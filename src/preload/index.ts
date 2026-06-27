@@ -4,10 +4,18 @@ import {
   apiResponseSchema,
   appSettingsPatchSchema,
   appSettingsSchema,
+  chatAbortRequestSchema,
+  chatPromptRequestSchema,
+  chatRuntimeEventSchema,
+  chatSnapshotSchema,
   diagnosticsSummarySchema,
   ipcChannels,
 } from "../shared/ipcSchemas.js";
-import type { AppSettings, PiDeckApi } from "../shared/types.js";
+import type {
+  AppSettings,
+  ChatRuntimeEvent,
+  PiDeckApi,
+} from "../shared/types.js";
 
 async function invokeValidated<TRequest, TResponse>(options: {
   channel: string;
@@ -57,6 +65,40 @@ const api: PiDeckApi = Object.freeze({
         request: appSettingsPatchSchema.parse(patch),
         responseSchema: appSettingsSchema,
       }),
+  }),
+  chat: Object.freeze({
+    getSnapshot: () =>
+      invokeValidated({
+        channel: ipcChannels.chatGetSnapshot,
+        request: undefined,
+        responseSchema: chatSnapshotSchema,
+      }),
+    prompt: (request: { runtimeId: string; text: string }) =>
+      invokeValidated({
+        channel: ipcChannels.chatPrompt,
+        request: chatPromptRequestSchema.parse(request),
+        responseSchema: z.void(),
+      }),
+    abort: (request: { runtimeId: string }) =>
+      invokeValidated({
+        channel: ipcChannels.chatAbort,
+        request: chatAbortRequestSchema.parse(request),
+        responseSchema: z.void(),
+      }),
+    onEvent: (listener: (event: ChatRuntimeEvent) => void) => {
+      const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => {
+        const parsed = chatRuntimeEventSchema.safeParse(payload);
+        if (!parsed.success) {
+          console.warn("Dropping invalid chat IPC event", parsed.error);
+          return;
+        }
+        listener(parsed.data);
+      };
+      ipcRenderer.on(ipcChannels.chatEvent, wrapped);
+      return () => {
+        ipcRenderer.off(ipcChannels.chatEvent, wrapped);
+      };
+    },
   }),
 });
 

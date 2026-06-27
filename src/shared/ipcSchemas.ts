@@ -34,6 +34,56 @@ export const diagnosticsSummarySchema = z
   })
   .strict();
 
+export const chatMessageSchema = z
+  .object({
+    id: z.string(),
+    role: z.string(),
+    content: z.string().optional(),
+    createdAt: z.number().optional(),
+  })
+  .passthrough();
+
+export const chatStateSchema = z
+  .object({
+    runtimeId: z.string().optional(),
+    sessionId: z.string().optional(),
+    sessionFile: z.string().optional(),
+    cwd: z.string().optional(),
+    model: z.string().optional(),
+    provider: z.string().optional(),
+    thinkingLevel: z.string().optional(),
+    isAgentActive: z.boolean().optional(),
+  })
+  .passthrough();
+
+export const chatSnapshotSchema = z
+  .object({
+    runtimeId: z.string(),
+    state: chatStateSchema,
+    messages: z.array(chatMessageSchema),
+  })
+  .strict();
+
+export const chatPromptRequestSchema = z
+  .object({
+    runtimeId: z.string(),
+    text: z.string().trim().min(1),
+  })
+  .strict();
+
+export const chatAbortRequestSchema = z
+  .object({
+    runtimeId: z.string(),
+  })
+  .strict();
+
+export const chatRuntimeEventSchema = z
+  .object({
+    type: z.string(),
+    runtimeId: z.string(),
+  })
+  .passthrough();
+
 export const ipcErrorSchema = z
   .object({
     code: z.string(),
@@ -55,6 +105,10 @@ export const ipcChannels = {
   appGetDiagnosticsSummary: "app:getDiagnosticsSummary",
   settingsGet: "settings:get",
   settingsUpdate: "settings:update",
+  chatGetSnapshot: "chat:getSnapshot",
+  chatPrompt: "chat:prompt",
+  chatAbort: "chat:abort",
+  chatEvent: "chat:event",
 } as const;
 
 export type IpcChannel = (typeof ipcChannels)[keyof typeof ipcChannels];
