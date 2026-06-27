@@ -3,7 +3,11 @@ import { it as test } from "vitest";
 import { JsonlFramingParser, type JsonlParseError } from "./jsonlClient.js";
 import type { JsonValue } from "./types.js";
 
-function makeParser(): { parser: JsonlFramingParser; records: JsonValue[]; errors: JsonlParseError[] } {
+function makeParser(): {
+  parser: JsonlFramingParser;
+  records: JsonValue[];
+  errors: JsonlParseError[];
+} {
   const records: JsonValue[] = [];
   const errors: JsonlParseError[] = [];
   const parser = new JsonlFramingParser({

@@ -17,7 +17,9 @@ function fakePath(): string {
     mkdirSync(outdir, { recursive: true });
     builtFakePath = path.join(outdir, "fakeRpcServer.cjs");
     buildSync({
-      entryPoints: [fileURLToPath(new URL("./fakeRpc/fakeRpcServer.ts", import.meta.url))],
+      entryPoints: [
+        fileURLToPath(new URL("./fakeRpc/fakeRpcServer.ts", import.meta.url)),
+      ],
       outfile: builtFakePath,
       bundle: true,
       platform: "node",
@@ -39,7 +41,11 @@ function createWorker(args: string[] = []): PiWorker {
   });
 }
 
-function waitForWorkerEvent(worker: PiWorker, predicate: (event: RuntimeEvent) => boolean, timeoutMs = 1_000): Promise<RuntimeEvent> {
+function waitForWorkerEvent(
+  worker: PiWorker,
+  predicate: (event: RuntimeEvent) => boolean,
+  timeoutMs = 1_000,
+): Promise<RuntimeEvent> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       cleanup();
@@ -84,7 +90,10 @@ test("PiWorker prompt resolves on command acceptance and continues streaming eve
   });
   try {
     await worker.prompt({ text: "stream please" });
-    const endEvent = await waitForWorkerEvent(worker, (event) => event.type === "agent_end");
+    const endEvent = await waitForWorkerEvent(
+      worker,
+      (event) => event.type === "agent_end",
+    );
     assert.equal((endEvent as { status?: string }).status, "completed");
     assert.ok(messageUpdates.length >= 1);
     assert.equal(messageUpdates[0].runtimeId, worker.runtimeId);
@@ -101,7 +110,9 @@ test("PiWorker abort path emits a sensible aborted end state", async () => {
     await worker.abort();
     const aborted = await waitForWorkerEvent(
       worker,
-      (event) => event.type === "agent_end" && (event as { status?: string }).status === "aborted",
+      (event) =>
+        event.type === "agent_end" &&
+        (event as { status?: string }).status === "aborted",
     );
     assert.equal(aborted.runtimeId, worker.runtimeId);
   } finally {
@@ -115,15 +126,25 @@ test("PiWorker intentional close does not create error diagnostic", async () => 
   await worker.closeSession();
 
   const diagnostics = worker.getDiagnostics().recentDiagnostics;
-  assert.equal(diagnostics.some((diagnostic) => diagnostic.level === "error"), false);
-  assert.ok(diagnostics.some((diagnostic) => diagnostic.level === "info" && /closed/.test(diagnostic.message)));
+  assert.equal(
+    diagnostics.some((diagnostic) => diagnostic.level === "error"),
+    false,
+  );
+  assert.ok(
+    diagnostics.some(
+      (diagnostic) =>
+        diagnostic.level === "info" && /closed/.test(diagnostic.message),
+    ),
+  );
 });
 
 test("PiWorker unexpected exit rejects pending request and emits error diagnostic", async () => {
   const worker = createWorker(["--exit-after-first-command"]);
   const errorDiagnostic = waitForWorkerEvent(
     worker,
-    (event) => event.type === "diagnostic" && (event as { level?: string }).level === "error",
+    (event) =>
+      event.type === "diagnostic" &&
+      (event as { level?: string }).level === "error",
   );
 
   await assert.rejects(worker.getState(), /exited|subprocess/i);

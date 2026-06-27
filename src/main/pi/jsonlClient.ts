@@ -1,9 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { StringDecoder } from "node:string_decoder";
-import type { ChildProcess, SpawnOptionsWithoutStdio } from "node:child_process";
+import type {
+  ChildProcess,
+  SpawnOptionsWithoutStdio,
+} from "node:child_process";
 import { spawn } from "node:child_process";
-import type { JsonObject, JsonValue, RpcErrorPayload, RpcEventRecord, RpcResponseRecord } from "./types.js";
+import type {
+  JsonObject,
+  JsonValue,
+  RpcErrorPayload,
+  RpcEventRecord,
+  RpcResponseRecord,
+} from "./types.js";
 
 export interface JsonlParseError {
   line: string;
@@ -32,7 +41,8 @@ export class JsonlFramingParser {
   constructor(private readonly options: JsonlFramingParserOptions) {}
 
   push(chunk: Buffer | string): void {
-    this.buffer += typeof chunk === "string" ? chunk : this.decoder.write(chunk);
+    this.buffer +=
+      typeof chunk === "string" ? chunk : this.decoder.write(chunk);
     this.drainCompleteLines();
   }
 
@@ -65,7 +75,8 @@ export class JsonlFramingParser {
     try {
       this.options.onRecord(JSON.parse(line) as JsonValue);
     } catch (cause) {
-      const causeMessage = cause instanceof Error ? cause.message : String(cause);
+      const causeMessage =
+        cause instanceof Error ? cause.message : String(cause);
       this.options.onMalformed({
         line,
         message: prefix ? `${prefix}: ${causeMessage}` : causeMessage,
@@ -140,11 +151,16 @@ export class JsonlRpcClient extends EventEmitter {
   private exitCode: number | null = null;
   private signal: NodeJS.Signals | null = null;
 
-  constructor(readonly child: ChildProcess, options: JsonlRpcClientOptions = {}) {
+  constructor(
+    readonly child: ChildProcess,
+    options: JsonlRpcClientOptions = {},
+  ) {
     super();
     this.requestTimeoutMs = options.requestTimeoutMs ?? 10_000;
     this.malformedOutputIsFatal = options.malformedOutputIsFatal ?? true;
-    this.stderr = new DiagnosticRingBuffer(options.stderrBufferBytes ?? 64 * 1024);
+    this.stderr = new DiagnosticRingBuffer(
+      options.stderrBufferBytes ?? 64 * 1024,
+    );
     this.parser = new JsonlFramingParser({
       onRecord: (record) => this.handleRecord(record),
       onMalformed: (error) => this.handleMalformed(error),
@@ -164,23 +180,41 @@ export class JsonlRpcClient extends EventEmitter {
       this.closed = true;
       this.exitCode = code;
       this.signal = signal;
-      this.rejectAll(new Error(`RPC subprocess exited (code=${code ?? "null"}, signal=${signal ?? "null"})`));
+      this.rejectAll(
+        new Error(
+          `RPC subprocess exited (code=${code ?? "null"}, signal=${signal ?? "null"})`,
+        ),
+      );
       this.emit("close", { code, signal });
     });
   }
 
-  typedOn<K extends keyof JsonlRpcClientEvents>(event: K, listener: (...args: JsonlRpcClientEvents[K]) => void): () => void {
+  typedOn<K extends keyof JsonlRpcClientEvents>(
+    event: K,
+    listener: (...args: JsonlRpcClientEvents[K]) => void,
+  ): () => void {
     this.on(event, listener as (...args: unknown[]) => void);
     return () => this.off(event, listener as (...args: unknown[]) => void);
   }
 
-  request<T extends JsonValue = JsonValue>(command: string, params?: JsonObject, timeoutMs = this.requestTimeoutMs): Promise<T> {
-    if (this.closed || this.child.killed || !this.child.stdin || this.child.stdin.destroyed) {
+  request<T extends JsonValue = JsonValue>(
+    command: string,
+    params?: JsonObject,
+    timeoutMs = this.requestTimeoutMs,
+  ): Promise<T> {
+    if (
+      this.closed ||
+      this.child.killed ||
+      !this.child.stdin ||
+      this.child.stdin.destroyed
+    ) {
       return Promise.reject(new Error("RPC subprocess is not writable"));
     }
 
     const id = randomUUID();
-    const payload = JSON.stringify({ id, type: "command", command, params: params ?? {} }) + "\n";
+    const payload =
+      JSON.stringify({ id, type: "command", command, params: params ?? {} }) +
+      "\n";
 
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -188,7 +222,13 @@ export class JsonlRpcClient extends EventEmitter {
         reject(new Error(`RPC command timed out before response: ${command}`));
       }, timeoutMs);
 
-      this.pending.set(id, { id, command, resolve: (value) => resolve(value as T), reject, timer });
+      this.pending.set(id, {
+        id,
+        command,
+        resolve: (value) => resolve(value as T),
+        reject,
+        timer,
+      });
 
       this.child.stdin!.write(payload, "utf8", (error?: Error | null) => {
         if (!error) {
@@ -198,7 +238,11 @@ export class JsonlRpcClient extends EventEmitter {
         if (pending) {
           clearTimeout(pending.timer);
           this.pending.delete(id);
-          pending.reject(new Error(`Failed to write RPC command ${command}: ${error.message}`));
+          pending.reject(
+            new Error(
+              `Failed to write RPC command ${command}: ${error.message}`,
+            ),
+          );
         }
       });
     });
@@ -221,7 +265,10 @@ export class JsonlRpcClient extends EventEmitter {
 
   private handleRecord(record: JsonValue): void {
     if (!record || typeof record !== "object" || Array.isArray(record)) {
-      this.handleMalformed({ line: JSON.stringify(record), message: "JSONL record must be an object" });
+      this.handleMalformed({
+        line: JSON.stringify(record),
+        message: "JSONL record must be an object",
+      });
       return;
     }
 
@@ -237,7 +284,10 @@ export class JsonlRpcClient extends EventEmitter {
   private handleResponse(response: RpcResponseRecord): void {
     const pending = this.pending.get(response.id);
     if (!pending) {
-      this.emit("diagnostic", `Received response for unknown RPC id: ${response.id}\n`);
+      this.emit(
+        "diagnostic",
+        `Received response for unknown RPC id: ${response.id}\n`,
+      );
       return;
     }
     clearTimeout(pending.timer);
@@ -245,7 +295,10 @@ export class JsonlRpcClient extends EventEmitter {
 
     if (response.ok === false || response.error) {
       const payload = response.error;
-      const message = typeof payload === "object" && payload !== null ? payload.message : String(payload ?? "RPC command failed");
+      const message =
+        typeof payload === "object" && payload !== null
+          ? payload.message
+          : String(payload ?? "RPC command failed");
       pending.reject(new JsonlRpcError(message, payload));
       return;
     }
@@ -263,7 +316,9 @@ export class JsonlRpcClient extends EventEmitter {
     });
 
     if (this.malformedOutputIsFatal) {
-      this.rejectAll(new Error(`Malformed JSONL from RPC subprocess: ${error.message}`));
+      this.rejectAll(
+        new Error(`Malformed JSONL from RPC subprocess: ${error.message}`),
+      );
       if (!this.child.killed) {
         this.child.kill("SIGTERM");
       }

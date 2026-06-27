@@ -44,7 +44,10 @@ export class PiWorker {
     this.runtimeId = options.runtimeId ?? generateRuntimeId();
     this.killGraceMs = options.killGraceMs ?? 2_000;
     const args = options.args ?? ["--mode", "rpc"];
-    const clientOptions: { requestTimeoutMs?: number; stderrBufferBytes?: number } = {};
+    const clientOptions: {
+      requestTimeoutMs?: number;
+      stderrBufferBytes?: number;
+    } = {};
     if (options.requestTimeoutMs !== undefined) {
       clientOptions.requestTimeoutMs = options.requestTimeoutMs;
     }
@@ -65,7 +68,10 @@ export class PiWorker {
     this.health = "healthy";
 
     this.client.typedOn("event", (event) => {
-      this.emitEvent({ ...(event as JsonObject), runtimeId: this.runtimeId } as RuntimeEvent);
+      this.emitEvent({
+        ...(event as JsonObject),
+        runtimeId: this.runtimeId,
+      } as RuntimeEvent);
     });
     this.client.typedOn("diagnostic", (message) => {
       this.addDiagnostic("warn", message.trimEnd() || "RPC diagnostic");
@@ -76,11 +82,17 @@ export class PiWorker {
 
       if (this.isClosingIntentionally) {
         this.health = "closed";
-        this.addDiagnostic("info", `RPC worker closed (code=${code ?? "null"}, signal=${signal ?? "null"})`);
+        this.addDiagnostic(
+          "info",
+          `RPC worker closed (code=${code ?? "null"}, signal=${signal ?? "null"})`,
+        );
       } else {
         this.health = code === 0 ? "closed" : "unhealthy";
         const level = code === 0 ? "info" : "error";
-        this.addDiagnostic(level, `RPC worker exited (code=${code ?? "null"}, signal=${signal ?? "null"})`);
+        this.addDiagnostic(
+          level,
+          `RPC worker exited (code=${code ?? "null"}, signal=${signal ?? "null"})`,
+        );
       }
 
       this.emitEvent({
@@ -128,7 +140,11 @@ export class PiWorker {
     await new Promise<void>((resolve) => {
       const done = (): void => resolve();
       const timer = setTimeout(() => {
-        if (child.exitCode === null && child.signalCode === null && !child.killed) {
+        if (
+          child.exitCode === null &&
+          child.signalCode === null &&
+          !child.killed
+        ) {
           child.kill("SIGKILL");
         }
         resolve();
@@ -169,7 +185,10 @@ export class PiWorker {
     this.events.emit("event", event);
   }
 
-  private addDiagnostic(level: RuntimeDiagnosticEvent["level"], message: string): void {
+  private addDiagnostic(
+    level: RuntimeDiagnosticEvent["level"],
+    message: string,
+  ): void {
     const diagnostic: RuntimeDiagnosticEvent = {
       type: "diagnostic",
       runtimeId: this.runtimeId,

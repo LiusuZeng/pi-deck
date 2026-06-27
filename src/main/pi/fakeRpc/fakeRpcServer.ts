@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 import { StringDecoder } from "node:string_decoder";
-import type { JsonObject, PiMessage, PiState, RpcCommandRecord, RpcResponseRecord } from "../types.js";
+import type {
+  JsonObject,
+  PiMessage,
+  PiState,
+  RpcCommandRecord,
+  RpcResponseRecord,
+} from "../types.js";
 
 interface FakeOptions {
   malformedOnStart: boolean;
@@ -89,7 +95,10 @@ class FakeRpcServer {
     try {
       command = JSON.parse(line) as RpcCommandRecord;
     } catch (error) {
-      this.write({ type: "error", message: error instanceof Error ? error.message : String(error) });
+      this.write({
+        type: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
       return;
     }
 
@@ -139,7 +148,8 @@ class FakeRpcServer {
   }
 
   private handlePrompt(command: RpcCommandRecord): void {
-    const text = typeof command.params?.text === "string" ? command.params.text : "";
+    const text =
+      typeof command.params?.text === "string" ? command.params.text : "";
     const userMessage: PiMessage = {
       id: `msg_user_${this.promptCounter + 1}`,
       role: "user",
@@ -154,39 +164,57 @@ class FakeRpcServer {
     this.agentActive = true;
 
     this.respond(command.id, { accepted: true });
-    this.write({ type: "agent_start", runId: `run_${this.promptCounter}`, messageId: assistantId });
-
-    chunks.forEach((chunk, index) => {
-      this.currentTimers.push(setTimeout(() => {
-        accumulated += chunk;
-        this.write({
-          type: "message_update",
-          messageId: assistantId,
-          role: "assistant",
-          delta: chunk,
-          content: accumulated,
-          done: false,
-        });
-      }, this.options.streamDelayMs * (index + 1)));
+    this.write({
+      type: "agent_start",
+      runId: `run_${this.promptCounter}`,
+      messageId: assistantId,
     });
 
-    this.currentTimers.push(setTimeout(() => {
-      this.agentActive = false;
-      this.messages.push({
-        id: assistantId,
-        role: "assistant",
-        content: accumulated,
-        createdAt: Date.now(),
-      });
-      this.write({
-        type: "message_update",
-        messageId: assistantId,
-        role: "assistant",
-        content: accumulated,
-        done: true,
-      });
-      this.write({ type: "agent_end", runId: `run_${this.promptCounter}`, status: "completed" });
-    }, this.options.streamDelayMs * (chunks.length + 1)));
+    chunks.forEach((chunk, index) => {
+      this.currentTimers.push(
+        setTimeout(
+          () => {
+            accumulated += chunk;
+            this.write({
+              type: "message_update",
+              messageId: assistantId,
+              role: "assistant",
+              delta: chunk,
+              content: accumulated,
+              done: false,
+            });
+          },
+          this.options.streamDelayMs * (index + 1),
+        ),
+      );
+    });
+
+    this.currentTimers.push(
+      setTimeout(
+        () => {
+          this.agentActive = false;
+          this.messages.push({
+            id: assistantId,
+            role: "assistant",
+            content: accumulated,
+            createdAt: Date.now(),
+          });
+          this.write({
+            type: "message_update",
+            messageId: assistantId,
+            role: "assistant",
+            content: accumulated,
+            done: true,
+          });
+          this.write({
+            type: "agent_end",
+            runId: `run_${this.promptCounter}`,
+            status: "completed",
+          });
+        },
+        this.options.streamDelayMs * (chunks.length + 1),
+      ),
+    );
   }
 
   private handleAbort(command: RpcCommandRecord): void {
@@ -197,10 +225,18 @@ class FakeRpcServer {
     const wasActive = this.agentActive;
     this.agentActive = false;
     this.respond(command.id, { aborted: wasActive });
-    this.write({ type: "agent_end", runId: `run_${this.promptCounter}`, status: "aborted" });
+    this.write({
+      type: "agent_end",
+      runId: `run_${this.promptCounter}`,
+      status: "aborted",
+    });
   }
 
-  private respond(id: string, result?: unknown, error?: { code?: string; message: string }): void {
+  private respond(
+    id: string,
+    result?: unknown,
+    error?: { code?: string; message: string },
+  ): void {
     const response: RpcResponseRecord = error
       ? { type: "response", id, ok: false, error }
       : { type: "response", id, ok: true, result: result as never };
