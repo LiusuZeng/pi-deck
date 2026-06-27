@@ -25,8 +25,8 @@ These items should be started earliest and reviewed frequently.
 | CP-1 | G0 contract freeze: PiAdapter, IPC, events, state, timeline, attachment model | Tech Lead | Not Started | Pre-M1 | Blocks broad parallel work |
 | CP-2 | Pi binary resolution and version diagnostics | Platform | Not Started | M1 | Required before real RPC |
 | CP-3 | Minimal no-resource RPC smoke test | Backend/RPC | Not Started | M1 | Must not create sessions/resources |
-| CP-4 | Strict JSONL transport | Backend/RPC | Not Started | M2 | Foundation for all Pi RPC |
-| CP-5 | Single PiWorker lifecycle | Backend/RPC | Not Started | M2 | Enables first vertical slice |
+| CP-4 | Strict JSONL transport | Backend/RPC | Done | M2 | Implemented in `src/main/pi/jsonlClient.ts` with parser/client tests |
+| CP-5 | Single PiWorker lifecycle | Backend/RPC | Done | M2 | Implemented in `src/main/pi/piWorker.ts` with fake-RPC integration tests |
 | CP-6 | Resume hard gate: `pi --mode rpc --session <file>` | Backend/RPC | Not Started | M3 | If fails, pause architecture |
 | CP-7 | Multiple workers and event routing | Backend | Not Started | M5 | Required for concurrency |
 | CP-8 | Scheduler/concurrency cap | Backend | Not Started | M5 | Required for multi-session MVP |
@@ -98,9 +98,9 @@ These items should be started earliest and reviewed frequently.
 
 | ID | Task | Owner | Status | Depends on | Acceptance summary |
 |---|---|---|---|---|---|
-| M2.1 | Strict JSONL transport | Backend/RPC | Not Started | G0 PiAdapter | Parser tests cover chunks/malformed/unicode; request correlation works |
-| M2.2 | Fake RPC subprocess/harness | Backend/QA | Not Started | M2.1 | Deterministic tests can run without real Pi |
-| M2.3 | Single PiWorker lifecycle | Backend/RPC | Not Started | M2.1, M1.5 | `get_state`, `get_messages`, `prompt`, `abort`, exit handling |
+| M2.1 | Strict JSONL transport | Backend/RPC | Done | G0 PiAdapter | Parser tests cover chunks/malformed/unicode; request correlation works |
+| M2.2 | Fake RPC subprocess/harness | Backend/QA | Done | M2.1 | Deterministic tests can run without real Pi; see `docs/fake-rpc.md` |
+| M2.3 | Single PiWorker lifecycle | Backend/RPC | Done | M2.1, M1.5 | `get_state`, `get_messages`, `prompt`, `abort`, exit handling covered against fake RPC |
 | M2.4 | Basic chat timeline rendering | Frontend | Not Started | M2.2, M1.6 | User/assistant messages stream; markdown sanitized |
 | M2.5 | Composer prompt and abort UX | Frontend/Backend | Not Started | M2.3, M2.4 | Multiline prompt sends; abort works or errors clearly |
 
@@ -162,7 +162,7 @@ Use this section for standups and resource assignment. Each agent should work on
 | Lane | Current owner | Branch | Worktree path | Active tasks | Status | Notes |
 |---|---|---|---|---|---|---|
 | A. App/Security Foundation | Eng 1 | `eng1/electron-security` | `/Users/liusu/pi-deck-worktrees/eng1-electron-security` | M1.1-M1.3 | Not Started | Starts immediately after G0 draft |
-| B. RPC/Backend Integration | Eng 2 | `eng2/rpc-backend` | `/Users/liusu/pi-deck-worktrees/eng2-rpc-backend` | M2.1-M2.3 | Not Started | Start JSONL/fake RPC immediately |
+| B. RPC/Backend Integration | Eng 2 | `eng2/rpc-backend` | `/Users/liusu/pi-deck-worktrees/eng2-rpc-backend` | M2.1-M2.3 | Done | JSONL client, fake RPC, PiWorker, and tests implemented |
 | C. Platform/Pi Env | Eng 3 | `eng3/platform-env` | `/Users/liusu/pi-deck-worktrees/eng3-platform-env` | M1.4-M1.5, M3.2 | Not Started | Binary/env/smoke test |
 | D. Frontend Chat | Eng 4 | `eng4/frontend-chat` | `/Users/liusu/pi-deck-worktrees/eng4-frontend-chat` | M1.6, M2.4-M2.5 | Not Started | Can use fake IPC/RPC |
 | E. Sessions/Controls UI | Eng 5 | `eng5/sessions-controls` | `/Users/liusu/pi-deck-worktrees/eng5-sessions-controls` | M3 UI, M4 controls | Not Started | Sidebar/model/thinking/slash/attachments |
@@ -179,7 +179,7 @@ Use this section for standups and resource assignment. Each agent should work on
 | D-2 | Minimum supported Pi version after smoke/resume tests | M3 | Backend/RPC | Open | TBD |
 | D-3 | Image resizing implementation choice | M4.6 | Platform | Open | TBD |
 | D-4 | Large-image warning/rejection thresholds | M4.6 | Platform/QA | Open | TBD |
-| D-5 | Fake RPC fixture format and location | M2.2 | QA/Backend | Open | TBD |
+| D-5 | Fake RPC fixture format and location | M2.2 | QA/Backend | Resolved | Source at `src/main/pi/fakeRpc/fakeRpcServer.ts`; usage documented in `docs/fake-rpc.md` |
 | D-6 | Release packaging/signing approach for internal MVP | M7 | Platform | Open | TBD |
 | D-7 | Starter prompts prepared for all Eng 1-6 | Pre-M1 | Orchestrator | Done | See `docs/starter-prompts/` |
 
