@@ -2,6 +2,7 @@
 
 Status: planning tracker  
 Source plan: `docs/project-task-breakdown.md`  
+Worktree setup: `docs/git-worktree-parallel-setup.md`  
 Update cadence: daily during active implementation; weekly milestone review.
 
 ## Status Legend
@@ -154,20 +155,21 @@ These items should be started earliest and reviewed frequently.
 | M7.3 | Error recovery flows | Backend/Frontend | Not Started | M5/M6 | Reopen after worker exit; refresh session list; reconcile messages |
 | M7.4 | End-to-end release validation | QA/All | Not Started | M1-M7 | MVP acceptance checklist passes; limitations documented |
 
-## 4. Parallel Work Lanes
+## 4. Parallel Work Lanes and Worktrees
 
-Use this section for standups and resource assignment.
+Use this section for standups and resource assignment. Each agent should work only in its assigned git worktree. See `docs/git-worktree-parallel-setup.md`.
 
-| Lane | Current owner | Active tasks | Status | Notes |
-|---|---|---|---|---|
-| A. App/Security Foundation | TBD | M1.1-M1.5 | Not Started | Starts immediately after G0 draft |
-| B. RPC/Backend Integration | TBD | M2.1-M2.3 | Not Started | Start JSONL/fake RPC immediately |
-| C. Frontend Shell/Mock UI | TBD | M1.6, M2.4 | Not Started | Can use fake IPC/RPC |
-| D. Session Repository/Resume | TBD | M3.1-M3.7 | Not Started | M3.6 is hard gate |
-| E. State/Concurrency | TBD | M5.1-M5.5 | Not Started | Reducer tests can start early |
-| F. Controls/Attachments | TBD | M4.1-M4.6 | Not Started | Image spike is separate platform risk |
-| G. Trust/Resources/Extension UI | TBD | M6.1-M6.4 | Not Started | Use strict resource labels |
-| H. Tool Visibility/Release | TBD | M7.1-M7.4 | Not Started | Depends on event coverage |
+| Lane | Current owner | Branch | Worktree path | Active tasks | Status | Notes |
+|---|---|---|---|---|---|---|
+| A. App/Security Foundation | Eng 1 | `eng1/electron-security` | `/Users/liusu/pi-deck-worktrees/eng1-electron-security` | M1.1-M1.3 | Not Started | Starts immediately after G0 draft |
+| B. RPC/Backend Integration | Eng 2 | `eng2/rpc-backend` | `/Users/liusu/pi-deck-worktrees/eng2-rpc-backend` | M2.1-M2.3 | Not Started | Start JSONL/fake RPC immediately |
+| C. Platform/Pi Env | Eng 3 | `eng3/platform-env` | `/Users/liusu/pi-deck-worktrees/eng3-platform-env` | M1.4-M1.5, M3.2 | Not Started | Binary/env/smoke test |
+| D. Frontend Chat | Eng 4 | `eng4/frontend-chat` | `/Users/liusu/pi-deck-worktrees/eng4-frontend-chat` | M1.6, M2.4-M2.5 | Not Started | Can use fake IPC/RPC |
+| E. Sessions/Controls UI | Eng 5 | `eng5/sessions-controls` | `/Users/liusu/pi-deck-worktrees/eng5-sessions-controls` | M3 UI, M4 controls | Not Started | Sidebar/model/thinking/slash/attachments |
+| F. QA/Automation | Eng 6 | `eng6/qa-automation` | `/Users/liusu/pi-deck-worktrees/eng6-qa-automation` | Tests/fixtures/smoke matrix | Not Started | Fake RPC and acceptance coverage |
+| G. State/Concurrency | TBD | TBD | TBD | M5.1-M5.5 | Not Started | Assign after M2/M3 foundations |
+| H. Trust/Resources/Extension UI | TBD | TBD | TBD | M6.1-M6.4 | Not Started | Assign after M3/M5 foundations |
+| I. Tool Visibility/Release | TBD | TBD | TBD | M7.1-M7.4 | Not Started | Depends on event coverage |
 
 ## 5. Open Decisions / Consensus Items
 

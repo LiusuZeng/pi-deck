@@ -6,6 +6,8 @@ Planning goal: maximize parallel work while forcing risky integration/consensus 
 
 ## 1. Execution Strategy
 
+Use **git worktrees** for parallel development on the same laptop. Each engineering agent should work in its own branch/worktree, following `docs/git-worktree-parallel-setup.md`, so agents do not overwrite each other's files in one checkout.
+
 Build the MVP as a set of thin vertical slices over stable contracts:
 
 1. **Freeze shared contracts first**: `PiAdapter`, normalized runtime events, typed IPC schemas, timeline item model, session state reducer inputs/outputs, attachment token model.
@@ -673,7 +675,17 @@ Goal: agent work is understandable, recoverable, and ready for personal daily us
 | QA/test engineer | Fake RPC harness, reducer tests, smoke matrix | Release validation |
 | Tech lead | G0-G4 gates, risk decisions, acceptance sign-off | Cross-stream integration reviews |
 
-## 7. Cross-Team Interface Contracts to Review Weekly
+## 7. Worktree Coordination Rules
+
+- Each engineer works only in their assigned git worktree/branch.
+- Before editing, each engineer verifies `pwd`, `git branch --show-current`, and `git status --short`.
+- Shared contract/config changes must be coordinated before merge: IPC schemas, `PiAdapter`, runtime events, package.json, lockfile, tsconfig, Electron config.
+- Prefer additive files/modules early to reduce merge conflicts.
+- The orchestrator should merge branches into main and ask other worktrees to rebase/sync after shared foundation changes.
+
+See `docs/git-worktree-parallel-setup.md` for exact commands and paths.
+
+## 8. Cross-Team Interface Contracts to Review Weekly
 
 - `PiAdapter` method signatures and error model.
 - IPC schemas and renderer preload API.
@@ -683,7 +695,7 @@ Goal: agent work is understandable, recoverable, and ready for personal daily us
 - Attachment token lifecycle and prompt payload conversion.
 - Session key/canonical path semantics.
 
-## 8. MVP Acceptance Checklist
+## 9. MVP Acceptance Checklist
 
 The MVP is acceptable when all are true:
 
@@ -708,7 +720,7 @@ The MVP is acceptable when all are true:
 - Diagnostics are useful and redact secrets.
 - App quit handles running/queued work explicitly.
 
-## 9. Risk Register
+## 10. Risk Register
 
 | Risk | Impact | Mitigation / early task | Owner |
 |---|---|---|---|
@@ -723,7 +735,7 @@ The MVP is acceptable when all are true:
 | Concurrency creates duplicate writers | Session corruption | M3.7 canonical lock, duplicate open reuse | Backend |
 | Tool output freezes UI | Poor daily usability | M7.1 lazy/virtualized expandable cards | Frontend |
 
-## 10. Definition of Done for Each Task
+## 11. Definition of Done for Each Task
 
 Every task must include:
 
