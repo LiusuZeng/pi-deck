@@ -87,9 +87,9 @@ These items should be started earliest and reviewed frequently.
 
 | ID | Task | Owner | Status | Depends on | Acceptance summary |
 |---|---|---|---|---|---|
-| M1.1 | Electron + TypeScript scaffold | Platform | Not Started | G0 draft | App launches; typecheck/lint/test scripts pass |
-| M1.2 | Secure preload IPC foundation | Platform/Security | Not Started | G0 IPC | Renderer has no Node/fs/process access; schemas validate IPC |
-| M1.3 | App settings and diagnostics storage | Platform | Not Started | M1.1 | Settings persist; logs under `userData`; secrets redacted |
+| M1.1 | Electron + TypeScript scaffold | Platform | Done | G0 draft | App launches; typecheck/lint/test scripts pass |
+| M1.2 | Secure preload IPC foundation | Platform/Security | Done | G0 IPC | Renderer has no Node/fs/process access; schemas validate IPC |
+| M1.3 | App settings and diagnostics storage | Platform | Done | M1.1 | Settings persist; logs under `userData`; secrets redacted |
 | M1.4 | Pi binary resolution/version | Platform | Not Started | M1.3 | Config/PATH/shell/common paths work; diagnostics visible |
 | M1.5 | Minimal RPC smoke test | Backend/RPC | Not Started | M1.4, M2.1 starter | Full no-resource command succeeds; no sessions created |
 | M1.6 | Basic layout shell | Frontend | Not Started | M1.2 | Header/sidebar/chat/composer visible with mock data |
