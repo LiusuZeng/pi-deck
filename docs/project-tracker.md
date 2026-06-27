@@ -181,6 +181,7 @@ Use this section for standups and resource assignment. Each agent should work on
 | D-4 | Large-image warning/rejection thresholds | M4.6 | Platform/QA | Open | TBD |
 | D-5 | Fake RPC fixture format and location | M2.2 | QA/Backend | Open | TBD |
 | D-6 | Release packaging/signing approach for internal MVP | M7 | Platform | Open | TBD |
+| D-7 | Starter prompts prepared for all Eng 1-6 | Pre-M1 | Orchestrator | Done | See `docs/starter-prompts/` |
 
 ## 6. Blocker Log
 
