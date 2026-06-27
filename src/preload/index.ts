@@ -4,12 +4,15 @@ import {
   apiResponseSchema,
   appSettingsPatchSchema,
   appSettingsSchema,
+  attachmentPickerRequestSchema,
   chatAbortRequestSchema,
   chatPromptRequestSchema,
   chatRuntimeEventSchema,
   chatSnapshotSchema,
   diagnosticsSummarySchema,
   ipcChannels,
+  pickAttachmentsResultSchema,
+  pickProjectResultSchema,
 } from "../shared/ipcSchemas.js";
 import type {
   AppSettings,
@@ -99,6 +102,22 @@ const api: PiDeckApi = Object.freeze({
         ipcRenderer.off(ipcChannels.chatEvent, wrapped);
       };
     },
+  }),
+  projects: Object.freeze({
+    pickProject: () =>
+      invokeValidated({
+        channel: ipcChannels.projectPickFolder,
+        request: undefined,
+        responseSchema: pickProjectResultSchema,
+      }),
+  }),
+  attachments: Object.freeze({
+    pickFiles: (request?: { projectPath?: string }) =>
+      invokeValidated({
+        channel: ipcChannels.attachmentsPickFiles,
+        request: attachmentPickerRequestSchema.parse(request ?? {}),
+        responseSchema: pickAttachmentsResultSchema,
+      }),
   }),
 });
 

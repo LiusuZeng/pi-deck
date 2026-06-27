@@ -7,16 +7,24 @@ import {
 } from "react";
 import type {
   AppSettings,
+  AttachmentDraft,
   ChatMessage,
   ChatRuntimeEvent,
   ChatSnapshot,
   DiagnosticsSummary,
+  ProjectRef,
 } from "../shared/types.js";
 import {
   parseSafeMarkdown,
   type InlineToken,
   type MarkdownBlock,
 } from "./markdown.js";
+import {
+  emptyOverlays,
+  selectSidebarIndicator,
+  type BaseSessionState,
+  type SessionOverlays,
+} from "./sessionState.js";
 
 type LoadState =
   | { state: "loading" }
@@ -64,22 +72,116 @@ interface SessionViewModel {
   id: string;
   title: string;
   project: string;
+  projectPath: string;
   subtitle: string;
   status: SessionStatus;
   updatedAt: string;
+  updatedAtMs: number;
   timeline: TimelineItem[];
+  baseState: BaseSessionState;
+  overlays: SessionOverlays;
   modelLabel?: string;
   thinkingLevel?: string;
+  lastError?: string;
+  runtimeBacked: boolean;
 }
+
+interface ModelOption {
+  provider: string;
+  id: string;
+  displayName: string;
+  supportsImages: boolean;
+  supportsThinking: boolean;
+  contextWindow?: string;
+  unavailableReason?: string;
+}
+
+interface ThinkingOption {
+  id: string;
+  label: string;
+  supported: boolean;
+  note?: string;
+}
+
+interface SlashCommand {
+  name: string;
+  description: string;
+  source: "extension" | "prompt template" | "skill";
+}
+
+const appStartedAt = Date.now();
+
+const modelOptions: ModelOption[] = [
+  {
+    provider: "anthropic",
+    id: "claude-sonnet-4.5",
+    displayName: "Claude Sonnet 4.5",
+    supportsImages: true,
+    supportsThinking: true,
+    contextWindow: "200k",
+  },
+  {
+    provider: "openai",
+    id: "gpt-5-codex",
+    displayName: "GPT-5 Codex",
+    supportsImages: false,
+    supportsThinking: true,
+    contextWindow: "128k",
+  },
+  {
+    provider: "local",
+    id: "offline-placeholder",
+    displayName: "Offline placeholder",
+    supportsImages: false,
+    supportsThinking: false,
+    unavailableReason: "Unavailable until provider/auth setup is complete",
+  },
+];
+
+const thinkingOptions: ThinkingOption[] = [
+  { id: "off", label: "Off", supported: true },
+  { id: "low", label: "Low", supported: true },
+  { id: "medium", label: "Medium", supported: true },
+  { id: "high", label: "High", supported: true },
+  {
+    id: "max",
+    label: "Max",
+    supported: false,
+    note: "Unsupported by current model",
+  },
+];
+
+const slashCommands: SlashCommand[] = [
+  {
+    name: "/skill:frontend-polish",
+    description: "Apply frontend polish checklist to the current prompt.",
+    source: "skill",
+  },
+  {
+    name: "/review",
+    description: "Prompt template returned by the active Pi worker.",
+    source: "prompt template",
+  },
+  {
+    name: "/extension:open-pr",
+    description: "Extension command exposed by get_commands.",
+    source: "extension",
+  },
+];
 
 const initialSessions: SessionViewModel[] = [
   {
     id: "session-active",
     title: "Frontend chat shell",
     project: "pi-deck",
+    projectPath: "/Users/liusu/pi-deck-worktrees/eng4-frontend-chat",
     subtitle: "Idle · fake IPC fixture",
     status: "idle",
     updatedAt: "Now",
+    updatedAtMs: appStartedAt,
+    baseState: "idle",
+    overlays: { ...emptyOverlays },
+    runtimeBacked: false,
     timeline: [
       {
         id: "welcome-user",
@@ -105,49 +207,94 @@ const initialSessions: SessionViewModel[] = [
       },
     ],
   },
+  fixtureSession(
+    "session-needs",
+    "Extension approval request",
+    "waitingForInput",
+    {
+      needsUserInput: true,
+    },
+  ),
+  fixtureSession(
+    "session-error",
+    "Failed dependency install",
+    "error",
+    {},
+    "Tool exited 1",
+  ),
+  fixtureSession("session-attach", "Opening old session", "attaching"),
+  fixtureSession("session-compact", "Large refactor plan", "working", {
+    compacting: true,
+  }),
+  fixtureSession("session-retry", "Provider retry demo", "working", {
+    retrying: true,
+  }),
+  fixtureSession("session-tool", "Apply edit patch", "working", {
+    toolRunning: true,
+  }),
+  fixtureSession("session-stream", "Streaming explanation", "working", {
+    streaming: true,
+  }),
+  fixtureSession("session-queued", "Queued follow-ups", "idle", {
+    localQueuedStartCount: 1,
+    piQueuedSteeringCount: 1,
+  }),
+  fixtureSession("session-exited", "Closed spike", "exited"),
+  fixtureSession("session-unloaded", "Older unloaded session", "unloaded"),
+];
+
+const invalidRecentProject: ProjectRef = {
+  id: "missing-demo",
+  path: "/Users/liusu/old-project-that-was-deleted",
+  canonicalPath: "/Users/liusu/old-project-that-was-deleted",
+  displayName: "Deleted project demo",
+  lastOpenedAt: appStartedAt - 86_400_000,
+  invalidReason: "Project folder is missing or no longer readable.",
+};
+
+const fakeAttachmentFixture: AttachmentDraft[] = [
   {
-    id: "session-working",
-    title: "RPC adapter spike",
-    project: "pi-deck",
-    subtitle: "Working · background placeholder",
-    status: "working",
-    updatedAt: "3m ago",
-    timeline: [
-      {
-        id: "working-diagnostic",
-        kind: "diagnostic",
-        tone: "info",
-        content:
-          "Background worker state is mocked here; real multi-session event routing arrives in later milestones.",
-        createdAt: "09:34",
-      },
-    ],
+    id: "fake-path-src",
+    selectedPathToken: "token-src",
+    fileName: "src/App.tsx",
+    displayPath: "src/App.tsx",
+    kind: "textFile",
+    sendMode: "pathReference",
+    outsideProject: false,
+    status: "ready",
   },
   {
-    id: "session-waiting",
-    title: "Extension approval",
-    project: "example-app",
-    subtitle: "Waiting for user input",
-    status: "waiting",
-    updatedAt: "Yesterday",
-    timeline: [],
+    id: "fake-image",
+    selectedPathToken: "token-image",
+    fileName: "mockup.png",
+    displayPath: "design/mockup.png",
+    mimeType: "image/png",
+    kind: "image",
+    sendMode: "imageInput",
+    outsideProject: false,
+    status: "ready",
   },
   {
-    id: "session-error",
-    title: "Old diagnostics run",
-    project: "archive",
-    subtitle: "Error · worker exited",
-    status: "error",
-    updatedAt: "Jun 26",
-    timeline: [
-      {
-        id: "error-item",
-        kind: "diagnostic",
-        tone: "error",
-        content: "Mock error state: failed to attach fake worker.",
-        createdAt: "18:02",
-      },
-    ],
+    id: "fake-outside",
+    selectedPathToken: "token-outside",
+    fileName: "notes.pdf",
+    displayPath: "/Users/liusu/Desktop/notes.pdf",
+    kind: "binaryFile",
+    sendMode: "pathReference",
+    outsideProject: true,
+    status: "ready",
+    warning: "Outside selected project; referenced by absolute path only.",
+  },
+  {
+    id: "fake-missing",
+    selectedPathToken: "token-missing",
+    fileName: "deleted.txt",
+    displayPath: "docs/deleted.txt",
+    kind: "textFile",
+    sendMode: "pathReference",
+    outsideProject: false,
+    status: "missing",
+    warning: "Deleted or unreadable; remove or reselect before sending.",
   },
 ];
 
@@ -157,6 +304,25 @@ export function App(): ReactElement {
   const [selectedSessionId, setSelectedSessionId] = useState("session-active");
   const [draft, setDraft] = useState("");
   const [composerError, setComposerError] = useState<string | null>(null);
+  const [currentProject, setCurrentProject] = useState<ProjectRef>(() => ({
+    id: "/Users/liusu/pi-deck-worktrees/eng5-sessions-controls",
+    path: "/Users/liusu/pi-deck-worktrees/eng5-sessions-controls",
+    canonicalPath: "/Users/liusu/pi-deck-worktrees/eng5-sessions-controls",
+    displayName: "eng5-sessions-controls",
+    lastOpenedAt: appStartedAt,
+  }));
+  const [recentProjects, setRecentProjects] = useState<ProjectRef[]>(() =>
+    loadRecentProjects(),
+  );
+  const [selectedModelId, setSelectedModelId] = useState(
+    modelOptions[0]?.id ?? "",
+  );
+  const [selectedThinking, setSelectedThinking] = useState("medium");
+  const [slashOpen, setSlashOpen] = useState(false);
+  const [attachments, setAttachments] = useState<AttachmentDraft[]>([]);
+  const [uiMessage, setUiMessage] = useState(
+    "Eng 4 fake chat path and Eng 5 controls are both active in this integrated shell.",
+  );
 
   useEffect(() => {
     let disposed = false;
@@ -214,11 +380,63 @@ export function App(): ReactElement {
     sessions.find((session) => session.id === selectedSessionId) ??
     sessions[0] ??
     initialSessions[0]!;
+  const selectedModel =
+    modelOptions.find((model) => model.id === selectedModelId) ??
+    modelOptions[0];
   const isWorking = selectedSession.status === "working";
+  const hasBlockingAttachment = attachments.some(
+    (attachment) => attachment.status !== "ready",
+  );
+  const hasImageAttachment = attachments.some(
+    (attachment) => attachment.kind === "image",
+  );
   const canSend = draft.trim().length > 0 && !isWorking;
+  const filteredCommands = slashCommands.filter((command) =>
+    command.name.toLowerCase().includes(draft.trim().toLowerCase()),
+  );
+
+  function applyRuntimeEvent(event: ChatRuntimeEvent): void {
+    setSessions((current) =>
+      current.map((session) =>
+        session.id === event.runtimeId
+          ? reduceRuntimeEvent(session, event)
+          : session,
+      ),
+    );
+  }
+
+  function handleComposerKeyDown(
+    event: KeyboardEvent<HTMLTextAreaElement>,
+  ): void {
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+      event.preventDefault();
+      handleSend();
+    }
+  }
+
+  function handleDraftChange(value: string): void {
+    setDraft(value);
+    setSlashOpen(value.trimStart().startsWith("/"));
+  }
 
   function handleSend(): void {
     if (!canSend) {
+      return;
+    }
+    if (!selectedSession.runtimeBacked) {
+      setComposerError(
+        "This session row is a UI shell fixture. Select the Backend fake RPC session to demo prompt streaming; real new-session wiring lands in M3.",
+      );
+      return;
+    }
+    if (hasBlockingAttachment) {
+      setComposerError(
+        "Remove or reselect deleted/unreadable attachments before sending.",
+      );
+      return;
+    }
+    if (hasImageAttachment && selectedModel && !selectedModel.supportsImages) {
+      setComposerError("Selected model does not support image input.");
       return;
     }
 
@@ -229,14 +447,18 @@ export function App(): ReactElement {
     const now = formatTime();
     setComposerError(null);
     setDraft("");
+    setSlashOpen(false);
     setSessions((current) =>
       current.map((session) =>
         session.id === runtimeId
           ? {
               ...session,
               status: "working",
+              baseState: "working",
+              overlays: { ...session.overlays, streaming: true },
               subtitle: "Working · backend fake RPC stream",
               updatedAt: "Now",
+              updatedAtMs: Date.now(),
               timeline: [
                 ...session.timeline,
                 {
@@ -291,23 +513,76 @@ export function App(): ReactElement {
     }
   }
 
-  function applyRuntimeEvent(event: ChatRuntimeEvent): void {
-    setSessions((current) =>
-      current.map((session) =>
-        session.id === event.runtimeId
-          ? reduceRuntimeEvent(session, event)
-          : session,
-      ),
+  async function handlePickProject(): Promise<void> {
+    try {
+      const result = await window.piDeck.projects.pickProject();
+      if (!result.selected) {
+        setUiMessage("Project picker canceled.");
+        return;
+      }
+      setCurrentProject(result.project);
+      setRecentProjects((projects) =>
+        saveRecentProjects(result.project, projects),
+      );
+      setUiMessage(
+        "Project picker used preload/main IPC; renderer received metadata only.",
+      );
+    } catch (error) {
+      setUiMessage(
+        `Project picker failed; no mock project was selected (${error instanceof Error ? error.message : String(error)}).`,
+      );
+    }
+  }
+
+  async function handlePickAttachments(): Promise<void> {
+    try {
+      const result = await window.piDeck.attachments.pickFiles({
+        projectPath: currentProject.canonicalPath,
+      });
+      if (!result.selected) {
+        setUiMessage("Attachment picker canceled.");
+        return;
+      }
+      setAttachments((existing) => [...existing, ...result.attachments]);
+      setUiMessage(
+        "Attachment picker returned opaque tokens and display metadata.",
+      );
+    } catch (error) {
+      setUiMessage(
+        `Attachment picker failed; no mock files were added (${error instanceof Error ? error.message : String(error)}).`,
+      );
+    }
+  }
+
+  function handleNewSession(): void {
+    const id = `local-new-${Date.now()}`;
+    const next: SessionViewModel = {
+      id,
+      title: "Untitled new session",
+      project: currentProject.displayName,
+      projectPath: currentProject.path,
+      subtitle: "Idle · UI hook only",
+      status: "idle",
+      updatedAt: "Now",
+      updatedAtMs: Date.now(),
+      baseState: "idle",
+      overlays: { ...emptyOverlays },
+      runtimeBacked: false,
+      timeline: [],
+    };
+    setSessions((items) => [next, ...items]);
+    setSelectedSessionId(id);
+    setUiMessage(
+      "New session UI hook fired; backend createSession can attach here.",
     );
   }
 
-  function handleComposerKeyDown(
-    event: KeyboardEvent<HTMLTextAreaElement>,
-  ): void {
-    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-      event.preventDefault();
-      handleSend();
-    }
+  function handleSelectCommand(command: SlashCommand): void {
+    setDraft(`${command.name} `);
+    setSlashOpen(false);
+    setUiMessage(
+      `${command.name} inserted into the normal prompt path; command behavior is not reimplemented in the GUI.`,
+    );
   }
 
   return (
@@ -316,6 +591,7 @@ export function App(): ReactElement {
         sessions={sessions}
         selectedSessionId={selectedSession.id}
         onSelect={setSelectedSessionId}
+        onNewSession={handleNewSession}
       />
 
       <section className="workspace" aria-label="Pi Deck chat workspace">
@@ -323,19 +599,46 @@ export function App(): ReactElement {
           loadState={loadState}
           nodeAccessSummary={nodeAccessSummary}
           selectedSession={selectedSession}
+          currentProject={currentProject}
+          recentProjects={recentProjects}
+          selectedModelId={selectedModelId}
+          selectedThinking={selectedThinking}
+          onPickProject={() => void handlePickProject()}
+          onSelectRecent={(project) => {
+            setCurrentProject(project);
+            setUiMessage(
+              "Recent project selected; invalid rows remain visibly recoverable.",
+            );
+          }}
+          onModelChange={setSelectedModelId}
+          onThinkingChange={(level) => {
+            setSelectedThinking(level);
+            setUiMessage(
+              "Thinking-level UI hook fired; fake/preload API can be wired here.",
+            );
+          }}
         />
 
-        <ChatTimeline session={selectedSession} />
+        <ChatTimeline session={selectedSession} uiMessage={uiMessage} />
 
         <Composer
           value={draft}
           isWorking={isWorking}
           canSend={canSend}
           error={composerError}
-          onChange={setDraft}
+          attachments={attachments}
+          slashOpen={slashOpen}
+          slashCommands={filteredCommands}
+          selectedModel={selectedModel}
+          onChange={handleDraftChange}
           onKeyDown={handleComposerKeyDown}
           onSend={handleSend}
           onAbort={handleAbort}
+          onPickAttachments={() => void handlePickAttachments()}
+          onRemoveAttachment={(id) =>
+            setAttachments((items) => items.filter((item) => item.id !== id))
+          }
+          onSelectCommand={handleSelectCommand}
         />
       </section>
     </main>
@@ -353,11 +656,19 @@ function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
     id: snapshot.runtimeId,
     title: "Backend fake RPC session",
     project: snapshot.state.cwd?.split(/[\\/]/).pop() ?? "pi-deck",
+    projectPath: snapshot.state.cwd ?? processCwdPlaceholder(),
     subtitle: snapshot.state.isAgentActive
       ? "Working · backend fake RPC"
       : "Idle · backend fake RPC ready",
     status: snapshot.state.isAgentActive ? "working" : "idle",
     updatedAt: "Now",
+    updatedAtMs: Date.now(),
+    baseState: snapshot.state.isAgentActive ? "working" : "idle",
+    overlays: {
+      ...emptyOverlays,
+      streaming: Boolean(snapshot.state.isAgentActive),
+    },
+    runtimeBacked: true,
     timeline: timelineFromMessages(snapshot.messages),
   };
   if (modelLabel.length > 0) {
@@ -435,8 +746,11 @@ function reduceRuntimeEvent(
       return {
         ...session,
         status: "working",
+        baseState: "working",
+        overlays: { ...session.overlays, streaming: true },
         subtitle: "Working · backend fake RPC stream",
         updatedAt: "Now",
+        updatedAtMs: Date.now(),
       };
     case "message_update":
       return reduceMessageUpdate(session, event);
@@ -445,11 +759,14 @@ function reduceRuntimeEvent(
       return {
         ...session,
         status: "idle",
+        baseState: "idle",
+        overlays: { ...session.overlays, streaming: false, toolRunning: false },
         subtitle:
           status === "aborted"
             ? "Idle · backend stream aborted"
             : "Idle · backend stream complete",
         updatedAt: "Now",
+        updatedAtMs: Date.now(),
         timeline: session.timeline.map((item) =>
           item.kind === "assistant" && item.streaming === true
             ? { ...item, streaming: false }
@@ -467,6 +784,7 @@ function reduceRuntimeEvent(
         {
           ...session,
           status: "error",
+          baseState: "error",
           subtitle: "Error · backend worker exited",
         },
         {
@@ -514,10 +832,13 @@ function reduceMessageUpdate(
   return {
     ...session,
     status: done ? "idle" : "working",
+    baseState: done ? "idle" : "working",
+    overlays: { ...session.overlays, streaming: !done },
     subtitle: done
       ? "Idle · backend stream complete"
       : "Working · backend fake RPC stream",
     updatedAt: "Now",
+    updatedAtMs: Date.now(),
     timeline,
   };
 }
@@ -529,7 +850,10 @@ function appendDiagnostic(
   return {
     ...session,
     status: diagnostic.tone === "error" ? "error" : session.status,
+    baseState: diagnostic.tone === "error" ? "error" : session.baseState,
+    ...(diagnostic.tone === "error" ? { lastError: diagnostic.content } : {}),
     updatedAt: "Now",
+    updatedAtMs: Date.now(),
     timeline: [
       ...session.timeline,
       {
@@ -543,37 +867,11 @@ function appendDiagnostic(
   };
 }
 
-function getString(event: ChatRuntimeEvent, key: string): string | undefined {
-  const value = getUnknown(event, key);
-  return typeof value === "string" ? value : undefined;
-}
-
-function getBoolean(event: ChatRuntimeEvent, key: string): boolean | undefined {
-  const value = getUnknown(event, key);
-  return typeof value === "boolean" ? value : undefined;
-}
-
-function getUnknown(event: ChatRuntimeEvent, key: string): unknown {
-  return (event as Record<string, unknown>)[key];
-}
-
-function formatMessageTime(timestamp: number | undefined): string {
-  if (timestamp === undefined) {
-    return formatTime();
-  }
-  const date = new Date(
-    timestamp > 10_000_000_000 ? timestamp : timestamp * 1000,
-  );
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
-}
-
 function SessionSidebar(props: {
   sessions: SessionViewModel[];
   selectedSessionId: string;
   onSelect(sessionId: string): void;
+  onNewSession(): void;
 }): ReactElement {
   return (
     <aside className="sidebar" aria-label="Sessions">
@@ -585,18 +883,25 @@ function SessionSidebar(props: {
         <button
           className="icon-button"
           type="button"
-          disabled
-          aria-label="New session placeholder"
+          aria-label="New session"
+          onClick={props.onNewSession}
         >
           +
         </button>
       </div>
 
-      <button className="new-session" type="button" disabled>
+      <button
+        className="new-session"
+        type="button"
+        onClick={props.onNewSession}
+      >
         + New session
       </button>
 
-      <section className="session-list" aria-label="Placeholder session list">
+      <section
+        className="session-list"
+        aria-label="Session list with priority states"
+      >
         {props.sessions.map((session) => (
           <button
             key={session.id}
@@ -606,10 +911,11 @@ function SessionSidebar(props: {
               props.onSelect(session.id);
             }}
           >
-            <span className={`dot ${session.status}`} aria-hidden="true" />
+            <StateIndicator session={session} />
             <span className="session-copy">
               <span className="session-title">{session.title}</span>
               <span className="session-meta">{session.subtitle}</span>
+              <span className="session-meta">{session.projectPath}</span>
             </span>
             <span className="session-time">{session.updatedAt}</span>
           </button>
@@ -617,9 +923,28 @@ function SessionSidebar(props: {
       </section>
 
       <div className="sidebar-note">
-        Sidebar data is mocked until session repository/resume work lands.
+        Red dot means supported extension UI is waiting for input. Fixture rows
+        exercise sidebar priority until the session repository lands.
       </div>
     </aside>
+  );
+}
+
+function StateIndicator(props: {
+  session: Pick<SessionViewModel, "baseState" | "overlays">;
+  verbose?: boolean;
+}): ReactElement {
+  const indicator = selectSidebarIndicator(props.session);
+  const badge = indicator.kind === "queued" ? indicator.queuedCount : undefined;
+  return (
+    <span
+      className={`state-indicator ${indicator.kind}`}
+      title={indicator.label}
+    >
+      <span className="state-dot" />
+      {badge ? <span className="queue-badge">{badge}</span> : null}
+      {props.verbose ? <span>{indicator.label}</span> : null}
+    </span>
   );
 }
 
@@ -627,34 +952,151 @@ function AppHeader(props: {
   loadState: LoadState;
   nodeAccessSummary: string;
   selectedSession: SessionViewModel;
+  currentProject: ProjectRef;
+  recentProjects: ProjectRef[];
+  selectedModelId: string;
+  selectedThinking: string;
+  onPickProject(): void;
+  onSelectRecent(project: ProjectRef): void;
+  onModelChange(id: string): void;
+  onThinkingChange(id: string): void;
 }): ReactElement {
   return (
     <header className="topbar">
-      <div className="title-block">
-        <p className="eyebrow">Project / Session</p>
-        <h1>
-          {props.selectedSession.project} / {props.selectedSession.title}
-        </h1>
-        <span className={`status-pill ${props.selectedSession.status}`}>
-          {statusLabel(props.selectedSession.status)}
-        </span>
-      </div>
+      <ProjectHeader
+        project={props.currentProject}
+        selectedSession={props.selectedSession}
+        recentProjects={props.recentProjects}
+        onPickProject={props.onPickProject}
+        onSelectRecent={props.onSelectRecent}
+      />
 
       <div className="header-right">
-        <div className="model-controls" aria-label="Model placeholders">
-          <span>
-            Model: {props.selectedSession.modelLabel ?? "placeholder"}
-          </span>
-          <span>
-            Thinking: {props.selectedSession.thinkingLevel ?? "placeholder"}
-          </span>
-        </div>
+        <ModelThinkingControls
+          selectedModelId={props.selectedModelId}
+          selectedThinking={props.selectedThinking}
+          onModelChange={props.onModelChange}
+          onThinkingChange={props.onThinkingChange}
+        />
         <LoadStateBadge
           loadState={props.loadState}
           nodeAccessSummary={props.nodeAccessSummary}
         />
       </div>
     </header>
+  );
+}
+
+function ProjectHeader(props: {
+  project: ProjectRef;
+  selectedSession: SessionViewModel;
+  recentProjects: ProjectRef[];
+  onPickProject(): void;
+  onSelectRecent(project: ProjectRef): void;
+}): ReactElement {
+  const storedRecent = props.recentProjects.filter(
+    (project) => project.id !== props.project.id,
+  );
+  const visibleRecent = [...storedRecent, invalidRecentProject];
+
+  return (
+    <div className="title-block project-header">
+      <p className="eyebrow">Project / Session</p>
+      <h1>
+        {props.project.displayName} / {props.selectedSession.title}
+      </h1>
+      <span className={`status-pill ${props.selectedSession.status}`}>
+        {statusLabel(props.selectedSession.status)}
+      </span>
+      <p className="project-path">{props.project.path}</p>
+      <div className="header-actions">
+        <button type="button" onClick={props.onPickProject}>
+          Open project…
+        </button>
+      </div>
+      <div className="recent-projects" aria-label="Recent projects">
+        <strong>Recent projects</strong>
+        {storedRecent.length === 0 ? (
+          <p className="empty-state-copy">No saved recent projects yet.</p>
+        ) : null}
+        {visibleRecent.map((project) => (
+          <button
+            key={project.id}
+            type="button"
+            className={project.invalidReason ? "recent invalid" : "recent"}
+            onClick={() => props.onSelectRecent(project)}
+          >
+            <span>{project.displayName}</span>
+            <small>{project.invalidReason ?? project.path}</small>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ModelThinkingControls(props: {
+  selectedModelId: string;
+  selectedThinking: string;
+  onModelChange(id: string): void;
+  onThinkingChange(id: string): void;
+}): ReactElement {
+  const selectedModel =
+    modelOptions.find((model) => model.id === props.selectedModelId) ??
+    modelOptions[0];
+  const selectedThinking = thinkingOptions.find(
+    (level) => level.id === props.selectedThinking,
+  );
+
+  return (
+    <div className="model-controls" aria-label="Model and thinking controls">
+      <label>
+        <span>Model</span>
+        <select
+          value={props.selectedModelId}
+          onChange={(event) => props.onModelChange(event.target.value)}
+        >
+          {modelOptions.map((model) => (
+            <option
+              key={model.id}
+              value={model.id}
+              disabled={Boolean(model.unavailableReason)}
+            >
+              {model.provider}/{model.id}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label>
+        <span>Thinking</span>
+        <select
+          value={props.selectedThinking}
+          onChange={(event) => props.onThinkingChange(event.target.value)}
+        >
+          {thinkingOptions.map((level) => (
+            <option key={level.id} value={level.id} disabled={!level.supported}>
+              {level.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <div className="capabilities" aria-live="polite">
+        <strong>
+          {selectedModel?.provider}/{selectedModel?.id}
+        </strong>
+        <span>{selectedModel?.supportsImages ? "Images" : "No images"}</span>
+        <span>
+          {selectedModel?.supportsThinking ? "Reasoning" : "No reasoning"}
+        </span>
+        <span>{selectedModel?.contextWindow ?? "Context unknown"}</span>
+        <span>Thinking: {selectedThinking?.label ?? "Unsupported"}</span>
+        {selectedModel?.unavailableReason ? (
+          <span className="inline-error">
+            {selectedModel.unavailableReason}
+          </span>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
@@ -684,7 +1126,10 @@ function LoadStateBadge(props: {
   );
 }
 
-function ChatTimeline(props: { session: SessionViewModel }): ReactElement {
+function ChatTimeline(props: {
+  session: SessionViewModel;
+  uiMessage: string;
+}): ReactElement {
   const hasItems = props.session.timeline.length > 0;
   return (
     <section className="timeline-shell" aria-label="Chat / Agent Timeline">
@@ -702,6 +1147,13 @@ function ChatTimeline(props: { session: SessionViewModel }): ReactElement {
             This placeholder session is waiting for user input.
           </div>
         ) : null}
+
+        <div className="state-banner info">
+          <StateIndicator session={props.session} verbose />
+          <span>{props.uiMessage}</span>
+        </div>
+
+        <AttachmentExampleStrip />
 
         {props.session.timeline.map((item) => (
           <TimelineRow key={item.id} item={item} />
@@ -877,62 +1329,272 @@ function Composer(props: {
   isWorking: boolean;
   canSend: boolean;
   error: string | null;
+  attachments: AttachmentDraft[];
+  slashOpen: boolean;
+  slashCommands: SlashCommand[];
+  selectedModel: ModelOption | undefined;
   onChange(value: string): void;
   onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void;
   onSend(): void;
   onAbort(): void;
+  onPickAttachments(): void;
+  onRemoveAttachment(id: string): void;
+  onSelectCommand(command: SlashCommand): void;
 }): ReactElement {
+  const hasImageWarning =
+    props.attachments.some((attachment) => attachment.kind === "image") &&
+    !props.selectedModel?.supportsImages;
+
   return (
     <footer className="composer" aria-label="Prompt composer">
       <button
         className="attachment-button"
         type="button"
-        disabled
-        aria-label="Attachment placeholder"
+        aria-label="Add attachments"
+        onClick={props.onPickAttachments}
       >
         +
       </button>
       <div className="composer-input-wrap">
+        <AttachmentChipRow
+          attachments={props.attachments}
+          onRemove={props.onRemoveAttachment}
+        />
         <textarea
           aria-label="Prompt text"
           onChange={(event) => {
             props.onChange(event.target.value);
           }}
           onKeyDown={props.onKeyDown}
-          placeholder="Prompt Pi Deck… (⌘/Ctrl + Enter to send)"
+          placeholder="Prompt Pi Deck… type / for active-worker command picker (⌘/Ctrl + Enter to send)"
           rows={3}
           value={props.value}
         />
+        {props.slashOpen ? (
+          <SlashPicker
+            commands={props.slashCommands}
+            onSelect={props.onSelectCommand}
+          />
+        ) : null}
         <div className="composer-meta">
           {props.error !== null ? (
             <span className="composer-error">{props.error}</span>
           ) : props.isWorking ? (
-            <span>Streaming from backend fake RPC…</span>
+            <span>Streaming from backend fake RPC… abort remains wired.</span>
+          ) : hasImageWarning ? (
+            <span className="composer-error">
+              Selected model does not support image input.
+            </span>
           ) : (
-            <span>Backend fake RPC active · attachments come later</span>
+            <span>
+              Backend fake RPC active · non-images are sent as Referenced path
+              metadata when backend send support lands.
+            </span>
           )}
         </div>
       </div>
-      {props.isWorking ? (
-        <button
-          className="send-button abort"
-          type="button"
-          onClick={props.onAbort}
-        >
-          Abort
-        </button>
-      ) : (
-        <button
-          className="send-button"
-          type="button"
-          disabled={!props.canSend}
-          onClick={props.onSend}
-        >
-          Send
-        </button>
-      )}
+      <div className="composer-actions">
+        {props.isWorking ? (
+          <>
+            <button className="send-button secondary" type="button" disabled>
+              Steer
+            </button>
+            <button className="send-button secondary" type="button" disabled>
+              Follow-up
+            </button>
+            <button
+              className="send-button abort"
+              type="button"
+              onClick={props.onAbort}
+            >
+              Abort
+            </button>
+          </>
+        ) : (
+          <button
+            className="send-button"
+            type="button"
+            disabled={!props.canSend}
+            onClick={props.onSend}
+          >
+            Send
+          </button>
+        )}
+      </div>
     </footer>
   );
+}
+
+function AttachmentExampleStrip(): ReactElement {
+  return (
+    <section
+      className="attachment-examples"
+      aria-label="Attachment state examples"
+    >
+      <strong>Attachment state examples (not selected)</strong>
+      <div className="attachment-row">
+        {fakeAttachmentFixture.map((attachment) => (
+          <span
+            key={attachment.id}
+            className={`attachment-chip example ${attachment.status !== "ready" ? "bad" : ""}`}
+          >
+            <strong>{attachment.fileName}</strong>
+            <em>
+              {attachment.kind === "image"
+                ? attachment.mimeType
+                : "Referenced path"}
+            </em>
+            {attachment.outsideProject ? <small>Outside project</small> : null}
+            {attachment.status !== "ready" ? (
+              <small>{attachment.status}</small>
+            ) : null}
+            {attachment.warning ? <small>{attachment.warning}</small> : null}
+          </span>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function AttachmentChipRow(props: {
+  attachments: AttachmentDraft[];
+  onRemove(id: string): void;
+}): ReactElement {
+  if (props.attachments.length === 0) {
+    return <p className="empty-state-copy compact">No files selected.</p>;
+  }
+
+  return (
+    <div className="attachment-row">
+      {props.attachments.map((attachment) => (
+        <span
+          key={attachment.id}
+          className={`attachment-chip ${attachment.status !== "ready" ? "bad" : ""}`}
+        >
+          <strong>{attachment.fileName}</strong>
+          <em>
+            {attachment.kind === "image"
+              ? attachment.mimeType
+              : "Referenced path"}
+          </em>
+          {attachment.outsideProject ? <small>Outside project</small> : null}
+          {attachment.warning ? <small>{attachment.warning}</small> : null}
+          <button
+            type="button"
+            aria-label={`Remove ${attachment.fileName}`}
+            onClick={() => props.onRemove(attachment.id)}
+          >
+            ×
+          </button>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function SlashPicker(props: {
+  commands: SlashCommand[];
+  onSelect(command: SlashCommand): void;
+}): ReactElement {
+  return (
+    <div
+      className="slash-picker"
+      role="listbox"
+      aria-label="Slash command picker"
+    >
+      {props.commands.length === 0 ? (
+        <p>
+          No active-worker commands match. TUI-only commands are not listed.
+        </p>
+      ) : (
+        props.commands.map((command) => (
+          <button
+            key={command.name}
+            type="button"
+            role="option"
+            onClick={() => props.onSelect(command)}
+          >
+            <strong>{command.name}</strong>
+            <span>{command.description}</span>
+            <small>{command.source}</small>
+          </button>
+        ))
+      )}
+    </div>
+  );
+}
+
+function fixtureSession(
+  id: string,
+  title: string,
+  baseState: BaseSessionState,
+  overlayPatch: Partial<SessionOverlays> = {},
+  lastError?: string,
+): SessionViewModel {
+  const status = toSessionStatus(baseState, overlayPatch);
+  const session: SessionViewModel = {
+    id,
+    title,
+    project: "pi-deck",
+    projectPath: "/Users/liusu/pi-deck-worktrees/eng5-sessions-controls",
+    subtitle: selectSidebarIndicator({
+      baseState,
+      overlays: { ...emptyOverlays, ...overlayPatch },
+    }).label,
+    status,
+    updatedAt: formatRelativeTime(
+      appStartedAt - Math.floor(Math.random() * 4_000_000),
+    ),
+    updatedAtMs: appStartedAt - Math.floor(Math.random() * 4_000_000),
+    baseState,
+    overlays: { ...emptyOverlays, ...overlayPatch },
+    runtimeBacked: false,
+    timeline: lastError
+      ? [
+          {
+            id: `${id}-error`,
+            kind: "diagnostic",
+            tone: "error",
+            content: lastError,
+            createdAt: "18:02",
+          },
+        ]
+      : [],
+  };
+  if (lastError) {
+    session.lastError = lastError;
+  }
+  return session;
+}
+
+function toSessionStatus(
+  baseState: BaseSessionState,
+  overlays: Partial<SessionOverlays>,
+): SessionStatus {
+  if (baseState === "error") {
+    return "error";
+  }
+  if (baseState === "waitingForInput" || overlays.needsUserInput === true) {
+    return "waiting";
+  }
+  if (baseState === "working" || baseState === "attaching") {
+    return "working";
+  }
+  return "idle";
+}
+
+function getString(event: ChatRuntimeEvent, key: string): string | undefined {
+  const value = getUnknown(event, key);
+  return typeof value === "string" ? value : undefined;
+}
+
+function getBoolean(event: ChatRuntimeEvent, key: string): boolean | undefined {
+  const value = getUnknown(event, key);
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function getUnknown(event: ChatRuntimeEvent, key: string): unknown {
+  return (event as Record<string, unknown>)[key];
 }
 
 function statusLabel(status: SessionStatus): string {
@@ -948,6 +1610,44 @@ function statusLabel(status: SessionStatus): string {
   }
 }
 
+function loadRecentProjects(): ProjectRef[] {
+  try {
+    const raw = localStorage.getItem("piDeck.recentProjects");
+    if (!raw) {
+      return [];
+    }
+    const parsed = JSON.parse(raw) as ProjectRef[];
+    return Array.isArray(parsed) ? parsed.slice(0, 5) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveRecentProjects(
+  project: ProjectRef,
+  projects: ProjectRef[],
+): ProjectRef[] {
+  const next = [
+    project,
+    ...projects.filter((item) => item.id !== project.id),
+  ].slice(0, 5);
+  localStorage.setItem("piDeck.recentProjects", JSON.stringify(next));
+  return next;
+}
+
+function formatMessageTime(timestamp: number | undefined): string {
+  if (timestamp === undefined) {
+    return formatTime();
+  }
+  const date = new Date(
+    timestamp > 10_000_000_000 ? timestamp : timestamp * 1000,
+  );
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
 function formatTime(): string {
   return new Intl.DateTimeFormat(undefined, {
     hour: "2-digit",
@@ -955,8 +1655,21 @@ function formatTime(): string {
   }).format(new Date());
 }
 
+function formatRelativeTime(timestamp: number): string {
+  const minutes = Math.max(1, Math.round((Date.now() - timestamp) / 60_000));
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
+  const hours = Math.round(minutes / 60);
+  return `${hours}h ago`;
+}
+
 function createId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function processCwdPlaceholder(): string {
+  return "/local/fake-rpc-worker";
 }
 
 function getRendererNodeAccessSummary(): string {

@@ -108,7 +108,7 @@ These items should be started earliest and reviewed frequently.
 
 | ID | Task | Owner | Status | Depends on | Acceptance summary |
 |---|---|---|---|---|---|
-| M3.1 | Project picker/recent projects | Frontend/Backend | Not Started | M1 settings | Native directory picker; recent projects persist |
+| M3.1 | Project picker/recent projects | Frontend/Backend | In Progress | M1 settings | Eng 5 UI shell + preload picker stub; backend persistence still needed |
 | M3.2 | EffectivePiConfig resolver | Backend/Platform | Done | M1.3, M1.4 | Resolver implemented with app/env/settings/trust/image precedence tests |
 | M3.3 | Static session repository scanning | Backend | Not Started | M3.2 | Lists project sessions; bounded scanning; no symlink loops |
 | M3.4 | Candidate sessionDir handling | Backend/Frontend | Not Started | M3.2, M3.3 | Candidate dirs require explicit enablement and strict bounds |
@@ -120,11 +120,11 @@ These items should be started earliest and reviewed frequently.
 
 | ID | Task | Owner | Status | Depends on | Acceptance summary |
 |---|---|---|---|---|---|
-| M4.1 | Model list/switcher | Backend/Frontend | Not Started | M2/M3 worker | Current model visible; switch works; capabilities shown |
-| M4.2 | Thinking-level switcher | Backend/Frontend | Not Started | M2/M3 worker | Current level visible; switch works/fails gracefully |
-| M4.3 | Slash command picker | Backend/Frontend | Not Started | M2 worker | Uses `get_commands`; TUI-only commands not promised |
-| M4.4 | Native attachment picker/tokens | Platform/Frontend | Not Started | G0 attachment, M1 IPC | Multi-select; opaque tokens; no arbitrary read IPC |
-| M4.5 | Non-image referenced-path files | Backend/Frontend | Not Started | M4.4 | Chips say `Referenced path`; prefix generated; outside-project warning |
+| M4.1 | Model list/switcher | Backend/Frontend | In Progress | M2/M3 worker | Eng 5 fake UI shows current model/capabilities; real worker methods still needed |
+| M4.2 | Thinking-level switcher | Backend/Frontend | In Progress | M2/M3 worker | Eng 5 fake UI shows levels/unsupported state; real setter still needed |
+| M4.3 | Slash command picker | Backend/Frontend | In Progress | M2 worker | Eng 5 fake picker uses get_commands-shaped data; real command API still needed |
+| M4.4 | Native attachment picker/tokens | Platform/Frontend | In Progress | G0 attachment, M1 IPC | Eng 5 UI + preload picker stub returns opaque tokens; send validation still needed |
+| M4.5 | Non-image referenced-path files | Backend/Frontend | In Progress | M4.4 | Eng 5 chips say `Referenced path`; prompt prefix backend still needed |
 | M4.6 | Image support + resize spike | Platform/Backend/QA | Not Started | G3, M4.1, M4.4, M3.2 | Model/settings validation; resize/block behavior; safety thresholds |
 
 ## M5. Concurrent Sessions, Scheduler, Intervention Controls
@@ -165,7 +165,7 @@ Use this section for standups and resource assignment. Each agent should work on
 | B. RPC/Backend Integration | Eng 2 | `eng2/rpc-backend` | `/Users/liusu/pi-deck-worktrees/eng2-rpc-backend` | M2.1-M2.3 | Done | JSONL client, fake RPC, PiWorker, and tests implemented |
 | C. Platform/Pi Env | Eng 3 | `eng3/platform-env` | `/Users/liusu/pi-deck-worktrees/eng3-platform-env` | M1.4-M1.5, M3.2 | Done | Platform env modules + tests implemented; real Pi validation pending |
 | D. Frontend Chat | Eng 4 | `eng4/frontend-chat` | `/Users/liusu/pi-deck-worktrees/eng4-frontend-chat` | M1.6, M2.4-M2.5 | In Review | Renderer wired to backend fake RPC/preload stream with sanitized markdown |
-| E. Sessions/Controls UI | Eng 5 | `eng5/sessions-controls` | `/Users/liusu/pi-deck-worktrees/eng5-sessions-controls` | M3 UI, M4 controls | Not Started | Sidebar/model/thinking/slash/attachments |
+| E. Sessions/Controls UI | Eng 5 | `eng5/sessions-controls` | `/Users/liusu/pi-deck-worktrees/eng5-sessions-controls` | M3 UI, M4 controls | In Progress | Integrated with Eng 4 chat shell; fake-data sidebar/project picker/model/thinking/slash/attachment shells awaiting real backend APIs |
 | F. QA/Automation | Eng 6 | `eng6/qa-automation` | `/Users/liusu/pi-deck-worktrees/eng6-qa-automation` | Tests/fixtures/smoke matrix | Not Started | Fake RPC and acceptance coverage |
 | G. State/Concurrency | TBD | TBD | TBD | M5.1-M5.5 | Not Started | Assign after M2/M3 foundations |
 | H. Trust/Resources/Extension UI | TBD | TBD | TBD | M6.1-M6.4 | Not Started | Assign after M3/M5 foundations |

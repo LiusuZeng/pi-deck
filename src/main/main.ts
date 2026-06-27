@@ -1,9 +1,20 @@
-import { app, BrowserWindow, shell, session } from "electron";
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  shell,
+  session,
+  type OpenDialogOptions,
+} from "electron";
+import { randomUUID } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import {
   appSettingsPatchSchema,
   appSettingsSchema,
+  attachmentPickerRequestSchema,
   chatAbortRequestSchema,
   chatPromptRequestSchema,
   chatRuntimeEventSchema,
@@ -11,17 +22,24 @@ import {
   diagnosticsSummarySchema,
   ipcChannels,
   noPayloadSchema,
+  pickAttachmentsResultSchema,
+  pickProjectResultSchema,
 } from "../shared/ipcSchemas.js";
-import type { ChatSnapshot } from "../shared/types.js";
+import type {
+  AttachmentDraft,
+  ChatSnapshot,
+  PickAttachmentsResult,
+  PickProjectResult,
+} from "../shared/types.js";
 import { DiagnosticsService } from "./diagnostics/diagnostics.js";
 import { registerValidatedIpc } from "./ipc/registerIpc.js";
+import { SinglePiAdapter } from "./pi/piAdapter.js";
 import {
   buildContentSecurityPolicy,
   buildSecureWebPreferences,
   isAllowedExternalUrl,
   shouldAllowNavigation,
 } from "./security.js";
-import { SinglePiAdapter } from "./pi/piAdapter.js";
 import { SettingsStore } from "./settings/settingsStore.js";
 
 const isDev = process.env.VITE_DEV_SERVER_URL !== undefined;
@@ -174,6 +192,72 @@ function registerIpcHandlers(
       return undefined;
     },
   });
+
+  registerValidatedIpc({
+    channel: ipcChannels.projectPickFolder,
+    requestSchema: noPayloadSchema,
+    responseSchema: pickProjectResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async (): Promise<PickProjectResult> => {
+      const options: OpenDialogOptions = {
+        title: "Open Pi Deck Project",
+        properties: ["openDirectory"],
+      };
+      const result = mainWindow
+        ? await dialog.showOpenDialog(mainWindow, options)
+        : await dialog.showOpenDialog(options);
+
+      if (result.canceled || result.filePaths.length === 0) {
+        return { selected: false } as const;
+      }
+
+      const selectedPath = result.filePaths[0] as string;
+      const canonicalPath = await fs.realpath(selectedPath);
+      return {
+        selected: true,
+        project: {
+          id: canonicalPath,
+          path: selectedPath,
+          canonicalPath,
+          displayName: path.basename(canonicalPath) || canonicalPath,
+          lastOpenedAt: Date.now(),
+        },
+      };
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.attachmentsPickFiles,
+    requestSchema: attachmentPickerRequestSchema,
+    responseSchema: pickAttachmentsResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async (request): Promise<PickAttachmentsResult> => {
+      const options: OpenDialogOptions = {
+        title: "Select files for Pi Deck",
+        properties: ["openFile", "multiSelections"],
+      };
+      const result = mainWindow
+        ? await dialog.showOpenDialog(mainWindow, options)
+        : await dialog.showOpenDialog(options);
+
+      if (result.canceled || result.filePaths.length === 0) {
+        return { selected: false } as const;
+      }
+
+      const projectRoot = request.projectPath
+        ? await safeRealpath(request.projectPath)
+        : undefined;
+
+      return {
+        selected: true,
+        attachments: await Promise.all(
+          result.filePaths.map((filePath) =>
+            buildAttachmentDraft(filePath, projectRoot),
+          ),
+        ),
+      };
+    },
+  });
 }
 
 // M2/M2.5 temporary fake chat bridge for renderer development.
@@ -239,6 +323,123 @@ async function getChatSnapshot(
     adapter.getMessages(runtimeId),
   ]);
   return { runtimeId, state, messages };
+}
+
+async function safeRealpath(filePath: string): Promise<string | undefined> {
+  try {
+    return await fs.realpath(filePath);
+  } catch {
+    return undefined;
+  }
+}
+
+// M4 UI shell only: token-shaped metadata is returned for renderer authority shape.
+// Real token registry/path validation for sending is implemented in AttachmentService later.
+async function buildAttachmentDraft(
+  filePath: string,
+  projectRoot: string | undefined,
+): Promise<AttachmentDraft> {
+  const canonicalPath = await safeRealpath(filePath);
+  const status = canonicalPath ? await getFileStatus(canonicalPath) : "missing";
+  const extension = path.extname(filePath).toLowerCase();
+  const imageMimeType = getImageMimeType(extension);
+  const kind: AttachmentDraft["kind"] = imageMimeType
+    ? "image"
+    : isLikelyTextPath(extension)
+      ? "textFile"
+      : "binaryFile";
+  const outsideProject = Boolean(
+    projectRoot && canonicalPath && !isPathInside(canonicalPath, projectRoot),
+  );
+  const stat = canonicalPath ? await statIfReadable(canonicalPath) : undefined;
+  const warning = outsideProject
+    ? "Outside selected project; the model may see an absolute local path."
+    : kind === "binaryFile"
+      ? "Binary/unknown files are referenced by path only."
+      : undefined;
+
+  return {
+    id: randomUUID(),
+    selectedPathToken: randomUUID(),
+    fileName: path.basename(filePath),
+    displayPath: filePath,
+    ...(imageMimeType ? { mimeType: imageMimeType } : {}),
+    ...(stat ? { size: stat.size } : {}),
+    kind,
+    sendMode: kind === "image" ? "imageInput" : "pathReference",
+    outsideProject,
+    status,
+    ...(warning ? { warning } : {}),
+  };
+}
+
+async function getFileStatus(
+  filePath: string,
+): Promise<"ready" | "missing" | "unreadable"> {
+  try {
+    await fs.access(filePath, fsConstants.R_OK);
+    return "ready";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" ? "missing" : "unreadable";
+  }
+}
+
+async function statIfReadable(
+  filePath: string,
+): Promise<{ size: number } | undefined> {
+  try {
+    return await fs.stat(filePath);
+  } catch {
+    return undefined;
+  }
+}
+
+function getImageMimeType(extension: string): string | undefined {
+  switch (extension) {
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".webp":
+      return "image/webp";
+    case ".gif":
+      return "image/gif";
+    default:
+      return undefined;
+  }
+}
+
+function isLikelyTextPath(extension: string): boolean {
+  return new Set([
+    ".c",
+    ".cpp",
+    ".css",
+    ".go",
+    ".h",
+    ".html",
+    ".java",
+    ".js",
+    ".json",
+    ".jsx",
+    ".md",
+    ".py",
+    ".rs",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".yaml",
+    ".yml",
+  ]).has(extension);
+}
+
+function isPathInside(candidate: string, root: string): boolean {
+  const relative = path.relative(root, candidate);
+  return (
+    relative === "" ||
+    (!relative.startsWith("..") && !path.isAbsolute(relative))
+  );
 }
 
 app.on("before-quit", (event) => {

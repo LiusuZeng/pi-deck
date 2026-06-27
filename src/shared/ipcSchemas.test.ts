@@ -3,6 +3,10 @@ import {
   apiResponseSchema,
   appSettingsPatchSchema,
   appSettingsSchema,
+  attachmentDraftSchema,
+  attachmentPickerRequestSchema,
+  pickProjectResultSchema,
+  projectRefSchema,
 } from "./ipcSchemas.js";
 
 describe("IPC schemas", () => {
@@ -34,5 +38,78 @@ describe("IPC schemas", () => {
         },
       }),
     ).toMatchObject({ ok: false });
+  });
+
+  it("validates project picker metadata and rejects unknown fields", () => {
+    const project = {
+      id: "/project/app",
+      path: "/project/app",
+      canonicalPath: "/private/project/app",
+      displayName: "app",
+      lastOpenedAt: 1_234,
+    };
+
+    expect(projectRefSchema.parse(project)).toEqual(project);
+    expect(
+      pickProjectResultSchema.parse({ selected: true, project }),
+    ).toMatchObject({ selected: true, project });
+    expect(pickProjectResultSchema.parse({ selected: false })).toEqual({
+      selected: false,
+    });
+
+    expect(() =>
+      projectRefSchema.parse({ ...project, arbitraryFileRead: true }),
+    ).toThrow();
+    expect(() =>
+      pickProjectResultSchema.parse({
+        selected: true,
+        project: { ...project, id: 42 },
+      }),
+    ).toThrow();
+  });
+
+  it("validates attachment picker request and token-shaped draft metadata", () => {
+    const attachment = {
+      id: "draft-1",
+      selectedPathToken: "opaque-token-1",
+      fileName: "App.tsx",
+      displayPath: "src/App.tsx",
+      kind: "textFile",
+      sendMode: "pathReference",
+      outsideProject: false,
+      status: "ready",
+    };
+
+    expect(
+      attachmentPickerRequestSchema.parse({ projectPath: "/project" }),
+    ).toEqual({
+      projectPath: "/project",
+    });
+    expect(attachmentDraftSchema.parse(attachment)).toEqual(attachment);
+
+    expect(() =>
+      attachmentPickerRequestSchema.parse({ recursiveRead: true }),
+    ).toThrow();
+    expect(() =>
+      attachmentDraftSchema.parse({
+        ...attachment,
+        selectedPathToken: undefined,
+      }),
+    ).toThrow();
+    expect(() =>
+      attachmentDraftSchema.parse({ ...attachment, sendMode: undefined }),
+    ).toThrow();
+    expect(() =>
+      attachmentDraftSchema.parse({ ...attachment, status: undefined }),
+    ).toThrow();
+    expect(() =>
+      attachmentDraftSchema.parse({ ...attachment, kind: "directory" }),
+    ).toThrow();
+    expect(() =>
+      attachmentDraftSchema.parse({
+        ...attachment,
+        sendMode: "inlineContents",
+      }),
+    ).toThrow();
   });
 });

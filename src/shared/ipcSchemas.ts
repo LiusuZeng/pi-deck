@@ -84,6 +84,54 @@ export const chatRuntimeEventSchema = z
   })
   .passthrough();
 
+export const projectRefSchema = z
+  .object({
+    id: z.string(),
+    path: z.string(),
+    canonicalPath: z.string(),
+    displayName: z.string(),
+    lastOpenedAt: z.number(),
+    invalidReason: z.string().optional(),
+  })
+  .strict();
+
+export const pickProjectResultSchema = z.discriminatedUnion("selected", [
+  z.object({ selected: z.literal(false) }).strict(),
+  z.object({ selected: z.literal(true), project: projectRefSchema }).strict(),
+]);
+
+export const attachmentPickerRequestSchema = z
+  .object({
+    projectPath: z.string().optional(),
+  })
+  .strict();
+
+export const attachmentDraftSchema = z
+  .object({
+    id: z.string(),
+    selectedPathToken: z.string(),
+    fileName: z.string(),
+    displayPath: z.string(),
+    mimeType: z.string().optional(),
+    size: z.number().optional(),
+    kind: z.enum(["image", "textFile", "binaryFile"]),
+    sendMode: z.enum(["imageInput", "pathReference"]),
+    outsideProject: z.boolean(),
+    status: z.enum(["ready", "missing", "unreadable"]),
+    warning: z.string().optional(),
+  })
+  .strict();
+
+export const pickAttachmentsResultSchema = z.discriminatedUnion("selected", [
+  z.object({ selected: z.literal(false) }).strict(),
+  z
+    .object({
+      selected: z.literal(true),
+      attachments: z.array(attachmentDraftSchema),
+    })
+    .strict(),
+]);
+
 export const ipcErrorSchema = z
   .object({
     code: z.string(),
@@ -109,6 +157,8 @@ export const ipcChannels = {
   chatPrompt: "chat:prompt",
   chatAbort: "chat:abort",
   chatEvent: "chat:event",
+  projectPickFolder: "project:pickFolder",
+  attachmentsPickFiles: "attachments:pickFiles",
 } as const;
 
 export type IpcChannel = (typeof ipcChannels)[keyof typeof ipcChannels];

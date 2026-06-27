@@ -107,13 +107,14 @@ test("PiWorker abort path emits a sensible aborted end state", async () => {
   const worker = createWorker(["--stream-delay-ms", "50"]);
   try {
     await worker.prompt({ text: "abort me" });
-    await worker.abort();
-    const aborted = await waitForWorkerEvent(
+    const abortedEvent = waitForWorkerEvent(
       worker,
       (event) =>
         event.type === "agent_end" &&
         (event as { status?: string }).status === "aborted",
     );
+    await worker.abort();
+    const aborted = await abortedEvent;
     assert.equal(aborted.runtimeId, worker.runtimeId);
   } finally {
     await worker.closeSession();
