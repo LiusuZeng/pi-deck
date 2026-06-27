@@ -1,0 +1,143 @@
+{
+  "version": 1,
+  "description": "Canonical event fixtures for Pi Deck base-state/overlay reducer tests. These are contract fixtures until the shared reducer lands; fake RPC can emit equivalent records with --prompt-scenario all.",
+  "initialState": {
+    "baseState": "idle",
+    "overlays": {
+      "streaming": false,
+      "toolRunning": false,
+      "compacting": false,
+      "retrying": false,
+      "localQueuedStartCount": 0,
+      "piQueuedSteeringCount": 0,
+      "piQueuedFollowUpCount": 0,
+      "needsUserInput": false
+    },
+    "activeTools": [],
+    "pendingExtensionUiQueue": []
+  },
+  "cases": [
+    {
+      "id": "agent-start-working",
+      "events": [{ "type": "agent_start", "runId": "run_1" }],
+      "expect": { "baseState": "working" }
+    },
+    {
+      "id": "message-update-streaming-overlay",
+      "events": [
+        { "type": "agent_start", "runId": "run_1" },
+        {
+          "type": "message_update",
+          "messageId": "msg_assistant_1",
+          "role": "assistant",
+          "delta": "Hello",
+          "content": "Hello",
+          "done": false
+        }
+      ],
+      "expect": {
+        "baseState": "working",
+        "overlays": { "streaming": true }
+      }
+    },
+    {
+      "id": "tool-card-lifecycle",
+      "events": [
+        { "type": "tool_execution_start", "toolCallId": "tool_1", "name": "bash" },
+        {
+          "type": "tool_execution_update",
+          "toolCallId": "tool_1",
+          "output": "partial output"
+        },
+        {
+          "type": "tool_execution_end",
+          "toolCallId": "tool_1",
+          "status": "completed",
+          "output": "final output"
+        }
+      ],
+      "expect": {
+        "overlays": { "toolRunning": false },
+        "toolCards": {
+          "tool_1": { "status": "completed", "output": "final output" }
+        }
+      }
+    },
+    {
+      "id": "queue-counts",
+      "events": [{ "type": "queue_update", "steeringCount": 1, "followUpCount": 2 }],
+      "expect": {
+        "overlays": {
+          "piQueuedSteeringCount": 1,
+          "piQueuedFollowUpCount": 2
+        }
+      }
+    },
+    {
+      "id": "compaction-lifecycle",
+      "events": [{ "type": "compaction_start" }, { "type": "compaction_end" }],
+      "expect": { "overlays": { "compacting": false } }
+    },
+    {
+      "id": "auto-retry-lifecycle",
+      "events": [
+        { "type": "auto_retry_start", "attempt": 1, "maxAttempts": 2 },
+        { "type": "auto_retry_end", "attempt": 1, "status": "recovered" }
+      ],
+      "expect": { "overlays": { "retrying": false } }
+    },
+    {
+      "id": "extension-dialog-waiting-red-dot",
+      "events": [
+        {
+          "type": "extension_ui_request",
+          "requestId": "ext_1",
+          "method": "confirm",
+          "params": { "message": "Approve?" },
+          "timeout": 5000
+        }
+      ],
+      "expect": {
+        "baseState": "waitingForInput",
+        "overlays": { "needsUserInput": true },
+        "sidebarPriority": "waitingForInput"
+      }
+    },
+    {
+      "id": "agent-end-clears-work-overlays",
+      "events": [
+        { "type": "agent_start", "runId": "run_1" },
+        {
+          "type": "message_update",
+          "messageId": "msg_1",
+          "role": "assistant",
+          "content": "Done",
+          "done": true
+        },
+        { "type": "agent_end", "runId": "run_1", "status": "completed" }
+      ],
+      "expect": {
+        "baseState": "idle",
+        "overlays": { "streaming": false, "toolRunning": false }
+      }
+    },
+    {
+      "id": "agent-end-does-not-clear-pending-dialog",
+      "events": [
+        { "type": "agent_start", "runId": "run_1" },
+        {
+          "type": "extension_ui_request",
+          "requestId": "ext_1",
+          "method": "input",
+          "params": { "label": "Value" }
+        },
+        { "type": "agent_end", "runId": "run_1", "status": "completed" }
+      ],
+      "expect": {
+        "baseState": "waitingForInput",
+        "overlays": { "needsUserInput": true },
+        "diagnosticsIncludes": "agent_end while extension UI request is pending"
+      }
+    }
+  ]
+}

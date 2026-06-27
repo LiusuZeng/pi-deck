@@ -8,11 +8,15 @@ Source:
 src/main/pi/fakeRpc/fakeRpcServer.ts
 ```
 
-Build and run it through Node after `npm run build`:
+For tests, use the shared harness rather than relying on a built output path:
 
-```bash
-node dist/src/main/pi/fakeRpc/fakeRpcServer.js
+```text
+src/test/fakeRpcHarness.ts
 ```
+
+The harness bundles the fake server with esbuild, spawns it for Vitest, and can write a temporary `pi` shim so platform smoke-test code exercises the same fake-RPC implementation.
+
+Direct Node execution of a built server is development-only if your local build emits a compatible path; the Electron main build does not guarantee a stable `dist/src/main/...` layout.
 
 The fake process speaks the same LF-delimited JSONL framing used by `JsonlRpcClient`:
 
@@ -35,13 +39,37 @@ Useful fixture flags:
 - `--malformed-on-start` — emits malformed stdout for parser/error handling tests.
 - `--exit-after-first-command` — exits before responding to the first command for pending-request rejection tests.
 - `--ignore-command <name>` — accepts a command but never responds, for deterministic timeout tests.
+- `--prompt-scenario <name>` — emits additional deterministic prompt-side events. Supported names:
+  - `basic` — default `agent_start`, streaming `message_update`, `agent_end`.
+  - `tool` — adds `tool_execution_start/update/end`.
+  - `queue` — adds `queue_update` with steering/follow-up counts.
+  - `compaction` — adds `compaction_start/end`.
+  - `retry` — adds `auto_retry_start/end`.
+  - `extension-ui` — adds a `confirm` `extension_ui_request` with a timeout.
+  - `all` — emits every extension fixture event above.
 
-Example PiWorker test configuration:
+G4 extension UI follow-up: the fake currently emits request events only. It does not yet simulate `respondToExtensionUi`, Pi-side timeout resolution, late-response suppression, or stdin write failure. Add those fixtures once the extension UI backend/write path exists.
+
+The fake accepts both JSONL command encodings used in tests:
+
+```jsonl
+{"id":"1","type":"command","command":"get_state","params":{}}
+{"id":"2","type":"get_state"}
+```
+
+Example test usage:
 
 ```ts
+import { buildFakeRpcServer } from "../../test/fakeRpcHarness.js";
+
 new PiWorker({
   command: process.execPath,
-  args: ["dist/src/main/pi/fakeRpc/fakeRpcServer.js", "--stream-delay-ms", "1"],
+  args: [buildFakeRpcServer(), "--stream-delay-ms", "1"],
   cwd: process.cwd(),
 });
 ```
+
+Related QA artifacts:
+
+- `docs/state-reducer-fixtures.json` — canonical reducer fixture cases for M5.
+- `docs/real-pi-smoke-test-matrix.md` — real Pi validation matrix for G1-G4 and MVP acceptance.

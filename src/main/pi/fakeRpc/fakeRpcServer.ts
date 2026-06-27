@@ -4,9 +4,17 @@ import type {
   JsonObject,
   PiMessage,
   PiState,
-  RpcCommandRecord,
   RpcResponseRecord,
 } from "../types.js";
+
+type PromptScenario =
+  | "basic"
+  | "tool"
+  | "queue"
+  | "compaction"
+  | "retry"
+  | "extension-ui"
+  | "all";
 
 interface FakeOptions {
   malformedOnStart: boolean;
@@ -14,7 +22,15 @@ interface FakeOptions {
   stderrOnStart: boolean;
   streamDelayMs: number;
   ignoredCommands: Set<string>;
+  promptScenario: PromptScenario;
 }
+
+type FakeCommandRecord = JsonObject & {
+  id?: string;
+  type?: string;
+  command?: string;
+  params?: JsonObject;
+};
 
 function parseOptions(argv: string[]): FakeOptions {
   const options: FakeOptions = {
@@ -23,6 +39,7 @@ function parseOptions(argv: string[]): FakeOptions {
     stderrOnStart: false,
     streamDelayMs: 5,
     ignoredCommands: new Set<string>(),
+    promptScenario: "basic",
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -39,10 +56,60 @@ function parseOptions(argv: string[]): FakeOptions {
     } else if (arg === "--ignore-command") {
       options.ignoredCommands.add(argv[index + 1] ?? "");
       index += 1;
+    } else if (arg === "--prompt-scenario") {
+      const scenario = argv[index + 1] ?? "basic";
+      if (isPromptScenario(scenario)) {
+        options.promptScenario = scenario;
+      }
+      index += 1;
     }
   }
 
   return options;
+}
+
+function isPromptScenario(value: string): value is PromptScenario {
+  return [
+    "basic",
+    "tool",
+    "queue",
+    "compaction",
+    "retry",
+    "extension-ui",
+    "all",
+  ].includes(value);
+}
+
+function commandName(command: FakeCommandRecord): string {
+  if (typeof command.command === "string") {
+    return command.command;
+  }
+  if (
+    typeof command.type === "string" &&
+    command.type !== "command" &&
+    command.type !== "response"
+  ) {
+    return command.type;
+  }
+  return "";
+}
+
+function commandParams(command: FakeCommandRecord): JsonObject {
+  if (
+    command.params &&
+    typeof command.params === "object" &&
+    !Array.isArray(command.params)
+  ) {
+    return command.params;
+  }
+
+  const params: JsonObject = {};
+  for (const [key, value] of Object.entries(command)) {
+    if (key !== "id" && key !== "type" && key !== "command") {
+      params[key] = value;
+    }
+  }
+  return params;
 }
 
 class FakeRpcServer {
@@ -91,9 +158,9 @@ class FakeRpcServer {
   }
 
   private handleLine(line: string): void {
-    let command: RpcCommandRecord;
+    let command: FakeCommandRecord;
     try {
-      command = JSON.parse(line) as RpcCommandRecord;
+      command = JSON.parse(line) as FakeCommandRecord;
     } catch (error) {
       this.write({
         type: "error",
@@ -109,16 +176,17 @@ class FakeRpcServer {
     }
     this.firstCommandSeen = true;
 
-    if (this.options.ignoredCommands.has(command.command)) {
+    const name = commandName(command);
+    if (this.options.ignoredCommands.has(name)) {
       return;
     }
 
-    switch (command.command) {
+    switch (name) {
       case "get_state":
-        this.respond(command.id, this.getState());
+        this.respond(command.id ?? "", this.getState());
         break;
       case "get_messages":
-        this.respond(command.id, this.messages);
+        this.respond(command.id ?? "", this.messages);
         break;
       case "prompt":
         this.handlePrompt(command);
@@ -127,9 +195,9 @@ class FakeRpcServer {
         this.handleAbort(command);
         break;
       default:
-        this.respond(command.id, undefined, {
+        this.respond(command.id ?? "", undefined, {
           code: "FAKE_UNKNOWN_COMMAND",
-          message: `Fake RPC does not implement command: ${command.command}`,
+          message: `Fake RPC does not implement command: ${name || "<missing>"}`,
         });
         break;
     }
@@ -147,9 +215,9 @@ class FakeRpcServer {
     };
   }
 
-  private handlePrompt(command: RpcCommandRecord): void {
-    const text =
-      typeof command.params?.text === "string" ? command.params.text : "";
+  private handlePrompt(command: FakeCommandRecord): void {
+    const params = commandParams(command);
+    const text = typeof params.text === "string" ? params.text : "";
     const userMessage: PiMessage = {
       id: `msg_user_${this.promptCounter + 1}`,
       role: "user",
@@ -163,12 +231,13 @@ class FakeRpcServer {
     let accumulated = "";
     this.agentActive = true;
 
-    this.respond(command.id, { accepted: true });
+    this.respond(command.id ?? "", { accepted: true });
     this.write({
       type: "agent_start",
       runId: `run_${this.promptCounter}`,
       messageId: assistantId,
     });
+    this.emitPromptScenarioEvents(assistantId);
 
     chunks.forEach((chunk, index) => {
       this.currentTimers.push(
@@ -217,14 +286,72 @@ class FakeRpcServer {
     );
   }
 
-  private handleAbort(command: RpcCommandRecord): void {
+  private emitPromptScenarioEvents(assistantId: string): void {
+    const scenario = this.options.promptScenario;
+    const shouldEmit = (target: PromptScenario): boolean =>
+      scenario === target || scenario === "all";
+
+    if (shouldEmit("queue")) {
+      this.write({
+        type: "queue_update",
+        steeringCount: 1,
+        followUpCount: 2,
+      });
+    }
+
+    if (shouldEmit("compaction")) {
+      this.write({ type: "compaction_start", reason: "fake-fixture" });
+      this.write({ type: "compaction_end", status: "completed" });
+    }
+
+    if (shouldEmit("retry")) {
+      this.write({ type: "auto_retry_start", attempt: 1, maxAttempts: 2 });
+      this.write({ type: "auto_retry_end", attempt: 1, status: "recovered" });
+    }
+
+    if (shouldEmit("tool")) {
+      this.write({
+        type: "tool_execution_start",
+        toolCallId: "tool_fake_1",
+        name: "read",
+        title: "Read fixture file",
+      });
+      this.write({
+        type: "tool_execution_update",
+        toolCallId: "tool_fake_1",
+        output: "partial tool output",
+      });
+      this.write({
+        type: "tool_execution_end",
+        toolCallId: "tool_fake_1",
+        status: "completed",
+        output: "final tool output",
+      });
+    }
+
+    if (shouldEmit("extension-ui")) {
+      this.write({
+        type: "extension_ui_request",
+        requestId: "ext_fake_dialog_1",
+        messageId: assistantId,
+        method: "confirm",
+        params: {
+          title: "Fake confirmation",
+          message: "Approve fake extension UI request?",
+        },
+        timeout: 250,
+      });
+    }
+  }
+
+  private handleAbort(command: FakeCommandRecord): void {
     for (const timer of this.currentTimers) {
       clearTimeout(timer);
     }
     this.currentTimers = [];
     const wasActive = this.agentActive;
     this.agentActive = false;
-    this.respond(command.id, { aborted: wasActive });
+    this.respond(command.id ?? "", { aborted: wasActive });
     this.write({
       type: "agent_end",
       runId: `run_${this.promptCounter}`,

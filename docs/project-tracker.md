@@ -30,7 +30,7 @@ These items should be started earliest and reviewed frequently.
 | CP-6 | Resume hard gate: `pi --mode rpc --session <file>` | Backend/RPC | Not Started | M3 | If fails, pause architecture |
 | CP-7 | Multiple workers and event routing | Backend | Not Started | M5 | Required for concurrency |
 | CP-8 | Scheduler/concurrency cap | Backend | Not Started | M5 | Required for multi-session MVP |
-| CP-9 | End-to-end release validation | QA / All | Not Started | M7 | Final MVP gate |
+| CP-9 | End-to-end release validation | QA / All | In Progress | M7 | Smoke matrix drafted in `docs/real-pi-smoke-test-matrix.md`; real Pi execution pending feature readiness |
 
 ## 2. Integration Gates
 
@@ -76,10 +76,10 @@ These items should be started earliest and reviewed frequently.
 
 | Task | Owner | Status | Acceptance |
 |---|---|---|---|
-| Fake RPC dialog fixture | QA / Backend | Not Started | Foreground/background dialog events covered |
-| Timeout + grace behavior | Backend | Not Started | Red dot clears locally after timeout |
-| Late-response suppression | Backend / Frontend | Not Started | Late response cannot be sent |
-| Worker exit/write failure path | Backend | Not Started | Session/request becomes error with diagnostics |
+| Fake RPC dialog fixture | QA / Backend | In Progress | Fake RPC emits `extension_ui_request` via `--prompt-scenario extension-ui/all`; response/timeout/write-failure fixtures remain follow-up |
+| Timeout + grace behavior | Backend | Not Started | Red dot clears locally after timeout; fake/backend fixture not implemented yet |
+| Late-response suppression | Backend / Frontend | Not Started | Late response cannot be sent; fake/backend fixture not implemented yet |
+| Worker exit/write failure path | Backend | Not Started | Session/request becomes error with diagnostics; stdin write-failure fixture not implemented yet |
 
 ## 3. Milestone Tracker
 
@@ -99,7 +99,7 @@ These items should be started earliest and reviewed frequently.
 | ID | Task | Owner | Status | Depends on | Acceptance summary |
 |---|---|---|---|---|---|
 | M2.1 | Strict JSONL transport | Backend/RPC | Done | G0 PiAdapter | Parser tests cover chunks/malformed/unicode; request correlation works |
-| M2.2 | Fake RPC subprocess/harness | Backend/QA | Done | M2.1 | Deterministic tests can run without real Pi; see `docs/fake-rpc.md` |
+| M2.2 | Fake RPC subprocess/harness | Backend/QA | Done | M2.1 | Deterministic tests can run without real Pi; Eng 6 added extended prompt scenarios and platform fake-shim coverage; see `docs/fake-rpc.md` |
 | M2.3 | Single PiWorker lifecycle | Backend/RPC | Done | M2.1, M1.5 | `get_state`, `get_messages`, `prompt`, `abort`, exit handling covered against fake RPC |
 | M2.4 | Basic chat timeline rendering | Frontend | In Review | M2.2, M1.6 | User/assistant messages stream; markdown sanitized |
 | M2.5 | Composer prompt and abort UX | Frontend/Backend | In Review | M2.3, M2.4 | Multiline prompt sends; abort works or errors clearly |
@@ -131,7 +131,7 @@ These items should be started earliest and reviewed frequently.
 
 | ID | Task | Owner | Status | Depends on | Acceptance summary |
 |---|---|---|---|---|---|
-| M5.1 | Base state + overlays reducer | Backend/Frontend | Not Started | G0 events, M2 events | Unit tests cover all reducer rules; sidebar priority selector works |
+| M5.1 | Base state + overlays reducer | Backend/Frontend | Not Started | G0 events, M2 events | QA fixtures drafted in `docs/state-reducer-fixtures.json`; unit tests still need reducer target |
 | M5.2 | Multiple attached workers | Backend | Not Started | M3 locks, M5.1 | Background events update correct session; no event leakage |
 | M5.3 | RunScheduler and concurrency cap | Backend | Not Started | M5.2 | Default 4, hard cap 20; cap blocks or explicit queue |
 | M5.4 | Steer/follow-up/abort controls | Backend/Frontend | Not Started | M2 abort, M5.1 | Composer intervention mode; queue counts update |
@@ -153,7 +153,7 @@ These items should be started earliest and reviewed frequently.
 | M7.1 | Tool execution cards | Frontend/Backend | Not Started | M5.1 tool events | Expand/collapse; bash status/output; edit/write paths |
 | M7.2 | Session stats and diagnostics panel | Backend/Frontend | Not Started | M3/M4 workers | Binary/config/workers/errors visible; secrets redacted |
 | M7.3 | Error recovery flows | Backend/Frontend | Not Started | M5/M6 | Reopen after worker exit; refresh session list; reconcile messages |
-| M7.4 | End-to-end release validation | QA/All | Not Started | M1-M7 | MVP acceptance checklist passes; limitations documented |
+| M7.4 | End-to-end release validation | QA/All | In Progress | M1-M7 | Matrix drafted in `docs/real-pi-smoke-test-matrix.md`; execution waits for feature readiness and real Pi validation |
 
 ## 4. Parallel Work Lanes and Worktrees
 
@@ -166,7 +166,7 @@ Use this section for standups and resource assignment. Each agent should work on
 | C. Platform/Pi Env | Eng 3 | `eng3/platform-env` | `/Users/liusu/pi-deck-worktrees/eng3-platform-env` | M1.4-M1.5, M3.2 | Done | Platform env modules + tests implemented; real Pi validation pending |
 | D. Frontend Chat | Eng 4 | `eng4/frontend-chat` | `/Users/liusu/pi-deck-worktrees/eng4-frontend-chat` | M1.6, M2.4-M2.5 | In Review | Renderer wired to backend fake RPC/preload stream with sanitized markdown |
 | E. Sessions/Controls UI | Eng 5 | `eng5/sessions-controls` | `/Users/liusu/pi-deck-worktrees/eng5-sessions-controls` | M3 UI, M4 controls | In Progress | Integrated with Eng 4 chat shell; fake-data sidebar/project picker/model/thinking/slash/attachment shells awaiting real backend APIs |
-| F. QA/Automation | Eng 6 | `eng6/qa-automation` | `/Users/liusu/pi-deck-worktrees/eng6-qa-automation` | Tests/fixtures/smoke matrix | Not Started | Fake RPC and acceptance coverage |
+| F. QA/Automation | Eng 6 | `eng6/qa-automation` | `/Users/liusu/pi-deck-worktrees/eng6-qa-automation` | Tests/fixtures/smoke matrix | In Progress | Fake-RPC extension fixtures, reducer fixtures, and real-Pi smoke matrix drafted |
 | G. State/Concurrency | TBD | TBD | TBD | M5.1-M5.5 | Not Started | Assign after M2/M3 foundations |
 | H. Trust/Resources/Extension UI | TBD | TBD | TBD | M6.1-M6.4 | Not Started | Assign after M3/M5 foundations |
 | I. Tool Visibility/Release | TBD | TBD | TBD | M7.1-M7.4 | Not Started | Depends on event coverage |
@@ -179,7 +179,7 @@ Use this section for standups and resource assignment. Each agent should work on
 | D-2 | Minimum supported Pi version after smoke/resume tests | M3 | Backend/RPC | Open | TBD |
 | D-3 | Image resizing implementation choice | M4.6 | Platform | Open | TBD |
 | D-4 | Large-image warning/rejection thresholds | M4.6 | Platform/QA | Open | TBD |
-| D-5 | Fake RPC fixture format and location | M2.2 | QA/Backend | Resolved | Source at `src/main/pi/fakeRpc/fakeRpcServer.ts`; usage documented in `docs/fake-rpc.md` |
+| D-5 | Fake RPC fixture format and location | M2.2 | QA/Backend | Resolved | Source at `src/main/pi/fakeRpc/fakeRpcServer.ts`; shared test helper at `src/test/fakeRpcHarness.ts`; usage documented in `docs/fake-rpc.md` |
 | D-6 | Release packaging/signing approach for internal MVP | M7 | Platform | Open | TBD |
 | D-7 | Starter prompts prepared for all Eng 1-6 | Pre-M1 | Orchestrator | Done | See `docs/starter-prompts/` |
 
@@ -187,7 +187,8 @@ Use this section for standups and resource assignment. Each agent should work on
 
 | Date | Blocker | Affected tasks | Owner | Status | Next action |
 |---|---|---|---|---|---|
-| TBD | TBD | TBD | TBD | Open | TBD |
+| 2026-06-27 | Real Pi smoke execution not yet run in this branch | G1-G2, M7.4 | QA / Orchestrator | Open | Run `docs/real-pi-smoke-test-matrix.md` against installed Pi after backend/platform branches are merged/rebased |
+| 2026-06-27 | Frontend/background UI targets not merged yet | G4, M5/M6 renderer acceptance | QA / Eng 4/5 | Open | Rebase after Eng 4/5 merge and wire reducer/sidebar fixture tests to renderer targets |
 
 ## 7. Weekly Milestone Review Checklist
 
