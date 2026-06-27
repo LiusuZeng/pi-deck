@@ -103,10 +103,13 @@ export class DiagnosticRingBuffer {
   }
 }
 
+export type JsonlRpcCommandProtocol = "command-field" | "type-field";
+
 export interface JsonlRpcClientOptions {
   requestTimeoutMs?: number;
   stderrBufferBytes?: number;
   malformedOutputIsFatal?: boolean;
+  commandProtocol?: JsonlRpcCommandProtocol;
 }
 
 interface PendingRequest {
@@ -145,6 +148,7 @@ export class JsonlRpcClient extends EventEmitter {
   readonly stderr: DiagnosticRingBuffer;
   private readonly requestTimeoutMs: number;
   private readonly malformedOutputIsFatal: boolean;
+  private readonly commandProtocol: JsonlRpcCommandProtocol;
   private readonly pending = new Map<string, PendingRequest>();
   private readonly parser: JsonlFramingParser;
   private closed = false;
@@ -158,6 +162,7 @@ export class JsonlRpcClient extends EventEmitter {
     super();
     this.requestTimeoutMs = options.requestTimeoutMs ?? 10_000;
     this.malformedOutputIsFatal = options.malformedOutputIsFatal ?? true;
+    this.commandProtocol = options.commandProtocol ?? "command-field";
     this.stderr = new DiagnosticRingBuffer(
       options.stderrBufferBytes ?? 64 * 1024,
     );
@@ -212,9 +217,11 @@ export class JsonlRpcClient extends EventEmitter {
     }
 
     const id = randomUUID();
-    const payload =
-      JSON.stringify({ id, type: "command", command, params: params ?? {} }) +
-      "\n";
+    const record =
+      this.commandProtocol === "type-field"
+        ? { id, type: command, ...(params ?? {}) }
+        : { id, type: "command", command, params: params ?? {} };
+    const payload = JSON.stringify(record) + "\n";
 
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -293,7 +300,12 @@ export class JsonlRpcClient extends EventEmitter {
     clearTimeout(pending.timer);
     this.pending.delete(response.id);
 
-    if (response.ok === false || response.error) {
+    const responseObject = response as unknown as JsonObject;
+    if (
+      response.ok === false ||
+      responseObject.success === false ||
+      response.error
+    ) {
       const payload = response.error;
       const message =
         typeof payload === "object" && payload !== null
@@ -303,7 +315,9 @@ export class JsonlRpcClient extends EventEmitter {
       return;
     }
 
-    pending.resolve((response.result ?? null) as JsonValue);
+    pending.resolve(
+      (response.result ?? responseObject.data ?? null) as JsonValue,
+    );
   }
 
   private handleMalformed(error: JsonlParseError): void {

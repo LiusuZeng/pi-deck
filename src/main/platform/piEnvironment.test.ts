@@ -44,10 +44,11 @@ if (process.argv.includes('--mode') && process.argv.includes('rpc')) {
   rl.on('line', (line) => {
     const msg = JSON.parse(line);
     if (payloadRecordPath) fs.writeFileSync(payloadRecordPath, JSON.stringify(msg), 'utf8');
-    if (msg.command === 'get_state') {
-      process.stdout.write(JSON.stringify({ type: 'response', id: msg.id, result: { ok: true, sessionFile: undefined } }) + '\\n');
+    const command = msg.command || msg.type;
+    if (command === 'get_state') {
+      process.stdout.write(JSON.stringify({ type: 'response', id: msg.id, success: true, data: { ok: true, sessionFile: undefined } }) + '\\n');
     } else {
-      process.stdout.write(JSON.stringify({ type: 'response', id: msg.id, error: 'unknown command' }) + '\\n');
+      process.stdout.write(JSON.stringify({ type: 'response', id: msg.id, success: false, error: 'unknown command' }) + '\\n');
     }
   });
 } else {
@@ -366,9 +367,9 @@ test("runMinimalRpcSmokeTest uses canonical no-resource command, temp cwd, valid
   assert.deepEqual(first.state, { ok: true });
 
   const payload = JSON.parse(fs.readFileSync(payloadRecord, "utf8"));
-  assert.equal(payload.type, "command");
-  assert.equal(payload.command, "get_state");
-  assert.deepEqual(payload.params, {});
+  assert.equal(payload.type, "get_state");
+  assert.equal(payload.command, undefined);
+  assert.equal(payload.params, undefined);
 
   const second = await runMinimalRpcSmokeTest({
     config: { piBinary: pi, env: { PATH: process.env.PATH ?? "" } },

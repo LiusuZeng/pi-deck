@@ -93,6 +93,7 @@ export async function runMinimalRpcSmokeTest(
       {
         requestTimeoutMs: timeoutMs,
         stderrBufferBytes: 64 * 1024,
+        commandProtocol: "type-field",
       },
     );
     client.on("event", (record) => stdoutRecords.push(record as JsonObject));
