@@ -23,8 +23,8 @@ These items should be started earliest and reviewed frequently.
 | ID | Critical item | Owner | Status | Target | Blocker / note |
 |---|---|---|---|---|---|
 | CP-1 | G0 contract freeze: PiAdapter, IPC, events, state, timeline, attachment model | Tech Lead | Not Started | Pre-M1 | Blocks broad parallel work |
-| CP-2 | Pi binary resolution and version diagnostics | Platform | Not Started | M1 | Required before real RPC |
-| CP-3 | Minimal no-resource RPC smoke test | Backend/RPC | Not Started | M1 | Must not create sessions/resources |
+| CP-2 | Pi binary resolution and version diagnostics | Platform | Done | M1 | Implemented in `src/main/platform/piEnvironment.ts`; real Finder/Pi validation pending |
+| CP-3 | Minimal no-resource RPC smoke test | Backend/RPC | Done | M1 | Implemented in `src/main/platform/rpcSmokeTest.ts` using Eng 2 JSONL client; real Pi validation pending |
 | CP-4 | Strict JSONL transport | Backend/RPC | Done | M2 | Implemented in `src/main/pi/jsonlClient.ts` with parser/client tests |
 | CP-5 | Single PiWorker lifecycle | Backend/RPC | Done | M2 | Implemented in `src/main/pi/piWorker.ts` with fake-RPC integration tests |
 | CP-6 | Resume hard gate: `pi --mode rpc --session <file>` | Backend/RPC | Not Started | M3 | If fails, pause architecture |
@@ -49,10 +49,10 @@ These items should be started earliest and reviewed frequently.
 
 | Task | Owner | Status | Acceptance |
 |---|---|---|---|
-| Resolve Pi binary from Finder-like env | Platform | Not Started | Path/version shown or actionable error |
-| Run full minimal smoke-test command | Backend/RPC | Not Started | `get_state` succeeds in temp cwd |
-| Verify no smoke-test session files created | QA | Not Started | No persisted session side effects |
-| Cache smoke-test result by binary/version | Backend | Not Started | Reruns only on defined triggers |
+| Resolve Pi binary from Finder-like env | Platform | Done | Path/version shown or actionable error; fake-path tests added |
+| Run full minimal smoke-test command | Backend/RPC | Done | `get_state` succeeds in temp cwd with fake RPC; real Pi pending |
+| Verify no smoke-test session files created | QA | Done | Temp cwd file check implemented; QA real Pi validation pending |
+| Cache smoke-test result by binary/version | Backend | Done | Cache by binary/version implemented and tested |
 
 ### G2. Resume Compatibility Hard Gate
 
@@ -90,8 +90,8 @@ These items should be started earliest and reviewed frequently.
 | M1.1 | Electron + TypeScript scaffold | Platform | Done | G0 draft | App launches; typecheck/lint/test scripts pass |
 | M1.2 | Secure preload IPC foundation | Platform/Security | Done | G0 IPC | Renderer has no Node/fs/process access; schemas validate IPC |
 | M1.3 | App settings and diagnostics storage | Platform | Done | M1.1 | Settings persist; logs under `userData`; secrets redacted |
-| M1.4 | Pi binary resolution/version | Platform | Not Started | M1.3 | Config/PATH/shell/common paths work; diagnostics visible |
-| M1.5 | Minimal RPC smoke test | Backend/RPC | Not Started | M1.4, M2.1 starter | Full no-resource command succeeds; no sessions created |
+| M1.4 | Pi binary resolution/version | Platform | Done | M1.3 | Config/PATH/shell/common paths implemented; diagnostics + tests added |
+| M1.5 | Minimal RPC smoke test | Backend/RPC | Done | M1.4, M2.1 starter | Full no-resource command, temp cwd, get_state, cache implemented with Eng 2 JSONL client; real Pi pending |
 | M1.6 | Basic layout shell | Frontend | Not Started | M1.2 | Header/sidebar/chat/composer visible with mock data |
 
 ## M2. Single-Session RPC Adapter and Streaming Chat
@@ -109,7 +109,7 @@ These items should be started earliest and reviewed frequently.
 | ID | Task | Owner | Status | Depends on | Acceptance summary |
 |---|---|---|---|---|---|
 | M3.1 | Project picker/recent projects | Frontend/Backend | Not Started | M1 settings | Native directory picker; recent projects persist |
-| M3.2 | EffectivePiConfig resolver | Backend/Platform | Not Started | M1.3, M1.4 | agentDir/sessionDir/image/trust resolution matches architecture |
+| M3.2 | EffectivePiConfig resolver | Backend/Platform | Done | M1.3, M1.4 | Resolver implemented with app/env/settings/trust/image precedence tests |
 | M3.3 | Static session repository scanning | Backend | Not Started | M3.2 | Lists project sessions; bounded scanning; no symlink loops |
 | M3.4 | Candidate sessionDir handling | Backend/Frontend | Not Started | M3.2, M3.3 | Candidate dirs require explicit enablement and strict bounds |
 | M3.5 | New session flow | Backend/Frontend | Not Started | M2.3, M3.1 | New session appears in sidebar with canonical key |
@@ -163,7 +163,7 @@ Use this section for standups and resource assignment. Each agent should work on
 |---|---|---|---|---|---|---|
 | A. App/Security Foundation | Eng 1 | `eng1/electron-security` | `/Users/liusu/pi-deck-worktrees/eng1-electron-security` | M1.1-M1.3 | Not Started | Starts immediately after G0 draft |
 | B. RPC/Backend Integration | Eng 2 | `eng2/rpc-backend` | `/Users/liusu/pi-deck-worktrees/eng2-rpc-backend` | M2.1-M2.3 | Done | JSONL client, fake RPC, PiWorker, and tests implemented |
-| C. Platform/Pi Env | Eng 3 | `eng3/platform-env` | `/Users/liusu/pi-deck-worktrees/eng3-platform-env` | M1.4-M1.5, M3.2 | Not Started | Binary/env/smoke test |
+| C. Platform/Pi Env | Eng 3 | `eng3/platform-env` | `/Users/liusu/pi-deck-worktrees/eng3-platform-env` | M1.4-M1.5, M3.2 | Done | Platform env modules + tests implemented; real Pi validation pending |
 | D. Frontend Chat | Eng 4 | `eng4/frontend-chat` | `/Users/liusu/pi-deck-worktrees/eng4-frontend-chat` | M1.6, M2.4-M2.5 | Not Started | Can use fake IPC/RPC |
 | E. Sessions/Controls UI | Eng 5 | `eng5/sessions-controls` | `/Users/liusu/pi-deck-worktrees/eng5-sessions-controls` | M3 UI, M4 controls | Not Started | Sidebar/model/thinking/slash/attachments |
 | F. QA/Automation | Eng 6 | `eng6/qa-automation` | `/Users/liusu/pi-deck-worktrees/eng6-qa-automation` | Tests/fixtures/smoke matrix | Not Started | Fake RPC and acceptance coverage |
