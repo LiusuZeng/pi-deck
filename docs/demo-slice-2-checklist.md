@@ -1,9 +1,9 @@
 # Demo Slice 2 Checklist — Controls + Chat Integrated Shell
 
 Status date: 2026-06-28  
-Owner: Eng 4  
+Owner: Eng 6 taking over demo/release readiness  
 Source branch: `main`  
-Validated commit: `fc6f2c3` (`origin/main` at start of this validation run)  
+Validated commit: `e81396e` before demo-readiness doc update  
 Scope: E2E integration readiness for Eng 4 chat loop plus Eng 5 sidebar/sessions/controls/project picker/attachment picker/model-thinking/slash UI.
 
 ## 1. Automated Command Results
@@ -22,9 +22,9 @@ Commands requested for latest `main`:
 | `npm run format` | Pass | Prettier check passed. |
 | `npm run dev` | Pass | Vite started, Electron launched, and integrated shell was exercised through Chrome DevTools Protocol. |
 
-## 2. Manual Pass / Fail Matrix
+## 2. Manual Pass / Deferred Matrix
 
-Manual interaction was performed against the running Electron renderer using Chrome DevTools Protocol because macOS assistive-access UI scripting was unavailable in the API harness. Native Finder dialogs could not be completed through CDP and are marked failed until a hands-on Finder pass is recorded.
+Manual interaction was performed against the running Electron renderer using Chrome DevTools Protocol because macOS assistive-access UI scripting was unavailable in the API harness. Native Finder dialogs could not be completed through CDP. Per user decision, the remaining literal Finder dialog hands-on validation is deferred user feedback/polish and is not a blocker for Demo Slice 2 acceptance.
 
 | Checklist item | Status | Evidence / notes |
 |---|---:|---|
@@ -41,9 +41,9 @@ Manual interaction was performed against the running Electron renderer using Chr
 | Selecting fixture/sidebar sessions does not permanently break active backend chat | Pass | Fixture row showed expected UI-shell guard; returning to backend fake RPC session allowed prompt streaming again. |
 | Model/thinking controls render and do not break send | Pass | Model and thinking selects were changed; subsequent prompt send succeeded. |
 | Slash picker opens for `/` and does not promise unsupported TUI-only commands | Pass | Slash picker opened and showed `/skill:frontend-polish`, `/review`, `/extension:open-pr`; no `/settings` or `/hotkeys` promises. |
-| Project picker cancel/select paths behave | Fail | Native Finder dialog cancel/select could not be completed through CDP; needs hands-on macOS dialog check. |
-| Attachment picker cancel/select paths behave | Fail | Native Finder dialog cancel/select could not be completed through CDP; needs hands-on macOS dialog check. |
-| Selected non-image files are labeled/referenced as path metadata | Fail | `Referenced path` labeling is visible in attachment examples, but actual native-selected non-image chip was not verified because file picker interaction could not be completed. |
+| Project picker cancel/select paths behave | Deferred | Project picker code path exists through the preload/main native dialog API. Literal Finder dialog cancel/select hands-on validation was deferred by user decision. |
+| Attachment picker cancel/select paths behave | Deferred | Attachment picker code path exists through the preload/main native dialog API. Literal Finder dialog cancel/select hands-on validation was deferred by user decision. |
+| Selected non-image files are labeled/referenced as path metadata | Deferred | `Referenced path` labeling is visible in attachment examples. Actual native-selected non-image chip labeling remains part of deferred Finder hands-on validation. |
 | Missing attachment examples are non-selected and do not block default send | Pass | Attachment examples include missing/deleted fixture separately; default composer showed `No files selected` and prompt send worked. |
 | Diagnostics/settings/version remain visible/stable | Pass | Version/security badge and composer diagnostic text remained visible. |
 | Quitting app does not intentionally leave fake worker running | Pass | `Browser.close`/app quit completed; process check found no remaining `fakeRpcServer`. |
@@ -51,22 +51,27 @@ Manual interaction was performed against the running Electron renderer using Chr
 
 ## 3. Blocking Issues
 
-1. **Native Finder dialog E2E remains unverified.**
-   - Project picker cancel/select paths could not be exercised from CDP.
-   - Attachment picker cancel/select paths could not be exercised from CDP.
-   - Actual native-selected non-image attachment chip labeling could not be verified.
+None for Demo Slice 2.
 
-No chat/sidebar/model/slash integration blocker was found.
+Chat/sidebar/model/thinking/slash integration passed. The only remaining unchecked item was literal native Finder dialog hands-on validation for project and attachment picker cancel/select paths, and the user explicitly deferred that as feedback/polish rather than a release blocker.
 
-## 4. Non-Blocking Polish Notes
+## 4. Deferred / User Feedback / Known Limitation
 
-- Add an Electron E2E strategy for native dialog stubbing or a documented hands-on macOS picker checklist.
+**Native Finder dialog hands-on validation is deferred.**
+
+- Project picker and attachment picker code paths exist through safe preload/main APIs.
+- CDP-based validation could not complete native macOS Finder dialogs.
+- User decision: skip remaining native Finder dialog hands-on validation for now and treat it as deferred user feedback/polish, not a blocker.
+- Follow-up: add an Electron E2E strategy for native dialog stubbing or record a hands-on macOS picker checklist when desired.
+
+## 5. Non-Blocking Polish Notes
+
 - Consider splitting `src/renderer/App.tsx` into chat, sidebar, header controls, and composer components before further UI expansion.
 - Keep temporary fake chat IPC clearly separated from future real session controller API.
 - Auto-scroll timeline to streamed output for smoother demos.
 
-## 5. Final Status
+## 6. Final Status
 
-**Not accepted yet.**
+**Accepted for the fake-backend integrated shell.**
 
-Demo Slice 2 is ready for chat/sidebar/model/slash integration, but it is not fully accepted until native project picker and attachment picker cancel/select behavior are manually verified on macOS.
+Demo Slice 2 passes chat/sidebar/model/thinking/slash integration and preserves the fake-agent chat loop. Native Finder dialog hands-on validation is deferred by user decision and is not a blocker.
