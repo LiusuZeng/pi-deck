@@ -84,6 +84,7 @@ interface SessionViewModel {
   thinkingLevel?: string;
   lastError?: string;
   runtimeBacked: boolean;
+  backendMode?: "fake" | "real";
 }
 
 interface ModelOption {
@@ -356,6 +357,9 @@ export function App(): ReactElement {
             ),
           ]);
           setSelectedSessionId(backendSession.id);
+          setUiMessage(
+            `${backendLabelFromMode(snapshot.backendMode)} mode active. Demo Slice 3 real Pi mode is opt-in and should not be treated as real-Pi usability until validated.`,
+          );
           setLoadState({ state: "ready", version, settings, diagnostics });
         }
       } catch (error) {
@@ -425,7 +429,7 @@ export function App(): ReactElement {
     }
     if (!selectedSession.runtimeBacked) {
       setComposerError(
-        "This session row is a UI shell fixture. Select the Backend fake RPC session to demo prompt streaming; real new-session wiring lands in M3.",
+        "This session row is a UI shell fixture. Select the backend RPC session to demo prompt streaming; real new-session wiring lands in M3.",
       );
       return;
     }
@@ -456,7 +460,7 @@ export function App(): ReactElement {
               status: "working",
               baseState: "working",
               overlays: { ...session.overlays, streaming: true },
-              subtitle: "Working · backend fake RPC stream",
+              subtitle: `Working · ${backendLabel(session)} stream`,
               updatedAt: "Now",
               updatedAtMs: Date.now(),
               timeline: [
@@ -630,6 +634,7 @@ export function App(): ReactElement {
           slashOpen={slashOpen}
           slashCommands={filteredCommands}
           selectedModel={selectedModel}
+          backendLabel={backendLabel(selectedSession)}
           onChange={handleDraftChange}
           onKeyDown={handleComposerKeyDown}
           onSend={handleSend}
@@ -646,30 +651,38 @@ export function App(): ReactElement {
 }
 
 function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
-  const modelLabel = [snapshot.state.provider, snapshot.state.model]
-    .filter(
-      (part): part is string => typeof part === "string" && part.length > 0,
-    )
-    .join(" / ");
+  const modelLabel = modelLabelFromState(snapshot.state);
+  const stateRecord = snapshot.state as Record<string, unknown>;
+  const isAgentActive = Boolean(
+    snapshot.state.isAgentActive ??
+    (typeof stateRecord.isStreaming === "boolean"
+      ? stateRecord.isStreaming
+      : undefined),
+  );
 
   const session: SessionViewModel = {
     id: snapshot.runtimeId,
-    title: "Backend fake RPC session",
+    title:
+      snapshot.backendMode === "real"
+        ? "Backend real Pi RPC session"
+        : "Backend fake RPC session",
     project: snapshot.state.cwd?.split(/[\\/]/).pop() ?? "pi-deck",
-    projectPath: snapshot.state.cwd ?? processCwdPlaceholder(),
-    subtitle: snapshot.state.isAgentActive
-      ? "Working · backend fake RPC"
-      : "Idle · backend fake RPC ready",
-    status: snapshot.state.isAgentActive ? "working" : "idle",
+    projectPath:
+      snapshot.state.cwd ?? processCwdPlaceholder(snapshot.backendMode),
+    subtitle: isAgentActive
+      ? `Working · ${backendLabelFromMode(snapshot.backendMode)}`
+      : `Idle · ${backendLabelFromMode(snapshot.backendMode)} ready`,
+    status: isAgentActive ? "working" : "idle",
     updatedAt: "Now",
     updatedAtMs: Date.now(),
-    baseState: snapshot.state.isAgentActive ? "working" : "idle",
+    baseState: isAgentActive ? "working" : "idle",
     overlays: {
       ...emptyOverlays,
-      streaming: Boolean(snapshot.state.isAgentActive),
+      streaming: isAgentActive,
     },
     runtimeBacked: true,
-    timeline: timelineFromMessages(snapshot.messages),
+    backendMode: snapshot.backendMode,
+    timeline: timelineFromMessages(snapshot.messages, snapshot.backendMode),
   };
   if (modelLabel.length > 0) {
     session.modelLabel = modelLabel;
@@ -680,23 +693,55 @@ function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
   return session;
 }
 
-function timelineFromMessages(messages: ChatMessage[]): TimelineItem[] {
-  const timeline = messages.flatMap((message): TimelineItem[] => {
+function modelLabelFromState(state: ChatSnapshot["state"]): string {
+  const provider = typeof state.provider === "string" ? state.provider : "";
+  const model = state.model;
+  if (typeof model === "string") {
+    return [provider, model].filter((part) => part.length > 0).join(" / ");
+  }
+  if (model && typeof model === "object" && !Array.isArray(model)) {
+    const modelId =
+      typeof model.id === "string"
+        ? model.id
+        : typeof model.name === "string"
+          ? model.name
+          : "";
+    const modelProvider =
+      typeof model.provider === "string" ? model.provider : provider;
+    return [modelProvider, modelId]
+      .filter((part) => part.length > 0)
+      .join(" / ");
+  }
+  return provider;
+}
+
+function timelineFromMessages(
+  messages: ChatMessage[],
+  backendMode: "fake" | "real",
+): TimelineItem[] {
+  const timeline = messages.flatMap((message, index): TimelineItem[] => {
     const content = typeof message.content === "string" ? message.content : "";
-    const createdAt = formatMessageTime(message.createdAt);
+    const timestamp =
+      typeof message.createdAt === "number"
+        ? message.createdAt
+        : typeof message.timestamp === "number"
+          ? message.timestamp
+          : undefined;
+    const createdAt = formatMessageTime(timestamp);
+    const id = message.id ?? `message-${index}`;
 
     if (message.role === "user") {
-      return [{ id: message.id, kind: "user", content, createdAt }];
+      return [{ id, kind: "user", content, createdAt }];
     }
 
     if (message.role === "assistant") {
-      return [{ id: message.id, kind: "assistant", content, createdAt }];
+      return [{ id, kind: "assistant", content, createdAt }];
     }
 
-    if (message.role === "tool") {
+    if (message.role === "tool" || message.role === "toolResult") {
       return [
         {
-          id: message.id,
+          id,
           kind: "tool",
           title: "Tool output placeholder",
           status: "collapsed",
@@ -709,7 +754,7 @@ function timelineFromMessages(messages: ChatMessage[]): TimelineItem[] {
     if (message.role === "system" && content.length > 0) {
       return [
         {
-          id: message.id,
+          id,
           kind: "diagnostic",
           tone: "info",
           content,
@@ -730,8 +775,7 @@ function timelineFromMessages(messages: ChatMessage[]): TimelineItem[] {
       id: "backend-empty-diagnostic",
       kind: "diagnostic",
       tone: "info",
-      content:
-        "Connected to the backend fake RPC worker. Send a prompt to stream assistant output through preload IPC.",
+      content: `Connected to the ${backendLabelFromMode(backendMode)} worker. Send a prompt to stream assistant output through preload IPC.`,
       createdAt: formatTime(),
     },
   ];
@@ -748,7 +792,7 @@ function reduceRuntimeEvent(
         status: "working",
         baseState: "working",
         overlays: { ...session.overlays, streaming: true },
-        subtitle: "Working · backend fake RPC stream",
+        subtitle: `Working · ${backendLabel(session)} stream`,
         updatedAt: "Now",
         updatedAtMs: Date.now(),
       };
@@ -789,7 +833,7 @@ function reduceRuntimeEvent(
         },
         {
           tone: "error",
-          content: `Backend fake RPC worker exited (code=${String(getUnknown(event, "code") ?? "null")}).`,
+          content: `${backendLabel(session)} worker exited (code=${String(getUnknown(event, "code") ?? "null")}).`,
         },
       );
     default:
@@ -801,10 +845,17 @@ function reduceMessageUpdate(
   session: SessionViewModel,
   event: ChatRuntimeEvent,
 ): SessionViewModel {
-  const messageId = getString(event, "messageId") ?? createId("assistant");
-  const done = getBoolean(event, "done") ?? false;
+  const messageId = getMessageUpdateId(event) ?? createId("assistant");
+  const assistantEventType = getAssistantMessageEventType(event);
+  const done =
+    getBoolean(event, "done") ??
+    (assistantEventType === "done" || assistantEventType === "error");
   const content =
-    getString(event, "content") ?? getString(event, "delta") ?? "";
+    getString(event, "content") ??
+    getMessageUpdateContent(event) ??
+    getString(event, "delta") ??
+    getAssistantMessageDelta(event) ??
+    "";
   let found = false;
 
   const timeline = session.timeline.map((item) => {
@@ -836,11 +887,19 @@ function reduceMessageUpdate(
     overlays: { ...session.overlays, streaming: !done },
     subtitle: done
       ? "Idle · backend stream complete"
-      : "Working · backend fake RPC stream",
+      : `Working · ${backendLabel(session)} stream`,
     updatedAt: "Now",
     updatedAtMs: Date.now(),
     timeline,
   };
+}
+
+function backendLabel(session: SessionViewModel): string {
+  return backendLabelFromMode(session.backendMode ?? "fake");
+}
+
+function backendLabelFromMode(mode: "fake" | "real"): string {
+  return mode === "real" ? "backend real Pi RPC" : "backend fake RPC";
 }
 
 function appendDiagnostic(
@@ -1333,6 +1392,7 @@ function Composer(props: {
   slashOpen: boolean;
   slashCommands: SlashCommand[];
   selectedModel: ModelOption | undefined;
+  backendLabel: string;
   onChange(value: string): void;
   onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void;
   onSend(): void;
@@ -1380,15 +1440,17 @@ function Composer(props: {
           {props.error !== null ? (
             <span className="composer-error">{props.error}</span>
           ) : props.isWorking ? (
-            <span>Streaming from backend fake RPC… abort remains wired.</span>
+            <span>
+              Streaming from {props.backendLabel}… abort remains wired.
+            </span>
           ) : hasImageWarning ? (
             <span className="composer-error">
               Selected model does not support image input.
             </span>
           ) : (
             <span>
-              Backend fake RPC active · non-images are sent as Referenced path
-              metadata when backend send support lands.
+              {props.backendLabel} active · non-images are sent as Referenced
+              path metadata when backend send support lands.
             </span>
           )}
         </div>
@@ -1583,6 +1645,84 @@ function toSessionStatus(
   return "idle";
 }
 
+function getMessageUpdateId(event: ChatRuntimeEvent): string | undefined {
+  const direct = getString(event, "messageId");
+  if (direct !== undefined) {
+    return direct;
+  }
+  const message = getUnknown(event, "message");
+  if (!message || typeof message !== "object" || Array.isArray(message)) {
+    return undefined;
+  }
+  const id = (message as Record<string, unknown>).id;
+  return typeof id === "string" ? id : undefined;
+}
+
+function getMessageUpdateContent(event: ChatRuntimeEvent): string | undefined {
+  const message = getUnknown(event, "message");
+  if (!message || typeof message !== "object" || Array.isArray(message)) {
+    return undefined;
+  }
+  return extractTextContent((message as Record<string, unknown>).content);
+}
+
+function getAssistantMessageEventType(
+  event: ChatRuntimeEvent,
+): string | undefined {
+  const assistantEvent = getUnknown(event, "assistantMessageEvent");
+  if (
+    !assistantEvent ||
+    typeof assistantEvent !== "object" ||
+    Array.isArray(assistantEvent)
+  ) {
+    return undefined;
+  }
+  const type = (assistantEvent as Record<string, unknown>).type;
+  return typeof type === "string" ? type : undefined;
+}
+
+function getAssistantMessageDelta(event: ChatRuntimeEvent): string | undefined {
+  const assistantEvent = getUnknown(event, "assistantMessageEvent");
+  if (
+    !assistantEvent ||
+    typeof assistantEvent !== "object" ||
+    Array.isArray(assistantEvent)
+  ) {
+    return undefined;
+  }
+  const record = assistantEvent as Record<string, unknown>;
+  if (typeof record.delta === "string") {
+    return record.delta;
+  }
+  if (typeof record.content === "string") {
+    return record.content;
+  }
+  return extractTextContent(record.partial);
+}
+
+function extractTextContent(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const parts = value.flatMap((item): string[] => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      return [];
+    }
+    const record = item as Record<string, unknown>;
+    if (typeof record.text === "string") {
+      return [record.text];
+    }
+    if (typeof record.thinking === "string") {
+      return [record.thinking];
+    }
+    return [];
+  });
+  return parts.length > 0 ? parts.join("\n") : undefined;
+}
+
 function getString(event: ChatRuntimeEvent, key: string): string | undefined {
   const value = getUnknown(event, key);
   return typeof value === "string" ? value : undefined;
@@ -1668,8 +1808,10 @@ function createId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
-function processCwdPlaceholder(): string {
-  return "/local/fake-rpc-worker";
+function processCwdPlaceholder(mode: "fake" | "real"): string {
+  return mode === "real"
+    ? "Real Pi worker cwd unavailable"
+    : "Fake RPC worker cwd unavailable";
 }
 
 function getRendererNodeAccessSummary(): string {

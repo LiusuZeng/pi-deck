@@ -80,6 +80,26 @@ test("PiWorker gets deterministic state and messages from fake RPC", async () =>
   }
 });
 
+test("PiWorker supports real-Pi type-field command protocol", async () => {
+  const worker = new PiWorker({
+    command: process.execPath,
+    args: [fakePath(), "--stream-delay-ms", "1"],
+    cwd: process.cwd(),
+    env: process.env,
+    requestTimeoutMs: 1_000,
+    killGraceMs: 100,
+    commandProtocol: "type-field",
+  });
+  try {
+    const state = await worker.getState();
+    assert.equal(state.sessionId, "fake-session-1");
+    await worker.prompt({ text: "type field prompt" });
+    await waitForWorkerEvent(worker, (event) => event.type === "agent_end");
+  } finally {
+    await worker.closeSession();
+  }
+});
+
 test("PiWorker prompt resolves on command acceptance and continues streaming events", async () => {
   const worker = createWorker(["--stream-delay-ms", "1"]);
   const messageUpdates: RuntimeEvent[] = [];

@@ -88,14 +88,40 @@ Demo Slice status:
 
 ## 6. Real Pi Current Status
 
-Do not treat the current GUI chat shell as a real Pi chat client yet.
+Fake RPC remains the default and safest demo mode. Do not claim broad real Pi GUI usability yet.
 
 Current reality:
 
-- GUI chat currently uses the fake RPC worker.
+- Default GUI chat uses the fake RPC worker.
+- An opt-in real backend mode exists for the narrow Demo Slice 3 vertical slice.
+- Real mode launches one real `pi --mode rpc` worker, loads `get_state` / `get_messages`, sends prompts through the existing GUI chat path, streams RPC events, supports `abort`, and closes the worker on app quit.
 - Real Pi binary resolution, environment resolution, EffectivePiConfig, JSONL transport, and minimal RPC smoke-test foundations exist.
-- Real Pi GUI sessions, new session flow, session listing, resume via `--session`, and multi-session orchestration remain future M3/M5 work.
-- Real Pi prompt streaming through the integrated renderer shell is not claimed as working yet.
+- Real Pi session listing, new-session UX, resume via `--session`, project trust UX, model/thinking RPC controls, attachments, and multi-session orchestration remain future M3/M5+ work.
+
+Opt-in real GUI chat launch:
+
+```bash
+PI_DECK_BACKEND=real npm run dev
+```
+
+Optional overrides:
+
+```bash
+PI_DECK_BACKEND=real \
+PI_DECK_PI_BINARY=/absolute/path/to/pi \
+PI_DECK_PROJECT_CWD=/path/to/smoke/project \
+npm run dev
+```
+
+Real mode expectations:
+
+1. The renderer should show `Backend real Pi RPC session`.
+2. Initial snapshot should come from real `get_state` / `get_messages` or show an actionable diagnostic if Pi cannot start.
+3. Prompt send should call real RPC `prompt` and stream returned events into the chat timeline.
+4. Abort should call real RPC `abort` and recover the UI or show a non-fatal error.
+5. Quitting the app should close/kill the real worker; no `pi --mode rpc` process should intentionally remain.
+
+Record real-mode validation evidence in `docs/real-pi-gui-chat-validation.md` before claiming this slice accepted.
 
 ## 7. Manual Real Pi Smoke Command
 
@@ -126,7 +152,10 @@ pi --mode rpc \
 Then send this JSONL request to stdin:
 
 ```jsonl
-{"id":"smoke-1","type":"get_state"}
+{
+  "id": "smoke-1",
+  "type": "get_state"
+}
 ```
 
 Expected result:

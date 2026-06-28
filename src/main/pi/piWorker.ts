@@ -23,6 +23,12 @@ function toJsonObject(input: PromptInput): JsonObject {
   for (const [key, value] of Object.entries(input)) {
     result[key] = value as JsonValue;
   }
+  // Pi RPC uses `message`; older fake/test fixtures use `text`. Send both at
+  // this adapter boundary so the renderer can keep one `text` contract while
+  // real `pi --mode rpc` receives the documented field.
+  if (typeof input.text === "string" && result.message === undefined) {
+    result.message = input.text;
+  }
   return result;
 }
 
@@ -47,12 +53,16 @@ export class PiWorker {
     const clientOptions: {
       requestTimeoutMs?: number;
       stderrBufferBytes?: number;
+      commandProtocol?: "command-field" | "type-field";
     } = {};
     if (options.requestTimeoutMs !== undefined) {
       clientOptions.requestTimeoutMs = options.requestTimeoutMs;
     }
     if (options.stderrBufferBytes !== undefined) {
       clientOptions.stderrBufferBytes = options.stderrBufferBytes;
+    }
+    if (options.commandProtocol !== undefined) {
+      clientOptions.commandProtocol = options.commandProtocol;
     }
 
     this.client = spawnJsonlRpcClient(
@@ -110,8 +120,16 @@ export class PiWorker {
   }
 
   async getMessages(): Promise<PiMessage[]> {
-    const messages = await this.client.request("get_messages");
-    if (!Array.isArray(messages)) {
+    const response = await this.client.request("get_messages");
+    const messages = Array.isArray(response)
+      ? response
+      : response &&
+          typeof response === "object" &&
+          !Array.isArray(response) &&
+          Array.isArray(response.messages)
+        ? response.messages
+        : undefined;
+    if (!messages) {
       throw new Error("RPC get_messages returned a non-array result");
     }
     return messages as PiMessage[];

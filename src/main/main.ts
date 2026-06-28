@@ -26,6 +26,7 @@ import {
   pickProjectResultSchema,
 } from "../shared/ipcSchemas.js";
 import type {
+  AppSettings,
   AttachmentDraft,
   ChatSnapshot,
   PickAttachmentsResult,
@@ -34,6 +35,11 @@ import type {
 import { DiagnosticsService } from "./diagnostics/diagnostics.js";
 import { registerValidatedIpc } from "./ipc/registerIpc.js";
 import { SinglePiAdapter } from "./pi/piAdapter.js";
+import {
+  resolveEffectivePiConfig,
+  resolvePiBinary,
+  type AppPiSettings,
+} from "./platform/piEnvironment.js";
 import {
   buildContentSecurityPolicy,
   buildSecureWebPreferences,
@@ -47,9 +53,13 @@ const isDev = process.env.VITE_DEV_SERVER_URL !== undefined;
 let mainWindow: BrowserWindow | undefined;
 let settingsStore: SettingsStore | undefined;
 let diagnostics: DiagnosticsService | undefined;
+type ChatBackendMode = "fake" | "real";
+
 let chatAdapter: SinglePiAdapter | undefined;
 let chatRuntimeId: string | undefined;
-let isQuittingAfterFakeWorkerCleanup = false;
+let chatBackendMode: ChatBackendMode | undefined;
+let chatWorkerCwd: string | undefined;
+let isQuittingAfterChatWorkerCleanup = false;
 
 async function bootstrap(): Promise<void> {
   await app.whenReady();
@@ -159,14 +169,14 @@ function registerIpcHandlers(
     handler: async (patch) => store.update(patch),
   });
 
-  // M2/M2.5 temporary fake chat bridge for renderer development.
-  // Real project/session worker management lands in M3/M5.
+  // Demo Slice chat bridge. Fake remains the default; PI_DECK_BACKEND=real
+  // enables the narrow real `pi --mode rpc` vertical slice.
   registerValidatedIpc({
     channel: ipcChannels.chatGetSnapshot,
     requestSchema: noPayloadSchema,
     responseSchema: chatSnapshotSchema,
     diagnostics: diagnosticsService,
-    handler: async () => getChatSnapshot(diagnosticsService),
+    handler: async () => getChatSnapshot(store, diagnosticsService),
   });
 
   registerValidatedIpc({
@@ -175,7 +185,7 @@ function registerIpcHandlers(
     responseSchema: z.void(),
     diagnostics: diagnosticsService,
     handler: async ({ runtimeId, text }) => {
-      const adapter = ensureChatAdapter(diagnosticsService);
+      const adapter = await ensureChatAdapter(store, diagnosticsService);
       await adapter.prompt(runtimeId, { text });
       return undefined;
     },
@@ -187,7 +197,7 @@ function registerIpcHandlers(
     responseSchema: z.void(),
     diagnostics: diagnosticsService,
     handler: async ({ runtimeId }) => {
-      const adapter = ensureChatAdapter(diagnosticsService);
+      const adapter = await ensureChatAdapter(store, diagnosticsService);
       await adapter.abort(runtimeId);
       return undefined;
     },
@@ -260,24 +270,24 @@ function registerIpcHandlers(
   });
 }
 
-// M2/M2.5 temporary fake chat bridge for renderer development.
-// Real project/session worker management lands in M3/M5.
-function ensureChatAdapter(
+async function ensureChatAdapter(
+  store: SettingsStore,
   diagnosticsService: DiagnosticsService,
-): SinglePiAdapter {
+): Promise<SinglePiAdapter> {
   if (chatAdapter !== undefined) {
     return chatAdapter;
   }
 
+  const mode = resolveChatBackendMode();
   const adapter = new SinglePiAdapter();
-  const fakeRpcPath = path.join(__dirname, "pi/fakeRpc/fakeRpcServer.js");
-  const worker = adapter.createWorker({
-    command: process.execPath,
-    args: [fakeRpcPath, "--stream-delay-ms", "120"],
-    cwd: process.cwd(),
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
-  });
-  chatRuntimeId = worker.runtimeId;
+  const workerSpec =
+    mode === "real"
+      ? await createRealChatWorker(adapter, store)
+      : createFakeChatWorker(adapter);
+
+  chatBackendMode = mode;
+  chatWorkerCwd = workerSpec.cwd;
+  chatRuntimeId = workerSpec.worker.runtimeId;
   adapter.onEvent((event) => {
     const parsed = chatRuntimeEventSchema.safeParse(event);
     if (!parsed.success) {
@@ -292,11 +302,99 @@ function ensureChatAdapter(
   return adapter;
 }
 
-async function closeFakeChatWorker(): Promise<void> {
+function resolveChatBackendMode(): ChatBackendMode {
+  return process.env.PI_DECK_BACKEND === "real" ? "real" : "fake";
+}
+
+interface ChatWorkerSpec {
+  worker: ReturnType<SinglePiAdapter["createWorker"]>;
+  cwd: string;
+}
+
+function createFakeChatWorker(adapter: SinglePiAdapter): ChatWorkerSpec {
+  const fakeRpcPath = path.join(__dirname, "pi/fakeRpc/fakeRpcServer.js");
+  const cwd = process.cwd();
+  const worker = adapter.createWorker({
+    command: process.execPath,
+    args: [fakeRpcPath, "--stream-delay-ms", "120"],
+    cwd,
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+  });
+  return { worker, cwd };
+}
+
+async function createRealChatWorker(
+  adapter: SinglePiAdapter,
+  store: SettingsStore,
+): Promise<ChatWorkerSpec> {
+  const settings = await store.get();
+  const appSettings = applyRealBackendEnvOverrides(settings);
+  const projectCwd = await resolveRealBackendCwd();
+  const binaryResolution = await resolvePiBinary({
+    appSettings,
+    env: process.env,
+  });
+
+  if (!binaryResolution.ok || binaryResolution.piBinary === undefined) {
+    const details = binaryResolution.diagnostics
+      .map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`)
+      .join("; ");
+    throw new Error(
+      `Real Pi backend requested but no usable pi binary was found. ${details}`,
+    );
+  }
+
+  const effective = await resolveEffectivePiConfig({
+    piBinary: binaryResolution.piBinary,
+    appSettings,
+    env: process.env,
+    cwd: projectCwd,
+  });
+
+  const worker = adapter.createWorker({
+    command: effective.config.piBinary,
+    args: ["--mode", "rpc", ...effective.workerArgs],
+    cwd: projectCwd,
+    env: effective.config.env,
+    requestTimeoutMs: Number(process.env.PI_DECK_REAL_RPC_TIMEOUT_MS ?? 30_000),
+    commandProtocol: "type-field",
+  });
+  return { worker, cwd: projectCwd };
+}
+
+function applyRealBackendEnvOverrides(settings: AppSettings): AppPiSettings {
+  const appPiSettings: AppPiSettings = {};
+  if (settings.piBinaryPath !== undefined) {
+    appPiSettings.piBinaryPath = settings.piBinaryPath;
+  }
+  if (settings.agentDir !== undefined) {
+    appPiSettings.agentDir = settings.agentDir;
+  }
+  if (settings.sessionDir !== undefined) {
+    appPiSettings.sessionDir = settings.sessionDir;
+  }
+
+  const piBinaryOverride = process.env.PI_DECK_PI_BINARY;
+  if (piBinaryOverride !== undefined && piBinaryOverride.trim().length > 0) {
+    appPiSettings.piBinaryPath = piBinaryOverride;
+  }
+  return appPiSettings;
+}
+
+async function resolveRealBackendCwd(): Promise<string> {
+  const requested = process.env.PI_DECK_PROJECT_CWD ?? process.cwd();
+  const resolved = path.resolve(requested);
+  return (await safeRealpath(resolved)) ?? resolved;
+}
+
+async function closeChatWorker(): Promise<void> {
   const adapter = chatAdapter;
   const runtimeId = chatRuntimeId;
+  const mode = chatBackendMode ?? resolveChatBackendMode();
   chatAdapter = undefined;
   chatRuntimeId = undefined;
+  chatBackendMode = undefined;
+  chatWorkerCwd = undefined;
 
   if (adapter === undefined || runtimeId === undefined) {
     return;
@@ -306,23 +404,30 @@ async function closeFakeChatWorker(): Promise<void> {
     await adapter.closeSession(runtimeId);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    diagnostics?.recordError(`Failed to close fake chat worker: ${message}`);
+    diagnostics?.recordError(`Failed to close ${mode} chat worker: ${message}`);
   }
 }
 
 async function getChatSnapshot(
+  store: SettingsStore,
   diagnosticsService: DiagnosticsService,
 ): Promise<ChatSnapshot> {
-  const adapter = ensureChatAdapter(diagnosticsService);
+  const adapter = await ensureChatAdapter(store, diagnosticsService);
   const runtimeId = chatRuntimeId;
+  const mode = chatBackendMode ?? resolveChatBackendMode();
   if (runtimeId === undefined) {
-    throw new Error("Fake chat runtime failed to initialize");
+    throw new Error(`${mode} chat runtime failed to initialize`);
   }
   const [state, messages] = await Promise.all([
     adapter.getState(runtimeId),
     adapter.getMessages(runtimeId),
   ]);
-  return { runtimeId, state, messages };
+  return {
+    runtimeId,
+    backendMode: mode,
+    state: { ...state, cwd: state.cwd ?? chatWorkerCwd },
+    messages,
+  };
 }
 
 async function safeRealpath(filePath: string): Promise<string | undefined> {
@@ -444,7 +549,7 @@ function isPathInside(candidate: string, root: string): boolean {
 
 app.on("before-quit", (event) => {
   if (
-    isQuittingAfterFakeWorkerCleanup ||
+    isQuittingAfterChatWorkerCleanup ||
     chatAdapter === undefined ||
     chatRuntimeId === undefined
   ) {
@@ -452,8 +557,8 @@ app.on("before-quit", (event) => {
   }
 
   event.preventDefault();
-  isQuittingAfterFakeWorkerCleanup = true;
-  void closeFakeChatWorker().finally(() => {
+  isQuittingAfterChatWorkerCleanup = true;
+  void closeChatWorker().finally(() => {
     app.quit();
   });
 });

@@ -36,12 +36,38 @@ export const diagnosticsSummarySchema = z
 
 export const chatMessageSchema = z
   .object({
-    id: z.string(),
+    id: z.string().optional(),
     role: z.string(),
-    content: z.string().optional(),
+    content: z.preprocess(
+      (value) => extractTextContent(value),
+      z.string().optional(),
+    ),
     createdAt: z.number().optional(),
   })
   .passthrough();
+
+function extractTextContent(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const parts = value.flatMap((item): string[] => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      return [];
+    }
+    const record = item as Record<string, unknown>;
+    if (typeof record.text === "string") {
+      return [record.text];
+    }
+    if (typeof record.thinking === "string") {
+      return [record.thinking];
+    }
+    return [];
+  });
+  return parts.length > 0 ? parts.join("\n") : undefined;
+}
 
 export const chatStateSchema = z
   .object({
@@ -49,7 +75,7 @@ export const chatStateSchema = z
     sessionId: z.string().optional(),
     sessionFile: z.string().optional(),
     cwd: z.string().optional(),
-    model: z.string().optional(),
+    model: z.union([z.string(), z.record(z.string(), z.unknown())]).optional(),
     provider: z.string().optional(),
     thinkingLevel: z.string().optional(),
     isAgentActive: z.boolean().optional(),
@@ -59,6 +85,7 @@ export const chatStateSchema = z
 export const chatSnapshotSchema = z
   .object({
     runtimeId: z.string(),
+    backendMode: z.enum(["fake", "real"]),
     state: chatStateSchema,
     messages: z.array(chatMessageSchema),
   })

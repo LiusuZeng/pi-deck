@@ -121,4 +121,5 @@ export interface PiWorkerSpawnOptions {
   requestTimeoutMs?: number;
   stderrBufferBytes?: number;
   killGraceMs?: number;
+  commandProtocol?: "command-field" | "type-field";
 }

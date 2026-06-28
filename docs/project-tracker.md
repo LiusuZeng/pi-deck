@@ -31,7 +31,7 @@ These items should be started earliest and reviewed frequently.
 | CP-7 | Multiple workers and event routing | Backend | Not Started | M5 | Required for concurrency |
 | CP-8 | Scheduler/concurrency cap | Backend | Not Started | M5 | Required for multi-session MVP |
 | CP-9 | End-to-end release validation | QA / All | In Progress | M7 | Smoke matrix drafted in `docs/real-pi-smoke-test-matrix.md`; real Pi execution pending feature readiness |
-| CP-10 | Real Pi GUI chat vertical slice | Orchestrator + Eng 6 | Not Started | Immediate / Demo Slice 3 | **Explicit owner assigned after orchestration miss.** Current GUI chat is fake-RPC-only; Eng 6 has not completed this yet. Next slice must wire `chat:*` IPC to real `pi --mode rpc` behind an opt-in real backend mode before claiming real-Pi usability. |
+| CP-10 | Real Pi GUI chat vertical slice | Orchestrator + Eng 6 | In Progress | Immediate / Demo Slice 3 | Opt-in `PI_DECK_BACKEND=real` code path is being implemented; do not claim real-Pi usability until hands-on validation passes and evidence is recorded. |
 
 ## 2. Integration Gates
 
@@ -65,16 +65,16 @@ Non-goal: full session repository/resume/concurrency. This is a narrow real-Pi v
 
 | Task | Owner | Status | Acceptance |
 |---|---|---|---|
-| Add explicit backend mode selection | Orchestrator + Eng 6 | Not Started | Fake remains default/safe; real mode can be enabled by env var or setting, e.g. `PI_DECK_BACKEND=real`; UI/diagnostics show `fake` vs `real` clearly |
-| Resolve real Pi binary for GUI chat | Eng 6 | Not Started | Uses existing Pi env/config resolver where feasible; supports an override such as `PI_DECK_PI_BINARY`; launch failure produces actionable diagnostics |
-| Choose real session cwd | Eng 6 | Not Started | Uses selected project cwd if available, otherwise an explicit env/default cwd such as `PI_DECK_PROJECT_CWD`; no hidden arbitrary renderer file access |
-| Spawn real `pi --mode rpc` worker | Eng 6 | Not Started | `chat:getSnapshot` creates/attaches a real `PiWorker` using `pi --mode rpc` instead of `fakeRpcServer` when real mode is enabled |
-| Real `get_state` / `get_messages` bridge | Eng 6 | Not Started | Snapshot loads real Pi state/messages or shows clear error in diagnostics/session UI |
-| Real prompt streaming | Eng 6 | Not Started | Sending a prompt from GUI streams a real assistant response through existing `chat:event` path |
-| Real abort path | Eng 6 | Not Started | Abort button sends real abort command; UI recovers or shows clear non-fatal error if unsupported/fails |
-| Real worker cleanup | Eng 6 | Not Started | Quitting app closes/kills real worker; no orphan `pi --mode rpc` process intentionally remains |
-| Real-Pi user guide | Eng 6 | Not Started | `docs/how-to-run-and-test.md` explains fake mode, real mode, prerequisites, commands, expected output, and known limitations |
-| Validation evidence | Eng 6 | Not Started | `npm test`, `typecheck`, `build`, `format` pass; manual real-Pi smoke result recorded with Pi version/path and pass/fail details |
+| Add explicit backend mode selection | Orchestrator + Eng 6 | In Progress | Fake remains default/safe; real mode can be enabled by `PI_DECK_BACKEND=real`; UI shows `fake` vs `real` session labels |
+| Resolve real Pi binary for GUI chat | Eng 6 | In Progress | Uses existing Pi resolver; supports `PI_DECK_PI_BINARY`; launch failure produces actionable diagnostics |
+| Choose real session cwd | Eng 6 | In Progress | Uses `PI_DECK_PROJECT_CWD` when set, otherwise app cwd; selected-project handoff remains future work |
+| Spawn real `pi --mode rpc` worker | Eng 6 | In Progress | `chat:getSnapshot` creates/attaches a real `PiWorker` using `pi --mode rpc` instead of `fakeRpcServer` when real mode is enabled |
+| Real `get_state` / `get_messages` bridge | Eng 6 | In Progress | Snapshot loads real Pi state/messages or shows clear error in diagnostics/session UI; hands-on validation pending |
+| Real prompt streaming | Eng 6 | In Progress | Sending a prompt from GUI uses real RPC `prompt` through existing `chat:event` path; hands-on validation pending |
+| Real abort path | Eng 6 | In Progress | Abort button sends real `abort`; hands-on validation pending |
+| Real worker cleanup | Eng 6 | In Progress | Existing quit cleanup path closes fake or real chat worker; hands-on process check pending |
+| Real-Pi user guide | Eng 6 | In Progress | `docs/how-to-run-and-test.md` documents fake mode, real mode, prerequisites, commands, expected output, and known limitations |
+| Validation evidence | Eng 6 | In Progress | `docs/real-pi-gui-chat-validation.md` added as evidence template; manual real-Pi GUI result still pending |
 
 ### G2. Resume Compatibility Hard Gate
 
@@ -125,7 +125,7 @@ Non-goal: full session repository/resume/concurrency. This is a narrow real-Pi v
 | M2.3 | Single PiWorker lifecycle | Backend/RPC | Done | M2.1, M1.5 | `get_state`, `get_messages`, `prompt`, `abort`, exit handling covered against fake RPC |
 | M2.4 | Basic chat timeline rendering | Frontend | In Review | M2.2, M1.6 | User/assistant messages stream; markdown sanitized |
 | M2.5 | Composer prompt and abort UX | Frontend/Backend | In Review | M2.3, M2.4 | Multiline prompt sends; abort works or errors clearly |
-| M2.6 | Real Pi GUI chat runtime mode | Orchestrator + Eng 6 | Not Started | M1.4, M1.5, M2.3, M2.5, G1.5 | Opt-in real backend mode runs GUI chat against real `pi --mode rpc`; prompt streams; abort and cleanup work; fake mode remains available |
+| M2.6 | Real Pi GUI chat runtime mode | Orchestrator + Eng 6 | In Progress | M1.4, M1.5, M2.3, M2.5, G1.5 | Opt-in real backend mode implemented behind `PI_DECK_BACKEND=real`; fake mode remains default; real hands-on validation pending |
 
 ## M3. Project Picker, Session Repository, New/Resume Sessions
 
