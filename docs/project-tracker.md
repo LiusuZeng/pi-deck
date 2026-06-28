@@ -31,6 +31,7 @@ These items should be started earliest and reviewed frequently.
 | CP-7 | Multiple workers and event routing | Backend | Not Started | M5 | Required for concurrency |
 | CP-8 | Scheduler/concurrency cap | Backend | Not Started | M5 | Required for multi-session MVP |
 | CP-9 | End-to-end release validation | QA / All | In Progress | M7 | Smoke matrix drafted in `docs/real-pi-smoke-test-matrix.md`; real Pi execution pending feature readiness |
+| CP-10 | Real Pi GUI chat vertical slice | Orchestrator + Eng 6 | Not Started | Immediate / Demo Slice 3 | **Explicit owner assigned after orchestration miss.** Current GUI chat is fake-RPC-only; Eng 6 has not completed this yet. Next slice must wire `chat:*` IPC to real `pi --mode rpc` behind an opt-in real backend mode before claiming real-Pi usability. |
 
 ## 2. Integration Gates
 
@@ -53,6 +54,27 @@ These items should be started earliest and reviewed frequently.
 | Run full minimal smoke-test command | Backend/RPC | Done | `get_state` succeeds in temp cwd with fake RPC; real Pi pending |
 | Verify no smoke-test session files created | QA | Done | Temp cwd file check implemented; QA real Pi validation pending |
 | Cache smoke-test result by binary/version | Backend | Done | Cache by binary/version implemented and tested |
+
+### G1.5. Real Pi GUI Chat Smoke Gate
+
+This gate closes the planning gap where Eng 2/3/4 delivered transport, environment, and fake-chat UI pieces, but no single owner was assigned to wire the GUI chat loop to a real Pi subprocess.
+
+Owner: **Orchestrator + Eng 6**. Eng 6 implements and validates; orchestrator owns scope, review, and acceptance.
+
+Non-goal: full session repository/resume/concurrency. This is a narrow real-Pi vertical slice.
+
+| Task | Owner | Status | Acceptance |
+|---|---|---|---|
+| Add explicit backend mode selection | Orchestrator + Eng 6 | Not Started | Fake remains default/safe; real mode can be enabled by env var or setting, e.g. `PI_DECK_BACKEND=real`; UI/diagnostics show `fake` vs `real` clearly |
+| Resolve real Pi binary for GUI chat | Eng 6 | Not Started | Uses existing Pi env/config resolver where feasible; supports an override such as `PI_DECK_PI_BINARY`; launch failure produces actionable diagnostics |
+| Choose real session cwd | Eng 6 | Not Started | Uses selected project cwd if available, otherwise an explicit env/default cwd such as `PI_DECK_PROJECT_CWD`; no hidden arbitrary renderer file access |
+| Spawn real `pi --mode rpc` worker | Eng 6 | Not Started | `chat:getSnapshot` creates/attaches a real `PiWorker` using `pi --mode rpc` instead of `fakeRpcServer` when real mode is enabled |
+| Real `get_state` / `get_messages` bridge | Eng 6 | Not Started | Snapshot loads real Pi state/messages or shows clear error in diagnostics/session UI |
+| Real prompt streaming | Eng 6 | Not Started | Sending a prompt from GUI streams a real assistant response through existing `chat:event` path |
+| Real abort path | Eng 6 | Not Started | Abort button sends real abort command; UI recovers or shows clear non-fatal error if unsupported/fails |
+| Real worker cleanup | Eng 6 | Not Started | Quitting app closes/kills real worker; no orphan `pi --mode rpc` process intentionally remains |
+| Real-Pi user guide | Eng 6 | Not Started | `docs/how-to-run-and-test.md` explains fake mode, real mode, prerequisites, commands, expected output, and known limitations |
+| Validation evidence | Eng 6 | Not Started | `npm test`, `typecheck`, `build`, `format` pass; manual real-Pi smoke result recorded with Pi version/path and pass/fail details |
 
 ### G2. Resume Compatibility Hard Gate
 
@@ -103,6 +125,7 @@ These items should be started earliest and reviewed frequently.
 | M2.3 | Single PiWorker lifecycle | Backend/RPC | Done | M2.1, M1.5 | `get_state`, `get_messages`, `prompt`, `abort`, exit handling covered against fake RPC |
 | M2.4 | Basic chat timeline rendering | Frontend | In Review | M2.2, M1.6 | User/assistant messages stream; markdown sanitized |
 | M2.5 | Composer prompt and abort UX | Frontend/Backend | In Review | M2.3, M2.4 | Multiline prompt sends; abort works or errors clearly |
+| M2.6 | Real Pi GUI chat runtime mode | Orchestrator + Eng 6 | Not Started | M1.4, M1.5, M2.3, M2.5, G1.5 | Opt-in real backend mode runs GUI chat against real `pi --mode rpc`; prompt streams; abort and cleanup work; fake mode remains available |
 
 ## M3. Project Picker, Session Repository, New/Resume Sessions
 
@@ -166,7 +189,7 @@ Use this section for standups and resource assignment. Each agent should work on
 | C. Platform/Pi Env | Eng 3 | `eng3/platform-env` | `/Users/liusu/pi-deck-worktrees/eng3-platform-env` | M1.4-M1.5, M3.2 | Done | Platform env modules + tests implemented; real Pi validation pending |
 | D. Frontend Chat | Eng 4 | `eng4/frontend-chat` | `/Users/liusu/pi-deck-worktrees/eng4-frontend-chat` | M1.6, M2.4-M2.5 | In Review | Renderer wired to backend fake RPC/preload stream with sanitized markdown |
 | E. Sessions/Controls UI | Eng 5 | `eng5/sessions-controls` | `/Users/liusu/pi-deck-worktrees/eng5-sessions-controls` | M3 UI, M4 controls | In Progress | Integrated with Eng 4 chat shell; fake-data sidebar/project picker/model/thinking/slash/attachment shells awaiting real backend APIs |
-| F. QA/Automation | Eng 6 | `eng6/qa-automation` | `/Users/liusu/pi-deck-worktrees/eng6-qa-automation` | Tests/fixtures/smoke matrix | In Progress | Fake-RPC extension fixtures, reducer fixtures, and real-Pi smoke matrix drafted |
+| F. QA/Automation + Real Pi Slice | Eng 6 + Orchestrator | `eng6/qa-automation` / next `eng6/real-pi-chat` | `/Users/liusu/pi-deck-worktrees/eng6-qa-automation` | CP-10, G1.5, M2.6, tests/docs | In Progress | Fake-RPC QA work is merged. Eng 6 now owns the remaining real-Pi GUI chat vertical slice with orchestrator, but implementation is not done yet. Next branch should wire opt-in real `pi --mode rpc` chat and document how to run/test it. |
 | G. State/Concurrency | TBD | TBD | TBD | M5.1-M5.5 | Not Started | Assign after M2/M3 foundations |
 | H. Trust/Resources/Extension UI | TBD | TBD | TBD | M6.1-M6.4 | Not Started | Assign after M3/M5 foundations |
 | I. Tool Visibility/Release | TBD | TBD | TBD | M7.1-M7.4 | Not Started | Depends on event coverage |
@@ -182,6 +205,7 @@ Use this section for standups and resource assignment. Each agent should work on
 | D-5 | Fake RPC fixture format and location | M2.2 | QA/Backend | Resolved | Source at `src/main/pi/fakeRpc/fakeRpcServer.ts`; shared test helper at `src/test/fakeRpcHarness.ts`; usage documented in `docs/fake-rpc.md` |
 | D-6 | Release packaging/signing approach for internal MVP | M7 | Platform | Open | TBD |
 | D-7 | Starter prompts prepared for all Eng 1-6 | Pre-M1 | Orchestrator | Done | See `docs/starter-prompts/` |
+| D-8 | Real Pi backend mode UX | Demo Slice 3 / M2.6 | Orchestrator + Eng 6 | Open | Proposed: fake backend remains default; real mode enabled explicitly by env var first (`PI_DECK_BACKEND=real`, optional `PI_DECK_PI_BINARY`, `PI_DECK_PROJECT_CWD`); later move to settings UI. |
 
 ## 6. Blocker Log
 
@@ -189,6 +213,7 @@ Use this section for standups and resource assignment. Each agent should work on
 |---|---|---|---|---|---|
 | 2026-06-27 | Real Pi smoke execution not yet run in this branch | G1-G2, M7.4 | QA / Orchestrator | Open | Run `docs/real-pi-smoke-test-matrix.md` against installed Pi after backend/platform branches are merged/rebased |
 | 2026-06-27 | Frontend/background UI targets not merged yet | G4, M5/M6 renderer acceptance | QA / Eng 4/5 | Open | Rebase after Eng 4/5 merge and wire reducer/sidebar fixture tests to renderer targets |
+| 2026-06-28 | No owner was assigned for real Pi GUI chat integration | CP-10, G1.5, M2.6, Demo Slice 3 | Orchestrator + Eng 6 | Open | Corrective action: Eng 6 owns implementation with orchestrator ownership. This is not done yet. Add opt-in real backend mode, real Pi run guide, and manual real-Pi validation evidence before claiming real-Pi usability. |
 
 ## 7. Weekly Milestone Review Checklist
 
@@ -204,11 +229,13 @@ Use this section for standups and resource assignment. Each agent should work on
 
 - [ ] App launches locally on macOS without Pi TUI.
 - [ ] Pi binary path/version and minimal RPC health visible.
+- [ ] Opt-in real Pi backend mode runs GUI chat against `pi --mode rpc`.
 - [ ] Project picker works and recent projects persist.
 - [ ] Prior sessions appear for current project.
 - [ ] New session works.
 - [ ] Resume via `pi --mode rpc --session <file>` passes canonical file check.
-- [ ] Text prompt streams assistant output.
+- [ ] Text prompt streams assistant output from fake backend for Demo Slice 1/2.
+- [ ] Text prompt streams assistant output from real Pi backend for Demo Slice 3.
 - [ ] Abort works.
 - [ ] Steer and follow-up work while session is active.
 - [ ] Multiple sessions run concurrently in background.
