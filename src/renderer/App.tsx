@@ -1747,12 +1747,24 @@ function getMessageUpdateId(event: ChatRuntimeEvent): string | undefined {
   if (direct !== undefined) {
     return direct;
   }
-  const message = getUnknown(event, "message");
-  if (!message || typeof message !== "object" || Array.isArray(message)) {
-    return undefined;
+
+  const message = getRecord(event, "message");
+  const messageId = getStringFromRecord(message, "id");
+  if (messageId !== undefined) {
+    return messageId;
   }
-  const id = (message as Record<string, unknown>).id;
-  return typeof id === "string" ? id : undefined;
+  const responseId = getStringFromRecord(message, "responseId");
+  if (responseId !== undefined) {
+    return responseId;
+  }
+
+  const assistantEvent = getRecord(event, "assistantMessageEvent");
+  const assistantResponseId = getStringFromRecord(assistantEvent, "responseId");
+  if (assistantResponseId !== undefined) {
+    return assistantResponseId;
+  }
+  const partial = getRecordFromRecord(assistantEvent, "partial");
+  return getStringFromRecord(partial, "responseId");
 }
 
 function getMessageUpdateContent(event: ChatRuntimeEvent): string | undefined {
@@ -1823,6 +1835,34 @@ function extractTextContent(value: unknown): string | undefined {
 function getString(event: ChatRuntimeEvent, key: string): string | undefined {
   const value = getUnknown(event, key);
   return typeof value === "string" ? value : undefined;
+}
+
+function getRecord(
+  event: ChatRuntimeEvent,
+  key: string,
+): Record<string, unknown> | undefined {
+  const value = getUnknown(event, key);
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function getStringFromRecord(
+  record: Record<string, unknown> | undefined,
+  key: string,
+): string | undefined {
+  const value = record?.[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function getRecordFromRecord(
+  record: Record<string, unknown> | undefined,
+  key: string,
+): Record<string, unknown> | undefined {
+  const value = record?.[key];
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 function getBoolean(event: ChatRuntimeEvent, key: string): boolean | undefined {
