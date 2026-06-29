@@ -114,11 +114,34 @@ function createMainWindow(): void {
     }
   });
 
+  registerDevReloadShortcut(mainWindow);
+
   if (isDev) {
     void mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL as string);
   } else {
     void mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
   }
+}
+
+function registerDevReloadShortcut(window: BrowserWindow): void {
+  if (!isDev) {
+    return;
+  }
+
+  window.webContents.on("before-input-event", (event, input) => {
+    const isReloadKey = input.key.toLowerCase() === "r" || input.key === "F5";
+    const hasReloadModifier = input.key === "F5" || input.meta || input.control;
+    if (input.type !== "keyDown" || !isReloadKey || !hasReloadModifier) {
+      return;
+    }
+
+    event.preventDefault();
+    if (input.shift) {
+      window.webContents.reloadIgnoringCache();
+      return;
+    }
+    window.webContents.reload();
+  });
 }
 
 function configureCsp(): void {
