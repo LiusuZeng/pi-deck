@@ -61,9 +61,6 @@ function extractTextContent(value: unknown): string | undefined {
     if (typeof record.text === "string") {
       return [record.text];
     }
-    if (typeof record.thinking === "string") {
-      return [record.thinking];
-    }
     return [];
   });
   return parts.length > 0 ? parts.join("\n") : undefined;

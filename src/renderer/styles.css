@@ -268,8 +268,8 @@ textarea:disabled {
 
 .topbar {
   justify-content: space-between;
-  gap: 24px;
-  padding: 22px 30px;
+  gap: 18px;
+  padding: 14px 22px;
   background: rgb(255 255 255 / 88%);
   border-bottom: 1px solid #e5e7eb;
   backdrop-filter: blur(18px);
@@ -289,10 +289,10 @@ p {
 
 .project-header h1,
 h1 {
-  margin-bottom: 8px;
-  font-size: 28px;
+  margin-bottom: 6px;
+  font-size: 22px;
   line-height: 1.12;
-  letter-spacing: -0.04em;
+  letter-spacing: -0.035em;
 }
 
 .project-path,
@@ -301,8 +301,9 @@ h1 {
 }
 
 .project-path {
-  margin-bottom: 10px;
+  margin-bottom: 6px;
   overflow-wrap: anywhere;
+  font-size: 13px;
 }
 
 .header-actions {
@@ -386,20 +387,24 @@ h1 {
 
 .header-right {
   display: grid;
-  gap: 10px;
+  gap: 8px;
   justify-items: end;
-  min-width: 360px;
+  min-width: 300px;
 }
 
 .model-controls {
   display: grid;
-  gap: 8px;
+  gap: 6px;
   justify-items: stretch;
+}
+
+.model-controls.compact .capabilities span {
+  display: none;
 }
 
 .model-controls label {
   display: grid;
-  grid-template-columns: 76px minmax(180px, 1fr);
+  grid-template-columns: 70px minmax(160px, 1fr);
   align-items: center;
   gap: 8px;
   color: #475467;
@@ -409,7 +414,7 @@ h1 {
 .model-controls select {
   border: 1px solid #d0d5dd;
   border-radius: 12px;
-  padding: 8px 10px;
+  padding: 6px 9px;
   background: #fff;
 }
 
@@ -562,6 +567,29 @@ h1 {
   color: #182033;
   background: #fff;
   border: 1px solid #e5e7eb;
+}
+
+.thinking-row {
+  max-width: min(760px, 84%);
+  margin-left: 46px;
+  color: #667085;
+}
+
+.thinking-row details {
+  border-left: 3px solid #d0d5dd;
+  padding: 4px 0 4px 12px;
+}
+
+.thinking-row summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.thinking-row p {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .markdown-body {

@@ -54,6 +54,13 @@ type TimelineItem =
     }
   | {
       id: string;
+      kind: "thinking";
+      content: string;
+      createdAt: string;
+      streaming?: boolean;
+    }
+  | {
+      id: string;
       kind: "diagnostic";
       tone: "info" | "error";
       content: string;
@@ -921,28 +928,21 @@ function reduceMessageUpdate(
     getString(event, "delta") ??
     getAssistantMessageDelta(event) ??
     "";
-  let found = false;
+  const thinking = getThinkingUpdateContent(event);
+  const hasReplyContent = content.trim().length > 0;
+  const hasThinkingContent =
+    thinking !== undefined && thinking.trim().length > 0;
 
-  const timeline = session.timeline.map((item) => {
-    if (item.kind !== "assistant" || item.id !== messageId) {
-      return item;
-    }
-    found = true;
-    return {
-      ...item,
-      content,
-      streaming: !done,
-    };
-  });
-
-  if (!found) {
-    timeline.push({
-      id: messageId,
-      kind: "assistant",
-      content,
-      createdAt: formatTime(),
-      streaming: !done,
-    });
+  let timeline = session.timeline;
+  if (hasReplyContent) {
+    timeline = upsertAssistantMessage(timeline, messageId, content, !done);
+  } else if (hasThinkingContent) {
+    timeline = upsertThinkingMessage(
+      timeline,
+      `thinking-${messageId}`,
+      thinking,
+      !done,
+    );
   }
 
   return {
@@ -957,6 +957,52 @@ function reduceMessageUpdate(
     updatedAtMs: Date.now(),
     timeline,
   };
+}
+
+function upsertAssistantMessage(
+  items: TimelineItem[],
+  id: string,
+  content: string,
+  streaming: boolean,
+): TimelineItem[] {
+  let found = false;
+  const next = items.map((item) => {
+    if (item.kind !== "assistant" || item.id !== id) {
+      return item;
+    }
+    found = true;
+    return { ...item, content, streaming };
+  });
+  if (found) {
+    return next;
+  }
+  return [
+    ...next,
+    { id, kind: "assistant", content, createdAt: formatTime(), streaming },
+  ];
+}
+
+function upsertThinkingMessage(
+  items: TimelineItem[],
+  id: string,
+  content: string,
+  streaming: boolean,
+): TimelineItem[] {
+  let found = false;
+  const next = items.map((item) => {
+    if (item.kind !== "thinking" || item.id !== id) {
+      return item;
+    }
+    found = true;
+    return { ...item, content, streaming };
+  });
+  if (found) {
+    return next;
+  }
+  return [
+    ...next,
+    { id, kind: "thinking", content, createdAt: formatTime(), streaming },
+  ];
 }
 
 function backendLabel(session: SessionViewModel): string {
@@ -1141,12 +1187,7 @@ function ProjectHeader(props: {
         {statusLabel(props.selectedSession.status)}
       </span>
       <p className="project-path">{props.project.path}</p>
-      {props.realMode ? (
-        <p className="empty-state-copy compact">
-          Real Pi is using the launch cwd above. Project switching will create a
-          new real worker in the next session-management slice.
-        </p>
-      ) : (
+      {props.realMode ? null : (
         <>
           <div className="header-actions">
             <button type="button" onClick={props.onPickProject}>
@@ -1191,7 +1232,10 @@ function ModelThinkingControls(props: {
   );
 
   return (
-    <div className="model-controls" aria-label="Model and thinking controls">
+    <div
+      className={`model-controls ${props.realMode ? "compact" : ""}`}
+      aria-label="Model and thinking controls"
+    >
       <label>
         <span>Model</span>
         <select
@@ -1357,6 +1401,19 @@ function TimelineRow(props: { item: TimelineItem }): ReactElement {
           ) : null}
           <time>{props.item.createdAt}</time>
         </div>
+      </article>
+    );
+  }
+
+  if (props.item.kind === "thinking") {
+    return (
+      <article className="thinking-row">
+        <details>
+          <summary>
+            {props.item.streaming ? "Thinking…" : "Thought process"}
+          </summary>
+          <p>{props.item.content}</p>
+        </details>
       </article>
     );
   }
@@ -1823,6 +1880,10 @@ function getAssistantMessageDelta(event: ChatRuntimeEvent): string | undefined {
     return undefined;
   }
   const record = assistantEvent as Record<string, unknown>;
+  const type = typeof record.type === "string" ? record.type : "";
+  if (type.includes("thinking")) {
+    return undefined;
+  }
   if (typeof record.delta === "string") {
     return record.delta;
   }
@@ -1830,6 +1891,19 @@ function getAssistantMessageDelta(event: ChatRuntimeEvent): string | undefined {
     return record.content;
   }
   return extractTextContent(record.partial);
+}
+
+function getThinkingUpdateContent(event: ChatRuntimeEvent): string | undefined {
+  const assistantEvent = getRecord(event, "assistantMessageEvent");
+  const type = getStringFromRecord(assistantEvent, "type") ?? "";
+  if (type.includes("thinking")) {
+    return (
+      getStringFromRecord(assistantEvent, "delta") ??
+      getStringFromRecord(assistantEvent, "content") ??
+      extractThinkingContent(assistantEvent?.partial)
+    );
+  }
+  return extractThinkingContent(getRecord(event, "message")?.content);
 }
 
 function extractTextContent(value: unknown): string | undefined {
@@ -1847,8 +1921,29 @@ function extractTextContent(value: unknown): string | undefined {
     if (typeof record.text === "string") {
       return [record.text];
     }
+    return [];
+  });
+  return parts.length > 0 ? parts.join("\n") : undefined;
+}
+
+function extractThinkingContent(value: unknown): string | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const parts = value.flatMap((item): string[] => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      return [];
+    }
+    const record = item as Record<string, unknown>;
     if (typeof record.thinking === "string") {
       return [record.thinking];
+    }
+    if (
+      typeof record.type === "string" &&
+      record.type.includes("thinking") &&
+      typeof record.text === "string"
+    ) {
+      return [record.text];
     }
     return [];
   });
