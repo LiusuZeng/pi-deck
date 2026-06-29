@@ -209,7 +209,7 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async ({ runtimeId, text }) => {
       const adapter = await ensureChatAdapter(store, diagnosticsService);
-      await adapter.prompt(runtimeId, { text });
+      await adapter.prompt(resolveActiveChatRuntimeId(runtimeId), { text });
       return undefined;
     },
   });
@@ -221,7 +221,7 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async ({ runtimeId }) => {
       const adapter = await ensureChatAdapter(store, diagnosticsService);
-      await adapter.abort(runtimeId);
+      await adapter.abort(resolveActiveChatRuntimeId(runtimeId));
       return undefined;
     },
   });
@@ -327,6 +327,18 @@ async function ensureChatAdapter(
 
 function resolveChatBackendMode(): ChatBackendMode {
   return process.env.PI_DECK_BACKEND === "real" ? "real" : "fake";
+}
+
+function resolveActiveChatRuntimeId(requestedRuntimeId: string): string {
+  if (chatRuntimeId === undefined) {
+    throw new Error("Chat runtime is not initialized");
+  }
+  if (requestedRuntimeId !== chatRuntimeId) {
+    diagnostics?.recordError(
+      `Renderer requested stale chat runtime ${requestedRuntimeId}; using active runtime ${chatRuntimeId}.`,
+    );
+  }
+  return chatRuntimeId;
 }
 
 interface ChatWorkerSpec {
