@@ -696,6 +696,22 @@ h1 {
   min-height: 18px;
   color: #667085;
   font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.composer-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #475467;
+  white-space: nowrap;
+}
+
+.composer-option input {
+  margin: 0;
 }
 
 .composer-actions {

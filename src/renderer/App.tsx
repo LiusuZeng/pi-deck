@@ -321,6 +321,9 @@ export function App(): ReactElement {
   const [selectedThinking, setSelectedThinking] = useState("medium");
   const [slashOpen, setSlashOpen] = useState(false);
   const [attachments, setAttachments] = useState<AttachmentDraft[]>([]);
+  const [enterToSend, setEnterToSend] = useState(() =>
+    loadEnterToSendPreference(),
+  );
   const [uiMessage, setUiMessage] = useState(
     "Eng 4 fake chat path and Eng 5 controls are both active in this integrated shell.",
   );
@@ -422,10 +425,18 @@ export function App(): ReactElement {
   function handleComposerKeyDown(
     event: KeyboardEvent<HTMLTextAreaElement>,
   ): void {
-    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+    if (event.key !== "Enter" || event.shiftKey) {
+      return;
+    }
+    if (enterToSend || event.metaKey || event.ctrlKey) {
       event.preventDefault();
       handleSend();
     }
+  }
+
+  function handleEnterToSendChange(value: boolean): void {
+    setEnterToSend(value);
+    saveEnterToSendPreference(value);
   }
 
   function handleDraftChange(value: string): void {
@@ -660,6 +671,8 @@ export function App(): ReactElement {
           selectedModel={selectedModel}
           backendLabel={backendLabel(selectedSession)}
           allowAttachments={!isRealBackendMode}
+          enterToSend={enterToSend}
+          onEnterToSendChange={handleEnterToSendChange}
           onChange={handleDraftChange}
           onKeyDown={handleComposerKeyDown}
           onSend={handleSend}
@@ -1481,6 +1494,8 @@ function Composer(props: {
   selectedModel: ModelOption | undefined;
   backendLabel: string;
   allowAttachments: boolean;
+  enterToSend: boolean;
+  onEnterToSendChange(value: boolean): void;
   onChange(value: string): void;
   onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void;
   onSend(): void;
@@ -1518,7 +1533,11 @@ function Composer(props: {
             props.onChange(event.target.value);
           }}
           onKeyDown={props.onKeyDown}
-          placeholder="Prompt Pi Deck… type / for active-worker command picker (⌘/Ctrl + Enter to send)"
+          placeholder={
+            props.enterToSend
+              ? "Prompt Pi Deck… Enter to send, Shift+Enter for newline"
+              : "Prompt Pi Deck… Shift+Enter for newline, ⌘/Ctrl+Enter to send"
+          }
           rows={3}
           value={props.value}
         />
@@ -1529,6 +1548,16 @@ function Composer(props: {
           />
         ) : null}
         <div className="composer-meta">
+          <label className="composer-option">
+            <input
+              checked={props.enterToSend}
+              type="checkbox"
+              onChange={(event) => {
+                props.onEnterToSendChange(event.target.checked);
+              }}
+            />
+            <span>Enter sends · Shift+Enter adds newline</span>
+          </label>
           {props.error !== null ? (
             <span className="composer-error">{props.error}</span>
           ) : props.isWorking ? (
@@ -1885,6 +1914,14 @@ function statusLabel(status: SessionStatus): string {
     case "idle":
       return "Idle";
   }
+}
+
+function loadEnterToSendPreference(): boolean {
+  return localStorage.getItem("piDeck.enterToSend") === "true";
+}
+
+function saveEnterToSendPreference(value: boolean): void {
+  localStorage.setItem("piDeck.enterToSend", String(value));
 }
 
 function loadRecentProjects(): ProjectRef[] {

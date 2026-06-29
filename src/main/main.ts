@@ -564,9 +564,10 @@ app.on("before-quit", (event) => {
 });
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
-    app.quit();
-  }
+  // Pi Deck owns local agent subprocesses. Closing the last window should end
+  // the app and trigger before-quit cleanup on macOS too, rather than leaving
+  // real/fake Pi workers running in the background.
+  app.quit();
 });
 
 bootstrap().catch((error: unknown) => {
