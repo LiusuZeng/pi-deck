@@ -17,8 +17,15 @@
   box-sizing: border-box;
 }
 
+html,
+body,
+#root {
+  height: 100%;
+}
+
 body {
   margin: 0;
+  overflow: hidden;
 }
 
 button,
@@ -40,7 +47,9 @@ textarea:disabled {
 .app-shell {
   display: grid;
   grid-template-columns: 330px minmax(0, 1fr);
-  min-height: 100vh;
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
   background:
     radial-gradient(
       circle at top right,
@@ -54,7 +63,9 @@ textarea:disabled {
   display: flex;
   flex-direction: column;
   gap: 18px;
-  min-height: 100vh;
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
   padding: 20px;
   color: #f8fafc;
   background: #0f172a;
@@ -126,6 +137,7 @@ textarea:disabled {
 .session-list {
   display: grid;
   gap: 8px;
+  min-height: 0;
   overflow: auto;
 }
 
@@ -248,7 +260,10 @@ textarea:disabled {
 .workspace {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
+  height: 100vh;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .topbar {

@@ -253,6 +253,21 @@ const invalidRecentProject: ProjectRef = {
   invalidReason: "Project folder is missing or no longer readable.",
 };
 
+const loadingSession: SessionViewModel = {
+  id: "loading-session",
+  title: "Connecting to Pi…",
+  project: "Pi Deck",
+  projectPath: "Resolving backend session",
+  subtitle: "Starting backend…",
+  status: "idle",
+  updatedAt: "Now",
+  updatedAtMs: appStartedAt,
+  baseState: "attaching",
+  overlays: { ...emptyOverlays },
+  runtimeBacked: false,
+  timeline: [],
+};
+
 const fakeAttachmentFixture: AttachmentDraft[] = [
   {
     id: "fake-path-src",
@@ -301,8 +316,8 @@ const fakeAttachmentFixture: AttachmentDraft[] = [
 
 export function App(): ReactElement {
   const [loadState, setLoadState] = useState<LoadState>({ state: "loading" });
-  const [sessions, setSessions] = useState(initialSessions);
-  const [selectedSessionId, setSelectedSessionId] = useState("session-active");
+  const [sessions, setSessions] = useState<SessionViewModel[]>([]);
+  const [selectedSessionId, setSelectedSessionId] = useState("");
   const [draft, setDraft] = useState("");
   const [composerError, setComposerError] = useState<string | null>(null);
   const [currentProject, setCurrentProject] = useState<ProjectRef>(() => ({
@@ -395,7 +410,7 @@ export function App(): ReactElement {
   const selectedSession =
     sessions.find((session) => session.id === selectedSessionId) ??
     sessions[0] ??
-    initialSessions[0]!;
+    loadingSession;
   const selectedModel =
     modelOptions.find((model) => model.id === selectedModelId) ??
     modelOptions[0];
@@ -670,7 +685,7 @@ export function App(): ReactElement {
           slashCommands={filteredCommands}
           selectedModel={selectedModel}
           backendLabel={backendLabel(selectedSession)}
-          allowAttachments={!isRealBackendMode}
+          allowAttachments={true}
           enterToSend={enterToSend}
           onEnterToSendChange={handleEnterToSendChange}
           onChange={handleDraftChange}
@@ -992,27 +1007,23 @@ function SessionSidebar(props: {
           </p>
           <div className="brand">Pi Deck</div>
         </div>
-        {props.realMode ? null : (
-          <button
-            className="icon-button"
-            type="button"
-            aria-label="New session"
-            onClick={props.onNewSession}
-          >
-            +
-          </button>
-        )}
-      </div>
-
-      {props.realMode ? null : (
         <button
-          className="new-session"
+          className="icon-button"
           type="button"
+          aria-label="New session"
           onClick={props.onNewSession}
         >
-          + New session
+          +
         </button>
-      )}
+      </div>
+
+      <button
+        className="new-session"
+        type="button"
+        onClick={props.onNewSession}
+      >
+        {props.realMode ? "+ New real session" : "+ New session"}
+      </button>
 
       <section
         className="session-list"
@@ -1091,16 +1102,13 @@ function AppHeader(props: {
       />
 
       <div className="header-right">
-        {props.realMode ? (
-          <RealModeSummary selectedSession={props.selectedSession} />
-        ) : (
-          <ModelThinkingControls
-            selectedModelId={props.selectedModelId}
-            selectedThinking={props.selectedThinking}
-            onModelChange={props.onModelChange}
-            onThinkingChange={props.onThinkingChange}
-          />
-        )}
+        <ModelThinkingControls
+          selectedModelId={props.selectedModelId}
+          selectedThinking={props.selectedThinking}
+          realMode={props.realMode}
+          onModelChange={props.onModelChange}
+          onThinkingChange={props.onThinkingChange}
+        />
         <LoadStateBadge
           loadState={props.loadState}
           nodeAccessSummary={props.nodeAccessSummary}
@@ -1168,26 +1176,10 @@ function ProjectHeader(props: {
   );
 }
 
-function RealModeSummary(props: {
-  selectedSession: SessionViewModel;
-}): ReactElement {
-  return (
-    <div className="model-controls" aria-label="Real Pi backend summary">
-      <div className="capabilities real-mode-summary">
-        <strong>Real Pi backend</strong>
-        <span>{props.selectedSession.modelLabel || "Pi-selected model"}</span>
-        {props.selectedSession.thinkingLevel ? (
-          <span>Thinking: {props.selectedSession.thinkingLevel}</span>
-        ) : null}
-        <span>Single active RPC session</span>
-      </div>
-    </div>
-  );
-}
-
 function ModelThinkingControls(props: {
   selectedModelId: string;
   selectedThinking: string;
+  realMode: boolean;
   onModelChange(id: string): void;
   onThinkingChange(id: string): void;
 }): ReactElement {
@@ -1232,7 +1224,9 @@ function ModelThinkingControls(props: {
       </label>
       <div className="capabilities" aria-live="polite">
         <strong>
-          {selectedModel?.provider}/{selectedModel?.id}
+          {props.realMode
+            ? "Real Pi uses active worker config"
+            : `${selectedModel?.provider}/${selectedModel?.id}`}
         </strong>
         <span>{selectedModel?.supportsImages ? "Images" : "No images"}</span>
         <span>
