@@ -25,7 +25,7 @@ Do not claim broad real Pi GUI usability from this slice. Session listing, new/r
 
 | Item                                      | Value                                            |
 | ----------------------------------------- | ------------------------------------------------ |
-| Commit                                    | Pending branch commit after validation update    |
+| Commit                                    | `317b0c7`                                        |
 | macOS version                             | `26.5.1`                                         |
 | Node/npm version                          | Node `v26.0.0`, npm `11.12.1`                    |
 | Pi binary path                            | `/usr/local/bin/pi`                              |
