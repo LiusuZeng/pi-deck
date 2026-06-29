@@ -350,15 +350,24 @@ export function App(): ReactElement {
         ]);
         if (!disposed) {
           const backendSession = sessionFromSnapshot(snapshot);
-          setSessions([
-            backendSession,
-            ...initialSessions.filter(
-              (session) => session.id !== "session-active",
-            ),
-          ]);
+          setSessions(
+            snapshot.backendMode === "real"
+              ? [backendSession]
+              : [
+                  backendSession,
+                  ...initialSessions.filter(
+                    (session) => session.id !== "session-active",
+                  ),
+                ],
+          );
           setSelectedSessionId(backendSession.id);
+          if (snapshot.backendMode === "real" && snapshot.state.cwd) {
+            setCurrentProject(projectFromCwd(snapshot.state.cwd));
+          }
           setUiMessage(
-            `${backendLabelFromMode(snapshot.backendMode)} mode active. Demo Slice 3 real Pi mode is opt-in and should not be treated as real-Pi usability until validated.`,
+            snapshot.backendMode === "real"
+              ? "Real Pi mode active. This session is connected to pi --mode rpc; send a prompt to use Pi."
+              : `${backendLabelFromMode(snapshot.backendMode)} mode active. Demo Slice 1/2 fake backend shell is ready.`,
           );
           setLoadState({ state: "ready", version, settings, diagnostics });
         }
@@ -388,6 +397,7 @@ export function App(): ReactElement {
     modelOptions.find((model) => model.id === selectedModelId) ??
     modelOptions[0];
   const isWorking = selectedSession.status === "working";
+  const isRealBackendMode = selectedSession.backendMode === "real";
   const hasBlockingAttachment = attachments.some(
     (attachment) => attachment.status !== "ready",
   );
@@ -429,7 +439,7 @@ export function App(): ReactElement {
     }
     if (!selectedSession.runtimeBacked) {
       setComposerError(
-        "This session row is a UI shell fixture. Select the backend RPC session to demo prompt streaming; real new-session wiring lands in M3.",
+        "This session row is a UI shell fixture. Select the backend RPC session to send prompts.",
       );
       return;
     }
@@ -574,6 +584,12 @@ export function App(): ReactElement {
       runtimeBacked: false,
       timeline: [],
     };
+    if (isRealBackendMode) {
+      setUiMessage(
+        "Real Pi mode currently uses the active session launched at startup. Real new/resume session controls land next.",
+      );
+      return;
+    }
     setSessions((items) => [next, ...items]);
     setSelectedSessionId(id);
     setUiMessage(
@@ -594,6 +610,7 @@ export function App(): ReactElement {
       <SessionSidebar
         sessions={sessions}
         selectedSessionId={selectedSession.id}
+        realMode={isRealBackendMode}
         onSelect={setSelectedSessionId}
         onNewSession={handleNewSession}
       />
@@ -607,6 +624,7 @@ export function App(): ReactElement {
           recentProjects={recentProjects}
           selectedModelId={selectedModelId}
           selectedThinking={selectedThinking}
+          realMode={isRealBackendMode}
           onPickProject={() => void handlePickProject()}
           onSelectRecent={(project) => {
             setCurrentProject(project);
@@ -618,12 +636,18 @@ export function App(): ReactElement {
           onThinkingChange={(level) => {
             setSelectedThinking(level);
             setUiMessage(
-              "Thinking-level UI hook fired; fake/preload API can be wired here.",
+              isRealBackendMode
+                ? "Real Pi model/thinking controls are not wired yet; the active Pi worker uses its current configuration."
+                : "Thinking-level UI hook fired; fake/preload API can be wired here.",
             );
           }}
         />
 
-        <ChatTimeline session={selectedSession} uiMessage={uiMessage} />
+        <ChatTimeline
+          session={selectedSession}
+          uiMessage={uiMessage}
+          showAttachmentExamples={!isRealBackendMode}
+        />
 
         <Composer
           value={draft}
@@ -635,6 +659,7 @@ export function App(): ReactElement {
           slashCommands={filteredCommands}
           selectedModel={selectedModel}
           backendLabel={backendLabel(selectedSession)}
+          allowAttachments={!isRealBackendMode}
           onChange={handleDraftChange}
           onKeyDown={handleComposerKeyDown}
           onSend={handleSend}
@@ -648,6 +673,18 @@ export function App(): ReactElement {
       </section>
     </main>
   );
+}
+
+function projectFromCwd(cwd: string): ProjectRef {
+  const normalized = cwd.replace(/\/$/, "");
+  const displayName = normalized.split(/[\\/]/).pop() || normalized;
+  return {
+    id: normalized,
+    path: normalized,
+    canonicalPath: normalized,
+    displayName,
+    lastOpenedAt: Date.now(),
+  };
 }
 
 function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
@@ -929,6 +966,7 @@ function appendDiagnostic(
 function SessionSidebar(props: {
   sessions: SessionViewModel[];
   selectedSessionId: string;
+  realMode: boolean;
   onSelect(sessionId: string): void;
   onNewSession(): void;
 }): ReactElement {
@@ -936,26 +974,32 @@ function SessionSidebar(props: {
     <aside className="sidebar" aria-label="Sessions">
       <div className="sidebar-header">
         <div>
-          <p className="eyebrow dark">Local projects</p>
+          <p className="eyebrow dark">
+            {props.realMode ? "Real Pi session" : "Local projects"}
+          </p>
           <div className="brand">Pi Deck</div>
         </div>
-        <button
-          className="icon-button"
-          type="button"
-          aria-label="New session"
-          onClick={props.onNewSession}
-        >
-          +
-        </button>
+        {props.realMode ? null : (
+          <button
+            className="icon-button"
+            type="button"
+            aria-label="New session"
+            onClick={props.onNewSession}
+          >
+            +
+          </button>
+        )}
       </div>
 
-      <button
-        className="new-session"
-        type="button"
-        onClick={props.onNewSession}
-      >
-        + New session
-      </button>
+      {props.realMode ? null : (
+        <button
+          className="new-session"
+          type="button"
+          onClick={props.onNewSession}
+        >
+          + New session
+        </button>
+      )}
 
       <section
         className="session-list"
@@ -982,8 +1026,9 @@ function SessionSidebar(props: {
       </section>
 
       <div className="sidebar-note">
-        Red dot means supported extension UI is waiting for input. Fixture rows
-        exercise sidebar priority until the session repository lands.
+        {props.realMode
+          ? "Real Pi mode shows only the active pi --mode rpc session. New/resume session controls are coming next."
+          : "Red dot means supported extension UI is waiting for input. Fixture rows exercise sidebar priority until the session repository lands."}
       </div>
     </aside>
   );
@@ -1015,6 +1060,7 @@ function AppHeader(props: {
   recentProjects: ProjectRef[];
   selectedModelId: string;
   selectedThinking: string;
+  realMode: boolean;
   onPickProject(): void;
   onSelectRecent(project: ProjectRef): void;
   onModelChange(id: string): void;
@@ -1026,17 +1072,22 @@ function AppHeader(props: {
         project={props.currentProject}
         selectedSession={props.selectedSession}
         recentProjects={props.recentProjects}
+        realMode={props.realMode}
         onPickProject={props.onPickProject}
         onSelectRecent={props.onSelectRecent}
       />
 
       <div className="header-right">
-        <ModelThinkingControls
-          selectedModelId={props.selectedModelId}
-          selectedThinking={props.selectedThinking}
-          onModelChange={props.onModelChange}
-          onThinkingChange={props.onThinkingChange}
-        />
+        {props.realMode ? (
+          <RealModeSummary selectedSession={props.selectedSession} />
+        ) : (
+          <ModelThinkingControls
+            selectedModelId={props.selectedModelId}
+            selectedThinking={props.selectedThinking}
+            onModelChange={props.onModelChange}
+            onThinkingChange={props.onThinkingChange}
+          />
+        )}
         <LoadStateBadge
           loadState={props.loadState}
           nodeAccessSummary={props.nodeAccessSummary}
@@ -1050,6 +1101,7 @@ function ProjectHeader(props: {
   project: ProjectRef;
   selectedSession: SessionViewModel;
   recentProjects: ProjectRef[];
+  realMode: boolean;
   onPickProject(): void;
   onSelectRecent(project: ProjectRef): void;
 }): ReactElement {
@@ -1068,27 +1120,53 @@ function ProjectHeader(props: {
         {statusLabel(props.selectedSession.status)}
       </span>
       <p className="project-path">{props.project.path}</p>
-      <div className="header-actions">
-        <button type="button" onClick={props.onPickProject}>
-          Open project…
-        </button>
-      </div>
-      <div className="recent-projects" aria-label="Recent projects">
-        <strong>Recent projects</strong>
-        {storedRecent.length === 0 ? (
-          <p className="empty-state-copy">No saved recent projects yet.</p>
+      {props.realMode ? (
+        <p className="empty-state-copy compact">
+          Real Pi is using the launch cwd above. Project switching will create a
+          new real worker in the next session-management slice.
+        </p>
+      ) : (
+        <>
+          <div className="header-actions">
+            <button type="button" onClick={props.onPickProject}>
+              Open project…
+            </button>
+          </div>
+          <div className="recent-projects" aria-label="Recent projects">
+            <strong>Recent projects</strong>
+            {storedRecent.length === 0 ? (
+              <p className="empty-state-copy">No saved recent projects yet.</p>
+            ) : null}
+            {visibleRecent.map((project) => (
+              <button
+                key={project.id}
+                type="button"
+                className={project.invalidReason ? "recent invalid" : "recent"}
+                onClick={() => props.onSelectRecent(project)}
+              >
+                <span>{project.displayName}</span>
+                <small>{project.invalidReason ?? project.path}</small>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function RealModeSummary(props: {
+  selectedSession: SessionViewModel;
+}): ReactElement {
+  return (
+    <div className="model-controls" aria-label="Real Pi backend summary">
+      <div className="capabilities real-mode-summary">
+        <strong>Real Pi backend</strong>
+        <span>{props.selectedSession.modelLabel || "Pi-selected model"}</span>
+        {props.selectedSession.thinkingLevel ? (
+          <span>Thinking: {props.selectedSession.thinkingLevel}</span>
         ) : null}
-        {visibleRecent.map((project) => (
-          <button
-            key={project.id}
-            type="button"
-            className={project.invalidReason ? "recent invalid" : "recent"}
-            onClick={() => props.onSelectRecent(project)}
-          >
-            <span>{project.displayName}</span>
-            <small>{project.invalidReason ?? project.path}</small>
-          </button>
-        ))}
+        <span>Single active RPC session</span>
       </div>
     </div>
   );
@@ -1188,13 +1266,17 @@ function LoadStateBadge(props: {
 function ChatTimeline(props: {
   session: SessionViewModel;
   uiMessage: string;
+  showAttachmentExamples: boolean;
 }): ReactElement {
   const hasItems = props.session.timeline.length > 0;
   return (
     <section className="timeline-shell" aria-label="Chat / Agent Timeline">
       <div className="timeline-scroll">
         {!hasItems ? (
-          <EmptyTimelineState status={props.session.status} />
+          <EmptyTimelineState
+            status={props.session.status}
+            backendMode={props.session.backendMode ?? "fake"}
+          />
         ) : null}
         {props.session.status === "error" ? (
           <div className="state-banner error">
@@ -1212,7 +1294,7 @@ function ChatTimeline(props: {
           <span>{props.uiMessage}</span>
         </div>
 
-        <AttachmentExampleStrip />
+        {props.showAttachmentExamples ? <AttachmentExampleStrip /> : null}
 
         {props.session.timeline.map((item) => (
           <TimelineRow key={item.id} item={item} />
@@ -1222,11 +1304,16 @@ function ChatTimeline(props: {
   );
 }
 
-function EmptyTimelineState(props: { status: SessionStatus }): ReactElement {
+function EmptyTimelineState(props: {
+  status: SessionStatus;
+  backendMode: "fake" | "real";
+}): ReactElement {
   const copy =
     props.status === "waiting"
       ? "A pending input request will appear here once extension UI wiring exists."
-      : "Send a prompt to start a fake streamed assistant response.";
+      : props.backendMode === "real"
+        ? "Send a prompt to the active real Pi session."
+        : "Send a prompt to start a fake streamed assistant response.";
 
   return (
     <div className="empty-state">
@@ -1393,6 +1480,7 @@ function Composer(props: {
   slashCommands: SlashCommand[];
   selectedModel: ModelOption | undefined;
   backendLabel: string;
+  allowAttachments: boolean;
   onChange(value: string): void;
   onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void;
   onSend(): void;
@@ -1407,19 +1495,23 @@ function Composer(props: {
 
   return (
     <footer className="composer" aria-label="Prompt composer">
-      <button
-        className="attachment-button"
-        type="button"
-        aria-label="Add attachments"
-        onClick={props.onPickAttachments}
-      >
-        +
-      </button>
+      {props.allowAttachments ? (
+        <button
+          className="attachment-button"
+          type="button"
+          aria-label="Add attachments"
+          onClick={props.onPickAttachments}
+        >
+          +
+        </button>
+      ) : null}
       <div className="composer-input-wrap">
-        <AttachmentChipRow
-          attachments={props.attachments}
-          onRemove={props.onRemoveAttachment}
-        />
+        {props.allowAttachments ? (
+          <AttachmentChipRow
+            attachments={props.attachments}
+            onRemove={props.onRemoveAttachment}
+          />
+        ) : null}
         <textarea
           aria-label="Prompt text"
           onChange={(event) => {
@@ -1447,10 +1539,15 @@ function Composer(props: {
             <span className="composer-error">
               Selected model does not support image input.
             </span>
-          ) : (
+          ) : props.allowAttachments ? (
             <span>
               {props.backendLabel} active · non-images are sent as Referenced
               path metadata when backend send support lands.
+            </span>
+          ) : (
+            <span>
+              {props.backendLabel} active · attachments and new/resume sessions
+              are not wired yet.
             </span>
           )}
         </div>
