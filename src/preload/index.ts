@@ -88,6 +88,12 @@ const api: PiDeckApi = Object.freeze({
         request: chatAbortRequestSchema.parse(request),
         responseSchema: z.void(),
       }),
+    reset: () =>
+      invokeValidated({
+        channel: ipcChannels.chatReset,
+        request: undefined,
+        responseSchema: chatSnapshotSchema,
+      }),
     onEvent: (listener: (event: ChatRuntimeEvent) => void) => {
       const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => {
         const parsed = chatRuntimeEventSchema.safeParse(payload);

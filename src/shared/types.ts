@@ -36,6 +36,7 @@ export interface PiDeckApi {
     getSnapshot(): Promise<ChatSnapshot>;
     prompt(request: { runtimeId: string; text: string }): Promise<void>;
     abort(request: { runtimeId: string }): Promise<void>;
+    reset(): Promise<ChatSnapshot>;
     onEvent(listener: (event: ChatRuntimeEvent) => void): () => void;
   };
   projects: {

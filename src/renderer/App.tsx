@@ -601,7 +601,27 @@ export function App(): ReactElement {
     }
   }
 
-  function handleNewSession(): void {
+  async function handleNewSession(): Promise<void> {
+    if (isRealBackendMode) {
+      setComposerError(null);
+      setUiMessage("Starting a new real Pi session…");
+      try {
+        const snapshot = await window.piDeck.chat.reset();
+        const backendSession = sessionFromSnapshot(snapshot);
+        setSessions([backendSession]);
+        setSelectedSessionId(backendSession.id);
+        if (snapshot.state.cwd) {
+          setCurrentProject(projectFromCwd(snapshot.state.cwd));
+        }
+        setUiMessage("Started a new real Pi session.");
+      } catch (error) {
+        setUiMessage(
+          `Failed to start a new real Pi session: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      return;
+    }
+
     const id = `local-new-${Date.now()}`;
     const next: SessionViewModel = {
       id,
@@ -617,12 +637,6 @@ export function App(): ReactElement {
       runtimeBacked: false,
       timeline: [],
     };
-    if (isRealBackendMode) {
-      setUiMessage(
-        "Real Pi mode currently uses the active session launched at startup. Real new/resume session controls land next.",
-      );
-      return;
-    }
     setSessions((items) => [next, ...items]);
     setSelectedSessionId(id);
     setUiMessage(
@@ -645,7 +659,7 @@ export function App(): ReactElement {
         selectedSessionId={selectedSession.id}
         realMode={isRealBackendMode}
         onSelect={setSelectedSessionId}
-        onNewSession={handleNewSession}
+        onNewSession={() => void handleNewSession()}
       />
 
       <section className="workspace" aria-label="Pi Deck chat workspace">
@@ -1152,6 +1166,7 @@ function AppHeader(props: {
           selectedModelId={props.selectedModelId}
           selectedThinking={props.selectedThinking}
           realMode={props.realMode}
+          selectedSession={props.selectedSession}
           onModelChange={props.onModelChange}
           onThinkingChange={props.onThinkingChange}
         />
@@ -1221,6 +1236,7 @@ function ModelThinkingControls(props: {
   selectedModelId: string;
   selectedThinking: string;
   realMode: boolean;
+  selectedSession: SessionViewModel;
   onModelChange(id: string): void;
   onThinkingChange(id: string): void;
 }): ReactElement {
@@ -1231,11 +1247,24 @@ function ModelThinkingControls(props: {
     (level) => level.id === props.selectedThinking,
   );
 
+  if (props.realMode) {
+    return (
+      <div className="model-controls compact" aria-label="Real Pi config">
+        <div className="capabilities" aria-live="polite">
+          <strong>
+            {props.selectedSession.modelLabel || "Pi-selected model"}
+          </strong>
+          {props.selectedSession.thinkingLevel ? (
+            <span>Thinking: {props.selectedSession.thinkingLevel}</span>
+          ) : null}
+          <span>Real Pi active worker config</span>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div
-      className={`model-controls ${props.realMode ? "compact" : ""}`}
-      aria-label="Model and thinking controls"
-    >
+    <div className="model-controls" aria-label="Model and thinking controls">
       <label>
         <span>Model</span>
         <select
@@ -1268,9 +1297,7 @@ function ModelThinkingControls(props: {
       </label>
       <div className="capabilities" aria-live="polite">
         <strong>
-          {props.realMode
-            ? "Real Pi uses active worker config"
-            : `${selectedModel?.provider}/${selectedModel?.id}`}
+          {selectedModel?.provider}/{selectedModel?.id}
         </strong>
         <span>{selectedModel?.supportsImages ? "Images" : "No images"}</span>
         <span>

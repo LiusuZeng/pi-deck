@@ -398,10 +398,6 @@ h1 {
   justify-items: stretch;
 }
 
-.model-controls.compact .capabilities span {
-  display: none;
-}
-
 .model-controls label {
   display: grid;
   grid-template-columns: 70px minmax(160px, 1fr);

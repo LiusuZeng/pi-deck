@@ -231,6 +231,17 @@ function registerIpcHandlers(
   });
 
   registerValidatedIpc({
+    channel: ipcChannels.chatReset,
+    requestSchema: noPayloadSchema,
+    responseSchema: chatSnapshotSchema,
+    diagnostics: diagnosticsService,
+    handler: async () => {
+      await closeChatWorker();
+      return getChatSnapshot(store, diagnosticsService);
+    },
+  });
+
+  registerValidatedIpc({
     channel: ipcChannels.projectPickFolder,
     requestSchema: noPayloadSchema,
     responseSchema: pickProjectResultSchema,
