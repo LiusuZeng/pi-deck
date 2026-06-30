@@ -116,6 +116,10 @@ function createMainWindow(): void {
 
   registerDevReloadShortcut(mainWindow);
 
+  mainWindow.on("closed", () => {
+    mainWindow = undefined;
+  });
+
   if (isDev) {
     void mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL as string);
   } else {
@@ -319,10 +323,24 @@ async function ensureChatAdapter(
       );
       return;
     }
-    mainWindow?.webContents.send(ipcChannels.chatEvent, parsed.data);
+    sendChatEventToRenderer(parsed.data);
   });
   chatAdapter = adapter;
   return adapter;
+}
+
+function sendChatEventToRenderer(
+  event: z.infer<typeof chatRuntimeEventSchema>,
+): void {
+  const window = mainWindow;
+  if (
+    window === undefined ||
+    window.isDestroyed() ||
+    window.webContents.isDestroyed()
+  ) {
+    return;
+  }
+  window.webContents.send(ipcChannels.chatEvent, event);
 }
 
 function resolveChatBackendMode(): ChatBackendMode {

@@ -144,6 +144,7 @@ class FakeRpcServer {
         this.handleLine(this.buffer);
       }
     });
+    process.stdin.resume();
   }
 
   private onData(chunk: Buffer): void {

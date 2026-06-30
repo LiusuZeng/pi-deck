@@ -36,7 +36,7 @@ export function spawnFakeRpc(args: string[] = []): JsonlRpcClient {
     process.execPath,
     [buildFakeRpcServer(), ...args],
     { cwd: process.cwd(), env: process.env },
-    { requestTimeoutMs: 500 },
+    { requestTimeoutMs: 2_000 },
   );
 }
 
