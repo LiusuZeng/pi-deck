@@ -72,6 +72,7 @@ type TimelineItem =
       title: string;
       status: "collapsed" | "running";
       summary: string;
+      details: string;
       createdAt: string;
     };
 
@@ -211,6 +212,7 @@ const initialSessions: SessionViewModel[] = [
         status: "collapsed",
         summary:
           "Full tool rendering is reserved for M7; this compact row shows the intended timeline slot.",
+        details: "Tool details will appear here when expanded.",
         createdAt: "09:42",
       },
     ],
@@ -801,6 +803,103 @@ function modelLabelFromState(state: ChatSnapshot["state"]): string {
   return provider;
 }
 
+function timelineToolStatus(streaming: boolean): "collapsed" | "running" {
+  return streaming ? "running" : "collapsed";
+}
+
+function toolTimelineItemFromContent(options: {
+  id: string;
+  content: string;
+  createdAt: string;
+  status: "collapsed" | "running";
+  role?: string | undefined;
+}): Extract<TimelineItem, { kind: "tool" }> | undefined {
+  const toolPayload = parseToolPayload(options.content);
+  const isToolRole =
+    options.role === "tool" ||
+    options.role === "toolResult" ||
+    options.role === "tool_use" ||
+    options.role === "tool_result";
+
+  if (toolPayload === undefined && !isToolRole) {
+    return undefined;
+  }
+
+  return {
+    id: options.id,
+    kind: "tool",
+    title: toolPayload?.title ?? "Tool output",
+    status: options.status,
+    summary: toolPayload?.summary ?? summarizeToolDetails(options.content, 180),
+    details: toolPayload?.details ?? options.content,
+    createdAt: options.createdAt,
+  };
+}
+
+function parseToolPayload(
+  content: string,
+): { title: string; summary: string; details: string } | undefined {
+  const trimmed = content.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
+    return undefined;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return undefined;
+  }
+
+  const record = parsed as Record<string, unknown>;
+  const details = JSON.stringify(record, null, 2);
+  if (typeof record.command === "string") {
+    return {
+      title: "Command",
+      summary: record.command,
+      details,
+    };
+  }
+  if (typeof record.path === "string") {
+    const limit =
+      typeof record.limit === "number" ? ` · ${record.limit} lines` : "";
+    return {
+      title: "Read file",
+      summary: `${record.path}${limit}`,
+      details,
+    };
+  }
+  if (Array.isArray(record.edits) || record.oldText !== undefined) {
+    return {
+      title: "Edit file",
+      summary:
+        typeof record.path === "string"
+          ? record.path
+          : "Patch details available when expanded",
+      details,
+    };
+  }
+  if (typeof record.tool === "string" || typeof record.name === "string") {
+    return {
+      title: String(record.tool ?? record.name),
+      summary: summarizeToolDetails(details, 180),
+      details,
+    };
+  }
+  return undefined;
+}
+
+function summarizeToolDetails(content: string, maxLength: number): string {
+  const singleLine = content.replace(/\s+/g, " ").trim();
+  if (singleLine.length <= maxLength) {
+    return singleLine || "Tool output";
+  }
+  return `${singleLine.slice(0, maxLength - 1)}…`;
+}
+
 function timelineFromMessages(
   messages: ChatMessage[],
   backendMode: "fake" | "real",
@@ -820,21 +919,19 @@ function timelineFromMessages(
       return [{ id, kind: "user", content, createdAt }];
     }
 
-    if (message.role === "assistant") {
-      return [{ id, kind: "assistant", content, createdAt }];
+    const toolItem = toolTimelineItemFromContent({
+      id,
+      content,
+      createdAt,
+      status: "collapsed",
+      role: message.role,
+    });
+    if (toolItem !== undefined) {
+      return [toolItem];
     }
 
-    if (message.role === "tool" || message.role === "toolResult") {
-      return [
-        {
-          id,
-          kind: "tool",
-          title: "Tool output placeholder",
-          status: "collapsed",
-          summary: content || "Tool output rendering arrives in M7.",
-          createdAt,
-        },
-      ];
+    if (message.role === "assistant") {
+      return [{ id, kind: "assistant", content, createdAt }];
     }
 
     if (message.role === "system" && content.length > 0) {
@@ -943,12 +1040,22 @@ function reduceMessageUpdate(
     getAssistantMessageDelta(event) ??
     "";
   const thinking = getThinkingUpdateContent(event);
+  const role = getMessageUpdateRole(event);
+  const toolItem = toolTimelineItemFromContent({
+    id: messageId,
+    content,
+    createdAt: formatTime(),
+    status: timelineToolStatus(!done),
+    role,
+  });
   const hasReplyContent = content.trim().length > 0;
   const hasThinkingContent =
     thinking !== undefined && thinking.trim().length > 0;
 
   let timeline = session.timeline;
-  if (hasReplyContent) {
+  if (toolItem !== undefined) {
+    timeline = upsertToolMessage(timeline, toolItem);
+  } else if (hasReplyContent) {
     timeline = upsertAssistantMessage(timeline, messageId, content, !done);
   } else if (hasThinkingContent) {
     timeline = upsertThinkingMessage(
@@ -971,6 +1078,21 @@ function reduceMessageUpdate(
     updatedAtMs: Date.now(),
     timeline,
   };
+}
+
+function upsertToolMessage(
+  items: TimelineItem[],
+  toolItem: Extract<TimelineItem, { kind: "tool" }>,
+): TimelineItem[] {
+  let found = false;
+  const next = items.map((item) => {
+    if (item.id !== toolItem.id) {
+      return item;
+    }
+    found = true;
+    return toolItem;
+  });
+  return found ? next : [...next, toolItem];
 }
 
 function upsertAssistantMessage(
@@ -1447,12 +1569,19 @@ function TimelineRow(props: { item: TimelineItem }): ReactElement {
 
   if (props.item.kind === "tool") {
     return (
-      <article className="tool-card">
-        <div>
-          <p className="tool-title">{props.item.title}</p>
-          <p>{props.item.summary}</p>
-        </div>
-        <span className="tool-status">{props.item.status}</span>
+      <article className={`tool-card ${props.item.status}`}>
+        <details>
+          <summary>
+            <span className="tool-copy">
+              <span className="tool-title">{props.item.title}</span>
+              <span className="tool-summary">{props.item.summary}</span>
+            </span>
+            <span className="tool-status">
+              {props.item.status === "running" ? "running" : "collapsed"}
+            </span>
+          </summary>
+          <pre>{props.item.details}</pre>
+        </details>
       </article>
     );
   }
@@ -1872,6 +2001,11 @@ function getMessageUpdateId(event: ChatRuntimeEvent): string | undefined {
   }
   const partial = getRecordFromRecord(assistantEvent, "partial");
   return getStringFromRecord(partial, "responseId");
+}
+
+function getMessageUpdateRole(event: ChatRuntimeEvent): string | undefined {
+  const message = getRecord(event, "message");
+  return getStringFromRecord(message, "role");
 }
 
 function getMessageUpdateContent(event: ChatRuntimeEvent): string | undefined {

@@ -59,6 +59,7 @@ let chatAdapter: SinglePiAdapter | undefined;
 let chatRuntimeId: string | undefined;
 let chatBackendMode: ChatBackendMode | undefined;
 let chatWorkerCwd: string | undefined;
+let chatEventUnsubscribe: (() => void) | undefined;
 let isQuittingAfterChatWorkerCleanup = false;
 
 async function bootstrap(): Promise<void> {
@@ -326,7 +327,7 @@ async function ensureChatAdapter(
   chatBackendMode = mode;
   chatWorkerCwd = workerSpec.cwd;
   chatRuntimeId = workerSpec.worker.runtimeId;
-  adapter.onEvent((event) => {
+  chatEventUnsubscribe = adapter.onEvent((event) => {
     const parsed = chatRuntimeEventSchema.safeParse(event);
     if (!parsed.success) {
       diagnosticsService.recordError(
@@ -455,6 +456,8 @@ async function closeChatWorker(): Promise<void> {
   const adapter = chatAdapter;
   const runtimeId = chatRuntimeId;
   const mode = chatBackendMode ?? resolveChatBackendMode();
+  chatEventUnsubscribe?.();
+  chatEventUnsubscribe = undefined;
   chatAdapter = undefined;
   chatRuntimeId = undefined;
   chatBackendMode = undefined;
