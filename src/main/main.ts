@@ -16,7 +16,9 @@ import {
   appSettingsSchema,
   attachmentPickerRequestSchema,
   chatAbortRequestSchema,
+  chatListSessionsResultSchema,
   chatPromptRequestSchema,
+  chatResumeSessionRequestSchema,
   chatRuntimeEventSchema,
   chatSnapshotSchema,
   diagnosticsSummarySchema,
@@ -28,6 +30,7 @@ import {
 import type {
   AppSettings,
   AttachmentDraft,
+  ChatListSessionsResult,
   ChatSnapshot,
   PickAttachmentsResult,
   PickProjectResult,
@@ -35,6 +38,7 @@ import type {
 import { DiagnosticsService } from "./diagnostics/diagnostics.js";
 import { registerValidatedIpc } from "./ipc/registerIpc.js";
 import { SinglePiAdapter } from "./pi/piAdapter.js";
+import { scanSessionRepository } from "./pi/sessionRepository.js";
 import {
   resolveEffectivePiConfig,
   resolvePiBinary,
@@ -61,6 +65,8 @@ let chatBackendMode: ChatBackendMode | undefined;
 const chatRuntimeIds = new Set<string>();
 const chatRuntimeModes = new Map<string, ChatBackendMode>();
 const chatWorkerCwds = new Map<string, string>();
+const chatRuntimeSessionFiles = new Map<string, string>();
+const chatSessionFileLocks = new Map<string, string>();
 let chatEventUnsubscribe: (() => void) | undefined;
 let isQuittingAfterChatWorkerCleanup = false;
 
@@ -207,6 +213,23 @@ function registerIpcHandlers(
     responseSchema: chatSnapshotSchema,
     diagnostics: diagnosticsService,
     handler: async () => getChatSnapshot(store, diagnosticsService),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.chatListSessions,
+    requestSchema: noPayloadSchema,
+    responseSchema: chatListSessionsResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async () => listChatSessions(store),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.chatResumeSession,
+    requestSchema: chatResumeSessionRequestSchema,
+    responseSchema: chatSnapshotSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ sessionFile }) =>
+      resumeChatSession(store, diagnosticsService, sessionFile),
   });
 
   registerValidatedIpc({
@@ -414,6 +437,50 @@ async function createRealChatWorker(
   adapter: SinglePiAdapter,
   store: SettingsStore,
 ): Promise<ChatWorkerSpec> {
+  const launch = await resolveRealChatLaunchConfig(store);
+  const worker = adapter.createWorker({
+    command: launch.effective.config.piBinary,
+    args: ["--mode", "rpc", ...launch.effective.workerArgs],
+    cwd: launch.projectCwd,
+    env: launch.effective.config.env,
+    requestTimeoutMs: Number(process.env.PI_DECK_REAL_RPC_TIMEOUT_MS ?? 30_000),
+    commandProtocol: "type-field",
+  });
+  return { worker, cwd: launch.projectCwd };
+}
+
+async function createRealResumeWorker(
+  adapter: SinglePiAdapter,
+  store: SettingsStore,
+  sessionFile: string,
+): Promise<ChatWorkerSpec> {
+  const launch = await resolveRealChatLaunchConfig(store);
+  const canonicalSessionFile =
+    (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
+  const sessionCwd = await readSessionFileCwd(canonicalSessionFile);
+  const cwd = sessionCwd ?? launch.projectCwd;
+  const worker = adapter.createWorker({
+    command: launch.effective.config.piBinary,
+    args: [
+      "--mode",
+      "rpc",
+      ...launch.effective.workerArgs,
+      "--session",
+      canonicalSessionFile,
+    ],
+    cwd,
+    env: launch.effective.config.env,
+    requestTimeoutMs: Number(process.env.PI_DECK_REAL_RPC_TIMEOUT_MS ?? 30_000),
+    commandProtocol: "type-field",
+  });
+  return { worker, cwd };
+}
+
+async function resolveRealChatLaunchConfig(store: SettingsStore): Promise<{
+  appSettings: AppPiSettings;
+  projectCwd: string;
+  effective: Awaited<ReturnType<typeof resolveEffectivePiConfig>>;
+}> {
   const settings = await store.get();
   const appSettings = applyRealBackendEnvOverrides(settings);
   const projectCwd = await resolveRealBackendCwd();
@@ -437,16 +504,7 @@ async function createRealChatWorker(
     env: process.env,
     cwd: projectCwd,
   });
-
-  const worker = adapter.createWorker({
-    command: effective.config.piBinary,
-    args: ["--mode", "rpc", ...effective.workerArgs],
-    cwd: projectCwd,
-    env: effective.config.env,
-    requestTimeoutMs: Number(process.env.PI_DECK_REAL_RPC_TIMEOUT_MS ?? 30_000),
-    commandProtocol: "type-field",
-  });
-  return { worker, cwd: projectCwd };
+  return { appSettings, projectCwd, effective };
 }
 
 function applyRealBackendEnvOverrides(settings: AppSettings): AppPiSettings {
@@ -485,6 +543,8 @@ async function closeChatWorker(): Promise<void> {
   chatRuntimeIds.clear();
   chatRuntimeModes.clear();
   chatWorkerCwds.clear();
+  chatRuntimeSessionFiles.clear();
+  chatSessionFileLocks.clear();
 
   if (adapter === undefined || runtimeIds.length === 0) {
     return;
@@ -502,6 +562,95 @@ async function closeChatWorker(): Promise<void> {
       }
     }),
   );
+}
+
+async function listChatSessions(
+  store: SettingsStore,
+): Promise<ChatListSessionsResult> {
+  const mode = resolveChatBackendMode();
+  if (mode !== "real") {
+    return {
+      projectCwd: process.cwd(),
+      sessions: [],
+      diagnostics: [
+        "Session repository scanning is only enabled in real Pi mode.",
+      ],
+    };
+  }
+
+  const launch = await resolveRealChatLaunchConfig(store);
+  const sessionDir = launch.effective.config.sessionDir;
+  if (sessionDir === undefined) {
+    return {
+      projectCwd: launch.projectCwd,
+      sessions: [],
+      diagnostics: ["No Pi session directory is configured."],
+    };
+  }
+
+  const result = await scanSessionRepository({
+    sessionDir,
+    projectCwd: launch.projectCwd,
+  });
+  return {
+    projectCwd: launch.projectCwd,
+    sessionDir,
+    sessions: result.sessions.map((session) => {
+      const attachedRuntimeId = chatSessionFileLocks.get(session.sessionFile);
+      return attachedRuntimeId ? { ...session, attachedRuntimeId } : session;
+    }),
+    diagnostics: result.diagnostics,
+  };
+}
+
+async function resumeChatSession(
+  store: SettingsStore,
+  diagnosticsService: DiagnosticsService,
+  sessionFile: string,
+): Promise<ChatSnapshot> {
+  if (resolveChatBackendMode() !== "real") {
+    throw new Error("Session resume is only available in real Pi mode.");
+  }
+
+  const canonicalSessionFile =
+    (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
+  const existingRuntimeId = chatSessionFileLocks.get(canonicalSessionFile);
+  const adapter = await ensureChatAdapter(store, diagnosticsService);
+  const mode = chatBackendMode ?? "real";
+  if (existingRuntimeId !== undefined) {
+    chatRuntimeId = existingRuntimeId;
+    return getChatSnapshotForRuntime(adapter, existingRuntimeId, mode);
+  }
+
+  const workerSpec = await createRealResumeWorker(
+    adapter,
+    store,
+    canonicalSessionFile,
+  );
+  const runtimeId = workerSpec.worker.runtimeId;
+  chatRuntimeId = runtimeId;
+  chatRuntimeIds.add(runtimeId);
+  chatRuntimeModes.set(runtimeId, "real");
+  chatWorkerCwds.set(runtimeId, workerSpec.cwd);
+
+  const snapshot = await getChatSnapshotForRuntime(adapter, runtimeId, "real");
+  const returnedSessionFile = snapshot.state.sessionFile;
+  if (typeof returnedSessionFile !== "string") {
+    throw new Error(
+      "Pi resume did not return a sessionFile in get_state; this Pi version may not support GUI resume.",
+    );
+  }
+  const returnedCanonical =
+    (await safeRealpath(returnedSessionFile)) ??
+    path.resolve(returnedSessionFile);
+  if (returnedCanonical !== canonicalSessionFile) {
+    throw new Error(
+      `Pi resume opened a different session. Requested ${canonicalSessionFile}, got ${returnedCanonical}.`,
+    );
+  }
+  chatRuntimeSessionFiles.set(runtimeId, canonicalSessionFile);
+  chatSessionFileLocks.set(canonicalSessionFile, runtimeId);
+  return snapshot;
 }
 
 async function createChatSessionSnapshot(
@@ -537,12 +686,51 @@ async function getChatSnapshotForRuntime(
     adapter.getState(runtimeId),
     adapter.getMessages(runtimeId),
   ]);
+  if (typeof state.sessionFile === "string") {
+    const canonicalSessionFile =
+      (await safeRealpath(state.sessionFile)) ??
+      path.resolve(state.sessionFile);
+    chatRuntimeSessionFiles.set(runtimeId, canonicalSessionFile);
+    chatSessionFileLocks.set(canonicalSessionFile, runtimeId);
+  }
+
   return {
     runtimeId,
     backendMode: mode,
     state: { ...state, cwd: state.cwd ?? chatWorkerCwds.get(runtimeId) },
     messages,
   };
+}
+
+async function readSessionFileCwd(
+  sessionFile: string,
+): Promise<string | undefined> {
+  try {
+    const handle = await fs.open(sessionFile, "r");
+    try {
+      const buffer = Buffer.alloc(64 * 1024);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      const firstLine = buffer
+        .subarray(0, bytesRead)
+        .toString("utf8")
+        .split(/\r?\n/, 1)[0];
+      if (!firstLine) {
+        return undefined;
+      }
+      const parsed = JSON.parse(firstLine) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return undefined;
+      }
+      const cwd = (parsed as Record<string, unknown>).cwd;
+      return typeof cwd === "string"
+        ? ((await safeRealpath(cwd)) ?? path.resolve(cwd))
+        : undefined;
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return undefined;
+  }
 }
 
 async function safeRealpath(filePath: string): Promise<string | undefined> {

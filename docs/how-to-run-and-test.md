@@ -96,7 +96,7 @@ Current reality:
 - An opt-in real backend mode exists for the narrow Demo Slice 3 vertical slice.
 - Real mode launches one real `pi --mode rpc` worker, loads `get_state` / `get_messages`, sends prompts through the existing GUI chat path, streams RPC events, supports `abort`, and closes the worker on app quit.
 - Real Pi binary resolution, environment resolution, EffectivePiConfig, JSONL transport, and minimal RPC smoke-test foundations exist.
-- Real Pi can create additional in-window sessions with `+ New real session`, but session listing/repository persistence, resume via `--session`, project trust UX, model/thinking RPC controls, attachments, and robust multi-session orchestration remain future M3/M5+ work.
+- Real Pi can create additional in-window sessions with `+ New real session`. Real mode now scans the authoritative session directory for the launch project and clicking a saved row attempts `pi --mode rpc --session <file>` with canonical `get_state.sessionFile` verification. Candidate session dirs, refresh/error polish, project trust UX, model/thinking RPC controls, attachments, and robust scheduler-backed multi-session orchestration remain future M3/M5+ work.
 
 Opt-in real GUI chat launch:
 
@@ -119,7 +119,8 @@ Real mode expectations:
 2. Initial snapshot should come from real `get_state` / `get_messages` or show an actionable diagnostic if Pi cannot start.
 3. Prompt send should call real RPC `prompt` and stream returned events into the chat timeline.
 4. Abort should call real RPC `abort` and recover the UI or show a non-fatal error.
-5. Quitting the app should close/kill the real worker; no `pi --mode rpc` process should intentionally remain.
+5. Saved prior sessions for the launch project should appear in the sidebar; clicking one should resume it or show a clear error.
+6. Quitting the app should close/kill real workers; no `pi --mode rpc` process should intentionally remain.
 
 Record real-mode validation evidence in `docs/real-pi-gui-chat-validation.md` before claiming this slice accepted.
 

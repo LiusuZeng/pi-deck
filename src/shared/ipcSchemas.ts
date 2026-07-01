@@ -88,6 +88,36 @@ export const chatSnapshotSchema = z
   })
   .strict();
 
+export const chatSessionSummarySchema = z
+  .object({
+    id: z.string(),
+    sessionFile: z.string(),
+    sessionId: z.string().optional(),
+    cwd: z.string().optional(),
+    title: z.string(),
+    updatedAtMs: z.number(),
+    createdAtMs: z.number().optional(),
+    messageCount: z.number().int().min(0),
+    preview: z.string().optional(),
+    attachedRuntimeId: z.string().optional(),
+  })
+  .strict();
+
+export const chatListSessionsResultSchema = z
+  .object({
+    projectCwd: z.string(),
+    sessionDir: z.string().optional(),
+    sessions: z.array(chatSessionSummarySchema),
+    diagnostics: z.array(z.string()),
+  })
+  .strict();
+
+export const chatResumeSessionRequestSchema = z
+  .object({
+    sessionFile: z.string().min(1),
+  })
+  .strict();
+
 export const chatPromptRequestSchema = z
   .object({
     runtimeId: z.string(),
@@ -178,6 +208,8 @@ export const ipcChannels = {
   settingsGet: "settings:get",
   settingsUpdate: "settings:update",
   chatGetSnapshot: "chat:getSnapshot",
+  chatListSessions: "chat:listSessions",
+  chatResumeSession: "chat:resumeSession",
   chatPrompt: "chat:prompt",
   chatAbort: "chat:abort",
   chatCreateSession: "chat:createSession",

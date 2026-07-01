@@ -1,0 +1,273 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import type { ChatSessionSummary } from "../../shared/types.js";
+
+export interface ScanSessionRepositoryOptions {
+  sessionDir: string;
+  projectCwd: string;
+  maxDepth?: number;
+  maxFiles?: number;
+  maxBytesPerFile?: number;
+}
+
+export interface ScanSessionRepositoryResult {
+  sessions: ChatSessionSummary[];
+  diagnostics: string[];
+}
+
+interface ParsedSessionFile {
+  sessionId?: string;
+  cwd?: string;
+  title?: string;
+  preview?: string;
+  createdAtMs?: number;
+  updatedAtMs?: number;
+  messageCount: number;
+}
+
+const DEFAULT_MAX_DEPTH = 5;
+const DEFAULT_MAX_FILES = 5_000;
+const DEFAULT_MAX_BYTES_PER_FILE = 256 * 1024;
+
+export async function scanSessionRepository(
+  options: ScanSessionRepositoryOptions,
+): Promise<ScanSessionRepositoryResult> {
+  const diagnostics: string[] = [];
+  const sessions: ChatSessionSummary[] = [];
+  const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
+  const maxFiles = options.maxFiles ?? DEFAULT_MAX_FILES;
+  const maxBytesPerFile = options.maxBytesPerFile ?? DEFAULT_MAX_BYTES_PER_FILE;
+  const projectCwd = await canonicalOrResolved(options.projectCwd);
+  const sessionDir = await canonicalOrResolved(options.sessionDir);
+  let seenFiles = 0;
+
+  async function walk(directory: string, depth: number): Promise<void> {
+    if (seenFiles >= maxFiles) {
+      return;
+    }
+    if (depth > maxDepth) {
+      diagnostics.push(
+        `Skipped ${directory}: max scan depth ${maxDepth} reached.`,
+      );
+      return;
+    }
+
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = await fs.readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      diagnostics.push(
+        `Could not read session directory ${directory}: ${errorMessage(error)}`,
+      );
+      return;
+    }
+
+    for (const entry of entries) {
+      if (seenFiles >= maxFiles) {
+        diagnostics.push(`Stopped session scan after ${maxFiles} files.`);
+        return;
+      }
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isSymbolicLink()) {
+        continue;
+      }
+      if (entry.isDirectory()) {
+        await walk(entryPath, depth + 1);
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.endsWith(".jsonl")) {
+        continue;
+      }
+
+      seenFiles += 1;
+      const summary = await summarizeSessionFile(
+        entryPath,
+        projectCwd,
+        maxBytesPerFile,
+        diagnostics,
+      );
+      if (summary !== undefined) {
+        sessions.push(summary);
+      }
+    }
+  }
+
+  await walk(sessionDir, 0);
+  sessions.sort((a, b) => b.updatedAtMs - a.updatedAtMs);
+  return { sessions, diagnostics };
+}
+
+async function summarizeSessionFile(
+  filePath: string,
+  projectCwd: string,
+  maxBytes: number,
+  diagnostics: string[],
+): Promise<ChatSessionSummary | undefined> {
+  let canonicalFile: string;
+  let stat: Awaited<ReturnType<typeof fs.stat>>;
+  try {
+    canonicalFile = await fs.realpath(filePath);
+    stat = await fs.stat(canonicalFile);
+  } catch (error) {
+    diagnostics.push(
+      `Could not inspect session file ${filePath}: ${errorMessage(error)}`,
+    );
+    return undefined;
+  }
+
+  const parsed = await parseSessionFile(canonicalFile, maxBytes, diagnostics);
+  const cwd = parsed.cwd ? await canonicalOrResolved(parsed.cwd) : undefined;
+  if (cwd !== projectCwd) {
+    return undefined;
+  }
+
+  const updatedAtMs = parsed.updatedAtMs ?? stat.mtimeMs;
+  const createdAtMs = parsed.createdAtMs ?? stat.birthtimeMs;
+  return {
+    id: canonicalFile,
+    sessionFile: canonicalFile,
+    ...(parsed.sessionId ? { sessionId: parsed.sessionId } : {}),
+    cwd,
+    title: parsed.title ?? path.basename(canonicalFile, ".jsonl"),
+    updatedAtMs,
+    createdAtMs,
+    messageCount: parsed.messageCount,
+    ...(parsed.preview ? { preview: parsed.preview } : {}),
+  };
+}
+
+async function parseSessionFile(
+  filePath: string,
+  maxBytes: number,
+  diagnostics: string[],
+): Promise<ParsedSessionFile> {
+  let content: string;
+  try {
+    const handle = await fs.open(filePath, "r");
+    try {
+      const buffer = Buffer.alloc(maxBytes);
+      const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
+      content = buffer.subarray(0, bytesRead).toString("utf8");
+    } finally {
+      await handle.close();
+    }
+  } catch (error) {
+    diagnostics.push(
+      `Could not read session file ${filePath}: ${errorMessage(error)}`,
+    );
+    return { messageCount: 0 };
+  }
+
+  const parsed: ParsedSessionFile = { messageCount: 0 };
+  for (const line of content.split(/\r?\n/)) {
+    if (line.trim().length === 0) {
+      continue;
+    }
+    let record: unknown;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!record || typeof record !== "object" || Array.isArray(record)) {
+      continue;
+    }
+    ingestRecord(parsed, record as Record<string, unknown>);
+  }
+  return parsed;
+}
+
+function ingestRecord(
+  parsed: ParsedSessionFile,
+  record: Record<string, unknown>,
+): void {
+  const timestamp = parseTimestamp(record.timestamp);
+  if (timestamp !== undefined) {
+    parsed.updatedAtMs = Math.max(parsed.updatedAtMs ?? 0, timestamp);
+  }
+
+  if (record.type === "session") {
+    if (typeof record.id === "string") {
+      parsed.sessionId = record.id;
+    }
+    if (typeof record.cwd === "string") {
+      parsed.cwd = record.cwd;
+    }
+    if (timestamp !== undefined) {
+      parsed.createdAtMs = timestamp;
+    }
+    return;
+  }
+
+  if (record.type !== "message") {
+    return;
+  }
+  parsed.messageCount += 1;
+  const message = record.message;
+  if (!message || typeof message !== "object" || Array.isArray(message)) {
+    return;
+  }
+  const messageRecord = message as Record<string, unknown>;
+  const text = extractTextContent(messageRecord.content);
+  if (!text) {
+    return;
+  }
+  if (parsed.preview === undefined) {
+    parsed.preview = text;
+  }
+  if (messageRecord.role === "user" && parsed.title === undefined) {
+    parsed.title = summarize(text, 80);
+  }
+}
+
+function extractTextContent(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const parts = value.flatMap((item): string[] => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      return [];
+    }
+    const record = item as Record<string, unknown>;
+    if (typeof record.text === "string") {
+      return [record.text];
+    }
+    return [];
+  });
+  return parts.length > 0 ? summarize(parts.join("\n"), 180) : undefined;
+}
+
+function parseTimestamp(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function summarize(value: string, maxLength: number): string {
+  const singleLine = value.replace(/\s+/g, " ").trim();
+  if (singleLine.length <= maxLength) {
+    return singleLine;
+  }
+  return `${singleLine.slice(0, maxLength - 1)}…`;
+}
+
+async function canonicalOrResolved(filePath: string): Promise<string> {
+  const resolved = path.resolve(filePath);
+  try {
+    return await fs.realpath(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}

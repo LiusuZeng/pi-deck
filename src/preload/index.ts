@@ -6,7 +6,9 @@ import {
   appSettingsSchema,
   attachmentPickerRequestSchema,
   chatAbortRequestSchema,
+  chatListSessionsResultSchema,
   chatPromptRequestSchema,
+  chatResumeSessionRequestSchema,
   chatRuntimeEventSchema,
   chatSnapshotSchema,
   diagnosticsSummarySchema,
@@ -74,6 +76,18 @@ const api: PiDeckApi = Object.freeze({
       invokeValidated({
         channel: ipcChannels.chatGetSnapshot,
         request: undefined,
+        responseSchema: chatSnapshotSchema,
+      }),
+    listSessions: () =>
+      invokeValidated({
+        channel: ipcChannels.chatListSessions,
+        request: undefined,
+        responseSchema: chatListSessionsResultSchema,
+      }),
+    resumeSession: (request: { sessionFile: string }) =>
+      invokeValidated({
+        channel: ipcChannels.chatResumeSession,
+        request: chatResumeSessionRequestSchema.parse(request),
         responseSchema: chatSnapshotSchema,
       }),
     prompt: (request: { runtimeId: string; text: string }) =>

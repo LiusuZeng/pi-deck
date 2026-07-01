@@ -19,7 +19,7 @@ PI_DECK_BACKEND=real npm run dev
 
 Implementation path is present behind `PI_DECK_BACKEND=real`. CDP validation evidence is recorded below; one follow-up remains to run the exact `PI_DECK_BACKEND=real npm run dev` command hands-on because CDP validation used a production-ish local Electron launch to pass `--remote-debugging-port` directly.
 
-Do not claim broad real Pi GUI usability from this slice. Session listing, new/resume session UX, model/thinking RPC controls, project trust UX, attachments, and multi-session orchestration remain future work.
+Do not claim broad real Pi GUI usability from this slice. Basic in-window new sessions, authoritative session-dir listing, and click-to-resume are now implemented, but candidate dirs, refresh/error polish, model/thinking RPC controls, project trust UX, attachments, and scheduler-backed multi-session orchestration remain future work.
 
 ## Environment to Record
 
@@ -104,9 +104,20 @@ Result: Pass. `response` records for `smoke-state` and `smoke-messages` returned
 
 This proves local Pi RPC health only. It does not prove GUI real chat acceptance.
 
+## Resume Smoke Evidence
+
+A direct real Pi resume smoke was run on 2026-06-30 against an existing Pi Deck project session:
+
+```bash
+SESSION=$(find ~/.pi/agent/sessions/--Users-liusu-liusu_pi_gui-- -type f -name '*.jsonl' | sort | tail -1)
+printf '{"id":"resume-smoke","type":"get_state"}\n' | /usr/local/bin/pi --mode rpc --session "$SESSION"
+```
+
+Result: Pass. `get_state` returned `success: true` and `data.sessionFile` matched the requested session file path. This validates the CLI hard gate for this installed Pi version; GUI click-to-resume still needs hands-on visual validation after relaunch.
+
 ## Known Limitations for This Slice
 
 - Fake backend remains default.
 - Real mode is env-var opt-in, not a finished settings UI.
-- Real mode starts a single worker in `PI_DECK_PROJECT_CWD` or the app cwd; full project/session controller is not implemented.
-- Real session listing, new-session UX, resume via `--session`, model/thinking RPC controls, trust UX, attachments, and multi-session management are not part of this slice.
+- Real mode starts workers in `PI_DECK_PROJECT_CWD` or the app cwd; full project/session controller polish is not complete.
+- Authoritative session-dir listing and click-to-resume are implemented, but candidate dirs, refresh/error polish, cwd mismatch UX, model/thinking RPC controls, trust UX, attachments, and robust scheduler-backed multi-session management remain incomplete.

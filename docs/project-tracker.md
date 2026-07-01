@@ -31,6 +31,8 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
 - [x] Expected worker exits during close/reset no longer crash or poison closed windows.
 - [x] Tool-like JSON payloads are collapsed into expandable cards as an interim UI.
 - [x] `+ New real session` can create another in-window real worker and keep previous in-window session rows.
+- [x] Real mode scans the authoritative session directory for prior sessions in the launch project.
+- [x] Clicking a saved session attempts `pi --mode rpc --session <file>` and verifies `get_state.sessionFile`.
 
 ### P0 — Required before Pi Deck can be dogfooded comfortably
 
@@ -38,14 +40,13 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
    - Current behavior: `+ New real session` creates another in-window real worker and keeps previous rows while the app remains open.
    - Required behavior: new sessions are backed by repository/session files so old sessions remain visible/resumable after restart and project changes.
 
-2. **Real session repository scanning**
-   - Discover prior Pi session files for the selected project.
-   - Bound scanning; avoid symlink loops and unsafe candidate dirs.
+2. **Harden real session repository scanning**
+   - Current behavior: scans authoritative session dir for current launch project, skips symlinks, and uses bounded depth/file/byte reads.
+   - Required before closing P0: better diagnostics in UI, refresh action, candidate-dir opt-in, and hands-on validation on messy real session dirs.
 
-3. **Resume existing sessions**
-   - Implement and validate `pi --mode rpc --session <sessionFile>`.
-   - Hard gate: `get_state.sessionFile` must canonicalize to the requested file.
-   - Unsupported Pi versions must show a clear blocking diagnostic.
+3. **Harden resume existing sessions**
+   - Current behavior: clicking a saved row spawns `pi --mode rpc --session <sessionFile>` and verifies `get_state.sessionFile` canonicalizes to the requested file.
+   - Required before closing P0: cwd mismatch UX, missing/deleted file refresh, unsupported-version copy, and broader real Pi validation.
 
 4. **Harden multiple real workers and event routing**
    - Basic multiple-worker support exists for in-window new sessions.
@@ -99,7 +100,7 @@ These items should be started earliest and reviewed frequently.
 | CP-3  | Minimal no-resource RPC smoke test                                            | Backend/RPC          | Done        | M1           | Implemented in `src/main/platform/rpcSmokeTest.ts` using Eng 2 JSONL client; real Pi validation pending                                                      |
 | CP-4  | Strict JSONL transport                                                        | Backend/RPC          | Done        | M2           | Implemented in `src/main/pi/jsonlClient.ts` with parser/client tests                                                                                         |
 | CP-5  | Single PiWorker lifecycle                                                     | Backend/RPC          | Done        | M2           | Implemented in `src/main/pi/piWorker.ts` with fake-RPC integration tests                                                                                     |
-| CP-6  | Resume hard gate: `pi --mode rpc --session <file>`                            | Backend/RPC          | Not Started | M3           | If fails, pause architecture                                                                                                                                 |
+| CP-6  | Resume hard gate: `pi --mode rpc --session <file>`                            | Backend/RPC          | In Progress | M3           | Implemented in GUI resume path with canonical `get_state.sessionFile` check; needs broader real-Pi validation.                                               |
 | CP-7  | Multiple workers and event routing                                            | Backend              | Not Started | M5           | Required for concurrency                                                                                                                                     |
 | CP-8  | Scheduler/concurrency cap                                                     | Backend              | Not Started | M5           | Required for multi-session MVP                                                                                                                               |
 | CP-9  | End-to-end release validation                                                 | QA / All             | In Progress | M7           | Smoke matrix drafted in `docs/real-pi-smoke-test-matrix.md`; real Pi execution pending feature readiness                                                     |
@@ -150,12 +151,12 @@ Non-goal: full session repository/resume/concurrency. This is a narrow real-Pi v
 
 ### G2. Resume Compatibility Hard Gate
 
-| Task                                           | Owner              | Status      | Acceptance                                   |
-| ---------------------------------------------- | ------------------ | ----------- | -------------------------------------------- |
-| Create/locate existing Pi session file fixture | QA / Backend       | Not Started | Fixture usable for real Pi test              |
-| Spawn `pi --mode rpc --session <file>`         | Backend/RPC        | Not Started | Worker starts without extra session fallback |
-| Verify returned canonical `sessionFile`        | Backend/RPC        | Not Started | Equals requested canonical file              |
-| Add clear unsupported-version diagnostic       | Backend / Frontend | Not Started | User sees path/version and blocking reason   |
+| Task                                           | Owner              | Status      | Acceptance                                                            |
+| ---------------------------------------------- | ------------------ | ----------- | --------------------------------------------------------------------- |
+| Create/locate existing Pi session file fixture | QA / Backend       | Not Started | Fixture usable for real Pi test                                       |
+| Spawn `pi --mode rpc --session <file>`         | Backend/RPC        | In Progress | GUI resume path spawns with `--session`; needs real matrix validation |
+| Verify returned canonical `sessionFile`        | Backend/RPC        | In Progress | GUI resume path blocks if returned file differs                       |
+| Add clear unsupported-version diagnostic       | Backend / Frontend | In Progress | Resume failures surface in sidebar/UI; copy still needs polish        |
 
 ### G3. Image Resizing / Packaging Spike
 
@@ -205,10 +206,10 @@ Non-goal: full session repository/resume/concurrency. This is a narrow real-Pi v
 | ---- | ---------------------------------- | ---------------- | ----------- | ----------- | ---------------------------------------------------------------------------------------------------------------------- |
 | M3.1 | Project picker/recent projects     | Frontend/Backend | In Progress | M1 settings | Picker IPC and renderer recents exist; real-mode selected-project handoff and backend persistence still needed.        |
 | M3.2 | EffectivePiConfig resolver         | Backend/Platform | Done        | M1.3, M1.4  | Resolver implemented with app/env/settings/trust/image precedence tests                                                |
-| M3.3 | Static session repository scanning | Backend          | Not Started | M3.2        | Lists project sessions; bounded scanning; no symlink loops                                                             |
+| M3.3 | Static session repository scanning | Backend          | In Progress | M3.2        | Scans authoritative session dir for project `.jsonl` files with bounds/no symlink following; candidate dirs/refresh/UI diagnostics still needed. |
 | M3.4 | Candidate sessionDir handling      | Backend/Frontend | Not Started | M3.2, M3.3  | Candidate dirs require explicit enablement and strict bounds                                                           |
 | M3.5 | New session flow                   | Backend/Frontend | In Progress | M2.3, M3.1  | Real `+` now creates an additional in-window worker and keeps old rows; repository-backed persistence/resume still P0. |
-| M3.6 | Resume existing session flow       | Backend/RPC      | Not Started | M3.3, G2    | Hard resume gate passes; cwd mismatch handled                                                                          |
+| M3.6 | Resume existing session flow       | Backend/RPC      | In Progress | M3.3, G2    | Clicking saved rows resumes with `--session` and verifies canonical file; cwd mismatch/deleted-file UX still needed. |
 | M3.7 | In-app session ownership lock      | Backend          | Not Started | M3.5, M3.6  | Duplicate open reuses existing worker                                                                                  |
 
 ## M4. Model, Thinking, Slash Commands, Attachments
@@ -305,9 +306,9 @@ Use this section for standups and resource assignment. Each agent should work on
 - [ ] Pi binary path/version and minimal RPC health visible.
 - [x] Opt-in real Pi backend mode runs GUI chat against `pi --mode rpc`.
 - [ ] Project picker works and recent projects persist.
-- [ ] Prior sessions appear for current project.
+- [x] Prior sessions appear for current launch project from authoritative session dir. Polish/refresh/candidate dirs remain.
 - [ ] New session works.
-- [ ] Resume via `pi --mode rpc --session <file>` passes canonical file check.
+- [x] Resume via `pi --mode rpc --session <file>` includes canonical file check in GUI path; broader validation remains.
 - [ ] Text prompt streams assistant output from fake backend for Demo Slice 1/2.
 - [x] Text prompt streams assistant output from real Pi backend for Demo Slice 3.
 - [x] Abort works for the current single active real/fake worker.

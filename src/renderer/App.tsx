@@ -10,6 +10,7 @@ import type {
   AttachmentDraft,
   ChatMessage,
   ChatRuntimeEvent,
+  ChatSessionSummary,
   ChatSnapshot,
   DiagnosticsSummary,
   ProjectRef,
@@ -93,6 +94,8 @@ interface SessionViewModel {
   lastError?: string;
   runtimeBacked: boolean;
   backendMode?: "fake" | "real";
+  sessionFile?: string;
+  resumeBacked?: boolean;
 }
 
 interface ModelOption {
@@ -375,11 +378,18 @@ export function App(): ReactElement {
           api.app.getDiagnosticsSummary(),
           api.chat.getSnapshot(),
         ]);
+        const listedSessions =
+          snapshot.backendMode === "real"
+            ? await api.chat.listSessions()
+            : undefined;
         if (!disposed) {
           const backendSession = sessionFromSnapshot(snapshot);
           setSessions(
             snapshot.backendMode === "real"
-              ? [backendSession]
+              ? mergeSessions(
+                  [backendSession],
+                  (listedSessions?.sessions ?? []).map(sessionFromSummary),
+                )
               : [
                   backendSession,
                   ...initialSessions.filter(
@@ -393,7 +403,7 @@ export function App(): ReactElement {
           }
           setUiMessage(
             snapshot.backendMode === "real"
-              ? "Real Pi mode active. This session is connected to pi --mode rpc; send a prompt to use Pi."
+              ? `Real Pi mode active. Found ${listedSessions?.sessions.length ?? 0} persisted session(s) for this project; click one to resume.`
               : `${backendLabelFromMode(snapshot.backendMode)} mode active. Demo Slice 1/2 fake backend shell is ready.`,
           );
           setLoadState({ state: "ready", version, settings, diagnostics });
@@ -431,7 +441,8 @@ export function App(): ReactElement {
   const hasImageAttachment = attachments.some(
     (attachment) => attachment.kind === "image",
   );
-  const canSend = draft.trim().length > 0 && !isWorking;
+  const canSend =
+    draft.trim().length > 0 && !isWorking && selectedSession.runtimeBacked;
   const filteredCommands = slashCommands.filter((command) =>
     command.name.toLowerCase().includes(draft.trim().toLowerCase()),
   );
@@ -466,6 +477,55 @@ export function App(): ReactElement {
   function handleDraftChange(value: string): void {
     setDraft(value);
     setSlashOpen(value.trimStart().startsWith("/"));
+  }
+
+  function handleSelectSession(sessionId: string): void {
+    const session = sessions.find((item) => item.id === sessionId);
+    if (
+      session?.backendMode === "real" &&
+      session.resumeBacked === true &&
+      session.sessionFile !== undefined
+    ) {
+      void resumeSession(session);
+      return;
+    }
+    setSelectedSessionId(sessionId);
+  }
+
+  async function resumeSession(session: SessionViewModel): Promise<void> {
+    if (session.sessionFile === undefined) {
+      return;
+    }
+    setComposerError(null);
+    setSelectedSessionId(session.id);
+    setUiMessage(`Resuming ${session.title}…`);
+    try {
+      const snapshot = await window.piDeck.chat.resumeSession({
+        sessionFile: session.sessionFile,
+      });
+      const resumed = sessionFromSnapshot(snapshot);
+      setSessions((items) =>
+        mergeSessions(
+          [resumed],
+          items.filter((item) => item.id !== session.id),
+        ),
+      );
+      setSelectedSessionId(resumed.id);
+      setUiMessage("Resumed saved Pi session.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setUiMessage(`Failed to resume session: ${message}`);
+      setSessions((items) =>
+        items.map((item) =>
+          item.id === session.id
+            ? appendDiagnostic(
+                { ...item, status: "error", baseState: "error" },
+                { tone: "error", content: `Resume failed: ${message}` },
+              )
+            : item,
+        ),
+      );
+    }
   }
 
   function handleSend(): void {
@@ -610,10 +670,7 @@ export function App(): ReactElement {
       try {
         const snapshot = await window.piDeck.chat.createSession();
         const backendSession = sessionFromSnapshot(snapshot);
-        setSessions((items) => [
-          backendSession,
-          ...items.filter((item) => item.id !== backendSession.id),
-        ]);
+        setSessions((items) => mergeSessions([backendSession], items));
         setSelectedSessionId(backendSession.id);
         if (snapshot.state.cwd) {
           setCurrentProject(projectFromCwd(snapshot.state.cwd));
@@ -665,7 +722,7 @@ export function App(): ReactElement {
         sessions={sessions}
         selectedSessionId={selectedSession.id}
         realMode={isRealBackendMode}
-        onSelect={setSelectedSessionId}
+        onSelect={handleSelectSession}
         onNewSession={() => void handleNewSession()}
       />
 
@@ -743,6 +800,57 @@ function projectFromCwd(cwd: string): ProjectRef {
   };
 }
 
+function mergeSessions(
+  primary: SessionViewModel[],
+  secondary: SessionViewModel[],
+): SessionViewModel[] {
+  const merged: SessionViewModel[] = [];
+  for (const session of [...primary, ...secondary]) {
+    const duplicateIndex = merged.findIndex(
+      (existing) =>
+        existing.id === session.id ||
+        (existing.sessionFile !== undefined &&
+          existing.sessionFile === session.sessionFile),
+    );
+    if (duplicateIndex === -1) {
+      merged.push(session);
+    }
+  }
+  return merged;
+}
+
+function sessionFromSummary(summary: ChatSessionSummary): SessionViewModel {
+  return {
+    id: summary.attachedRuntimeId ?? summary.id,
+    title: summary.title,
+    project: summary.cwd?.split(/[\\/]/).pop() ?? "Pi project",
+    projectPath: summary.cwd ?? "Unknown project",
+    subtitle: summary.attachedRuntimeId
+      ? "Idle · attached real Pi session"
+      : "Saved · click to resume",
+    status: "idle",
+    updatedAt: formatRelativeTime(summary.updatedAtMs),
+    updatedAtMs: summary.updatedAtMs,
+    baseState: "idle",
+    overlays: { ...emptyOverlays },
+    runtimeBacked: summary.attachedRuntimeId !== undefined,
+    resumeBacked: summary.attachedRuntimeId === undefined,
+    backendMode: "real",
+    sessionFile: summary.sessionFile,
+    timeline: summary.preview
+      ? [
+          {
+            id: `preview-${summary.id}`,
+            kind: "diagnostic",
+            tone: "info",
+            content: `Saved session preview: ${summary.preview}`,
+            createdAt: formatRelativeTime(summary.updatedAtMs),
+          },
+        ]
+      : [],
+  };
+}
+
 function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
   const modelLabel = modelLabelFromState(snapshot.state);
   const stateRecord = snapshot.state as Record<string, unknown>;
@@ -774,9 +882,13 @@ function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
       streaming: isAgentActive,
     },
     runtimeBacked: true,
+    resumeBacked: false,
     backendMode: snapshot.backendMode,
     timeline: timelineFromMessages(snapshot.messages, snapshot.backendMode),
   };
+  if (typeof snapshot.state.sessionFile === "string") {
+    session.sessionFile = snapshot.state.sessionFile;
+  }
   if (modelLabel.length > 0) {
     session.modelLabel = modelLabel;
   }
