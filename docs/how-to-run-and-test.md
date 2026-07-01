@@ -52,6 +52,7 @@ npm test
 npm run typecheck
 npm run build
 npm run format
+npm run test:e2e
 ```
 
 Current expected state on latest accepted main:
@@ -60,6 +61,7 @@ Current expected state on latest accepted main:
 - TypeScript checks pass for main/preload/shared and renderer code.
 - Electron main/preload and Vite renderer build successfully.
 - Prettier formatting check passes.
+- Playwright Electron E2E checks fake launch and real-mode no-fallback/send-enabled regressions when local Pi is available.
 
 ## 5. Fake Pi Demo Checklist
 

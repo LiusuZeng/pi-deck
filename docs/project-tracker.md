@@ -33,6 +33,7 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
 - [x] `+ New real session` can create another in-window real worker and keep previous in-window session rows.
 - [x] Real mode scans the authoritative session directory for prior sessions in the launch project.
 - [x] Clicking a saved session attempts `pi --mode rpc --session <file>` and verifies `get_state.sessionFile`.
+- [x] Playwright Electron E2E regression tests cover fake launch and real-mode no-fallback/send-enabled smoke.
 
 ### P0 — Required before Pi Deck can be dogfooded comfortably
 
@@ -88,6 +89,7 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
 16. Extension UI dialogs and background red-dot behavior.
 17. Image validation/resizing/package spike.
 18. Release-readiness matrix execution and limitations notes.
+19. Expand E2E coverage for resume click, new session, tool collapse, and close/cleanup regressions.
 
 ## 1. Critical Path Tracker
 
@@ -202,15 +204,15 @@ Non-goal: full session repository/resume/concurrency. This is a narrow real-Pi v
 
 ## M3. Project Picker, Session Repository, New/Resume Sessions
 
-| ID   | Task                               | Owner            | Status      | Depends on  | Acceptance summary                                                                                                     |
-| ---- | ---------------------------------- | ---------------- | ----------- | ----------- | ---------------------------------------------------------------------------------------------------------------------- |
-| M3.1 | Project picker/recent projects     | Frontend/Backend | In Progress | M1 settings | Picker IPC and renderer recents exist; real-mode selected-project handoff and backend persistence still needed.        |
-| M3.2 | EffectivePiConfig resolver         | Backend/Platform | Done        | M1.3, M1.4  | Resolver implemented with app/env/settings/trust/image precedence tests                                                |
+| ID   | Task                               | Owner            | Status      | Depends on  | Acceptance summary                                                                                                                               |
+| ---- | ---------------------------------- | ---------------- | ----------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| M3.1 | Project picker/recent projects     | Frontend/Backend | In Progress | M1 settings | Picker IPC and renderer recents exist; real-mode selected-project handoff and backend persistence still needed.                                  |
+| M3.2 | EffectivePiConfig resolver         | Backend/Platform | Done        | M1.3, M1.4  | Resolver implemented with app/env/settings/trust/image precedence tests                                                                          |
 | M3.3 | Static session repository scanning | Backend          | In Progress | M3.2        | Scans authoritative session dir for project `.jsonl` files with bounds/no symlink following; candidate dirs/refresh/UI diagnostics still needed. |
-| M3.4 | Candidate sessionDir handling      | Backend/Frontend | Not Started | M3.2, M3.3  | Candidate dirs require explicit enablement and strict bounds                                                           |
-| M3.5 | New session flow                   | Backend/Frontend | In Progress | M2.3, M3.1  | Real `+` now creates an additional in-window worker and keeps old rows; repository-backed persistence/resume still P0. |
-| M3.6 | Resume existing session flow       | Backend/RPC      | In Progress | M3.3, G2    | Clicking saved rows resumes with `--session` and verifies canonical file; cwd mismatch/deleted-file UX still needed. |
-| M3.7 | In-app session ownership lock      | Backend          | Not Started | M3.5, M3.6  | Duplicate open reuses existing worker                                                                                  |
+| M3.4 | Candidate sessionDir handling      | Backend/Frontend | Not Started | M3.2, M3.3  | Candidate dirs require explicit enablement and strict bounds                                                                                     |
+| M3.5 | New session flow                   | Backend/Frontend | In Progress | M2.3, M3.1  | Real `+` now creates an additional in-window worker and keeps old rows; repository-backed persistence/resume still P0.                           |
+| M3.6 | Resume existing session flow       | Backend/RPC      | In Progress | M3.3, G2    | Clicking saved rows resumes with `--session` and verifies canonical file; cwd mismatch/deleted-file UX still needed.                             |
+| M3.7 | In-app session ownership lock      | Backend          | Not Started | M3.5, M3.6  | Duplicate open reuses existing worker                                                                                                            |
 
 ## M4. Model, Thinking, Slash Commands, Attachments
 

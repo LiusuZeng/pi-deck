@@ -410,9 +410,17 @@ export function App(): ReactElement {
         }
       } catch (error) {
         if (!disposed) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          setSessions([preloadErrorSession(message)]);
+          setSelectedSessionId("preload-error");
+          setComposerError(
+            "Pi Deck preload/main API is unavailable. Fully quit and relaunch the app.",
+          );
+          setUiMessage(`Preload error: ${message}`);
           setLoadState({
             state: "error",
-            message: error instanceof Error ? error.message : String(error),
+            message,
           });
         }
       }
@@ -442,7 +450,7 @@ export function App(): ReactElement {
     (attachment) => attachment.kind === "image",
   );
   const canSend =
-    draft.trim().length > 0 && !isWorking && selectedSession.runtimeBacked;
+    draft.trim().length > 0 && !isWorking && loadState.state === "ready";
   const filteredCommands = slashCommands.filter((command) =>
     command.name.toLowerCase().includes(draft.trim().toLowerCase()),
   );
@@ -492,9 +500,11 @@ export function App(): ReactElement {
     setSelectedSessionId(sessionId);
   }
 
-  async function resumeSession(session: SessionViewModel): Promise<void> {
+  async function resumeSession(
+    session: SessionViewModel,
+  ): Promise<SessionViewModel | undefined> {
     if (session.sessionFile === undefined) {
-      return;
+      return undefined;
     }
     setComposerError(null);
     setSelectedSessionId(session.id);
@@ -512,6 +522,7 @@ export function App(): ReactElement {
       );
       setSelectedSessionId(resumed.id);
       setUiMessage("Resumed saved Pi session.");
+      return resumed;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setUiMessage(`Failed to resume session: ${message}`);
@@ -525,6 +536,17 @@ export function App(): ReactElement {
             : item,
         ),
       );
+      return undefined;
+    }
+  }
+
+  async function resumeSessionAndSend(
+    session: SessionViewModel,
+    prompt: string,
+  ): Promise<void> {
+    const resumed = await resumeSession(session);
+    if (resumed !== undefined) {
+      await sendPrompt(resumed.id, prompt);
     }
   }
 
@@ -532,9 +554,16 @@ export function App(): ReactElement {
     if (!canSend) {
       return;
     }
+    if (
+      selectedSession.resumeBacked === true &&
+      selectedSession.sessionFile !== undefined
+    ) {
+      void resumeSessionAndSend(selectedSession, draft.trimEnd());
+      return;
+    }
     if (!selectedSession.runtimeBacked) {
       setComposerError(
-        "This session row is a UI shell fixture. Select the backend RPC session to send prompts.",
+        "This session row is not attached to a Pi runtime. Select a real backend session or relaunch in real mode.",
       );
       return;
     }
@@ -797,6 +826,32 @@ function projectFromCwd(cwd: string): ProjectRef {
     canonicalPath: normalized,
     displayName,
     lastOpenedAt: Date.now(),
+  };
+}
+
+function preloadErrorSession(message: string): SessionViewModel {
+  return {
+    id: "preload-error",
+    title: "Pi Deck needs relaunch",
+    project: "Pi Deck",
+    projectPath: "Main/preload API unavailable",
+    subtitle: "Error · fully quit and relaunch",
+    status: "error",
+    updatedAt: "Now",
+    updatedAtMs: Date.now(),
+    baseState: "error",
+    overlays: { ...emptyOverlays },
+    runtimeBacked: false,
+    backendMode: "real",
+    timeline: [
+      {
+        id: "preload-error-diagnostic",
+        kind: "diagnostic",
+        tone: "error",
+        content: message,
+        createdAt: formatTime(),
+      },
+    ],
   };
 }
 
@@ -1401,14 +1456,16 @@ function AppHeader(props: {
       />
 
       <div className="header-right">
-        <ModelThinkingControls
-          selectedModelId={props.selectedModelId}
-          selectedThinking={props.selectedThinking}
-          realMode={props.realMode}
-          selectedSession={props.selectedSession}
-          onModelChange={props.onModelChange}
-          onThinkingChange={props.onThinkingChange}
-        />
+        {props.loadState.state === "error" ? null : (
+          <ModelThinkingControls
+            selectedModelId={props.selectedModelId}
+            selectedThinking={props.selectedThinking}
+            realMode={props.realMode}
+            selectedSession={props.selectedSession}
+            onModelChange={props.onModelChange}
+            onThinkingChange={props.onThinkingChange}
+          />
+        )}
         <LoadStateBadge
           loadState={props.loadState}
           nodeAccessSummary={props.nodeAccessSummary}
