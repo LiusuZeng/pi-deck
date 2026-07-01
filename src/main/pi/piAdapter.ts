@@ -13,19 +13,17 @@ import type {
 } from "./types.js";
 
 /**
- * Minimal single-process adapter for M2.
+ * Runtime-id keyed adapter for Pi workers.
  *
- * The public methods already use runtime ids so this can grow into a multi-worker
- * adapter in M5 without exposing JSONL/protocol details to renderer-facing code.
+ * The class name is retained for now to avoid a broad rename, but it can host
+ * multiple workers so real-mode new sessions can coexist while M5 scheduler work
+ * remains separate.
  */
 export class SinglePiAdapter implements PiAdapter {
   private readonly events = new EventEmitter();
   private readonly workers = new Map<RuntimeSessionId, PiWorker>();
 
   createWorker(options: PiWorkerSpawnOptions): PiWorker {
-    if (this.workers.size >= 1) {
-      throw new Error("SinglePiAdapter supports only one worker in M2");
-    }
     const worker = new PiWorker(options);
     this.workers.set(worker.runtimeId, worker);
     worker.onEvent((event) => this.events.emit("event", event));

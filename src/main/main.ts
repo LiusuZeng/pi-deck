@@ -58,7 +58,9 @@ type ChatBackendMode = "fake" | "real";
 let chatAdapter: SinglePiAdapter | undefined;
 let chatRuntimeId: string | undefined;
 let chatBackendMode: ChatBackendMode | undefined;
-let chatWorkerCwd: string | undefined;
+const chatRuntimeIds = new Set<string>();
+const chatRuntimeModes = new Map<string, ChatBackendMode>();
+const chatWorkerCwds = new Map<string, string>();
 let chatEventUnsubscribe: (() => void) | undefined;
 let isQuittingAfterChatWorkerCleanup = false;
 
@@ -232,6 +234,14 @@ function registerIpcHandlers(
   });
 
   registerValidatedIpc({
+    channel: ipcChannels.chatCreateSession,
+    requestSchema: noPayloadSchema,
+    responseSchema: chatSnapshotSchema,
+    diagnostics: diagnosticsService,
+    handler: async () => createChatSessionSnapshot(store, diagnosticsService),
+  });
+
+  registerValidatedIpc({
     channel: ipcChannels.chatReset,
     requestSchema: noPayloadSchema,
     responseSchema: chatSnapshotSchema,
@@ -319,14 +329,7 @@ async function ensureChatAdapter(
 
   const mode = resolveChatBackendMode();
   const adapter = new SinglePiAdapter();
-  const workerSpec =
-    mode === "real"
-      ? await createRealChatWorker(adapter, store)
-      : createFakeChatWorker(adapter);
-
   chatBackendMode = mode;
-  chatWorkerCwd = workerSpec.cwd;
-  chatRuntimeId = workerSpec.worker.runtimeId;
   chatEventUnsubscribe = adapter.onEvent((event) => {
     const parsed = chatRuntimeEventSchema.safeParse(event);
     if (!parsed.success) {
@@ -338,7 +341,25 @@ async function ensureChatAdapter(
     sendChatEventToRenderer(parsed.data);
   });
   chatAdapter = adapter;
+  await createChatWorker(adapter, store, mode);
   return adapter;
+}
+
+async function createChatWorker(
+  adapter: SinglePiAdapter,
+  store: SettingsStore,
+  mode: ChatBackendMode,
+): Promise<ChatWorkerSpec> {
+  const workerSpec =
+    mode === "real"
+      ? await createRealChatWorker(adapter, store)
+      : createFakeChatWorker(adapter);
+  const runtimeId = workerSpec.worker.runtimeId;
+  chatRuntimeId = runtimeId;
+  chatRuntimeIds.add(runtimeId);
+  chatRuntimeModes.set(runtimeId, mode);
+  chatWorkerCwds.set(runtimeId, workerSpec.cwd);
+  return workerSpec;
 }
 
 function sendChatEventToRenderer(
@@ -360,14 +381,15 @@ function resolveChatBackendMode(): ChatBackendMode {
 }
 
 function resolveActiveChatRuntimeId(requestedRuntimeId: string): string {
+  if (chatRuntimeIds.has(requestedRuntimeId)) {
+    return requestedRuntimeId;
+  }
   if (chatRuntimeId === undefined) {
     throw new Error("Chat runtime is not initialized");
   }
-  if (requestedRuntimeId !== chatRuntimeId) {
-    diagnostics?.recordError(
-      `Renderer requested stale chat runtime ${requestedRuntimeId}; using active runtime ${chatRuntimeId}.`,
-    );
-  }
+  diagnostics?.recordError(
+    `Renderer requested stale chat runtime ${requestedRuntimeId}; using active runtime ${chatRuntimeId}.`,
+  );
   return chatRuntimeId;
 }
 
@@ -454,25 +476,42 @@ async function resolveRealBackendCwd(): Promise<string> {
 
 async function closeChatWorker(): Promise<void> {
   const adapter = chatAdapter;
-  const runtimeId = chatRuntimeId;
-  const mode = chatBackendMode ?? resolveChatBackendMode();
+  const runtimeIds = [...chatRuntimeIds];
   chatEventUnsubscribe?.();
   chatEventUnsubscribe = undefined;
   chatAdapter = undefined;
   chatRuntimeId = undefined;
   chatBackendMode = undefined;
-  chatWorkerCwd = undefined;
+  chatRuntimeIds.clear();
+  chatRuntimeModes.clear();
+  chatWorkerCwds.clear();
 
-  if (adapter === undefined || runtimeId === undefined) {
+  if (adapter === undefined || runtimeIds.length === 0) {
     return;
   }
 
-  try {
-    await adapter.closeSession(runtimeId);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    diagnostics?.recordError(`Failed to close ${mode} chat worker: ${message}`);
-  }
+  await Promise.all(
+    runtimeIds.map(async (runtimeId) => {
+      try {
+        await adapter.closeSession(runtimeId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        diagnostics?.recordError(
+          `Failed to close chat worker ${runtimeId}: ${message}`,
+        );
+      }
+    }),
+  );
+}
+
+async function createChatSessionSnapshot(
+  store: SettingsStore,
+  diagnosticsService: DiagnosticsService,
+): Promise<ChatSnapshot> {
+  const adapter = await ensureChatAdapter(store, diagnosticsService);
+  const mode = chatBackendMode ?? resolveChatBackendMode();
+  const workerSpec = await createChatWorker(adapter, store, mode);
+  return getChatSnapshotForRuntime(adapter, workerSpec.worker.runtimeId, mode);
 }
 
 async function getChatSnapshot(
@@ -485,6 +524,15 @@ async function getChatSnapshot(
   if (runtimeId === undefined) {
     throw new Error(`${mode} chat runtime failed to initialize`);
   }
+  return getChatSnapshotForRuntime(adapter, runtimeId, mode);
+}
+
+async function getChatSnapshotForRuntime(
+  adapter: SinglePiAdapter,
+  runtimeId: string,
+  fallbackMode: ChatBackendMode,
+): Promise<ChatSnapshot> {
+  const mode = chatRuntimeModes.get(runtimeId) ?? fallbackMode;
   const [state, messages] = await Promise.all([
     adapter.getState(runtimeId),
     adapter.getMessages(runtimeId),
@@ -492,7 +540,7 @@ async function getChatSnapshot(
   return {
     runtimeId,
     backendMode: mode,
-    state: { ...state, cwd: state.cwd ?? chatWorkerCwd },
+    state: { ...state, cwd: state.cwd ?? chatWorkerCwds.get(runtimeId) },
     messages,
   };
 }
@@ -618,7 +666,7 @@ app.on("before-quit", (event) => {
   if (
     isQuittingAfterChatWorkerCleanup ||
     chatAdapter === undefined ||
-    chatRuntimeId === undefined
+    chatRuntimeIds.size === 0
   ) {
     return;
   }

@@ -608,14 +608,19 @@ export function App(): ReactElement {
       setComposerError(null);
       setUiMessage("Starting a new real Pi session…");
       try {
-        const snapshot = await window.piDeck.chat.reset();
+        const snapshot = await window.piDeck.chat.createSession();
         const backendSession = sessionFromSnapshot(snapshot);
-        setSessions([backendSession]);
+        setSessions((items) => [
+          backendSession,
+          ...items.filter((item) => item.id !== backendSession.id),
+        ]);
         setSelectedSessionId(backendSession.id);
         if (snapshot.state.cwd) {
           setCurrentProject(projectFromCwd(snapshot.state.cwd));
         }
-        setUiMessage("Started a new real Pi session.");
+        setUiMessage(
+          "Started a new real Pi session. Previous sessions remain in the sidebar.",
+        );
       } catch (error) {
         setUiMessage(
           `Failed to start a new real Pi session: ${error instanceof Error ? error.message : String(error)}`,
@@ -1233,7 +1238,7 @@ function SessionSidebar(props: {
 
       <div className="sidebar-note">
         {props.realMode
-          ? "Real Pi mode shows only the active pi --mode rpc session. New/resume session controls are coming next."
+          ? "Real Pi mode keeps newly created sessions in this window. Resume from disk/session repository is next."
           : "Red dot means supported extension UI is waiting for input. Fixture rows exercise sidebar priority until the session repository lands."}
       </div>
     </aside>

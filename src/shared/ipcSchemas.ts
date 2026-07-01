@@ -180,6 +180,7 @@ export const ipcChannels = {
   chatGetSnapshot: "chat:getSnapshot",
   chatPrompt: "chat:prompt",
   chatAbort: "chat:abort",
+  chatCreateSession: "chat:createSession",
   chatReset: "chat:reset",
   chatEvent: "chat:event",
   projectPickFolder: "project:pickFolder",

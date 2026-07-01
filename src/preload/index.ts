@@ -88,6 +88,12 @@ const api: PiDeckApi = Object.freeze({
         request: chatAbortRequestSchema.parse(request),
         responseSchema: z.void(),
       }),
+    createSession: () =>
+      invokeValidated({
+        channel: ipcChannels.chatCreateSession,
+        request: undefined,
+        responseSchema: chatSnapshotSchema,
+      }),
     reset: () =>
       invokeValidated({
         channel: ipcChannels.chatReset,

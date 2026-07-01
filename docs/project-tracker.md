@@ -30,12 +30,13 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
 - [x] Real mode hides fake/mock sessions and shows active worker model/thinking info instead of fake Claude placeholders.
 - [x] Expected worker exits during close/reset no longer crash or poison closed windows.
 - [x] Tool-like JSON payloads are collapsed into expandable cards as an interim UI.
+- [x] `+ New real session` can create another in-window real worker and keep previous in-window session rows.
 
 ### P0 — Required before Pi Deck can be dogfooded comfortably
 
-1. **True real new-session flow**
-   - Current behavior: `+ New real session` resets/replaces the active worker.
-   - Required behavior: `+` creates a new real session row and keeps old sessions visible/resumable.
+1. **Persistent/resume-backed real new-session flow**
+   - Current behavior: `+ New real session` creates another in-window real worker and keeps previous rows while the app remains open.
+   - Required behavior: new sessions are backed by repository/session files so old sessions remain visible/resumable after restart and project changes.
 
 2. **Real session repository scanning**
    - Discover prior Pi session files for the selected project.
@@ -46,9 +47,9 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
    - Hard gate: `get_state.sessionFile` must canonicalize to the requested file.
    - Unsupported Pi versions must show a clear blocking diagnostic.
 
-4. **Multiple real workers and event routing**
-   - Replace/extend `SinglePiAdapter`; today the backend supports only one worker.
-   - Background session events must update the correct sidebar row/timeline with no leakage.
+4. **Harden multiple real workers and event routing**
+   - Basic multiple-worker support exists for in-window new sessions.
+   - Still required: ownership locks, scheduler integration, per-project/session identity, and no event leakage under restart/resume/error cases.
 
 5. **Project picker → real session handoff**
    - In real mode, selecting/opening a project should start/list sessions for that cwd.
@@ -200,15 +201,15 @@ Non-goal: full session repository/resume/concurrency. This is a narrow real-Pi v
 
 ## M3. Project Picker, Session Repository, New/Resume Sessions
 
-| ID   | Task                               | Owner            | Status      | Depends on  | Acceptance summary                                                                                              |
-| ---- | ---------------------------------- | ---------------- | ----------- | ----------- | --------------------------------------------------------------------------------------------------------------- |
-| M3.1 | Project picker/recent projects     | Frontend/Backend | In Progress | M1 settings | Picker IPC and renderer recents exist; real-mode selected-project handoff and backend persistence still needed. |
-| M3.2 | EffectivePiConfig resolver         | Backend/Platform | Done        | M1.3, M1.4  | Resolver implemented with app/env/settings/trust/image precedence tests                                         |
-| M3.3 | Static session repository scanning | Backend          | Not Started | M3.2        | Lists project sessions; bounded scanning; no symlink loops                                                      |
-| M3.4 | Candidate sessionDir handling      | Backend/Frontend | Not Started | M3.2, M3.3  | Candidate dirs require explicit enablement and strict bounds                                                    |
-| M3.5 | New session flow                   | Backend/Frontend | Not Started | M2.3, M3.1  | Current real `+` only resets/replaces active worker. True new row + keep old session is P0.                     |
-| M3.6 | Resume existing session flow       | Backend/RPC      | Not Started | M3.3, G2    | Hard resume gate passes; cwd mismatch handled                                                                   |
-| M3.7 | In-app session ownership lock      | Backend          | Not Started | M3.5, M3.6  | Duplicate open reuses existing worker                                                                           |
+| ID   | Task                               | Owner            | Status      | Depends on  | Acceptance summary                                                                                                     |
+| ---- | ---------------------------------- | ---------------- | ----------- | ----------- | ---------------------------------------------------------------------------------------------------------------------- |
+| M3.1 | Project picker/recent projects     | Frontend/Backend | In Progress | M1 settings | Picker IPC and renderer recents exist; real-mode selected-project handoff and backend persistence still needed.        |
+| M3.2 | EffectivePiConfig resolver         | Backend/Platform | Done        | M1.3, M1.4  | Resolver implemented with app/env/settings/trust/image precedence tests                                                |
+| M3.3 | Static session repository scanning | Backend          | Not Started | M3.2        | Lists project sessions; bounded scanning; no symlink loops                                                             |
+| M3.4 | Candidate sessionDir handling      | Backend/Frontend | Not Started | M3.2, M3.3  | Candidate dirs require explicit enablement and strict bounds                                                           |
+| M3.5 | New session flow                   | Backend/Frontend | In Progress | M2.3, M3.1  | Real `+` now creates an additional in-window worker and keeps old rows; repository-backed persistence/resume still P0. |
+| M3.6 | Resume existing session flow       | Backend/RPC      | Not Started | M3.3, G2    | Hard resume gate passes; cwd mismatch handled                                                                          |
+| M3.7 | In-app session ownership lock      | Backend          | Not Started | M3.5, M3.6  | Duplicate open reuses existing worker                                                                                  |
 
 ## M4. Model, Thinking, Slash Commands, Attachments
 
@@ -223,13 +224,13 @@ Non-goal: full session repository/resume/concurrency. This is a narrow real-Pi v
 
 ## M5. Concurrent Sessions, Scheduler, Intervention Controls
 
-| ID   | Task                             | Owner            | Status      | Depends on           | Acceptance summary                                                                              |
-| ---- | -------------------------------- | ---------------- | ----------- | -------------------- | ----------------------------------------------------------------------------------------------- |
-| M5.1 | Base state + overlays reducer    | Backend/Frontend | Not Started | G0 events, M2 events | QA fixtures drafted in `docs/state-reducer-fixtures.json`; unit tests still need reducer target |
-| M5.2 | Multiple attached workers        | Backend          | Not Started | M3 locks, M5.1       | Required for P0 multi-session; current backend is `SinglePiAdapter`.                            |
-| M5.3 | RunScheduler and concurrency cap | Backend          | Not Started | M5.2                 | Default 4, hard cap 20; cap blocks or explicit queue                                            |
-| M5.4 | Steer/follow-up/abort controls   | Backend/Frontend | Not Started | M2 abort, M5.1       | Composer intervention mode; queue counts update                                                 |
-| M5.5 | Quit handling                    | Platform/Backend | Not Started | M5.2, M5.3           | Cancel Quit or Abort Agents and Quit; queued starts warned                                      |
+| ID   | Task                             | Owner            | Status      | Depends on           | Acceptance summary                                                                                          |
+| ---- | -------------------------------- | ---------------- | ----------- | -------------------- | ----------------------------------------------------------------------------------------------------------- |
+| M5.1 | Base state + overlays reducer    | Backend/Frontend | Not Started | G0 events, M2 events | QA fixtures drafted in `docs/state-reducer-fixtures.json`; unit tests still need reducer target             |
+| M5.2 | Multiple attached workers        | Backend          | In Progress | M3 locks, M5.1       | Adapter can host multiple workers for in-window sessions; scheduler/locks/repository identity still needed. |
+| M5.3 | RunScheduler and concurrency cap | Backend          | Not Started | M5.2                 | Default 4, hard cap 20; cap blocks or explicit queue                                                        |
+| M5.4 | Steer/follow-up/abort controls   | Backend/Frontend | Not Started | M2 abort, M5.1       | Composer intervention mode; queue counts update                                                             |
+| M5.5 | Quit handling                    | Platform/Backend | Not Started | M5.2, M5.3           | Cancel Quit or Abort Agents and Quit; queued starts warned                                                  |
 
 ## M6. Extension UI, Project Trust, Resource Panel
 
@@ -286,7 +287,7 @@ Use this section for standups and resource assignment. Each agent should work on
 | 2026-06-27 | Frontend/background UI targets not merged yet          | G4, M5/M6 renderer acceptance   | QA / Eng 4/5         | Open   | Rebase after Eng 4/5 merge and wire reducer/sidebar fixture tests to renderer targets                                           |
 | 2026-06-28 | No owner was assigned for real Pi GUI chat integration | CP-10, G1.5, M2.6, Demo Slice 3 | Orchestrator + Eng 6 | Closed | Narrow real Pi GUI chat is implemented and validated. Broader daily-use gaps are explicitly tracked in the P0/P1/P2 list above. |
 
-| 2026-06-29 | Tracker drift hid real product gaps | M3-M7, dogfooding | Orchestrator | Open | Keep Current Dogfood TODO section as source of truth; update immediately when user feedback exposes a gap. |
+| 2026-06-29 | Tracker drift hid real product gaps | M3-M7, dogfooding | Orchestrator | Open | Keep Current Dogfood TODO section as source of truth; update immediately when user feedback exposes a gap. Latest: in-window new sessions started; persistent resume remains P0. |
 
 ## 7. Weekly Milestone Review Checklist
 

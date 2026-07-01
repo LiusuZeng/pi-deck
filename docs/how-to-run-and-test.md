@@ -96,7 +96,7 @@ Current reality:
 - An opt-in real backend mode exists for the narrow Demo Slice 3 vertical slice.
 - Real mode launches one real `pi --mode rpc` worker, loads `get_state` / `get_messages`, sends prompts through the existing GUI chat path, streams RPC events, supports `abort`, and closes the worker on app quit.
 - Real Pi binary resolution, environment resolution, EffectivePiConfig, JSONL transport, and minimal RPC smoke-test foundations exist.
-- Real Pi session listing, new-session UX, resume via `--session`, project trust UX, model/thinking RPC controls, attachments, and multi-session orchestration remain future M3/M5+ work.
+- Real Pi can create additional in-window sessions with `+ New real session`, but session listing/repository persistence, resume via `--session`, project trust UX, model/thinking RPC controls, attachments, and robust multi-session orchestration remain future M3/M5+ work.
 
 Opt-in real GUI chat launch:
 
