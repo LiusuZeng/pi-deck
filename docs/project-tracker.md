@@ -34,7 +34,8 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
 - [x] Real mode scans the authoritative session directory for prior sessions in the launch project.
 - [x] Clicking a saved session attempts `pi --mode rpc --session <file>` and verifies `get_state.sessionFile`.
 - [x] Playwright Electron E2E regression tests cover fake launch, real startup failure labeling, real no-fallback/send-enabled smoke, and saved-session refresh/resume.
-- [x] Real-mode UI simplified: sidebar uses only the compact `+` for new sessions, saved rows are concise, and model controls moved into the composer.
+- [x] Real-mode UI simplified: sidebar uses only the compact `+` for new sessions, saved rows are concise, model controls moved into the composer, and startup no longer flashes the legacy fake/local UI.
+- [x] Real-mode sidebar shows the 5 most recent sessions first with relative timestamps; older sessions are behind a Browse older sessions control and hover shows a readable timestamp.
 - [x] Real mode can list Pi models and switch model/thinking through RPC from the composer.
 - [x] New real session creation shows an immediate optimistic starting row, returns before loading full messages, and prewarms one spare real worker.
 

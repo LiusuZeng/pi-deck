@@ -77,16 +77,18 @@ test("real mode can show and resume a saved project session", async () => {
   fs.mkdirSync(agentDir, { recursive: true });
   const sessionDir = path.join(agentDir, "sessions", "--e2e--");
   fs.mkdirSync(sessionDir, { recursive: true });
-  fs.writeFileSync(
-    path.join(sessionDir, "manual-e2e-session.jsonl"),
-    `${JSON.stringify({
-      type: "session",
-      version: 3,
-      id: "manual-e2e-session",
-      timestamp: "2026-07-02T00:00:00.000Z",
-      cwd: projectCwd,
-    })}\n`,
-  );
+  for (let index = 0; index < 7; index += 1) {
+    fs.writeFileSync(
+      path.join(sessionDir, `manual-e2e-session-${index}.jsonl`),
+      `${JSON.stringify({
+        type: "session",
+        version: 3,
+        id: `manual-e2e-session-${index}`,
+        timestamp: `2026-07-02T00:0${index}:00.000Z`,
+        cwd: projectCwd,
+      })}\n`,
+    );
+  }
 
   const { app, page } = await launchPiDeck({
     PI_DECK_BACKEND: "real",
@@ -97,6 +99,7 @@ test("real mode can show and resume a saved project session", async () => {
   try {
     await expectHealthyPreload(page);
     await expect(page.getByText(/Real Pi mode active/i)).toBeVisible();
+    await expect(page.getByText(/Browse \d+ older sessions/)).toBeVisible();
     await expect(
       page.getByText("Saved · click to resume").first(),
     ).toBeVisible();

@@ -147,12 +147,18 @@ textarea:disabled {
   overflow: auto;
 }
 
+.session-item,
+.browse-sessions {
+  width: 100%;
+  color: inherit;
+  text-align: left;
+}
+
 .session-item {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 9px;
   align-items: center;
-  width: 100%;
   border: 1px solid transparent;
   border-radius: 12px;
   padding: 9px;
@@ -197,6 +203,20 @@ textarea:disabled {
 
 .session-time {
   align-self: start;
+  white-space: nowrap;
+}
+
+.browse-sessions {
+  border: 0;
+  border-radius: 10px;
+  padding: 8px 11px;
+  color: #cbd5e1;
+  background: transparent;
+  font-size: 12px;
+}
+
+.browse-sessions:hover {
+  background: rgb(255 255 255 / 8%);
 }
 
 .sidebar-note {

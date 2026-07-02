@@ -280,6 +280,7 @@ const loadingSession: SessionViewModel = {
   baseState: "attaching",
   overlays: { ...emptyOverlays },
   runtimeBacked: false,
+  backendMode: "real",
   timeline: [],
 };
 
@@ -1464,6 +1465,13 @@ function SessionSidebar(props: {
   onSelect(sessionId: string): void;
   onNewSession(): void;
 }): ReactElement {
+  const [showOlderRealSessions, setShowOlderRealSessions] = useState(false);
+  const visibleSessions =
+    props.realMode && !showOlderRealSessions
+      ? props.sessions.slice(0, 5)
+      : props.sessions;
+  const hiddenSessionCount = Math.max(0, props.sessions.length - 5);
+
   return (
     <aside className="sidebar" aria-label="Sessions">
       <div className="sidebar-header">
@@ -1497,11 +1505,12 @@ function SessionSidebar(props: {
         className="session-list"
         aria-label="Session list with priority states"
       >
-        {props.sessions.map((session) => (
+        {visibleSessions.map((session) => (
           <button
             key={session.id}
             className={`session-item ${session.id === props.selectedSessionId ? "active" : ""}`}
             type="button"
+            title={`${session.title}\n${formatReadableTimestamp(session.updatedAtMs)}`}
             onClick={() => {
               props.onSelect(session.id);
             }}
@@ -1514,11 +1523,25 @@ function SessionSidebar(props: {
                 <span className="session-meta">{session.projectPath}</span>
               ) : null}
             </span>
-            {!props.realMode ? (
-              <span className="session-time">{session.updatedAt}</span>
-            ) : null}
+            <span
+              className="session-time"
+              title={formatReadableTimestamp(session.updatedAtMs)}
+            >
+              {session.updatedAt}
+            </span>
           </button>
         ))}
+        {props.realMode && hiddenSessionCount > 0 ? (
+          <button
+            className="browse-sessions"
+            type="button"
+            onClick={() => setShowOlderRealSessions((value) => !value)}
+          >
+            {showOlderRealSessions
+              ? "Show recent only"
+              : `Browse ${hiddenSessionCount} older session${hiddenSessionCount === 1 ? "" : "s"}`}
+          </button>
+        ) : null}
       </section>
 
       {!props.realMode ? (
@@ -2548,7 +2571,21 @@ function formatRelativeTime(timestamp: number): string {
     return `${minutes}m ago`;
   }
   const hours = Math.round(minutes / 60);
-  return `${hours}h ago`;
+  if (hours < 24) {
+    return `${hours}h ago`;
+  }
+  const days = Math.round(hours / 24);
+  return `${days}d ago`;
+}
+
+function formatReadableTimestamp(timestamp: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    year: "2-digit",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(timestamp));
 }
 
 function createId(prefix: string): string {
