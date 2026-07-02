@@ -2,8 +2,10 @@ import type { z } from "zod";
 import type {
   appSettingsSchema,
   attachmentDraftSchema,
-  chatMessageSchema,
+  chatListModelsResultSchema,
   chatListSessionsResultSchema,
+  chatMessageSchema,
+  chatModelSummarySchema,
   chatRuntimeEventSchema,
   chatSessionSummarySchema,
   chatSnapshotSchema,
@@ -20,6 +22,8 @@ export type IpcErrorPayload = z.infer<typeof ipcErrorSchema>;
 export type ChatMessage = z.infer<typeof chatMessageSchema>;
 export type ChatSnapshot = z.infer<typeof chatSnapshotSchema>;
 export type ChatSessionSummary = z.infer<typeof chatSessionSummarySchema>;
+export type ChatModelSummary = z.infer<typeof chatModelSummarySchema>;
+export type ChatListModelsResult = z.infer<typeof chatListModelsResultSchema>;
 export type ChatListSessionsResult = z.infer<
   typeof chatListSessionsResultSchema
 >;
@@ -42,6 +46,16 @@ export interface PiDeckApi {
     getSnapshot(): Promise<ChatSnapshot>;
     listSessions(): Promise<ChatListSessionsResult>;
     resumeSession(request: { sessionFile: string }): Promise<ChatSnapshot>;
+    listModels(request: { runtimeId: string }): Promise<ChatListModelsResult>;
+    setModel(request: {
+      runtimeId: string;
+      provider: string;
+      modelId: string;
+    }): Promise<ChatSnapshot>;
+    setThinking(request: {
+      runtimeId: string;
+      level: string;
+    }): Promise<ChatSnapshot>;
     prompt(request: { runtimeId: string; text: string }): Promise<void>;
     abort(request: { runtimeId: string }): Promise<void>;
     createSession(): Promise<ChatSnapshot>;

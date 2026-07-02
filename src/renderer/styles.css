@@ -794,15 +794,21 @@ h1 {
   pointer-events: auto;
 }
 
-.composer-model-pill {
+.composer-model-pill,
+.composer-select {
   overflow: hidden;
   max-width: 48%;
   border: 1px solid #e5e7eb;
   border-radius: 999px;
   padding: 3px 8px;
+  color: #475467;
   text-overflow: ellipsis;
   white-space: nowrap;
   background: #f9fafb;
+}
+
+.composer-select.thinking {
+  max-width: 110px;
 }
 
 .composer-option {

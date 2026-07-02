@@ -128,7 +128,10 @@ test("real mode does not fall back to fake/local UI and can send from active run
     await expect(page.getByText("Local projects")).toHaveCount(0);
     await expect(page.getByText(/backend fake RPC active/i)).toHaveCount(0);
     await expect(page.getByText(/claude/i)).toHaveCount(0);
-    await expect(page.getByLabel("Model")).toHaveCount(0);
+    await expect(page.getByLabel("Real Pi model")).toBeVisible();
+    await expect(page.getByLabel("Real Pi thinking")).toBeVisible();
+    await page.getByLabel("Real Pi thinking").selectOption("high");
+    await expect(page.getByText("Switched thinking to high.")).toBeVisible();
     await expect(
       page.getByRole("button", { name: /New real session/i }),
     ).toHaveCount(0);

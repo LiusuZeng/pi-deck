@@ -16,9 +16,13 @@ import {
   appSettingsSchema,
   attachmentPickerRequestSchema,
   chatAbortRequestSchema,
+  chatListModelsRequestSchema,
+  chatListModelsResultSchema,
   chatListSessionsResultSchema,
   chatPromptRequestSchema,
   chatResumeSessionRequestSchema,
+  chatSetModelRequestSchema,
+  chatSetThinkingRequestSchema,
   chatRuntimeEventSchema,
   chatSnapshotSchema,
   diagnosticsSummarySchema,
@@ -230,6 +234,33 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async ({ sessionFile }) =>
       resumeChatSession(store, diagnosticsService, sessionFile),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.chatListModels,
+    requestSchema: chatListModelsRequestSchema,
+    responseSchema: chatListModelsResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runtimeId }) =>
+      listChatModels(store, diagnosticsService, runtimeId),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.chatSetModel,
+    requestSchema: chatSetModelRequestSchema,
+    responseSchema: chatSnapshotSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runtimeId, provider, modelId }) =>
+      setChatModel(store, diagnosticsService, runtimeId, provider, modelId),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.chatSetThinking,
+    requestSchema: chatSetThinkingRequestSchema,
+    responseSchema: chatSnapshotSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runtimeId, level }) =>
+      setChatThinking(store, diagnosticsService, runtimeId, level),
   });
 
   registerValidatedIpc({
@@ -572,6 +603,62 @@ async function closeChatWorker(): Promise<void> {
   );
 }
 
+async function listChatModels(
+  store: SettingsStore,
+  diagnosticsService: DiagnosticsService,
+  runtimeId: string,
+): Promise<z.infer<typeof chatListModelsResultSchema>> {
+  const adapter = await ensureChatAdapter(store, diagnosticsService);
+  const response = await adapter.request(
+    resolveActiveChatRuntimeId(runtimeId),
+    "get_available_models",
+  );
+  if (
+    response &&
+    typeof response === "object" &&
+    !Array.isArray(response) &&
+    Array.isArray((response as { models?: unknown }).models)
+  ) {
+    return chatListModelsResultSchema.parse(response);
+  }
+  return { models: [] };
+}
+
+async function setChatModel(
+  store: SettingsStore,
+  diagnosticsService: DiagnosticsService,
+  runtimeId: string,
+  provider: string,
+  modelId: string,
+): Promise<ChatSnapshot> {
+  const adapter = await ensureChatAdapter(store, diagnosticsService);
+  const activeRuntimeId = resolveActiveChatRuntimeId(runtimeId);
+  await adapter.request(activeRuntimeId, "set_model", { provider, modelId });
+  return getChatSnapshotForRuntime(
+    adapter,
+    activeRuntimeId,
+    chatRuntimeModes.get(activeRuntimeId) ?? resolveChatBackendMode(),
+    { skipMessages: true },
+  );
+}
+
+async function setChatThinking(
+  store: SettingsStore,
+  diagnosticsService: DiagnosticsService,
+  runtimeId: string,
+  level: string,
+): Promise<ChatSnapshot> {
+  const adapter = await ensureChatAdapter(store, diagnosticsService);
+  const activeRuntimeId = resolveActiveChatRuntimeId(runtimeId);
+  await adapter.request(activeRuntimeId, "set_thinking_level", { level });
+  return getChatSnapshotForRuntime(
+    adapter,
+    activeRuntimeId,
+    chatRuntimeModes.get(activeRuntimeId) ?? resolveChatBackendMode(),
+    { skipMessages: true },
+  );
+}
+
 async function listChatSessions(
   store: SettingsStore,
 ): Promise<ChatListSessionsResult> {
@@ -678,7 +765,9 @@ async function createChatSessionSnapshot(
   const adapter = await ensureChatAdapter(store, diagnosticsService);
   const mode = chatBackendMode ?? resolveChatBackendMode();
   const workerSpec = await createChatWorker(adapter, store, mode);
-  return getChatSnapshotForRuntime(adapter, workerSpec.worker.runtimeId, mode);
+  return getChatSnapshotForRuntime(adapter, workerSpec.worker.runtimeId, mode, {
+    skipMessages: true,
+  });
 }
 
 async function getChatSnapshot(
@@ -698,12 +787,13 @@ async function getChatSnapshotForRuntime(
   adapter: SinglePiAdapter,
   runtimeId: string,
   fallbackMode: ChatBackendMode,
+  options: { skipMessages?: boolean } = {},
 ): Promise<ChatSnapshot> {
   const mode = chatRuntimeModes.get(runtimeId) ?? fallbackMode;
-  const [state, messages] = await Promise.all([
-    adapter.getState(runtimeId),
-    adapter.getMessages(runtimeId),
-  ]);
+  const state = await adapter.getState(runtimeId);
+  const messages = options.skipMessages
+    ? []
+    : await adapter.getMessages(runtimeId);
   if (typeof state.sessionFile === "string") {
     const canonicalSessionFile =
       (await safeRealpath(state.sessionFile)) ??

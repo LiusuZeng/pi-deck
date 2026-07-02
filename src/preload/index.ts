@@ -6,9 +6,13 @@ import {
   appSettingsSchema,
   attachmentPickerRequestSchema,
   chatAbortRequestSchema,
+  chatListModelsRequestSchema,
+  chatListModelsResultSchema,
   chatListSessionsResultSchema,
   chatPromptRequestSchema,
   chatResumeSessionRequestSchema,
+  chatSetModelRequestSchema,
+  chatSetThinkingRequestSchema,
   chatRuntimeEventSchema,
   chatSnapshotSchema,
   diagnosticsSummarySchema,
@@ -88,6 +92,28 @@ const api: PiDeckApi = Object.freeze({
       invokeValidated({
         channel: ipcChannels.chatResumeSession,
         request: chatResumeSessionRequestSchema.parse(request),
+        responseSchema: chatSnapshotSchema,
+      }),
+    listModels: (request: { runtimeId: string }) =>
+      invokeValidated({
+        channel: ipcChannels.chatListModels,
+        request: chatListModelsRequestSchema.parse(request),
+        responseSchema: chatListModelsResultSchema,
+      }),
+    setModel: (request: {
+      runtimeId: string;
+      provider: string;
+      modelId: string;
+    }) =>
+      invokeValidated({
+        channel: ipcChannels.chatSetModel,
+        request: chatSetModelRequestSchema.parse(request),
+        responseSchema: chatSnapshotSchema,
+      }),
+    setThinking: (request: { runtimeId: string; level: string }) =>
+      invokeValidated({
+        channel: ipcChannels.chatSetThinking,
+        request: chatSetThinkingRequestSchema.parse(request),
         responseSchema: chatSnapshotSchema,
       }),
     prompt: (request: { runtimeId: string; text: string }) =>

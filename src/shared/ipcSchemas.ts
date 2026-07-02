@@ -118,6 +118,44 @@ export const chatResumeSessionRequestSchema = z
   })
   .strict();
 
+export const chatModelSummarySchema = z
+  .object({
+    id: z.string(),
+    name: z.string().optional(),
+    provider: z.string().optional(),
+    reasoning: z.boolean().optional(),
+    input: z.array(z.string()).optional(),
+    contextWindow: z.number().optional(),
+  })
+  .passthrough();
+
+export const chatListModelsRequestSchema = z
+  .object({
+    runtimeId: z.string(),
+  })
+  .strict();
+
+export const chatListModelsResultSchema = z
+  .object({
+    models: z.array(chatModelSummarySchema),
+  })
+  .strict();
+
+export const chatSetModelRequestSchema = z
+  .object({
+    runtimeId: z.string(),
+    provider: z.string().min(1),
+    modelId: z.string().min(1),
+  })
+  .strict();
+
+export const chatSetThinkingRequestSchema = z
+  .object({
+    runtimeId: z.string(),
+    level: z.string().min(1),
+  })
+  .strict();
+
 export const chatPromptRequestSchema = z
   .object({
     runtimeId: z.string(),
@@ -212,6 +250,9 @@ export const ipcChannels = {
   chatResumeSession: "chat:resumeSession",
   chatPrompt: "chat:prompt",
   chatAbort: "chat:abort",
+  chatListModels: "chat:listModels",
+  chatSetModel: "chat:setModel",
+  chatSetThinking: "chat:setThinking",
   chatCreateSession: "chat:createSession",
   chatReset: "chat:reset",
   chatEvent: "chat:event",

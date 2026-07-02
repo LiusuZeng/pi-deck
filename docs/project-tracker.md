@@ -34,7 +34,9 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
 - [x] Real mode scans the authoritative session directory for prior sessions in the launch project.
 - [x] Clicking a saved session attempts `pi --mode rpc --session <file>` and verifies `get_state.sessionFile`.
 - [x] Playwright Electron E2E regression tests cover fake launch, real startup failure labeling, real no-fallback/send-enabled smoke, and saved-session refresh/resume.
-- [x] Real-mode UI simplified: sidebar uses only the compact `+` for new sessions, saved rows are concise, and model info moved into the composer.
+- [x] Real-mode UI simplified: sidebar uses only the compact `+` for new sessions, saved rows are concise, and model controls moved into the composer.
+- [x] Real mode can list Pi models and switch model/thinking through RPC from the composer.
+- [x] New real session creation shows an immediate optimistic starting row and returns before loading full messages.
 
 ### P0 — Required before Pi Deck can be dogfooded comfortably
 
@@ -61,9 +63,9 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
 
 ### P1 — Needed for practical daily use
 
-6. **Real model list/switching and thinking controls**
-   - Current UI only displays active worker config.
-   - Wire real Pi RPC methods if available; otherwise hide/disable with explicit copy.
+6. **Harden real model list/switching and thinking controls**
+   - Current behavior: composer lists real Pi models and thinking levels and calls `set_model` / `set_thinking_level`.
+   - Remaining: capability-aware thinking labels and more validation across providers.
 
 7. **Real attachment send path**
    - Native picker and safe tokens exist.
@@ -220,7 +222,7 @@ Non-goal: full session repository/resume/concurrency. This is a narrow real-Pi v
 
 | ID   | Task                            | Owner               | Status      | Depends on            | Acceptance summary                                                                 |
 | ---- | ------------------------------- | ------------------- | ----------- | --------------------- | ---------------------------------------------------------------------------------- |
-| M4.1 | Model list/switcher             | Backend/Frontend    | In Progress | M2/M3 worker          | Eng 5 fake UI shows current model/capabilities; real worker methods still needed   |
+| M4.1 | Model list/switcher             | Backend/Frontend    | In Progress | M2/M3 worker          | Real composer lists Pi models and calls `set_model`; capability polish remains.    |
 | M4.2 | Thinking-level switcher         | Backend/Frontend    | In Progress | M2/M3 worker          | Eng 5 fake UI shows levels/unsupported state; real setter still needed             |
 | M4.3 | Slash command picker            | Backend/Frontend    | In Progress | M2 worker             | Eng 5 fake picker uses get_commands-shaped data; real command API still needed     |
 | M4.4 | Native attachment picker/tokens | Platform/Frontend   | In Progress | G0 attachment, M1 IPC | Eng 5 UI + preload picker stub returns opaque tokens; send validation still needed |

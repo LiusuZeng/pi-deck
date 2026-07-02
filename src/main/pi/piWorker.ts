@@ -143,6 +143,10 @@ export class PiWorker {
     await this.client.request("abort");
   }
 
+  async request(command: string, params?: JsonObject): Promise<unknown> {
+    return this.client.request(command, params);
+  }
+
   async closeSession(): Promise<void> {
     if (this.health === "closed") {
       return;

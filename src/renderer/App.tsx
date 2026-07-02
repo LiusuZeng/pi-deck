@@ -9,6 +9,7 @@ import type {
   AppSettings,
   AttachmentDraft,
   ChatMessage,
+  ChatModelSummary,
   ChatRuntimeEvent,
   ChatSessionSummary,
   ChatSnapshot,
@@ -162,6 +163,8 @@ const thinkingOptions: ThinkingOption[] = [
     note: "Unsupported by current model",
   },
 ];
+
+const realThinkingLevels = ["off", "low", "medium", "high", "xhigh"];
 
 const slashCommands: SlashCommand[] = [
   {
@@ -348,6 +351,7 @@ export function App(): ReactElement {
   const [selectedThinking, setSelectedThinking] = useState("medium");
   const [slashOpen, setSlashOpen] = useState(false);
   const [attachments, setAttachments] = useState<AttachmentDraft[]>([]);
+  const [realModels, setRealModels] = useState<ChatModelSummary[]>([]);
   const [enterToSend, setEnterToSend] = useState(() =>
     loadEnterToSendPreference(),
   );
@@ -400,6 +404,9 @@ export function App(): ReactElement {
           setSelectedSessionId(backendSession.id);
           if (snapshot.backendMode === "real" && snapshot.state.cwd) {
             setCurrentProject(projectFromCwd(snapshot.state.cwd));
+          }
+          if (snapshot.backendMode === "real") {
+            void loadRealModels(backendSession.id);
           }
           setUiMessage(
             snapshot.backendMode === "real"
@@ -521,6 +528,7 @@ export function App(): ReactElement {
         ),
       );
       setSelectedSessionId(resumed.id);
+      void loadRealModels(resumed.id);
       setUiMessage("Resumed saved Pi session.");
       return resumed;
     } catch (error) {
@@ -672,6 +680,15 @@ export function App(): ReactElement {
     }
   }
 
+  async function loadRealModels(runtimeId: string): Promise<void> {
+    try {
+      const result = await window.piDeck.chat.listModels({ runtimeId });
+      setRealModels(result.models);
+    } catch {
+      setRealModels([]);
+    }
+  }
+
   async function refreshRealSessions(): Promise<void> {
     if (!isRealBackendMode || loadState.state !== "ready") {
       return;
@@ -692,6 +709,58 @@ export function App(): ReactElement {
       setUiMessage(
         `Failed to refresh sessions: ${error instanceof Error ? error.message : String(error)}`,
       );
+    }
+  }
+
+  async function handleSetRealModel(
+    provider: string,
+    modelId: string,
+  ): Promise<void> {
+    if (!selectedSession.runtimeBacked) {
+      return;
+    }
+    setComposerError(null);
+    try {
+      const snapshot = await window.piDeck.chat.setModel({
+        runtimeId: selectedSession.id,
+        provider,
+        modelId,
+      });
+      const updated = sessionFromSnapshot(snapshot);
+      setSessions((items) =>
+        items.map((item) =>
+          item.id === updated.id
+            ? { ...updated, timeline: item.timeline }
+            : item,
+        ),
+      );
+      setUiMessage(`Switched model to ${provider}/${modelId}.`);
+    } catch (error) {
+      setComposerError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function handleSetRealThinking(level: string): Promise<void> {
+    if (!selectedSession.runtimeBacked) {
+      return;
+    }
+    setComposerError(null);
+    try {
+      const snapshot = await window.piDeck.chat.setThinking({
+        runtimeId: selectedSession.id,
+        level,
+      });
+      const updated = sessionFromSnapshot(snapshot);
+      setSessions((items) =>
+        items.map((item) =>
+          item.id === updated.id
+            ? { ...updated, timeline: item.timeline }
+            : item,
+        ),
+      );
+      setUiMessage(`Switched thinking to ${level}.`);
+    } catch (error) {
+      setComposerError(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -724,6 +793,7 @@ export function App(): ReactElement {
         const backendSession = sessionFromSnapshot(snapshot);
         setSessions((items) => mergeSessions([backendSession], items));
         setSelectedSessionId(backendSession.id);
+        void loadRealModels(backendSession.id);
         if (snapshot.state.cwd) {
           setCurrentProject(projectFromCwd(snapshot.state.cwd));
         }
@@ -823,6 +893,9 @@ export function App(): ReactElement {
           selectedModel={selectedModel}
           backendLabel={backendLabel(selectedSession)}
           modelInfo={composerModelInfo(selectedSession)}
+          realModels={realModels}
+          realThinkingLevels={realThinkingLevels}
+          selectedSession={selectedSession}
           allowAttachments={true}
           enterToSend={enterToSend}
           onEnterToSendChange={handleEnterToSendChange}
@@ -831,6 +904,10 @@ export function App(): ReactElement {
           onSend={handleSend}
           onAbort={handleAbort}
           onPickAttachments={() => void handlePickAttachments()}
+          onSetModel={(provider, modelId) =>
+            void handleSetRealModel(provider, modelId)
+          }
+          onSetThinking={(level) => void handleSetRealThinking(level)}
           onRemoveAttachment={(id) =>
             setAttachments((items) => items.filter((item) => item.id !== id))
           }
@@ -1917,6 +1994,9 @@ function Composer(props: {
   selectedModel: ModelOption | undefined;
   backendLabel: string;
   modelInfo?: string | undefined;
+  realModels: ChatModelSummary[];
+  realThinkingLevels: string[];
+  selectedSession: SessionViewModel;
   allowAttachments: boolean;
   enterToSend: boolean;
   onEnterToSendChange(value: boolean): void;
@@ -1925,12 +2005,18 @@ function Composer(props: {
   onSend(): void;
   onAbort(): void;
   onPickAttachments(): void;
+  onSetModel(provider: string, modelId: string): void;
+  onSetThinking(level: string): void;
   onRemoveAttachment(id: string): void;
   onSelectCommand(command: SlashCommand): void;
 }): ReactElement {
   const hasImageWarning =
     props.attachments.some((attachment) => attachment.kind === "image") &&
     !props.selectedModel?.supportsImages;
+  const currentRealModelValue = props.selectedSession.modelLabel?.replace(
+    /\s+\/\s+/,
+    "/",
+  );
 
   return (
     <footer className="composer" aria-label="Prompt composer">
@@ -1972,8 +2058,43 @@ function Composer(props: {
           />
         ) : null}
         <div className="composer-meta">
-          {props.modelInfo ? (
+          {props.realModels.length > 0 ? (
+            <select
+              className="composer-select"
+              aria-label="Real Pi model"
+              value={currentRealModelValue ?? ""}
+              onChange={(event) => {
+                const [provider, modelId] = event.target.value.split("/");
+                if (provider && modelId) {
+                  props.onSetModel(provider, modelId);
+                }
+              }}
+            >
+              {props.realModels.map((model) => (
+                <option
+                  key={`${model.provider ?? ""}/${model.id}`}
+                  value={`${model.provider ?? ""}/${model.id}`}
+                >
+                  {model.name ?? model.id}
+                </option>
+              ))}
+            </select>
+          ) : props.modelInfo ? (
             <span className="composer-model-pill">{props.modelInfo}</span>
+          ) : null}
+          {props.selectedSession.backendMode === "real" ? (
+            <select
+              className="composer-select thinking"
+              aria-label="Real Pi thinking"
+              value={props.selectedSession.thinkingLevel ?? "off"}
+              onChange={(event) => props.onSetThinking(event.target.value)}
+            >
+              {props.realThinkingLevels.map((level) => (
+                <option key={level} value={level}>
+                  {level}
+                </option>
+              ))}
+            </select>
           ) : null}
           <label className="composer-option">
             <input
