@@ -66,7 +66,7 @@ test("real mode startup failure is not mislabeled as preload/fake UI", async () 
   }
 });
 
-test("real mode can refresh and resume a saved project session", async () => {
+test("real mode can show and resume a saved project session", async () => {
   const piBinary = process.env.PI_DECK_PI_BINARY || "/usr/local/bin/pi";
   test.skip(!fs.existsSync(piBinary), `Pi binary not found at ${piBinary}`);
 
@@ -97,7 +97,6 @@ test("real mode can refresh and resume a saved project session", async () => {
   try {
     await expectHealthyPreload(page);
     await expect(page.getByText(/Real Pi mode active/i)).toBeVisible();
-    await page.getByRole("button", { name: "Refresh saved sessions" }).click();
     await expect(
       page.getByText("Saved · click to resume").first(),
     ).toBeVisible();
@@ -130,6 +129,9 @@ test("real mode does not fall back to fake/local UI and can send from active run
     await expect(page.getByText(/backend fake RPC active/i)).toHaveCount(0);
     await expect(page.getByText(/claude/i)).toHaveCount(0);
     await expect(page.getByLabel("Model")).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: /New real session/i }),
+    ).toHaveCount(0);
 
     await page
       .getByLabel("Prompt text")

@@ -776,7 +776,6 @@ export function App(): ReactElement {
         realMode={isRealBackendMode}
         onSelect={handleSelectSession}
         onNewSession={() => void handleNewSession()}
-        onRefreshSessions={() => void refreshRealSessions()}
       />
 
       <section className="workspace" aria-label="Pi Deck chat workspace">
@@ -823,6 +822,7 @@ export function App(): ReactElement {
           slashCommands={filteredCommands}
           selectedModel={selectedModel}
           backendLabel={backendLabel(selectedSession)}
+          modelInfo={composerModelInfo(selectedSession)}
           allowAttachments={true}
           enterToSend={enterToSend}
           onEnterToSendChange={handleEnterToSendChange}
@@ -1337,6 +1337,17 @@ function upsertThinkingMessage(
   ];
 }
 
+function composerModelInfo(session: SessionViewModel): string | undefined {
+  if (session.backendMode !== "real") {
+    return undefined;
+  }
+  const parts = [
+    session.modelLabel,
+    session.thinkingLevel ? `Thinking: ${session.thinkingLevel}` : undefined,
+  ].filter((part): part is string => Boolean(part && part.trim().length > 0));
+  return parts.length > 0 ? parts.join(" · ") : "Pi selected model";
+}
+
 function backendLabel(session: SessionViewModel): string {
   return backendLabelFromMode(session.backendMode ?? "fake");
 }
@@ -1375,7 +1386,6 @@ function SessionSidebar(props: {
   realMode: boolean;
   onSelect(sessionId: string): void;
   onNewSession(): void;
-  onRefreshSessions(): void;
 }): ReactElement {
   return (
     <aside className="sidebar" aria-label="Sessions">
@@ -1396,20 +1406,13 @@ function SessionSidebar(props: {
         </button>
       </div>
 
-      <button
-        className="new-session"
-        type="button"
-        onClick={props.onNewSession}
-      >
-        {props.realMode ? "+ New real session" : "+ New session"}
-      </button>
-      {props.realMode ? (
+      {!props.realMode ? (
         <button
-          className="new-session secondary"
+          className="new-session"
           type="button"
-          onClick={props.onRefreshSessions}
+          onClick={props.onNewSession}
         >
-          Refresh saved sessions
+          + New session
         </button>
       ) : null}
 
@@ -1430,18 +1433,23 @@ function SessionSidebar(props: {
             <span className="session-copy">
               <span className="session-title">{session.title}</span>
               <span className="session-meta">{session.subtitle}</span>
-              <span className="session-meta">{session.projectPath}</span>
+              {!props.realMode ? (
+                <span className="session-meta">{session.projectPath}</span>
+              ) : null}
             </span>
-            <span className="session-time">{session.updatedAt}</span>
+            {!props.realMode ? (
+              <span className="session-time">{session.updatedAt}</span>
+            ) : null}
           </button>
         ))}
       </section>
 
-      <div className="sidebar-note">
-        {props.realMode
-          ? "Saved rows can be clicked to resume. Attached rows stay live until Pi Deck quits."
-          : "Red dot means supported extension UI is waiting for input. Fixture rows exercise sidebar priority until the session repository lands."}
-      </div>
+      {!props.realMode ? (
+        <div className="sidebar-note">
+          Red dot means supported extension UI is waiting for input. Fixture
+          rows exercise sidebar priority until the session repository lands.
+        </div>
+      ) : null}
     </aside>
   );
 }
@@ -1490,7 +1498,7 @@ function AppHeader(props: {
       />
 
       <div className="header-right">
-        {props.loadState.state === "error" ? null : (
+        {props.loadState.state === "error" || props.realMode ? null : (
           <ModelThinkingControls
             selectedModelId={props.selectedModelId}
             selectedThinking={props.selectedThinking}
@@ -1908,6 +1916,7 @@ function Composer(props: {
   slashCommands: SlashCommand[];
   selectedModel: ModelOption | undefined;
   backendLabel: string;
+  modelInfo?: string | undefined;
   allowAttachments: boolean;
   enterToSend: boolean;
   onEnterToSendChange(value: boolean): void;
@@ -1963,6 +1972,9 @@ function Composer(props: {
           />
         ) : null}
         <div className="composer-meta">
+          {props.modelInfo ? (
+            <span className="composer-model-pill">{props.modelInfo}</span>
+          ) : null}
           <label className="composer-option">
             <input
               checked={props.enterToSend}
@@ -1971,7 +1983,7 @@ function Composer(props: {
                 props.onEnterToSendChange(event.target.checked);
               }}
             />
-            <span>Enter sends · Shift+Enter adds newline</span>
+            <span>Enter sends</span>
           </label>
           {props.error !== null ? (
             <span className="composer-error">{props.error}</span>
@@ -1983,36 +1995,18 @@ function Composer(props: {
             <span className="composer-error">
               Selected model does not support image input.
             </span>
-          ) : props.allowAttachments ? (
-            <span>
-              {props.backendLabel} active · non-images are sent as Referenced
-              path metadata when backend send support lands.
-            </span>
-          ) : (
-            <span>
-              {props.backendLabel} active · attachments and new/resume sessions
-              are not wired yet.
-            </span>
-          )}
+          ) : null}
         </div>
       </div>
       <div className="composer-actions">
         {props.isWorking ? (
-          <>
-            <button className="send-button secondary" type="button" disabled>
-              Steer
-            </button>
-            <button className="send-button secondary" type="button" disabled>
-              Follow-up
-            </button>
-            <button
-              className="send-button abort"
-              type="button"
-              onClick={props.onAbort}
-            >
-              Abort
-            </button>
-          </>
+          <button
+            className="send-button abort"
+            type="button"
+            onClick={props.onAbort}
+          >
+            Abort
+          </button>
         ) : (
           <button
             className="send-button"
