@@ -36,7 +36,7 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
 - [x] Playwright Electron E2E regression tests cover fake launch, real startup failure labeling, real no-fallback/send-enabled smoke, and saved-session refresh/resume.
 - [x] Real-mode UI simplified: sidebar uses only the compact `+` for new sessions, saved rows are concise, and model controls moved into the composer.
 - [x] Real mode can list Pi models and switch model/thinking through RPC from the composer.
-- [x] New real session creation shows an immediate optimistic starting row and returns before loading full messages.
+- [x] New real session creation shows an immediate optimistic starting row, returns before loading full messages, and prewarms one spare real worker.
 
 ### P0 — Required before Pi Deck can be dogfooded comfortably
 
@@ -93,7 +93,7 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
 16. Extension UI dialogs and background red-dot behavior.
 17. Image validation/resizing/package spike.
 18. Release-readiness matrix execution and limitations notes.
-19. Expand E2E coverage for compact new-session button, tool collapse, and close/cleanup regressions.
+19. Expand E2E coverage for tool collapse and close/cleanup regressions.
 
 ## 1. Critical Path Tracker
 

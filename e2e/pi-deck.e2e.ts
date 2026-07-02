@@ -112,6 +112,40 @@ test("real mode can show and resume a saved project session", async () => {
   }
 });
 
+test("real mode compact plus creates another attached session", async () => {
+  const piBinary = process.env.PI_DECK_PI_BINARY || "/usr/local/bin/pi";
+  test.skip(!fs.existsSync(piBinary), `Pi binary not found at ${piBinary}`);
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-new-"));
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck({
+    PI_DECK_BACKEND: "real",
+    PI_DECK_PI_BINARY: piBinary,
+    PI_DECK_PROJECT_CWD: projectCwd,
+    PI_CODING_AGENT_DIR: agentDir,
+  });
+  try {
+    await expectHealthyPreload(page);
+    const sessionList = page.getByRole("region", {
+      name: "Session list with priority states",
+    });
+    const initialCount = await sessionList.getByRole("button").count();
+    await page.getByRole("button", { name: "New session" }).click();
+    await expect(sessionList.getByRole("button")).toHaveCount(initialCount + 1);
+    await page
+      .getByLabel("Prompt text")
+      .fill("new session e2e prompt without sending");
+    await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("real mode does not fall back to fake/local UI and can send from active runtime", async () => {
   const piBinary = process.env.PI_DECK_PI_BINARY || "/usr/local/bin/pi";
   test.skip(!fs.existsSync(piBinary), `Pi binary not found at ${piBinary}`);
