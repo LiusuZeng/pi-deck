@@ -61,7 +61,7 @@ Current expected state on latest accepted main:
 - TypeScript checks pass for main/preload/shared and renderer code.
 - Electron main/preload and Vite renderer build successfully.
 - Prettier formatting check passes.
-- Playwright Electron E2E checks fake launch and real-mode no-fallback/send-enabled regressions when local Pi is available.
+- Playwright Electron E2E checks fake launch, real startup failure labeling, real-mode no-fallback/send-enabled, and saved-session refresh/resume regressions when local Pi is available.
 
 ## 5. Fake Pi Demo Checklist
 

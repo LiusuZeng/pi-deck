@@ -127,6 +127,12 @@ textarea:disabled {
   text-align: left;
 }
 
+.new-session.secondary {
+  color: #dbeafe;
+  background: rgb(255 255 255 / 10%);
+  box-shadow: none;
+}
+
 .icon-button {
   width: 38px;
   height: 38px;

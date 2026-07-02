@@ -620,8 +620,18 @@ async function resumeChatSession(
     throw new Error("Session resume is only available in real Pi mode.");
   }
 
-  const canonicalSessionFile =
-    (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
+  const canonicalSessionFile = await safeRealpath(sessionFile);
+  if (canonicalSessionFile === undefined) {
+    throw new Error(`Session file is missing or unreadable: ${sessionFile}`);
+  }
+  const launch = await resolveRealChatLaunchConfig(store);
+  const sessionCwd = await readSessionFileCwd(canonicalSessionFile);
+  if (sessionCwd !== undefined && sessionCwd !== launch.projectCwd) {
+    throw new Error(
+      `Session belongs to a different project. Session cwd: ${sessionCwd}; current project: ${launch.projectCwd}.`,
+    );
+  }
+
   const existingRuntimeId = chatSessionFileLocks.get(canonicalSessionFile);
   const adapter = await ensureChatAdapter(store, diagnosticsService);
   const mode = chatBackendMode ?? "real";

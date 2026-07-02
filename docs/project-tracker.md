@@ -33,7 +33,7 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
 - [x] `+ New real session` can create another in-window real worker and keep previous in-window session rows.
 - [x] Real mode scans the authoritative session directory for prior sessions in the launch project.
 - [x] Clicking a saved session attempts `pi --mode rpc --session <file>` and verifies `get_state.sessionFile`.
-- [x] Playwright Electron E2E regression tests cover fake launch and real-mode no-fallback/send-enabled smoke.
+- [x] Playwright Electron E2E regression tests cover fake launch, real startup failure labeling, real no-fallback/send-enabled smoke, and saved-session refresh/resume.
 
 ### P0 — Required before Pi Deck can be dogfooded comfortably
 
@@ -43,7 +43,8 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
 
 2. **Harden real session repository scanning**
    - Current behavior: scans authoritative session dir for current launch project, skips symlinks, and uses bounded depth/file/byte reads.
-   - Required before closing P0: better diagnostics in UI, refresh action, candidate-dir opt-in, and hands-on validation on messy real session dirs.
+   - Current behavior: refresh button updates saved sessions without relaunch.
+   - Required before closing P0: candidate-dir opt-in and hands-on validation on messy real session dirs.
 
 3. **Harden resume existing sessions**
    - Current behavior: clicking a saved row spawns `pi --mode rpc --session <sessionFile>` and verifies `get_state.sessionFile` canonicalizes to the requested file.
@@ -89,7 +90,7 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
 16. Extension UI dialogs and background red-dot behavior.
 17. Image validation/resizing/package spike.
 18. Release-readiness matrix execution and limitations notes.
-19. Expand E2E coverage for resume click, new session, tool collapse, and close/cleanup regressions.
+19. Expand E2E coverage for new session, tool collapse, and close/cleanup regressions.
 
 ## 1. Critical Path Tracker
 

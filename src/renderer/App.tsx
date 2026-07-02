@@ -672,6 +672,29 @@ export function App(): ReactElement {
     }
   }
 
+  async function refreshRealSessions(): Promise<void> {
+    if (!isRealBackendMode || loadState.state !== "ready") {
+      return;
+    }
+    setUiMessage("Refreshing saved Pi sessions…");
+    try {
+      const result = await window.piDeck.chat.listSessions();
+      setSessions((items) =>
+        mergeSessions(
+          items.filter((item) => item.runtimeBacked),
+          result.sessions.map(sessionFromSummary),
+        ),
+      );
+      setUiMessage(
+        `Found ${result.sessions.length} saved session(s) for this project.`,
+      );
+    } catch (error) {
+      setUiMessage(
+        `Failed to refresh sessions: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   async function handlePickAttachments(): Promise<void> {
     try {
       const result = await window.piDeck.attachments.pickFiles({
@@ -753,6 +776,7 @@ export function App(): ReactElement {
         realMode={isRealBackendMode}
         onSelect={handleSelectSession}
         onNewSession={() => void handleNewSession()}
+        onRefreshSessions={() => void refreshRealSessions()}
       />
 
       <section className="workspace" aria-label="Pi Deck chat workspace">
@@ -1351,6 +1375,7 @@ function SessionSidebar(props: {
   realMode: boolean;
   onSelect(sessionId: string): void;
   onNewSession(): void;
+  onRefreshSessions(): void;
 }): ReactElement {
   return (
     <aside className="sidebar" aria-label="Sessions">
@@ -1378,6 +1403,15 @@ function SessionSidebar(props: {
       >
         {props.realMode ? "+ New real session" : "+ New session"}
       </button>
+      {props.realMode ? (
+        <button
+          className="new-session secondary"
+          type="button"
+          onClick={props.onRefreshSessions}
+        >
+          Refresh saved sessions
+        </button>
+      ) : null}
 
       <section
         className="session-list"
@@ -1405,7 +1439,7 @@ function SessionSidebar(props: {
 
       <div className="sidebar-note">
         {props.realMode
-          ? "Real Pi mode keeps newly created sessions in this window. Resume from disk/session repository is next."
+          ? "Saved rows can be clicked to resume. Attached rows stay live until Pi Deck quits."
           : "Red dot means supported extension UI is waiting for input. Fixture rows exercise sidebar priority until the session repository lands."}
       </div>
     </aside>
