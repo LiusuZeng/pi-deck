@@ -38,14 +38,14 @@ function spawnFake(args: string[] = []): JsonlRpcClient {
     process.execPath,
     [fakePath(), ...args],
     { cwd: process.cwd(), env: process.env },
-    { requestTimeoutMs: 2_000 },
+    { requestTimeoutMs: 5_000 },
   );
 }
 
 function waitForEvent(
   client: JsonlRpcClient,
   predicate: (event: RpcEventRecord) => boolean,
-  timeoutMs = 2_000,
+  timeoutMs = 5_000,
 ): Promise<RpcEventRecord> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {

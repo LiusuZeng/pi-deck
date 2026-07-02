@@ -412,12 +412,12 @@ export function App(): ReactElement {
         if (!disposed) {
           const message =
             error instanceof Error ? error.message : String(error);
-          setSessions([preloadErrorSession(message)]);
-          setSelectedSessionId("preload-error");
+          setSessions([startupErrorSession(message)]);
+          setSelectedSessionId("startup-error");
           setComposerError(
-            "Pi Deck preload/main API is unavailable. Fully quit and relaunch the app.",
+            "Real Pi backend is not attached. Fully quit and relaunch from the intended project directory.",
           );
-          setUiMessage(`Preload error: ${message}`);
+          setUiMessage(`Startup error: ${message}`);
           setLoadState({
             state: "error",
             message,
@@ -829,13 +829,13 @@ function projectFromCwd(cwd: string): ProjectRef {
   };
 }
 
-function preloadErrorSession(message: string): SessionViewModel {
+function startupErrorSession(message: string): SessionViewModel {
   return {
-    id: "preload-error",
-    title: "Pi Deck needs relaunch",
+    id: "startup-error",
+    title: "Real Pi backend failed",
     project: "Pi Deck",
-    projectPath: "Main/preload API unavailable",
-    subtitle: "Error · fully quit and relaunch",
+    projectPath: "No Pi runtime attached",
+    subtitle: "Error · relaunch from intended project",
     status: "error",
     updatedAt: "Now",
     updatedAtMs: Date.now(),
@@ -845,7 +845,7 @@ function preloadErrorSession(message: string): SessionViewModel {
     backendMode: "real",
     timeline: [
       {
-        id: "preload-error-diagnostic",
+        id: "startup-error-diagnostic",
         kind: "diagnostic",
         tone: "error",
         content: message,
@@ -1622,7 +1622,7 @@ function LoadStateBadge(props: {
   if (props.loadState.state === "error") {
     return (
       <span className="diagnostic-badge error" title={props.loadState.message}>
-        Preload error
+        Startup error
       </span>
     );
   }

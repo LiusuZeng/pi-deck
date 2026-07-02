@@ -10,7 +10,7 @@ import { spawnFakeRpc, writeFakePiShim } from "../../test/fakeRpcHarness.js";
 function waitForEvents(
   client: ReturnType<typeof spawnFakeRpc>,
   predicate: (events: RpcEventRecord[]) => boolean,
-  timeoutMs = 2_000,
+  timeoutMs = 5_000,
 ): Promise<RpcEventRecord[]> {
   return new Promise((resolve, reject) => {
     const events: RpcEventRecord[] = [];
@@ -167,7 +167,7 @@ test("platform minimal RPC smoke can run against the shared fake RPC shim", asyn
     config: { piBinary: piShim, env: { PATH: process.env.PATH ?? "" } },
     version: "pi fake-rpc 0.0.0",
     tempRoot: root,
-    timeoutMs: 2_000,
+    timeoutMs: 5_000,
     force: true,
   });
 

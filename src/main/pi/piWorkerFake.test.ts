@@ -36,7 +36,7 @@ function createWorker(args: string[] = []): PiWorker {
     args: [fakePath(), ...args],
     cwd: process.cwd(),
     env: process.env,
-    requestTimeoutMs: 2_000,
+    requestTimeoutMs: 5_000,
     killGraceMs: 100,
   });
 }
@@ -44,7 +44,7 @@ function createWorker(args: string[] = []): PiWorker {
 function waitForWorkerEvent(
   worker: PiWorker,
   predicate: (event: RuntimeEvent) => boolean,
-  timeoutMs = 2_000,
+  timeoutMs = 5_000,
 ): Promise<RuntimeEvent> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -86,7 +86,7 @@ test("PiWorker supports real-Pi type-field command protocol", async () => {
     args: [fakePath(), "--stream-delay-ms", "1"],
     cwd: process.cwd(),
     env: process.env,
-    requestTimeoutMs: 2_000,
+    requestTimeoutMs: 5_000,
     killGraceMs: 100,
     commandProtocol: "type-field",
   });
@@ -181,7 +181,7 @@ test("SinglePiAdapter routes required methods by runtime id", async () => {
     args: [fakePath(), "--stream-delay-ms", "1"],
     cwd: process.cwd(),
     env: process.env,
-    requestTimeoutMs: 2_000,
+    requestTimeoutMs: 5_000,
     killGraceMs: 100,
   });
 

@@ -352,8 +352,7 @@ async function ensureChatAdapter(
 
   const mode = resolveChatBackendMode();
   const adapter = new SinglePiAdapter();
-  chatBackendMode = mode;
-  chatEventUnsubscribe = adapter.onEvent((event) => {
+  const unsubscribe = adapter.onEvent((event) => {
     const parsed = chatRuntimeEventSchema.safeParse(event);
     if (!parsed.success) {
       diagnosticsService.recordError(
@@ -363,8 +362,17 @@ async function ensureChatAdapter(
     }
     sendChatEventToRenderer(parsed.data);
   });
+
+  try {
+    await createChatWorker(adapter, store, mode);
+  } catch (error) {
+    unsubscribe();
+    throw error;
+  }
+
+  chatBackendMode = mode;
+  chatEventUnsubscribe = unsubscribe;
   chatAdapter = adapter;
-  await createChatWorker(adapter, store, mode);
   return adapter;
 }
 

@@ -43,6 +43,28 @@ test("fake mode launches with backend runtime and send enabled", async () => {
   }
 });
 
+test("real mode startup failure is not mislabeled as preload/fake UI", async () => {
+  const piBinary = process.env.PI_DECK_PI_BINARY || "/usr/local/bin/pi";
+  test.skip(!fs.existsSync(piBinary), `Pi binary not found at ${piBinary}`);
+
+  const { app, page } = await launchPiDeck({
+    PI_DECK_BACKEND: "real",
+    PI_DECK_PI_BINARY: piBinary,
+    PI_DECK_PROJECT_CWD: path.join(repoRoot, "missing-e2e-project"),
+  });
+  try {
+    await expect(
+      page.getByText("Startup error", { exact: true }),
+    ).toBeVisible();
+    await expect(page.getByText("Preload error")).toHaveCount(0);
+    await expect(page.getByText("Local projects")).toHaveCount(0);
+    await expect(page.getByText(/backend fake RPC active/i)).toHaveCount(0);
+    await expect(page.getByText(/claude/i)).toHaveCount(0);
+  } finally {
+    await app.close();
+  }
+});
+
 test("real mode does not fall back to fake/local UI and can send from active runtime", async () => {
   const piBinary = process.env.PI_DECK_PI_BINARY || "/usr/local/bin/pi";
   test.skip(!fs.existsSync(piBinary), `Pi binary not found at ${piBinary}`);
