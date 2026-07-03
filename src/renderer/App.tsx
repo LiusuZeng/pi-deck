@@ -1,6 +1,8 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   type KeyboardEvent,
   type ReactElement,
@@ -78,6 +80,25 @@ type TimelineItem =
       createdAt: string;
     };
 
+interface UsageStats {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  totalTokens: number;
+  contextUsedTokens?: number;
+  contextWindowTokens?: number;
+  totalCostUsd?: number;
+}
+
+interface MessageUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  totalCostUsd?: number;
+}
+
 interface SessionViewModel {
   id: string;
   title: string;
@@ -90,6 +111,8 @@ interface SessionViewModel {
   timeline: TimelineItem[];
   baseState: BaseSessionState;
   overlays: SessionOverlays;
+  usageStats?: UsageStats;
+  usageByMessageId?: Record<string, MessageUsage>;
   modelLabel?: string;
   thinkingLevel?: string;
   lastError?: string;
@@ -356,6 +379,12 @@ export function App(): ReactElement {
   const [enterToSend, setEnterToSend] = useState(() =>
     loadEnterToSendPreference(),
   );
+  const [sidebarVisible, setSidebarVisible] = useState(() =>
+    loadSidebarVisiblePreference(),
+  );
+  const [usageStatsVisible, setUsageStatsVisible] = useState(() =>
+    loadUsageStatsVisiblePreference(),
+  );
   const [uiMessage, setUiMessage] = useState(
     "Eng 4 fake chat path and Eng 5 controls are both active in this integrated shell.",
   );
@@ -488,6 +517,16 @@ export function App(): ReactElement {
   function handleEnterToSendChange(value: boolean): void {
     setEnterToSend(value);
     saveEnterToSendPreference(value);
+  }
+
+  function handleSidebarVisibleChange(value: boolean): void {
+    setSidebarVisible(value);
+    saveSidebarVisiblePreference(value);
+  }
+
+  function handleUsageStatsVisibleChange(value: boolean): void {
+    setUsageStatsVisible(value);
+    saveUsageStatsVisiblePreference(value);
   }
 
   function handleDraftChange(value: string): void {
@@ -840,14 +879,16 @@ export function App(): ReactElement {
   }
 
   return (
-    <main className="app-shell">
-      <SessionSidebar
-        sessions={sessions}
-        selectedSessionId={selectedSession.id}
-        realMode={isRealBackendMode}
-        onSelect={handleSelectSession}
-        onNewSession={() => void handleNewSession()}
-      />
+    <main className={`app-shell ${sidebarVisible ? "" : "sidebar-hidden"}`}>
+      {sidebarVisible ? (
+        <SessionSidebar
+          sessions={sessions}
+          selectedSessionId={selectedSession.id}
+          realMode={isRealBackendMode}
+          onSelect={handleSelectSession}
+          onNewSession={() => void handleNewSession()}
+        />
+      ) : null}
 
       <section className="workspace" aria-label="Pi Deck chat workspace">
         <AppHeader
@@ -859,6 +900,12 @@ export function App(): ReactElement {
           selectedModelId={selectedModelId}
           selectedThinking={selectedThinking}
           realMode={isRealBackendMode}
+          sidebarVisible={sidebarVisible}
+          usageStatsVisible={usageStatsVisible}
+          onToggleSidebar={() => handleSidebarVisibleChange(!sidebarVisible)}
+          onToggleUsageStats={() =>
+            handleUsageStatsVisibleChange(!usageStatsVisible)
+          }
           onPickProject={() => void handlePickProject()}
           onSelectRecent={(project) => {
             setCurrentProject(project);
@@ -1010,6 +1057,10 @@ function sessionFromSummary(summary: ChatSessionSummary): SessionViewModel {
 
 function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
   const modelLabel = modelLabelFromState(snapshot.state);
+  const { usageStats, usageByMessageId } = usageFromMessages(
+    snapshot.messages,
+    getContextWindowTokens(snapshot.state),
+  );
   const stateRecord = snapshot.state as Record<string, unknown>;
   const isAgentActive = Boolean(
     snapshot.state.isAgentActive ??
@@ -1043,6 +1094,12 @@ function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
     backendMode: snapshot.backendMode,
     timeline: timelineFromMessages(snapshot.messages, snapshot.backendMode),
   };
+  if (usageStats !== undefined) {
+    session.usageStats = usageStats;
+  }
+  if (usageByMessageId !== undefined) {
+    session.usageByMessageId = usageByMessageId;
+  }
   if (typeof snapshot.state.sessionFile === "string") {
     session.sessionFile = snapshot.state.sessionFile;
   }
@@ -1302,27 +1359,39 @@ function reduceMessageUpdate(
   session: SessionViewModel,
   event: ChatRuntimeEvent,
 ): SessionViewModel {
-  const messageId = getMessageUpdateId(event) ?? createId("assistant");
+  const messageId =
+    getMessageUpdateId(event) ??
+    getActiveAssistantMessageId(session) ??
+    createId("assistant");
   const assistantEventType = getAssistantMessageEventType(event);
   const done =
     getBoolean(event, "done") ??
     (assistantEventType === "done" || assistantEventType === "error");
-  const content =
-    getString(event, "content") ??
-    getMessageUpdateContent(event) ??
-    getString(event, "delta") ??
-    getAssistantMessageDelta(event) ??
-    "";
+  const textUpdate = getMessageTextUpdate(event);
+  const content = textUpdate?.content ?? "";
   const thinking = getThinkingUpdateContent(event);
   const role = getMessageUpdateRole(event);
+  const existingAssistantContent = getAssistantContent(
+    session.timeline,
+    messageId,
+  );
+  const nextAssistantContent =
+    textUpdate?.mode === "append" ||
+    shouldAppendShortStreamingReplacement(
+      existingAssistantContent,
+      content,
+      done,
+    )
+      ? `${existingAssistantContent ?? ""}${content}`
+      : content;
   const toolItem = toolTimelineItemFromContent({
     id: messageId,
-    content,
+    content: nextAssistantContent,
     createdAt: formatTime(),
     status: timelineToolStatus(!done),
     role,
   });
-  const hasReplyContent = content.trim().length > 0;
+  const hasReplyContent = nextAssistantContent.trim().length > 0;
   const hasThinkingContent =
     thinking !== undefined && thinking.trim().length > 0;
 
@@ -1330,7 +1399,12 @@ function reduceMessageUpdate(
   if (toolItem !== undefined) {
     timeline = upsertToolMessage(timeline, toolItem);
   } else if (hasReplyContent) {
-    timeline = upsertAssistantMessage(timeline, messageId, content, !done);
+    timeline = upsertAssistantMessage(
+      timeline,
+      messageId,
+      nextAssistantContent,
+      !done,
+    );
   } else if (hasThinkingContent) {
     timeline = upsertThinkingMessage(
       timeline,
@@ -1340,8 +1414,23 @@ function reduceMessageUpdate(
     );
   }
 
+  const eventUsage = getMessageUsageFromEvent(event);
+  const usageByMessageId =
+    eventUsage !== undefined
+      ? { ...(session.usageByMessageId ?? {}), [messageId]: eventUsage }
+      : session.usageByMessageId;
+  const usageStats =
+    usageByMessageId !== undefined
+      ? summarizeUsageByMessage(
+          usageByMessageId,
+          session.usageStats?.contextWindowTokens,
+        )
+      : undefined;
+
   return {
     ...session,
+    ...(usageByMessageId !== undefined ? { usageByMessageId } : {}),
+    ...(usageStats !== undefined ? { usageStats } : {}),
     status: done ? "idle" : "working",
     baseState: done ? "idle" : "working",
     overlays: { ...session.overlays, streaming: !done },
@@ -1352,6 +1441,39 @@ function reduceMessageUpdate(
     updatedAtMs: Date.now(),
     timeline,
   };
+}
+
+function getActiveAssistantMessageId(
+  session: SessionViewModel,
+): string | undefined {
+  const activeAssistant = [...session.timeline]
+    .reverse()
+    .find((item) => item.kind === "assistant" && item.streaming === true);
+  return activeAssistant?.id;
+}
+
+function getAssistantContent(
+  items: TimelineItem[],
+  id: string,
+): string | undefined {
+  const existing = items.find(
+    (item) => item.kind === "assistant" && item.id === id,
+  );
+  return existing?.kind === "assistant" ? existing.content : undefined;
+}
+
+function shouldAppendShortStreamingReplacement(
+  existingContent: string | undefined,
+  nextContent: string,
+  done: boolean,
+): boolean {
+  return (
+    existingContent !== undefined &&
+    !done &&
+    nextContent.length > 0 &&
+    nextContent.length < existingContent.length &&
+    nextContent !== existingContent
+  );
 }
 
 function upsertToolMessage(
@@ -1413,6 +1535,196 @@ function upsertThinkingMessage(
     ...next,
     { id, kind: "thinking", content, createdAt: formatTime(), streaming },
   ];
+}
+
+function usageFromMessages(
+  messages: ChatMessage[],
+  contextWindowTokens: number | undefined,
+): {
+  usageStats?: UsageStats;
+  usageByMessageId?: Record<string, MessageUsage>;
+} {
+  const usageByMessageId: Record<string, MessageUsage> = {};
+  messages.forEach((message, index) => {
+    const usage = extractMessageUsage(message);
+    if (usage !== undefined) {
+      usageByMessageId[message.id ?? `message-${index}`] = usage;
+    }
+  });
+
+  if (Object.keys(usageByMessageId).length === 0) {
+    if (contextWindowTokens === undefined) {
+      return {};
+    }
+    return {
+      usageStats: summarizeUsageByMessage({}, contextWindowTokens),
+    };
+  }
+
+  return {
+    usageByMessageId,
+    usageStats: summarizeUsageByMessage(usageByMessageId, contextWindowTokens),
+  };
+}
+
+function summarizeUsageByMessage(
+  usageByMessageId: Record<string, MessageUsage>,
+  contextWindowTokens: number | undefined,
+): UsageStats {
+  const values = Object.values(usageByMessageId);
+  const inputTokens = sumUsage(values, "inputTokens");
+  const outputTokens = sumUsage(values, "outputTokens");
+  const cacheReadTokens = sumUsage(values, "cacheReadTokens");
+  const cacheWriteTokens = sumUsage(values, "cacheWriteTokens");
+  const contextUsedTokens = values.reduce((peak, usage) => {
+    const contextTokens =
+      usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
+    return Math.max(peak, contextTokens);
+  }, 0);
+  const costValues = values
+    .map((usage) => usage.totalCostUsd)
+    .filter((value): value is number => value !== undefined);
+  const totalCostUsd =
+    costValues.length > 0
+      ? costValues.reduce((total, value) => total + value, 0)
+      : undefined;
+
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    totalTokens:
+      inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
+    ...(contextUsedTokens > 0 ? { contextUsedTokens } : {}),
+    ...(contextWindowTokens !== undefined ? { contextWindowTokens } : {}),
+    ...(totalCostUsd !== undefined ? { totalCostUsd } : {}),
+  };
+}
+
+function sumUsage(
+  values: MessageUsage[],
+  key: keyof Pick<
+    MessageUsage,
+    "inputTokens" | "outputTokens" | "cacheReadTokens" | "cacheWriteTokens"
+  >,
+): number {
+  return values.reduce((total, usage) => total + usage[key], 0);
+}
+
+function getMessageUsageFromEvent(
+  event: ChatRuntimeEvent,
+): MessageUsage | undefined {
+  return extractMessageUsage(getRecord(event, "message") ?? event);
+}
+
+function extractMessageUsage(value: unknown): MessageUsage | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const usage = record.usage;
+  const usageRecord =
+    usage && typeof usage === "object" && !Array.isArray(usage)
+      ? (usage as Record<string, unknown>)
+      : record;
+  const inputTokens = readNumber(usageRecord, [
+    "input",
+    "inputTokens",
+    "promptTokens",
+    "prompt_tokens",
+  ]);
+  const outputTokens = readNumber(usageRecord, [
+    "output",
+    "outputTokens",
+    "completionTokens",
+    "completion_tokens",
+  ]);
+  const cacheReadTokens = readNumber(usageRecord, [
+    "cacheRead",
+    "cacheReadTokens",
+    "cache_read",
+    "cache_read_tokens",
+  ]);
+  const cacheWriteTokens = readNumber(usageRecord, [
+    "cacheWrite",
+    "cacheWriteTokens",
+    "cache_write",
+    "cache_write_tokens",
+  ]);
+  const totalCostUsd = readCostUsd(usageRecord);
+
+  if (
+    inputTokens === undefined &&
+    outputTokens === undefined &&
+    cacheReadTokens === undefined &&
+    cacheWriteTokens === undefined &&
+    totalCostUsd === undefined
+  ) {
+    return undefined;
+  }
+
+  return {
+    inputTokens: inputTokens ?? 0,
+    outputTokens: outputTokens ?? 0,
+    cacheReadTokens: cacheReadTokens ?? 0,
+    cacheWriteTokens: cacheWriteTokens ?? 0,
+    ...(totalCostUsd !== undefined ? { totalCostUsd } : {}),
+  };
+}
+
+function getContextWindowTokens(
+  state: ChatSnapshot["state"],
+): number | undefined {
+  const direct = readNumber(state as Record<string, unknown>, [
+    "contextWindow",
+    "contextWindowTokens",
+    "context_window",
+  ]);
+  if (direct !== undefined) {
+    return direct;
+  }
+  const model = state.model;
+  if (!model || typeof model !== "object" || Array.isArray(model)) {
+    return undefined;
+  }
+  return readNumber(model as Record<string, unknown>, [
+    "contextWindow",
+    "contextWindowTokens",
+    "context_window",
+  ]);
+}
+
+function readCostUsd(record: Record<string, unknown>): number | undefined {
+  const direct = readNumber(record, [
+    "costUsd",
+    "totalCostUsd",
+    "total_cost_usd",
+  ]);
+  if (direct !== undefined) {
+    return direct;
+  }
+  const cost = record.cost;
+  if (typeof cost === "number" && Number.isFinite(cost)) {
+    return cost;
+  }
+  if (cost && typeof cost === "object" && !Array.isArray(cost)) {
+    return readNumber(cost as Record<string, unknown>, ["total", "usd"]);
+  }
+  return undefined;
+}
+
+function readNumber(
+  record: Record<string, unknown>,
+  keys: string[],
+): number | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return undefined;
 }
 
 function composerModelInfo(session: SessionViewModel): string | undefined {
@@ -1581,6 +1893,10 @@ function AppHeader(props: {
   selectedModelId: string;
   selectedThinking: string;
   realMode: boolean;
+  sidebarVisible: boolean;
+  usageStatsVisible: boolean;
+  onToggleSidebar(): void;
+  onToggleUsageStats(): void;
   onPickProject(): void;
   onSelectRecent(project: ProjectRef): void;
   onModelChange(id: string): void;
@@ -1588,16 +1904,36 @@ function AppHeader(props: {
 }): ReactElement {
   return (
     <header className="topbar">
-      <ProjectHeader
-        project={props.currentProject}
-        selectedSession={props.selectedSession}
-        recentProjects={props.recentProjects}
-        realMode={props.realMode}
-        onPickProject={props.onPickProject}
-        onSelectRecent={props.onSelectRecent}
-      />
+      <div className="header-left">
+        <button
+          className="sidebar-toggle"
+          type="button"
+          aria-label={props.sidebarVisible ? "Hide sessions" : "Show sessions"}
+          aria-pressed={!props.sidebarVisible}
+          title={props.sidebarVisible ? "Hide sessions" : "Show sessions"}
+          onClick={props.onToggleSidebar}
+        >
+          {props.sidebarVisible ? "‹" : "☰"}
+        </button>
+        <ProjectHeader
+          project={props.currentProject}
+          selectedSession={props.selectedSession}
+          recentProjects={props.recentProjects}
+          realMode={props.realMode}
+          onPickProject={props.onPickProject}
+          onSelectRecent={props.onSelectRecent}
+        />
+      </div>
 
       <div className="header-right">
+        <UsageStatsToggle
+          session={props.selectedSession}
+          visible={props.usageStatsVisible}
+          onToggle={props.onToggleUsageStats}
+        />
+        {props.usageStatsVisible ? (
+          <UsageStatsPanel session={props.selectedSession} />
+        ) : null}
         {props.loadState.state === "error" || props.realMode ? null : (
           <ModelThinkingControls
             selectedModelId={props.selectedModelId}
@@ -1614,6 +1950,62 @@ function AppHeader(props: {
         />
       </div>
     </header>
+  );
+}
+
+function UsageStatsToggle(props: {
+  session: SessionViewModel;
+  visible: boolean;
+  onToggle(): void;
+}): ReactElement {
+  const hasStats = props.session.usageStats !== undefined;
+  return (
+    <button
+      className={`usage-toggle ${props.visible ? "active" : ""}`}
+      type="button"
+      aria-label={
+        props.visible ? "Hide session usage stats" : "Show session usage stats"
+      }
+      aria-pressed={props.visible}
+      title={
+        hasStats
+          ? "Toggle session usage stats"
+          : "Usage stats appear after Pi returns usage data"
+      }
+      onClick={props.onToggle}
+    >
+      ◷
+    </button>
+  );
+}
+
+function UsageStatsPanel(props: { session: SessionViewModel }): ReactElement {
+  const stats = props.session.usageStats;
+  if (stats === undefined) {
+    return (
+      <div className="usage-stats empty" aria-live="polite">
+        Usage stats unavailable until Pi returns usage data.
+      </div>
+    );
+  }
+
+  return (
+    <div className="usage-stats" aria-live="polite">
+      <span title="Peak prompt/context tokens compared with the model context window">
+        Context: {formatContextUsage(stats)}
+      </span>
+      <span title="Session token totals from Pi message usage">
+        Tokens: {formatInteger(stats.inputTokens)} in /{" "}
+        {formatInteger(stats.outputTokens)} out
+      </span>
+      <span title="Cached token totals, when reported by the provider">
+        Cache: {formatInteger(stats.cacheReadTokens)} read /{" "}
+        {formatInteger(stats.cacheWriteTokens)} write
+      </span>
+      <span title="Total reported provider cost for this loaded session">
+        Cost: {formatCurrency(stats.totalCostUsd)}
+      </span>
+    </div>
   );
 }
 
@@ -1779,15 +2171,50 @@ function LoadStateBadge(props: {
   );
 }
 
+function getTimelineScrollMarker(session: SessionViewModel): string {
+  const timelineMarker = session.timeline
+    .map((item) => {
+      if (item.kind === "tool") {
+        return `${item.id}:${item.status}:${item.summary.length}:${item.details.length}`;
+      }
+
+      return `${item.id}:${item.kind}:${"content" in item ? item.content.length : 0}`;
+    })
+    .join("|");
+
+  return `${session.id}|${session.status}|${session.baseState}|${session.overlays.streaming}|${session.overlays.toolRunning}|${timelineMarker}`;
+}
+
 function ChatTimeline(props: {
   session: SessionViewModel;
   uiMessage: string;
   showAttachmentExamples: boolean;
 }): ReactElement {
   const hasItems = props.session.timeline.length > 0;
+  const showPendingAgent =
+    props.session.status === "working" &&
+    !hasActiveTimelineOutput(props.session.timeline);
+  const timelineScrollRef = useRef<HTMLDivElement | null>(null);
+  const timelineScrollMarker = getTimelineScrollMarker(props.session);
+
+  useLayoutEffect(() => {
+    const scrollContainer = timelineScrollRef.current;
+    if (scrollContainer === null) {
+      return;
+    }
+
+    const animationFrameId = window.requestAnimationFrame(() => {
+      scrollContainer.scrollTop = scrollContainer.scrollHeight;
+    });
+
+    return () => {
+      window.cancelAnimationFrame(animationFrameId);
+    };
+  }, [timelineScrollMarker]);
+
   return (
     <section className="timeline-shell" aria-label="Chat / Agent Timeline">
-      <div className="timeline-scroll">
+      <div className="timeline-scroll" ref={timelineScrollRef}>
         {!hasItems ? (
           <EmptyTimelineState
             status={props.session.status}
@@ -1815,8 +2242,30 @@ function ChatTimeline(props: {
         {props.session.timeline.map((item) => (
           <TimelineRow key={item.id} item={item} />
         ))}
+        {showPendingAgent ? <PendingAgentRow /> : null}
       </div>
     </section>
+  );
+}
+
+function hasActiveTimelineOutput(items: TimelineItem[]): boolean {
+  return items.some(
+    (item) =>
+      (item.kind === "assistant" && item.streaming === true) ||
+      (item.kind === "thinking" && item.streaming === true) ||
+      (item.kind === "tool" && item.status === "running"),
+  );
+}
+
+function PendingAgentRow(): ReactElement {
+  return (
+    <article className="timeline-row assistant-row pending-agent-row">
+      <div className="assistant-avatar">π</div>
+      <div className="assistant-message pending-agent-message">
+        <span className="spinner" aria-hidden="true" />
+        <span>Agent is working…</span>
+      </div>
+    </article>
   );
 }
 
@@ -2351,7 +2800,42 @@ function getMessageUpdateId(event: ChatRuntimeEvent): string | undefined {
 
 function getMessageUpdateRole(event: ChatRuntimeEvent): string | undefined {
   const message = getRecord(event, "message");
-  return getStringFromRecord(message, "role");
+  return getString(event, "role") ?? getStringFromRecord(message, "role");
+}
+
+type MessageTextUpdate = {
+  content: string;
+  mode: "replace" | "append";
+};
+
+function getMessageTextUpdate(
+  event: ChatRuntimeEvent,
+): MessageTextUpdate | undefined {
+  const directDelta = getString(event, "delta");
+  const assistantDelta = getAssistantMessageDelta(event);
+  if (directDelta !== undefined) {
+    return { content: directDelta, mode: "append" };
+  }
+  if (assistantDelta !== undefined) {
+    return { content: assistantDelta, mode: "append" };
+  }
+
+  const directContent = getString(event, "content");
+  if (directContent !== undefined) {
+    return { content: directContent, mode: "replace" };
+  }
+
+  const messageContent = getMessageUpdateContent(event);
+  if (messageContent !== undefined) {
+    return { content: messageContent, mode: "replace" };
+  }
+
+  const assistantContent = getAssistantMessageContent(event);
+  if (assistantContent !== undefined) {
+    return { content: assistantContent, mode: "replace" };
+  }
+
+  return undefined;
 }
 
 function getMessageUpdateContent(event: ChatRuntimeEvent): string | undefined {
@@ -2388,11 +2872,30 @@ function getAssistantMessageDelta(event: ChatRuntimeEvent): string | undefined {
   }
   const record = assistantEvent as Record<string, unknown>;
   const type = typeof record.type === "string" ? record.type : "";
-  if (type.includes("thinking")) {
+  if (type !== "" && type !== "text_delta") {
     return undefined;
   }
-  if (typeof record.delta === "string") {
-    return record.delta;
+  return typeof record.delta === "string" ? record.delta : undefined;
+}
+
+function getAssistantMessageContent(
+  event: ChatRuntimeEvent,
+): string | undefined {
+  const assistantEvent = getUnknown(event, "assistantMessageEvent");
+  if (
+    !assistantEvent ||
+    typeof assistantEvent !== "object" ||
+    Array.isArray(assistantEvent)
+  ) {
+    return undefined;
+  }
+  const record = assistantEvent as Record<string, unknown>;
+  const type = typeof record.type === "string" ? record.type : "";
+  if (type !== "" && !type.startsWith("text_") && type !== "done") {
+    return undefined;
+  }
+  if (type === "done") {
+    return extractTextContent(record.partial);
   }
   if (typeof record.content === "string") {
     return record.content;
@@ -2520,6 +3023,22 @@ function saveEnterToSendPreference(value: boolean): void {
   localStorage.setItem("piDeck.enterToSend", String(value));
 }
 
+function loadSidebarVisiblePreference(): boolean {
+  return localStorage.getItem("piDeck.sidebarVisible") !== "false";
+}
+
+function saveSidebarVisiblePreference(value: boolean): void {
+  localStorage.setItem("piDeck.sidebarVisible", String(value));
+}
+
+function loadUsageStatsVisiblePreference(): boolean {
+  return localStorage.getItem("piDeck.usageStatsVisible") === "true";
+}
+
+function saveUsageStatsVisiblePreference(value: boolean): void {
+  localStorage.setItem("piDeck.usageStatsVisible", String(value));
+}
+
 function loadRecentProjects(): ProjectRef[] {
   try {
     const raw = localStorage.getItem("piDeck.recentProjects");
@@ -2588,6 +3107,40 @@ function formatReadableTimestamp(timestamp: number): string {
   }).format(new Date(timestamp));
 }
 
+function formatContextUsage(stats: UsageStats): string {
+  if (stats.contextUsedTokens === undefined) {
+    return stats.contextWindowTokens === undefined
+      ? "unknown"
+      : `0 / ${formatInteger(stats.contextWindowTokens)}`;
+  }
+  if (stats.contextWindowTokens === undefined) {
+    return formatInteger(stats.contextUsedTokens);
+  }
+  const percent = Math.min(
+    999,
+    Math.round((stats.contextUsedTokens / stats.contextWindowTokens) * 100),
+  );
+  return `${formatInteger(stats.contextUsedTokens)} / ${formatInteger(stats.contextWindowTokens)} (${percent}%)`;
+}
+
+function formatInteger(value: number): string {
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(
+    value,
+  );
+}
+
+function formatCurrency(value: number | undefined): string {
+  if (value === undefined) {
+    return "unavailable";
+  }
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: value < 0.01 ? 4 : 2,
+    maximumFractionDigits: value < 0.01 ? 4 : 2,
+  }).format(value);
+}
+
 function createId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
@@ -2597,6 +3150,11 @@ function processCwdPlaceholder(mode: "fake" | "real"): string {
     ? "Real Pi worker cwd unavailable"
     : "Fake RPC worker cwd unavailable";
 }
+
+export const __rendererTestHooks = {
+  reduceRuntimeEvent,
+  sessionFromSnapshot,
+};
 
 function getRendererNodeAccessSummary(): string {
   const hasProcess = Reflect.get(globalThis, "process") !== undefined;
