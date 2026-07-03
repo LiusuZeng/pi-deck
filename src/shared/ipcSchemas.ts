@@ -156,10 +156,18 @@ export const chatSetThinkingRequestSchema = z
   })
   .strict();
 
+export const chatPromptAttachmentSchema = z
+  .object({
+    selectedPathToken: z.string().min(1),
+    sendMode: z.enum(["imageInput", "pathReference"]),
+  })
+  .strict();
+
 export const chatPromptRequestSchema = z
   .object({
     runtimeId: z.string(),
     text: z.string().trim().min(1),
+    attachments: z.array(chatPromptAttachmentSchema).optional(),
   })
   .strict();
 

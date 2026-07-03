@@ -44,6 +44,7 @@ import { registerValidatedIpc } from "./ipc/registerIpc.js";
 import { SinglePiAdapter } from "./pi/piAdapter.js";
 import { selectAvailableRuntime } from "./runtimeSelection.js";
 import { scanSessionRepository } from "./pi/sessionRepository.js";
+import type { PromptInput } from "./pi/types.js";
 import {
   resolveEffectivePiConfig,
   resolvePiBinary,
@@ -77,6 +78,14 @@ let warmChatWorkerPromise: Promise<ChatWorkerSpec | undefined> | undefined;
 let warmChatWorkerSessionFile: string | undefined;
 let chatEventUnsubscribe: (() => void) | undefined;
 let isQuittingAfterChatWorkerCleanup = false;
+
+interface AttachmentSelectionRecord {
+  filePath: string;
+  kind: AttachmentDraft["kind"];
+  mimeType?: string;
+}
+
+const attachmentSelections = new Map<string, AttachmentSelectionRecord>();
 
 async function bootstrap(): Promise<void> {
   await app.whenReady();
@@ -272,11 +281,12 @@ function registerIpcHandlers(
     requestSchema: chatPromptRequestSchema,
     responseSchema: z.void(),
     diagnostics: diagnosticsService,
-    handler: async ({ runtimeId, text }) => {
+    handler: async ({ runtimeId, text, attachments }) => {
       const adapter = await ensureChatAdapter(store, diagnosticsService);
-      await adapter.prompt(resolveActiveChatRuntimeId(adapter, runtimeId), {
-        text,
-      });
+      await adapter.prompt(
+        resolveActiveChatRuntimeId(adapter, runtimeId),
+        await buildPromptInput(text, attachments ?? []),
+      );
       return undefined;
     },
   });
@@ -976,8 +986,59 @@ async function safeRealpath(filePath: string): Promise<string | undefined> {
   }
 }
 
-// M4 UI shell only: token-shaped metadata is returned for renderer authority shape.
-// Real token registry/path validation for sending is implemented in AttachmentService later.
+async function buildPromptInput(
+  text: string,
+  attachments: NonNullable<
+    z.infer<typeof chatPromptRequestSchema>["attachments"]
+  >,
+): Promise<PromptInput> {
+  const imageInputs: NonNullable<PromptInput["images"]> = [];
+  const pathReferences: string[] = [];
+
+  for (const attachment of attachments) {
+    const selection = attachmentSelections.get(attachment.selectedPathToken);
+    if (selection === undefined) {
+      throw new Error(
+        "Attachment is no longer available; reselect it and retry.",
+      );
+    }
+
+    await assertAttachmentReadable(selection.filePath);
+
+    if (attachment.sendMode === "imageInput") {
+      if (selection.kind !== "image" || selection.mimeType === undefined) {
+        throw new Error("Selected attachment is not a supported image.");
+      }
+      const data = await fs.readFile(selection.filePath);
+      imageInputs.push({
+        mimeType: selection.mimeType,
+        dataBase64: data.toString("base64"),
+      });
+    } else {
+      pathReferences.push(selection.filePath);
+    }
+  }
+
+  const referencedPaths = pathReferences
+    .map((filePath) => `- ${filePath}`)
+    .join("\n");
+  const promptText = referencedPaths
+    ? `${text}\n\nReferenced file paths:\n${referencedPaths}`
+    : text;
+
+  return {
+    text: promptText,
+    ...(imageInputs.length > 0 ? { images: imageInputs } : {}),
+  };
+}
+
+async function assertAttachmentReadable(filePath: string): Promise<void> {
+  const status = await getFileStatus(filePath);
+  if (status !== "ready") {
+    throw new Error(`Attachment is ${status}: ${filePath}`);
+  }
+}
+
 async function buildAttachmentDraft(
   filePath: string,
   projectRoot: string | undefined,
@@ -1001,9 +1062,18 @@ async function buildAttachmentDraft(
       ? "Binary/unknown files are referenced by path only."
       : undefined;
 
+  const selectedPathToken = randomUUID();
+  if (canonicalPath && status === "ready") {
+    attachmentSelections.set(selectedPathToken, {
+      filePath: canonicalPath,
+      kind,
+      ...(imageMimeType ? { mimeType: imageMimeType } : {}),
+    });
+  }
+
   return {
     id: randomUUID(),
-    selectedPathToken: randomUUID(),
+    selectedPathToken,
     fileName: path.basename(filePath),
     displayPath: filePath,
     ...(imageMimeType ? { mimeType: imageMimeType } : {}),

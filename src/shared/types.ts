@@ -56,7 +56,14 @@ export interface PiDeckApi {
       runtimeId: string;
       level: string;
     }): Promise<ChatSnapshot>;
-    prompt(request: { runtimeId: string; text: string }): Promise<void>;
+    prompt(request: {
+      runtimeId: string;
+      text: string;
+      attachments?: Array<{
+        selectedPathToken: string;
+        sendMode: "imageInput" | "pathReference";
+      }>;
+    }): Promise<void>;
     abort(request: { runtimeId: string }): Promise<void>;
     createSession(): Promise<ChatSnapshot>;
     reset(): Promise<ChatSnapshot>;

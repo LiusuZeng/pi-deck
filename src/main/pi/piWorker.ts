@@ -23,6 +23,15 @@ function toJsonObject(input: PromptInput): JsonObject {
   for (const [key, value] of Object.entries(input)) {
     result[key] = value as JsonValue;
   }
+  if (Array.isArray(input.images)) {
+    result.images = input.images.map(
+      (image): JsonObject => ({
+        type: "image",
+        mimeType: image.mimeType,
+        data: image.dataBase64,
+      }),
+    );
+  }
   // Pi RPC uses `message`; older fake/test fixtures use `text`. Send both at
   // this adapter boundary so the renderer can keep one `text` contract while
   // real `pi --mode rpc` receives the documented field.

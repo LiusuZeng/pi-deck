@@ -116,7 +116,14 @@ const api: PiDeckApi = Object.freeze({
         request: chatSetThinkingRequestSchema.parse(request),
         responseSchema: chatSnapshotSchema,
       }),
-    prompt: (request: { runtimeId: string; text: string }) =>
+    prompt: (request: {
+      runtimeId: string;
+      text: string;
+      attachments?: Array<{
+        selectedPathToken: string;
+        sendMode: "imageInput" | "pathReference";
+      }>;
+    }) =>
       invokeValidated({
         channel: ipcChannels.chatPrompt,
         request: chatPromptRequestSchema.parse(request),

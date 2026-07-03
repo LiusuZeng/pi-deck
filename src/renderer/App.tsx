@@ -591,10 +591,11 @@ export function App(): ReactElement {
   async function resumeSessionAndSend(
     session: SessionViewModel,
     prompt: string,
+    promptAttachments: AttachmentDraft[],
   ): Promise<void> {
     const resumed = await resumeSession(session);
     if (resumed !== undefined) {
-      await sendPrompt(resumed.id, prompt);
+      await sendPrompt(resumed.id, prompt, promptAttachments);
     }
   }
 
@@ -606,7 +607,7 @@ export function App(): ReactElement {
       selectedSession.resumeBacked === true &&
       selectedSession.sessionFile !== undefined
     ) {
-      void resumeSessionAndSend(selectedSession, draft.trimEnd());
+      void resumeSessionAndSend(selectedSession, draft.trimEnd(), attachments);
       return;
     }
     if (!selectedSession.runtimeBacked) {
@@ -626,14 +627,19 @@ export function App(): ReactElement {
       return;
     }
 
-    void sendPrompt(selectedSession.id, draft.trimEnd());
+    void sendPrompt(selectedSession.id, draft.trimEnd(), attachments);
   }
 
-  async function sendPrompt(runtimeId: string, prompt: string): Promise<void> {
+  async function sendPrompt(
+    runtimeId: string,
+    prompt: string,
+    promptAttachments: AttachmentDraft[],
+  ): Promise<void> {
     const now = formatTime();
     setComposerError(null);
     setDraft("");
     setSlashOpen(false);
+    setAttachments([]);
     setSessions((current) =>
       current.map((session) =>
         session.id === runtimeId
@@ -650,7 +656,7 @@ export function App(): ReactElement {
                 {
                   id: createId("user"),
                   kind: "user",
-                  content: prompt,
+                  content: userTimelineContent(prompt, promptAttachments),
                   createdAt: now,
                 },
               ],
@@ -660,9 +666,17 @@ export function App(): ReactElement {
     );
 
     try {
-      await window.piDeck.chat.prompt({ runtimeId, text: prompt });
+      await window.piDeck.chat.prompt({
+        runtimeId,
+        text: prompt,
+        attachments: promptAttachments.map((attachment) => ({
+          selectedPathToken: attachment.selectedPathToken,
+          sendMode: attachment.sendMode,
+        })),
+      });
     } catch (error) {
       setComposerError(error instanceof Error ? error.message : String(error));
+      setAttachments(promptAttachments);
       setSessions((current) =>
         current.map((session) =>
           session.id === runtimeId
@@ -1229,6 +1243,27 @@ function summarizeToolDetails(content: string, maxLength: number): string {
     return singleLine || "Tool output";
   }
   return `${singleLine.slice(0, maxLength - 1)}…`;
+}
+
+function userTimelineContent(
+  prompt: string,
+  attachments: AttachmentDraft[],
+): string {
+  const readyAttachments = attachments.filter(
+    (attachment) => attachment.status === "ready",
+  );
+  if (readyAttachments.length === 0) {
+    return prompt;
+  }
+
+  const summary = readyAttachments
+    .map((attachment) => {
+      const label =
+        attachment.sendMode === "imageInput" ? "image" : "referenced path";
+      return `- ${attachment.fileName} (${label})`;
+    })
+    .join("\n");
+  return `${prompt}\n\nAttachments:\n${summary}`;
 }
 
 function timelineFromMessages(

@@ -5,6 +5,7 @@ import {
   appSettingsSchema,
   attachmentDraftSchema,
   attachmentPickerRequestSchema,
+  chatPromptRequestSchema,
   pickProjectResultSchema,
   projectRefSchema,
 } from "./ipcSchemas.js";
@@ -64,6 +65,29 @@ describe("IPC schemas", () => {
       pickProjectResultSchema.parse({
         selected: true,
         project: { ...project, id: 42 },
+      }),
+    ).toThrow();
+  });
+
+  it("validates prompt attachment tokens without file paths", () => {
+    expect(
+      chatPromptRequestSchema.parse({
+        runtimeId: "runtime-1",
+        text: "Summarize these",
+        attachments: [
+          { selectedPathToken: "token-1", sendMode: "pathReference" },
+          { selectedPathToken: "token-2", sendMode: "imageInput" },
+        ],
+      }),
+    ).toMatchObject({ runtimeId: "runtime-1" });
+
+    expect(() =>
+      chatPromptRequestSchema.parse({
+        runtimeId: "runtime-1",
+        text: "Summarize this",
+        attachments: [
+          { selectedPathToken: "token-1", filePath: "/etc/passwd" },
+        ],
       }),
     ).toThrow();
   });
