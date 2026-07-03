@@ -413,9 +413,32 @@ export function App(): ReactElement {
         if (api === undefined) {
           throw new Error("Preload API window.piDeck is unavailable");
         }
+        const deckApi = api;
+        async function refreshRuntimeUsage(runtimeId: string): Promise<void> {
+          try {
+            const snapshot = await deckApi.chat.getSnapshot();
+            if (disposed || snapshot.runtimeId !== runtimeId) {
+              return;
+            }
+            const refreshed = sessionFromSnapshot(snapshot);
+            setSessions((items) =>
+              items.map((item) =>
+                item.id === runtimeId
+                  ? mergeSessionUsageFromSnapshot(item, refreshed)
+                  : item,
+              ),
+            );
+          } catch {
+            // Usage is best-effort; keep the streamed conversation visible.
+          }
+        }
+
         unsubscribe = api.chat.onEvent((event) => {
           if (!disposed) {
             applyRuntimeEvent(event);
+            if (event.type === "agent_end") {
+              void refreshRuntimeUsage(event.runtimeId);
+            }
           }
         });
         const [version, settings, diagnostics, snapshot] = await Promise.all([
@@ -1164,6 +1187,27 @@ function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
     session.thinkingLevel = snapshot.state.thinkingLevel;
   }
   return session;
+}
+
+function mergeSessionUsageFromSnapshot(
+  session: SessionViewModel,
+  snapshotSession: SessionViewModel,
+): SessionViewModel {
+  return {
+    ...session,
+    ...(snapshotSession.usageStats !== undefined
+      ? { usageStats: snapshotSession.usageStats }
+      : {}),
+    ...(snapshotSession.usageByMessageId !== undefined
+      ? { usageByMessageId: snapshotSession.usageByMessageId }
+      : {}),
+    ...(snapshotSession.modelLabel !== undefined
+      ? { modelLabel: snapshotSession.modelLabel }
+      : {}),
+    ...(snapshotSession.thinkingLevel !== undefined
+      ? { thinkingLevel: snapshotSession.thinkingLevel }
+      : {}),
+  };
 }
 
 function modelLabelFromState(state: ChatSnapshot["state"]): string {
@@ -3329,6 +3373,7 @@ function processCwdPlaceholder(mode: "fake" | "real"): string {
 export const __rendererTestHooks = {
   reduceRuntimeEvent,
   sessionFromSnapshot,
+  mergeSessionUsageFromSnapshot,
 };
 
 function getRendererNodeAccessSummary(): string {

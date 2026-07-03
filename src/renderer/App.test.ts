@@ -73,6 +73,34 @@ describe("renderer message_update reduction", () => {
     ]);
   });
 
+  it("merges refreshed Pi usage without replacing streamed timeline", () => {
+    const current = {
+      ...baseSession(),
+      timeline: [
+        { id: "user-1", kind: "user", content: "hello", createdAt: "now" },
+      ],
+    } as any;
+    const refreshed = {
+      ...baseSession(),
+      usageStats: {
+        inputTokens: 10,
+        outputTokens: 5,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        totalTokens: 15,
+      },
+      timeline: [],
+    } as any;
+
+    const next = __rendererTestHooks.mergeSessionUsageFromSnapshot(
+      current,
+      refreshed,
+    );
+
+    expect(next.timeline).toEqual(current.timeline);
+    expect(next.usageStats).toMatchObject({ inputTokens: 10, outputTokens: 5 });
+  });
+
   it("summarizes Pi message usage and model context window", () => {
     const session = __rendererTestHooks.sessionFromSnapshot({
       runtimeId: "runtime-1",
