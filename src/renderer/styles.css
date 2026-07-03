@@ -356,11 +356,17 @@ textarea:disabled {
 }
 
 .usage-stats {
+  position: absolute;
+  top: 0;
+  right: 42px;
+  z-index: 5;
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 6px;
-  max-width: 560px;
+  width: max-content;
+  max-width: min(760px, calc(100vw - 460px));
+  pointer-events: auto;
 }
 
 .usage-stats span,
@@ -493,6 +499,7 @@ h1 {
 }
 
 .header-right {
+  position: relative;
   display: grid;
   gap: 6px;
   justify-items: end;
@@ -1096,6 +1103,13 @@ h1 {
   .header-right {
     justify-items: stretch;
     min-width: 0;
+  }
+
+  .usage-stats {
+    position: static;
+    width: auto;
+    max-width: none;
+    justify-content: flex-start;
   }
 
   .capabilities {
