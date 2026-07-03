@@ -42,6 +42,7 @@ import type {
 import { DiagnosticsService } from "./diagnostics/diagnostics.js";
 import { registerValidatedIpc } from "./ipc/registerIpc.js";
 import { SinglePiAdapter } from "./pi/piAdapter.js";
+import { selectAvailableRuntime } from "./runtimeSelection.js";
 import { scanSessionRepository } from "./pi/sessionRepository.js";
 import {
   resolveEffectivePiConfig,
@@ -524,31 +525,25 @@ function resolveActiveChatRuntimeId(
   adapter: SinglePiAdapter,
   requestedRuntimeId: string,
 ): string {
-  if (
-    chatRuntimeIds.has(requestedRuntimeId) &&
-    adapter.hasRuntime(requestedRuntimeId)
-  ) {
-    return requestedRuntimeId;
+  const selection = selectAvailableRuntime({
+    requestedRuntimeId,
+    activeRuntimeId: chatRuntimeId,
+    runtimeIds: chatRuntimeIds,
+    hasRuntime: (runtimeId) => adapter.hasRuntime(runtimeId),
+  });
+
+  if (selection.reason === "requested" && selection.runtimeId !== undefined) {
+    return selection.runtimeId;
   }
 
   forgetChatRuntime(requestedRuntimeId);
 
-  if (chatRuntimeId !== undefined && adapter.hasRuntime(chatRuntimeId)) {
+  if (selection.runtimeId !== undefined) {
+    chatRuntimeId = selection.runtimeId;
     diagnostics?.recordError(
-      `Renderer requested stale chat runtime ${requestedRuntimeId}; using active runtime ${chatRuntimeId}.`,
+      `Renderer requested stale chat runtime ${requestedRuntimeId}; using ${selection.reason} runtime ${selection.runtimeId}.`,
     );
-    return chatRuntimeId;
-  }
-
-  const fallbackRuntimeId = [...chatRuntimeIds].find((runtimeId) =>
-    adapter.hasRuntime(runtimeId),
-  );
-  if (fallbackRuntimeId !== undefined) {
-    chatRuntimeId = fallbackRuntimeId;
-    diagnostics?.recordError(
-      `Renderer requested unavailable chat runtime ${requestedRuntimeId}; using available runtime ${fallbackRuntimeId}.`,
-    );
-    return fallbackRuntimeId;
+    return selection.runtimeId;
   }
 
   throw new Error("Chat runtime is not initialized");
