@@ -273,7 +273,9 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async ({ runtimeId, text }) => {
       const adapter = await ensureChatAdapter(store, diagnosticsService);
-      await adapter.prompt(resolveActiveChatRuntimeId(runtimeId), { text });
+      await adapter.prompt(resolveActiveChatRuntimeId(adapter, runtimeId), {
+        text,
+      });
       return undefined;
     },
   });
@@ -285,7 +287,7 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async ({ runtimeId }) => {
       const adapter = await ensureChatAdapter(store, diagnosticsService);
-      await adapter.abort(resolveActiveChatRuntimeId(runtimeId));
+      await adapter.abort(resolveActiveChatRuntimeId(adapter, runtimeId));
       return undefined;
     },
   });
@@ -518,17 +520,55 @@ function resolveChatBackendMode(): ChatBackendMode {
   return process.env.PI_DECK_BACKEND === "real" ? "real" : "fake";
 }
 
-function resolveActiveChatRuntimeId(requestedRuntimeId: string): string {
-  if (chatRuntimeIds.has(requestedRuntimeId)) {
+function resolveActiveChatRuntimeId(
+  adapter: SinglePiAdapter,
+  requestedRuntimeId: string,
+): string {
+  if (
+    chatRuntimeIds.has(requestedRuntimeId) &&
+    adapter.hasRuntime(requestedRuntimeId)
+  ) {
     return requestedRuntimeId;
   }
-  if (chatRuntimeId === undefined) {
-    throw new Error("Chat runtime is not initialized");
+
+  forgetChatRuntime(requestedRuntimeId);
+
+  if (chatRuntimeId !== undefined && adapter.hasRuntime(chatRuntimeId)) {
+    diagnostics?.recordError(
+      `Renderer requested stale chat runtime ${requestedRuntimeId}; using active runtime ${chatRuntimeId}.`,
+    );
+    return chatRuntimeId;
   }
-  diagnostics?.recordError(
-    `Renderer requested stale chat runtime ${requestedRuntimeId}; using active runtime ${chatRuntimeId}.`,
+
+  const fallbackRuntimeId = [...chatRuntimeIds].find((runtimeId) =>
+    adapter.hasRuntime(runtimeId),
   );
-  return chatRuntimeId;
+  if (fallbackRuntimeId !== undefined) {
+    chatRuntimeId = fallbackRuntimeId;
+    diagnostics?.recordError(
+      `Renderer requested unavailable chat runtime ${requestedRuntimeId}; using available runtime ${fallbackRuntimeId}.`,
+    );
+    return fallbackRuntimeId;
+  }
+
+  throw new Error("Chat runtime is not initialized");
+}
+
+function forgetChatRuntime(runtimeId: string): void {
+  chatRuntimeIds.delete(runtimeId);
+  chatRuntimeModes.delete(runtimeId);
+  chatWorkerCwds.delete(runtimeId);
+  const sessionFile = chatRuntimeSessionFiles.get(runtimeId);
+  if (
+    sessionFile !== undefined &&
+    chatSessionFileLocks.get(sessionFile) === runtimeId
+  ) {
+    chatSessionFileLocks.delete(sessionFile);
+  }
+  chatRuntimeSessionFiles.delete(runtimeId);
+  if (chatRuntimeId === runtimeId) {
+    chatRuntimeId = undefined;
+  }
 }
 
 interface ChatWorkerSpec {
@@ -698,7 +738,7 @@ async function listChatModels(
 ): Promise<z.infer<typeof chatListModelsResultSchema>> {
   const adapter = await ensureChatAdapter(store, diagnosticsService);
   const response = await adapter.request(
-    resolveActiveChatRuntimeId(runtimeId),
+    resolveActiveChatRuntimeId(adapter, runtimeId),
     "get_available_models",
   );
   if (
@@ -720,7 +760,7 @@ async function setChatModel(
   modelId: string,
 ): Promise<ChatSnapshot> {
   const adapter = await ensureChatAdapter(store, diagnosticsService);
-  const activeRuntimeId = resolveActiveChatRuntimeId(runtimeId);
+  const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
   await adapter.request(activeRuntimeId, "set_model", { provider, modelId });
   return getChatSnapshotForRuntime(
     adapter,
@@ -737,7 +777,7 @@ async function setChatThinking(
   level: string,
 ): Promise<ChatSnapshot> {
   const adapter = await ensureChatAdapter(store, diagnosticsService);
-  const activeRuntimeId = resolveActiveChatRuntimeId(runtimeId);
+  const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
   await adapter.request(activeRuntimeId, "set_thinking_level", { level });
   return getChatSnapshotForRuntime(
     adapter,

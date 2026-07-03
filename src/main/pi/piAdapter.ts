@@ -31,6 +31,10 @@ export class SinglePiAdapter implements PiAdapter {
     return worker;
   }
 
+  hasRuntime(runtimeId: RuntimeSessionId): boolean {
+    return this.workers.has(runtimeId);
+  }
+
   getWorker(runtimeId: RuntimeSessionId): PiWorker {
     const worker = this.workers.get(runtimeId);
     if (!worker) {
