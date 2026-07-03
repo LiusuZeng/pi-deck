@@ -219,6 +219,24 @@ export const attachmentDraftSchema = z
     outsideProject: z.boolean(),
     status: z.enum(["ready", "missing", "unreadable"]),
     warning: z.string().optional(),
+    previewDataUrl: z.string().optional(),
+  })
+  .strict();
+
+export const attachmentImportImageRequestSchema = z
+  .object({
+    images: z
+      .array(
+        z
+          .object({
+            fileName: z.string().min(1),
+            mimeType: z.string().min(1),
+            size: z.number().int().nonnegative(),
+            dataBase64: z.string().min(1),
+          })
+          .strict(),
+      )
+      .min(1),
   })
   .strict();
 
@@ -266,6 +284,7 @@ export const ipcChannels = {
   chatEvent: "chat:event",
   projectPickFolder: "project:pickFolder",
   attachmentsPickFiles: "attachments:pickFiles",
+  attachmentsImportImages: "attachments:importImages",
 } as const;
 
 export type IpcChannel = (typeof ipcChannels)[keyof typeof ipcChannels];

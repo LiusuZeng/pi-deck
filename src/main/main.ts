@@ -14,6 +14,7 @@ import { z } from "zod";
 import {
   appSettingsPatchSchema,
   appSettingsSchema,
+  attachmentImportImageRequestSchema,
   attachmentPickerRequestSchema,
   chatAbortRequestSchema,
   chatListModelsRequestSchema,
@@ -80,12 +81,15 @@ let chatEventUnsubscribe: (() => void) | undefined;
 let isQuittingAfterChatWorkerCleanup = false;
 
 interface AttachmentSelectionRecord {
-  filePath: string;
+  filePath?: string;
   kind: AttachmentDraft["kind"];
   mimeType?: string;
+  imageDataBase64?: string;
+  size?: number;
 }
 
 const attachmentSelections = new Map<string, AttachmentSelectionRecord>();
+const maxImportedImageBytes = 20 * 1024 * 1024;
 
 async function bootstrap(): Promise<void> {
   await app.whenReady();
@@ -386,6 +390,17 @@ function registerIpcHandlers(
         ),
       };
     },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.attachmentsImportImages,
+    requestSchema: attachmentImportImageRequestSchema,
+    responseSchema: pickAttachmentsResultSchema,
+    diagnostics: diagnosticsService,
+    handler: (request): PickAttachmentsResult => ({
+      selected: true,
+      attachments: request.images.map(importImageAttachmentDraft),
+    }),
   });
 }
 
@@ -1003,18 +1018,31 @@ async function buildPromptInput(
       );
     }
 
-    await assertAttachmentReadable(selection.filePath);
-
     if (attachment.sendMode === "imageInput") {
       if (selection.kind !== "image" || selection.mimeType === undefined) {
         throw new Error("Selected attachment is not a supported image.");
       }
-      const data = await fs.readFile(selection.filePath);
+      const dataBase64 =
+        selection.imageDataBase64 ??
+        (selection.filePath
+          ? await readImageAttachmentBase64(selection.filePath)
+          : undefined);
+      if (dataBase64 === undefined) {
+        throw new Error(
+          "Image attachment is no longer available; reselect it and retry.",
+        );
+      }
       imageInputs.push({
         mimeType: selection.mimeType,
-        dataBase64: data.toString("base64"),
+        dataBase64,
       });
     } else {
+      if (selection.filePath === undefined) {
+        throw new Error(
+          "Referenced attachment is no longer available; reselect it and retry.",
+        );
+      }
+      await assertAttachmentReadable(selection.filePath);
       pathReferences.push(selection.filePath);
     }
   }
@@ -1029,6 +1057,49 @@ async function buildPromptInput(
   return {
     text: promptText,
     ...(imageInputs.length > 0 ? { images: imageInputs } : {}),
+  };
+}
+
+async function readImageAttachmentBase64(
+  filePath: string,
+): Promise<string | undefined> {
+  await assertAttachmentReadable(filePath);
+  const data = await fs.readFile(filePath);
+  return data.toString("base64");
+}
+
+function importImageAttachmentDraft(
+  image: z.infer<typeof attachmentImportImageRequestSchema>["images"][number],
+): AttachmentDraft {
+  if (!isSupportedImageMimeType(image.mimeType)) {
+    throw new Error(`Unsupported image type: ${image.mimeType}`);
+  }
+  if (image.size > maxImportedImageBytes) {
+    throw new Error(
+      "Image is too large to import; choose an image under 20 MB.",
+    );
+  }
+
+  const selectedPathToken = randomUUID();
+  attachmentSelections.set(selectedPathToken, {
+    kind: "image",
+    mimeType: image.mimeType,
+    imageDataBase64: image.dataBase64,
+    size: image.size,
+  });
+
+  return {
+    id: randomUUID(),
+    selectedPathToken,
+    fileName: image.fileName,
+    displayPath: image.fileName,
+    mimeType: image.mimeType,
+    size: image.size,
+    kind: "image",
+    sendMode: "imageInput",
+    outsideProject: false,
+    status: "ready",
+    previewDataUrl: `data:${image.mimeType};base64,${image.dataBase64}`,
   };
 }
 
@@ -1106,6 +1177,12 @@ async function statIfReadable(
   } catch {
     return undefined;
   }
+}
+
+function isSupportedImageMimeType(mimeType: string): boolean {
+  return new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]).has(
+    mimeType,
+  );
 }
 
 function getImageMimeType(extension: string): string | undefined {

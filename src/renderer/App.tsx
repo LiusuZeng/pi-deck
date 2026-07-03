@@ -4,6 +4,8 @@ import {
   useMemo,
   useRef,
   useState,
+  type ClipboardEvent,
+  type DragEvent,
   type KeyboardEvent,
   type ReactElement,
 } from "react";
@@ -42,12 +44,22 @@ type LoadState =
 
 type SessionStatus = "idle" | "working" | "waiting" | "error";
 
+interface TimelineAttachment {
+  id: string;
+  fileName: string;
+  kind: AttachmentDraft["kind"];
+  sendMode: AttachmentDraft["sendMode"];
+  mimeType?: string;
+  previewDataUrl?: string;
+}
+
 type TimelineItem =
   | {
       id: string;
       kind: "user";
       content: string;
       createdAt: string;
+      attachments?: TimelineAttachment[];
     }
   | {
       id: string;
@@ -636,6 +648,7 @@ export function App(): ReactElement {
     promptAttachments: AttachmentDraft[],
   ): Promise<void> {
     const now = formatTime();
+    const sentAttachments = timelineAttachmentsFromDrafts(promptAttachments);
     setComposerError(null);
     setDraft("");
     setSlashOpen(false);
@@ -656,8 +669,9 @@ export function App(): ReactElement {
                 {
                   id: createId("user"),
                   kind: "user",
-                  content: userTimelineContent(prompt, promptAttachments),
+                  content: prompt,
                   createdAt: now,
+                  ...(sentAttachments ? { attachments: sentAttachments } : {}),
                 },
               ],
             }
@@ -838,6 +852,29 @@ export function App(): ReactElement {
     }
   }
 
+  async function handleImportImageAttachments(files: File[]): Promise<void> {
+    const imageFiles = files.filter((file) => isSupportedDroppedImage(file));
+    if (imageFiles.length === 0) {
+      setUiMessage("Drop or paste PNG, JPEG, WebP, or GIF images.");
+      return;
+    }
+
+    try {
+      const images = await Promise.all(imageFiles.map(readDroppedImageFile));
+      const result = await window.piDeck.attachments.importImages({ images });
+      if (result.selected) {
+        setAttachments((existing) => [...existing, ...result.attachments]);
+        setUiMessage(
+          `Imported ${result.attachments.length} image attachment(s).`,
+        );
+      }
+    } catch (error) {
+      setUiMessage(
+        `Image import failed (${error instanceof Error ? error.message : String(error)}).`,
+      );
+    }
+  }
+
   async function handleNewSession(): Promise<void> {
     if (isRealBackendMode) {
       setComposerError(null);
@@ -966,6 +1003,9 @@ export function App(): ReactElement {
           onSend={handleSend}
           onAbort={handleAbort}
           onPickAttachments={() => void handlePickAttachments()}
+          onImportImageAttachments={(files) =>
+            void handleImportImageAttachments(files)
+          }
           onSetModel={(provider, modelId) =>
             void handleSetRealModel(provider, modelId)
           }
@@ -1245,25 +1285,24 @@ function summarizeToolDetails(content: string, maxLength: number): string {
   return `${singleLine.slice(0, maxLength - 1)}…`;
 }
 
-function userTimelineContent(
-  prompt: string,
+function timelineAttachmentsFromDrafts(
   attachments: AttachmentDraft[],
-): string {
-  const readyAttachments = attachments.filter(
-    (attachment) => attachment.status === "ready",
-  );
-  if (readyAttachments.length === 0) {
-    return prompt;
-  }
-
-  const summary = readyAttachments
-    .map((attachment) => {
-      const label =
-        attachment.sendMode === "imageInput" ? "image" : "referenced path";
-      return `- ${attachment.fileName} (${label})`;
-    })
-    .join("\n");
-  return `${prompt}\n\nAttachments:\n${summary}`;
+): TimelineAttachment[] | undefined {
+  const timelineAttachments = attachments
+    .filter((attachment) => attachment.status === "ready")
+    .map(
+      (attachment): TimelineAttachment => ({
+        id: attachment.id,
+        fileName: attachment.fileName,
+        kind: attachment.kind,
+        sendMode: attachment.sendMode,
+        ...(attachment.mimeType ? { mimeType: attachment.mimeType } : {}),
+        ...(attachment.previewDataUrl
+          ? { previewDataUrl: attachment.previewDataUrl }
+          : {}),
+      }),
+    );
+  return timelineAttachments.length > 0 ? timelineAttachments : undefined;
 }
 
 function timelineFromMessages(
@@ -2330,6 +2369,9 @@ function TimelineRow(props: { item: TimelineItem }): ReactElement {
       <article className="timeline-row user-row">
         <div className="bubble user-bubble">
           <p>{props.item.content}</p>
+          {props.item.attachments ? (
+            <TimelineAttachmentGrid attachments={props.item.attachments} />
+          ) : null}
           <time>{props.item.createdAt}</time>
         </div>
       </article>
@@ -2391,6 +2433,30 @@ function TimelineRow(props: { item: TimelineItem }): ReactElement {
       <strong>{props.item.tone === "error" ? "Error" : "Diagnostic"}</strong>
       <span>{props.item.content}</span>
     </article>
+  );
+}
+
+function TimelineAttachmentGrid(props: {
+  attachments: TimelineAttachment[];
+}): ReactElement {
+  return (
+    <div className="timeline-attachments" aria-label="Sent attachments">
+      {props.attachments.map((attachment) => (
+        <span className="timeline-attachment" key={attachment.id}>
+          {attachment.previewDataUrl ? (
+            <img src={attachment.previewDataUrl} alt={attachment.fileName} />
+          ) : null}
+          <span>
+            <strong>{attachment.fileName}</strong>
+            <em>
+              {attachment.sendMode === "imageInput"
+                ? (attachment.mimeType ?? "Image")
+                : "Referenced path"}
+            </em>
+          </span>
+        </span>
+      ))}
+    </div>
   );
 }
 
@@ -2512,6 +2578,7 @@ function Composer(props: {
   onSend(): void;
   onAbort(): void;
   onPickAttachments(): void;
+  onImportImageAttachments(files: File[]): void;
   onSetModel(provider: string, modelId: string): void;
   onSetThinking(level: string): void;
   onRemoveAttachment(id: string): void;
@@ -2524,9 +2591,42 @@ function Composer(props: {
     /\s+\/\s+/,
     "/",
   );
+  const [dragActive, setDragActive] = useState(false);
+
+  function handleDrop(event: DragEvent<HTMLElement>): void {
+    event.preventDefault();
+    setDragActive(false);
+    const files = Array.from(event.dataTransfer.files);
+    if (files.length > 0) {
+      props.onImportImageAttachments(files);
+    }
+  }
+
+  function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>): void {
+    const files = Array.from(event.clipboardData.files);
+    if (files.some(isSupportedDroppedImage)) {
+      props.onImportImageAttachments(files);
+    }
+  }
 
   return (
-    <footer className="composer" aria-label="Prompt composer">
+    <footer
+      className={`composer ${dragActive ? "drag-active" : ""}`}
+      aria-label="Prompt composer"
+      onDragEnter={(event) => {
+        event.preventDefault();
+        setDragActive(true);
+      }}
+      onDragOver={(event) => {
+        event.preventDefault();
+      }}
+      onDragLeave={(event) => {
+        if (event.currentTarget === event.target) {
+          setDragActive(false);
+        }
+      }}
+      onDrop={handleDrop}
+    >
       {props.allowAttachments ? (
         <button
           className="attachment-button"
@@ -2550,6 +2650,7 @@ function Composer(props: {
             props.onChange(event.target.value);
           }}
           onKeyDown={props.onKeyDown}
+          onPaste={handlePaste}
           placeholder={
             props.enterToSend
               ? "Prompt Pi Deck… Enter to send, Shift+Enter for newline"
@@ -2696,6 +2797,9 @@ function AttachmentChipRow(props: {
           key={attachment.id}
           className={`attachment-chip ${attachment.status !== "ready" ? "bad" : ""}`}
         >
+          {attachment.previewDataUrl ? (
+            <img src={attachment.previewDataUrl} alt="" />
+          ) : null}
           <strong>{attachment.fileName}</strong>
           <em>
             {attachment.kind === "image"
@@ -3035,6 +3139,42 @@ function getBoolean(event: ChatRuntimeEvent, key: string): boolean | undefined {
 
 function getUnknown(event: ChatRuntimeEvent, key: string): unknown {
   return (event as Record<string, unknown>)[key];
+}
+
+function isSupportedDroppedImage(file: File): boolean {
+  return new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]).has(
+    file.type,
+  );
+}
+
+async function readDroppedImageFile(file: File): Promise<{
+  fileName: string;
+  mimeType: string;
+  size: number;
+  dataBase64: string;
+}> {
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => {
+      if (typeof reader.result === "string") {
+        resolve(reader.result);
+      } else {
+        reject(new Error("Failed to read image data."));
+      }
+    });
+    reader.addEventListener("error", () => reject(reader.error));
+    reader.readAsDataURL(file);
+  });
+  const [, dataBase64] = dataUrl.split(",", 2);
+  if (!dataBase64) {
+    throw new Error("Failed to decode image data.");
+  }
+  return {
+    fileName: file.name || `dropped-image-${Date.now()}`,
+    mimeType: file.type,
+    size: file.size,
+    dataBase64,
+  };
 }
 
 function statusLabel(status: SessionStatus): string {

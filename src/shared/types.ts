@@ -2,6 +2,7 @@ import type { z } from "zod";
 import type {
   appSettingsSchema,
   attachmentDraftSchema,
+  attachmentImportImageRequestSchema,
   chatListModelsResultSchema,
   chatListSessionsResultSchema,
   chatMessageSchema,
@@ -31,6 +32,9 @@ export type ChatRuntimeEvent = z.infer<typeof chatRuntimeEventSchema>;
 export type ProjectRef = z.infer<typeof projectRefSchema>;
 export type PickProjectResult = z.infer<typeof pickProjectResultSchema>;
 export type AttachmentDraft = z.infer<typeof attachmentDraftSchema>;
+export type AttachmentImportImageRequest = z.infer<
+  typeof attachmentImportImageRequestSchema
+>;
 export type PickAttachmentsResult = z.infer<typeof pickAttachmentsResultSchema>;
 
 export interface PiDeckApi {
@@ -76,5 +80,8 @@ export interface PiDeckApi {
     pickFiles(request?: {
       projectPath?: string;
     }): Promise<PickAttachmentsResult>;
+    importImages(
+      request: AttachmentImportImageRequest,
+    ): Promise<PickAttachmentsResult>;
   };
 }

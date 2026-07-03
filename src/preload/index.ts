@@ -4,6 +4,7 @@ import {
   apiResponseSchema,
   appSettingsPatchSchema,
   appSettingsSchema,
+  attachmentImportImageRequestSchema,
   attachmentPickerRequestSchema,
   chatAbortRequestSchema,
   chatListModelsRequestSchema,
@@ -22,6 +23,7 @@ import {
 } from "../shared/ipcSchemas.js";
 import type {
   AppSettings,
+  AttachmentImportImageRequest,
   ChatRuntimeEvent,
   PiDeckApi,
 } from "../shared/types.js";
@@ -175,6 +177,12 @@ const api: PiDeckApi = Object.freeze({
       invokeValidated({
         channel: ipcChannels.attachmentsPickFiles,
         request: attachmentPickerRequestSchema.parse(request ?? {}),
+        responseSchema: pickAttachmentsResultSchema,
+      }),
+    importImages: (request: AttachmentImportImageRequest) =>
+      invokeValidated({
+        channel: ipcChannels.attachmentsImportImages,
+        request: attachmentImportImageRequestSchema.parse(request),
         responseSchema: pickAttachmentsResultSchema,
       }),
   }),

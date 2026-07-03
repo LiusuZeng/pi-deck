@@ -4,6 +4,7 @@ import {
   appSettingsPatchSchema,
   appSettingsSchema,
   attachmentDraftSchema,
+  attachmentImportImageRequestSchema,
   attachmentPickerRequestSchema,
   chatPromptRequestSchema,
   pickProjectResultSchema,
@@ -88,6 +89,27 @@ describe("IPC schemas", () => {
         attachments: [
           { selectedPathToken: "token-1", filePath: "/etc/passwd" },
         ],
+      }),
+    ).toThrow();
+  });
+
+  it("validates dropped image import payloads", () => {
+    expect(
+      attachmentImportImageRequestSchema.parse({
+        images: [
+          {
+            fileName: "screenshot.png",
+            mimeType: "image/png",
+            size: 123,
+            dataBase64: "abc123",
+          },
+        ],
+      }),
+    ).toMatchObject({ images: [{ fileName: "screenshot.png" }] });
+
+    expect(() =>
+      attachmentImportImageRequestSchema.parse({
+        images: [{ fileName: "x.png", mimeType: "image/png", path: "/tmp/x" }],
       }),
     ).toThrow();
   });

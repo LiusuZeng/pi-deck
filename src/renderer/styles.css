@@ -661,6 +661,49 @@ h1 {
   opacity: 0.72;
 }
 
+.timeline-attachments {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.timeline-attachment {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  border-radius: 12px;
+  padding: 7px;
+  color: #182033;
+  background: rgb(255 255 255 / 92%);
+}
+
+.timeline-attachment img {
+  width: 100%;
+  max-height: 160px;
+  border-radius: 10px;
+  object-fit: cover;
+  background: #eef2f6;
+}
+
+.timeline-attachment span {
+  display: grid;
+  min-width: 0;
+}
+
+.timeline-attachment strong,
+.timeline-attachment em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timeline-attachment em {
+  color: #667085;
+  font-size: 11px;
+  font-style: normal;
+}
+
 .assistant-avatar {
   display: grid;
   flex: 0 0 auto;
@@ -872,6 +915,11 @@ h1 {
   backdrop-filter: blur(18px);
 }
 
+.composer.drag-active {
+  background: #eff6ff;
+  box-shadow: inset 0 0 0 2px #84a9ff;
+}
+
 .attachment-button {
   align-self: end;
   width: 36px;
@@ -996,7 +1044,7 @@ h1 {
 
 .attachment-chip {
   display: inline-grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: auto 1fr auto;
   gap: 2px 8px;
   align-items: center;
   max-width: 280px;
@@ -1009,6 +1057,15 @@ h1 {
 .attachment-chip.bad {
   border-color: #fca5a5;
   background: #fff7f7;
+}
+
+.attachment-chip img {
+  grid-row: 1 / span 3;
+  width: 42px;
+  height: 42px;
+  border-radius: 10px;
+  object-fit: cover;
+  background: #eef2f6;
 }
 
 .attachment-chip strong,
@@ -1028,7 +1085,7 @@ h1 {
 
 .attachment-chip button {
   grid-row: 1 / span 3;
-  grid-column: 2;
+  grid-column: 3;
   border: 0;
   border-radius: 999px;
   width: 22px;
