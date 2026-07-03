@@ -101,6 +101,42 @@ describe("renderer message_update reduction", () => {
     expect(next.usageStats).toMatchObject({ inputTokens: 10, outputTokens: 5 });
   });
 
+  it("restores image previews from resumed user messages", () => {
+    const session = __rendererTestHooks.sessionFromSnapshot({
+      runtimeId: "runtime-1",
+      backendMode: "real",
+      state: { cwd: "/tmp/project" },
+      messages: [
+        {
+          id: "user-1",
+          role: "user",
+          content: "What is this?",
+          imageAttachments: [
+            {
+              id: "image-1",
+              fileName: "screenshot.png",
+              mimeType: "image/png",
+              dataBase64: "abc123",
+            },
+          ],
+        },
+      ],
+    } as any);
+
+    expect(session.timeline).toMatchObject([
+      {
+        id: "user-1",
+        kind: "user",
+        attachments: [
+          {
+            fileName: "screenshot.png",
+            previewDataUrl: "data:image/png;base64,abc123",
+          },
+        ],
+      },
+    ]);
+  });
+
   it("summarizes Pi message usage and model context window", () => {
     const session = __rendererTestHooks.sessionFromSnapshot({
       runtimeId: "runtime-1",

@@ -6,6 +6,7 @@ import {
   attachmentDraftSchema,
   attachmentImportImageRequestSchema,
   attachmentPickerRequestSchema,
+  chatMessageSchema,
   chatPromptRequestSchema,
   pickProjectResultSchema,
   projectRefSchema,
@@ -68,6 +69,35 @@ describe("IPC schemas", () => {
         project: { ...project, id: 42 },
       }),
     ).toThrow();
+  });
+
+  it("normalizes persisted user image content for resumed previews", () => {
+    expect(
+      chatMessageSchema.parse({
+        id: "msg-1",
+        role: "user",
+        content: [
+          { type: "text", text: "What is this?" },
+          {
+            type: "image",
+            id: "image-1",
+            fileName: "screenshot.png",
+            mimeType: "image/png",
+            data: "abc123",
+          },
+        ],
+      }),
+    ).toMatchObject({
+      content: "What is this?",
+      imageAttachments: [
+        {
+          id: "image-1",
+          fileName: "screenshot.png",
+          mimeType: "image/png",
+          dataBase64: "abc123",
+        },
+      ],
+    });
   });
 
   it("validates prompt attachment tokens without file paths", () => {

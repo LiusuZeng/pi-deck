@@ -34,17 +34,41 @@ export const diagnosticsSummarySchema = z
   })
   .strict();
 
-export const chatMessageSchema = z
+export const chatImageAttachmentSchema = z
   .object({
     id: z.string().optional(),
-    role: z.string(),
-    content: z.preprocess(
-      (value) => extractTextContent(value),
-      z.string().optional(),
-    ),
-    createdAt: z.number().optional(),
+    fileName: z.string().optional(),
+    mimeType: z.string(),
+    dataBase64: z.string(),
   })
-  .passthrough();
+  .strict();
+
+export const chatMessageSchema = z.preprocess(
+  (value) => normalizeChatMessage(value),
+  z
+    .object({
+      id: z.string().optional(),
+      role: z.string(),
+      content: z.string().optional(),
+      imageAttachments: z.array(chatImageAttachmentSchema).optional(),
+      createdAt: z.number().optional(),
+    })
+    .passthrough(),
+);
+
+function normalizeChatMessage(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return value;
+  }
+  const record = value as Record<string, unknown>;
+  const content = extractTextContent(record.content);
+  const imageAttachments = extractImageAttachments(record.content);
+  return {
+    ...record,
+    ...(content !== undefined ? { content } : {}),
+    ...(imageAttachments.length > 0 ? { imageAttachments } : {}),
+  };
+}
 
 function extractTextContent(value: unknown): string | undefined {
   if (typeof value === "string") {
@@ -64,6 +88,47 @@ function extractTextContent(value: unknown): string | undefined {
     return [];
   });
   return parts.length > 0 ? parts.join("\n") : undefined;
+}
+
+function extractImageAttachments(value: unknown): Array<{
+  id?: string;
+  fileName?: string;
+  mimeType: string;
+  dataBase64: string;
+}> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      return [];
+    }
+    const record = item as Record<string, unknown>;
+    if (record.type !== "image") {
+      return [];
+    }
+    const mimeType =
+      typeof record.mimeType === "string" ? record.mimeType : undefined;
+    const dataBase64 =
+      typeof record.data === "string"
+        ? record.data
+        : typeof record.dataBase64 === "string"
+          ? record.dataBase64
+          : undefined;
+    if (mimeType === undefined || dataBase64 === undefined) {
+      return [];
+    }
+    return [
+      {
+        id: typeof record.id === "string" ? record.id : `image-${index}`,
+        ...(typeof record.fileName === "string"
+          ? { fileName: record.fileName }
+          : {}),
+        mimeType,
+        dataBase64,
+      },
+    ];
+  });
 }
 
 export const chatStateSchema = z

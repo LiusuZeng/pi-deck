@@ -1329,6 +1329,24 @@ function summarizeToolDetails(content: string, maxLength: number): string {
   return `${singleLine.slice(0, maxLength - 1)}…`;
 }
 
+function timelineAttachmentsFromMessage(
+  message: ChatMessage,
+  messageId: string,
+): TimelineAttachment[] | undefined {
+  const imageAttachments = Array.isArray(message.imageAttachments)
+    ? message.imageAttachments
+    : [];
+  const timelineAttachments = imageAttachments.map((attachment, index) => ({
+    id: attachment.id ?? `${messageId}-image-${index}`,
+    fileName: attachment.fileName ?? `Image ${index + 1}`,
+    kind: "image" as const,
+    sendMode: "imageInput" as const,
+    mimeType: attachment.mimeType,
+    previewDataUrl: `data:${attachment.mimeType};base64,${attachment.dataBase64}`,
+  }));
+  return timelineAttachments.length > 0 ? timelineAttachments : undefined;
+}
+
 function timelineAttachmentsFromDrafts(
   attachments: AttachmentDraft[],
 ): TimelineAttachment[] | undefined {
@@ -1365,7 +1383,16 @@ function timelineFromMessages(
     const id = message.id ?? `message-${index}`;
 
     if (message.role === "user") {
-      return [{ id, kind: "user", content, createdAt }];
+      const attachments = timelineAttachmentsFromMessage(message, id);
+      return [
+        {
+          id,
+          kind: "user",
+          content,
+          createdAt,
+          ...(attachments ? { attachments } : {}),
+        },
+      ];
     }
 
     const toolItem = toolTimelineItemFromContent({
