@@ -65,7 +65,11 @@ function normalizeChatMessage(value: unknown): unknown {
   const imageAttachments = extractImageAttachments(record.content);
   return {
     ...record,
-    ...(content !== undefined ? { content } : {}),
+    ...(Array.isArray(record.content)
+      ? { content: content ?? "" }
+      : content !== undefined
+        ? { content }
+        : {}),
     ...(imageAttachments.length > 0 ? { imageAttachments } : {}),
   };
 }

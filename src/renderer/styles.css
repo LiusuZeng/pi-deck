@@ -612,6 +612,43 @@ h1 {
   background: #fef3f2;
 }
 
+.starter-page {
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  align-items: center;
+  justify-items: center;
+  padding: 32px 24px;
+}
+
+.starter-content {
+  display: grid;
+  gap: 24px;
+  width: min(1040px, 100%);
+}
+
+.starter-content h2 {
+  margin: 0;
+  font-size: clamp(28px, 4vw, 44px);
+  line-height: 1.05;
+  letter-spacing: -0.06em;
+  text-align: center;
+}
+
+.starter-page .composer {
+  border: 0;
+  border-radius: 28px;
+  padding: 0;
+  background: transparent;
+  backdrop-filter: none;
+}
+
+.starter-page .composer-input-wrap {
+  border-radius: 22px;
+  background: #fff;
+  box-shadow: 0 20px 60px rgb(16 24 40 / 10%);
+}
+
 .timeline-shell {
   min-height: 0;
   overflow: hidden;

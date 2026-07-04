@@ -525,6 +525,8 @@ export function App(): ReactElement {
   const filteredCommands = slashCommands.filter((command) =>
     command.name.toLowerCase().includes(draft.trim().toLowerCase()),
   );
+  const showStarterPage =
+    selectedSession.timeline.length === 0 && selectedSession.status === "idle";
 
   function applyRuntimeEvent(event: ChatRuntimeEvent): void {
     setSessions((current) =>
@@ -680,6 +682,9 @@ export function App(): ReactElement {
         session.id === runtimeId
           ? {
               ...session,
+              title: isPlaceholderSessionTitle(session.title)
+                ? summarizeTitle(prompt, 64)
+                : session.title,
               status: "working",
               baseState: "working",
               overlays: { ...session.overlays, streaming: true },
@@ -1013,6 +1018,43 @@ export function App(): ReactElement {
     );
   }
 
+  const composer = (
+    <Composer
+      value={draft}
+      isWorking={isWorking}
+      canSend={canSend}
+      error={composerError}
+      attachments={attachments}
+      slashOpen={slashOpen}
+      slashCommands={filteredCommands}
+      selectedModel={selectedModel}
+      backendLabel={backendLabel(selectedSession)}
+      modelInfo={composerModelInfo(selectedSession)}
+      realModels={realModels}
+      realThinkingLevels={realThinkingLevels}
+      selectedSession={selectedSession}
+      allowAttachments={true}
+      enterToSend={enterToSend}
+      onEnterToSendChange={handleEnterToSendChange}
+      onChange={handleDraftChange}
+      onKeyDown={handleComposerKeyDown}
+      onSend={handleSend}
+      onAbort={handleAbort}
+      onPickAttachments={() => void handlePickAttachments()}
+      onImportImageAttachments={(files) =>
+        void handleImportImageAttachments(files)
+      }
+      onSetModel={(provider, modelId) =>
+        void handleSetRealModel(provider, modelId)
+      }
+      onSetThinking={(level) => void handleSetRealThinking(level)}
+      onRemoveAttachment={(id) =>
+        setAttachments((items) => items.filter((item) => item.id !== id))
+      }
+      onSelectCommand={handleSelectCommand}
+    />
+  );
+
   return (
     <main className={`app-shell ${sidebarVisible ? "" : "sidebar-hidden"}`}>
       {sidebarVisible ? (
@@ -1061,46 +1103,18 @@ export function App(): ReactElement {
           }}
         />
 
-        <ChatTimeline
-          session={selectedSession}
-          uiMessage={uiMessage}
-          showAttachmentExamples={!isRealBackendMode}
-        />
-
-        <Composer
-          value={draft}
-          isWorking={isWorking}
-          canSend={canSend}
-          error={composerError}
-          attachments={attachments}
-          slashOpen={slashOpen}
-          slashCommands={filteredCommands}
-          selectedModel={selectedModel}
-          backendLabel={backendLabel(selectedSession)}
-          modelInfo={composerModelInfo(selectedSession)}
-          realModels={realModels}
-          realThinkingLevels={realThinkingLevels}
-          selectedSession={selectedSession}
-          allowAttachments={true}
-          enterToSend={enterToSend}
-          onEnterToSendChange={handleEnterToSendChange}
-          onChange={handleDraftChange}
-          onKeyDown={handleComposerKeyDown}
-          onSend={handleSend}
-          onAbort={handleAbort}
-          onPickAttachments={() => void handlePickAttachments()}
-          onImportImageAttachments={(files) =>
-            void handleImportImageAttachments(files)
-          }
-          onSetModel={(provider, modelId) =>
-            void handleSetRealModel(provider, modelId)
-          }
-          onSetThinking={(level) => void handleSetRealThinking(level)}
-          onRemoveAttachment={(id) =>
-            setAttachments((items) => items.filter((item) => item.id !== id))
-          }
-          onSelectCommand={handleSelectCommand}
-        />
+        {showStarterPage ? (
+          <StarterPage composer={composer} />
+        ) : (
+          <>
+            <ChatTimeline
+              session={selectedSession}
+              uiMessage={uiMessage}
+              showAttachmentExamples={!isRealBackendMode}
+            />
+            {composer}
+          </>
+        )}
       </section>
     </main>
   );
@@ -1211,10 +1225,7 @@ function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
 
   const session: SessionViewModel = {
     id: snapshot.runtimeId,
-    title:
-      snapshot.backendMode === "real"
-        ? "Backend real Pi RPC session"
-        : "Local demo backend session",
+    title: titleFromSnapshot(snapshot),
     project: snapshot.state.cwd?.split(/[\\/]/).pop() ?? "pi-deck",
     projectPath:
       snapshot.state.cwd ?? processCwdPlaceholder(snapshot.backendMode),
@@ -1250,6 +1261,56 @@ function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
     session.thinkingLevel = snapshot.state.thinkingLevel;
   }
   return session;
+}
+
+function titleFromSnapshot(snapshot: ChatSnapshot): string {
+  const stateRecord = snapshot.state as Record<string, unknown>;
+  const stateTitle = [stateRecord.title, stateRecord.name].find(
+    (value): value is string =>
+      typeof value === "string" && value.trim().length > 0,
+  );
+  if (
+    stateTitle !== undefined &&
+    !isPlaceholderSessionTitle(stateTitle) &&
+    !isNoisyBackendTitle(stateTitle)
+  ) {
+    return summarizeTitle(stateTitle, 64);
+  }
+
+  const firstUserPrompt = snapshot.messages.find(
+    (message) => message.role === "user" && message.content?.trim(),
+  )?.content;
+  if (firstUserPrompt !== undefined) {
+    return summarizeTitle(firstUserPrompt, 64);
+  }
+
+  return snapshot.backendMode === "real" ? "New chat" : "Local demo chat";
+}
+
+function isPlaceholderSessionTitle(title: string): boolean {
+  const normalized = title.trim().toLowerCase();
+  return (
+    normalized === "new chat" ||
+    normalized === "untitled new session" ||
+    normalized === "local demo chat" ||
+    isNoisyBackendTitle(title)
+  );
+}
+
+function isNoisyBackendTitle(title: string): boolean {
+  const normalized = title.trim().toLowerCase();
+  return (
+    normalized === "backend real pi rpc session" ||
+    normalized === "local demo backend session"
+  );
+}
+
+function summarizeTitle(value: string, maxLength: number): string {
+  const singleLine = value.replace(/\s+/g, " ").trim();
+  if (singleLine.length <= maxLength) {
+    return singleLine;
+  }
+  return `${singleLine.slice(0, maxLength - 1)}…`;
 }
 
 function mergeSessionUsageFromSnapshot(
@@ -2401,6 +2462,17 @@ function getTimelineScrollMarker(session: SessionViewModel): string {
     .join("|");
 
   return `${session.id}|${session.status}|${session.baseState}|${session.overlays.streaming}|${session.overlays.toolRunning}|${timelineMarker}`;
+}
+
+function StarterPage(props: { composer: ReactElement }): ReactElement {
+  return (
+    <section className="starter-page" aria-label="Start a new chat">
+      <div className="starter-content">
+        <h2>What’s on the agenda today?</h2>
+        {props.composer}
+      </div>
+    </section>
+  );
 }
 
 function ChatTimeline(props: {

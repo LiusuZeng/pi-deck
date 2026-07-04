@@ -72,6 +72,16 @@ describe("IPC schemas", () => {
     ).toThrow();
   });
 
+  it("normalizes non-text message content arrays to avoid resume validation failures", () => {
+    expect(
+      chatMessageSchema.parse({
+        id: "assistant-1",
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "hidden" }],
+      }),
+    ).toMatchObject({ content: "" });
+  });
+
   it("normalizes persisted user image content for resumed previews", () => {
     expect(
       chatMessageSchema.parse({
