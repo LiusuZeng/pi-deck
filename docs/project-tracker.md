@@ -1,7 +1,7 @@
 # Pi Deck MVP Tracker
 
 Status: active implementation tracker  
-Last updated: 2026-06-29  
+Last updated: 2026-07-04  
 Source plan: `docs/project-task-breakdown.md`  
 Worktree setup: `docs/git-worktree-parallel-setup.md`  
 Update cadence: daily during active implementation; weekly milestone review.
@@ -38,6 +38,12 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
 - [x] Real-mode sidebar shows the 5 most recent sessions first with relative timestamps; older sessions are behind a Browse older sessions control and hover shows a readable timestamp.
 - [x] Real mode can list Pi models and switch model/thinking through RPC from the composer.
 - [x] New real session creation shows an immediate optimistic starting row, returns before loading full messages, and prewarms one spare real worker.
+- [x] Real prompt attachments send through main-process-owned opaque tokens: image inputs are sent natively, non-image files are referenced by path.
+- [x] Drag/drop and paste image attachments show thumbnails before send and in live conversation bubbles.
+- [x] Resumed sessions restore persisted image previews from Pi message content.
+- [x] Session usage stats refresh after agent turns and display in a floating popover.
+- [x] Saved inactive sessions can be deleted individually or in bulk; files are moved to Trash when possible.
+- [x] User-facing renderer copy no longer leaks internal Eng/worktree/default development state.
 
 ### P0 — Required before Pi Deck can be dogfooded comfortably
 
@@ -68,9 +74,9 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
    - Current behavior: composer lists real Pi models and thinking levels and calls `set_model` / `set_thinking_level`.
    - Remaining: capability-aware thinking labels and more validation across providers.
 
-7. **Real attachment send path**
-   - Native picker and safe tokens exist.
-   - Prompt integration for referenced-path files/images is not implemented.
+7. **Real attachment polish**
+   - Implemented: native picker tokens, referenced-path sends, image sends, drag/drop/paste image import, live/resumed thumbnails.
+   - Remaining: drag/drop regular files, dedupe, image resizing/large-file policy, and broader real-provider validation.
 
 8. **Real slash commands**
    - Fake picker exists.
@@ -92,9 +98,9 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
 14. Diagnostics panel for Pi binary/config/workers/stderr/session files.
 15. Project trust prompt and static resource panel.
 16. Extension UI dialogs and background red-dot behavior.
-17. Image validation/resizing/package spike.
+17. Drag/drop regular files, image validation/resizing/package spike, and attachment dedupe.
 18. Release-readiness matrix execution and limitations notes.
-19. Expand E2E coverage for tool collapse and close/cleanup regressions.
+19. Expand E2E coverage for tool collapse, attachment flows, session deletion, and close/cleanup regressions.
 
 ## 1. Critical Path Tracker
 
@@ -107,7 +113,7 @@ These items should be started earliest and reviewed frequently.
 | CP-3  | Minimal no-resource RPC smoke test                                            | Backend/RPC          | Done        | M1           | Implemented in `src/main/platform/rpcSmokeTest.ts` using Eng 2 JSONL client; real Pi validation pending                                                      |
 | CP-4  | Strict JSONL transport                                                        | Backend/RPC          | Done        | M2           | Implemented in `src/main/pi/jsonlClient.ts` with parser/client tests                                                                                         |
 | CP-5  | Single PiWorker lifecycle                                                     | Backend/RPC          | Done        | M2           | Implemented in `src/main/pi/piWorker.ts` with fake-RPC integration tests                                                                                     |
-| CP-6  | Resume hard gate: `pi --mode rpc --session <file>`                            | Backend/RPC          | In Progress | M3           | Implemented in GUI resume path with canonical `get_state.sessionFile` check; needs broader real-Pi validation.                                               |
+| CP-6  | Resume hard gate: `pi --mode rpc --session <file>`                            | Backend/RPC          | In Progress | M3           | Implemented in GUI resume path with canonical `get_state.sessionFile` check and resumed image preview restoration; needs broader real-Pi validation.         |
 | CP-7  | Multiple workers and event routing                                            | Backend              | Not Started | M5           | Required for concurrency                                                                                                                                     |
 | CP-8  | Scheduler/concurrency cap                                                     | Backend              | Not Started | M5           | Required for multi-session MVP                                                                                                                               |
 | CP-9  | End-to-end release validation                                                 | QA / All             | In Progress | M7           | Smoke matrix drafted in `docs/real-pi-smoke-test-matrix.md`; real Pi execution pending feature readiness                                                     |
@@ -117,14 +123,14 @@ These items should be started earliest and reviewed frequently.
 
 ### G0. Contract Freeze
 
-| Task                                  | Owner                | Status      | Acceptance                                    |
-| ------------------------------------- | -------------------- | ----------- | --------------------------------------------- |
-| Define `PiAdapter` interface          | Tech Lead / Backend  | Not Started | All backend/frontend leads approve            |
-| Define IPC channel list and schemas   | Tech Lead / Platform | Not Started | Renderer can use fake backend                 |
-| Define normalized runtime event model | Backend / Frontend   | Not Started | Reducer and UI can consume same model         |
-| Define timeline item schema           | Frontend / Backend   | Not Started | Chat/tool/diagnostic items covered            |
-| Define attachment token model         | Platform / Frontend  | Not Started | Renderer has no arbitrary file-read authority |
-| Define diagnostics/error envelope     | Platform / Backend   | Not Started | Errors can be surfaced consistently           |
+| Task                                  | Owner                | Status      | Acceptance                                                                                                                                     |
+| ------------------------------------- | -------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Define `PiAdapter` interface          | Tech Lead / Backend  | Not Started | All backend/frontend leads approve                                                                                                             |
+| Define IPC channel list and schemas   | Tech Lead / Platform | Not Started | Renderer can use fake backend                                                                                                                  |
+| Define normalized runtime event model | Backend / Frontend   | Not Started | Reducer and UI can consume same model                                                                                                          |
+| Define timeline item schema           | Frontend / Backend   | Not Started | Chat/tool/diagnostic items covered                                                                                                             |
+| Define attachment token model         | Platform / Frontend  | In Progress | Renderer uses opaque selected-file tokens; dropped/pasted images import via main-owned token records; regular drag/drop files remain follow-up |
+| Define diagnostics/error envelope     | Platform / Backend   | Not Started | Errors can be surfaced consistently                                                                                                            |
 
 ### G1. Minimal RPC Health Spike
 
@@ -209,26 +215,26 @@ Non-goal: full session repository/resume/concurrency. This is a narrow real-Pi v
 
 ## M3. Project Picker, Session Repository, New/Resume Sessions
 
-| ID   | Task                               | Owner            | Status      | Depends on  | Acceptance summary                                                                                                                               |
-| ---- | ---------------------------------- | ---------------- | ----------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| M3.1 | Project picker/recent projects     | Frontend/Backend | In Progress | M1 settings | Picker IPC and renderer recents exist; real-mode selected-project handoff and backend persistence still needed.                                  |
-| M3.2 | EffectivePiConfig resolver         | Backend/Platform | Done        | M1.3, M1.4  | Resolver implemented with app/env/settings/trust/image precedence tests                                                                          |
-| M3.3 | Static session repository scanning | Backend          | In Progress | M3.2        | Scans authoritative session dir for project `.jsonl` files with bounds/no symlink following; candidate dirs/refresh/UI diagnostics still needed. |
-| M3.4 | Candidate sessionDir handling      | Backend/Frontend | Not Started | M3.2, M3.3  | Candidate dirs require explicit enablement and strict bounds                                                                                     |
-| M3.5 | New session flow                   | Backend/Frontend | In Progress | M2.3, M3.1  | Real `+` now creates an additional in-window worker and keeps old rows; repository-backed persistence/resume still P0.                           |
-| M3.6 | Resume existing session flow       | Backend/RPC      | In Progress | M3.3, G2    | Clicking saved rows resumes with `--session` and verifies canonical file; cwd mismatch/deleted-file UX still needed.                             |
-| M3.7 | In-app session ownership lock      | Backend          | Not Started | M3.5, M3.6  | Duplicate open reuses existing worker                                                                                                            |
+| ID   | Task                               | Owner            | Status      | Depends on  | Acceptance summary                                                                                                                                                                |
+| ---- | ---------------------------------- | ---------------- | ----------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| M3.1 | Project picker/recent projects     | Frontend/Backend | In Progress | M1 settings | Picker IPC and renderer recents exist; real-mode selected-project handoff and backend persistence still needed.                                                                   |
+| M3.2 | EffectivePiConfig resolver         | Backend/Platform | Done        | M1.3, M1.4  | Resolver implemented with app/env/settings/trust/image precedence tests                                                                                                           |
+| M3.3 | Static session repository scanning | Backend          | In Progress | M3.2        | Scans authoritative session dir for project `.jsonl` files with bounds/no symlink following; saved inactive sessions can be deleted; candidate dirs still need opt-in validation. |
+| M3.4 | Candidate sessionDir handling      | Backend/Frontend | Not Started | M3.2, M3.3  | Candidate dirs require explicit enablement and strict bounds                                                                                                                      |
+| M3.5 | New session flow                   | Backend/Frontend | In Progress | M2.3, M3.1  | Real `+` now creates an additional in-window worker and keeps old rows; repository-backed persistence/resume still P0.                                                            |
+| M3.6 | Resume existing session flow       | Backend/RPC      | In Progress | M3.3, G2    | Clicking saved rows resumes with `--session`, verifies canonical file, and restores image previews; cwd mismatch/unsupported-version copy still needs polish.                     |
+| M3.7 | In-app session ownership lock      | Backend          | In Progress | M3.5, M3.6  | Duplicate open of a known session file reuses the existing worker; scheduler-grade ownership locks remain.                                                                        |
 
 ## M4. Model, Thinking, Slash Commands, Attachments
 
-| ID   | Task                            | Owner               | Status      | Depends on            | Acceptance summary                                                                 |
-| ---- | ------------------------------- | ------------------- | ----------- | --------------------- | ---------------------------------------------------------------------------------- |
-| M4.1 | Model list/switcher             | Backend/Frontend    | In Progress | M2/M3 worker          | Real composer lists Pi models and calls `set_model`; capability polish remains.    |
-| M4.2 | Thinking-level switcher         | Backend/Frontend    | In Progress | M2/M3 worker          | Eng 5 fake UI shows levels/unsupported state; real setter still needed             |
-| M4.3 | Slash command picker            | Backend/Frontend    | In Progress | M2 worker             | Eng 5 fake picker uses get_commands-shaped data; real command API still needed     |
-| M4.4 | Native attachment picker/tokens | Platform/Frontend   | In Progress | G0 attachment, M1 IPC | Eng 5 UI + preload picker stub returns opaque tokens; send validation still needed |
-| M4.5 | Non-image referenced-path files | Backend/Frontend    | In Progress | M4.4                  | Eng 5 chips say `Referenced path`; prompt prefix backend still needed              |
-| M4.6 | Image support + resize spike    | Platform/Backend/QA | Not Started | G3, M4.1, M4.4, M3.2  | Model/settings validation; resize/block behavior; safety thresholds                |
+| ID   | Task                            | Owner               | Status      | Depends on            | Acceptance summary                                                                                                     |
+| ---- | ------------------------------- | ------------------- | ----------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| M4.1 | Model list/switcher             | Backend/Frontend    | In Progress | M2/M3 worker          | Real composer lists Pi models and calls `set_model`; capability polish remains.                                        |
+| M4.2 | Thinking-level switcher         | Backend/Frontend    | Done        | M2/M3 worker          | Real composer calls `set_thinking_level`; provider-specific capability labels remain polish.                           |
+| M4.3 | Slash command picker            | Backend/Frontend    | In Progress | M2 worker             | Local picker exists; active-worker command discovery/insertion still needed or should be hidden in real mode.          |
+| M4.4 | Native attachment picker/tokens | Platform/Frontend   | Done        | G0 attachment, M1 IPC | Native picker returns opaque tokens; prompt send resolves tokens only in main.                                         |
+| M4.5 | Non-image referenced-path files | Backend/Frontend    | Done        | M4.4                  | Non-image selected files are sent as explicit referenced paths in the prompt.                                          |
+| M4.6 | Image support + resize spike    | Platform/Backend/QA | In Progress | G3, M4.1, M4.4, M3.2  | Image picker/drop/paste sends native Pi image inputs and renders thumbnails; resize/large-image package spike remains. |
 
 ## M5. Concurrent Sessions, Scheduler, Intervention Controls
 
@@ -251,12 +257,12 @@ Non-goal: full session repository/resume/concurrency. This is a narrow real-Pi v
 
 ## M7. Tool Visibility, Diagnostics, Polish, Release Readiness
 
-| ID   | Task                                | Owner            | Status      | Depends on       | Acceptance summary                                                                                                  |
-| ---- | ----------------------------------- | ---------------- | ----------- | ---------------- | ------------------------------------------------------------------------------------------------------------------- |
-| M7.1 | Tool execution cards                | Frontend/Backend | In Progress | M5.1 tool events | Interim collapsed cards for JSON command/read/edit payloads exist; full lifecycle/output cards still needed.        |
-| M7.2 | Session stats and diagnostics panel | Backend/Frontend | Not Started | M3/M4 workers    | Binary/config/workers/errors visible; secrets redacted                                                              |
-| M7.3 | Error recovery flows                | Backend/Frontend | Not Started | M5/M6            | Reopen after worker exit; refresh session list; reconcile messages                                                  |
-| M7.4 | End-to-end release validation       | QA/All           | In Progress | M1-M7            | Matrix drafted in `docs/real-pi-smoke-test-matrix.md`; execution waits for feature readiness and real Pi validation |
+| ID   | Task                                | Owner            | Status      | Depends on       | Acceptance summary                                                                                                        |
+| ---- | ----------------------------------- | ---------------- | ----------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| M7.1 | Tool execution cards                | Frontend/Backend | In Progress | M5.1 tool events | Interim collapsed cards for JSON command/read/edit payloads exist; full lifecycle/output cards still needed.              |
+| M7.2 | Session stats and diagnostics panel | Backend/Frontend | In Progress | M3/M4 workers    | Usage stats popover refreshes after turns; full diagnostics panel for binary/config/workers/stderr/session files remains. |
+| M7.3 | Error recovery flows                | Backend/Frontend | Not Started | M5/M6            | Reopen after worker exit; refresh session list; reconcile messages                                                        |
+| M7.4 | End-to-end release validation       | QA/All           | In Progress | M1-M7            | Matrix drafted in `docs/real-pi-smoke-test-matrix.md`; execution waits for feature readiness and real Pi validation       |
 
 ## 4. Parallel Work Lanes and Worktrees
 
