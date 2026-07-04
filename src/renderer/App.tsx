@@ -225,7 +225,7 @@ const initialSessions: SessionViewModel[] = [
     title: "Local demo session",
     project: "Pi Deck",
     projectPath: "Local demo project",
-    subtitle: "Idle · fake IPC fixture",
+    subtitle: "Idle · local demo backend",
     status: "idle",
     updatedAt: "Now",
     updatedAtMs: appStartedAt,
@@ -243,17 +243,16 @@ const initialSessions: SessionViewModel[] = [
         id: "welcome-assistant",
         kind: "assistant",
         content:
-          "# Welcome to Pi Deck\n\nThis is a chat-centered Electron renderer shell backed by local demo data when no real backend is selected. Try sending a multiline prompt to see a streamed, sanitized markdown response.",
+          "# Welcome to Pi Deck\n\nThis is a chat-centered Electron renderer shell backed by sample data when no real backend is selected. Try sending a multiline prompt to see a streamed, sanitized markdown response.",
         createdAt: "09:42",
       },
       {
         id: "placeholder-tool",
         kind: "tool",
-        title: "Tool card placeholder",
+        title: "Tool output example",
         status: "collapsed",
-        summary:
-          "Full tool rendering is reserved for M7; this compact row shows the intended timeline slot.",
-        details: "Tool details will appear here when expanded.",
+        summary: "Tool activity appears as expandable cards in the timeline.",
+        details: "Tool details appear here when expanded.",
         createdAt: "09:42",
       },
     ],
@@ -277,7 +276,7 @@ const initialSessions: SessionViewModel[] = [
   fixtureSession("session-compact", "Large refactor plan", "working", {
     compacting: true,
   }),
-  fixtureSession("session-retry", "Provider retry demo", "working", {
+  fixtureSession("session-retry", "Provider retry", "working", {
     retrying: true,
   }),
   fixtureSession("session-tool", "Apply edit patch", "working", {
@@ -290,7 +289,7 @@ const initialSessions: SessionViewModel[] = [
     localQueuedStartCount: 1,
     piQueuedSteeringCount: 1,
   }),
-  fixtureSession("session-exited", "Closed spike", "exited"),
+  fixtureSession("session-exited", "Closed session", "exited"),
   fixtureSession("session-unloaded", "Older unloaded session", "unloaded"),
 ];
 
@@ -298,7 +297,7 @@ const invalidRecentProject: ProjectRef = {
   id: "missing-demo",
   path: "Example deleted project",
   canonicalPath: "Example deleted project",
-  displayName: "Deleted project demo",
+  displayName: "Deleted project",
   lastOpenedAt: appStartedAt - 86_400_000,
   invalidReason: "Project folder is missing or no longer readable.",
 };
@@ -333,8 +332,8 @@ const fakeAttachmentFixture: AttachmentDraft[] = [
   {
     id: "fake-image",
     selectedPathToken: "token-image",
-    fileName: "mockup.png",
-    displayPath: "design/mockup.png",
+    fileName: "screenshot.png",
+    displayPath: "design/screenshot.png",
     mimeType: "image/png",
     kind: "image",
     sendMode: "imageInput",
@@ -766,7 +765,7 @@ export function App(): ReactElement {
       );
     } catch (error) {
       setUiMessage(
-        `Project picker failed; no mock project was selected (${error instanceof Error ? error.message : String(error)}).`,
+        `Project picker failed; no project was selected (${error instanceof Error ? error.message : String(error)}).`,
       );
     }
   }
@@ -870,7 +869,7 @@ export function App(): ReactElement {
       );
     } catch (error) {
       setUiMessage(
-        `Attachment picker failed; no mock files were added (${error instanceof Error ? error.message : String(error)}).`,
+        `Attachment picker failed; no files were added (${error instanceof Error ? error.message : String(error)}).`,
       );
     }
   }
@@ -928,7 +927,7 @@ export function App(): ReactElement {
       title: "Untitled new session",
       project: currentProject.displayName,
       projectPath: currentProject.path,
-      subtitle: "Idle · UI hook only",
+      subtitle: "Idle · local demo session",
       status: "idle",
       updatedAt: "Now",
       updatedAtMs: Date.now(),
@@ -939,9 +938,7 @@ export function App(): ReactElement {
     };
     setSessions((items) => [next, ...items]);
     setSelectedSessionId(id);
-    setUiMessage(
-      "New session UI hook fired; backend createSession can attach here.",
-    );
+    setUiMessage("Created a new local demo session.");
   }
 
   function handleSelectCommand(command: SlashCommand): void {
@@ -992,8 +989,8 @@ export function App(): ReactElement {
             setSelectedThinking(level);
             setUiMessage(
               isRealBackendMode
-                ? "Real Pi model/thinking controls are not wired yet; the active Pi worker uses its current configuration."
-                : "Thinking-level UI hook fired; fake/preload API can be wired here.",
+                ? "The active Pi worker uses its current model and thinking configuration."
+                : "Updated the local demo thinking level.",
             );
           }}
         />
@@ -1151,7 +1148,7 @@ function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
     title:
       snapshot.backendMode === "real"
         ? "Backend real Pi RPC session"
-        : "Backend fake RPC session",
+        : "Local demo backend session",
     project: snapshot.state.cwd?.split(/[\\/]/).pop() ?? "pi-deck",
     projectPath:
       snapshot.state.cwd ?? processCwdPlaceholder(snapshot.backendMode),
@@ -1888,7 +1885,7 @@ function backendLabel(session: SessionViewModel): string {
 }
 
 function backendLabelFromMode(mode: "fake" | "real"): string {
-  return mode === "real" ? "backend real Pi RPC" : "backend fake RPC";
+  return mode === "real" ? "Pi RPC backend" : "local demo backend";
 }
 
 function appendDiagnostic(
@@ -2373,7 +2370,7 @@ function ChatTimeline(props: {
         ) : null}
         {props.session.status === "waiting" ? (
           <div className="state-banner waiting">
-            This placeholder session is waiting for user input.
+            This session is waiting for user input.
           </div>
         ) : null}
 
@@ -2423,7 +2420,7 @@ function EmptyTimelineState(props: {
       ? "A pending input request will appear here once extension UI wiring exists."
       : props.backendMode === "real"
         ? "Send a prompt to the active real Pi session."
-        : "Send a prompt to start a fake streamed assistant response.";
+        : "Send a prompt to start a streamed assistant response.";
 
   return (
     <div className="empty-state">
@@ -3394,7 +3391,7 @@ function createId(prefix: string): string {
 function processCwdPlaceholder(mode: "fake" | "real"): string {
   return mode === "real"
     ? "Real Pi worker cwd unavailable"
-    : "Fake RPC worker cwd unavailable";
+    : "Local demo backend cwd unavailable";
 }
 
 export const __rendererTestHooks = {
