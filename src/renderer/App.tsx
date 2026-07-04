@@ -2838,18 +2838,8 @@ function Composer(props: {
       }}
       onDrop={handleDrop}
     >
-      {props.allowAttachments ? (
-        <button
-          className="attachment-button"
-          type="button"
-          aria-label="Add attachments"
-          onClick={props.onPickAttachments}
-        >
-          +
-        </button>
-      ) : null}
       <div className="composer-input-wrap">
-        {props.allowAttachments ? (
+        {props.allowAttachments && props.attachments.length > 0 ? (
           <AttachmentChipRow
             attachments={props.attachments}
             onRemove={props.onRemoveAttachment}
@@ -2877,6 +2867,16 @@ function Composer(props: {
           />
         ) : null}
         <div className="composer-meta">
+          {props.allowAttachments ? (
+            <button
+              className="attachment-button"
+              type="button"
+              aria-label="Add attachments"
+              onClick={props.onPickAttachments}
+            >
+              +
+            </button>
+          ) : null}
           {props.realModels.length > 0 ? (
             <select
               className="composer-select"
@@ -2928,35 +2928,33 @@ function Composer(props: {
           {props.error !== null ? (
             <span className="composer-error">{props.error}</span>
           ) : props.isWorking ? (
-            <span>
-              Streaming from {props.backendLabel}… abort remains wired.
-            </span>
+            <span>Streaming from {props.backendLabel}…</span>
           ) : hasImageWarning ? (
             <span className="composer-error">
               Selected model does not support image input.
             </span>
           ) : null}
+          <span className="composer-spacer" />
+          {props.isWorking ? (
+            <button
+              className="send-button abort"
+              type="button"
+              onClick={props.onAbort}
+            >
+              Abort
+            </button>
+          ) : (
+            <button
+              className="send-button"
+              type="button"
+              disabled={!props.canSend}
+              onClick={props.onSend}
+              aria-label="Send prompt"
+            >
+              ↑
+            </button>
+          )}
         </div>
-      </div>
-      <div className="composer-actions">
-        {props.isWorking ? (
-          <button
-            className="send-button abort"
-            type="button"
-            onClick={props.onAbort}
-          >
-            Abort
-          </button>
-        ) : (
-          <button
-            className="send-button"
-            type="button"
-            disabled={!props.canSend}
-            onClick={props.onSend}
-          >
-            Send
-          </button>
-        )}
       </div>
     </footer>
   );
@@ -2998,7 +2996,7 @@ function AttachmentChipRow(props: {
   onRemove(id: string): void;
 }): ReactElement {
   if (props.attachments.length === 0) {
-    return <p className="empty-state-copy compact">No files selected.</p>;
+    return <></>;
   }
 
   return (

@@ -624,14 +624,15 @@ h1 {
 .starter-content {
   display: grid;
   gap: 24px;
-  width: min(1040px, 100%);
+  width: min(940px, 100%);
 }
 
 .starter-content h2 {
   margin: 0;
-  font-size: clamp(28px, 4vw, 44px);
-  line-height: 1.05;
-  letter-spacing: -0.06em;
+  font-size: clamp(28px, 3vw, 36px);
+  font-weight: 520;
+  line-height: 1.1;
+  letter-spacing: -0.04em;
   text-align: center;
 }
 
@@ -1009,9 +1010,8 @@ h1 {
 }
 
 .attachment-button {
-  align-self: end;
-  width: 36px;
-  height: 36px;
+  width: 32px;
+  height: 32px;
   padding: 0;
   border-radius: 999px;
   font-size: 20px;
@@ -1023,21 +1023,25 @@ h1 {
   flex: 1;
   gap: 8px;
   min-width: 0;
+  border: 1px solid #d0d5dd;
+  border-radius: 22px;
+  padding: 10px 12px;
+  background: #fff;
 }
 
 .composer textarea {
   width: 100%;
-  min-height: 52px;
+  min-height: 56px;
   max-height: 150px;
-  border: 1px solid #d0d5dd;
+  border: 0;
   border-radius: 14px;
-  padding: 10px 12px 32px;
+  padding: 4px 8px 46px;
   resize: vertical;
   outline: none;
-  background: #fff;
+  background: transparent;
 }
 
-.composer textarea:focus {
+.composer-input-wrap:focus-within {
   border-color: #4458ff;
   box-shadow: 0 0 0 4px rgb(68 88 255 / 12%);
 }
@@ -1047,18 +1051,33 @@ h1 {
   right: 14px;
   bottom: 10px;
   left: 14px;
-  min-height: 18px;
+  min-height: 32px;
   color: #667085;
   font-size: 12px;
   display: flex;
   align-items: center;
   gap: 10px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   pointer-events: none;
 }
 
 .composer-meta > * {
   pointer-events: auto;
+}
+
+.composer-meta .attachment-button {
+  flex: 0 0 auto;
+  color: #172033;
+  background: transparent;
+  box-shadow: none;
+}
+
+.composer-meta .attachment-button:hover {
+  background: #f2f4f7;
+}
+
+.composer-spacer {
+  flex: 1 1 auto;
 }
 
 .composer-model-pill,
@@ -1098,8 +1117,18 @@ h1 {
 }
 
 .send-button {
-  min-width: 72px;
-  padding: 9px 12px;
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  min-width: 36px;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 999px;
+  color: #fff;
+  background: #101828;
+  font-size: 20px;
+  line-height: 1;
 }
 
 .send-button.secondary {
@@ -1109,8 +1138,12 @@ h1 {
 }
 
 .send-button.abort {
+  width: auto;
+  min-width: 72px;
+  padding: 0 12px;
   color: #991b1b;
   background: #fee2e2;
+  font-size: 13px;
   box-shadow: none;
 }
 
