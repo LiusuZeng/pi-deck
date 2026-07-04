@@ -196,6 +196,14 @@ export const chatDeleteSessionResultSchema = z
   })
   .strict();
 
+export const chatDeleteAllSessionsResultSchema = z
+  .object({
+    deleted: z.literal(true),
+    deletedCount: z.number().int().min(0),
+    skippedCount: z.number().int().min(0),
+  })
+  .strict();
+
 export const chatModelSummarySchema = z
   .object({
     id: z.string(),
@@ -353,6 +361,7 @@ export const ipcChannels = {
   chatListSessions: "chat:listSessions",
   chatResumeSession: "chat:resumeSession",
   chatDeleteSession: "chat:deleteSession",
+  chatDeleteAllSessions: "chat:deleteAllSessions",
   chatPrompt: "chat:prompt",
   chatAbort: "chat:abort",
   chatListModels: "chat:listModels",

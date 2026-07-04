@@ -17,6 +17,7 @@ import {
   attachmentImportImageRequestSchema,
   attachmentPickerRequestSchema,
   chatAbortRequestSchema,
+  chatDeleteAllSessionsResultSchema,
   chatDeleteSessionRequestSchema,
   chatDeleteSessionResultSchema,
   chatListModelsRequestSchema,
@@ -37,6 +38,7 @@ import {
 import type {
   AppSettings,
   AttachmentDraft,
+  ChatDeleteAllSessionsResult,
   ChatDeleteSessionResult,
   ChatListSessionsResult,
   ChatSnapshot,
@@ -262,6 +264,14 @@ function registerIpcHandlers(
     responseSchema: chatDeleteSessionResultSchema,
     diagnostics: diagnosticsService,
     handler: async ({ sessionFile }) => deleteChatSession(store, sessionFile),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.chatDeleteAllSessions,
+    requestSchema: noPayloadSchema,
+    responseSchema: chatDeleteAllSessionsResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async () => deleteAllChatSessions(store),
   });
 
   registerValidatedIpc({
@@ -890,13 +900,46 @@ async function deleteChatSession(
     );
   }
 
-  try {
-    await shell.trashItem(canonicalSessionFile);
-  } catch {
-    await fs.rm(canonicalSessionFile, { force: true });
-  }
+  await trashOrRemoveFile(canonicalSessionFile);
   chatSessionFileLocks.delete(canonicalSessionFile);
   return { deleted: true, sessionFile: canonicalSessionFile };
+}
+
+async function deleteAllChatSessions(
+  store: SettingsStore,
+): Promise<ChatDeleteAllSessionsResult> {
+  const listed = await listChatSessions(store);
+  let deletedCount = 0;
+  let skippedCount = 0;
+
+  for (const session of listed.sessions) {
+    const canonicalSessionFile = await safeRealpath(session.sessionFile);
+    if (canonicalSessionFile === undefined) {
+      skippedCount += 1;
+      continue;
+    }
+    const lockedRuntimeId = chatSessionFileLocks.get(canonicalSessionFile);
+    if (
+      canonicalSessionFile === warmChatWorkerSessionFile ||
+      (lockedRuntimeId !== undefined && chatRuntimeIds.has(lockedRuntimeId))
+    ) {
+      skippedCount += 1;
+      continue;
+    }
+    await trashOrRemoveFile(canonicalSessionFile);
+    chatSessionFileLocks.delete(canonicalSessionFile);
+    deletedCount += 1;
+  }
+
+  return { deleted: true, deletedCount, skippedCount };
+}
+
+async function trashOrRemoveFile(filePath: string): Promise<void> {
+  try {
+    await shell.trashItem(filePath);
+  } catch {
+    await fs.rm(filePath, { force: true });
+  }
 }
 
 async function resumeChatSession(

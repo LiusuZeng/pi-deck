@@ -802,6 +802,36 @@ export function App(): ReactElement {
     }
   }
 
+  async function handleDeleteAllSessions(): Promise<void> {
+    const savedSessions = sessions.filter(
+      (session) => session.resumeBacked === true,
+    );
+    if (savedSessions.length === 0) {
+      setUiMessage("No inactive saved sessions to delete.");
+      return;
+    }
+    const confirmed = window.confirm(
+      `Delete ${savedSessions.length} inactive saved Pi session${savedSessions.length === 1 ? "" : "s"}? Files will be moved to Trash when possible.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      const result = await window.piDeck.chat.deleteAllSessions();
+      setSessions((items) =>
+        items.filter((item) => item.resumeBacked !== true),
+      );
+      setUiMessage(
+        `Deleted ${result.deletedCount} saved session${result.deletedCount === 1 ? "" : "s"}.${result.skippedCount > 0 ? ` Skipped ${result.skippedCount} attached or unavailable session${result.skippedCount === 1 ? "" : "s"}.` : ""}`,
+      );
+    } catch (error) {
+      setUiMessage(
+        `Failed to delete saved sessions: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   async function handleDeleteSession(sessionId: string): Promise<void> {
     const session = sessions.find((item) => item.id === sessionId);
     if (!session?.sessionFile || session.resumeBacked !== true) {
@@ -993,6 +1023,7 @@ export function App(): ReactElement {
           onSelect={handleSelectSession}
           onNewSession={() => void handleNewSession()}
           onDeleteSession={(sessionId) => void handleDeleteSession(sessionId)}
+          onDeleteAllSessions={() => void handleDeleteAllSessions()}
         />
       ) : null}
 
@@ -1201,7 +1232,7 @@ function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
     runtimeBacked: true,
     resumeBacked: false,
     backendMode: snapshot.backendMode,
-    timeline: timelineFromMessages(snapshot.messages, snapshot.backendMode),
+    timeline: timelineFromMessages(snapshot.messages),
   };
   if (usageStats !== undefined) {
     session.usageStats = usageStats;
@@ -1399,10 +1430,7 @@ function timelineAttachmentsFromDrafts(
   return timelineAttachments.length > 0 ? timelineAttachments : undefined;
 }
 
-function timelineFromMessages(
-  messages: ChatMessage[],
-  backendMode: "fake" | "real",
-): TimelineItem[] {
+function timelineFromMessages(messages: ChatMessage[]): TimelineItem[] {
   const timeline = messages.flatMap((message, index): TimelineItem[] => {
     const content = typeof message.content === "string" ? message.content : "";
     const timestamp =
@@ -1457,19 +1485,7 @@ function timelineFromMessages(
     return [];
   });
 
-  if (timeline.length > 0) {
-    return timeline;
-  }
-
-  return [
-    {
-      id: "backend-empty-diagnostic",
-      kind: "diagnostic",
-      tone: "info",
-      content: `Connected to the ${backendLabelFromMode(backendMode)} worker. Send a prompt to stream assistant output through preload IPC.`,
-      createdAt: formatTime(),
-    },
-  ];
+  return timeline;
 }
 
 function reduceRuntimeEvent(
@@ -1954,6 +1970,7 @@ function SessionSidebar(props: {
   onSelect(sessionId: string): void;
   onNewSession(): void;
   onDeleteSession(sessionId: string): void;
+  onDeleteAllSessions(): void;
 }): ReactElement {
   const [showOlderRealSessions, setShowOlderRealSessions] = useState(false);
   const visibleSessions =
@@ -1989,7 +2006,15 @@ function SessionSidebar(props: {
         >
           + New session
         </button>
-      ) : null}
+      ) : (
+        <button
+          className="delete-all-sessions"
+          type="button"
+          onClick={props.onDeleteAllSessions}
+        >
+          Delete saved sessions…
+        </button>
+      )}
 
       <section
         className="session-list"
@@ -2424,11 +2449,6 @@ function ChatTimeline(props: {
             This session is waiting for user input.
           </div>
         ) : null}
-
-        <div className="state-banner info">
-          <StateIndicator session={props.session} verbose />
-          <span>{props.uiMessage}</span>
-        </div>
 
         {props.showAttachmentExamples ? <AttachmentExampleStrip /> : null}
 

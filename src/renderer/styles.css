@@ -109,6 +109,7 @@ textarea:disabled {
 }
 
 .new-session,
+.delete-all-sessions,
 .icon-button,
 .send-button,
 .attachment-button,
@@ -131,6 +132,19 @@ textarea:disabled {
 .new-session {
   padding: 9px 11px;
   text-align: left;
+}
+
+.delete-all-sessions {
+  padding: 9px 11px;
+  color: #fecaca;
+  background: rgb(127 29 29 / 42%);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.delete-all-sessions:hover {
+  color: #fff;
+  background: #b91c1c;
 }
 
 .new-session.secondary {
