@@ -52,6 +52,28 @@ describe("renderer message_update reduction", () => {
     expect(next.timeline).toEqual([]);
   });
 
+  it("renders tool execution events so active tool work does not look stuck", () => {
+    const next = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {
+      type: "tool_execution_start",
+      runtimeId: "session-1",
+      toolCallId: "tool-1",
+      toolName: "bash",
+      args: { command: "npm test" },
+    } as any);
+
+    expect(next.status).toBe("working");
+    expect(next.overlays.toolRunning).toBe(true);
+    expect(next.timeline).toMatchObject([
+      {
+        id: "tool-1",
+        kind: "tool",
+        title: "bash",
+        status: "running",
+        summary: "npm test",
+      },
+    ]);
+  });
+
   it("still appends text deltas from assistantMessageEvent", () => {
     const next = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {
       type: "message_update",

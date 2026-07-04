@@ -1566,6 +1566,10 @@ function reduceRuntimeEvent(
       };
     case "message_update":
       return reduceMessageUpdate(session, event);
+    case "tool_execution_start":
+    case "tool_execution_update":
+    case "tool_execution_end":
+      return reduceToolExecutionEvent(session, event);
     case "agent_end": {
       const status = getString(event, "status");
       return {
@@ -1607,6 +1611,76 @@ function reduceRuntimeEvent(
     default:
       return session;
   }
+}
+
+function reduceToolExecutionEvent(
+  session: SessionViewModel,
+  event: ChatRuntimeEvent,
+): SessionViewModel {
+  const status = event.type === "tool_execution_end" ? "collapsed" : "running";
+  const toolItem = toolTimelineItemFromRuntimeEvent(event, status);
+  const timeline = toolItem
+    ? upsertToolMessage(session.timeline, toolItem)
+    : session.timeline;
+  const toolRunning = timeline.some(
+    (item) => item.kind === "tool" && item.status === "running",
+  );
+
+  return {
+    ...session,
+    status: "working",
+    baseState: "working",
+    overlays: { ...session.overlays, toolRunning },
+    subtitle: `Working · ${backendLabel(session)} stream`,
+    updatedAt: "Now",
+    updatedAtMs: Date.now(),
+    timeline,
+  };
+}
+
+function toolTimelineItemFromRuntimeEvent(
+  event: ChatRuntimeEvent,
+  status: "collapsed" | "running",
+): Extract<TimelineItem, { kind: "tool" }> | undefined {
+  const id = getString(event, "toolCallId") ?? getString(event, "id");
+  if (id === undefined) {
+    return undefined;
+  }
+  const title =
+    getString(event, "toolName") ?? getString(event, "name") ?? "Tool";
+  const args = getRecord(event, "args");
+  const result =
+    getRecord(event, "result") ?? getRecord(event, "partialResult");
+  const output = getString(event, "output");
+  const command = getStringFromRecord(args, "command");
+  const path = getStringFromRecord(args, "path");
+  const summary =
+    command ??
+    path ??
+    output ??
+    summarizeToolDetails(JSON.stringify({ title, args, result }, null, 2), 180);
+  const details = JSON.stringify(
+    {
+      type: event.type,
+      toolName: title,
+      ...(args !== undefined ? { args } : {}),
+      ...(output !== undefined ? { output } : {}),
+      ...(result !== undefined ? { result } : {}),
+      isError: getBoolean(event, "isError"),
+    },
+    null,
+    2,
+  );
+
+  return {
+    id,
+    kind: "tool",
+    title,
+    status,
+    summary,
+    details,
+    createdAt: formatTime(),
+  };
 }
 
 function reduceMessageUpdate(
