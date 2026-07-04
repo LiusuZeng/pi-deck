@@ -222,9 +222,9 @@ const slashCommands: SlashCommand[] = [
 const initialSessions: SessionViewModel[] = [
   {
     id: "session-active",
-    title: "Frontend chat shell",
-    project: "pi-deck",
-    projectPath: "/Users/liusu/pi-deck-worktrees/eng4-frontend-chat",
+    title: "Local demo session",
+    project: "Pi Deck",
+    projectPath: "Local demo project",
     subtitle: "Idle · fake IPC fixture",
     status: "idle",
     updatedAt: "Now",
@@ -243,7 +243,7 @@ const initialSessions: SessionViewModel[] = [
         id: "welcome-assistant",
         kind: "assistant",
         content:
-          "# Welcome to Pi Deck\n\nThis is a chat-centered Electron renderer shell backed by fake data for now. Try sending a multiline prompt to see a streamed, sanitized markdown response.",
+          "# Welcome to Pi Deck\n\nThis is a chat-centered Electron renderer shell backed by local demo data when no real backend is selected. Try sending a multiline prompt to see a streamed, sanitized markdown response.",
         createdAt: "09:42",
       },
       {
@@ -296,8 +296,8 @@ const initialSessions: SessionViewModel[] = [
 
 const invalidRecentProject: ProjectRef = {
   id: "missing-demo",
-  path: "/Users/liusu/old-project-that-was-deleted",
-  canonicalPath: "/Users/liusu/old-project-that-was-deleted",
+  path: "Example deleted project",
+  canonicalPath: "Example deleted project",
   displayName: "Deleted project demo",
   lastOpenedAt: appStartedAt - 86_400_000,
   invalidReason: "Project folder is missing or no longer readable.",
@@ -345,7 +345,7 @@ const fakeAttachmentFixture: AttachmentDraft[] = [
     id: "fake-outside",
     selectedPathToken: "token-outside",
     fileName: "notes.pdf",
-    displayPath: "/Users/liusu/Desktop/notes.pdf",
+    displayPath: "/Users/example/Desktop/notes.pdf",
     kind: "binaryFile",
     sendMode: "pathReference",
     outsideProject: true,
@@ -372,10 +372,10 @@ export function App(): ReactElement {
   const [draft, setDraft] = useState("");
   const [composerError, setComposerError] = useState<string | null>(null);
   const [currentProject, setCurrentProject] = useState<ProjectRef>(() => ({
-    id: "/Users/liusu/pi-deck-worktrees/eng5-sessions-controls",
-    path: "/Users/liusu/pi-deck-worktrees/eng5-sessions-controls",
-    canonicalPath: "/Users/liusu/pi-deck-worktrees/eng5-sessions-controls",
-    displayName: "eng5-sessions-controls",
+    id: "pending-project",
+    path: "Resolving project…",
+    canonicalPath: "",
+    displayName: "Pi Deck",
     lastOpenedAt: appStartedAt,
   }));
   const [recentProjects, setRecentProjects] = useState<ProjectRef[]>(() =>
@@ -398,7 +398,7 @@ export function App(): ReactElement {
     loadUsageStatsVisiblePreference(),
   );
   const [uiMessage, setUiMessage] = useState(
-    "Eng 4 fake chat path and Eng 5 controls are both active in this integrated shell.",
+    "Starting Pi Deck and resolving the active backend session.",
   );
 
   useEffect(() => {
@@ -476,7 +476,7 @@ export function App(): ReactElement {
           setUiMessage(
             snapshot.backendMode === "real"
               ? `Real Pi mode active. Found ${listedSessions?.sessions.length ?? 0} persisted session(s) for this project; click one to resume.`
-              : `${backendLabelFromMode(snapshot.backendMode)} mode active. Demo Slice 1/2 fake backend shell is ready.`,
+              : `${backendLabelFromMode(snapshot.backendMode)} mode active. Local demo backend is ready.`,
           );
           setLoadState({ state: "ready", version, settings, diagnostics });
         }
@@ -2936,7 +2936,7 @@ function fixtureSession(
     id,
     title,
     project: "pi-deck",
-    projectPath: "/Users/liusu/pi-deck-worktrees/eng5-sessions-controls",
+    projectPath: "Local demo project",
     subtitle: selectSidebarIndicator({
       baseState,
       overlays: { ...emptyOverlays, ...overlayPatch },
