@@ -17,6 +17,8 @@ import {
   attachmentImportImageRequestSchema,
   attachmentPickerRequestSchema,
   chatAbortRequestSchema,
+  chatDeleteSessionRequestSchema,
+  chatDeleteSessionResultSchema,
   chatListModelsRequestSchema,
   chatListModelsResultSchema,
   chatListSessionsResultSchema,
@@ -35,6 +37,7 @@ import {
 import type {
   AppSettings,
   AttachmentDraft,
+  ChatDeleteSessionResult,
   ChatListSessionsResult,
   ChatSnapshot,
   PickAttachmentsResult,
@@ -251,6 +254,14 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async ({ sessionFile }) =>
       resumeChatSession(store, diagnosticsService, sessionFile),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.chatDeleteSession,
+    requestSchema: chatDeleteSessionRequestSchema,
+    responseSchema: chatDeleteSessionResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ sessionFile }) => deleteChatSession(store, sessionFile),
   });
 
   registerValidatedIpc({
@@ -846,6 +857,46 @@ async function listChatSessions(
       }),
     diagnostics: result.diagnostics,
   };
+}
+
+async function deleteChatSession(
+  store: SettingsStore,
+  sessionFile: string,
+): Promise<ChatDeleteSessionResult> {
+  const mode = resolveChatBackendMode();
+  if (mode !== "real") {
+    throw new Error(
+      "Deleting saved sessions is only available in real Pi mode.",
+    );
+  }
+
+  const canonicalSessionFile = await safeRealpath(sessionFile);
+  if (canonicalSessionFile === undefined) {
+    throw new Error(`Session file is missing or unreadable: ${sessionFile}`);
+  }
+
+  const launch = await resolveRealChatLaunchConfig(store);
+  const sessionCwd = await readSessionFileCwd(canonicalSessionFile);
+  if (sessionCwd !== undefined && sessionCwd !== launch.projectCwd) {
+    throw new Error(
+      `Session belongs to a different project. Session cwd: ${sessionCwd}; current project: ${launch.projectCwd}.`,
+    );
+  }
+
+  const lockedRuntimeId = chatSessionFileLocks.get(canonicalSessionFile);
+  if (lockedRuntimeId !== undefined && chatRuntimeIds.has(lockedRuntimeId)) {
+    throw new Error(
+      "Cannot delete an attached Pi runtime session. Start or select another session first.",
+    );
+  }
+
+  try {
+    await shell.trashItem(canonicalSessionFile);
+  } catch {
+    await fs.rm(canonicalSessionFile, { force: true });
+  }
+  chatSessionFileLocks.delete(canonicalSessionFile);
+  return { deleted: true, sessionFile: canonicalSessionFile };
 }
 
 async function resumeChatSession(

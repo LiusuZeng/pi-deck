@@ -802,6 +802,40 @@ export function App(): ReactElement {
     }
   }
 
+  async function handleDeleteSession(sessionId: string): Promise<void> {
+    const session = sessions.find((item) => item.id === sessionId);
+    if (!session?.sessionFile || session.resumeBacked !== true) {
+      setUiMessage("Only saved inactive sessions can be deleted.");
+      return;
+    }
+    const confirmed = window.confirm(
+      `Delete saved Pi session “${session.title}”? It will be moved to Trash when possible.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      await window.piDeck.chat.deleteSession({
+        sessionFile: session.sessionFile,
+      });
+      setSessions((items) => items.filter((item) => item.id !== session.id));
+      if (selectedSessionId === session.id) {
+        const nextSession = sessions.find(
+          (item) => item.id !== session.id && item.runtimeBacked,
+        );
+        if (nextSession) {
+          setSelectedSessionId(nextSession.id);
+        }
+      }
+      setUiMessage("Deleted saved Pi session.");
+    } catch (error) {
+      setUiMessage(
+        `Failed to delete session: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   async function handleSetRealModel(
     provider: string,
     modelId: string,
@@ -958,6 +992,7 @@ export function App(): ReactElement {
           realMode={isRealBackendMode}
           onSelect={handleSelectSession}
           onNewSession={() => void handleNewSession()}
+          onDeleteSession={(sessionId) => void handleDeleteSession(sessionId)}
         />
       ) : null}
 
@@ -1918,6 +1953,7 @@ function SessionSidebar(props: {
   realMode: boolean;
   onSelect(sessionId: string): void;
   onNewSession(): void;
+  onDeleteSession(sessionId: string): void;
 }): ReactElement {
   const [showOlderRealSessions, setShowOlderRealSessions] = useState(false);
   const visibleSessions =
@@ -1959,32 +1995,47 @@ function SessionSidebar(props: {
         className="session-list"
         aria-label="Session list with priority states"
       >
-        {visibleSessions.map((session) => (
-          <button
-            key={session.id}
-            className={`session-item ${session.id === props.selectedSessionId ? "active" : ""}`}
-            type="button"
-            title={`${session.title}\n${formatReadableTimestamp(session.updatedAtMs)}`}
-            onClick={() => {
-              props.onSelect(session.id);
-            }}
-          >
-            <StateIndicator session={session} />
-            <span className="session-copy">
-              <span className="session-title">{session.title}</span>
-              <span className="session-meta">{session.subtitle}</span>
-              {!props.realMode ? (
-                <span className="session-meta">{session.projectPath}</span>
+        {visibleSessions.map((session) => {
+          const canDelete = props.realMode && session.resumeBacked === true;
+          return (
+            <div className="session-item-wrap" key={session.id}>
+              <button
+                className={`session-item ${session.id === props.selectedSessionId ? "active" : ""}`}
+                type="button"
+                title={`${session.title}\n${formatReadableTimestamp(session.updatedAtMs)}`}
+                onClick={() => {
+                  props.onSelect(session.id);
+                }}
+              >
+                <StateIndicator session={session} />
+                <span className="session-copy">
+                  <span className="session-title">{session.title}</span>
+                  <span className="session-meta">{session.subtitle}</span>
+                  {!props.realMode ? (
+                    <span className="session-meta">{session.projectPath}</span>
+                  ) : null}
+                </span>
+                <span
+                  className="session-time"
+                  title={formatReadableTimestamp(session.updatedAtMs)}
+                >
+                  {session.updatedAt}
+                </span>
+              </button>
+              {canDelete ? (
+                <button
+                  className="session-delete-button"
+                  type="button"
+                  aria-label={`Delete ${session.title}`}
+                  title="Delete saved session"
+                  onClick={() => props.onDeleteSession(session.id)}
+                >
+                  ×
+                </button>
               ) : null}
-            </span>
-            <span
-              className="session-time"
-              title={formatReadableTimestamp(session.updatedAtMs)}
-            >
-              {session.updatedAt}
-            </span>
-          </button>
-        ))}
+            </div>
+          );
+        })}
         {props.realMode && hiddenSessionCount > 0 ? (
           <button
             className="browse-sessions"

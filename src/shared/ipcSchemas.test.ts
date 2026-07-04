@@ -6,6 +6,7 @@ import {
   attachmentDraftSchema,
   attachmentImportImageRequestSchema,
   attachmentPickerRequestSchema,
+  chatDeleteSessionRequestSchema,
   chatMessageSchema,
   chatPromptRequestSchema,
   pickProjectResultSchema,
@@ -98,6 +99,15 @@ describe("IPC schemas", () => {
         },
       ],
     });
+  });
+
+  it("validates delete session requests", () => {
+    expect(
+      chatDeleteSessionRequestSchema.parse({
+        sessionFile: "/tmp/session.jsonl",
+      }),
+    ).toEqual({ sessionFile: "/tmp/session.jsonl" });
+    expect(() => chatDeleteSessionRequestSchema.parse({})).toThrow();
   });
 
   it("validates prompt attachment tokens without file paths", () => {

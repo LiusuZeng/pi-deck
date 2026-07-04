@@ -183,6 +183,19 @@ export const chatResumeSessionRequestSchema = z
   })
   .strict();
 
+export const chatDeleteSessionRequestSchema = z
+  .object({
+    sessionFile: z.string().min(1),
+  })
+  .strict();
+
+export const chatDeleteSessionResultSchema = z
+  .object({
+    deleted: z.literal(true),
+    sessionFile: z.string(),
+  })
+  .strict();
+
 export const chatModelSummarySchema = z
   .object({
     id: z.string(),
@@ -339,6 +352,7 @@ export const ipcChannels = {
   chatGetSnapshot: "chat:getSnapshot",
   chatListSessions: "chat:listSessions",
   chatResumeSession: "chat:resumeSession",
+  chatDeleteSession: "chat:deleteSession",
   chatPrompt: "chat:prompt",
   chatAbort: "chat:abort",
   chatListModels: "chat:listModels",
