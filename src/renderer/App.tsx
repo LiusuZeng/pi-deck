@@ -609,6 +609,24 @@ export function App(): ReactElement {
       return resumed;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (isMissingSessionFileError(message)) {
+        const remainingSessions = sessions.filter(
+          (item) => item.id !== session.id,
+        );
+        setSessions(remainingSessions);
+        if (selectedSessionId === session.id) {
+          const nextSession =
+            remainingSessions.find((item) => item.runtimeBacked) ??
+            remainingSessions[0];
+          if (nextSession !== undefined) {
+            setSelectedSessionId(nextSession.id);
+          }
+        }
+        setUiMessage(
+          "Saved session file is missing or unreadable. Removed it from the list.",
+        );
+        return undefined;
+      }
       setUiMessage(`Failed to resume session: ${message}`);
       setSessions((items) =>
         items.map((item) =>
@@ -1257,6 +1275,10 @@ function startupErrorSession(message: string): SessionViewModel {
       },
     ],
   };
+}
+
+function isMissingSessionFileError(message: string): boolean {
+  return /session file is missing or unreadable/i.test(message);
 }
 
 function mergeAttachmentDrafts(
@@ -3819,6 +3841,7 @@ export const __rendererTestHooks = {
   sessionFromSnapshot,
   mergeSessionUsageFromSnapshot,
   mergeAttachmentDrafts,
+  isMissingSessionFileError,
   isSessionDeletable,
 };
 

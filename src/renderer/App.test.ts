@@ -55,6 +55,21 @@ describe("renderer attachment actions", () => {
   });
 });
 
+describe("renderer resume recovery", () => {
+  it("recognizes missing saved session files as refreshable rows", () => {
+    expect(
+      __rendererTestHooks.isMissingSessionFileError(
+        "Session file is missing or unreadable: /tmp/deleted.jsonl",
+      ),
+    ).toBe(true);
+    expect(
+      __rendererTestHooks.isMissingSessionFileError(
+        "Session belongs to a different project.",
+      ),
+    ).toBe(false);
+  });
+});
+
 describe("renderer session actions", () => {
   it("keeps a saved session deletable after it is resumed", () => {
     expect(

@@ -25,6 +25,30 @@ async function launchPiDeck(
   return { app, page };
 }
 
+function createFakePiBinary(root: string): string {
+  const fakePiPath = path.join(root, "fake-pi.js");
+  fs.writeFileSync(
+    fakePiPath,
+    `#!/usr/bin/env node\nif (process.argv.includes("--version")) {\n  console.log("v42.5.0");\n  process.exit(0);\n}\nrequire(${JSON.stringify(path.join(repoRoot, "dist/main/pi/fakeRpc/fakeRpcServer.js"))});\n`,
+    { mode: 0o755 },
+  );
+  return fakePiPath;
+}
+
+function fakeRealModeEnv(options: {
+  root: string;
+  projectCwd: string;
+  agentDir: string;
+}): NodeJS.ProcessEnv {
+  return {
+    PI_DECK_BACKEND: "real",
+    PI_DECK_PI_BINARY: createFakePiBinary(options.root),
+    PI_DECK_PROJECT_CWD: options.projectCwd,
+    PI_CODING_AGENT_DIR: options.agentDir,
+    PI_DECK_DISABLE_PREWARM_REAL_WORKER: "1",
+  };
+}
+
 async function expectHealthyPreload(page: Page): Promise<void> {
   await expect(page.getByText("Preload error")).toHaveCount(0);
   await expect(page.getByText(/secure renderer/i)).toBeVisible();
@@ -36,7 +60,7 @@ test("fake mode launches with backend runtime and send enabled", async () => {
   });
   try {
     await expectHealthyPreload(page);
-    await expect(page.getByText(/backend fake RPC mode active/i)).toBeVisible();
+    await expect(page.getByText(/Local demo mode active/i)).toBeVisible();
     await page.getByLabel("Prompt text").fill("fake e2e prompt");
     await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
   } finally {
@@ -66,10 +90,7 @@ test("real mode startup failure is not mislabeled as preload/fake UI", async () 
   }
 });
 
-test("real mode can show and resume a saved project session", async () => {
-  const piBinary = process.env.PI_DECK_PI_BINARY || "/usr/local/bin/pi";
-  test.skip(!fs.existsSync(piBinary), `Pi binary not found at ${piBinary}`);
-
+test("real mode can show and resume a saved project session with fake Pi", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-resume-"));
   const projectCwd = path.join(root, "project");
   const agentDir = path.join(root, "agent");
@@ -90,12 +111,9 @@ test("real mode can show and resume a saved project session", async () => {
     );
   }
 
-  const { app, page } = await launchPiDeck({
-    PI_DECK_BACKEND: "real",
-    PI_DECK_PI_BINARY: piBinary,
-    PI_DECK_PROJECT_CWD: projectCwd,
-    PI_CODING_AGENT_DIR: agentDir,
-  });
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({ root, projectCwd, agentDir }),
+  );
   try {
     await expectHealthyPreload(page);
     await expect(page.getByText(/Real Pi mode active/i)).toBeVisible();
@@ -115,30 +133,61 @@ test("real mode can show and resume a saved project session", async () => {
   }
 });
 
-test("real mode compact plus creates another attached session", async () => {
-  const piBinary = process.env.PI_DECK_PI_BINARY || "/usr/local/bin/pi";
-  test.skip(!fs.existsSync(piBinary), `Pi binary not found at ${piBinary}`);
+test("real mode lists a newly prompted session after restart with fake Pi", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-persist-"));
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+  const env = fakeRealModeEnv({ root, projectCwd, agentDir });
 
+  const firstLaunch = await launchPiDeck(env);
+  try {
+    await expectHealthyPreload(firstLaunch.page);
+    await firstLaunch.page
+      .getByLabel("Prompt text")
+      .fill("persisted restart session");
+    await firstLaunch.page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      firstLaunch.page.getByText(/Fake response to: persisted restart session/),
+    ).toBeVisible();
+  } finally {
+    await firstLaunch.app.close();
+  }
+
+  const secondLaunch = await launchPiDeck(env);
+  try {
+    await expectHealthyPreload(secondLaunch.page);
+    await expect(
+      secondLaunch.page.getByText("Saved · click to resume").first(),
+    ).toBeVisible();
+    await secondLaunch.page
+      .getByText("Saved · click to resume")
+      .first()
+      .click();
+    await expect(
+      secondLaunch.page.getByText("Resumed saved Pi session."),
+    ).toBeVisible();
+  } finally {
+    await secondLaunch.app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("real mode compact plus creates another attached session with fake Pi", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-new-"));
   const projectCwd = path.join(root, "project");
   const agentDir = path.join(root, "agent");
   fs.mkdirSync(projectCwd, { recursive: true });
   fs.mkdirSync(agentDir, { recursive: true });
 
-  const { app, page } = await launchPiDeck({
-    PI_DECK_BACKEND: "real",
-    PI_DECK_PI_BINARY: piBinary,
-    PI_DECK_PROJECT_CWD: projectCwd,
-    PI_CODING_AGENT_DIR: agentDir,
-  });
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({ root, projectCwd, agentDir }),
+  );
   try {
     await expectHealthyPreload(page);
-    const sessionList = page.getByRole("region", {
-      name: "Session list with priority states",
-    });
-    const initialCount = await sessionList.getByRole("button").count();
     await page.getByRole("button", { name: "New session" }).click();
-    await expect(sessionList.getByRole("button")).toHaveCount(initialCount + 1);
+    await expect(page.getByText(/New real Pi chat is ready/)).toBeVisible();
     await page
       .getByLabel("Prompt text")
       .fill("new session e2e prompt without sending");

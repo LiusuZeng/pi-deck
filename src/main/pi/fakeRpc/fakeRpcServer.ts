@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import fs from "node:fs";
+import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type {
   JsonObject,
@@ -23,6 +25,7 @@ interface FakeOptions {
   streamDelayMs: number;
   ignoredCommands: Set<string>;
   promptScenario: PromptScenario;
+  sessionFile?: string;
 }
 
 type FakeCommandRecord = JsonObject & {
@@ -60,6 +63,12 @@ function parseOptions(argv: string[]): FakeOptions {
       const scenario = argv[index + 1] ?? "basic";
       if (isPromptScenario(scenario)) {
         options.promptScenario = scenario;
+      }
+      index += 1;
+    } else if (arg === "--session") {
+      const sessionFile = argv[index + 1];
+      if (sessionFile) {
+        options.sessionFile = sessionFile;
       }
       index += 1;
     }
@@ -115,6 +124,10 @@ function commandParams(command: FakeCommandRecord): JsonObject {
 class FakeRpcServer {
   private readonly decoder = new StringDecoder("utf8");
   private readonly options = parseOptions(process.argv.slice(2));
+  private readonly sessionFile = this.resolveSessionFile();
+  private readonly shouldPersistSessionFile = Boolean(
+    this.options.sessionFile || process.env.PI_CODING_AGENT_DIR,
+  );
   private buffer = "";
   private firstCommandSeen = false;
   private promptCounter = 0;
@@ -130,6 +143,7 @@ class FakeRpcServer {
   ];
 
   start(): void {
+    this.ensurePersistedSessionRecord();
     if (this.options.stderrOnStart) {
       process.stderr.write("fake-rpc: deterministic stderr diagnostic\n");
     }
@@ -145,6 +159,69 @@ class FakeRpcServer {
       }
     });
     process.stdin.resume();
+  }
+
+  private resolveSessionFile(): string {
+    if (this.options.sessionFile) {
+      return path.resolve(this.options.sessionFile);
+    }
+    const agentDir = process.env.PI_CODING_AGENT_DIR;
+    if (agentDir) {
+      return path.join(
+        path.resolve(agentDir),
+        "sessions",
+        "--fake-rpc--",
+        `fake-session-${Date.now()}-${process.pid}.jsonl`,
+      );
+    }
+    return path.join(process.cwd(), "fake-session.jsonl");
+  }
+
+  private ensurePersistedSessionRecord(): void {
+    if (!this.shouldPersistSessionFile) {
+      return;
+    }
+    try {
+      fs.mkdirSync(path.dirname(this.sessionFile), { recursive: true });
+      if (!fs.existsSync(this.sessionFile)) {
+        fs.writeFileSync(
+          this.sessionFile,
+          `${JSON.stringify({
+            type: "session",
+            version: 3,
+            id: path.basename(this.sessionFile, ".jsonl"),
+            timestamp: new Date().toISOString(),
+            cwd: process.cwd(),
+          })}\n`,
+        );
+      }
+    } catch {
+      // Fake persistence is best-effort and should not break RPC tests.
+    }
+  }
+
+  private appendPersistedMessage(message: PiMessage): void {
+    if (!this.shouldPersistSessionFile) {
+      return;
+    }
+    try {
+      this.ensurePersistedSessionRecord();
+      fs.appendFileSync(
+        this.sessionFile,
+        `${JSON.stringify({
+          type: "message",
+          id: `record_${message.id}`,
+          timestamp: new Date(
+            typeof message.createdAt === "number"
+              ? message.createdAt
+              : Date.now(),
+          ).toISOString(),
+          message,
+        })}\n`,
+      );
+    } catch {
+      // Fake persistence is best-effort and should not break RPC tests.
+    }
   }
 
   private onData(chunk: Buffer): void {
@@ -206,8 +283,10 @@ class FakeRpcServer {
 
   private getState(): PiState {
     return {
-      sessionId: "fake-session-1",
-      sessionFile: `${process.cwd()}/fake-session.jsonl`,
+      sessionId: this.shouldPersistSessionFile
+        ? path.basename(this.sessionFile, ".jsonl")
+        : "fake-session-1",
+      sessionFile: this.sessionFile,
       cwd: process.cwd(),
       model: "fake-model",
       provider: "fake-provider",
@@ -226,6 +305,7 @@ class FakeRpcServer {
       createdAt: Date.now(),
     };
     this.messages.push(userMessage);
+    this.appendPersistedMessage(userMessage);
     this.promptCounter += 1;
     const assistantId = `msg_assistant_${this.promptCounter}`;
     const chunks = ["Fake response", " to: ", text || "(empty prompt)"];
@@ -263,12 +343,14 @@ class FakeRpcServer {
       setTimeout(
         () => {
           this.agentActive = false;
-          this.messages.push({
+          const assistantMessage: PiMessage = {
             id: assistantId,
             role: "assistant",
             content: accumulated,
             createdAt: Date.now(),
-          });
+          };
+          this.messages.push(assistantMessage);
+          this.appendPersistedMessage(assistantMessage);
           this.write({
             type: "message_update",
             messageId: assistantId,

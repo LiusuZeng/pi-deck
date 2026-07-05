@@ -1059,7 +1059,7 @@ async function resumeChatSession(
   const returnedSessionFile = snapshot.state.sessionFile;
   if (typeof returnedSessionFile !== "string") {
     throw new Error(
-      "Pi resume did not return a sessionFile in get_state; this Pi version may not support GUI resume.",
+      "This Pi version did not report the resumed session file. Update Pi and try again, or resume this session from the Pi CLI.",
     );
   }
   const returnedCanonical =

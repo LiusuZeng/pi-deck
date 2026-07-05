@@ -63,7 +63,8 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
 3. **Harden resume existing sessions**
    - Current behavior: clicking a saved row spawns `pi --mode rpc --session <sessionFile>` and verifies `get_state.sessionFile` canonicalizes to the requested file.
    - Current behavior: saved/resumed sessions remain deletable; attached runtime locks are closed before delete.
-   - Required before closing P0: missing/deleted file refresh, unsupported-version copy polish, and broader real Pi validation.
+   - Current behavior: missing/unreadable saved-session files are removed from the visible list when resume fails.
+   - Required before closing P0: broader real Pi validation.
 
 4. **Harden multiple real workers and event routing**
    - Basic multiple-worker support exists for in-window new sessions and resumed sessions; duplicate known session files reuse an attached worker.
@@ -220,15 +221,15 @@ Non-goal: full session repository/resume/concurrency. This is a narrow real-Pi v
 
 ## M3. Project Picker, Session Repository, New/Resume Sessions
 
-| ID   | Task                               | Owner            | Status      | Depends on  | Acceptance summary                                                                                                                                                                 |
-| ---- | ---------------------------------- | ---------------- | ----------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| M3.1 | Project picker/recent projects     | Frontend/Backend | In Progress | M1 settings | Picker IPC, renderer recents, real-mode selected-project handoff, and selected-cwd persistence exist; trust/permission UX still needs polish.                                      |
-| M3.2 | EffectivePiConfig resolver         | Backend/Platform | Done        | M1.3, M1.4  | Resolver implemented with app/env/settings/trust/image precedence tests                                                                                                            |
-| M3.3 | Static session repository scanning | Backend          | In Progress | M3.2        | Scans authoritative session dir for project `.jsonl` files with bounds/no symlink following; saved sessions can be deleted before/after resume; messy-dir validation remains.      |
-| M3.4 | Candidate sessionDir handling      | Backend/Frontend | In Progress | M3.2, M3.3  | Project candidate dirs are scanned only with explicit env opt-in and repository scanner bounds; hands-on validation still needed.                                                  |
-| M3.5 | New session flow                   | Backend/Frontend | In Progress | M2.3, M3.1  | Real `+` creates an additional in-window worker with an optimistic row and reports Pi sessionFile backing when available; restart/resume validation still P0.                      |
-| M3.6 | Resume existing session flow       | Backend/RPC      | In Progress | M3.3, G2    | Clicking saved rows resumes with `--session`, verifies canonical file, restores image previews, and keeps resumed sessions deletable; unsupported-version copy still needs polish. |
-| M3.7 | In-app session ownership lock      | Backend          | In Progress | M3.5, M3.6  | Duplicate open of a known session file reuses the existing worker; scheduler-grade ownership locks remain.                                                                         |
+| ID   | Task                               | Owner            | Status      | Depends on  | Acceptance summary                                                                                                                                                                                                 |
+| ---- | ---------------------------------- | ---------------- | ----------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| M3.1 | Project picker/recent projects     | Frontend/Backend | In Progress | M1 settings | Picker IPC, renderer recents, real-mode selected-project handoff, and selected-cwd persistence exist; trust/permission UX still needs polish.                                                                      |
+| M3.2 | EffectivePiConfig resolver         | Backend/Platform | Done        | M1.3, M1.4  | Resolver implemented with app/env/settings/trust/image precedence tests                                                                                                                                            |
+| M3.3 | Static session repository scanning | Backend          | In Progress | M3.2        | Scans authoritative session dir for project `.jsonl` files with bounds/no symlink following; saved sessions can be deleted before/after resume; messy-dir regression coverage exists; hands-on validation remains. |
+| M3.4 | Candidate sessionDir handling      | Backend/Frontend | In Progress | M3.2, M3.3  | Project candidate dirs are scanned only with explicit env opt-in and repository scanner bounds; hands-on validation still needed.                                                                                  |
+| M3.5 | New session flow                   | Backend/Frontend | In Progress | M2.3, M3.1  | Real `+` creates an additional in-window worker with an optimistic row and reports Pi sessionFile backing when available; restart/resume validation still P0.                                                      |
+| M3.6 | Resume existing session flow       | Backend/RPC      | In Progress | M3.3, G2    | Clicking saved rows resumes with `--session`, verifies canonical file, restores image previews, keeps resumed sessions deletable, and removes missing files from the list; broader real-Pi validation remains.     |
+| M3.7 | In-app session ownership lock      | Backend          | In Progress | M3.5, M3.6  | Duplicate open of a known session file reuses the existing worker; scheduler-grade ownership locks remain.                                                                                                         |
 
 ## M4. Model, Thinking, Slash Commands, Attachments
 
