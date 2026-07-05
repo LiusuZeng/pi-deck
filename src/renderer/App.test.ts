@@ -20,6 +20,37 @@ function baseSession() {
   } as const;
 }
 
+describe("renderer session actions", () => {
+  it("keeps a saved session deletable after it is resumed", () => {
+    expect(
+      __rendererTestHooks.isSessionDeletable(
+        {
+          ...baseSession(),
+          sessionFile: "/Users/example/.pi/agent/sessions/session.jsonl",
+          runtimeBacked: true,
+          resumeBacked: false,
+        } as any,
+        true,
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps an inactive saved session deletable before resume", () => {
+    expect(
+      __rendererTestHooks.isSessionDeletable(
+        {
+          ...baseSession(),
+          id: "saved-1",
+          sessionFile: "/Users/example/.pi/agent/sessions/session.jsonl",
+          runtimeBacked: false,
+          resumeBacked: true,
+        } as any,
+        true,
+      ),
+    ).toBe(true);
+  });
+});
+
 describe("renderer message_update reduction", () => {
   it("does not render toolcall JSON deltas as assistant text", () => {
     const next = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {

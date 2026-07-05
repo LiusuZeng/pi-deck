@@ -839,12 +839,17 @@ export function App(): ReactElement {
 
   async function handleDeleteSession(sessionId: string): Promise<void> {
     const session = sessions.find((item) => item.id === sessionId);
-    if (!session?.sessionFile || session.resumeBacked !== true) {
-      setUiMessage("Only saved inactive sessions can be deleted.");
+    if (
+      session === undefined ||
+      typeof session.sessionFile !== "string" ||
+      !isSessionDeletable(session, isRealBackendMode)
+    ) {
+      setUiMessage("Only saved Pi sessions can be deleted.");
       return;
     }
+    const sessionFile = session.sessionFile;
     const confirmed = window.confirm(
-      `Delete saved Pi session “${session.title}”? It will be moved to Trash when possible.`,
+      `Delete Pi session “${session.title}”?${session.runtimeBacked ? " This will close it first." : ""} It will be moved to Trash when possible.`,
     );
     if (!confirmed) {
       return;
@@ -852,18 +857,23 @@ export function App(): ReactElement {
 
     try {
       await window.piDeck.chat.deleteSession({
-        sessionFile: session.sessionFile,
+        sessionFile,
       });
-      setSessions((items) => items.filter((item) => item.id !== session.id));
+      const remainingSessions = sessions.filter(
+        (item) => item.id !== session.id,
+      );
+      setSessions(remainingSessions);
       if (selectedSessionId === session.id) {
-        const nextSession = sessions.find(
-          (item) => item.id !== session.id && item.runtimeBacked,
-        );
-        if (nextSession) {
+        const nextSession =
+          remainingSessions.find((item) => item.runtimeBacked) ??
+          remainingSessions[0];
+        if (nextSession !== undefined) {
           setSelectedSessionId(nextSession.id);
+        } else {
+          await handleNewSession();
         }
       }
-      setUiMessage("Deleted saved Pi session.");
+      setUiMessage("Deleted Pi session.");
     } catch (error) {
       setUiMessage(
         `Failed to delete session: ${error instanceof Error ? error.message : String(error)}`,
@@ -2169,7 +2179,7 @@ function SessionSidebar(props: {
         aria-label="Session list with priority states"
       >
         {visibleSessions.map((session) => {
-          const canDelete = props.realMode && session.resumeBacked === true;
+          const canDelete = isSessionDeletable(session, props.realMode);
           return (
             <div className="session-item-wrap" key={session.id}>
               <button
@@ -2233,6 +2243,18 @@ function SessionSidebar(props: {
         </div>
       ) : null}
     </aside>
+  );
+}
+
+function isSessionDeletable(
+  session: SessionViewModel,
+  realMode: boolean,
+): boolean {
+  return (
+    realMode &&
+    session.backendMode === "real" &&
+    typeof session.sessionFile === "string" &&
+    session.sessionFile.length > 0
   );
 }
 
@@ -3670,6 +3692,7 @@ export const __rendererTestHooks = {
   reduceRuntimeEvent,
   sessionFromSnapshot,
   mergeSessionUsageFromSnapshot,
+  isSessionDeletable,
 };
 
 function getRendererNodeAccessSummary(): string {
