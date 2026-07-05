@@ -980,7 +980,7 @@ export function App(): ReactElement {
           setCurrentProject(projectFromCwd(snapshot.state.cwd));
         }
         setUiMessage(
-          "Started a new real Pi session. Previous sessions remain in the sidebar.",
+          "New real Pi chat is ready. It will appear in the sidebar after you send the first prompt.",
         );
       } catch (error) {
         setUiMessage(
@@ -1528,7 +1528,9 @@ function timelineFromMessages(messages: ChatMessage[]): TimelineItem[] {
     }
 
     if (message.role === "assistant") {
-      return [{ id, kind: "assistant", content, createdAt }];
+      return content.trim().length > 0
+        ? [{ id, kind: "assistant", content, createdAt }]
+        : [];
     }
 
     if (message.role === "system" && content.length > 0) {
@@ -1583,10 +1585,12 @@ function reduceRuntimeEvent(
             : "Idle · backend stream complete",
         updatedAt: "Now",
         updatedAtMs: Date.now(),
-        timeline: session.timeline.map((item) =>
-          item.kind === "assistant" && item.streaming === true
-            ? { ...item, streaming: false }
-            : item,
+        timeline: removeEmptyAssistantMessages(
+          session.timeline.map((item) =>
+            item.kind === "assistant" && item.streaming === true
+              ? { ...item, streaming: false }
+              : item,
+          ),
         ),
       };
     }
@@ -1769,6 +1773,12 @@ function reduceMessageUpdate(
     updatedAtMs: Date.now(),
     timeline,
   };
+}
+
+function removeEmptyAssistantMessages(items: TimelineItem[]): TimelineItem[] {
+  return items.filter(
+    (item) => item.kind !== "assistant" || item.content.trim().length > 0,
+  );
 }
 
 function getActiveAssistantMessageId(
@@ -2108,11 +2118,14 @@ function SessionSidebar(props: {
   onDeleteAllSessions(): void;
 }): ReactElement {
   const [showOlderRealSessions, setShowOlderRealSessions] = useState(false);
+  const sidebarSessions = props.realMode
+    ? props.sessions.filter(shouldShowSessionInSidebar)
+    : props.sessions;
   const visibleSessions =
     props.realMode && !showOlderRealSessions
-      ? props.sessions.slice(0, 5)
-      : props.sessions;
-  const hiddenSessionCount = Math.max(0, props.sessions.length - 5);
+      ? sidebarSessions.slice(0, 5)
+      : sidebarSessions;
+  const hiddenSessionCount = Math.max(0, sidebarSessions.length - 5);
 
   return (
     <aside className="sidebar" aria-label="Sessions">
@@ -2216,6 +2229,17 @@ function SessionSidebar(props: {
         </div>
       ) : null}
     </aside>
+  );
+}
+
+function shouldShowSessionInSidebar(session: SessionViewModel): boolean {
+  return !(
+    session.backendMode === "real" &&
+    session.runtimeBacked &&
+    session.resumeBacked !== true &&
+    session.status === "idle" &&
+    session.timeline.length === 0 &&
+    isPlaceholderSessionTitle(session.title)
   );
 }
 
@@ -2524,6 +2548,14 @@ function LoadStateBadge(props: {
   );
 }
 
+function isScrolledNearBottom(scrollContainer: HTMLElement): boolean {
+  const distanceFromBottom =
+    scrollContainer.scrollHeight -
+    scrollContainer.scrollTop -
+    scrollContainer.clientHeight;
+  return distanceFromBottom < 80;
+}
+
 function getTimelineScrollMarker(session: SessionViewModel): string {
   const timelineMarker = session.timeline
     .map((item) => {
@@ -2559,6 +2591,8 @@ function ChatTimeline(props: {
     props.session.status === "working" &&
     !hasActiveTimelineOutput(props.session.timeline);
   const timelineScrollRef = useRef<HTMLDivElement | null>(null);
+  const shouldStickToBottomRef = useRef(true);
+  const previousSessionIdRef = useRef(props.session.id);
   const timelineScrollMarker = getTimelineScrollMarker(props.session);
 
   useLayoutEffect(() => {
@@ -2567,18 +2601,37 @@ function ChatTimeline(props: {
       return;
     }
 
+    const sessionChanged = previousSessionIdRef.current !== props.session.id;
+    previousSessionIdRef.current = props.session.id;
+    if (!sessionChanged && !shouldStickToBottomRef.current) {
+      return;
+    }
+
     const animationFrameId = window.requestAnimationFrame(() => {
       scrollContainer.scrollTop = scrollContainer.scrollHeight;
+      shouldStickToBottomRef.current = true;
     });
 
     return () => {
       window.cancelAnimationFrame(animationFrameId);
     };
-  }, [timelineScrollMarker]);
+  }, [props.session.id, timelineScrollMarker]);
+
+  function handleTimelineScroll(): void {
+    const scrollContainer = timelineScrollRef.current;
+    if (scrollContainer === null) {
+      return;
+    }
+    shouldStickToBottomRef.current = isScrolledNearBottom(scrollContainer);
+  }
 
   return (
     <section className="timeline-shell" aria-label="Chat / Agent Timeline">
-      <div className="timeline-scroll" ref={timelineScrollRef}>
+      <div
+        className="timeline-scroll"
+        ref={timelineScrollRef}
+        onScroll={handleTimelineScroll}
+      >
         {!hasItems ? (
           <EmptyTimelineState
             status={props.session.status}

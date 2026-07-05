@@ -123,6 +123,45 @@ describe("renderer message_update reduction", () => {
     expect(next.usageStats).toMatchObject({ inputTokens: 10, outputTokens: 5 });
   });
 
+  it("does not render persisted empty assistant messages as waiting forever", () => {
+    const session = __rendererTestHooks.sessionFromSnapshot({
+      runtimeId: "runtime-1",
+      backendMode: "real",
+      state: { cwd: "/tmp/project" },
+      messages: [
+        {
+          id: "assistant-empty",
+          role: "assistant",
+          content: "",
+        },
+      ],
+    } as any);
+
+    expect(session.timeline).toEqual([]);
+  });
+
+  it("clears empty assistant placeholders when an agent turn ends", () => {
+    const next = __rendererTestHooks.reduceRuntimeEvent(
+      {
+        ...baseSession(),
+        status: "working",
+        baseState: "working",
+        timeline: [
+          {
+            id: "assistant-empty",
+            kind: "assistant",
+            content: "",
+            createdAt: "now",
+            streaming: true,
+          },
+        ],
+      } as any,
+      { type: "agent_end", runtimeId: "session-1" } as any,
+    );
+
+    expect(next.timeline).toEqual([]);
+  });
+
   it("restores image previews from resumed user messages", () => {
     const session = __rendererTestHooks.sessionFromSnapshot({
       runtimeId: "runtime-1",
