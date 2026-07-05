@@ -204,6 +204,7 @@ textarea:disabled {
   position: absolute;
   right: 6px;
   bottom: 6px;
+  z-index: 2;
   display: none;
   place-items: center;
   width: 20px;

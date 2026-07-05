@@ -2201,7 +2201,11 @@ function SessionSidebar(props: {
                   type="button"
                   aria-label={`Delete ${session.title}`}
                   title="Delete saved session"
-                  onClick={() => props.onDeleteSession(session.id)}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    props.onDeleteSession(session.id);
+                  }}
                 >
                   ×
                 </button>

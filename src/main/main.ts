@@ -894,15 +894,24 @@ async function deleteChatSession(
   }
 
   const lockedRuntimeId = chatSessionFileLocks.get(canonicalSessionFile);
-  if (lockedRuntimeId !== undefined && chatRuntimeIds.has(lockedRuntimeId)) {
-    throw new Error(
-      "Cannot delete an attached Pi runtime session. Start or select another session first.",
-    );
+  if (lockedRuntimeId !== undefined) {
+    await closeRuntimeForDeletedSession(lockedRuntimeId);
   }
 
   await trashOrRemoveFile(canonicalSessionFile);
   chatSessionFileLocks.delete(canonicalSessionFile);
   return { deleted: true, sessionFile: canonicalSessionFile };
+}
+
+async function closeRuntimeForDeletedSession(runtimeId: string): Promise<void> {
+  const adapter = chatAdapter;
+  try {
+    if (adapter !== undefined && adapter.hasRuntime(runtimeId)) {
+      await adapter.closeSession(runtimeId);
+    }
+  } finally {
+    forgetChatRuntime(runtimeId);
+  }
 }
 
 async function deleteAllChatSessions(
