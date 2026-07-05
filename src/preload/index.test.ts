@@ -13,12 +13,18 @@ const electronMock = vi.hoisted(() => {
     ipcRenderer: {
       invoke: vi.fn(),
     },
+    webUtils: {
+      getPathForFile: vi.fn(
+        (file: File & { path?: string }) => file.path ?? "",
+      ),
+    },
   };
 });
 
 vi.mock("electron", () => ({
   contextBridge: electronMock.contextBridge,
   ipcRenderer: electronMock.ipcRenderer,
+  webUtils: electronMock.webUtils,
 }));
 
 describe("preload PiDeck API validation", () => {
@@ -64,6 +70,40 @@ describe("preload PiDeck API validation", () => {
     });
 
     await expect(api.projects.pickProject()).rejects.toThrow();
+  });
+
+  it("passes dropped file paths through preload-owned Electron webUtils", async () => {
+    const payload = {
+      selected: true,
+      attachments: [
+        {
+          id: "draft-1",
+          selectedPathToken: "opaque-token-1",
+          fileName: "notes.txt",
+          displayPath: "/project/notes.txt",
+          kind: "textFile",
+          sendMode: "pathReference",
+          outsideProject: false,
+          status: "ready",
+        },
+      ],
+    };
+    electronMock.ipcRenderer.invoke.mockResolvedValueOnce({
+      ok: true,
+      data: payload,
+    });
+
+    await expect(
+      api.attachments.importDroppedFiles(
+        [{ name: "notes.txt", path: "/project/notes.txt" } as unknown as File],
+        { projectPath: "/project" },
+      ),
+    ).resolves.toEqual(payload);
+
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenCalledWith(
+      "attachments:importDroppedFiles",
+      { paths: ["/project/notes.txt"], projectPath: "/project" },
+    );
   });
 
   it("accepts valid attachment picker responses from IPC", async () => {

@@ -4,6 +4,7 @@ const appSettingsShape = {
   piBinaryPath: z.string().min(1).optional(),
   agentDir: z.string().min(1).optional(),
   sessionDir: z.string().min(1).optional(),
+  projectCwd: z.string().min(1).optional(),
   maxRunningSessions: z.number().int().min(1).max(20),
   warmWorkerLimit: z.number().int().min(0).max(20),
   enableLoginShellEnvCapture: z.boolean(),
@@ -313,6 +314,13 @@ export const attachmentDraftSchema = z
   })
   .strict();
 
+export const attachmentImportDroppedFilesRequestSchema = z
+  .object({
+    paths: z.array(z.string().min(1)).min(1).max(100),
+    projectPath: z.string().optional(),
+  })
+  .strict();
+
 export const attachmentImportImageRequestSchema = z
   .object({
     images: z
@@ -376,6 +384,7 @@ export const ipcChannels = {
   chatEvent: "chat:event",
   projectPickFolder: "project:pickFolder",
   attachmentsPickFiles: "attachments:pickFiles",
+  attachmentsImportDroppedFiles: "attachments:importDroppedFiles",
   attachmentsImportImages: "attachments:importImages",
 } as const;
 

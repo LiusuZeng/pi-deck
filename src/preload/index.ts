@@ -1,9 +1,10 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 import { z, type ZodType } from "zod";
 import {
   apiResponseSchema,
   appSettingsPatchSchema,
   appSettingsSchema,
+  attachmentImportDroppedFilesRequestSchema,
   attachmentImportImageRequestSchema,
   attachmentPickerRequestSchema,
   chatAbortRequestSchema,
@@ -194,6 +195,19 @@ const api: PiDeckApi = Object.freeze({
         request: attachmentPickerRequestSchema.parse(request ?? {}),
         responseSchema: pickAttachmentsResultSchema,
       }),
+    importDroppedFiles: (files: File[], request?: { projectPath?: string }) => {
+      const paths = files
+        .map((file) => webUtils.getPathForFile(file))
+        .filter((filePath) => filePath.length > 0);
+      return invokeValidated({
+        channel: ipcChannels.attachmentsImportDroppedFiles,
+        request: attachmentImportDroppedFilesRequestSchema.parse({
+          ...(request ?? {}),
+          paths,
+        }),
+        responseSchema: pickAttachmentsResultSchema,
+      });
+    },
     importImages: (request: AttachmentImportImageRequest) =>
       invokeValidated({
         channel: ipcChannels.attachmentsImportImages,

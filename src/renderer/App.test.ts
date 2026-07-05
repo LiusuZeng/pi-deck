@@ -20,6 +20,41 @@ function baseSession() {
   } as const;
 }
 
+describe("renderer attachment actions", () => {
+  it("deduplicates dropped and picked attachments by displayed file identity", () => {
+    const existing = [
+      {
+        id: "draft-1",
+        selectedPathToken: "token-1",
+        fileName: "notes.txt",
+        displayPath: "/project/notes.txt",
+        kind: "textFile",
+        sendMode: "pathReference",
+        outsideProject: false,
+        status: "ready",
+        size: 12,
+      },
+    ];
+    const incoming = [
+      { ...existing[0], id: "draft-2", selectedPathToken: "token-2" },
+      {
+        ...existing[0],
+        id: "draft-3",
+        selectedPathToken: "token-3",
+        fileName: "other.txt",
+        displayPath: "/project/other.txt",
+      },
+    ];
+
+    expect(
+      __rendererTestHooks.mergeAttachmentDrafts(
+        existing as any,
+        incoming as any,
+      ),
+    ).toHaveLength(2);
+  });
+});
+
 describe("renderer session actions", () => {
   it("keeps a saved session deletable after it is resumed", () => {
     expect(

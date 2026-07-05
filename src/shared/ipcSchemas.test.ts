@@ -4,6 +4,7 @@ import {
   appSettingsPatchSchema,
   appSettingsSchema,
   attachmentDraftSchema,
+  attachmentImportDroppedFilesRequestSchema,
   attachmentImportImageRequestSchema,
   attachmentPickerRequestSchema,
   chatDeleteSessionRequestSchema,
@@ -139,6 +140,25 @@ describe("IPC schemas", () => {
         attachments: [
           { selectedPathToken: "token-1", filePath: "/etc/passwd" },
         ],
+      }),
+    ).toThrow();
+  });
+
+  it("validates dropped regular file path import payloads", () => {
+    expect(
+      attachmentImportDroppedFilesRequestSchema.parse({
+        paths: ["/tmp/a.txt", "/tmp/b.bin"],
+        projectPath: "/tmp",
+      }),
+    ).toEqual({ paths: ["/tmp/a.txt", "/tmp/b.bin"], projectPath: "/tmp" });
+
+    expect(() =>
+      attachmentImportDroppedFilesRequestSchema.parse({ paths: [] }),
+    ).toThrow();
+    expect(() =>
+      attachmentImportDroppedFilesRequestSchema.parse({
+        paths: ["/tmp/a.txt"],
+        recursiveRead: true,
       }),
     ).toThrow();
   });

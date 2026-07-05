@@ -475,7 +475,7 @@ export function App(): ReactElement {
           setUiMessage(
             snapshot.backendMode === "real"
               ? `Real Pi mode active. Found ${listedSessions?.sessions.length ?? 0} persisted session(s) for this project; click one to resume.`
-              : `${backendLabelFromMode(snapshot.backendMode)} mode active. Local demo backend is ready.`,
+              : "Local demo mode active. Demo backend is ready.",
           );
           setLoadState({ state: "ready", version, settings, diagnostics });
         }
@@ -765,6 +765,27 @@ export function App(): ReactElement {
       setRecentProjects((projects) =>
         saveRecentProjects(result.project, projects),
       );
+
+      if (isRealBackendMode) {
+        setComposerError(null);
+        setUiMessage(`Switching real Pi project to ${result.project.path}…`);
+        const snapshot = await window.piDeck.chat.reset();
+        const listedSessions = await window.piDeck.chat.listSessions();
+        const backendSession = sessionFromSnapshot(snapshot);
+        setSessions(
+          mergeSessions(
+            [backendSession],
+            listedSessions.sessions.map(sessionFromSummary),
+          ),
+        );
+        setSelectedSessionId(backendSession.id);
+        void loadRealModels(backendSession.id);
+        setUiMessage(
+          `Real Pi project switched. Found ${listedSessions.sessions.length} saved session(s) for this project.`,
+        );
+        return;
+      }
+
       setUiMessage(
         "Project picker used preload/main IPC; renderer received metadata only.",
       );
@@ -942,13 +963,35 @@ export function App(): ReactElement {
         setUiMessage("Attachment picker canceled.");
         return;
       }
-      setAttachments((existing) => [...existing, ...result.attachments]);
-      setUiMessage(
-        "Attachment picker returned opaque tokens and display metadata.",
+      setAttachments((existing) =>
+        mergeAttachmentDrafts(existing, result.attachments),
       );
+      setUiMessage(`Added ${result.attachments.length} attachment(s).`);
     } catch (error) {
       setUiMessage(
         `Attachment picker failed; no files were added (${error instanceof Error ? error.message : String(error)}).`,
+      );
+    }
+  }
+
+  async function handleImportDroppedFileAttachments(
+    files: File[],
+  ): Promise<void> {
+    try {
+      const result = await window.piDeck.attachments.importDroppedFiles(files, {
+        projectPath: currentProject.canonicalPath,
+      });
+      if (result.selected) {
+        setAttachments((existing) =>
+          mergeAttachmentDrafts(existing, result.attachments),
+        );
+        setUiMessage(
+          `Added ${result.attachments.length} dropped file attachment(s).`,
+        );
+      }
+    } catch (error) {
+      setUiMessage(
+        `Dropped file import failed (${error instanceof Error ? error.message : String(error)}).`,
       );
     }
   }
@@ -964,7 +1007,9 @@ export function App(): ReactElement {
       const images = await Promise.all(imageFiles.map(readDroppedImageFile));
       const result = await window.piDeck.attachments.importImages({ images });
       if (result.selected) {
-        setAttachments((existing) => [...existing, ...result.attachments]);
+        setAttachments((existing) =>
+          mergeAttachmentDrafts(existing, result.attachments),
+        );
         setUiMessage(
           `Imported ${result.attachments.length} image attachment(s).`,
         );
@@ -978,21 +1023,60 @@ export function App(): ReactElement {
 
   async function handleNewSession(): Promise<void> {
     if (isRealBackendMode) {
+      const optimisticId = createId("starting-real");
+      const optimisticSession: SessionViewModel = {
+        id: optimisticId,
+        title: "Starting real Pi chat",
+        project: currentProject.displayName,
+        projectPath: currentProject.path,
+        subtitle: "Attaching · starting Pi RPC worker",
+        status: "idle",
+        updatedAt: "Now",
+        updatedAtMs: Date.now(),
+        baseState: "attaching",
+        overlays: { ...emptyOverlays },
+        runtimeBacked: false,
+        resumeBacked: false,
+        backendMode: "real",
+        timeline: [],
+      };
       setComposerError(null);
+      setSessions((items) => mergeSessions([optimisticSession], items));
+      setSelectedSessionId(optimisticId);
       setUiMessage("Starting a new real Pi session…");
       try {
         const snapshot = await window.piDeck.chat.createSession();
         const backendSession = sessionFromSnapshot(snapshot);
-        setSessions((items) => mergeSessions([backendSession], items));
+        setSessions((items) =>
+          mergeSessions(
+            [backendSession],
+            items.filter((item) => item.id !== optimisticId),
+          ),
+        );
         setSelectedSessionId(backendSession.id);
         void loadRealModels(backendSession.id);
         if (snapshot.state.cwd) {
           setCurrentProject(projectFromCwd(snapshot.state.cwd));
         }
         setUiMessage(
-          "New real Pi chat is ready. It will appear in the sidebar after you send the first prompt.",
+          backendSession.sessionFile
+            ? "New real Pi chat is ready and backed by a session file."
+            : "New real Pi chat is ready. It will be persisted after Pi reports a session file.",
         );
       } catch (error) {
+        setSessions((items) =>
+          items.map((item) =>
+            item.id === optimisticId
+              ? appendDiagnostic(
+                  { ...item, status: "error", baseState: "error" },
+                  {
+                    tone: "error",
+                    content: `New session failed: ${error instanceof Error ? error.message : String(error)}`,
+                  },
+                )
+              : item,
+          ),
+        );
         setUiMessage(
           `Failed to start a new real Pi session: ${error instanceof Error ? error.message : String(error)}`,
         );
@@ -1051,6 +1135,9 @@ export function App(): ReactElement {
       onSend={handleSend}
       onAbort={handleAbort}
       onPickAttachments={() => void handlePickAttachments()}
+      onImportDroppedFileAttachments={(files) =>
+        void handleImportDroppedFileAttachments(files)
+      }
       onImportImageAttachments={(files) =>
         void handleImportImageAttachments(files)
       }
@@ -1113,6 +1200,10 @@ export function App(): ReactElement {
           }}
         />
 
+        <div className="ui-status-message" role="status" aria-live="polite">
+          {uiMessage}
+        </div>
+
         {showStarterPage ? (
           <StarterPage composer={composer} />
         ) : (
@@ -1166,6 +1257,31 @@ function startupErrorSession(message: string): SessionViewModel {
       },
     ],
   };
+}
+
+function mergeAttachmentDrafts(
+  existing: AttachmentDraft[],
+  incoming: AttachmentDraft[],
+): AttachmentDraft[] {
+  const merged = [...existing];
+  const seen = new Set(existing.map(attachmentDedupKey));
+  for (const attachment of incoming) {
+    const key = attachmentDedupKey(attachment);
+    if (!seen.has(key)) {
+      seen.add(key);
+      merged.push(attachment);
+    }
+  }
+  return merged;
+}
+
+function attachmentDedupKey(attachment: AttachmentDraft): string {
+  return [
+    attachment.kind,
+    attachment.sendMode,
+    attachment.displayPath,
+    attachment.size ?? "unknown-size",
+  ].join("|");
 }
 
 function mergeSessions(
@@ -2942,6 +3058,7 @@ function Composer(props: {
   onSend(): void;
   onAbort(): void;
   onPickAttachments(): void;
+  onImportDroppedFileAttachments(files: File[]): void;
   onImportImageAttachments(files: File[]): void;
   onSetModel(provider: string, modelId: string): void;
   onSetThinking(level: string): void;
@@ -2962,7 +3079,16 @@ function Composer(props: {
     setDragActive(false);
     const files = Array.from(event.dataTransfer.files);
     if (files.length > 0) {
-      props.onImportImageAttachments(files);
+      const imageFiles = files.filter(isSupportedDroppedImage);
+      const fileAttachments = files.filter(
+        (file) => !isSupportedDroppedImage(file),
+      );
+      if (fileAttachments.length > 0) {
+        props.onImportDroppedFileAttachments(fileAttachments);
+      }
+      if (imageFiles.length > 0) {
+        props.onImportImageAttachments(imageFiles);
+      }
     }
   }
 
@@ -3692,6 +3818,7 @@ export const __rendererTestHooks = {
   reduceRuntimeEvent,
   sessionFromSnapshot,
   mergeSessionUsageFromSnapshot,
+  mergeAttachmentDrafts,
   isSessionDeletable,
 };
 

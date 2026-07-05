@@ -14,6 +14,7 @@ import { z } from "zod";
 import {
   appSettingsPatchSchema,
   appSettingsSchema,
+  attachmentImportDroppedFilesRequestSchema,
   attachmentImportImageRequestSchema,
   attachmentPickerRequestSchema,
   chatAbortRequestSchema,
@@ -83,6 +84,7 @@ let warmChatWorker: ChatWorkerSpec | undefined;
 let warmChatWorkerPromise: Promise<ChatWorkerSpec | undefined> | undefined;
 let warmChatWorkerSessionFile: string | undefined;
 let chatEventUnsubscribe: (() => void) | undefined;
+let selectedRealProjectCwd: string | undefined;
 let isQuittingAfterChatWorkerCleanup = false;
 
 interface AttachmentSelectionRecord {
@@ -367,6 +369,8 @@ function registerIpcHandlers(
 
       const selectedPath = result.filePaths[0] as string;
       const canonicalPath = await fs.realpath(selectedPath);
+      selectedRealProjectCwd = canonicalPath;
+      await store.update({ projectCwd: canonicalPath });
       return {
         selected: true,
         project: {
@@ -406,6 +410,29 @@ function registerIpcHandlers(
         selected: true,
         attachments: await Promise.all(
           result.filePaths.map((filePath) =>
+            buildAttachmentDraft(filePath, projectRoot),
+          ),
+        ),
+      };
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.attachmentsImportDroppedFiles,
+    requestSchema: attachmentImportDroppedFilesRequestSchema,
+    responseSchema: pickAttachmentsResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async (request): Promise<PickAttachmentsResult> => {
+      const projectRoot = request.projectPath
+        ? await safeRealpath(request.projectPath)
+        : undefined;
+      const uniquePaths = [
+        ...new Set(request.paths.map((filePath) => path.resolve(filePath))),
+      ];
+      return {
+        selected: true,
+        attachments: await Promise.all(
+          uniquePaths.map((filePath) =>
             buildAttachmentDraft(filePath, projectRoot),
           ),
         ),
@@ -679,7 +706,7 @@ async function resolveRealChatLaunchConfig(store: SettingsStore): Promise<{
 }> {
   const settings = await store.get();
   const appSettings = applyRealBackendEnvOverrides(settings);
-  const projectCwd = await resolveRealBackendCwd();
+  const projectCwd = await resolveRealBackendCwd(settings);
   const binaryResolution = await resolvePiBinary({
     appSettings,
     env: process.env,
@@ -722,8 +749,12 @@ function applyRealBackendEnvOverrides(settings: AppSettings): AppPiSettings {
   return appPiSettings;
 }
 
-async function resolveRealBackendCwd(): Promise<string> {
-  const requested = process.env.PI_DECK_PROJECT_CWD ?? process.cwd();
+async function resolveRealBackendCwd(settings: AppSettings): Promise<string> {
+  const requested =
+    selectedRealProjectCwd ??
+    process.env.PI_DECK_PROJECT_CWD ??
+    settings.projectCwd ??
+    process.cwd();
   const resolved = path.resolve(requested);
   return (await safeRealpath(resolved)) ?? resolved;
 }
@@ -852,20 +883,53 @@ async function listChatSessions(
     };
   }
 
-  const result = await scanSessionRepository({
-    sessionDir,
-    projectCwd: launch.projectCwd,
-  });
+  const scanResults = [
+    await scanSessionRepository({
+      sessionDir,
+      projectCwd: launch.projectCwd,
+    }),
+  ];
+  const candidateDir = launch.effective.projectSessionDirCandidate;
+  if (
+    candidateDir !== undefined &&
+    candidateDir !== sessionDir &&
+    process.env.PI_DECK_SCAN_PROJECT_SESSION_DIR_CANDIDATE === "1"
+  ) {
+    scanResults.push(
+      await scanSessionRepository({
+        sessionDir: candidateDir,
+        projectCwd: launch.projectCwd,
+      }),
+    );
+  }
+
+  const sessionsByFile = new Map(
+    scanResults.flatMap((result) =>
+      result.sessions.map((session) => [session.sessionFile, session] as const),
+    ),
+  );
+  const sessions = [...sessionsByFile.values()].sort(
+    (a, b) => b.updatedAtMs - a.updatedAtMs,
+  );
+  const diagnostics = scanResults.flatMap((result) => result.diagnostics);
+  if (candidateDir !== undefined && candidateDir !== sessionDir) {
+    diagnostics.push(
+      process.env.PI_DECK_SCAN_PROJECT_SESSION_DIR_CANDIDATE === "1"
+        ? `Scanned opted-in project sessionDir candidate: ${candidateDir}`
+        : `Project sessionDir candidate not scanned without opt-in: ${candidateDir}`,
+    );
+  }
+
   return {
     projectCwd: launch.projectCwd,
     sessionDir,
-    sessions: result.sessions
+    sessions: sessions
       .filter((session) => session.sessionFile !== warmChatWorkerSessionFile)
       .map((session) => {
         const attachedRuntimeId = chatSessionFileLocks.get(session.sessionFile);
         return attachedRuntimeId ? { ...session, attachedRuntimeId } : session;
       }),
-    diagnostics: result.diagnostics,
+    diagnostics,
   };
 }
 
