@@ -41,6 +41,7 @@ function fakeRealModeEnv(options: {
   agentDir: string;
   userDataDir?: string;
   testPickProjectCwd?: string;
+  testPickProjectCwds?: string[];
 }): NodeJS.ProcessEnv {
   return {
     PI_DECK_BACKEND: "real",
@@ -53,6 +54,13 @@ function fakeRealModeEnv(options: {
       : {}),
     ...(options.testPickProjectCwd
       ? { PI_DECK_TEST_PICK_PROJECT_CWD: options.testPickProjectCwd }
+      : {}),
+    ...(options.testPickProjectCwds
+      ? {
+          PI_DECK_TEST_PICK_PROJECT_CWDS: JSON.stringify(
+            options.testPickProjectCwds,
+          ),
+        }
       : {}),
   };
 }
@@ -217,6 +225,57 @@ test("real mode lists a newly prompted session after restart with fake Pi", asyn
     ).toBeVisible();
   } finally {
     await secondLaunch.app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("real mode prompted session survives project switch and resumes after switching back with fake Pi", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-project-resume-"),
+  );
+  const projectA = path.join(root, "project-a");
+  const projectB = path.join(root, "project-b");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectA, { recursive: true });
+  fs.mkdirSync(projectB, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd: projectA,
+      agentDir,
+      testPickProjectCwds: [projectB, projectA],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await page
+      .getByLabel("Prompt text")
+      .fill("project switch persisted session");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText(/Fake response to: project switch persisted session/),
+    ).toBeVisible();
+
+    await page.getByRole("button", { name: /Open project/i }).click();
+    await expect(page.getByText(/Real Pi project switched/)).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: /project-b/ }),
+    ).toBeVisible();
+    await expect(page.getByText("Saved · click to resume")).toHaveCount(0);
+
+    await page.getByRole("button", { name: /Open project/i }).click();
+    await expect(
+      page.getByRole("heading", { name: /project-a/ }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Saved · click to resume").first(),
+    ).toBeVisible();
+    await page.getByText("Saved · click to resume").first().click();
+    await expect(page.getByText("Resumed saved Pi session.")).toBeVisible();
+  } finally {
+    await app.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

@@ -61,12 +61,14 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
 9. **Trust/resource/extension UI:** per-run trust prompt, static resource panel, supported extension dialogs/red dots.
 10. **Release readiness:** real Pi smoke matrix execution, limitations notes, expanded E2E coverage.
 
-Latest implementation note: reducer/event overlay groundwork has started. `src/renderer/sessionState.ts` now has a documented event reducer with fixture-backed tests from `docs/state-reducer-fixtures.json`, and the renderer handles queue/compaction/retry/extension-waiting events for sidebar overlays. Initial backend adapter stress tests now cover concurrent fake workers, runtime-id event routing, and closing one runtime without dropping another; real Pi/project/session identity stress coverage remains. Session repository scan regression coverage now includes symlink/depth/file-count/total-byte/wall-time bounds, and real mode passes authoritative/candidate scan bounds explicitly. Real-mode project picker handoff now has an E2E regression using fake Pi that switches projects, resets the worker, and verifies selected cwd persistence across relaunch.
+Latest implementation note: reducer/event overlay groundwork has started. `src/renderer/sessionState.ts` now has a documented event reducer with fixture-backed tests from `docs/state-reducer-fixtures.json`, and the renderer handles queue/compaction/retry/extension-waiting events for sidebar overlays. Initial backend adapter stress tests now cover concurrent fake workers, runtime-id event routing, and closing one runtime without dropping another; real Pi/project/session identity stress coverage remains. Session repository scan regression coverage now includes symlink/depth/file-count/total-byte/wall-time bounds, and real mode passes authoritative/candidate scan bounds explicitly. Real-mode project picker handoff now has E2E regressions using fake Pi that switch projects, reset the worker, verify selected cwd persistence across relaunch, and verify a prompted project-A session is resumable after switching to project B and back.
 
 ### P0 — Required before Pi Deck can be dogfooded comfortably
 
 1. **Persistent/resume-backed real new-session flow**
    - Current behavior: `+ New real session` creates another in-window real worker, shows an optimistic row, and reports when Pi returns a backing `sessionFile`.
+   - Regression coverage: fake-Pi E2E confirms a newly prompted session is visible/resumable after app restart.
+   - Regression coverage: fake-Pi E2E confirms a prompted project-A session is hidden after switching to project B, then visible/resumable after switching back to project A.
    - Required before closing P0: hands-on confirmation that newly prompted sessions are visible/resumable after app restart and project switches on real Pi.
 
 2. **Harden real session repository scanning**

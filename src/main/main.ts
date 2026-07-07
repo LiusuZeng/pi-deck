@@ -86,6 +86,7 @@ let warmChatWorkerSessionFile: string | undefined;
 let chatEventUnsubscribe: (() => void) | undefined;
 let selectedRealProjectCwd: string | undefined;
 let isQuittingAfterChatWorkerCleanup = false;
+let testProjectPickQueue: string[] | undefined;
 
 interface AttachmentSelectionRecord {
   filePath?: string;
@@ -360,8 +361,8 @@ function registerIpcHandlers(
     responseSchema: pickProjectResultSchema,
     diagnostics: diagnosticsService,
     handler: async (): Promise<PickProjectResult> => {
-      const testProjectPath = process.env.PI_DECK_TEST_PICK_PROJECT_CWD;
-      if (testProjectPath !== undefined && testProjectPath.trim().length > 0) {
+      const testProjectPath = nextTestProjectPickPath();
+      if (testProjectPath !== undefined) {
         return pickProjectByPathForTest(testProjectPath, store);
       }
 
@@ -460,6 +461,27 @@ function registerIpcHandlers(
       attachments: request.images.map(importImageAttachmentDraft),
     }),
   });
+}
+
+function nextTestProjectPickPath(): string | undefined {
+  const singlePath = process.env.PI_DECK_TEST_PICK_PROJECT_CWD;
+  if (singlePath !== undefined && singlePath.trim().length > 0) {
+    return singlePath;
+  }
+
+  const pathQueue = process.env.PI_DECK_TEST_PICK_PROJECT_CWDS;
+  if (pathQueue === undefined || pathQueue.trim().length === 0) {
+    return undefined;
+  }
+
+  if (testProjectPickQueue === undefined) {
+    const parsed = JSON.parse(pathQueue) as unknown;
+    testProjectPickQueue = Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === "string")
+      : [];
+  }
+
+  return testProjectPickQueue.shift();
 }
 
 async function pickProjectByPathForTest(
