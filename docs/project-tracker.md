@@ -61,7 +61,7 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
 9. **Trust/resource/extension UI:** per-run trust prompt, static resource panel, supported extension dialogs/red dots.
 10. **Release readiness:** real Pi smoke matrix execution, limitations notes, expanded E2E coverage.
 
-Latest implementation note: reducer/event overlay groundwork has started. `src/renderer/sessionState.ts` now has a documented event reducer with fixture-backed tests from `docs/state-reducer-fixtures.json`, and the renderer handles queue/compaction/retry/extension-waiting events for sidebar overlays. Initial backend adapter stress tests now cover concurrent fake workers, runtime-id event routing, and closing one runtime without dropping another; real Pi/project/session identity stress coverage remains. Session repository scan regression coverage now includes symlink/depth/file-count/total-byte/wall-time bounds, and real mode passes authoritative/candidate scan bounds explicitly. Real-mode project picker handoff now has E2E regressions using fake Pi that switch projects, reset the worker, verify selected cwd persistence across relaunch, and verify a prompted project-A session is resumable after switching to project B and back.
+Latest implementation note: reducer/event overlay groundwork has started. `src/renderer/sessionState.ts` now has a documented event reducer with fixture-backed tests from `docs/state-reducer-fixtures.json`, and the renderer handles queue/compaction/retry/extension-waiting events for sidebar overlays. Initial backend adapter stress tests now cover concurrent fake workers, runtime-id event routing, and closing one runtime without dropping another; real Pi/project/session identity stress coverage remains. A real-mode fake-Pi E2E now verifies background-session events stay routed to the correct attached session while the user creates/prompts another session. Session repository scan regression coverage now includes symlink/depth/file-count/total-byte/wall-time bounds, and real mode passes authoritative/candidate scan bounds explicitly. Real-mode project picker handoff now has E2E regressions using fake Pi that switch projects, reset the worker, verify selected cwd persistence across relaunch, and verify a prompted project-A session is resumable after switching to project B and back.
 
 ### P0 — Required before Pi Deck can be dogfooded comfortably
 
@@ -89,6 +89,7 @@ Latest implementation note: reducer/event overlay groundwork has started. `src/r
    - Basic multiple-worker support exists for in-window new sessions and resumed sessions; duplicate known session files reuse an attached worker.
    - Renderer reducer/sidebar overlay groundwork is in progress with fixture-backed tests.
    - Initial backend adapter stress coverage exists for concurrent fake workers, runtime-id routing, and one-runtime close isolation.
+   - Regression coverage: real-mode fake-Pi E2E confirms a background session can finish streaming while another session is created/prompted, and each transcript remains on the correct sidebar row.
    - Still required: real Pi multi-worker validation, scheduler integration, per-project/session identity stress tests, and no event leakage under restart/resume/error cases.
 
 5. **Project picker → real session handoff**

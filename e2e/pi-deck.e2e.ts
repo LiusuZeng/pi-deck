@@ -25,11 +25,11 @@ async function launchPiDeck(
   return { app, page };
 }
 
-function createFakePiBinary(root: string): string {
+function createFakePiBinary(root: string, extraArgs: string[] = []): string {
   const fakePiPath = path.join(root, "fake-pi.js");
   fs.writeFileSync(
     fakePiPath,
-    `#!/usr/bin/env node\nif (process.argv.includes("--version")) {\n  console.log("v42.5.0");\n  process.exit(0);\n}\nrequire(${JSON.stringify(path.join(repoRoot, "dist/main/pi/fakeRpc/fakeRpcServer.js"))});\n`,
+    `#!/usr/bin/env node\nif (process.argv.includes("--version")) {\n  console.log("v42.5.0");\n  process.exit(0);\n}\nprocess.argv.push(...${JSON.stringify(extraArgs)});\nrequire(${JSON.stringify(path.join(repoRoot, "dist/main/pi/fakeRpc/fakeRpcServer.js"))});\n`,
     { mode: 0o755 },
   );
   return fakePiPath;
@@ -42,10 +42,11 @@ function fakeRealModeEnv(options: {
   userDataDir?: string;
   testPickProjectCwd?: string;
   testPickProjectCwds?: string[];
+  fakePiArgs?: string[];
 }): NodeJS.ProcessEnv {
   return {
     PI_DECK_BACKEND: "real",
-    PI_DECK_PI_BINARY: createFakePiBinary(options.root),
+    PI_DECK_PI_BINARY: createFakePiBinary(options.root, options.fakePiArgs),
     ...(options.projectCwd ? { PI_DECK_PROJECT_CWD: options.projectCwd } : {}),
     PI_CODING_AGENT_DIR: options.agentDir,
     PI_DECK_DISABLE_PREWARM_REAL_WORKER: "1",
@@ -331,6 +332,52 @@ test("real mode project picker handoff persists selected cwd with fake Pi", asyn
     ).toHaveCount(0);
   } finally {
     await secondLaunch.app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("real mode routes background session events to the right session with fake Pi", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-routing-"));
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: ["--stream-delay-ms", "150"],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await page.getByLabel("Prompt text").fill("background route one");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.locator(".session-item", { hasText: "background route one" }),
+    ).toBeVisible();
+
+    await page.getByRole("button", { name: "New session" }).click();
+    await expect(page.getByText(/New real Pi chat is ready/)).toBeVisible();
+    await page.getByLabel("Prompt text").fill("foreground route two");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText(/Fake response to: foreground route two/),
+    ).toBeVisible();
+
+    await page
+      .locator(".session-item", { hasText: "background route one" })
+      .click();
+    await expect(
+      page.getByText(/Fake response to: background route one/),
+    ).toBeVisible();
+    await expect(
+      page.getByText(/Fake response to: foreground route two/),
+    ).toHaveCount(0);
+  } finally {
+    await app.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
