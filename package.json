@@ -19,6 +19,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.main.json && tsc --noEmit -p tsconfig.renderer.json",
     "test": "vitest run",
     "test:e2e": "npm run build && playwright test -c e2e/playwright.config.ts",
+    "smoke:real": "node scripts/smoke-real-pi.mjs",
+    "smoke:real:prompt": "node scripts/smoke-real-pi.mjs --prompt \"Reply with exactly: PI_DECK_REAL_SMOKE_OK\"",
     "lint": "npm run typecheck",
     "format": "prettier --check \"index.html\" \"package*.json\" \"*.config.ts\" \"tsconfig*.json\" \"scripts/**/*.mjs\" \"src/**/*.{ts,tsx,css}\" \"e2e/**/*.ts\""
   },

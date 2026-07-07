@@ -48,6 +48,7 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
 - [x] Saved sessions can be deleted individually or in bulk before or after resume; attached runtimes are closed first and files are moved to Trash when possible.
 - [x] User-facing renderer copy no longer leaks internal Eng/worktree/default development state.
 - [x] Starting experience formalized through `scripts/start-pi-deck.mjs` and npm aliases: `npm start`, `npm run deck:real -- <project>`, `npm run dev:real -- <project>`, and `npm run deck:fake`.
+- [x] Real Pi smoke commands added: `npm run smoke:real` for get_state/get_messages and `npm run smoke:real:prompt` for a minimal authenticated prompt/agent_end round-trip.
 
 ### Immediate execution order — current priority stack
 

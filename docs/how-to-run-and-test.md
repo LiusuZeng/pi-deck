@@ -94,6 +94,16 @@ npm run format
 npm run test:e2e
 ```
 
+Real Pi smoke checks are separate because prompt smoke requires local Pi/model-provider auth. The non-prompt smoke uses an isolated temp agent dir; prompt smoke uses Pi's default/user agent dir so auth is available:
+
+```bash
+# Starts a real temp pi --mode rpc session and checks get_state/get_messages.
+npm run smoke:real
+
+# Sends a tiny real prompt and waits for agent_end. Requires configured provider auth.
+npm run smoke:real:prompt
+```
+
 Current expected state on latest accepted main:
 
 - Unit/integration tests pass, including fake RPC, platform, IPC, and renderer shell coverage.
@@ -101,6 +111,7 @@ Current expected state on latest accepted main:
 - Electron main/preload and Vite renderer build successfully.
 - Prettier formatting check passes.
 - Playwright Electron E2E checks fake launch, real startup failure labeling, real-mode no-fallback/send-enabled, and saved-session refresh/resume regressions when local Pi is available.
+- `npm run smoke:real` checks the installed real Pi RPC path without fake RPC; `npm run smoke:real:prompt` additionally verifies the simplest real prompt round-trip when auth is configured.
 
 ## 6. Fake Pi Demo Checklist
 
@@ -171,7 +182,18 @@ Real mode expectations:
 
 Record real-mode validation evidence in `docs/real-pi-gui-chat-validation.md` before claiming this slice accepted.
 
-## 8. Manual Real Pi Smoke Command
+## 8. Real Pi Smoke Commands
+
+Prefer the scripted smoke checks:
+
+```bash
+npm run smoke:real
+npm run smoke:real:prompt
+```
+
+Use `npm run smoke:real -- --help` for options such as `--pi`, `--project`, `--prompt`, `--timeout-ms`, and `--keep-temp`.
+
+## 9. Manual Real Pi Smoke Command
 
 Use only controlled temp directories. Do not point smoke tests at active user sessions unless explicitly approved.
 

@@ -757,6 +757,31 @@ export function App(): ReactElement {
     setComposerError(null);
     try {
       await window.piDeck.chat.abort({ runtimeId });
+      setSessions((current) =>
+        current.map((session) =>
+          session.id === runtimeId
+            ? appendDiagnostic(
+                {
+                  ...session,
+                  status: "idle",
+                  baseState: "idle",
+                  overlays: {
+                    ...session.overlays,
+                    streaming: false,
+                    toolRunning: false,
+                  },
+                  subtitle: "Idle · abort sent to Pi backend",
+                },
+                {
+                  tone: "info",
+                  content:
+                    "Abort sent to Pi. Marked the session idle locally; reopen/resume if the transcript looks stale.",
+                },
+              )
+            : session,
+        ),
+      );
+      setUiMessage("Abort sent to Pi.");
     } catch (error) {
       setComposerError(error instanceof Error ? error.message : String(error));
       setSessions((current) =>
