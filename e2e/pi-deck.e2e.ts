@@ -150,6 +150,49 @@ test("real mode can show and resume a saved project session with fake Pi", async
   }
 });
 
+test("real mode concurrent duplicate resume reuses one runtime with fake Pi", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-duplicate-resume-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const sessionDir = path.join(agentDir, "sessions", "--e2e-duplicate--");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(sessionDir, { recursive: true });
+  const sessionFile = path.join(sessionDir, "duplicate-resume.jsonl");
+  fs.writeFileSync(
+    sessionFile,
+    `${JSON.stringify({
+      type: "session",
+      version: 3,
+      id: "duplicate-resume",
+      timestamp: "2026-07-02T00:00:00.000Z",
+      cwd: projectCwd,
+    })}\n`,
+  );
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({ root, projectCwd, agentDir }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await expect(page.getByText("Saved · click to resume")).toBeVisible();
+    const runtimeIds = await page.evaluate(async (file) => {
+      const api = window.piDeck;
+      const [first, second] = await Promise.all([
+        api.chat.resumeSession({ sessionFile: file }),
+        api.chat.resumeSession({ sessionFile: file }),
+      ]);
+      return [first.runtimeId, second.runtimeId];
+    }, sessionFile);
+
+    expect(runtimeIds[0]).toBe(runtimeIds[1]);
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("real mode removes missing saved session after resume failure with fake Pi", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-missing-"));
   const projectCwd = path.join(root, "project");

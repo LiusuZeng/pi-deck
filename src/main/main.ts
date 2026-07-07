@@ -80,6 +80,7 @@ const chatRuntimeModes = new Map<string, ChatBackendMode>();
 const chatWorkerCwds = new Map<string, string>();
 const chatRuntimeSessionFiles = new Map<string, string>();
 const chatSessionFileLocks = new Map<string, string>();
+const chatSessionResumePromises = new Map<string, Promise<ChatSnapshot>>();
 let warmChatWorker: ChatWorkerSpec | undefined;
 let warmChatWorkerPromise: Promise<ChatWorkerSpec | undefined> | undefined;
 let warmChatWorkerSessionFile: string | undefined;
@@ -835,6 +836,7 @@ async function closeChatWorker(): Promise<void> {
   chatWorkerCwds.clear();
   chatRuntimeSessionFiles.clear();
   chatSessionFileLocks.clear();
+  chatSessionResumePromises.clear();
   warmChatWorker = undefined;
   warmChatWorkerPromise = undefined;
   warmChatWorkerSessionFile = undefined;
@@ -1098,14 +1100,35 @@ async function resumeChatSession(
     );
   }
 
-  const existingRuntimeId = chatSessionFileLocks.get(canonicalSessionFile);
   const adapter = await ensureChatAdapter(store, diagnosticsService);
+  const existingRuntimeId = chatSessionFileLocks.get(canonicalSessionFile);
   const mode = chatBackendMode ?? "real";
   if (existingRuntimeId !== undefined) {
     chatRuntimeId = existingRuntimeId;
     return getChatSnapshotForRuntime(adapter, existingRuntimeId, mode);
   }
 
+  const pendingResume = chatSessionResumePromises.get(canonicalSessionFile);
+  if (pendingResume !== undefined) {
+    return pendingResume;
+  }
+
+  const resumePromise = attachRealResumeWorker(
+    adapter,
+    store,
+    canonicalSessionFile,
+  ).finally(() => {
+    chatSessionResumePromises.delete(canonicalSessionFile);
+  });
+  chatSessionResumePromises.set(canonicalSessionFile, resumePromise);
+  return resumePromise;
+}
+
+async function attachRealResumeWorker(
+  adapter: SinglePiAdapter,
+  store: SettingsStore,
+  canonicalSessionFile: string,
+): Promise<ChatSnapshot> {
   const workerSpec = await createRealResumeWorker(
     adapter,
     store,
@@ -1116,25 +1139,36 @@ async function resumeChatSession(
   chatRuntimeIds.add(runtimeId);
   chatRuntimeModes.set(runtimeId, "real");
   chatWorkerCwds.set(runtimeId, workerSpec.cwd);
-
-  const snapshot = await getChatSnapshotForRuntime(adapter, runtimeId, "real");
-  const returnedSessionFile = snapshot.state.sessionFile;
-  if (typeof returnedSessionFile !== "string") {
-    throw new Error(
-      "This Pi version did not report the resumed session file. Update Pi and try again, or resume this session from the Pi CLI.",
-    );
-  }
-  const returnedCanonical =
-    (await safeRealpath(returnedSessionFile)) ??
-    path.resolve(returnedSessionFile);
-  if (returnedCanonical !== canonicalSessionFile) {
-    throw new Error(
-      `Pi resume opened a different session. Requested ${canonicalSessionFile}, got ${returnedCanonical}.`,
-    );
-  }
   chatRuntimeSessionFiles.set(runtimeId, canonicalSessionFile);
   chatSessionFileLocks.set(canonicalSessionFile, runtimeId);
-  return snapshot;
+
+  try {
+    const snapshot = await getChatSnapshotForRuntime(
+      adapter,
+      runtimeId,
+      "real",
+    );
+    const returnedSessionFile = snapshot.state.sessionFile;
+    if (typeof returnedSessionFile !== "string") {
+      throw new Error(
+        "This Pi version did not report the resumed session file. Update Pi and try again, or resume this session from the Pi CLI.",
+      );
+    }
+    const returnedCanonical =
+      (await safeRealpath(returnedSessionFile)) ??
+      path.resolve(returnedSessionFile);
+    if (returnedCanonical !== canonicalSessionFile) {
+      throw new Error(
+        `Pi resume opened a different session. Requested ${canonicalSessionFile}, got ${returnedCanonical}.`,
+      );
+    }
+    chatRuntimeSessionFiles.set(runtimeId, canonicalSessionFile);
+    chatSessionFileLocks.set(canonicalSessionFile, runtimeId);
+    return snapshot;
+  } catch (error) {
+    await closeRuntimeForDeletedSession(runtimeId);
+    throw error;
+  }
 }
 
 async function createChatSessionSnapshot(
