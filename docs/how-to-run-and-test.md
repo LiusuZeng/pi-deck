@@ -17,17 +17,58 @@ For clean CI-like installs, use:
 npm ci
 ```
 
-## 2. Development Launch
+## 2. Starting Pi Deck
 
-Use the Vite + Electron development loop:
+Pi Deck now has one formal launcher entrypoint:
+
+```bash
+npm run deck -- [options] [project-dir]
+```
+
+Common starts:
+
+```bash
+# Daily dogfood: real Pi backend, production-ish local Electron launch
+npm start
+# or explicitly:
+npm run deck:real -- /path/to/project
+
+# Real Pi backend with Vite renderer hot reload
+npm run dev:real -- /path/to/project
+
+# Safe fake backend demo mode
+npm run deck:fake
+
+# Launcher help / dry-run plan
+npm run deck -- --help
+npm run deck:real -- --dry-run /path/to/project
+```
+
+The launcher resolves and validates:
+
+- project cwd, defaulting to the caller cwd;
+- `pi` binary from `--pi`, `PI_DECK_PI_BINARY`, `PATH`, and common macOS install paths;
+- real/fake backend env;
+- optional `--no-prewarm` for disabling spare real-worker prewarm.
+
+The old shell scripts still exist as compatibility wrappers:
+
+```bash
+scripts/dev-real-pi.sh [project-dir]
+scripts/launch-real-pi.sh [project-dir]
+```
+
+## 3. Raw Development Launch
+
+Use the raw Vite + Electron development loop for fake/local development only:
 
 ```bash
 npm run dev
 ```
 
-This builds the Electron main/preload code, starts the renderer dev server, and launches Electron against the local Vite URL.
+This builds the Electron main/preload code, starts the renderer dev server, and launches Electron against the local Vite URL. It does not select the real backend unless you set `PI_DECK_BACKEND=real` yourself; prefer `npm run dev:real -- /path/to/project` for real Pi dogfooding.
 
-## 3. Production-ish Local Launch
+## 4. Raw Production-ish Local Launch
 
 Build the app and launch Electron from the built main process without creating a DMG, signing, or notarizing:
 
@@ -35,15 +76,13 @@ Build the app and launch Electron from the built main process without creating a
 npm run launch
 ```
 
-`npm run start` is an alias for the same local launch flow.
-
 Equivalent expanded command:
 
 ```bash
 npm run build && electron dist/main/main.js
 ```
 
-## 4. Automated Validation Commands
+## 5. Automated Validation Commands
 
 Run these before demo/release-readiness handoff:
 
@@ -63,13 +102,13 @@ Current expected state on latest accepted main:
 - Prettier formatting check passes.
 - Playwright Electron E2E checks fake launch, real startup failure labeling, real-mode no-fallback/send-enabled, and saved-session refresh/resume regressions when local Pi is available.
 
-## 5. Fake Pi Demo Checklist
+## 6. Fake Pi Demo Checklist
 
 The current GUI demo uses the fake RPC worker path. This is intentional for Demo Slices 1 and 2.
 
 Suggested smoke flow:
 
-1. Run `npm run dev` or `npm run launch`.
+1. Run `npm run deck:fake` for a production-ish fake launch, or `npm run dev` for raw fake dev mode.
 2. Confirm the app window opens and the security/status badges render.
 3. Confirm the fake backend session appears in the sidebar/header.
 4. Send a multiline prompt.
@@ -88,7 +127,7 @@ Demo Slice status:
 - Demo Slice 2: accepted for the fake-backend integrated shell covering chat/sidebar/model/thinking/slash UI.
 - Native Finder dialog hands-on validation for project and attachment picker cancel/select paths is deferred as user feedback/polish, not a blocker. The project picker and attachment picker code paths exist through preload/main APIs, but literal Finder dialog interaction was not hands-on validated in this demo pass.
 
-## 6. Real Pi Current Status
+## 7. Real Pi Current Status
 
 Fake RPC remains the default and safest demo mode. Do not claim broad real Pi GUI usability yet.
 
@@ -100,19 +139,25 @@ Current reality:
 - Real Pi binary resolution, environment resolution, EffectivePiConfig, JSONL transport, and minimal RPC smoke-test foundations exist.
 - Real Pi can create additional in-window sessions with `+ New real session`. Real mode now scans the authoritative session directory for the launch project and clicking a saved row attempts `pi --mode rpc --session <file>` with canonical `get_state.sessionFile` verification. Candidate session dirs, refresh/error polish, project trust UX, attachments, and robust scheduler-backed multi-session orchestration remain future M3/M5+ work. Model/thinking controls are now available in the composer for the active real worker, with provider-specific polish still pending. Pi Deck also prewarms one spare real worker unless `PI_DECK_DISABLE_PREWARM_REAL_WORKER=1` is set.
 
-Opt-in real GUI chat launch:
+Real GUI chat launch:
 
 ```bash
-PI_DECK_BACKEND=real npm run dev
+npm start
+# or:
+npm run deck:real -- /path/to/project
+```
+
+Real GUI chat dev launch:
+
+```bash
+npm run dev:real -- /path/to/project
 ```
 
 Optional overrides:
 
 ```bash
-PI_DECK_BACKEND=real \
-PI_DECK_PI_BINARY=/absolute/path/to/pi \
-PI_DECK_PROJECT_CWD=/path/to/smoke/project \
-npm run dev
+npm run deck:real -- --pi /absolute/path/to/pi /path/to/smoke/project
+PI_CODING_AGENT_DIR=/tmp/pi-deck-agent npm run deck:real -- /path/to/smoke/project
 ```
 
 Real mode expectations:
@@ -126,7 +171,7 @@ Real mode expectations:
 
 Record real-mode validation evidence in `docs/real-pi-gui-chat-validation.md` before claiming this slice accepted.
 
-## 7. Manual Real Pi Smoke Command
+## 8. Manual Real Pi Smoke Command
 
 Use only controlled temp directories. Do not point smoke tests at active user sessions unless explicitly approved.
 

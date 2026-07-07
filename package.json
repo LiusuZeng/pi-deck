@@ -6,9 +6,13 @@
   "main": "dist/main/main.js",
   "scripts": {
     "dev": "npm run build:main && concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron dist/main/main.js\"",
-    "dev:real": "scripts/dev-real-pi.sh",
+    "deck": "node scripts/start-pi-deck.mjs",
+    "deck:fake": "node scripts/start-pi-deck.mjs --fake --launch",
+    "deck:real": "node scripts/start-pi-deck.mjs --real --launch",
+    "dev:real": "node scripts/start-pi-deck.mjs --real --dev",
     "launch": "npm run build && electron dist/main/main.js",
-    "start": "npm run launch",
+    "launch:real": "node scripts/start-pi-deck.mjs --real --launch",
+    "start": "npm run deck:real",
     "build": "npm run build:main && npm run build:renderer",
     "build:main": "tsc -p tsconfig.main.json && esbuild src/preload/index.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist/preload/index.js --sourcemap",
     "build:renderer": "vite build",
@@ -16,7 +20,7 @@
     "test": "vitest run",
     "test:e2e": "npm run build && playwright test -c e2e/playwright.config.ts",
     "lint": "npm run typecheck",
-    "format": "prettier --check \"index.html\" \"package*.json\" \"*.config.ts\" \"tsconfig*.json\" \"src/**/*.{ts,tsx,css}\" \"e2e/**/*.ts\""
+    "format": "prettier --check \"index.html\" \"package*.json\" \"*.config.ts\" \"tsconfig*.json\" \"scripts/**/*.mjs\" \"src/**/*.{ts,tsx,css}\" \"e2e/**/*.ts\""
   },
   "dependencies": {
     "react": "19.2.7",
