@@ -80,6 +80,7 @@ Latest implementation note: reducer/event overlay groundwork has started. `src/r
    - Current behavior: clicking a saved row spawns `pi --mode rpc --session <sessionFile>` and verifies `get_state.sessionFile` canonicalizes to the requested file.
    - Current behavior: saved/resumed sessions remain deletable; attached runtime locks are closed before delete.
    - Current behavior: missing/unreadable saved-session files are removed from the visible list when resume fails.
+   - Regression coverage: fake-Pi E2E covers successful resume and missing-file resume failure removal.
    - Required before closing P0: broader real Pi validation.
 
 4. **Harden multiple real workers and event routing**

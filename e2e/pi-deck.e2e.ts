@@ -141,6 +141,45 @@ test("real mode can show and resume a saved project session with fake Pi", async
   }
 });
 
+test("real mode removes missing saved session after resume failure with fake Pi", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-missing-"));
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const sessionDir = path.join(agentDir, "sessions", "--e2e-missing--");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(sessionDir, { recursive: true });
+  const sessionFile = path.join(sessionDir, "missing-before-resume.jsonl");
+  fs.writeFileSync(
+    sessionFile,
+    `${JSON.stringify({
+      type: "session",
+      version: 3,
+      id: "missing-before-resume",
+      timestamp: "2026-07-02T00:00:00.000Z",
+      cwd: projectCwd,
+    })}\n`,
+  );
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({ root, projectCwd, agentDir }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await expect(page.getByText("Saved · click to resume")).toBeVisible();
+    fs.rmSync(sessionFile, { force: true });
+    await page.getByText("Saved · click to resume").click();
+    await expect(
+      page.getByText(
+        "Saved session file is missing or unreadable. Removed it from the list.",
+      ),
+    ).toBeVisible();
+    await expect(page.getByText("Saved · click to resume")).toHaveCount(0);
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("real mode lists a newly prompted session after restart with fake Pi", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-persist-"));
   const projectCwd = path.join(root, "project");
