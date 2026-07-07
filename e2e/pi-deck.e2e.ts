@@ -37,15 +37,23 @@ function createFakePiBinary(root: string): string {
 
 function fakeRealModeEnv(options: {
   root: string;
-  projectCwd: string;
+  projectCwd?: string;
   agentDir: string;
+  userDataDir?: string;
+  testPickProjectCwd?: string;
 }): NodeJS.ProcessEnv {
   return {
     PI_DECK_BACKEND: "real",
     PI_DECK_PI_BINARY: createFakePiBinary(options.root),
-    PI_DECK_PROJECT_CWD: options.projectCwd,
+    ...(options.projectCwd ? { PI_DECK_PROJECT_CWD: options.projectCwd } : {}),
     PI_CODING_AGENT_DIR: options.agentDir,
     PI_DECK_DISABLE_PREWARM_REAL_WORKER: "1",
+    ...(options.userDataDir
+      ? { PI_DECK_USER_DATA_DIR: options.userDataDir }
+      : {}),
+    ...(options.testPickProjectCwd
+      ? { PI_DECK_TEST_PICK_PROJECT_CWD: options.testPickProjectCwd }
+      : {}),
   };
 }
 
@@ -168,6 +176,61 @@ test("real mode lists a newly prompted session after restart with fake Pi", asyn
     await expect(
       secondLaunch.page.getByText("Resumed saved Pi session."),
     ).toBeVisible();
+  } finally {
+    await secondLaunch.app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("real mode project picker handoff persists selected cwd with fake Pi", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-project-"));
+  const projectA = path.join(root, "project-a");
+  const projectB = path.join(root, "project-b");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  fs.mkdirSync(projectA, { recursive: true });
+  fs.mkdirSync(projectB, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+  fs.mkdirSync(userDataDir, { recursive: true });
+
+  const firstLaunch = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd: projectA,
+      agentDir,
+      userDataDir,
+      testPickProjectCwd: projectB,
+    }),
+  );
+  try {
+    await expectHealthyPreload(firstLaunch.page);
+    await expect(
+      firstLaunch.page.getByRole("heading", { name: /project-a/ }),
+    ).toBeVisible();
+    await firstLaunch.page
+      .getByRole("button", { name: /Open project/i })
+      .click();
+    await expect(
+      firstLaunch.page.getByText(/Real Pi project switched/),
+    ).toBeVisible();
+    await expect(
+      firstLaunch.page.getByRole("heading", { name: /project-b/ }),
+    ).toBeVisible();
+  } finally {
+    await firstLaunch.app.close();
+  }
+
+  const secondLaunch = await launchPiDeck(
+    fakeRealModeEnv({ root, agentDir, userDataDir }),
+  );
+  try {
+    await expectHealthyPreload(secondLaunch.page);
+    await expect(
+      secondLaunch.page.getByRole("heading", { name: /project-b/ }),
+    ).toBeVisible();
+    await expect(
+      secondLaunch.page.getByRole("heading", { name: /project-a/ }),
+    ).toHaveCount(0);
   } finally {
     await secondLaunch.app.close();
     fs.rmSync(root, { recursive: true, force: true });

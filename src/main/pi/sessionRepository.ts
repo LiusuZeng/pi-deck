@@ -8,6 +8,8 @@ export interface ScanSessionRepositoryOptions {
   maxDepth?: number;
   maxFiles?: number;
   maxBytesPerFile?: number;
+  maxTotalBytes?: number;
+  maxWallTimeMs?: number;
 }
 
 export interface ScanSessionRepositoryResult {
@@ -23,11 +25,14 @@ interface ParsedSessionFile {
   createdAtMs?: number;
   updatedAtMs?: number;
   messageCount: number;
+  bytesRead: number;
 }
 
-const DEFAULT_MAX_DEPTH = 5;
-const DEFAULT_MAX_FILES = 5_000;
+const DEFAULT_MAX_DEPTH = 4;
+const DEFAULT_MAX_FILES = 20_000;
 const DEFAULT_MAX_BYTES_PER_FILE = 256 * 1024;
+const DEFAULT_MAX_TOTAL_BYTES = 250 * 1024 * 1024;
+const DEFAULT_MAX_WALL_TIME_MS = 15_000;
 
 export async function scanSessionRepository(
   options: ScanSessionRepositoryOptions,
@@ -37,12 +42,35 @@ export async function scanSessionRepository(
   const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
   const maxFiles = options.maxFiles ?? DEFAULT_MAX_FILES;
   const maxBytesPerFile = options.maxBytesPerFile ?? DEFAULT_MAX_BYTES_PER_FILE;
+  const maxTotalBytes = options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES;
+  const maxWallTimeMs = options.maxWallTimeMs ?? DEFAULT_MAX_WALL_TIME_MS;
   const projectCwd = await canonicalOrResolved(options.projectCwd);
   const sessionDir = await canonicalOrResolved(options.sessionDir);
+  const startedAt = Date.now();
   let seenFiles = 0;
+  let totalBytesRead = 0;
+  let stoppedForByteCap = false;
+  let stoppedForTimeCap = false;
+
+  function shouldStopScanning(): boolean {
+    if (seenFiles >= maxFiles) {
+      return true;
+    }
+    if (stoppedForByteCap || stoppedForTimeCap) {
+      return true;
+    }
+    if (Date.now() - startedAt > maxWallTimeMs) {
+      stoppedForTimeCap = true;
+      diagnostics.push(
+        `Stopped session scan after ${maxWallTimeMs}ms wall-time limit.`,
+      );
+      return true;
+    }
+    return false;
+  }
 
   async function walk(directory: string, depth: number): Promise<void> {
-    if (seenFiles >= maxFiles) {
+    if (shouldStopScanning()) {
       return;
     }
     if (depth > maxDepth) {
@@ -63,8 +91,10 @@ export async function scanSessionRepository(
     }
 
     for (const entry of entries) {
-      if (seenFiles >= maxFiles) {
-        diagnostics.push(`Stopped session scan after ${maxFiles} files.`);
+      if (shouldStopScanning()) {
+        if (seenFiles >= maxFiles) {
+          diagnostics.push(`Stopped session scan after ${maxFiles} files.`);
+        }
         return;
       }
       const entryPath = path.join(directory, entry.name);
@@ -79,13 +109,30 @@ export async function scanSessionRepository(
         continue;
       }
 
+      const remainingBytes = maxTotalBytes - totalBytesRead;
+      if (remainingBytes <= 0) {
+        stoppedForByteCap = true;
+        diagnostics.push(
+          `Stopped session scan after reading ${maxTotalBytes} bytes.`,
+        );
+        return;
+      }
+
       seenFiles += 1;
-      const summary = await summarizeSessionFile(
+      const result = await summarizeSessionFile(
         entryPath,
         projectCwd,
-        maxBytesPerFile,
+        Math.min(maxBytesPerFile, remainingBytes),
         diagnostics,
       );
+      totalBytesRead += result.bytesRead;
+      const summary = result.summary;
+      if (totalBytesRead >= maxTotalBytes) {
+        stoppedForByteCap = true;
+        diagnostics.push(
+          `Stopped session scan after reading ${maxTotalBytes} bytes.`,
+        );
+      }
       if (summary !== undefined) {
         sessions.push(summary);
       }
@@ -102,7 +149,7 @@ async function summarizeSessionFile(
   projectCwd: string,
   maxBytes: number,
   diagnostics: string[],
-): Promise<ChatSessionSummary | undefined> {
+): Promise<{ summary?: ChatSessionSummary; bytesRead: number }> {
   let canonicalFile: string;
   let stat: Awaited<ReturnType<typeof fs.stat>>;
   try {
@@ -112,27 +159,30 @@ async function summarizeSessionFile(
     diagnostics.push(
       `Could not inspect session file ${filePath}: ${errorMessage(error)}`,
     );
-    return undefined;
+    return { bytesRead: 0 };
   }
 
   const parsed = await parseSessionFile(canonicalFile, maxBytes, diagnostics);
   const cwd = parsed.cwd ? await canonicalOrResolved(parsed.cwd) : undefined;
   if (cwd !== projectCwd) {
-    return undefined;
+    return { bytesRead: parsed.bytesRead };
   }
 
   const updatedAtMs = parsed.updatedAtMs ?? stat.mtimeMs;
   const createdAtMs = parsed.createdAtMs ?? stat.birthtimeMs;
   return {
-    id: canonicalFile,
-    sessionFile: canonicalFile,
-    ...(parsed.sessionId ? { sessionId: parsed.sessionId } : {}),
-    cwd,
-    title: parsed.title ?? path.basename(canonicalFile, ".jsonl"),
-    updatedAtMs,
-    createdAtMs,
-    messageCount: parsed.messageCount,
-    ...(parsed.preview ? { preview: parsed.preview } : {}),
+    bytesRead: parsed.bytesRead,
+    summary: {
+      id: canonicalFile,
+      sessionFile: canonicalFile,
+      ...(parsed.sessionId ? { sessionId: parsed.sessionId } : {}),
+      cwd,
+      title: parsed.title ?? path.basename(canonicalFile, ".jsonl"),
+      updatedAtMs,
+      createdAtMs,
+      messageCount: parsed.messageCount,
+      ...(parsed.preview ? { preview: parsed.preview } : {}),
+    },
   };
 }
 
@@ -155,10 +205,13 @@ async function parseSessionFile(
     diagnostics.push(
       `Could not read session file ${filePath}: ${errorMessage(error)}`,
     );
-    return { messageCount: 0 };
+    return { messageCount: 0, bytesRead: 0 };
   }
 
-  const parsed: ParsedSessionFile = { messageCount: 0 };
+  const parsed: ParsedSessionFile = {
+    messageCount: 0,
+    bytesRead: Buffer.byteLength(content),
+  };
   for (const line of content.split(/\r?\n/)) {
     if (line.trim().length === 0) {
       continue;

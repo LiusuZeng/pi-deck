@@ -99,6 +99,11 @@ const attachmentSelections = new Map<string, AttachmentSelectionRecord>();
 const maxImportedImageBytes = 20 * 1024 * 1024;
 
 async function bootstrap(): Promise<void> {
+  const userDataOverride = process.env.PI_DECK_USER_DATA_DIR;
+  if (userDataOverride !== undefined && userDataOverride.trim().length > 0) {
+    app.setPath("userData", path.resolve(userDataOverride));
+  }
+
   await app.whenReady();
 
   diagnostics = new DiagnosticsService(
@@ -355,6 +360,11 @@ function registerIpcHandlers(
     responseSchema: pickProjectResultSchema,
     diagnostics: diagnosticsService,
     handler: async (): Promise<PickProjectResult> => {
+      const testProjectPath = process.env.PI_DECK_TEST_PICK_PROJECT_CWD;
+      if (testProjectPath !== undefined && testProjectPath.trim().length > 0) {
+        return pickProjectByPathForTest(testProjectPath, store);
+      }
+
       const options: OpenDialogOptions = {
         title: "Open Pi Deck Project",
         properties: ["openDirectory"],
@@ -450,6 +460,28 @@ function registerIpcHandlers(
       attachments: request.images.map(importImageAttachmentDraft),
     }),
   });
+}
+
+async function pickProjectByPathForTest(
+  projectPath: string,
+  store: SettingsStore,
+): Promise<PickProjectResult> {
+  if (projectPath === "__cancel__") {
+    return { selected: false } as const;
+  }
+  const canonicalPath = await fs.realpath(projectPath);
+  selectedRealProjectCwd = canonicalPath;
+  await store.update({ projectCwd: canonicalPath });
+  return {
+    selected: true,
+    project: {
+      id: canonicalPath,
+      path: projectPath,
+      canonicalPath,
+      displayName: path.basename(canonicalPath) || canonicalPath,
+      lastOpenedAt: Date.now(),
+    },
+  };
 }
 
 async function ensureChatAdapter(
@@ -887,6 +919,10 @@ async function listChatSessions(
     await scanSessionRepository({
       sessionDir,
       projectCwd: launch.projectCwd,
+      maxDepth: 4,
+      maxFiles: 20_000,
+      maxTotalBytes: 250 * 1024 * 1024,
+      maxWallTimeMs: 15_000,
     }),
   ];
   const candidateDir = launch.effective.projectSessionDirCandidate;
@@ -899,6 +935,10 @@ async function listChatSessions(
       await scanSessionRepository({
         sessionDir: candidateDir,
         projectCwd: launch.projectCwd,
+        maxDepth: 3,
+        maxFiles: 5_000,
+        maxTotalBytes: 100 * 1024 * 1024,
+        maxWallTimeMs: 5_000,
       }),
     );
   }

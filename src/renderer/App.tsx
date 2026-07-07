@@ -1720,15 +1720,87 @@ function reduceRuntimeEvent(
     case "tool_execution_update":
     case "tool_execution_end":
       return reduceToolExecutionEvent(session, event);
-    case "agent_end": {
-      const status = getString(event, "status");
+    case "queue_update": {
+      const steeringCount = getNumber(event, "steeringCount") ?? 0;
+      const followUpCount = getNumber(event, "followUpCount") ?? 0;
       return {
         ...session,
-        status: "idle",
-        baseState: "idle",
-        overlays: { ...session.overlays, streaming: false, toolRunning: false },
-        subtitle:
-          status === "aborted"
+        overlays: {
+          ...session.overlays,
+          piQueuedSteeringCount: steeringCount,
+          piQueuedFollowUpCount: followUpCount,
+        },
+        updatedAt: "Now",
+        updatedAtMs: Date.now(),
+      };
+    }
+    case "compaction_start":
+      return {
+        ...session,
+        overlays: { ...session.overlays, compacting: true },
+        updatedAt: "Now",
+        updatedAtMs: Date.now(),
+      };
+    case "compaction_end":
+      return {
+        ...session,
+        overlays: { ...session.overlays, compacting: false },
+        updatedAt: "Now",
+        updatedAtMs: Date.now(),
+      };
+    case "auto_retry_start":
+      return {
+        ...session,
+        overlays: { ...session.overlays, retrying: true },
+        updatedAt: "Now",
+        updatedAtMs: Date.now(),
+      };
+    case "auto_retry_end": {
+      const retryStatus = getString(event, "status");
+      return {
+        ...session,
+        status:
+          retryStatus === "failed" || retryStatus === "error"
+            ? "error"
+            : session.status,
+        baseState:
+          retryStatus === "failed" || retryStatus === "error"
+            ? "error"
+            : session.baseState,
+        overlays: { ...session.overlays, retrying: false },
+        updatedAt: "Now",
+        updatedAtMs: Date.now(),
+      };
+    }
+    case "extension_ui_request":
+      return reduceExtensionUiRequestEvent(session, event);
+    case "extension_ui_response_sent":
+    case "extension_ui_request_timeout":
+      return {
+        ...session,
+        status: "working",
+        baseState: "working",
+        overlays: { ...session.overlays, needsUserInput: false },
+        subtitle: `Working · ${backendLabel(session)} stream`,
+        updatedAt: "Now",
+        updatedAtMs: Date.now(),
+      };
+    case "agent_end": {
+      const status = getString(event, "status");
+      const stillWaitingForInput = session.overlays.needsUserInput;
+      return {
+        ...session,
+        status: stillWaitingForInput ? "waiting" : "idle",
+        baseState: stillWaitingForInput ? "waitingForInput" : "idle",
+        overlays: {
+          ...session.overlays,
+          streaming: false,
+          toolRunning: false,
+          needsUserInput: stillWaitingForInput,
+        },
+        subtitle: stillWaitingForInput
+          ? "Waiting · extension input required"
+          : status === "aborted"
             ? "Idle · backend stream aborted"
             : "Idle · backend stream complete",
         updatedAt: "Now",
@@ -1763,6 +1835,38 @@ function reduceRuntimeEvent(
     default:
       return session;
   }
+}
+
+function reduceExtensionUiRequestEvent(
+  session: SessionViewModel,
+  event: ChatRuntimeEvent,
+): SessionViewModel {
+  const method = getString(event, "method") ?? "unknown";
+  if (!["select", "confirm", "input", "editor"].includes(method)) {
+    return session;
+  }
+
+  const params = getRecord(event, "params");
+  const title = getStringFromRecord(params, "title") ?? method;
+  const message =
+    getStringFromRecord(params, "message") ??
+    "Pi extension UI is waiting for input.";
+
+  return appendDiagnostic(
+    {
+      ...session,
+      status: "waiting",
+      baseState: "waitingForInput",
+      overlays: { ...session.overlays, needsUserInput: true },
+      subtitle: "Waiting · extension input required",
+      updatedAt: "Now",
+      updatedAtMs: Date.now(),
+    },
+    {
+      tone: "info",
+      content: `Extension UI request (${title}): ${message}`,
+    },
+  );
 }
 
 function reduceToolExecutionEvent(
@@ -2573,31 +2677,29 @@ function ProjectHeader(props: {
         {statusLabel(props.selectedSession.status)}
       </span>
       <p className="project-path">{props.project.path}</p>
+      <div className="header-actions">
+        <button type="button" onClick={props.onPickProject}>
+          Open project…
+        </button>
+      </div>
       {props.realMode ? null : (
-        <>
-          <div className="header-actions">
-            <button type="button" onClick={props.onPickProject}>
-              Open project…
+        <div className="recent-projects" aria-label="Recent projects">
+          <strong>Recent projects</strong>
+          {storedRecent.length === 0 ? (
+            <p className="empty-state-copy">No saved recent projects yet.</p>
+          ) : null}
+          {visibleRecent.map((project) => (
+            <button
+              key={project.id}
+              type="button"
+              className={project.invalidReason ? "recent invalid" : "recent"}
+              onClick={() => props.onSelectRecent(project)}
+            >
+              <span>{project.displayName}</span>
+              <small>{project.invalidReason ?? project.path}</small>
             </button>
-          </div>
-          <div className="recent-projects" aria-label="Recent projects">
-            <strong>Recent projects</strong>
-            {storedRecent.length === 0 ? (
-              <p className="empty-state-copy">No saved recent projects yet.</p>
-            ) : null}
-            {visibleRecent.map((project) => (
-              <button
-                key={project.id}
-                type="button"
-                className={project.invalidReason ? "recent invalid" : "recent"}
-                onClick={() => props.onSelectRecent(project)}
-              >
-                <span>{project.displayName}</span>
-                <small>{project.invalidReason ?? project.path}</small>
-              </button>
-            ))}
-          </div>
-        </>
+          ))}
+        </div>
       )}
     </div>
   );
@@ -3639,6 +3741,13 @@ function getRecordFromRecord(
   const value = record?.[key];
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function getNumber(event: ChatRuntimeEvent, key: string): number | undefined {
+  const value = getUnknown(event, key);
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
     : undefined;
 }
 

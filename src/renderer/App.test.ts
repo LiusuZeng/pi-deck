@@ -155,6 +155,51 @@ describe("renderer message_update reduction", () => {
     ]);
   });
 
+  it("reduces queue, compaction, and retry events into sidebar overlays", () => {
+    const queued = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {
+      type: "queue_update",
+      runtimeId: "session-1",
+      steeringCount: 1,
+      followUpCount: 2,
+    } as any);
+    expect(queued.overlays).toMatchObject({
+      piQueuedSteeringCount: 1,
+      piQueuedFollowUpCount: 2,
+    });
+
+    const compacting = __rendererTestHooks.reduceRuntimeEvent(queued, {
+      type: "compaction_start",
+      runtimeId: "session-1",
+    } as any);
+    expect(compacting.overlays.compacting).toBe(true);
+
+    const retrying = __rendererTestHooks.reduceRuntimeEvent(compacting, {
+      type: "auto_retry_start",
+      runtimeId: "session-1",
+    } as any);
+    expect(retrying.overlays.retrying).toBe(true);
+  });
+
+  it("marks extension UI dialog events as waiting for input", () => {
+    const waiting = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {
+      type: "extension_ui_request",
+      runtimeId: "session-1",
+      requestId: "ext-1",
+      method: "confirm",
+      params: { title: "Confirm", message: "Approve?" },
+    } as any);
+
+    expect(waiting.status).toBe("waiting");
+    expect(waiting.baseState).toBe("waitingForInput");
+    expect(waiting.overlays.needsUserInput).toBe(true);
+    expect(waiting.timeline).toMatchObject([
+      {
+        kind: "diagnostic",
+        content: "Extension UI request (Confirm): Approve?",
+      },
+    ]);
+  });
+
   it("still appends text deltas from assistantMessageEvent", () => {
     const next = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {
       type: "message_update",

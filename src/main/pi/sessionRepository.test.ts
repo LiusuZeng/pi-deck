@@ -140,4 +140,65 @@ describe("messy session repository scanning", () => {
       ),
     );
   });
+
+  test("reports partial results when the total byte cap is reached", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-byte-capped-sessions-"),
+    );
+    const project = path.join(root, "project");
+    const sessionDir = path.join(root, "sessions");
+    await fs.mkdir(project, { recursive: true });
+    await fs.mkdir(sessionDir, { recursive: true });
+
+    await fs.writeFile(
+      path.join(sessionDir, "a.jsonl"),
+      `${JSON.stringify({ type: "session", id: "a", cwd: project })}\n`,
+    );
+    await fs.writeFile(
+      path.join(sessionDir, "b.jsonl"),
+      `${JSON.stringify({ type: "session", id: "b", cwd: project })}\n`,
+    );
+
+    const result = await scanSessionRepository({
+      sessionDir,
+      projectCwd: project,
+      maxFiles: 100,
+      maxBytesPerFile: 1024,
+      maxTotalBytes: 1,
+    });
+
+    assert.ok(result.sessions.length <= 1);
+    assert.ok(
+      result.diagnostics.some((diagnostic) =>
+        diagnostic.includes("Stopped session scan after reading 1 bytes"),
+      ),
+    );
+  });
+
+  test("reports when the wall-time scan cap is reached", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-time-capped-sessions-"),
+    );
+    const project = path.join(root, "project");
+    const sessionDir = path.join(root, "sessions");
+    await fs.mkdir(project, { recursive: true });
+    await fs.mkdir(sessionDir, { recursive: true });
+    await fs.writeFile(
+      path.join(sessionDir, "session.jsonl"),
+      `${JSON.stringify({ type: "session", id: "session", cwd: project })}\n`,
+    );
+
+    const result = await scanSessionRepository({
+      sessionDir,
+      projectCwd: project,
+      maxWallTimeMs: -1,
+    });
+
+    assert.equal(result.sessions.length, 0);
+    assert.ok(
+      result.diagnostics.some((diagnostic) =>
+        diagnostic.includes("wall-time limit"),
+      ),
+    );
+  });
 });

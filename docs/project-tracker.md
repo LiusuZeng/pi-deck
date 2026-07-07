@@ -48,6 +48,21 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
 - [x] Saved sessions can be deleted individually or in bulk before or after resume; attached runtimes are closed first and files are moved to Trash when possible.
 - [x] User-facing renderer copy no longer leaks internal Eng/worktree/default development state.
 
+### Immediate execution order — current priority stack
+
+1. **P0 validation pass:** persistent new-session restart/resume, messy session-dir scanning, broader resume, multi-project project picker handoff.
+2. **P0 multi-worker hardening:** per-runtime event routing, duplicate-open reuse, restart/resume/error stress coverage.
+3. **M5 scheduler:** default concurrency cap 4, hard cap 20, blocked-send/explicit queue states.
+4. **Active-run controls:** steer, follow-up, abort/queue count polish.
+5. **Real slash commands:** active-worker `get_commands` picker/insertion, or hide real-mode slash UI until available.
+6. **Tool lifecycle cards:** full start/update/end/error cards with large-output safety.
+7. **Recovery/diagnostics:** worker reopen/retry, session reconciliation, binary/config/worker/stderr diagnostics panel.
+8. **Attachment/image hardening:** image resize/package spike, large-file policy, provider validation.
+9. **Trust/resource/extension UI:** per-run trust prompt, static resource panel, supported extension dialogs/red dots.
+10. **Release readiness:** real Pi smoke matrix execution, limitations notes, expanded E2E coverage.
+
+Latest implementation note: reducer/event overlay groundwork has started. `src/renderer/sessionState.ts` now has a documented event reducer with fixture-backed tests from `docs/state-reducer-fixtures.json`, and the renderer handles queue/compaction/retry/extension-waiting events for sidebar overlays. Initial backend adapter stress tests now cover concurrent fake workers, runtime-id event routing, and closing one runtime without dropping another; real Pi/project/session identity stress coverage remains. Session repository scan regression coverage now includes symlink/depth/file-count/total-byte/wall-time bounds, and real mode passes authoritative/candidate scan bounds explicitly. Real-mode project picker handoff now has an E2E regression using fake Pi that switches projects, resets the worker, and verifies selected cwd persistence across relaunch.
+
 ### P0 — Required before Pi Deck can be dogfooded comfortably
 
 1. **Persistent/resume-backed real new-session flow**
@@ -55,9 +70,10 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
    - Required before closing P0: hands-on confirmation that newly prompted sessions are visible/resumable after app restart and project switches on real Pi.
 
 2. **Harden real session repository scanning**
-   - Current behavior: scans authoritative session dir for current launch project, skips symlinks, and uses bounded depth/file/byte reads.
+   - Current behavior: scans authoritative session dir for current launch project, skips symlinks, and uses bounded depth/file/byte/time reads.
    - Current behavior: refresh button updates saved sessions without relaunch.
-   - Current behavior: project `sessionDir` candidates can be scanned only with explicit `PI_DECK_SCAN_PROJECT_SESSION_DIR_CANDIDATE=1` opt-in.
+   - Current behavior: project `sessionDir` candidates can be scanned only with explicit `PI_DECK_SCAN_PROJECT_SESSION_DIR_CANDIDATE=1` opt-in and stricter bounds.
+   - Regression coverage: messy dirs, symlink skip, depth cap, file-count cap, total-byte cap, and wall-time cap.
    - Required before closing P0: hands-on validation on messy real session dirs.
 
 3. **Harden resume existing sessions**
@@ -68,10 +84,13 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
 
 4. **Harden multiple real workers and event routing**
    - Basic multiple-worker support exists for in-window new sessions and resumed sessions; duplicate known session files reuse an attached worker.
-   - Still required: scheduler integration, per-project/session identity stress tests, and no event leakage under restart/resume/error cases.
+   - Renderer reducer/sidebar overlay groundwork is in progress with fixture-backed tests.
+   - Initial backend adapter stress coverage exists for concurrent fake workers, runtime-id routing, and one-runtime close isolation.
+   - Still required: real Pi multi-worker validation, scheduler integration, per-project/session identity stress tests, and no event leakage under restart/resume/error cases.
 
 5. **Project picker → real session handoff**
    - Current behavior: in real mode, selecting/opening a project resets the worker, persists the selected cwd, and starts/lists sessions for that cwd.
+   - Regression coverage: fake-Pi E2E switches from project A to project B through the project picker path and verifies project B persists across relaunch without `PI_DECK_PROJECT_CWD`.
    - Required before closing P0: real Pi hands-on validation across multiple projects and clearer trust/permission UX.
 
 ### P1 — Needed for practical daily use
@@ -221,15 +240,15 @@ Non-goal: full session repository/resume/concurrency. This is a narrow real-Pi v
 
 ## M3. Project Picker, Session Repository, New/Resume Sessions
 
-| ID   | Task                               | Owner            | Status      | Depends on  | Acceptance summary                                                                                                                                                                                                 |
-| ---- | ---------------------------------- | ---------------- | ----------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| M3.1 | Project picker/recent projects     | Frontend/Backend | In Progress | M1 settings | Picker IPC, renderer recents, real-mode selected-project handoff, and selected-cwd persistence exist; trust/permission UX still needs polish.                                                                      |
-| M3.2 | EffectivePiConfig resolver         | Backend/Platform | Done        | M1.3, M1.4  | Resolver implemented with app/env/settings/trust/image precedence tests                                                                                                                                            |
-| M3.3 | Static session repository scanning | Backend          | In Progress | M3.2        | Scans authoritative session dir for project `.jsonl` files with bounds/no symlink following; saved sessions can be deleted before/after resume; messy-dir regression coverage exists; hands-on validation remains. |
-| M3.4 | Candidate sessionDir handling      | Backend/Frontend | In Progress | M3.2, M3.3  | Project candidate dirs are scanned only with explicit env opt-in and repository scanner bounds; hands-on validation still needed.                                                                                  |
-| M3.5 | New session flow                   | Backend/Frontend | In Progress | M2.3, M3.1  | Real `+` creates an additional in-window worker with an optimistic row and reports Pi sessionFile backing when available; restart/resume validation still P0.                                                      |
-| M3.6 | Resume existing session flow       | Backend/RPC      | In Progress | M3.3, G2    | Clicking saved rows resumes with `--session`, verifies canonical file, restores image previews, keeps resumed sessions deletable, and removes missing files from the list; broader real-Pi validation remains.     |
-| M3.7 | In-app session ownership lock      | Backend          | In Progress | M3.5, M3.6  | Duplicate open of a known session file reuses the existing worker; scheduler-grade ownership locks remain.                                                                                                         |
+| ID   | Task                               | Owner            | Status      | Depends on  | Acceptance summary                                                                                                                                                                                                                          |
+| ---- | ---------------------------------- | ---------------- | ----------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| M3.1 | Project picker/recent projects     | Frontend/Backend | In Progress | M1 settings | Picker IPC, renderer recents, real-mode selected-project handoff, and selected-cwd persistence exist; trust/permission UX still needs polish.                                                                                               |
+| M3.2 | EffectivePiConfig resolver         | Backend/Platform | Done        | M1.3, M1.4  | Resolver implemented with app/env/settings/trust/image precedence tests                                                                                                                                                                     |
+| M3.3 | Static session repository scanning | Backend          | In Progress | M3.2        | Scans authoritative session dir for project `.jsonl` files with depth/file/byte/time bounds and no symlink following; saved sessions can be deleted before/after resume; messy-dir regression coverage exists; hands-on validation remains. |
+| M3.4 | Candidate sessionDir handling      | Backend/Frontend | In Progress | M3.2, M3.3  | Project candidate dirs are scanned only with explicit env opt-in and stricter depth/file/byte/time scanner bounds; hands-on validation still needed.                                                                                        |
+| M3.5 | New session flow                   | Backend/Frontend | In Progress | M2.3, M3.1  | Real `+` creates an additional in-window worker with an optimistic row and reports Pi sessionFile backing when available; restart/resume validation still P0.                                                                               |
+| M3.6 | Resume existing session flow       | Backend/RPC      | In Progress | M3.3, G2    | Clicking saved rows resumes with `--session`, verifies canonical file, restores image previews, keeps resumed sessions deletable, and removes missing files from the list; broader real-Pi validation remains.                              |
+| M3.7 | In-app session ownership lock      | Backend          | In Progress | M3.5, M3.6  | Duplicate open of a known session file reuses the existing worker; scheduler-grade ownership locks remain.                                                                                                                                  |
 
 ## M4. Model, Thinking, Slash Commands, Attachments
 
@@ -244,13 +263,13 @@ Non-goal: full session repository/resume/concurrency. This is a narrow real-Pi v
 
 ## M5. Concurrent Sessions, Scheduler, Intervention Controls
 
-| ID   | Task                             | Owner            | Status      | Depends on           | Acceptance summary                                                                                          |
-| ---- | -------------------------------- | ---------------- | ----------- | -------------------- | ----------------------------------------------------------------------------------------------------------- |
-| M5.1 | Base state + overlays reducer    | Backend/Frontend | Not Started | G0 events, M2 events | QA fixtures drafted in `docs/state-reducer-fixtures.json`; unit tests still need reducer target             |
-| M5.2 | Multiple attached workers        | Backend          | In Progress | M3 locks, M5.1       | Adapter can host multiple workers for in-window sessions; scheduler/locks/repository identity still needed. |
-| M5.3 | RunScheduler and concurrency cap | Backend          | Not Started | M5.2                 | Default 4, hard cap 20; cap blocks or explicit queue                                                        |
-| M5.4 | Steer/follow-up/abort controls   | Backend/Frontend | Not Started | M2 abort, M5.1       | Composer intervention mode; queue counts update                                                             |
-| M5.5 | Quit handling                    | Platform/Backend | Not Started | M5.2, M5.3           | Cancel Quit or Abort Agents and Quit; queued starts warned                                                  |
+| ID   | Task                             | Owner            | Status      | Depends on           | Acceptance summary                                                                                                                                             |
+| ---- | -------------------------------- | ---------------- | ----------- | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| M5.1 | Base state + overlays reducer    | Backend/Frontend | In Progress | G0 events, M2 events | Renderer reducer target and fixture-backed tests exist; backend/session-controller integration and full UI adoption remain.                                    |
+| M5.2 | Multiple attached workers        | Backend          | In Progress | M3 locks, M5.1       | Adapter can host multiple workers; fake-worker routing/close-isolation tests exist. Scheduler, locks, repository identity, and real-Pi stress coverage remain. |
+| M5.3 | RunScheduler and concurrency cap | Backend          | Not Started | M5.2                 | Default 4, hard cap 20; cap blocks or explicit queue                                                                                                           |
+| M5.4 | Steer/follow-up/abort controls   | Backend/Frontend | Not Started | M2 abort, M5.1       | Composer intervention mode; queue counts update                                                                                                                |
+| M5.5 | Quit handling                    | Platform/Backend | Not Started | M5.2, M5.3           | Cancel Quit or Abort Agents and Quit; queued starts warned                                                                                                     |
 
 ## M6. Extension UI, Project Trust, Resource Panel
 
