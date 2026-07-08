@@ -47,6 +47,7 @@ Useful fixture flags:
   - `compaction` — adds `compaction_start/end`.
   - `retry` — adds `auto_retry_start/end`.
   - `extension-ui` — adds a `confirm` `extension_ui_request` with a timeout.
+  - `error` — accepts `prompt`, emits `agent_start`, then emits a completed error `message_update` and `agent_end status=error` for provider/usage-limit UI tests.
   - `all` — emits every extension fixture event above.
 
 G4 extension UI follow-up: the fake currently emits request events only. It does not yet simulate `respondToExtensionUi`, Pi-side timeout resolution, late-response suppression, or stdin write failure. Add those fixtures once the extension UI backend/write path exists.

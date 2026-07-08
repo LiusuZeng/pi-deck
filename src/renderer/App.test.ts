@@ -221,6 +221,58 @@ describe("renderer message_update reduction", () => {
     ]);
   });
 
+  it("surfaces asynchronous message update errors instead of returning to idle", () => {
+    const next = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {
+      type: "message_update",
+      runtimeId: "session-1",
+      messageId: "assistant-1",
+      role: "assistant",
+      content: "Usage limit reached",
+      done: true,
+      error: "Usage limit reached",
+    } as any);
+
+    expect(next.status).toBe("error");
+    expect(next.baseState).toBe("error");
+    expect(next.overlays.streaming).toBe(false);
+    expect(next.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "diagnostic",
+          content: "Usage limit reached",
+        }),
+      ]),
+    );
+  });
+
+  it("surfaces agent_end errors instead of swallowing provider failures", () => {
+    const next = __rendererTestHooks.reduceRuntimeEvent(
+      {
+        ...baseSession(),
+        status: "working",
+        baseState: "working",
+        overlays: { ...emptyOverlays, streaming: true },
+      } as any,
+      {
+        type: "agent_end",
+        runtimeId: "session-1",
+        status: "error",
+        error: "Usage limit reached",
+      } as any,
+    );
+
+    expect(next.status).toBe("error");
+    expect(next.baseState).toBe("error");
+    expect(next.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "diagnostic",
+          content: "Usage limit reached",
+        }),
+      ]),
+    );
+  });
+
   it("merges refreshed Pi usage without replacing streamed timeline", () => {
     const current = {
       ...baseSession(),

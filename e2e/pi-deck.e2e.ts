@@ -379,6 +379,40 @@ test("real mode project picker handoff persists selected cwd with fake Pi", asyn
   }
 });
 
+test("real mode surfaces asynchronous provider errors with fake Pi", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-provider-error-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: ["--prompt-scenario", "error"],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await page.getByLabel("Prompt text").fill("trigger usage limit");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Usage limit reached for fake provider.").first(),
+    ).toBeVisible();
+    await expect(page.getByText("Agent is working…")).toHaveCount(0);
+    await expect(page.getByText("Error").first()).toBeVisible();
+    await page.getByLabel("Prompt text").fill("can edit after error");
+    await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("real mode reconciles a working session when completion event is missed", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-reconcile-"));
   const projectCwd = path.join(root, "project");

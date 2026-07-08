@@ -16,6 +16,7 @@ type PromptScenario =
   | "compaction"
   | "retry"
   | "extension-ui"
+  | "error"
   | "all";
 
 interface FakeOptions {
@@ -89,6 +90,7 @@ function isPromptScenario(value: string): value is PromptScenario {
     "compaction",
     "retry",
     "extension-ui",
+    "error",
     "all",
   ].includes(value);
 }
@@ -322,6 +324,28 @@ class FakeRpcServer {
       runId: `run_${this.promptCounter}`,
       messageId: assistantId,
     });
+
+    if (this.options.promptScenario === "error") {
+      const errorMessage = "Usage limit reached for fake provider.";
+      this.agentActive = false;
+      this.write({
+        type: "message_update",
+        messageId: assistantId,
+        role: "assistant",
+        content: errorMessage,
+        done: true,
+        isError: true,
+        error: errorMessage,
+      });
+      this.write({
+        type: "agent_end",
+        runId: `run_${this.promptCounter}`,
+        status: "error",
+        error: errorMessage,
+      });
+      return;
+    }
+
     this.emitPromptScenarioEvents(assistantId);
 
     chunks.forEach((chunk, index) => {

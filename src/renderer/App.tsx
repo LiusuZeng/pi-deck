@@ -1893,22 +1893,35 @@ function reduceRuntimeEvent(
       };
     case "agent_end": {
       const status = getString(event, "status");
+      const errorMessage = getRuntimeEventErrorMessage(event);
+      const endedWithError =
+        status === "error" || status === "failed" || errorMessage !== undefined;
       const stillWaitingForInput = session.overlays.needsUserInput;
-      return {
+      const nextSession: SessionViewModel = {
         ...session,
-        status: stillWaitingForInput ? "waiting" : "idle",
-        baseState: stillWaitingForInput ? "waitingForInput" : "idle",
+        status: endedWithError
+          ? "error"
+          : stillWaitingForInput
+            ? "waiting"
+            : "idle",
+        baseState: endedWithError
+          ? "error"
+          : stillWaitingForInput
+            ? "waitingForInput"
+            : "idle",
         overlays: {
           ...session.overlays,
           streaming: false,
           toolRunning: false,
-          needsUserInput: stillWaitingForInput,
+          needsUserInput: stillWaitingForInput && !endedWithError,
         },
-        subtitle: stillWaitingForInput
-          ? "Waiting · extension input required"
-          : status === "aborted"
-            ? "Idle · backend stream aborted"
-            : "Idle · backend stream complete",
+        subtitle: endedWithError
+          ? "Error · backend stream failed"
+          : stillWaitingForInput
+            ? "Waiting · extension input required"
+            : status === "aborted"
+              ? "Idle · backend stream aborted"
+              : "Idle · backend stream complete",
         updatedAt: "Now",
         updatedAtMs: Date.now(),
         timeline: removeEmptyAssistantMessages(
@@ -1919,6 +1932,12 @@ function reduceRuntimeEvent(
           ),
         ),
       };
+      return endedWithError
+        ? appendDiagnostic(nextSession, {
+            tone: "error",
+            content: errorMessage ?? "Pi agent failed.",
+          })
+        : nextSession;
     }
     case "diagnostic":
       return appendDiagnostic(session, {
@@ -2117,20 +2136,32 @@ function reduceMessageUpdate(
         )
       : undefined;
 
-  return {
+  const errorMessage = getRuntimeEventErrorMessage(event);
+  const isErrorUpdate =
+    assistantEventType === "error" || errorMessage !== undefined;
+  const nextSession: SessionViewModel = {
     ...session,
     ...(usageByMessageId !== undefined ? { usageByMessageId } : {}),
     ...(usageStats !== undefined ? { usageStats } : {}),
-    status: done ? "idle" : "working",
-    baseState: done ? "idle" : "working",
-    overlays: { ...session.overlays, streaming: !done },
-    subtitle: done
-      ? "Idle · backend stream complete"
-      : `Working · ${backendLabel(session)} stream`,
+    status: isErrorUpdate ? "error" : done ? "idle" : "working",
+    baseState: isErrorUpdate ? "error" : done ? "idle" : "working",
+    overlays: { ...session.overlays, streaming: !done && !isErrorUpdate },
+    subtitle: isErrorUpdate
+      ? "Error · backend stream failed"
+      : done
+        ? "Idle · backend stream complete"
+        : `Working · ${backendLabel(session)} stream`,
     updatedAt: "Now",
     updatedAtMs: Date.now(),
     timeline,
   };
+
+  return isErrorUpdate
+    ? appendDiagnostic(nextSession, {
+        tone: "error",
+        content: errorMessage ?? "Pi message update failed.",
+      })
+    : nextSession;
 }
 
 function removeEmptyAssistantMessages(items: TimelineItem[]): TimelineItem[] {
@@ -3815,6 +3846,22 @@ function extractThinkingContent(value: unknown): string | undefined {
     return [];
   });
   return parts.length > 0 ? parts.join("\n") : undefined;
+}
+
+function getRuntimeEventErrorMessage(
+  event: ChatRuntimeEvent,
+): string | undefined {
+  const directError = getString(event, "error") ?? getString(event, "message");
+  if (directError !== undefined) {
+    return directError;
+  }
+
+  const errorRecord = getRecord(event, "error");
+  return (
+    getStringFromRecord(errorRecord, "message") ??
+    getStringFromRecord(errorRecord, "error") ??
+    getStringFromRecord(getRecord(event, "assistantMessageEvent"), "error")
+  );
 }
 
 function getString(event: ChatRuntimeEvent, key: string): string | undefined {

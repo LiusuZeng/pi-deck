@@ -50,6 +50,7 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
 - [x] Starting experience formalized through `scripts/start-pi-deck.mjs` and npm aliases: `npm start`, `npm run deck:real -- <project>`, `npm run dev:real -- <project>`, and `npm run deck:fake`.
 - [x] Real Pi smoke commands added: `npm run smoke:real` for get_state/get_messages and `npm run smoke:real:prompt` for a minimal authenticated prompt/agent_end round-trip.
 - [x] Live working-session reconciliation added: renderer can request runtime-specific snapshots and clears stale working state from persisted Pi messages when completion events are missed.
+- [x] Async provider/usage-limit errors emitted after prompt acceptance are surfaced as session errors instead of being treated as normal idle completion.
 
 ### Immediate execution order — current priority stack
 
