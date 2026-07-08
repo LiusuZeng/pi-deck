@@ -822,10 +822,23 @@ h1 {
 
 .pending-agent-message {
   display: inline-flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
   color: #667085;
   font-size: 13px;
+}
+
+.pending-agent-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pending-agent-message small {
+  color: #8a94a6;
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .spinner {

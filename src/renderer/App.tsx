@@ -125,6 +125,8 @@ interface SessionViewModel {
   overlays: SessionOverlays;
   usageStats?: UsageStats;
   usageByMessageId?: Record<string, MessageUsage>;
+  workingStartedAtMs?: number | undefined;
+  lastRuntimeEventLabel?: string | undefined;
   modelLabel?: string;
   thinkingLevel?: string;
   lastError?: string;
@@ -159,6 +161,7 @@ interface SlashCommand {
 
 const appStartedAt = Date.now();
 const WORKING_SESSION_RECONCILE_AFTER_MS = 3_000;
+const NO_VISIBLE_OUTPUT_NOTICE_MS = 3_000;
 
 const modelOptions: ModelOption[] = [
   {
@@ -400,6 +403,7 @@ export function App(): ReactElement {
   const [uiMessage, setUiMessage] = useState(
     "Starting Pi Deck and resolving the active backend session.",
   );
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   useEffect(() => {
     let disposed = false;
@@ -528,6 +532,17 @@ export function App(): ReactElement {
   );
   const showStarterPage =
     selectedSession.timeline.length === 0 && selectedSession.status === "idle";
+
+  useEffect(() => {
+    const hasWorkingSession = sessions.some(
+      (session) => session.status === "working",
+    );
+    if (!hasWorkingSession) {
+      return;
+    }
+    const intervalId = window.setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => window.clearInterval(intervalId);
+  }, [sessions]);
 
   useEffect(() => {
     if (loadState.state !== "ready") {
@@ -763,6 +778,8 @@ export function App(): ReactElement {
               baseState: "working",
               overlays: { ...session.overlays, streaming: true },
               subtitle: `Working · ${backendLabel(session)} stream`,
+              workingStartedAtMs: session.workingStartedAtMs ?? Date.now(),
+              lastRuntimeEventLabel: "Prompt accepted by Pi Deck",
               updatedAt: "Now",
               updatedAtMs: Date.now(),
               timeline: [
@@ -1332,6 +1349,7 @@ export function App(): ReactElement {
               session={selectedSession}
               uiMessage={uiMessage}
               showAttachmentExamples={!isRealBackendMode}
+              nowMs={nowMs}
             />
             {composer}
           </>
@@ -1484,6 +1502,12 @@ function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
       ...emptyOverlays,
       streaming: isAgentActive,
     },
+    ...(isAgentActive
+      ? {
+          workingStartedAtMs: Date.now(),
+          lastRuntimeEventLabel: "Pi reports active work",
+        }
+      : {}),
     runtimeBacked: true,
     resumeBacked: false,
     backendMode: snapshot.backendMode,
@@ -1817,6 +1841,8 @@ function reduceRuntimeEvent(
         baseState: "working",
         overlays: { ...session.overlays, streaming: true },
         subtitle: `Working · ${backendLabel(session)} stream`,
+        workingStartedAtMs: session.workingStartedAtMs ?? Date.now(),
+        lastRuntimeEventLabel: "Pi agent started",
         updatedAt: "Now",
         updatedAtMs: Date.now(),
       };
@@ -1922,6 +1948,12 @@ function reduceRuntimeEvent(
             : status === "aborted"
               ? "Idle · backend stream aborted"
               : "Idle · backend stream complete",
+        workingStartedAtMs: undefined,
+        lastRuntimeEventLabel: endedWithError
+          ? "Pi reported an error"
+          : status === "aborted"
+            ? "Pi aborted the turn"
+            : "Pi completed the turn",
         updatedAt: "Now",
         updatedAtMs: Date.now(),
         timeline: removeEmptyAssistantMessages(
@@ -2013,6 +2045,13 @@ function reduceToolExecutionEvent(
     baseState: "working",
     overlays: { ...session.overlays, toolRunning },
     subtitle: `Working · ${backendLabel(session)} stream`,
+    workingStartedAtMs: session.workingStartedAtMs ?? Date.now(),
+    lastRuntimeEventLabel:
+      event.type === "tool_execution_end"
+        ? "Tool finished"
+        : event.type === "tool_execution_update"
+          ? "Tool output updated"
+          : "Tool started",
     updatedAt: "Now",
     updatedAtMs: Date.now(),
     timeline,
@@ -2151,6 +2190,16 @@ function reduceMessageUpdate(
       : done
         ? "Idle · backend stream complete"
         : `Working · ${backendLabel(session)} stream`,
+    ...(done || isErrorUpdate ? { workingStartedAtMs: undefined } : {}),
+    lastRuntimeEventLabel: isErrorUpdate
+      ? "Pi reported an error"
+      : done
+        ? "Pi completed the turn"
+        : hasReplyContent
+          ? "Receiving assistant text"
+          : hasThinkingContent
+            ? "Receiving thinking update"
+            : "Pi sent a runtime update",
     updatedAt: "Now",
     updatedAtMs: Date.now(),
     timeline,
@@ -2988,6 +3037,7 @@ function ChatTimeline(props: {
   session: SessionViewModel;
   uiMessage: string;
   showAttachmentExamples: boolean;
+  nowMs: number;
 }): ReactElement {
   const hasItems = props.session.timeline.length > 0;
   const showPendingAgent =
@@ -3057,7 +3107,9 @@ function ChatTimeline(props: {
         {props.session.timeline.map((item) => (
           <TimelineRow key={item.id} item={item} />
         ))}
-        {showPendingAgent ? <PendingAgentRow /> : null}
+        {showPendingAgent ? (
+          <PendingAgentRow session={props.session} nowMs={props.nowMs} />
+        ) : null}
       </div>
     </section>
   );
@@ -3072,13 +3124,33 @@ function hasActiveTimelineOutput(items: TimelineItem[]): boolean {
   );
 }
 
-function PendingAgentRow(): ReactElement {
+function PendingAgentRow(props: {
+  session: SessionViewModel;
+  nowMs: number;
+}): ReactElement {
+  const startedAt =
+    props.session.workingStartedAtMs ?? props.session.updatedAtMs;
+  const elapsedMs = Math.max(0, props.nowMs - startedAt);
+  const showNoOutputNotice = elapsedMs >= NO_VISIBLE_OUTPUT_NOTICE_MS;
+  const lastEvent = props.session.lastRuntimeEventLabel ?? "Prompt sent to Pi";
+
   return (
     <article className="timeline-row assistant-row pending-agent-row">
       <div className="assistant-avatar">π</div>
       <div className="assistant-message pending-agent-message">
-        <span className="spinner" aria-hidden="true" />
-        <span>Agent is working…</span>
+        <span className="pending-agent-primary">
+          <span className="spinner" aria-hidden="true" />
+          <span>
+            Agent is working… {formatElapsedSeconds(elapsedMs)} elapsed.
+          </span>
+        </span>
+        <small>{lastEvent}</small>
+        {showNoOutputNotice ? (
+          <small>
+            No visible output yet. Pi may still be thinking, waiting on the
+            model, or running tools.
+          </small>
+        ) : null}
       </div>
     </article>
   );
@@ -3468,7 +3540,7 @@ function Composer(props: {
           {props.error !== null ? (
             <span className="composer-error">{props.error}</span>
           ) : props.isWorking ? (
-            <span>Streaming from {props.backendLabel}…</span>
+            <span>Working in {props.backendLabel}…</span>
           ) : hasImageWarning ? (
             <span className="composer-error">
               Selected model does not support image input.
@@ -4029,6 +4101,15 @@ function formatTime(): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date());
+}
+
+function formatElapsedSeconds(elapsedMs: number): string {
+  const seconds = Math.max(0, Math.floor(elapsedMs / 1_000));
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m ${seconds % 60}s`;
 }
 
 function formatRelativeTime(timestamp: number): string {

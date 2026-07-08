@@ -379,6 +379,38 @@ test("real mode project picker handoff persists selected cwd with fake Pi", asyn
   }
 });
 
+test("real mode explains long no-output active work with fake Pi", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-no-output-"));
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: ["--stream-delay-ms", "10000"],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await page.getByLabel("Prompt text").fill("slow first output");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText(/Agent is working… \d+s elapsed\./),
+    ).toBeVisible();
+    await expect(page.getByText("Pi agent started")).toBeVisible();
+    await expect(page.getByText(/No visible output yet/)).toBeVisible({
+      timeout: 8_000,
+    });
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("real mode surfaces asynchronous provider errors with fake Pi", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-e2e-provider-error-"),

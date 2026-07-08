@@ -51,6 +51,7 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
 - [x] Real Pi smoke commands added: `npm run smoke:real` for get_state/get_messages and `npm run smoke:real:prompt` for a minimal authenticated prompt/agent_end round-trip.
 - [x] Live working-session reconciliation added: renderer can request runtime-specific snapshots and clears stale working state from persisted Pi messages when completion events are missed.
 - [x] Async provider/usage-limit errors emitted after prompt acceptance are surfaced as session errors instead of being treated as normal idle completion.
+- [x] Long active runs with no visible output show elapsed time, last backend phase, and an explicit no-visible-output-yet explanation instead of a bare stuck-looking spinner.
 
 ### Immediate execution order — current priority stack
 
