@@ -12,6 +12,7 @@ import type {
   chatModelSummarySchema,
   chatRuntimeEventSchema,
   chatSessionSummarySchema,
+  chatSnapshotRequestSchema,
   chatSnapshotSchema,
   diagnosticsSummarySchema,
   ipcErrorSchema,
@@ -24,6 +25,7 @@ export type AppSettings = z.infer<typeof appSettingsSchema>;
 export type DiagnosticsSummary = z.infer<typeof diagnosticsSummarySchema>;
 export type IpcErrorPayload = z.infer<typeof ipcErrorSchema>;
 export type ChatMessage = z.infer<typeof chatMessageSchema>;
+export type ChatSnapshotRequest = z.infer<typeof chatSnapshotRequestSchema>;
 export type ChatSnapshot = z.infer<typeof chatSnapshotSchema>;
 export type ChatSessionSummary = z.infer<typeof chatSessionSummarySchema>;
 export type ChatModelSummary = z.infer<typeof chatModelSummarySchema>;
@@ -59,7 +61,7 @@ export interface PiDeckApi {
     update(patch: Partial<AppSettings>): Promise<AppSettings>;
   };
   chat: {
-    getSnapshot(): Promise<ChatSnapshot>;
+    getSnapshot(request?: ChatSnapshotRequest): Promise<ChatSnapshot>;
     listSessions(): Promise<ChatListSessionsResult>;
     resumeSession(request: { sessionFile: string }): Promise<ChatSnapshot>;
     deleteSession(request: {

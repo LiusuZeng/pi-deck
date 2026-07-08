@@ -29,6 +29,7 @@ import {
   chatSetModelRequestSchema,
   chatSetThinkingRequestSchema,
   chatRuntimeEventSchema,
+  chatSnapshotRequestSchema,
   chatSnapshotSchema,
   diagnosticsSummarySchema,
   ipcChannels,
@@ -244,10 +245,11 @@ function registerIpcHandlers(
   // enables the narrow real `pi --mode rpc` vertical slice.
   registerValidatedIpc({
     channel: ipcChannels.chatGetSnapshot,
-    requestSchema: noPayloadSchema,
+    requestSchema: chatSnapshotRequestSchema,
     responseSchema: chatSnapshotSchema,
     diagnostics: diagnosticsService,
-    handler: async () => getChatSnapshot(store, diagnosticsService),
+    handler: async (request) =>
+      getChatSnapshot(store, diagnosticsService, request?.runtimeId),
   });
 
   registerValidatedIpc({
@@ -1188,12 +1190,17 @@ async function createChatSessionSnapshot(
 async function getChatSnapshot(
   store: SettingsStore,
   diagnosticsService: DiagnosticsService,
+  requestedRuntimeId?: string,
 ): Promise<ChatSnapshot> {
   const adapter = await ensureChatAdapter(store, diagnosticsService);
-  const runtimeId = chatRuntimeId;
   const mode = chatBackendMode ?? resolveChatBackendMode();
+  const runtimeId = requestedRuntimeId ?? chatRuntimeId;
   if (runtimeId === undefined) {
     throw new Error(`${mode} chat runtime failed to initialize`);
+  }
+  if (!adapter.hasRuntime(runtimeId)) {
+    forgetChatRuntime(runtimeId);
+    throw new Error(`Chat runtime is no longer attached: ${runtimeId}`);
   }
   return getChatSnapshotForRuntime(adapter, runtimeId, mode);
 }

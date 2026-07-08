@@ -19,6 +19,7 @@ import {
   chatSetModelRequestSchema,
   chatSetThinkingRequestSchema,
   chatRuntimeEventSchema,
+  chatSnapshotRequestSchema,
   chatSnapshotSchema,
   diagnosticsSummarySchema,
   ipcChannels,
@@ -82,10 +83,10 @@ const api: PiDeckApi = Object.freeze({
       }),
   }),
   chat: Object.freeze({
-    getSnapshot: () =>
+    getSnapshot: (request?: { runtimeId?: string }) =>
       invokeValidated({
         channel: ipcChannels.chatGetSnapshot,
-        request: undefined,
+        request: chatSnapshotRequestSchema.parse(request),
         responseSchema: chatSnapshotSchema,
       }),
     listSessions: () =>

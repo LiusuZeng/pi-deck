@@ -158,6 +158,7 @@ interface SlashCommand {
 }
 
 const appStartedAt = Date.now();
+const WORKING_SESSION_RECONCILE_AFTER_MS = 3_000;
 
 const modelOptions: ModelOption[] = [
   {
@@ -528,6 +529,61 @@ export function App(): ReactElement {
   const showStarterPage =
     selectedSession.timeline.length === 0 && selectedSession.status === "idle";
 
+  useEffect(() => {
+    if (loadState.state !== "ready") {
+      return;
+    }
+    const runtimeIds = sessions
+      .filter(
+        (session) =>
+          session.backendMode === "real" &&
+          session.runtimeBacked &&
+          session.status === "working",
+      )
+      .map((session) => session.id);
+    if (runtimeIds.length === 0) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      void reconcileWorkingSessions(runtimeIds);
+    }, WORKING_SESSION_RECONCILE_AFTER_MS);
+    return () => window.clearTimeout(timer);
+  }, [loadState.state, sessions]);
+
+  async function reconcileWorkingSessions(runtimeIds: string[]): Promise<void> {
+    for (const runtimeId of runtimeIds) {
+      try {
+        const snapshot = await window.piDeck.chat.getSnapshot({ runtimeId });
+        if (isSnapshotAgentActive(snapshot)) {
+          continue;
+        }
+        const reconciled = sessionFromSnapshot(snapshot);
+        setSessions((current) =>
+          current.map((session) =>
+            session.id === runtimeId
+              ? appendDiagnostic(
+                  {
+                    ...reconciled,
+                    title: isPlaceholderSessionTitle(reconciled.title)
+                      ? session.title
+                      : reconciled.title,
+                  },
+                  {
+                    tone: "info",
+                    content:
+                      "Reconciled from persisted Pi session because the live completion event was not observed.",
+                  },
+                )
+              : session,
+          ),
+        );
+      } catch {
+        // Reconciliation is best-effort. Keep the live projection visible.
+      }
+    }
+  }
+
   function applyRuntimeEvent(event: ChatRuntimeEvent): void {
     setSessions((current) =>
       current.map((session) =>
@@ -783,13 +839,34 @@ export function App(): ReactElement {
       );
       setUiMessage("Abort sent to Pi.");
     } catch (error) {
-      setComposerError(error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      try {
+        const snapshot = await window.piDeck.chat.getSnapshot({ runtimeId });
+        if (!isSnapshotAgentActive(snapshot)) {
+          const reconciled = sessionFromSnapshot(snapshot);
+          setSessions((current) =>
+            current.map((session) =>
+              session.id === runtimeId
+                ? appendDiagnostic(reconciled, {
+                    tone: "info",
+                    content: `Abort returned an error, but Pi now reports this session idle: ${message}`,
+                  })
+                : session,
+            ),
+          );
+          setUiMessage("Pi reports the session is idle after abort.");
+          return;
+        }
+      } catch {
+        // Fall through to surfacing the original abort error.
+      }
+      setComposerError(message);
       setSessions((current) =>
         current.map((session) =>
           session.id === runtimeId
             ? appendDiagnostic(session, {
                 tone: "error",
-                content: `Abort failed: ${error instanceof Error ? error.message : String(error)}`,
+                content: `Abort failed: ${message}`,
               })
             : session,
         ),
@@ -1388,13 +1465,7 @@ function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
     snapshot.messages,
     getContextWindowTokens(snapshot.state),
   );
-  const stateRecord = snapshot.state as Record<string, unknown>;
-  const isAgentActive = Boolean(
-    snapshot.state.isAgentActive ??
-    (typeof stateRecord.isStreaming === "boolean"
-      ? stateRecord.isStreaming
-      : undefined),
-  );
+  const isAgentActive = isSnapshotAgentActive(snapshot);
 
   const session: SessionViewModel = {
     id: snapshot.runtimeId,
@@ -1434,6 +1505,16 @@ function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
     session.thinkingLevel = snapshot.state.thinkingLevel;
   }
   return session;
+}
+
+function isSnapshotAgentActive(snapshot: ChatSnapshot): boolean {
+  const stateRecord = snapshot.state as Record<string, unknown>;
+  return Boolean(
+    snapshot.state.isAgentActive ??
+    (typeof stateRecord.isStreaming === "boolean"
+      ? stateRecord.isStreaming
+      : undefined),
+  );
 }
 
 function titleFromSnapshot(snapshot: ChatSnapshot): string {

@@ -39,6 +39,7 @@ Useful fixture flags:
 - `--malformed-on-start` — emits malformed stdout for parser/error handling tests.
 - `--exit-after-first-command` — exits before responding to the first command for pending-request rejection tests.
 - `--ignore-command <name>` — accepts a command but never responds, for deterministic timeout tests.
+- `--drop-completion-events` — persists the final assistant message and marks fake state idle, but does not emit final `message_update done` or `agent_end`; useful for UI reconciliation regressions.
 - `--prompt-scenario <name>` — emits additional deterministic prompt-side events. Supported names:
   - `basic` — default `agent_start`, streaming `message_update`, `agent_end`.
   - `tool` — adds `tool_execution_start/update/end`.

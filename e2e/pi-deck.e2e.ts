@@ -379,6 +379,42 @@ test("real mode project picker handoff persists selected cwd with fake Pi", asyn
   }
 });
 
+test("real mode reconciles a working session when completion event is missed", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-reconcile-"));
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: ["--drop-completion-events"],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await page.getByLabel("Prompt text").fill("missed completion event");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText(
+        "Reconciled from persisted Pi session because the live completion event was not observed.",
+      ),
+    ).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText("Agent is working…")).toHaveCount(0);
+    await expect(
+      page.getByText(/Fake response to: missed completion event/),
+    ).toBeVisible();
+    await page.getByLabel("Prompt text").fill("can send after reconcile");
+    await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("real mode routes background session events to the right session with fake Pi", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-routing-"));
   const projectCwd = path.join(root, "project");

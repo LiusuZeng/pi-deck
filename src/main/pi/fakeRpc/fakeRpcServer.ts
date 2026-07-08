@@ -25,6 +25,7 @@ interface FakeOptions {
   streamDelayMs: number;
   ignoredCommands: Set<string>;
   promptScenario: PromptScenario;
+  dropCompletionEvents: boolean;
   sessionFile?: string;
 }
 
@@ -43,6 +44,7 @@ function parseOptions(argv: string[]): FakeOptions {
     streamDelayMs: 5,
     ignoredCommands: new Set<string>(),
     promptScenario: "basic",
+    dropCompletionEvents: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -65,6 +67,8 @@ function parseOptions(argv: string[]): FakeOptions {
         options.promptScenario = scenario;
       }
       index += 1;
+    } else if (arg === "--drop-completion-events") {
+      options.dropCompletionEvents = true;
     } else if (arg === "--session") {
       const sessionFile = argv[index + 1];
       if (sessionFile) {
@@ -351,18 +355,20 @@ class FakeRpcServer {
           };
           this.messages.push(assistantMessage);
           this.appendPersistedMessage(assistantMessage);
-          this.write({
-            type: "message_update",
-            messageId: assistantId,
-            role: "assistant",
-            content: accumulated,
-            done: true,
-          });
-          this.write({
-            type: "agent_end",
-            runId: `run_${this.promptCounter}`,
-            status: "completed",
-          });
+          if (!this.options.dropCompletionEvents) {
+            this.write({
+              type: "message_update",
+              messageId: assistantId,
+              role: "assistant",
+              content: accumulated,
+              done: true,
+            });
+            this.write({
+              type: "agent_end",
+              runId: `run_${this.promptCounter}`,
+              status: "completed",
+            });
+          }
         },
         this.options.streamDelayMs * (chunks.length + 1),
       ),

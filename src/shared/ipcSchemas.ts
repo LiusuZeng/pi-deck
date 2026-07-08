@@ -149,6 +149,13 @@ export const chatStateSchema = z
   })
   .passthrough();
 
+export const chatSnapshotRequestSchema = z
+  .object({
+    runtimeId: z.string().optional(),
+  })
+  .strict()
+  .optional();
+
 export const chatSnapshotSchema = z
   .object({
     runtimeId: z.string(),
