@@ -8,23 +8,28 @@ import {
   attachmentImportImageRequestSchema,
   attachmentPickerRequestSchema,
   chatAbortRequestSchema,
+  chatDeleteAllSessionsRequestSchema,
   chatDeleteAllSessionsResultSchema,
   chatDeleteSessionRequestSchema,
   chatDeleteSessionResultSchema,
   chatListModelsRequestSchema,
   chatListModelsResultSchema,
+  chatListSessionsRequestSchema,
   chatListSessionsResultSchema,
   chatPromptRequestSchema,
   chatResumeSessionRequestSchema,
   chatSetModelRequestSchema,
   chatSetThinkingRequestSchema,
   chatRuntimeEventSchema,
+  chatCreateSessionRequestSchema,
   chatSnapshotRequestSchema,
   chatSnapshotSchema,
   diagnosticsSummarySchema,
   ipcChannels,
   pickAttachmentsResultSchema,
   pickProjectResultSchema,
+  projectListResultSchema,
+  projectSelectRequestSchema,
 } from "../shared/ipcSchemas.js";
 import type {
   AppSettings,
@@ -89,28 +94,28 @@ const api: PiDeckApi = Object.freeze({
         request: chatSnapshotRequestSchema.parse(request),
         responseSchema: chatSnapshotSchema,
       }),
-    listSessions: () =>
+    listSessions: (request?: { projectId?: string }) =>
       invokeValidated({
         channel: ipcChannels.chatListSessions,
-        request: undefined,
+        request: chatListSessionsRequestSchema.parse(request),
         responseSchema: chatListSessionsResultSchema,
       }),
-    resumeSession: (request: { sessionFile: string }) =>
+    resumeSession: (request: { projectId?: string; sessionFile: string }) =>
       invokeValidated({
         channel: ipcChannels.chatResumeSession,
         request: chatResumeSessionRequestSchema.parse(request),
         responseSchema: chatSnapshotSchema,
       }),
-    deleteSession: (request: { sessionFile: string }) =>
+    deleteSession: (request: { projectId?: string; sessionFile: string }) =>
       invokeValidated({
         channel: ipcChannels.chatDeleteSession,
         request: chatDeleteSessionRequestSchema.parse(request),
         responseSchema: chatDeleteSessionResultSchema,
       }),
-    deleteAllSessions: () =>
+    deleteAllSessions: (request?: { projectId?: string }) =>
       invokeValidated({
         channel: ipcChannels.chatDeleteAllSessions,
-        request: undefined,
+        request: chatDeleteAllSessionsRequestSchema.parse(request),
         responseSchema: chatDeleteAllSessionsResultSchema,
       }),
     listModels: (request: { runtimeId: string }) =>
@@ -154,10 +159,10 @@ const api: PiDeckApi = Object.freeze({
         request: chatAbortRequestSchema.parse(request),
         responseSchema: z.void(),
       }),
-    createSession: () =>
+    createSession: (request?: { projectId?: string }) =>
       invokeValidated({
         channel: ipcChannels.chatCreateSession,
-        request: undefined,
+        request: chatCreateSessionRequestSchema.parse(request),
         responseSchema: chatSnapshotSchema,
       }),
     reset: () =>
@@ -182,6 +187,24 @@ const api: PiDeckApi = Object.freeze({
     },
   }),
   projects: Object.freeze({
+    list: () =>
+      invokeValidated({
+        channel: ipcChannels.projectList,
+        request: undefined,
+        responseSchema: projectListResultSchema,
+      }),
+    getActive: () =>
+      invokeValidated({
+        channel: ipcChannels.projectGetActive,
+        request: undefined,
+        responseSchema: projectListResultSchema,
+      }),
+    select: (request: { projectId: string }) =>
+      invokeValidated({
+        channel: ipcChannels.projectSelect,
+        request: projectSelectRequestSchema.parse(request),
+        responseSchema: projectListResultSchema,
+      }),
     pickProject: () =>
       invokeValidated({
         channel: ipcChannels.projectPickFolder,

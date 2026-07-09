@@ -70,6 +70,44 @@ describe("renderer resume recovery", () => {
   });
 });
 
+describe("renderer project API compatibility", () => {
+  it("falls back when running with an older preload without projects.list", async () => {
+    const fallbackProject = {
+      id: "/tmp/project",
+      path: "/tmp/project",
+      canonicalPath: "/tmp/project",
+      displayName: "project",
+      lastOpenedAt: 1,
+    };
+
+    const result = await __rendererTestHooks.listProjectsIfAvailable(
+      { projects: { pickProject: async () => ({ selected: false }) } } as any,
+      fallbackProject,
+    );
+
+    expect(result.activeProject).toEqual(fallbackProject);
+    expect(result.projects[0]).toMatchObject({ id: "/tmp/project" });
+  });
+
+  it("falls back when running with an older preload without projects.select", async () => {
+    const project = {
+      id: "/tmp/project",
+      path: "/tmp/project",
+      canonicalPath: "/tmp/project",
+      displayName: "project",
+      lastOpenedAt: 1,
+    };
+
+    const result = await __rendererTestHooks.selectProjectIfAvailable(
+      { projects: { pickProject: async () => ({ selected: false }) } } as any,
+      project,
+    );
+
+    expect(result.activeProject).toEqual(project);
+    expect(result.activeProjectId).toBe(project.id);
+  });
+});
+
 describe("renderer session actions", () => {
   it("keeps a saved session deletable after it is resumed", () => {
     expect(

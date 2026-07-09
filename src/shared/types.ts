@@ -4,9 +4,11 @@ import type {
   attachmentDraftSchema,
   attachmentImportDroppedFilesRequestSchema,
   attachmentImportImageRequestSchema,
+  chatDeleteAllSessionsRequestSchema,
   chatDeleteAllSessionsResultSchema,
   chatDeleteSessionResultSchema,
   chatListModelsResultSchema,
+  chatListSessionsRequestSchema,
   chatListSessionsResultSchema,
   chatMessageSchema,
   chatModelSummarySchema,
@@ -18,6 +20,7 @@ import type {
   ipcErrorSchema,
   pickAttachmentsResultSchema,
   pickProjectResultSchema,
+  projectListResultSchema,
   projectRefSchema,
 } from "./ipcSchemas.js";
 
@@ -30,8 +33,14 @@ export type ChatSnapshot = z.infer<typeof chatSnapshotSchema>;
 export type ChatSessionSummary = z.infer<typeof chatSessionSummarySchema>;
 export type ChatModelSummary = z.infer<typeof chatModelSummarySchema>;
 export type ChatListModelsResult = z.infer<typeof chatListModelsResultSchema>;
+export type ChatListSessionsRequest = z.infer<
+  typeof chatListSessionsRequestSchema
+>;
 export type ChatDeleteSessionResult = z.infer<
   typeof chatDeleteSessionResultSchema
+>;
+export type ChatDeleteAllSessionsRequest = z.infer<
+  typeof chatDeleteAllSessionsRequestSchema
 >;
 export type ChatDeleteAllSessionsResult = z.infer<
   typeof chatDeleteAllSessionsResultSchema
@@ -41,6 +50,7 @@ export type ChatListSessionsResult = z.infer<
 >;
 export type ChatRuntimeEvent = z.infer<typeof chatRuntimeEventSchema>;
 export type ProjectRef = z.infer<typeof projectRefSchema>;
+export type ProjectListResult = z.infer<typeof projectListResultSchema>;
 export type PickProjectResult = z.infer<typeof pickProjectResultSchema>;
 export type AttachmentDraft = z.infer<typeof attachmentDraftSchema>;
 export type AttachmentImportDroppedFilesRequest = z.infer<
@@ -62,12 +72,20 @@ export interface PiDeckApi {
   };
   chat: {
     getSnapshot(request?: ChatSnapshotRequest): Promise<ChatSnapshot>;
-    listSessions(): Promise<ChatListSessionsResult>;
-    resumeSession(request: { sessionFile: string }): Promise<ChatSnapshot>;
+    listSessions(
+      request?: ChatListSessionsRequest,
+    ): Promise<ChatListSessionsResult>;
+    resumeSession(request: {
+      projectId?: string;
+      sessionFile: string;
+    }): Promise<ChatSnapshot>;
     deleteSession(request: {
+      projectId?: string;
       sessionFile: string;
     }): Promise<ChatDeleteSessionResult>;
-    deleteAllSessions(): Promise<ChatDeleteAllSessionsResult>;
+    deleteAllSessions(
+      request?: ChatDeleteAllSessionsRequest,
+    ): Promise<ChatDeleteAllSessionsResult>;
     listModels(request: { runtimeId: string }): Promise<ChatListModelsResult>;
     setModel(request: {
       runtimeId: string;
@@ -87,11 +105,14 @@ export interface PiDeckApi {
       }>;
     }): Promise<void>;
     abort(request: { runtimeId: string }): Promise<void>;
-    createSession(): Promise<ChatSnapshot>;
+    createSession(request?: { projectId?: string }): Promise<ChatSnapshot>;
     reset(): Promise<ChatSnapshot>;
     onEvent(listener: (event: ChatRuntimeEvent) => void): () => void;
   };
   projects: {
+    list(): Promise<ProjectListResult>;
+    getActive(): Promise<ProjectListResult>;
+    select(request: { projectId: string }): Promise<ProjectListResult>;
     pickProject(): Promise<PickProjectResult>;
   };
   attachments: {

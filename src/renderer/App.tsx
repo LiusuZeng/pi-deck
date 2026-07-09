@@ -18,6 +18,7 @@ import type {
   ChatSessionSummary,
   ChatSnapshot,
   DiagnosticsSummary,
+  ProjectListResult,
   ProjectRef,
 } from "../shared/types.js";
 import {
@@ -381,9 +382,7 @@ export function App(): ReactElement {
     displayName: "Pi Deck",
     lastOpenedAt: appStartedAt,
   }));
-  const [recentProjects, setRecentProjects] = useState<ProjectRef[]>(() =>
-    loadRecentProjects(),
-  );
+  const [recentProjects, setRecentProjects] = useState<ProjectRef[]>([]);
   const [selectedModelId, setSelectedModelId] = useState(
     modelOptions[0]?.id ?? "",
   );
@@ -451,6 +450,10 @@ export function App(): ReactElement {
           api.app.getDiagnosticsSummary(),
           api.chat.getSnapshot(),
         ]);
+        const fallbackProject = snapshot.state.cwd
+          ? projectFromCwd(snapshot.state.cwd)
+          : currentProject;
+        const projectList = await listProjectsIfAvailable(api, fallbackProject);
         const listedSessions =
           snapshot.backendMode === "real"
             ? await api.chat.listSessions()
@@ -471,8 +474,14 @@ export function App(): ReactElement {
                 ],
           );
           setSelectedSessionId(backendSession.id);
-          if (snapshot.backendMode === "real" && snapshot.state.cwd) {
-            setCurrentProject(projectFromCwd(snapshot.state.cwd));
+          if (snapshot.backendMode === "real") {
+            setRecentProjects(projectList.projects);
+            setCurrentProject(
+              projectList.activeProject ??
+                (snapshot.state.cwd
+                  ? projectFromCwd(snapshot.state.cwd)
+                  : currentProject),
+            );
           }
           if (snapshot.backendMode === "real") {
             void loadRealModels(backendSession.id);
@@ -665,6 +674,7 @@ export function App(): ReactElement {
     setUiMessage(`Resuming ${session.title}…`);
     try {
       const snapshot = await window.piDeck.chat.resumeSession({
+        projectId: currentProject.id,
         sessionFile: session.sessionFile,
       });
       const resumed = sessionFromSnapshot(snapshot);
@@ -899,15 +909,19 @@ export function App(): ReactElement {
         return;
       }
       setCurrentProject(result.project);
-      setRecentProjects((projects) =>
-        saveRecentProjects(result.project, projects),
+      const refreshedProjects = await listProjectsIfAvailable(
+        window.piDeck,
+        result.project,
       );
+      setRecentProjects(refreshedProjects.projects);
 
       if (isRealBackendMode) {
         setComposerError(null);
         setUiMessage(`Switching real Pi project to ${result.project.path}…`);
         const snapshot = await window.piDeck.chat.reset();
-        const listedSessions = await window.piDeck.chat.listSessions();
+        const listedSessions = await window.piDeck.chat.listSessions({
+          projectId: result.project.id,
+        });
         const backendSession = sessionFromSnapshot(snapshot);
         setSessions(
           mergeSessions(
@@ -933,6 +947,45 @@ export function App(): ReactElement {
     }
   }
 
+  async function handleSelectProject(project: ProjectRef): Promise<void> {
+    if (project.invalidReason) {
+      setUiMessage(project.invalidReason);
+      return;
+    }
+    try {
+      const result = await selectProjectIfAvailable(window.piDeck, project);
+      const activeProject = result.activeProject ?? project;
+      setCurrentProject(activeProject);
+      setRecentProjects(result.projects);
+      if (isRealBackendMode) {
+        setComposerError(null);
+        setUiMessage(`Switching real Pi project to ${activeProject.path}…`);
+        const snapshot = await window.piDeck.chat.reset();
+        const listedSessions = await window.piDeck.chat.listSessions({
+          projectId: activeProject.id,
+        });
+        const backendSession = sessionFromSnapshot(snapshot);
+        setSessions(
+          mergeSessions(
+            [backendSession],
+            listedSessions.sessions.map(sessionFromSummary),
+          ),
+        );
+        setSelectedSessionId(backendSession.id);
+        void loadRealModels(backendSession.id);
+        setUiMessage(
+          `Real Pi project switched. Found ${listedSessions.sessions.length} saved session(s) for this project.`,
+        );
+        return;
+      }
+      setUiMessage(`Selected project ${activeProject.displayName}.`);
+    } catch (error) {
+      setUiMessage(
+        `Failed to select project: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   async function loadRealModels(runtimeId: string): Promise<void> {
     try {
       const result = await window.piDeck.chat.listModels({ runtimeId });
@@ -948,7 +1001,9 @@ export function App(): ReactElement {
     }
     setUiMessage("Refreshing saved Pi sessions…");
     try {
-      const result = await window.piDeck.chat.listSessions();
+      const result = await window.piDeck.chat.listSessions({
+        projectId: currentProject.id,
+      });
       setSessions((items) =>
         mergeSessions(
           items.filter((item) => item.runtimeBacked),
@@ -981,7 +1036,9 @@ export function App(): ReactElement {
     }
 
     try {
-      const result = await window.piDeck.chat.deleteAllSessions();
+      const result = await window.piDeck.chat.deleteAllSessions({
+        projectId: currentProject.id,
+      });
       setSessions((items) =>
         items.filter((item) => item.resumeBacked !== true),
       );
@@ -1015,6 +1072,7 @@ export function App(): ReactElement {
 
     try {
       await window.piDeck.chat.deleteSession({
+        projectId: currentProject.id,
         sessionFile,
       });
       const remainingSessions = sessions.filter(
@@ -1182,7 +1240,9 @@ export function App(): ReactElement {
       setSelectedSessionId(optimisticId);
       setUiMessage("Starting a new real Pi session…");
       try {
-        const snapshot = await window.piDeck.chat.createSession();
+        const snapshot = await window.piDeck.chat.createSession({
+          projectId: currentProject.id,
+        });
         const backendSession = sessionFromSnapshot(snapshot);
         setSessions((items) =>
           mergeSessions(
@@ -1320,12 +1380,7 @@ export function App(): ReactElement {
             handleUsageStatsVisibleChange(!usageStatsVisible)
           }
           onPickProject={() => void handlePickProject()}
-          onSelectRecent={(project) => {
-            setCurrentProject(project);
-            setUiMessage(
-              "Recent project selected; invalid rows remain visibly recoverable.",
-            );
-          }}
+          onSelectRecent={(project) => void handleSelectProject(project)}
           onModelChange={setSelectedModelId}
           onThinkingChange={(level) => {
             setSelectedThinking(level);
@@ -1357,6 +1412,38 @@ export function App(): ReactElement {
       </section>
     </main>
   );
+}
+
+async function listProjectsIfAvailable(
+  api: typeof window.piDeck,
+  fallbackProject: ProjectRef,
+): Promise<ProjectListResult> {
+  const projectsApi = api.projects as Partial<typeof api.projects>;
+  if (typeof projectsApi.list === "function") {
+    return projectsApi.list();
+  }
+
+  return {
+    activeProjectId: fallbackProject.id,
+    activeProject: fallbackProject,
+    projects: [fallbackProject],
+  };
+}
+
+async function selectProjectIfAvailable(
+  api: typeof window.piDeck,
+  project: ProjectRef,
+): Promise<ProjectListResult> {
+  const projectsApi = api.projects as Partial<typeof api.projects>;
+  if (typeof projectsApi.select === "function") {
+    return projectsApi.select({ projectId: project.id });
+  }
+
+  return {
+    activeProjectId: project.id,
+    activeProject: project,
+    projects: [project],
+  };
 }
 
 function projectFromCwd(cwd: string): ProjectRef {
@@ -4186,6 +4273,8 @@ export const __rendererTestHooks = {
   mergeAttachmentDrafts,
   isMissingSessionFileError,
   isSessionDeletable,
+  listProjectsIfAvailable,
+  selectProjectIfAvailable,
 };
 
 function getRendererNodeAccessSummary(): string {

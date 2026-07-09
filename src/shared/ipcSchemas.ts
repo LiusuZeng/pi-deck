@@ -180,9 +180,17 @@ export const chatSessionSummarySchema = z
   })
   .strict();
 
+export const chatListSessionsRequestSchema = z
+  .object({
+    projectId: z.string().min(1).optional(),
+  })
+  .strict()
+  .optional();
+
 export const chatListSessionsResultSchema = z
   .object({
     projectCwd: z.string(),
+    projectId: z.string().optional(),
     sessionDir: z.string().optional(),
     sessions: z.array(chatSessionSummarySchema),
     diagnostics: z.array(z.string()),
@@ -191,12 +199,14 @@ export const chatListSessionsResultSchema = z
 
 export const chatResumeSessionRequestSchema = z
   .object({
+    projectId: z.string().min(1).optional(),
     sessionFile: z.string().min(1),
   })
   .strict();
 
 export const chatDeleteSessionRequestSchema = z
   .object({
+    projectId: z.string().min(1).optional(),
     sessionFile: z.string().min(1),
   })
   .strict();
@@ -207,6 +217,13 @@ export const chatDeleteSessionResultSchema = z
     sessionFile: z.string(),
   })
   .strict();
+
+export const chatDeleteAllSessionsRequestSchema = z
+  .object({
+    projectId: z.string().min(1).optional(),
+  })
+  .strict()
+  .optional();
 
 export const chatDeleteAllSessionsResultSchema = z
   .object({
@@ -275,6 +292,13 @@ export const chatAbortRequestSchema = z
   })
   .strict();
 
+export const chatCreateSessionRequestSchema = z
+  .object({
+    projectId: z.string().min(1).optional(),
+  })
+  .strict()
+  .optional();
+
 export const chatRuntimeEventSchema = z
   .object({
     type: z.string(),
@@ -297,6 +321,20 @@ export const pickProjectResultSchema = z.discriminatedUnion("selected", [
   z.object({ selected: z.literal(false) }).strict(),
   z.object({ selected: z.literal(true), project: projectRefSchema }).strict(),
 ]);
+
+export const projectListResultSchema = z
+  .object({
+    activeProjectId: z.string().optional(),
+    activeProject: projectRefSchema.optional(),
+    projects: z.array(projectRefSchema),
+  })
+  .strict();
+
+export const projectSelectRequestSchema = z
+  .object({
+    projectId: z.string().min(1),
+  })
+  .strict();
 
 export const attachmentPickerRequestSchema = z
   .object({
@@ -389,6 +427,9 @@ export const ipcChannels = {
   chatCreateSession: "chat:createSession",
   chatReset: "chat:reset",
   chatEvent: "chat:event",
+  projectList: "projects:list",
+  projectGetActive: "projects:getActive",
+  projectSelect: "projects:select",
   projectPickFolder: "project:pickFolder",
   attachmentsPickFiles: "attachments:pickFiles",
   attachmentsImportDroppedFiles: "attachments:importDroppedFiles",

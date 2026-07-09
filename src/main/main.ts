@@ -18,11 +18,14 @@ import {
   attachmentImportImageRequestSchema,
   attachmentPickerRequestSchema,
   chatAbortRequestSchema,
+  chatCreateSessionRequestSchema,
+  chatDeleteAllSessionsRequestSchema,
   chatDeleteAllSessionsResultSchema,
   chatDeleteSessionRequestSchema,
   chatDeleteSessionResultSchema,
   chatListModelsRequestSchema,
   chatListModelsResultSchema,
+  chatListSessionsRequestSchema,
   chatListSessionsResultSchema,
   chatPromptRequestSchema,
   chatResumeSessionRequestSchema,
@@ -36,6 +39,8 @@ import {
   noPayloadSchema,
   pickAttachmentsResultSchema,
   pickProjectResultSchema,
+  projectListResultSchema,
+  projectSelectRequestSchema,
 } from "../shared/ipcSchemas.js";
 import type {
   AppSettings,
@@ -52,7 +57,7 @@ import { registerValidatedIpc } from "./ipc/registerIpc.js";
 import { SinglePiAdapter } from "./pi/piAdapter.js";
 import { selectAvailableRuntime } from "./runtimeSelection.js";
 import { scanSessionRepository } from "./pi/sessionRepository.js";
-import type { PromptInput } from "./pi/types.js";
+import type { PiMessage, PromptInput } from "./pi/types.js";
 import {
   resolveEffectivePiConfig,
   resolvePiBinary,
@@ -64,12 +69,14 @@ import {
   isAllowedExternalUrl,
   shouldAllowNavigation,
 } from "./security.js";
+import { ProjectStore, resolvePiDeckHome } from "./projects/projectStore.js";
 import { SettingsStore } from "./settings/settingsStore.js";
 
 const isDev = process.env.VITE_DEV_SERVER_URL !== undefined;
 
 let mainWindow: BrowserWindow | undefined;
 let settingsStore: SettingsStore | undefined;
+let projectStore: ProjectStore | undefined;
 let diagnostics: DiagnosticsService | undefined;
 type ChatBackendMode = "fake" | "real";
 
@@ -80,6 +87,7 @@ const chatRuntimeIds = new Set<string>();
 const chatRuntimeModes = new Map<string, ChatBackendMode>();
 const chatWorkerCwds = new Map<string, string>();
 const chatRuntimeSessionFiles = new Map<string, string>();
+const chatRuntimeProjectIds = new Map<string, string>();
 const chatSessionFileLocks = new Map<string, string>();
 const chatSessionResumePromises = new Map<string, Promise<ChatSnapshot>>();
 let warmChatWorker: ChatWorkerSpec | undefined;
@@ -116,6 +124,8 @@ async function bootstrap(): Promise<void> {
   await diagnostics.initialize();
   settingsStore = new SettingsStore(app.getPath("userData"), diagnostics);
   await settingsStore.loadIfNeeded();
+  projectStore = new ProjectStore(resolvePiDeckHome(process.env), diagnostics);
+  await projectStore.loadIfNeeded();
 
   configureCsp();
   registerIpcHandlers(settingsStore, diagnostics);
@@ -136,6 +146,7 @@ function createMainWindow(): void {
     minWidth: 900,
     minHeight: 600,
     title: "Pi Deck",
+    show: process.env.PI_DECK_E2E_HIDE_WINDOWS !== "1",
     webPreferences: buildSecureWebPreferences(preloadPath),
   });
 
@@ -254,10 +265,10 @@ function registerIpcHandlers(
 
   registerValidatedIpc({
     channel: ipcChannels.chatListSessions,
-    requestSchema: noPayloadSchema,
+    requestSchema: chatListSessionsRequestSchema,
     responseSchema: chatListSessionsResultSchema,
     diagnostics: diagnosticsService,
-    handler: async () => listChatSessions(store),
+    handler: async (request) => listChatSessions(store, request?.projectId),
   });
 
   registerValidatedIpc({
@@ -265,8 +276,8 @@ function registerIpcHandlers(
     requestSchema: chatResumeSessionRequestSchema,
     responseSchema: chatSnapshotSchema,
     diagnostics: diagnosticsService,
-    handler: async ({ sessionFile }) =>
-      resumeChatSession(store, diagnosticsService, sessionFile),
+    handler: async ({ projectId, sessionFile }) =>
+      resumeChatSession(store, diagnosticsService, sessionFile, projectId),
   });
 
   registerValidatedIpc({
@@ -274,15 +285,17 @@ function registerIpcHandlers(
     requestSchema: chatDeleteSessionRequestSchema,
     responseSchema: chatDeleteSessionResultSchema,
     diagnostics: diagnosticsService,
-    handler: async ({ sessionFile }) => deleteChatSession(store, sessionFile),
+    handler: async ({ projectId, sessionFile }) =>
+      deleteChatSession(store, sessionFile, projectId),
   });
 
   registerValidatedIpc({
     channel: ipcChannels.chatDeleteAllSessions,
-    requestSchema: noPayloadSchema,
+    requestSchema: chatDeleteAllSessionsRequestSchema,
     responseSchema: chatDeleteAllSessionsResultSchema,
     diagnostics: diagnosticsService,
-    handler: async () => deleteAllChatSessions(store),
+    handler: async (request) =>
+      deleteAllChatSessions(store, request?.projectId),
   });
 
   registerValidatedIpc({
@@ -319,8 +332,10 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async ({ runtimeId, text, attachments }) => {
       const adapter = await ensureChatAdapter(store, diagnosticsService);
+      const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
+      await assertRuntimeInActiveProject(activeRuntimeId);
       await adapter.prompt(
-        resolveActiveChatRuntimeId(adapter, runtimeId),
+        activeRuntimeId,
         await buildPromptInput(text, attachments ?? []),
       );
       return undefined;
@@ -334,17 +349,20 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async ({ runtimeId }) => {
       const adapter = await ensureChatAdapter(store, diagnosticsService);
-      await adapter.abort(resolveActiveChatRuntimeId(adapter, runtimeId));
+      const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
+      await assertRuntimeInActiveProject(activeRuntimeId);
+      await adapter.abort(activeRuntimeId);
       return undefined;
     },
   });
 
   registerValidatedIpc({
     channel: ipcChannels.chatCreateSession,
-    requestSchema: noPayloadSchema,
+    requestSchema: chatCreateSessionRequestSchema,
     responseSchema: chatSnapshotSchema,
     diagnostics: diagnosticsService,
-    handler: async () => createChatSessionSnapshot(store, diagnosticsService),
+    handler: async (request) =>
+      createChatSessionSnapshot(store, diagnosticsService, request?.projectId),
   });
 
   registerValidatedIpc({
@@ -355,6 +373,34 @@ function registerIpcHandlers(
     handler: async () => {
       await closeChatWorker();
       return getChatSnapshot(store, diagnosticsService);
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.projectList,
+    requestSchema: noPayloadSchema,
+    responseSchema: projectListResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async () => ensureProjectStore().list(),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.projectGetActive,
+    requestSchema: noPayloadSchema,
+    responseSchema: projectListResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async () => ensureProjectStore().list(),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.projectSelect,
+    requestSchema: projectSelectRequestSchema,
+    responseSchema: projectListResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ projectId }) => {
+      await ensureProjectStore().selectProject(projectId);
+      selectedRealProjectCwd = projectId;
+      return ensureProjectStore().list();
     },
   });
 
@@ -385,16 +431,9 @@ function registerIpcHandlers(
       const canonicalPath = await fs.realpath(selectedPath);
       selectedRealProjectCwd = canonicalPath;
       await store.update({ projectCwd: canonicalPath });
-      return {
-        selected: true,
-        project: {
-          id: canonicalPath,
-          path: selectedPath,
-          canonicalPath,
-          displayName: path.basename(canonicalPath) || canonicalPath,
-          lastOpenedAt: Date.now(),
-        },
-      };
+      const project =
+        await ensureProjectStore().upsertAndActivateProject(canonicalPath);
+      return { selected: true, project };
     },
   });
 
@@ -466,6 +505,13 @@ function registerIpcHandlers(
   });
 }
 
+function ensureProjectStore(): ProjectStore {
+  if (projectStore === undefined) {
+    throw new Error("Project store is not initialized");
+  }
+  return projectStore;
+}
+
 function nextTestProjectPickPath(): string | undefined {
   const singlePath = process.env.PI_DECK_TEST_PICK_PROJECT_CWD;
   if (singlePath !== undefined && singlePath.trim().length > 0) {
@@ -497,16 +543,9 @@ async function pickProjectByPathForTest(
   const canonicalPath = await fs.realpath(projectPath);
   selectedRealProjectCwd = canonicalPath;
   await store.update({ projectCwd: canonicalPath });
-  return {
-    selected: true,
-    project: {
-      id: canonicalPath,
-      path: projectPath,
-      canonicalPath,
-      displayName: path.basename(canonicalPath) || canonicalPath,
-      lastOpenedAt: Date.now(),
-    },
-  };
+  const project =
+    await ensureProjectStore().upsertAndActivateProject(canonicalPath);
+  return { selected: true, project };
 }
 
 async function ensureChatAdapter(
@@ -577,6 +616,9 @@ function registerChatWorker(
   chatRuntimeIds.add(runtimeId);
   chatRuntimeModes.set(runtimeId, mode);
   chatWorkerCwds.set(runtimeId, workerSpec.cwd);
+  if (workerSpec.projectId !== undefined) {
+    chatRuntimeProjectIds.set(runtimeId, workerSpec.projectId);
+  }
 }
 
 async function ensureWarmChatWorker(
@@ -679,6 +721,23 @@ function resolveActiveChatRuntimeId(
   throw new Error("Chat runtime is not initialized");
 }
 
+async function assertRuntimeInActiveProject(runtimeId: string): Promise<void> {
+  if (resolveChatBackendMode() !== "real") {
+    return;
+  }
+  const runtimeProjectId = chatRuntimeProjectIds.get(runtimeId);
+  const activeProject = await projectStore?.getActiveProject();
+  if (
+    runtimeProjectId !== undefined &&
+    activeProject !== undefined &&
+    runtimeProjectId !== activeProject.id
+  ) {
+    throw new Error(
+      `Runtime ${runtimeId} belongs to project ${runtimeProjectId}, but the active project is ${activeProject.id}.`,
+    );
+  }
+}
+
 function forgetChatRuntime(runtimeId: string): void {
   chatRuntimeIds.delete(runtimeId);
   chatRuntimeModes.delete(runtimeId);
@@ -691,6 +750,7 @@ function forgetChatRuntime(runtimeId: string): void {
     chatSessionFileLocks.delete(sessionFile);
   }
   chatRuntimeSessionFiles.delete(runtimeId);
+  chatRuntimeProjectIds.delete(runtimeId);
   if (chatRuntimeId === runtimeId) {
     chatRuntimeId = undefined;
   }
@@ -699,6 +759,7 @@ function forgetChatRuntime(runtimeId: string): void {
 interface ChatWorkerSpec {
   worker: ReturnType<SinglePiAdapter["createWorker"]>;
   cwd: string;
+  projectId?: string;
 }
 
 function createFakeChatWorker(adapter: SinglePiAdapter): ChatWorkerSpec {
@@ -726,7 +787,7 @@ async function createRealChatWorker(
     requestTimeoutMs: Number(process.env.PI_DECK_REAL_RPC_TIMEOUT_MS ?? 30_000),
     commandProtocol: "type-field",
   });
-  return { worker, cwd: launch.projectCwd };
+  return { worker, cwd: launch.projectCwd, projectId: launch.projectCwd };
 }
 
 async function createRealResumeWorker(
@@ -753,7 +814,7 @@ async function createRealResumeWorker(
     requestTimeoutMs: Number(process.env.PI_DECK_REAL_RPC_TIMEOUT_MS ?? 30_000),
     commandProtocol: "type-field",
   });
-  return { worker, cwd };
+  return { worker, cwd, projectId: launch.projectCwd };
 }
 
 async function resolveRealChatLaunchConfig(store: SettingsStore): Promise<{
@@ -807,13 +868,19 @@ function applyRealBackendEnvOverrides(settings: AppSettings): AppPiSettings {
 }
 
 async function resolveRealBackendCwd(settings: AppSettings): Promise<string> {
+  const activeProject = await projectStore?.getActiveProject();
   const requested =
     selectedRealProjectCwd ??
     process.env.PI_DECK_PROJECT_CWD ??
+    activeProject?.rootPath ??
     settings.projectCwd ??
     process.cwd();
   const resolved = path.resolve(requested);
-  return (await safeRealpath(resolved)) ?? resolved;
+  const canonical = (await safeRealpath(resolved)) ?? resolved;
+  if (projectStore !== undefined) {
+    await projectStore.upsertAndActivateProject(canonical);
+  }
+  return canonical;
 }
 
 async function closeChatWorker(): Promise<void> {
@@ -837,6 +904,7 @@ async function closeChatWorker(): Promise<void> {
   chatRuntimeModes.clear();
   chatWorkerCwds.clear();
   chatRuntimeSessionFiles.clear();
+  chatRuntimeProjectIds.clear();
   chatSessionFileLocks.clear();
   chatSessionResumePromises.clear();
   warmChatWorker = undefined;
@@ -867,8 +935,10 @@ async function listChatModels(
   runtimeId: string,
 ): Promise<z.infer<typeof chatListModelsResultSchema>> {
   const adapter = await ensureChatAdapter(store, diagnosticsService);
+  const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
+  await assertRuntimeInActiveProject(activeRuntimeId);
   const response = await adapter.request(
-    resolveActiveChatRuntimeId(adapter, runtimeId),
+    activeRuntimeId,
     "get_available_models",
   );
   if (
@@ -891,6 +961,7 @@ async function setChatModel(
 ): Promise<ChatSnapshot> {
   const adapter = await ensureChatAdapter(store, diagnosticsService);
   const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
+  await assertRuntimeInActiveProject(activeRuntimeId);
   await adapter.request(activeRuntimeId, "set_model", { provider, modelId });
   return getChatSnapshotForRuntime(
     adapter,
@@ -908,6 +979,7 @@ async function setChatThinking(
 ): Promise<ChatSnapshot> {
   const adapter = await ensureChatAdapter(store, diagnosticsService);
   const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
+  await assertRuntimeInActiveProject(activeRuntimeId);
   await adapter.request(activeRuntimeId, "set_thinking_level", { level });
   return getChatSnapshotForRuntime(
     adapter,
@@ -919,11 +991,13 @@ async function setChatThinking(
 
 async function listChatSessions(
   store: SettingsStore,
+  projectId?: string,
 ): Promise<ChatListSessionsResult> {
   const mode = resolveChatBackendMode();
   if (mode !== "real") {
     return {
       projectCwd: process.cwd(),
+      ...(projectId ? { projectId } : {}),
       sessions: [],
       diagnostics: [
         "Session repository scanning is only enabled in real Pi mode.",
@@ -931,11 +1005,17 @@ async function listChatSessions(
     };
   }
 
+  if (projectId !== undefined) {
+    await ensureProjectStore().selectProject(projectId);
+    selectedRealProjectCwd = projectId;
+  }
+
   const launch = await resolveRealChatLaunchConfig(store);
   const sessionDir = launch.effective.config.sessionDir;
   if (sessionDir === undefined) {
     return {
       projectCwd: launch.projectCwd,
+      projectId: launch.projectCwd,
       sessions: [],
       diagnostics: ["No Pi session directory is configured."],
     };
@@ -974,10 +1054,11 @@ async function listChatSessions(
       result.sessions.map((session) => [session.sessionFile, session] as const),
     ),
   );
+  const diagnostics = scanResults.flatMap((result) => result.diagnostics);
+  await mergeProjectSessionRefs(launch.projectCwd, sessionsByFile, diagnostics);
   const sessions = [...sessionsByFile.values()].sort(
     (a, b) => b.updatedAtMs - a.updatedAtMs,
   );
-  const diagnostics = scanResults.flatMap((result) => result.diagnostics);
   if (candidateDir !== undefined && candidateDir !== sessionDir) {
     diagnostics.push(
       process.env.PI_DECK_SCAN_PROJECT_SESSION_DIR_CANDIDATE === "1"
@@ -988,6 +1069,7 @@ async function listChatSessions(
 
   return {
     projectCwd: launch.projectCwd,
+    projectId: launch.projectCwd,
     sessionDir,
     sessions: sessions
       .filter((session) => session.sessionFile !== warmChatWorkerSessionFile)
@@ -999,9 +1081,51 @@ async function listChatSessions(
   };
 }
 
+async function mergeProjectSessionRefs(
+  projectId: string,
+  sessionsByFile: Map<string, ChatListSessionsResult["sessions"][number]>,
+  diagnostics: string[],
+): Promise<void> {
+  const store = projectStore;
+  if (store === undefined) {
+    return;
+  }
+
+  for (const session of sessionsByFile.values()) {
+    await store.upsertSessionRef(projectId, session);
+  }
+
+  const refs = await store.getSessionRefs(projectId);
+  for (const ref of refs) {
+    if (sessionsByFile.has(ref.sessionFile)) {
+      continue;
+    }
+    const canonical = await safeRealpath(ref.sessionFile);
+    if (canonical === undefined) {
+      await store.markSessionMissing(projectId, ref.sessionFile);
+      diagnostics.push(
+        `Project session ref is missing or unreadable and was hidden: ${ref.sessionFile}`,
+      );
+      continue;
+    }
+    sessionsByFile.set(canonical, {
+      id: canonical,
+      sessionFile: canonical,
+      ...(ref.sessionId ? { sessionId: ref.sessionId } : {}),
+      ...(ref.cwd ? { cwd: ref.cwd } : { cwd: projectId }),
+      title: ref.title ?? path.basename(canonical, ".jsonl"),
+      updatedAtMs: ref.lastKnownUpdatedAtMs ?? ref.lastSeenAtMs,
+      ...(ref.createdAtMs ? { createdAtMs: ref.createdAtMs } : {}),
+      messageCount: ref.messageCount ?? 0,
+      ...(ref.preview ? { preview: ref.preview } : {}),
+    });
+  }
+}
+
 async function deleteChatSession(
   store: SettingsStore,
   sessionFile: string,
+  projectId?: string,
 ): Promise<ChatDeleteSessionResult> {
   const mode = resolveChatBackendMode();
   if (mode !== "real") {
@@ -1013,6 +1137,11 @@ async function deleteChatSession(
   const canonicalSessionFile = await safeRealpath(sessionFile);
   if (canonicalSessionFile === undefined) {
     throw new Error(`Session file is missing or unreadable: ${sessionFile}`);
+  }
+
+  if (projectId !== undefined) {
+    await ensureProjectStore().selectProject(projectId);
+    selectedRealProjectCwd = projectId;
   }
 
   const launch = await resolveRealChatLaunchConfig(store);
@@ -1030,6 +1159,7 @@ async function deleteChatSession(
 
   await trashOrRemoveFile(canonicalSessionFile);
   chatSessionFileLocks.delete(canonicalSessionFile);
+  await projectStore?.removeSessionRef(launch.projectCwd, canonicalSessionFile);
   return { deleted: true, sessionFile: canonicalSessionFile };
 }
 
@@ -1046,8 +1176,9 @@ async function closeRuntimeForDeletedSession(runtimeId: string): Promise<void> {
 
 async function deleteAllChatSessions(
   store: SettingsStore,
+  projectId?: string,
 ): Promise<ChatDeleteAllSessionsResult> {
-  const listed = await listChatSessions(store);
+  const listed = await listChatSessions(store, projectId);
   let deletedCount = 0;
   let skippedCount = 0;
 
@@ -1067,6 +1198,10 @@ async function deleteAllChatSessions(
     }
     await trashOrRemoveFile(canonicalSessionFile);
     chatSessionFileLocks.delete(canonicalSessionFile);
+    await projectStore?.removeSessionRef(
+      listed.projectId ?? listed.projectCwd,
+      canonicalSessionFile,
+    );
     deletedCount += 1;
   }
 
@@ -1085,6 +1220,7 @@ async function resumeChatSession(
   store: SettingsStore,
   diagnosticsService: DiagnosticsService,
   sessionFile: string,
+  projectId?: string,
 ): Promise<ChatSnapshot> {
   if (resolveChatBackendMode() !== "real") {
     throw new Error("Session resume is only available in real Pi mode.");
@@ -1093,6 +1229,10 @@ async function resumeChatSession(
   const canonicalSessionFile = await safeRealpath(sessionFile);
   if (canonicalSessionFile === undefined) {
     throw new Error(`Session file is missing or unreadable: ${sessionFile}`);
+  }
+  if (projectId !== undefined) {
+    await ensureProjectStore().selectProject(projectId);
+    selectedRealProjectCwd = projectId;
   }
   const launch = await resolveRealChatLaunchConfig(store);
   const sessionCwd = await readSessionFileCwd(canonicalSessionFile);
@@ -1141,6 +1281,9 @@ async function attachRealResumeWorker(
   chatRuntimeIds.add(runtimeId);
   chatRuntimeModes.set(runtimeId, "real");
   chatWorkerCwds.set(runtimeId, workerSpec.cwd);
+  if (workerSpec.projectId !== undefined) {
+    chatRuntimeProjectIds.set(runtimeId, workerSpec.projectId);
+  }
   chatRuntimeSessionFiles.set(runtimeId, canonicalSessionFile);
   chatSessionFileLocks.set(canonicalSessionFile, runtimeId);
 
@@ -1176,7 +1319,12 @@ async function attachRealResumeWorker(
 async function createChatSessionSnapshot(
   store: SettingsStore,
   diagnosticsService: DiagnosticsService,
+  projectId?: string,
 ): Promise<ChatSnapshot> {
+  if (projectId !== undefined) {
+    await ensureProjectStore().selectProject(projectId);
+    selectedRealProjectCwd = projectId;
+  }
   const adapter = await ensureChatAdapter(store, diagnosticsService);
   const mode = chatBackendMode ?? resolveChatBackendMode();
   const workerSpec = await createChatWorker(adapter, store, mode, {
@@ -1222,6 +1370,24 @@ async function getChatSnapshotForRuntime(
       path.resolve(state.sessionFile);
     chatRuntimeSessionFiles.set(runtimeId, canonicalSessionFile);
     chatSessionFileLocks.set(canonicalSessionFile, runtimeId);
+    const projectId = chatRuntimeProjectIds.get(runtimeId) ?? state.cwd;
+    if (projectId !== undefined) {
+      const preview = previewFromMessages(messages);
+      await projectStore?.upsertSessionRefFromSnapshot({
+        projectId,
+        sessionFile: canonicalSessionFile,
+        ...(typeof state.sessionId === "string"
+          ? { sessionId: state.sessionId }
+          : {}),
+        ...(typeof state.cwd === "string" ? { cwd: state.cwd } : {}),
+        title:
+          titleFromMessages(messages) ??
+          path.basename(canonicalSessionFile, ".jsonl"),
+        updatedAtMs: Date.now(),
+        messageCount: messages.length,
+        ...(preview !== undefined ? { preview } : {}),
+      });
+    }
   }
 
   return {
@@ -1230,6 +1396,28 @@ async function getChatSnapshotForRuntime(
     state: { ...state, cwd: state.cwd ?? chatWorkerCwds.get(runtimeId) },
     messages,
   };
+}
+
+function titleFromMessages(messages: PiMessage[]): string | undefined {
+  const firstUser = messages.find((message) => message.role === "user");
+  const content =
+    typeof firstUser?.content === "string" ? firstUser.content : undefined;
+  if (content === undefined || content.trim().length === 0) {
+    return undefined;
+  }
+  return content.trim().replace(/\s+/g, " ").slice(0, 64);
+}
+
+function previewFromMessages(messages: PiMessage[]): string | undefined {
+  const lastMessage = [...messages]
+    .reverse()
+    .find((message) => typeof message.content === "string");
+  const content =
+    typeof lastMessage?.content === "string" ? lastMessage.content : undefined;
+  if (content === undefined || content.trim().length === 0) {
+    return undefined;
+  }
+  return content.trim().replace(/\s+/g, " ").slice(0, 160);
 }
 
 async function readSessionFileCwd(

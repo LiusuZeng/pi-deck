@@ -17,6 +17,7 @@ async function launchPiDeck(
     cwd: repoRoot,
     env: {
       ...process.env,
+      PI_DECK_E2E_HIDE_WINDOWS: process.env.PI_DECK_E2E_HIDE_WINDOWS ?? "1",
       ...env,
     },
   });
