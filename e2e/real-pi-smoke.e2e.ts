@@ -113,7 +113,9 @@ test("real Pi GUI P0 smoke: prompt, project switch, restart, resume", async () =
     });
     try {
       await expectHealthyPreload(firstLaunch.page);
-      await expect(firstLaunch.page.getByText("Real Pi session")).toBeVisible();
+      await expect(
+        firstLaunch.page.getByText(/Sessions in project-a/i),
+      ).toBeVisible();
       await expect(
         firstLaunch.page.getByRole("heading", { name: /project-a/ }),
       ).toBeVisible();
@@ -129,16 +131,20 @@ test("real Pi GUI P0 smoke: prompt, project switch, restart, resume", async () =
         .getByLabel("Prompt text")
         .fill(`Reply with exactly: ${token}`);
       await firstLaunch.page.getByRole("button", { name: "Send" }).click();
-      await expect(
-        firstLaunch.page.locator(".assistant-row", { hasText: token }).first(),
-      ).toBeVisible({
-        timeout: Number(
-          process.env.PI_DECK_E2E_REAL_PROMPT_TIMEOUT_MS ?? 180_000,
-        ),
-      });
       await expect(firstLaunch.page.getByText("Agent is working…")).toHaveCount(
         0,
+        {
+          timeout: Number(
+            process.env.PI_DECK_E2E_REAL_PROMPT_TIMEOUT_MS ?? 180_000,
+          ),
+        },
       );
+      await expect(
+        firstLaunch.page
+          .getByLabel("Chat / Agent Timeline")
+          .getByText(token)
+          .first(),
+      ).toBeVisible();
       await expect
         .poll(() => listJsonlFiles(sessionDir).length, {
           message: "Pi should persist the prompted real session before restart",
@@ -186,7 +192,10 @@ test("real Pi GUI P0 smoke: prompt, project switch, restart, resume", async () =
         secondLaunch.page.getByText("Resumed saved Pi session."),
       ).toBeVisible();
       await expect(
-        secondLaunch.page.locator(".assistant-row", { hasText: token }).first(),
+        secondLaunch.page
+          .getByLabel("Chat / Agent Timeline")
+          .getByText(token)
+          .first(),
       ).toBeVisible();
     } finally {
       await secondLaunch.app.close();

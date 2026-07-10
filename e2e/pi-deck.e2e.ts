@@ -583,7 +583,7 @@ test("real mode does not fall back to fake/local UI and can send from active run
   });
   try {
     await expectHealthyPreload(page);
-    await expect(page.getByText("Real Pi session")).toBeVisible();
+    await expect(page.getByText(/Sessions in project/i)).toBeVisible();
     await expect(page.getByText(/Real Pi mode active/i)).toBeVisible();
     await expect(page.getByText("Local projects")).toHaveCount(0);
     await expect(page.getByText(/backend fake RPC active/i)).toHaveCount(0);

@@ -924,6 +924,9 @@ export function App(): ReactElement {
   }
 
   async function handlePickProject(): Promise<void> {
+    if (!confirmProjectSwitchIfNeeded()) {
+      return;
+    }
     try {
       const result = await window.piDeck.projects.pickProject();
       if (!result.selected) {
@@ -970,6 +973,9 @@ export function App(): ReactElement {
   }
 
   async function handleSelectProject(project: ProjectRef): Promise<void> {
+    if (!confirmProjectSwitchIfNeeded(project)) {
+      return;
+    }
     if (project.invalidReason) {
       setUiMessage(project.invalidReason);
       return;
@@ -1006,6 +1012,22 @@ export function App(): ReactElement {
         `Failed to select project: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+  }
+
+  function confirmProjectSwitchIfNeeded(project?: ProjectRef): boolean {
+    if (!isRealBackendMode || project?.id === currentProject.id) {
+      return true;
+    }
+    const runningCount = sessions.filter(
+      (session) =>
+        session.backendMode === "real" && session.status === "working",
+    ).length;
+    if (runningCount === 0) {
+      return true;
+    }
+    return window.confirm(
+      `Switching projects will close ${runningCount} running Pi worker${runningCount === 1 ? "" : "s"}. Continue?`,
+    );
   }
 
   function loadRealCapabilities(runtimeId: string): void {
@@ -1395,6 +1417,7 @@ export function App(): ReactElement {
           sessions={sessions}
           selectedSessionId={selectedSession.id}
           realMode={isRealBackendMode}
+          currentProject={currentProject}
           onSelect={handleSelectSession}
           onNewSession={() => void handleNewSession()}
           onDeleteSession={(sessionId) => void handleDeleteSession(sessionId)}
@@ -2781,6 +2804,7 @@ function SessionSidebar(props: {
   sessions: SessionViewModel[];
   selectedSessionId: string;
   realMode: boolean;
+  currentProject: ProjectRef;
   onSelect(sessionId: string): void;
   onNewSession(): void;
   onDeleteSession(sessionId: string): void;
@@ -2801,7 +2825,9 @@ function SessionSidebar(props: {
       <div className="sidebar-header">
         <div>
           <p className="eyebrow dark">
-            {props.realMode ? "Real Pi session" : "Local projects"}
+            {props.realMode
+              ? `Sessions in ${props.currentProject.displayName}`
+              : "Local projects"}
           </p>
           <div className="brand">Pi Deck</div>
         </div>
@@ -2837,6 +2863,13 @@ function SessionSidebar(props: {
         className="session-list"
         aria-label="Session list with priority states"
       >
+        {visibleSessions.length === 0 ? (
+          <p className="empty-session-list">
+            {props.realMode
+              ? "No sessions in this project yet."
+              : "No local demo sessions."}
+          </p>
+        ) : null}
         {visibleSessions.map((session) => {
           const canDelete = isSessionDeletable(session, props.realMode);
           return (
@@ -4311,31 +4344,6 @@ function loadUsageStatsVisiblePreference(): boolean {
 
 function saveUsageStatsVisiblePreference(value: boolean): void {
   localStorage.setItem("piDeck.usageStatsVisible", String(value));
-}
-
-function loadRecentProjects(): ProjectRef[] {
-  try {
-    const raw = localStorage.getItem("piDeck.recentProjects");
-    if (!raw) {
-      return [];
-    }
-    const parsed = JSON.parse(raw) as ProjectRef[];
-    return Array.isArray(parsed) ? parsed.slice(0, 5) : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveRecentProjects(
-  project: ProjectRef,
-  projects: ProjectRef[],
-): ProjectRef[] {
-  const next = [
-    project,
-    ...projects.filter((item) => item.id !== project.id),
-  ].slice(0, 5);
-  localStorage.setItem("piDeck.recentProjects", JSON.stringify(next));
-  return next;
 }
 
 function formatMessageTime(timestamp: number | undefined): string {
