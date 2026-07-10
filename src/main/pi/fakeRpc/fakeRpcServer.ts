@@ -278,6 +278,30 @@ class FakeRpcServer {
       case "abort":
         this.handleAbort(command);
         break;
+      case "get_commands":
+        this.respond(command.id ?? "", {
+          commands: [
+            {
+              name: "/review",
+              description: "Review the current change with the active worker.",
+              source: "prompt template",
+              insertText: "/review ",
+            },
+            {
+              name: "/skill:frontend-polish",
+              description: "Apply frontend polish checklist to the prompt.",
+              source: "skill",
+              insertText: "/skill:frontend-polish ",
+            },
+            {
+              name: "/fake-worker-command",
+              description: "Command discovered from the active fake Pi worker.",
+              source: "extension",
+              insertText: "/fake-worker-command ",
+            },
+          ],
+        });
+        break;
       default:
         this.respond(command.id ?? "", undefined, {
           code: "FAKE_UNKNOWN_COMMAND",

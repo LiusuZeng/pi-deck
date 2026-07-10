@@ -20,6 +20,7 @@
     "test": "vitest run",
     "test:e2e": "npm run build && playwright test -c e2e/playwright.config.ts",
     "test:e2e:headed": "PI_DECK_E2E_HIDE_WINDOWS=0 npm run test:e2e",
+    "test:e2e:real-smoke": "npm run build && PI_DECK_E2E_REAL_SMOKE=1 playwright test -c e2e/playwright.config.ts e2e/real-pi-smoke.e2e.ts",
     "smoke:real": "node scripts/smoke-real-pi.mjs",
     "smoke:real:prompt": "node scripts/smoke-real-pi.mjs --prompt \"Reply with exactly: PI_DECK_REAL_SMOKE_OK\"",
     "lint": "npm run typecheck",

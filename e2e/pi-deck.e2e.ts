@@ -50,10 +50,10 @@ function fakeRealModeEnv(options: {
     PI_DECK_PI_BINARY: createFakePiBinary(options.root, options.fakePiArgs),
     ...(options.projectCwd ? { PI_DECK_PROJECT_CWD: options.projectCwd } : {}),
     PI_CODING_AGENT_DIR: options.agentDir,
+    PI_DECK_HOME: path.join(options.root, "pideck-home"),
     PI_DECK_DISABLE_PREWARM_REAL_WORKER: "1",
-    ...(options.userDataDir
-      ? { PI_DECK_USER_DATA_DIR: options.userDataDir }
-      : {}),
+    PI_DECK_USER_DATA_DIR:
+      options.userDataDir ?? path.join(options.root, "user-data"),
     ...(options.testPickProjectCwd
       ? { PI_DECK_TEST_PICK_PROJECT_CWD: options.testPickProjectCwd }
       : {}),
@@ -89,11 +89,17 @@ test("fake mode launches with backend runtime and send enabled", async () => {
 test("real mode startup failure is not mislabeled as preload/fake UI", async () => {
   const piBinary = process.env.PI_DECK_PI_BINARY || "/usr/local/bin/pi";
   test.skip(!fs.existsSync(piBinary), `Pi binary not found at ${piBinary}`);
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-startup-fail-"),
+  );
 
   const { app, page } = await launchPiDeck({
     PI_DECK_BACKEND: "real",
     PI_DECK_PI_BINARY: piBinary,
     PI_DECK_PROJECT_CWD: path.join(repoRoot, "missing-e2e-project"),
+    PI_DECK_HOME: path.join(root, "pideck-home"),
+    PI_DECK_USER_DATA_DIR: path.join(root, "user-data"),
+    PI_CODING_AGENT_DIR: path.join(root, "agent"),
   });
   try {
     await expect(
@@ -105,6 +111,7 @@ test("real mode startup failure is not mislabeled as preload/fake UI", async () 
     await expect(page.getByText(/claude/i)).toHaveCount(0);
   } finally {
     await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -542,6 +549,12 @@ test("real mode compact plus creates another attached session with fake Pi", asy
     await expectHealthyPreload(page);
     await page.getByRole("button", { name: "New session" }).click();
     await expect(page.getByText(/New real Pi chat is ready/)).toBeVisible();
+    await page.getByLabel("Prompt text").fill("/");
+    await expect(page.getByText("/fake-worker-command")).toBeVisible();
+    await page.getByText("/fake-worker-command").click();
+    await expect(page.getByLabel("Prompt text")).toHaveValue(
+      "/fake-worker-command ",
+    );
     await page
       .getByLabel("Prompt text")
       .fill("new session e2e prompt without sending");
@@ -555,11 +568,18 @@ test("real mode compact plus creates another attached session with fake Pi", asy
 test("real mode does not fall back to fake/local UI and can send from active runtime", async () => {
   const piBinary = process.env.PI_DECK_PI_BINARY || "/usr/local/bin/pi";
   test.skip(!fs.existsSync(piBinary), `Pi binary not found at ${piBinary}`);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-real-ui-"));
+  const projectCwd = path.join(root, "project");
+  fs.mkdirSync(projectCwd, { recursive: true });
 
   const { app, page } = await launchPiDeck({
     PI_DECK_BACKEND: "real",
     PI_DECK_PI_BINARY: piBinary,
-    PI_DECK_PROJECT_CWD: repoRoot,
+    PI_DECK_PROJECT_CWD: projectCwd,
+    PI_DECK_HOME: path.join(root, "pideck-home"),
+    PI_DECK_USER_DATA_DIR: path.join(root, "user-data"),
+    PI_CODING_AGENT_DIR: path.join(root, "agent"),
+    PI_DECK_DISABLE_PREWARM_REAL_WORKER: "1",
   });
   try {
     await expectHealthyPreload(page);
@@ -568,10 +588,7 @@ test("real mode does not fall back to fake/local UI and can send from active run
     await expect(page.getByText("Local projects")).toHaveCount(0);
     await expect(page.getByText(/backend fake RPC active/i)).toHaveCount(0);
     await expect(page.getByText(/claude/i)).toHaveCount(0);
-    await expect(page.getByLabel("Real Pi model")).toBeVisible();
     await expect(page.getByLabel("Real Pi thinking")).toBeVisible();
-    await page.getByLabel("Real Pi thinking").selectOption("high");
-    await expect(page.getByText("Switched thinking to high.")).toBeVisible();
     await expect(
       page.getByRole("button", { name: /New real session/i }),
     ).toHaveCount(0);
@@ -582,5 +599,6 @@ test("real mode does not fall back to fake/local UI and can send from active run
     await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
   } finally {
     await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });

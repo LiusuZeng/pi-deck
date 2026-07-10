@@ -23,6 +23,8 @@ import {
   chatDeleteAllSessionsResultSchema,
   chatDeleteSessionRequestSchema,
   chatDeleteSessionResultSchema,
+  chatListCommandsRequestSchema,
+  chatListCommandsResultSchema,
   chatListModelsRequestSchema,
   chatListModelsResultSchema,
   chatListSessionsRequestSchema,
@@ -45,8 +47,10 @@ import {
 import type {
   AppSettings,
   AttachmentDraft,
+  ChatCommandSummary,
   ChatDeleteAllSessionsResult,
   ChatDeleteSessionResult,
+  ChatListCommandsResult,
   ChatListSessionsResult,
   ChatSnapshot,
   PickAttachmentsResult,
@@ -108,6 +112,7 @@ interface AttachmentSelectionRecord {
 
 const attachmentSelections = new Map<string, AttachmentSelectionRecord>();
 const maxImportedImageBytes = 20 * 1024 * 1024;
+const maxReferencedFileWarningBytes = 100 * 1024 * 1024;
 
 async function bootstrap(): Promise<void> {
   const userDataOverride = process.env.PI_DECK_USER_DATA_DIR;
@@ -305,6 +310,15 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async ({ runtimeId }) =>
       listChatModels(store, diagnosticsService, runtimeId),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.chatListCommands,
+    requestSchema: chatListCommandsRequestSchema,
+    responseSchema: chatListCommandsResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runtimeId }) =>
+      listChatCommands(store, diagnosticsService, runtimeId),
   });
 
   registerValidatedIpc({
@@ -567,6 +581,9 @@ async function ensureChatAdapter(
       return;
     }
     sendChatEventToRenderer(parsed.data);
+    if (parsed.data.type === "worker_exit") {
+      forgetChatRuntime(parsed.data.runtimeId);
+    }
   });
 
   try {
@@ -950,6 +967,87 @@ async function listChatModels(
     return chatListModelsResultSchema.parse(response);
   }
   return { models: [] };
+}
+
+async function listChatCommands(
+  store: SettingsStore,
+  diagnosticsService: DiagnosticsService,
+  runtimeId: string,
+): Promise<ChatListCommandsResult> {
+  const adapter = await ensureChatAdapter(store, diagnosticsService);
+  const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
+  await assertRuntimeInActiveProject(activeRuntimeId);
+  const response = await adapter.request(activeRuntimeId, "get_commands");
+  return { commands: normalizeChatCommands(response) };
+}
+
+function normalizeChatCommands(response: unknown): ChatCommandSummary[] {
+  const rawCommands =
+    response &&
+    typeof response === "object" &&
+    !Array.isArray(response) &&
+    Array.isArray((response as { commands?: unknown }).commands)
+      ? (response as { commands: unknown[] }).commands
+      : Array.isArray(response)
+        ? response
+        : [];
+
+  return rawCommands.flatMap((item): ChatCommandSummary[] => {
+    if (typeof item === "string") {
+      return [{ name: item, source: "extension", insertText: item }];
+    }
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      return [];
+    }
+    const record = item as Record<string, unknown>;
+    const name = firstString(record.name, record.command, record.id);
+    if (name === undefined || isTuiOnlyCommand(name)) {
+      return [];
+    }
+    const description = firstString(
+      record.description,
+      record.summary,
+      record.title,
+    );
+    const source = normalizeCommandSource(
+      firstString(record.source, record.type, record.kind),
+    );
+    const insertText = firstString(record.insertText, record.text, name);
+    return [
+      {
+        name,
+        ...(description !== undefined ? { description } : {}),
+        source,
+        ...(insertText !== undefined ? { insertText } : {}),
+      },
+    ];
+  });
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function normalizeCommandSource(
+  source: string | undefined,
+): ChatCommandSummary["source"] {
+  const value = source?.toLowerCase().replace(/[\s_-]+/g, " ");
+  if (value?.includes("skill")) {
+    return "skill";
+  }
+  if (value?.includes("prompt") || value?.includes("template")) {
+    return "prompt template";
+  }
+  return "extension";
+}
+
+function isTuiOnlyCommand(name: string): boolean {
+  return ["/settings", "/hotkeys", "/help"].includes(name.trim());
 }
 
 async function setChatModel(
@@ -1522,6 +1620,10 @@ async function readImageAttachmentBase64(
   filePath: string,
 ): Promise<string | undefined> {
   await assertAttachmentReadable(filePath);
+  const stat = await fs.stat(filePath);
+  if (stat.size > maxImportedImageBytes) {
+    throw new Error("Image is too large to send; choose an image under 20 MB.");
+  }
   const data = await fs.readFile(filePath);
   return data.toString("base64");
 }
@@ -1585,11 +1687,7 @@ async function buildAttachmentDraft(
     projectRoot && canonicalPath && !isPathInside(canonicalPath, projectRoot),
   );
   const stat = canonicalPath ? await statIfReadable(canonicalPath) : undefined;
-  const warning = outsideProject
-    ? "Outside selected project; the model may see an absolute local path."
-    : kind === "binaryFile"
-      ? "Binary/unknown files are referenced by path only."
-      : undefined;
+  const warning = attachmentWarning({ outsideProject, kind, stat });
 
   const selectedPathToken = randomUUID();
   if (canonicalPath && status === "ready") {
@@ -1613,6 +1711,34 @@ async function buildAttachmentDraft(
     status,
     ...(warning ? { warning } : {}),
   };
+}
+
+function attachmentWarning(options: {
+  outsideProject: boolean;
+  kind: AttachmentDraft["kind"];
+  stat?: { size: number } | undefined;
+}): string | undefined {
+  if (
+    options.kind === "image" &&
+    options.stat !== undefined &&
+    options.stat.size > maxImportedImageBytes
+  ) {
+    return "Image is over 20 MB and will be blocked before send.";
+  }
+  if (
+    options.kind !== "image" &&
+    options.stat?.size !== undefined &&
+    options.stat.size > maxReferencedFileWarningBytes
+  ) {
+    return "Large files are referenced by path only; Pi may choose not to inspect them.";
+  }
+  if (options.outsideProject) {
+    return "Outside selected project; the model may see an absolute local path.";
+  }
+  if (options.kind === "binaryFile") {
+    return "Binary/unknown files are referenced by path only.";
+  }
+  return undefined;
 }
 
 async function getFileStatus(

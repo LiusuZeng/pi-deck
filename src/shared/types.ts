@@ -4,9 +4,12 @@ import type {
   attachmentDraftSchema,
   attachmentImportDroppedFilesRequestSchema,
   attachmentImportImageRequestSchema,
+  chatCommandSummarySchema,
   chatDeleteAllSessionsRequestSchema,
   chatDeleteAllSessionsResultSchema,
   chatDeleteSessionResultSchema,
+  chatListCommandsRequestSchema,
+  chatListCommandsResultSchema,
   chatListModelsResultSchema,
   chatListSessionsRequestSchema,
   chatListSessionsResultSchema,
@@ -33,6 +36,13 @@ export type ChatSnapshot = z.infer<typeof chatSnapshotSchema>;
 export type ChatSessionSummary = z.infer<typeof chatSessionSummarySchema>;
 export type ChatModelSummary = z.infer<typeof chatModelSummarySchema>;
 export type ChatListModelsResult = z.infer<typeof chatListModelsResultSchema>;
+export type ChatCommandSummary = z.infer<typeof chatCommandSummarySchema>;
+export type ChatListCommandsRequest = z.infer<
+  typeof chatListCommandsRequestSchema
+>;
+export type ChatListCommandsResult = z.infer<
+  typeof chatListCommandsResultSchema
+>;
 export type ChatListSessionsRequest = z.infer<
   typeof chatListSessionsRequestSchema
 >;
@@ -87,6 +97,9 @@ export interface PiDeckApi {
       request?: ChatDeleteAllSessionsRequest,
     ): Promise<ChatDeleteAllSessionsResult>;
     listModels(request: { runtimeId: string }): Promise<ChatListModelsResult>;
+    listCommands(
+      request: ChatListCommandsRequest,
+    ): Promise<ChatListCommandsResult>;
     setModel(request: {
       runtimeId: string;
       provider: string;

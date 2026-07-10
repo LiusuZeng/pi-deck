@@ -1,8 +1,8 @@
 # Real Pi GUI Chat Validation
 
-Status date: 2026-06-28  
-Branch: `eng6/real-pi-chat`  
-Scope: narrow opt-in real backend vertical slice only.
+Status date: 2026-07-09
+Branch: `main`
+Scope: real backend vertical slice plus P0 project/session restart-resume smoke.
 
 ## Scope Under Test
 
@@ -17,30 +17,31 @@ PI_DECK_BACKEND=real npm run dev
 
 ## Current Status
 
-Implementation path is present behind `PI_DECK_BACKEND=real`. CDP validation evidence is recorded below; one follow-up remains to run the exact `PI_DECK_BACKEND=real npm run dev` command hands-on because CDP validation used a production-ish local Electron launch to pass `--remote-debugging-port` directly.
+Implementation path is present behind `PI_DECK_BACKEND=real`. The narrow chat slice and the P0 project/session dogfood path have both been validated against the installed real Pi binary.
 
-Do not claim broad real Pi GUI usability from this slice. Basic in-window new sessions, authoritative session-dir listing, and click-to-resume are now implemented, but candidate dirs, refresh/error polish, model/thinking RPC controls, project trust UX, attachments, and scheduler-backed multi-session orchestration remain future work.
+P0 coverage now includes a plus-created real session, prompt streaming, app restart, authoritative saved-session scan, project A/B/A handoff, click-to-resume, and transcript restoration. Initial P1 coverage now includes active-worker slash command IPC, model/thinking capability labels, active-real-model image gating, large-image blocking, tool-card lifecycle status/truncation, and worker-exit reopen recovery. Scheduler-backed queue/cap behavior, richer diagnostics, trust/resource UI, actual image resizing, and broader real-provider validation remain post-P1-baseline work.
 
 ## Environment to Record
 
-| Item                                      | Value                                            |
-| ----------------------------------------- | ------------------------------------------------ |
-| Commit                                    | `317b0c7`                                        |
-| macOS version                             | `26.5.1`                                         |
-| Node/npm version                          | Node `v26.0.0`, npm `11.12.1`                    |
-| Pi binary path                            | `/usr/local/bin/pi`                              |
-| `pi --version`                            | `0.80.2`                                         |
-| `PI_DECK_PROJECT_CWD`                     | Temp roots under `/tmp/pi-deck-real-gui.*`       |
-| `PI_CODING_AGENT_DIR` / session isolation | Temp roots under `/tmp/pi-deck-real-gui.*/agent` |
+| Item                  | Value                                                              |
+| --------------------- | ------------------------------------------------------------------ |
+| Commit                | local `main` worktree                                              |
+| macOS version         | local macOS test host                                              |
+| Node/npm version      | Node `v26.0.0`, npm `11.12.1`                                      |
+| Pi binary path        | `/usr/local/bin/pi`                                                |
+| `pi --version`        | `0.80.3`                                                           |
+| `PI_DECK_PROJECT_CWD` | Temp roots under OS temp dir                                       |
+| Session isolation     | Explicit temp `PI_CODING_AGENT_SESSION_DIR`; normal auth preserved |
 
 ## Automated Validation
 
-| Command             | Result | Notes                                                      |
-| ------------------- | -----: | ---------------------------------------------------------- |
-| `npm test`          |   Pass | 13 test files, 60 tests passed.                            |
-| `npm run typecheck` |   Pass | Main/preload/shared and renderer TypeScript checks passed. |
-| `npm run build`     |   Pass | Main/preload and Vite renderer build passed.               |
-| `npm run format`    |   Pass | Prettier check passed.                                     |
+| Command                       | Result | Notes                                                      |
+| ----------------------------- | -----: | ---------------------------------------------------------- |
+| `npm test`                    |   Pass | 19 test files, 101 tests passed.                           |
+| `npm run typecheck`           |   Pass | Main/preload/shared and renderer TypeScript checks passed. |
+| `npm run format`              |   Pass | Prettier check passed.                                     |
+| `npm run test:e2e`            |   Pass | 14 passed, real smoke skipped by default.                  |
+| `npm run test:e2e:real-smoke` |   Pass | Real Pi GUI P0 smoke passed against installed Pi.          |
 
 ## Manual Real GUI Chat Checklist
 
@@ -104,6 +105,16 @@ Result: Pass. `response` records for `smoke-state` and `smoke-messages` returned
 
 This proves local Pi RPC health only. It does not prove GUI real chat acceptance.
 
+## Real GUI P0 Smoke Evidence
+
+Automated real GUI P0 smoke was run on 2026-07-09:
+
+```bash
+npm run test:e2e:real-smoke
+```
+
+Result: Pass. The test launches Electron in real mode with `/usr/local/bin/pi`, uses temp projects A/B and an explicit temp `PI_CODING_AGENT_SESSION_DIR`, creates a new real session with the compact `+`, sends a prompt, verifies the assistant token, restarts the app, verifies the saved row, switches A → B → A, resumes the saved session, and verifies the transcript token is restored.
+
 ## Resume Smoke Evidence
 
 A direct real Pi resume smoke was run on 2026-06-30 against an existing Pi Deck project session:
@@ -113,11 +124,11 @@ SESSION=$(find ~/.pi/agent/sessions/--Users-liusu-liusu_pi_gui-- -type f -name '
 printf '{"id":"resume-smoke","type":"get_state"}\n' | /usr/local/bin/pi --mode rpc --session "$SESSION"
 ```
 
-Result: Pass. `get_state` returned `success: true` and `data.sessionFile` matched the requested session file path. This validates the CLI hard gate for this installed Pi version; GUI click-to-resume still needs hands-on visual validation after relaunch.
+Result: Pass. `get_state` returned `success: true` and `data.sessionFile` matched the requested session file path. This validates the CLI hard gate for this installed Pi version; GUI click-to-resume is now also covered by `npm run test:e2e:real-smoke`.
 
 ## Known Limitations for This Slice
 
 - Fake backend remains default.
 - Real mode is env-var opt-in, not a finished settings UI.
-- Real mode starts workers in `PI_DECK_PROJECT_CWD` or the app cwd; full project/session controller polish is not complete.
-- Authoritative session-dir listing and click-to-resume are implemented, but candidate dirs, refresh/error polish, cwd mismatch UX, model/thinking RPC controls, trust UX, attachments, and robust scheduler-backed multi-session management remain incomplete.
+- Real mode starts workers in `PI_DECK_PROJECT_CWD`, the selected project, or the app cwd; project/session controller polish can continue.
+- Authoritative session-dir listing, project handoff, and click-to-resume are implemented and covered by smoke. Candidate-dir edge cases, refresh/error polish, cwd mismatch UX, trust UX, and robust scheduler-backed multi-session management remain incomplete.

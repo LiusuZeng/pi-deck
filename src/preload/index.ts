@@ -12,6 +12,8 @@ import {
   chatDeleteAllSessionsResultSchema,
   chatDeleteSessionRequestSchema,
   chatDeleteSessionResultSchema,
+  chatListCommandsRequestSchema,
+  chatListCommandsResultSchema,
   chatListModelsRequestSchema,
   chatListModelsResultSchema,
   chatListSessionsRequestSchema,
@@ -123,6 +125,12 @@ const api: PiDeckApi = Object.freeze({
         channel: ipcChannels.chatListModels,
         request: chatListModelsRequestSchema.parse(request),
         responseSchema: chatListModelsResultSchema,
+      }),
+    listCommands: (request: { runtimeId: string }) =>
+      invokeValidated({
+        channel: ipcChannels.chatListCommands,
+        request: chatListCommandsRequestSchema.parse(request),
+        responseSchema: chatListCommandsResultSchema,
       }),
     setModel: (request: {
       runtimeId: string;

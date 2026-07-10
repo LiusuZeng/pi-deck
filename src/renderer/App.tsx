@@ -12,6 +12,7 @@ import {
 import type {
   AppSettings,
   AttachmentDraft,
+  ChatCommandSummary,
   ChatMessage,
   ChatModelSummary,
   ChatRuntimeEvent,
@@ -87,7 +88,7 @@ type TimelineItem =
       id: string;
       kind: "tool";
       title: string;
-      status: "collapsed" | "running";
+      status: "running" | "success" | "error" | "collapsed";
       summary: string;
       details: string;
       createdAt: string;
@@ -158,6 +159,7 @@ interface SlashCommand {
   name: string;
   description: string;
   source: "extension" | "prompt template" | "skill";
+  insertText?: string;
 }
 
 const appStartedAt = Date.now();
@@ -390,6 +392,7 @@ export function App(): ReactElement {
   const [slashOpen, setSlashOpen] = useState(false);
   const [attachments, setAttachments] = useState<AttachmentDraft[]>([]);
   const [realModels, setRealModels] = useState<ChatModelSummary[]>([]);
+  const [realCommands, setRealCommands] = useState<SlashCommand[]>([]);
   const [enterToSend, setEnterToSend] = useState(() =>
     loadEnterToSendPreference(),
   );
@@ -484,7 +487,7 @@ export function App(): ReactElement {
             );
           }
           if (snapshot.backendMode === "real") {
-            void loadRealModels(backendSession.id);
+            loadRealCapabilities(backendSession.id);
           }
           setUiMessage(
             snapshot.backendMode === "real"
@@ -536,7 +539,10 @@ export function App(): ReactElement {
   );
   const canSend =
     draft.trim().length > 0 && !isWorking && loadState.state === "ready";
-  const filteredCommands = slashCommands.filter((command) =>
+  const availableSlashCommands = isRealBackendMode
+    ? realCommands
+    : slashCommands;
+  const filteredCommands = availableSlashCommands.filter((command) =>
     command.name.toLowerCase().includes(draft.trim().toLowerCase()),
   );
   const showStarterPage =
@@ -661,6 +667,9 @@ export function App(): ReactElement {
       return;
     }
     setSelectedSessionId(sessionId);
+    if (session?.backendMode === "real" && session.runtimeBacked) {
+      loadRealCapabilities(session.id);
+    }
   }
 
   async function resumeSession(
@@ -685,7 +694,7 @@ export function App(): ReactElement {
         ),
       );
       setSelectedSessionId(resumed.id);
-      void loadRealModels(resumed.id);
+      loadRealCapabilities(resumed.id);
       setUiMessage("Resumed saved Pi session.");
       return resumed;
     } catch (error) {
@@ -757,7 +766,10 @@ export function App(): ReactElement {
       );
       return;
     }
-    if (hasImageAttachment && selectedModel && !selectedModel.supportsImages) {
+    if (
+      hasImageAttachment &&
+      !selectedSessionSupportsImages(selectedSession, realModels, selectedModel)
+    ) {
       setComposerError("Selected model does not support image input.");
       return;
     }
@@ -834,6 +846,16 @@ export function App(): ReactElement {
 
   function handleAbort(): void {
     void abortPrompt(selectedSession.id);
+  }
+
+  function handleRecoverSelectedSession(): void {
+    if (selectedSession.sessionFile === undefined) {
+      setUiMessage(
+        "This session does not have a saved Pi session file to reopen.",
+      );
+      return;
+    }
+    void resumeSession({ ...selectedSession, resumeBacked: true });
   }
 
   async function abortPrompt(runtimeId: string): Promise<void> {
@@ -930,7 +952,7 @@ export function App(): ReactElement {
           ),
         );
         setSelectedSessionId(backendSession.id);
-        void loadRealModels(backendSession.id);
+        loadRealCapabilities(backendSession.id);
         setUiMessage(
           `Real Pi project switched. Found ${listedSessions.sessions.length} saved session(s) for this project.`,
         );
@@ -972,7 +994,7 @@ export function App(): ReactElement {
           ),
         );
         setSelectedSessionId(backendSession.id);
-        void loadRealModels(backendSession.id);
+        loadRealCapabilities(backendSession.id);
         setUiMessage(
           `Real Pi project switched. Found ${listedSessions.sessions.length} saved session(s) for this project.`,
         );
@@ -986,12 +1008,26 @@ export function App(): ReactElement {
     }
   }
 
+  function loadRealCapabilities(runtimeId: string): void {
+    void loadRealModels(runtimeId);
+    void loadRealCommands(runtimeId);
+  }
+
   async function loadRealModels(runtimeId: string): Promise<void> {
     try {
       const result = await window.piDeck.chat.listModels({ runtimeId });
       setRealModels(result.models);
     } catch {
       setRealModels([]);
+    }
+  }
+
+  async function loadRealCommands(runtimeId: string): Promise<void> {
+    try {
+      const result = await window.piDeck.chat.listCommands({ runtimeId });
+      setRealCommands(result.commands.map(slashCommandFromWorkerCommand));
+    } catch {
+      setRealCommands([]);
     }
   }
 
@@ -1251,7 +1287,7 @@ export function App(): ReactElement {
           ),
         );
         setSelectedSessionId(backendSession.id);
-        void loadRealModels(backendSession.id);
+        loadRealCapabilities(backendSession.id);
         if (snapshot.state.cwd) {
           setCurrentProject(projectFromCwd(snapshot.state.cwd));
         }
@@ -1302,10 +1338,13 @@ export function App(): ReactElement {
   }
 
   function handleSelectCommand(command: SlashCommand): void {
-    setDraft(`${command.name} `);
+    const inserted = command.insertText ?? `${command.name} `;
+    setDraft(inserted.endsWith(" ") ? inserted : `${inserted} `);
     setSlashOpen(false);
     setUiMessage(
-      `${command.name} inserted into the normal prompt path; command behavior is not reimplemented in the GUI.`,
+      isRealBackendMode
+        ? `${command.name} inserted from the active Pi worker command list.`
+        : `${command.name} inserted into the normal prompt path; command behavior is not reimplemented in the GUI.`,
     );
   }
 
@@ -1405,6 +1444,7 @@ export function App(): ReactElement {
               uiMessage={uiMessage}
               showAttachmentExamples={!isRealBackendMode}
               nowMs={nowMs}
+              onRecoverSession={handleRecoverSelectedSession}
             />
             {composer}
           </>
@@ -1530,6 +1570,20 @@ function mergeSessions(
     }
   }
   return merged;
+}
+
+function slashCommandFromWorkerCommand(
+  command: ChatCommandSummary,
+): SlashCommand {
+  return {
+    name: command.name,
+    description:
+      command.description ?? "Command returned by the active Pi worker.",
+    source: command.source ?? "extension",
+    ...(command.insertText !== undefined
+      ? { insertText: command.insertText }
+      : {}),
+  };
 }
 
 function sessionFromSummary(summary: ChatSessionSummary): SessionViewModel {
@@ -1721,15 +1775,15 @@ function modelLabelFromState(state: ChatSnapshot["state"]): string {
   return provider;
 }
 
-function timelineToolStatus(streaming: boolean): "collapsed" | "running" {
-  return streaming ? "running" : "collapsed";
+function timelineToolStatus(streaming: boolean): "running" | "success" {
+  return streaming ? "running" : "success";
 }
 
 function toolTimelineItemFromContent(options: {
   id: string;
   content: string;
   createdAt: string;
-  status: "collapsed" | "running";
+  status: "running" | "success" | "error" | "collapsed";
   role?: string | undefined;
 }): Extract<TimelineItem, { kind: "tool" }> | undefined {
   const toolPayload = parseToolPayload(options.content);
@@ -1816,6 +1870,29 @@ function summarizeToolDetails(content: string, maxLength: number): string {
     return singleLine || "Tool output";
   }
   return `${singleLine.slice(0, maxLength - 1)}…`;
+}
+
+function safeToolDetails(content: string): string {
+  const maxLength = 20_000;
+  if (content.length <= maxLength) {
+    return content;
+  }
+  return `${content.slice(0, maxLength)}\n\n… Tool output truncated in Pi Deck after ${formatInteger(maxLength)} characters.`;
+}
+
+function formatToolStatus(
+  status: Extract<TimelineItem, { kind: "tool" }>["status"],
+): string {
+  switch (status) {
+    case "running":
+      return "running";
+    case "success":
+      return "success";
+    case "error":
+      return "error";
+    default:
+      return "collapsed";
+  }
 }
 
 function timelineAttachmentsFromMessage(
@@ -2117,7 +2194,12 @@ function reduceToolExecutionEvent(
   session: SessionViewModel,
   event: ChatRuntimeEvent,
 ): SessionViewModel {
-  const status = event.type === "tool_execution_end" ? "collapsed" : "running";
+  const status =
+    event.type === "tool_execution_end"
+      ? getBoolean(event, "isError") || getString(event, "status") === "error"
+        ? "error"
+        : "success"
+      : "running";
   const toolItem = toolTimelineItemFromRuntimeEvent(event, status);
   const timeline = toolItem
     ? upsertToolMessage(session.timeline, toolItem)
@@ -2147,7 +2229,7 @@ function reduceToolExecutionEvent(
 
 function toolTimelineItemFromRuntimeEvent(
   event: ChatRuntimeEvent,
-  status: "collapsed" | "running",
+  status: "running" | "success" | "error" | "collapsed",
 ): Extract<TimelineItem, { kind: "tool" }> | undefined {
   const id = getString(event, "toolCallId") ?? getString(event, "id");
   if (id === undefined) {
@@ -2166,17 +2248,20 @@ function toolTimelineItemFromRuntimeEvent(
     path ??
     output ??
     summarizeToolDetails(JSON.stringify({ title, args, result }, null, 2), 180);
-  const details = JSON.stringify(
-    {
-      type: event.type,
-      toolName: title,
-      ...(args !== undefined ? { args } : {}),
-      ...(output !== undefined ? { output } : {}),
-      ...(result !== undefined ? { result } : {}),
-      isError: getBoolean(event, "isError"),
-    },
-    null,
-    2,
+  const details = safeToolDetails(
+    JSON.stringify(
+      {
+        type: event.type,
+        toolName: title,
+        ...(args !== undefined ? { args } : {}),
+        ...(output !== undefined ? { output } : {}),
+        ...(result !== undefined ? { result } : {}),
+        status: getString(event, "status"),
+        isError: getBoolean(event, "isError"),
+      },
+      null,
+      2,
+    ),
   );
 
   return {
@@ -2599,6 +2684,65 @@ function composerModelInfo(session: SessionViewModel): string | undefined {
     session.thinkingLevel ? `Thinking: ${session.thinkingLevel}` : undefined,
   ].filter((part): part is string => Boolean(part && part.trim().length > 0));
   return parts.length > 0 ? parts.join(" · ") : "Pi selected model";
+}
+
+function selectedSessionSupportsImages(
+  session: SessionViewModel,
+  realModels: ChatModelSummary[],
+  selectedModel: ModelOption | undefined,
+): boolean {
+  if (session.backendMode !== "real") {
+    return Boolean(selectedModel?.supportsImages);
+  }
+  return realModelSupportsImages(findActiveRealModel(session, realModels));
+}
+
+function findActiveRealModel(
+  session: SessionViewModel,
+  realModels: ChatModelSummary[],
+): ChatModelSummary | undefined {
+  const normalizedLabel = session.modelLabel?.replace(/\s+\/\s+/, "/");
+  if (!normalizedLabel) {
+    return undefined;
+  }
+  return realModels.find((model) => {
+    const providerModel = `${model.provider ?? ""}/${model.id}`;
+    return providerModel === normalizedLabel || model.id === normalizedLabel;
+  });
+}
+
+function realModelSupportsImages(model: ChatModelSummary | undefined): boolean {
+  if (model === undefined) {
+    return true;
+  }
+  return model.input?.some((value) => /image/i.test(value)) ?? false;
+}
+
+function realModelSupportsThinking(
+  model: ChatModelSummary | undefined,
+): boolean {
+  return model?.reasoning !== false;
+}
+
+function formatRealModelOption(model: ChatModelSummary): string {
+  const capabilities = [
+    model.reasoning === false ? "no thinking" : "thinking",
+    realModelSupportsImages(model) ? "images" : "text-only",
+    model.contextWindow
+      ? `${formatInteger(model.contextWindow)} ctx`
+      : undefined,
+  ].filter((item): item is string => item !== undefined);
+  return `${model.name ?? model.id}${capabilities.length > 0 ? ` · ${capabilities.join(" · ")}` : ""}`;
+}
+
+function formatRealThinkingOption(
+  level: string,
+  supportedByModel: boolean,
+): string {
+  if (supportedByModel || level === "off") {
+    return level;
+  }
+  return `${level} — unsupported by selected model`;
 }
 
 function backendLabel(session: SessionViewModel): string {
@@ -3125,6 +3269,7 @@ function ChatTimeline(props: {
   uiMessage: string;
   showAttachmentExamples: boolean;
   nowMs: number;
+  onRecoverSession(): void;
 }): ReactElement {
   const hasItems = props.session.timeline.length > 0;
   const showPendingAgent =
@@ -3180,7 +3325,12 @@ function ChatTimeline(props: {
         ) : null}
         {props.session.status === "error" ? (
           <div className="state-banner error">
-            This session is in an error state.
+            <span>This session is in an error state.</span>
+            {props.session.sessionFile !== undefined ? (
+              <button type="button" onClick={props.onRecoverSession}>
+                Reopen saved session
+              </button>
+            ) : null}
           </div>
         ) : null}
         {props.session.status === "waiting" ? (
@@ -3319,7 +3469,7 @@ function TimelineRow(props: { item: TimelineItem }): ReactElement {
               <span className="tool-summary">{props.item.summary}</span>
             </span>
             <span className="tool-status">
-              {props.item.status === "running" ? "running" : "collapsed"}
+              {formatToolStatus(props.item.status)}
             </span>
           </summary>
           <pre>{props.item.details}</pre>
@@ -3485,13 +3635,24 @@ function Composer(props: {
   onRemoveAttachment(id: string): void;
   onSelectCommand(command: SlashCommand): void;
 }): ReactElement {
+  const activeRealModel = findActiveRealModel(
+    props.selectedSession,
+    props.realModels,
+  );
+  const selectedModelSupportsImages =
+    props.selectedSession.backendMode === "real"
+      ? realModelSupportsImages(activeRealModel)
+      : Boolean(props.selectedModel?.supportsImages);
+  const selectedModelSupportsThinking =
+    props.selectedSession.backendMode === "real"
+      ? realModelSupportsThinking(activeRealModel)
+      : Boolean(props.selectedModel?.supportsThinking);
   const hasImageWarning =
     props.attachments.some((attachment) => attachment.kind === "image") &&
-    !props.selectedModel?.supportsImages;
-  const currentRealModelValue = props.selectedSession.modelLabel?.replace(
-    /\s+\/\s+/,
-    "/",
-  );
+    !selectedModelSupportsImages;
+  const currentRealModelValue = activeRealModel
+    ? `${activeRealModel.provider ?? ""}/${activeRealModel.id}`
+    : props.selectedSession.modelLabel?.replace(/\s+\/\s+/, "/");
   const [dragActive, setDragActive] = useState(false);
 
   function handleDrop(event: DragEvent<HTMLElement>): void {
@@ -3593,7 +3754,7 @@ function Composer(props: {
                   key={`${model.provider ?? ""}/${model.id}`}
                   value={`${model.provider ?? ""}/${model.id}`}
                 >
-                  {model.name ?? model.id}
+                  {formatRealModelOption(model)}
                 </option>
               ))}
             </select>
@@ -3608,8 +3769,15 @@ function Composer(props: {
               onChange={(event) => props.onSetThinking(event.target.value)}
             >
               {props.realThinkingLevels.map((level) => (
-                <option key={level} value={level}>
-                  {level}
+                <option
+                  key={level}
+                  value={level}
+                  disabled={!selectedModelSupportsThinking && level !== "off"}
+                >
+                  {formatRealThinkingOption(
+                    level,
+                    selectedModelSupportsThinking,
+                  )}
                 </option>
               ))}
             </select>

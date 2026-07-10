@@ -256,6 +256,27 @@ export const chatListModelsResultSchema = z
   })
   .strict();
 
+export const chatCommandSummarySchema = z
+  .object({
+    name: z.string().min(1),
+    description: z.string().optional(),
+    source: z.enum(["extension", "prompt template", "skill"]).optional(),
+    insertText: z.string().optional(),
+  })
+  .strict();
+
+export const chatListCommandsRequestSchema = z
+  .object({
+    runtimeId: z.string(),
+  })
+  .strict();
+
+export const chatListCommandsResultSchema = z
+  .object({
+    commands: z.array(chatCommandSummarySchema),
+  })
+  .strict();
+
 export const chatSetModelRequestSchema = z
   .object({
     runtimeId: z.string(),
@@ -422,6 +443,7 @@ export const ipcChannels = {
   chatPrompt: "chat:prompt",
   chatAbort: "chat:abort",
   chatListModels: "chat:listModels",
+  chatListCommands: "chat:listCommands",
   chatSetModel: "chat:setModel",
   chatSetThinking: "chat:setThinking",
   chatCreateSession: "chat:createSession",
