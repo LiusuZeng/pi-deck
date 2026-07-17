@@ -81,6 +81,7 @@ import {
 } from "./security.js";
 import { ProjectStore, resolvePiDeckHome } from "./projects/projectStore.js";
 import { SettingsStore } from "./settings/settingsStore.js";
+import { formatCanonicalFileReference } from "./attachments.js";
 import {
   assertImagePromptPermitted,
   decodeImageBase64,
@@ -1241,9 +1242,9 @@ async function listChatSessions(
     projectId: launch.projectCwd,
     sessionDir,
     sessions: sessions.map((session) => {
-        const attachedRuntimeId = chatSessionFileLocks.get(session.sessionFile);
-        return attachedRuntimeId ? { ...session, attachedRuntimeId } : session;
-      }),
+      const attachedRuntimeId = chatSessionFileLocks.get(session.sessionFile);
+      return attachedRuntimeId ? { ...session, attachedRuntimeId } : session;
+    }),
     diagnostics,
   };
 }
@@ -1734,7 +1735,12 @@ async function buildPromptInputWithImagePolicy(
       await activeModelForRuntime(adapter, runtimeId),
     );
   }
-  return buildPromptInput(text, attachments, imageSettings?.autoResize ?? false);
+  return buildPromptInput(
+    text,
+    attachments,
+    imageSettings?.autoResize ?? false,
+    chatRuntimeProjectIds.get(runtimeId) ?? chatWorkerCwds.get(runtimeId),
+  );
 }
 
 async function buildPromptInput(
@@ -1743,6 +1749,7 @@ async function buildPromptInput(
     z.infer<typeof chatPromptRequestSchema>["attachments"]
   >,
   autoResize: boolean,
+  projectRoot: string | undefined,
 ): Promise<PromptInput> {
   const imageInputs: NonNullable<PromptInput["images"]> = [];
   const pathReferences: string[] = [];
@@ -1779,7 +1786,9 @@ async function buildPromptInput(
         );
       }
       await assertAttachmentReadable(selection.filePath);
-      pathReferences.push(selection.filePath);
+      pathReferences.push(
+        formatCanonicalFileReference(selection.filePath, projectRoot),
+      );
     }
   }
 
@@ -1909,13 +1918,11 @@ async function buildAttachmentDraft(
     canonicalPath && status === "ready"
       ? await inspectImageFile(canonicalPath)
       : undefined;
-  const imageRequested = isImagePath(extension);
-  const kind: AttachmentDraft["kind"] =
-    sniffedImage || imageRequested
-      ? "image"
-      : isLikelyTextPath(extension)
-        ? "textFile"
-        : "binaryFile";
+  const kind: AttachmentDraft["kind"] = sniffedImage
+    ? "image"
+    : isLikelyTextPath(extension)
+      ? "textFile"
+      : "binaryFile";
   const outsideProject = Boolean(
     projectRoot && canonicalPath && !isPathInside(canonicalPath, projectRoot),
   );
