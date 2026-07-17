@@ -60,7 +60,10 @@ import { DiagnosticsService } from "./diagnostics/diagnostics.js";
 import { registerValidatedIpc } from "./ipc/registerIpc.js";
 import { SinglePiAdapter } from "./pi/piAdapter.js";
 import { selectAvailableRuntime } from "./runtimeSelection.js";
-import { scanSessionRepository } from "./pi/sessionRepository.js";
+import {
+  scanSessionRepository,
+  validateSessionForDeletion,
+} from "./pi/sessionRepository.js";
 import type { PiMessage, PromptInput } from "./pi/types.js";
 import {
   resolveEffectivePiConfig,
@@ -1266,23 +1269,27 @@ async function deleteChatSession(
     );
   }
 
-  const canonicalSessionFile = await safeRealpath(sessionFile);
-  if (canonicalSessionFile === undefined) {
-    throw new Error(`Session file is missing or unreadable: ${sessionFile}`);
-  }
-
   if (projectId !== undefined) {
     await ensureProjectStore().selectProject(projectId);
     selectedRealProjectCwd = projectId;
   }
 
   const launch = await resolveRealChatLaunchConfig(store);
-  const sessionCwd = await readSessionFileCwd(canonicalSessionFile);
-  if (sessionCwd !== undefined && sessionCwd !== launch.projectCwd) {
+  const sessionDir = launch.effective.config.sessionDir;
+  if (sessionDir === undefined) {
+    throw new Error("No Pi session directory is configured.");
+  }
+  const validation = await validateSessionForDeletion({
+    sessionFile,
+    sessionDir,
+    projectCwd: launch.projectCwd,
+  });
+  if (!validation.ok) {
     throw new Error(
-      `Session belongs to a different project. Session cwd: ${sessionCwd}; current project: ${launch.projectCwd}.`,
+      `Session is not eligible for deletion: ${validation.reason}.`,
     );
   }
+  const canonicalSessionFile = validation.sessionFile;
 
   const lockedRuntimeId = chatSessionFileLocks.get(canonicalSessionFile);
   if (lockedRuntimeId !== undefined) {
@@ -1311,15 +1318,29 @@ async function deleteAllChatSessions(
   projectId?: string,
 ): Promise<ChatDeleteAllSessionsResult> {
   const listed = await listChatSessions(store, projectId);
+  if (listed.sessions.length === 0) {
+    return { deleted: true, deletedCount: 0, skippedCount: 0 };
+  }
+  const launch = await resolveRealChatLaunchConfig(store);
+  const sessionDir = launch.effective.config.sessionDir;
   let deletedCount = 0;
   let skippedCount = 0;
 
   for (const session of listed.sessions) {
-    const canonicalSessionFile = await safeRealpath(session.sessionFile);
-    if (canonicalSessionFile === undefined) {
+    if (sessionDir === undefined) {
       skippedCount += 1;
       continue;
     }
+    const validation = await validateSessionForDeletion({
+      sessionFile: session.sessionFile,
+      sessionDir,
+      projectCwd: launch.projectCwd,
+    });
+    if (!validation.ok) {
+      skippedCount += 1;
+      continue;
+    }
+    const canonicalSessionFile = validation.sessionFile;
     const lockedRuntimeId = chatSessionFileLocks.get(canonicalSessionFile);
     if (
       canonicalSessionFile === warmChatWorkerSessionFile ||
@@ -1331,7 +1352,7 @@ async function deleteAllChatSessions(
     await trashOrRemoveFile(canonicalSessionFile);
     chatSessionFileLocks.delete(canonicalSessionFile);
     await projectStore?.removeSessionRef(
-      listed.projectId ?? listed.projectCwd,
+      launch.projectCwd,
       canonicalSessionFile,
     );
     deletedCount += 1;
