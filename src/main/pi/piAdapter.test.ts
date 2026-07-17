@@ -136,9 +136,11 @@ test("SinglePiAdapter closes one runtime without dropping another runtime", asyn
   });
 
   try {
+    assert.equal(adapter.workerCount(), 2);
     await adapter.closeSession(workerA.runtimeId);
     assert.equal(adapter.hasRuntime(workerA.runtimeId), false);
     assert.equal(adapter.hasRuntime(workerB.runtimeId), true);
+    assert.equal(adapter.workerCount(), 1);
 
     const state = await adapter.getState(workerB.runtimeId);
     assert.equal(state.runtimeId, workerB.runtimeId);
