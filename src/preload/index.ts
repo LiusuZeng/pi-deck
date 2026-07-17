@@ -8,6 +8,7 @@ import {
   attachmentImportImageRequestSchema,
   attachmentPickerRequestSchema,
   chatAbortRequestSchema,
+  chatInterventionRequestSchema,
   chatDeleteAllSessionsRequestSchema,
   chatDeleteAllSessionsResultSchema,
   chatDeleteSessionRequestSchema,
@@ -36,6 +37,7 @@ import {
 import type {
   AppSettings,
   AttachmentImportImageRequest,
+  ChatInterventionRequest,
   ChatRuntimeEvent,
   PiDeckApi,
 } from "../shared/types.js";
@@ -148,17 +150,22 @@ const api: PiDeckApi = Object.freeze({
         request: chatSetThinkingRequestSchema.parse(request),
         responseSchema: chatSnapshotSchema,
       }),
-    prompt: (request: {
-      runtimeId: string;
-      text: string;
-      attachments?: Array<{
-        selectedPathToken: string;
-        sendMode: "imageInput" | "pathReference";
-      }>;
-    }) =>
+    prompt: (request: ChatInterventionRequest) =>
       invokeValidated({
         channel: ipcChannels.chatPrompt,
         request: chatPromptRequestSchema.parse(request),
+        responseSchema: z.void(),
+      }),
+    steer: (request: ChatInterventionRequest) =>
+      invokeValidated({
+        channel: ipcChannels.chatSteer,
+        request: chatInterventionRequestSchema.parse(request),
+        responseSchema: z.void(),
+      }),
+    followUp: (request: ChatInterventionRequest) =>
+      invokeValidated({
+        channel: ipcChannels.chatFollowUp,
+        request: chatInterventionRequestSchema.parse(request),
         responseSchema: z.void(),
       }),
     abort: (request: { runtimeId: string }) =>

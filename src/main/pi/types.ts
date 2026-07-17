@@ -25,11 +25,12 @@ export interface RpcCommandRecord {
 }
 
 export interface RpcResponseRecord<T = JsonValue> {
-  id: string;
+  id?: string;
   type: "response";
-  ok?: boolean;
-  result?: T;
-  error?: RpcErrorPayload | string;
+  command: string;
+  success: boolean;
+  data?: T;
+  error?: string;
 }
 
 export interface RpcErrorPayload {
@@ -107,6 +108,8 @@ export interface PiAdapter {
   getState(runtimeId: RuntimeSessionId): Promise<PiState>;
   getMessages(runtimeId: RuntimeSessionId): Promise<PiMessage[]>;
   prompt(runtimeId: RuntimeSessionId, input: PromptInput): Promise<void>;
+  steer(runtimeId: RuntimeSessionId, input: PromptInput): Promise<void>;
+  followUp(runtimeId: RuntimeSessionId, input: PromptInput): Promise<void>;
   abort(runtimeId: RuntimeSessionId): Promise<void>;
   closeSession(runtimeId: RuntimeSessionId): Promise<void>;
   onEvent(listener: (event: RuntimeEvent) => void): Unsubscribe;

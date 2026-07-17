@@ -139,6 +139,8 @@ class FakeRpcServer {
   private promptCounter = 0;
   private currentTimers: NodeJS.Timeout[] = [];
   private agentActive = false;
+  private readonly steering: string[] = [];
+  private readonly followUp: string[] = [];
   private messages: PiMessage[] = [
     {
       id: "msg_system_1",
@@ -267,46 +269,51 @@ class FakeRpcServer {
 
     switch (name) {
       case "get_state":
-        this.respond(command.id ?? "", this.getState());
+        this.respond(command.id, name, this.getState());
         break;
       case "get_messages":
-        this.respond(command.id ?? "", this.messages);
+        this.respond(command.id, name, { messages: this.messages });
         break;
       case "prompt":
         this.handlePrompt(command);
+        break;
+      case "steer":
+        this.handleIntervention(command, "steer");
+        break;
+      case "follow_up":
+        this.handleIntervention(command, "follow_up");
         break;
       case "abort":
         this.handleAbort(command);
         break;
       case "get_commands":
-        this.respond(command.id ?? "", {
+        this.respond(command.id, name, {
           commands: [
             {
-              name: "/review",
+              name: "review",
               description: "Review the current change with the active worker.",
-              source: "prompt template",
-              insertText: "/review ",
+              source: "prompt",
             },
             {
-              name: "/skill:frontend-polish",
+              name: "skill:frontend-polish",
               description: "Apply frontend polish checklist to the prompt.",
               source: "skill",
-              insertText: "/skill:frontend-polish ",
             },
             {
-              name: "/fake-worker-command",
+              name: "fake-worker-command",
               description: "Command discovered from the active fake Pi worker.",
               source: "extension",
-              insertText: "/fake-worker-command ",
             },
           ],
         });
         break;
       default:
-        this.respond(command.id ?? "", undefined, {
-          code: "FAKE_UNKNOWN_COMMAND",
-          message: `Fake RPC does not implement command: ${name || "<missing>"}`,
-        });
+        this.respond(
+          command.id,
+          name || "unknown",
+          undefined,
+          `Fake RPC does not implement command: ${name || "<missing>"}`,
+        );
         break;
     }
   }
@@ -321,13 +328,18 @@ class FakeRpcServer {
       model: "fake-model",
       provider: "fake-provider",
       thinkingLevel: "medium",
-      isAgentActive: this.agentActive,
+      isStreaming: this.agentActive,
     };
   }
 
   private handlePrompt(command: FakeCommandRecord): void {
     const params = commandParams(command);
-    const text = typeof params.text === "string" ? params.text : "";
+    const text =
+      typeof params.message === "string"
+        ? params.message
+        : typeof params.text === "string"
+          ? params.text
+          : "";
     const userMessage: PiMessage = {
       id: `msg_user_${this.promptCounter + 1}`,
       role: "user",
@@ -342,7 +354,7 @@ class FakeRpcServer {
     let accumulated = "";
     this.agentActive = true;
 
-    this.respond(command.id ?? "", { accepted: true });
+    this.respond(command.id, "prompt");
     this.write({
       type: "agent_start",
       runId: `run_${this.promptCounter}`,
@@ -429,11 +441,14 @@ class FakeRpcServer {
       scenario === target || scenario === "all";
 
     if (shouldEmit("queue")) {
-      this.write({
-        type: "queue_update",
-        steeringCount: 1,
-        followUpCount: 2,
-      });
+      this.steering.splice(0, this.steering.length, "Queued steering fixture");
+      this.followUp.splice(
+        0,
+        this.followUp.length,
+        "Queued follow-up fixture one",
+        "Queued follow-up fixture two",
+      );
+      this.emitQueueUpdate();
     }
 
     if (shouldEmit("compaction")) {
@@ -481,6 +496,26 @@ class FakeRpcServer {
     }
   }
 
+  private handleIntervention(
+    command: FakeCommandRecord,
+    kind: "steer" | "follow_up",
+  ): void {
+    const params = commandParams(command);
+    const message =
+      typeof params.message === "string"
+        ? params.message
+        : typeof params.text === "string"
+          ? params.text
+          : "";
+    if (kind === "steer") {
+      this.steering.push(message);
+    } else {
+      this.followUp.push(message);
+    }
+    this.respond(command.id, kind);
+    this.emitQueueUpdate();
+  }
+
   private handleAbort(command: FakeCommandRecord): void {
     for (const timer of this.currentTimers) {
       clearTimeout(timer);
@@ -488,7 +523,7 @@ class FakeRpcServer {
     this.currentTimers = [];
     const wasActive = this.agentActive;
     this.agentActive = false;
-    this.respond(command.id ?? "", { aborted: wasActive });
+    this.respond(command.id, "abort");
     this.write({
       type: "agent_end",
       runId: `run_${this.promptCounter}`,
@@ -496,14 +531,35 @@ class FakeRpcServer {
     });
   }
 
+  private emitQueueUpdate(): void {
+    this.write({
+      type: "queue_update",
+      steering: [...this.steering],
+      followUp: [...this.followUp],
+    });
+  }
+
   private respond(
-    id: string,
-    result?: unknown,
-    error?: { code?: string; message: string },
+    id: string | undefined,
+    command: string,
+    data?: unknown,
+    error?: string,
   ): void {
     const response: RpcResponseRecord = error
-      ? { type: "response", id, ok: false, error }
-      : { type: "response", id, ok: true, result: result as never };
+      ? {
+          type: "response",
+          ...(id ? { id } : {}),
+          command,
+          success: false,
+          error,
+        }
+      : {
+          type: "response",
+          ...(id ? { id } : {}),
+          command,
+          success: true,
+          ...(data === undefined ? {} : { data: data as never }),
+        };
     this.write(response as unknown as JsonObject);
   }
 

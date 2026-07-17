@@ -86,6 +86,59 @@ test("fake mode launches with backend runtime and send enabled", async () => {
   }
 });
 
+test("working sessions expose steer, follow-up, extension, and abort interventions", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-intervention-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: ["--stream-delay-ms", "400"],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    const composer = page.getByLabel("Prompt text");
+    await composer.fill("start intervention fixture");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(page.getByRole("button", { name: "Steer" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Follow-up" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Abort" })).toBeVisible();
+
+    await composer.fill("focus on focused tests");
+    await page.getByRole("button", { name: "Steer" }).click();
+    await expect(
+      page.getByText("Steering instruction queued in Pi."),
+    ).toBeVisible();
+
+    await composer.fill("summarize afterward");
+    await page.getByRole("button", { name: "Follow-up" }).click();
+    await expect(
+      page.getByText("Follow-up queued in Pi after current work."),
+    ).toBeVisible();
+
+    await composer.fill("/fake-worker-command now");
+    await expect(page.getByRole("button", { name: "Steer" })).toBeDisabled();
+    await expect(
+      page.getByRole("button", { name: "Run command now" }),
+    ).toBeEnabled();
+
+    await page.getByRole("button", { name: "Abort" }).click();
+    await expect(
+      page.getByText("Abort sent to Pi.", { exact: true }),
+    ).toBeVisible();
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("real mode startup failure is not mislabeled as preload/fake UI", async () => {
   const piBinary = process.env.PI_DECK_PI_BINARY || "/usr/local/bin/pi";
   test.skip(!fs.existsSync(piBinary), `Pi binary not found at ${piBinary}`);

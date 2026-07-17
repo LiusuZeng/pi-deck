@@ -18,6 +18,7 @@ import {
   attachmentImportImageRequestSchema,
   attachmentPickerRequestSchema,
   chatAbortRequestSchema,
+  chatInterventionRequestSchema,
   chatCreateSessionRequestSchema,
   chatDeleteAllSessionsRequestSchema,
   chatDeleteAllSessionsResultSchema,
@@ -356,6 +357,40 @@ function registerIpcHandlers(
       const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
       await assertRuntimeInActiveProject(activeRuntimeId);
       await adapter.prompt(
+        activeRuntimeId,
+        await buildPromptInput(text, attachments ?? []),
+      );
+      return undefined;
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.chatSteer,
+    requestSchema: chatInterventionRequestSchema,
+    responseSchema: z.void(),
+    diagnostics: diagnosticsService,
+    handler: async ({ runtimeId, text, attachments }) => {
+      const adapter = await ensureChatAdapter(store, diagnosticsService);
+      const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
+      await assertRuntimeInActiveProject(activeRuntimeId);
+      await adapter.steer(
+        activeRuntimeId,
+        await buildPromptInput(text, attachments ?? []),
+      );
+      return undefined;
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.chatFollowUp,
+    requestSchema: chatInterventionRequestSchema,
+    responseSchema: z.void(),
+    diagnostics: diagnosticsService,
+    handler: async ({ runtimeId, text, attachments }) => {
+      const adapter = await ensureChatAdapter(store, diagnosticsService);
+      const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
+      await assertRuntimeInActiveProject(activeRuntimeId);
+      await adapter.followUp(
         activeRuntimeId,
         await buildPromptInput(text, attachments ?? []),
       );
@@ -1144,10 +1179,11 @@ function normalizeChatCommands(response: unknown): ChatCommandSummary[] {
       return [];
     }
     const record = item as Record<string, unknown>;
-    const name = firstString(record.name, record.command, record.id);
-    if (name === undefined || isTuiOnlyCommand(name)) {
+    const rawName = firstString(record.name, record.command, record.id);
+    if (rawName === undefined || isTuiOnlyCommand(rawName)) {
       return [];
     }
+    const name = rawName.startsWith("/") ? rawName : `/${rawName}`;
     const description = firstString(
       record.description,
       record.summary,

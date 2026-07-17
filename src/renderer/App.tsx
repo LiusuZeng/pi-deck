@@ -539,9 +539,15 @@ export function App(): ReactElement {
   );
   const canSend =
     draft.trim().length > 0 && !isWorking && loadState.state === "ready";
+  const canIntervene =
+    draft.trim().length > 0 && isWorking && loadState.state === "ready";
   const availableSlashCommands = isRealBackendMode
     ? realCommands
     : slashCommands;
+  const knownExtensionCommand = findKnownExtensionCommand(
+    draft,
+    availableSlashCommands,
+  );
   const filteredCommands = availableSlashCommands.filter((command) =>
     command.name.toLowerCase().includes(draft.trim().toLowerCase()),
   );
@@ -632,7 +638,11 @@ export function App(): ReactElement {
     }
     if (enterToSend || event.metaKey || event.ctrlKey) {
       event.preventDefault();
-      handleSend();
+      if (isWorking) {
+        handleSteer();
+      } else {
+        handleSend();
+      }
     }
   }
 
@@ -837,6 +847,110 @@ export function App(): ReactElement {
             ? appendDiagnostic(session, {
                 tone: "error",
                 content: `Prompt failed: ${error instanceof Error ? error.message : String(error)}`,
+              })
+            : session,
+        ),
+      );
+    }
+  }
+
+  function handleSteer(): void {
+    void sendIntervention("steer");
+  }
+
+  function handleFollowUp(): void {
+    void sendIntervention("followUp");
+  }
+
+  function handleRunExtensionCommand(): void {
+    if (knownExtensionCommand === undefined) {
+      return;
+    }
+    if (!selectedSession.runtimeBacked) {
+      setComposerError("This session is not attached to a Pi runtime.");
+      return;
+    }
+    if (hasBlockingAttachment) {
+      setComposerError(
+        "Remove or reselect deleted/unreadable attachments before sending.",
+      );
+      return;
+    }
+    if (
+      hasImageAttachment &&
+      !selectedSessionSupportsImages(selectedSession, realModels, selectedModel)
+    ) {
+      setComposerError("Selected model does not support image input.");
+      return;
+    }
+    // Pi executes extension commands immediately through `prompt`, even while
+    // streaming. They cannot be sent through steer or follow_up.
+    void sendPrompt(selectedSession.id, draft.trimEnd(), attachments);
+  }
+
+  async function sendIntervention(kind: "steer" | "followUp"): Promise<void> {
+    if (!canIntervene) {
+      return;
+    }
+    if (knownExtensionCommand !== undefined) {
+      setComposerError(
+        `${knownExtensionCommand} is an extension command and cannot be queued as ${kind === "steer" ? "steering" : "a follow-up"}. Use Run command now instead.`,
+      );
+      return;
+    }
+    if (!selectedSession.runtimeBacked) {
+      setComposerError("This session is not attached to a Pi runtime.");
+      return;
+    }
+    if (hasBlockingAttachment) {
+      setComposerError(
+        "Remove or reselect deleted/unreadable attachments before queuing.",
+      );
+      return;
+    }
+    if (
+      hasImageAttachment &&
+      !selectedSessionSupportsImages(selectedSession, realModels, selectedModel)
+    ) {
+      setComposerError("Selected model does not support image input.");
+      return;
+    }
+
+    const text = draft.trimEnd();
+    const queuedAttachments = attachments;
+    setComposerError(null);
+    try {
+      const request = {
+        runtimeId: selectedSession.id,
+        text,
+        attachments: queuedAttachments.map((attachment) => ({
+          selectedPathToken: attachment.selectedPathToken,
+          sendMode: attachment.sendMode,
+        })),
+      };
+      if (kind === "steer") {
+        await window.piDeck.chat.steer(request);
+      } else {
+        await window.piDeck.chat.followUp(request);
+      }
+      setDraft("");
+      setSlashOpen(false);
+      setAttachments([]);
+      setUiMessage(
+        kind === "steer"
+          ? "Steering instruction queued in Pi."
+          : "Follow-up queued in Pi after current work.",
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setComposerError(message);
+      setAttachments(queuedAttachments);
+      setSessions((current) =>
+        current.map((session) =>
+          session.id === selectedSession.id
+            ? appendDiagnostic(session, {
+                tone: "error",
+                content: `${kind === "steer" ? "Steer" : "Follow-up"} failed: ${message}`,
               })
             : session,
         ),
@@ -1375,6 +1489,8 @@ export function App(): ReactElement {
       value={draft}
       isWorking={isWorking}
       canSend={canSend}
+      canIntervene={canIntervene}
+      knownExtensionCommand={knownExtensionCommand}
       error={composerError}
       attachments={attachments}
       slashOpen={slashOpen}
@@ -1391,6 +1507,9 @@ export function App(): ReactElement {
       onChange={handleDraftChange}
       onKeyDown={handleComposerKeyDown}
       onSend={handleSend}
+      onSteer={handleSteer}
+      onFollowUp={handleFollowUp}
+      onRunExtensionCommand={handleRunExtensionCommand}
       onAbort={handleAbort}
       onPickAttachments={() => void handlePickAttachments()}
       onImportDroppedFileAttachments={(files) =>
@@ -2040,8 +2159,14 @@ function reduceRuntimeEvent(
     case "tool_execution_end":
       return reduceToolExecutionEvent(session, event);
     case "queue_update": {
-      const steeringCount = getNumber(event, "steeringCount") ?? 0;
-      const followUpCount = getNumber(event, "followUpCount") ?? 0;
+      const steeringCount =
+        getArray(event, "steering")?.length ??
+        getNumber(event, "steeringCount") ??
+        0;
+      const followUpCount =
+        getArray(event, "followUp")?.length ??
+        getNumber(event, "followUpCount") ??
+        0;
       return {
         ...session,
         overlays: {
@@ -3643,6 +3768,8 @@ function Composer(props: {
   value: string;
   isWorking: boolean;
   canSend: boolean;
+  canIntervene: boolean;
+  knownExtensionCommand: string | undefined;
   error: string | null;
   attachments: AttachmentDraft[];
   slashOpen: boolean;
@@ -3659,6 +3786,9 @@ function Composer(props: {
   onChange(value: string): void;
   onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void;
   onSend(): void;
+  onSteer(): void;
+  onFollowUp(): void;
+  onRunExtensionCommand(): void;
   onAbort(): void;
   onPickAttachments(): void;
   onImportDroppedFileAttachments(files: File[]): void;
@@ -3827,6 +3957,11 @@ function Composer(props: {
           </label>
           {props.error !== null ? (
             <span className="composer-error">{props.error}</span>
+          ) : props.knownExtensionCommand !== undefined ? (
+            <span className="composer-error">
+              {props.knownExtensionCommand} is an extension command. It runs
+              immediately and cannot be queued.
+            </span>
           ) : props.isWorking ? (
             <span>Working in {props.backendLabel}…</span>
           ) : hasImageWarning ? (
@@ -3836,13 +3971,47 @@ function Composer(props: {
           ) : null}
           <span className="composer-spacer" />
           {props.isWorking ? (
-            <button
-              className="send-button abort"
-              type="button"
-              onClick={props.onAbort}
-            >
-              Abort
-            </button>
+            <>
+              <button
+                className="send-button steer"
+                type="button"
+                disabled={
+                  !props.canIntervene ||
+                  props.knownExtensionCommand !== undefined
+                }
+                onClick={props.onSteer}
+              >
+                Steer
+              </button>
+              <button
+                className="send-button follow-up"
+                type="button"
+                disabled={
+                  !props.canIntervene ||
+                  props.knownExtensionCommand !== undefined
+                }
+                onClick={props.onFollowUp}
+              >
+                Follow-up
+              </button>
+              {props.knownExtensionCommand !== undefined ? (
+                <button
+                  className="send-button extension-command"
+                  type="button"
+                  disabled={!props.canIntervene}
+                  onClick={props.onRunExtensionCommand}
+                >
+                  Run command now
+                </button>
+              ) : null}
+              <button
+                className="send-button abort"
+                type="button"
+                onClick={props.onAbort}
+              >
+                Abort
+              </button>
+            </>
           ) : (
             <button
               className="send-button"
@@ -4257,6 +4426,11 @@ function getRecordFromRecord(
     : undefined;
 }
 
+function getArray(event: ChatRuntimeEvent, key: string): unknown[] | undefined {
+  const value = getUnknown(event, key);
+  return Array.isArray(value) ? value : undefined;
+}
+
 function getNumber(event: ChatRuntimeEvent, key: string): number | undefined {
   const value = getUnknown(event, key);
   return typeof value === "number" && Number.isFinite(value)
@@ -4442,6 +4616,22 @@ function processCwdPlaceholder(mode: "fake" | "real"): string {
     : "Local demo backend cwd unavailable";
 }
 
+export function findKnownExtensionCommand(
+  text: string,
+  commands: SlashCommand[],
+): string | undefined {
+  const command = text.trimStart().split(/\s+/, 1)[0];
+  if (!command?.startsWith("/")) {
+    return undefined;
+  }
+  const normalized = command.slice(1);
+  return commands.find(
+    (item) =>
+      item.source === "extension" &&
+      item.name.replace(/^\//, "") === normalized,
+  )?.name;
+}
+
 export const __rendererTestHooks = {
   reduceRuntimeEvent,
   sessionFromSnapshot,
@@ -4451,6 +4641,7 @@ export const __rendererTestHooks = {
   isSessionDeletable,
   listProjectsIfAvailable,
   selectProjectIfAvailable,
+  findKnownExtensionCommand,
 };
 
 function getRendererNodeAccessSummary(): string {

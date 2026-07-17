@@ -8,6 +8,7 @@ import {
   attachmentImportImageRequestSchema,
   attachmentPickerRequestSchema,
   chatDeleteSessionRequestSchema,
+  chatInterventionRequestSchema,
   chatMessageSchema,
   chatPromptRequestSchema,
   pickProjectResultSchema,
@@ -119,6 +120,22 @@ describe("IPC schemas", () => {
       }),
     ).toEqual({ sessionFile: "/tmp/session.jsonl" });
     expect(() => chatDeleteSessionRequestSchema.parse({})).toThrow();
+  });
+
+  it("validates strict steer and follow-up intervention payloads", () => {
+    expect(
+      chatInterventionRequestSchema.parse({
+        runtimeId: "runtime-1",
+        text: "Change direction",
+      }),
+    ).toEqual({ runtimeId: "runtime-1", text: "Change direction" });
+    expect(() =>
+      chatInterventionRequestSchema.parse({
+        runtimeId: "runtime-1",
+        text: "Queue this",
+        streamingBehavior: "steer",
+      }),
+    ).toThrow();
   });
 
   it("validates prompt attachment tokens without file paths", () => {

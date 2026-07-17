@@ -67,6 +67,14 @@ export class SinglePiAdapter implements PiAdapter {
     return this.getWorker(runtimeId).prompt(input);
   }
 
+  steer(runtimeId: RuntimeSessionId, input: PromptInput): Promise<void> {
+    return this.getWorker(runtimeId).steer(input);
+  }
+
+  followUp(runtimeId: RuntimeSessionId, input: PromptInput): Promise<void> {
+    return this.getWorker(runtimeId).followUp(input);
+  }
+
   abort(runtimeId: RuntimeSessionId): Promise<void> {
     return this.getWorker(runtimeId).abort();
   }

@@ -53,6 +53,34 @@ describe("preload PiDeck API validation", () => {
     expect(electronMock.ipcRenderer.invoke).not.toHaveBeenCalled();
   });
 
+  it("exposes strict steer and follow-up IPC methods", async () => {
+    electronMock.ipcRenderer.invoke.mockResolvedValue({
+      ok: true,
+      data: undefined,
+    });
+
+    await api.chat.steer({ runtimeId: "runtime-1", text: "Change course" });
+    await api.chat.followUp({ runtimeId: "runtime-1", text: "Then test it" });
+
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
+      1,
+      "chat:steer",
+      { runtimeId: "runtime-1", text: "Change course" },
+    );
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
+      2,
+      "chat:followUp",
+      { runtimeId: "runtime-1", text: "Then test it" },
+    );
+    expect(() =>
+      api.chat.steer({
+        runtimeId: "runtime-1",
+        text: "Nope",
+        arbitraryIpc: true,
+      } as unknown as { runtimeId: string; text: string }),
+    ).toThrow();
+  });
+
   it("validates project picker responses from IPC", async () => {
     electronMock.ipcRenderer.invoke.mockResolvedValueOnce({
       ok: true,

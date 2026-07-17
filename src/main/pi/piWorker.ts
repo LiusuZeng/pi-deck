@@ -19,12 +19,13 @@ function generateRuntimeId(): RuntimeSessionId {
 }
 
 function toJsonObject(input: PromptInput): JsonObject {
+  const { text, images, ...extra } = input;
   const result: JsonObject = {};
-  for (const [key, value] of Object.entries(input)) {
+  for (const [key, value] of Object.entries(extra)) {
     result[key] = value as JsonValue;
   }
-  if (Array.isArray(input.images)) {
-    result.images = input.images.map(
+  if (Array.isArray(images)) {
+    result.images = images.map(
       (image): JsonObject => ({
         type: "image",
         mimeType: image.mimeType,
@@ -32,12 +33,8 @@ function toJsonObject(input: PromptInput): JsonObject {
       }),
     );
   }
-  // Pi RPC uses `message`; older fake/test fixtures use `text`. Send both at
-  // this adapter boundary so the renderer can keep one `text` contract while
-  // real `pi --mode rpc` receives the documented field.
-  if (typeof input.text === "string" && result.message === undefined) {
-    result.message = input.text;
-  }
+  // Pi's RPC protocol accepts `message`, not the renderer's internal `text`.
+  result.message = text;
   return result;
 }
 
@@ -146,6 +143,14 @@ export class PiWorker {
 
   async prompt(input: PromptInput): Promise<void> {
     await this.client.request("prompt", toJsonObject(input));
+  }
+
+  async steer(input: PromptInput): Promise<void> {
+    await this.client.request("steer", toJsonObject(input));
+  }
+
+  async followUp(input: PromptInput): Promise<void> {
+    await this.client.request("follow_up", toJsonObject(input));
   }
 
   async abort(): Promise<void> {

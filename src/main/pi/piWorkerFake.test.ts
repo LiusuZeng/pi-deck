@@ -123,6 +123,41 @@ test("PiWorker prompt resolves on command acceptance and continues streaming eve
   }
 });
 
+test("PiWorker sends exact steer and follow_up RPC commands", async () => {
+  const worker = new PiWorker({
+    command: process.execPath,
+    args: [fakePath(), "--stream-delay-ms", "50"],
+    cwd: process.cwd(),
+    env: process.env,
+    requestTimeoutMs: 5_000,
+    killGraceMs: 100,
+    commandProtocol: "type-field",
+  });
+  try {
+    await worker.prompt({ text: "keep working" });
+    const queued = waitForWorkerEvent(
+      worker,
+      (event) =>
+        event.type === "queue_update" &&
+        Array.isArray((event as { steering?: unknown }).steering) &&
+        Array.isArray((event as { followUp?: unknown }).followUp) &&
+        (event as { steering: unknown[] }).steering.length === 1 &&
+        (event as { followUp: unknown[] }).followUp.length === 1,
+    );
+    await worker.steer({ text: "Use the focused tests" });
+    await worker.followUp({ text: "Summarize the result" });
+    const event = await queued;
+    assert.deepEqual((event as { steering: unknown[] }).steering, [
+      "Use the focused tests",
+    ]);
+    assert.deepEqual((event as { followUp: unknown[] }).followUp, [
+      "Summarize the result",
+    ]);
+  } finally {
+    await worker.closeSession();
+  }
+});
+
 test("PiWorker abort path emits a sensible aborted end state", async () => {
   const worker = createWorker(["--stream-delay-ms", "50"]);
   try {
@@ -191,6 +226,8 @@ test("SinglePiAdapter routes required methods by runtime id", async () => {
     const state = await adapter.getState(worker.runtimeId);
     assert.equal(state.sessionId, "fake-session-1");
     await adapter.prompt(worker.runtimeId, { text: "via adapter" });
+    await adapter.steer(worker.runtimeId, { text: "via adapter steer" });
+    await adapter.followUp(worker.runtimeId, { text: "via adapter follow-up" });
     await waitForWorkerEvent(worker, (event) => event.type === "agent_end");
     assert.ok(events.some((event) => event.type === "message_update"));
     unsubscribe();

@@ -125,8 +125,15 @@ export function reduceSessionRuntimeEvent(
         ...state,
         overlays: {
           ...state.overlays,
-          piQueuedSteeringCount: getNumber(event, "steeringCount") ?? 0,
-          piQueuedFollowUpCount: getNumber(event, "followUpCount") ?? 0,
+          // Pi RPC emits complete queues, rather than count fields.
+          piQueuedSteeringCount:
+            getArray(event, "steering")?.length ??
+            getNumber(event, "steeringCount") ??
+            0,
+          piQueuedFollowUpCount:
+            getArray(event, "followUp")?.length ??
+            getNumber(event, "followUpCount") ??
+            0,
         },
       };
     case "compaction_start":
@@ -388,6 +395,11 @@ function getString(
 ): string | undefined {
   const value = event?.[key];
   return typeof value === "string" ? value : undefined;
+}
+
+function getArray(event: RuntimeEventLike, key: string): unknown[] | undefined {
+  const value = event[key];
+  return Array.isArray(value) ? value : undefined;
 }
 
 function getNumber(event: RuntimeEventLike, key: string): number | undefined {
