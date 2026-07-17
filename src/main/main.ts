@@ -582,6 +582,10 @@ async function ensureChatAdapter(
     }
     sendChatEventToRenderer(parsed.data);
     if (parsed.data.type === "worker_exit") {
+      if (warmChatWorker?.worker.runtimeId === parsed.data.runtimeId) {
+        warmChatWorker = undefined;
+        warmChatWorkerSessionFile = undefined;
+      }
       forgetChatRuntime(parsed.data.runtimeId);
     }
   });
@@ -612,8 +616,16 @@ async function createChatWorker(
     mode === "real" && options.preferWarm === true
       ? await takeWarmChatWorker()
       : undefined;
+  const usableWarmWorker = isWarmChatWorkerUsable(adapter, warmWorker)
+    ? warmWorker
+    : undefined;
+  if (warmWorker !== undefined && usableWarmWorker === undefined) {
+    diagnostics?.recordError(
+      `Discarded stale warm Pi worker ${warmWorker.worker.runtimeId}; starting a fresh runtime.`,
+    );
+  }
   const workerSpec =
-    warmWorker ??
+    usableWarmWorker ??
     (mode === "real"
       ? await createRealChatWorker(adapter, store)
       : createFakeChatWorker(adapter));
@@ -645,8 +657,16 @@ async function ensureWarmChatWorker(
   if (!shouldPrewarmRealWorker()) {
     return undefined;
   }
-  if (warmChatWorker !== undefined) {
-    return warmChatWorker;
+  const existingWarmWorker = warmChatWorker;
+  if (existingWarmWorker !== undefined) {
+    if (isWarmChatWorkerUsable(adapter, existingWarmWorker)) {
+      return existingWarmWorker;
+    }
+    diagnostics?.recordError(
+      `Discarded stale warm Pi worker ${existingWarmWorker.worker.runtimeId}; prewarming a replacement.`,
+    );
+    warmChatWorker = undefined;
+    warmChatWorkerSessionFile = undefined;
   }
   if (warmChatWorkerPromise !== undefined) {
     return warmChatWorkerPromise;
@@ -686,6 +706,20 @@ async function takeWarmChatWorker(): Promise<ChatWorkerSpec | undefined> {
   warmChatWorkerPromise = undefined;
   warmChatWorkerSessionFile = undefined;
   return workerSpec;
+}
+
+function isWarmChatWorkerUsable(
+  adapter: SinglePiAdapter,
+  workerSpec: ChatWorkerSpec | undefined,
+): boolean {
+  if (workerSpec === undefined) {
+    return false;
+  }
+  const runtimeId = workerSpec.worker.runtimeId;
+  if (!adapter.hasRuntime(runtimeId)) {
+    return false;
+  }
+  return adapter.diagnostics(runtimeId).healthy;
 }
 
 function shouldPrewarmRealWorker(): boolean {
