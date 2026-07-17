@@ -27,8 +27,20 @@ export class SinglePiAdapter implements PiAdapter {
   createWorker(options: PiWorkerSpawnOptions): PiWorker {
     const worker = new PiWorker(options);
     this.workers.set(worker.runtimeId, worker);
-    worker.onEvent((event) => this.events.emit("event", event));
+    worker.onEvent((event) => {
+      this.events.emit("event", event);
+      if (
+        event.type === "worker_exit" &&
+        this.workers.get(worker.runtimeId) === worker
+      ) {
+        this.workers.delete(worker.runtimeId);
+      }
+    });
     return worker;
+  }
+
+  workerCount(): number {
+    return this.workers.size;
   }
 
   hasRuntime(runtimeId: RuntimeSessionId): boolean {
