@@ -4,6 +4,7 @@ import {
   dialog,
   shell,
   session,
+  nativeImage,
   type OpenDialogOptions,
 } from "electron";
 import { randomUUID } from "node:crypto";
@@ -66,7 +67,7 @@ import {
   scanSessionRepository,
   validateSessionForDeletion,
 } from "./pi/sessionRepository.js";
-import type { PiMessage, PromptInput } from "./pi/types.js";
+import type { PiMessage, PiState, PromptInput } from "./pi/types.js";
 import {
   resolveEffectivePiConfig,
   resolvePiBinary,
@@ -80,6 +81,14 @@ import {
 } from "./security.js";
 import { ProjectStore, resolvePiDeckHome } from "./projects/projectStore.js";
 import { SettingsStore } from "./settings/settingsStore.js";
+import {
+  assertImagePromptPermitted,
+  decodeImageBase64,
+  inspectImage,
+  MAX_IMAGE_BYTES,
+  MAX_IMAGE_DIMENSION,
+  type SupportedImageMimeType,
+} from "./imagePolicy.js";
 
 const isDev = process.env.VITE_DEV_SERVER_URL !== undefined;
 
@@ -119,7 +128,8 @@ interface AttachmentSelectionRecord {
 }
 
 const attachmentSelections = new Map<string, AttachmentSelectionRecord>();
-const maxImportedImageBytes = 20 * 1024 * 1024;
+const maxImportedImageBytes = MAX_IMAGE_BYTES;
+const maxPromptImages = 10;
 const maxReferencedFileWarningBytes = 100 * 1024 * 1024;
 
 async function bootstrap(): Promise<void> {
@@ -356,9 +366,34 @@ function registerIpcHandlers(
       const adapter = await ensureChatAdapter(store, diagnosticsService);
       const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
       await assertRuntimeInActiveProject(activeRuntimeId);
+      const imageAttachments = (attachments ?? []).filter(
+        (attachment) => attachment.sendMode === "imageInput",
+      );
+      if (imageAttachments.length > maxPromptImages) {
+        throw new Error(
+          `A prompt may contain at most ${maxPromptImages} images.`,
+        );
+      }
+      const imageSettings =
+        imageAttachments.length > 0
+          ? await resolvePromptImageSettings(store, activeRuntimeId)
+          : undefined;
+      if (imageAttachments.length > 0) {
+        // Enforce settings before asking the worker, then enforce the active
+        // model capability from the worker's authoritative model list.
+        assertImagePromptPermitted(imageSettings!, undefined);
+        assertImagePromptPermitted(
+          imageSettings!,
+          await activeModelForRuntime(adapter, activeRuntimeId),
+        );
+      }
       await adapter.prompt(
         activeRuntimeId,
-        await buildPromptInput(text, attachments ?? []),
+        await buildPromptInput(
+          text,
+          attachments ?? [],
+          imageSettings?.autoResize ?? false,
+        ),
       );
       return undefined;
     },
@@ -1053,6 +1088,16 @@ function applyRealBackendEnvOverrides(settings: AppSettings): AppPiSettings {
   }
   if (settings.sessionDir !== undefined) {
     appPiSettings.sessionDir = settings.sessionDir;
+  }
+  if (settings.images !== undefined) {
+    appPiSettings.images = {
+      ...(settings.images.blockImages !== undefined
+        ? { blockImages: settings.images.blockImages }
+        : {}),
+      ...(settings.images.autoResize !== undefined
+        ? { autoResize: settings.images.autoResize }
+        : {}),
+    };
   }
 
   const piBinaryOverride = process.env.PI_DECK_PI_BINARY;
@@ -1759,11 +1804,75 @@ async function safeRealpath(filePath: string): Promise<string | undefined> {
   }
 }
 
+async function resolvePromptImageSettings(
+  store: SettingsStore,
+  runtimeId: string,
+): Promise<{ blockImages: boolean; autoResize: boolean }> {
+  if (chatRuntimeModes.get(runtimeId) !== "real") {
+    // Fake mode has no Pi settings files, but retains Pi's safe defaults.
+    return { blockImages: false, autoResize: true };
+  }
+  const launch = await resolveRealChatLaunchConfig(store);
+  return launch.effective.config.imageSettings;
+}
+
+async function activeModelForRuntime(
+  adapter: SinglePiAdapter,
+  runtimeId: string,
+): Promise<unknown> {
+  const [state, response] = await Promise.all([
+    adapter.getState(runtimeId),
+    adapter.request(runtimeId, "get_available_models"),
+  ]);
+  const models =
+    response &&
+    typeof response === "object" &&
+    !Array.isArray(response) &&
+    Array.isArray((response as { models?: unknown }).models)
+      ? (response as { models: unknown[] }).models
+      : [];
+  const activeModel = models.find((candidate) =>
+    modelMatchesState(candidate, state),
+  );
+  return activeModel ?? null;
+}
+
+function modelMatchesState(model: unknown, state: PiState): boolean {
+  if (!model || typeof model !== "object" || Array.isArray(model)) return false;
+  const candidate = model as { id?: unknown; provider?: unknown };
+  const stateModel =
+    typeof state.model === "string"
+      ? state.model
+      : state.model &&
+          typeof state.model === "object" &&
+          !Array.isArray(state.model)
+        ? (state.model as { id?: unknown }).id
+        : undefined;
+  const stateProvider =
+    typeof state.provider === "string"
+      ? state.provider
+      : state.model &&
+          typeof state.model === "object" &&
+          !Array.isArray(state.model)
+        ? (state.model as { provider?: unknown }).provider
+        : undefined;
+  if (typeof candidate.id !== "string" || typeof stateModel !== "string") {
+    return false;
+  }
+  return (
+    candidate.id === stateModel ||
+    (typeof candidate.provider === "string" &&
+      typeof stateProvider === "string" &&
+      `${candidate.provider}/${candidate.id}` === stateModel)
+  );
+}
+
 async function buildPromptInput(
   text: string,
   attachments: NonNullable<
     z.infer<typeof chatPromptRequestSchema>["attachments"]
   >,
+  autoResize: boolean,
 ): Promise<PromptInput> {
   const imageInputs: NonNullable<PromptInput["images"]> = [];
   const pathReferences: string[] = [];
@@ -1777,23 +1886,22 @@ async function buildPromptInput(
     }
 
     if (attachment.sendMode === "imageInput") {
-      if (selection.kind !== "image" || selection.mimeType === undefined) {
-        throw new Error("Selected attachment is not a supported image.");
+      if (selection.kind !== "image") {
+        throw new Error("Selected attachment is not an image.");
       }
-      const dataBase64 =
-        selection.imageDataBase64 ??
-        (selection.filePath
-          ? await readImageAttachmentBase64(selection.filePath)
-          : undefined);
-      if (dataBase64 === undefined) {
+      const data = selection.imageDataBase64
+        ? decodeImageBase64(selection.imageDataBase64)
+        : selection.filePath
+          ? await readImageAttachment(selection.filePath)
+          : undefined;
+      if (data === undefined) {
         throw new Error(
           "Image attachment is no longer available; reselect it and retry.",
         );
       }
-      imageInputs.push({
-        mimeType: selection.mimeType,
-        dataBase64,
-      });
+      // Re-inspect at send time: a local path may have changed since selection,
+      // and renderer MIME values are never authoritative.
+      imageInputs.push(prepareImageForPrompt(data, autoResize));
     } else {
       if (selection.filePath === undefined) {
         throw new Error(
@@ -1818,36 +1926,65 @@ async function buildPromptInput(
   };
 }
 
-async function readImageAttachmentBase64(
+async function readImageAttachment(
   filePath: string,
-): Promise<string | undefined> {
+): Promise<Buffer | undefined> {
   await assertAttachmentReadable(filePath);
   const stat = await fs.stat(filePath);
   if (stat.size > maxImportedImageBytes) {
     throw new Error("Image is too large to send; choose an image under 20 MB.");
   }
-  const data = await fs.readFile(filePath);
-  return data.toString("base64");
+  return fs.readFile(filePath);
+}
+
+function prepareImageForPrompt(
+  data: Buffer,
+  autoResize: boolean,
+): { mimeType: SupportedImageMimeType; dataBase64: string } {
+  const inspected = inspectImage(data);
+  if (
+    !autoResize ||
+    (inspected.width <= MAX_IMAGE_DIMENSION &&
+      inspected.height <= MAX_IMAGE_DIMENSION)
+  ) {
+    return {
+      mimeType: inspected.mimeType,
+      dataBase64: data.toString("base64"),
+    };
+  }
+
+  // Electron's decoder is used only after our byte/dimension preflight. PNG
+  // output is deliberate: it is supported by all image-input providers and
+  // avoids preserving an animated GIF's ambiguous frame semantics.
+  const image = nativeImage.createFromBuffer(data);
+  if (image.isEmpty()) {
+    throw new Error("Image could not be decoded for resizing.");
+  }
+  const scale = Math.min(
+    MAX_IMAGE_DIMENSION / inspected.width,
+    MAX_IMAGE_DIMENSION / inspected.height,
+  );
+  const resized = image.resize({
+    width: Math.max(1, Math.round(inspected.width * scale)),
+    height: Math.max(1, Math.round(inspected.height * scale)),
+  });
+  const output = resized.toPNG();
+  inspectImage(output);
+  return { mimeType: "image/png", dataBase64: output.toString("base64") };
 }
 
 function importImageAttachmentDraft(
   image: z.infer<typeof attachmentImportImageRequestSchema>["images"][number],
 ): AttachmentDraft {
-  if (!isSupportedImageMimeType(image.mimeType)) {
-    throw new Error(`Unsupported image type: ${image.mimeType}`);
-  }
-  if (image.size > maxImportedImageBytes) {
-    throw new Error(
-      "Image is too large to import; choose an image under 20 MB.",
-    );
-  }
+  const data = decodeImageBase64(image.dataBase64);
+  const inspected = inspectImage(data);
 
   const selectedPathToken = randomUUID();
   attachmentSelections.set(selectedPathToken, {
     kind: "image",
-    mimeType: image.mimeType,
+    mimeType: inspected.mimeType,
     imageDataBase64: image.dataBase64,
-    size: image.size,
+    size: data.length,
   });
 
   return {
@@ -1855,14 +1992,31 @@ function importImageAttachmentDraft(
     selectedPathToken,
     fileName: image.fileName,
     displayPath: image.fileName,
-    mimeType: image.mimeType,
-    size: image.size,
+    mimeType: inspected.mimeType,
+    size: data.length,
     kind: "image",
     sendMode: "imageInput",
     outsideProject: false,
     status: "ready",
-    previewDataUrl: `data:${image.mimeType};base64,${image.dataBase64}`,
+    previewDataUrl: `data:${inspected.mimeType};base64,${image.dataBase64}`,
   };
+}
+
+async function inspectImageFile(
+  filePath: string,
+): Promise<ReturnType<typeof inspectImage> | undefined> {
+  try {
+    const handle = await fs.open(filePath, "r");
+    try {
+      const header = Buffer.alloc(64 * 1024);
+      const { bytesRead } = await handle.read(header, 0, header.length, 0);
+      return inspectImage(header.subarray(0, bytesRead));
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return undefined;
+  }
 }
 
 async function assertAttachmentReadable(filePath: string): Promise<void> {
@@ -1879,12 +2033,19 @@ async function buildAttachmentDraft(
   const canonicalPath = await safeRealpath(filePath);
   const status = canonicalPath ? await getFileStatus(canonicalPath) : "missing";
   const extension = path.extname(filePath).toLowerCase();
-  const imageMimeType = getImageMimeType(extension);
-  const kind: AttachmentDraft["kind"] = imageMimeType
-    ? "image"
-    : isLikelyTextPath(extension)
-      ? "textFile"
-      : "binaryFile";
+  // A filename is only a hint. Read a bounded header so a renamed image is
+  // accepted and a disguised image is never sent under its claimed MIME type.
+  const sniffedImage =
+    canonicalPath && status === "ready"
+      ? await inspectImageFile(canonicalPath)
+      : undefined;
+  const imageRequested = isImagePath(extension);
+  const kind: AttachmentDraft["kind"] =
+    sniffedImage || imageRequested
+      ? "image"
+      : isLikelyTextPath(extension)
+        ? "textFile"
+        : "binaryFile";
   const outsideProject = Boolean(
     projectRoot && canonicalPath && !isPathInside(canonicalPath, projectRoot),
   );
@@ -1896,7 +2057,7 @@ async function buildAttachmentDraft(
     attachmentSelections.set(selectedPathToken, {
       filePath: canonicalPath,
       kind,
-      ...(imageMimeType ? { mimeType: imageMimeType } : {}),
+      ...(sniffedImage ? { mimeType: sniffedImage.mimeType } : {}),
     });
   }
 
@@ -1905,7 +2066,7 @@ async function buildAttachmentDraft(
     selectedPathToken,
     fileName: path.basename(filePath),
     displayPath: filePath,
-    ...(imageMimeType ? { mimeType: imageMimeType } : {}),
+    ...(sniffedImage ? { mimeType: sniffedImage.mimeType } : {}),
     ...(stat ? { size: stat.size } : {}),
     kind,
     sendMode: kind === "image" ? "imageInput" : "pathReference",
@@ -1965,9 +2126,10 @@ async function statIfReadable(
   }
 }
 
-function isSupportedImageMimeType(mimeType: string): boolean {
-  return new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]).has(
-    mimeType,
+function isImagePath(extension: string): boolean {
+  return (
+    getImageMimeType(extension) !== undefined ||
+    new Set([".avif", ".bmp", ".heic", ".tif", ".tiff"]).has(extension)
   );
 }
 

@@ -286,6 +286,17 @@ class FakeRpcServer {
       case "abort":
         this.handleAbort(command);
         break;
+      case "get_available_models":
+        this.respond(command.id ?? "", {
+          models: [
+            {
+              id: "fake-model",
+              provider: "fake-provider",
+              input: ["text", "image"],
+            },
+          ],
+        });
+        break;
       case "get_commands":
         this.respond(command.id, name, {
           commands: [
