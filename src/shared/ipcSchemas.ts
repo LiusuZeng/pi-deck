@@ -4,6 +4,13 @@ const appSettingsShape = {
   piBinaryPath: z.string().min(1).optional(),
   agentDir: z.string().min(1).optional(),
   sessionDir: z.string().min(1).optional(),
+  images: z
+    .object({
+      blockImages: z.boolean().optional(),
+      autoResize: z.boolean().optional(),
+    })
+    .strict()
+    .optional(),
   projectCwd: z.string().min(1).optional(),
   maxRunningSessions: z.number().int().min(1).max(20),
   warmWorkerLimit: z.number().int().min(0).max(20),
@@ -396,11 +403,14 @@ export const attachmentImportImageRequestSchema = z
             fileName: z.string().min(1),
             mimeType: z.string().min(1),
             size: z.number().int().nonnegative(),
-            dataBase64: z.string().min(1),
+            // Bound encoded input before it reaches the main process. The
+            // exact decoded length and canonical base64 form are checked there.
+            dataBase64: z.string().min(1).max(27_962_028),
           })
           .strict(),
       )
-      .min(1),
+      .min(1)
+      .max(10),
   })
   .strict();
 
