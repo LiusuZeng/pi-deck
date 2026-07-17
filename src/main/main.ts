@@ -75,6 +75,7 @@ import {
 } from "./security.js";
 import { ProjectStore, resolvePiDeckHome } from "./projects/projectStore.js";
 import { SettingsStore } from "./settings/settingsStore.js";
+import { availableSessionCapacity } from "./workerCapacity.js";
 
 const isDev = process.env.VITE_DEV_SERVER_URL !== undefined;
 
@@ -94,9 +95,7 @@ const chatRuntimeSessionFiles = new Map<string, string>();
 const chatRuntimeProjectIds = new Map<string, string>();
 const chatSessionFileLocks = new Map<string, string>();
 const chatSessionResumePromises = new Map<string, Promise<ChatSnapshot>>();
-let warmChatWorker: ChatWorkerSpec | undefined;
-let warmChatWorkerPromise: Promise<ChatWorkerSpec | undefined> | undefined;
-let warmChatWorkerSessionFile: string | undefined;
+let pendingChatWorkerLaunches = 0;
 let chatEventUnsubscribe: (() => void) | undefined;
 let selectedRealProjectCwd: string | undefined;
 let isQuittingAfterChatWorkerCleanup = false;
@@ -582,10 +581,6 @@ async function ensureChatAdapter(
     }
     sendChatEventToRenderer(parsed.data);
     if (parsed.data.type === "worker_exit") {
-      if (warmChatWorker?.worker.runtimeId === parsed.data.runtimeId) {
-        warmChatWorker = undefined;
-        warmChatWorkerSessionFile = undefined;
-      }
       forgetChatRuntime(parsed.data.runtimeId);
     }
   });
@@ -596,44 +591,31 @@ async function ensureChatAdapter(
     unsubscribe();
     throw error;
   }
-  if (mode === "real") {
-    void ensureWarmChatWorker(adapter, store);
-  }
-
   chatBackendMode = mode;
   chatEventUnsubscribe = unsubscribe;
   chatAdapter = adapter;
   return adapter;
 }
 
+// Do not start background real workers here. Pi can create either a persisted
+// session or an ephemeral --no-session worker, but cannot promote the latter
+// when it is claimed, so a real warm worker would leave a hidden empty session.
 async function createChatWorker(
   adapter: SinglePiAdapter,
   store: SettingsStore,
   mode: ChatBackendMode,
-  options: { preferWarm?: boolean } = {},
 ): Promise<ChatWorkerSpec> {
-  const warmWorker =
-    mode === "real" && options.preferWarm === true
-      ? await takeWarmChatWorker()
-      : undefined;
-  const usableWarmWorker = isWarmChatWorkerUsable(adapter, warmWorker)
-    ? warmWorker
-    : undefined;
-  if (warmWorker !== undefined && usableWarmWorker === undefined) {
-    diagnostics?.recordError(
-      `Discarded stale warm Pi worker ${warmWorker.worker.runtimeId}; starting a fresh runtime.`,
-    );
+  const reservation = await reserveChatWorkerCapacity(store);
+  try {
+    const workerSpec =
+      mode === "real"
+        ? await createRealChatWorker(adapter, store)
+        : createFakeChatWorker(adapter);
+    registerChatWorker(workerSpec, mode);
+    return workerSpec;
+  } finally {
+    reservation.release();
   }
-  const workerSpec =
-    usableWarmWorker ??
-    (mode === "real"
-      ? await createRealChatWorker(adapter, store)
-      : createFakeChatWorker(adapter));
-  registerChatWorker(workerSpec, mode);
-  if (mode === "real") {
-    void ensureWarmChatWorker(adapter, store);
-  }
-  return workerSpec;
 }
 
 function registerChatWorker(
@@ -650,80 +632,36 @@ function registerChatWorker(
   }
 }
 
-async function ensureWarmChatWorker(
-  adapter: SinglePiAdapter,
+interface ChatWorkerCapacityReservation {
+  release(): void;
+}
+
+async function reserveChatWorkerCapacity(
   store: SettingsStore,
-): Promise<ChatWorkerSpec | undefined> {
-  if (!shouldPrewarmRealWorker()) {
-    return undefined;
-  }
-  const existingWarmWorker = warmChatWorker;
-  if (existingWarmWorker !== undefined) {
-    if (isWarmChatWorkerUsable(adapter, existingWarmWorker)) {
-      return existingWarmWorker;
-    }
-    diagnostics?.recordError(
-      `Discarded stale warm Pi worker ${existingWarmWorker.worker.runtimeId}; prewarming a replacement.`,
+): Promise<ChatWorkerCapacityReservation> {
+  const settings = await store.get();
+  if (
+    availableSessionCapacity(
+      settings,
+      chatRuntimeIds.size,
+      pendingChatWorkerLaunches,
+    ) === 0
+  ) {
+    throw new Error(
+      `Cannot start another session: the ${settings.maxRunningSessions}-session limit has been reached.`,
     );
-    warmChatWorker = undefined;
-    warmChatWorkerSessionFile = undefined;
-  }
-  if (warmChatWorkerPromise !== undefined) {
-    return warmChatWorkerPromise;
   }
 
-  warmChatWorkerPromise = (async () => {
-    const workerSpec = await createRealChatWorker(adapter, store);
-    const state = await adapter.getState(workerSpec.worker.runtimeId);
-    if (typeof state.sessionFile === "string") {
-      warmChatWorkerSessionFile =
-        (await safeRealpath(state.sessionFile)) ??
-        path.resolve(state.sessionFile);
-    }
-    warmChatWorker = workerSpec;
-    return workerSpec;
-  })()
-    .catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : String(error);
-      diagnostics?.recordError(`Failed to prewarm real Pi worker: ${message}`);
-      warmChatWorker = undefined;
-      warmChatWorkerSessionFile = undefined;
-      return undefined;
-    })
-    .finally(() => {
-      warmChatWorkerPromise = undefined;
-    });
-
-  return warmChatWorkerPromise;
-}
-
-async function takeWarmChatWorker(): Promise<ChatWorkerSpec | undefined> {
-  const workerSpec = warmChatWorker ?? (await warmChatWorkerPromise);
-  if (workerSpec === undefined) {
-    return undefined;
-  }
-  warmChatWorker = undefined;
-  warmChatWorkerPromise = undefined;
-  warmChatWorkerSessionFile = undefined;
-  return workerSpec;
-}
-
-function isWarmChatWorkerUsable(
-  adapter: SinglePiAdapter,
-  workerSpec: ChatWorkerSpec | undefined,
-): boolean {
-  if (workerSpec === undefined) {
-    return false;
-  }
-  const runtimeId = workerSpec.worker.runtimeId;
-  if (!adapter.hasRuntime(runtimeId)) {
-    return false;
-  }
-  return adapter.diagnostics(runtimeId).healthy;
-}
-
-function shouldPrewarmRealWorker(): boolean {
-  return process.env.PI_DECK_DISABLE_PREWARM_REAL_WORKER !== "1";
+  pendingChatWorkerLaunches += 1;
+  let released = false;
+  return {
+    release: () => {
+      if (!released) {
+        released = true;
+        pendingChatWorkerLaunches -= 1;
+      }
+    },
+  };
 }
 
 function sendChatEventToRenderer(
@@ -936,16 +874,7 @@ async function resolveRealBackendCwd(settings: AppSettings): Promise<string> {
 
 async function closeChatWorker(): Promise<void> {
   const adapter = chatAdapter;
-  const pendingWarmWorker = warmChatWorkerPromise
-    ? await warmChatWorkerPromise
-    : undefined;
-  const runtimeIds = [
-    ...new Set([
-      ...chatRuntimeIds,
-      ...(warmChatWorker ? [warmChatWorker.worker.runtimeId] : []),
-      ...(pendingWarmWorker ? [pendingWarmWorker.worker.runtimeId] : []),
-    ]),
-  ];
+  const runtimeIds = [...chatRuntimeIds];
   chatEventUnsubscribe?.();
   chatEventUnsubscribe = undefined;
   chatAdapter = undefined;
@@ -958,9 +887,6 @@ async function closeChatWorker(): Promise<void> {
   chatRuntimeProjectIds.clear();
   chatSessionFileLocks.clear();
   chatSessionResumePromises.clear();
-  warmChatWorker = undefined;
-  warmChatWorkerPromise = undefined;
-  warmChatWorkerSessionFile = undefined;
 
   if (adapter === undefined || runtimeIds.length === 0) {
     return;
@@ -1203,12 +1129,10 @@ async function listChatSessions(
     projectCwd: launch.projectCwd,
     projectId: launch.projectCwd,
     sessionDir,
-    sessions: sessions
-      .filter((session) => session.sessionFile !== warmChatWorkerSessionFile)
-      .map((session) => {
-        const attachedRuntimeId = chatSessionFileLocks.get(session.sessionFile);
-        return attachedRuntimeId ? { ...session, attachedRuntimeId } : session;
-      }),
+    sessions: sessions.map((session) => {
+      const attachedRuntimeId = chatSessionFileLocks.get(session.sessionFile);
+      return attachedRuntimeId ? { ...session, attachedRuntimeId } : session;
+    }),
     diagnostics,
   };
 }
@@ -1321,10 +1245,7 @@ async function deleteAllChatSessions(
       continue;
     }
     const lockedRuntimeId = chatSessionFileLocks.get(canonicalSessionFile);
-    if (
-      canonicalSessionFile === warmChatWorkerSessionFile ||
-      (lockedRuntimeId !== undefined && chatRuntimeIds.has(lockedRuntimeId))
-    ) {
+    if (lockedRuntimeId !== undefined && chatRuntimeIds.has(lockedRuntimeId)) {
       skippedCount += 1;
       continue;
     }
@@ -1403,21 +1324,27 @@ async function attachRealResumeWorker(
   store: SettingsStore,
   canonicalSessionFile: string,
 ): Promise<ChatSnapshot> {
-  const workerSpec = await createRealResumeWorker(
-    adapter,
-    store,
-    canonicalSessionFile,
-  );
-  const runtimeId = workerSpec.worker.runtimeId;
-  chatRuntimeId = runtimeId;
-  chatRuntimeIds.add(runtimeId);
-  chatRuntimeModes.set(runtimeId, "real");
-  chatWorkerCwds.set(runtimeId, workerSpec.cwd);
-  if (workerSpec.projectId !== undefined) {
-    chatRuntimeProjectIds.set(runtimeId, workerSpec.projectId);
+  const reservation = await reserveChatWorkerCapacity(store);
+  let runtimeId: string;
+  try {
+    const workerSpec = await createRealResumeWorker(
+      adapter,
+      store,
+      canonicalSessionFile,
+    );
+    runtimeId = workerSpec.worker.runtimeId;
+    chatRuntimeId = runtimeId;
+    chatRuntimeIds.add(runtimeId);
+    chatRuntimeModes.set(runtimeId, "real");
+    chatWorkerCwds.set(runtimeId, workerSpec.cwd);
+    if (workerSpec.projectId !== undefined) {
+      chatRuntimeProjectIds.set(runtimeId, workerSpec.projectId);
+    }
+    chatRuntimeSessionFiles.set(runtimeId, canonicalSessionFile);
+    chatSessionFileLocks.set(canonicalSessionFile, runtimeId);
+  } finally {
+    reservation.release();
   }
-  chatRuntimeSessionFiles.set(runtimeId, canonicalSessionFile);
-  chatSessionFileLocks.set(canonicalSessionFile, runtimeId);
 
   try {
     const snapshot = await getChatSnapshotForRuntime(
@@ -1459,9 +1386,7 @@ async function createChatSessionSnapshot(
   }
   const adapter = await ensureChatAdapter(store, diagnosticsService);
   const mode = chatBackendMode ?? resolveChatBackendMode();
-  const workerSpec = await createChatWorker(adapter, store, mode, {
-    preferWarm: true,
-  });
+  const workerSpec = await createChatWorker(adapter, store, mode);
   return getChatSnapshotForRuntime(adapter, workerSpec.worker.runtimeId, mode, {
     skipMessages: true,
   });

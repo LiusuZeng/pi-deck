@@ -102,7 +102,6 @@ test("real Pi GUI P0 smoke: prompt, project switch, restart, resume", async () =
     PI_DECK_USER_DATA_DIR: userDataDir,
     PI_DECK_HOME: piDeckHome,
     PI_CODING_AGENT_SESSION_DIR: sessionDir,
-    PI_DECK_DISABLE_PREWARM_REAL_WORKER: "1",
     PI_DECK_TEST_PICK_PROJECT_CWDS: JSON.stringify([projectB, projectA]),
   };
 
@@ -119,6 +118,12 @@ test("real Pi GUI P0 smoke: prompt, project switch, restart, resume", async () =
       await expect(
         firstLaunch.page.getByRole("heading", { name: /project-a/ }),
       ).toBeVisible();
+      await expect
+        .poll(() => listJsonlFiles(sessionDir).length, {
+          message: "Startup must not leave a hidden empty warm-worker session",
+          timeout: 30_000,
+        })
+        .toBe(0);
 
       await firstLaunch.page
         .getByRole("button", { name: "New session" })

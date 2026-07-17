@@ -51,7 +51,6 @@ function fakeRealModeEnv(options: {
     ...(options.projectCwd ? { PI_DECK_PROJECT_CWD: options.projectCwd } : {}),
     PI_CODING_AGENT_DIR: options.agentDir,
     PI_DECK_HOME: path.join(options.root, "pideck-home"),
-    PI_DECK_DISABLE_PREWARM_REAL_WORKER: "1",
     PI_DECK_USER_DATA_DIR:
       options.userDataDir ?? path.join(options.root, "user-data"),
     ...(options.testPickProjectCwd
@@ -579,7 +578,6 @@ test("real mode does not fall back to fake/local UI and can send from active run
     PI_DECK_HOME: path.join(root, "pideck-home"),
     PI_DECK_USER_DATA_DIR: path.join(root, "user-data"),
     PI_CODING_AGENT_DIR: path.join(root, "agent"),
-    PI_DECK_DISABLE_PREWARM_REAL_WORKER: "1",
   });
   try {
     await expectHealthyPreload(page);

@@ -23,7 +23,6 @@ Options:
   --launch            Use production-ish local launch (default).
   --project <dir>     Project cwd for real Pi workers. Defaults to caller cwd.
   --pi <path>         Pi binary path. Defaults to PI_DECK_PI_BINARY or PATH/common locations.
-  --no-prewarm        Disable spare real-worker prewarm.
   --dry-run           Print resolved launch plan without starting Electron.
   -h, --help          Show this help.
 
@@ -38,7 +37,6 @@ function parseArgs(argv) {
     runMode: "launch",
     project: undefined,
     piBinary: undefined,
-    noPrewarm: false,
     dryRun: false,
     help: false,
   };
@@ -58,8 +56,6 @@ function parseArgs(argv) {
       options.project = requireValue(argv, ++index, "--project");
     } else if (arg === "--pi") {
       options.piBinary = requireValue(argv, ++index, "--pi");
-    } else if (arg === "--no-prewarm") {
-      options.noPrewarm = true;
     } else if (arg === "--dry-run") {
       options.dryRun = true;
     } else if (arg === "-h" || arg === "--help") {
@@ -206,9 +202,6 @@ function main() {
       env.PI_DECK_BACKEND = "real";
       env.PI_DECK_PI_BINARY = piBinary;
       env.PI_DECK_PROJECT_CWD = projectCwd;
-      if (options.noPrewarm) {
-        env.PI_DECK_DISABLE_PREWARM_REAL_WORKER = "1";
-      }
     } else {
       env.PI_DECK_BACKEND = "fake";
     }

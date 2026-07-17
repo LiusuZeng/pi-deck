@@ -48,8 +48,7 @@ The launcher resolves and validates:
 
 - project cwd, defaulting to the caller cwd;
 - `pi` binary from `--pi`, `PI_DECK_PI_BINARY`, `PATH`, and common macOS install paths;
-- real/fake backend env;
-- optional `--no-prewarm` for disabling spare real-worker prewarm.
+- real/fake backend env.
 
 The old shell scripts still exist as compatibility wrappers:
 
@@ -148,7 +147,7 @@ Current reality:
 - An opt-in real backend mode exists for the narrow Demo Slice 3 vertical slice.
 - Real mode launches one real `pi --mode rpc` worker, loads `get_state` / `get_messages`, sends prompts through the existing GUI chat path, streams RPC events, supports `abort`, and closes the worker on app quit.
 - Real Pi binary resolution, environment resolution, EffectivePiConfig, JSONL transport, and minimal RPC smoke-test foundations exist.
-- Real Pi can create additional in-window sessions with the compact `+`. Real mode scans the authoritative session directory for the selected project, clicking a saved row attempts `pi --mode rpc --session <file>` with canonical `get_state.sessionFile` verification, and the P0 restart/resume/project-handoff path is covered by `npm run test:e2e:real-smoke`. Candidate session dirs, refresh/error polish, project trust UX, and robust scheduler-backed multi-session orchestration remain future M3/M5+ work. Model/thinking controls are available in the composer for the active real worker with capability labels. Real slash commands use active-worker `get_commands` when available. Attachments include image capability gating and large-image blocking, while actual image resizing/package work remains future. Pi Deck also prewarms one spare real worker unless `PI_DECK_DISABLE_PREWARM_REAL_WORKER=1` is set.
+- Real Pi can create additional in-window sessions with the compact `+`, up to `maxRunningSessions`. Real mode scans the authoritative session directory for the selected project, clicking a saved row attempts `pi --mode rpc --session <file>` with canonical `get_state.sessionFile` verification, and the P0 restart/resume/project-handoff path is covered by `npm run test:e2e:real-smoke`. Candidate session dirs, refresh/error polish, project trust UX, and robust scheduler-backed multi-session orchestration remain future M3/M5+ work. Model/thinking controls are available in the composer for the active real worker with capability labels. Real slash commands use active-worker `get_commands` when available. Attachments include image capability gating and large-image blocking, while actual image resizing/package work remains future. Real-worker prewarming is disabled: current Pi can only create either a persisted session or an ephemeral `--no-session` worker, and cannot promote the latter when it is used.
 
 Real GUI chat launch:
 

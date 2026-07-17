@@ -37,7 +37,7 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
 - [x] Real-mode UI simplified: sidebar uses only the compact `+` for new sessions, saved rows are concise, model controls moved into the composer, and startup no longer flashes the legacy fake/local UI.
 - [x] Real-mode sidebar shows the 5 most recent sessions first with relative timestamps; older sessions are behind a Browse older sessions control and hover shows a readable timestamp.
 - [x] Real mode can list Pi models and switch model/thinking through RPC from the composer.
-- [x] New real session creation shows an immediate optimistic starting row, returns before loading full messages, and prewarms one spare real worker.
+- [x] New real session creation shows an immediate optimistic starting row and returns before loading full messages; real-worker prewarming stays disabled so Pi cannot leave hidden empty persisted sessions.
 - [x] Real-mode project picker resets the active real worker to the selected cwd, persists the selected cwd for later launches, and refreshes saved sessions for that project.
 - [x] Authoritative session scanning can optionally include a project `sessionDir` candidate via explicit `PI_DECK_SCAN_PROJECT_SESSION_DIR_CANDIDATE=1` opt-in.
 - [x] Real prompt attachments send through main-process-owned opaque tokens: image inputs are sent natively, non-image files are referenced by path.
