@@ -3,7 +3,10 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, it as test } from "vitest";
-import { scanSessionRepository } from "./sessionRepository.js";
+import {
+  scanSessionRepository,
+  validateSessionForDeletion,
+} from "./sessionRepository.js";
 
 test("session repository scans project jsonl sessions without following other projects", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-deck-sessions-"));
@@ -46,6 +49,135 @@ test("session repository scans project jsonl sessions without following other pr
   assert.equal(result.sessions[0]?.sessionId, "session-one");
   assert.equal(result.sessions[0]?.title, "Resume this important session");
   assert.equal(result.sessions[0]?.messageCount, 1);
+});
+
+describe("session deletion validation", () => {
+  async function createSessionFixture(): Promise<{
+    root: string;
+    project: string;
+    otherProject: string;
+    sessionDir: string;
+  }> {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-deck-delete-"));
+    const project = path.join(root, "project");
+    const otherProject = path.join(root, "other-project");
+    const sessionDir = path.join(root, "sessions");
+    await Promise.all(
+      [project, otherProject, sessionDir].map((directory) =>
+        fs.mkdir(directory, { recursive: true }),
+      ),
+    );
+    return { root, project, otherProject, sessionDir };
+  }
+
+  function piHeader(cwd: string): string {
+    return `${JSON.stringify({
+      type: "session",
+      version: 3,
+      id: "saved-session",
+      timestamp: "2026-06-29T10:00:00.000Z",
+      cwd,
+    })}\n`;
+  }
+
+  test("accepts only a canonical regular Pi session in the active session directory", async () => {
+    const { project, sessionDir } = await createSessionFixture();
+    const sessionFile = path.join(sessionDir, "saved.jsonl");
+    await fs.writeFile(sessionFile, piHeader(project));
+
+    const result = await validateSessionForDeletion({
+      sessionFile,
+      sessionDir,
+      projectCwd: project,
+    });
+
+    assert.deepEqual(result, {
+      ok: true,
+      sessionFile: await fs.realpath(sessionFile),
+    });
+  });
+
+  test("rejects paths outside the authoritative directory even with a matching Pi header", async () => {
+    const { project, sessionDir, root } = await createSessionFixture();
+    const sessionFile = path.join(root, "not-a-session-dir.jsonl");
+    await fs.writeFile(sessionFile, piHeader(project));
+
+    const result = await validateSessionForDeletion({
+      sessionFile,
+      sessionDir,
+      projectCwd: project,
+    });
+
+    assert.deepEqual(result, {
+      ok: false,
+      reason: "session file is outside the configured session directory",
+    });
+  });
+
+  test("rejects project-store-like files with a forged or missing Pi session header", async () => {
+    const { project, otherProject, sessionDir } = await createSessionFixture();
+    const wrongProject = path.join(sessionDir, "wrong-project.jsonl");
+    const malformed = path.join(sessionDir, "not-a-pi-session.jsonl");
+    await fs.writeFile(wrongProject, piHeader(otherProject));
+    await fs.writeFile(
+      malformed,
+      `${JSON.stringify({ cwd: project, id: "forged" })}\n`,
+    );
+
+    const [wrongProjectResult, malformedResult] = await Promise.all([
+      validateSessionForDeletion({
+        sessionFile: wrongProject,
+        sessionDir,
+        projectCwd: project,
+      }),
+      validateSessionForDeletion({
+        sessionFile: malformed,
+        sessionDir,
+        projectCwd: project,
+      }),
+    ]);
+
+    assert.deepEqual(wrongProjectResult, {
+      ok: false,
+      reason: "session belongs to a different project",
+    });
+    assert.deepEqual(malformedResult, {
+      ok: false,
+      reason: "session file does not have a valid Pi session header",
+    });
+  });
+
+  test("rejects non-regular files and symlinks resolving outside the session directory", async () => {
+    const { project, sessionDir, root } = await createSessionFixture();
+    const directory = path.join(sessionDir, "directory.jsonl");
+    const outsideFile = path.join(root, "outside.jsonl");
+    const linkedFile = path.join(sessionDir, "linked.jsonl");
+    await fs.mkdir(directory);
+    await fs.writeFile(outsideFile, piHeader(project));
+    await fs.symlink(outsideFile, linkedFile);
+
+    const [directoryResult, linkedResult] = await Promise.all([
+      validateSessionForDeletion({
+        sessionFile: directory,
+        sessionDir,
+        projectCwd: project,
+      }),
+      validateSessionForDeletion({
+        sessionFile: linkedFile,
+        sessionDir,
+        projectCwd: project,
+      }),
+    ]);
+
+    assert.deepEqual(directoryResult, {
+      ok: false,
+      reason: "session path is not a regular file",
+    });
+    assert.deepEqual(linkedResult, {
+      ok: false,
+      reason: "session file is outside the configured session directory",
+    });
+  });
 });
 
 describe("messy session repository scanning", () => {

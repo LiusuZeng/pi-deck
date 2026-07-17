@@ -17,6 +17,17 @@ export interface ScanSessionRepositoryResult {
   diagnostics: string[];
 }
 
+/** The filesystem and Pi-header checks required before a session can be deleted. */
+export interface ValidateSessionDeletionOptions {
+  sessionFile: string;
+  sessionDir: string;
+  projectCwd: string;
+}
+
+export type SessionDeletionValidationResult =
+  | { ok: true; sessionFile: string }
+  | { ok: false; reason: string };
+
 interface ParsedSessionFile {
   sessionId?: string;
   cwd?: string;
@@ -33,6 +44,88 @@ const DEFAULT_MAX_FILES = 20_000;
 const DEFAULT_MAX_BYTES_PER_FILE = 256 * 1024;
 const DEFAULT_MAX_TOTAL_BYTES = 250 * 1024 * 1024;
 const DEFAULT_MAX_WALL_TIME_MS = 15_000;
+const DELETE_HEADER_MAX_BYTES = 64 * 1024;
+
+/**
+ * Validates a renderer-supplied path against the active Pi configuration.
+ *
+ * Session references are presentation metadata, not deletion authority.  This
+ * deliberately rechecks the canonical directory, file type, extension, and
+ * on-disk Pi session header immediately before deletion.
+ */
+export async function validateSessionForDeletion(
+  options: ValidateSessionDeletionOptions,
+): Promise<SessionDeletionValidationResult> {
+  let sessionDir: string;
+  let projectCwd: string;
+  let sessionFile: string;
+  try {
+    [sessionDir, projectCwd, sessionFile] = await Promise.all([
+      fs.realpath(options.sessionDir),
+      fs.realpath(options.projectCwd),
+      fs.realpath(options.sessionFile),
+    ]);
+  } catch {
+    return {
+      ok: false,
+      reason: "session file, directory, or project is unavailable",
+    };
+  }
+
+  let sessionDirStat: Awaited<ReturnType<typeof fs.stat>>;
+  let sessionFileStat: Awaited<ReturnType<typeof fs.lstat>>;
+  try {
+    [sessionDirStat, sessionFileStat] = await Promise.all([
+      fs.stat(sessionDir),
+      fs.lstat(sessionFile),
+    ]);
+  } catch {
+    return {
+      ok: false,
+      reason: "session file or directory could not be inspected",
+    };
+  }
+  if (!sessionDirStat.isDirectory()) {
+    return {
+      ok: false,
+      reason: "configured session directory is not a directory",
+    };
+  }
+  if (!sessionFileStat.isFile()) {
+    return { ok: false, reason: "session path is not a regular file" };
+  }
+  if (!sessionFile.endsWith(".jsonl")) {
+    return {
+      ok: false,
+      reason: "session file does not have a .jsonl extension",
+    };
+  }
+  if (!isStrictDescendant(sessionFile, sessionDir)) {
+    return {
+      ok: false,
+      reason: "session file is outside the configured session directory",
+    };
+  }
+
+  const header = await readPiSessionHeader(sessionFile);
+  if (header === undefined) {
+    return {
+      ok: false,
+      reason: "session file does not have a valid Pi session header",
+    };
+  }
+  let headerCwd: string;
+  try {
+    headerCwd = await fs.realpath(header.cwd);
+  } catch {
+    return { ok: false, reason: "session header project is unavailable" };
+  }
+  if (headerCwd !== projectCwd) {
+    return { ok: false, reason: "session belongs to a different project" };
+  }
+
+  return { ok: true, sessionFile };
+}
 
 export async function scanSessionRepository(
   options: ScanSessionRepositoryOptions,
@@ -184,6 +277,55 @@ async function summarizeSessionFile(
       ...(parsed.preview ? { preview: parsed.preview } : {}),
     },
   };
+}
+
+interface PiSessionHeader {
+  cwd: string;
+}
+
+async function readPiSessionHeader(
+  filePath: string,
+): Promise<PiSessionHeader | undefined> {
+  try {
+    const handle = await fs.open(filePath, "r");
+    try {
+      const buffer = Buffer.alloc(DELETE_HEADER_MAX_BYTES);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      const firstLine = buffer
+        .subarray(0, bytesRead)
+        .toString("utf8")
+        .split(/\r?\n/, 1)[0];
+      if (firstLine === undefined || firstLine.length === 0) {
+        return undefined;
+      }
+      const record = JSON.parse(firstLine) as unknown;
+      if (!record || typeof record !== "object" || Array.isArray(record)) {
+        return undefined;
+      }
+      const header = record as Record<string, unknown>;
+      return header.type === "session" &&
+        typeof header.id === "string" &&
+        header.id.length > 0 &&
+        typeof header.cwd === "string" &&
+        header.cwd.length > 0
+        ? { cwd: header.cwd }
+        : undefined;
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+function isStrictDescendant(filePath: string, directory: string): boolean {
+  const relative = path.relative(directory, filePath);
+  return (
+    relative.length > 0 &&
+    !relative.startsWith(`..${path.sep}`) &&
+    relative !== ".." &&
+    !path.isAbsolute(relative)
+  );
 }
 
 async function parseSessionFile(
