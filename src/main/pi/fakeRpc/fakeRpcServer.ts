@@ -287,7 +287,7 @@ class FakeRpcServer {
         this.handleAbort(command);
         break;
       case "get_available_models":
-        this.respond(command.id ?? "", {
+        this.respond(command.id, name, {
           models: [
             {
               id: "fake-model",
