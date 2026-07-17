@@ -75,6 +75,11 @@ import {
 } from "./security.js";
 import { ProjectStore, resolvePiDeckHome } from "./projects/projectStore.js";
 import { SettingsStore } from "./settings/settingsStore.js";
+import {
+  formatCanonicalFileReference,
+  isPathInside,
+  sniffImageMimeType,
+} from "./attachments.js";
 
 const isDev = process.env.VITE_DEV_SERVER_URL !== undefined;
 
@@ -348,9 +353,17 @@ function registerIpcHandlers(
       const adapter = await ensureChatAdapter(store, diagnosticsService);
       const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
       await assertRuntimeInActiveProject(activeRuntimeId);
+      const activeProjectRoot = (await ensureProjectStore().getActiveProject())
+        ?.rootPath;
       await adapter.prompt(
         activeRuntimeId,
-        await buildPromptInput(text, attachments ?? []),
+        await buildPromptInput(
+          text,
+          attachments ?? [],
+          chatRuntimeProjectIds.get(activeRuntimeId) ??
+            activeProjectRoot ??
+            chatWorkerCwds.get(activeRuntimeId),
+        ),
       );
       return undefined;
     },
@@ -1596,6 +1609,7 @@ async function buildPromptInput(
   attachments: NonNullable<
     z.infer<typeof chatPromptRequestSchema>["attachments"]
   >,
+  projectRoot: string | undefined,
 ): Promise<PromptInput> {
   const imageInputs: NonNullable<PromptInput["images"]> = [];
   const pathReferences: string[] = [];
@@ -1609,23 +1623,20 @@ async function buildPromptInput(
     }
 
     if (attachment.sendMode === "imageInput") {
-      if (selection.kind !== "image" || selection.mimeType === undefined) {
+      if (selection.kind !== "image") {
         throw new Error("Selected attachment is not a supported image.");
       }
-      const dataBase64 =
-        selection.imageDataBase64 ??
-        (selection.filePath
-          ? await readImageAttachmentBase64(selection.filePath)
-          : undefined);
-      if (dataBase64 === undefined) {
+      const image = selection.imageDataBase64
+        ? inspectImageAttachmentData(selection.imageDataBase64)
+        : selection.filePath
+          ? await readImageAttachment(selection.filePath)
+          : undefined;
+      if (image === undefined) {
         throw new Error(
           "Image attachment is no longer available; reselect it and retry.",
         );
       }
-      imageInputs.push({
-        mimeType: selection.mimeType,
-        dataBase64,
-      });
+      imageInputs.push(image);
     } else {
       if (selection.filePath === undefined) {
         throw new Error(
@@ -1633,7 +1644,9 @@ async function buildPromptInput(
         );
       }
       await assertAttachmentReadable(selection.filePath);
-      pathReferences.push(selection.filePath);
+      pathReferences.push(
+        formatCanonicalFileReference(selection.filePath, projectRoot),
+      );
     }
   }
 
@@ -1650,36 +1663,51 @@ async function buildPromptInput(
   };
 }
 
-async function readImageAttachmentBase64(
+async function readImageAttachment(
   filePath: string,
-): Promise<string | undefined> {
+): Promise<{ mimeType: string; dataBase64: string }> {
   await assertAttachmentReadable(filePath);
   const stat = await fs.stat(filePath);
   if (stat.size > maxImportedImageBytes) {
     throw new Error("Image is too large to send; choose an image under 20 MB.");
   }
-  const data = await fs.readFile(filePath);
-  return data.toString("base64");
+  return inspectImageAttachmentData(
+    (await fs.readFile(filePath)).toString("base64"),
+  );
+}
+
+function inspectImageAttachmentData(dataBase64: string): {
+  mimeType: string;
+  dataBase64: string;
+} {
+  const data = Buffer.from(dataBase64, "base64");
+  if (data.length === 0) {
+    throw new Error("Unsupported image file contents.");
+  }
+  if (data.length > maxImportedImageBytes) {
+    throw new Error("Image is too large to send; choose an image under 20 MB.");
+  }
+  const mimeType = sniffImageMimeType(data);
+  if (mimeType === undefined) {
+    throw new Error("Unsupported image file contents.");
+  }
+  return { mimeType, dataBase64: data.toString("base64") };
 }
 
 function importImageAttachmentDraft(
   image: z.infer<typeof attachmentImportImageRequestSchema>["images"][number],
 ): AttachmentDraft {
-  if (!isSupportedImageMimeType(image.mimeType)) {
-    throw new Error(`Unsupported image type: ${image.mimeType}`);
-  }
-  if (image.size > maxImportedImageBytes) {
-    throw new Error(
-      "Image is too large to import; choose an image under 20 MB.",
-    );
-  }
+  // Renderer-provided MIME and size are display hints only. The main process
+  // derives both from decoded bytes before allowing an image input token.
+  const inspected = inspectImageAttachmentData(image.dataBase64);
+  const size = Buffer.from(inspected.dataBase64, "base64").length;
 
   const selectedPathToken = randomUUID();
   attachmentSelections.set(selectedPathToken, {
     kind: "image",
-    mimeType: image.mimeType,
-    imageDataBase64: image.dataBase64,
-    size: image.size,
+    mimeType: inspected.mimeType,
+    imageDataBase64: inspected.dataBase64,
+    size,
   });
 
   return {
@@ -1687,13 +1715,13 @@ function importImageAttachmentDraft(
     selectedPathToken,
     fileName: image.fileName,
     displayPath: image.fileName,
-    mimeType: image.mimeType,
-    size: image.size,
+    mimeType: inspected.mimeType,
+    size,
     kind: "image",
     sendMode: "imageInput",
     outsideProject: false,
     status: "ready",
-    previewDataUrl: `data:${image.mimeType};base64,${image.dataBase64}`,
+    previewDataUrl: `data:${inspected.mimeType};base64,${inspected.dataBase64}`,
   };
 }
 
@@ -1701,6 +1729,13 @@ async function assertAttachmentReadable(filePath: string): Promise<void> {
   const status = await getFileStatus(filePath);
   if (status !== "ready") {
     throw new Error(`Attachment is ${status}: ${filePath}`);
+  }
+  // Tokens retain the canonical path selected by the user. Reject a path that
+  // has since been swapped for a symlink rather than following it elsewhere.
+  if ((await safeRealpath(filePath)) !== filePath) {
+    throw new Error(
+      "Attachment changed after selection; reselect it and retry.",
+    );
   }
 }
 
@@ -1711,7 +1746,13 @@ async function buildAttachmentDraft(
   const canonicalPath = await safeRealpath(filePath);
   const status = canonicalPath ? await getFileStatus(canonicalPath) : "missing";
   const extension = path.extname(filePath).toLowerCase();
-  const imageMimeType = getImageMimeType(extension);
+  // Filename extensions and renderer MIME claims are never authority for a
+  // native image input. A renamed image is accepted; a disguised one remains
+  // a path reference instead of being sent with a false image MIME type.
+  const imageMimeType =
+    canonicalPath && status === "ready"
+      ? await sniffImageFileMimeType(canonicalPath)
+      : undefined;
   const kind: AttachmentDraft["kind"] = imageMimeType
     ? "image"
     : isLikelyTextPath(extension)
@@ -1720,7 +1761,10 @@ async function buildAttachmentDraft(
   const outsideProject = Boolean(
     projectRoot && canonicalPath && !isPathInside(canonicalPath, projectRoot),
   );
-  const stat = canonicalPath ? await statIfReadable(canonicalPath) : undefined;
+  const stat =
+    canonicalPath && status === "ready"
+      ? await statIfReadable(canonicalPath)
+      : undefined;
   const warning = attachmentWarning({ outsideProject, kind, stat });
 
   const selectedPathToken = randomUUID();
@@ -1775,10 +1819,31 @@ function attachmentWarning(options: {
   return undefined;
 }
 
+async function sniffImageFileMimeType(
+  filePath: string,
+): Promise<string | undefined> {
+  try {
+    const handle = await fs.open(filePath, "r");
+    try {
+      const header = Buffer.alloc(16);
+      const { bytesRead } = await handle.read(header, 0, header.length, 0);
+      return sniffImageMimeType(header.subarray(0, bytesRead));
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return undefined;
+  }
+}
+
 async function getFileStatus(
   filePath: string,
 ): Promise<"ready" | "missing" | "unreadable"> {
   try {
+    const stat = await fs.stat(filePath);
+    if (!stat.isFile()) {
+      return "unreadable";
+    }
     await fs.access(filePath, fsConstants.R_OK);
     return "ready";
   } catch (error) {
@@ -1794,28 +1859,6 @@ async function statIfReadable(
     return await fs.stat(filePath);
   } catch {
     return undefined;
-  }
-}
-
-function isSupportedImageMimeType(mimeType: string): boolean {
-  return new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]).has(
-    mimeType,
-  );
-}
-
-function getImageMimeType(extension: string): string | undefined {
-  switch (extension) {
-    case ".png":
-      return "image/png";
-    case ".jpg":
-    case ".jpeg":
-      return "image/jpeg";
-    case ".webp":
-      return "image/webp";
-    case ".gif":
-      return "image/gif";
-    default:
-      return undefined;
   }
 }
 
@@ -1840,14 +1883,6 @@ function isLikelyTextPath(extension: string): boolean {
     ".yaml",
     ".yml",
   ]).has(extension);
-}
-
-function isPathInside(candidate: string, root: string): boolean {
-  const relative = path.relative(root, candidate);
-  return (
-    relative === "" ||
-    (!relative.startsWith("..") && !path.isAbsolute(relative))
-  );
 }
 
 app.on("before-quit", (event) => {
