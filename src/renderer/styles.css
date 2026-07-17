@@ -1178,14 +1178,36 @@ h1 {
   box-shadow: none;
 }
 
+.send-button.steer,
+.send-button.follow-up,
+.send-button.extension-command,
 .send-button.abort {
   width: auto;
   min-width: 72px;
   padding: 0 12px;
-  color: #991b1b;
-  background: #fee2e2;
   font-size: 13px;
   box-shadow: none;
+}
+
+.send-button.steer {
+  min-width: 64px;
+}
+
+.send-button.follow-up {
+  min-width: 86px;
+  color: #1d4ed8;
+  background: #dbeafe;
+}
+
+.send-button.extension-command {
+  min-width: 132px;
+  color: #7c2d12;
+  background: #ffedd5;
+}
+
+.send-button.abort {
+  color: #991b1b;
+  background: #fee2e2;
 }
 
 .attachment-examples {

@@ -307,6 +307,14 @@ export const chatPromptRequestSchema = z
   })
   .strict();
 
+export const chatInterventionRequestSchema = z
+  .object({
+    runtimeId: z.string(),
+    text: z.string().trim().min(1),
+    attachments: z.array(chatPromptAttachmentSchema).optional(),
+  })
+  .strict();
+
 export const chatAbortRequestSchema = z
   .object({
     runtimeId: z.string(),
@@ -441,6 +449,8 @@ export const ipcChannels = {
   chatDeleteSession: "chat:deleteSession",
   chatDeleteAllSessions: "chat:deleteAllSessions",
   chatPrompt: "chat:prompt",
+  chatSteer: "chat:steer",
+  chatFollowUp: "chat:followUp",
   chatAbort: "chat:abort",
   chatListModels: "chat:listModels",
   chatListCommands: "chat:listCommands",

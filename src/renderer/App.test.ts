@@ -139,6 +139,31 @@ describe("renderer session actions", () => {
   });
 });
 
+describe("renderer intervention UX", () => {
+  it("identifies only known extension commands as unavailable for queues", () => {
+    const commands = [
+      { name: "/deploy", description: "Deploy", source: "extension" },
+      { name: "/review", description: "Review", source: "prompt template" },
+    ] as const;
+
+    expect(
+      __rendererTestHooks.findKnownExtensionCommand(
+        "/deploy production",
+        commands as any,
+      ),
+    ).toBe("/deploy");
+    expect(
+      __rendererTestHooks.findKnownExtensionCommand("/review", commands as any),
+    ).toBeUndefined();
+    expect(
+      __rendererTestHooks.findKnownExtensionCommand(
+        "ordinary instruction",
+        commands as any,
+      ),
+    ).toBeUndefined();
+  });
+});
+
 describe("renderer message_update reduction", () => {
   it("does not render toolcall JSON deltas as assistant text", () => {
     const next = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {
@@ -201,6 +226,17 @@ describe("renderer message_update reduction", () => {
       followUpCount: 2,
     } as any);
     expect(queued.overlays).toMatchObject({
+      piQueuedSteeringCount: 1,
+      piQueuedFollowUpCount: 2,
+    });
+
+    const exactPiQueue = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {
+      type: "queue_update",
+      runtimeId: "session-1",
+      steering: ["one"],
+      followUp: ["two", "three"],
+    } as any);
+    expect(exactPiQueue.overlays).toMatchObject({
       piQueuedSteeringCount: 1,
       piQueuedFollowUpCount: 2,
     });

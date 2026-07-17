@@ -49,9 +49,12 @@ test("fake RPC get_state and get_messages fixtures are deterministic", async () 
     assert.equal(state.model, "fake-model");
     assert.equal(state.provider, "fake-provider");
 
-    const messages = await client.request("get_messages");
-    assert.ok(Array.isArray(messages));
-    assert.equal(messages[0].content, "Fake RPC ready");
+    const messages = (await client.request("get_messages")) as JsonObject;
+    assert.ok(Array.isArray(messages.messages));
+    assert.equal(
+      (messages.messages as JsonObject[])[0]?.content,
+      "Fake RPC ready",
+    );
   } finally {
     client.close();
   }
@@ -63,8 +66,8 @@ test("fake RPC prompt fixture emits start, streaming update, and completed end",
     const done = waitForEvents(client, (events) =>
       events.some((event) => event.type === "agent_end"),
     );
-    const accepted = await client.request("prompt", { text: "hello" });
-    assert.deepEqual(accepted, { accepted: true });
+    const accepted = await client.request("prompt", { message: "hello" });
+    assert.equal(accepted, null);
     const events = await done;
     assert.deepEqual(
       events
@@ -92,8 +95,35 @@ test("fake RPC abort fixture stops work and emits an aborted agent_end", async (
     );
     await client.request("prompt", { text: "abort fixture" });
     const abortResult = await client.request("abort");
-    assert.deepEqual(abortResult, { aborted: true });
+    assert.equal(abortResult, null);
     await aborted;
+  } finally {
+    client.close();
+  }
+});
+
+test("fake RPC accepts exact steer and follow_up commands and emits full queues", async () => {
+  const client = spawnFakeRpc(["--stream-delay-ms", "50"]);
+  try {
+    const queueUpdate = waitForEvents(client, (events) =>
+      events.some(
+        (event) =>
+          event.type === "queue_update" &&
+          Array.isArray((event as JsonObject).steering) &&
+          Array.isArray((event as JsonObject).followUp) &&
+          ((event as JsonObject).steering as unknown[]).length === 1 &&
+          ((event as JsonObject).followUp as unknown[]).length === 1,
+      ),
+    );
+    await client.request("prompt", { message: "work first" });
+    await client.request("steer", { message: "change direction" });
+    await client.request("follow_up", { message: "do this afterwards" });
+    const events = await queueUpdate;
+    const queue = [...events]
+      .reverse()
+      .find((event) => event.type === "queue_update") as JsonObject;
+    assert.deepEqual(queue.steering, ["change direction"]);
+    assert.deepEqual(queue.followUp, ["do this afterwards"]);
   } finally {
     client.close();
   }
@@ -132,8 +162,10 @@ test("fake RPC prompt scenario exposes reducer extension event fixtures", async 
       "confirm",
     );
     assert.equal(
-      (events.find((event) => event.type === "queue_update") as JsonObject)
-        .followUpCount,
+      (
+        (events.find((event) => event.type === "queue_update") as JsonObject)
+          .followUp as unknown[]
+      ).length,
       2,
     );
   } finally {

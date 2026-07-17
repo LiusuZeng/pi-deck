@@ -102,14 +102,14 @@ test("JSONL RPC client rejects pending requests when subprocess exits", async ()
   assert.equal(client.pendingCount, 0);
 });
 
-test("JSONL RPC client rejects RPC error responses with code and message", async () => {
+test("JSONL RPC client rejects exact Pi RPC error responses", async () => {
   const client = spawnFake();
   try {
     await assert.rejects(
       client.request("unknown_command"),
       (error: unknown) => {
         assert.ok(error instanceof JsonlRpcError);
-        assert.equal(error.code, "FAKE_UNKNOWN_COMMAND");
+        assert.equal(error.code, undefined);
         assert.match(error.message, /unknown_command/);
         return true;
       },

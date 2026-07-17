@@ -162,7 +162,7 @@ export class JsonlRpcClient extends EventEmitter {
     super();
     this.requestTimeoutMs = options.requestTimeoutMs ?? 10_000;
     this.malformedOutputIsFatal = options.malformedOutputIsFatal ?? true;
-    this.commandProtocol = options.commandProtocol ?? "command-field";
+    this.commandProtocol = options.commandProtocol ?? "type-field";
     this.stderr = new DiagnosticRingBuffer(
       options.stderrBufferBytes ?? 64 * 1024,
     );
@@ -289,6 +289,10 @@ export class JsonlRpcClient extends EventEmitter {
   }
 
   private handleResponse(response: RpcResponseRecord): void {
+    if (response.id === undefined) {
+      this.emit("diagnostic", "Received RPC response without an id\n");
+      return;
+    }
     const pending = this.pending.get(response.id);
     if (!pending) {
       this.emit(
@@ -301,23 +305,13 @@ export class JsonlRpcClient extends EventEmitter {
     this.pending.delete(response.id);
 
     const responseObject = response as unknown as JsonObject;
-    if (
-      response.ok === false ||
-      responseObject.success === false ||
-      response.error
-    ) {
-      const payload = response.error;
-      const message =
-        typeof payload === "object" && payload !== null
-          ? payload.message
-          : String(payload ?? "RPC command failed");
-      pending.reject(new JsonlRpcError(message, payload));
+    if (responseObject.success === false || response.error) {
+      const payload = response.error ?? "RPC command failed";
+      pending.reject(new JsonlRpcError(payload, payload));
       return;
     }
 
-    pending.resolve(
-      (response.result ?? responseObject.data ?? null) as JsonValue,
-    );
+    pending.resolve((responseObject.data ?? null) as JsonValue);
   }
 
   private handleMalformed(error: JsonlParseError): void {
