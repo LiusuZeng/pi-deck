@@ -112,6 +112,8 @@ export interface WorkerDiagnostics {
 
 export interface PiAdapter {
   getState(runtimeId: RuntimeSessionId): Promise<PiState>;
+  /** Lightweight lifecycle state; this must not request conversation messages. */
+  getRuntimeStatus(runtimeId: RuntimeSessionId): Promise<PiState>;
   getMessages(runtimeId: RuntimeSessionId): Promise<PiMessage[]>;
   prompt(runtimeId: RuntimeSessionId, input: PromptInput): Promise<void>;
   steer(runtimeId: RuntimeSessionId, input: PromptInput): Promise<void>;

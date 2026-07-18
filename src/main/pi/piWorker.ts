@@ -126,6 +126,15 @@ export class PiWorker {
     return { ...state, runtimeId: this.runtimeId };
   }
 
+  /**
+   * Lifecycle/metadata path intentionally shares only Pi's get_state RPC.
+   * Keep this separate from getMessages so callers cannot accidentally turn a
+   * status poll into a transcript transfer.
+   */
+  getRuntimeStatus(): Promise<PiState> {
+    return this.getState();
+  }
+
   async getMessages(): Promise<PiMessage[]> {
     const response = await this.client.request("get_messages");
     const messages = Array.isArray(response)

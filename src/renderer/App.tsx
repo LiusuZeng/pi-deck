@@ -16,6 +16,7 @@ import type {
   ChatMessage,
   ChatModelSummary,
   ChatRuntimeEvent,
+  ChatRuntimeStatus,
   ChatSessionSummary,
   ChatSnapshot,
   DiagnosticsSummary,
@@ -446,6 +447,13 @@ export function App(): ReactElement {
   // closeSession intentionally terminates its child process. Ignore that
   // expected worker_exit while converting the row to a resumable saved session.
   const intentionallyClosingRuntimeIds = useRef(new Set<string>());
+  // A stale/missed lifecycle event may need recovery, but never let repeated
+  // renders fan out duplicate status requests for the same runtime.
+  const reconcilingRuntimeIds = useRef(new Set<string>());
+  const sessionsRef = useRef<SessionViewModel[]>([]);
+  const reconciliationRetryTimers = useRef(new Map<string, number>());
+  const reconciliationRetryAttempts = useRef(new Map<string, number>());
+  sessionsRef.current = sessions;
 
   useEffect(() => {
     let disposed = false;
@@ -462,16 +470,13 @@ export function App(): ReactElement {
         const deckApi = api;
         async function refreshRuntimeUsage(runtimeId: string): Promise<void> {
           try {
-            const snapshot = await deckApi.chat.getSnapshot();
-            if (disposed || snapshot.runtimeId !== runtimeId) {
+            const status = await deckApi.chat.getRuntimeStatus({ runtimeId });
+            if (disposed || status.runtimeId !== runtimeId) {
               return;
             }
-            const refreshed = sessionFromSnapshot(snapshot);
             setSessions((items) =>
-              items.map((item) =>
-                item.id === runtimeId
-                  ? mergeSessionUsageFromSnapshot(item, refreshed)
-                  : item,
+              updateSessionByRuntimeId(items, runtimeId, (item) =>
+                mergeSessionUsageFromRuntimeStatus(item, status),
               ),
             );
           } catch {
@@ -482,7 +487,9 @@ export function App(): ReactElement {
         unsubscribe = api.chat.onEvent((event) => {
           if (!disposed) {
             applyRuntimeEvent(event);
-            if (event.type === "agent_end") {
+            // Pi's final event often already contains usage. Only fall back to
+            // compact get_state metadata when it does not.
+            if (event.type === "agent_end" && !eventHasUsageMetadata(event)) {
               void refreshRuntimeUsage(event.runtimeId);
             }
           }
@@ -560,6 +567,11 @@ export function App(): ReactElement {
     return () => {
       disposed = true;
       unsubscribe?.();
+      for (const timer of reconciliationRetryTimers.current.values()) {
+        window.clearTimeout(timer);
+      }
+      reconciliationRetryTimers.current.clear();
+      reconciliationRetryAttempts.current.clear();
     };
   }, []);
 
@@ -631,7 +643,7 @@ export function App(): ReactElement {
   }, []);
 
   useEffect(() => {
-    const hasWorkingSession = sessions.some(shouldReconcileSession);
+    const hasWorkingSession = sessions.some(isSessionBusy);
     if (!hasWorkingSession) {
       return;
     }
@@ -663,20 +675,39 @@ export function App(): ReactElement {
 
   async function reconcileWorkingSessions(runtimeIds: string[]): Promise<void> {
     for (const runtimeId of runtimeIds) {
+      if (
+        !shouldReconcileSession(
+          sessionsRef.current.find((session) => session.id === runtimeId) ??
+            loadingSession,
+        ) ||
+        reconcilingRuntimeIds.current.has(runtimeId)
+      ) {
+        continue;
+      }
+      reconcilingRuntimeIds.current.add(runtimeId);
       try {
-        const snapshot = await window.piDeck.chat.getSnapshot({ runtimeId });
+        const status = await window.piDeck.chat.getRuntimeStatus({ runtimeId });
         setSessions((current) =>
-          current.map((session) =>
-            session.id === runtimeId
-              ? reconcileSessionWithSnapshot(session, snapshot)
+          updateSessionByRuntimeId(current, runtimeId, (session) =>
+            shouldReconcileSession(session)
+              ? reconcileSessionWithRuntimeStatus(session, status)
               : session,
           ),
         );
+        if (
+          status.state.isAgentActive &&
+          sessionsRef.current.find((session) => session.id === runtimeId)
+            ?.status === "aborting"
+        ) {
+          scheduleRuntimeStatusRetry(runtimeId);
+        } else {
+          clearRuntimeStatusRetry(runtimeId);
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         setSessions((current) =>
-          current.map((session) =>
-            session.id === runtimeId && isLifecycleTransition(session.status)
+          updateSessionByRuntimeId(current, runtimeId, (session) =>
+            isLifecycleTransition(session.status)
               ? appendDiagnostic(session, {
                   tone: "error",
                   content: `Could not reconcile Pi runtime: ${message}`,
@@ -684,11 +715,49 @@ export function App(): ReactElement {
               : session,
           ),
         );
+      } finally {
+        reconcilingRuntimeIds.current.delete(runtimeId);
       }
     }
   }
 
+  function scheduleRuntimeStatusRetry(runtimeId: string): void {
+    if (reconciliationRetryTimers.current.has(runtimeId)) {
+      return;
+    }
+    const attempt = reconciliationRetryAttempts.current.get(runtimeId) ?? 0;
+    const delayMs = Math.min(
+      WORKING_SESSION_RECONCILE_AFTER_MS * 2 ** attempt,
+      30_000,
+    );
+    reconciliationRetryAttempts.current.set(runtimeId, attempt + 1);
+    const timer = window.setTimeout(() => {
+      reconciliationRetryTimers.current.delete(runtimeId);
+      if (
+        shouldReconcileSession(
+          sessionsRef.current.find((session) => session.id === runtimeId) ??
+            loadingSession,
+        )
+      ) {
+        void reconcileWorkingSessions([runtimeId]);
+      }
+    }, delayMs);
+    reconciliationRetryTimers.current.set(runtimeId, timer);
+  }
+
+  function clearRuntimeStatusRetry(runtimeId: string): void {
+    const timer = reconciliationRetryTimers.current.get(runtimeId);
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      reconciliationRetryTimers.current.delete(runtimeId);
+    }
+    reconciliationRetryAttempts.current.delete(runtimeId);
+  }
+
   function applyRuntimeEvent(event: ChatRuntimeEvent): void {
+    if (event.type === "agent_end" || event.type === "worker_exit") {
+      clearRuntimeStatusRetry(event.runtimeId);
+    }
     if (
       event.type === "worker_exit" &&
       intentionallyClosingRuntimeIds.current.delete(event.runtimeId)
@@ -1265,40 +1334,41 @@ export function App(): ReactElement {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       try {
-        const snapshot = await window.piDeck.chat.getSnapshot({ runtimeId });
-        if (!isSnapshotAgentActive(snapshot)) {
-          const reconciled = sessionFromSnapshot(snapshot);
+        const status = await window.piDeck.chat.getRuntimeStatus({ runtimeId });
+        if (status.runtimeId !== runtimeId) {
+          return;
+        }
+        if (!status.state.isAgentActive) {
           setSessions((current) =>
-            current.map((session) =>
-              session.id === runtimeId
-                ? appendDiagnostic(reconciled, {
-                    tone: "info",
-                    content: `Abort returned an error, but Pi now reports this session idle: ${message}`,
-                  })
-                : session,
+            updateSessionByRuntimeId(current, runtimeId, (session) =>
+              appendDiagnostic(
+                reconcileSessionWithRuntimeStatus(session, status),
+                {
+                  tone: "info",
+                  content: `Abort returned an error, but Pi now reports this session idle: ${message}`,
+                },
+              ),
             ),
           );
           setUiMessage("Pi reports the session is idle after abort.");
           return;
         }
-        // The abort request failed, but this snapshot authoritatively says the
+        // The abort request failed, but this status authoritatively says the
         // turn remains active. Restore working controls; do not claim idle.
         setSessions((current) =>
-          current.map((session) =>
-            session.id === runtimeId
-              ? appendDiagnostic(
-                  {
-                    ...session,
-                    status: "working",
-                    baseState: "working",
-                    subtitle: `Working · ${backendLabel(session)} confirmed by Pi`,
-                  },
-                  {
-                    tone: "info",
-                    content: `Abort failed and Pi still reports active work: ${message}`,
-                  },
-                )
-              : session,
+          updateSessionByRuntimeId(current, runtimeId, (session) =>
+            appendDiagnostic(
+              {
+                ...session,
+                status: "working",
+                baseState: "working",
+                subtitle: `Working · ${backendLabel(session)} confirmed by Pi`,
+              },
+              {
+                tone: "info",
+                content: `Abort failed and Pi still reports active work: ${message}`,
+              },
+            ),
           ),
         );
         setComposerError(message);
@@ -2322,6 +2392,40 @@ function mergeSessionUsageFromSnapshot(
   };
 }
 
+function mergeSessionUsageFromRuntimeStatus(
+  session: SessionViewModel,
+  status: ChatRuntimeStatus,
+): SessionViewModel {
+  if (status.runtimeId !== session.id || status.usage === undefined) {
+    return session;
+  }
+  return {
+    ...session,
+    usageStats: {
+      inputTokens: status.usage.inputTokens,
+      outputTokens: status.usage.outputTokens,
+      cacheReadTokens: status.usage.cacheReadTokens,
+      cacheWriteTokens: status.usage.cacheWriteTokens,
+      totalTokens: status.usage.totalTokens,
+      ...(status.usage.contextUsedTokens !== undefined
+        ? { contextUsedTokens: status.usage.contextUsedTokens }
+        : {}),
+      ...(status.usage.contextWindowTokens !== undefined
+        ? { contextWindowTokens: status.usage.contextWindowTokens }
+        : {}),
+      ...(status.usage.totalCostUsd !== undefined
+        ? { totalCostUsd: status.usage.totalCostUsd }
+        : {}),
+    },
+    ...(modelLabelFromState(status.state).length > 0
+      ? { modelLabel: modelLabelFromState(status.state) }
+      : {}),
+    ...(status.state.thinkingLevel !== undefined
+      ? { thinkingLevel: status.state.thinkingLevel }
+      : {}),
+  };
+}
+
 function modelLabelFromState(state: ChatSnapshot["state"]): string {
   const provider = typeof state.provider === "string" ? state.provider : "";
   const model = state.model;
@@ -2670,8 +2774,30 @@ function reduceRuntimeEvent(
       const endedWithError =
         status === "error" || status === "failed" || errorMessage !== undefined;
       const stillWaitingForInput = session.overlays.needsUserInput;
+      const finalEventUsage = getMessageUsageFromEvent(event);
+      const finalUsageMessageId =
+        getMessageUpdateId(event) ??
+        getMostRecentAssistantMessageId(session) ??
+        getString(event, "runId") ??
+        "agent-end";
+      const usageByMessageId =
+        finalEventUsage !== undefined
+          ? {
+              ...(session.usageByMessageId ?? {}),
+              [finalUsageMessageId]: finalEventUsage,
+            }
+          : session.usageByMessageId;
       const nextSession: SessionViewModel = {
         ...session,
+        ...(usageByMessageId !== undefined ? { usageByMessageId } : {}),
+        ...(usageByMessageId !== undefined
+          ? {
+              usageStats: summarizeUsageByMessage(
+                usageByMessageId,
+                session.usageStats?.contextWindowTokens,
+              ),
+            }
+          : {}),
         status: endedWithError
           ? "error"
           : stillWaitingForInput
@@ -3085,6 +3211,14 @@ function getActiveAssistantMessageId(
   return activeAssistant?.id;
 }
 
+function getMostRecentAssistantMessageId(
+  session: SessionViewModel,
+): string | undefined {
+  return [...session.timeline]
+    .reverse()
+    .find((item) => item.kind === "assistant")?.id;
+}
+
 function getAssistantContent(
   items: TimelineItem[],
   id: string,
@@ -3249,6 +3383,10 @@ function getMessageUsageFromEvent(
   event: ChatRuntimeEvent,
 ): MessageUsage | undefined {
   return extractMessageUsage(getRecord(event, "message") ?? event);
+}
+
+function eventHasUsageMetadata(event: ChatRuntimeEvent): boolean {
+  return getMessageUsageFromEvent(event) !== undefined;
 }
 
 function extractMessageUsage(value: unknown): MessageUsage | undefined {
@@ -5219,17 +5357,22 @@ function isSessionBusy(session: Pick<SessionViewModel, "status">): boolean {
 }
 
 function shouldReconcileSession(session: SessionViewModel): boolean {
-  return session.runtimeBacked && isSessionBusy(session);
+  // Healthy working turns are driven by ordered runtime events. Poll only an
+  // ambiguous local transition where an event could have been missed.
+  return session.runtimeBacked && isLifecycleTransition(session.status);
 }
 
-function reconcileSessionWithSnapshot(
+function reconcileSessionWithRuntimeStatus(
   session: SessionViewModel,
-  snapshot: ChatSnapshot,
+  status: ChatRuntimeStatus,
 ): SessionViewModel {
-  const active = isSnapshotAgentActive(snapshot);
-  if (active) {
+  // A response for another runtime must never mutate the selected/session row.
+  if (status.runtimeId !== session.id) {
+    return session;
+  }
+  if (status.state.isAgentActive) {
     // Abort remains pending until Pi reports a terminal completion event or an
-    // authoritative inactive snapshot; a still-active snapshot is not success.
+    // authoritative inactive status; a still-active status is not success.
     if (session.status === "aborting" || session.status === "working") {
       return session;
     }
@@ -5243,21 +5386,50 @@ function reconcileSessionWithSnapshot(
     };
   }
 
-  const reconciled = sessionFromSnapshot(snapshot);
   return appendDiagnostic(
     {
-      ...reconciled,
-      title: isPlaceholderSessionTitle(reconciled.title)
-        ? session.title
-        : reconciled.title,
-      timeline: session.timeline,
+      ...session,
+      status: "idle",
+      baseState: "idle",
+      overlays: {
+        ...session.overlays,
+        streaming: false,
+        toolRunning: false,
+      },
+      workingStartedAtMs: undefined,
+      subtitle: `Idle · ${backendLabel(session)} reconciled`,
+      lastRuntimeEventLabel: "Pi reconciliation confirmed completion",
+      updatedAt: "Now",
+      updatedAtMs: Date.now(),
     },
     {
       tone: "info",
       content:
-        "Reconciled from persisted Pi session because the live completion event was not observed.",
+        "Reconciled from Pi runtime status because the live completion event was not observed.",
     },
   );
+}
+
+function updateSessionByRuntimeId(
+  sessions: SessionViewModel[],
+  runtimeId: string,
+  update: (session: SessionViewModel) => SessionViewModel,
+): SessionViewModel[] {
+  const index = sessions.findIndex((session) => session.id === runtimeId);
+  if (index < 0) {
+    return sessions;
+  }
+  const current = sessions[index];
+  if (current === undefined) {
+    return sessions;
+  }
+  const updated = update(current);
+  if (updated === current) {
+    return sessions;
+  }
+  const next = sessions.slice();
+  next[index] = updated;
+  return next;
 }
 
 function getMessageUpdateId(event: ChatRuntimeEvent): string | undefined {
@@ -5729,7 +5901,11 @@ export const __rendererTestHooks = {
   buildRealSessionInbox,
   queueBadgeLabels,
   isSessionBusy,
-  reconcileSessionWithSnapshot,
+  shouldReconcileSession,
+  reconcileSessionWithRuntimeStatus,
+  mergeSessionUsageFromRuntimeStatus,
+  updateSessionByRuntimeId,
+  eventHasUsageMetadata,
 };
 
 function getRendererNodeAccessSummary(): string {

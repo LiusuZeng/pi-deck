@@ -60,6 +60,10 @@ export class SinglePiAdapter implements PiAdapter {
     return this.getWorker(runtimeId).getState();
   }
 
+  getRuntimeStatus(runtimeId: RuntimeSessionId): Promise<PiState> {
+    return this.getWorker(runtimeId).getRuntimeStatus();
+  }
+
   getMessages(runtimeId: RuntimeSessionId): Promise<PiMessage[]> {
     return this.getWorker(runtimeId).getMessages();
   }

@@ -12,6 +12,8 @@ import {
   chatMessageSchema,
   chatPromptRequestSchema,
   chatRespondToExtensionUiRequestSchema,
+  chatRuntimeStatusRequestSchema,
+  chatRuntimeStatusSchema,
   pickProjectResultSchema,
   projectRefSchema,
 } from "./ipcSchemas.js";
@@ -112,6 +114,43 @@ describe("IPC schemas", () => {
         },
       ],
     });
+  });
+
+  it("validates compact, runtime-scoped status DTOs without messages", () => {
+    expect(
+      chatRuntimeStatusRequestSchema.parse({ runtimeId: "runtime-1" }),
+    ).toEqual({ runtimeId: "runtime-1" });
+    expect(() =>
+      chatRuntimeStatusRequestSchema.parse({
+        runtimeId: "runtime-1",
+        messages: [],
+      }),
+    ).toThrow();
+    expect(
+      chatRuntimeStatusSchema.parse({
+        runtimeId: "runtime-1",
+        backendMode: "real",
+        state: { cwd: "/project", isAgentActive: true },
+      }),
+    ).toMatchObject({ runtimeId: "runtime-1" });
+    expect(() =>
+      chatRuntimeStatusSchema.parse({
+        runtimeId: "runtime-1",
+        backendMode: "real",
+        state: { isAgentActive: false },
+        messages: [],
+      }),
+    ).toThrow();
+    expect(() =>
+      chatRuntimeStatusSchema.parse({
+        runtimeId: "runtime-1",
+        backendMode: "real",
+        state: {
+          isAgentActive: false,
+          model: { id: "model-1", unboundedModelPayload: "nope" },
+        },
+      }),
+    ).toThrow();
   });
 
   it("validates delete session requests", () => {

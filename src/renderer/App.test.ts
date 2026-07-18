@@ -619,31 +619,90 @@ describe("renderer message_update reduction", () => {
     expect(next.subtitle).toContain("waiting for Pi completion");
   });
 
-  it("uses reconciliation to confirm sending, while keeping abort pending", () => {
+  it("uses compact runtime status to confirm sending, while keeping abort pending", () => {
     const sending = {
       ...baseSession(),
       status: "sending",
       baseState: "attaching",
     } as any;
-    const activeSnapshot = {
+    const activeStatus = {
       runtimeId: "session-1",
       backendMode: "real",
       state: { cwd: "/tmp/project", isAgentActive: true },
-      messages: [],
     } as any;
 
-    const confirmed = __rendererTestHooks.reconcileSessionWithSnapshot(
+    const confirmed = __rendererTestHooks.reconcileSessionWithRuntimeStatus(
       sending,
-      activeSnapshot,
+      activeStatus,
     );
     expect(confirmed.status).toBe("working");
     expect(__rendererTestHooks.isSessionBusy(confirmed)).toBe(true);
 
     const aborting = { ...confirmed, status: "aborting" } as any;
     expect(
-      __rendererTestHooks.reconcileSessionWithSnapshot(aborting, activeSnapshot)
-        .status,
+      __rendererTestHooks.reconcileSessionWithRuntimeStatus(
+        aborting,
+        activeStatus,
+      ).status,
     ).toBe("aborting");
+  });
+
+  it("keeps status reconciliation runtime-scoped and skips healthy working turns", () => {
+    const working = {
+      ...baseSession(),
+      status: "working",
+      baseState: "working",
+    } as any;
+    const otherRuntimeStatus = {
+      runtimeId: "session-2",
+      backendMode: "real",
+      state: { isAgentActive: false },
+    } as any;
+
+    expect(__rendererTestHooks.shouldReconcileSession(working)).toBe(false);
+    expect(
+      __rendererTestHooks.reconcileSessionWithRuntimeStatus(
+        working,
+        otherRuntimeStatus,
+      ),
+    ).toBe(working);
+  });
+
+  it("uses final event usage before requesting a status refresh", () => {
+    const event = {
+      type: "agent_end",
+      runtimeId: "session-1",
+      usage: { input: 10, output: 5 },
+    } as any;
+    expect(__rendererTestHooks.eventHasUsageMetadata(event)).toBe(true);
+
+    const next = __rendererTestHooks.reduceRuntimeEvent(
+      { ...baseSession(), status: "working", baseState: "working" } as any,
+      event,
+    );
+    expect(next.usageStats).toMatchObject({ inputTokens: 10, outputTokens: 5 });
+  });
+
+  it("merges status usage only into the requested runtime", () => {
+    const session = baseSession() as any;
+    const otherStatus = {
+      runtimeId: "session-2",
+      backendMode: "real",
+      state: { isAgentActive: false },
+      usage: {
+        inputTokens: 10,
+        outputTokens: 5,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        totalTokens: 15,
+      },
+    } as any;
+    expect(
+      __rendererTestHooks.mergeSessionUsageFromRuntimeStatus(
+        session,
+        otherStatus,
+      ),
+    ).toBe(session);
   });
 
   it("clears empty assistant placeholders when an agent turn ends", () => {

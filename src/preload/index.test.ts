@@ -81,6 +81,31 @@ describe("preload PiDeck API validation", () => {
     ).toThrow();
   });
 
+  it("exposes a runtime-scoped compact status API", async () => {
+    electronMock.ipcRenderer.invoke.mockResolvedValueOnce({
+      ok: true,
+      data: {
+        runtimeId: "runtime-1",
+        backendMode: "real",
+        state: { isAgentActive: false },
+      },
+    });
+
+    await expect(
+      api.chat.getRuntimeStatus({ runtimeId: "runtime-1" }),
+    ).resolves.toMatchObject({ runtimeId: "runtime-1" });
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenCalledWith(
+      "chat:getRuntimeStatus",
+      { runtimeId: "runtime-1" },
+    );
+    expect(() =>
+      api.chat.getRuntimeStatus({
+        runtimeId: "runtime-1",
+        messages: [],
+      } as unknown as { runtimeId: string }),
+    ).toThrow();
+  });
+
   it("validates project picker responses from IPC", async () => {
     electronMock.ipcRenderer.invoke.mockResolvedValueOnce({
       ok: true,

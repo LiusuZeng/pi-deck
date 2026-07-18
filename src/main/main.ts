@@ -38,6 +38,8 @@ import {
   chatSetModelRequestSchema,
   chatSetThinkingRequestSchema,
   chatRuntimeEventSchema,
+  chatRuntimeStatusRequestSchema,
+  chatRuntimeStatusSchema,
   chatSnapshotRequestSchema,
   chatSnapshotSchema,
   diagnosticsSummarySchema,
@@ -57,6 +59,7 @@ import type {
   ChatListCommandsResult,
   ChatListSessionsResult,
   ChatRespondToExtensionUiRequest,
+  ChatRuntimeStatus,
   ChatSnapshot,
   PickAttachmentsResult,
   PickProjectResult,
@@ -302,6 +305,14 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async (request) =>
       getChatSnapshot(store, diagnosticsService, request?.runtimeId),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.chatGetRuntimeStatus,
+    requestSchema: chatRuntimeStatusRequestSchema,
+    responseSchema: chatRuntimeStatusSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runtimeId }) => getChatRuntimeStatus(runtimeId),
   });
 
   registerValidatedIpc({
@@ -1679,6 +1690,146 @@ async function getChatSnapshot(
     throw new Error(`Chat runtime is no longer attached: ${runtimeId}`);
   }
   return getChatSnapshotForRuntime(adapter, runtimeId, mode);
+}
+
+async function getChatRuntimeStatus(
+  requestedRuntimeId: string,
+): Promise<ChatRuntimeStatus> {
+  // A status read must not initialize a replacement worker for a stale runtime.
+  const adapter = chatAdapter;
+  if (adapter === undefined) {
+    throw new Error(
+      `Chat runtime is no longer attached: ${requestedRuntimeId}`,
+    );
+  }
+  const runtimeId = resolveActiveChatRuntimeId(adapter, requestedRuntimeId);
+  const mode = chatRuntimeModes.get(runtimeId) ?? resolveChatBackendMode();
+  // Do not replace this with getChatSnapshot: status reconciliation must never
+  // transfer get_messages/history across RPC or Electron IPC.
+  const state = await adapter.getRuntimeStatus(runtimeId);
+  const usage = runtimeUsageFromState(state);
+  return {
+    runtimeId,
+    backendMode: mode,
+    state: compactRuntimeStatusState(state, runtimeId),
+    ...(usage !== undefined ? { usage } : {}),
+  };
+}
+
+function compactRuntimeStatusState(
+  state: PiState,
+  runtimeId: string,
+): ChatRuntimeStatus["state"] {
+  const record = state as Record<string, unknown>;
+  const isAgentActive = Boolean(
+    state.isAgentActive ??
+    (typeof record.isStreaming === "boolean" ? record.isStreaming : false),
+  );
+  const model = compactRuntimeStatusModel(state.model);
+  return {
+    ...(typeof state.sessionId === "string"
+      ? { sessionId: state.sessionId }
+      : {}),
+    ...(typeof state.sessionFile === "string"
+      ? { sessionFile: state.sessionFile }
+      : {}),
+    ...(typeof state.cwd === "string"
+      ? { cwd: state.cwd ?? chatWorkerCwds.get(runtimeId) }
+      : chatWorkerCwds.get(runtimeId) !== undefined
+        ? { cwd: chatWorkerCwds.get(runtimeId) }
+        : {}),
+    ...(model !== undefined ? { model } : {}),
+    ...(typeof state.provider === "string" ? { provider: state.provider } : {}),
+    ...(typeof state.thinkingLevel === "string"
+      ? { thinkingLevel: state.thinkingLevel }
+      : {}),
+    isAgentActive,
+  };
+}
+
+function compactRuntimeStatusModel(
+  model: unknown,
+): ChatRuntimeStatus["state"]["model"] | undefined {
+  if (typeof model === "string") {
+    return model;
+  }
+  if (!model || typeof model !== "object" || Array.isArray(model)) {
+    return undefined;
+  }
+  const record = model as Record<string, unknown>;
+  const compact = {
+    ...(typeof record.id === "string" ? { id: record.id } : {}),
+    ...(typeof record.name === "string" ? { name: record.name } : {}),
+    ...(typeof record.provider === "string"
+      ? { provider: record.provider }
+      : {}),
+    ...(typeof record.contextWindow === "number" &&
+    Number.isFinite(record.contextWindow) &&
+    record.contextWindow >= 0
+      ? { contextWindow: record.contextWindow }
+      : {}),
+  };
+  return Object.keys(compact).length > 0 ? compact : undefined;
+}
+
+function runtimeUsageFromState(
+  state: PiState,
+): ChatRuntimeStatus["usage"] | undefined {
+  const usage = (state as Record<string, unknown>).usage;
+  if (!usage || typeof usage !== "object" || Array.isArray(usage)) {
+    return undefined;
+  }
+  const record = usage as Record<string, unknown>;
+  const number = (...keys: string[]): number | undefined => {
+    for (const key of keys) {
+      const value = record[key];
+      if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+        return value;
+      }
+    }
+    return undefined;
+  };
+  const inputTokens = number("inputTokens", "input");
+  const outputTokens = number("outputTokens", "output");
+  const cacheReadTokens = number("cacheReadTokens", "cacheRead") ?? 0;
+  const cacheWriteTokens = number("cacheWriteTokens", "cacheWrite") ?? 0;
+  const nestedCost = record.cost;
+  const nestedCostTotal =
+    nestedCost && typeof nestedCost === "object" && !Array.isArray(nestedCost)
+      ? (nestedCost as Record<string, unknown>).total
+      : undefined;
+  const totalCostUsd =
+    number("totalCostUsd", "cost") ??
+    (typeof nestedCostTotal === "number" &&
+    Number.isFinite(nestedCostTotal) &&
+    nestedCostTotal >= 0
+      ? nestedCostTotal
+      : undefined);
+  if (
+    inputTokens === undefined &&
+    outputTokens === undefined &&
+    totalCostUsd === undefined
+  ) {
+    return undefined;
+  }
+  const safeInputTokens = inputTokens ?? 0;
+  const safeOutputTokens = outputTokens ?? 0;
+  return {
+    inputTokens: safeInputTokens,
+    outputTokens: safeOutputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    totalTokens:
+      number("totalTokens", "total") ??
+      safeInputTokens + safeOutputTokens + cacheReadTokens + cacheWriteTokens,
+    ...(number("contextUsedTokens", "contextUsed") !== undefined
+      ? { contextUsedTokens: number("contextUsedTokens", "contextUsed") }
+      : {}),
+    ...(number("contextWindowTokens", "contextWindow") !== undefined
+      ? { contextWindowTokens: number("contextWindowTokens", "contextWindow") }
+      : {}),
+    ...(totalCostUsd !== undefined ? { totalCostUsd } : {}),
+  };
 }
 
 async function getChatSnapshotForRuntime(

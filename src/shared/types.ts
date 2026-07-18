@@ -17,6 +17,9 @@ import type {
   chatMessageSchema,
   chatModelSummarySchema,
   chatRuntimeEventSchema,
+  chatRuntimeStatusRequestSchema,
+  chatRuntimeStatusSchema,
+  chatRuntimeUsageSchema,
   chatRespondToExtensionUiRequestSchema,
   chatSessionSummarySchema,
   chatSnapshotRequestSchema,
@@ -41,6 +44,11 @@ export type ChatRespondToExtensionUiRequest = z.infer<
 >;
 export type ChatSnapshotRequest = z.infer<typeof chatSnapshotRequestSchema>;
 export type ChatSnapshot = z.infer<typeof chatSnapshotSchema>;
+export type ChatRuntimeStatusRequest = z.infer<
+  typeof chatRuntimeStatusRequestSchema
+>;
+export type ChatRuntimeStatus = z.infer<typeof chatRuntimeStatusSchema>;
+export type ChatRuntimeUsage = z.infer<typeof chatRuntimeUsageSchema>;
 export type ChatSessionSummary = z.infer<typeof chatSessionSummarySchema>;
 export type ChatModelSummary = z.infer<typeof chatModelSummarySchema>;
 export type ChatListModelsResult = z.infer<typeof chatListModelsResultSchema>;
@@ -90,6 +98,9 @@ export interface PiDeckApi {
   };
   chat: {
     getSnapshot(request?: ChatSnapshotRequest): Promise<ChatSnapshot>;
+    getRuntimeStatus(
+      request: ChatRuntimeStatusRequest,
+    ): Promise<ChatRuntimeStatus>;
     listSessions(
       request?: ChatListSessionsRequest,
     ): Promise<ChatListSessionsResult>;

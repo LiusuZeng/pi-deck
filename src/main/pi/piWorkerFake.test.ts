@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildSync } from "esbuild";
-import { it as test } from "vitest";
+import { it as test, vi } from "vitest";
 import { PiWorker } from "./piWorker.js";
 import { SinglePiAdapter } from "./piAdapter.js";
 import type { RuntimeEvent } from "./types.js";
@@ -248,6 +248,47 @@ test("PiWorker unexpected exit rejects pending request and emits error diagnosti
   const diagnostic = await errorDiagnostic;
   assert.match((diagnostic as { message?: string }).message ?? "", /exited/);
   assert.equal(worker.getDiagnostics().healthy, false);
+});
+
+test("runtime status uses get_state only and stays scoped to its runtime", async () => {
+  const adapter = new SinglePiAdapter();
+  const workerA = adapter.createWorker({
+    runtimeId: "runtime-status-a",
+    command: process.execPath,
+    args: [fakePath()],
+    cwd: process.cwd(),
+    env: process.env,
+    requestTimeoutMs: 5_000,
+    killGraceMs: 100,
+  });
+  const workerB = adapter.createWorker({
+    runtimeId: "runtime-status-b",
+    command: process.execPath,
+    args: [fakePath()],
+    cwd: process.cwd(),
+    env: process.env,
+    requestTimeoutMs: 5_000,
+    killGraceMs: 100,
+  });
+  const getMessagesA = vi.spyOn(workerA, "getMessages");
+  const getMessagesB = vi.spyOn(workerB, "getMessages");
+  const requestA = vi.spyOn((workerA as any).client, "request");
+  const requestB = vi.spyOn((workerB as any).client, "request");
+
+  try {
+    const status = await adapter.getRuntimeStatus(workerA.runtimeId);
+    assert.equal(status.runtimeId, workerA.runtimeId);
+    assert.deepEqual(
+      requestA.mock.calls.map(([command]: [string]) => command),
+      ["get_state"],
+    );
+    assert.equal(getMessagesA.mock.calls.length, 0);
+    assert.equal(getMessagesB.mock.calls.length, 0);
+    assert.equal(requestB.mock.calls.length, 0);
+  } finally {
+    await adapter.closeSession(workerA.runtimeId);
+    await adapter.closeSession(workerB.runtimeId);
+  }
 });
 
 test("SinglePiAdapter routes required methods by runtime id", async () => {

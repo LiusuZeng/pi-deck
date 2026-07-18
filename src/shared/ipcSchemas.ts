@@ -172,6 +172,57 @@ export const chatSnapshotSchema = z
   })
   .strict();
 
+// Deliberately small state projection for lifecycle recovery and post-turn
+// metadata refreshes. Unlike ChatSnapshot, this DTO must never carry history.
+export const chatRuntimeStatusRequestSchema = z
+  .object({
+    runtimeId: z.string().min(1),
+  })
+  .strict();
+
+export const chatRuntimeUsageSchema = z
+  .object({
+    inputTokens: z.number().nonnegative(),
+    outputTokens: z.number().nonnegative(),
+    cacheReadTokens: z.number().nonnegative(),
+    cacheWriteTokens: z.number().nonnegative(),
+    totalTokens: z.number().nonnegative(),
+    contextUsedTokens: z.number().nonnegative().optional(),
+    contextWindowTokens: z.number().nonnegative().optional(),
+    totalCostUsd: z.number().nonnegative().optional(),
+  })
+  .strict();
+
+const chatRuntimeStatusModelSchema = z
+  .object({
+    id: z.string().optional(),
+    name: z.string().optional(),
+    provider: z.string().optional(),
+    contextWindow: z.number().nonnegative().optional(),
+  })
+  .strict();
+
+export const chatRuntimeStatusStateSchema = z
+  .object({
+    sessionId: z.string().optional(),
+    sessionFile: z.string().optional(),
+    cwd: z.string().optional(),
+    model: z.union([z.string(), chatRuntimeStatusModelSchema]).optional(),
+    provider: z.string().optional(),
+    thinkingLevel: z.string().optional(),
+    isAgentActive: z.boolean(),
+  })
+  .strict();
+
+export const chatRuntimeStatusSchema = z
+  .object({
+    runtimeId: z.string(),
+    backendMode: z.enum(["fake", "real"]),
+    state: chatRuntimeStatusStateSchema,
+    usage: chatRuntimeUsageSchema.optional(),
+  })
+  .strict();
+
 export const chatSessionSummarySchema = z
   .object({
     id: z.string(),
@@ -478,6 +529,7 @@ export const ipcChannels = {
   settingsGet: "settings:get",
   settingsUpdate: "settings:update",
   chatGetSnapshot: "chat:getSnapshot",
+  chatGetRuntimeStatus: "chat:getRuntimeStatus",
   chatListSessions: "chat:listSessions",
   chatResumeSession: "chat:resumeSession",
   chatDeleteSession: "chat:deleteSession",
