@@ -5292,7 +5292,7 @@ function Composer(props: {
           onPaste={handlePaste}
           disabled={isActionPending}
           placeholder="Ask Pi…"
-          rows={3}
+          rows={2}
           value={props.value}
         />
         {props.slashOpen ? (

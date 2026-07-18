@@ -65,7 +65,7 @@ body {
   margin: 0;
   overflow: hidden;
   background: var(--color-canvas);
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1.45;
 }
 
@@ -101,11 +101,11 @@ textarea:disabled {
 .sidebar {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   height: 100vh;
   min-height: 0;
   overflow: hidden;
-  padding: 14px;
+  padding: 10px;
   color: var(--color-text);
   background: var(--color-surface-subtle);
   border-right: 1px solid var(--color-border);
@@ -120,7 +120,7 @@ textarea:disabled {
 
 .sidebar-header {
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
 }
 
 .sidebar-header-actions {
@@ -167,7 +167,7 @@ textarea:disabled {
 
 .session-search {
   width: 100%;
-  padding: 7px 9px 7px 31px;
+  padding: 6px 8px 6px 29px;
   outline: none;
 }
 
@@ -185,7 +185,7 @@ textarea:disabled {
 .session-list,
 .active-work-list {
   display: grid;
-  gap: 6px;
+  gap: 4px;
   min-height: 0;
   overflow: auto;
 }
@@ -193,8 +193,8 @@ textarea:disabled {
 .active-work-list {
   margin: 2px 0;
   border: 1px solid rgb(129 140 248 / 35%);
-  border-radius: 12px;
-  padding: 7px;
+  border-radius: 10px;
+  padding: 5px;
   background: rgb(67 56 202 / 14%);
 }
 
@@ -225,10 +225,10 @@ textarea:disabled {
 }
 
 .empty-session-list {
-  margin: 4px 0;
+  margin: 3px 0;
   border: 1px solid rgb(255 255 255 / 10%);
-  border-radius: 12px;
-  padding: 10px;
+  border-radius: 10px;
+  padding: 8px;
   color: #cbd5e1;
   background: rgb(255 255 255 / 5%);
   font-size: 12px;
@@ -242,11 +242,11 @@ textarea:disabled {
 .session-item {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 7px;
+  gap: 6px;
   align-items: center;
   border: 1px solid transparent;
-  border-radius: 10px;
-  padding: 7px;
+  border-radius: 8px;
+  padding: 6px;
   color: inherit;
   text-align: left;
   background: rgb(255 255 255 / 5%);
@@ -418,7 +418,7 @@ textarea:disabled {
 }
 
 .ui-status-message {
-  padding: 7px 14px;
+  padding: 5px 10px;
   color: #344054;
   background: rgb(255 255 255 / 70%);
   border-bottom: 1px solid #eef2f6;
@@ -427,8 +427,8 @@ textarea:disabled {
 
 .topbar {
   justify-content: space-between;
-  gap: 10px;
-  padding: 8px 14px;
+  gap: 8px;
+  padding: 6px 10px;
   background: rgb(255 255 255 / 88%);
   border-bottom: 1px solid #e5e7eb;
   backdrop-filter: blur(18px);
@@ -437,7 +437,7 @@ textarea:disabled {
 .header-left {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
 }
 
@@ -452,17 +452,17 @@ textarea:disabled {
 
 .usage-stats {
   position: absolute;
-  top: 42px;
+  top: 38px;
   right: 0;
   z-index: 20;
   display: grid;
-  gap: 8px;
+  gap: 5px;
   width: max-content;
-  min-width: 280px;
-  max-width: min(360px, calc(100vw - 32px));
-  border: 1px solid #dbeafe;
-  border-radius: 16px;
-  padding: 10px;
+  min-width: 260px;
+  max-width: min(340px, calc(100vw - 24px));
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 7px;
   background: rgb(255 255 255 / 96%);
   box-shadow: 0 18px 50px rgb(16 24 40 / 18%);
   pointer-events: auto;
@@ -472,10 +472,10 @@ textarea:disabled {
 .usage-stats.empty {
   display: flex;
   justify-content: space-between;
-  gap: 14px;
-  border: 1px solid #dbeafe;
-  border-radius: 12px;
-  padding: 7px 9px;
+  gap: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 5px 7px;
   color: #1e3a8a;
   background: #eff6ff;
   font-size: 12px;
@@ -504,8 +504,8 @@ p {
 
 .project-header h1,
 h1 {
-  margin-bottom: 3px;
-  font-size: 16px;
+  margin-bottom: 2px;
+  font-size: 15px;
   line-height: 1.18;
   letter-spacing: -0.035em;
 }
@@ -516,15 +516,15 @@ h1 {
 }
 
 .project-path {
-  margin-bottom: 4px;
+  margin-bottom: 2px;
   overflow-wrap: anywhere;
   font-size: 12px;
 }
 
 .header-actions {
   display: flex;
-  gap: 10px;
-  margin-bottom: 10px;
+  gap: 6px;
+  margin-bottom: 6px;
 }
 
 .project-switcher {
@@ -687,18 +687,18 @@ h1 {
   display: grid;
   align-items: center;
   justify-items: center;
-  padding: 32px 24px;
+  padding: 24px 18px;
 }
 
 .starter-content {
   display: grid;
-  gap: 24px;
+  gap: 16px;
   width: min(940px, 100%);
 }
 
 .starter-content h2 {
   margin: 0;
-  font-size: clamp(28px, 3vw, 36px);
+  font-size: clamp(24px, 3vw, 30px);
   font-weight: 520;
   line-height: 1.1;
   letter-spacing: -0.04em;
@@ -714,9 +714,9 @@ h1 {
 }
 
 .starter-page .composer-input-wrap {
-  border-radius: 22px;
+  border-radius: 16px;
   background: #fff;
-  box-shadow: 0 20px 60px rgb(16 24 40 / 10%);
+  box-shadow: var(--shadow-sm);
 }
 
 .transcript-loading {
@@ -763,10 +763,10 @@ h1 {
 .timeline-scroll {
   display: grid;
   align-content: start;
-  gap: 12px;
+  gap: 10px;
   height: 100%;
   overflow: auto;
-  padding: 18px 22px 24px;
+  padding: 12px 16px 16px;
 }
 
 .empty-state {
@@ -781,10 +781,10 @@ h1 {
 .empty-icon {
   display: grid;
   place-items: center;
-  width: 54px;
-  height: 54px;
-  margin: 0 auto 16px;
-  border-radius: 18px;
+  width: 44px;
+  height: 44px;
+  margin: 0 auto 12px;
+  border-radius: 12px;
   color: #4458ff;
   background: #eef4ff;
   font-size: 28px;
@@ -794,10 +794,10 @@ h1 {
 .diagnostic-message {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   border: 1px solid #bfdbfe;
-  border-radius: 16px;
-  padding: 12px 14px;
+  border-radius: 10px;
+  padding: 8px 10px;
   color: #1e3a8a;
   background: #eff6ff;
 }
@@ -839,14 +839,15 @@ h1 {
 .bubble,
 .assistant-message {
   max-width: min(920px, 90%);
-  border-radius: 16px;
-  padding: 10px 12px;
-  box-shadow: 0 10px 24px rgb(16 24 40 / 7%);
+  border-radius: 12px;
+  padding: 8px 10px;
+  box-shadow: none;
 }
 
 .user-bubble {
-  color: #fff;
-  background: #4458ff;
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-muted);
 }
 
 .user-bubble p,
@@ -909,8 +910,8 @@ h1 {
   display: grid;
   flex: 0 0 auto;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   border-radius: 999px;
   color: #fff;
   background: #101828;
@@ -918,9 +919,12 @@ h1 {
 }
 
 .assistant-message {
-  color: #182033;
-  background: #fff;
-  border: 1px solid #e5e7eb;
+  color: var(--color-text);
+  border: 0;
+  border-radius: 0;
+  padding: 2px 0 5px;
+  background: transparent;
+  box-shadow: none;
 }
 
 .pending-agent-message {
@@ -961,7 +965,7 @@ h1 {
 
 .thinking-row {
   max-width: min(920px, 90%);
-  margin-left: 37px;
+  margin-left: 33px;
   color: #667085;
 }
 
@@ -1083,11 +1087,11 @@ h1 {
 
 .extension-ui-card {
   display: grid;
-  gap: 10px;
+  gap: 8px;
   max-width: min(620px, 90%);
   border: 1px solid #fdba74;
-  border-radius: 16px;
-  padding: 14px;
+  border-radius: 10px;
+  padding: 10px;
   color: #7c2d12;
   background: #fff7ed;
   box-shadow: 0 10px 28px rgb(16 24 40 / 6%);
@@ -1130,9 +1134,9 @@ h1 {
 
 .tool-card {
   max-width: min(920px, 90%);
-  margin-left: 37px;
+  margin-left: 33px;
   border: 1px solid #d0d5dd;
-  border-radius: 16px;
+  border-radius: 10px;
   color: #475467;
   background: #fff;
   box-shadow: 0 10px 28px rgb(16 24 40 / 6%);
@@ -1151,14 +1155,14 @@ h1 {
 }
 
 .tool-card details {
-  padding: 12px 14px;
+  padding: 8px 10px;
 }
 
 .tool-card summary {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
+  gap: 10px;
   cursor: pointer;
   list-style-position: outside;
 }
@@ -1183,17 +1187,17 @@ h1 {
 
 .tool-card pre {
   overflow: auto;
-  margin: 12px 0 0;
-  border-radius: 12px;
-  padding: 12px;
+  margin: 8px 0 0;
+  border-radius: 8px;
+  padding: 10px;
   color: #f9fafb;
   background: #111827;
   white-space: pre-wrap;
 }
 
 .composer {
-  gap: 8px;
-  padding: 9px 22px;
+  gap: 6px;
+  padding: 7px 16px;
   background: rgb(255 255 255 / 92%);
   border-top: 1px solid #e5e7eb;
   backdrop-filter: blur(18px);
@@ -1208,22 +1212,22 @@ h1 {
   position: relative;
   display: grid;
   flex: 1;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
   border: 1px solid #d0d5dd;
-  border-radius: 22px;
-  padding: 10px 12px;
+  border-radius: 16px;
+  padding: 8px 10px;
   background: #fff;
 }
 
 .composer textarea {
   width: 100%;
-  min-height: 56px;
-  max-height: 150px;
+  min-height: 44px;
+  max-height: 120px;
   border: 0;
-  border-radius: 14px;
-  padding: 4px 8px 46px;
-  resize: vertical;
+  border-radius: 10px;
+  padding: 2px 6px 40px;
+  resize: none;
   outline: none;
   background: transparent;
 }
@@ -1235,15 +1239,15 @@ h1 {
 
 .composer-meta {
   position: absolute;
-  right: 14px;
-  bottom: 10px;
-  left: 14px;
+  right: 10px;
+  bottom: 8px;
+  left: 10px;
   min-height: 32px;
   color: #667085;
   font-size: 12px;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
   flex-wrap: nowrap;
   pointer-events: none;
 }
@@ -1320,12 +1324,12 @@ h1 {
 .attachment-chip {
   display: inline-grid;
   grid-template-columns: auto 1fr auto;
-  gap: 2px 8px;
+  gap: 2px 6px;
   align-items: center;
   max-width: 280px;
   border: 1px solid #d0d5dd;
-  border-radius: 14px;
-  padding: 8px 9px;
+  border-radius: 10px;
+  padding: 6px 7px;
   background: #fff;
 }
 
@@ -1336,9 +1340,9 @@ h1 {
 
 .attachment-chip img {
   grid-row: 1 / span 3;
-  width: 42px;
-  height: 42px;
-  border-radius: 10px;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
   object-fit: cover;
   background: #eef2f6;
 }
@@ -1375,10 +1379,10 @@ h1 {
   bottom: calc(100% + 8px);
   z-index: 5;
   display: grid;
-  gap: 6px;
+  gap: 4px;
   border: 1px solid #d0d5dd;
-  border-radius: 16px;
-  padding: 8px;
+  border-radius: 10px;
+  padding: 6px;
   background: #fff;
   box-shadow: 0 18px 48px rgb(16 24 40 / 16%);
 }
@@ -1670,12 +1674,16 @@ h3 {
 }
 
 .usage-stats,
-.assistant-message,
 .tool-card,
 .composer-input-wrap,
 .attachment-chip,
-.slash-picker,
 .extension-ui-card {
+  border-color: var(--color-border);
+  background: var(--color-surface);
+  box-shadow: none;
+}
+
+.slash-picker {
   border-color: var(--color-border);
   background: var(--color-surface);
   box-shadow: var(--shadow-md);
@@ -1722,8 +1730,9 @@ h3 {
 }
 
 .user-bubble {
-  color: var(--color-on-accent);
-  background: var(--color-accent);
+  color: var(--color-text);
+  border-color: var(--color-border);
+  background: var(--color-surface-muted);
 }
 
 .assistant-message,
@@ -1731,6 +1740,12 @@ h3 {
 .tool-card,
 .tool-title {
   color: var(--color-text);
+}
+
+.assistant-message {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .slash-picker .ui-button:hover {

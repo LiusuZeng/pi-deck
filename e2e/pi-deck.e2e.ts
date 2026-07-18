@@ -115,6 +115,15 @@ test("icon controls retain names, neutral styles, and fit a 900×600 viewport", 
       page.getByRole("button", { name: "Add attachments" }),
     ).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
 
+    await send.click();
+    const userBubble = page.locator(".user-bubble").last();
+    await expect(userBubble).toHaveCSS(
+      "background-color",
+      "rgb(241, 243, 241)",
+    );
+    await expect(userBubble).toHaveCSS("color", "rgb(31, 41, 51)");
+    await expect(userBubble).toHaveCSS("box-shadow", "none");
+
     const sidebarToggle = page.locator(".topbar .sidebar-toggle");
     await expect(sidebarToggle).not.toHaveAttribute("aria-describedby");
     await sidebarToggle.focus();
