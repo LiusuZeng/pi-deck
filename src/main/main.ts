@@ -930,8 +930,6 @@ function resolveActiveChatRuntimeId(
 ): string {
   const selection = selectAvailableRuntime({
     requestedRuntimeId,
-    activeRuntimeId: chatRuntimeId,
-    runtimeIds: chatRuntimeIds,
     hasRuntime: (runtimeId) => adapter.hasRuntime(runtimeId),
   });
 
@@ -939,17 +937,16 @@ function resolveActiveChatRuntimeId(
     return selection.runtimeId;
   }
 
+  // Do not redirect a stale renderer request to another active session. An
+  // abort, close, or prompt against the wrong conversation is worse than a
+  // recoverable error in the originating session.
   forgetChatRuntime(requestedRuntimeId);
-
-  if (selection.runtimeId !== undefined) {
-    chatRuntimeId = selection.runtimeId;
-    diagnostics?.recordError(
-      `Renderer requested stale chat runtime ${requestedRuntimeId}; using ${selection.reason} runtime ${selection.runtimeId}.`,
-    );
-    return selection.runtimeId;
-  }
-
-  throw new Error("Chat runtime is not initialized");
+  diagnostics?.recordError(
+    `Renderer requested stale chat runtime ${requestedRuntimeId}; action rejected.`,
+  );
+  throw new Error(
+    `Chat runtime is no longer attached: ${requestedRuntimeId}. Reopen the saved session or create a new session.`,
+  );
 }
 
 function forgetChatRuntime(runtimeId: string): void {

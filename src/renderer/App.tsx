@@ -44,7 +44,15 @@ type LoadState =
     }
   | { state: "error"; message: string };
 
-type SessionStatus = "idle" | "working" | "waiting" | "error";
+type SessionStatus =
+  | "idle"
+  | "starting"
+  | "sending"
+  | "working"
+  | "aborting"
+  | "reconnecting"
+  | "waiting"
+  | "error";
 
 type ExtensionUiDialogMethod = "select" | "confirm" | "input" | "editor";
 
@@ -155,6 +163,8 @@ interface SessionViewModel {
   /** The saved session worker/transcript is being restored. */
   isResuming?: boolean;
   pendingExtensionUiRequests?: PendingExtensionUiRequest[];
+  /** Prompt retained only after a failed send so recovery can retry it. */
+  retryPrompt?: { text: string; attachments: AttachmentDraft[] } | undefined;
 }
 
 interface ComposerDraftState {
@@ -342,7 +352,7 @@ const loadingSession: SessionViewModel = {
   project: "Pi Deck",
   projectPath: "Resolving backend session",
   subtitle: "Starting backend…",
-  status: "idle",
+  status: "starting",
   updatedAt: "Now",
   updatedAtMs: appStartedAt,
   baseState: "attaching",
@@ -569,7 +579,8 @@ export function App(): ReactElement {
   const attachments = composerDraft.attachments;
   const slashOpen = composerDraft.slashOpen;
   const isWorking = selectedSession.status === "working";
-  const isResuming = selectedSession.isResuming === true;
+  const isBusy = isSessionBusy(selectedSession);
+  const isResuming = selectedSession.status === "reconnecting";
   const isRealBackendMode = selectedSession.backendMode === "real";
   const hasBlockingAttachment = attachments.some(
     (attachment) => attachment.status !== "ready",
@@ -579,7 +590,7 @@ export function App(): ReactElement {
   );
   const canSend =
     draft.trim().length > 0 &&
-    !isWorking &&
+    !isBusy &&
     !isResuming &&
     loadState.state === "ready";
   const canIntervene =
@@ -620,9 +631,7 @@ export function App(): ReactElement {
   }, []);
 
   useEffect(() => {
-    const hasWorkingSession = sessions.some(
-      (session) => session.status === "working",
-    );
+    const hasWorkingSession = sessions.some(shouldReconcileSession);
     if (!hasWorkingSession) {
       return;
     }
@@ -639,7 +648,7 @@ export function App(): ReactElement {
         (session) =>
           session.backendMode === "real" &&
           session.runtimeBacked &&
-          session.status === "working",
+          shouldReconcileSession(session),
       )
       .map((session) => session.id);
     if (runtimeIds.length === 0) {
@@ -656,31 +665,25 @@ export function App(): ReactElement {
     for (const runtimeId of runtimeIds) {
       try {
         const snapshot = await window.piDeck.chat.getSnapshot({ runtimeId });
-        if (isSnapshotAgentActive(snapshot)) {
-          continue;
-        }
-        const reconciled = sessionFromSnapshot(snapshot);
         setSessions((current) =>
           current.map((session) =>
             session.id === runtimeId
-              ? appendDiagnostic(
-                  {
-                    ...reconciled,
-                    title: isPlaceholderSessionTitle(reconciled.title)
-                      ? session.title
-                      : reconciled.title,
-                  },
-                  {
-                    tone: "info",
-                    content:
-                      "Reconciled from persisted Pi session because the live completion event was not observed.",
-                  },
-                )
+              ? reconcileSessionWithSnapshot(session, snapshot)
               : session,
           ),
         );
-      } catch {
-        // Reconciliation is best-effort. Keep the live projection visible.
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setSessions((current) =>
+          current.map((session) =>
+            session.id === runtimeId && isLifecycleTransition(session.status)
+              ? appendDiagnostic(session, {
+                  tone: "error",
+                  content: `Could not reconcile Pi runtime: ${message}`,
+                })
+              : session,
+          ),
+        );
       }
     }
   }
@@ -775,8 +778,9 @@ export function App(): ReactElement {
           ? {
               ...item,
               isResuming: true,
+              status: "reconnecting",
               baseState: "attaching",
-              subtitle: "Loading previous context…",
+              subtitle: "Reconnecting · loading previous context…",
             }
           : item,
       ),
@@ -927,9 +931,9 @@ export function App(): ReactElement {
         session.id === draftSession.id
           ? {
               ...session,
-              status: "working",
+              status: "starting",
               baseState: "attaching",
-              subtitle: "Attaching · starting Pi RPC worker for first prompt",
+              subtitle: "Starting · launching Pi RPC worker for first prompt",
             }
           : session,
       ),
@@ -1005,12 +1009,13 @@ export function App(): ReactElement {
               title: isPlaceholderSessionTitle(session.title)
                 ? summarizeTitle(prompt, 64)
                 : session.title,
-              status: "working",
-              baseState: "working",
-              overlays: { ...session.overlays, streaming: true },
-              subtitle: `Working · ${backendLabel(session)} stream`,
+              status: "sending",
+              baseState: "attaching",
+              overlays: { ...session.overlays, streaming: false },
+              subtitle: `Sending · waiting for ${backendLabel(session)} confirmation`,
               workingStartedAtMs: session.workingStartedAtMs ?? Date.now(),
-              lastRuntimeEventLabel: "Prompt accepted by Pi Deck",
+              lastRuntimeEventLabel: "Prompt sent; awaiting Pi confirmation",
+              retryPrompt: { text: prompt, attachments: promptAttachments },
               updatedAt: "Now",
               updatedAtMs: Date.now(),
               timeline: [
@@ -1209,35 +1214,54 @@ export function App(): ReactElement {
     void resumeSession({ ...selectedSession, resumeBacked: true });
   }
 
+  function handleRetrySelectedSession(): void {
+    const retry = selectedSession.retryPrompt;
+    if (!selectedSession.runtimeBacked || retry === undefined) {
+      setUiMessage("There is no failed prompt available to retry.");
+      return;
+    }
+    void sendPrompt(selectedSession.id, retry.text, retry.attachments);
+  }
+
+  async function handleCopySelectedDiagnostics(): Promise<void> {
+    const diagnostics = selectedSession.timeline
+      .filter(
+        (item): item is Extract<TimelineItem, { kind: "diagnostic" }> =>
+          item.kind === "diagnostic",
+      )
+      .map((item) => `${item.tone.toUpperCase()}: ${item.content}`)
+      .join("\n");
+    const text =
+      diagnostics || selectedSession.lastError || "No diagnostics recorded.";
+    try {
+      await navigator.clipboard.writeText(text);
+      setUiMessage("Copied session diagnostics to the clipboard.");
+    } catch {
+      setUiMessage("Could not copy diagnostics. Clipboard access was denied.");
+    }
+  }
+
   async function abortPrompt(runtimeId: string): Promise<void> {
+    if (selectedSession.status !== "working") {
+      return;
+    }
     setComposerError(null);
+    setSessions((current) =>
+      current.map((session) =>
+        session.id === runtimeId
+          ? {
+              ...session,
+              status: "aborting",
+              baseState: "working",
+              subtitle: "Aborting · waiting for Pi confirmation",
+              lastRuntimeEventLabel: "Abort requested; awaiting Pi completion",
+            }
+          : session,
+      ),
+    );
     try {
       await window.piDeck.chat.abort({ runtimeId });
-      setSessions((current) =>
-        current.map((session) =>
-          session.id === runtimeId
-            ? appendDiagnostic(
-                {
-                  ...session,
-                  status: "idle",
-                  baseState: "idle",
-                  overlays: {
-                    ...session.overlays,
-                    streaming: false,
-                    toolRunning: false,
-                  },
-                  subtitle: "Idle · abort sent to Pi backend",
-                },
-                {
-                  tone: "info",
-                  content:
-                    "Abort sent to Pi. Marked the session idle locally; reopen/resume if the transcript looks stale.",
-                },
-              )
-            : session,
-        ),
-      );
-      setUiMessage("Abort sent to Pi.");
+      setUiMessage("Abort requested; waiting for Pi to confirm completion.");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       try {
@@ -1257,6 +1281,28 @@ export function App(): ReactElement {
           setUiMessage("Pi reports the session is idle after abort.");
           return;
         }
+        // The abort request failed, but this snapshot authoritatively says the
+        // turn remains active. Restore working controls; do not claim idle.
+        setSessions((current) =>
+          current.map((session) =>
+            session.id === runtimeId
+              ? appendDiagnostic(
+                  {
+                    ...session,
+                    status: "working",
+                    baseState: "working",
+                    subtitle: `Working · ${backendLabel(session)} confirmed by Pi`,
+                  },
+                  {
+                    tone: "info",
+                    content: `Abort failed and Pi still reports active work: ${message}`,
+                  },
+                )
+              : session,
+          ),
+        );
+        setComposerError(message);
+        return;
       } catch {
         // Fall through to surfacing the original abort error.
       }
@@ -1325,7 +1371,6 @@ export function App(): ReactElement {
       setUiMessage(`Selected project ${project.displayName}.`);
       return;
     }
-
     setComposerError(null);
     setUiMessage(
       `Opening ${project.displayName}; existing Pi workers stay attached…`,
@@ -1476,6 +1521,12 @@ export function App(): ReactElement {
     if (session === undefined || !session.runtimeBacked) {
       return;
     }
+    if (isSessionBusy(session)) {
+      setUiMessage(
+        "Wait for Pi to complete or reconcile before closing this runtime.",
+      );
+      return;
+    }
 
     intentionallyClosingRuntimeIds.current.add(session.id);
     try {
@@ -1564,7 +1615,7 @@ export function App(): ReactElement {
     provider: string,
     modelId: string,
   ): Promise<void> {
-    if (!selectedSession.runtimeBacked) {
+    if (!selectedSession.runtimeBacked || isSessionBusy(selectedSession)) {
       return;
     }
     setComposerError(null);
@@ -1589,7 +1640,7 @@ export function App(): ReactElement {
   }
 
   async function handleSetRealThinking(level: string): Promise<void> {
-    if (!selectedSession.runtimeBacked) {
+    if (!selectedSession.runtimeBacked || isSessionBusy(selectedSession)) {
       return;
     }
     setComposerError(null);
@@ -1744,6 +1795,7 @@ export function App(): ReactElement {
     <Composer
       value={draft}
       isWorking={isWorking}
+      status={selectedSession.status}
       canSend={canSend}
       canIntervene={canIntervene}
       knownExtensionCommand={knownExtensionCommand}
@@ -1855,6 +1907,9 @@ export function App(): ReactElement {
               nowMs={nowMs}
               onRecoverSession={handleRecoverSelectedSession}
               onRespondToExtensionUi={handleExtensionUiResponse}
+              onRetrySession={handleRetrySelectedSession}
+              onCloseSession={() => void handleCloseRuntime(selectedSession.id)}
+              onCopyDiagnostics={() => void handleCopySelectedDiagnostics()}
             />
             {composer}
           </>
@@ -2521,6 +2576,7 @@ function reduceRuntimeEvent(
         subtitle: `Working · ${backendLabel(session)} stream`,
         workingStartedAtMs: session.workingStartedAtMs ?? Date.now(),
         lastRuntimeEventLabel: "Pi agent started",
+        retryPrompt: undefined,
         updatedAt: "Now",
         updatedAtMs: Date.now(),
       };
@@ -2640,6 +2696,7 @@ function reduceRuntimeEvent(
               ? "Idle · backend stream aborted"
               : "Idle · backend stream complete",
         workingStartedAtMs: undefined,
+        retryPrompt: endedWithError ? session.retryPrompt : undefined,
         lastRuntimeEventLabel: endedWithError
           ? "Pi reported an error"
           : status === "aborted"
@@ -2825,12 +2882,15 @@ function reduceToolExecutionEvent(
     (item) => item.kind === "tool" && item.status === "running",
   );
 
+  const isAborting = session.status === "aborting";
   return {
     ...session,
-    status: "working",
+    status: isAborting ? "aborting" : "working",
     baseState: "working",
     overlays: { ...session.overlays, toolRunning },
-    subtitle: `Working · ${backendLabel(session)} stream`,
+    subtitle: isAborting
+      ? "Aborting · waiting for Pi confirmation"
+      : `Working · ${backendLabel(session)} stream`,
     workingStartedAtMs: session.workingStartedAtMs ?? Date.now(),
     lastRuntimeEventLabel:
       event.type === "tool_execution_end"
@@ -2971,19 +3031,27 @@ function reduceMessageUpdate(
     ...session,
     ...(usageByMessageId !== undefined ? { usageByMessageId } : {}),
     ...(usageStats !== undefined ? { usageStats } : {}),
-    status: isErrorUpdate ? "error" : done ? "idle" : "working",
-    baseState: isErrorUpdate ? "error" : done ? "idle" : "working",
+    // An assistant message's `done` only completes that message. The agent
+    // may still be running tools or emit an authoritative agent_end next.
+    status: isErrorUpdate
+      ? "error"
+      : session.status === "aborting"
+        ? "aborting"
+        : "working",
+    baseState: isErrorUpdate ? "error" : "working",
     overlays: { ...session.overlays, streaming: !done && !isErrorUpdate },
     subtitle: isErrorUpdate
       ? "Error · backend stream failed"
-      : done
-        ? "Idle · backend stream complete"
-        : `Working · ${backendLabel(session)} stream`,
-    ...(done || isErrorUpdate ? { workingStartedAtMs: undefined } : {}),
+      : session.status === "aborting"
+        ? "Aborting · waiting for Pi confirmation"
+        : done
+          ? "Working · waiting for Pi completion"
+          : `Working · ${backendLabel(session)} stream`,
+    ...(isErrorUpdate ? { workingStartedAtMs: undefined } : {}),
     lastRuntimeEventLabel: isErrorUpdate
       ? "Pi reported an error"
       : done
-        ? "Pi completed the turn"
+        ? "Assistant message complete; awaiting Pi turn completion"
         : hasReplyContent
           ? "Receiving assistant text"
           : hasThinkingContent
@@ -3590,7 +3658,8 @@ function SessionSidebar(props: {
         ) : null}
         {visibleSessions.map((session) => {
           const canDelete = isSessionDeletable(session, props.realMode);
-          const canCloseRuntime = props.realMode && session.runtimeBacked;
+          const canCloseRuntime =
+            props.realMode && session.runtimeBacked && !isSessionBusy(session);
           return (
             <div className="session-item-wrap" key={session.id}>
               <button
@@ -4215,6 +4284,9 @@ function ChatTimeline(props: {
     requestId: string,
     response: { confirmed: boolean } | { value: string } | { cancelled: true },
   ): Promise<void>;
+  onRetrySession(): void;
+  onCloseSession(): void;
+  onCopyDiagnostics(): void;
 }): ReactElement {
   const hasItems = props.session.timeline.length > 0;
   const showPendingAgent =
@@ -4271,11 +4343,27 @@ function ChatTimeline(props: {
         {props.session.status === "error" ? (
           <div className="state-banner error">
             <span>This session is in an error state.</span>
-            {props.session.sessionFile !== undefined ? (
-              <button type="button" onClick={props.onRecoverSession}>
-                Reopen saved session
+            <div className="recovery-actions">
+              {props.session.retryPrompt !== undefined &&
+              props.session.runtimeBacked ? (
+                <button type="button" onClick={props.onRetrySession}>
+                  Retry prompt
+                </button>
+              ) : null}
+              {props.session.sessionFile !== undefined ? (
+                <button type="button" onClick={props.onRecoverSession}>
+                  Reopen saved session
+                </button>
+              ) : null}
+              {props.session.runtimeBacked ? (
+                <button type="button" onClick={props.onCloseSession}>
+                  Close runtime
+                </button>
+              ) : null}
+              <button type="button" onClick={props.onCopyDiagnostics}>
+                Copy diagnostics
               </button>
-            ) : null}
+            </div>
           </div>
         ) : null}
         {props.session.status === "waiting" ? (
@@ -4680,6 +4768,7 @@ function InlineTokens(props: { tokens: InlineToken[] }): ReactElement {
 function Composer(props: {
   value: string;
   isWorking: boolean;
+  status: SessionStatus;
   canSend: boolean;
   canIntervene: boolean;
   knownExtensionCommand: string | undefined;
@@ -4730,6 +4819,7 @@ function Composer(props: {
     ? `${activeRealModel.provider ?? ""}/${activeRealModel.id}`
     : props.selectedSession.modelLabel?.replace(/\s+\/\s+/, "/");
   const [dragActive, setDragActive] = useState(false);
+  const isActionPending = isLifecycleTransition(props.status);
 
   function handleDrop(event: DragEvent<HTMLElement>): void {
     event.preventDefault();
@@ -4788,6 +4878,7 @@ function Composer(props: {
           }}
           onKeyDown={props.onKeyDown}
           onPaste={handlePaste}
+          disabled={isActionPending}
           placeholder={
             props.enterToSend
               ? "Prompt Pi Deck… Enter to send, Shift+Enter for newline"
@@ -4808,6 +4899,7 @@ function Composer(props: {
               className="attachment-button"
               type="button"
               aria-label="Add attachments"
+              disabled={isActionPending}
               onClick={props.onPickAttachments}
             >
               +
@@ -4818,6 +4910,7 @@ function Composer(props: {
               className="composer-select"
               aria-label="Real Pi model"
               value={currentRealModelValue ?? ""}
+              disabled={isActionPending}
               onChange={(event) => {
                 const [provider, modelId] = event.target.value.split("/");
                 if (provider && modelId) {
@@ -4842,6 +4935,7 @@ function Composer(props: {
               className="composer-select thinking"
               aria-label="Real Pi thinking"
               value={props.selectedSession.thinkingLevel ?? "off"}
+              disabled={isActionPending}
               onChange={(event) => props.onSetThinking(event.target.value)}
             >
               {props.realThinkingLevels.map((level) => (
@@ -4862,6 +4956,7 @@ function Composer(props: {
             <input
               checked={props.enterToSend}
               type="checkbox"
+              disabled={isActionPending}
               onChange={(event) => {
                 props.onEnterToSendChange(event.target.checked);
               }}
@@ -4870,6 +4965,10 @@ function Composer(props: {
           </label>
           {props.error !== null ? (
             <span className="composer-error">{props.error}</span>
+          ) : isActionPending ? (
+            <span>
+              {statusLabel(props.status)} · waiting for Pi confirmation…
+            </span>
           ) : props.knownExtensionCommand !== undefined ? (
             <span className="composer-error">
               {props.knownExtensionCommand} is an extension command. It runs
@@ -5097,10 +5196,68 @@ function toSessionStatus(
   if (baseState === "waitingForInput" || overlays.needsUserInput === true) {
     return "waiting";
   }
-  if (baseState === "working" || baseState === "attaching") {
+  if (baseState === "attaching") {
+    return "starting";
+  }
+  if (baseState === "working") {
     return "working";
   }
   return "idle";
+}
+
+function isLifecycleTransition(status: SessionStatus): boolean {
+  return (
+    status === "starting" ||
+    status === "sending" ||
+    status === "aborting" ||
+    status === "reconnecting"
+  );
+}
+
+function isSessionBusy(session: Pick<SessionViewModel, "status">): boolean {
+  return isLifecycleTransition(session.status) || session.status === "working";
+}
+
+function shouldReconcileSession(session: SessionViewModel): boolean {
+  return session.runtimeBacked && isSessionBusy(session);
+}
+
+function reconcileSessionWithSnapshot(
+  session: SessionViewModel,
+  snapshot: ChatSnapshot,
+): SessionViewModel {
+  const active = isSnapshotAgentActive(snapshot);
+  if (active) {
+    // Abort remains pending until Pi reports a terminal completion event or an
+    // authoritative inactive snapshot; a still-active snapshot is not success.
+    if (session.status === "aborting" || session.status === "working") {
+      return session;
+    }
+    return {
+      ...session,
+      status: "working",
+      baseState: "working",
+      overlays: { ...session.overlays, streaming: true },
+      subtitle: `Working · ${backendLabel(session)} confirmed by Pi`,
+      lastRuntimeEventLabel: "Pi reconciliation confirmed active work",
+    };
+  }
+
+  const reconciled = sessionFromSnapshot(snapshot);
+  return appendDiagnostic(
+    {
+      ...reconciled,
+      title: isPlaceholderSessionTitle(reconciled.title)
+        ? session.title
+        : reconciled.title,
+      timeline: session.timeline,
+    },
+    {
+      tone: "info",
+      content:
+        "Reconciled from persisted Pi session because the live completion event was not observed.",
+    },
+  );
 }
 
 function getMessageUpdateId(event: ChatRuntimeEvent): string | undefined {
@@ -5398,8 +5555,16 @@ async function readDroppedImageFile(file: File): Promise<{
 
 function statusLabel(status: SessionStatus): string {
   switch (status) {
+    case "starting":
+      return "Starting";
+    case "sending":
+      return "Sending";
     case "working":
       return "Working";
+    case "aborting":
+      return "Aborting";
+    case "reconnecting":
+      return "Reconnecting";
     case "waiting":
       return "Needs input";
     case "error":
@@ -5563,6 +5728,8 @@ export const __rendererTestHooks = {
   findKnownExtensionCommand,
   buildRealSessionInbox,
   queueBadgeLabels,
+  isSessionBusy,
+  reconcileSessionWithSnapshot,
 };
 
 function getRendererNodeAccessSummary(): string {

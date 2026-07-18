@@ -130,7 +130,9 @@ test("working sessions expose steer, follow-up, extension, and abort interventio
 
     await page.getByRole("button", { name: "Abort" }).click();
     await expect(
-      page.getByText("Abort sent to Pi.", { exact: true }),
+      page.getByText("Abort requested; waiting for Pi to confirm completion.", {
+        exact: true,
+      }),
     ).toBeVisible();
   } finally {
     await app.close();
@@ -192,7 +194,7 @@ test("extension UI confirm request completes through renderer, IPC, and fake Pi"
     await expect(
       page.getByText(/Fake response to: confirm extension request/),
     ).toBeVisible();
-    await expect(page.getByText("Needs input")).toHaveCount(0);
+    await expect(page.getByText("Needs input", { exact: true })).toHaveCount(0);
   } finally {
     await app.close();
     fs.rmSync(root, { recursive: true, force: true });
