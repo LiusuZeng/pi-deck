@@ -34,6 +34,7 @@ import {
   type BaseSessionState,
   type SessionOverlays,
 } from "./sessionState.js";
+import { RuntimeEventBuffer } from "./runtimeEventBuffer.js";
 
 type LoadState =
   | { state: "loading" }
@@ -451,13 +452,16 @@ export function App(): ReactElement {
   // renders fan out duplicate status requests for the same runtime.
   const reconcilingRuntimeIds = useRef(new Set<string>());
   const sessionsRef = useRef<SessionViewModel[]>([]);
+  const selectedSessionIdRef = useRef(selectedSessionId);
   const reconciliationRetryTimers = useRef(new Map<string, number>());
   const reconciliationRetryAttempts = useRef(new Map<string, number>());
   sessionsRef.current = sessions;
+  selectedSessionIdRef.current = selectedSessionId;
 
   useEffect(() => {
     let disposed = false;
     let unsubscribe: (() => void) | undefined;
+    let eventBuffer: RuntimeEventBuffer | undefined;
 
     async function load(): Promise<void> {
       try {
@@ -484,14 +488,26 @@ export function App(): ReactElement {
           }
         }
 
-        unsubscribe = api.chat.onEvent((event) => {
-          if (!disposed) {
-            applyRuntimeEvent(event);
-            // Pi's final event often already contains usage. Only fall back to
-            // compact get_state metadata when it does not.
-            if (event.type === "agent_end" && !eventHasUsageMetadata(event)) {
-              void refreshRuntimeUsage(event.runtimeId);
+        eventBuffer = new RuntimeEventBuffer({
+          deliver: (event) => {
+            if (!disposed) {
+              applyRuntimeEvent(event);
             }
+          },
+          isRuntimeVisible: (runtimeId) =>
+            selectedSessionIdRef.current === runtimeId,
+        });
+        unsubscribe = api.chat.onEvent((event) => {
+          if (disposed) {
+            return;
+          }
+          eventBuffer?.handle(event);
+          // agent_end is a synchronous buffer barrier, so its preceding
+          // message/tool updates have already reached the reducer here.
+          // Pi's final event often already contains usage. Only fall back to
+          // compact get_state metadata when it does not.
+          if (event.type === "agent_end" && !eventHasUsageMetadata(event)) {
+            void refreshRuntimeUsage(event.runtimeId);
           }
         });
         const [version, settings, diagnostics, snapshot] = await Promise.all([
@@ -567,6 +583,7 @@ export function App(): ReactElement {
     return () => {
       disposed = true;
       unsubscribe?.();
+      eventBuffer?.dispose();
       for (const timer of reconciliationRetryTimers.current.values()) {
         window.clearTimeout(timer);
       }
@@ -765,10 +782,8 @@ export function App(): ReactElement {
       return;
     }
     setSessions((current) =>
-      current.map((session) =>
-        session.id === event.runtimeId
-          ? reduceRuntimeEvent(session, event)
-          : session,
+      updateSessionByRuntimeId(current, event.runtimeId, (session) =>
+        reduceRuntimeEvent(session, event),
       ),
     );
   }
