@@ -27,6 +27,7 @@
     "format": "prettier --check \"index.html\" \"package*.json\" \"*.config.ts\" \"tsconfig*.json\" \"scripts/**/*.mjs\" \"src/**/*.{ts,tsx,css}\" \"e2e/**/*.ts\""
   },
   "dependencies": {
+    "lucide-react": "^1.25.0",
     "react": "19.2.7",
     "react-dom": "19.2.7",
     "zod": "4.4.3"
@@ -40,6 +41,7 @@
     "concurrently": "10.0.3",
     "electron": "42.5.0",
     "esbuild": "0.28.1",
+    "jsdom": "^29.1.1",
     "prettier": "3.8.5",
     "typescript": "6.0.3",
     "vite": "8.1.0",
