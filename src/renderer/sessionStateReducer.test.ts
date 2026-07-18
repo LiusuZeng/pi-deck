@@ -88,6 +88,21 @@ describe("reduceSessionRuntimeEvent", () => {
     expect(state.pendingExtensionUiQueue).toEqual([]);
   });
 
+  it("retains steering and follow-up queue counts while the agent is working", () => {
+    const state = applyEvents([
+      { type: "queue_update", steeringCount: 1, followUpCount: 2 },
+      { type: "agent_start" },
+      { type: "message_update", done: false },
+    ]);
+
+    expect(selectSidebarIndicator(state).kind).toBe("working");
+    expect(state.overlays).toMatchObject({
+      piQueuedSteeringCount: 1,
+      piQueuedFollowUpCount: 2,
+      streaming: true,
+    });
+  });
+
   it("marks final auto-retry failure as an error", () => {
     const state = applyEvents([
       { type: "auto_retry_start", attempt: 2, maxAttempts: 2 },

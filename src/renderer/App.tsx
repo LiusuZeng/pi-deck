@@ -1668,6 +1668,7 @@ export function App(): ReactElement {
           onCloseRuntime={(sessionId) => void handleCloseRuntime(sessionId)}
           onDeleteSession={(sessionId) => void handleDeleteSession(sessionId)}
           onDeleteAllSessions={() => void handleDeleteAllSessions()}
+          onRefresh={refreshRealSessions}
         />
       ) : null}
 
@@ -3069,16 +3070,46 @@ function SessionSidebar(props: {
   onCloseRuntime(sessionId: string): void;
   onDeleteSession(sessionId: string): void;
   onDeleteAllSessions(): void;
+  onRefresh(): Promise<void>;
 }): ReactElement {
   const [showOlderRealSessions, setShowOlderRealSessions] = useState(false);
-  const sidebarSessions = props.realMode
-    ? props.sessions.filter(shouldShowSessionInSidebar)
-    : props.sessions;
-  const visibleSessions =
-    props.realMode && !showOlderRealSessions
-      ? sidebarSessions.slice(0, 5)
-      : sidebarSessions;
-  const hiddenSessionCount = Math.max(0, sidebarSessions.length - 5);
+  const [sessionFilter, setSessionFilter] = useState("");
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const sidebarSessions = props.sessions.filter(shouldShowSessionInSidebar);
+  const allRealInbox = props.realMode
+    ? buildRealSessionInbox(sidebarSessions, "")
+    : undefined;
+  const inbox = props.realMode
+    ? sessionFilter.trim().length === 0
+      ? allRealInbox
+      : buildRealSessionInbox(sidebarSessions, sessionFilter)
+    : undefined;
+  const visibleIdleSavedSessions =
+    inbox === undefined
+      ? []
+      : sessionFilter.trim().length > 0 || showOlderRealSessions
+        ? inbox.idleSaved
+        : inbox.idleSaved.slice(0, 5);
+  const hiddenSessionCount = Math.max(0, (inbox?.idleSaved.length ?? 0) - 5);
+  const visibleSessions = props.realMode
+    ? [
+        ...(inbox?.needsInput ?? []),
+        ...(inbox?.errors ?? []),
+        ...(inbox?.working ?? []),
+        ...(inbox?.queued ?? []),
+        ...(inbox?.attached ?? []),
+        ...visibleIdleSavedSessions,
+      ]
+    : sidebarSessions;
+
+  async function handleRefresh(): Promise<void> {
+    setIsRefreshing(true);
+    try {
+      await props.onRefresh();
+    } finally {
+      setIsRefreshing(false);
+    }
+  }
 
   return (
     <aside className="sidebar" aria-label="Sessions">
@@ -3100,6 +3131,19 @@ function SessionSidebar(props: {
           >
             ×
           </button>
+          {props.realMode ? (
+            <button
+              className="sidebar-refresh"
+              type="button"
+              aria-label="Refresh sessions"
+              title="Refresh saved Pi sessions"
+              aria-busy={isRefreshing}
+              disabled={isRefreshing}
+              onClick={() => void handleRefresh()}
+            >
+              {isRefreshing ? "Refreshing…" : "Refresh"}
+            </button>
+          ) : null}
           <button
             className="icon-button"
             type="button"
@@ -3130,6 +3174,27 @@ function SessionSidebar(props: {
         </button>
       )}
 
+      {props.realMode ? (
+        <>
+          <label className="session-search-label" htmlFor="session-search">
+            Search sessions
+          </label>
+          <input
+            id="session-search"
+            className="session-search"
+            type="search"
+            value={sessionFilter}
+            placeholder="Search saved sessions"
+            onChange={(event) => setSessionFilter(event.target.value)}
+          />
+          <p className="attention-summary" aria-live="polite">
+            Needs input {allRealInbox?.needsInput.length ?? 0} · Errors{" "}
+            {allRealInbox?.errors.length ?? 0} · Working{" "}
+            {allRealInbox?.working.length ?? 0}
+          </p>
+        </>
+      ) : null}
+
       <section
         className="session-list"
         aria-label="Session list with priority states"
@@ -3137,7 +3202,9 @@ function SessionSidebar(props: {
         {visibleSessions.length === 0 ? (
           <p className="empty-session-list">
             {props.realMode
-              ? "No sessions in this project yet."
+              ? sessionFilter.trim().length > 0
+                ? "No sessions match this search."
+                : "No sessions in this project yet."
               : "No local demo sessions."}
           </p>
         ) : null}
@@ -3202,7 +3269,9 @@ function SessionSidebar(props: {
             </div>
           );
         })}
-        {props.realMode && hiddenSessionCount > 0 ? (
+        {props.realMode &&
+        hiddenSessionCount > 0 &&
+        sessionFilter.trim().length === 0 ? (
           <button
             className="browse-sessions"
             type="button"
@@ -3269,19 +3338,130 @@ function shouldShowSessionInSidebar(session: SessionViewModel): boolean {
   );
 }
 
+interface RealSessionInbox {
+  needsInput: SessionViewModel[];
+  errors: SessionViewModel[];
+  working: SessionViewModel[];
+  queued: SessionViewModel[];
+  attached: SessionViewModel[];
+  idleSaved: SessionViewModel[];
+}
+
+/**
+ * Attention rows are deliberately outside the five-row saved-session limit.
+ * The remaining persisted, idle sessions retain their familiar recency order.
+ */
+function buildRealSessionInbox(
+  sessions: SessionViewModel[],
+  filter: string,
+): RealSessionInbox {
+  const normalizedFilter = filter.trim().toLocaleLowerCase();
+  const matches = sessions.filter((session) => {
+    if (normalizedFilter.length === 0) {
+      return true;
+    }
+    const indicator = selectSidebarIndicator(session);
+    return [
+      session.title,
+      session.subtitle,
+      session.project,
+      session.projectPath,
+      indicator.label,
+    ].some((value) => value.toLocaleLowerCase().includes(normalizedFilter));
+  });
+  const newestFirst = (items: SessionViewModel[]): SessionViewModel[] =>
+    [...items].sort((left, right) => right.updatedAtMs - left.updatedAtMs);
+  const inbox: RealSessionInbox = {
+    needsInput: [],
+    errors: [],
+    working: [],
+    queued: [],
+    attached: [],
+    idleSaved: [],
+  };
+
+  for (const session of matches) {
+    const indicator = selectSidebarIndicator(session);
+    if (indicator.kind === "needsInput") {
+      inbox.needsInput.push(session);
+    } else if (indicator.kind === "error") {
+      inbox.errors.push(session);
+    } else if (
+      session.status === "working" ||
+      session.baseState === "attaching" ||
+      [
+        "attaching",
+        "compacting",
+        "retrying",
+        "toolRunning",
+        "working",
+      ].includes(indicator.kind)
+    ) {
+      inbox.working.push(session);
+    } else if (
+      session.overlays.localQueuedStartCount > 0 ||
+      session.overlays.piQueuedSteeringCount > 0 ||
+      session.overlays.piQueuedFollowUpCount > 0
+    ) {
+      // Queued work is also always visible: it has user-visible work pending.
+      inbox.queued.push(session);
+    } else if (session.runtimeBacked) {
+      inbox.attached.push(session);
+    } else {
+      inbox.idleSaved.push(session);
+    }
+  }
+
+  return {
+    needsInput: newestFirst(inbox.needsInput),
+    errors: newestFirst(inbox.errors),
+    working: newestFirst(inbox.working),
+    queued: newestFirst(inbox.queued),
+    attached: newestFirst(inbox.attached),
+    idleSaved: newestFirst(inbox.idleSaved),
+  };
+}
+
+function queueBadgeLabels(overlays: SessionOverlays): string[] {
+  const labels: string[] = [];
+  if (overlays.piQueuedSteeringCount > 0) {
+    labels.push(`Steer ${overlays.piQueuedSteeringCount}`);
+  }
+  if (overlays.piQueuedFollowUpCount > 0) {
+    labels.push(`Follow-up ${overlays.piQueuedFollowUpCount}`);
+  }
+  if (overlays.localQueuedStartCount > 0) {
+    labels.push(`Start ${overlays.localQueuedStartCount}`);
+  }
+  return labels;
+}
+
 function StateIndicator(props: {
   session: Pick<SessionViewModel, "baseState" | "overlays">;
   verbose?: boolean;
 }): ReactElement {
   const indicator = selectSidebarIndicator(props.session);
+  const queueLabels = queueBadgeLabels(props.session.overlays);
   const badge = indicator.kind === "queued" ? indicator.queuedCount : undefined;
+  const accessibleLabel = [indicator.label, ...queueLabels].join("; ");
   return (
     <span
       className={`state-indicator ${indicator.kind}`}
-      title={indicator.label}
+      title={accessibleLabel}
+      role="img"
+      aria-label={accessibleLabel}
     >
       <span className="state-dot" />
       {badge ? <span className="queue-badge">{badge}</span> : null}
+      {queueLabels.length > 0 ? (
+        <span className="queue-badges" aria-hidden="true">
+          {queueLabels.map((label) => (
+            <span className="queue-badge" key={label}>
+              {label}
+            </span>
+          ))}
+        </span>
+      ) : null}
       {props.verbose ? <span>{indicator.label}</span> : null}
     </span>
   );
@@ -4839,6 +5019,8 @@ export const __rendererTestHooks = {
   listProjectsIfAvailable,
   selectProjectIfAvailable,
   findKnownExtensionCommand,
+  buildRealSessionInbox,
+  queueBadgeLabels,
 };
 
 function getRendererNodeAccessSummary(): string {

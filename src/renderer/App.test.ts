@@ -139,6 +139,94 @@ describe("renderer session actions", () => {
   });
 });
 
+describe("renderer attention-first inbox", () => {
+  function inboxSession(
+    id: string,
+    updatedAtMs: number,
+    patch: Record<string, unknown> = {},
+  ) {
+    return {
+      ...baseSession(),
+      id,
+      title: id,
+      updatedAtMs,
+      runtimeBacked: false,
+      resumeBacked: true,
+      sessionFile: `/tmp/${id}.jsonl`,
+      ...patch,
+    };
+  }
+
+  it("pins all attention rows ahead of five recency-limited idle saved sessions", () => {
+    const idleSaved = Array.from({ length: 7 }, (_, index) =>
+      inboxSession(`saved-${index}`, index),
+    );
+    const inbox = __rendererTestHooks.buildRealSessionInbox(
+      [
+        ...idleSaved,
+        inboxSession("working-old", -10, {
+          status: "working",
+          baseState: "working",
+        }),
+        inboxSession("needs-input", -20, {
+          status: "waiting",
+          baseState: "waitingForInput",
+          overlays: { ...emptyOverlays, needsUserInput: true },
+        }),
+        inboxSession("error", -30, {
+          status: "error",
+          baseState: "error",
+        }),
+        inboxSession("working-new", 20, {
+          status: "working",
+          baseState: "working",
+        }),
+      ] as any,
+      "",
+    );
+
+    expect(inbox.needsInput.map((session: any) => session.id)).toEqual([
+      "needs-input",
+    ]);
+    expect(inbox.errors.map((session: any) => session.id)).toEqual(["error"]);
+    expect(inbox.working.map((session: any) => session.id)).toEqual([
+      "working-new",
+      "working-old",
+    ]);
+    expect(inbox.idleSaved.map((session: any) => session.id)).toEqual([
+      "saved-6",
+      "saved-5",
+      "saved-4",
+      "saved-3",
+      "saved-2",
+      "saved-1",
+      "saved-0",
+    ]);
+  });
+
+  it("searches every saved row and keeps intervention queues labeled during work", () => {
+    const inbox = __rendererTestHooks.buildRealSessionInbox(
+      [
+        inboxSession("recent", 2),
+        inboxSession("older-match", 1, { title: "Find this saved session" }),
+      ] as any,
+      "find this",
+    );
+
+    expect(inbox.idleSaved.map((session: any) => session.id)).toEqual([
+      "older-match",
+    ]);
+    expect(
+      __rendererTestHooks.queueBadgeLabels({
+        ...emptyOverlays,
+        streaming: true,
+        piQueuedSteeringCount: 1,
+        piQueuedFollowUpCount: 2,
+      }),
+    ).toEqual(["Steer 1", "Follow-up 2"]);
+  });
+});
+
 describe("renderer intervention UX", () => {
   it("identifies only known extension commands as unavailable for queues", () => {
     const commands = [

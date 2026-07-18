@@ -130,6 +130,7 @@ textarea:disabled {
 
 .new-session,
 .delete-all-sessions,
+.sidebar-refresh,
 .icon-button,
 .send-button,
 .attachment-button,
@@ -175,6 +176,21 @@ textarea:disabled {
   font-weight: 750;
 }
 
+.sidebar-refresh {
+  border: 1px solid rgb(255 255 255 / 18%);
+  border-radius: 10px;
+  padding: 7px 8px;
+  color: #dbeafe;
+  background: rgb(255 255 255 / 8%);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.sidebar-refresh:hover {
+  color: #fff;
+  background: rgb(255 255 255 / 16%);
+}
+
 .delete-all-sessions:hover {
   color: #fff;
   background: #b91c1c;
@@ -191,6 +207,38 @@ textarea:disabled {
   height: 34px;
   color: #fff;
   background: rgb(255 255 255 / 12%);
+}
+
+.session-search-label {
+  color: #cbd5e1;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.session-search {
+  width: 100%;
+  border: 1px solid rgb(255 255 255 / 16%);
+  border-radius: 9px;
+  padding: 7px 9px;
+  color: #f8fafc;
+  background: rgb(255 255 255 / 8%);
+  outline: none;
+}
+
+.session-search::placeholder {
+  color: #94a3b8;
+}
+
+.session-search:focus {
+  border-color: #93c5fd;
+  box-shadow: 0 0 0 3px rgb(147 197 253 / 18%);
+}
+
+.attention-summary {
+  margin: -2px 0 0;
+  color: #cbd5e1;
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .session-list {
@@ -378,6 +426,12 @@ textarea:disabled {
   background: #94a3b8;
 }
 
+.queue-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
 .queue-badge {
   min-width: 18px;
   min-height: 18px;
@@ -385,7 +439,8 @@ textarea:disabled {
   padding: 1px 6px;
   color: #1e3a8a;
   background: #dbeafe;
-  font-size: 12px;
+  font-size: 10px;
+  line-height: 16px;
   text-align: center;
 }
 
