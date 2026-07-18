@@ -1,14 +1,35 @@
 :root {
-  color: #172033;
-  background: #f4f6fb;
-  font-family:
-    Inter,
-    ui-sans-serif,
-    system-ui,
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    sans-serif;
+  color-scheme: light;
+  --font-sans:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  --color-canvas: #f6f7f5;
+  --color-surface: #ffffff;
+  --color-surface-subtle: #fafaf8;
+  --color-surface-muted: #f1f3f1;
+  --color-text: #1f2933;
+  --color-text-strong: #17212b;
+  --color-text-muted: #65727a;
+  --color-text-subtle: #7b8790;
+  --color-border: #dfe4e1;
+  --color-border-strong: #cbd3cf;
+  --color-accent: #4f46e5;
+  --color-accent-hover: #4338ca;
+  --color-on-accent: #ffffff;
+  --color-focus: #4f46e5;
+  --color-danger: #c2413b;
+  --color-danger-surface: #fff4f2;
+  --color-success: #198754;
+  --shadow-sm: 0 1px 2px rgb(23 33 43 / 6%);
+  --shadow-md: 0 10px 24px rgb(23 33 43 / 8%);
+  --shadow-lg: 0 18px 48px rgb(23 33 43 / 14%);
+  --focus-ring: 0 0 0 3px rgb(79 70 229 / 22%);
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  color: var(--color-text);
+  background: var(--color-canvas);
+  font-family: var(--font-sans);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
@@ -26,7 +47,9 @@ body,
 body {
   margin: 0;
   overflow: hidden;
+  background: var(--color-canvas);
   font-size: 14px;
+  line-height: 1.45;
 }
 
 button,
@@ -51,13 +74,7 @@ textarea:disabled {
   height: 100vh;
   min-height: 0;
   overflow: hidden;
-  background:
-    radial-gradient(
-      circle at top right,
-      rgb(68 88 255 / 10%),
-      transparent 32rem
-    ),
-    #f4f6fb;
+  background: var(--color-canvas);
 }
 
 .app-shell.sidebar-hidden {
@@ -72,9 +89,9 @@ textarea:disabled {
   min-height: 0;
   overflow: hidden;
   padding: 14px;
-  color: #f8fafc;
-  background: #0f172a;
-  border-right: 1px solid rgb(255 255 255 / 8%);
+  color: var(--color-text);
+  background: var(--color-surface-subtle);
+  border-right: 1px solid var(--color-border);
 }
 
 .sidebar-header,
@@ -1658,5 +1675,330 @@ h1 {
   .starter-page,
   .transcript-loading {
     padding: 20px 14px;
+  }
+}
+
+/* Phase 1: shared light-neutral visual foundation. */
+button,
+input,
+textarea,
+select {
+  color: var(--color-text);
+}
+
+button {
+  border: 1px solid transparent;
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    color 150ms ease;
+}
+
+input:not([type="checkbox"]),
+textarea,
+select {
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+}
+
+button:disabled,
+input:disabled,
+textarea:disabled,
+select:disabled,
+[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+  box-shadow: var(--focus-ring);
+}
+
+h1,
+h2,
+h3 {
+  color: var(--color-text-strong);
+}
+
+.eyebrow,
+.project-path,
+.empty-state-copy,
+.session-meta,
+.session-time,
+.sidebar-note,
+.attention-summary,
+.session-search-label {
+  color: var(--color-text-muted);
+}
+
+.app-shell,
+.workspace,
+.timeline-shell,
+.timeline-scroll,
+.starter-page,
+.transcript-loading {
+  background: var(--color-canvas);
+}
+
+.sidebar {
+  color: var(--color-text);
+  background: var(--color-surface-subtle);
+  border-color: var(--color-border);
+  box-shadow: var(--shadow-sm);
+}
+
+.eyebrow.dark {
+  color: var(--color-text-muted);
+}
+
+.sidebar-dismiss,
+.icon-button,
+.sidebar-toggle,
+.usage-toggle,
+.attachment-button {
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.sidebar-dismiss:hover,
+.icon-button:hover,
+.sidebar-toggle:hover,
+.usage-toggle:hover,
+.usage-toggle.active,
+.attachment-button:hover {
+  color: var(--color-accent);
+  border-color: color-mix(
+    in srgb,
+    var(--color-accent) 30%,
+    var(--color-border)
+  );
+  background: color-mix(in srgb, var(--color-accent) 7%, var(--color-surface));
+}
+
+.new-session,
+.send-button,
+.header-actions button {
+  color: var(--color-on-accent);
+  background: var(--color-accent);
+  box-shadow: 0 8px 18px rgb(79 70 229 / 18%);
+}
+
+.new-session:hover,
+.send-button:hover,
+.header-actions button:hover {
+  background: var(--color-accent-hover);
+}
+
+.new-session.secondary,
+.sidebar-refresh {
+  color: var(--color-text);
+  border-color: var(--color-border);
+  background: var(--color-surface);
+  box-shadow: none;
+}
+
+.sidebar-refresh:hover,
+.new-session.secondary:hover {
+  color: var(--color-accent);
+  border-color: var(--color-border-strong);
+  background: var(--color-surface-muted);
+}
+
+.delete-all-sessions {
+  color: var(--color-danger);
+  background: var(--color-danger-surface);
+}
+
+.delete-all-sessions:hover {
+  color: var(--color-on-accent);
+  background: var(--color-danger);
+}
+
+.session-search {
+  color: var(--color-text);
+  border-color: var(--color-border-strong);
+  background: var(--color-surface);
+}
+
+.session-search::placeholder {
+  color: var(--color-text-subtle);
+}
+
+.session-search:focus,
+.session-search:focus-visible {
+  border-color: var(--color-accent);
+  box-shadow: var(--focus-ring);
+}
+
+.active-work-list {
+  border-color: color-mix(
+    in srgb,
+    var(--color-accent) 24%,
+    var(--color-border)
+  );
+  background: color-mix(in srgb, var(--color-accent) 5%, var(--color-surface));
+}
+
+.active-work-heading {
+  color: var(--color-text-muted);
+}
+
+.active-work-item,
+.session-item,
+.empty-session-list,
+.sidebar-note {
+  color: var(--color-text);
+  border-color: var(--color-border);
+  background: var(--color-surface);
+}
+
+.session-item:hover,
+.session-item.active,
+.browse-sessions:hover {
+  background: var(--color-surface-muted);
+}
+
+.session-item.active {
+  border-color: color-mix(
+    in srgb,
+    var(--color-accent) 38%,
+    var(--color-border)
+  );
+  box-shadow: inset 3px 0 0 var(--color-accent);
+}
+
+.session-draft-marker,
+.queue-badge {
+  color: var(--color-accent-hover);
+  border-color: color-mix(
+    in srgb,
+    var(--color-accent) 35%,
+    var(--color-border)
+  );
+  background: color-mix(in srgb, var(--color-accent) 9%, var(--color-surface));
+}
+
+.browse-sessions {
+  color: var(--color-text-muted);
+}
+
+.ui-status-message,
+.topbar,
+.composer {
+  color: var(--color-text);
+  background: var(--color-surface);
+  border-color: var(--color-border);
+  backdrop-filter: none;
+}
+
+.topbar {
+  box-shadow: var(--shadow-sm);
+}
+
+.usage-stats,
+.assistant-message,
+.tool-card,
+.composer-input-wrap,
+.attachment-chip,
+.slash-picker,
+.extension-ui-card {
+  border-color: var(--color-border);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-md);
+}
+
+.usage-stats span,
+.usage-stats.empty,
+.recent,
+.capabilities span,
+.capabilities strong,
+.composer-model-pill,
+.composer-select,
+.attachment-examples,
+.slash-picker button {
+  color: var(--color-text-muted);
+  border-color: var(--color-border);
+  background: var(--color-surface-subtle);
+}
+
+.recent.invalid,
+.attachment-chip.bad,
+.diagnostic-badge.error {
+  border-color: color-mix(
+    in srgb,
+    var(--color-danger) 35%,
+    var(--color-border)
+  );
+  background: var(--color-danger-surface);
+}
+
+.model-controls select,
+.extension-ui-form input,
+.extension-ui-form textarea {
+  color: var(--color-text);
+  border-color: var(--color-border-strong);
+  background: var(--color-surface);
+}
+
+.composer-input-wrap:focus-within {
+  border-color: var(--color-accent);
+  box-shadow: var(--focus-ring);
+}
+
+.composer.drag-active {
+  background: color-mix(in srgb, var(--color-accent) 6%, var(--color-surface));
+  box-shadow: inset 0 0 0 2px var(--color-accent);
+}
+
+.user-bubble {
+  color: var(--color-on-accent);
+  background: var(--color-accent);
+}
+
+.assistant-message,
+.timeline-attachment,
+.tool-card,
+.tool-title {
+  color: var(--color-text);
+}
+
+.send-button {
+  background: var(--color-accent);
+}
+
+.send-button.secondary,
+.send-button.follow-up {
+  color: var(--color-accent-hover);
+  background: color-mix(in srgb, var(--color-accent) 9%, var(--color-surface));
+}
+
+.send-button.abort {
+  color: var(--color-danger);
+  background: var(--color-danger-surface);
+}
+
+.slash-picker button:hover {
+  color: var(--color-text);
+  background: var(--color-surface-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }
