@@ -201,6 +201,13 @@ interface SlashCommand {
   insertText?: string;
 }
 
+interface RuntimeCapabilities {
+  models?: ChatModelSummary[];
+  commands?: SlashCommand[];
+}
+
+type RuntimeCapabilitiesById = Record<string, RuntimeCapabilities>;
+
 const appStartedAt = Date.now();
 const WORKING_SESSION_RECONCILE_AFTER_MS = 3_000;
 const NO_VISIBLE_OUTPUT_NOTICE_MS = 3_000;
@@ -430,8 +437,8 @@ export function App(): ReactElement {
     modelOptions[0]?.id ?? "",
   );
   const [selectedThinking, setSelectedThinking] = useState("medium");
-  const [realModels, setRealModels] = useState<ChatModelSummary[]>([]);
-  const [realCommands, setRealCommands] = useState<SlashCommand[]>([]);
+  const [realCapabilitiesByRuntime, setRealCapabilitiesByRuntime] =
+    useState<RuntimeCapabilitiesById>({});
   const [enterToSend, setEnterToSend] = useState(() =>
     loadEnterToSendPreference(),
   );
@@ -600,6 +607,12 @@ export function App(): ReactElement {
   const selectedModel =
     modelOptions.find((model) => model.id === selectedModelId) ??
     modelOptions[0];
+  const selectedRealCapabilities =
+    selectedSession.backendMode === "real"
+      ? runtimeCapabilitiesFor(realCapabilitiesByRuntime, selectedSession.id)
+      : undefined;
+  const realModels = selectedRealCapabilities?.models ?? [];
+  const realCommands = selectedRealCapabilities?.commands ?? [];
   const composerDraft = composerDraftForSession(
     composerDrafts,
     selectedSession.id,
@@ -1525,18 +1538,30 @@ export function App(): ReactElement {
   async function loadRealModels(runtimeId: string): Promise<void> {
     try {
       const result = await window.piDeck.chat.listModels({ runtimeId });
-      setRealModels(result.models);
+      setRealCapabilitiesByRuntime((current) =>
+        updateRuntimeCapabilities(current, runtimeId, {
+          models: result.models,
+        }),
+      );
     } catch {
-      setRealModels([]);
+      setRealCapabilitiesByRuntime((current) =>
+        updateRuntimeCapabilities(current, runtimeId, { models: [] }),
+      );
     }
   }
 
   async function loadRealCommands(runtimeId: string): Promise<void> {
     try {
       const result = await window.piDeck.chat.listCommands({ runtimeId });
-      setRealCommands(result.commands.map(slashCommandFromWorkerCommand));
+      setRealCapabilitiesByRuntime((current) =>
+        updateRuntimeCapabilities(current, runtimeId, {
+          commands: result.commands.map(slashCommandFromWorkerCommand),
+        }),
+      );
     } catch {
-      setRealCommands([]);
+      setRealCapabilitiesByRuntime((current) =>
+        updateRuntimeCapabilities(current, runtimeId, { commands: [] }),
+      );
     }
   }
 
@@ -5939,6 +5964,27 @@ function processCwdPlaceholder(mode: "fake" | "real"): string {
     : "Local demo backend cwd unavailable";
 }
 
+function runtimeCapabilitiesFor(
+  capabilitiesByRuntime: RuntimeCapabilitiesById,
+  runtimeId: string,
+): RuntimeCapabilities {
+  return capabilitiesByRuntime[runtimeId] ?? {};
+}
+
+function updateRuntimeCapabilities(
+  capabilitiesByRuntime: RuntimeCapabilitiesById,
+  runtimeId: string,
+  update: RuntimeCapabilities,
+): RuntimeCapabilitiesById {
+  return {
+    ...capabilitiesByRuntime,
+    [runtimeId]: {
+      ...runtimeCapabilitiesFor(capabilitiesByRuntime, runtimeId),
+      ...update,
+    },
+  };
+}
+
 export function findKnownExtensionCommand(
   text: string,
   commands: SlashCommand[],
@@ -5984,6 +6030,8 @@ export const __rendererTestHooks = {
   closeRuntimeInSessionState,
   savedSessionsForProject,
   removeSavedSessionsForProject,
+  runtimeCapabilitiesFor,
+  updateRuntimeCapabilities,
 };
 
 function getRendererNodeAccessSummary(): string {

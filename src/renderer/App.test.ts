@@ -458,6 +458,61 @@ describe("renderer intervention UX", () => {
   });
 });
 
+describe("renderer runtime-scoped capabilities", () => {
+  it("keeps model and command responses scoped when older runtime requests finish last", async () => {
+    let capabilities: any = {};
+    let resolveModelsForA: ((models: any[]) => void) | undefined;
+    let resolveCommandsForA: ((commands: any[]) => void) | undefined;
+    const modelsForA = new Promise<any[]>((resolve) => {
+      resolveModelsForA = resolve;
+    });
+    const commandsForA = new Promise<any[]>((resolve) => {
+      resolveCommandsForA = resolve;
+    });
+
+    const loadModels = async (runtimeId: string, response: Promise<any[]>) => {
+      const models = await response;
+      capabilities = __rendererTestHooks.updateRuntimeCapabilities(
+        capabilities,
+        runtimeId,
+        { models },
+      );
+    };
+    const loadCommands = async (
+      runtimeId: string,
+      response: Promise<any[]>,
+    ) => {
+      const commands = await response;
+      capabilities = __rendererTestHooks.updateRuntimeCapabilities(
+        capabilities,
+        runtimeId,
+        { commands },
+      );
+    };
+
+    const slowModelsForA = loadModels("runtime-a", modelsForA);
+    const slowCommandsForA = loadCommands("runtime-a", commandsForA);
+    await loadModels("runtime-b", Promise.resolve([{ id: "model-b" }]));
+    await loadCommands("runtime-b", Promise.resolve([{ name: "/command-b" }]));
+    resolveModelsForA?.([{ id: "model-a" }]);
+    resolveCommandsForA?.([{ name: "/command-a" }]);
+    await Promise.all([slowModelsForA, slowCommandsForA]);
+
+    expect(
+      __rendererTestHooks.runtimeCapabilitiesFor(capabilities, "runtime-a"),
+    ).toMatchObject({
+      models: [{ id: "model-a" }],
+      commands: [{ name: "/command-a" }],
+    });
+    expect(
+      __rendererTestHooks.runtimeCapabilitiesFor(capabilities, "runtime-b"),
+    ).toMatchObject({
+      models: [{ id: "model-b" }],
+      commands: [{ name: "/command-b" }],
+    });
+  });
+});
+
 describe("renderer message_update reduction", () => {
   it("does not render toolcall JSON deltas as assistant text", () => {
     const next = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {
