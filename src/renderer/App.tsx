@@ -876,12 +876,9 @@ export function App(): ReactElement {
         sessionFile: session.sessionFile,
       });
       const resumed = sessionFromSnapshot(snapshot);
-      setSessions((items) =>
-        mergeSessions(
-          [resumed],
-          items.filter((item) => item.id !== session.id),
-        ),
-      );
+      // Use the state at completion time: another runtime can stream while
+      // this saved session is being resumed.
+      setSessions((items) => replaceResumedSession(items, session.id, resumed));
       setSelectedSessionId(resumed.id);
       setComposerDrafts((items) =>
         moveComposerDraft(items, session.id, resumed.id),
@@ -892,11 +889,14 @@ export function App(): ReactElement {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (isMissingSessionFileError(message)) {
-        const remainingSessions = sessions.filter(
-          (item) => item.id !== session.id,
+        // Do not restore the pre-await render's session array here. Runtime
+        // events from other workers may have arrived while resume was pending.
+        const remainingSessions = removeSessionById(
+          sessionsRef.current,
+          session.id,
         );
-        setSessions(remainingSessions);
-        if (selectedSessionId === session.id) {
+        setSessions((items) => removeSessionById(items, session.id));
+        if (selectedSessionIdRef.current === session.id) {
           const nextSession =
             remainingSessions.find((item) => item.runtimeBacked) ??
             remainingSessions[0];
@@ -1570,9 +1570,8 @@ export function App(): ReactElement {
   }
 
   async function handleDeleteAllSessions(): Promise<void> {
-    const savedSessions = sessions.filter(
-      (session) => session.resumeBacked === true,
-    );
+    const projectId = currentProject.id;
+    const savedSessions = savedSessionsForProject(sessions, projectId);
     if (savedSessions.length === 0) {
       setUiMessage("No inactive saved sessions to delete.");
       return;
@@ -1585,12 +1584,10 @@ export function App(): ReactElement {
     }
 
     try {
-      const result = await window.piDeck.chat.deleteAllSessions({
-        projectId: currentProject.id,
-      });
-      setSessions((items) =>
-        items.filter((item) => item.resumeBacked !== true),
-      );
+      const result = await window.piDeck.chat.deleteAllSessions({ projectId });
+      // Only the project submitted to the backend is affected. Keep saved
+      // rows and live updates for every other project.
+      setSessions((items) => removeSavedSessionsForProject(items, projectId));
       setUiMessage(
         `Deleted ${result.deletedCount} saved session${result.deletedCount === 1 ? "" : "s"}.${result.skippedCount > 0 ? ` Skipped ${result.skippedCount} attached or unavailable session${result.skippedCount === 1 ? "" : "s"}.` : ""}`,
       );
@@ -1616,21 +1613,15 @@ export function App(): ReactElement {
     intentionallyClosingRuntimeIds.current.add(session.id);
     try {
       await window.piDeck.chat.closeSession({ runtimeId: session.id });
-      const detached = session.sessionFile
-        ? {
-            ...session,
-            runtimeBacked: false,
-            resumeBacked: true,
-            status: "idle" as const,
-            baseState: "idle" as const,
-            subtitle: "Saved · click to resume",
-          }
-        : undefined;
-      const remainingSessions = detached
-        ? sessions.map((item) => (item.id === session.id ? detached : item))
-        : sessions.filter((item) => item.id !== session.id);
-      setSessions(remainingSessions);
-      if (selectedSessionId === session.id) {
+      // Derive both the visible state and selection fallback from the latest
+      // render, rather than the array captured before closeSession awaited.
+      const remainingSessions = closeRuntimeInSessionState(
+        sessionsRef.current,
+        session.id,
+      );
+      setSessions((items) => closeRuntimeInSessionState(items, session.id));
+      const detached = remainingSessions.some((item) => item.id === session.id);
+      if (selectedSessionIdRef.current === session.id) {
         const nextSession = remainingSessions.find(
           (item) => item.id !== session.id && item.runtimeBacked,
         );
@@ -1674,11 +1665,14 @@ export function App(): ReactElement {
         projectId: currentProject.id,
         sessionFile,
       });
-      const remainingSessions = sessions.filter(
-        (item) => item.id !== session.id,
+      // A background worker may have emitted an update while deleteSession
+      // awaited, so remove only this row from the latest state.
+      const remainingSessions = removeSessionById(
+        sessionsRef.current,
+        session.id,
       );
-      setSessions(remainingSessions);
-      if (selectedSessionId === session.id) {
+      setSessions((items) => removeSessionById(items, session.id));
+      if (selectedSessionIdRef.current === session.id) {
         const nextSession =
           remainingSessions.find((item) => item.runtimeBacked) ??
           remainingSessions[0];
@@ -2171,6 +2165,70 @@ function attachmentDedupKey(attachment: AttachmentDraft): string {
     attachment.displayPath,
     attachment.size ?? "unknown-size",
   ].join("|");
+}
+
+function replaceResumedSession(
+  sessions: SessionViewModel[],
+  previousSessionId: string,
+  resumed: SessionViewModel,
+): SessionViewModel[] {
+  return mergeSessions(
+    [resumed],
+    sessions.filter((session) => session.id !== previousSessionId),
+  );
+}
+
+function removeSessionById(
+  sessions: SessionViewModel[],
+  sessionId: string,
+): SessionViewModel[] {
+  return sessions.filter((session) => session.id !== sessionId);
+}
+
+function closeRuntimeInSessionState(
+  sessions: SessionViewModel[],
+  sessionId: string,
+): SessionViewModel[] {
+  return sessions.flatMap((session) => {
+    if (session.id !== sessionId) {
+      return [session];
+    }
+    if (session.sessionFile === undefined) {
+      return [];
+    }
+    return [
+      {
+        ...session,
+        runtimeBacked: false,
+        resumeBacked: true,
+        status: "idle" as const,
+        baseState: "idle" as const,
+        subtitle: "Saved · click to resume",
+      },
+    ];
+  });
+}
+
+function savedSessionsForProject(
+  sessions: SessionViewModel[],
+  projectId: string,
+): SessionViewModel[] {
+  return sessions.filter(
+    (session) =>
+      session.resumeBacked === true &&
+      sessionBelongsToProject(session, projectId),
+  );
+}
+
+function removeSavedSessionsForProject(
+  sessions: SessionViewModel[],
+  projectId: string,
+): SessionViewModel[] {
+  return sessions.filter(
+    (session) =>
+      session.resumeBacked !== true ||
+      !sessionBelongsToProject(session, projectId),
+  );
 }
 
 function mergeSessions(
@@ -5921,6 +5979,11 @@ export const __rendererTestHooks = {
   mergeSessionUsageFromRuntimeStatus,
   updateSessionByRuntimeId,
   eventHasUsageMetadata,
+  replaceResumedSession,
+  removeSessionById,
+  closeRuntimeInSessionState,
+  savedSessionsForProject,
+  removeSavedSessionsForProject,
 };
 
 function getRendererNodeAccessSummary(): string {

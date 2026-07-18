@@ -228,6 +228,121 @@ describe("renderer session actions", () => {
       ),
     ).toBe(true);
   });
+
+  it("preserves a background runtime update when an awaited resume completes", () => {
+    const saved = {
+      ...baseSession(),
+      id: "saved-before-resume",
+      projectId: "/projects/a",
+      sessionFile: "/sessions/saved.jsonl",
+      runtimeBacked: false,
+      resumeBacked: true,
+    };
+    const backgroundAfterEvent = __rendererTestHooks.reduceRuntimeEvent(
+      { ...baseSession(), id: "background-runtime", projectId: "/projects/b" },
+      { type: "agent_start", runtimeId: "background-runtime" } as any,
+    );
+    const resumed = {
+      ...baseSession(),
+      id: "resumed-runtime",
+      projectId: "/projects/a",
+      sessionFile: "/sessions/saved.jsonl",
+    };
+
+    const completed = __rendererTestHooks.replaceResumedSession(
+      [saved, backgroundAfterEvent] as any,
+      saved.id,
+      resumed as any,
+    );
+
+    expect(
+      completed.find((session: any) => session.id === "background-runtime"),
+    ).toMatchObject({ status: "working", baseState: "working" });
+    expect(
+      completed.find((session: any) => session.id === "resumed-runtime"),
+    ).toBeDefined();
+  });
+
+  it("preserves background updates while close or delete completion removes its target", () => {
+    const backgroundAfterEvent = __rendererTestHooks.reduceRuntimeEvent(
+      { ...baseSession(), id: "background-runtime", projectId: "/projects/b" },
+      { type: "agent_start", runtimeId: "background-runtime" } as any,
+    );
+    const savedRuntime = {
+      ...baseSession(),
+      id: "saved-runtime",
+      projectId: "/projects/a",
+      sessionFile: "/sessions/saved.jsonl",
+    };
+    const savedRow = {
+      ...baseSession(),
+      id: "saved-row",
+      projectId: "/projects/a",
+      sessionFile: "/sessions/delete.jsonl",
+      runtimeBacked: false,
+      resumeBacked: true,
+    };
+
+    const afterClose = __rendererTestHooks.closeRuntimeInSessionState(
+      [savedRuntime, backgroundAfterEvent] as any,
+      savedRuntime.id,
+    );
+    const afterDelete = __rendererTestHooks.removeSessionById(
+      [savedRow, backgroundAfterEvent] as any,
+      savedRow.id,
+    );
+
+    expect(
+      afterClose.find((session: any) => session.id === savedRuntime.id),
+    ).toMatchObject({ runtimeBacked: false, resumeBacked: true });
+    expect(
+      afterClose.find((session: any) => session.id === "background-runtime"),
+    ).toMatchObject({ status: "working" });
+    expect(afterDelete.map((session: any) => session.id)).toEqual([
+      "background-runtime",
+    ]);
+    expect(afterDelete[0]).toMatchObject({ status: "working" });
+  });
+
+  it("counts and removes only saved sessions in the current project", () => {
+    const currentSaved = {
+      ...baseSession(),
+      id: "current-saved",
+      projectId: "/projects/a",
+      projectPath: "/projects/a",
+      sessionFile: "/sessions/current.jsonl",
+      runtimeBacked: false,
+      resumeBacked: true,
+    };
+    const otherProjectSaved = {
+      ...currentSaved,
+      id: "other-project-saved",
+      projectId: "/projects/b",
+      projectPath: "/projects/b",
+      sessionFile: "/sessions/other.jsonl",
+    };
+    const attachedCurrentProject = {
+      ...currentSaved,
+      id: "attached-current",
+      sessionFile: "/sessions/attached.jsonl",
+      runtimeBacked: true,
+      resumeBacked: false,
+    };
+    const sessions = [
+      currentSaved,
+      otherProjectSaved,
+      attachedCurrentProject,
+    ] as any;
+
+    expect(
+      __rendererTestHooks.savedSessionsForProject(sessions, "/projects/a"),
+    ).toEqual([currentSaved]);
+    expect(
+      __rendererTestHooks
+        .removeSavedSessionsForProject(sessions, "/projects/a")
+        .map((session: any) => session.id),
+    ).toEqual(["other-project-saved", "attached-current"]);
+  });
 });
 
 describe("renderer attention-first inbox", () => {
