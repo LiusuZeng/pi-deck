@@ -285,7 +285,17 @@ test("closing an attached runtime preserves its saved session for recovery", asy
       page.getByText(/Fake response to: close runtime recovery/),
     ).toBeVisible();
 
-    await page.getByRole("button", { name: /Close runtime for/ }).click();
+    const sessionRow = page.getByRole("button", {
+      name: /Session: close runtime recovery/,
+    });
+    const closeRuntime = page.getByRole("button", {
+      name: /Close runtime for close runtime recovery/,
+    });
+    await sessionRow.focus();
+    await page.keyboard.press("Tab");
+    await expect(closeRuntime).toBeFocused();
+    await expect(closeRuntime).toHaveCSS("opacity", "1");
+    await page.keyboard.press("Enter");
     await expect(
       page.getByText(/Closed the Pi runtime. The saved session can be resumed/),
     ).toBeVisible();
@@ -294,6 +304,52 @@ test("closing an attached runtime preserves its saved session for recovery", asy
       .getByRole("button", { name: /Session: close runtime recovery/ })
       .click();
     await expect(page.getByText("Resumed saved Pi session.")).toBeVisible();
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("saved session deletion control is reachable and activated with the keyboard", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-delete-"));
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const sessionDir = path.join(agentDir, "sessions", "--e2e-delete--");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(sessionDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(sessionDir, "keyboard-delete.jsonl"),
+    `${JSON.stringify({
+      type: "session",
+      version: 3,
+      id: "keyboard-delete",
+      timestamp: "2026-07-02T00:00:00.000Z",
+      cwd: projectCwd,
+    })}\n`,
+  );
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({ root, projectCwd, agentDir }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    const sessionRow = page.getByRole("button", {
+      name: "Session: keyboard-delete",
+    });
+    const deleteSession = page.getByRole("button", {
+      name: "Delete keyboard-delete",
+    });
+    await expect(sessionRow).toBeVisible();
+
+    await sessionRow.focus();
+    await page.keyboard.press("Tab");
+    await expect(deleteSession).toBeFocused();
+    await expect(deleteSession).toHaveCSS("opacity", "1");
+    page.once("dialog", (dialog) => void dialog.accept());
+    await page.keyboard.press("Enter");
+
+    await expect(page.getByText("Deleted Pi session.")).toBeVisible();
+    await expect(sessionRow).toHaveCount(0);
   } finally {
     await app.close();
     fs.rmSync(root, { recursive: true, force: true });

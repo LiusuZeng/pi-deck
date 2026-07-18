@@ -336,7 +336,7 @@ textarea:disabled {
   right: 6px;
   bottom: 6px;
   z-index: 2;
-  display: none;
+  display: grid;
   place-items: center;
   width: 20px;
   height: 20px;
@@ -346,12 +346,30 @@ textarea:disabled {
   color: #fecaca;
   background: rgb(127 29 29 / 70%);
   line-height: 1;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 150ms ease,
+    background-color 150ms ease,
+    color 150ms ease;
 }
 
 .session-item-wrap:hover .session-delete-button,
-.session-delete-button:focus-visible,
-.session-close-button {
-  display: grid;
+.session-item-wrap:focus-within .session-delete-button {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.session-delete-button:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px rgb(79 70 229 / 45%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-delete-button {
+    transition: none;
+  }
 }
 
 .session-close-button {
