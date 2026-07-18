@@ -5,7 +5,7 @@ import path from "node:path";
 import { describe, it as test } from "vitest";
 import {
   scanSessionRepository,
-  validateSessionForDeletion,
+  validatePiSession,
 } from "./sessionRepository.js";
 
 test("session repository scans project jsonl sessions without following other projects", async () => {
@@ -51,7 +51,7 @@ test("session repository scans project jsonl sessions without following other pr
   assert.equal(result.sessions[0]?.messageCount, 1);
 });
 
-describe("session deletion validation", () => {
+describe("Pi session eligibility validation", () => {
   async function createSessionFixture(): Promise<{
     root: string;
     project: string;
@@ -80,12 +80,12 @@ describe("session deletion validation", () => {
     })}\n`;
   }
 
-  test("accepts only a canonical regular Pi session in the active session directory", async () => {
+  test("accepts a canonical Pi session for resume in the active repository", async () => {
     const { project, sessionDir } = await createSessionFixture();
     const sessionFile = path.join(sessionDir, "saved.jsonl");
     await fs.writeFile(sessionFile, piHeader(project));
 
-    const result = await validateSessionForDeletion({
+    const result = await validatePiSession({
       sessionFile,
       sessionDir,
       projectCwd: project,
@@ -97,12 +97,12 @@ describe("session deletion validation", () => {
     });
   });
 
-  test("rejects paths outside the authoritative directory even with a matching Pi header", async () => {
+  test("rejects arbitrary paths outside the configured repository", async () => {
     const { project, sessionDir, root } = await createSessionFixture();
     const sessionFile = path.join(root, "not-a-session-dir.jsonl");
     await fs.writeFile(sessionFile, piHeader(project));
 
-    const result = await validateSessionForDeletion({
+    const result = await validatePiSession({
       sessionFile,
       sessionDir,
       projectCwd: project,
@@ -125,12 +125,12 @@ describe("session deletion validation", () => {
     );
 
     const [wrongProjectResult, malformedResult] = await Promise.all([
-      validateSessionForDeletion({
+      validatePiSession({
         sessionFile: wrongProject,
         sessionDir,
         projectCwd: project,
       }),
-      validateSessionForDeletion({
+      validatePiSession({
         sessionFile: malformed,
         sessionDir,
         projectCwd: project,
@@ -140,6 +140,38 @@ describe("session deletion validation", () => {
     assert.deepEqual(wrongProjectResult, {
       ok: false,
       reason: "session belongs to a different project",
+    });
+    assert.deepEqual(malformedResult, {
+      ok: false,
+      reason: "session file does not have a valid Pi session header",
+    });
+  });
+
+  test("rejects unavailable files and sessions with a malformed first line", async () => {
+    const { project, sessionDir } = await createSessionFixture();
+    const missing = path.join(sessionDir, "missing.jsonl");
+    const malformedFirstLine = path.join(
+      sessionDir,
+      "malformed-first-line.jsonl",
+    );
+    await fs.writeFile(malformedFirstLine, `not-json\n${piHeader(project)}`);
+
+    const [missingResult, malformedResult] = await Promise.all([
+      validatePiSession({
+        sessionFile: missing,
+        sessionDir,
+        projectCwd: project,
+      }),
+      validatePiSession({
+        sessionFile: malformedFirstLine,
+        sessionDir,
+        projectCwd: project,
+      }),
+    ]);
+
+    assert.deepEqual(missingResult, {
+      ok: false,
+      reason: "session file, directory, or project is unavailable",
     });
     assert.deepEqual(malformedResult, {
       ok: false,
@@ -157,12 +189,12 @@ describe("session deletion validation", () => {
     await fs.symlink(outsideFile, linkedFile);
 
     const [directoryResult, linkedResult] = await Promise.all([
-      validateSessionForDeletion({
+      validatePiSession({
         sessionFile: directory,
         sessionDir,
         projectCwd: project,
       }),
-      validateSessionForDeletion({
+      validatePiSession({
         sessionFile: linkedFile,
         sessionDir,
         projectCwd: project,

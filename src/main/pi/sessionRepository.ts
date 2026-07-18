@@ -17,14 +17,14 @@ export interface ScanSessionRepositoryResult {
   diagnostics: string[];
 }
 
-/** The filesystem and Pi-header checks required before a session can be deleted. */
-export interface ValidateSessionDeletionOptions {
+/** The filesystem and Pi-header checks required before Pi opens or deletes a session. */
+export interface ValidatePiSessionOptions {
   sessionFile: string;
   sessionDir: string;
   projectCwd: string;
 }
 
-export type SessionDeletionValidationResult =
+export type PiSessionValidationResult =
   | { ok: true; sessionFile: string }
   | { ok: false; reason: string };
 
@@ -44,18 +44,18 @@ const DEFAULT_MAX_FILES = 20_000;
 const DEFAULT_MAX_BYTES_PER_FILE = 256 * 1024;
 const DEFAULT_MAX_TOTAL_BYTES = 250 * 1024 * 1024;
 const DEFAULT_MAX_WALL_TIME_MS = 15_000;
-const DELETE_HEADER_MAX_BYTES = 64 * 1024;
+const PI_SESSION_HEADER_MAX_BYTES = 64 * 1024;
 
 /**
  * Validates a renderer-supplied path against the active Pi configuration.
  *
- * Session references are presentation metadata, not deletion authority.  This
- * deliberately rechecks the canonical directory, file type, extension, and
- * on-disk Pi session header immediately before deletion.
+ * Session references are presentation metadata, not authority to open or
+ * delete files. This deliberately rechecks the canonical directory, file type,
+ * extension, and on-disk Pi session header immediately before Pi acts on one.
  */
-export async function validateSessionForDeletion(
-  options: ValidateSessionDeletionOptions,
-): Promise<SessionDeletionValidationResult> {
+export async function validatePiSession(
+  options: ValidatePiSessionOptions,
+): Promise<PiSessionValidationResult> {
   let sessionDir: string;
   let projectCwd: string;
   let sessionFile: string;
@@ -289,7 +289,7 @@ async function readPiSessionHeader(
   try {
     const handle = await fs.open(filePath, "r");
     try {
-      const buffer = Buffer.alloc(DELETE_HEADER_MAX_BYTES);
+      const buffer = Buffer.alloc(PI_SESSION_HEADER_MAX_BYTES);
       const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
       const firstLine = buffer
         .subarray(0, bytesRead)

@@ -71,7 +71,7 @@ import { WorkerCapacity } from "./pi/workerCapacity.js";
 import { selectAvailableRuntime } from "./runtimeSelection.js";
 import {
   scanSessionRepository,
-  validateSessionForDeletion,
+  validatePiSession,
 } from "./pi/sessionRepository.js";
 import type { PiMessage, PiState, PromptInput } from "./pi/types.js";
 import type {
@@ -1045,10 +1045,21 @@ async function createRealResumeWorker(
   projectId?: string,
 ): Promise<ChatWorkerSpec> {
   const launch = await resolveRealChatLaunchConfig(store, projectId);
-  const canonicalSessionFile =
-    (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
-  const sessionCwd = await readSessionFileCwd(canonicalSessionFile);
-  const cwd = sessionCwd ?? launch.projectCwd;
+  const sessionDir = launch.effective.config.sessionDir;
+  if (sessionDir === undefined) {
+    throw new Error("No Pi session directory is configured.");
+  }
+  const validation = await validatePiSession({
+    sessionFile,
+    sessionDir,
+    projectCwd: launch.projectCwd,
+  });
+  if (!validation.ok) {
+    throw new Error(
+      `Session is not eligible for resume: ${validation.reason}.`,
+    );
+  }
+  const canonicalSessionFile = validation.sessionFile;
   return capacity.allocate(
     async () => (await store.get()).maxRunningSessions,
     () => {
@@ -1061,14 +1072,18 @@ async function createRealResumeWorker(
           "--session",
           canonicalSessionFile,
         ],
-        cwd,
+        cwd: launch.projectCwd,
         env: launch.effective.config.env,
         requestTimeoutMs: Number(
           process.env.PI_DECK_REAL_RPC_TIMEOUT_MS ?? 30_000,
         ),
         commandProtocol: "type-field",
       });
-      return { worker, cwd, projectId: launch.projectCwd };
+      return {
+        worker,
+        cwd: launch.projectCwd,
+        projectId: launch.projectCwd,
+      };
     },
   );
 }
@@ -1464,7 +1479,7 @@ async function deleteChatSession(
   if (sessionDir === undefined) {
     throw new Error("No Pi session directory is configured.");
   }
-  const validation = await validateSessionForDeletion({
+  const validation = await validatePiSession({
     sessionFile,
     sessionDir,
     projectCwd: launch.projectCwd,
@@ -1516,7 +1531,7 @@ async function deleteAllChatSessions(
       skippedCount += 1;
       continue;
     }
-    const validation = await validateSessionForDeletion({
+    const validation = await validatePiSession({
       sessionFile: session.sessionFile,
       sessionDir,
       projectCwd: launch.projectCwd,
@@ -1561,17 +1576,22 @@ async function resumeChatSession(
     throw new Error("Session resume is only available in real Pi mode.");
   }
 
-  const canonicalSessionFile = await safeRealpath(sessionFile);
-  if (canonicalSessionFile === undefined) {
-    throw new Error(`Session file is missing or unreadable: ${sessionFile}`);
-  }
   const launch = await resolveRealChatLaunchConfig(store, projectId);
-  const sessionCwd = await readSessionFileCwd(canonicalSessionFile);
-  if (sessionCwd !== undefined && sessionCwd !== launch.projectCwd) {
+  const sessionDir = launch.effective.config.sessionDir;
+  if (sessionDir === undefined) {
+    throw new Error("No Pi session directory is configured.");
+  }
+  const validation = await validatePiSession({
+    sessionFile,
+    sessionDir,
+    projectCwd: launch.projectCwd,
+  });
+  if (!validation.ok) {
     throw new Error(
-      `Session belongs to a different project. Session cwd: ${sessionCwd}; current project: ${launch.projectCwd}.`,
+      `Session is not eligible for resume: ${validation.reason}.`,
     );
   }
+  const canonicalSessionFile = validation.sessionFile;
 
   const adapter = await ensureChatAdapter(store, diagnosticsService);
   const existingRuntimeId = chatSessionFileLocks.get(canonicalSessionFile);
@@ -1897,37 +1917,6 @@ function previewFromMessages(messages: PiMessage[]): string | undefined {
     return undefined;
   }
   return content.trim().replace(/\s+/g, " ").slice(0, 160);
-}
-
-async function readSessionFileCwd(
-  sessionFile: string,
-): Promise<string | undefined> {
-  try {
-    const handle = await fs.open(sessionFile, "r");
-    try {
-      const buffer = Buffer.alloc(64 * 1024);
-      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-      const firstLine = buffer
-        .subarray(0, bytesRead)
-        .toString("utf8")
-        .split(/\r?\n/, 1)[0];
-      if (!firstLine) {
-        return undefined;
-      }
-      const parsed = JSON.parse(firstLine) as unknown;
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        return undefined;
-      }
-      const cwd = (parsed as Record<string, unknown>).cwd;
-      return typeof cwd === "string"
-        ? ((await safeRealpath(cwd)) ?? path.resolve(cwd))
-        : undefined;
-    } finally {
-      await handle.close();
-    }
-  } catch {
-    return undefined;
-  }
 }
 
 async function safeRealpath(filePath: string): Promise<string | undefined> {
