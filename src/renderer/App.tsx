@@ -1261,7 +1261,9 @@ export function App(): ReactElement {
       });
       setSessions((items) =>
         mergeSessions(
-          items.filter((item) => item.runtimeBacked),
+          items.filter(
+            (item) => item.runtimeBacked || item.draftSession === true,
+          ),
           result.sessions.map(sessionFromSummary),
         ),
       );
@@ -1535,7 +1537,12 @@ export function App(): ReactElement {
       timeline: [],
     };
     setComposerError(null);
-    setSessions((items) => mergeSessions([next], items));
+    setSessions((items) =>
+      mergeSessions(
+        [next],
+        items.filter((item) => item.draftSession !== true),
+      ),
+    );
     setSelectedSessionId(id);
     setUiMessage(
       "Created a new session. Pi will start when you send a prompt.",
@@ -3167,6 +3174,9 @@ function isSessionDeletable(
 }
 
 function shouldShowSessionInSidebar(session: SessionViewModel): boolean {
+  if (session.draftSession === true) {
+    return false;
+  }
   return !(
     session.backendMode === "real" &&
     session.runtimeBacked &&

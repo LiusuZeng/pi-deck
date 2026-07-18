@@ -187,8 +187,10 @@ test("new session drafts do not allocate a worker before their first prompt", as
       await newSession.click();
     }
     await expect(
-      page.getByText("Idle · Pi starts when you send the first prompt").last(),
-    ).toBeVisible();
+      page
+        .getByLabel("Sessions")
+        .getByText("Untitled new session", { exact: true }),
+    ).toHaveCount(0);
 
     await page.getByLabel("Prompt text").fill("lazy first prompt");
     await page.getByRole("button", { name: "Send" }).click();
@@ -630,9 +632,6 @@ test("real mode routes background session events to the right session with fake 
     ).toBeVisible();
 
     await page.getByRole("button", { name: "New session" }).click();
-    await expect(
-      page.getByText("Idle · Pi starts when you send the first prompt"),
-    ).toBeVisible();
     await page.getByLabel("Prompt text").fill("foreground route two");
     await page.getByRole("button", { name: "Send" }).click();
     await expect(
