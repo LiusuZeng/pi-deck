@@ -25,23 +25,34 @@ Pi Deck now has one formal launcher entrypoint:
 npm run deck -- [options] [project-dir]
 ```
 
+Build once after a fresh checkout, and again whenever you want source changes in the local production build:
+
+```bash
+npm run build
+```
+
 Common starts:
 
 ```bash
-# Daily dogfood: real Pi backend, production-ish local Electron launch
+# Daily dogfood: real Pi backend using the existing dist output (never rebuilds)
 npm start
 # or explicitly:
 npm run deck:real -- /path/to/project
 
+# Build and launch in one explicit development/CI command
+npm run launch:build
+npm run deck:real:build -- /path/to/project
+
 # Real Pi backend with Vite renderer hot reload
 npm run dev:real -- /path/to/project
 
-# Safe fake backend demo mode
+# Safe fake backend demo mode using the existing dist output
 npm run deck:fake
 
 # Launcher help / dry-run plan
 npm run deck -- --help
 npm run deck:real -- --dry-run /path/to/project
+npm run deck -- --fake --build --dry-run
 ```
 
 The launcher resolves and validates:
@@ -69,16 +80,24 @@ This builds the Electron main/preload code, starts the renderer dev server, and 
 
 ## 4. Raw Production-ish Local Launch
 
-Build the app and launch Electron from the built main process without creating a DMG, signing, or notarizing:
+Launch Electron from an already-built main process without creating a DMG, signing, or notarizing:
 
 ```bash
 npm run launch
 ```
 
+This command deliberately does not build. It verifies that the main process, preload, renderer, and completed-build manifest exist and match; if they are missing, incomplete, or older than source/configuration, it prints the exact repair command instead of launching a broken or stale app.
+
+For development or CI, use the explicit build-and-launch command:
+
+```bash
+npm run launch:build
+```
+
 Equivalent expanded command:
 
 ```bash
-npm run build && electron dist/main/main.js
+npm run build && npm run launch
 ```
 
 ## 5. Automated Validation Commands

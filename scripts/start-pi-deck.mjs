@@ -14,13 +14,14 @@ Usage:
   npm run deck:real -- [project-dir]
   npm run deck:fake
   npm run dev:real -- [project-dir]
-  node scripts/start-pi-deck.mjs [--real|--fake] [--dev|--launch] [project-dir]
+  node scripts/start-pi-deck.mjs [--real|--fake] [--dev|--launch] [--build] [project-dir]
 
 Options:
   --real              Launch against a real local pi --mode rpc worker.
   --fake              Launch local fake backend mode.
   --dev               Use Vite/Electron dev loop.
-  --launch            Use production-ish local launch (default).
+  --launch            Use the existing production build (default; does not rebuild).
+  --build             Build before a production launch (for development/CI).
   --project <dir>     Project cwd for real Pi workers. Defaults to caller cwd.
   --pi <path>         Pi binary path. Defaults to PI_DECK_PI_BINARY or PATH/common locations.
   --dry-run           Print resolved launch plan without starting Electron.
@@ -38,6 +39,7 @@ function parseArgs(argv) {
     project: undefined,
     piBinary: undefined,
     dryRun: false,
+    build: false,
     help: false,
   };
   const positional = [];
@@ -58,6 +60,8 @@ function parseArgs(argv) {
       options.piBinary = requireValue(argv, ++index, "--pi");
     } else if (arg === "--dry-run") {
       options.dryRun = true;
+    } else if (arg === "--build") {
+      options.build = true;
     } else if (arg === "-h" || arg === "--help") {
       options.help = true;
     } else if (arg.startsWith("--")) {
@@ -74,6 +78,10 @@ function parseArgs(argv) {
     throw new Error(
       `Unexpected extra arguments: ${positional.slice(1).join(" ")}`,
     );
+  }
+
+  if (options.build && options.runMode === "dev") {
+    throw new Error("--build is only valid with --launch, not --dev");
   }
 
   return options;
@@ -210,7 +218,12 @@ function main() {
     process.exit(1);
   }
 
-  const npmScript = options.runMode === "dev" ? "dev" : "launch";
+  const npmScript =
+    options.runMode === "dev"
+      ? "dev"
+      : options.build
+        ? "launch:build"
+        : "launch";
   const plan = {
     backend,
     runMode: options.runMode,
