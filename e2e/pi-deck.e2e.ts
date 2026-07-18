@@ -87,6 +87,52 @@ test("fake mode launches with backend runtime and send enabled", async () => {
   }
 });
 
+test("icon controls retain names, neutral styles, and fit a 900×600 viewport", async () => {
+  const { app, page } = await launchPiDeck({ PI_DECK_BACKEND: "fake" });
+  try {
+    await page.setViewportSize({ width: 900, height: 600 });
+    await expectHealthyPreload(page);
+
+    const send = page.getByRole("button", { name: "Send" });
+    await page.getByLabel("Prompt text").fill("style check");
+    await expect(send).toBeVisible();
+    await expect(send).toBeEnabled();
+    await expect(send).toHaveText("");
+    const sendBox = await send.boundingBox();
+    expect(sendBox).not.toBeNull();
+    expect(
+      (sendBox?.y ?? Infinity) + (sendBox?.height ?? 0),
+    ).toBeLessThanOrEqual(600);
+    await expect
+      .poll(() =>
+        send.evaluate((element) => getComputedStyle(element).backgroundColor),
+      )
+      .toBe("rgb(32, 33, 36)");
+    await expect(
+      page.getByRole("button", { name: "Add attachments" }),
+    ).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+
+    const sidebarToggle = page.locator(".topbar .sidebar-toggle");
+    await expect(sidebarToggle).not.toHaveAttribute("aria-describedby");
+    await sidebarToggle.focus();
+    await expect(page.getByRole("tooltip")).toHaveText(/sessions/);
+    await expect(sidebarToggle).toHaveAttribute("aria-describedby");
+    await page.getByLabel("Prompt text").focus();
+    await expect(sidebarToggle).not.toHaveAttribute("aria-describedby");
+
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => document.documentElement.scrollWidth <= window.innerWidth,
+        ),
+      )
+      .toBe(true);
+    await page.screenshot({ path: "test-results/ui-controls-900x600.png" });
+  } finally {
+    await app.close();
+  }
+});
+
 test("working sessions expose steer, follow-up, extension, and abort interventions", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-e2e-intervention-"),

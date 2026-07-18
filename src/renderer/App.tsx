@@ -3736,6 +3736,7 @@ function SessionSidebar(props: {
             <Menu label="Session actions">
               <Button
                 aria-label="Delete saved sessions"
+                role="menuitem"
                 size="sm"
                 variant="danger"
                 onClick={props.onDeleteAllSessions}
@@ -4367,7 +4368,7 @@ function LoadStateBadge(props: {
   }
 
   return (
-    <Menu label="Workspace options">
+    <Menu label="Workspace options" menu={false}>
       <div className="ui-menu-diagnostics">
         <strong>Pi Deck {props.loadState.version}</strong>
         <span>{props.nodeAccessSummary}</span>
@@ -5139,8 +5140,9 @@ function Composer(props: {
           ) : null}
           <Menu label="Composer options">
             <Button
-              aria-pressed={props.enterToSend}
+              aria-checked={props.enterToSend}
               disabled={isActionPending}
+              role="menuitemcheckbox"
               size="sm"
               variant="menuItem"
               onClick={() => props.onEnterToSendChange(!props.enterToSend)}

@@ -81,11 +81,17 @@ describe("IconButton", () => {
     const view = renderIconButton();
     const button = view.querySelector("button");
 
+    expect(view.firstElementChild).toBe(button);
+    expect(button?.hasAttribute("aria-describedby")).toBe(false);
     expect(view.querySelector('[role="tooltip"]')).toBeNull();
     act(() => button?.focus());
 
+    expect(button?.getAttribute("aria-describedby")).toBeTruthy();
     expect(view.querySelector('[role="tooltip"]')?.textContent).toContain(
       "Refresh sessions",
     );
+
+    act(() => button?.blur());
+    expect(button?.hasAttribute("aria-describedby")).toBe(false);
   });
 });

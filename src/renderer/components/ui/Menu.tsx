@@ -13,10 +13,14 @@ export function Menu(props: {
   label: string;
   children: ReactNode;
   className?: string;
+  /** Use false for a non-interactive information popover rather than a menu. */
+  menu?: boolean;
 }): ReactNode {
   const [isOpen, setIsOpen] = useState(false);
   const menuId = useId();
   const menuRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const isMenu = props.menu !== false;
 
   useEffect(() => {
     if (!isOpen) {
@@ -31,10 +35,22 @@ export function Menu(props: {
     return () => document.removeEventListener("mousedown", closeOnPointerDown);
   }, [isOpen]);
 
+  useEffect(() => {
+    if (!isOpen || !isMenu) {
+      return;
+    }
+    menuRef.current?.querySelector<HTMLElement>('[role^="menuitem"]')?.focus();
+  }, [isMenu, isOpen]);
+
+  function closeAndRestoreFocus(): void {
+    setIsOpen(false);
+    triggerRef.current?.focus();
+  }
+
   function onKeyDown(event: KeyboardEvent<HTMLDivElement>): void {
     if (event.key === "Escape") {
       event.preventDefault();
-      setIsOpen(false);
+      closeAndRestoreFocus();
     }
   }
 
@@ -45,8 +61,10 @@ export function Menu(props: {
       onKeyDown={onKeyDown}
     >
       <IconButton
-        aria-controls={menuId}
+        ref={triggerRef}
+        aria-controls={isOpen ? menuId : undefined}
         aria-expanded={isOpen}
+        aria-haspopup={isMenu ? "menu" : undefined}
         icon={Ellipsis}
         label={props.label}
         pressed={isOpen}
@@ -54,7 +72,12 @@ export function Menu(props: {
         onClick={() => setIsOpen((value) => !value)}
       />
       {isOpen ? (
-        <div className="ui-menu-popover" id={menuId} role="menu">
+        <div
+          className="ui-menu-popover"
+          id={menuId}
+          role={isMenu ? "menu" : undefined}
+          onClick={isMenu ? () => setIsOpen(false) : undefined}
+        >
           {props.children}
         </div>
       ) : null}
