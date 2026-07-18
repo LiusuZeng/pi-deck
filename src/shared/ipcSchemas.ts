@@ -238,6 +238,10 @@ export const chatSessionSummarySchema = z
   })
   .strict();
 
+export const bootstrapSessionSummarySchema = chatSessionSummarySchema.omit({
+  attachedRuntimeId: true,
+});
+
 export const chatListSessionsRequestSchema = z
   .object({
     projectId: z.string().min(1).optional(),
@@ -458,7 +462,7 @@ export const appBootstrapStateSchema = z
     diagnostics: diagnosticsSummarySchema,
     project: projectRefSchema,
     projects: z.array(projectRefSchema),
-    cachedSessions: z.array(chatSessionSummarySchema),
+    cachedSessions: z.array(bootstrapSessionSummarySchema),
   })
   .strict();
 

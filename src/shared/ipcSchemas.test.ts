@@ -58,33 +58,44 @@ describe("IPC schemas", () => {
       displayName: "app",
       lastOpenedAt: 1_234,
     };
-    expect(
-      appBootstrapStateSchema.parse({
-        backendMode: "real",
-        version: "0.1.0",
+    const bootstrap = {
+      backendMode: "real" as const,
+      version: "0.1.0",
+      settings: {},
+      diagnostics: {
+        appVersion: "0.1.0",
+        userDataPath: "/tmp/user-data",
+        logPath: "/tmp/log",
         settings: {},
-        diagnostics: {
-          appVersion: "0.1.0",
-          userDataPath: "/tmp/user-data",
-          logPath: "/tmp/log",
-          settings: {},
-          recentErrors: [],
-        },
-        project,
-        projects: [project],
-        cachedSessions: [],
-      }),
-    ).toMatchObject({ backendMode: "real", project });
+        recentErrors: [],
+      },
+      project,
+      projects: [project],
+      cachedSessions: [],
+    };
+    expect(appBootstrapStateSchema.parse(bootstrap)).toMatchObject({
+      backendMode: "real",
+      project,
+    });
     expect(() =>
       appBootstrapStateSchema.parse({
-        backendMode: "real",
-        version: "0.1.0",
-        settings: {},
-        diagnostics: {},
-        project,
-        projects: [],
-        cachedSessions: [],
+        ...bootstrap,
         runtimeId: "must-not-be-here",
+      }),
+    ).toThrow();
+    expect(() =>
+      appBootstrapStateSchema.parse({
+        ...bootstrap,
+        cachedSessions: [
+          {
+            id: "saved-1",
+            sessionFile: "/sessions/saved-1.jsonl",
+            title: "Saved",
+            updatedAtMs: 1,
+            messageCount: 1,
+            attachedRuntimeId: "must-not-be-in-bootstrap",
+          },
+        ],
       }),
     ).toThrow();
   });

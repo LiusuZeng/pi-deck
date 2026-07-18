@@ -701,11 +701,13 @@ async function getAppBootstrapState(
   };
 }
 
-function hasBootstrapProjectOverride(settings: AppSettings): boolean {
+function hasBootstrapProjectOverride(_settings: AppSettings): boolean {
+  // Persisted settings.projectCwd is only a fallback when ProjectStore has no
+  // active project. Treating it as explicit would undo a recent-project switch
+  // on every restart.
   return (
     selectedRealProjectCwd !== undefined ||
-    (process.env.PI_DECK_PROJECT_CWD?.trim().length ?? 0) > 0 ||
-    (settings.projectCwd?.trim().length ?? 0) > 0
+    (process.env.PI_DECK_PROJECT_CWD?.trim().length ?? 0) > 0
   );
 }
 
