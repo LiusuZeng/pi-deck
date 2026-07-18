@@ -89,6 +89,26 @@ textarea:disabled {
   gap: 12px;
 }
 
+.sidebar-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sidebar-dismiss {
+  display: none;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 10px;
+  padding: 0;
+  color: #cbd5e1;
+  background: rgb(255 255 255 / 8%);
+  font-size: 22px;
+  line-height: 1;
+}
+
 .brand {
   font-size: 18px;
   font-weight: 800;
@@ -130,8 +150,21 @@ textarea:disabled {
 }
 
 .new-session {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   padding: 9px 11px;
   text-align: left;
+}
+
+.new-chat-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.icon-button .new-chat-icon {
+  display: block;
+  margin: auto;
 }
 
 .delete-all-sessions {
@@ -678,6 +711,42 @@ h1 {
   border-radius: 22px;
   background: #fff;
   box-shadow: 0 20px 60px rgb(16 24 40 / 10%);
+}
+
+.transcript-loading {
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 12px;
+  min-height: 0;
+  padding: 32px;
+  color: #475467;
+  text-align: center;
+}
+
+.transcript-loading h2 {
+  margin: 0;
+  color: #1d2939;
+  font-size: 22px;
+}
+
+.transcript-loading p {
+  margin: 0;
+}
+
+.transcript-loading-spinner {
+  width: 30px;
+  height: 30px;
+  border: 3px solid #d0d5dd;
+  border-top-color: #4458ff;
+  border-radius: 999px;
+  animation: transcript-spin 0.8s linear infinite;
+}
+
+@keyframes transcript-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .timeline-shell {
@@ -1337,8 +1406,17 @@ h1 {
   }
 
   .sidebar {
-    min-height: auto;
-    max-height: 360px;
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 40;
+    width: min(330px, 88vw);
+    height: 100dvh;
+    max-height: none;
+    box-shadow: 18px 0 48px rgb(15 23 42 / 36%);
+  }
+
+  .sidebar-dismiss {
+    display: grid;
   }
 
   .topbar,
@@ -1369,5 +1447,42 @@ h1 {
 
   .composer-actions {
     align-items: stretch;
+  }
+}
+
+@media (max-width: 720px) {
+  .topbar {
+    padding: 8px 10px;
+  }
+
+  .header-right,
+  .project-header .eyebrow,
+  .project-path {
+    display: none;
+  }
+
+  .header-actions {
+    margin-bottom: 0;
+  }
+
+  .header-actions button {
+    padding: 8px 10px;
+  }
+}
+
+@media (max-width: 560px) {
+  .composer {
+    padding: 7px 10px;
+  }
+
+  .composer-meta .composer-model-pill,
+  .composer-meta .composer-select,
+  .composer-meta .composer-option {
+    display: none;
+  }
+
+  .starter-page,
+  .transcript-loading {
+    padding: 20px 14px;
   }
 }

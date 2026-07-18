@@ -139,6 +139,8 @@ interface SessionViewModel {
   /** A local placeholder; its Pi worker is created only on first send. */
   draftSession?: boolean;
   projectId?: string;
+  /** The saved session worker/transcript is being restored. */
+  isResuming?: boolean;
 }
 
 interface ModelOption {
@@ -533,6 +535,7 @@ export function App(): ReactElement {
     modelOptions.find((model) => model.id === selectedModelId) ??
     modelOptions[0];
   const isWorking = selectedSession.status === "working";
+  const isResuming = selectedSession.isResuming === true;
   const isRealBackendMode = selectedSession.backendMode === "real";
   const hasBlockingAttachment = attachments.some(
     (attachment) => attachment.status !== "ready",
@@ -541,9 +544,15 @@ export function App(): ReactElement {
     (attachment) => attachment.kind === "image",
   );
   const canSend =
-    draft.trim().length > 0 && !isWorking && loadState.state === "ready";
+    draft.trim().length > 0 &&
+    !isWorking &&
+    !isResuming &&
+    loadState.state === "ready";
   const canIntervene =
-    draft.trim().length > 0 && isWorking && loadState.state === "ready";
+    draft.trim().length > 0 &&
+    isWorking &&
+    !isResuming &&
+    loadState.state === "ready";
   const availableSlashCommands = isRealBackendMode
     ? realCommands
     : slashCommands;
@@ -556,6 +565,25 @@ export function App(): ReactElement {
   );
   const showStarterPage =
     selectedSession.timeline.length === 0 && selectedSession.status === "idle";
+
+  useEffect(() => {
+    const compactLayout = window.matchMedia("(max-width: 980px)");
+    const collapseSidebarForCompactLayout = (): void => {
+      if (compactLayout.matches) {
+        // Preserve the desktop preference, but never let the session drawer
+        // consume the narrow layout on launch or after a resize.
+        setSidebarVisible(false);
+      }
+    };
+    collapseSidebarForCompactLayout();
+    compactLayout.addEventListener("change", collapseSidebarForCompactLayout);
+    return () => {
+      compactLayout.removeEventListener(
+        "change",
+        collapseSidebarForCompactLayout,
+      );
+    };
+  }, []);
 
   useEffect(() => {
     const hasWorkingSession = sessions.some(
@@ -671,6 +699,9 @@ export function App(): ReactElement {
 
   function handleSelectSession(sessionId: string): void {
     const session = sessions.find((item) => item.id === sessionId);
+    if (session?.isResuming === true) {
+      return;
+    }
     if (
       session?.backendMode === "real" &&
       session.resumeBacked === true &&
@@ -693,7 +724,19 @@ export function App(): ReactElement {
     }
     setComposerError(null);
     setSelectedSessionId(session.id);
-    setUiMessage(`Resuming ${session.title}…`);
+    setSessions((items) =>
+      items.map((item) =>
+        item.id === session.id
+          ? {
+              ...item,
+              isResuming: true,
+              baseState: "attaching",
+              subtitle: "Loading previous context…",
+            }
+          : item,
+      ),
+    );
+    setUiMessage(`Loading previous context for ${session.title}…`);
     try {
       const snapshot = await window.piDeck.chat.resumeSession({
         projectId: currentProject.id,
@@ -735,7 +778,13 @@ export function App(): ReactElement {
         items.map((item) =>
           item.id === session.id
             ? appendDiagnostic(
-                { ...item, status: "error", baseState: "error" },
+                {
+                  ...item,
+                  status: "error",
+                  baseState: "error",
+                  isResuming: false,
+                  subtitle: "Error · unable to resume saved session",
+                },
                 { tone: "error", content: `Resume failed: ${message}` },
               )
             : item,
@@ -1614,6 +1663,7 @@ export function App(): ReactElement {
           realMode={isRealBackendMode}
           currentProject={currentProject}
           onSelect={handleSelectSession}
+          onHideSidebar={() => handleSidebarVisibleChange(false)}
           onNewSession={() => void handleNewSession()}
           onCloseRuntime={(sessionId) => void handleCloseRuntime(sessionId)}
           onDeleteSession={(sessionId) => void handleDeleteSession(sessionId)}
@@ -1654,7 +1704,9 @@ export function App(): ReactElement {
           {uiMessage}
         </div>
 
-        {showStarterPage ? (
+        {isResuming ? (
+          <TranscriptLoading sessionTitle={selectedSession.title} />
+        ) : showStarterPage ? (
           <StarterPage composer={composer} />
         ) : (
           <>
@@ -3012,6 +3064,7 @@ function SessionSidebar(props: {
   realMode: boolean;
   currentProject: ProjectRef;
   onSelect(sessionId: string): void;
+  onHideSidebar(): void;
   onNewSession(): void;
   onCloseRuntime(sessionId: string): void;
   onDeleteSession(sessionId: string): void;
@@ -3038,14 +3091,24 @@ function SessionSidebar(props: {
           </p>
           <div className="brand">Pi Deck</div>
         </div>
-        <button
-          className="icon-button"
-          type="button"
-          aria-label="New session"
-          onClick={props.onNewSession}
-        >
-          +
-        </button>
+        <div className="sidebar-header-actions">
+          <button
+            className="sidebar-dismiss"
+            type="button"
+            aria-label="Hide sessions"
+            onClick={props.onHideSidebar}
+          >
+            ×
+          </button>
+          <button
+            className="icon-button"
+            type="button"
+            aria-label="New session"
+            onClick={props.onNewSession}
+          >
+            <NewChatIcon />
+          </button>
+        </div>
       </div>
 
       {!props.realMode ? (
@@ -3054,7 +3117,8 @@ function SessionSidebar(props: {
           type="button"
           onClick={props.onNewSession}
         >
-          + New session
+          <NewChatIcon />
+          New session
         </button>
       ) : (
         <button
@@ -3158,6 +3222,24 @@ function SessionSidebar(props: {
         </div>
       ) : null}
     </aside>
+  );
+}
+
+function NewChatIcon(): ReactElement {
+  return (
+    <svg
+      aria-hidden="true"
+      className="new-chat-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.9"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L8 18l-4 1 1-4Z" />
+    </svg>
   );
 }
 
@@ -3519,6 +3601,20 @@ function StarterPage(props: { composer: ReactElement }): ReactElement {
         <h2>What’s on the agenda today?</h2>
         {props.composer}
       </div>
+    </section>
+  );
+}
+
+function TranscriptLoading(props: { sessionTitle: string }): ReactElement {
+  return (
+    <section
+      className="transcript-loading"
+      aria-label="Loading previous context"
+      aria-live="polite"
+    >
+      <span className="transcript-loading-spinner" aria-hidden="true" />
+      <h2>Loading previous context…</h2>
+      <p>Restoring the conversation for “{props.sessionTitle}”.</p>
     </section>
   );
 }
