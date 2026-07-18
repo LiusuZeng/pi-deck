@@ -78,6 +78,9 @@ test("fake mode launches with backend runtime and send enabled", async () => {
   try {
     await expectHealthyPreload(page);
     await expect(page.getByText(/Local demo mode active/i)).toBeVisible();
+    await expect(page.getByLabel("Recent projects")).toContainText(
+      "Deleted project",
+    );
     await page.getByLabel("Prompt text").fill("fake e2e prompt");
     await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
   } finally {
@@ -541,13 +544,15 @@ test("background worker continues through project A → B navigation and return"
   fs.mkdirSync(projectA, { recursive: true });
   fs.mkdirSync(projectB, { recursive: true });
   fs.mkdirSync(agentDir, { recursive: true });
+  const canonicalProjectA = fs.realpathSync(projectA);
+  const canonicalProjectB = fs.realpathSync(projectB);
 
   const { app, page } = await launchPiDeck(
     fakeRealModeEnv({
       root,
       projectCwd: projectA,
       agentDir,
-      testPickProjectCwds: [projectB, projectA],
+      testPickProjectCwds: [projectB],
       fakePiArgs: ["--stream-delay-ms", "500"],
     }),
   );
@@ -572,7 +577,10 @@ test("background worker continues through project A → B navigation and return"
       ),
     ).toBeVisible();
 
-    await page.getByRole("button", { name: /Open project/i }).click();
+    const recentProjectSwitcher = page.getByLabel("Switch recent project");
+    await expect(recentProjectSwitcher).toHaveValue(canonicalProjectB);
+    await expect(recentProjectSwitcher.locator("option")).toHaveCount(2);
+    await recentProjectSwitcher.selectOption(canonicalProjectA);
     await expect(
       page.getByRole("heading", { name: /project-a/ }),
     ).toBeVisible();

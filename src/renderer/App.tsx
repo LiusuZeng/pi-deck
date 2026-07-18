@@ -4315,6 +4315,10 @@ function ProjectHeader(props: {
     (project) => project.id !== props.project.id,
   );
   const visibleRecent = [...storedRecent, invalidRecentProject];
+  const switcherProjects = projectsForSwitcher(
+    props.project,
+    props.recentProjects,
+  );
 
   return (
     <div className="title-block project-header">
@@ -4331,7 +4335,33 @@ function ProjectHeader(props: {
           Open project…
         </button>
       </div>
-      {props.realMode ? null : (
+      {props.realMode ? (
+        <label className="project-switcher">
+          <span>Recent projects</span>
+          <select
+            aria-label="Switch recent project"
+            value={props.project.id}
+            onChange={(event) => {
+              const project = switcherProjects.find(
+                (item) => item.id === event.target.value,
+              );
+              if (project !== undefined && project.id !== props.project.id) {
+                props.onSelectRecent(project);
+              }
+            }}
+          >
+            {switcherProjects.map((project) => (
+              <option
+                key={project.id}
+                value={project.id}
+                disabled={project.invalidReason !== undefined}
+              >
+                {project.displayName} — {project.path}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : (
         <div className="recent-projects" aria-label="Recent projects">
           <strong>Recent projects</strong>
           {storedRecent.length === 0 ? (
@@ -4352,6 +4382,16 @@ function ProjectHeader(props: {
       )}
     </div>
   );
+}
+
+function projectsForSwitcher(
+  activeProject: ProjectRef,
+  recentProjects: ProjectRef[],
+): ProjectRef[] {
+  return [
+    activeProject,
+    ...recentProjects.filter((project) => project.id !== activeProject.id),
+  ];
 }
 
 function ModelThinkingControls(props: {
@@ -6016,6 +6056,7 @@ export const __rendererTestHooks = {
   isSessionDeletable,
   listProjectsIfAvailable,
   selectProjectIfAvailable,
+  projectsForSwitcher,
   findKnownExtensionCommand,
   buildRealSessionInbox,
   queueBadgeLabels,

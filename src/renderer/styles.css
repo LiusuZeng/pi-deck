@@ -652,6 +652,27 @@ h1 {
   padding: 9px 12px;
 }
 
+.project-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: min(100%, 360px);
+  color: #667085;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.project-switcher select {
+  min-width: 0;
+  max-width: 260px;
+  border: 1px solid #d0d5dd;
+  border-radius: 8px;
+  padding: 5px 26px 5px 8px;
+  color: #344054;
+  background: #fff;
+  font-size: 12px;
+}
+
 .recent-projects {
   display: flex;
   flex-wrap: wrap;
@@ -1659,6 +1680,18 @@ h1 {
   .header-actions button {
     padding: 8px 10px;
   }
+
+  .project-switcher {
+    max-width: 100%;
+  }
+
+  .project-switcher span {
+    display: none;
+  }
+
+  .project-switcher select {
+    max-width: 100%;
+  }
 }
 
 @media (max-width: 560px) {
@@ -1920,6 +1953,8 @@ h3 {
 .usage-stats span,
 .usage-stats.empty,
 .recent,
+.project-switcher,
+.project-switcher select,
 .capabilities span,
 .capabilities strong,
 .composer-model-pill,

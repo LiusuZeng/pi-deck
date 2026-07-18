@@ -197,6 +197,30 @@ describe("renderer project API compatibility", () => {
     expect(result.activeProject).toEqual(project);
     expect(result.activeProjectId).toBe(project.id);
   });
+
+  it("keeps the active main-process project in the compact recent switcher", () => {
+    const activeProject = {
+      id: "/tmp/project-b",
+      path: "/tmp/project-b",
+      canonicalPath: "/tmp/project-b",
+      displayName: "project-b",
+      lastOpenedAt: 2,
+    };
+    const recentProject = {
+      id: "/tmp/project-a",
+      path: "/tmp/project-a",
+      canonicalPath: "/tmp/project-a",
+      displayName: "project-a",
+      lastOpenedAt: 1,
+    };
+
+    expect(
+      __rendererTestHooks.projectsForSwitcher(activeProject, [
+        recentProject,
+        activeProject,
+      ]),
+    ).toEqual([activeProject, recentProject]);
+  });
 });
 
 describe("renderer session actions", () => {
