@@ -1,5 +1,6 @@
 import type { z } from "zod";
 import type {
+  appBootstrapStateSchema,
   appSettingsSchema,
   attachmentDraftSchema,
   attachmentImportDroppedFilesRequestSchema,
@@ -33,6 +34,7 @@ import type {
 } from "./ipcSchemas.js";
 
 export type AppSettings = z.infer<typeof appSettingsSchema>;
+export type AppBootstrapState = z.infer<typeof appBootstrapStateSchema>;
 export type DiagnosticsSummary = z.infer<typeof diagnosticsSummarySchema>;
 export type IpcErrorPayload = z.infer<typeof ipcErrorSchema>;
 export type ChatMessage = z.infer<typeof chatMessageSchema>;
@@ -91,6 +93,7 @@ export interface PiDeckApi {
   app: {
     getVersion(): Promise<string>;
     getDiagnosticsSummary(): Promise<DiagnosticsSummary>;
+    getBootstrapState(): Promise<AppBootstrapState>;
   };
   settings: {
     get(): Promise<AppSettings>;

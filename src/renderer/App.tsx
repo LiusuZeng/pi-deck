@@ -10,6 +10,7 @@ import {
   type ReactElement,
 } from "react";
 import type {
+  AppBootstrapState,
   AppSettings,
   AttachmentDraft,
   ChatCommandSummary,
@@ -462,15 +463,67 @@ export function App(): ReactElement {
   const reconcilingRuntimeIds = useRef(new Set<string>());
   const sessionsRef = useRef<SessionViewModel[]>([]);
   const selectedSessionIdRef = useRef(selectedSessionId);
+  const currentProjectRef = useRef(currentProject);
+  const sessionListGeneration = useRef(0);
   const reconciliationRetryTimers = useRef(new Map<string, number>());
   const reconciliationRetryAttempts = useRef(new Map<string, number>());
   sessionsRef.current = sessions;
   selectedSessionIdRef.current = selectedSessionId;
+  currentProjectRef.current = currentProject;
 
   useEffect(() => {
     let disposed = false;
     let unsubscribe: (() => void) | undefined;
     let eventBuffer: RuntimeEventBuffer | undefined;
+    let bootstrapRefreshFrame: number | undefined;
+    let bootstrapRefreshSecondFrame: number | undefined;
+
+    async function refreshBootstrapSessionList(
+      api: typeof window.piDeck,
+      bootstrap: AppBootstrapState,
+      generation: number,
+    ): Promise<void> {
+      try {
+        const listed = await api.chat.listSessions({
+          projectId: bootstrap.project.id,
+        });
+        // Do not let a late startup scan replace a project the user has since
+        // selected, or overwrite a newer explicit refresh.
+        if (
+          disposed ||
+          generation !== sessionListGeneration.current ||
+          currentProjectRef.current.id !== bootstrap.project.id
+        ) {
+          return;
+        }
+        setSessions((items) =>
+          mergeSessions(
+            items.filter(
+              (item) =>
+                item.runtimeBacked ||
+                item.draftSession === true ||
+                item.projectId !== bootstrap.project.id,
+            ),
+            listed.sessions.map((summary) =>
+              sessionFromSummary(summary, bootstrap.project.id),
+            ),
+          ),
+        );
+        setUiMessage(
+          `Real Pi mode active. Found ${listed.sessions.length} saved session(s) for this project.`,
+        );
+      } catch (error) {
+        if (
+          !disposed &&
+          generation === sessionListGeneration.current &&
+          currentProjectRef.current.id === bootstrap.project.id
+        ) {
+          setUiMessage(
+            `Saved-session refresh failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+    }
 
     async function load(): Promise<void> {
       try {
@@ -519,56 +572,60 @@ export function App(): ReactElement {
             void refreshRuntimeUsage(event.runtimeId);
           }
         });
-        const [version, settings, diagnostics, snapshot] = await Promise.all([
-          api.app.getVersion(),
-          api.settings.get(),
-          api.app.getDiagnosticsSummary(),
-          api.chat.getSnapshot(),
-        ]);
-        const fallbackProject = snapshot.state.cwd
-          ? projectFromCwd(snapshot.state.cwd)
-          : currentProject;
-        const projectList = await listProjectsIfAvailable(api, fallbackProject);
-        const listedSessions =
-          snapshot.backendMode === "real"
-            ? await api.chat.listSessions()
-            : undefined;
-        if (!disposed) {
-          const backendSession = sessionFromSnapshot(snapshot);
-          setSessions(
-            snapshot.backendMode === "real"
-              ? mergeSessions(
-                  [backendSession],
-                  (listedSessions?.sessions ?? []).map((summary) =>
-                    sessionFromSummary(summary, fallbackProject.id),
-                  ),
-                )
-              : [
-                  backendSession,
-                  ...initialSessions.filter(
-                    (session) => session.id !== "session-active",
-                  ),
-                ],
-          );
-          setSelectedSessionId(backendSession.id);
-          if (snapshot.backendMode === "real") {
-            setRecentProjects(projectList.projects);
-            setCurrentProject(
-              projectList.activeProject ??
-                (snapshot.state.cwd
-                  ? projectFromCwd(snapshot.state.cwd)
-                  : currentProject),
-            );
-          }
-          if (snapshot.backendMode === "real") {
-            loadRealCapabilities(backendSession.id);
-          }
-          setUiMessage(
-            snapshot.backendMode === "real"
-              ? `Real Pi mode active. Found ${listedSessions?.sessions.length ?? 0} persisted session(s) for this project; click one to resume.`
-              : "Local demo mode active. Demo backend is ready.",
-          );
-          setLoadState({ state: "ready", version, settings, diagnostics });
+        const bootstrap = await api.app.getBootstrapState();
+        if (disposed) {
+          return;
+        }
+
+        // A draft is a renderer-only shell. It intentionally has no runtime
+        // id, so the first send is the only path that can create a Pi worker.
+        const draft = draftSessionForProject(
+          bootstrap.project,
+          createId("draft-session"),
+          bootstrap.backendMode,
+        );
+        const cachedRows = bootstrap.cachedSessions.map((summary) =>
+          sessionFromSummary(summary, bootstrap.project.id),
+        );
+        setSessions(
+          bootstrap.backendMode === "real"
+            ? mergeSessions([draft], cachedRows)
+            : [
+                draft,
+                ...initialSessions.filter(
+                  (session) => session.id !== "session-active",
+                ),
+              ],
+        );
+        setSelectedSessionId(draft.id);
+        setCurrentProject(bootstrap.project);
+        setRecentProjects(
+          bootstrap.backendMode === "real"
+            ? bootstrap.projects
+            : [invalidRecentProject],
+        );
+        setUiMessage(
+          bootstrap.backendMode === "real"
+            ? `Real Pi mode active. Showing ${cachedRows.length} cached session(s); refreshing saved sessions in the background.`
+            : "Local demo mode active. Pi starts when you send the first prompt.",
+        );
+        setLoadState({
+          state: "ready",
+          version: bootstrap.version,
+          settings: bootstrap.settings,
+          diagnostics: bootstrap.diagnostics,
+        });
+
+        if (bootstrap.backendMode === "real") {
+          const generation = ++sessionListGeneration.current;
+          // Two animation frames guarantee the ready shell has an opportunity
+          // to commit and paint before main begins its potentially expensive
+          // repository scan.
+          bootstrapRefreshFrame = window.requestAnimationFrame(() => {
+            bootstrapRefreshSecondFrame = window.requestAnimationFrame(() => {
+              void refreshBootstrapSessionList(api, bootstrap, generation);
+            });
+          });
         }
       } catch (error) {
         if (!disposed) {
@@ -593,6 +650,12 @@ export function App(): ReactElement {
       disposed = true;
       unsubscribe?.();
       eventBuffer?.dispose();
+      if (bootstrapRefreshFrame !== undefined) {
+        window.cancelAnimationFrame(bootstrapRefreshFrame);
+      }
+      if (bootstrapRefreshSecondFrame !== undefined) {
+        window.cancelAnimationFrame(bootstrapRefreshSecondFrame);
+      }
       for (const timer of reconciliationRetryTimers.current.values()) {
         window.clearTimeout(timer);
       }
@@ -1468,6 +1531,7 @@ export function App(): ReactElement {
     project: ProjectRef,
     projects: ProjectRef[],
   ): Promise<void> {
+    const sessionListRequest = ++sessionListGeneration.current;
     if (!isRealBackendMode) {
       setCurrentProject(project);
       setRecentProjects(projects);
@@ -1481,6 +1545,9 @@ export function App(): ReactElement {
     const listedSessions = await window.piDeck.chat.listSessions({
       projectId: project.id,
     });
+    if (sessionListRequest !== sessionListGeneration.current) {
+      return;
+    }
     const savedRows = listedSessions.sessions.map((summary) =>
       sessionFromSummary(summary, project.id),
     );
@@ -1574,18 +1641,24 @@ export function App(): ReactElement {
     if (!isRealBackendMode || loadState.state !== "ready") {
       return;
     }
+    const sessionListRequest = ++sessionListGeneration.current;
+    const projectId = currentProject.id;
     setUiMessage("Refreshing saved Pi sessions…");
     try {
-      const result = await window.piDeck.chat.listSessions({
-        projectId: currentProject.id,
-      });
+      const result = await window.piDeck.chat.listSessions({ projectId });
+      if (
+        sessionListRequest !== sessionListGeneration.current ||
+        currentProjectRef.current.id !== projectId
+      ) {
+        return;
+      }
       setSessions((items) =>
         mergeSessions(
           items.filter(
             (item) => item.runtimeBacked || item.draftSession === true,
           ),
           result.sessions.map((summary) =>
-            sessionFromSummary(summary, currentProject.id),
+            sessionFromSummary(summary, projectId),
           ),
         ),
       );

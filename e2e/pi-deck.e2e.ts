@@ -204,7 +204,7 @@ test("extension UI confirm request completes through renderer, IPC, and fake Pi"
   }
 });
 
-test("real mode startup failure is not mislabeled as preload/fake UI", async () => {
+test("real mode renders a draft shell before an unavailable backend is touched", async () => {
   const piBinary = process.env.PI_DECK_PI_BINARY || "/usr/local/bin/pi";
   test.skip(!fs.existsSync(piBinary), `Pi binary not found at ${piBinary}`);
   const root = fs.mkdtempSync(
@@ -220,20 +220,21 @@ test("real mode startup failure is not mislabeled as preload/fake UI", async () 
     PI_CODING_AGENT_DIR: path.join(root, "agent"),
   });
   try {
+    await expectHealthyPreload(page);
     await expect(
-      page.getByText("Startup error", { exact: true }),
+      page.getByRole("heading", { name: /Untitled new session/ }),
     ).toBeVisible();
-    await expect(page.getByText("Preload error")).toHaveCount(0);
-    await expect(page.getByText("Local projects")).toHaveCount(0);
+    await expect(page.getByText("Startup error", { exact: true })).toHaveCount(
+      0,
+    );
     await expect(page.getByText(/backend fake RPC active/i)).toHaveCount(0);
-    await expect(page.getByText(/claude/i)).toHaveCount(0);
   } finally {
     await app.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("new session drafts do not allocate a worker before their first prompt", async () => {
+test("bootstrap creates no worker and the first draft send creates one", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-lazy-new-"));
   const projectCwd = path.join(root, "project");
   const agentDir = path.join(root, "agent");
@@ -245,6 +246,12 @@ test("new session drafts do not allocate a worker before their first prompt", as
   );
   try {
     await expectHealthyPreload(page);
+    // fakeRpc writes its session record synchronously when a worker starts.
+    // Waiting through the background repository refresh proves bootstrap did
+    // not create an eager empty worker or persisted session.
+    await page.waitForTimeout(150);
+    const fakeSessionRoot = path.join(agentDir, "sessions");
+    expect(fs.existsSync(fakeSessionRoot)).toBe(false);
     const newSession = page.getByRole("button", {
       name: "New session",
       exact: true,
@@ -261,6 +268,7 @@ test("new session drafts do not allocate a worker before their first prompt", as
     await page.getByLabel("Prompt text").fill("lazy first prompt");
     await page.getByRole("button", { name: "Send" }).click();
     await expect(page.getByText("Fake response").first()).toBeVisible();
+    expect(fs.existsSync(fakeSessionRoot)).toBe(true);
   } finally {
     await app.close();
     fs.rmSync(root, { recursive: true, force: true });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   apiResponseSchema,
+  appBootstrapStateSchema,
   appSettingsPatchSchema,
   appSettingsSchema,
   attachmentDraftSchema,
@@ -47,6 +48,45 @@ describe("IPC schemas", () => {
         },
       }),
     ).toMatchObject({ ok: false });
+  });
+
+  it("validates a compact local-only bootstrap DTO", () => {
+    const project = {
+      id: "/project/app",
+      path: "/project/app",
+      canonicalPath: "/project/app",
+      displayName: "app",
+      lastOpenedAt: 1_234,
+    };
+    expect(
+      appBootstrapStateSchema.parse({
+        backendMode: "real",
+        version: "0.1.0",
+        settings: {},
+        diagnostics: {
+          appVersion: "0.1.0",
+          userDataPath: "/tmp/user-data",
+          logPath: "/tmp/log",
+          settings: {},
+          recentErrors: [],
+        },
+        project,
+        projects: [project],
+        cachedSessions: [],
+      }),
+    ).toMatchObject({ backendMode: "real", project });
+    expect(() =>
+      appBootstrapStateSchema.parse({
+        backendMode: "real",
+        version: "0.1.0",
+        settings: {},
+        diagnostics: {},
+        project,
+        projects: [],
+        cachedSessions: [],
+        runtimeId: "must-not-be-here",
+      }),
+    ).toThrow();
   });
 
   it("validates project picker metadata and rejects unknown fields", () => {

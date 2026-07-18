@@ -13,6 +13,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import {
+  appBootstrapStateSchema,
   appSettingsPatchSchema,
   appSettingsSchema,
   attachmentImportDroppedFilesRequestSchema,
@@ -51,6 +52,7 @@ import {
   projectSelectRequestSchema,
 } from "../shared/ipcSchemas.js";
 import type {
+  AppBootstrapState,
   AppSettings,
   AttachmentDraft,
   ChatCommandSummary,
@@ -62,6 +64,7 @@ import type {
   ChatRuntimeStatus,
   ChatSnapshot,
   PickAttachmentsResult,
+  ProjectRef,
   PickProjectResult,
 } from "../shared/types.js";
 import { DiagnosticsService } from "./diagnostics/diagnostics.js";
@@ -273,6 +276,14 @@ function registerIpcHandlers(
     responseSchema: diagnosticsSummarySchema,
     diagnostics: diagnosticsService,
     handler: async () => diagnosticsService.getSummary(await store.get()),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.appGetBootstrapState,
+    requestSchema: noPayloadSchema,
+    responseSchema: appBootstrapStateSchema,
+    diagnostics: diagnosticsService,
+    handler: async () => getAppBootstrapState(store, diagnosticsService),
   });
 
   registerValidatedIpc({
@@ -506,7 +517,8 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async () => {
       await closeChatWorker();
-      return getChatSnapshot(store, diagnosticsService);
+      // Reset is an explicit new-session action, unlike application bootstrap.
+      return createChatSessionSnapshot(store, diagnosticsService);
     },
   });
 
@@ -646,6 +658,79 @@ function ensureProjectStore(): ProjectStore {
   return projectStore;
 }
 
+/**
+ * Build the first renderer payload strictly from local stores. In particular,
+ * do not call ensureChatAdapter(), resolveRealChatLaunchConfig(), or
+ * listChatSessions() here: each can eventually start Pi or scan its session
+ * repository. The renderer asks for a fresh list only after this shell paints.
+ */
+async function getAppBootstrapState(
+  store: SettingsStore,
+  diagnosticsService: DiagnosticsService,
+): Promise<AppBootstrapState> {
+  const settings = await store.get();
+  const projects = ensureProjectStore();
+  const listedProjects = await projects.list();
+  const explicitProject = hasBootstrapProjectOverride(settings);
+  const mode = resolveChatBackendMode();
+  const needsProjectActivation =
+    explicitProject || listedProjects.activeProject === undefined;
+  const project =
+    !needsProjectActivation && listedProjects.activeProject !== undefined
+      ? listedProjects.activeProject
+      : mode === "real"
+        ? await projects.upsertAndActivateProject(
+            await resolveBootstrapProjectCwd(settings),
+          )
+        : projectRefFromCwd(await resolveBootstrapProjectCwd(settings));
+  const projectList =
+    mode === "real" && needsProjectActivation
+      ? await projects.list()
+      : listedProjects;
+  const cachedSessions =
+    mode === "real" ? await projects.getCachedSessionSummaries(project.id) : [];
+
+  return {
+    backendMode: mode,
+    version: app.getVersion(),
+    settings,
+    diagnostics: diagnosticsService.getSummary(settings),
+    project,
+    projects: projectList.projects,
+    cachedSessions,
+  };
+}
+
+function hasBootstrapProjectOverride(settings: AppSettings): boolean {
+  return (
+    selectedRealProjectCwd !== undefined ||
+    (process.env.PI_DECK_PROJECT_CWD?.trim().length ?? 0) > 0 ||
+    (settings.projectCwd?.trim().length ?? 0) > 0
+  );
+}
+
+function projectRefFromCwd(cwd: string): ProjectRef {
+  return {
+    id: cwd,
+    path: cwd,
+    canonicalPath: cwd,
+    displayName: path.basename(cwd) || cwd,
+    lastOpenedAt: Date.now(),
+  };
+}
+
+async function resolveBootstrapProjectCwd(
+  settings: AppSettings,
+): Promise<string> {
+  const requested =
+    selectedRealProjectCwd ??
+    process.env.PI_DECK_PROJECT_CWD ??
+    settings.projectCwd ??
+    process.cwd();
+  const resolved = path.resolve(requested);
+  return (await safeRealpath(resolved)) ?? resolved;
+}
+
 function nextTestProjectPickPath(): string | undefined {
   const singlePath = process.env.PI_DECK_TEST_PICK_PROJECT_CWD;
   if (singlePath !== undefined && singlePath.trim().length > 0) {
@@ -729,12 +814,9 @@ async function initializeChatAdapter(
     }
   });
 
-  try {
-    await createChatWorker(adapter, store, mode, capacity);
-  } catch (error) {
-    unsubscribe();
-    throw error;
-  }
+  // Creating an adapter only installs routing and capacity bookkeeping. A
+  // worker is created by an explicit create/resume/send path, never merely by
+  // making the app interactive.
   chatBackendMode = mode;
   chatEventUnsubscribe = unsubscribe;
   chatWorkerCapacity = capacity;

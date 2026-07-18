@@ -368,6 +368,36 @@ export class ProjectStore {
     return this.state.sessionRefs.filter((ref) => ref.projectId === projectId);
   }
 
+  /**
+   * Return the local metadata cache without touching the session filesystem.
+   * Bootstrap uses this for an immediate shell; a later repository refresh is
+   * still authoritative and reconciles missing or changed files.
+   */
+  async getCachedSessionSummaries(
+    projectId: string,
+  ): Promise<ChatSessionSummary[]> {
+    await this.loadIfNeeded();
+    return this.state.sessionRefs
+      .filter(
+        (ref) =>
+          ref.projectId === projectId && ref.missingSinceMs === undefined,
+      )
+      .map((ref) => ({
+        id: ref.sessionFile,
+        sessionFile: ref.sessionFile,
+        ...(ref.sessionId ? { sessionId: ref.sessionId } : {}),
+        ...(ref.cwd ? { cwd: ref.cwd } : {}),
+        title: ref.title ?? path.basename(ref.sessionFile, ".jsonl"),
+        updatedAtMs: ref.lastKnownUpdatedAtMs ?? ref.lastSeenAtMs,
+        ...(ref.createdAtMs !== undefined
+          ? { createdAtMs: ref.createdAtMs }
+          : {}),
+        messageCount: ref.messageCount ?? 0,
+        ...(ref.preview ? { preview: ref.preview } : {}),
+      }))
+      .sort((left, right) => right.updatedAtMs - left.updatedAtMs);
+  }
+
   async markSessionMissing(
     projectId: string,
     sessionFile: string,

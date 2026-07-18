@@ -81,6 +81,43 @@ describe("preload PiDeck API validation", () => {
     ).toThrow();
   });
 
+  it("exposes the validated local bootstrap API", async () => {
+    const project = {
+      id: "/project",
+      path: "/project",
+      canonicalPath: "/project",
+      displayName: "project",
+      lastOpenedAt: 1,
+    };
+    electronMock.ipcRenderer.invoke.mockResolvedValueOnce({
+      ok: true,
+      data: {
+        backendMode: "fake",
+        version: "0.1.0",
+        settings: {},
+        diagnostics: {
+          appVersion: "0.1.0",
+          userDataPath: "/tmp/user-data",
+          logPath: "/tmp/log",
+          settings: {},
+          recentErrors: [],
+        },
+        project,
+        projects: [project],
+        cachedSessions: [],
+      },
+    });
+
+    await expect(api.app.getBootstrapState()).resolves.toMatchObject({
+      backendMode: "fake",
+      project,
+    });
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenCalledWith(
+      "app:getBootstrapState",
+      undefined,
+    );
+  });
+
   it("exposes a runtime-scoped compact status API", async () => {
     electronMock.ipcRenderer.invoke.mockResolvedValueOnce({
       ok: true,

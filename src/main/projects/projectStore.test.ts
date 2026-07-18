@@ -128,6 +128,42 @@ test("ProjectStore bulk session refresh persists once and skips an unchanged nor
   writeFile.mockRestore();
 });
 
+test("ProjectStore returns cached bootstrap summaries without touching session files", async () => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "pi-deck-project-store-bootstrap-"),
+  );
+  const projectDir = path.join(root, "project");
+  const sessionFile = path.join(root, "session.jsonl");
+  await fs.mkdir(projectDir, { recursive: true });
+  const project = await fs.realpath(projectDir);
+  const store = new ProjectStore(path.join(root, "home"));
+  await store.upsertAndActivateProject(project);
+  await store.upsertSessionRefs(project, [
+    {
+      id: sessionFile,
+      sessionFile,
+      title: "Cached session",
+      updatedAtMs: 123,
+      messageCount: 2,
+    },
+  ]);
+
+  const readFile = vi.spyOn(fs, "readFile");
+  const cached = await store.getCachedSessionSummaries(project);
+
+  assert.deepEqual(cached, [
+    {
+      id: sessionFile,
+      sessionFile,
+      title: "Cached session",
+      updatedAtMs: 123,
+      messageCount: 2,
+    },
+  ]);
+  assert.equal(readFile.mock.calls.length, 0);
+  readFile.mockRestore();
+});
+
 test("ProjectStore retries a failed bulk persist on an unchanged refresh", async () => {
   const root = await fs.mkdtemp(
     path.join(os.tmpdir(), "pi-deck-project-store-retry-"),

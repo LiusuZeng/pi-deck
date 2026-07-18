@@ -447,6 +447,21 @@ export const projectSelectRequestSchema = z
   })
   .strict();
 
+// Startup projection intentionally excludes runtime state and messages. It is
+// assembled solely from local app/project metadata so rendering it can never
+// create a Pi worker or trigger a session-repository scan.
+export const appBootstrapStateSchema = z
+  .object({
+    backendMode: z.enum(["fake", "real"]),
+    version: z.string(),
+    settings: appSettingsSchema,
+    diagnostics: diagnosticsSummarySchema,
+    project: projectRefSchema,
+    projects: z.array(projectRefSchema),
+    cachedSessions: z.array(chatSessionSummarySchema),
+  })
+  .strict();
+
 export const attachmentPickerRequestSchema = z
   .object({
     projectPath: z.string().optional(),
@@ -526,6 +541,7 @@ export const noPayloadSchema = z.undefined();
 export const ipcChannels = {
   appGetVersion: "app:getVersion",
   appGetDiagnosticsSummary: "app:getDiagnosticsSummary",
+  appGetBootstrapState: "app:getBootstrapState",
   settingsGet: "settings:get",
   settingsUpdate: "settings:update",
   chatGetSnapshot: "chat:getSnapshot",

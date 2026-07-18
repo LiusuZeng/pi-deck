@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, webUtils } from "electron";
 import { z, type ZodType } from "zod";
 import {
   apiResponseSchema,
+  appBootstrapStateSchema,
   appSettingsPatchSchema,
   appSettingsSchema,
   attachmentImportDroppedFilesRequestSchema,
@@ -80,6 +81,12 @@ const api: PiDeckApi = Object.freeze({
         channel: ipcChannels.appGetDiagnosticsSummary,
         request: undefined,
         responseSchema: diagnosticsSummarySchema,
+      }),
+    getBootstrapState: () =>
+      invokeValidated({
+        channel: ipcChannels.appGetBootstrapState,
+        request: undefined,
+        responseSchema: appBootstrapStateSchema,
       }),
   }),
   settings: Object.freeze({
