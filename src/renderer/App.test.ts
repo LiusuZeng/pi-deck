@@ -392,6 +392,56 @@ describe("renderer message_update reduction", () => {
     expect(session.timeline).toEqual([]);
   });
 
+  it("keeps a completed assistant message working until agent_end confirms the turn", () => {
+    const next = __rendererTestHooks.reduceRuntimeEvent(
+      {
+        ...baseSession(),
+        status: "sending",
+        baseState: "attaching",
+        overlays: { ...emptyOverlays, streaming: true },
+      } as any,
+      {
+        type: "message_update",
+        runtimeId: "session-1",
+        messageId: "assistant-1",
+        role: "assistant",
+        content: "Done",
+        done: true,
+      } as any,
+    );
+
+    expect(next.status).toBe("working");
+    expect(next.baseState).toBe("working");
+    expect(next.subtitle).toContain("waiting for Pi completion");
+  });
+
+  it("uses reconciliation to confirm sending, while keeping abort pending", () => {
+    const sending = {
+      ...baseSession(),
+      status: "sending",
+      baseState: "attaching",
+    } as any;
+    const activeSnapshot = {
+      runtimeId: "session-1",
+      backendMode: "real",
+      state: { cwd: "/tmp/project", isAgentActive: true },
+      messages: [],
+    } as any;
+
+    const confirmed = __rendererTestHooks.reconcileSessionWithSnapshot(
+      sending,
+      activeSnapshot,
+    );
+    expect(confirmed.status).toBe("working");
+    expect(__rendererTestHooks.isSessionBusy(confirmed)).toBe(true);
+
+    const aborting = { ...confirmed, status: "aborting" } as any;
+    expect(
+      __rendererTestHooks.reconcileSessionWithSnapshot(aborting, activeSnapshot)
+        .status,
+    ).toBe("aborting");
+  });
+
   it("clears empty assistant placeholders when an agent turn ends", () => {
     const next = __rendererTestHooks.reduceRuntimeEvent(
       {

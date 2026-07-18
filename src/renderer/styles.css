@@ -600,8 +600,18 @@ h1 {
   background: #17b26a;
 }
 
+.status-pill.starting,
+.status-pill.sending,
+.status-pill.reconnecting {
+  background: #7c3aed;
+}
+
 .status-pill.working {
   background: #4458ff;
+}
+
+.status-pill.aborting {
+  background: #dc2626;
 }
 
 .status-pill.waiting {
@@ -807,6 +817,24 @@ h1 {
   border-color: #fed7aa;
   color: #9a3412;
   background: #fff7ed;
+}
+
+.recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.recovery-actions button {
+  border: 1px solid currentColor;
+  border-radius: 8px;
+  padding: 5px 8px;
+  color: inherit;
+  background: #fff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .timeline-row {

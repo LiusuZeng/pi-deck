@@ -130,7 +130,9 @@ test("working sessions expose steer, follow-up, extension, and abort interventio
 
     await page.getByRole("button", { name: "Abort" }).click();
     await expect(
-      page.getByText("Abort sent to Pi.", { exact: true }),
+      page.getByText("Abort requested; waiting for Pi to confirm completion.", {
+        exact: true,
+      }),
     ).toBeVisible();
   } finally {
     await app.close();
