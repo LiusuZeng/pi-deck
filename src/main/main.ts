@@ -71,11 +71,11 @@ import {
   validateSessionForDeletion,
 } from "./pi/sessionRepository.js";
 import type { PiMessage, PiState, PromptInput } from "./pi/types.js";
-import {
-  resolveEffectivePiConfig,
-  resolvePiBinary,
-  type AppPiSettings,
+import type {
+  AppPiSettings,
+  EffectivePiConfigResult,
 } from "./platform/piEnvironment.js";
+import { RealChatLaunchConfigCache } from "./platform/realChatLaunchConfigCache.js";
 import {
   buildContentSecurityPolicy,
   buildSecureWebPreferences,
@@ -99,6 +99,7 @@ const isDev = process.env.VITE_DEV_SERVER_URL !== undefined;
 let mainWindow: BrowserWindow | undefined;
 let settingsStore: SettingsStore | undefined;
 let projectStore: ProjectStore | undefined;
+const realChatLaunchConfigCache = new RealChatLaunchConfigCache();
 let diagnostics: DiagnosticsService | undefined;
 type ChatBackendMode = "fake" | "real";
 
@@ -284,7 +285,12 @@ function registerIpcHandlers(
     requestSchema: appSettingsPatchSchema,
     responseSchema: appSettingsSchema,
     diagnostics: diagnosticsService,
-    handler: async (patch) => store.update(patch),
+    handler: async (patch) => {
+      const updated = await store.update(patch);
+      // App settings are an explicit configuration generation boundary.
+      realChatLaunchConfigCache.clear();
+      return updated;
+    },
   });
 
   // Demo Slice chat bridge. Fake remains the default; PI_DECK_BACKEND=real
@@ -1062,30 +1068,15 @@ async function resolveRealChatLaunchConfig(
 ): Promise<{
   appSettings: AppPiSettings;
   projectCwd: string;
-  effective: Awaited<ReturnType<typeof resolveEffectivePiConfig>>;
+  effective: EffectivePiConfigResult;
 }> {
   const settings = await store.get();
   const appSettings = applyRealBackendEnvOverrides(settings);
   const projectCwd = await resolveRealBackendCwd(settings, projectId);
-  const binaryResolution = await resolvePiBinary({
+  const effective = await realChatLaunchConfigCache.resolve({
     appSettings,
     env: process.env,
-  });
-
-  if (!binaryResolution.ok || binaryResolution.piBinary === undefined) {
-    const details = binaryResolution.diagnostics
-      .map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`)
-      .join("; ");
-    throw new Error(
-      `Real Pi backend requested but no usable pi binary was found. ${details}`,
-    );
-  }
-
-  const effective = await resolveEffectivePiConfig({
-    piBinary: binaryResolution.piBinary,
-    appSettings,
-    env: process.env,
-    cwd: projectCwd,
+    projectCwd,
   });
   return { appSettings, projectCwd, effective };
 }

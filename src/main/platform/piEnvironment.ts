@@ -113,6 +113,30 @@ export interface EffectivePiConfigResult {
   projectSessionDirCandidate?: string | undefined;
 }
 
+/** Paths whose contents contribute to an effective Pi configuration. */
+export function getEffectivePiConfigSettingsPaths(
+  options: Pick<
+    ResolveEffectivePiConfigOptions,
+    "appSettings" | "env" | "cwd" | "homeDir"
+  >,
+): string[] {
+  const env = options.env || process.env;
+  const homeDir = options.homeDir || os.homedir();
+  const appSettings = options.appSettings || {};
+  const cwd = options.cwd
+    ? resolveUserPath(options.cwd, undefined, homeDir)
+    : process.cwd();
+  const agentDir = appSettings.agentDir
+    ? resolveUserPath(appSettings.agentDir, undefined, homeDir)
+    : env.PI_CODING_AGENT_DIR
+      ? resolveUserPath(env.PI_CODING_AGENT_DIR, undefined, homeDir)
+      : path.join(homeDir, ".pi", "agent");
+  return [
+    path.join(agentDir, "settings.json"),
+    path.join(cwd, ".pi", "settings.json"),
+  ];
+}
+
 interface NarrowSettings {
   sessionDir?: string;
   images?: {
