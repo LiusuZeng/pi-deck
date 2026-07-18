@@ -35,6 +35,35 @@ import {
   type BaseSessionState,
   type SessionOverlays,
 } from "./sessionState.js";
+import { Button } from "./components/ui/Button.js";
+import { IconButton } from "./components/ui/IconButton.js";
+import {
+  ArrowUp,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  CircleAlert,
+  CircleDot,
+  Copy,
+  CornerUpLeft,
+  FolderOpen,
+  Gauge,
+  History,
+  ListPlus,
+  LoaderCircle,
+  PanelLeft,
+  Paperclip,
+  Play,
+  RotateCcw,
+  Search,
+  Square,
+  SquarePen,
+  Trash2,
+  Unplug,
+  Wrench,
+  X,
+} from "./components/ui/icons.js";
+import { Menu } from "./components/ui/Menu.js";
 import { RuntimeEventBuffer } from "./runtimeEventBuffer.js";
 
 type LoadState =
@@ -3861,56 +3890,44 @@ function SessionSidebar(props: {
           <div className="brand">Pi Deck</div>
         </div>
         <div className="sidebar-header-actions">
-          <button
+          <IconButton
             className="sidebar-dismiss"
-            type="button"
-            aria-label="Hide sessions"
+            icon={X}
+            label="Hide sessions"
+            size="sm"
             onClick={props.onHideSidebar}
-          >
-            ×
-          </button>
+          />
           {props.realMode ? (
-            <button
-              className="sidebar-refresh"
-              type="button"
-              aria-label="Refresh sessions"
-              title="Refresh saved Pi sessions"
-              aria-busy={isRefreshing}
-              disabled={isRefreshing}
+            <IconButton
+              icon={RotateCcw}
+              label="Refresh sessions"
+              loading={isRefreshing}
+              size="sm"
               onClick={() => void handleRefresh()}
-            >
-              {isRefreshing ? "Refreshing…" : "Refresh"}
-            </button>
+            />
           ) : null}
-          <button
-            className="icon-button"
-            type="button"
-            aria-label="New session"
+          <IconButton
+            icon={SquarePen}
+            label="New session"
+            size="sm"
             onClick={props.onNewSession}
-          >
-            <NewChatIcon />
-          </button>
+          />
+          {props.realMode ? (
+            <Menu label="Session actions">
+              <Button
+                aria-label="Delete saved sessions"
+                role="menuitem"
+                size="sm"
+                variant="danger"
+                onClick={props.onDeleteAllSessions}
+              >
+                <Trash2 aria-hidden="true" size={14} strokeWidth={1.75} />
+                Delete saved sessions…
+              </Button>
+            </Menu>
+          ) : null}
         </div>
       </div>
-
-      {!props.realMode ? (
-        <button
-          className="new-session"
-          type="button"
-          onClick={props.onNewSession}
-        >
-          <NewChatIcon />
-          New session
-        </button>
-      ) : (
-        <button
-          className="delete-all-sessions"
-          type="button"
-          onClick={props.onDeleteAllSessions}
-        >
-          Delete saved sessions…
-        </button>
-      )}
 
       {activeWork.length > 0 ? (
         <section
@@ -3919,9 +3936,8 @@ function SessionSidebar(props: {
         >
           <p className="active-work-heading">Active work · other projects</p>
           {activeWork.map((session) => (
-            <button
+            <Button
               className={`session-item active-work-item ${session.id === props.selectedSessionId ? "active" : ""}`}
-              type="button"
               key={session.id}
               aria-label={`Active work in ${session.project}: ${session.title}`}
               title={`Open background work from ${session.project}`}
@@ -3935,24 +3951,27 @@ function SessionSidebar(props: {
                 </span>
               </span>
               <span className="session-time">{session.updatedAt}</span>
-            </button>
+            </Button>
           ))}
         </section>
       ) : null}
 
       {props.realMode ? (
         <>
-          <label className="session-search-label" htmlFor="session-search">
+          <label className="sr-only" htmlFor="session-search">
             Search sessions
           </label>
-          <input
-            id="session-search"
-            className="session-search"
-            type="search"
-            value={sessionFilter}
-            placeholder="Search saved sessions"
-            onChange={(event) => setSessionFilter(event.target.value)}
-          />
+          <div className="session-search-wrap">
+            <Search aria-hidden="true" size={16} strokeWidth={1.75} />
+            <input
+              id="session-search"
+              className="session-search"
+              type="search"
+              value={sessionFilter}
+              placeholder="Search saved sessions"
+              onChange={(event) => setSessionFilter(event.target.value)}
+            />
+          </div>
           <p className="attention-summary" aria-live="polite">
             Needs input {allRealInbox?.needsInput.length ?? 0} · Errors{" "}
             {allRealInbox?.errors.length ?? 0} · Working{" "}
@@ -3980,9 +3999,8 @@ function SessionSidebar(props: {
             props.realMode && session.runtimeBacked && !isSessionBusy(session);
           return (
             <div className="session-item-wrap" key={session.id}>
-              <button
+              <Button
                 className={`session-item ${session.id === props.selectedSessionId ? "active" : ""}`}
-                type="button"
                 aria-label={`Session: ${session.title}`}
                 title={`${session.title}\n${formatReadableTimestamp(session.updatedAtMs)}`}
                 onClick={() => {
@@ -4008,35 +4026,32 @@ function SessionSidebar(props: {
                 >
                   {session.updatedAt}
                 </span>
-              </button>
+              </Button>
               {canCloseRuntime ? (
-                <button
+                <IconButton
                   className="session-delete-button session-close-button"
-                  type="button"
-                  aria-label={`Close runtime for ${session.title}`}
-                  title="Close runtime and keep saved session"
+                  icon={Unplug}
+                  label={`Close runtime for ${session.title}`}
+                  size="sm"
                   onPointerDown={(event) => event.stopPropagation()}
                   onClick={(event) => {
                     event.stopPropagation();
                     props.onCloseRuntime(session.id);
                   }}
-                >
-                  ×
-                </button>
+                />
               ) : canDelete ? (
-                <button
+                <IconButton
                   className="session-delete-button"
-                  type="button"
-                  aria-label={`Delete ${session.title}`}
-                  title="Delete saved session"
+                  icon={Trash2}
+                  label={`Delete ${session.title}`}
+                  size="sm"
+                  variant="danger"
                   onPointerDown={(event) => event.stopPropagation()}
                   onClick={(event) => {
                     event.stopPropagation();
                     props.onDeleteSession(session.id);
                   }}
-                >
-                  ×
-                </button>
+                />
               ) : null}
             </div>
           );
@@ -4044,15 +4059,16 @@ function SessionSidebar(props: {
         {props.realMode &&
         hiddenSessionCount > 0 &&
         sessionFilter.trim().length === 0 ? (
-          <button
+          <Button
             className="browse-sessions"
-            type="button"
+            size="sm"
             onClick={() => setShowOlderRealSessions((value) => !value)}
           >
+            <ChevronDown aria-hidden="true" size={14} strokeWidth={1.75} />
             {showOlderRealSessions
               ? "Show recent only"
               : `Browse ${hiddenSessionCount} older session${hiddenSessionCount === 1 ? "" : "s"}`}
-          </button>
+          </Button>
         ) : null}
       </section>
 
@@ -4063,24 +4079,6 @@ function SessionSidebar(props: {
         </div>
       ) : null}
     </aside>
-  );
-}
-
-function NewChatIcon(): ReactElement {
-  return (
-    <svg
-      aria-hidden="true"
-      className="new-chat-icon"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.9"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M12 20h9" />
-      <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L8 18l-4 1 1-4Z" />
-    </svg>
   );
 }
 
@@ -4260,6 +4258,27 @@ function StateIndicator(props: {
   );
 }
 
+function StatusMark(props: { status: SessionStatus }): ReactElement {
+  const icon =
+    props.status === "working" ||
+    props.status === "starting" ||
+    props.status === "sending" ||
+    props.status === "reconnecting"
+      ? LoaderCircle
+      : props.status === "waiting"
+        ? CircleDot
+        : props.status === "error"
+          ? CircleAlert
+          : Check;
+  const Icon = icon;
+  return (
+    <span className={`status-mark ${props.status}`}>
+      <Icon aria-hidden="true" size={14} strokeWidth={1.75} />
+      {statusLabel(props.status)}
+    </span>
+  );
+}
+
 function AppHeader(props: {
   loadState: LoadState;
   nodeAccessSummary: string;
@@ -4281,16 +4300,13 @@ function AppHeader(props: {
   return (
     <header className="topbar">
       <div className="header-left">
-        <button
+        <IconButton
           className="sidebar-toggle"
-          type="button"
-          aria-label={props.sidebarVisible ? "Hide sessions" : "Show sessions"}
-          aria-pressed={!props.sidebarVisible}
-          title={props.sidebarVisible ? "Hide sessions" : "Show sessions"}
+          icon={PanelLeft}
+          label={props.sidebarVisible ? "Hide sessions" : "Show sessions"}
+          pressed={props.sidebarVisible}
           onClick={props.onToggleSidebar}
-        >
-          {props.sidebarVisible ? "‹" : "☰"}
-        </button>
+        />
         <ProjectHeader
           project={props.currentProject}
           selectedSession={props.selectedSession}
@@ -4336,22 +4352,19 @@ function UsageStatsToggle(props: {
 }): ReactElement {
   const hasStats = props.session.usageStats !== undefined;
   return (
-    <button
+    <IconButton
       className={`usage-toggle ${props.visible ? "active" : ""}`}
-      type="button"
-      aria-label={
-        props.visible ? "Hide session usage stats" : "Show session usage stats"
-      }
-      aria-pressed={props.visible}
-      title={
+      icon={Gauge}
+      label={
         hasStats
-          ? "Toggle session usage stats"
-          : "Usage stats appear after Pi returns usage data"
+          ? props.visible
+            ? "Hide session usage stats"
+            : "Show session usage stats"
+          : "Usage stats unavailable"
       }
+      pressed={props.visible}
       onClick={props.onToggle}
-    >
-      ◷
-    </button>
+    />
   );
 }
 
@@ -4408,14 +4421,14 @@ function ProjectHeader(props: {
       <h1>
         {props.project.displayName} / {props.selectedSession.title}
       </h1>
-      <span className={`status-pill ${props.selectedSession.status}`}>
-        {statusLabel(props.selectedSession.status)}
-      </span>
+      <StatusMark status={props.selectedSession.status} />
       <p className="project-path">{props.project.path}</p>
       <div className="header-actions">
-        <button type="button" onClick={props.onPickProject}>
-          Open project…
-        </button>
+        <IconButton
+          icon={FolderOpen}
+          label="Open project"
+          onClick={props.onPickProject}
+        />
       </div>
       {props.realMode ? (
         <label className="project-switcher">
@@ -4450,15 +4463,14 @@ function ProjectHeader(props: {
             <p className="empty-state-copy">No saved recent projects yet.</p>
           ) : null}
           {visibleRecent.map((project) => (
-            <button
+            <Button
               key={project.id}
-              type="button"
               className={project.invalidReason ? "recent invalid" : "recent"}
               onClick={() => props.onSelectRecent(project)}
             >
               <span>{project.displayName}</span>
               <small>{project.invalidReason ?? project.path}</small>
-            </button>
+            </Button>
           ))}
         </div>
       )}
@@ -4576,12 +4588,13 @@ function LoadStateBadge(props: {
   }
 
   return (
-    <span
-      className="diagnostic-badge"
-      title={`${props.nodeAccessSummary}; userData: ${props.loadState.diagnostics.userDataPath}`}
-    >
-      v{props.loadState.version} · secure renderer
-    </span>
+    <Menu label="Workspace options" menu={false}>
+      <div className="ui-menu-diagnostics">
+        <strong>Pi Deck {props.loadState.version}</strong>
+        <span>{props.nodeAccessSummary}</span>
+        <span>userData: {props.loadState.diagnostics.userDataPath}</span>
+      </div>
+    </Menu>
   );
 }
 
@@ -4704,23 +4717,31 @@ function ChatTimeline(props: {
             <div className="recovery-actions">
               {props.session.retryPrompt !== undefined &&
               props.session.runtimeBacked ? (
-                <button type="button" onClick={props.onRetrySession}>
-                  Retry prompt
-                </button>
+                <IconButton
+                  icon={RotateCcw}
+                  label="Retry prompt"
+                  onClick={props.onRetrySession}
+                />
               ) : null}
               {props.session.sessionFile !== undefined ? (
-                <button type="button" onClick={props.onRecoverSession}>
-                  Reopen saved session
-                </button>
+                <IconButton
+                  icon={History}
+                  label="Reopen saved session"
+                  onClick={props.onRecoverSession}
+                />
               ) : null}
               {props.session.runtimeBacked ? (
-                <button type="button" onClick={props.onCloseSession}>
-                  Close runtime
-                </button>
+                <IconButton
+                  icon={Unplug}
+                  label="Close runtime"
+                  onClick={props.onCloseSession}
+                />
               ) : null}
-              <button type="button" onClick={props.onCopyDiagnostics}>
-                Copy diagnostics
-              </button>
+              <IconButton
+                icon={Copy}
+                label="Copy diagnostics"
+                onClick={props.onCopyDiagnostics}
+              />
             </div>
           </div>
         ) : null}
@@ -4805,7 +4826,9 @@ function EmptyTimelineState(props: {
 
   return (
     <div className="empty-state">
-      <div className="empty-icon">◇</div>
+      <div className="empty-icon">
+        <SquarePen aria-hidden="true" size={28} strokeWidth={1.75} />
+      </div>
       <h2>No messages yet</h2>
       <p>{copy}</p>
     </div>
@@ -4849,41 +4872,39 @@ function ExtensionUiCard(props: {
       ) : null}
       {props.request.method === "confirm" ? (
         <div className="extension-ui-actions">
-          <button
-            type="button"
+          <IconButton
+            icon={X}
+            label="Decline"
             disabled={submitting}
+            variant="outline"
             onClick={() => void respond({ confirmed: false })}
-          >
-            No
-          </button>
-          <button
-            type="button"
+          />
+          <IconButton
+            icon={Check}
+            label="Confirm"
             disabled={submitting}
+            variant="solid"
             onClick={() => void respond({ confirmed: true })}
-          >
-            Yes
-          </button>
+          />
         </div>
       ) : null}
       {props.request.method === "select" ? (
         <div className="extension-ui-actions">
           {(props.request.options ?? []).map((option) => (
-            <button
+            <Button
               key={option}
-              type="button"
               disabled={submitting}
               onClick={() => void respond({ value: option })}
             >
               {option}
-            </button>
+            </Button>
           ))}
-          <button
-            type="button"
+          <IconButton
+            icon={X}
+            label="Cancel"
             disabled={submitting}
             onClick={() => void respond({ cancelled: true })}
-          >
-            Cancel
-          </button>
+          />
         </div>
       ) : null}
       {props.request.method === "input" || props.request.method === "editor" ? (
@@ -4912,16 +4933,19 @@ function ExtensionUiCard(props: {
             />
           )}
           <div className="extension-ui-actions">
-            <button
-              type="button"
+            <IconButton
+              icon={X}
+              label="Cancel"
               disabled={submitting}
               onClick={() => void respond({ cancelled: true })}
-            >
-              Cancel
-            </button>
-            <button type="submit" disabled={submitting}>
-              {submitting ? "Sending…" : "Submit"}
-            </button>
+            />
+            <IconButton
+              icon={ArrowUp}
+              label="Submit"
+              loading={submitting}
+              type="submit"
+              variant="solid"
+            />
           </div>
         </form>
       ) : null}
@@ -4968,6 +4992,12 @@ function TimelineRow(props: { item: TimelineItem }): ReactElement {
       <article className="thinking-row">
         <details>
           <summary>
+            <ChevronRight
+              aria-hidden="true"
+              className="disclosure-chevron"
+              size={16}
+              strokeWidth={1.75}
+            />
             {props.item.streaming ? "Thinking…" : "Thought process"}
           </summary>
           <p>{props.item.content}</p>
@@ -4985,9 +5015,13 @@ function TimelineRow(props: { item: TimelineItem }): ReactElement {
               <span className="tool-title">{props.item.title}</span>
               <span className="tool-summary">{props.item.summary}</span>
             </span>
-            <span className="tool-status">
-              {formatToolStatus(props.item.status)}
-            </span>
+            <ToolStatus status={props.item.status} />
+            <ChevronRight
+              aria-hidden="true"
+              className="disclosure-chevron"
+              size={16}
+              strokeWidth={1.75}
+            />
           </summary>
           <pre>{props.item.details}</pre>
         </details>
@@ -5000,6 +5034,26 @@ function TimelineRow(props: { item: TimelineItem }): ReactElement {
       <strong>{props.item.tone === "error" ? "Error" : "Diagnostic"}</strong>
       <span>{props.item.content}</span>
     </article>
+  );
+}
+
+function ToolStatus(props: {
+  status: Extract<TimelineItem, { kind: "tool" }>["status"];
+}): ReactElement {
+  const icon =
+    props.status === "running"
+      ? LoaderCircle
+      : props.status === "error"
+        ? CircleAlert
+        : props.status === "success"
+          ? Check
+          : Wrench;
+  const Icon = icon;
+  return (
+    <span className={`tool-status ${props.status}`}>
+      <Icon aria-hidden="true" size={14} strokeWidth={1.75} />
+      {formatToolStatus(props.status)}
+    </span>
   );
 }
 
@@ -5237,11 +5291,7 @@ function Composer(props: {
           onKeyDown={props.onKeyDown}
           onPaste={handlePaste}
           disabled={isActionPending}
-          placeholder={
-            props.enterToSend
-              ? "Prompt Pi Deck… Enter to send, Shift+Enter for newline"
-              : "Prompt Pi Deck… Shift+Enter for newline, ⌘/Ctrl+Enter to send"
-          }
+          placeholder="Ask Pi…"
           rows={3}
           value={props.value}
         />
@@ -5253,15 +5303,13 @@ function Composer(props: {
         ) : null}
         <div className="composer-meta">
           {props.allowAttachments ? (
-            <button
+            <IconButton
               className="attachment-button"
-              type="button"
-              aria-label="Add attachments"
+              icon={Paperclip}
+              label="Add attachments"
               disabled={isActionPending}
               onClick={props.onPickAttachments}
-            >
-              +
-            </button>
+            />
           ) : null}
           {props.realModels.length > 0 ? (
             <select
@@ -5310,17 +5358,24 @@ function Composer(props: {
               ))}
             </select>
           ) : null}
-          <label className="composer-option">
-            <input
-              checked={props.enterToSend}
-              type="checkbox"
+          <Menu label="Composer options">
+            <Button
+              aria-checked={props.enterToSend}
               disabled={isActionPending}
-              onChange={(event) => {
-                props.onEnterToSendChange(event.target.checked);
-              }}
-            />
-            <span>Enter sends</span>
-          </label>
+              role="menuitemcheckbox"
+              size="sm"
+              variant="menuItem"
+              onClick={() => props.onEnterToSendChange(!props.enterToSend)}
+            >
+              <Check
+                aria-hidden="true"
+                size={14}
+                strokeWidth={1.75}
+                visibility={props.enterToSend ? "visible" : "hidden"}
+              />
+              Enter sends
+            </Button>
+          </Menu>
           {props.error !== null ? (
             <span className="composer-error">{props.error}</span>
           ) : isActionPending ? (
@@ -5342,56 +5397,53 @@ function Composer(props: {
           <span className="composer-spacer" />
           {props.isWorking ? (
             <>
-              <button
-                className="send-button steer"
-                type="button"
+              <IconButton
+                icon={CornerUpLeft}
+                label="Steer"
+                size="lg"
+                variant="solid"
                 disabled={
                   !props.canIntervene ||
                   props.knownExtensionCommand !== undefined
                 }
                 onClick={props.onSteer}
-              >
-                Steer
-              </button>
-              <button
-                className="send-button follow-up"
-                type="button"
+              />
+              <IconButton
+                icon={ListPlus}
+                label="Follow-up"
+                variant="outline"
                 disabled={
                   !props.canIntervene ||
                   props.knownExtensionCommand !== undefined
                 }
                 onClick={props.onFollowUp}
-              >
-                Follow-up
-              </button>
+              />
               {props.knownExtensionCommand !== undefined ? (
-                <button
-                  className="send-button extension-command"
-                  type="button"
+                <IconButton
+                  icon={Play}
+                  label="Run command now"
+                  variant="outline"
                   disabled={!props.canIntervene}
                   onClick={props.onRunExtensionCommand}
-                >
-                  Run command now
-                </button>
+                />
               ) : null}
-              <button
-                className="send-button abort"
-                type="button"
+              <IconButton
+                icon={Square}
+                label="Abort"
+                variant="danger"
                 onClick={props.onAbort}
-              >
-                Abort
-              </button>
+              />
             </>
           ) : (
-            <button
+            <IconButton
               className="send-button"
-              type="button"
+              icon={ArrowUp}
+              label="Send"
+              size="lg"
+              variant="solid"
               disabled={!props.canSend}
               onClick={props.onSend}
-              aria-label="Send prompt"
-            >
-              ↑
-            </button>
+            />
           )}
         </div>
       </div>
@@ -5456,13 +5508,12 @@ function AttachmentChipRow(props: {
           </em>
           {attachment.outsideProject ? <small>Outside project</small> : null}
           {attachment.warning ? <small>{attachment.warning}</small> : null}
-          <button
-            type="button"
-            aria-label={`Remove ${attachment.fileName}`}
+          <IconButton
+            icon={X}
+            label={`Remove ${attachment.fileName}`}
+            size="sm"
             onClick={() => props.onRemove(attachment.id)}
-          >
-            ×
-          </button>
+          />
         </span>
       ))}
     </div>
@@ -5485,16 +5536,15 @@ function SlashPicker(props: {
         </p>
       ) : (
         props.commands.map((command) => (
-          <button
+          <Button
             key={command.name}
-            type="button"
             role="option"
             onClick={() => props.onSelect(command)}
           >
             <strong>{command.name}</strong>
             <span>{command.description}</span>
             <small>{command.source}</small>
-          </button>
+          </Button>
         ))
       )}
     </div>
