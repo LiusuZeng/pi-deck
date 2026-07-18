@@ -20,9 +20,17 @@ export interface JsonlParseError {
   cause?: unknown;
 }
 
+export const DEFAULT_MAX_JSONL_LINE_BYTES = 8 * 1024 * 1024;
+
 export interface JsonlFramingParserOptions {
   onRecord: (record: JsonValue) => void;
   onMalformed: (error: JsonlParseError) => void;
+  /**
+   * Maximum UTF-8 byte length of one record, excluding its LF delimiter and
+   * optional CR before that delimiter.
+   * This also bounds the retained unterminated-record buffer.
+   */
+  maxLineBytes?: number;
 }
 
 /**
@@ -36,21 +44,33 @@ export interface JsonlFramingParserOptions {
  */
 export class JsonlFramingParser {
   private readonly decoder = new StringDecoder("utf8");
+  private readonly maxLineBytes: number;
   private buffer = "";
+  private bufferBytes = 0;
+  private discardingOversizedLine = false;
 
-  constructor(private readonly options: JsonlFramingParserOptions) {}
+  constructor(private readonly options: JsonlFramingParserOptions) {
+    this.maxLineBytes = options.maxLineBytes ?? DEFAULT_MAX_JSONL_LINE_BYTES;
+    if (!Number.isSafeInteger(this.maxLineBytes) || this.maxLineBytes <= 0) {
+      throw new RangeError("maxLineBytes must be a positive safe integer");
+    }
+  }
 
   push(chunk: Buffer | string): void {
-    this.buffer +=
-      typeof chunk === "string" ? chunk : this.decoder.write(chunk);
+    this.append(typeof chunk === "string" ? chunk : this.decoder.write(chunk));
     this.drainCompleteLines();
   }
 
   end(): void {
-    this.buffer += this.decoder.end();
+    this.append(this.decoder.end());
+    this.drainCompleteLines();
+    if (this.discardingOversizedLine) {
+      return;
+    }
     if (this.buffer.length > 0) {
       const line = this.buffer;
       this.buffer = "";
+      this.bufferBytes = 0;
       this.options.onMalformed({
         line,
         message: "Incomplete JSONL record at EOF",
@@ -58,17 +78,65 @@ export class JsonlFramingParser {
     }
   }
 
+  private append(text: string): void {
+    if (text.length === 0) {
+      return;
+    }
+    this.buffer += text;
+    this.bufferBytes += Buffer.byteLength(text, "utf8");
+  }
+
   private drainCompleteLines(): void {
-    let lfIndex = this.buffer.indexOf("\n");
-    while (lfIndex !== -1) {
-      let line = this.buffer.slice(0, lfIndex);
-      this.buffer = this.buffer.slice(lfIndex + 1);
-      if (line.endsWith("\r")) {
-        line = line.slice(0, -1);
+    let cursor = 0;
+    let lineStart = 0;
+    while (cursor < this.buffer.length) {
+      if (this.buffer.charCodeAt(cursor) !== 0x0a) {
+        cursor += 1;
+        continue;
+      }
+
+      const rawLine = this.buffer.slice(lineStart, cursor);
+      const rawLineBytes = Buffer.byteLength(rawLine, "utf8");
+      this.bufferBytes -= rawLineBytes + 1; // Include the LF delimiter.
+      cursor += 1;
+      lineStart = cursor;
+
+      if (this.discardingOversizedLine) {
+        this.discardingOversizedLine = false;
+        continue;
+      }
+
+      const hasCarriageReturn = rawLine.endsWith("\r");
+      const line = hasCarriageReturn ? rawLine.slice(0, -1) : rawLine;
+      const lineBytes = hasCarriageReturn ? rawLineBytes - 1 : rawLineBytes;
+      if (lineBytes > this.maxLineBytes) {
+        this.reportOversizedLine();
+        continue;
       }
       this.parseLine(line);
-      lfIndex = this.buffer.indexOf("\n");
     }
+
+    // Do not repeatedly slice the whole remaining buffer for every record.
+    this.buffer = this.buffer.slice(lineStart);
+    if (this.discardingOversizedLine) {
+      this.buffer = "";
+      this.bufferBytes = 0;
+      return;
+    }
+    if (this.bufferBytes > this.maxLineBytes) {
+      this.buffer = "";
+      this.bufferBytes = 0;
+      this.discardingOversizedLine = true;
+      this.reportOversizedLine();
+    }
+  }
+
+  private reportOversizedLine(): void {
+    this.options.onMalformed({
+      // Do not retain attacker-controlled oversized output in diagnostics.
+      line: "",
+      message: `JSONL record exceeds maximum size of ${this.maxLineBytes} bytes`,
+    });
   }
 
   private parseLine(line: string, prefix?: string): void {
@@ -108,6 +176,8 @@ export type JsonlRpcCommandProtocol = "command-field" | "type-field";
 export interface JsonlRpcClientOptions {
   requestTimeoutMs?: number;
   stderrBufferBytes?: number;
+  /** Maximum UTF-8 byte length of one stdout JSONL record. */
+  maxLineBytes?: number;
   malformedOutputIsFatal?: boolean;
   commandProtocol?: JsonlRpcCommandProtocol;
 }
@@ -169,6 +239,9 @@ export class JsonlRpcClient extends EventEmitter {
     this.parser = new JsonlFramingParser({
       onRecord: (record) => this.handleRecord(record),
       onMalformed: (error) => this.handleMalformed(error),
+      ...(options.maxLineBytes === undefined
+        ? {}
+        : { maxLineBytes: options.maxLineBytes }),
     });
 
     child.stdout?.on("data", (chunk: Buffer) => this.parser.push(chunk));

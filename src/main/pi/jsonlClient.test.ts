@@ -8,6 +8,7 @@ import { it as test } from "vitest";
 import {
   JsonlRpcClient,
   JsonlRpcError,
+  type JsonlRpcClientOptions,
   spawnJsonlRpcClient,
 } from "./jsonlClient.js";
 import type { RpcEventRecord } from "./types.js";
@@ -33,12 +34,15 @@ function fakePath(): string {
   return builtFakePath;
 }
 
-function spawnFake(args: string[] = []): JsonlRpcClient {
+function spawnFake(
+  args: string[] = [],
+  options: JsonlRpcClientOptions = {},
+): JsonlRpcClient {
   return spawnJsonlRpcClient(
     process.execPath,
     [fakePath(), ...args],
     { cwd: process.cwd(), env: process.env },
-    { requestTimeoutMs: 5_000 },
+    { requestTimeoutMs: 5_000, ...options },
   );
 }
 
@@ -152,4 +156,21 @@ test("JSONL RPC client treats malformed output as fatal and emits parse error ev
   const event = await parseError;
   assert.match(String(event.message), /Malformed|Expected|Unexpected|JSON/i);
   assert.match(client.stderr.snapshot(), /Malformed JSONL/);
+});
+
+test("JSONL RPC client treats an oversized record as fatal by default", async () => {
+  const client = spawnFake([], { maxLineBytes: 1 });
+  try {
+    const parseError = waitForEvent(
+      client,
+      (event) => event.type === "rpc_parse_error",
+    );
+    const request = client.request("get_state");
+    const event = await parseError;
+    assert.match(String(event.message), /exceeds maximum size of 1 bytes/i);
+    await assert.rejects(request, /Malformed JSONL/i);
+    assert.match(client.stderr.snapshot(), /Malformed JSONL/);
+  } finally {
+    client.close();
+  }
 });
