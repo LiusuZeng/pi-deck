@@ -19,6 +19,7 @@ import {
   attachmentImportImageRequestSchema,
   attachmentPickerRequestSchema,
   chatAbortRequestSchema,
+  chatCloseSessionRequestSchema,
   chatInterventionRequestSchema,
   chatCreateSessionRequestSchema,
   chatDeleteAllSessionsRequestSchema,
@@ -439,6 +440,21 @@ function registerIpcHandlers(
   });
 
   registerValidatedIpc({
+    channel: ipcChannels.chatCloseSession,
+    requestSchema: chatCloseSessionRequestSchema,
+    responseSchema: z.void(),
+    diagnostics: diagnosticsService,
+    handler: async ({ runtimeId }) => {
+      const adapter = await ensureChatAdapter(store, diagnosticsService);
+      const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
+      await assertRuntimeInActiveProject(activeRuntimeId);
+      await adapter.closeSession(activeRuntimeId);
+      forgetChatRuntime(activeRuntimeId);
+      return undefined;
+    },
+  });
+
+  registerValidatedIpc({
     channel: ipcChannels.chatCreateSession,
     requestSchema: chatCreateSessionRequestSchema,
     responseSchema: chatSnapshotSchema,
@@ -669,6 +685,9 @@ async function initializeChatAdapter(
     }
     sendChatEventToRenderer(parsed.data);
     if (parsed.data.type === "worker_exit") {
+      // A child exit does not go through closeSession(), so remove it from the
+      // adapter as well as the UI/runtime maps or it would consume capacity.
+      adapter.forgetExitedWorker(parsed.data.runtimeId);
       forgetChatRuntime(parsed.data.runtimeId);
     }
   });

@@ -115,6 +115,24 @@ test("SinglePiAdapter routes concurrent worker events by runtime id", async () =
   }
 });
 
+test("SinglePiAdapter removes an exited worker from capacity accounting", async () => {
+  const adapter = new SinglePiAdapter();
+  const fakeServer = buildFakeRpcServer();
+  const worker = adapter.createWorker({
+    runtimeId: "runtime-exited",
+    command: process.execPath,
+    args: [fakeServer],
+    cwd: process.cwd(),
+    env: process.env,
+  });
+
+  assert.equal(adapter.workerCount(), 1);
+  adapter.forgetExitedWorker(worker.runtimeId);
+  assert.equal(adapter.hasRuntime(worker.runtimeId), false);
+  assert.equal(adapter.workerCount(), 0);
+  await worker.closeSession();
+});
+
 test("SinglePiAdapter closes one runtime without dropping another runtime", async () => {
   const adapter = new SinglePiAdapter();
   const fakeServer = buildFakeRpcServer();

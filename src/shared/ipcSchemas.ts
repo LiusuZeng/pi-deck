@@ -328,6 +328,13 @@ export const chatAbortRequestSchema = z
   })
   .strict();
 
+/** Detach a runtime without deleting its persisted Pi session file. */
+export const chatCloseSessionRequestSchema = z
+  .object({
+    runtimeId: z.string(),
+  })
+  .strict();
+
 export const chatCreateSessionRequestSchema = z
   .object({
     projectId: z.string().min(1).optional(),
@@ -462,6 +469,7 @@ export const ipcChannels = {
   chatSteer: "chat:steer",
   chatFollowUp: "chat:followUp",
   chatAbort: "chat:abort",
+  chatCloseSession: "chat:closeSession",
   chatListModels: "chat:listModels",
   chatListCommands: "chat:listCommands",
   chatSetModel: "chat:setModel",

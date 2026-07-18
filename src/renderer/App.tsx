@@ -136,6 +136,9 @@ interface SessionViewModel {
   backendMode?: "fake" | "real";
   sessionFile?: string;
   resumeBacked?: boolean;
+  /** A local placeholder; its Pi worker is created only on first send. */
+  draftSession?: boolean;
+  projectId?: string;
 }
 
 interface ModelOption {
@@ -764,6 +767,14 @@ export function App(): ReactElement {
       void resumeSessionAndSend(selectedSession, draft.trimEnd(), attachments);
       return;
     }
+    if (selectedSession.draftSession === true) {
+      void startDraftSessionAndSend(
+        selectedSession,
+        draft.trimEnd(),
+        attachments,
+      );
+      return;
+    }
     if (!selectedSession.runtimeBacked) {
       setComposerError(
         "This session row is not attached to a Pi runtime. Select a real backend session or relaunch in real mode.",
@@ -785,6 +796,70 @@ export function App(): ReactElement {
     }
 
     void sendPrompt(selectedSession.id, draft.trimEnd(), attachments);
+  }
+
+  async function startDraftSessionAndSend(
+    draftSession: SessionViewModel,
+    prompt: string,
+    promptAttachments: AttachmentDraft[],
+  ): Promise<void> {
+    setComposerError(null);
+    setSessions((items) =>
+      items.map((session) =>
+        session.id === draftSession.id
+          ? {
+              ...session,
+              status: "working",
+              baseState: "attaching",
+              subtitle: "Attaching · starting Pi RPC worker for first prompt",
+            }
+          : session,
+      ),
+    );
+    setUiMessage("Starting Pi for this session…");
+    try {
+      const snapshot = await window.piDeck.chat.createSession({
+        projectId: draftSession.projectId ?? currentProject.id,
+      });
+      const backendSession = {
+        ...sessionFromSnapshot(snapshot),
+        title: draftSession.title,
+      };
+      setSessions((items) =>
+        mergeSessions(
+          [backendSession],
+          items.filter((item) => item.id !== draftSession.id),
+        ),
+      );
+      setSelectedSessionId(backendSession.id);
+      if (backendSession.backendMode === "real") {
+        loadRealCapabilities(backendSession.id);
+      }
+      if (snapshot.state.cwd) {
+        setCurrentProject(projectFromCwd(snapshot.state.cwd));
+      }
+      await sendPrompt(backendSession.id, prompt, promptAttachments);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setComposerError(message);
+      setAttachments(promptAttachments);
+      setSessions((items) =>
+        items.map((session) =>
+          session.id === draftSession.id
+            ? appendDiagnostic(
+                {
+                  ...session,
+                  status: "error",
+                  baseState: "error",
+                  subtitle: "Error · unable to start Pi worker",
+                },
+                { tone: "error", content: `New session failed: ${message}` },
+              )
+            : session,
+        ),
+      );
+      setUiMessage(`Failed to start a new Pi session: ${message}`);
+    }
   }
 
   async function sendPrompt(
@@ -864,6 +939,14 @@ export function App(): ReactElement {
 
   function handleRunExtensionCommand(): void {
     if (knownExtensionCommand === undefined) {
+      return;
+    }
+    if (selectedSession.draftSession === true) {
+      void startDraftSessionAndSend(
+        selectedSession,
+        draft.trimEnd(),
+        attachments,
+      );
       return;
     }
     if (!selectedSession.runtimeBacked) {
@@ -1224,6 +1307,48 @@ export function App(): ReactElement {
     }
   }
 
+  async function handleCloseRuntime(sessionId: string): Promise<void> {
+    const session = sessions.find((item) => item.id === sessionId);
+    if (session === undefined || !session.runtimeBacked) {
+      return;
+    }
+
+    try {
+      await window.piDeck.chat.closeSession({ runtimeId: session.id });
+      const detached = session.sessionFile
+        ? {
+            ...session,
+            runtimeBacked: false,
+            resumeBacked: true,
+            status: "idle" as const,
+            baseState: "idle" as const,
+            subtitle: "Saved · click to resume",
+          }
+        : undefined;
+      const remainingSessions = detached
+        ? sessions.map((item) => (item.id === session.id ? detached : item))
+        : sessions.filter((item) => item.id !== session.id);
+      setSessions(remainingSessions);
+      if (selectedSessionId === session.id) {
+        const nextSession = remainingSessions.find(
+          (item) => item.id !== session.id && item.runtimeBacked,
+        );
+        if (nextSession !== undefined) {
+          setSelectedSessionId(nextSession.id);
+        } else {
+          await handleNewSession();
+        }
+      }
+      setUiMessage(
+        detached
+          ? "Closed the Pi runtime. The saved session can be resumed later."
+          : "Closed the Pi runtime.",
+      );
+    } catch (error) {
+      setComposerError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   async function handleDeleteSession(sessionId: string): Promise<void> {
     const session = sessions.find((item) => item.id === sessionId);
     if (
@@ -1389,88 +1514,32 @@ export function App(): ReactElement {
   }
 
   async function handleNewSession(): Promise<void> {
-    if (isRealBackendMode) {
-      const optimisticId = createId("starting-real");
-      const optimisticSession: SessionViewModel = {
-        id: optimisticId,
-        title: "Starting real Pi chat",
-        project: currentProject.displayName,
-        projectPath: currentProject.path,
-        subtitle: "Attaching · starting Pi RPC worker",
-        status: "idle",
-        updatedAt: "Now",
-        updatedAtMs: Date.now(),
-        baseState: "attaching",
-        overlays: { ...emptyOverlays },
-        runtimeBacked: false,
-        resumeBacked: false,
-        backendMode: "real",
-        timeline: [],
-      };
-      setComposerError(null);
-      setSessions((items) => mergeSessions([optimisticSession], items));
-      setSelectedSessionId(optimisticId);
-      setUiMessage("Starting a new real Pi session…");
-      try {
-        const snapshot = await window.piDeck.chat.createSession({
-          projectId: currentProject.id,
-        });
-        const backendSession = sessionFromSnapshot(snapshot);
-        setSessions((items) =>
-          mergeSessions(
-            [backendSession],
-            items.filter((item) => item.id !== optimisticId),
-          ),
-        );
-        setSelectedSessionId(backendSession.id);
-        loadRealCapabilities(backendSession.id);
-        if (snapshot.state.cwd) {
-          setCurrentProject(projectFromCwd(snapshot.state.cwd));
-        }
-        setUiMessage(
-          backendSession.sessionFile
-            ? "New real Pi chat is ready and backed by a session file."
-            : "New real Pi chat is ready. It will be persisted after Pi reports a session file.",
-        );
-      } catch (error) {
-        setSessions((items) =>
-          items.map((item) =>
-            item.id === optimisticId
-              ? appendDiagnostic(
-                  { ...item, status: "error", baseState: "error" },
-                  {
-                    tone: "error",
-                    content: `New session failed: ${error instanceof Error ? error.message : String(error)}`,
-                  },
-                )
-              : item,
-          ),
-        );
-        setUiMessage(
-          `Failed to start a new real Pi session: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-      return;
-    }
-
-    const id = `local-new-${Date.now()}`;
+    const id = createId("draft-session");
+    const backendMode = isRealBackendMode ? "real" : "fake";
     const next: SessionViewModel = {
       id,
       title: "Untitled new session",
       project: currentProject.displayName,
       projectPath: currentProject.path,
-      subtitle: "Idle · local demo session",
+      projectId: currentProject.id,
+      subtitle: "Idle · Pi starts when you send the first prompt",
       status: "idle",
       updatedAt: "Now",
       updatedAtMs: Date.now(),
       baseState: "idle",
       overlays: { ...emptyOverlays },
       runtimeBacked: false,
+      resumeBacked: false,
+      draftSession: true,
+      backendMode,
       timeline: [],
     };
-    setSessions((items) => [next, ...items]);
+    setComposerError(null);
+    setSessions((items) => mergeSessions([next], items));
     setSelectedSessionId(id);
-    setUiMessage("Created a new local demo session.");
+    setUiMessage(
+      "Created a new session. Pi will start when you send a prompt.",
+    );
   }
 
   function handleSelectCommand(command: SlashCommand): void {
@@ -1539,6 +1608,7 @@ export function App(): ReactElement {
           currentProject={currentProject}
           onSelect={handleSelectSession}
           onNewSession={() => void handleNewSession()}
+          onCloseRuntime={(sessionId) => void handleCloseRuntime(sessionId)}
           onDeleteSession={(sessionId) => void handleDeleteSession(sessionId)}
           onDeleteAllSessions={() => void handleDeleteAllSessions()}
         />
@@ -2294,7 +2364,11 @@ function reduceRuntimeEvent(
           ...session,
           status: "error",
           baseState: "error",
-          subtitle: "Error · backend worker exited",
+          runtimeBacked: false,
+          resumeBacked: session.sessionFile !== undefined,
+          subtitle: session.sessionFile
+            ? "Error · worker exited; click to resume saved session"
+            : "Error · backend worker exited",
         },
         {
           tone: "error",
@@ -2932,6 +3006,7 @@ function SessionSidebar(props: {
   currentProject: ProjectRef;
   onSelect(sessionId: string): void;
   onNewSession(): void;
+  onCloseRuntime(sessionId: string): void;
   onDeleteSession(sessionId: string): void;
   onDeleteAllSessions(): void;
 }): ReactElement {
@@ -2997,11 +3072,13 @@ function SessionSidebar(props: {
         ) : null}
         {visibleSessions.map((session) => {
           const canDelete = isSessionDeletable(session, props.realMode);
+          const canCloseRuntime = props.realMode && session.runtimeBacked;
           return (
             <div className="session-item-wrap" key={session.id}>
               <button
                 className={`session-item ${session.id === props.selectedSessionId ? "active" : ""}`}
                 type="button"
+                aria-label={`Session: ${session.title}`}
                 title={`${session.title}\n${formatReadableTimestamp(session.updatedAtMs)}`}
                 onClick={() => {
                   props.onSelect(session.id);
@@ -3022,7 +3099,21 @@ function SessionSidebar(props: {
                   {session.updatedAt}
                 </span>
               </button>
-              {canDelete ? (
+              {canCloseRuntime ? (
+                <button
+                  className="session-delete-button session-close-button"
+                  type="button"
+                  aria-label={`Close runtime for ${session.title}`}
+                  title="Close runtime and keep saved session"
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    props.onCloseRuntime(session.id);
+                  }}
+                >
+                  ×
+                </button>
+              ) : canDelete ? (
                 <button
                   className="session-delete-button"
                   type="button"

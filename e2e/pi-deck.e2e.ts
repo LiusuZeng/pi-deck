@@ -167,6 +167,71 @@ test("real mode startup failure is not mislabeled as preload/fake UI", async () 
   }
 });
 
+test("new session drafts do not allocate a worker before their first prompt", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-lazy-new-"));
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({ root, projectCwd, agentDir }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    const newSession = page.getByRole("button", {
+      name: "New session",
+      exact: true,
+    });
+    for (let index = 0; index < 5; index += 1) {
+      await newSession.click();
+    }
+    await expect(
+      page.getByText("Idle · Pi starts when you send the first prompt").last(),
+    ).toBeVisible();
+
+    await page.getByLabel("Prompt text").fill("lazy first prompt");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(page.getByText("Fake response").first()).toBeVisible();
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("closing an attached runtime preserves its saved session for recovery", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-close-"));
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({ root, projectCwd, agentDir }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await page.getByLabel("Prompt text").fill("close runtime recovery");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText(/Fake response to: close runtime recovery/),
+    ).toBeVisible();
+
+    await page.getByRole("button", { name: /Close runtime for/ }).click();
+    await expect(
+      page.getByText(/Closed the Pi runtime. The saved session can be resumed/),
+    ).toBeVisible();
+    await expect(page.getByText("Saved · click to resume")).toBeVisible();
+    await page
+      .getByRole("button", { name: /Session: close runtime recovery/ })
+      .click();
+    await expect(page.getByText("Resumed saved Pi session.")).toBeVisible();
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("real mode can show and resume a saved project session with fake Pi", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-resume-"));
   const projectCwd = path.join(root, "project");
@@ -565,7 +630,9 @@ test("real mode routes background session events to the right session with fake 
     ).toBeVisible();
 
     await page.getByRole("button", { name: "New session" }).click();
-    await expect(page.getByText(/New real Pi chat is ready/)).toBeVisible();
+    await expect(
+      page.getByText("Idle · Pi starts when you send the first prompt"),
+    ).toBeVisible();
     await page.getByLabel("Prompt text").fill("foreground route two");
     await page.getByRole("button", { name: "Send" }).click();
     await expect(
@@ -600,7 +667,11 @@ test("real mode compact plus creates another attached session with fake Pi", asy
   try {
     await expectHealthyPreload(page);
     await page.getByRole("button", { name: "New session" }).click();
-    await expect(page.getByText(/New real Pi chat is ready/)).toBeVisible();
+    await page.getByLabel("Prompt text").fill("start draft session");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText(/Fake response to: start draft session/),
+    ).toBeVisible();
     await page.getByLabel("Prompt text").fill("/");
     await expect(page.getByText("/fake-worker-command")).toBeVisible();
     await page.getByText("/fake-worker-command").click();

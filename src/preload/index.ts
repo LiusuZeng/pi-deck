@@ -8,6 +8,7 @@ import {
   attachmentImportImageRequestSchema,
   attachmentPickerRequestSchema,
   chatAbortRequestSchema,
+  chatCloseSessionRequestSchema,
   chatInterventionRequestSchema,
   chatDeleteAllSessionsRequestSchema,
   chatDeleteAllSessionsResultSchema,
@@ -172,6 +173,12 @@ const api: PiDeckApi = Object.freeze({
       invokeValidated({
         channel: ipcChannels.chatAbort,
         request: chatAbortRequestSchema.parse(request),
+        responseSchema: z.void(),
+      }),
+    closeSession: (request: { runtimeId: string }) =>
+      invokeValidated({
+        channel: ipcChannels.chatCloseSession,
+        request: chatCloseSessionRequestSchema.parse(request),
         responseSchema: z.void(),
       }),
     createSession: (request?: { projectId?: string }) =>

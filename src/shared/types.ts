@@ -117,6 +117,7 @@ export interface PiDeckApi {
     steer(request: ChatInterventionRequest): Promise<void>;
     followUp(request: ChatInterventionRequest): Promise<void>;
     abort(request: { runtimeId: string }): Promise<void>;
+    closeSession(request: { runtimeId: string }): Promise<void>;
     createSession(request?: { projectId?: string }): Promise<ChatSnapshot>;
     reset(): Promise<ChatSnapshot>;
     onEvent(listener: (event: ChatRuntimeEvent) => void): () => void;

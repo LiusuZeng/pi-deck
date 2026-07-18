@@ -229,8 +229,18 @@ textarea:disabled {
 }
 
 .session-item-wrap:hover .session-delete-button,
-.session-delete-button:focus-visible {
+.session-delete-button:focus-visible,
+.session-close-button {
   display: grid;
+}
+
+.session-close-button {
+  color: #fed7aa;
+  background: rgb(154 52 18 / 70%);
+}
+
+.session-close-button:hover {
+  background: #ea580c;
 }
 
 .session-delete-button:hover {

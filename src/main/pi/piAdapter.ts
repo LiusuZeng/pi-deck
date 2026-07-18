@@ -93,6 +93,11 @@ export class SinglePiAdapter implements PiAdapter {
     this.workers.delete(runtimeId);
   }
 
+  /** Remove a worker that has already emitted its process-exit event. */
+  forgetExitedWorker(runtimeId: RuntimeSessionId): void {
+    this.workers.delete(runtimeId);
+  }
+
   onEvent(listener: (event: RuntimeEvent) => void): Unsubscribe {
     this.events.on("event", listener);
     return () => this.events.off("event", listener);
