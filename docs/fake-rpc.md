@@ -46,11 +46,11 @@ Useful fixture flags:
   - `queue` — adds `queue_update` with steering/follow-up counts.
   - `compaction` — adds `compaction_start/end`.
   - `retry` — adds `auto_retry_start/end`.
-  - `extension-ui` — adds a `confirm` `extension_ui_request` with a timeout.
+  - `extension-ui` — emits an exact Pi-protocol `confirm` `extension_ui_request` (top-level `id`, `title`, and `message`) and blocks until an `extension_ui_response` with that id is written to stdin. `--extension-ui-method select|confirm|input|editor` selects the dialog fixture.
   - `error` — accepts `prompt`, emits `agent_start`, then emits a completed error `message_update` and `agent_end status=error` for provider/usage-limit UI tests.
   - `all` — emits every extension fixture event above.
 
-G4 extension UI follow-up: the fake currently emits request events only. It does not yet simulate `respondToExtensionUi`, Pi-side timeout resolution, late-response suppression, or stdin write failure. Add those fixtures once the extension UI backend/write path exists.
+The fake accepts response-only `extension_ui_response` records (there is no normal RPC command response), resumes its blocked request on a matching id, and auto-resolves after its fixture timeout. It deliberately ignores late or mismatched ids, matching Pi's response correlation behavior.
 
 The fake accepts both JSONL command encodings used in tests:
 

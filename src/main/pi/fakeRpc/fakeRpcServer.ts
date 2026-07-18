@@ -27,6 +27,7 @@ interface FakeOptions {
   ignoredCommands: Set<string>;
   promptScenario: PromptScenario;
   dropCompletionEvents: boolean;
+  extensionUiMethod: "select" | "confirm" | "input" | "editor";
   sessionFile?: string;
 }
 
@@ -46,6 +47,7 @@ function parseOptions(argv: string[]): FakeOptions {
     ignoredCommands: new Set<string>(),
     promptScenario: "basic",
     dropCompletionEvents: false,
+    extensionUiMethod: "confirm",
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -70,6 +72,17 @@ function parseOptions(argv: string[]): FakeOptions {
       index += 1;
     } else if (arg === "--drop-completion-events") {
       options.dropCompletionEvents = true;
+    } else if (arg === "--extension-ui-method") {
+      const method = argv[index + 1];
+      if (
+        method === "select" ||
+        method === "confirm" ||
+        method === "input" ||
+        method === "editor"
+      ) {
+        options.extensionUiMethod = method;
+      }
+      index += 1;
     } else if (arg === "--session") {
       const sessionFile = argv[index + 1];
       if (sessionFile) {
@@ -139,6 +152,14 @@ class FakeRpcServer {
   private promptCounter = 0;
   private currentTimers: NodeJS.Timeout[] = [];
   private agentActive = false;
+  private pendingExtensionUi:
+    | {
+        id: string;
+        assistantId: string;
+        promptText: string;
+        timer: NodeJS.Timeout;
+      }
+    | undefined;
   private readonly steering: string[] = [];
   private readonly followUp: string[] = [];
   private messages: PiMessage[] = [
@@ -263,6 +284,10 @@ class FakeRpcServer {
     this.firstCommandSeen = true;
 
     const name = commandName(command);
+    if (name === "extension_ui_response") {
+      this.handleExtensionUiResponse(command);
+      return;
+    }
     if (this.options.ignoredCommands.has(name)) {
       return;
     }
@@ -361,8 +386,6 @@ class FakeRpcServer {
     this.appendPersistedMessage(userMessage);
     this.promptCounter += 1;
     const assistantId = `msg_assistant_${this.promptCounter}`;
-    const chunks = ["Fake response", " to: ", text || "(empty prompt)"];
-    let accumulated = "";
     this.agentActive = true;
 
     this.respond(command.id, "prompt");
@@ -393,8 +416,27 @@ class FakeRpcServer {
       return;
     }
 
+    const isExtensionUiScenario =
+      this.options.promptScenario === "extension-ui" ||
+      this.options.promptScenario === "all";
     this.emitPromptScenarioEvents(assistantId);
+    if (isExtensionUiScenario) {
+      const id = "ext_fake_dialog_1";
+      const timer = setTimeout(() => {
+        if (this.pendingExtensionUi?.id === id) {
+          this.pendingExtensionUi = undefined;
+          this.completePrompt(assistantId, text);
+        }
+      }, 5_000);
+      this.pendingExtensionUi = { id, assistantId, promptText: text, timer };
+      return;
+    }
+    this.completePrompt(assistantId, text);
+  }
 
+  private completePrompt(assistantId: string, text: string): void {
+    const chunks = ["Fake response", " to: ", text || "(empty prompt)"];
+    let accumulated = "";
     chunks.forEach((chunk, index) => {
       this.currentTimers.push(
         setTimeout(
@@ -413,7 +455,6 @@ class FakeRpcServer {
         ),
       );
     });
-
     this.currentTimers.push(
       setTimeout(
         () => {
@@ -493,18 +534,33 @@ class FakeRpcServer {
     }
 
     if (shouldEmit("extension-ui")) {
+      const method = this.options.extensionUiMethod;
       this.write({
         type: "extension_ui_request",
-        requestId: "ext_fake_dialog_1",
+        id: "ext_fake_dialog_1",
         messageId: assistantId,
-        method: "confirm",
-        params: {
-          title: "Fake confirmation",
-          message: "Approve fake extension UI request?",
-        },
-        timeout: 250,
+        method,
+        title: `Fake ${method}`,
+        ...(method === "confirm"
+          ? { message: "Approve fake extension UI request?" }
+          : {}),
+        ...(method === "select" ? { options: ["Allow", "Block"] } : {}),
+        ...(method === "input" ? { placeholder: "Type a fake value" } : {}),
+        ...(method === "editor" ? { prefill: "Fake editable text" } : {}),
+        timeout: 5_000,
       });
     }
+  }
+
+  private handleExtensionUiResponse(command: FakeCommandRecord): void {
+    const id = typeof command.id === "string" ? command.id : undefined;
+    const pending = this.pendingExtensionUi;
+    if (id === undefined || pending === undefined || pending.id !== id) {
+      return;
+    }
+    clearTimeout(pending.timer);
+    this.pendingExtensionUi = undefined;
+    this.completePrompt(pending.assistantId, pending.promptText);
   }
 
   private handleIntervention(

@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { spawnJsonlRpcClient, type JsonlRpcClient } from "./jsonlClient.js";
 import type {
+  ExtensionUiResponse,
   JsonObject,
   JsonValue,
   PiMessage,
@@ -155,6 +156,14 @@ export class PiWorker {
 
   async abort(): Promise<void> {
     await this.client.request("abort");
+  }
+
+  /** Send Pi's response-only extension UI record; no command response exists. */
+  async respondToExtensionUi(response: ExtensionUiResponse): Promise<void> {
+    await this.client.send({
+      type: "extension_ui_response",
+      ...response,
+    });
   }
 
   async request(command: string, params?: JsonObject): Promise<unknown> {

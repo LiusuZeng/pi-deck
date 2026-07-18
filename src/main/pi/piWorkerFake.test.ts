@@ -158,6 +158,47 @@ test("PiWorker sends exact steer and follow_up RPC commands", async () => {
   }
 });
 
+test("PiWorker writes exact extension UI response records and resumes the request", async () => {
+  const worker = new PiWorker({
+    command: process.execPath,
+    args: [
+      fakePath(),
+      "--prompt-scenario",
+      "extension-ui",
+      "--stream-delay-ms",
+      "1",
+    ],
+    cwd: process.cwd(),
+    env: process.env,
+    requestTimeoutMs: 5_000,
+    killGraceMs: 100,
+    commandProtocol: "type-field",
+  });
+  try {
+    const request = waitForWorkerEvent(
+      worker,
+      (event) => event.type === "extension_ui_request",
+    );
+    await worker.prompt({ text: "confirm lifecycle" });
+    const event = await request;
+    assert.equal((event as { id?: string }).id, "ext_fake_dialog_1");
+    assert.equal((event as { method?: string }).method, "confirm");
+    assert.equal((event as { title?: string }).title, "Fake confirm");
+
+    const done = waitForWorkerEvent(
+      worker,
+      (item) => item.type === "agent_end",
+    );
+    await worker.respondToExtensionUi({
+      id: "ext_fake_dialog_1",
+      confirmed: true,
+    });
+    await done;
+  } finally {
+    await worker.closeSession();
+  }
+});
+
 test("PiWorker abort path emits a sensible aborted end state", async () => {
   const worker = createWorker(["--stream-delay-ms", "50"]);
   try {

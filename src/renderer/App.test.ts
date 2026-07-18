@@ -258,20 +258,45 @@ describe("renderer message_update reduction", () => {
     const waiting = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {
       type: "extension_ui_request",
       runtimeId: "session-1",
-      requestId: "ext-1",
+      id: "ext-1",
       method: "confirm",
-      params: { title: "Confirm", message: "Approve?" },
+      title: "Confirm",
+      message: "Approve?",
     } as any);
 
     expect(waiting.status).toBe("waiting");
     expect(waiting.baseState).toBe("waitingForInput");
     expect(waiting.overlays.needsUserInput).toBe(true);
-    expect(waiting.timeline).toMatchObject([
+    expect(waiting.pendingExtensionUiRequests).toMatchObject([
       {
-        kind: "diagnostic",
-        content: "Extension UI request (Confirm): Approve?",
+        id: "ext-1",
+        method: "confirm",
+        title: "Confirm",
+        message: "Approve?",
       },
     ]);
+  });
+
+  it("explains unsupported extension UI methods instead of silently ignoring them", () => {
+    const next = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {
+      type: "extension_ui_request",
+      runtimeId: "session-1",
+      id: "notify-1",
+      method: "notify",
+      message: "Background notification",
+    } as any);
+
+    expect(next.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "diagnostic",
+          content: expect.stringContaining(
+            "Only select, confirm, input, and editor",
+          ),
+        }),
+      ]),
+    );
+    expect(next.overlays.needsUserInput).toBe(false);
   });
 
   it("still appends text deltas from assistantMessageEvent", () => {

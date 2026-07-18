@@ -22,6 +22,7 @@ import {
   chatListSessionsResultSchema,
   chatPromptRequestSchema,
   chatResumeSessionRequestSchema,
+  chatRespondToExtensionUiRequestSchema,
   chatSetModelRequestSchema,
   chatSetThinkingRequestSchema,
   chatRuntimeEventSchema,
@@ -39,6 +40,7 @@ import type {
   AppSettings,
   AttachmentImportImageRequest,
   ChatInterventionRequest,
+  ChatRespondToExtensionUiRequest,
   ChatRuntimeEvent,
   PiDeckApi,
 } from "../shared/types.js";
@@ -173,6 +175,12 @@ const api: PiDeckApi = Object.freeze({
       invokeValidated({
         channel: ipcChannels.chatAbort,
         request: chatAbortRequestSchema.parse(request),
+        responseSchema: z.void(),
+      }),
+    respondToExtensionUi: (request: ChatRespondToExtensionUiRequest) =>
+      invokeValidated({
+        channel: ipcChannels.chatRespondToExtensionUi,
+        request: chatRespondToExtensionUiRequestSchema.parse(request),
         responseSchema: z.void(),
       }),
     closeSession: (request: { runtimeId: string }) =>

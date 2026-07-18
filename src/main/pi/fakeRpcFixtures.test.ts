@@ -148,19 +148,16 @@ test("fake RPC prompt scenario exposes reducer extension event fixtures", async 
         "auto_retry_start",
         "auto_retry_end",
         "extension_ui_request",
-        "agent_end",
       ].every((type) => events.some((event) => event.type === type)),
     );
     await client.request("prompt", { text: "exercise reducer fixtures" });
     const events = await allFixtureEvents;
-    assert.equal(
-      (
-        events.find(
-          (event) => event.type === "extension_ui_request",
-        ) as JsonObject
-      ).method,
-      "confirm",
-    );
+    const extensionRequest = events.find(
+      (event) => event.type === "extension_ui_request",
+    ) as JsonObject;
+    assert.equal(extensionRequest.method, "confirm");
+    assert.equal(extensionRequest.id, "ext_fake_dialog_1");
+    assert.equal(extensionRequest.title, "Fake confirm");
     assert.equal(
       (
         (events.find((event) => event.type === "queue_update") as JsonObject)

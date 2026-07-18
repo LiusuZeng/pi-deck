@@ -328,6 +328,23 @@ export const chatAbortRequestSchema = z
   })
   .strict();
 
+// Pi RPC extension_ui_response payloads. The runtime and request id stay
+// outside this payload so main can scope a response to the worker that emitted
+// the original request.
+export const extensionUiResponsePayloadSchema = z.union([
+  z.object({ confirmed: z.boolean() }).strict(),
+  z.object({ value: z.string() }).strict(),
+  z.object({ cancelled: z.literal(true) }).strict(),
+]);
+
+export const chatRespondToExtensionUiRequestSchema = z
+  .object({
+    runtimeId: z.string().min(1),
+    requestId: z.string().min(1),
+    response: extensionUiResponsePayloadSchema,
+  })
+  .strict();
+
 /** Detach a runtime without deleting its persisted Pi session file. */
 export const chatCloseSessionRequestSchema = z
   .object({
@@ -469,6 +486,7 @@ export const ipcChannels = {
   chatSteer: "chat:steer",
   chatFollowUp: "chat:followUp",
   chatAbort: "chat:abort",
+  chatRespondToExtensionUi: "chat:respondToExtensionUi",
   chatCloseSession: "chat:closeSession",
   chatListModels: "chat:listModels",
   chatListCommands: "chat:listCommands",

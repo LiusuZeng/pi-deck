@@ -138,6 +138,67 @@ test("working sessions expose steer, follow-up, extension, and abort interventio
   }
 });
 
+test("extension UI confirm request completes through renderer, IPC, and fake Pi", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-extension-ui-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: [
+        "--prompt-scenario",
+        "extension-ui",
+        "--stream-delay-ms",
+        "1",
+      ],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await page.getByLabel("Prompt text").fill("confirm extension request");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(page.getByText("Fake confirm", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("Approve fake extension UI request?"),
+    ).toBeVisible();
+
+    // A waiting worker remains in the sidebar after the user moves elsewhere;
+    // receiving extension input never steals foreground selection.
+    await page
+      .getByRole("button", { name: "New session", exact: true })
+      .click();
+    await expect(
+      page.getByRole("heading", { name: /Untitled new session/ }),
+    ).toBeVisible();
+    await expect(
+      page.locator(".session-item", {
+        hasText: "Waiting · extension input required",
+      }),
+    ).toBeVisible();
+    await page
+      .getByRole("button", { name: /Session: confirm extension request/ })
+      .click();
+    await expect(page.getByRole("button", { name: "Yes" })).toBeVisible();
+    await page.getByRole("button", { name: "Yes" }).click();
+    await expect(
+      page.getByText("Extension UI response delivered to Pi."),
+    ).toBeVisible();
+    await expect(
+      page.getByText(/Fake response to: confirm extension request/),
+    ).toBeVisible();
+    await expect(page.getByText("Needs input")).toHaveCount(0);
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("real mode startup failure is not mislabeled as preload/fake UI", async () => {
   const piBinary = process.env.PI_DECK_PI_BINARY || "/usr/local/bin/pi";
   test.skip(!fs.existsSync(piBinary), `Pi binary not found at ${piBinary}`);
