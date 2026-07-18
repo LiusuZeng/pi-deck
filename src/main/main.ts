@@ -377,7 +377,6 @@ function registerIpcHandlers(
     handler: async ({ runtimeId, text, attachments }) => {
       const adapter = await ensureChatAdapter(store, diagnosticsService);
       const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
-      await assertRuntimeInActiveProject(activeRuntimeId);
       await adapter.prompt(
         activeRuntimeId,
         await buildPromptInputWithImagePolicy(
@@ -400,7 +399,6 @@ function registerIpcHandlers(
     handler: async ({ runtimeId, text, attachments }) => {
       const adapter = await ensureChatAdapter(store, diagnosticsService);
       const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
-      await assertRuntimeInActiveProject(activeRuntimeId);
       await adapter.steer(
         activeRuntimeId,
         await buildPromptInputWithImagePolicy(
@@ -423,7 +421,6 @@ function registerIpcHandlers(
     handler: async ({ runtimeId, text, attachments }) => {
       const adapter = await ensureChatAdapter(store, diagnosticsService);
       const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
-      await assertRuntimeInActiveProject(activeRuntimeId);
       await adapter.followUp(
         activeRuntimeId,
         await buildPromptInputWithImagePolicy(
@@ -446,7 +443,6 @@ function registerIpcHandlers(
     handler: async ({ runtimeId }) => {
       const adapter = await ensureChatAdapter(store, diagnosticsService);
       const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
-      await assertRuntimeInActiveProject(activeRuntimeId);
       await adapter.abort(activeRuntimeId);
       return undefined;
     },
@@ -471,7 +467,6 @@ function registerIpcHandlers(
     handler: async ({ runtimeId }) => {
       const adapter = await ensureChatAdapter(store, diagnosticsService);
       const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
-      await assertRuntimeInActiveProject(activeRuntimeId);
       await adapter.closeSession(activeRuntimeId);
       forgetChatRuntime(activeRuntimeId);
       return undefined;
@@ -735,11 +730,12 @@ async function createChatWorker(
   store: SettingsStore,
   mode: ChatBackendMode,
   capacity: WorkerCapacity,
+  projectId?: string,
 ): Promise<ChatWorkerSpec> {
   return serializeChatWorkerCreation(async () => {
     const workerSpec =
       mode === "real"
-        ? await createRealChatWorker(adapter, store, capacity)
+        ? await createRealChatWorker(adapter, store, capacity, projectId)
         : await createFakeChatWorker(adapter, store, capacity);
     registerChatWorker(workerSpec, mode);
     return workerSpec;
@@ -837,7 +833,6 @@ async function respondToExtensionUi(
       `Extension UI runtime is no longer attached: ${request.runtimeId}`,
     );
   }
-  await assertRuntimeInActiveProject(request.runtimeId);
   const pending = pendingExtensionUiRequests
     .get(request.runtimeId)
     ?.get(request.requestId);
@@ -957,23 +952,6 @@ function resolveActiveChatRuntimeId(
   throw new Error("Chat runtime is not initialized");
 }
 
-async function assertRuntimeInActiveProject(runtimeId: string): Promise<void> {
-  if (resolveChatBackendMode() !== "real") {
-    return;
-  }
-  const runtimeProjectId = chatRuntimeProjectIds.get(runtimeId);
-  const activeProject = await projectStore?.getActiveProject();
-  if (
-    runtimeProjectId !== undefined &&
-    activeProject !== undefined &&
-    runtimeProjectId !== activeProject.id
-  ) {
-    throw new Error(
-      `Runtime ${runtimeId} belongs to project ${runtimeProjectId}, but the active project is ${activeProject.id}.`,
-    );
-  }
-}
-
 function forgetChatRuntime(runtimeId: string): void {
   clearPendingExtensionUiRequests(runtimeId);
   chatRuntimeIds.delete(runtimeId);
@@ -1024,8 +1002,9 @@ async function createRealChatWorker(
   adapter: SinglePiAdapter,
   store: SettingsStore,
   capacity: WorkerCapacity,
+  projectId?: string,
 ): Promise<ChatWorkerSpec> {
-  const launch = await resolveRealChatLaunchConfig(store);
+  const launch = await resolveRealChatLaunchConfig(store, projectId);
   return capacity.allocate(
     async () => (await store.get()).maxRunningSessions,
     () => {
@@ -1049,8 +1028,9 @@ async function createRealResumeWorker(
   store: SettingsStore,
   capacity: WorkerCapacity,
   sessionFile: string,
+  projectId?: string,
 ): Promise<ChatWorkerSpec> {
-  const launch = await resolveRealChatLaunchConfig(store);
+  const launch = await resolveRealChatLaunchConfig(store, projectId);
   const canonicalSessionFile =
     (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
   const sessionCwd = await readSessionFileCwd(canonicalSessionFile);
@@ -1079,14 +1059,17 @@ async function createRealResumeWorker(
   );
 }
 
-async function resolveRealChatLaunchConfig(store: SettingsStore): Promise<{
+async function resolveRealChatLaunchConfig(
+  store: SettingsStore,
+  projectId?: string,
+): Promise<{
   appSettings: AppPiSettings;
   projectCwd: string;
   effective: Awaited<ReturnType<typeof resolveEffectivePiConfig>>;
 }> {
   const settings = await store.get();
   const appSettings = applyRealBackendEnvOverrides(settings);
-  const projectCwd = await resolveRealBackendCwd(settings);
+  const projectCwd = await resolveRealBackendCwd(settings, projectId);
   const binaryResolution = await resolvePiBinary({
     appSettings,
     env: process.env,
@@ -1139,9 +1122,13 @@ function applyRealBackendEnvOverrides(settings: AppSettings): AppPiSettings {
   return appPiSettings;
 }
 
-async function resolveRealBackendCwd(settings: AppSettings): Promise<string> {
+async function resolveRealBackendCwd(
+  settings: AppSettings,
+  projectId?: string,
+): Promise<string> {
   const activeProject = await projectStore?.getActiveProject();
   const requested =
+    projectId ??
     selectedRealProjectCwd ??
     process.env.PI_DECK_PROJECT_CWD ??
     activeProject?.rootPath ??
@@ -1149,7 +1136,10 @@ async function resolveRealBackendCwd(settings: AppSettings): Promise<string> {
     process.cwd();
   const resolved = path.resolve(requested);
   const canonical = (await safeRealpath(resolved)) ?? resolved;
-  if (projectStore !== undefined) {
+  // Only initial startup establishes a navigator project. Operations for an
+  // explicit project must not retarget it: their workers can continue in the
+  // background after the user navigates elsewhere.
+  if (projectId === undefined && projectStore !== undefined) {
     await projectStore.upsertAndActivateProject(canonical);
   }
   return canonical;
@@ -1200,7 +1190,6 @@ async function listChatModels(
 ): Promise<z.infer<typeof chatListModelsResultSchema>> {
   const adapter = await ensureChatAdapter(store, diagnosticsService);
   const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
-  await assertRuntimeInActiveProject(activeRuntimeId);
   const response = await adapter.request(
     activeRuntimeId,
     "get_available_models",
@@ -1223,7 +1212,6 @@ async function listChatCommands(
 ): Promise<ChatListCommandsResult> {
   const adapter = await ensureChatAdapter(store, diagnosticsService);
   const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
-  await assertRuntimeInActiveProject(activeRuntimeId);
   const response = await adapter.request(activeRuntimeId, "get_commands");
   return { commands: normalizeChatCommands(response) };
 }
@@ -1307,7 +1295,6 @@ async function setChatModel(
 ): Promise<ChatSnapshot> {
   const adapter = await ensureChatAdapter(store, diagnosticsService);
   const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
-  await assertRuntimeInActiveProject(activeRuntimeId);
   await adapter.request(activeRuntimeId, "set_model", { provider, modelId });
   return getChatSnapshotForRuntime(
     adapter,
@@ -1325,7 +1312,6 @@ async function setChatThinking(
 ): Promise<ChatSnapshot> {
   const adapter = await ensureChatAdapter(store, diagnosticsService);
   const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
-  await assertRuntimeInActiveProject(activeRuntimeId);
   await adapter.request(activeRuntimeId, "set_thinking_level", { level });
   return getChatSnapshotForRuntime(
     adapter,
@@ -1351,12 +1337,7 @@ async function listChatSessions(
     };
   }
 
-  if (projectId !== undefined) {
-    await ensureProjectStore().selectProject(projectId);
-    selectedRealProjectCwd = projectId;
-  }
-
-  const launch = await resolveRealChatLaunchConfig(store);
+  const launch = await resolveRealChatLaunchConfig(store, projectId);
   const sessionDir = launch.effective.config.sessionDir;
   if (sessionDir === undefined) {
     return {
@@ -1478,12 +1459,7 @@ async function deleteChatSession(
     );
   }
 
-  if (projectId !== undefined) {
-    await ensureProjectStore().selectProject(projectId);
-    selectedRealProjectCwd = projectId;
-  }
-
-  const launch = await resolveRealChatLaunchConfig(store);
+  const launch = await resolveRealChatLaunchConfig(store, projectId);
   const sessionDir = launch.effective.config.sessionDir;
   if (sessionDir === undefined) {
     throw new Error("No Pi session directory is configured.");
@@ -1530,7 +1506,7 @@ async function deleteAllChatSessions(
   if (listed.sessions.length === 0) {
     return { deleted: true, deletedCount: 0, skippedCount: 0 };
   }
-  const launch = await resolveRealChatLaunchConfig(store);
+  const launch = await resolveRealChatLaunchConfig(store, projectId);
   const sessionDir = launch.effective.config.sessionDir;
   let deletedCount = 0;
   let skippedCount = 0;
@@ -1589,11 +1565,7 @@ async function resumeChatSession(
   if (canonicalSessionFile === undefined) {
     throw new Error(`Session file is missing or unreadable: ${sessionFile}`);
   }
-  if (projectId !== undefined) {
-    await ensureProjectStore().selectProject(projectId);
-    selectedRealProjectCwd = projectId;
-  }
-  const launch = await resolveRealChatLaunchConfig(store);
+  const launch = await resolveRealChatLaunchConfig(store, projectId);
   const sessionCwd = await readSessionFileCwd(canonicalSessionFile);
   if (sessionCwd !== undefined && sessionCwd !== launch.projectCwd) {
     throw new Error(
@@ -1619,6 +1591,7 @@ async function resumeChatSession(
     store,
     getChatWorkerCapacity(),
     canonicalSessionFile,
+    projectId,
   ).finally(() => {
     chatSessionResumePromises.delete(canonicalSessionFile);
   });
@@ -1631,9 +1604,16 @@ async function attachRealResumeWorker(
   store: SettingsStore,
   capacity: WorkerCapacity,
   canonicalSessionFile: string,
+  projectId?: string,
 ): Promise<ChatSnapshot> {
   const workerSpec = await serializeChatWorkerCreation(() =>
-    createRealResumeWorker(adapter, store, capacity, canonicalSessionFile),
+    createRealResumeWorker(
+      adapter,
+      store,
+      capacity,
+      canonicalSessionFile,
+      projectId,
+    ),
   );
   const runtimeId = workerSpec.worker.runtimeId;
   chatRuntimeId = runtimeId;
@@ -1680,10 +1660,6 @@ async function createChatSessionSnapshot(
   diagnosticsService: DiagnosticsService,
   projectId?: string,
 ): Promise<ChatSnapshot> {
-  if (projectId !== undefined) {
-    await ensureProjectStore().selectProject(projectId);
-    selectedRealProjectCwd = projectId;
-  }
   const adapter = await ensureChatAdapter(store, diagnosticsService);
   const mode = chatBackendMode ?? resolveChatBackendMode();
   const workerSpec = await createChatWorker(
@@ -1691,6 +1667,7 @@ async function createChatSessionSnapshot(
     store,
     mode,
     getChatWorkerCapacity(),
+    projectId,
   );
   return getChatSnapshotForRuntime(adapter, workerSpec.worker.runtimeId, mode, {
     skipMessages: true,
@@ -1829,7 +1806,10 @@ async function resolvePromptImageSettings(
     // Fake mode has no Pi settings files, but retains Pi's safe defaults.
     return { blockImages: false, autoResize: true };
   }
-  const launch = await resolveRealChatLaunchConfig(store);
+  const launch = await resolveRealChatLaunchConfig(
+    store,
+    chatRuntimeProjectIds.get(runtimeId),
+  );
   return launch.effective.config.imageSettings;
 }
 

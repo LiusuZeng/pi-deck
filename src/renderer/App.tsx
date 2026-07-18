@@ -433,6 +433,9 @@ export function App(): ReactElement {
     "Starting Pi Deck and resolving the active backend session.",
   );
   const [nowMs, setNowMs] = useState(() => Date.now());
+  // closeSession intentionally terminates its child process. Ignore that
+  // expected worker_exit while converting the row to a resumable saved session.
+  const intentionallyClosingRuntimeIds = useRef(new Set<string>());
 
   useEffect(() => {
     let disposed = false;
@@ -494,7 +497,9 @@ export function App(): ReactElement {
             snapshot.backendMode === "real"
               ? mergeSessions(
                   [backendSession],
-                  (listedSessions?.sessions ?? []).map(sessionFromSummary),
+                  (listedSessions?.sessions ?? []).map((summary) =>
+                    sessionFromSummary(summary, fallbackProject.id),
+                  ),
                 )
               : [
                   backendSession,
@@ -681,6 +686,12 @@ export function App(): ReactElement {
   }
 
   function applyRuntimeEvent(event: ChatRuntimeEvent): void {
+    if (
+      event.type === "worker_exit" &&
+      intentionallyClosingRuntimeIds.current.delete(event.runtimeId)
+    ) {
+      return;
+    }
     setSessions((current) =>
       current.map((session) =>
         session.id === event.runtimeId
@@ -1264,47 +1275,17 @@ export function App(): ReactElement {
   }
 
   async function handlePickProject(): Promise<void> {
-    if (!confirmProjectSwitchIfNeeded()) {
-      return;
-    }
     try {
       const result = await window.piDeck.projects.pickProject();
       if (!result.selected) {
         setUiMessage("Project picker canceled.");
         return;
       }
-      setCurrentProject(result.project);
       const refreshedProjects = await listProjectsIfAvailable(
         window.piDeck,
         result.project,
       );
-      setRecentProjects(refreshedProjects.projects);
-
-      if (isRealBackendMode) {
-        setComposerError(null);
-        setUiMessage(`Switching real Pi project to ${result.project.path}…`);
-        const snapshot = await window.piDeck.chat.reset();
-        const listedSessions = await window.piDeck.chat.listSessions({
-          projectId: result.project.id,
-        });
-        const backendSession = sessionFromSnapshot(snapshot);
-        setSessions(
-          mergeSessions(
-            [backendSession],
-            listedSessions.sessions.map(sessionFromSummary),
-          ),
-        );
-        setSelectedSessionId(backendSession.id);
-        loadRealCapabilities(backendSession.id);
-        setUiMessage(
-          `Real Pi project switched. Found ${listedSessions.sessions.length} saved session(s) for this project.`,
-        );
-        return;
-      }
-
-      setUiMessage(
-        "Project picker used preload/main IPC; renderer received metadata only.",
-      );
+      await switchProjectView(result.project, refreshedProjects.projects);
     } catch (error) {
       setUiMessage(
         `Project picker failed; no project was selected (${error instanceof Error ? error.message : String(error)}).`,
@@ -1313,40 +1294,13 @@ export function App(): ReactElement {
   }
 
   async function handleSelectProject(project: ProjectRef): Promise<void> {
-    if (!confirmProjectSwitchIfNeeded(project)) {
-      return;
-    }
     if (project.invalidReason) {
       setUiMessage(project.invalidReason);
       return;
     }
     try {
       const result = await selectProjectIfAvailable(window.piDeck, project);
-      const activeProject = result.activeProject ?? project;
-      setCurrentProject(activeProject);
-      setRecentProjects(result.projects);
-      if (isRealBackendMode) {
-        setComposerError(null);
-        setUiMessage(`Switching real Pi project to ${activeProject.path}…`);
-        const snapshot = await window.piDeck.chat.reset();
-        const listedSessions = await window.piDeck.chat.listSessions({
-          projectId: activeProject.id,
-        });
-        const backendSession = sessionFromSnapshot(snapshot);
-        setSessions(
-          mergeSessions(
-            [backendSession],
-            listedSessions.sessions.map(sessionFromSummary),
-          ),
-        );
-        setSelectedSessionId(backendSession.id);
-        loadRealCapabilities(backendSession.id);
-        setUiMessage(
-          `Real Pi project switched. Found ${listedSessions.sessions.length} saved session(s) for this project.`,
-        );
-        return;
-      }
-      setUiMessage(`Selected project ${activeProject.displayName}.`);
+      await switchProjectView(result.activeProject ?? project, result.projects);
     } catch (error) {
       setUiMessage(
         `Failed to select project: ${error instanceof Error ? error.message : String(error)}`,
@@ -1354,19 +1308,82 @@ export function App(): ReactElement {
     }
   }
 
-  function confirmProjectSwitchIfNeeded(project?: ProjectRef): boolean {
-    if (!isRealBackendMode || project?.id === currentProject.id) {
-      return true;
+  /**
+   * Project navigation is deliberately a view transaction, not a worker
+   * transaction. The project store changes first; only after the destination
+   * session list is available do we replace the visible project rows. Attached
+   * workers (including active, waiting, and Pi-queued work) are never reset or
+   * closed here and remain addressable by their runtime id.
+   */
+  async function switchProjectView(
+    project: ProjectRef,
+    projects: ProjectRef[],
+  ): Promise<void> {
+    if (!isRealBackendMode) {
+      setCurrentProject(project);
+      setRecentProjects(projects);
+      setUiMessage(`Selected project ${project.displayName}.`);
+      return;
     }
-    const runningCount = sessions.filter(
+
+    setComposerError(null);
+    setUiMessage(
+      `Opening ${project.displayName}; existing Pi workers stay attached…`,
+    );
+    const listedSessions = await window.piDeck.chat.listSessions({
+      projectId: project.id,
+    });
+    const savedRows = listedSessions.sessions.map((summary) =>
+      sessionFromSummary(summary, project.id),
+    );
+    const existingProjectRuntime = sessions
+      .filter(
+        (session) => session.runtimeBacked && session.projectId === project.id,
+      )
+      .sort(
+        (left, right) =>
+          Number(right.status === "working") -
+          Number(left.status === "working"),
+      )[0];
+    const existingProjectDraft = sessions.find(
       (session) =>
-        session.backendMode === "real" && session.status === "working",
-    ).length;
-    if (runningCount === 0) {
-      return true;
+        session.draftSession === true && session.projectId === project.id,
+    );
+    const selectedId =
+      existingProjectRuntime?.id ??
+      savedRows.find((session) => session.runtimeBacked)?.id ??
+      existingProjectDraft?.id ??
+      createId("draft-session");
+    const draft =
+      existingProjectRuntime === undefined &&
+      !savedRows.some((session) => session.runtimeBacked) &&
+      existingProjectDraft === undefined
+        ? draftSessionForProject(project, selectedId)
+        : undefined;
+
+    setSessions((items) => {
+      // Keep every attached runtime and drafts from other projects. Replace
+      // only stale saved rows for the destination project with the fresh scan.
+      const retained = items.filter(
+        (session) =>
+          session.runtimeBacked ||
+          session.draftSession === true ||
+          session.projectId !== project.id,
+      );
+      return mergeSessions(retained, draft ? [...savedRows, draft] : savedRows);
+    });
+    setCurrentProject(project);
+    setRecentProjects(projects);
+    setSelectedSessionId(selectedId);
+    if (existingProjectRuntime?.runtimeBacked) {
+      loadRealCapabilities(existingProjectRuntime.id);
     }
-    return window.confirm(
-      `Switching projects will close ${runningCount} running Pi worker${runningCount === 1 ? "" : "s"}. Continue?`,
+    const backgroundCount = sessions.filter(
+      (session) =>
+        session.projectId !== project.id && isBackgroundActiveWork(session),
+    ).length;
+    setUiMessage(
+      `Project view switched to ${project.displayName}. No Pi worker was closed; ${backgroundCount} background active work item${backgroundCount === 1 ? "" : "s"} ${backgroundCount === 1 ? "remains" : "remain"} in Active work.`,
     );
   }
 
@@ -1407,7 +1424,9 @@ export function App(): ReactElement {
           items.filter(
             (item) => item.runtimeBacked || item.draftSession === true,
           ),
-          result.sessions.map(sessionFromSummary),
+          result.sessions.map((summary) =>
+            sessionFromSummary(summary, currentProject.id),
+          ),
         ),
       );
       setUiMessage(
@@ -1458,6 +1477,7 @@ export function App(): ReactElement {
       return;
     }
 
+    intentionallyClosingRuntimeIds.current.add(session.id);
     try {
       await window.piDeck.chat.closeSession({ runtimeId: session.id });
       const detached = session.sessionFile
@@ -1490,6 +1510,7 @@ export function App(): ReactElement {
           : "Closed the Pi runtime.",
       );
     } catch (error) {
+      intentionallyClosingRuntimeIds.current.delete(session.id);
       setComposerError(error instanceof Error ? error.message : String(error));
     }
   }
@@ -1680,26 +1701,11 @@ export function App(): ReactElement {
   }
 
   async function handleNewSession(): Promise<void> {
-    const id = createId("draft-session");
-    const backendMode = isRealBackendMode ? "real" : "fake";
-    const next: SessionViewModel = {
-      id,
-      title: "Untitled new session",
-      project: currentProject.displayName,
-      projectPath: currentProject.path,
-      projectId: currentProject.id,
-      subtitle: "Idle · Pi starts when you send the first prompt",
-      status: "idle",
-      updatedAt: "Now",
-      updatedAtMs: Date.now(),
-      baseState: "idle",
-      overlays: { ...emptyOverlays },
-      runtimeBacked: false,
-      resumeBacked: false,
-      draftSession: true,
-      backendMode,
-      timeline: [],
-    };
+    const next = draftSessionForProject(
+      currentProject,
+      createId("draft-session"),
+      isRealBackendMode ? "real" : "fake",
+    );
     setComposerError(null);
     setSessions((items) =>
       mergeSessions(
@@ -1707,11 +1713,12 @@ export function App(): ReactElement {
         items.filter(
           (item) =>
             item.draftSession !== true ||
-            hasComposerDraft(composerDrafts, item.id),
+            hasComposerDraft(composerDrafts, item.id) ||
+            item.projectId !== currentProject.id,
         ),
       ),
     );
-    setSelectedSessionId(id);
+    setSelectedSessionId(next.id);
     setUiMessage(
       "Created a new session. Pi will start when you send a prompt.",
     );
@@ -2059,12 +2066,45 @@ function slashCommandFromWorkerCommand(
   };
 }
 
-function sessionFromSummary(summary: ChatSessionSummary): SessionViewModel {
+function draftSessionForProject(
+  project: ProjectRef,
+  id: string,
+  backendMode: "fake" | "real" = "real",
+): SessionViewModel {
+  return {
+    id,
+    title: "Untitled new session",
+    project: project.displayName,
+    projectPath: project.path,
+    projectId: project.id,
+    subtitle: "Idle · Pi starts when you send the first prompt",
+    status: "idle",
+    updatedAt: "Now",
+    updatedAtMs: Date.now(),
+    baseState: "idle",
+    overlays: { ...emptyOverlays },
+    runtimeBacked: false,
+    resumeBacked: false,
+    draftSession: true,
+    backendMode,
+    timeline: [],
+  };
+}
+
+function sessionFromSummary(
+  summary: ChatSessionSummary,
+  projectId?: string,
+): SessionViewModel {
   return {
     id: summary.attachedRuntimeId ?? summary.id,
     title: summary.title,
     project: summary.cwd?.split(/[\\/]/).pop() ?? "Pi project",
     projectPath: summary.cwd ?? "Unknown project",
+    ...(projectId !== undefined
+      ? { projectId }
+      : summary.cwd !== undefined
+        ? { projectId: summary.cwd }
+        : {}),
     subtitle: summary.attachedRuntimeId
       ? "Idle · attached real Pi session"
       : "Saved · click to resume",
@@ -2125,6 +2165,7 @@ function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
     runtimeBacked: true,
     resumeBacked: false,
     backendMode: snapshot.backendMode,
+    ...(snapshot.state.cwd ? { projectId: snapshot.state.cwd } : {}),
     timeline: timelineFromMessages(snapshot.messages),
   };
   if (usageStats !== undefined) {
@@ -3370,12 +3411,23 @@ function SessionSidebar(props: {
   const [showOlderRealSessions, setShowOlderRealSessions] = useState(false);
   const [sessionFilter, setSessionFilter] = useState("");
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const sidebarSessions = props.sessions.filter((session) =>
-    shouldShowSessionInSidebar(
-      session,
-      hasComposerDraft(props.composerDrafts, session.id),
-    ),
-  );
+  const sidebarSessions = props.realMode
+    ? props.sessions.filter(
+        (session) =>
+          sessionBelongsToProject(session, props.currentProject.id) &&
+          shouldShowSessionInSidebar(
+            session,
+            hasComposerDraft(props.composerDrafts, session.id),
+          ),
+      )
+    : props.sessions;
+  const activeWork = props.realMode
+    ? props.sessions.filter(
+        (session) =>
+          !sessionBelongsToProject(session, props.currentProject.id) &&
+          isBackgroundActiveWork(session),
+      )
+    : [];
   const allRealInbox = props.realMode
     ? buildRealSessionInbox(sidebarSessions, "")
     : undefined;
@@ -3473,6 +3525,34 @@ function SessionSidebar(props: {
           Delete saved sessions…
         </button>
       )}
+
+      {activeWork.length > 0 ? (
+        <section
+          className="active-work-list"
+          aria-label="Active work across projects"
+        >
+          <p className="active-work-heading">Active work · other projects</p>
+          {activeWork.map((session) => (
+            <button
+              className={`session-item active-work-item ${session.id === props.selectedSessionId ? "active" : ""}`}
+              type="button"
+              key={session.id}
+              aria-label={`Active work in ${session.project}: ${session.title}`}
+              title={`Open background work from ${session.project}`}
+              onClick={() => props.onSelect(session.id)}
+            >
+              <StateIndicator session={session} />
+              <span className="session-copy">
+                <span className="session-title">{session.title}</span>
+                <span className="session-meta">
+                  {session.project} · {session.subtitle}
+                </span>
+              </span>
+              <span className="session-time">{session.updatedAt}</span>
+            </button>
+          ))}
+        </section>
+      ) : null}
 
       {props.realMode ? (
         <>
@@ -3626,6 +3706,23 @@ function isSessionDeletable(
     session.backendMode === "real" &&
     typeof session.sessionFile === "string" &&
     session.sessionFile.length > 0
+  );
+}
+
+function sessionBelongsToProject(
+  session: SessionViewModel,
+  projectId: string,
+): boolean {
+  return session.projectId === projectId || session.projectPath === projectId;
+}
+
+function isBackgroundActiveWork(session: SessionViewModel): boolean {
+  return (
+    session.status === "working" ||
+    session.status === "waiting" ||
+    session.overlays.localQueuedStartCount > 0 ||
+    session.overlays.piQueuedSteeringCount > 0 ||
+    session.overlays.piQueuedFollowUpCount > 0
   );
 }
 

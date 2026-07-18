@@ -529,7 +529,7 @@ test("real mode lists a newly prompted session after restart with fake Pi", asyn
   }
 });
 
-test("real mode prompted session survives project switch and resumes after switching back with fake Pi", async () => {
+test("background worker continues through project A → B navigation and return", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-e2e-project-resume-"),
   );
@@ -546,34 +546,37 @@ test("real mode prompted session survives project switch and resumes after switc
       projectCwd: projectA,
       agentDir,
       testPickProjectCwds: [projectB, projectA],
+      fakePiArgs: ["--stream-delay-ms", "500"],
     }),
   );
   try {
     await expectHealthyPreload(page);
     await page
       .getByLabel("Prompt text")
-      .fill("project switch persisted session");
+      .fill("project switch background worker");
     await page.getByRole("button", { name: "Send" }).click();
-    await expect(
-      page.getByText(/Fake response to: project switch persisted session/),
-    ).toBeVisible();
+    await expect(page.getByRole("button", { name: "Abort" })).toBeVisible();
 
     await page.getByRole("button", { name: /Open project/i }).click();
-    await expect(page.getByText(/Real Pi project switched/)).toBeVisible();
     await expect(
       page.getByRole("heading", { name: /project-b/ }),
     ).toBeVisible();
-    await expect(page.getByText("Saved · click to resume")).toHaveCount(0);
+    await expect(page.getByLabel("Active work across projects")).toContainText(
+      "project switch background worker",
+    );
+    await expect(
+      page.getByText(
+        /No Pi worker was closed; 1 background active work item remains/,
+      ),
+    ).toBeVisible();
 
     await page.getByRole("button", { name: /Open project/i }).click();
     await expect(
       page.getByRole("heading", { name: /project-a/ }),
     ).toBeVisible();
     await expect(
-      page.getByText("Saved · click to resume").first(),
-    ).toBeVisible();
-    await page.getByText("Saved · click to resume").first().click();
-    await expect(page.getByText("Resumed saved Pi session.")).toBeVisible();
+      page.getByText(/Fake response to: project switch background worker/),
+    ).toBeVisible({ timeout: 8_000 });
   } finally {
     await app.close();
     fs.rmSync(root, { recursive: true, force: true });
@@ -609,7 +612,7 @@ test("real mode project picker handoff persists selected cwd with fake Pi", asyn
       .getByRole("button", { name: /Open project/i })
       .click();
     await expect(
-      firstLaunch.page.getByText(/Real Pi project switched/),
+      firstLaunch.page.getByText(/Project view switched to project-b/),
     ).toBeVisible();
     await expect(
       firstLaunch.page.getByRole("heading", { name: /project-b/ }),
