@@ -295,8 +295,23 @@ textarea:disabled {
 }
 
 .session-title {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   font-size: 12.5px;
   font-weight: 680;
+}
+
+.session-draft-marker {
+  flex: 0 0 auto;
+  border: 1px solid rgb(191 219 254 / 55%);
+  border-radius: 999px;
+  padding: 1px 5px;
+  color: #bfdbfe;
+  background: rgb(59 130 246 / 13%);
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.02em;
 }
 
 .session-meta,

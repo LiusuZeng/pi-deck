@@ -143,6 +143,14 @@ interface SessionViewModel {
   isResuming?: boolean;
 }
 
+interface ComposerDraftState {
+  text: string;
+  attachments: AttachmentDraft[];
+  slashOpen: boolean;
+}
+
+type ComposerDraftsBySession = Record<string, ComposerDraftState | undefined>;
+
 interface ModelOption {
   provider: string;
   id: string;
@@ -380,7 +388,9 @@ export function App(): ReactElement {
   const [loadState, setLoadState] = useState<LoadState>({ state: "loading" });
   const [sessions, setSessions] = useState<SessionViewModel[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState("");
-  const [draft, setDraft] = useState("");
+  const [composerDrafts, setComposerDrafts] = useState<ComposerDraftsBySession>(
+    {},
+  );
   const [composerError, setComposerError] = useState<string | null>(null);
   const [currentProject, setCurrentProject] = useState<ProjectRef>(() => ({
     id: "pending-project",
@@ -394,8 +404,6 @@ export function App(): ReactElement {
     modelOptions[0]?.id ?? "",
   );
   const [selectedThinking, setSelectedThinking] = useState("medium");
-  const [slashOpen, setSlashOpen] = useState(false);
-  const [attachments, setAttachments] = useState<AttachmentDraft[]>([]);
   const [realModels, setRealModels] = useState<ChatModelSummary[]>([]);
   const [realCommands, setRealCommands] = useState<SlashCommand[]>([]);
   const [enterToSend, setEnterToSend] = useState(() =>
@@ -534,6 +542,13 @@ export function App(): ReactElement {
   const selectedModel =
     modelOptions.find((model) => model.id === selectedModelId) ??
     modelOptions[0];
+  const composerDraft = composerDraftForSession(
+    composerDrafts,
+    selectedSession.id,
+  );
+  const draft = composerDraft.text;
+  const attachments = composerDraft.attachments;
+  const slashOpen = composerDraft.slashOpen;
   const isWorking = selectedSession.status === "working";
   const isResuming = selectedSession.isResuming === true;
   const isRealBackendMode = selectedSession.backendMode === "real";
@@ -693,8 +708,13 @@ export function App(): ReactElement {
   }
 
   function handleDraftChange(value: string): void {
-    setDraft(value);
-    setSlashOpen(value.trimStart().startsWith("/"));
+    setComposerDrafts((items) =>
+      updateComposerDraft(items, selectedSession.id, (current) => ({
+        ...current,
+        text: value,
+        slashOpen: value.trimStart().startsWith("/"),
+      })),
+    );
   }
 
   function handleSelectSession(sessionId: string): void {
@@ -750,6 +770,9 @@ export function App(): ReactElement {
         ),
       );
       setSelectedSessionId(resumed.id);
+      setComposerDrafts((items) =>
+        moveComposerDraft(items, session.id, resumed.id),
+      );
       loadRealCapabilities(resumed.id);
       setUiMessage("Resumed saved Pi session.");
       return resumed;
@@ -799,6 +822,18 @@ export function App(): ReactElement {
     prompt: string,
     promptAttachments: AttachmentDraft[],
   ): Promise<void> {
+    const validationError = validateComposerInput({
+      attachments: promptAttachments,
+      supportsImages: selectedSessionSupportsImages(
+        session,
+        realModels,
+        selectedModel,
+      ),
+    });
+    if (validationError !== undefined) {
+      setComposerError(validationError);
+      return;
+    }
     const resumed = await resumeSession(session);
     if (resumed !== undefined) {
       await sendPrompt(resumed.id, prompt, promptAttachments);
@@ -809,19 +844,29 @@ export function App(): ReactElement {
     if (!canSend) {
       return;
     }
+    const prompt = draft.trimEnd();
+    const promptAttachments = attachments;
+    const validationError = validateComposerInput({
+      attachments: promptAttachments,
+      supportsImages: selectedSessionSupportsImages(
+        selectedSession,
+        realModels,
+        selectedModel,
+      ),
+    });
+    if (validationError !== undefined) {
+      setComposerError(validationError);
+      return;
+    }
     if (
       selectedSession.resumeBacked === true &&
       selectedSession.sessionFile !== undefined
     ) {
-      void resumeSessionAndSend(selectedSession, draft.trimEnd(), attachments);
+      void resumeSessionAndSend(selectedSession, prompt, promptAttachments);
       return;
     }
     if (selectedSession.draftSession === true) {
-      void startDraftSessionAndSend(
-        selectedSession,
-        draft.trimEnd(),
-        attachments,
-      );
+      void startDraftSessionAndSend(selectedSession, prompt, promptAttachments);
       return;
     }
     if (!selectedSession.runtimeBacked) {
@@ -830,21 +875,8 @@ export function App(): ReactElement {
       );
       return;
     }
-    if (hasBlockingAttachment) {
-      setComposerError(
-        "Remove or reselect deleted/unreadable attachments before sending.",
-      );
-      return;
-    }
-    if (
-      hasImageAttachment &&
-      !selectedSessionSupportsImages(selectedSession, realModels, selectedModel)
-    ) {
-      setComposerError("Selected model does not support image input.");
-      return;
-    }
 
-    void sendPrompt(selectedSession.id, draft.trimEnd(), attachments);
+    void sendPrompt(selectedSession.id, prompt, promptAttachments);
   }
 
   async function startDraftSessionAndSend(
@@ -852,6 +884,18 @@ export function App(): ReactElement {
     prompt: string,
     promptAttachments: AttachmentDraft[],
   ): Promise<void> {
+    const validationError = validateComposerInput({
+      attachments: promptAttachments,
+      supportsImages: selectedSessionSupportsImages(
+        draftSession,
+        realModels,
+        selectedModel,
+      ),
+    });
+    if (validationError !== undefined) {
+      setComposerError(validationError);
+      return;
+    }
     setComposerError(null);
     setSessions((items) =>
       items.map((session) =>
@@ -881,6 +925,9 @@ export function App(): ReactElement {
         ),
       );
       setSelectedSessionId(backendSession.id);
+      setComposerDrafts((items) =>
+        moveComposerDraft(items, draftSession.id, backendSession.id),
+      );
       if (backendSession.backendMode === "real") {
         loadRealCapabilities(backendSession.id);
       }
@@ -891,7 +938,12 @@ export function App(): ReactElement {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setComposerError(message);
-      setAttachments(promptAttachments);
+      setComposerDrafts((items) =>
+        updateComposerDraft(items, draftSession.id, (current) => ({
+          ...current,
+          attachments: promptAttachments,
+        })),
+      );
       setSessions((items) =>
         items.map((session) =>
           session.id === draftSession.id
@@ -919,9 +971,7 @@ export function App(): ReactElement {
     const now = formatTime();
     const sentAttachments = timelineAttachmentsFromDrafts(promptAttachments);
     setComposerError(null);
-    setDraft("");
-    setSlashOpen(false);
-    setAttachments([]);
+    setComposerDrafts((items) => clearComposerDraft(items, runtimeId));
     setSessions((current) =>
       current.map((session) =>
         session.id === runtimeId
@@ -964,7 +1014,12 @@ export function App(): ReactElement {
       });
     } catch (error) {
       setComposerError(error instanceof Error ? error.message : String(error));
-      setAttachments(promptAttachments);
+      setComposerDrafts((items) =>
+        updateComposerDraft(items, runtimeId, (current) => ({
+          ...current,
+          attachments: promptAttachments,
+        })),
+      );
       setSessions((current) =>
         current.map((session) =>
           session.id === runtimeId
@@ -990,34 +1045,31 @@ export function App(): ReactElement {
     if (knownExtensionCommand === undefined) {
       return;
     }
-    if (selectedSession.draftSession === true) {
-      void startDraftSessionAndSend(
+    const prompt = draft.trimEnd();
+    const promptAttachments = attachments;
+    const validationError = validateComposerInput({
+      attachments: promptAttachments,
+      supportsImages: selectedSessionSupportsImages(
         selectedSession,
-        draft.trimEnd(),
-        attachments,
-      );
+        realModels,
+        selectedModel,
+      ),
+    });
+    if (validationError !== undefined) {
+      setComposerError(validationError);
+      return;
+    }
+    if (selectedSession.draftSession === true) {
+      void startDraftSessionAndSend(selectedSession, prompt, promptAttachments);
       return;
     }
     if (!selectedSession.runtimeBacked) {
       setComposerError("This session is not attached to a Pi runtime.");
       return;
     }
-    if (hasBlockingAttachment) {
-      setComposerError(
-        "Remove or reselect deleted/unreadable attachments before sending.",
-      );
-      return;
-    }
-    if (
-      hasImageAttachment &&
-      !selectedSessionSupportsImages(selectedSession, realModels, selectedModel)
-    ) {
-      setComposerError("Selected model does not support image input.");
-      return;
-    }
     // Pi executes extension commands immediately through `prompt`, even while
     // streaming. They cannot be sent through steer or follow_up.
-    void sendPrompt(selectedSession.id, draft.trimEnd(), attachments);
+    void sendPrompt(selectedSession.id, prompt, promptAttachments);
   }
 
   async function sendIntervention(kind: "steer" | "followUp"): Promise<void> {
@@ -1065,9 +1117,9 @@ export function App(): ReactElement {
       } else {
         await window.piDeck.chat.followUp(request);
       }
-      setDraft("");
-      setSlashOpen(false);
-      setAttachments([]);
+      setComposerDrafts((items) =>
+        clearComposerDraft(items, selectedSession.id),
+      );
       setUiMessage(
         kind === "steer"
           ? "Steering instruction queued in Pi."
@@ -1076,7 +1128,12 @@ export function App(): ReactElement {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setComposerError(message);
-      setAttachments(queuedAttachments);
+      setComposerDrafts((items) =>
+        updateComposerDraft(items, selectedSession.id, (current) => ({
+          ...current,
+          attachments: queuedAttachments,
+        })),
+      );
       setSessions((current) =>
         current.map((session) =>
           session.id === selectedSession.id
@@ -1498,6 +1555,7 @@ export function App(): ReactElement {
   }
 
   async function handlePickAttachments(): Promise<void> {
+    const sessionId = selectedSession.id;
     try {
       const result = await window.piDeck.attachments.pickFiles({
         projectPath: currentProject.canonicalPath,
@@ -1506,8 +1564,14 @@ export function App(): ReactElement {
         setUiMessage("Attachment picker canceled.");
         return;
       }
-      setAttachments((existing) =>
-        mergeAttachmentDrafts(existing, result.attachments),
+      setComposerDrafts((items) =>
+        updateComposerDraft(items, sessionId, (current) => ({
+          ...current,
+          attachments: mergeAttachmentDrafts(
+            current.attachments,
+            result.attachments,
+          ),
+        })),
       );
       setUiMessage(`Added ${result.attachments.length} attachment(s).`);
     } catch (error) {
@@ -1520,13 +1584,20 @@ export function App(): ReactElement {
   async function handleImportDroppedFileAttachments(
     files: File[],
   ): Promise<void> {
+    const sessionId = selectedSession.id;
     try {
       const result = await window.piDeck.attachments.importDroppedFiles(files, {
         projectPath: currentProject.canonicalPath,
       });
       if (result.selected) {
-        setAttachments((existing) =>
-          mergeAttachmentDrafts(existing, result.attachments),
+        setComposerDrafts((items) =>
+          updateComposerDraft(items, sessionId, (current) => ({
+            ...current,
+            attachments: mergeAttachmentDrafts(
+              current.attachments,
+              result.attachments,
+            ),
+          })),
         );
         setUiMessage(
           `Added ${result.attachments.length} dropped file attachment(s).`,
@@ -1540,6 +1611,7 @@ export function App(): ReactElement {
   }
 
   async function handleImportImageAttachments(files: File[]): Promise<void> {
+    const sessionId = selectedSession.id;
     const imageFiles = files.filter((file) => isSupportedDroppedImage(file));
     if (imageFiles.length === 0) {
       setUiMessage("Drop or paste PNG, JPEG, WebP, or GIF images.");
@@ -1550,8 +1622,14 @@ export function App(): ReactElement {
       const images = await Promise.all(imageFiles.map(readDroppedImageFile));
       const result = await window.piDeck.attachments.importImages({ images });
       if (result.selected) {
-        setAttachments((existing) =>
-          mergeAttachmentDrafts(existing, result.attachments),
+        setComposerDrafts((items) =>
+          updateComposerDraft(items, sessionId, (current) => ({
+            ...current,
+            attachments: mergeAttachmentDrafts(
+              current.attachments,
+              result.attachments,
+            ),
+          })),
         );
         setUiMessage(
           `Imported ${result.attachments.length} image attachment(s).`,
@@ -1589,7 +1667,11 @@ export function App(): ReactElement {
     setSessions((items) =>
       mergeSessions(
         [next],
-        items.filter((item) => item.draftSession !== true),
+        items.filter(
+          (item) =>
+            item.draftSession !== true ||
+            hasComposerDraft(composerDrafts, item.id),
+        ),
       ),
     );
     setSelectedSessionId(id);
@@ -1600,8 +1682,13 @@ export function App(): ReactElement {
 
   function handleSelectCommand(command: SlashCommand): void {
     const inserted = command.insertText ?? `${command.name} `;
-    setDraft(inserted.endsWith(" ") ? inserted : `${inserted} `);
-    setSlashOpen(false);
+    setComposerDrafts((items) =>
+      updateComposerDraft(items, selectedSession.id, (current) => ({
+        ...current,
+        text: inserted.endsWith(" ") ? inserted : `${inserted} `,
+        slashOpen: false,
+      })),
+    );
     setUiMessage(
       isRealBackendMode
         ? `${command.name} inserted from the active Pi worker command list.`
@@ -1648,7 +1735,12 @@ export function App(): ReactElement {
       }
       onSetThinking={(level) => void handleSetRealThinking(level)}
       onRemoveAttachment={(id) =>
-        setAttachments((items) => items.filter((item) => item.id !== id))
+        setComposerDrafts((items) =>
+          updateComposerDraft(items, selectedSession.id, (current) => ({
+            ...current,
+            attachments: current.attachments.filter((item) => item.id !== id),
+          })),
+        )
       }
       onSelectCommand={handleSelectCommand}
     />
@@ -1662,6 +1754,7 @@ export function App(): ReactElement {
           selectedSessionId={selectedSession.id}
           realMode={isRealBackendMode}
           currentProject={currentProject}
+          composerDrafts={composerDrafts}
           onSelect={handleSelectSession}
           onHideSidebar={() => handleSidebarVisibleChange(false)}
           onNewSession={() => void handleNewSession()}
@@ -1797,6 +1890,76 @@ function startupErrorSession(message: string): SessionViewModel {
 
 function isMissingSessionFileError(message: string): boolean {
   return /session file is missing or unreadable/i.test(message);
+}
+
+function composerDraftForSession(
+  drafts: ComposerDraftsBySession,
+  sessionId: string,
+): ComposerDraftState {
+  return (
+    drafts[sessionId] ?? {
+      text: "",
+      attachments: [],
+      slashOpen: false,
+    }
+  );
+}
+
+function updateComposerDraft(
+  drafts: ComposerDraftsBySession,
+  sessionId: string,
+  update: (current: ComposerDraftState) => ComposerDraftState,
+): ComposerDraftsBySession {
+  return {
+    ...drafts,
+    [sessionId]: update(composerDraftForSession(drafts, sessionId)),
+  };
+}
+
+function clearComposerDraft(
+  drafts: ComposerDraftsBySession,
+  sessionId: string,
+): ComposerDraftsBySession {
+  const { [sessionId]: _, ...remaining } = drafts;
+  return remaining;
+}
+
+function moveComposerDraft(
+  drafts: ComposerDraftsBySession,
+  fromSessionId: string,
+  toSessionId: string,
+): ComposerDraftsBySession {
+  if (fromSessionId === toSessionId || drafts[fromSessionId] === undefined) {
+    return drafts;
+  }
+  const { [fromSessionId]: draft, ...remaining } = drafts;
+  return { ...remaining, [toSessionId]: draft };
+}
+
+function hasComposerDraft(
+  drafts: ComposerDraftsBySession,
+  sessionId: string,
+): boolean {
+  const draft = drafts[sessionId];
+  return Boolean(
+    draft && (draft.text.trim().length > 0 || draft.attachments.length > 0),
+  );
+}
+
+function validateComposerInput(input: {
+  attachments: AttachmentDraft[];
+  supportsImages: boolean;
+}): string | undefined {
+  if (input.attachments.some((attachment) => attachment.status !== "ready")) {
+    return "Remove or reselect deleted/unreadable attachments before sending.";
+  }
+  if (
+    input.attachments.some((attachment) => attachment.kind === "image") &&
+    !input.supportsImages
+  ) {
+    return "Selected model does not support image input.";
+  }
+  return undefined;
 }
 
 function mergeAttachmentDrafts(
@@ -3063,6 +3226,7 @@ function SessionSidebar(props: {
   selectedSessionId: string;
   realMode: boolean;
   currentProject: ProjectRef;
+  composerDrafts: ComposerDraftsBySession;
   onSelect(sessionId: string): void;
   onHideSidebar(): void;
   onNewSession(): void;
@@ -3072,7 +3236,12 @@ function SessionSidebar(props: {
 }): ReactElement {
   const [showOlderRealSessions, setShowOlderRealSessions] = useState(false);
   const sidebarSessions = props.realMode
-    ? props.sessions.filter(shouldShowSessionInSidebar)
+    ? props.sessions.filter((session) =>
+        shouldShowSessionInSidebar(
+          session,
+          hasComposerDraft(props.composerDrafts, session.id),
+        ),
+      )
     : props.sessions;
   const visibleSessions =
     props.realMode && !showOlderRealSessions
@@ -3157,7 +3326,12 @@ function SessionSidebar(props: {
               >
                 <StateIndicator session={session} />
                 <span className="session-copy">
-                  <span className="session-title">{session.title}</span>
+                  <span className="session-title">
+                    {session.title}
+                    {hasComposerDraft(props.composerDrafts, session.id) ? (
+                      <span className="session-draft-marker">Draft</span>
+                    ) : null}
+                  </span>
                   <span className="session-meta">{session.subtitle}</span>
                   {!props.realMode ? (
                     <span className="session-meta">{session.projectPath}</span>
@@ -3255,9 +3429,12 @@ function isSessionDeletable(
   );
 }
 
-function shouldShowSessionInSidebar(session: SessionViewModel): boolean {
+function shouldShowSessionInSidebar(
+  session: SessionViewModel,
+  hasDraft: boolean,
+): boolean {
   if (session.draftSession === true) {
-    return false;
+    return hasDraft;
   }
   return !(
     session.backendMode === "real" &&
@@ -3265,7 +3442,8 @@ function shouldShowSessionInSidebar(session: SessionViewModel): boolean {
     session.resumeBacked !== true &&
     session.status === "idle" &&
     session.timeline.length === 0 &&
-    isPlaceholderSessionTitle(session.title)
+    isPlaceholderSessionTitle(session.title) &&
+    !hasDraft
   );
 }
 
@@ -4833,6 +5011,12 @@ export const __rendererTestHooks = {
   reduceRuntimeEvent,
   sessionFromSnapshot,
   mergeSessionUsageFromSnapshot,
+  composerDraftForSession,
+  updateComposerDraft,
+  clearComposerDraft,
+  moveComposerDraft,
+  hasComposerDraft,
+  validateComposerInput,
   mergeAttachmentDrafts,
   isMissingSessionFileError,
   isSessionDeletable,

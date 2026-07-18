@@ -20,6 +20,97 @@ function baseSession() {
   } as const;
 }
 
+describe("renderer per-session composer drafts", () => {
+  it("restores text, attachments, and slash state after switching sessions", () => {
+    const attachment = {
+      id: "attachment-a",
+      selectedPathToken: "token-a",
+      fileName: "notes.txt",
+      displayPath: "/project/notes.txt",
+      kind: "textFile",
+      sendMode: "pathReference",
+      outsideProject: false,
+      status: "ready",
+    } as const;
+    let drafts = {};
+    drafts = __rendererTestHooks.updateComposerDraft(
+      drafts,
+      "session-a",
+      () => ({
+        text: "/review this",
+        attachments: [attachment],
+        slashOpen: true,
+      }),
+    );
+    drafts = __rendererTestHooks.updateComposerDraft(
+      drafts,
+      "session-b",
+      () => ({ text: "Different session", attachments: [], slashOpen: false }),
+    );
+
+    expect(
+      __rendererTestHooks.composerDraftForSession(drafts, "session-a"),
+    ).toEqual({
+      text: "/review this",
+      attachments: [attachment],
+      slashOpen: true,
+    });
+    expect(
+      __rendererTestHooks.composerDraftForSession(drafts, "session-b"),
+    ).toEqual({ text: "Different session", attachments: [], slashOpen: false });
+    expect(__rendererTestHooks.hasComposerDraft(drafts, "session-a")).toBe(
+      true,
+    );
+  });
+
+  it("keeps the hidden new-session landing draft until its worker gets an id", () => {
+    const drafts = __rendererTestHooks.updateComposerDraft(
+      {},
+      "new-session",
+      () => ({ text: "Start here", attachments: [], slashOpen: false }),
+    );
+    const moved = __rendererTestHooks.moveComposerDraft(
+      drafts,
+      "new-session",
+      "runtime-1",
+    );
+
+    expect(
+      __rendererTestHooks.composerDraftForSession(moved, "runtime-1").text,
+    ).toBe("Start here");
+    expect(__rendererTestHooks.hasComposerDraft(moved, "new-session")).toBe(
+      false,
+    );
+  });
+
+  it("reports invalid attachments or image models before work is started", () => {
+    const missingAttachment = {
+      id: "missing",
+      selectedPathToken: "missing-token",
+      fileName: "missing.png",
+      displayPath: "/project/missing.png",
+      kind: "image",
+      sendMode: "imageInput",
+      outsideProject: false,
+      status: "missing",
+    } as const;
+    const imageAttachment = { ...missingAttachment, status: "ready" as const };
+
+    expect(
+      __rendererTestHooks.validateComposerInput({
+        attachments: [missingAttachment],
+        supportsImages: true,
+      }),
+    ).toBe("Remove or reselect deleted/unreadable attachments before sending.");
+    expect(
+      __rendererTestHooks.validateComposerInput({
+        attachments: [imageAttachment],
+        supportsImages: false,
+      }),
+    ).toBe("Selected model does not support image input.");
+  });
+});
+
 describe("renderer attachment actions", () => {
   it("deduplicates dropped and picked attachments by displayed file identity", () => {
     const existing = [
