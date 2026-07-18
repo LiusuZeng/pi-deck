@@ -68,7 +68,9 @@ function fakeRealModeEnv(options: {
 
 async function expectHealthyPreload(page: Page): Promise<void> {
   await expect(page.getByText("Preload error")).toHaveCount(0);
-  await expect(page.getByText(/secure renderer/i)).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Workspace options" }),
+  ).toBeVisible();
 }
 
 test("fake mode launches with backend runtime and send enabled", async () => {
@@ -186,8 +188,10 @@ test("extension UI confirm request completes through renderer, IPC, and fake Pi"
     await page
       .getByRole("button", { name: /Session: confirm extension request/ })
       .click();
-    await expect(page.getByRole("button", { name: "Yes" })).toBeVisible();
-    await page.getByRole("button", { name: "Yes" }).click();
+    await expect(
+      page.getByRole("button", { name: "Confirm", exact: true }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Confirm", exact: true }).click();
     await expect(
       page.getByText("Extension UI response delivered to Pi."),
     ).toBeVisible();
