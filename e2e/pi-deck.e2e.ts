@@ -277,6 +277,74 @@ test("real mode can show and resume a saved project session with fake Pi", async
   }
 });
 
+test("real mode keeps attention sessions visible, labels queues, searches, and refreshes", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-inbox-"));
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const sessionDir = path.join(agentDir, "sessions", "--e2e-inbox--");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(sessionDir, { recursive: true });
+  const writeSavedSession = (name: string, timestamp: string): void => {
+    fs.writeFileSync(
+      path.join(sessionDir, `${name}.jsonl`),
+      `${JSON.stringify({
+        type: "session",
+        version: 3,
+        id: name,
+        timestamp,
+        cwd: projectCwd,
+      })}\n`,
+    );
+  };
+  for (let index = 0; index < 7; index += 1) {
+    writeSavedSession(
+      `saved-inbox-${index}`,
+      `2026-07-02T00:0${index}:00.000Z`,
+    );
+  }
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: ["--stream-delay-ms", "10000", "--prompt-scenario", "queue"],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await page.getByLabel("Prompt text").fill("attention stays visible");
+    await page.getByRole("button", { name: "Send" }).click();
+    const sidebar = page.getByLabel("Sessions");
+    await expect(
+      sidebar.getByRole("button", { name: "Session: attention stays visible" }),
+    ).toBeVisible();
+    await expect(sidebar.getByText("Steer 1")).toBeVisible();
+    await expect(sidebar.getByText("Follow-up 2")).toBeVisible();
+    await expect(
+      sidebar.getByText(/Needs input 0 · Errors 0 · Working 1/),
+    ).toBeVisible();
+    await expect(
+      sidebar.getByRole("button", { name: /Browse 2 older sessions/ }),
+    ).toBeVisible();
+
+    await sidebar.getByLabel("Search sessions").fill("saved-inbox-6");
+    await expect(
+      sidebar.getByRole("button", { name: "Session: saved-inbox-6" }),
+    ).toBeVisible();
+
+    writeSavedSession("refreshed-inbox-target", "2026-07-03T00:00:00.000Z");
+    await sidebar.getByRole("button", { name: "Refresh sessions" }).click();
+    await sidebar.getByLabel("Search sessions").fill("refreshed-inbox-target");
+    await expect(
+      sidebar.getByRole("button", { name: "Session: refreshed-inbox-target" }),
+    ).toBeVisible();
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("real mode concurrent duplicate resume reuses one runtime with fake Pi", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-e2e-duplicate-resume-"),
