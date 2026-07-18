@@ -128,6 +128,42 @@ test("ProjectStore bulk session refresh persists once and skips an unchanged nor
   writeFile.mockRestore();
 });
 
+test("ProjectStore retries a failed bulk persist on an unchanged refresh", async () => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "pi-deck-project-store-retry-"),
+  );
+  const home = path.join(root, "home");
+  const projectDir = path.join(root, "project");
+  const sessionFile = path.join(root, "session.jsonl");
+  await fs.mkdir(projectDir, { recursive: true });
+  await fs.writeFile(sessionFile, "");
+  const project = await fs.realpath(projectDir);
+  const summary: ChatSessionSummary = {
+    id: sessionFile,
+    sessionFile,
+    title: "Retry session",
+    updatedAtMs: 100,
+    messageCount: 1,
+  };
+
+  const store = new ProjectStore(home);
+  await store.upsertAndActivateProject(project);
+  const writeFile = vi.spyOn(fs, "writeFile");
+  writeFile.mockRejectedValueOnce(new Error("injected write failure"));
+
+  await assert.rejects(
+    store.upsertSessionRefs(project, [summary]),
+    /injected write failure/,
+  );
+  await store.upsertSessionRefs(project, [summary]);
+  writeFile.mockRestore();
+
+  const reloaded = new ProjectStore(home);
+  const refs = await reloaded.getSessionRefs(project);
+  assert.equal(refs.length, 1);
+  assert.equal(refs[0]?.title, "Retry session");
+});
+
 test("ProjectStore bulk session upserts validate the entire batch before changing state", async () => {
   const root = await fs.mkdtemp(
     path.join(os.tmpdir(), "pi-deck-project-store-"),

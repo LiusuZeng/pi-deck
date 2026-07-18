@@ -20,7 +20,11 @@ export interface JsonlParseError {
   cause?: unknown;
 }
 
-export const DEFAULT_MAX_JSONL_LINE_BYTES = 8 * 1024 * 1024;
+// A get_messages response can legitimately contain several base64-encoded
+// images (each imported image is bounded at 20 MiB). Keep framing bounded while
+// leaving enough headroom for supported histories until image payloads move to
+// opaque main-owned tokens.
+export const DEFAULT_MAX_JSONL_LINE_BYTES = 256 * 1024 * 1024;
 
 export interface JsonlFramingParserOptions {
   onRecord: (record: JsonValue) => void;

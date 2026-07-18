@@ -74,6 +74,8 @@ export class ProjectStore {
   private state: ProjectStoreFile = emptyStore();
   private loaded = false;
   private persistQueue: Promise<void> = Promise.resolve();
+  private sessionRefsGeneration = 0;
+  private persistedSessionRefsGeneration = 0;
 
   constructor(
     private readonly piDeckHome: string,
@@ -290,17 +292,24 @@ export class ProjectStore {
       }
     }
 
-    if (!changed) {
-      return;
+    if (changed) {
+      // Keep the on-disk schema as the final guard before committing the batch.
+      const nextState = projectStoreFileSchema.parse({
+        ...this.state,
+        sessionRefs: nextRefs,
+      });
+      this.state = nextState;
+      this.sessionRefsGeneration += 1;
     }
 
-    // Keep the on-disk schema as the final guard before committing the batch.
-    const nextState = projectStoreFileSchema.parse({
-      ...this.state,
-      sessionRefs: nextRefs,
-    });
-    this.state = nextState;
-    await this.persist();
+    // Retry a prior failed batch write even when this scan produced the same
+    // normalized state. Otherwise the in-memory update could be lost at exit.
+    if (
+      changed ||
+      this.persistedSessionRefsGeneration < this.sessionRefsGeneration
+    ) {
+      await this.persist();
+    }
   }
 
   async upsertSessionRefFromSnapshot(options: {
@@ -396,7 +405,14 @@ export class ProjectStore {
   private async persist(): Promise<void> {
     this.persistQueue = this.persistQueue
       .catch(() => undefined)
-      .then(() => this.writeStoreFile());
+      .then(async () => {
+        const sessionRefsGeneration = this.sessionRefsGeneration;
+        await this.writeStoreFile();
+        this.persistedSessionRefsGeneration = Math.max(
+          this.persistedSessionRefsGeneration,
+          sessionRefsGeneration,
+        );
+      });
     return this.persistQueue;
   }
 

@@ -57,19 +57,24 @@ export async function validatePiSession(
   options: ValidatePiSessionOptions,
 ): Promise<PiSessionValidationResult> {
   let sessionDir: string;
+  try {
+    sessionDir = await fs.realpath(options.sessionDir);
+  } catch {
+    return { ok: false, reason: "configured session directory is unavailable" };
+  }
+
   let projectCwd: string;
+  try {
+    projectCwd = await fs.realpath(options.projectCwd);
+  } catch {
+    return { ok: false, reason: "project directory is unavailable" };
+  }
+
   let sessionFile: string;
   try {
-    [sessionDir, projectCwd, sessionFile] = await Promise.all([
-      fs.realpath(options.sessionDir),
-      fs.realpath(options.projectCwd),
-      fs.realpath(options.sessionFile),
-    ]);
+    sessionFile = await fs.realpath(options.sessionFile);
   } catch {
-    return {
-      ok: false,
-      reason: "session file, directory, or project is unavailable",
-    };
+    return { ok: false, reason: "session file is missing or unreadable" };
   }
 
   let sessionDirStat: Awaited<ReturnType<typeof fs.stat>>;

@@ -15,6 +15,7 @@ export const requiredOutputs = [
 const buildInputs = [
   "index.html",
   "package.json",
+  "package-lock.json",
   "tsconfig.base.json",
   "tsconfig.main.json",
   "tsconfig.renderer.json",
@@ -29,18 +30,19 @@ async function fileStats(filePath) {
   }
 }
 
-async function newestSourceMtime(directory) {
+async function newestBuildTreeMtime(directory) {
   let newest = 0;
   const entries = await readdir(directory, { withFileTypes: true });
   for (const entry of entries) {
     const entryPath = path.join(directory, entry.name);
     if (entry.isDirectory()) {
-      newest = Math.max(newest, await newestSourceMtime(entryPath));
+      newest = Math.max(newest, await newestBuildTreeMtime(entryPath));
     } else if (
       entry.isFile() &&
-      /\.(?:ts|tsx|css)$/.test(entry.name) &&
-      !/\.test\.(?:ts|tsx)$/.test(entry.name)
+      !/\.(?:test|spec)\.(?:[cm]?[jt]sx?)$/.test(entry.name)
     ) {
+      // Renderer imports can include JSON, SVG, fonts, and images in addition
+      // to TS/CSS. Conservatively include every non-test file in build trees.
       newest = Math.max(newest, (await stat(entryPath)).mtimeMs);
     }
   }
@@ -118,12 +120,14 @@ export async function validateBuiltApp(root = repoRoot) {
       const inputStats = await fileStats(path.join(root, relativePath));
       newestInputMtime = Math.max(newestInputMtime, inputStats?.mtimeMs ?? 0);
     }
-    const sourceDirectory = path.join(root, "src");
-    if ((await fileStats(sourceDirectory))?.isDirectory()) {
-      newestInputMtime = Math.max(
-        newestInputMtime,
-        await newestSourceMtime(sourceDirectory),
-      );
+    for (const buildTree of ["src", "public"]) {
+      const directory = path.join(root, buildTree);
+      if ((await fileStats(directory))?.isDirectory()) {
+        newestInputMtime = Math.max(
+          newestInputMtime,
+          await newestBuildTreeMtime(directory),
+        );
+      }
     }
     if (newestInputMtime > manifest.builtAtMs) {
       errors.push(

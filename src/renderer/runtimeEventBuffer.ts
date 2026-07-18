@@ -206,14 +206,12 @@ function coalescingKey(event: ChatRuntimeEvent): string | undefined {
 }
 
 function isTerminalMessageUpdate(event: ChatRuntimeEvent): boolean {
-  const assistantEventType = getString(
-    getRecord(event, "assistantMessageEvent"),
-    "type",
-  );
+  const assistantEvent = getRecord(event, "assistantMessageEvent");
+  const assistantEventType = getString(assistantEvent, "type");
   return (
     getBoolean(event, "done") === true ||
-    getBoolean(event, "isError") === true ||
-    getString(event, "error") !== undefined ||
+    hasRuntimeError(event) ||
+    hasRuntimeError(assistantEvent) ||
     assistantEventType === "done" ||
     assistantEventType === "error"
   );
@@ -223,12 +221,19 @@ function isTerminalToolUpdate(event: ChatRuntimeEvent): boolean {
   const status = getString(event, "status");
   return (
     getBoolean(event, "done") === true ||
-    getBoolean(event, "isError") === true ||
-    getString(event, "error") !== undefined ||
+    hasRuntimeError(event) ||
     status === "completed" ||
     status === "success" ||
     status === "error" ||
     status === "failed"
+  );
+}
+
+function hasRuntimeError(event: Record<string, unknown> | undefined): boolean {
+  return (
+    getBoolean(event, "isError") === true ||
+    (event?.error !== undefined && event.error !== null) ||
+    (event?.errorMessage !== undefined && event.errorMessage !== null)
   );
 }
 

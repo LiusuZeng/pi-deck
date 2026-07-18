@@ -138,6 +138,54 @@ describe("RuntimeEventBuffer", () => {
     expect(buffer.getStats()).toEqual({ pendingEntries: 0, pendingBytes: 0 });
   });
 
+  it("flushes partial text before object and nested stream errors", () => {
+    const scheduler = new ManualScheduler();
+    const delivered: ChatRuntimeEvent[] = [];
+    const buffer = new RuntimeEventBuffer({
+      deliver: (current) => delivered.push(current),
+      isRuntimeVisible: () => true,
+      scheduler,
+    });
+
+    buffer.handle(
+      event("message_update", "runtime-a", {
+        messageId: "message-1",
+        delta: "partial text",
+      }),
+    );
+    buffer.handle(
+      event("message_update", "runtime-a", {
+        messageId: "message-1",
+        error: { message: "provider failed" },
+      }),
+    );
+    buffer.handle(
+      event("message_update", "runtime-a", {
+        messageId: "message-2",
+        delta: "other partial",
+      }),
+    );
+    buffer.handle(
+      event("message_update", "runtime-a", {
+        messageId: "message-2",
+        assistantMessageEvent: {
+          type: "error",
+          error: { message: "nested failure" },
+        },
+      }),
+    );
+
+    expect(delivered).toHaveLength(4);
+    expect(delivered.map((current) => current.messageId)).toEqual([
+      "message-1",
+      "message-1",
+      "message-2",
+      "message-2",
+    ]);
+    expect(delivered[0]?.delta).toBe("partial text");
+    expect(delivered[2]?.delta).toBe("other partial");
+  });
+
   it("keeps pending updates isolated by runtime", () => {
     const scheduler = new ManualScheduler();
     const delivered: ChatRuntimeEvent[] = [];

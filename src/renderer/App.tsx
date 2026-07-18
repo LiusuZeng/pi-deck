@@ -167,6 +167,8 @@ interface SessionViewModel {
   pendingExtensionUiRequests?: PendingExtensionUiRequest[];
   /** Prompt retained only after a failed send so recovery can retry it. */
   retryPrompt?: { text: string; attachments: AttachmentDraft[] } | undefined;
+  /** A final message arrived but the authoritative agent_end has not. */
+  awaitingAgentEnd?: boolean;
 }
 
 interface ComposerDraftState {
@@ -724,10 +726,13 @@ export function App(): ReactElement {
               : session,
           ),
         );
+        const currentSession = sessionsRef.current.find(
+          (session) => session.id === runtimeId,
+        );
         if (
           status.state.isAgentActive &&
-          sessionsRef.current.find((session) => session.id === runtimeId)
-            ?.status === "aborting"
+          currentSession !== undefined &&
+          shouldReconcileSession(currentSession)
         ) {
           scheduleRuntimeStatusRetry(runtimeId);
         } else {
@@ -2772,6 +2777,7 @@ function reduceRuntimeEvent(
     case "agent_start":
       return {
         ...session,
+        awaitingAgentEnd: false,
         status: "working",
         baseState: "working",
         overlays: { ...session.overlays, streaming: true },
@@ -2887,6 +2893,7 @@ function reduceRuntimeEvent(
           : session.usageByMessageId;
       const nextSession: SessionViewModel = {
         ...session,
+        awaitingAgentEnd: false,
         ...(usageByMessageId !== undefined ? { usageByMessageId } : {}),
         ...(usageByMessageId !== undefined
           ? {
@@ -2960,6 +2967,7 @@ function reduceRuntimeEvent(
           ...session,
           status: "error",
           baseState: "error",
+          awaitingAgentEnd: false,
           runtimeBacked: false,
           resumeBacked: session.sessionFile !== undefined,
           subtitle: session.sessionFile
@@ -3272,6 +3280,7 @@ function reduceMessageUpdate(
           ? "Working · waiting for Pi completion"
           : `Working · ${backendLabel(session)} stream`,
     ...(isErrorUpdate ? { workingStartedAtMs: undefined } : {}),
+    awaitingAgentEnd: done && !isErrorUpdate,
     lastRuntimeEventLabel: isErrorUpdate
       ? "Pi reported an error"
       : done
@@ -5495,9 +5504,10 @@ function isSessionBusy(session: Pick<SessionViewModel, "status">): boolean {
 }
 
 function shouldReconcileSession(session: SessionViewModel): boolean {
-  // Healthy working turns are driven by ordered runtime events. Poll only an
-  // ambiguous local transition where an event could have been missed.
-  return session.runtimeBacked && isLifecycleTransition(session.status);
+  // Runtime events remain authoritative, but a bounded status fallback must
+  // include working turns so dropping both terminal events cannot leave the UI
+  // permanently busy.
+  return session.runtimeBacked && isSessionBusy(session);
 }
 
 function reconcileSessionWithRuntimeStatus(
@@ -5529,6 +5539,7 @@ function reconcileSessionWithRuntimeStatus(
       ...session,
       status: "idle",
       baseState: "idle",
+      awaitingAgentEnd: false,
       overlays: {
         ...session.overlays,
         streaming: false,

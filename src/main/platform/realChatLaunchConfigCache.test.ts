@@ -91,6 +91,34 @@ test("deduplicates Pi validation in flight and invalidates effective config inpu
   assert.equal(versionCount(versionRecord), 1);
 });
 
+test("revalidates Pi when a configured symlink is retargeted", async () => {
+  const root = tempDir("pi-deck-launch-config-symlink-cache-");
+  const binaryA = path.join(root, "pi-a");
+  const binaryB = path.join(root, "pi-b");
+  const configuredLink = path.join(root, "pi");
+  const versionRecord = path.join(root, "versions.log");
+  const projectCwd = path.join(root, "project");
+  writeCountingPi(binaryA, versionRecord);
+  writeCountingPi(binaryB, versionRecord);
+  fs.symlinkSync(binaryA, configuredLink);
+  fs.mkdirSync(projectCwd, { recursive: true });
+
+  const cache = new RealChatLaunchConfigCache();
+  const options = {
+    appSettings: { piBinaryPath: configuredLink },
+    env: { PATH: process.env.PATH ?? "" },
+    projectCwd,
+  };
+  const first = await cache.resolve(options);
+  fs.unlinkSync(configuredLink);
+  fs.symlinkSync(binaryB, configuredLink);
+  const second = await cache.resolve(options);
+
+  assert.equal(first.config.piBinary, fs.realpathSync(binaryA));
+  assert.equal(second.config.piBinary, fs.realpathSync(binaryB));
+  assert.equal(versionCount(versionRecord), 2);
+});
+
 test("revalidates Pi when the canonical binary identity changes", async () => {
   const root = tempDir("pi-deck-launch-config-binary-cache-");
   const piBinary = path.join(root, "pi");

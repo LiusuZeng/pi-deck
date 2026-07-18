@@ -171,7 +171,7 @@ describe("Pi session eligibility validation", () => {
 
     assert.deepEqual(missingResult, {
       ok: false,
-      reason: "session file, directory, or project is unavailable",
+      reason: "session file is missing or unreadable",
     });
     assert.deepEqual(malformedResult, {
       ok: false,

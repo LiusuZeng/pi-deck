@@ -810,6 +810,7 @@ describe("renderer message_update reduction", () => {
 
     expect(next.status).toBe("working");
     expect(next.baseState).toBe("working");
+    expect(next.awaitingAgentEnd).toBe(true);
     expect(next.subtitle).toContain("waiting for Pi completion");
   });
 
@@ -841,11 +842,15 @@ describe("renderer message_update reduction", () => {
     ).toBe("aborting");
   });
 
-  it("keeps status reconciliation runtime-scoped and skips healthy working turns", () => {
+  it("keeps quiet working reconciliation runtime-scoped", () => {
     const working = {
       ...baseSession(),
       status: "working",
       baseState: "working",
+    } as any;
+    const awaitingAgentEnd = {
+      ...working,
+      awaitingAgentEnd: true,
     } as any;
     const otherRuntimeStatus = {
       runtimeId: "session-2",
@@ -853,13 +858,16 @@ describe("renderer message_update reduction", () => {
       state: { isAgentActive: false },
     } as any;
 
-    expect(__rendererTestHooks.shouldReconcileSession(working)).toBe(false);
+    expect(__rendererTestHooks.shouldReconcileSession(working)).toBe(true);
+    expect(__rendererTestHooks.shouldReconcileSession(awaitingAgentEnd)).toBe(
+      true,
+    );
     expect(
       __rendererTestHooks.reconcileSessionWithRuntimeStatus(
-        working,
+        awaitingAgentEnd,
         otherRuntimeStatus,
       ),
-    ).toBe(working);
+    ).toBe(awaitingAgentEnd);
   });
 
   it("uses final event usage before requesting a status refresh", () => {

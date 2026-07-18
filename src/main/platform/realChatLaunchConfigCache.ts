@@ -1,3 +1,5 @@
+import os from "node:os";
+import path from "node:path";
 import { stat } from "node:fs/promises";
 import {
   getEffectivePiConfigSettingsPaths,
@@ -27,7 +29,8 @@ interface FileSnapshot {
 
 interface CachedBinary {
   inputKey: string;
-  snapshot: FileSnapshot;
+  canonicalSnapshot: FileSnapshot;
+  sourceSnapshot: FileSnapshot;
   resolution: PiBinaryResolution;
 }
 
@@ -143,8 +146,14 @@ export class RealChatLaunchConfigCache {
     });
     const cached = this.cachedBinary;
     if (cached !== undefined && cached.inputKey === inputKey) {
-      const currentSnapshot = await snapshotFile(cached.resolution.piBinary!);
-      if (sameSnapshot(cached.snapshot, currentSnapshot)) {
+      const [canonicalSnapshot, sourceSnapshot] = await Promise.all([
+        snapshotFile(cached.resolution.piBinary!),
+        snapshotFile(binarySourcePath(options, cached.resolution.piBinary!)),
+      ]);
+      if (
+        sameSnapshot(cached.canonicalSnapshot, canonicalSnapshot) &&
+        sameSnapshot(cached.sourceSnapshot, sourceSnapshot)
+      ) {
         return cached.resolution;
       }
     }
@@ -165,9 +174,14 @@ export class RealChatLaunchConfigCache {
         resolution.ok &&
         resolution.piBinary !== undefined
       ) {
+        const [canonicalSnapshot, sourceSnapshot] = await Promise.all([
+          snapshotFile(resolution.piBinary),
+          snapshotFile(binarySourcePath(options, resolution.piBinary)),
+        ]);
         this.cachedBinary = {
           inputKey,
-          snapshot: await snapshotFile(resolution.piBinary),
+          canonicalSnapshot,
+          sourceSnapshot,
           resolution,
         };
       }
@@ -180,6 +194,24 @@ export class RealChatLaunchConfigCache {
       this.binaryInFlight.delete(inputKey);
     }
   }
+}
+
+function binarySourcePath(
+  options: RealChatLaunchConfigCacheOptions,
+  canonicalBinary: string,
+): string {
+  const configured =
+    options.appSettings.piBinaryPath ?? options.appSettings.piBinary;
+  if (!configured) {
+    return canonicalBinary;
+  }
+  if (configured === "~") {
+    return os.homedir();
+  }
+  if (configured.startsWith(`~${path.sep}`)) {
+    return path.join(os.homedir(), configured.slice(2));
+  }
+  return path.resolve(configured);
 }
 
 async function snapshotFiles(paths: string[]): Promise<FileSnapshot[]> {

@@ -791,7 +791,7 @@ test("real mode reconciles a working session when completion event is missed", a
     await page.getByRole("button", { name: "Send" }).click();
     await expect(
       page.getByText(
-        "Reconciled from persisted Pi session because the live completion event was not observed.",
+        "Reconciled from Pi runtime status because the live completion event was not observed.",
       ),
     ).toBeVisible({ timeout: 10_000 });
     await expect(page.getByText("Agent is working…")).toHaveCount(0);
