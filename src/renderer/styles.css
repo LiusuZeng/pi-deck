@@ -1123,6 +1123,60 @@ h1 {
   color: #667085;
 }
 
+.extension-ui-card {
+  display: grid;
+  gap: 10px;
+  max-width: min(620px, 90%);
+  border: 1px solid #fdba74;
+  border-radius: 16px;
+  padding: 14px;
+  color: #7c2d12;
+  background: #fff7ed;
+  box-shadow: 0 10px 28px rgb(16 24 40 / 6%);
+}
+
+.extension-ui-card .eyebrow,
+.extension-ui-card h3,
+.extension-ui-card p {
+  margin: 0;
+}
+
+.extension-ui-card small {
+  color: #9a3412;
+}
+
+.extension-ui-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.extension-ui-actions button,
+.extension-ui-form input,
+.extension-ui-form textarea {
+  border: 1px solid #fdba74;
+  border-radius: 10px;
+  padding: 8px 10px;
+  color: #7c2d12;
+  background: #fff;
+}
+
+.extension-ui-actions button:last-child,
+.extension-ui-form button[type="submit"] {
+  color: #fff;
+  background: #c2410c;
+}
+
+.extension-ui-form {
+  display: grid;
+  gap: 8px;
+}
+
+.extension-ui-form textarea {
+  min-height: 120px;
+  resize: vertical;
+}
+
 .tool-card {
   max-width: min(920px, 90%);
   margin-left: 37px;

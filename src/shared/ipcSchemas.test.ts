@@ -11,6 +11,7 @@ import {
   chatInterventionRequestSchema,
   chatMessageSchema,
   chatPromptRequestSchema,
+  chatRespondToExtensionUiRequestSchema,
   pickProjectResultSchema,
   projectRefSchema,
 } from "./ipcSchemas.js";
@@ -134,6 +135,31 @@ describe("IPC schemas", () => {
         runtimeId: "runtime-1",
         text: "Queue this",
         streamingBehavior: "steer",
+      }),
+    ).toThrow();
+  });
+
+  it("validates strict, request-scoped extension UI response payloads", () => {
+    expect(
+      chatRespondToExtensionUiRequestSchema.parse({
+        runtimeId: "runtime-1",
+        requestId: "uuid-1",
+        response: { confirmed: true },
+      }),
+    ).toMatchObject({ runtimeId: "runtime-1", requestId: "uuid-1" });
+    expect(() =>
+      chatRespondToExtensionUiRequestSchema.parse({
+        runtimeId: "runtime-1",
+        requestId: "uuid-1",
+        response: { confirmed: true, value: "wrong" },
+      }),
+    ).toThrow();
+    expect(() =>
+      chatRespondToExtensionUiRequestSchema.parse({
+        runtimeId: "runtime-1",
+        requestId: "uuid-1",
+        response: { value: "x" },
+        arbitraryFileWrite: true,
       }),
     ).toThrow();
   });

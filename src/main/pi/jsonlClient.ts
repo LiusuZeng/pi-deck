@@ -255,6 +255,35 @@ export class JsonlRpcClient extends EventEmitter {
     });
   }
 
+  /**
+   * Write a protocol notification that deliberately has no RPC response.
+   * Extension UI responses use this path: Pi resumes the blocked extension but
+   * does not emit a normal command response.
+   */
+  send(record: JsonObject): Promise<void> {
+    if (
+      this.closed ||
+      this.child.killed ||
+      !this.child.stdin ||
+      this.child.stdin.destroyed
+    ) {
+      return Promise.reject(new Error("RPC subprocess is not writable"));
+    }
+
+    const payload = JSON.stringify(record) + "\n";
+    return new Promise<void>((resolve, reject) => {
+      this.child.stdin!.write(payload, "utf8", (error?: Error | null) => {
+        if (error) {
+          reject(
+            new Error(`Failed to write RPC notification: ${error.message}`),
+          );
+          return;
+        }
+        resolve();
+      });
+    });
+  }
+
   get pendingCount(): number {
     return this.pending.size;
   }

@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { PiWorker } from "./piWorker.js";
 import type {
+  ExtensionUiResponse,
   JsonObject,
   PiAdapter,
   PiMessage,
@@ -77,6 +78,13 @@ export class SinglePiAdapter implements PiAdapter {
 
   abort(runtimeId: RuntimeSessionId): Promise<void> {
     return this.getWorker(runtimeId).abort();
+  }
+
+  respondToExtensionUi(
+    runtimeId: RuntimeSessionId,
+    response: ExtensionUiResponse,
+  ): Promise<void> {
+    return this.getWorker(runtimeId).respondToExtensionUi(response);
   }
 
   request(

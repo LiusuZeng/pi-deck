@@ -58,6 +58,12 @@ export interface PromptInput {
   [key: string]: unknown;
 }
 
+/** Exact stdin payload shape for Pi's extension_ui_response sub-protocol. */
+export type ExtensionUiResponse =
+  | { id: string; confirmed: boolean }
+  | { id: string; value: string }
+  | { id: string; cancelled: true };
+
 export interface PiState {
   runtimeId?: RuntimeSessionId;
   sessionId?: string;
@@ -111,6 +117,10 @@ export interface PiAdapter {
   steer(runtimeId: RuntimeSessionId, input: PromptInput): Promise<void>;
   followUp(runtimeId: RuntimeSessionId, input: PromptInput): Promise<void>;
   abort(runtimeId: RuntimeSessionId): Promise<void>;
+  respondToExtensionUi(
+    runtimeId: RuntimeSessionId,
+    response: ExtensionUiResponse,
+  ): Promise<void>;
   closeSession(runtimeId: RuntimeSessionId): Promise<void>;
   onEvent(listener: (event: RuntimeEvent) => void): Unsubscribe;
 }

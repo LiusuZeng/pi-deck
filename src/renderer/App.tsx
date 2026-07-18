@@ -46,6 +46,19 @@ type LoadState =
 
 type SessionStatus = "idle" | "working" | "waiting" | "error";
 
+type ExtensionUiDialogMethod = "select" | "confirm" | "input" | "editor";
+
+interface PendingExtensionUiRequest {
+  id: string;
+  method: ExtensionUiDialogMethod;
+  title: string;
+  message?: string | undefined;
+  options?: string[] | undefined;
+  placeholder?: string | undefined;
+  prefill?: string | undefined;
+  timeout?: number | undefined;
+}
+
 interface TimelineAttachment {
   id: string;
   fileName: string;
@@ -141,6 +154,7 @@ interface SessionViewModel {
   projectId?: string;
   /** The saved session worker/transcript is being restored. */
   isResuming?: boolean;
+  pendingExtensionUiRequests?: PendingExtensionUiRequest[];
 }
 
 interface ComposerDraftState {
@@ -1151,6 +1165,29 @@ export function App(): ReactElement {
     void abortPrompt(selectedSession.id);
   }
 
+  async function handleExtensionUiResponse(
+    requestId: string,
+    response: { confirmed: boolean } | { value: string } | { cancelled: true },
+  ): Promise<void> {
+    if (!selectedSession.runtimeBacked) {
+      throw new Error(
+        "This extension UI request no longer has an attached Pi runtime.",
+      );
+    }
+    try {
+      await window.piDeck.chat.respondToExtensionUi({
+        runtimeId: selectedSession.id,
+        requestId,
+        response,
+      });
+      setUiMessage("Extension UI response delivered to Pi.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setComposerError(message);
+      throw error;
+    }
+  }
+
   function handleRecoverSelectedSession(): void {
     if (selectedSession.sessionFile === undefined) {
       setUiMessage(
@@ -1810,6 +1847,7 @@ export function App(): ReactElement {
               showAttachmentExamples={!isRealBackendMode}
               nowMs={nowMs}
               onRecoverSession={handleRecoverSelectedSession}
+              onRespondToExtensionUi={handleExtensionUiResponse}
             />
             {composer}
           </>
@@ -2513,15 +2551,22 @@ function reduceRuntimeEvent(
       return reduceExtensionUiRequestEvent(session, event);
     case "extension_ui_response_sent":
     case "extension_ui_request_timeout":
-      return {
-        ...session,
-        status: "working",
-        baseState: "working",
-        overlays: { ...session.overlays, needsUserInput: false },
-        subtitle: `Working · ${backendLabel(session)} stream`,
-        updatedAt: "Now",
-        updatedAtMs: Date.now(),
-      };
+      return clearExtensionUiRequest(session, getString(event, "requestId"));
+    case "extension_ui_response_failed":
+      return appendDiagnostic(
+        {
+          ...session,
+          status: "error",
+          baseState: "error",
+          subtitle: "Error · extension UI response was not delivered",
+        },
+        {
+          tone: "error",
+          content:
+            getString(event, "message") ??
+            "Pi Deck could not write the extension UI response to Pi.",
+        },
+      );
     case "agent_end": {
       const status = getString(event, "status");
       const errorMessage = getRuntimeEventErrorMessage(event);
@@ -2582,6 +2627,12 @@ function reduceRuntimeEvent(
         content: getString(event, "message") ?? "Backend diagnostic event",
       });
     case "worker_exit":
+      // An intentional close already detached this runtime and preserved the
+      // saved-session row. Its late process-exit event must not turn that row
+      // into an error.
+      if (!session.runtimeBacked && session.resumeBacked === true) {
+        return session;
+      }
       return appendDiagnostic(
         {
           ...session,
@@ -2607,32 +2658,112 @@ function reduceExtensionUiRequestEvent(
   session: SessionViewModel,
   event: ChatRuntimeEvent,
 ): SessionViewModel {
-  const method = getString(event, "method") ?? "unknown";
-  if (!["select", "confirm", "input", "editor"].includes(method)) {
-    return session;
+  const method = getString(event, "method");
+  if (!isExtensionUiDialogMethod(method)) {
+    return appendDiagnostic(session, {
+      tone: "info",
+      content: `Extension UI method “${method ?? "unknown"}” is not supported by Pi Deck. Only select, confirm, input, and editor requests can be answered.`,
+    });
   }
 
+  // Pi puts dialog fields at the top level. params supports old fixture events.
   const params = getRecord(event, "params");
-  const title = getStringFromRecord(params, "title") ?? method;
-  const message =
-    getStringFromRecord(params, "message") ??
-    "Pi extension UI is waiting for input.";
+  const requestId = getString(event, "id") ?? getString(event, "requestId");
+  if (requestId === undefined) {
+    return appendDiagnostic(session, {
+      tone: "error",
+      content:
+        "Pi sent an extension UI dialog without an id, so Pi Deck cannot safely answer it.",
+    });
+  }
+  const options = getStringArray(event, "options");
+  const request: PendingExtensionUiRequest = {
+    id: requestId,
+    method,
+    title:
+      getString(event, "title") ??
+      getStringFromRecord(params, "title") ??
+      method,
+    ...((getString(event, "message") ?? getStringFromRecord(params, "message"))
+      ? {
+          message:
+            getString(event, "message") ??
+            getStringFromRecord(params, "message"),
+        }
+      : {}),
+    ...(options !== undefined ? { options } : {}),
+    ...(getString(event, "placeholder") !== undefined
+      ? { placeholder: getString(event, "placeholder") }
+      : {}),
+    ...(getString(event, "prefill") !== undefined
+      ? { prefill: getString(event, "prefill") }
+      : {}),
+    ...(getNumber(event, "timeout") !== undefined
+      ? { timeout: getNumber(event, "timeout") }
+      : {}),
+  };
+  const pending = session.pendingExtensionUiRequests ?? [];
+  const pendingExtensionUiRequests = pending.some(
+    (item) => item.id === request.id,
+  )
+    ? pending.map((item) => (item.id === request.id ? request : item))
+    : [...pending, request];
 
-  return appendDiagnostic(
-    {
-      ...session,
-      status: "waiting",
-      baseState: "waitingForInput",
-      overlays: { ...session.overlays, needsUserInput: true },
-      subtitle: "Waiting · extension input required",
-      updatedAt: "Now",
-      updatedAtMs: Date.now(),
-    },
-    {
-      tone: "info",
-      content: `Extension UI request (${title}): ${message}`,
-    },
+  return {
+    ...session,
+    status: "waiting",
+    baseState: "waitingForInput",
+    overlays: { ...session.overlays, needsUserInput: true },
+    pendingExtensionUiRequests,
+    subtitle: "Waiting · extension input required",
+    updatedAt: "Now",
+    updatedAtMs: Date.now(),
+  };
+}
+
+function clearExtensionUiRequest(
+  session: SessionViewModel,
+  requestId: string | undefined,
+): SessionViewModel {
+  const pending = session.pendingExtensionUiRequests ?? [];
+  const pendingExtensionUiRequests =
+    requestId === undefined
+      ? pending.slice(1)
+      : pending.filter((request) => request.id !== requestId);
+  const stillWaiting = pendingExtensionUiRequests.length > 0;
+  return {
+    ...session,
+    status: stillWaiting ? "waiting" : "working",
+    baseState: stillWaiting ? "waitingForInput" : "working",
+    pendingExtensionUiRequests,
+    overlays: { ...session.overlays, needsUserInput: stillWaiting },
+    subtitle: stillWaiting
+      ? "Waiting · extension input required"
+      : `Working · ${backendLabel(session)} stream`,
+    updatedAt: "Now",
+    updatedAtMs: Date.now(),
+  };
+}
+
+function isExtensionUiDialogMethod(
+  method: string | undefined,
+): method is ExtensionUiDialogMethod {
+  return (
+    method === "select" ||
+    method === "confirm" ||
+    method === "input" ||
+    method === "editor"
   );
+}
+
+function getStringArray(
+  event: ChatRuntimeEvent,
+  key: string,
+): string[] | undefined {
+  const value = getArray(event, key);
+  return value?.every((item) => typeof item === "string")
+    ? (value as string[])
+    : undefined;
 }
 
 function reduceToolExecutionEvent(
@@ -3983,6 +4114,10 @@ function ChatTimeline(props: {
   showAttachmentExamples: boolean;
   nowMs: number;
   onRecoverSession(): void;
+  onRespondToExtensionUi(
+    requestId: string,
+    response: { confirmed: boolean } | { value: string } | { cancelled: true },
+  ): Promise<void>;
 }): ReactElement {
   const hasItems = props.session.timeline.length > 0;
   const showPendingAgent =
@@ -4054,6 +4189,14 @@ function ChatTimeline(props: {
 
         {props.showAttachmentExamples ? <AttachmentExampleStrip /> : null}
 
+        {(props.session.pendingExtensionUiRequests ?? []).map((request) => (
+          <ExtensionUiCard
+            key={request.id}
+            request={request}
+            onRespond={props.onRespondToExtensionUi}
+          />
+        ))}
+
         {props.session.timeline.map((item) => (
           <TimelineRow key={item.id} item={item} />
         ))}
@@ -4123,6 +4266,124 @@ function EmptyTimelineState(props: {
       <h2>No messages yet</h2>
       <p>{copy}</p>
     </div>
+  );
+}
+
+function ExtensionUiCard(props: {
+  request: PendingExtensionUiRequest;
+  onRespond(
+    requestId: string,
+    response: { confirmed: boolean } | { value: string } | { cancelled: true },
+  ): Promise<void>;
+}): ReactElement {
+  const [value, setValue] = useState(props.request.prefill ?? "");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | undefined>();
+
+  async function respond(
+    response: { confirmed: boolean } | { value: string } | { cancelled: true },
+  ): Promise<void> {
+    setSubmitting(true);
+    setError(undefined);
+    try {
+      await props.onRespond(props.request.id, response);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <article
+      className="extension-ui-card"
+      aria-label={`Extension request: ${props.request.title}`}
+    >
+      <p className="eyebrow">Pi extension request</p>
+      <h3>{props.request.title}</h3>
+      {props.request.message ? <p>{props.request.message}</p> : null}
+      {props.request.timeout !== undefined ? (
+        <small>Pi owns this request timeout; answer before it expires.</small>
+      ) : null}
+      {props.request.method === "confirm" ? (
+        <div className="extension-ui-actions">
+          <button
+            type="button"
+            disabled={submitting}
+            onClick={() => void respond({ confirmed: false })}
+          >
+            No
+          </button>
+          <button
+            type="button"
+            disabled={submitting}
+            onClick={() => void respond({ confirmed: true })}
+          >
+            Yes
+          </button>
+        </div>
+      ) : null}
+      {props.request.method === "select" ? (
+        <div className="extension-ui-actions">
+          {(props.request.options ?? []).map((option) => (
+            <button
+              key={option}
+              type="button"
+              disabled={submitting}
+              onClick={() => void respond({ value: option })}
+            >
+              {option}
+            </button>
+          ))}
+          <button
+            type="button"
+            disabled={submitting}
+            onClick={() => void respond({ cancelled: true })}
+          >
+            Cancel
+          </button>
+        </div>
+      ) : null}
+      {props.request.method === "input" || props.request.method === "editor" ? (
+        <form
+          className="extension-ui-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void respond({ value });
+          }}
+        >
+          {props.request.method === "editor" ? (
+            <textarea
+              aria-label={`${props.request.title} value`}
+              value={value}
+              placeholder={props.request.placeholder}
+              disabled={submitting}
+              onChange={(event) => setValue(event.target.value)}
+            />
+          ) : (
+            <input
+              aria-label={`${props.request.title} value`}
+              value={value}
+              placeholder={props.request.placeholder}
+              disabled={submitting}
+              onChange={(event) => setValue(event.target.value)}
+            />
+          )}
+          <div className="extension-ui-actions">
+            <button
+              type="button"
+              disabled={submitting}
+              onClick={() => void respond({ cancelled: true })}
+            >
+              Cancel
+            </button>
+            <button type="submit" disabled={submitting}>
+              {submitting ? "Sending…" : "Submit"}
+            </button>
+          </div>
+        </form>
+      ) : null}
+      {error ? <p className="inline-error">{error}</p> : null}
+    </article>
   );
 }
 

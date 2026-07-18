@@ -34,6 +34,7 @@ import {
   chatListSessionsResultSchema,
   chatPromptRequestSchema,
   chatResumeSessionRequestSchema,
+  chatRespondToExtensionUiRequestSchema,
   chatSetModelRequestSchema,
   chatSetThinkingRequestSchema,
   chatRuntimeEventSchema,
@@ -55,6 +56,7 @@ import type {
   ChatDeleteSessionResult,
   ChatListCommandsResult,
   ChatListSessionsResult,
+  ChatRespondToExtensionUiRequest,
   ChatSnapshot,
   PickAttachmentsResult,
   PickProjectResult,
@@ -112,6 +114,17 @@ const chatRuntimeSessionFiles = new Map<string, string>();
 const chatRuntimeProjectIds = new Map<string, string>();
 const chatSessionFileLocks = new Map<string, string>();
 const chatSessionResumePromises = new Map<string, Promise<ChatSnapshot>>();
+const pendingExtensionUiRequests = new Map<
+  string,
+  Map<
+    string,
+    {
+      method: "select" | "confirm" | "input" | "editor";
+      timer?: NodeJS.Timeout;
+    }
+  >
+>();
+const extensionUiTimeoutGraceMs = 1_000;
 let chatWorkerCreationTail: Promise<void> = Promise.resolve();
 let chatEventUnsubscribe: (() => void) | undefined;
 let selectedRealProjectCwd: string | undefined;
@@ -440,6 +453,17 @@ function registerIpcHandlers(
   });
 
   registerValidatedIpc({
+    channel: ipcChannels.chatRespondToExtensionUi,
+    requestSchema: chatRespondToExtensionUiRequestSchema,
+    responseSchema: z.void(),
+    diagnostics: diagnosticsService,
+    handler: async (request) => {
+      await respondToExtensionUi(store, diagnosticsService, request);
+      return undefined;
+    },
+  });
+
+  registerValidatedIpc({
     channel: ipcChannels.chatCloseSession,
     requestSchema: chatCloseSessionRequestSchema,
     responseSchema: z.void(),
@@ -683,6 +707,7 @@ async function initializeChatAdapter(
       );
       return;
     }
+    trackExtensionUiRuntimeEvent(parsed.data);
     sendChatEventToRenderer(parsed.data);
     if (parsed.data.type === "worker_exit") {
       // A child exit does not go through closeSession(), so remove it from the
@@ -758,6 +783,134 @@ function getChatWorkerCapacity(): WorkerCapacity {
   return chatWorkerCapacity;
 }
 
+function trackExtensionUiRuntimeEvent(
+  event: z.infer<typeof chatRuntimeEventSchema>,
+): void {
+  if (event.type !== "extension_ui_request") {
+    return;
+  }
+  const method = getExtensionUiDialogMethod(event.method);
+  const requestId = typeof event.id === "string" ? event.id : undefined;
+  if (method === undefined || requestId === undefined) {
+    return;
+  }
+
+  const requests = pendingExtensionUiRequests.get(event.runtimeId) ?? new Map();
+  const existing = requests.get(requestId);
+  if (existing?.timer !== undefined) clearTimeout(existing.timer);
+  const timeout =
+    typeof event.timeout === "number" && event.timeout >= 0
+      ? event.timeout
+      : undefined;
+  const timer =
+    timeout === undefined
+      ? undefined
+      : setTimeout(() => {
+          const pending = pendingExtensionUiRequests.get(event.runtimeId);
+          if (pending === undefined || pending.get(requestId)?.timer !== timer)
+            return;
+          pending.delete(requestId);
+          if (pending.size === 0)
+            pendingExtensionUiRequests.delete(event.runtimeId);
+          sendChatEventToRenderer({
+            type: "extension_ui_request_timeout",
+            runtimeId: event.runtimeId,
+            requestId,
+          });
+        }, timeout + extensionUiTimeoutGraceMs);
+  if (timer !== undefined) timer.unref();
+  requests.set(requestId, {
+    method,
+    ...(timer !== undefined ? { timer } : {}),
+  });
+  pendingExtensionUiRequests.set(event.runtimeId, requests);
+}
+
+async function respondToExtensionUi(
+  store: SettingsStore,
+  diagnosticsService: DiagnosticsService,
+  request: ChatRespondToExtensionUiRequest,
+): Promise<void> {
+  const adapter = await ensureChatAdapter(store, diagnosticsService);
+  if (!adapter.hasRuntime(request.runtimeId)) {
+    throw new Error(
+      `Extension UI runtime is no longer attached: ${request.runtimeId}`,
+    );
+  }
+  await assertRuntimeInActiveProject(request.runtimeId);
+  const pending = pendingExtensionUiRequests
+    .get(request.runtimeId)
+    ?.get(request.requestId);
+  if (pending === undefined) {
+    throw new Error(
+      `Extension UI request ${request.requestId} is no longer pending for this runtime. It may have timed out or already been answered.`,
+    );
+  }
+  if (!isValidExtensionUiResponse(pending.method, request.response)) {
+    throw new Error(
+      `Invalid response for Pi extension UI ${pending.method} request.`,
+    );
+  }
+
+  try {
+    await adapter.respondToExtensionUi(request.runtimeId, {
+      id: request.requestId,
+      ...request.response,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    diagnosticsService.recordError(
+      `Failed to write extension UI response ${request.requestId} for ${request.runtimeId}: ${message}`,
+    );
+    sendChatEventToRenderer({
+      type: "extension_ui_response_failed",
+      runtimeId: request.runtimeId,
+      requestId: request.requestId,
+      message: `Could not deliver extension UI response: ${message}`,
+    });
+    throw error;
+  }
+
+  if (pending.timer !== undefined) clearTimeout(pending.timer);
+  const requests = pendingExtensionUiRequests.get(request.runtimeId);
+  requests?.delete(request.requestId);
+  if (requests?.size === 0)
+    pendingExtensionUiRequests.delete(request.runtimeId);
+  sendChatEventToRenderer({
+    type: "extension_ui_response_sent",
+    runtimeId: request.runtimeId,
+    requestId: request.requestId,
+  });
+}
+
+function getExtensionUiDialogMethod(
+  value: unknown,
+): "select" | "confirm" | "input" | "editor" | undefined {
+  return value === "select" ||
+    value === "confirm" ||
+    value === "input" ||
+    value === "editor"
+    ? value
+    : undefined;
+}
+
+function isValidExtensionUiResponse(
+  method: "select" | "confirm" | "input" | "editor",
+  response: ChatRespondToExtensionUiRequest["response"],
+): boolean {
+  if ("cancelled" in response) return true;
+  return method === "confirm" ? "confirmed" in response : "value" in response;
+}
+
+function clearPendingExtensionUiRequests(runtimeId: string): void {
+  const requests = pendingExtensionUiRequests.get(runtimeId);
+  if (requests === undefined) return;
+  for (const pending of requests.values()) {
+    if (pending.timer !== undefined) clearTimeout(pending.timer);
+  }
+  pendingExtensionUiRequests.delete(runtimeId);
+}
+
 function sendChatEventToRenderer(
   event: z.infer<typeof chatRuntimeEventSchema>,
 ): void {
@@ -822,6 +975,7 @@ async function assertRuntimeInActiveProject(runtimeId: string): Promise<void> {
 }
 
 function forgetChatRuntime(runtimeId: string): void {
+  clearPendingExtensionUiRequests(runtimeId);
   chatRuntimeIds.delete(runtimeId);
   chatRuntimeModes.delete(runtimeId);
   chatWorkerCwds.delete(runtimeId);
@@ -1017,6 +1171,9 @@ async function closeChatWorker(): Promise<void> {
   chatRuntimeProjectIds.clear();
   chatSessionFileLocks.clear();
   chatSessionResumePromises.clear();
+  for (const runtimeId of [...pendingExtensionUiRequests.keys()]) {
+    clearPendingExtensionUiRequests(runtimeId);
+  }
 
   if (adapter === undefined || runtimeIds.length === 0) {
     return;
