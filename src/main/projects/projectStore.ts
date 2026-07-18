@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
+import { chatSessionSummarySchema } from "../../shared/ipcSchemas.js";
 import type {
   ChatSessionSummary,
   ProjectListResult,
@@ -196,31 +197,109 @@ export class ProjectStore {
     projectId: string,
     summary: ChatSessionSummary,
   ): Promise<void> {
-    await this.loadIfNeeded();
-    const sessionFile = await canonicalOrResolved(summary.sessionFile);
-    const now = Date.now();
-    const index = this.state.sessionRefs.findIndex(
-      (ref) => ref.projectId === projectId && ref.sessionFile === sessionFile,
+    await this.upsertSessionRefs(projectId, [summary]);
+  }
+
+  /**
+   * Merge a scan's session summaries in one validated in-memory transaction.
+   * Canonicalize and validate every input before changing state so a malformed
+   * batch cannot leave partially persisted session metadata behind.
+   */
+  async upsertSessionRefs(
+    projectId: string,
+    summaries: readonly ChatSessionSummary[],
+    options: { missingSessionFiles?: readonly string[] } = {},
+  ): Promise<void> {
+    const validProjectId = z.string().min(1).parse(projectId);
+    const validSummaries = summaries.map((summary) => {
+      const parsed = chatSessionSummarySchema.parse(summary);
+      z.string().min(1).parse(parsed.sessionFile);
+      return parsed;
+    });
+    const missingSessionFiles = (options.missingSessionFiles ?? []).map(
+      (sessionFile) => z.string().min(1).parse(sessionFile),
     );
-    const existing = index >= 0 ? this.state.sessionRefs[index] : undefined;
-    const next: ProjectSessionRef = {
-      projectId,
-      sessionFile,
-      ...(summary.sessionId ? { sessionId: summary.sessionId } : {}),
-      title: summary.title,
-      ...(summary.cwd ? { cwd: summary.cwd } : {}),
-      ...(summary.preview ? { preview: summary.preview } : {}),
-      addedAtMs: existing?.addedAtMs ?? now,
-      lastSeenAtMs: now,
-      lastKnownUpdatedAtMs: summary.updatedAtMs,
-      ...(summary.createdAtMs ? { createdAtMs: summary.createdAtMs } : {}),
-      messageCount: summary.messageCount,
-    };
-    if (index >= 0) {
-      this.state.sessionRefs[index] = next;
-    } else {
-      this.state.sessionRefs.push(next);
+    const [canonicalSummaries, canonicalMissingSessionFiles] =
+      await Promise.all([
+        Promise.all(
+          validSummaries.map(async (summary) => ({
+            summary,
+            sessionFile: await canonicalOrResolved(summary.sessionFile),
+          })),
+        ),
+        Promise.all(
+          missingSessionFiles.map((sessionFile) =>
+            canonicalOrResolved(sessionFile),
+          ),
+        ),
+      ]);
+
+    await this.loadIfNeeded();
+    const now = Date.now();
+    const nextRefs = [...this.state.sessionRefs];
+    const indexes = new Map(
+      nextRefs.map((ref, index) => [
+        sessionRefKey(ref.projectId, ref.sessionFile),
+        index,
+      ]),
+    );
+    let changed = false;
+
+    for (const { summary, sessionFile } of canonicalSummaries) {
+      const key = sessionRefKey(validProjectId, sessionFile);
+      const index = indexes.get(key);
+      const existing = index === undefined ? undefined : nextRefs[index];
+      const candidate: ProjectSessionRef = {
+        projectId: validProjectId,
+        sessionFile,
+        ...(summary.sessionId ? { sessionId: summary.sessionId } : {}),
+        title: summary.title,
+        ...(summary.cwd ? { cwd: summary.cwd } : {}),
+        ...(summary.preview ? { preview: summary.preview } : {}),
+        addedAtMs: existing?.addedAtMs ?? now,
+        lastSeenAtMs: existing?.lastSeenAtMs ?? now,
+        lastKnownUpdatedAtMs: summary.updatedAtMs,
+        ...(summary.createdAtMs !== undefined
+          ? { createdAtMs: summary.createdAtMs }
+          : {}),
+        messageCount: summary.messageCount,
+      };
+
+      if (existing && sameSessionRefData(existing, candidate)) {
+        continue;
+      }
+      candidate.lastSeenAtMs = now;
+      if (index === undefined) {
+        indexes.set(key, nextRefs.length);
+        nextRefs.push(candidate);
+      } else {
+        nextRefs[index] = candidate;
+      }
+      changed = true;
     }
+
+    for (const sessionFile of canonicalMissingSessionFiles) {
+      const index = indexes.get(sessionRefKey(validProjectId, sessionFile));
+      if (index === undefined) {
+        continue;
+      }
+      const existing = nextRefs[index];
+      if (existing && existing.missingSinceMs === undefined) {
+        nextRefs[index] = { ...existing, missingSinceMs: now };
+        changed = true;
+      }
+    }
+
+    if (!changed) {
+      return;
+    }
+
+    // Keep the on-disk schema as the final guard before committing the batch.
+    const nextState = projectStoreFileSchema.parse({
+      ...this.state,
+      sessionRefs: nextRefs,
+    });
+    this.state = nextState;
     await this.persist();
   }
 
@@ -329,6 +408,28 @@ export class ProjectStore {
     });
     await fs.rename(tempFile, this.storeFile);
   }
+}
+
+function sessionRefKey(projectId: string, sessionFile: string): string {
+  return `${projectId}\u0000${sessionFile}`;
+}
+
+function sameSessionRefData(
+  existing: ProjectSessionRef,
+  candidate: ProjectSessionRef,
+): boolean {
+  return (
+    existing.projectId === candidate.projectId &&
+    existing.sessionFile === candidate.sessionFile &&
+    existing.sessionId === candidate.sessionId &&
+    existing.title === candidate.title &&
+    existing.cwd === candidate.cwd &&
+    existing.preview === candidate.preview &&
+    existing.lastKnownUpdatedAtMs === candidate.lastKnownUpdatedAtMs &&
+    existing.createdAtMs === candidate.createdAtMs &&
+    existing.messageCount === candidate.messageCount &&
+    existing.missingSinceMs === undefined
+  );
 }
 
 function toProjectRef(project: ProjectRecord): ProjectRef {

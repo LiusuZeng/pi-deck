@@ -1404,18 +1404,15 @@ async function mergeProjectSessionRefs(
     return;
   }
 
-  for (const session of sessionsByFile.values()) {
-    await store.upsertSessionRef(projectId, session);
-  }
-
   const refs = await store.getSessionRefs(projectId);
+  const missingSessionFiles: string[] = [];
   for (const ref of refs) {
     if (sessionsByFile.has(ref.sessionFile)) {
       continue;
     }
     const canonical = await safeRealpath(ref.sessionFile);
     if (canonical === undefined) {
-      await store.markSessionMissing(projectId, ref.sessionFile);
+      missingSessionFiles.push(ref.sessionFile);
       diagnostics.push(
         `Project session ref is missing or unreadable and was hidden: ${ref.sessionFile}`,
       );
@@ -1433,6 +1430,10 @@ async function mergeProjectSessionRefs(
       ...(ref.preview ? { preview: ref.preview } : {}),
     });
   }
+
+  await store.upsertSessionRefs(projectId, [...sessionsByFile.values()], {
+    missingSessionFiles,
+  });
 }
 
 async function deleteChatSession(

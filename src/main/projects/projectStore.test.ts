@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { test } from "vitest";
+import { test, vi } from "vitest";
 import { ProjectStore } from "./projectStore.js";
 import type { ChatSessionSummary } from "../../shared/types.js";
 
@@ -69,6 +69,94 @@ test("ProjectStore backs up corrupt metadata and recovers to defaults", async ()
   assert.equal(listed.projects.length, 0);
   const files = await fs.readdir(home);
   assert.ok(files.some((file) => file.startsWith("projects.json.corrupt-")));
+});
+
+test("ProjectStore bulk session refresh persists once and skips an unchanged normalized refresh", async () => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "pi-deck-project-store-"),
+  );
+  const home = path.join(root, "home");
+  const projectDir = path.join(root, "project");
+  const sessionsDir = path.join(root, "sessions");
+  await fs.mkdir(projectDir, { recursive: true });
+  await fs.mkdir(sessionsDir, { recursive: true });
+  const project = await fs.realpath(projectDir);
+  const sessionFiles = await Promise.all(
+    ["one.jsonl", "two.jsonl", "three.jsonl"].map(async (name) => {
+      const sessionFile = path.join(sessionsDir, name);
+      await fs.writeFile(sessionFile, "");
+      return sessionFile;
+    }),
+  );
+  const summaries: ChatSessionSummary[] = sessionFiles.map(
+    (sessionFile, index) => ({
+      id: sessionFile,
+      sessionFile,
+      sessionId: `session-${index}`,
+      cwd: project,
+      title: `Session ${index}`,
+      updatedAtMs: 100 + index,
+      createdAtMs: 50 + index,
+      messageCount: index,
+      preview: `preview ${index}`,
+    }),
+  );
+
+  const store = new ProjectStore(home);
+  await store.upsertAndActivateProject(project);
+  const writeFile = vi.spyOn(fs, "writeFile");
+
+  await store.upsertSessionRefs(project, summaries);
+  assert.equal(writeFile.mock.calls.length, 1);
+  assert.equal((await store.getSessionRefs(project)).length, summaries.length);
+
+  writeFile.mockClear();
+  await store.upsertSessionRefs(project, summaries);
+  assert.equal(writeFile.mock.calls.length, 0);
+
+  writeFile.mockClear();
+  await store.upsertSessionRefs(project, [], {
+    missingSessionFiles: sessionFiles.slice(0, 2),
+  });
+  assert.equal(writeFile.mock.calls.length, 1);
+
+  writeFile.mockClear();
+  await store.upsertSessionRefs(project, [], {
+    missingSessionFiles: sessionFiles.slice(0, 2),
+  });
+  assert.equal(writeFile.mock.calls.length, 0);
+  writeFile.mockRestore();
+});
+
+test("ProjectStore bulk session upserts validate the entire batch before changing state", async () => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "pi-deck-project-store-"),
+  );
+  const home = path.join(root, "home");
+  const projectDir = path.join(root, "project");
+  const sessionsDir = path.join(root, "sessions");
+  await fs.mkdir(projectDir, { recursive: true });
+  await fs.mkdir(sessionsDir, { recursive: true });
+  const project = await fs.realpath(projectDir);
+  const sessionFile = path.join(sessionsDir, "session.jsonl");
+  await fs.writeFile(sessionFile, "");
+
+  const store = new ProjectStore(home);
+  await store.upsertAndActivateProject(project);
+  const writeFile = vi.spyOn(fs, "writeFile");
+  const valid: ChatSessionSummary = {
+    id: sessionFile,
+    sessionFile,
+    title: "Valid session",
+    updatedAtMs: 100,
+    messageCount: 1,
+  };
+  const invalid = { ...valid, sessionFile: "" } as ChatSessionSummary;
+
+  await assert.rejects(store.upsertSessionRefs(project, [valid, invalid]));
+  assert.equal((await store.getSessionRefs(project)).length, 0);
+  assert.equal(writeFile.mock.calls.length, 0);
+  writeFile.mockRestore();
 });
 
 test("ProjectStore upserts and marks project session refs by canonical file", async () => {
