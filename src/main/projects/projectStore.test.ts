@@ -55,6 +55,25 @@ test("ProjectStore persists active canonical project and avoids duplicate upsert
   assert.equal(listed.projects.length, 1);
 });
 
+test("ProjectStore marks deleted recent project folders as invalid", async () => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "pi-deck-project-store-"),
+  );
+  const home = path.join(root, "home");
+  const projectDir = path.join(root, "deleted-project");
+  await fs.mkdir(projectDir, { recursive: true });
+
+  const store = new ProjectStore(home);
+  await store.upsertAndActivateProject(projectDir);
+  await fs.rm(projectDir, { recursive: true });
+
+  const listed = await store.list();
+  assert.equal(
+    listed.projects[0]?.invalidReason,
+    "Project folder is missing or unreadable.",
+  );
+});
+
 test("ProjectStore backs up corrupt metadata and recovers to defaults", async () => {
   const root = await fs.mkdtemp(
     path.join(os.tmpdir(), "pi-deck-project-store-"),

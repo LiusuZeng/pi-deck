@@ -115,6 +115,32 @@ export class ProjectStore {
 
   async list(): Promise<ProjectListResult> {
     await this.loadIfNeeded();
+    let changed = false;
+    for (const project of this.state.projects) {
+      if (project.archivedAtMs !== undefined) {
+        continue;
+      }
+      try {
+        const stat = await fs.stat(project.rootPath);
+        const invalidReason = stat.isDirectory()
+          ? undefined
+          : "Project path is not a folder.";
+        if (project.invalidReason !== invalidReason) {
+          project.invalidReason = invalidReason;
+          changed = true;
+        }
+      } catch {
+        const invalidReason = "Project folder is missing or unreadable.";
+        if (project.invalidReason !== invalidReason) {
+          project.invalidReason = invalidReason;
+          changed = true;
+        }
+      }
+    }
+    if (changed) {
+      await this.persist();
+    }
+
     const activeProject = this.getActiveProjectRecordSync();
     return {
       ...(this.state.activeProjectId
