@@ -118,7 +118,10 @@ export interface PiDeckApi {
     deleteAllSessions(
       request?: ChatDeleteAllSessionsRequest,
     ): Promise<ChatDeleteAllSessionsResult>;
-    listModels(request: { runtimeId: string }): Promise<ChatListModelsResult>;
+    listModels(request: {
+      runtimeId?: string;
+      projectId?: string;
+    }): Promise<ChatListModelsResult>;
     listCommands(
       request: ChatListCommandsRequest,
     ): Promise<ChatListCommandsResult>;

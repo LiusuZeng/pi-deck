@@ -113,11 +113,8 @@ test("real Pi GUI P0 smoke: prompt, project switch, restart, resume", async () =
     try {
       await expectHealthyPreload(firstLaunch.page);
       await expect(
-        firstLaunch.page.getByText(/Sessions in project-a/i),
-      ).toBeVisible();
-      await expect(
-        firstLaunch.page.getByRole("heading", { name: /project-a/ }),
-      ).toBeVisible();
+        firstLaunch.page.locator(".project-switcher-trigger"),
+      ).toHaveAttribute("data-project-id", fs.realpathSync(projectA));
       await expect
         .poll(() => listJsonlFiles(sessionDir).length, {
           message: "Startup must not leave a hidden empty warm-worker session",
@@ -163,36 +160,40 @@ test("real Pi GUI P0 smoke: prompt, project switch, restart, resume", async () =
     const secondLaunch = await launchPiDeck(baseEnv);
     try {
       await expectHealthyPreload(secondLaunch.page);
+      const projectSwitcher = secondLaunch.page.locator(
+        ".project-switcher-trigger",
+      );
+      await expect(projectSwitcher).toHaveAttribute(
+        "data-project-id",
+        fs.realpathSync(projectA),
+      );
       await expect(
-        secondLaunch.page.getByRole("heading", { name: /project-a/ }),
-      ).toBeVisible();
-      await expect(
-        secondLaunch.page.getByText("Saved · click to resume").first(),
+        secondLaunch.page.locator(".session-list .session-item").first(),
       ).toBeVisible();
 
       await secondLaunch.page
         .getByRole("button", { name: /Open project/i })
         .click();
+      await expect(projectSwitcher).toHaveAttribute(
+        "data-project-id",
+        fs.realpathSync(projectB),
+      );
       await expect(
-        secondLaunch.page.getByRole("heading", { name: /project-b/ }),
-      ).toBeVisible();
-      await expect(
-        secondLaunch.page.getByText("Saved · click to resume"),
+        secondLaunch.page.locator(".session-list .session-item"),
       ).toHaveCount(0);
 
       await secondLaunch.page
         .getByRole("button", { name: /Open project/i })
         .click();
-      await expect(
-        secondLaunch.page.getByRole("heading", { name: /project-a/ }),
-      ).toBeVisible();
-      await expect(
-        secondLaunch.page.getByText("Saved · click to resume").first(),
-      ).toBeVisible();
-      await secondLaunch.page
-        .getByText("Saved · click to resume")
-        .first()
-        .click();
+      await expect(projectSwitcher).toHaveAttribute(
+        "data-project-id",
+        fs.realpathSync(projectA),
+      );
+      const savedSession = secondLaunch.page
+        .locator(".session-list .session-item")
+        .first();
+      await expect(savedSession).toBeVisible();
+      await savedSession.click();
       await expect(
         secondLaunch.page.getByText("Resumed saved Pi session."),
       ).toBeVisible();

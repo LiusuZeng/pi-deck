@@ -223,6 +223,53 @@ describe("renderer project API compatibility", () => {
   });
 });
 
+describe("Pi draft defaults and thinking capabilities", () => {
+  it("uses Pi's model-specific levels, including max and unsupported holes", () => {
+    expect(
+      __rendererTestHooks.thinkingLevelsForModel(
+        {
+          id: "reasoning-model",
+          provider: "provider",
+          reasoning: true,
+          thinkingLevelMap: {
+            minimal: null,
+            xhigh: null,
+            max: "max",
+          },
+        },
+        [],
+      ),
+    ).toEqual(["off", "low", "medium", "high", "max"]);
+  });
+
+  it("initializes a draft with Pi's effective model and thinking defaults", () => {
+    const draft = __rendererTestHooks.draftSessionForProject(
+      {
+        id: "/tmp/project",
+        path: "/tmp/project",
+        canonicalPath: "/tmp/project",
+        displayName: "project",
+        lastOpenedAt: 1,
+      },
+      "draft-1",
+      "real",
+      {
+        models: [],
+        activeModel: {
+          id: "gpt-5.6-sol",
+          name: "GPT-5.6 Sol",
+          provider: "openai-codex",
+        },
+        thinkingLevel: "xhigh",
+        thinkingLevels: ["off", "low", "high", "xhigh", "max"],
+      },
+    );
+
+    expect(draft.modelLabel).toBe("openai-codex / gpt-5.6-sol");
+    expect(draft.thinkingLevel).toBe("xhigh");
+  });
+});
+
 describe("renderer session actions", () => {
   it("keeps a saved session deletable after it is resumed", () => {
     expect(

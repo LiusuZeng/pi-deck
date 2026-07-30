@@ -30,7 +30,7 @@ function createFakePiBinary(root: string, extraArgs: string[] = []): string {
   const fakePiPath = path.join(root, "fake-pi.js");
   fs.writeFileSync(
     fakePiPath,
-    `#!/usr/bin/env node\nif (process.argv.includes("--version")) {\n  console.log("v42.5.0");\n  process.exit(0);\n}\nprocess.argv.push(...${JSON.stringify(extraArgs)});\nrequire(${JSON.stringify(path.join(repoRoot, "dist/main/pi/fakeRpc/fakeRpcServer.js"))});\n`,
+    `#!/usr/bin/env node\nif (process.argv.includes("--version")) {\n  console.log("v42.5.0");\n  process.exit(0);\n}\nif (process.argv.includes("--list-models")) {\n  console.log("provider  model       context  max-out  thinking  images");\n  console.log("fake-provider  fake-model  128K     32K      yes       yes");\n  process.exit(0);\n}\nprocess.argv.push(...${JSON.stringify(extraArgs)});\nrequire(${JSON.stringify(path.join(repoRoot, "dist/main/pi/fakeRpc/fakeRpcServer.js"))});\n`,
     { mode: 0o755 },
   );
   return fakePiPath;
@@ -69,8 +69,29 @@ function fakeRealModeEnv(options: {
 async function expectHealthyPreload(page: Page): Promise<void> {
   await expect(page.getByText("Preload error")).toHaveCount(0);
   await expect(
-    page.getByRole("button", { name: "Workspace options" }),
+    page.locator('.workspace[data-load-state="ready"]'),
   ).toBeVisible();
+}
+
+function projectSwitcher(page: Page) {
+  return page.locator(".project-switcher-trigger");
+}
+
+async function selectRecentProject(
+  page: Page,
+  projectId: string,
+): Promise<void> {
+  await projectSwitcher(page).click();
+  const options = page.locator(".project-switcher-option");
+  const index = await options.evaluateAll(
+    (elements, id) =>
+      elements.findIndex(
+        (element) => (element as HTMLElement).dataset.projectId === id,
+      ),
+    projectId,
+  );
+  expect(index).toBeGreaterThanOrEqual(0);
+  await options.nth(index).click();
 }
 
 test("fake mode launches with backend runtime and send enabled", async () => {
@@ -80,9 +101,9 @@ test("fake mode launches with backend runtime and send enabled", async () => {
   try {
     await expectHealthyPreload(page);
     await expect(page.getByText(/Local demo mode active/i)).toBeVisible();
-    await expect(page.getByLabel("Recent projects")).toContainText(
-      "Deleted project",
-    );
+    await projectSwitcher(page).click();
+    await expect(page.getByText("Deleted project")).toBeVisible();
+    await page.keyboard.press("Escape");
     await page.getByLabel("Prompt text").fill("fake e2e prompt");
     await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
   } finally {
@@ -119,17 +140,17 @@ test("icon controls retain names, neutral styles, and fit a 900×600 viewport", 
     const userBubble = page.locator(".user-bubble").last();
     await expect(userBubble).toHaveCSS(
       "background-color",
-      "rgb(241, 243, 241)",
+      "rgb(244, 244, 244)",
     );
-    await expect(userBubble).toHaveCSS("color", "rgb(31, 41, 51)");
+    await expect(userBubble).toHaveCSS("color", "rgb(47, 47, 47)");
     await expect(userBubble).toHaveCSS("box-shadow", "none");
 
     const sidebarToggle = page.locator(".topbar .sidebar-toggle");
     await expect(sidebarToggle).not.toHaveAttribute("aria-describedby");
-    await sidebarToggle.focus();
+    await sidebarToggle.hover();
     await expect(page.getByRole("tooltip")).toHaveText(/sessions/);
     await expect(sidebarToggle).toHaveAttribute("aria-describedby");
-    await page.getByLabel("Prompt text").focus();
+    await page.getByLabel("Prompt text").hover();
     await expect(sidebarToggle).not.toHaveAttribute("aria-describedby");
 
     await expect
@@ -293,7 +314,7 @@ test("real mode renders a draft shell before an unavailable backend is touched",
   }
 });
 
-test("bootstrap creates no worker and the first draft send creates one", async () => {
+test("bootstrap creates no saved session and the first draft send creates one", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-lazy-new-"));
   const projectCwd = path.join(root, "project");
   const agentDir = path.join(root, "agent");
@@ -305,9 +326,38 @@ test("bootstrap creates no worker and the first draft send creates one", async (
   );
   try {
     await expectHealthyPreload(page);
-    // fakeRpc writes its session record synchronously when a worker starts.
-    // Waiting through the background repository refresh proves bootstrap did
-    // not create an eager empty worker or persisted session.
+    const configuration = page.locator(".pi-configuration-trigger");
+    await expect(configuration).toHaveAttribute("data-model-id", "fake-model");
+    await expect(configuration).toHaveAttribute(
+      "data-model-provider",
+      "fake-provider",
+    );
+    await expect(configuration).toHaveAttribute(
+      "data-thinking-level",
+      "medium",
+    );
+    await expect(configuration).toHaveCSS("width", "90px");
+    await configuration.click();
+    const maxThinking = page.getByRole("menuitemradio", {
+      name: "max",
+      exact: true,
+    });
+    await expect(maxThinking).toBeVisible();
+    const modelMenuTrigger = page.getByRole("menuitem", {
+      name: /Fake model/,
+    });
+    await expect(modelMenuTrigger).toBeVisible();
+    await modelMenuTrigger.click();
+    await expect(
+      page.getByRole("menu", { name: "Available Pi models" }),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(maxThinking).toBeVisible();
+    await maxThinking.click();
+    await expect(configuration).toHaveAttribute("data-thinking-level", "max");
+    // fakeRpc writes its session record synchronously for persistent workers.
+    // Waiting through the background refresh proves the no-session defaults
+    // probe did not create an eager saved conversation.
     await page.waitForTimeout(150);
     const fakeSessionRoot = path.join(agentDir, "sessions");
     expect(fs.existsSync(fakeSessionRoot)).toBe(false);
@@ -318,14 +368,20 @@ test("bootstrap creates no worker and the first draft send creates one", async (
     for (let index = 0; index < 5; index += 1) {
       await newSession.click();
     }
+    await expect(configuration).toHaveAttribute("data-model-id", "fake-model");
+    await expect(configuration).toHaveAttribute(
+      "data-thinking-level",
+      "medium",
+    );
     await expect(
       page
         .getByLabel("Sessions")
         .getByText("Untitled new session", { exact: true }),
     ).toHaveCount(0);
 
-    await page.getByLabel("Prompt text").fill("lazy first prompt");
-    await page.getByRole("button", { name: "Send" }).click();
+    const prompt = page.getByLabel("Prompt text");
+    await prompt.fill("lazy first prompt");
+    await prompt.press("Enter");
     await expect(page.getByText("Fake response").first()).toBeVisible();
     expect(fs.existsSync(fakeSessionRoot)).toBe(true);
   } finally {
@@ -366,7 +422,6 @@ test("closing an attached runtime preserves its saved session for recovery", asy
     await expect(
       page.getByText(/Closed the Pi runtime. The saved session can be resumed/),
     ).toBeVisible();
-    await expect(page.getByText("Saved · click to resume")).toBeVisible();
     await page
       .getByRole("button", { name: /Session: close runtime recovery/ })
       .click();
@@ -450,11 +505,12 @@ test("real mode can show and resume a saved project session with fake Pi", async
   try {
     await expectHealthyPreload(page);
     await expect(page.getByText(/Real Pi mode active/i)).toBeVisible();
-    await expect(page.getByText(/Browse \d+ older sessions/)).toBeVisible();
-    await expect(
-      page.getByText("Saved · click to resume").first(),
-    ).toBeVisible();
-    await page.getByText("Saved · click to resume").first().click();
+    await expect(page.getByText(/\d+ older sessions/)).toBeVisible();
+    const savedSession = page
+      .getByRole("button", { name: /Session: manual-e2e-session-/ })
+      .first();
+    await expect(savedSession).toBeVisible();
+    await savedSession.click();
     await expect(page.getByText("Resumed saved Pi session.")).toBeVisible();
     await page
       .getByLabel("Prompt text")
@@ -510,11 +566,9 @@ test("real mode keeps attention sessions visible, labels queues, searches, and r
     ).toBeVisible();
     await expect(sidebar.getByText("Steer 1")).toBeVisible();
     await expect(sidebar.getByText("Follow-up 2")).toBeVisible();
+    await expect(sidebar.getByText("1 working", { exact: true })).toBeVisible();
     await expect(
-      sidebar.getByText(/Needs input 0 · Errors 0 · Working 1/),
-    ).toBeVisible();
-    await expect(
-      sidebar.getByRole("button", { name: /Browse 2 older sessions/ }),
+      sidebar.getByRole("button", { name: /2 older sessions/ }),
     ).toBeVisible();
 
     await sidebar.getByLabel("Search sessions").fill("saved-inbox-6");
@@ -560,7 +614,9 @@ test("real mode concurrent duplicate resume reuses one runtime with fake Pi", as
   );
   try {
     await expectHealthyPreload(page);
-    await expect(page.getByText("Saved · click to resume")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Session: duplicate-resume" }),
+    ).toBeVisible();
     const runtimeIds = await page.evaluate(async (file) => {
       const api = window.piDeck;
       const [first, second] = await Promise.all([
@@ -601,15 +657,18 @@ test("real mode removes missing saved session after resume failure with fake Pi"
   );
   try {
     await expectHealthyPreload(page);
-    await expect(page.getByText("Saved · click to resume")).toBeVisible();
+    const missingSession = page.getByRole("button", {
+      name: "Session: missing-before-resume",
+    });
+    await expect(missingSession).toBeVisible();
     fs.rmSync(sessionFile, { force: true });
-    await page.getByText("Saved · click to resume").click();
+    await missingSession.click();
     await expect(
       page.getByText(
         "Saved session file is missing or unreadable. Removed it from the list.",
       ),
     ).toBeVisible();
-    await expect(page.getByText("Saved · click to resume")).toHaveCount(0);
+    await expect(missingSession).toHaveCount(0);
   } finally {
     await app.close();
     fs.rmSync(root, { recursive: true, force: true });
@@ -641,13 +700,11 @@ test("real mode lists a newly prompted session after restart with fake Pi", asyn
   const secondLaunch = await launchPiDeck(env);
   try {
     await expectHealthyPreload(secondLaunch.page);
-    await expect(
-      secondLaunch.page.getByText("Saved · click to resume").first(),
-    ).toBeVisible();
-    await secondLaunch.page
-      .getByText("Saved · click to resume")
-      .first()
-      .click();
+    const persistedSession = secondLaunch.page.getByRole("button", {
+      name: "Session: persisted restart session",
+    });
+    await expect(persistedSession).toBeVisible();
+    await persistedSession.click();
     await expect(
       secondLaunch.page.getByText("Resumed saved Pi session."),
     ).toBeVisible();
@@ -688,9 +745,10 @@ test("background worker continues through project A → B navigation and return"
     await expect(page.getByRole("button", { name: "Abort" })).toBeVisible();
 
     await page.getByRole("button", { name: /Open project/i }).click();
-    await expect(
-      page.getByRole("heading", { name: /project-b/ }),
-    ).toBeVisible();
+    await expect(projectSwitcher(page)).toHaveAttribute(
+      "data-project-id",
+      canonicalProjectB,
+    );
     await expect(page.getByLabel("Active work across projects")).toContainText(
       "project switch background worker",
     );
@@ -700,13 +758,19 @@ test("background worker continues through project A → B navigation and return"
       ),
     ).toBeVisible();
 
-    const recentProjectSwitcher = page.getByLabel("Switch recent project");
-    await expect(recentProjectSwitcher).toHaveValue(canonicalProjectB);
-    await expect(recentProjectSwitcher.locator("option")).toHaveCount(2);
-    await recentProjectSwitcher.selectOption(canonicalProjectA);
-    await expect(
-      page.getByRole("heading", { name: /project-a/ }),
-    ).toBeVisible();
+    const recentProjectSwitcher = projectSwitcher(page);
+    await expect(recentProjectSwitcher).toHaveAttribute(
+      "data-project-id",
+      canonicalProjectB,
+    );
+    await recentProjectSwitcher.click();
+    await expect(page.locator(".project-switcher-option")).toHaveCount(2);
+    await page.keyboard.press("Escape");
+    await selectRecentProject(page, canonicalProjectA);
+    await expect(recentProjectSwitcher).toHaveAttribute(
+      "data-project-id",
+      canonicalProjectA,
+    );
     await expect(
       page.getByText(/Fake response to: project switch background worker/),
     ).toBeVisible({ timeout: 8_000 });
@@ -726,6 +790,8 @@ test("real mode project picker handoff persists selected cwd with fake Pi", asyn
   fs.mkdirSync(projectB, { recursive: true });
   fs.mkdirSync(agentDir, { recursive: true });
   fs.mkdirSync(userDataDir, { recursive: true });
+  const canonicalProjectA = fs.realpathSync(projectA);
+  const canonicalProjectB = fs.realpathSync(projectB);
 
   const firstLaunch = await launchPiDeck(
     fakeRealModeEnv({
@@ -738,18 +804,20 @@ test("real mode project picker handoff persists selected cwd with fake Pi", asyn
   );
   try {
     await expectHealthyPreload(firstLaunch.page);
-    await expect(
-      firstLaunch.page.getByRole("heading", { name: /project-a/ }),
-    ).toBeVisible();
+    await expect(projectSwitcher(firstLaunch.page)).toHaveAttribute(
+      "data-project-id",
+      canonicalProjectA,
+    );
     await firstLaunch.page
       .getByRole("button", { name: /Open project/i })
       .click();
     await expect(
       firstLaunch.page.getByText(/Project view switched to project-b/),
     ).toBeVisible();
-    await expect(
-      firstLaunch.page.getByRole("heading", { name: /project-b/ }),
-    ).toBeVisible();
+    await expect(projectSwitcher(firstLaunch.page)).toHaveAttribute(
+      "data-project-id",
+      canonicalProjectB,
+    );
   } finally {
     await firstLaunch.app.close();
   }
@@ -759,12 +827,10 @@ test("real mode project picker handoff persists selected cwd with fake Pi", asyn
   );
   try {
     await expectHealthyPreload(secondLaunch.page);
-    await expect(
-      secondLaunch.page.getByRole("heading", { name: /project-b/ }),
-    ).toBeVisible();
-    await expect(
-      secondLaunch.page.getByRole("heading", { name: /project-a/ }),
-    ).toHaveCount(0);
+    await expect(projectSwitcher(secondLaunch.page)).toHaveAttribute(
+      "data-project-id",
+      canonicalProjectB,
+    );
   } finally {
     await secondLaunch.app.close();
     fs.rmSync(root, { recursive: true, force: true });
@@ -969,12 +1035,12 @@ test("real mode does not fall back to fake/local UI and can send from active run
   });
   try {
     await expectHealthyPreload(page);
-    await expect(page.getByText(/Sessions in project/i)).toBeVisible();
+    await expect(projectSwitcher(page)).toBeVisible();
     await expect(page.getByText(/Real Pi mode active/i)).toBeVisible();
     await expect(page.getByText("Local projects")).toHaveCount(0);
     await expect(page.getByText(/backend fake RPC active/i)).toHaveCount(0);
     await expect(page.getByText(/claude/i)).toHaveCount(0);
-    await expect(page.getByLabel("Real Pi thinking")).toBeVisible();
+    await expect(page.locator(".pi-configuration-trigger")).toBeVisible();
     await expect(
       page.getByRole("button", { name: /New real session/i }),
     ).toHaveCount(0);

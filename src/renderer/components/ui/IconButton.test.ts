@@ -90,6 +90,9 @@ describe("IconButton", () => {
     expect(view.querySelector('[role="tooltip"]')?.textContent).toContain(
       "Refresh sessions",
     );
+    expect(view.querySelector('[role="tooltip"]')?.classList).toContain(
+      "below",
+    );
 
     act(() => button?.blur());
     expect(button?.hasAttribute("aria-describedby")).toBe(false);

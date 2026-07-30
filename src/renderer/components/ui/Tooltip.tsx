@@ -28,6 +28,7 @@ export interface TooltipProps {
 type TooltipPosition = {
   left: number;
   top: number;
+  placement: "above" | "below";
 };
 
 /** A delayed hover tooltip that opens immediately for keyboard focus. */
@@ -74,7 +75,12 @@ export function Tooltip({
 
   const setTooltipPosition = (target: HTMLElement) => {
     const rect = target.getBoundingClientRect();
-    setPosition({ left: rect.left + rect.width / 2, top: rect.top - 7 });
+    const placement = rect.top < 48 ? "below" : "above";
+    setPosition({
+      left: rect.left + rect.width / 2,
+      top: placement === "below" ? rect.bottom + 7 : rect.top - 7,
+      placement,
+    });
   };
 
   const openAfterDelay = (target: HTMLElement) => {
@@ -123,7 +129,7 @@ export function Tooltip({
       {cloneElement(children, tooltipTargetProps)}
       {isOpen && position !== undefined ? (
         <span
-          className="ui-tooltip"
+          className={`ui-tooltip ${position.placement}`}
           id={tooltipId}
           role="tooltip"
           style={{ left: position.left, top: position.top }}

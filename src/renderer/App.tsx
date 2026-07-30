@@ -14,6 +14,7 @@ import type {
   AppSettings,
   AttachmentDraft,
   ChatCommandSummary,
+  ChatListModelsResult,
   ChatMessage,
   ChatModelSummary,
   ChatRuntimeEvent,
@@ -235,6 +236,7 @@ interface SlashCommand {
 
 interface RuntimeCapabilities {
   models?: ChatModelSummary[];
+  thinkingLevels?: string[];
   commands?: SlashCommand[];
 }
 
@@ -243,6 +245,15 @@ type RuntimeCapabilitiesById = Record<string, RuntimeCapabilities>;
 const appStartedAt = Date.now();
 const WORKING_SESSION_RECONCILE_AFTER_MS = 3_000;
 const NO_VISIBLE_OUTPUT_NOTICE_MS = 3_000;
+const PI_THINKING_LEVELS = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
 
 const modelOptions: ModelOption[] = [
   {
@@ -283,8 +294,6 @@ const thinkingOptions: ThinkingOption[] = [
     note: "Unsupported by current model",
   },
 ];
-
-const realThinkingLevels = ["off", "low", "medium", "high", "xhigh"];
 
 const slashCommands: SlashCommand[] = [
   {
@@ -471,9 +480,8 @@ export function App(): ReactElement {
   const [selectedThinking, setSelectedThinking] = useState("medium");
   const [realCapabilitiesByRuntime, setRealCapabilitiesByRuntime] =
     useState<RuntimeCapabilitiesById>({});
-  const [enterToSend, setEnterToSend] = useState(() =>
-    loadEnterToSendPreference(),
-  );
+  const [projectModelConfiguration, setProjectModelConfiguration] =
+    useState<ChatListModelsResult>({ models: [], thinkingLevels: [] });
   const [sidebarVisible, setSidebarVisible] = useState(() =>
     loadSidebarVisiblePreference(),
   );
@@ -646,6 +654,28 @@ export function App(): ReactElement {
         });
 
         if (bootstrap.backendMode === "real") {
+          void api.chat
+            .listModels({ projectId: bootstrap.project.id })
+            .then((result) => {
+              if (!disposed) {
+                setProjectModelConfiguration(result);
+                setSessions((items) =>
+                  applyPiDefaultsToDraftSessions(
+                    items,
+                    bootstrap.project.id,
+                    result,
+                  ),
+                );
+              }
+            })
+            .catch(() => {
+              if (!disposed) {
+                setProjectModelConfiguration({
+                  models: [],
+                  thinkingLevels: [],
+                });
+              }
+            });
           const generation = ++sessionListGeneration.current;
           // Two animation frames guarantee the ready shell has an opportunity
           // to commit and paint before main begins its potentially expensive
@@ -693,7 +723,6 @@ export function App(): ReactElement {
     };
   }, []);
 
-  const nodeAccessSummary = useMemo(() => getRendererNodeAccessSummary(), []);
   const selectedSession =
     sessions.find((session) => session.id === selectedSessionId) ??
     sessions[0] ??
@@ -705,7 +734,18 @@ export function App(): ReactElement {
     selectedSession.backendMode === "real"
       ? runtimeCapabilitiesFor(realCapabilitiesByRuntime, selectedSession.id)
       : undefined;
-  const realModels = selectedRealCapabilities?.models ?? [];
+  const runtimeModels = selectedRealCapabilities?.models ?? [];
+  const realModels =
+    runtimeModels.length > 0 ? runtimeModels : projectModelConfiguration.models;
+  const activeRealModel = findActiveRealModel(selectedSession, realModels);
+  const runtimeThinkingLevels = selectedRealCapabilities?.thinkingLevels ?? [];
+  const availableRealThinkingLevels =
+    runtimeThinkingLevels.length > 0
+      ? runtimeThinkingLevels
+      : thinkingLevelsForModel(
+          activeRealModel,
+          projectModelConfiguration.thinkingLevels,
+        );
   const realCommands = selectedRealCapabilities?.commands ?? [];
   const composerDraft = composerDraftForSession(
     composerDrafts,
@@ -748,7 +788,7 @@ export function App(): ReactElement {
     selectedSession.timeline.length === 0 && selectedSession.status === "idle";
 
   useEffect(() => {
-    const compactLayout = window.matchMedia("(max-width: 980px)");
+    const compactLayout = window.matchMedia("(max-width: 760px)");
     const collapseSidebarForCompactLayout = (): void => {
       if (compactLayout.matches) {
         // Preserve the desktop preference, but never let the session drawer
@@ -901,22 +941,19 @@ export function App(): ReactElement {
   function handleComposerKeyDown(
     event: KeyboardEvent<HTMLTextAreaElement>,
   ): void {
-    if (event.key !== "Enter" || event.shiftKey) {
+    if (
+      event.key !== "Enter" ||
+      event.shiftKey ||
+      event.nativeEvent.isComposing
+    ) {
       return;
     }
-    if (enterToSend || event.metaKey || event.ctrlKey) {
-      event.preventDefault();
-      if (isWorking) {
-        handleSteer();
-      } else {
-        handleSend();
-      }
+    event.preventDefault();
+    if (isWorking) {
+      handleSteer();
+    } else {
+      handleSend();
     }
-  }
-
-  function handleEnterToSendChange(value: boolean): void {
-    setEnterToSend(value);
-    saveEnterToSendPreference(value);
   }
 
   function handleSidebarVisibleChange(value: boolean): void {
@@ -1134,9 +1171,23 @@ export function App(): ReactElement {
     );
     setUiMessage("Starting Pi for this session…");
     try {
-      const snapshot = await window.piDeck.chat.createSession({
+      let snapshot = await window.piDeck.chat.createSession({
         projectId: draftSession.projectId ?? currentProject.id,
       });
+      const selectedDraftModel = parseModelLabel(draftSession.modelLabel);
+      if (selectedDraftModel !== undefined) {
+        snapshot = await window.piDeck.chat.setModel({
+          runtimeId: snapshot.runtimeId,
+          provider: selectedDraftModel.provider,
+          modelId: selectedDraftModel.modelId,
+        });
+      }
+      if (draftSession.thinkingLevel !== undefined) {
+        snapshot = await window.piDeck.chat.setThinking({
+          runtimeId: snapshot.runtimeId,
+          level: draftSession.thinkingLevel,
+        });
+      }
       const backendSession = {
         ...sessionFromSnapshot(snapshot),
         title: draftSession.title,
@@ -1152,6 +1203,7 @@ export function App(): ReactElement {
         moveComposerDraft(items, draftSession.id, backendSession.id),
       );
       if (backendSession.backendMode === "real") {
+        rememberPiDefaults(backendSession);
         loadRealCapabilities(backendSession.id);
       }
       if (snapshot.state.cwd) {
@@ -1568,9 +1620,13 @@ export function App(): ReactElement {
       return;
     }
     setComposerError(null);
+    setProjectModelConfiguration({ models: [], thinkingLevels: [] });
     setUiMessage(
       `Opening ${project.displayName}; existing Pi workers stay attached…`,
     );
+    const modelConfigurationPromise = window.piDeck.chat
+      .listModels({ projectId: project.id })
+      .catch(() => undefined);
     const listedSessions = await window.piDeck.chat.listSessions({
       projectId: project.id,
     });
@@ -1619,6 +1675,19 @@ export function App(): ReactElement {
     setCurrentProject(project);
     setRecentProjects(projects);
     setSelectedSessionId(selectedId);
+    void modelConfigurationPromise.then((result) => {
+      if (sessionListRequest !== sessionListGeneration.current) {
+        return;
+      }
+      if (result === undefined) {
+        setProjectModelConfiguration({ models: [], thinkingLevels: [] });
+        return;
+      }
+      setProjectModelConfiguration(result);
+      setSessions((items) =>
+        applyPiDefaultsToDraftSessions(items, project.id, result),
+      );
+    });
     if (existingProjectRuntime?.runtimeBacked) {
       loadRealCapabilities(existingProjectRuntime.id);
     }
@@ -1642,11 +1711,15 @@ export function App(): ReactElement {
       setRealCapabilitiesByRuntime((current) =>
         updateRuntimeCapabilities(current, runtimeId, {
           models: result.models,
+          thinkingLevels: result.thinkingLevels,
         }),
       );
     } catch {
       setRealCapabilitiesByRuntime((current) =>
-        updateRuntimeCapabilities(current, runtimeId, { models: [] }),
+        updateRuntimeCapabilities(current, runtimeId, {
+          models: [],
+          thinkingLevels: [],
+        }),
       );
     }
   }
@@ -1822,14 +1895,61 @@ export function App(): ReactElement {
     }
   }
 
+  function rememberPiDefaults(session: SessionViewModel): void {
+    const activeModel = findActiveRealModel(session, realModels);
+    setProjectModelConfiguration((current) => ({
+      ...current,
+      ...(activeModel !== undefined ? { activeModel } : {}),
+      ...(session.thinkingLevel !== undefined
+        ? { thinkingLevel: session.thinkingLevel }
+        : {}),
+      thinkingLevels: thinkingLevelsForModel(
+        activeModel,
+        current.thinkingLevels,
+      ),
+    }));
+  }
+
   async function handleSetRealModel(
     provider: string,
     modelId: string,
   ): Promise<void> {
-    if (!selectedSession.runtimeBacked || isSessionBusy(selectedSession)) {
+    if (isSessionBusy(selectedSession)) {
       return;
     }
     setComposerError(null);
+    if (selectedSession.draftSession === true) {
+      const nextModel = realModels.find(
+        (model) => model.provider === provider && model.id === modelId,
+      );
+      const nextThinkingLevels = thinkingLevelsForModel(
+        nextModel,
+        projectModelConfiguration.thinkingLevels,
+      );
+      setSessions((items) =>
+        items.map((session) =>
+          session.id === selectedSession.id
+            ? {
+                ...session,
+                modelLabel: `${provider} / ${modelId}`,
+                ...(session.thinkingLevel !== undefined
+                  ? {
+                      thinkingLevel: clampThinkingLevel(
+                        session.thinkingLevel,
+                        nextThinkingLevels,
+                      ),
+                    }
+                  : {}),
+              }
+            : session,
+        ),
+      );
+      setUiMessage(`New session will use ${provider}/${modelId}.`);
+      return;
+    }
+    if (!selectedSession.runtimeBacked) {
+      return;
+    }
     try {
       const snapshot = await window.piDeck.chat.setModel({
         runtimeId: selectedSession.id,
@@ -1844,6 +1964,8 @@ export function App(): ReactElement {
             : item,
         ),
       );
+      rememberPiDefaults(updated);
+      void loadRealModels(updated.id);
       setUiMessage(`Switched model to ${provider}/${modelId}.`);
     } catch (error) {
       setComposerError(error instanceof Error ? error.message : String(error));
@@ -1851,10 +1973,24 @@ export function App(): ReactElement {
   }
 
   async function handleSetRealThinking(level: string): Promise<void> {
-    if (!selectedSession.runtimeBacked || isSessionBusy(selectedSession)) {
+    if (isSessionBusy(selectedSession)) {
       return;
     }
     setComposerError(null);
+    if (selectedSession.draftSession === true) {
+      setSessions((items) =>
+        items.map((session) =>
+          session.id === selectedSession.id
+            ? { ...session, thinkingLevel: level }
+            : session,
+        ),
+      );
+      setUiMessage(`New session will use ${level} thinking.`);
+      return;
+    }
+    if (!selectedSession.runtimeBacked) {
+      return;
+    }
     try {
       const snapshot = await window.piDeck.chat.setThinking({
         runtimeId: selectedSession.id,
@@ -1868,6 +2004,7 @@ export function App(): ReactElement {
             : item,
         ),
       );
+      rememberPiDefaults(updated);
       setUiMessage(`Switched thinking to ${level}.`);
     } catch (error) {
       setComposerError(error instanceof Error ? error.message : String(error));
@@ -1967,6 +2104,7 @@ export function App(): ReactElement {
       currentProject,
       createId("draft-session"),
       isRealBackendMode ? "real" : "fake",
+      isRealBackendMode ? projectModelConfiguration : undefined,
     );
     setComposerError(null);
     setSessions((items) =>
@@ -2016,13 +2154,10 @@ export function App(): ReactElement {
       slashCommands={filteredCommands}
       selectedModel={selectedModel}
       backendLabel={backendLabel(selectedSession)}
-      modelInfo={composerModelInfo(selectedSession)}
       realModels={realModels}
-      realThinkingLevels={realThinkingLevels}
+      realThinkingLevels={availableRealThinkingLevels}
       selectedSession={selectedSession}
       allowAttachments={true}
-      enterToSend={enterToSend}
-      onEnterToSendChange={handleEnterToSendChange}
       onChange={handleDraftChange}
       onKeyDown={handleComposerKeyDown}
       onSend={handleSend}
@@ -2072,10 +2207,13 @@ export function App(): ReactElement {
         />
       ) : null}
 
-      <section className="workspace" aria-label="Pi Deck chat workspace">
+      <section
+        className="workspace"
+        aria-label="Pi Deck chat workspace"
+        data-load-state={loadState.state}
+      >
         <AppHeader
           loadState={loadState}
-          nodeAccessSummary={nodeAccessSummary}
           selectedSession={selectedSession}
           currentProject={currentProject}
           recentProjects={recentProjects}
@@ -2101,7 +2239,13 @@ export function App(): ReactElement {
           }}
         />
 
-        <div className="ui-status-message" role="status" aria-live="polite">
+        <div
+          className="ui-status-message"
+          key={uiMessage}
+          role="status"
+          aria-live="polite"
+          title={uiMessage}
+        >
           {uiMessage}
         </div>
 
@@ -2396,12 +2540,47 @@ function slashCommandFromWorkerCommand(
   };
 }
 
+function applyPiDefaultsToDraftSessions(
+  sessions: SessionViewModel[],
+  projectId: string,
+  configuration: ChatListModelsResult,
+): SessionViewModel[] {
+  const modelLabel = configuration.activeModel
+    ? modelLabelForChatModel(configuration.activeModel)
+    : undefined;
+  return sessions.map((session) =>
+    session.projectId === projectId && session.draftSession === true
+      ? {
+          ...session,
+          ...(session.modelLabel === undefined && modelLabel !== undefined
+            ? { modelLabel }
+            : {}),
+          ...(session.thinkingLevel === undefined &&
+          configuration.thinkingLevel !== undefined
+            ? { thinkingLevel: configuration.thinkingLevel }
+            : {}),
+        }
+      : session,
+  );
+}
+
+function modelLabelForChatModel(model: ChatModelSummary): string {
+  return model.provider ? `${model.provider} / ${model.id}` : model.id;
+}
+
 function draftSessionForProject(
   project: ProjectRef,
   id: string,
   backendMode: "fake" | "real" = "real",
+  configuration?: ChatListModelsResult,
 ): SessionViewModel {
   return {
+    ...(configuration?.activeModel
+      ? { modelLabel: modelLabelForChatModel(configuration.activeModel) }
+      : {}),
+    ...(configuration?.thinkingLevel !== undefined
+      ? { thinkingLevel: configuration.thinkingLevel }
+      : {}),
     id,
     title: "Untitled new session",
     project: project.displayName,
@@ -2651,6 +2830,21 @@ function modelLabelFromState(state: ChatSnapshot["state"]): string {
       .join(" / ");
   }
   return provider;
+}
+
+function parseModelLabel(
+  label: string | undefined,
+): { provider: string; modelId: string } | undefined {
+  if (!label) {
+    return undefined;
+  }
+  const separator = label.indexOf("/");
+  if (separator === -1) {
+    return undefined;
+  }
+  const provider = label.slice(0, separator).trim();
+  const modelId = label.slice(separator + 1).trim();
+  return provider && modelId ? { provider, modelId } : undefined;
 }
 
 function timelineToolStatus(streaming: boolean): "running" | "success" {
@@ -3707,17 +3901,6 @@ function readNumber(
   return undefined;
 }
 
-function composerModelInfo(session: SessionViewModel): string | undefined {
-  if (session.backendMode !== "real") {
-    return undefined;
-  }
-  const parts = [
-    session.modelLabel,
-    session.thinkingLevel ? `Thinking: ${session.thinkingLevel}` : undefined,
-  ].filter((part): part is string => Boolean(part && part.trim().length > 0));
-  return parts.length > 0 ? parts.join(" · ") : "Pi selected model";
-}
-
 function selectedSessionSupportsImages(
   session: SessionViewModel,
   realModels: ChatModelSummary[],
@@ -3750,31 +3933,52 @@ function realModelSupportsImages(model: ChatModelSummary | undefined): boolean {
   return model.input?.some((value) => /image/i.test(value)) ?? false;
 }
 
-function realModelSupportsThinking(
+function thinkingLevelsForModel(
   model: ChatModelSummary | undefined,
-): boolean {
-  return model?.reasoning !== false;
+  fallback: string[],
+): string[] {
+  if (model === undefined || model.reasoning === undefined) {
+    return fallback.length > 0 ? fallback : ["off"];
+  }
+  if (!model.reasoning) {
+    return ["off"];
+  }
+  return PI_THINKING_LEVELS.filter((level) => {
+    const mapped = model.thinkingLevelMap?.[level];
+    if (mapped === null) {
+      return false;
+    }
+    return level !== "xhigh" && level !== "max" ? true : mapped !== undefined;
+  });
 }
 
-function formatRealModelOption(model: ChatModelSummary): string {
-  const capabilities = [
-    model.reasoning === false ? "no thinking" : "thinking",
-    realModelSupportsImages(model) ? "images" : "text-only",
-    model.contextWindow
-      ? `${formatInteger(model.contextWindow)} ctx`
-      : undefined,
-  ].filter((item): item is string => item !== undefined);
-  return `${model.name ?? model.id}${capabilities.length > 0 ? ` · ${capabilities.join(" · ")}` : ""}`;
-}
-
-function formatRealThinkingOption(
-  level: string,
-  supportedByModel: boolean,
-): string {
-  if (supportedByModel || level === "off") {
+function clampThinkingLevel(level: string, availableLevels: string[]): string {
+  if (availableLevels.includes(level)) {
     return level;
   }
-  return `${level} — unsupported by selected model`;
+  const requestedIndex = PI_THINKING_LEVELS.indexOf(
+    level as (typeof PI_THINKING_LEVELS)[number],
+  );
+  if (requestedIndex === -1) {
+    return availableLevels[0] ?? "off";
+  }
+  for (
+    let index = requestedIndex;
+    index < PI_THINKING_LEVELS.length;
+    index += 1
+  ) {
+    const candidate = PI_THINKING_LEVELS[index];
+    if (candidate !== undefined && availableLevels.includes(candidate)) {
+      return candidate;
+    }
+  }
+  for (let index = requestedIndex - 1; index >= 0; index -= 1) {
+    const candidate = PI_THINKING_LEVELS[index];
+    if (candidate !== undefined && availableLevels.includes(candidate)) {
+      return candidate;
+    }
+  }
+  return availableLevels[0] ?? "off";
 }
 
 function backendLabel(session: SessionViewModel): string {
@@ -3881,13 +4085,11 @@ function SessionSidebar(props: {
   return (
     <aside className="sidebar" aria-label="Sessions">
       <div className="sidebar-header">
-        <div>
-          <p className="eyebrow dark">
-            {props.realMode
-              ? `Sessions in ${props.currentProject.displayName}`
-              : "Local projects"}
-          </p>
-          <div className="brand">Pi Deck</div>
+        <div className="sidebar-brand-row">
+          <span className="brand-mark" aria-hidden="true">
+            π
+          </span>
+          <span className="brand">Pi Deck</span>
         </div>
         <div className="sidebar-header-actions">
           <IconButton
@@ -3906,12 +4108,6 @@ function SessionSidebar(props: {
               onClick={() => void handleRefresh()}
             />
           ) : null}
-          <IconButton
-            icon={SquarePen}
-            label="New session"
-            size="sm"
-            onClick={props.onNewSession}
-          />
           {props.realMode ? (
             <Menu label="Session actions">
               <Button
@@ -3928,6 +4124,11 @@ function SessionSidebar(props: {
           ) : null}
         </div>
       </div>
+
+      <Button className="sidebar-new-chat" onClick={props.onNewSession}>
+        <SquarePen aria-hidden="true" size={16} strokeWidth={1.75} />
+        New session
+      </Button>
 
       {activeWork.length > 0 ? (
         <section
@@ -3972,11 +4173,22 @@ function SessionSidebar(props: {
               onChange={(event) => setSessionFilter(event.target.value)}
             />
           </div>
-          <p className="attention-summary" aria-live="polite">
-            Needs input {allRealInbox?.needsInput.length ?? 0} · Errors{" "}
-            {allRealInbox?.errors.length ?? 0} · Working{" "}
-            {allRealInbox?.working.length ?? 0}
-          </p>
+          {(allRealInbox?.needsInput.length ?? 0) +
+            (allRealInbox?.errors.length ?? 0) +
+            (allRealInbox?.working.length ?? 0) >
+          0 ? (
+            <p className="attention-summary" aria-live="polite">
+              {allRealInbox?.needsInput.length
+                ? `${allRealInbox.needsInput.length} needs input`
+                : null}
+              {allRealInbox?.errors.length
+                ? `${allRealInbox.needsInput.length ? " · " : ""}${allRealInbox.errors.length} error${allRealInbox.errors.length === 1 ? "" : "s"}`
+                : null}
+              {allRealInbox?.working.length
+                ? `${(allRealInbox.needsInput.length ?? 0) + (allRealInbox.errors.length ?? 0) > 0 ? " · " : ""}${allRealInbox.working.length} working`
+                : null}
+            </p>
+          ) : null}
         </>
       ) : null}
 
@@ -4002,7 +4214,6 @@ function SessionSidebar(props: {
               <Button
                 className={`session-item ${session.id === props.selectedSessionId ? "active" : ""}`}
                 aria-label={`Session: ${session.title}`}
-                title={`${session.title}\n${formatReadableTimestamp(session.updatedAtMs)}`}
                 onClick={() => {
                   props.onSelect(session.id);
                 }}
@@ -4010,12 +4221,14 @@ function SessionSidebar(props: {
                 <StateIndicator session={session} />
                 <span className="session-copy">
                   <span className="session-title">
-                    {session.title}
+                    <span className="session-title-copy">{session.title}</span>
                     {hasComposerDraft(props.composerDrafts, session.id) ? (
                       <span className="session-draft-marker">Draft</span>
                     ) : null}
                   </span>
-                  <span className="session-meta">{session.subtitle}</span>
+                  {session.status !== "idle" ? (
+                    <span className="session-meta">{session.subtitle}</span>
+                  ) : null}
                   {!props.realMode ? (
                     <span className="session-meta">{session.projectPath}</span>
                   ) : null}
@@ -4066,8 +4279,8 @@ function SessionSidebar(props: {
           >
             <ChevronDown aria-hidden="true" size={14} strokeWidth={1.75} />
             {showOlderRealSessions
-              ? "Show recent only"
-              : `Browse ${hiddenSessionCount} older session${hiddenSessionCount === 1 ? "" : "s"}`}
+              ? "Show recent"
+              : `${hiddenSessionCount} older session${hiddenSessionCount === 1 ? "" : "s"}`}
           </Button>
         ) : null}
       </section>
@@ -4281,7 +4494,6 @@ function StatusMark(props: { status: SessionStatus }): ReactElement {
 
 function AppHeader(props: {
   loadState: LoadState;
-  nodeAccessSummary: string;
   selectedSession: SessionViewModel;
   currentProject: ProjectRef;
   recentProjects: ProjectRef[];
@@ -4336,10 +4548,7 @@ function AppHeader(props: {
             onThinkingChange={props.onThinkingChange}
           />
         )}
-        <LoadStateBadge
-          loadState={props.loadState}
-          nodeAccessSummary={props.nodeAccessSummary}
-        />
+        <LoadStateBadge loadState={props.loadState} />
       </div>
     </header>
   );
@@ -4406,74 +4615,120 @@ function ProjectHeader(props: {
   onPickProject(): void;
   onSelectRecent(project: ProjectRef): void;
 }): ReactElement {
-  const storedRecent = props.recentProjects.filter(
-    (project) => project.id !== props.project.id,
-  );
-  const visibleRecent = [...storedRecent, invalidRecentProject];
   const switcherProjects = projectsForSwitcher(
     props.project,
-    props.recentProjects,
+    props.realMode
+      ? props.recentProjects.filter(
+          (project) => project.invalidReason === undefined,
+        )
+      : [...props.recentProjects, invalidRecentProject],
   );
 
   return (
     <div className="title-block project-header">
-      <p className="eyebrow">Project / Session</p>
-      <h1>
-        {props.project.displayName} / {props.selectedSession.title}
-      </h1>
-      <StatusMark status={props.selectedSession.status} />
-      <p className="project-path">{props.project.path}</p>
-      <div className="header-actions">
+      <div className="session-heading-line">
+        <h1>{props.selectedSession.title}</h1>
+        <StatusMark status={props.selectedSession.status} />
+      </div>
+      <div
+        className="project-context"
+        aria-label={props.realMode ? "Current project" : "Recent projects"}
+      >
+        <ProjectSwitcher
+          activeProject={props.project}
+          projects={switcherProjects}
+          onSelect={props.onSelectRecent}
+        />
         <IconButton
           icon={FolderOpen}
           label="Open project"
+          size="sm"
           onClick={props.onPickProject}
         />
       </div>
-      {props.realMode ? (
-        <label className="project-switcher">
-          <span>Recent projects</span>
-          <select
-            aria-label="Switch recent project"
-            value={props.project.id}
-            onChange={(event) => {
-              const project = switcherProjects.find(
-                (item) => item.id === event.target.value,
-              );
-              if (project !== undefined && project.id !== props.project.id) {
-                props.onSelectRecent(project);
-              }
-            }}
-          >
-            {switcherProjects.map((project) => (
-              <option
-                key={project.id}
-                value={project.id}
+    </div>
+  );
+}
+
+function ProjectSwitcher(props: {
+  activeProject: ProjectRef;
+  projects: ProjectRef[];
+  onSelect(project: ProjectRef): void;
+}): ReactElement {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const closeOnOutsideClick = (event: MouseEvent): void => {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", closeOnOutsideClick);
+    return () => document.removeEventListener("mousedown", closeOnOutsideClick);
+  }, [open]);
+
+  return (
+    <div
+      className="project-switcher-menu"
+      ref={rootRef}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          setOpen(false);
+        }
+      }}
+    >
+      <Button
+        aria-expanded={open}
+        aria-haspopup="menu"
+        aria-label={`Switch project. Current: ${props.activeProject.displayName}`}
+        className="project-switcher-trigger"
+        data-project-id={props.activeProject.id}
+        size="sm"
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span>{props.activeProject.displayName}</span>
+        <ChevronDown aria-hidden="true" size={13} strokeWidth={1.75} />
+      </Button>
+      {open ? (
+        <div className="project-switcher-popover" role="menu">
+          {props.projects.map((project) => {
+            const active = project.id === props.activeProject.id;
+            return (
+              <Button
+                aria-current={active ? "true" : undefined}
+                className="project-switcher-option"
+                data-project-id={project.id}
                 disabled={project.invalidReason !== undefined}
+                key={project.id}
+                role="menuitem"
+                variant="menuItem"
+                onClick={() => {
+                  setOpen(false);
+                  if (!active) {
+                    props.onSelect(project);
+                  }
+                }}
               >
-                {project.displayName} — {project.path}
-              </option>
-            ))}
-          </select>
-        </label>
-      ) : (
-        <div className="recent-projects" aria-label="Recent projects">
-          <strong>Recent projects</strong>
-          {storedRecent.length === 0 ? (
-            <p className="empty-state-copy">No saved recent projects yet.</p>
-          ) : null}
-          {visibleRecent.map((project) => (
-            <Button
-              key={project.id}
-              className={project.invalidReason ? "recent invalid" : "recent"}
-              onClick={() => props.onSelectRecent(project)}
-            >
-              <span>{project.displayName}</span>
-              <small>{project.invalidReason ?? project.path}</small>
-            </Button>
-          ))}
+                <Check
+                  aria-hidden="true"
+                  className="project-switcher-check"
+                  size={14}
+                  strokeWidth={1.75}
+                  visibility={active ? "visible" : "hidden"}
+                />
+                <span className="project-switcher-copy">
+                  <strong>{project.displayName}</strong>
+                  <small>{project.invalidReason ?? project.path}</small>
+                </span>
+              </Button>
+            );
+          })}
         </div>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -4482,10 +4737,14 @@ function projectsForSwitcher(
   activeProject: ProjectRef,
   recentProjects: ProjectRef[],
 ): ProjectRef[] {
-  return [
-    activeProject,
-    ...recentProjects.filter((project) => project.id !== activeProject.id),
-  ];
+  const unique = new Map<string, ProjectRef>();
+  for (const project of [activeProject, ...recentProjects]) {
+    const identity = project.canonicalPath || project.id;
+    if (!unique.has(identity)) {
+      unique.set(identity, project);
+    }
+  }
+  return [...unique.values()].slice(0, 10);
 }
 
 function ModelThinkingControls(props: {
@@ -4571,10 +4830,7 @@ function ModelThinkingControls(props: {
   );
 }
 
-function LoadStateBadge(props: {
-  loadState: LoadState;
-  nodeAccessSummary: string;
-}): ReactElement {
+function LoadStateBadge(props: { loadState: LoadState }): ReactElement | null {
   if (props.loadState.state === "loading") {
     return <span className="diagnostic-badge">Loading preload API…</span>;
   }
@@ -4587,15 +4843,7 @@ function LoadStateBadge(props: {
     );
   }
 
-  return (
-    <Menu label="Workspace options" menu={false}>
-      <div className="ui-menu-diagnostics">
-        <strong>Pi Deck {props.loadState.version}</strong>
-        <span>{props.nodeAccessSummary}</span>
-        <span>userData: {props.loadState.diagnostics.userDataPath}</span>
-      </div>
-    </Menu>
-  );
+  return null;
 }
 
 function isScrolledNearBottom(scrollContainer: HTMLElement): boolean {
@@ -4624,7 +4872,7 @@ function StarterPage(props: { composer: ReactElement }): ReactElement {
   return (
     <section className="starter-page" aria-label="Start a new chat">
       <div className="starter-content">
-        <h2>What’s on the agenda today?</h2>
+        <h2>What can I help with?</h2>
         {props.composer}
       </div>
     </section>
@@ -5177,6 +5425,197 @@ function InlineTokens(props: { tokens: InlineToken[] }): ReactElement {
   );
 }
 
+function PiModelThinkingMenu(props: {
+  models: ChatModelSummary[];
+  selectedModel: ChatModelSummary | undefined;
+  thinkingLevels: string[];
+  selectedThinking: string | undefined;
+  disabled: boolean;
+  onSelectModel(provider: string, modelId: string): void;
+  onSelectThinking(level: string): void;
+}): ReactElement {
+  const [open, setOpen] = useState(false);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const modelTriggerRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const closeOnOutsideClick = (event: MouseEvent): void => {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+        setModelMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", closeOnOutsideClick);
+    return () => document.removeEventListener("mousedown", closeOnOutsideClick);
+  }, [open]);
+
+  function close(restoreFocus = false): void {
+    setOpen(false);
+    setModelMenuOpen(false);
+    if (restoreFocus) {
+      triggerRef.current?.focus();
+    }
+  }
+
+  const modelName =
+    props.selectedModel?.name ?? props.selectedModel?.id ?? "Model";
+  const thinkingName = props.selectedThinking ?? "Thinking";
+
+  return (
+    <div
+      className="pi-configuration-menu"
+      ref={rootRef}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          if (modelMenuOpen) {
+            setModelMenuOpen(false);
+            modelTriggerRef.current?.focus();
+          } else {
+            close(true);
+          }
+        }
+        if (
+          event.key === "ArrowRight" &&
+          event.target === modelTriggerRef.current
+        ) {
+          event.preventDefault();
+          setModelMenuOpen(true);
+        }
+        if (
+          event.key === "ArrowLeft" &&
+          (event.target as HTMLElement).closest(".pi-model-submenu")
+        ) {
+          event.preventDefault();
+          setModelMenuOpen(false);
+          modelTriggerRef.current?.focus();
+        }
+      }}
+    >
+      <Button
+        ref={triggerRef}
+        aria-expanded={open}
+        aria-haspopup="menu"
+        aria-label={`Model and thinking. Current model: ${modelName}. Current thinking: ${thinkingName}.`}
+        className="pi-configuration-trigger"
+        data-model-id={props.selectedModel?.id}
+        data-model-provider={props.selectedModel?.provider}
+        data-thinking-level={props.selectedThinking}
+        disabled={props.disabled}
+        size="sm"
+        onClick={() => {
+          setOpen((value) => !value);
+          setModelMenuOpen(false);
+        }}
+      >
+        <span>{thinkingName}</span>
+        <ChevronDown aria-hidden="true" size={13} strokeWidth={1.75} />
+      </Button>
+      {open ? (
+        <div
+          aria-label="Model and thinking options"
+          className="pi-configuration-popover"
+          role="menu"
+        >
+          <span className="pi-configuration-heading">Thinking</span>
+          {props.thinkingLevels.map((level) => {
+            const selected = level === props.selectedThinking;
+            return (
+              <Button
+                aria-checked={selected}
+                className="pi-configuration-option"
+                data-thinking-level={level}
+                key={level}
+                role="menuitemradio"
+                size="sm"
+                variant="menuItem"
+                onClick={() => {
+                  close();
+                  if (!selected) {
+                    props.onSelectThinking(level);
+                  }
+                }}
+              >
+                <span>{level}</span>
+                <Check
+                  aria-hidden="true"
+                  size={14}
+                  strokeWidth={1.75}
+                  visibility={selected ? "visible" : "hidden"}
+                />
+              </Button>
+            );
+          })}
+          {props.models.length > 0 ? (
+            <>
+              <div className="pi-configuration-divider" />
+              <Button
+                ref={modelTriggerRef}
+                aria-expanded={modelMenuOpen}
+                aria-haspopup="menu"
+                className="pi-configuration-option model"
+                role="menuitem"
+                size="sm"
+                variant="menuItem"
+                onClick={() => setModelMenuOpen(true)}
+                onMouseEnter={() => setModelMenuOpen(true)}
+              >
+                <span title={modelName}>{modelName}</span>
+                <ChevronRight aria-hidden="true" size={14} strokeWidth={1.75} />
+              </Button>
+              {modelMenuOpen ? (
+                <div
+                  aria-label="Available Pi models"
+                  className="pi-model-submenu"
+                  role="menu"
+                >
+                  {props.models.map((model) => {
+                    const selected =
+                      model.id === props.selectedModel?.id &&
+                      model.provider === props.selectedModel?.provider;
+                    const name = model.name ?? model.id;
+                    return (
+                      <Button
+                        aria-checked={selected}
+                        className="pi-configuration-option model-choice"
+                        data-model-id={model.id}
+                        data-model-provider={model.provider}
+                        key={`${model.provider ?? ""}/${model.id}`}
+                        role="menuitemradio"
+                        size="sm"
+                        variant="menuItem"
+                        onClick={() => {
+                          close();
+                          if (!selected && model.provider) {
+                            props.onSelectModel(model.provider, model.id);
+                          }
+                        }}
+                      >
+                        <span title={name}>{name}</span>
+                        <Check
+                          aria-hidden="true"
+                          size={14}
+                          strokeWidth={1.75}
+                          visibility={selected ? "visible" : "hidden"}
+                        />
+                      </Button>
+                    );
+                  })}
+                </div>
+              ) : null}
+            </>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function Composer(props: {
   value: string;
   isWorking: boolean;
@@ -5190,13 +5629,10 @@ function Composer(props: {
   slashCommands: SlashCommand[];
   selectedModel: ModelOption | undefined;
   backendLabel: string;
-  modelInfo?: string | undefined;
   realModels: ChatModelSummary[];
   realThinkingLevels: string[];
   selectedSession: SessionViewModel;
   allowAttachments: boolean;
-  enterToSend: boolean;
-  onEnterToSendChange(value: boolean): void;
   onChange(value: string): void;
   onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void;
   onSend(): void;
@@ -5220,16 +5656,12 @@ function Composer(props: {
     props.selectedSession.backendMode === "real"
       ? realModelSupportsImages(activeRealModel)
       : Boolean(props.selectedModel?.supportsImages);
-  const selectedModelSupportsThinking =
-    props.selectedSession.backendMode === "real"
-      ? realModelSupportsThinking(activeRealModel)
-      : Boolean(props.selectedModel?.supportsThinking);
   const hasImageWarning =
     props.attachments.some((attachment) => attachment.kind === "image") &&
     !selectedModelSupportsImages;
-  const currentRealModelValue = activeRealModel
-    ? `${activeRealModel.provider ?? ""}/${activeRealModel.id}`
-    : props.selectedSession.modelLabel?.replace(/\s+\/\s+/, "/");
+  const selectedRealModel =
+    activeRealModel ??
+    (props.realModels.length === 1 ? props.realModels[0] : undefined);
   const [dragActive, setDragActive] = useState(false);
   const isActionPending = isLifecycleTransition(props.status);
 
@@ -5311,71 +5743,17 @@ function Composer(props: {
               onClick={props.onPickAttachments}
             />
           ) : null}
-          {props.realModels.length > 0 ? (
-            <select
-              className="composer-select"
-              aria-label="Real Pi model"
-              value={currentRealModelValue ?? ""}
-              disabled={isActionPending}
-              onChange={(event) => {
-                const [provider, modelId] = event.target.value.split("/");
-                if (provider && modelId) {
-                  props.onSetModel(provider, modelId);
-                }
-              }}
-            >
-              {props.realModels.map((model) => (
-                <option
-                  key={`${model.provider ?? ""}/${model.id}`}
-                  value={`${model.provider ?? ""}/${model.id}`}
-                >
-                  {formatRealModelOption(model)}
-                </option>
-              ))}
-            </select>
-          ) : props.modelInfo ? (
-            <span className="composer-model-pill">{props.modelInfo}</span>
-          ) : null}
           {props.selectedSession.backendMode === "real" ? (
-            <select
-              className="composer-select thinking"
-              aria-label="Real Pi thinking"
-              value={props.selectedSession.thinkingLevel ?? "off"}
+            <PiModelThinkingMenu
               disabled={isActionPending}
-              onChange={(event) => props.onSetThinking(event.target.value)}
-            >
-              {props.realThinkingLevels.map((level) => (
-                <option
-                  key={level}
-                  value={level}
-                  disabled={!selectedModelSupportsThinking && level !== "off"}
-                >
-                  {formatRealThinkingOption(
-                    level,
-                    selectedModelSupportsThinking,
-                  )}
-                </option>
-              ))}
-            </select>
+              models={props.realModels}
+              selectedModel={selectedRealModel}
+              selectedThinking={props.selectedSession.thinkingLevel}
+              thinkingLevels={props.realThinkingLevels}
+              onSelectModel={props.onSetModel}
+              onSelectThinking={props.onSetThinking}
+            />
           ) : null}
-          <Menu label="Composer options">
-            <Button
-              aria-checked={props.enterToSend}
-              disabled={isActionPending}
-              role="menuitemcheckbox"
-              size="sm"
-              variant="menuItem"
-              onClick={() => props.onEnterToSendChange(!props.enterToSend)}
-            >
-              <Check
-                aria-hidden="true"
-                size={14}
-                strokeWidth={1.75}
-                visibility={props.enterToSend ? "visible" : "hidden"}
-              />
-              Enter sends
-            </Button>
-          </Menu>
           {props.error !== null ? (
             <span className="composer-error">{props.error}</span>
           ) : isActionPending ? (
@@ -5439,6 +5817,8 @@ function Composer(props: {
               className="send-button"
               icon={ArrowUp}
               label="Send"
+              aria-keyshortcuts="Enter"
+              shortcut="Enter"
               size="lg"
               variant="solid"
               disabled={!props.canSend}
@@ -6018,14 +6398,6 @@ function statusLabel(status: SessionStatus): string {
   }
 }
 
-function loadEnterToSendPreference(): boolean {
-  return localStorage.getItem("piDeck.enterToSend") === "true";
-}
-
-function saveEnterToSendPreference(value: boolean): void {
-  localStorage.setItem("piDeck.enterToSend", String(value));
-}
-
 function loadSidebarVisiblePreference(): boolean {
   return localStorage.getItem("piDeck.sidebarVisible") !== "false";
 }
@@ -6207,12 +6579,8 @@ export const __rendererTestHooks = {
   removeSavedSessionsForProject,
   runtimeCapabilitiesFor,
   updateRuntimeCapabilities,
+  thinkingLevelsForModel,
+  clampThinkingLevel,
+  applyPiDefaultsToDraftSessions,
+  draftSessionForProject,
 };
-
-function getRendererNodeAccessSummary(): string {
-  const hasProcess = Reflect.get(globalThis, "process") !== undefined;
-  const hasRequire = Reflect.get(globalThis, "require") !== undefined;
-  return hasProcess || hasRequire
-    ? "unexpected Node globals visible"
-    : "no process/require globals visible";
-}

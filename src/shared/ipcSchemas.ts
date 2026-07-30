@@ -301,6 +301,7 @@ export const chatModelSummarySchema = z
     name: z.string().optional(),
     provider: z.string().optional(),
     reasoning: z.boolean().optional(),
+    thinkingLevelMap: z.record(z.string(), z.string().nullable()).optional(),
     input: z.array(z.string()).optional(),
     contextWindow: z.number().optional(),
   })
@@ -308,13 +309,17 @@ export const chatModelSummarySchema = z
 
 export const chatListModelsRequestSchema = z
   .object({
-    runtimeId: z.string(),
+    runtimeId: z.string().optional(),
+    projectId: z.string().optional(),
   })
   .strict();
 
 export const chatListModelsResultSchema = z
   .object({
     models: z.array(chatModelSummarySchema),
+    activeModel: chatModelSummarySchema.optional(),
+    thinkingLevel: z.string().optional(),
+    thinkingLevels: z.array(z.string()),
   })
   .strict();
 

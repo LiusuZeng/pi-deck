@@ -28,6 +28,7 @@ interface FakeOptions {
   promptScenario: PromptScenario;
   dropCompletionEvents: boolean;
   extensionUiMethod: "select" | "confirm" | "input" | "editor";
+  noSession: boolean;
   sessionFile?: string;
 }
 
@@ -48,6 +49,7 @@ function parseOptions(argv: string[]): FakeOptions {
     promptScenario: "basic",
     dropCompletionEvents: false,
     extensionUiMethod: "confirm",
+    noSession: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -83,6 +85,8 @@ function parseOptions(argv: string[]): FakeOptions {
         options.extensionUiMethod = method;
       }
       index += 1;
+    } else if (arg === "--no-session") {
+      options.noSession = true;
     } else if (arg === "--session") {
       const sessionFile = argv[index + 1];
       if (sessionFile) {
@@ -144,14 +148,17 @@ class FakeRpcServer {
   private readonly decoder = new StringDecoder("utf8");
   private readonly options = parseOptions(process.argv.slice(2));
   private readonly sessionFile = this.resolveSessionFile();
-  private readonly shouldPersistSessionFile = Boolean(
-    this.options.sessionFile || process.env.PI_CODING_AGENT_DIR,
-  );
+  private readonly shouldPersistSessionFile =
+    !this.options.noSession &&
+    Boolean(this.options.sessionFile || process.env.PI_CODING_AGENT_DIR);
   private buffer = "";
   private firstCommandSeen = false;
   private promptCounter = 0;
   private currentTimers: NodeJS.Timeout[] = [];
   private agentActive = false;
+  private currentModel = "fake-model";
+  private currentProvider = "fake-provider";
+  private currentThinkingLevel = "medium";
   private pendingExtensionUi:
     | {
         id: string;
@@ -316,12 +323,49 @@ class FakeRpcServer {
           models: [
             {
               id: "fake-model",
+              name: "Fake model",
               provider: "fake-provider",
+              reasoning: true,
+              thinkingLevelMap: {
+                minimal: "minimal",
+                xhigh: "xhigh",
+                max: "max",
+              },
               input: ["text", "image"],
             },
           ],
         });
         break;
+      case "get_available_thinking_levels":
+        this.respond(command.id, name, {
+          levels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+        });
+        break;
+      case "set_model": {
+        const params = commandParams(command);
+        if (typeof params.modelId === "string") {
+          this.currentModel = params.modelId;
+        }
+        if (typeof params.provider === "string") {
+          this.currentProvider = params.provider;
+        }
+        this.respond(command.id, name, {
+          id: this.currentModel,
+          name: "Fake model",
+          provider: this.currentProvider,
+          reasoning: true,
+          input: ["text", "image"],
+        });
+        break;
+      }
+      case "set_thinking_level": {
+        const params = commandParams(command);
+        if (typeof params.level === "string") {
+          this.currentThinkingLevel = params.level;
+        }
+        this.respond(command.id, name);
+        break;
+      }
       case "get_commands":
         this.respond(command.id, name, {
           commands: [
@@ -361,9 +405,9 @@ class FakeRpcServer {
         : "fake-session-1",
       sessionFile: this.sessionFile,
       cwd: process.cwd(),
-      model: "fake-model",
-      provider: "fake-provider",
-      thinkingLevel: "medium",
+      model: this.currentModel,
+      provider: this.currentProvider,
+      thinkingLevel: this.currentThinkingLevel,
       isStreaming: this.agentActive,
     };
   }

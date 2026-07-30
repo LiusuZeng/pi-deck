@@ -140,7 +140,7 @@ const api: PiDeckApi = Object.freeze({
         request: chatDeleteAllSessionsRequestSchema.parse(request),
         responseSchema: chatDeleteAllSessionsResultSchema,
       }),
-    listModels: (request: { runtimeId: string }) =>
+    listModels: (request: { runtimeId?: string; projectId?: string }) =>
       invokeValidated({
         channel: ipcChannels.chatListModels,
         request: chatListModelsRequestSchema.parse(request),

@@ -69,6 +69,11 @@ import type {
 } from "../shared/types.js";
 import { DiagnosticsService } from "./diagnostics/diagnostics.js";
 import { registerValidatedIpc } from "./ipc/registerIpc.js";
+import {
+  discoverPiModels,
+  discoverPiRuntimeModels,
+  parsePiRuntimeModelDiscovery,
+} from "./pi/modelDiscovery.js";
 import { SinglePiAdapter } from "./pi/piAdapter.js";
 import { WorkerCapacity } from "./pi/workerCapacity.js";
 import { selectAvailableRuntime } from "./runtimeSelection.js";
@@ -366,8 +371,8 @@ function registerIpcHandlers(
     requestSchema: chatListModelsRequestSchema,
     responseSchema: chatListModelsResultSchema,
     diagnostics: diagnosticsService,
-    handler: async ({ runtimeId }) =>
-      listChatModels(store, diagnosticsService, runtimeId),
+    handler: async ({ runtimeId, projectId }) =>
+      listChatModels(store, diagnosticsService, runtimeId, projectId),
   });
 
   registerValidatedIpc({
@@ -1284,23 +1289,73 @@ async function closeChatWorker(): Promise<void> {
 async function listChatModels(
   store: SettingsStore,
   diagnosticsService: DiagnosticsService,
-  runtimeId: string,
+  runtimeId?: string,
+  projectId?: string,
 ): Promise<z.infer<typeof chatListModelsResultSchema>> {
+  if (runtimeId === undefined) {
+    if (resolveChatBackendMode() === "fake") {
+      const activeModel = {
+        id: "fake-model",
+        name: "Fake model",
+        provider: "fake",
+        reasoning: true,
+        input: ["text", "image"],
+        contextWindow: 128_000,
+      };
+      return {
+        models: [activeModel],
+        activeModel,
+        thinkingLevel: "medium",
+        thinkingLevels: [
+          "off",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max",
+        ],
+      };
+    }
+    const launch = await resolveRealChatLaunchConfig(store, projectId);
+    try {
+      const discovery = await discoverPiRuntimeModels({
+        command: launch.effective.config.piBinary,
+        args: launch.effective.workerArgs,
+        cwd: launch.projectCwd,
+        env: launch.effective.config.env,
+        requestTimeoutMs: Number(
+          process.env.PI_DECK_REAL_RPC_TIMEOUT_MS ?? 30_000,
+        ),
+      });
+      return chatListModelsResultSchema.parse(discovery);
+    } catch (error) {
+      diagnosticsService.recordError(
+        `Pi runtime model discovery failed; falling back to --list-models: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      const models = await discoverPiModels({
+        command: launch.effective.config.piBinary,
+        args: launch.effective.workerArgs,
+        cwd: launch.projectCwd,
+        env: launch.effective.config.env,
+      });
+      return chatListModelsResultSchema.parse({
+        models,
+        thinkingLevels: [],
+      });
+    }
+  }
+
   const adapter = await ensureChatAdapter(store, diagnosticsService);
   const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
-  const response = await adapter.request(
-    activeRuntimeId,
-    "get_available_models",
+  const [state, modelsResponse, thinkingLevelsResponse] = await Promise.all([
+    adapter.request(activeRuntimeId, "get_state"),
+    adapter.request(activeRuntimeId, "get_available_models"),
+    adapter.request(activeRuntimeId, "get_available_thinking_levels"),
+  ]);
+  return chatListModelsResultSchema.parse(
+    parsePiRuntimeModelDiscovery(state, modelsResponse, thinkingLevelsResponse),
   );
-  if (
-    response &&
-    typeof response === "object" &&
-    !Array.isArray(response) &&
-    Array.isArray((response as { models?: unknown }).models)
-  ) {
-    return chatListModelsResultSchema.parse(response);
-  }
-  return { models: [] };
 }
 
 async function listChatCommands(
