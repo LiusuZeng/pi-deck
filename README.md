@@ -1,35 +1,294 @@
 # Pi Deck
 
-**Pi Deck — a local command deck for Pi agents.**
+**A local macOS control plane for Pi coding agents.**
 
-Pi Deck is a planned local macOS GUI/control plane for running and managing Pi coding-agent sessions without launching Pi's terminal UI.
+Pi Deck gives Pi a dedicated desktop workspace for running, watching, and steering coding-agent sessions without opening Pi's terminal UI. It keeps projects and conversations organized in a sidebar while Pi continues to use its native models, settings, tools, resources, and session files.
 
-## Naming
+![Pi Deck showing project sessions, a resumed conversation, tool activity, and usage statistics](docs/assets/pi-deck.png)
 
-- Display name: Pi Deck
-- Repo/package name: `pi-deck`
-- App identifier: `com.liusu.pideck` or `com.pideck.app`
-- Docs short name: Pi Deck
+> **Status:** Pi Deck is an active, pre-release personal MVP. It currently runs from source and targets macOS.
 
-## Starting Pi Deck
+## What Pi Deck is
 
-```bash
-npm install
-npm run build                      # required once after clone or source changes
-npm start                          # existing dist, real Pi backend, current directory as project
-npm run deck:real -- /path/project # existing dist, real Pi backend for a specific project
-npm run dev:real -- /path/project  # real Pi backend with Vite renderer dev loop
-npm run deck:fake                  # existing dist, safe fake-backend demo mode
+Pi Deck is a **local agent harness** for developers who already use Pi and want a clearer way to manage ongoing work:
+
+- Open a project and continue its previous Pi sessions.
+- Run multiple independent Pi workers without managing terminal windows.
+- Switch projects while active work remains attached in the background.
+- Send prompts, files, and images from a graphical composer.
+- Change models and thinking levels from the session workspace.
+- Watch streaming replies, thinking, tool execution, usage, and errors.
+- Steer, queue a follow-up, answer extension requests, or abort a turn.
+
+Pi Deck is **not** an IDE, source editor, terminal wrapper, or hosted agent service. Keep using your preferred editor for code navigation and editing; Pi Deck coordinates the agents working alongside it.
+
+## Features
+
+### Projects and Pi-native sessions
+
+- Open local project folders with the macOS directory picker.
+- Persist recent projects and group sessions by canonical project path.
+- Discover existing Pi JSONL sessions for the active project.
+- Create a lightweight draft without starting Pi; the worker starts on first send.
+- Resume saved sessions with their transcript and persisted image inputs.
+- Search, refresh, close, resume, and delete sessions from the sidebar.
+- Close an idle runtime without deleting its session, then reopen it later.
+- Move deleted session files to Trash when possible.
+- Keep active workers attached when navigating to another project.
+- Surface cross-project background work in a dedicated sidebar section.
+
+### Multi-session control
+
+Each attached conversation has its own `pi --mode rpc` subprocess and event stream. Pi Deck routes actions by runtime ID so a stale prompt, abort, or close request cannot be redirected to the wrong conversation.
+
+- Independent foreground and background workers.
+- Configurable attached-worker capacity: **4 by default**, with a hard maximum of **20**.
+- Duplicate resume protection for the same session file.
+- Visible state for starting, working, tool execution, waiting for input, retrying, compacting, queued messages, idle, and errors.
+- Attention-first ordering keeps sessions that need input or recovery visible.
+- Runtime reconciliation recovers the UI when a terminal completion event is missed.
+
+### Chat and intervention controls
+
+- Streaming assistant responses rendered as safe Markdown.
+- Collapsible thinking sections.
+- Expandable tool cards with running, success, and error states.
+- Long-running status with elapsed time and the latest observed Pi phase.
+- **Steer** an active turn as soon as Pi can accept the instruction.
+- Queue a **Follow-up** for after the current work finishes.
+- Run active-worker extension commands immediately through Pi's prompt path.
+- **Abort** current work and reconcile the resulting runtime state.
+- Retry failed prompts, reopen exited saved sessions, and copy session diagnostics.
+
+### Models, thinking, commands, and usage
+
+- Discover available models from the active Pi runtime.
+- Use model capability metadata such as image input, reasoning, and context window to gate available controls and report usage.
+- Switch model and thinking level per session.
+- Discover slash commands exposed by the active worker, including skills and prompt templates.
+- Exclude terminal-only commands that do not have a meaningful GUI workflow.
+- Display context usage, input/output tokens, cache reads/writes, and provider cost when Pi reports them.
+
+### Files and images
+
+- Select one or more files through the native macOS picker.
+- Drag files or images into the composer.
+- Paste images directly from the clipboard.
+- Preview selected images before sending and restore previews in resumed sessions.
+- Send PNG, JPEG, WebP, and GIF image inputs when the active model supports images.
+- Enforce byte-signature detection, a 20 MB limit, and a 50-megapixel safety limit.
+- Resize oversized images to a maximum 2000 × 2000 bounding box when Pi's effective `images.autoResize` setting is enabled.
+- Respect Pi's effective `images.blockImages` setting.
+- Send non-image files as explicit **referenced paths**, rather than claiming their contents were uploaded.
+- Prefer project-relative references and warn when a path is outside the project, missing, unreadable, binary, or unusually large.
+
+### Extension requests
+
+Pi Deck can render and answer the blocking extension UI methods currently covered by the desktop bridge:
+
+- `select`
+- `confirm`
+- `input`
+- `editor`
+
+A background request marks its session as needing input without stealing focus. Responses remain scoped to the worker and request that produced them, and stale or timed-out responses are rejected.
+
+## How it works
+
+```text
+┌──────────────────────── Electron app ────────────────────────┐
+│                                                              │
+│  React renderer                                              │
+│  Projects · Sessions · Timeline · Composer                   │
+│              │                                               │
+│              │ validated, typed IPC                          │
+│              ▼                                               │
+│  Electron main process                                      │
+│  Project store · Session index · Attachments · Runtime state │
+│              │                                               │
+│              │ PiAdapter + strict JSONL transport            │
+│              ▼                                               │
+│  One local `pi --mode rpc` subprocess per attached session   │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+                         │
+                         ▼
+       Pi settings, provider auth, resources, and sessions
 ```
 
-`npm start` never rebuilds. Use `npm run launch:build` (or `npm run deck:real:build -- /path/project`) when development or CI needs to build and launch in one command.
+The renderer has no direct filesystem or process access. Electron main owns Pi subprocesses, selected-file tokens, project metadata, and session validation. Pi's session files remain the source of truth for conversation history; Pi Deck stores only the metadata needed to organize and reopen them.
 
-See [How to run and test](docs/how-to-run-and-test.md) for launcher options and validation commands.
+## Requirements
 
-## Project docs
+- **macOS** — the current MVP target.
+- **Node.js 22.12 or newer**.
+- **npm**.
+- A working `pi` executable that supports RPC mode.
+- Pi provider authentication configured as it would be for normal Pi use.
 
-- [Requirements](docs/requirements.md)
+Confirm Pi is available before launching:
+
+```bash
+pi --version
+```
+
+The launcher can resolve Pi from an explicit `--pi` path, `PI_DECK_PI_BINARY`, `PATH`, or common macOS install locations.
+
+## Quick start
+
+```bash
+git clone https://github.com/LiusuZeng/pi-deck.git
+cd pi-deck
+npm ci
+npm run build
+npm run deck:real -- /absolute/path/to/your/project
+```
+
+The production-style launcher uses the existing `dist` output and deliberately does **not** rebuild it. Rebuild after pulling or changing source:
+
+```bash
+npm run build
+```
+
+To build and launch a project in one command:
+
+```bash
+npm run deck:real:build -- /absolute/path/to/your/project
+```
+
+To use the repository directory itself as the project:
+
+```bash
+npm start
+```
+
+### Development mode
+
+```bash
+npm run dev:real -- /absolute/path/to/your/project
+```
+
+This starts Vite for renderer hot reload and launches Electron against the real Pi backend. Main-process or preload changes still require a restart.
+
+See every launcher option without starting the app:
+
+```bash
+npm run deck -- --help
+npm run deck:real -- --dry-run /absolute/path/to/your/project
+```
+
+## Typical workflow
+
+1. Launch Pi Deck for a project or select one with **Open project**.
+2. Choose a saved session, or create a **New session** draft.
+3. Select the model and thinking level from the composer.
+4. Add referenced files or image inputs if needed.
+5. Send the prompt; Pi starts lazily and streams into the timeline.
+6. Switch sessions or projects while other attached workers continue.
+7. Use **Steer**, **Follow-up**, or **Abort** while a turn is active.
+8. Close an idle runtime to free capacity while keeping its saved session resumable.
+
+Press **Enter** to send or steer. Use **Shift+Enter** for a newline.
+
+## Configuration
+
+The launcher accepts a project path positionally or through `--project`:
+
+```bash
+npm run deck:real -- --pi /absolute/path/to/pi /absolute/path/to/project
+```
+
+Useful environment overrides:
+
+| Variable                                       | Purpose                                                                                 |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `PI_DECK_PI_BINARY`                            | Absolute path to the Pi executable                                                      |
+| `PI_DECK_PROJECT_CWD`                          | Initial project directory                                                               |
+| `PI_CODING_AGENT_DIR`                          | Override Pi's agent/configuration directory                                             |
+| `PI_CODING_AGENT_SESSION_DIR`                  | Override Pi's session directory                                                         |
+| `PI_DECK_HOME`                                 | Override Pi Deck's project-metadata directory                                           |
+| `PI_DECK_REAL_RPC_TIMEOUT_MS`                  | Override the RPC command-response timeout                                               |
+| `PI_DECK_SCAN_PROJECT_SESSION_DIR_CANDIDATE=1` | Explicitly include a trust-dependent project `sessionDir` candidate in bounded scanning |
+
+Pi Deck narrowly reads effective `sessionDir`, `images.blockImages`, and `images.autoResize` values needed before worker launch. Other Pi settings and resource behavior remain owned by Pi.
+
+## Local data and privacy
+
+Pi Deck has no hosted backend and does not sync app data.
+
+- **Conversation history:** Pi-owned JSONL session files in Pi's resolved session directory.
+- **Project grouping:** `~/.pideck/projects.json` by default.
+- **App settings and diagnostics:** Electron's local user-data directory.
+- **Provider authentication and Pi resources:** Pi's normal agent directory, `~/.pi/agent` by default.
+
+“Local” describes the desktop control plane. Pi may still contact configured model providers, run network-capable tools, and perform its normal startup checks according to your Pi settings and environment.
+
+Security boundaries include:
+
+- Sandboxed renderer with `contextIsolation: true` and Node integration disabled.
+- Runtime validation for IPC requests and responses.
+- Strict production Content Security Policy.
+- Opaque selected-file tokens instead of renderer-controlled read paths.
+- Session path, extension, header, project, and session-directory validation before resume or deletion.
+- Image content sniffing and decode-safety limits in Electron main.
+- External-link allowlisting for `http`, `https`, and `mailto`.
+
+## Current limitations
+
+- Pi Deck currently runs from source; there is no signed/notarized installer or packaged release yet.
+- macOS is the supported MVP target.
+- Worker capacity is enforced, but there is no queued-start scheduler. New workers are blocked when capacity is reached.
+- There is not yet a full settings or diagnostics screen; some advanced configuration remains environment/file driven.
+- Project resources follow Pi's own trust and settings behavior; Pi Deck does not yet provide a project trust or resource-inspection panel.
+- Custom extension interfaces beyond `select`, `confirm`, `input`, and `editor` are not rendered as bespoke GUI components.
+- Tool cards do not yet provide rich diffs, output search, or advanced filtering.
+- Concurrent external writes to the same session from Pi Deck and another Pi process are unsupported.
+- After an Electron main-process crash, Pi Deck cannot reconnect to an already-running RPC subprocess. Persisted sessions can be reopened after restart, but unsaved partial stream text may be lost.
+
+## Development and validation
+
+Run the standard checks:
+
+```bash
+npm test
+npm run typecheck
+npm run format
+npm run build
+npm run test:e2e
+```
+
+Validate the installed Pi RPC path separately:
+
+```bash
+# Isolated get_state/get_messages health check; no model prompt
+npm run smoke:real
+
+# Minimal authenticated prompt round-trip
+npm run smoke:real:prompt
+
+# Real GUI project/session restart-and-resume flow
+npm run test:e2e:real-smoke
+```
+
+The prompt and GUI smoke commands require working provider authentication and may contact the configured model provider.
+
+## Repository layout
+
+```text
+src/main/       Electron backend, Pi workers, projects, sessions, attachments
+src/preload/    Sandboxed, validated renderer API
+src/renderer/   React chat workspace and runtime-state reduction
+src/shared/     IPC schemas and shared TypeScript types
+scripts/        Launch, build-validation, and real Pi smoke tooling
+e2e/            Playwright Electron end-to-end coverage
+docs/           Requirements, architecture, plans, and validation records
+```
+
+## Further documentation
+
+- [How to run and test Pi Deck](docs/how-to-run-and-test.md)
+- [Product requirements](docs/requirements.md)
 - [Technical architecture](docs/technical-architecture.md)
-- [Project task breakdown](docs/project-task-breakdown.md)
-- [Project tracker](docs/project-tracker.md)
-- [Engineering design review notes](docs/engineering-design-review-notes.md)
+- [Project-grouped sessions design](docs/project-grouped-sessions-p0-design.md)
+- [Real Pi validation record](docs/real-pi-gui-chat-validation.md)
+- [Implementation tracker](docs/project-tracker.md)
