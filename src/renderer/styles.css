@@ -211,8 +211,7 @@ textarea:disabled {
   background: rgb(255 255 255 / 8%);
 }
 
-.session-item,
-.browse-sessions {
+.session-item {
   width: 100%;
   color: inherit;
   text-align: left;
@@ -328,19 +327,6 @@ textarea:disabled {
 .session-time {
   align-self: start;
   white-space: nowrap;
-}
-
-.browse-sessions {
-  border: 0;
-  border-radius: 10px;
-  padding: 8px 11px;
-  color: #cbd5e1;
-  background: transparent;
-  font-size: 12px;
-}
-
-.browse-sessions:hover {
-  background: rgb(255 255 255 / 8%);
 }
 
 .sidebar-note {
@@ -1618,8 +1604,7 @@ h3 {
 }
 
 .session-item:hover,
-.session-item.active,
-.browse-sessions:hover {
+.session-item.active {
   background: var(--color-surface-muted);
 }
 
@@ -1641,10 +1626,6 @@ h3 {
     var(--color-border)
   );
   background: color-mix(in srgb, var(--color-accent) 9%, var(--color-surface));
-}
-
-.browse-sessions {
-  color: var(--color-text-muted);
 }
 
 .ui-status-message,
@@ -2119,12 +2100,24 @@ body {
   gap: 1px;
 }
 
+.session-list {
+  flex: 1 1 auto;
+  width: 100%;
+  padding-bottom: 4px;
+}
+
 .session-item,
 .active-work-item,
 .empty-session-list,
 .sidebar-note {
   border: 0;
   background: transparent;
+}
+
+.session-item.ui-button {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  width: 100%;
 }
 
 .session-item {
@@ -2159,10 +2152,17 @@ body {
 
 .session-delete-button.ui-control {
   position: absolute;
+  top: 3px;
+  right: 3px;
+  bottom: auto;
 }
 
-.session-item-wrap:has(.session-delete-button) .session-item {
-  padding-right: 38px;
+.session-item-wrap:hover
+  .session-delete-button.ui-control:not(:hover):not(:focus-visible),
+.session-item-wrap:focus-within
+  .session-delete-button.ui-control:not(:hover):not(:focus-visible) {
+  background: #ececec;
+  box-shadow: -7px 0 8px #ececec;
 }
 
 .state-dot {
@@ -2197,11 +2197,6 @@ body {
   font-size: 10px;
   font-weight: 600;
   text-transform: none;
-}
-
-.browse-sessions {
-  border-radius: 8px;
-  color: var(--color-text-muted);
 }
 
 .workspace {

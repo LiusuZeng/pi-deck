@@ -145,6 +145,15 @@ test("icon controls retain names, neutral styles, and fit a 900×600 viewport", 
     await expect(userBubble).toHaveCSS("color", "rgb(47, 47, 47)");
     await expect(userBubble).toHaveCSS("box-shadow", "none");
 
+    const sessionList = page.locator(".session-list");
+    const firstSessionRow = sessionList.locator(".session-item").first();
+    await expect(firstSessionRow).toHaveCSS("display", "grid");
+    const sessionListBox = await sessionList.boundingBox();
+    const firstSessionRowBox = await firstSessionRow.boundingBox();
+    expect(firstSessionRowBox?.width).toBeGreaterThanOrEqual(
+      (sessionListBox?.width ?? 0) - 1,
+    );
+
     const sidebarToggle = page.locator(".topbar .sidebar-toggle");
     await expect(sidebarToggle).not.toHaveAttribute("aria-describedby");
     await sidebarToggle.hover();
@@ -505,7 +514,9 @@ test("real mode can show and resume a saved project session with fake Pi", async
   try {
     await expectHealthyPreload(page);
     await expect(page.getByText(/Real Pi mode active/i)).toBeVisible();
-    await expect(page.getByText(/\d+ older sessions/)).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Session: manual-e2e-session-0" }),
+    ).toBeVisible();
     const savedSession = page
       .getByRole("button", { name: /Session: manual-e2e-session-/ })
       .first();
@@ -568,7 +579,7 @@ test("real mode keeps attention sessions visible, labels queues, searches, and r
     await expect(sidebar.getByText("Follow-up 2")).toBeVisible();
     await expect(sidebar.getByText("1 working", { exact: true })).toBeVisible();
     await expect(
-      sidebar.getByRole("button", { name: /2 older sessions/ }),
+      sidebar.getByRole("button", { name: "Session: saved-inbox-0" }),
     ).toBeVisible();
 
     await sidebar.getByLabel("Search sessions").fill("saved-inbox-6");

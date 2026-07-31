@@ -4027,7 +4027,6 @@ function SessionSidebar(props: {
   onDeleteAllSessions(): void;
   onRefresh(): Promise<void>;
 }): ReactElement {
-  const [showOlderRealSessions, setShowOlderRealSessions] = useState(false);
   const [sessionFilter, setSessionFilter] = useState("");
   const [isRefreshing, setIsRefreshing] = useState(false);
   const sidebarSessions = props.realMode
@@ -4055,13 +4054,7 @@ function SessionSidebar(props: {
       ? allRealInbox
       : buildRealSessionInbox(sidebarSessions, sessionFilter)
     : undefined;
-  const visibleIdleSavedSessions =
-    inbox === undefined
-      ? []
-      : sessionFilter.trim().length > 0 || showOlderRealSessions
-        ? inbox.idleSaved
-        : inbox.idleSaved.slice(0, 5);
-  const hiddenSessionCount = Math.max(0, (inbox?.idleSaved.length ?? 0) - 5);
+  const visibleIdleSavedSessions = inbox?.idleSaved ?? [];
   const visibleSessions = props.realMode
     ? [
         ...(inbox?.needsInput ?? []),
@@ -4269,20 +4262,6 @@ function SessionSidebar(props: {
             </div>
           );
         })}
-        {props.realMode &&
-        hiddenSessionCount > 0 &&
-        sessionFilter.trim().length === 0 ? (
-          <Button
-            className="browse-sessions"
-            size="sm"
-            onClick={() => setShowOlderRealSessions((value) => !value)}
-          >
-            <ChevronDown aria-hidden="true" size={14} strokeWidth={1.75} />
-            {showOlderRealSessions
-              ? "Show recent"
-              : `${hiddenSessionCount} older session${hiddenSessionCount === 1 ? "" : "s"}`}
-          </Button>
-        ) : null}
       </section>
 
       {!props.realMode ? (
