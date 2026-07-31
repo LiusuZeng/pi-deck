@@ -25,9 +25,11 @@ interface FakeOptions {
   stderrOnStart: boolean;
   streamDelayMs: number;
   ignoredCommands: Set<string>;
+  failedCommands: Set<string>;
   promptScenario: PromptScenario;
   dropCompletionEvents: boolean;
   extensionUiMethod: "select" | "confirm" | "input" | "editor";
+  extraModel: boolean;
   noSession: boolean;
   sessionFile?: string;
 }
@@ -46,9 +48,11 @@ function parseOptions(argv: string[]): FakeOptions {
     stderrOnStart: false,
     streamDelayMs: 5,
     ignoredCommands: new Set<string>(),
+    failedCommands: new Set<string>(),
     promptScenario: "basic",
     dropCompletionEvents: false,
     extensionUiMethod: "confirm",
+    extraModel: false,
     noSession: false,
   };
 
@@ -65,6 +69,9 @@ function parseOptions(argv: string[]): FakeOptions {
       index += 1;
     } else if (arg === "--ignore-command") {
       options.ignoredCommands.add(argv[index + 1] ?? "");
+      index += 1;
+    } else if (arg === "--fail-command") {
+      options.failedCommands.add(argv[index + 1] ?? "");
       index += 1;
     } else if (arg === "--prompt-scenario") {
       const scenario = argv[index + 1] ?? "basic";
@@ -85,6 +92,8 @@ function parseOptions(argv: string[]): FakeOptions {
         options.extensionUiMethod = method;
       }
       index += 1;
+    } else if (arg === "--extra-model") {
+      options.extraModel = true;
     } else if (arg === "--no-session") {
       options.noSession = true;
     } else if (arg === "--session") {
@@ -298,6 +307,15 @@ class FakeRpcServer {
     if (this.options.ignoredCommands.has(name)) {
       return;
     }
+    if (this.options.failedCommands.has(name)) {
+      this.respond(
+        command.id,
+        name,
+        undefined,
+        `Fake RPC configured to fail command: ${name}`,
+      );
+      return;
+    }
 
     switch (name) {
       case "get_state":
@@ -333,6 +351,17 @@ class FakeRpcServer {
               },
               input: ["text", "image"],
             },
+            ...(this.options.extraModel
+              ? [
+                  {
+                    id: "fake-model-2",
+                    name: "Fake model 2",
+                    provider: "fake-provider",
+                    reasoning: true,
+                    input: ["text", "image"],
+                  },
+                ]
+              : []),
           ],
         });
         break;
@@ -351,7 +380,10 @@ class FakeRpcServer {
         }
         this.respond(command.id, name, {
           id: this.currentModel,
-          name: "Fake model",
+          name:
+            this.currentModel === "fake-model-2"
+              ? "Fake model 2"
+              : "Fake model",
           provider: this.currentProvider,
           reasoning: true,
           input: ["text", "image"],
@@ -441,21 +473,47 @@ class FakeRpcServer {
 
     if (this.options.promptScenario === "error") {
       const errorMessage = "Usage limit reached for fake provider.";
+      const failedAssistant = {
+        role: "assistant",
+        content: [],
+        api: "openai-completions",
+        provider: this.currentProvider,
+        model: this.currentModel,
+        responseId: assistantId,
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            total: 0,
+          },
+        },
+        stopReason: "error",
+        errorMessage,
+        timestamp: Date.now(),
+      };
       this.agentActive = false;
+      // Mirror Pi 0.81's assistant-stream failure and terminal event shapes,
+      // rather than the legacy fixture-only status/error fields.
       this.write({
         type: "message_update",
-        messageId: assistantId,
-        role: "assistant",
-        content: errorMessage,
-        done: true,
-        isError: true,
-        error: errorMessage,
+        message: failedAssistant,
+        assistantMessageEvent: {
+          type: "error",
+          reason: "error",
+          error: failedAssistant,
+        },
       });
       this.write({
         type: "agent_end",
-        runId: `run_${this.promptCounter}`,
-        status: "error",
-        error: errorMessage,
+        messages: [failedAssistant],
+        willRetry: false,
       });
       return;
     }

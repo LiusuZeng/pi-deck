@@ -67,6 +67,8 @@ export type ExtensionUiResponse =
 export interface PiState {
   runtimeId?: RuntimeSessionId;
   sessionId?: string;
+  /** User-assigned display name returned by Pi's production get_state RPC. */
+  sessionName?: string;
   sessionFile?: string;
   cwd?: string;
   model?: string;

@@ -64,6 +64,14 @@ import {
   Wrench,
   X,
 } from "./components/ui/icons.js";
+import {
+  attachmentTokens,
+  getOrCreateAttachmentOwnerGeneration,
+  mergeAttachmentDrafts,
+  releaseAttachmentOwner,
+  releaseAttachmentTokens,
+  transferAttachmentOwnership,
+} from "./attachmentLifecycle.js";
 import { RuntimeEventBuffer } from "./runtimeEventBuffer.js";
 
 type LoadState =
@@ -184,7 +192,7 @@ interface SessionViewModel {
   lastRuntimeEventLabel?: string | undefined;
   modelLabel?: string;
   thinkingLevel?: string;
-  lastError?: string;
+  lastError?: string | undefined;
   runtimeBacked: boolean;
   backendMode?: "fake" | "real";
   sessionFile?: string;
@@ -199,6 +207,8 @@ interface SessionViewModel {
   retryPrompt?: { text: string; attachments: AttachmentDraft[] } | undefined;
   /** A final message arrived but the authoritative agent_end has not. */
   awaitingAgentEnd?: boolean;
+  /** A provider failure observed in a Pi runtime event, not a local UI error. */
+  providerErrorObserved?: boolean;
 }
 
 interface ComposerDraftState {
@@ -498,12 +508,18 @@ export function App(): ReactElement {
   // renders fan out duplicate status requests for the same runtime.
   const reconcilingRuntimeIds = useRef(new Set<string>());
   const sessionsRef = useRef<SessionViewModel[]>([]);
+  const composerDraftsRef = useRef<ComposerDraftsBySession>({});
+  // Stable session IDs can reappear after project switches/reloads, so each
+  // composer incarnation gets a unique, one-use attachment owner generation.
+  const attachmentOwnersBySession = useRef(new Map<string, string>());
+  const blockedAttachmentOwnerIds = useRef(new Set<string>());
   const selectedSessionIdRef = useRef(selectedSessionId);
   const currentProjectRef = useRef(currentProject);
   const sessionListGeneration = useRef(0);
   const reconciliationRetryTimers = useRef(new Map<string, number>());
   const reconciliationRetryAttempts = useRef(new Map<string, number>());
   sessionsRef.current = sessions;
+  composerDraftsRef.current = composerDrafts;
   selectedSessionIdRef.current = selectedSessionId;
   currentProjectRef.current = currentProject;
 
@@ -538,6 +554,7 @@ export function App(): ReactElement {
               (item) =>
                 item.runtimeBacked ||
                 item.draftSession === true ||
+                hasComposerDraft(composerDraftsRef.current, item.id) ||
                 item.projectId !== bootstrap.project.id,
             ),
             listed.sessions.map((summary) =>
@@ -721,6 +738,31 @@ export function App(): ReactElement {
       reconciliationRetryAttempts.current.clear();
     };
   }, []);
+
+  // A renderer reload/disposal loses all composer and retry references. Main
+  // retains each selection only by its owner, so revoke every owner we created
+  // rather than relying solely on the ten-minute expiry fallback.
+  useEffect(() => {
+    return () => {
+      for (const ownerId of attachmentOwnersBySession.current.values()) {
+        void releaseAttachmentOwner(window.piDeck.attachments, ownerId).catch(
+          () => undefined,
+        );
+      }
+    };
+  }, []);
+
+  // A session-list refresh may remove a saved row while a native picker is
+  // still resolving. Revoke its owner on the next render even if the async
+  // callback raced the state replacement.
+  useEffect(() => {
+    const visibleSessionIds = new Set(sessions.map((session) => session.id));
+    for (const sessionId of attachmentOwnersBySession.current.keys()) {
+      if (!visibleSessionIds.has(sessionId)) {
+        discardComposerAttachmentOwner(sessionId);
+      }
+    }
+  }, [composerDrafts, sessions]);
 
   const selectedSession =
     sessions.find((session) => session.id === selectedSessionId) ??
@@ -920,15 +962,228 @@ export function App(): ReactElement {
     reconciliationRetryAttempts.current.delete(runtimeId);
   }
 
+  function attachmentOwnerForSession(sessionId: string): string {
+    return getOrCreateAttachmentOwnerGeneration(
+      attachmentOwnersBySession.current,
+      blockedAttachmentOwnerIds.current,
+      sessionId,
+      () => createId("attachment-owner"),
+    );
+  }
+
+  function blockAttachmentOwner(sessionId: string): void {
+    blockedAttachmentOwnerIds.current.add(sessionId);
+  }
+
+  function unblockAttachmentOwner(sessionId: string): void {
+    blockedAttachmentOwnerIds.current.delete(sessionId);
+  }
+
+  function releaseSelectedAttachmentTokens(
+    ownerId: string,
+    selectedPathTokens: readonly string[],
+  ): void {
+    void releaseAttachmentTokens(
+      window.piDeck.attachments,
+      ownerId,
+      selectedPathTokens,
+    ).catch(() => undefined);
+  }
+
+  function discardComposerAttachmentOwner(sessionId: string): void {
+    discardComposerAttachmentOwners([sessionId]);
+  }
+
+  function discardComposerAttachmentOwners(
+    sessionIds: readonly string[],
+  ): void {
+    const uniqueSessionIds = [...new Set(sessionIds)];
+    if (uniqueSessionIds.length === 0) {
+      return;
+    }
+    const ownerIds: string[] = [];
+    for (const sessionId of uniqueSessionIds) {
+      blockAttachmentOwner(sessionId);
+      const ownerId = attachmentOwnersBySession.current.get(sessionId);
+      if (ownerId !== undefined) {
+        ownerIds.push(ownerId);
+        attachmentOwnersBySession.current.delete(sessionId);
+      }
+    }
+    setComposerDrafts((items) =>
+      clearComposerDraftsForSessions(items, uniqueSessionIds),
+    );
+    for (const ownerId of ownerIds) {
+      void releaseAttachmentOwner(window.piDeck.attachments, ownerId).catch(
+        () => undefined,
+      );
+    }
+  }
+
+  /**
+   * Complete a deletion only for rows main has confirmed absent. The untouched
+   * candidate rows retain both their composer state and main-process owners.
+   */
+  function finalizeSavedSessionDeletion(
+    candidates: readonly SessionViewModel[],
+    removed: readonly SessionViewModel[],
+  ): void {
+    const removedIds = new Set(removed.map((session) => session.id));
+    if (removedIds.size === 0) {
+      for (const session of candidates) {
+        unblockAttachmentOwner(session.id);
+      }
+      return;
+    }
+
+    discardComposerAttachmentOwners([...removedIds]);
+    for (const session of candidates) {
+      if (!removedIds.has(session.id)) {
+        unblockAttachmentOwner(session.id);
+      }
+    }
+
+    // Preserve updates that arrived while the deletion IPC was in flight and
+    // only remove rows known to have been torn down.
+    const remainingSessions = removeSessionsByIds(
+      sessionsRef.current,
+      removedIds,
+    );
+    setSessions((items) => removeSessionsByIds(items, removedIds));
+    if (removedIds.has(selectedSessionIdRef.current)) {
+      const nextSession =
+        remainingSessions.find((session) => session.runtimeBacked) ??
+        remainingSessions[0];
+      if (nextSession !== undefined) {
+        setSelectedSessionId(nextSession.id);
+      } else {
+        void handleNewSession();
+      }
+    }
+  }
+
+  function canAcceptAttachmentsForSession(sessionId: string): boolean {
+    const session = sessionsRef.current.find((item) => item.id === sessionId);
+    return (
+      session !== undefined &&
+      !isLifecycleTransition(session.status) &&
+      !blockedAttachmentOwnerIds.current.has(sessionId)
+    );
+  }
+
+  function acceptImportedAttachments(
+    sessionId: string,
+    ownerId: string,
+    imported: AttachmentDraft[],
+  ): boolean {
+    const ownerIsCurrent =
+      attachmentOwnersBySession.current.get(sessionId) === ownerId;
+    if (!ownerIsCurrent || !canAcceptAttachmentsForSession(sessionId)) {
+      releaseSelectedAttachmentTokens(ownerId, attachmentTokens(imported));
+      return false;
+    }
+
+    setComposerDrafts((items) => {
+      // The native picker/import may resolve after its target session was
+      // closed, resumed, or began delivery. Never create an orphan composer
+      // draft in that case or attach it to a newer owner generation.
+      if (
+        !canAcceptAttachmentsForSession(sessionId) ||
+        attachmentOwnersBySession.current.get(sessionId) !== ownerId
+      ) {
+        releaseSelectedAttachmentTokens(ownerId, attachmentTokens(imported));
+        return items;
+      }
+      const current = composerDraftForSession(items, sessionId);
+      const merged = mergeAttachmentDrafts(current.attachments, imported);
+      releaseSelectedAttachmentTokens(
+        ownerId,
+        attachmentTokens(merged.discarded),
+      );
+      return updateComposerDraft(items, sessionId, (draft) => ({
+        ...draft,
+        attachments: merged.attachments,
+      }));
+    });
+    return true;
+  }
+
+  async function transferComposerAttachmentOwnership(
+    previousSessionId: string,
+    sessionId: string,
+    attachmentsToTransfer: AttachmentDraft[],
+  ): Promise<boolean> {
+    if (previousSessionId === sessionId) {
+      return true;
+    }
+    const previousOwnerId =
+      attachmentOwnersBySession.current.get(previousSessionId);
+    const readyTokens = attachmentTokens(
+      attachmentsToTransfer.filter(
+        (attachment) => attachment.status === "ready",
+      ),
+    );
+    if (readyTokens.length === 0) {
+      if (previousOwnerId !== undefined) {
+        attachmentOwnersBySession.current.delete(previousSessionId);
+        void releaseAttachmentOwner(
+          window.piDeck.attachments,
+          previousOwnerId,
+        ).catch(() => undefined);
+      }
+      return true;
+    }
+    if (previousOwnerId === undefined) {
+      return false;
+    }
+
+    const existingOwnerId = attachmentOwnersBySession.current.get(sessionId);
+    const ownerId = existingOwnerId ?? attachmentOwnerForSession(sessionId);
+    try {
+      await transferAttachmentOwnership(
+        window.piDeck.attachments,
+        previousOwnerId,
+        previousSessionId,
+        ownerId,
+        sessionId,
+        attachmentsToTransfer,
+      );
+      // Revoke the old generation after its represented tokens moved. Any
+      // omitted stale token is discarded rather than following the session.
+      void releaseAttachmentOwner(
+        window.piDeck.attachments,
+        previousOwnerId,
+      ).catch(() => undefined);
+      attachmentOwnersBySession.current.delete(previousSessionId);
+      return true;
+    } catch {
+      if (existingOwnerId === undefined) {
+        attachmentOwnersBySession.current.delete(sessionId);
+        void releaseAttachmentOwner(window.piDeck.attachments, ownerId).catch(
+          () => undefined,
+        );
+      }
+      return false;
+    }
+  }
+
   function applyRuntimeEvent(event: ChatRuntimeEvent): void {
     if (event.type === "agent_end" || event.type === "worker_exit") {
       clearRuntimeStatusRetry(event.runtimeId);
+    }
+    if (event.type === "agent_end") {
+      unblockAttachmentOwner(event.runtimeId);
     }
     if (
       event.type === "worker_exit" &&
       intentionallyClosingRuntimeIds.current.delete(event.runtimeId)
     ) {
       return;
+    }
+    if (event.type === "worker_exit") {
+      // Main has already released this runtime owner. Drop renderer references
+      // too, so a later resume cannot try to reuse revoked tokens.
+      discardComposerAttachmentOwner(event.runtimeId);
     }
     setSessions((current) =>
       updateSessionByRuntimeId(current, event.runtimeId, (session) =>
@@ -1002,6 +1257,7 @@ export function App(): ReactElement {
     }
     setComposerError(null);
     setSelectedSessionId(session.id);
+    blockAttachmentOwner(session.id);
     setSessions((items) =>
       items.map((item) =>
         item.id === session.id
@@ -1022,6 +1278,39 @@ export function App(): ReactElement {
         sessionFile: session.sessionFile,
       });
       const resumed = sessionFromSnapshot(snapshot);
+      const draftToMove = composerDraftForSession(
+        composerDraftsRef.current,
+        session.id,
+      );
+      const transferred = await transferComposerAttachmentOwnership(
+        session.id,
+        resumed.id,
+        draftToMove.attachments,
+      );
+      if (!transferred) {
+        // The worker is usable, but an expired/stale selection cannot safely
+        // follow it to the new runtime. Preserve typed text and ask for a
+        // fresh attachment instead of carrying a dead token into retry.
+        const expiredOwnerId = attachmentOwnersBySession.current.get(
+          session.id,
+        );
+        attachmentOwnersBySession.current.delete(session.id);
+        if (expiredOwnerId !== undefined) {
+          void releaseAttachmentOwner(
+            window.piDeck.attachments,
+            expiredOwnerId,
+          ).catch(() => undefined);
+        }
+        setComposerDrafts((items) =>
+          updateComposerDraft(items, session.id, (current) => ({
+            ...current,
+            attachments: [],
+          })),
+        );
+        setComposerError(
+          "One or more attachments expired; reselect them before sending.",
+        );
+      }
       // Use the state at completion time: another runtime can stream while
       // this saved session is being resumed.
       setSessions((items) => replaceResumedSession(items, session.id, resumed));
@@ -1030,8 +1319,12 @@ export function App(): ReactElement {
         moveComposerDraft(items, session.id, resumed.id),
       );
       loadRealCapabilities(resumed.id);
-      setUiMessage("Resumed saved Pi session.");
-      return resumed;
+      setUiMessage(
+        transferred
+          ? "Resumed saved Pi session."
+          : "Resumed saved Pi session; reselect expired attachments before sending.",
+      );
+      return transferred ? resumed : undefined;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (isMissingSessionFileError(message)) {
@@ -1042,6 +1335,7 @@ export function App(): ReactElement {
           session.id,
         );
         setSessions((items) => removeSessionById(items, session.id));
+        discardComposerAttachmentOwner(session.id);
         if (selectedSessionIdRef.current === session.id) {
           const nextSession =
             remainingSessions.find((item) => item.runtimeBacked) ??
@@ -1055,6 +1349,7 @@ export function App(): ReactElement {
         );
         return undefined;
       }
+      unblockAttachmentOwner(session.id);
       setUiMessage(`Failed to resume session: ${message}`);
       setSessions((items) =>
         items.map((item) =>
@@ -1156,6 +1451,7 @@ export function App(): ReactElement {
       return;
     }
     setComposerError(null);
+    blockAttachmentOwner(draftSession.id);
     setSessions((items) =>
       items.map((session) =>
         session.id === draftSession.id
@@ -1169,10 +1465,16 @@ export function App(): ReactElement {
       ),
     );
     setUiMessage("Starting Pi for this session…");
+    let createdRuntimeId: string | undefined;
+    let backendSession: SessionViewModel | undefined;
     try {
       let snapshot = await window.piDeck.chat.createSession({
         projectId: draftSession.projectId ?? currentProject.id,
       });
+      // Configuration RPCs can fail after main has successfully spawned and
+      // registered this worker. Retain the original id so this setup attempt
+      // can be rolled back instead of becoming an invisible capacity consumer.
+      createdRuntimeId = snapshot.runtimeId;
       const selectedDraftModel = parseModelLabel(draftSession.modelLabel);
       if (selectedDraftModel !== undefined) {
         snapshot = await window.piDeck.chat.setModel({
@@ -1187,30 +1489,86 @@ export function App(): ReactElement {
           level: draftSession.thinkingLevel,
         });
       }
-      const backendSession = {
+      const transferred = await transferComposerAttachmentOwnership(
+        draftSession.id,
+        snapshot.runtimeId,
+        promptAttachments,
+      );
+      if (!transferred) {
+        const expiredOwnerId = attachmentOwnersBySession.current.get(
+          draftSession.id,
+        );
+        attachmentOwnersBySession.current.delete(draftSession.id);
+        if (expiredOwnerId !== undefined) {
+          void releaseAttachmentOwner(
+            window.piDeck.attachments,
+            expiredOwnerId,
+          ).catch(() => undefined);
+        }
+        setComposerDrafts((items) =>
+          updateComposerDraft(items, draftSession.id, (current) => ({
+            ...current,
+            attachments: [],
+          })),
+        );
+      }
+      const initializedSession = {
         ...sessionFromSnapshot(snapshot),
         title: draftSession.title,
       };
+      backendSession = initializedSession;
       setSessions((items) =>
         mergeSessions(
-          [backendSession],
+          [initializedSession],
           items.filter((item) => item.id !== draftSession.id),
         ),
       );
-      setSelectedSessionId(backendSession.id);
+      setSelectedSessionId(initializedSession.id);
       setComposerDrafts((items) =>
-        moveComposerDraft(items, draftSession.id, backendSession.id),
+        moveComposerDraft(items, draftSession.id, initializedSession.id),
       );
-      if (backendSession.backendMode === "real") {
-        rememberPiDefaults(backendSession);
-        loadRealCapabilities(backendSession.id);
+      if (initializedSession.backendMode === "real") {
+        rememberPiDefaults(initializedSession);
+        loadRealCapabilities(initializedSession.id);
       }
-      if (snapshot.state.cwd) {
+      if (snapshot.projectId !== undefined) {
+        // Project IDs are app-owned references, not cwd strings. Preserve the
+        // selected record when an ID is path-independent in a future/migrated
+        // ProjectStore, rather than reconstructing one from Pi's cwd.
+        const snapshotProject = [currentProject, ...recentProjects].find(
+          (candidate) => candidate.id === snapshot.projectId,
+        );
+        if (snapshotProject !== undefined) {
+          setCurrentProject(snapshotProject);
+        }
+      } else if (snapshot.state.cwd) {
         setCurrentProject(projectFromCwd(snapshot.state.cwd));
       }
-      await sendPrompt(backendSession.id, prompt, promptAttachments);
+      if (!transferred) {
+        setComposerError(
+          "One or more attachments expired; reselect them before sending.",
+        );
+        setUiMessage(
+          "Pi is ready, but expired attachments were removed. Reselect them before sending.",
+        );
+        return;
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      unblockAttachmentOwner(draftSession.id);
+      if (createdRuntimeId !== undefined) {
+        try {
+          await window.piDeck.chat.closeSession({
+            runtimeId: createdRuntimeId,
+          });
+        } catch (cleanupError) {
+          // Preserve the setup failure for the retryable draft; main still
+          // clears its runtime maps in a closeSession finally path.
+          console.error(
+            `Failed to clean up new Pi runtime ${createdRuntimeId}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+          );
+        }
+      }
       setComposerError(message);
       setComposerDrafts((items) =>
         updateComposerDraft(items, draftSession.id, (current) => ({
@@ -1234,6 +1592,13 @@ export function App(): ReactElement {
         ),
       );
       setUiMessage(`Failed to start a new Pi session: ${message}`);
+      return;
+    }
+
+    // sendPrompt has its own failure/retry path. Keep it outside the setup
+    // transaction so a worker is never closed after Pi accepted a prompt.
+    if (backendSession !== undefined) {
+      await sendPrompt(backendSession.id, prompt, promptAttachments);
     }
   }
 
@@ -1245,6 +1610,7 @@ export function App(): ReactElement {
     const now = formatTime();
     const sentAttachments = timelineAttachmentsFromDrafts(promptAttachments);
     setComposerError(null);
+    blockAttachmentOwner(runtimeId);
     setComposerDrafts((items) => clearComposerDraft(items, runtimeId));
     setSessions((current) =>
       current.map((session) =>
@@ -1279,6 +1645,15 @@ export function App(): ReactElement {
     );
 
     try {
+      const attachmentOwnerId =
+        promptAttachments.length > 0
+          ? attachmentOwnersBySession.current.get(runtimeId)
+          : undefined;
+      if (promptAttachments.length > 0 && attachmentOwnerId === undefined) {
+        throw new Error(
+          "Attachment owner generation is unavailable; reselect attachments and retry.",
+        );
+      }
       await window.piDeck.chat.prompt({
         runtimeId,
         text: prompt,
@@ -1286,8 +1661,10 @@ export function App(): ReactElement {
           selectedPathToken: attachment.selectedPathToken,
           sendMode: attachment.sendMode,
         })),
+        ...(attachmentOwnerId !== undefined ? { attachmentOwnerId } : {}),
       });
     } catch (error) {
+      unblockAttachmentOwner(runtimeId);
       setComposerError(error instanceof Error ? error.message : String(error));
       setComposerDrafts((items) =>
         updateComposerDraft(items, runtimeId, (current) => ({
@@ -1379,6 +1756,15 @@ export function App(): ReactElement {
     const queuedAttachments = attachments;
     setComposerError(null);
     try {
+      const attachmentOwnerId =
+        queuedAttachments.length > 0
+          ? attachmentOwnersBySession.current.get(selectedSession.id)
+          : undefined;
+      if (queuedAttachments.length > 0 && attachmentOwnerId === undefined) {
+        throw new Error(
+          "Attachment owner generation is unavailable; reselect attachments and retry.",
+        );
+      }
       const request = {
         runtimeId: selectedSession.id,
         text,
@@ -1386,6 +1772,7 @@ export function App(): ReactElement {
           selectedPathToken: attachment.selectedPathToken,
           sendMode: attachment.sendMode,
         })),
+        ...(attachmentOwnerId !== undefined ? { attachmentOwnerId } : {}),
       };
       if (kind === "steer") {
         await window.piDeck.chat.steer(request);
@@ -1667,6 +2054,7 @@ export function App(): ReactElement {
         (session) =>
           session.runtimeBacked ||
           session.draftSession === true ||
+          hasComposerDraft(composerDraftsRef.current, session.id) ||
           session.projectId !== project.id,
       );
       return mergeSessions(retained, draft ? [...savedRows, draft] : savedRows);
@@ -1756,7 +2144,10 @@ export function App(): ReactElement {
       setSessions((items) =>
         mergeSessions(
           items.filter(
-            (item) => item.runtimeBacked || item.draftSession === true,
+            (item) =>
+              item.runtimeBacked ||
+              item.draftSession === true ||
+              hasComposerDraft(composerDraftsRef.current, item.id),
           ),
           result.sessions.map((summary) =>
             sessionFromSummary(summary, projectId),
@@ -1787,17 +2178,30 @@ export function App(): ReactElement {
       return;
     }
 
+    for (const session of savedSessions) {
+      blockAttachmentOwner(session.id);
+    }
     try {
       const result = await window.piDeck.chat.deleteAllSessions({ projectId });
-      // Only the project submitted to the backend is affected. Keep saved
-      // rows and live updates for every other project.
-      setSessions((items) => removeSavedSessionsForProject(items, projectId));
+      // Counts are not enough when Pi skips individual files. Main returns
+      // the exact canonical files it removed, so drafts on skipped rows stay
+      // intact instead of being blanket-discarded.
+      finalizeSavedSessionDeletion(
+        savedSessions,
+        savedSessionsForDeletedFiles(savedSessions, result.deletedSessionFiles),
+      );
       setUiMessage(
         `Deleted ${result.deletedCount} saved session${result.deletedCount === 1 ? "" : "s"}.${result.skippedCount > 0 ? ` Skipped ${result.skippedCount} attached or unavailable session${result.skippedCount === 1 ? "" : "s"}.` : ""}`,
       );
     } catch (error) {
+      // Main returns successful prefixes as an exact result. A rejected bulk
+      // request therefore has no confirmed removals, so preserve every draft
+      // rather than guessing from a potentially incomplete session scan.
+      for (const session of savedSessions) {
+        unblockAttachmentOwner(session.id);
+      }
       setUiMessage(
-        `Failed to delete saved sessions: ${error instanceof Error ? error.message : String(error)}`,
+        `Failed to delete saved sessions: ${error instanceof Error ? error.message : String(error)}. Drafts were retained; refresh before retrying.`,
       );
     }
   }
@@ -1814,9 +2218,11 @@ export function App(): ReactElement {
       return;
     }
 
+    blockAttachmentOwner(session.id);
     intentionallyClosingRuntimeIds.current.add(session.id);
     try {
       await window.piDeck.chat.closeSession({ runtimeId: session.id });
+      discardComposerAttachmentOwner(session.id);
       // Derive both the visible state and selection fallback from the latest
       // render, rather than the array captured before closeSession awaited.
       const remainingSessions = closeRuntimeInSessionState(
@@ -1842,6 +2248,7 @@ export function App(): ReactElement {
       );
     } catch (error) {
       intentionallyClosingRuntimeIds.current.delete(session.id);
+      discardComposerAttachmentOwner(session.id);
       setComposerError(error instanceof Error ? error.message : String(error));
     }
   }
@@ -1864,32 +2271,54 @@ export function App(): ReactElement {
       return;
     }
 
+    blockAttachmentOwner(session.id);
+    if (session.runtimeBacked) {
+      // Main must close an attached Pi worker before moving its live session
+      // file. Suppress that expected exit while the delete transaction settles.
+      intentionallyClosingRuntimeIds.current.add(session.id);
+    }
     try {
-      await window.piDeck.chat.deleteSession({
+      const result = await window.piDeck.chat.deleteSession({
         projectId: currentProject.id,
         sessionFile,
       });
-      // A background worker may have emitted an update while deleteSession
-      // awaited, so remove only this row from the latest state.
-      const remainingSessions = removeSessionById(
-        sessionsRef.current,
-        session.id,
+      finalizeSavedSessionDeletion(
+        [session],
+        savedSessionsForDeletedFiles([session], [result.sessionFile]),
       );
-      setSessions((items) => removeSessionById(items, session.id));
-      if (selectedSessionIdRef.current === session.id) {
-        const nextSession =
-          remainingSessions.find((item) => item.runtimeBacked) ??
-          remainingSessions[0];
-        if (nextSession !== undefined) {
-          setSelectedSessionId(nextSession.id);
-        } else {
-          await handleNewSession();
-        }
-      }
       setUiMessage("Deleted Pi session.");
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      let runtimeDetached = false;
+      if (session.runtimeBacked) {
+        try {
+          await window.piDeck.chat.getRuntimeStatus({
+            runtimeId: session.id,
+          });
+          intentionallyClosingRuntimeIds.current.delete(session.id);
+        } catch (statusError) {
+          runtimeDetached = isDetachedRuntimeError(
+            statusError instanceof Error
+              ? statusError.message
+              : String(statusError),
+          );
+          if (!runtimeDetached) {
+            intentionallyClosingRuntimeIds.current.delete(session.id);
+          }
+        }
+      }
+
+      if (runtimeDetached) {
+        // Main deliberately preserved the generation when file removal failed.
+        // Keep the same row/id so a later resume can atomically transfer its
+        // typed draft and still-live attachment tokens to the new runtime.
+        setSessions((items) => closeRuntimeInSessionState(items, session.id));
+      }
+      unblockAttachmentOwner(session.id);
       setUiMessage(
-        `Failed to delete session: ${error instanceof Error ? error.message : String(error)}`,
+        runtimeDetached
+          ? `Failed to delete session after closing its runtime: ${message}. The saved file and draft were retained; click the session to resume.`
+          : `Failed to delete session: ${message}. Draft was retained.`,
       );
     }
   }
@@ -1959,7 +2388,7 @@ export function App(): ReactElement {
       setSessions((items) =>
         items.map((item) =>
           item.id === updated.id
-            ? { ...updated, timeline: item.timeline }
+            ? mergeSessionUsageFromSnapshot(item, updated)
             : item,
         ),
       );
@@ -1999,7 +2428,7 @@ export function App(): ReactElement {
       setSessions((items) =>
         items.map((item) =>
           item.id === updated.id
-            ? { ...updated, timeline: item.timeline }
+            ? mergeSessionUsageFromSnapshot(item, updated)
             : item,
         ),
       );
@@ -2012,24 +2441,20 @@ export function App(): ReactElement {
 
   async function handlePickAttachments(): Promise<void> {
     const sessionId = selectedSession.id;
+    const ownerId = attachmentOwnerForSession(sessionId);
     try {
       const result = await window.piDeck.attachments.pickFiles({
         projectPath: currentProject.canonicalPath,
+        ownerId,
+        sessionId,
       });
       if (!result.selected) {
         setUiMessage("Attachment picker canceled.");
         return;
       }
-      setComposerDrafts((items) =>
-        updateComposerDraft(items, sessionId, (current) => ({
-          ...current,
-          attachments: mergeAttachmentDrafts(
-            current.attachments,
-            result.attachments,
-          ),
-        })),
-      );
-      setUiMessage(`Added ${result.attachments.length} attachment(s).`);
+      if (acceptImportedAttachments(sessionId, ownerId, result.attachments)) {
+        setUiMessage(`Added ${result.attachments.length} attachment(s).`);
+      }
     } catch (error) {
       setUiMessage(
         `Attachment picker failed; no files were added (${error instanceof Error ? error.message : String(error)}).`,
@@ -2041,20 +2466,17 @@ export function App(): ReactElement {
     files: File[],
   ): Promise<void> {
     const sessionId = selectedSession.id;
+    const ownerId = attachmentOwnerForSession(sessionId);
     try {
       const result = await window.piDeck.attachments.importDroppedFiles(files, {
         projectPath: currentProject.canonicalPath,
+        ownerId,
+        sessionId,
       });
-      if (result.selected) {
-        setComposerDrafts((items) =>
-          updateComposerDraft(items, sessionId, (current) => ({
-            ...current,
-            attachments: mergeAttachmentDrafts(
-              current.attachments,
-              result.attachments,
-            ),
-          })),
-        );
+      if (
+        result.selected &&
+        acceptImportedAttachments(sessionId, ownerId, result.attachments)
+      ) {
         setUiMessage(
           `Added ${result.attachments.length} dropped file attachment(s).`,
         );
@@ -2074,19 +2496,18 @@ export function App(): ReactElement {
       return;
     }
 
+    const ownerId = attachmentOwnerForSession(sessionId);
     try {
       const images = await Promise.all(imageFiles.map(readDroppedImageFile));
-      const result = await window.piDeck.attachments.importImages({ images });
-      if (result.selected) {
-        setComposerDrafts((items) =>
-          updateComposerDraft(items, sessionId, (current) => ({
-            ...current,
-            attachments: mergeAttachmentDrafts(
-              current.attachments,
-              result.attachments,
-            ),
-          })),
-        );
+      const result = await window.piDeck.attachments.importImages({
+        images,
+        ownerId,
+        sessionId,
+      });
+      if (
+        result.selected &&
+        acceptImportedAttachments(sessionId, ownerId, result.attachments)
+      ) {
         setUiMessage(
           `Imported ${result.attachments.length} image attachment(s).`,
         );
@@ -2095,6 +2516,29 @@ export function App(): ReactElement {
       setUiMessage(
         `Image import failed (${error instanceof Error ? error.message : String(error)}).`,
       );
+    }
+  }
+
+  function handleRemoveAttachment(id: string): void {
+    const ownerId = selectedSession.id;
+    const attachment = composerDraftForSession(
+      composerDraftsRef.current,
+      ownerId,
+    ).attachments.find((item) => item.id === id);
+    if (attachment === undefined) {
+      return;
+    }
+    setComposerDrafts((items) =>
+      updateComposerDraft(items, ownerId, (current) => ({
+        ...current,
+        attachments: current.attachments.filter((item) => item.id !== id),
+      })),
+    );
+    const attachmentOwnerId = attachmentOwnersBySession.current.get(ownerId);
+    if (attachmentOwnerId !== undefined) {
+      releaseSelectedAttachmentTokens(attachmentOwnerId, [
+        attachment.selectedPathToken,
+      ]);
     }
   }
 
@@ -2175,14 +2619,7 @@ export function App(): ReactElement {
         void handleSetRealModel(provider, modelId)
       }
       onSetThinking={(level) => void handleSetRealThinking(level)}
-      onRemoveAttachment={(id) =>
-        setComposerDrafts((items) =>
-          updateComposerDraft(items, selectedSession.id, (current) => ({
-            ...current,
-            attachments: current.attachments.filter((item) => item.id !== id),
-          })),
-        )
-      }
+      onRemoveAttachment={handleRemoveAttachment}
       onSelectCommand={handleSelectCommand}
     />
   );
@@ -2347,6 +2784,10 @@ function isMissingSessionFileError(message: string): boolean {
   return /session file is missing or unreadable/i.test(message);
 }
 
+function isDetachedRuntimeError(message: string): boolean {
+  return /chat runtime is no longer attached|unknown pi runtime/i.test(message);
+}
+
 function composerDraftForSession(
   drafts: ComposerDraftsBySession,
   sessionId: string,
@@ -2375,8 +2816,26 @@ function clearComposerDraft(
   drafts: ComposerDraftsBySession,
   sessionId: string,
 ): ComposerDraftsBySession {
-  const { [sessionId]: _, ...remaining } = drafts;
-  return remaining;
+  return clearComposerDraftsForSessions(drafts, [sessionId]);
+}
+
+function clearComposerDraftsForSessions(
+  drafts: ComposerDraftsBySession,
+  sessionIds: readonly string[],
+): ComposerDraftsBySession {
+  const uniqueSessionIds = new Set(sessionIds);
+  if (uniqueSessionIds.size === 0) {
+    return drafts;
+  }
+  const remaining = { ...drafts };
+  let changed = false;
+  for (const sessionId of uniqueSessionIds) {
+    if (Object.hasOwn(remaining, sessionId)) {
+      delete remaining[sessionId];
+      changed = true;
+    }
+  }
+  return changed ? remaining : drafts;
 }
 
 function moveComposerDraft(
@@ -2417,31 +2876,6 @@ function validateComposerInput(input: {
   return undefined;
 }
 
-function mergeAttachmentDrafts(
-  existing: AttachmentDraft[],
-  incoming: AttachmentDraft[],
-): AttachmentDraft[] {
-  const merged = [...existing];
-  const seen = new Set(existing.map(attachmentDedupKey));
-  for (const attachment of incoming) {
-    const key = attachmentDedupKey(attachment);
-    if (!seen.has(key)) {
-      seen.add(key);
-      merged.push(attachment);
-    }
-  }
-  return merged;
-}
-
-function attachmentDedupKey(attachment: AttachmentDraft): string {
-  return [
-    attachment.kind,
-    attachment.sendMode,
-    attachment.displayPath,
-    attachment.size ?? "unknown-size",
-  ].join("|");
-}
-
 function replaceResumedSession(
   sessions: SessionViewModel[],
   previousSessionId: string,
@@ -2457,7 +2891,16 @@ function removeSessionById(
   sessions: SessionViewModel[],
   sessionId: string,
 ): SessionViewModel[] {
-  return sessions.filter((session) => session.id !== sessionId);
+  return removeSessionsByIds(sessions, new Set([sessionId]));
+}
+
+function removeSessionsByIds(
+  sessions: SessionViewModel[],
+  sessionIds: ReadonlySet<string>,
+): SessionViewModel[] {
+  return sessionIds.size === 0
+    ? sessions
+    : sessions.filter((session) => !sessionIds.has(session.id));
 }
 
 function closeRuntimeInSessionState(
@@ -2492,6 +2935,18 @@ function savedSessionsForProject(
     (session) =>
       session.resumeBacked === true &&
       sessionBelongsToProject(session, projectId),
+  );
+}
+
+function savedSessionsForDeletedFiles(
+  savedSessions: readonly SessionViewModel[],
+  deletedSessionFiles: readonly string[],
+): SessionViewModel[] {
+  const deletedFiles = new Set(deletedSessionFiles);
+  return savedSessions.filter(
+    (session) =>
+      session.sessionFile !== undefined &&
+      deletedFiles.has(session.sessionFile),
   );
 }
 
@@ -2673,7 +3128,11 @@ function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
     runtimeBacked: true,
     resumeBacked: false,
     backendMode: snapshot.backendMode,
-    ...(snapshot.state.cwd ? { projectId: snapshot.state.cwd } : {}),
+    ...(snapshot.projectId !== undefined
+      ? { projectId: snapshot.projectId }
+      : snapshot.state.cwd
+        ? { projectId: snapshot.state.cwd }
+        : {}),
     timeline: timelineFromMessages(snapshot.messages),
   };
   if (usageStats !== undefined) {
@@ -2706,7 +3165,13 @@ function isSnapshotAgentActive(snapshot: ChatSnapshot): boolean {
 
 function titleFromSnapshot(snapshot: ChatSnapshot): string {
   const stateRecord = snapshot.state as Record<string, unknown>;
-  const stateTitle = [stateRecord.title, stateRecord.name].find(
+  // Pi RPC exposes a user-assigned display name as sessionName, rather than
+  // the older title/name aliases used by some fixtures.
+  const stateTitle = [
+    stateRecord.sessionName,
+    stateRecord.title,
+    stateRecord.name,
+  ].find(
     (value): value is string =>
       typeof value === "string" && value.trim().length > 0,
   );
@@ -3080,6 +3545,8 @@ function reduceRuntimeEvent(
         workingStartedAtMs: session.workingStartedAtMs ?? Date.now(),
         lastRuntimeEventLabel: "Pi agent started",
         retryPrompt: undefined,
+        providerErrorObserved: false,
+        lastError: undefined,
         updatedAt: "Now",
         updatedAtMs: Date.now(),
       };
@@ -3124,28 +3591,98 @@ function reduceRuntimeEvent(
         updatedAtMs: Date.now(),
       };
     case "auto_retry_start":
+      // Pi 0.81 emits this after agent_end({ willRetry: true }). Keep the
+      // runtime busy through backoff rather than exposing idle/send controls.
       return {
         ...session,
-        overlays: { ...session.overlays, retrying: true },
+        awaitingAgentEnd: false,
+        status: session.status === "aborting" ? "aborting" : "working",
+        baseState: "working",
+        overlays: {
+          ...session.overlays,
+          streaming: false,
+          retrying: true,
+        },
+        subtitle: `Retrying · ${backendLabel(session)} will retry this turn`,
+        workingStartedAtMs: session.workingStartedAtMs ?? Date.now(),
+        lastRuntimeEventLabel: "Pi scheduled an automatic retry",
+        providerErrorObserved: false,
         updatedAt: "Now",
         updatedAtMs: Date.now(),
       };
     case "auto_retry_end": {
       const retryStatus = getString(event, "status");
-      return {
+      // Real Pi reports success/finalError. Keep the status fallback solely
+      // for older fake fixtures and manually recorded event logs.
+      const retryFailed =
+        getBoolean(event, "success") === false ||
+        retryStatus === "failed" ||
+        retryStatus === "error";
+
+      // Pi 0.81 AgentSession.abort() cancels retry backoff and emits
+      // auto_retry_end({ success: false, finalError: "Retry cancelled" }).
+      // The renderer has already recorded the user's abort intent, and Pi
+      // does not emit another successful agent_end to repair this state.
+      // Handle that terminal cancellation before generic retry failures.
+      if (session.status === "aborting" && retryFailed) {
+        return {
+          ...session,
+          awaitingAgentEnd: false,
+          providerErrorObserved: false,
+          status: "idle",
+          baseState: "idle",
+          overlays: {
+            ...session.overlays,
+            streaming: false,
+            toolRunning: false,
+            retrying: false,
+            needsUserInput: false,
+          },
+          subtitle: "Idle · backend stream aborted",
+          workingStartedAtMs: undefined,
+          retryPrompt: undefined,
+          lastError: undefined,
+          lastRuntimeEventLabel: "Pi cancelled the automatic retry after abort",
+          updatedAt: "Now",
+          updatedAtMs: Date.now(),
+        };
+      }
+
+      const retryError = getRuntimeEventErrorMessage(event);
+      const nextSession: SessionViewModel = {
         ...session,
-        status:
-          retryStatus === "failed" || retryStatus === "error"
-            ? "error"
-            : session.status,
-        baseState:
-          retryStatus === "failed" || retryStatus === "error"
-            ? "error"
-            : session.baseState,
-        overlays: { ...session.overlays, retrying: false },
+        awaitingAgentEnd: retryFailed
+          ? false
+          : (session.awaitingAgentEnd ?? false),
+        // A successful retry_end is emitted before the authoritative final
+        // agent_end, so it must not expose an idle session in that gap.
+        status: retryFailed ? "error" : "working",
+        baseState: retryFailed ? "error" : "working",
+        overlays: {
+          ...session.overlays,
+          streaming: false,
+          retrying: false,
+        },
+        subtitle: retryFailed
+          ? "Error · automatic retry failed"
+          : `Working · ${backendLabel(session)} retry complete`,
+        workingStartedAtMs: retryFailed
+          ? undefined
+          : (session.workingStartedAtMs ?? Date.now()),
+        lastRuntimeEventLabel: retryFailed
+          ? "Pi reported a final retry error"
+          : "Pi finished an automatic retry",
+        providerErrorObserved: retryFailed,
+        ...(retryFailed ? {} : { lastError: undefined }),
         updatedAt: "Now",
         updatedAtMs: Date.now(),
       };
+      return retryFailed
+        ? appendRuntimeErrorDiagnostic(
+            nextSession,
+            retryError ?? "Pi automatic retry failed.",
+          )
+        : nextSession;
     }
     case "extension_ui_request":
       return reduceExtensionUiRequestEvent(session, event);
@@ -3169,9 +3706,15 @@ function reduceRuntimeEvent(
       );
     case "agent_end": {
       const status = getString(event, "status");
+      const willRetry = getBoolean(event, "willRetry") === true;
       const errorMessage = getRuntimeEventErrorMessage(event);
+      // Production Pi sends agent_end({ messages, willRetry }) without the
+      // fixture-only status/error fields. Carry only an error observed in a
+      // Pi runtime event, never a previous UI/local error state, into this
+      // terminal classification.
       const endedWithError =
-        status === "error" || status === "failed" || errorMessage !== undefined;
+        !willRetry &&
+        (hasRuntimeEventError(event) || session.providerErrorObserved === true);
       const stillWaitingForInput = session.overlays.needsUserInput;
       const finalEventUsage = getMessageUsageFromEvent(event);
       const finalUsageMessageId =
@@ -3186,6 +3729,47 @@ function reduceRuntimeEvent(
               [finalUsageMessageId]: finalEventUsage,
             }
           : session.usageByMessageId;
+      const completedTimeline = removeEmptyAssistantMessages(
+        session.timeline.map((item) =>
+          item.kind === "assistant" && item.streaming === true
+            ? { ...item, streaming: false }
+            : item,
+        ),
+      );
+
+      if (willRetry) {
+        return {
+          ...session,
+          awaitingAgentEnd: false,
+          ...(usageByMessageId !== undefined ? { usageByMessageId } : {}),
+          ...(usageByMessageId !== undefined
+            ? {
+                usageStats: summarizeUsageByMessage(
+                  usageByMessageId,
+                  session.usageStats?.contextWindowTokens,
+                ),
+              }
+            : {}),
+          status: "working",
+          baseState: "working",
+          providerErrorObserved: false,
+          lastError: undefined,
+          overlays: {
+            ...session.overlays,
+            streaming: false,
+            toolRunning: false,
+            retrying: true,
+            needsUserInput: false,
+          },
+          subtitle: `Retrying · ${backendLabel(session)} will retry this turn`,
+          workingStartedAtMs: session.workingStartedAtMs ?? Date.now(),
+          lastRuntimeEventLabel: "Pi ended an attempt and scheduled a retry",
+          updatedAt: "Now",
+          updatedAtMs: Date.now(),
+          timeline: completedTimeline,
+        };
+      }
+
       const nextSession: SessionViewModel = {
         ...session,
         awaitingAgentEnd: false,
@@ -3208,10 +3792,13 @@ function reduceRuntimeEvent(
           : stillWaitingForInput
             ? "waitingForInput"
             : "idle",
+        providerErrorObserved: false,
+        ...(endedWithError ? {} : { lastError: undefined }),
         overlays: {
           ...session.overlays,
           streaming: false,
           toolRunning: false,
+          retrying: false,
           needsUserInput: stillWaitingForInput && !endedWithError,
         },
         subtitle: endedWithError
@@ -3230,19 +3817,13 @@ function reduceRuntimeEvent(
             : "Pi completed the turn",
         updatedAt: "Now",
         updatedAtMs: Date.now(),
-        timeline: removeEmptyAssistantMessages(
-          session.timeline.map((item) =>
-            item.kind === "assistant" && item.streaming === true
-              ? { ...item, streaming: false }
-              : item,
-          ),
-        ),
+        timeline: completedTimeline,
       };
       return endedWithError
-        ? appendDiagnostic(nextSession, {
-            tone: "error",
-            content: errorMessage ?? "Pi agent failed.",
-          })
+        ? appendRuntimeErrorDiagnostic(
+            nextSession,
+            errorMessage ?? session.lastError ?? "Pi agent failed.",
+          )
         : nextSession;
     }
     case "diagnostic":
@@ -3552,12 +4133,13 @@ function reduceMessageUpdate(
       : undefined;
 
   const errorMessage = getRuntimeEventErrorMessage(event);
-  const isErrorUpdate =
-    assistantEventType === "error" || errorMessage !== undefined;
+  const isErrorUpdate = hasRuntimeEventError(event);
   const nextSession: SessionViewModel = {
     ...session,
     ...(usageByMessageId !== undefined ? { usageByMessageId } : {}),
     ...(usageStats !== undefined ? { usageStats } : {}),
+    providerErrorObserved:
+      isErrorUpdate || session.providerErrorObserved === true,
     // An assistant message's `done` only completes that message. The agent
     // may still be running tools or emit an authoritative agent_end next.
     status: isErrorUpdate
@@ -3591,10 +4173,10 @@ function reduceMessageUpdate(
   };
 
   return isErrorUpdate
-    ? appendDiagnostic(nextSession, {
-        tone: "error",
-        content: errorMessage ?? "Pi message update failed.",
-      })
+    ? appendRuntimeErrorDiagnostic(
+        nextSession,
+        errorMessage ?? "Pi message update failed.",
+      )
     : nextSession;
 }
 
@@ -4010,6 +4592,26 @@ function appendDiagnostic(
       },
     ],
   };
+}
+
+function appendRuntimeErrorDiagnostic(
+  session: SessionViewModel,
+  content: string,
+): SessionViewModel {
+  const mostRecentTimelineItem = session.timeline[session.timeline.length - 1];
+  if (
+    mostRecentTimelineItem?.kind === "diagnostic" &&
+    mostRecentTimelineItem.tone === "error" &&
+    mostRecentTimelineItem.content === content
+  ) {
+    return {
+      ...session,
+      status: "error",
+      baseState: "error",
+      lastError: content,
+    };
+  }
+  return appendDiagnostic(session, { tone: "error", content });
 }
 
 function SessionSidebar(props: {
@@ -5975,8 +6577,14 @@ function isLifecycleTransition(status: SessionStatus): boolean {
   );
 }
 
-function isSessionBusy(session: Pick<SessionViewModel, "status">): boolean {
-  return isLifecycleTransition(session.status) || session.status === "working";
+function isSessionBusy(
+  session: Pick<SessionViewModel, "status" | "overlays">,
+): boolean {
+  return (
+    isLifecycleTransition(session.status) ||
+    session.status === "working" ||
+    session.overlays.retrying
+  );
 }
 
 function shouldReconcileSession(session: SessionViewModel): boolean {
@@ -6016,10 +6624,13 @@ function reconcileSessionWithRuntimeStatus(
       status: "idle",
       baseState: "idle",
       awaitingAgentEnd: false,
+      providerErrorObserved: false,
+      lastError: undefined,
       overlays: {
         ...session.overlays,
         streaming: false,
         toolRunning: false,
+        retrying: false,
       },
       workingStartedAtMs: undefined,
       subtitle: `Idle · ${backendLabel(session)} reconciled`,
@@ -6247,17 +6858,129 @@ function extractThinkingContent(value: unknown): string | undefined {
 function getRuntimeEventErrorMessage(
   event: ChatRuntimeEvent,
 ): string | undefined {
-  const directError = getString(event, "error") ?? getString(event, "message");
+  const directError =
+    getString(event, "error") ??
+    getString(event, "errorMessage") ??
+    getString(event, "finalError") ??
+    getString(event, "message");
   if (directError !== undefined) {
     return directError;
   }
 
-  const errorRecord = getRecord(event, "error");
+  const assistantEvent = getRecord(event, "assistantMessageEvent");
   return (
-    getStringFromRecord(errorRecord, "message") ??
-    getStringFromRecord(errorRecord, "error") ??
-    getStringFromRecord(getRecord(event, "assistantMessageEvent"), "error")
+    getErrorMessageFromRecord(getRecord(event, "error")) ??
+    getAssistantMessageEventErrorMessage(assistantEvent) ??
+    getAssistantMessageErrorMessage(getRecord(event, "message")) ??
+    getAssistantMessageErrorMessage(getFinalAssistantMessage(event))
   );
+}
+
+function hasRuntimeEventError(event: ChatRuntimeEvent): boolean {
+  const status = getString(event, "status");
+  const assistantEvent = getRecord(event, "assistantMessageEvent");
+  return (
+    status === "error" ||
+    status === "failed" ||
+    hasDirectRuntimeEventError(event) ||
+    isAssistantMessageEventFailure(assistantEvent) ||
+    isErrorAssistantMessage(getRecord(event, "message")) ||
+    isErrorAssistantMessage(getRecordFromRecord(assistantEvent, "error")) ||
+    isErrorAssistantMessage(getFinalAssistantMessage(event))
+  );
+}
+
+function hasDirectRuntimeEventError(event: ChatRuntimeEvent): boolean {
+  return (
+    getString(event, "error") !== undefined ||
+    getString(event, "errorMessage") !== undefined ||
+    getString(event, "finalError") !== undefined ||
+    getString(event, "message") !== undefined ||
+    getErrorMessageFromRecord(getRecord(event, "error")) !== undefined
+  );
+}
+
+function isAssistantMessageEventFailure(
+  assistantEvent: Record<string, unknown> | undefined,
+): boolean {
+  if (getStringFromRecord(assistantEvent, "type") !== "error") {
+    return false;
+  }
+  return (
+    getStringFromRecord(assistantEvent, "reason") !== "aborted" &&
+    getStringFromRecord(
+      getRecordFromRecord(assistantEvent, "error"),
+      "stopReason",
+    ) !== "aborted"
+  );
+}
+
+function isErrorAssistantMessage(
+  message: Record<string, unknown> | undefined,
+): boolean {
+  const stopReason = getStringFromRecord(message, "stopReason");
+  return (
+    stopReason !== "aborted" &&
+    (stopReason === "error" ||
+      getAssistantMessageErrorMessage(message) !== undefined)
+  );
+}
+
+function getAssistantMessageEventErrorMessage(
+  assistantEvent: Record<string, unknown> | undefined,
+): string | undefined {
+  return (
+    getErrorMessageFromRecord(getRecordFromRecord(assistantEvent, "error")) ??
+    getAssistantMessageErrorMessage(
+      getRecordFromRecord(assistantEvent, "message"),
+    ) ??
+    getAssistantMessageErrorMessage(
+      getRecordFromRecord(assistantEvent, "partial"),
+    ) ??
+    getStringFromRecord(assistantEvent, "errorMessage")
+  );
+}
+
+function getAssistantMessageErrorMessage(
+  message: Record<string, unknown> | undefined,
+): string | undefined {
+  return (
+    getStringFromRecord(message, "errorMessage") ??
+    getStringFromRecord(message, "error") ??
+    getErrorMessageFromRecord(getRecordFromRecord(message, "error"))
+  );
+}
+
+function getErrorMessageFromRecord(
+  error: Record<string, unknown> | undefined,
+): string | undefined {
+  return (
+    getStringFromRecord(error, "errorMessage") ??
+    getStringFromRecord(error, "message") ??
+    getStringFromRecord(error, "error")
+  );
+}
+
+function getFinalAssistantMessage(
+  event: ChatRuntimeEvent,
+): Record<string, unknown> | undefined {
+  const messages = getArray(event, "messages");
+  if (messages === undefined) {
+    return undefined;
+  }
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message || typeof message !== "object" || Array.isArray(message)) {
+      continue;
+    }
+    const record = message as Record<string, unknown>;
+    if (getStringFromRecord(record, "role") === "assistant") {
+      return record;
+    }
+  }
+
+  return undefined;
 }
 
 function getString(event: ChatRuntimeEvent, key: string): string | undefined {
@@ -6527,11 +7250,16 @@ export const __rendererTestHooks = {
   composerDraftForSession,
   updateComposerDraft,
   clearComposerDraft,
+  clearComposerDraftsForSessions,
   moveComposerDraft,
   hasComposerDraft,
   validateComposerInput,
-  mergeAttachmentDrafts,
+  mergeAttachmentDrafts: (
+    existing: AttachmentDraft[],
+    incoming: AttachmentDraft[],
+  ) => mergeAttachmentDrafts(existing, incoming).attachments,
   isMissingSessionFileError,
+  isDetachedRuntimeError,
   isSessionDeletable,
   listProjectsIfAvailable,
   selectProjectIfAvailable,
@@ -6547,8 +7275,10 @@ export const __rendererTestHooks = {
   eventHasUsageMetadata,
   replaceResumedSession,
   removeSessionById,
+  removeSessionsByIds,
   closeRuntimeInSessionState,
   savedSessionsForProject,
+  savedSessionsForDeletedFiles,
   removeSavedSessionsForProject,
   runtimeCapabilitiesFor,
   updateRuntimeCapabilities,

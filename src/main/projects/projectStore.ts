@@ -200,17 +200,67 @@ export class ProjectStore {
     return toProjectRef(next);
   }
 
-  async selectProject(projectId: string): Promise<ProjectRef> {
+  /**
+   * Resolve a renderer-visible project id into the canonical root that main is
+   * allowed to use. IDs are looked up exactly; they are never interpreted as
+   * arbitrary filesystem paths.
+   */
+  async resolveAuthorizedProject(projectId: string): Promise<ProjectRef> {
     await this.loadIfNeeded();
     const project = this.state.projects.find((item) => item.id === projectId);
     if (!project) {
       throw new Error(`Unknown project: ${projectId}`);
     }
-    const canonical = await canonicalOrResolved(project.rootPath);
+    if (project.archivedAtMs !== undefined) {
+      throw new Error(`Project is archived: ${projectId}`);
+    }
+
+    let canonical: string;
+    let stat: Awaited<ReturnType<typeof fs.stat>>;
+    try {
+      canonical = await fs.realpath(project.rootPath);
+      stat = await fs.stat(canonical);
+    } catch {
+      await this.setProjectInvalidReason(
+        project,
+        "Project folder is missing or unreadable.",
+      );
+      throw new Error(`Project folder is missing or unreadable: ${project.id}`);
+    }
+    if (!stat.isDirectory()) {
+      await this.setProjectInvalidReason(
+        project,
+        "Project path is not a folder.",
+      );
+      throw new Error(`Project path is not a folder: ${project.id}`);
+    }
+    // IDs are app-owned lookup keys. P0 currently creates them from the
+    // canonical root, but authorization must not reinterpret an ID as a path
+    // or require that implementation detail for future/migrated records.
     if (canonical !== project.rootPath) {
+      await this.setProjectInvalidReason(
+        project,
+        "Project folder moved or its canonical path changed.",
+      );
       throw new Error(
         `Project folder moved or is unavailable: ${project.rootPath}`,
       );
+    }
+
+    if (project.invalidReason !== undefined) {
+      project.invalidReason = undefined;
+      await this.persist();
+    }
+    return toProjectRef(project);
+  }
+
+  async selectProject(projectId: string): Promise<ProjectRef> {
+    await this.resolveAuthorizedProject(projectId);
+    const project = this.state.projects.find((item) => item.id === projectId);
+    if (!project) {
+      // resolveAuthorizedProject above makes this unreachable, but retain a
+      // defensive error if future store mutations become concurrent.
+      throw new Error(`Unknown project: ${projectId}`);
     }
     const now = Date.now();
     project.lastOpenedAtMs = now;
@@ -359,7 +409,11 @@ export class ProjectStore {
     const next: ProjectSessionRef = {
       projectId: options.projectId,
       sessionFile,
-      ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+      ...(options.sessionId
+        ? { sessionId: options.sessionId }
+        : existing?.sessionId
+          ? { sessionId: existing.sessionId }
+          : {}),
       title:
         options.title ??
         existing?.title ??
@@ -448,6 +502,17 @@ export class ProjectStore {
     this.state.sessionRefs = this.state.sessionRefs.filter(
       (ref) => !(ref.projectId === projectId && ref.sessionFile === canonical),
     );
+    await this.persist();
+  }
+
+  private async setProjectInvalidReason(
+    project: ProjectRecord,
+    invalidReason: string,
+  ): Promise<void> {
+    if (project.invalidReason === invalidReason) {
+      return;
+    }
+    project.invalidReason = invalidReason;
     await this.persist();
   }
 

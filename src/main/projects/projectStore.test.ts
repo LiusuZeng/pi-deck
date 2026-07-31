@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { test, vi } from "vitest";
+import { expect, test, vi } from "vitest";
 import { ProjectStore } from "./projectStore.js";
 import type { ChatSessionSummary } from "../../shared/types.js";
 
@@ -53,6 +53,85 @@ test("ProjectStore persists active canonical project and avoids duplicate upsert
   assert.equal(listed.activeProjectId, canonicalProject);
   assert.equal(listed.activeProject?.id, canonicalProject);
   assert.equal(listed.projects.length, 1);
+});
+
+test("ProjectStore resolves only registered project IDs for process work", async () => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "pi-deck-project-store-authorize-"),
+  );
+  const home = path.join(root, "home");
+  const selectedDir = path.join(root, "selected");
+  const unselectedDir = path.join(root, "unselected");
+  await fs.mkdir(selectedDir, { recursive: true });
+  await fs.mkdir(unselectedDir, { recursive: true });
+  const selected = await fs.realpath(selectedDir);
+
+  const store = new ProjectStore(home);
+  await store.upsertAndActivateProject(selected);
+
+  await expect(store.resolveAuthorizedProject(selected)).resolves.toMatchObject(
+    {
+      id: selected,
+      canonicalPath: selected,
+    },
+  );
+  await expect(store.resolveAuthorizedProject(unselectedDir)).rejects.toThrow(
+    /unknown project/i,
+  );
+  await expect(
+    store.resolveAuthorizedProject(`${selected}${path.sep}.`),
+  ).rejects.toThrow(/unknown project/i);
+
+  await fs.rm(selectedDir, { recursive: true });
+  await expect(store.resolveAuthorizedProject(selected)).rejects.toThrow(
+    /missing or unreadable/i,
+  );
+});
+
+test("ProjectStore resolves opaque stored IDs to canonical roots without treating IDs as paths", async () => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "pi-deck-project-store-opaque-id-"),
+  );
+  const home = path.join(root, "home");
+  const selectedDir = path.join(root, "selected");
+  await fs.mkdir(selectedDir, { recursive: true });
+  const selected = await fs.realpath(selectedDir);
+  const projectId = "project-record-opaque-id";
+  const now = Date.now();
+  await fs.mkdir(home, { recursive: true });
+  await fs.writeFile(
+    path.join(home, "projects.json"),
+    `${JSON.stringify({
+      version: 1,
+      activeProjectId: projectId,
+      projects: [
+        {
+          id: projectId,
+          rootPath: selected,
+          displayName: "selected",
+          createdAtMs: now,
+          updatedAtMs: now,
+          lastOpenedAtMs: now,
+        },
+      ],
+      sessionRefs: [],
+    })}\n`,
+  );
+
+  const store = new ProjectStore(home);
+  await expect(
+    store.resolveAuthorizedProject(projectId),
+  ).resolves.toMatchObject({
+    id: projectId,
+    canonicalPath: selected,
+  });
+  await expect(store.resolveAuthorizedProject(selected)).rejects.toThrow(
+    /unknown project/i,
+  );
+  await expect(store.selectProject(projectId)).resolves.toMatchObject({
+    id: projectId,
+    canonicalPath: selected,
+  });
 });
 
 test("ProjectStore marks deleted recent project folders as invalid", async () => {
@@ -248,6 +327,47 @@ test("ProjectStore bulk session upserts validate the entire batch before changin
   assert.equal((await store.getSessionRefs(project)).length, 0);
   assert.equal(writeFile.mock.calls.length, 0);
   writeFile.mockRestore();
+});
+
+test("ProjectStore preserves cached transcript fields for metadata-only snapshots", async () => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "pi-deck-project-store-snapshot-"),
+  );
+  const home = path.join(root, "home");
+  const projectDir = path.join(root, "project");
+  const sessionFile = path.join(root, "session.jsonl");
+  await fs.mkdir(projectDir, { recursive: true });
+  await fs.writeFile(sessionFile, "");
+  const project = await fs.realpath(projectDir);
+
+  const store = new ProjectStore(home);
+  await store.upsertAndActivateProject(project);
+  await store.upsertSessionRef(project, {
+    id: sessionFile,
+    sessionFile,
+    sessionId: "stable-session-id",
+    cwd: project,
+    title: "First prompt title",
+    updatedAtMs: 123,
+    messageCount: 2,
+    preview: "Latest assistant reply",
+  });
+
+  // A model/thinking read has no transcript. It may safely apply Pi's real
+  // sessionName, but must leave cached identity and transcript metadata alone.
+  await store.upsertSessionRefFromSnapshot({
+    projectId: project,
+    sessionFile,
+    title: "Named by Pi",
+  });
+
+  const [ref] = await store.getSessionRefs(project);
+  assert.equal(ref?.sessionId, "stable-session-id");
+  assert.equal(ref?.title, "Named by Pi");
+  assert.equal(ref?.cwd, project);
+  assert.equal(ref?.messageCount, 2);
+  assert.equal(ref?.preview, "Latest assistant reply");
+  assert.equal(ref?.lastKnownUpdatedAtMs, 123);
 });
 
 test("ProjectStore upserts and marks project session refs by canonical file", async () => {

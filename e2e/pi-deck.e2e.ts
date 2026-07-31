@@ -30,7 +30,7 @@ function createFakePiBinary(root: string, extraArgs: string[] = []): string {
   const fakePiPath = path.join(root, "fake-pi.js");
   fs.writeFileSync(
     fakePiPath,
-    `#!/usr/bin/env node\nif (process.argv.includes("--version")) {\n  console.log("v42.5.0");\n  process.exit(0);\n}\nif (process.argv.includes("--list-models")) {\n  console.log("provider  model       context  max-out  thinking  images");\n  console.log("fake-provider  fake-model  128K     32K      yes       yes");\n  process.exit(0);\n}\nprocess.argv.push(...${JSON.stringify(extraArgs)});\nrequire(${JSON.stringify(path.join(repoRoot, "dist/main/pi/fakeRpc/fakeRpcServer.js"))});\n`,
+    `#!/usr/bin/env node\nconst cwdLogPath = process.env.PI_DECK_TEST_FAKE_PI_CWD_LOG;\nif (cwdLogPath) {\n  require("fs").appendFileSync(cwdLogPath, process.cwd() + "\\n");\n}\nif (process.argv.includes("--version")) {\n  console.log("v42.5.0");\n  process.exit(0);\n}\nif (process.argv.includes("--list-models")) {\n  console.log("provider  model       context  max-out  thinking  images");\n  console.log("fake-provider  fake-model  128K     32K      yes       yes");\n  process.exit(0);\n}\nprocess.argv.push(...${JSON.stringify(extraArgs)});\nrequire(${JSON.stringify(path.join(repoRoot, "dist/main/pi/fakeRpc/fakeRpcServer.js"))});\n`,
     { mode: 0o755 },
   );
   return fakePiPath;
@@ -44,6 +44,7 @@ function fakeRealModeEnv(options: {
   testPickProjectCwd?: string;
   testPickProjectCwds?: string[];
   fakePiArgs?: string[];
+  fakePiCwdLog?: string;
 }): NodeJS.ProcessEnv {
   return {
     PI_DECK_BACKEND: "real",
@@ -63,7 +64,34 @@ function fakeRealModeEnv(options: {
           ),
         }
       : {}),
+    ...(options.fakePiCwdLog
+      ? { PI_DECK_TEST_FAKE_PI_CWD_LOG: options.fakePiCwdLog }
+      : {}),
   };
+}
+
+interface CachedSessionRef {
+  sessionFile: string;
+  sessionId?: string;
+  title?: string;
+  messageCount?: number;
+  preview?: string;
+}
+
+function cachedSessionRef(home: string, sessionFile: string): CachedSessionRef {
+  const store = JSON.parse(
+    fs.readFileSync(path.join(home, "projects.json"), "utf8"),
+  ) as { sessionRefs?: CachedSessionRef[] };
+  const canonicalSessionFile = fs.realpathSync(sessionFile);
+  const ref = store.sessionRefs?.find(
+    (candidate) => candidate.sessionFile === canonicalSessionFile,
+  );
+  if (ref === undefined) {
+    throw new Error(
+      `Missing cached session metadata for ${canonicalSessionFile}`,
+    );
+  }
+  return ref;
 }
 
 async function expectHealthyPreload(page: Page): Promise<void> {
@@ -73,8 +101,68 @@ async function expectHealthyPreload(page: Page): Promise<void> {
   ).toBeVisible();
 }
 
+async function startRuntimeExitTracking(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const testWindow = window as typeof window & {
+      __piDeckRuntimeExitTracker?: {
+        runtimeIds: string[];
+        unsubscribe: () => void;
+      };
+    };
+    testWindow.__piDeckRuntimeExitTracker?.unsubscribe();
+    const runtimeIds: string[] = [];
+    testWindow.__piDeckRuntimeExitTracker = {
+      runtimeIds,
+      unsubscribe: window.piDeck.chat.onEvent((event) => {
+        if (event.type === "worker_exit") {
+          runtimeIds.push(event.runtimeId);
+        }
+      }),
+    };
+  });
+}
+
+async function trackedRuntimeExitIds(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const testWindow = window as typeof window & {
+      __piDeckRuntimeExitTracker?: { runtimeIds: string[] };
+    };
+    return [...(testWindow.__piDeckRuntimeExitTracker?.runtimeIds ?? [])];
+  });
+}
+
+async function waitForRuntimeExitCount(
+  page: Page,
+  count: number,
+): Promise<void> {
+  await expect
+    .poll(async () => (await trackedRuntimeExitIds(page)).length, {
+      timeout: 5_000,
+    })
+    .toBe(count);
+}
+
+async function stopRuntimeExitTracking(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const testWindow = window as typeof window & {
+      __piDeckRuntimeExitTracker?: { unsubscribe: () => void };
+    };
+    testWindow.__piDeckRuntimeExitTracker?.unsubscribe();
+    delete testWindow.__piDeckRuntimeExitTracker;
+  });
+}
+
 function projectSwitcher(page: Page) {
   return page.locator(".project-switcher-trigger");
+}
+
+function tinyPngBase64(): string {
+  const data = Buffer.alloc(24);
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(data);
+  data.write("IHDR", 12, "ascii");
+  data.writeUInt32BE(1, 16);
+  data.writeUInt32BE(1, 20);
+  return data.toString("base64");
 }
 
 async function selectRecentProject(
@@ -106,6 +194,58 @@ test("fake mode launches with backend runtime and send enabled", async () => {
     await page.keyboard.press("Escape");
     await page.getByLabel("Prompt text").fill("fake e2e prompt");
     await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+  } finally {
+    await app.close();
+  }
+});
+
+test("attachment selections release and revoke through preload/main IPC", async () => {
+  const { app, page } = await launchPiDeck({ PI_DECK_BACKEND: "fake" });
+  try {
+    await expectHealthyPreload(page);
+    const result = await page.evaluate(async (dataBase64) => {
+      const api = (
+        window as unknown as {
+          piDeck: typeof window.piDeck;
+        }
+      ).piDeck.attachments;
+      const ownerId = "attachment-e2e-owner-generation";
+      const sessionId = "attachment-e2e-session";
+      const request = (fileName: string) => ({
+        ownerId,
+        sessionId,
+        images: [
+          {
+            fileName,
+            mimeType: "image/png",
+            size: 24,
+            dataBase64,
+          },
+        ],
+      });
+      const first = await api.importImages(request("first.png"));
+      if (!first.selected) {
+        throw new Error("Expected image import to create a selection.");
+      }
+      await api.release({
+        ownerId,
+        selectedPathTokens: first.attachments.map(
+          (attachment) => attachment.selectedPathToken,
+        ),
+      });
+      const second = await api.importImages(request("second.png"));
+      if (!second.selected) {
+        throw new Error("Expected release to allow a replacement selection.");
+      }
+      await api.releaseOwner({ ownerId });
+      try {
+        await api.importImages(request("late.png"));
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+      throw new Error("Discarded attachment owner was unexpectedly reusable.");
+    }, tinyPngBase64());
+    expect(result).toMatch(/owner is no longer active/i);
   } finally {
     await app.close();
   }
@@ -399,6 +539,252 @@ test("bootstrap creates no saved session and the first draft send creates one", 
   }
 });
 
+test("failed draft setup releases its worker before the next retry", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-draft-setup-cleanup-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: ["--fail-command", "set_model", "--no-session"],
+    }),
+  );
+  let trackingStarted = false;
+  try {
+    await expectHealthyPreload(page);
+    await expect(page.locator(".pi-configuration-trigger")).toHaveAttribute(
+      "data-model-id",
+      "fake-model",
+    );
+    await page.evaluate(async () => {
+      await window.piDeck.settings.update({ maxRunningSessions: 1 });
+    });
+    await startRuntimeExitTracking(page);
+    trackingStarted = true;
+
+    const composer = page.getByLabel("Prompt text");
+    const send = page.getByRole("button", { name: "Send" });
+    await composer.fill("retry model setup");
+    for (let index = 0; index < 5; index += 1) {
+      await expect(send).toBeEnabled();
+      await send.click();
+      await waitForRuntimeExitCount(page, index + 1);
+      await expect(page.locator(".composer-error")).toHaveText(
+        "Fake RPC configured to fail command: set_model",
+      );
+    }
+
+    const failedRuntimeIds = await trackedRuntimeExitIds(page);
+    expect(failedRuntimeIds).toHaveLength(5);
+    expect(new Set(failedRuntimeIds).size).toBe(5);
+    const staleRuntimeMessages = await page.evaluate(
+      async (runtimeIds) =>
+        Promise.all(
+          runtimeIds.map(async (runtimeId) => {
+            try {
+              await window.piDeck.chat.getRuntimeStatus({ runtimeId });
+              return "still attached";
+            } catch (error) {
+              return error instanceof Error ? error.message : String(error);
+            }
+          }),
+        ),
+      failedRuntimeIds,
+    );
+    for (const message of staleRuntimeMessages) {
+      expect(message).toMatch(/Chat runtime is no longer attached/);
+    }
+
+    // A sixth allocation under the one-worker limit proves the failed draft
+    // workers no longer occupy adapter capacity.
+    const recoveredSnapshot = await page.evaluate(() =>
+      window.piDeck.chat.createSession(),
+    );
+    expect(recoveredSnapshot.runtimeId.length).toBeGreaterThan(0);
+    await page.evaluate(
+      (runtimeId) => window.piDeck.chat.closeSession({ runtimeId }),
+      recoveredSnapshot.runtimeId,
+    );
+    await waitForRuntimeExitCount(page, 6);
+  } finally {
+    if (trackingStarted) {
+      await stopRuntimeExitTracking(page).catch(() => undefined);
+    }
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("failed initial snapshots release runtime maps and capacity", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-snapshot-cleanup-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: ["--fail-command", "get_state", "--no-session"],
+    }),
+  );
+  let trackingStarted = false;
+  try {
+    await expectHealthyPreload(page);
+    await page.evaluate(async () => {
+      await window.piDeck.settings.update({ maxRunningSessions: 1 });
+    });
+    await startRuntimeExitTracking(page);
+    trackingStarted = true;
+
+    const failureMessages = await page.evaluate(async () => {
+      const messages: string[] = [];
+      for (let index = 0; index < 5; index += 1) {
+        try {
+          await window.piDeck.chat.createSession();
+          messages.push("unexpected successful snapshot");
+        } catch (error) {
+          messages.push(error instanceof Error ? error.message : String(error));
+        }
+      }
+      return messages;
+    });
+    expect(failureMessages).toHaveLength(5);
+    for (const message of failureMessages) {
+      // The original get_state failure must survive cleanup rather than being
+      // replaced by a close failure or a later capacity error.
+      expect(message).toBe("Fake RPC configured to fail command: get_state");
+    }
+
+    await waitForRuntimeExitCount(page, 5);
+    const failedRuntimeIds = await trackedRuntimeExitIds(page);
+    expect(new Set(failedRuntimeIds).size).toBe(5);
+    const staleRuntimeMessages = await page.evaluate(
+      async (runtimeIds) =>
+        Promise.all(
+          runtimeIds.map(async (runtimeId) => {
+            try {
+              await window.piDeck.chat.getRuntimeStatus({ runtimeId });
+              return "still attached";
+            } catch (error) {
+              return error instanceof Error ? error.message : String(error);
+            }
+          }),
+        ),
+      failedRuntimeIds,
+    );
+    for (const message of staleRuntimeMessages) {
+      expect(message).toMatch(/Chat runtime is no longer attached/);
+    }
+  } finally {
+    if (trackingStarted) {
+      await stopRuntimeExitTracking(page).catch(() => undefined);
+    }
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("metadata-only model and thinking changes preserve session title, transcript, and cache", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-metadata-"));
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const piDeckHome = path.join(root, "pideck-home");
+  const prompt = "keep this title";
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: ["--extra-model"],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await page.getByLabel("Prompt text").fill(prompt);
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText(`Fake response to: ${prompt}`, { exact: true }),
+    ).toBeVisible();
+
+    // A full snapshot establishes the cache before the following RPC calls
+    // return their intentionally metadata-only snapshots.
+    const snapshot = await page.evaluate(() =>
+      window.piDeck.chat.getSnapshot(),
+    );
+    const sessionFile = snapshot.state.sessionFile;
+    if (sessionFile === undefined) {
+      throw new Error("Fake Pi did not report a session file");
+    }
+    const cachedBefore = cachedSessionRef(piDeckHome, sessionFile);
+    expect(cachedBefore.title).toBe(prompt);
+    expect(cachedBefore.messageCount).toBeGreaterThan(0);
+
+    const configuration = page.locator(".pi-configuration-trigger");
+    await configuration.click();
+    await page
+      .getByRole("menuitemradio", { name: "high", exact: true })
+      .click();
+    await expect(page.getByText("Switched thinking to high.")).toBeVisible();
+    await expect(page.getByRole("heading", { name: prompt })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: `Session: ${prompt}` }),
+    ).toBeVisible();
+    await expect(
+      page.getByText(`Fake response to: ${prompt}`, { exact: true }),
+    ).toBeVisible();
+    expect(cachedSessionRef(piDeckHome, sessionFile)).toMatchObject({
+      sessionId: cachedBefore.sessionId,
+      title: cachedBefore.title,
+      messageCount: cachedBefore.messageCount,
+      preview: cachedBefore.preview,
+    });
+
+    await configuration.click();
+    await page
+      .getByRole("menuitem", { name: "Fake model", exact: true })
+      .click();
+    await page
+      .getByRole("menuitemradio", { name: "Fake model 2", exact: true })
+      .click();
+    await expect(
+      page.getByText("Switched model to fake-provider/fake-model-2."),
+    ).toBeVisible();
+    await expect(configuration).toHaveAttribute(
+      "data-model-id",
+      "fake-model-2",
+    );
+    await expect(page.getByRole("heading", { name: prompt })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: `Session: ${prompt}` }),
+    ).toBeVisible();
+    await expect(
+      page.getByText(`Fake response to: ${prompt}`, { exact: true }),
+    ).toBeVisible();
+    expect(cachedSessionRef(piDeckHome, sessionFile)).toMatchObject({
+      sessionId: cachedBefore.sessionId,
+      title: cachedBefore.title,
+      messageCount: cachedBefore.messageCount,
+      preview: cachedBefore.preview,
+    });
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("closing an attached runtime preserves its saved session for recovery", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-close-"));
   const projectCwd = path.join(root, "project");
@@ -435,6 +821,365 @@ test("closing an attached runtime preserves its saved session for recovery", asy
       .getByRole("button", { name: /Session: close runtime recovery/ })
       .click();
     await expect(page.getByText("Resumed saved Pi session.")).toBeVisible();
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("failed saved-session deletion preserves the composer draft and attachment owner", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-delete-preserve-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const unrelatedProjectCwd = path.join(root, "other-project");
+  const agentDir = path.join(root, "agent");
+  const sessionDir = path.join(agentDir, "sessions", "--e2e-delete-preserve--");
+  const sessionFile = path.join(sessionDir, "preserve-draft.jsonl");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(unrelatedProjectCwd, { recursive: true });
+  fs.mkdirSync(sessionDir, { recursive: true });
+  fs.writeFileSync(
+    sessionFile,
+    `${JSON.stringify({
+      type: "session",
+      version: 3,
+      id: "preserve-draft",
+      timestamp: "2026-07-02T00:00:00.000Z",
+      cwd: projectCwd,
+    })}\n`,
+  );
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: ["--stream-delay-ms", "20000"],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await page.getByRole("button", { name: "Session: preserve-draft" }).click();
+    await expect(page.getByText("Resumed saved Pi session.")).toBeVisible();
+
+    const composer = page.getByLabel("Prompt text");
+    await composer.fill("preserve this unsent draft");
+    await page.evaluate((dataBase64) => {
+      const bytes = Uint8Array.from(atob(dataBase64), (character) =>
+        character.charCodeAt(0),
+      );
+      const image = new File([bytes], "keep-after-delete-failure.png", {
+        type: "image/png",
+      });
+      const clipboard = new DataTransfer();
+      clipboard.items.add(image);
+      const textarea = document.querySelector<HTMLTextAreaElement>(
+        'textarea[aria-label="Prompt text"]',
+      );
+      if (textarea === null) {
+        throw new Error("Prompt textarea is unavailable.");
+      }
+      textarea.dispatchEvent(
+        new ClipboardEvent("paste", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: clipboard,
+        }),
+      );
+    }, tinyPngBase64());
+    await expect(
+      page
+        .locator(".composer .attachment-chip")
+        .getByText("keep-after-delete-failure.png"),
+    ).toBeVisible();
+
+    // Simulate an independent active turn without sending the displayed
+    // composer draft. The busy runtime exposes Delete instead of Close while
+    // leaving this intact draft/owner available for the failure path below.
+    await page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      await window.piDeck.chat.prompt({
+        runtimeId: snapshot.runtimeId,
+        text: "make deletion control active",
+        attachments: [],
+      });
+    });
+    await expect(page.getByRole("button", { name: "Abort" })).toBeVisible();
+
+    // A mismatched Pi header fails main-side validation before close/trash
+    // work. Read the active runtime's reported file so this mutation targets
+    // the same canonical path the renderer will submit for deletion.
+    const runtimeSessionFile = await page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      return snapshot.state.sessionFile;
+    });
+    expect(runtimeSessionFile).toEqual(expect.any(String));
+    fs.writeFileSync(
+      runtimeSessionFile as string,
+      `${JSON.stringify({
+        type: "session",
+        version: 3,
+        id: "preserve-draft",
+        timestamp: "2026-07-02T00:00:00.000Z",
+        cwd: unrelatedProjectCwd,
+      })}\n`,
+    );
+    const validationError = await page.evaluate(async (file) => {
+      const project = await window.piDeck.projects.getActive();
+      try {
+        await window.piDeck.chat.resumeSession({
+          projectId: project.activeProject?.id,
+          sessionFile: file,
+        });
+        return undefined;
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    }, runtimeSessionFile as string);
+    expect(validationError).toMatch(/belongs to a different project/i);
+
+    const deleteSession = page
+      .locator(".session-list .session-delete-button")
+      .first();
+    await expect(deleteSession).toBeVisible();
+    await expect(deleteSession).toHaveAttribute("aria-label", /^Delete /);
+    // The sidebar row overlaps its trailing icon on this narrow fixture; use
+    // the same keyboard activation path supported by the accessibility test.
+    await deleteSession.focus();
+    await expect(deleteSession).toBeFocused();
+    page.once("dialog", (dialog) => void dialog.accept());
+    await page.keyboard.press("Enter");
+
+    await expect(page.locator(".ui-status-message")).toHaveText(
+      /Failed to delete session:/,
+    );
+    await expect(composer).toHaveValue("preserve this unsent draft");
+    await expect(
+      page
+        .locator(".composer .attachment-chip")
+        .getByText("keep-after-delete-failure.png"),
+    ).toBeVisible();
+
+    // Stop the unrelated active turn, then prove the retained owner still
+    // authorizes delivery. A blanket release would reject this prompt before
+    // the fake backend could respond.
+    await page.getByRole("button", { name: "Abort" }).click();
+    await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(page.getByRole("button", { name: "Abort" })).toBeVisible();
+    await expect(composer).toHaveValue("");
+    await expect(page.locator(".composer .attachment-chip")).toHaveCount(0);
+    await page.getByRole("button", { name: "Abort" }).click();
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("post-close delete failure keeps the saved file and composer generation resumable", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-delete-post-close-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const sessionDir = path.join(
+    agentDir,
+    "sessions",
+    "--e2e-delete-post-close--",
+  );
+  const sessionFile = path.join(sessionDir, "post-close-delete.jsonl");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(sessionDir, { recursive: true });
+  fs.writeFileSync(
+    sessionFile,
+    `${JSON.stringify({
+      type: "session",
+      version: 3,
+      id: "post-close-delete",
+      timestamp: "2026-07-02T00:00:00.000Z",
+      cwd: projectCwd,
+    })}\n`,
+  );
+  const canonicalSessionFile = fs.realpathSync(sessionFile);
+
+  const { app, page } = await launchPiDeck({
+    ...fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: ["--stream-delay-ms", "5000"],
+    }),
+    PI_DECK_TEST_FAIL_SESSION_DELETE_PATH: canonicalSessionFile,
+  });
+  try {
+    await expectHealthyPreload(page);
+    await page
+      .getByRole("button", { name: "Session: post-close-delete" })
+      .click();
+    await expect(page.getByText("Resumed saved Pi session.")).toBeVisible();
+
+    const composer = page.getByLabel("Prompt text");
+    await composer.fill("retain after post-close failure");
+    await page.evaluate((dataBase64) => {
+      const bytes = Uint8Array.from(atob(dataBase64), (character) =>
+        character.charCodeAt(0),
+      );
+      const clipboard = new DataTransfer();
+      clipboard.items.add(
+        new File([bytes], "post-close-retained.png", { type: "image/png" }),
+      );
+      const textarea = document.querySelector<HTMLTextAreaElement>(
+        'textarea[aria-label="Prompt text"]',
+      );
+      if (textarea === null) throw new Error("Prompt textarea is unavailable.");
+      textarea.dispatchEvent(
+        new ClipboardEvent("paste", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: clipboard,
+        }),
+      );
+    }, tinyPngBase64());
+    await expect(page.getByText("post-close-retained.png")).toBeVisible();
+
+    // Keep Pi active without consuming the displayed composer. Active saved
+    // rows expose Delete (which closes transactionally) rather than Detach.
+    await page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      await window.piDeck.chat.prompt({
+        runtimeId: snapshot.runtimeId,
+        text: "keep runtime active for forced delete failure",
+        attachments: [],
+      });
+    });
+    await expect(page.getByRole("button", { name: "Abort" })).toBeVisible();
+
+    const deleteSession = page
+      .locator(".session-list .session-delete-button")
+      .first();
+    await deleteSession.focus();
+    page.once("dialog", (dialog) => void dialog.accept());
+    await page.keyboard.press("Enter");
+
+    await expect(page.locator(".ui-status-message")).toHaveText(
+      /Failed to delete session after closing its runtime/,
+    );
+    expect(fs.existsSync(canonicalSessionFile)).toBe(true);
+    await expect(composer).toHaveValue("retain after post-close failure");
+    await expect(page.getByText("post-close-retained.png")).toBeVisible();
+
+    // The detached row keeps its old composer generation. Resume transfers it
+    // to a fresh runtime generation, and successful delivery proves main did
+    // not revoke the token during the failed delete transaction.
+    await page.locator(".session-list .session-item.active").click();
+    await expect(page.getByText("Resumed saved Pi session.")).toBeVisible();
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText(/Fake response to: retain after post-close failure/),
+    ).toBeVisible({ timeout: 20_000 });
+    await expect(page.locator(".composer .attachment-chip")).toHaveCount(0);
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("bulk deletion reports exact removals and releases only deleted saved-session owners", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-bulk-delete-owners-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const sessionDir = path.join(agentDir, "sessions", "--e2e-bulk-delete--");
+  const attachedFile = path.join(sessionDir, "attached.jsonl");
+  const deletedFile = path.join(sessionDir, "delete-me.jsonl");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(sessionDir, { recursive: true });
+  for (const [file, id] of [
+    [attachedFile, "attached"],
+    [deletedFile, "delete-me"],
+  ]) {
+    fs.writeFileSync(
+      file,
+      `${JSON.stringify({
+        type: "session",
+        version: 3,
+        id,
+        timestamp: "2026-07-02T00:00:00.000Z",
+        cwd: projectCwd,
+      })}\n`,
+    );
+  }
+
+  const canonicalAttachedFile = fs.realpathSync(attachedFile);
+  const canonicalDeletedFile = fs.realpathSync(deletedFile);
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({ root, projectCwd, agentDir }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    const outcome = await page.evaluate(
+      async ({ attachedFile, deletedFile, dataBase64 }) => {
+        const api = window.piDeck;
+        const project = await api.projects.getActive();
+        const projectId = project.activeProject?.id;
+        if (projectId === undefined) {
+          throw new Error("Expected an active project.");
+        }
+        const imageRequest = (ownerId: string, sessionId: string) => ({
+          ownerId,
+          sessionId,
+          images: [
+            {
+              fileName: "owner-check.png",
+              mimeType: "image/png",
+              size: 24,
+              dataBase64,
+            },
+          ],
+        });
+        const attachedOwnerId = "attached-owner-generation";
+        const deletedOwnerId = "deleted-owner-generation";
+        await api.attachments.importImages(
+          imageRequest(attachedOwnerId, attachedFile),
+        );
+        await api.attachments.importImages(
+          imageRequest(deletedOwnerId, deletedFile),
+        );
+        await api.chat.resumeSession({ projectId, sessionFile: attachedFile });
+        const result = await api.chat.deleteAllSessions({ projectId });
+        let deletedOwnerError: string | undefined;
+        try {
+          await api.attachments.importImages(
+            imageRequest(deletedOwnerId, deletedFile),
+          );
+        } catch (error) {
+          deletedOwnerError =
+            error instanceof Error ? error.message : String(error);
+        }
+        const retainedOwner = await api.attachments.importImages(
+          imageRequest(attachedOwnerId, attachedFile),
+        );
+        return { result, deletedOwnerError, retainedOwner };
+      },
+      {
+        attachedFile: canonicalAttachedFile,
+        deletedFile: canonicalDeletedFile,
+        dataBase64: tinyPngBase64(),
+      },
+    );
+
+    expect(outcome.result).toMatchObject({
+      deleted: true,
+      deletedCount: 1,
+      skippedCount: 1,
+      deletedSessionFiles: [canonicalDeletedFile],
+    });
+    expect(outcome.deletedOwnerError).toMatch(/owner is no longer active/i);
+    expect(outcome.retainedOwner).toMatchObject({ selected: true });
+    expect(fs.existsSync(canonicalAttachedFile)).toBe(true);
+    expect(fs.existsSync(canonicalDeletedFile)).toBe(false);
   } finally {
     await app.close();
     fs.rmSync(root, { recursive: true, force: true });
@@ -725,6 +1470,143 @@ test("real mode lists a newly prompted session after restart with fake Pi", asyn
     ).toBeVisible();
   } finally {
     await secondLaunch.app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("real mode authorizes opaque project IDs before any project-scoped Pi work", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-project-authority-"),
+  );
+  const selectedDir = path.join(root, "selected-project");
+  const unselectedDir = path.join(root, "unselected-project");
+  const agentDir = path.join(root, "agent");
+  const piDeckHome = path.join(root, "pideck-home");
+  const fakePiCwdLog = path.join(root, "fake-pi-cwds.log");
+  fs.mkdirSync(selectedDir, { recursive: true });
+  fs.mkdirSync(unselectedDir, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+  fs.mkdirSync(piDeckHome, { recursive: true });
+  const selectedProject = fs.realpathSync(selectedDir);
+  const unselectedProject = fs.realpathSync(unselectedDir);
+  const selectedProjectId = "opaque-selected-project-id";
+  const now = Date.now();
+  fs.writeFileSync(
+    path.join(piDeckHome, "projects.json"),
+    `${JSON.stringify({
+      version: 1,
+      activeProjectId: selectedProjectId,
+      projects: [
+        {
+          id: selectedProjectId,
+          rootPath: selectedProject,
+          displayName: "selected-project",
+          createdAtMs: now,
+          updatedAtMs: now,
+          lastOpenedAtMs: now,
+        },
+      ],
+      sessionRefs: [],
+    })}\n`,
+  );
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({ root, agentDir, fakePiCwdLog }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await expect(projectSwitcher(page)).toHaveAttribute(
+      "data-project-id",
+      selectedProjectId,
+    );
+
+    const rejectionMessages = await page.evaluate(
+      async ({ projectId, sessionFile }) => {
+        const reject = async (operation: Promise<unknown>) => {
+          try {
+            await operation;
+            return "unexpected success";
+          } catch (error) {
+            return error instanceof Error ? error.message : String(error);
+          }
+        };
+        const api = window.piDeck;
+        return {
+          create: await reject(api.chat.createSession({ projectId })),
+          listModels: await reject(api.chat.listModels({ projectId })),
+          listSessions: await reject(api.chat.listSessions({ projectId })),
+          resume: await reject(
+            api.chat.resumeSession({ projectId, sessionFile }),
+          ),
+          delete: await reject(
+            api.chat.deleteSession({ projectId, sessionFile }),
+          ),
+          deleteAll: await reject(api.chat.deleteAllSessions({ projectId })),
+        };
+      },
+      {
+        projectId: unselectedProject,
+        sessionFile: path.join(unselectedProject, "unregistered.jsonl"),
+      },
+    );
+    for (const message of Object.values(rejectionMessages)) {
+      expect(message).toMatch(/unknown project/i);
+    }
+
+    const positive = await page.evaluate(async (projectId) => {
+      const api = window.piDeck;
+      const [models, sessions] = await Promise.all([
+        api.chat.listModels({ projectId }),
+        api.chat.listSessions({ projectId }),
+      ]);
+      return {
+        modelCount: models.models.length,
+        projectId: sessions.projectId,
+        projectCwd: sessions.projectCwd,
+      };
+    }, selectedProjectId);
+    expect(positive.modelCount).toBeGreaterThan(0);
+    expect(positive.projectId).toBe(selectedProjectId);
+    expect(positive.projectCwd).toBe(selectedProject);
+
+    await page.getByLabel("Prompt text").fill("opaque project authority");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText(/Fake response to: opaque project authority/),
+    ).toBeVisible();
+    const snapshot = await page.evaluate(() =>
+      window.piDeck.chat.getSnapshot(),
+    );
+    expect(snapshot.projectId).toBe(selectedProjectId);
+    expect(snapshot.state.cwd).toBe(selectedProject);
+    await expect(projectSwitcher(page)).toHaveAttribute(
+      "data-project-id",
+      selectedProjectId,
+    );
+
+    const runtimeProjectRejection = await page.evaluate(
+      async ({ runtimeId, projectId }) => {
+        try {
+          await window.piDeck.chat.listModels({ runtimeId, projectId });
+          return "unexpected success";
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      },
+      { runtimeId: snapshot.runtimeId, projectId: unselectedProject },
+    );
+    expect(runtimeProjectRejection).toMatch(/unknown project/i);
+
+    const launchedCwds = fs.existsSync(fakePiCwdLog)
+      ? fs
+          .readFileSync(fakePiCwdLog, "utf8")
+          .split("\n")
+          .filter((cwd) => cwd.length > 0)
+      : [];
+    expect(launchedCwds).toContain(selectedProject);
+    expect(launchedCwds).not.toContain(unselectedProject);
+  } finally {
+    await app.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

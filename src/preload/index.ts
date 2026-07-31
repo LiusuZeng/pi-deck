@@ -5,9 +5,12 @@ import {
   appBootstrapStateSchema,
   appSettingsPatchSchema,
   appSettingsSchema,
+  attachmentAssignOwnerRequestSchema,
   attachmentImportDroppedFilesRequestSchema,
   attachmentImportImageRequestSchema,
   attachmentPickerRequestSchema,
+  attachmentReleaseOwnerRequestSchema,
+  attachmentReleaseRequestSchema,
   chatAbortRequestSchema,
   chatCloseSessionRequestSchema,
   chatInterventionRequestSchema,
@@ -41,7 +44,10 @@ import {
 } from "../shared/ipcSchemas.js";
 import type {
   AppSettings,
+  AttachmentAssignOwnerRequest,
   AttachmentImportImageRequest,
+  AttachmentReleaseOwnerRequest,
+  AttachmentReleaseRequest,
   ChatInterventionRequest,
   ChatRespondToExtensionUiRequest,
   ChatRuntimeEvent,
@@ -258,20 +264,31 @@ const api: PiDeckApi = Object.freeze({
       }),
   }),
   attachments: Object.freeze({
-    pickFiles: (request?: { projectPath?: string }) =>
+    pickFiles: (request: {
+      projectPath?: string;
+      ownerId: string;
+      sessionId: string;
+    }) =>
       invokeValidated({
         channel: ipcChannels.attachmentsPickFiles,
-        request: attachmentPickerRequestSchema.parse(request ?? {}),
+        request: attachmentPickerRequestSchema.parse(request),
         responseSchema: pickAttachmentsResultSchema,
       }),
-    importDroppedFiles: (files: File[], request?: { projectPath?: string }) => {
+    importDroppedFiles: (
+      files: File[],
+      request: {
+        projectPath?: string;
+        ownerId: string;
+        sessionId: string;
+      },
+    ) => {
       const paths = files
         .map((file) => webUtils.getPathForFile(file))
         .filter((filePath) => filePath.length > 0);
       return invokeValidated({
         channel: ipcChannels.attachmentsImportDroppedFiles,
         request: attachmentImportDroppedFilesRequestSchema.parse({
-          ...(request ?? {}),
+          ...request,
           paths,
         }),
         responseSchema: pickAttachmentsResultSchema,
@@ -282,6 +299,24 @@ const api: PiDeckApi = Object.freeze({
         channel: ipcChannels.attachmentsImportImages,
         request: attachmentImportImageRequestSchema.parse(request),
         responseSchema: pickAttachmentsResultSchema,
+      }),
+    release: (request: AttachmentReleaseRequest) =>
+      invokeValidated({
+        channel: ipcChannels.attachmentsRelease,
+        request: attachmentReleaseRequestSchema.parse(request),
+        responseSchema: z.void(),
+      }),
+    releaseOwner: (request: AttachmentReleaseOwnerRequest) =>
+      invokeValidated({
+        channel: ipcChannels.attachmentsReleaseOwner,
+        request: attachmentReleaseOwnerRequestSchema.parse(request),
+        responseSchema: z.void(),
+      }),
+    assignOwner: (request: AttachmentAssignOwnerRequest) =>
+      invokeValidated({
+        channel: ipcChannels.attachmentsAssignOwner,
+        request: attachmentAssignOwnerRequestSchema.parse(request),
+        responseSchema: z.void(),
       }),
   }),
 });

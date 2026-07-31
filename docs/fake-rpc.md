@@ -47,7 +47,7 @@ Useful fixture flags:
   - `compaction` — adds `compaction_start/end`.
   - `retry` — adds `auto_retry_start/end`.
   - `extension-ui` — emits an exact Pi-protocol `confirm` `extension_ui_request` (top-level `id`, `title`, and `message`) and blocks until an `extension_ui_response` with that id is written to stdin. `--extension-ui-method select|confirm|input|editor` selects the dialog fixture.
-  - `error` — accepts `prompt`, emits `agent_start`, then emits a completed error `message_update` and `agent_end status=error` for provider/usage-limit UI tests.
+  - `error` — accepts `prompt`, emits `agent_start`, then emits Pi 0.81-shaped provider-failure records: `message_update.assistantMessageEvent.type=error` with an assistant `errorMessage`, followed by `agent_end { messages, willRetry: false }`.
   - `all` — emits every extension fixture event above.
 
 The fake accepts response-only `extension_ui_response` records (there is no normal RPC command response), resumes its blocked request on a matching id, and auto-resolves after its fixture timeout. It deliberately ignores late or mismatched ids, matching Pi's response correlation behavior.

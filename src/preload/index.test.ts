@@ -186,13 +186,64 @@ describe("preload PiDeck API validation", () => {
     await expect(
       api.attachments.importDroppedFiles(
         [{ name: "notes.txt", path: "/project/notes.txt" } as unknown as File],
-        { projectPath: "/project" },
+        {
+          projectPath: "/project",
+          ownerId: "owner-generation-1",
+          sessionId: "draft-1",
+        },
       ),
     ).resolves.toEqual(payload);
 
     expect(electronMock.ipcRenderer.invoke).toHaveBeenCalledWith(
       "attachments:importDroppedFiles",
-      { paths: ["/project/notes.txt"], projectPath: "/project" },
+      {
+        paths: ["/project/notes.txt"],
+        projectPath: "/project",
+        ownerId: "owner-generation-1",
+        sessionId: "draft-1",
+      },
+    );
+  });
+
+  it("exposes owner-scoped attachment release and transfer methods", async () => {
+    electronMock.ipcRenderer.invoke.mockResolvedValue({
+      ok: true,
+      data: undefined,
+    });
+
+    await api.attachments.release({
+      ownerId: "draft-1",
+      selectedPathTokens: ["token-1"],
+    });
+    await api.attachments.releaseOwner({ ownerId: "draft-1" });
+    await api.attachments.assignOwner({
+      previousOwnerId: "owner-generation-1",
+      previousSessionId: "draft-1",
+      ownerId: "owner-generation-2",
+      sessionId: "runtime-1",
+      selectedPathTokens: ["token-1"],
+    });
+
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
+      1,
+      "attachments:release",
+      { ownerId: "draft-1", selectedPathTokens: ["token-1"] },
+    );
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
+      2,
+      "attachments:releaseOwner",
+      { ownerId: "draft-1" },
+    );
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
+      3,
+      "attachments:assignOwner",
+      {
+        previousOwnerId: "owner-generation-1",
+        previousSessionId: "draft-1",
+        ownerId: "owner-generation-2",
+        sessionId: "runtime-1",
+        selectedPathTokens: ["token-1"],
+      },
     );
   });
 
@@ -219,7 +270,11 @@ describe("preload PiDeck API validation", () => {
     });
 
     await expect(
-      api.attachments.pickFiles({ projectPath: "/project" }),
+      api.attachments.pickFiles({
+        projectPath: "/project",
+        ownerId: "owner-generation-1",
+        sessionId: "draft-1",
+      }),
     ).resolves.toEqual(payload);
   });
 });

@@ -147,6 +147,9 @@ export const chatStateSchema = z
   .object({
     runtimeId: z.string().optional(),
     sessionId: z.string().optional(),
+    // Pi's production RPC state uses sessionName for its user-assigned
+    // display name.
+    sessionName: z.string().optional(),
     sessionFile: z.string().optional(),
     cwd: z.string().optional(),
     model: z.union([z.string(), z.record(z.string(), z.unknown())]).optional(),
@@ -167,6 +170,9 @@ export const chatSnapshotSchema = z
   .object({
     runtimeId: z.string(),
     backendMode: z.enum(["fake", "real"]),
+    // Pi reports cwd, while Pi Deck owns the project identifier. Keep both so
+    // renderers never have to turn a filesystem path back into a project ID.
+    projectId: z.string().optional(),
     state: chatStateSchema,
     messages: z.array(chatMessageSchema),
   })
@@ -292,6 +298,9 @@ export const chatDeleteAllSessionsResultSchema = z
     deleted: z.literal(true),
     deletedCount: z.number().int().min(0),
     skippedCount: z.number().int().min(0),
+    // Counts alone cannot tell the renderer which composer owners are safe to
+    // release when a bulk operation skips individual sessions.
+    deletedSessionFiles: z.array(z.string()),
   })
   .strict();
 
@@ -310,7 +319,7 @@ export const chatModelSummarySchema = z
 export const chatListModelsRequestSchema = z
   .object({
     runtimeId: z.string().optional(),
-    projectId: z.string().optional(),
+    projectId: z.string().min(1).optional(),
   })
   .strict();
 
@@ -359,18 +368,42 @@ export const chatSetThinkingRequestSchema = z
   })
   .strict();
 
+const attachmentTokenSchema = z.string().min(1).max(256);
+// Owner IDs are one-use renderer generations. Session IDs are stable lifecycle
+// identities used by trusted main-process teardown.
+const attachmentOwnerIdSchema = z.string().min(1).max(1_024);
+const attachmentSessionIdSchema = z.string().min(1).max(1_024);
+
 export const chatPromptAttachmentSchema = z
   .object({
-    selectedPathToken: z.string().min(1),
+    selectedPathToken: attachmentTokenSchema,
     sendMode: z.enum(["imageInput", "pathReference"]),
   })
   .strict();
+
+const chatPromptAttachmentsSchema = z
+  .array(chatPromptAttachmentSchema)
+  .max(100)
+  .superRefine((attachments, context) => {
+    const seen = new Set<string>();
+    for (const [index, attachment] of attachments.entries()) {
+      if (seen.has(attachment.selectedPathToken)) {
+        context.addIssue({
+          code: "custom",
+          path: [index, "selectedPathToken"],
+          message: "An attachment token may appear only once per request.",
+        });
+      }
+      seen.add(attachment.selectedPathToken);
+    }
+  });
 
 export const chatPromptRequestSchema = z
   .object({
     runtimeId: z.string(),
     text: z.string().trim().min(1),
-    attachments: z.array(chatPromptAttachmentSchema).optional(),
+    attachments: chatPromptAttachmentsSchema.optional(),
+    attachmentOwnerId: attachmentOwnerIdSchema.optional(),
   })
   .strict();
 
@@ -378,7 +411,8 @@ export const chatInterventionRequestSchema = z
   .object({
     runtimeId: z.string(),
     text: z.string().trim().min(1),
-    attachments: z.array(chatPromptAttachmentSchema).optional(),
+    attachments: chatPromptAttachmentsSchema.optional(),
+    attachmentOwnerId: attachmentOwnerIdSchema.optional(),
   })
   .strict();
 
@@ -471,16 +505,20 @@ export const appBootstrapStateSchema = z
   })
   .strict();
 
+// Renderer-only ownership used to revoke opaque attachment tokens when a
+// draft/runtime is discarded. It is never a filesystem authority.
 export const attachmentPickerRequestSchema = z
   .object({
     projectPath: z.string().optional(),
+    ownerId: attachmentOwnerIdSchema,
+    sessionId: attachmentSessionIdSchema,
   })
   .strict();
 
 export const attachmentDraftSchema = z
   .object({
     id: z.string(),
-    selectedPathToken: z.string(),
+    selectedPathToken: attachmentTokenSchema,
     fileName: z.string(),
     displayPath: z.string(),
     mimeType: z.string().optional(),
@@ -498,6 +536,8 @@ export const attachmentImportDroppedFilesRequestSchema = z
   .object({
     paths: z.array(z.string().min(1)).min(1).max(100),
     projectPath: z.string().optional(),
+    ownerId: attachmentOwnerIdSchema,
+    sessionId: attachmentSessionIdSchema,
   })
   .strict();
 
@@ -507,8 +547,8 @@ export const attachmentImportImageRequestSchema = z
       .array(
         z
           .object({
-            fileName: z.string().min(1),
-            mimeType: z.string().min(1),
+            fileName: z.string().min(1).max(1_024),
+            mimeType: z.string().min(1).max(256),
             size: z.number().int().nonnegative(),
             // Bound encoded input before it reaches the main process. The
             // exact decoded length and canonical base64 form are checked there.
@@ -518,6 +558,31 @@ export const attachmentImportImageRequestSchema = z
       )
       .min(1)
       .max(10),
+    ownerId: attachmentOwnerIdSchema,
+    sessionId: attachmentSessionIdSchema,
+  })
+  .strict();
+
+export const attachmentReleaseRequestSchema = z
+  .object({
+    selectedPathTokens: z.array(attachmentTokenSchema).min(1).max(100),
+    ownerId: attachmentOwnerIdSchema,
+  })
+  .strict();
+
+export const attachmentReleaseOwnerRequestSchema = z
+  .object({
+    ownerId: attachmentOwnerIdSchema,
+  })
+  .strict();
+
+export const attachmentAssignOwnerRequestSchema = z
+  .object({
+    selectedPathTokens: z.array(attachmentTokenSchema).min(1).max(100),
+    previousOwnerId: attachmentOwnerIdSchema,
+    previousSessionId: attachmentSessionIdSchema,
+    ownerId: attachmentOwnerIdSchema,
+    sessionId: attachmentSessionIdSchema,
   })
   .strict();
 
@@ -579,6 +644,9 @@ export const ipcChannels = {
   attachmentsPickFiles: "attachments:pickFiles",
   attachmentsImportDroppedFiles: "attachments:importDroppedFiles",
   attachmentsImportImages: "attachments:importImages",
+  attachmentsRelease: "attachments:release",
+  attachmentsReleaseOwner: "attachments:releaseOwner",
+  attachmentsAssignOwner: "attachments:assignOwner",
 } as const;
 
 export type IpcChannel = (typeof ipcChannels)[keyof typeof ipcChannels];

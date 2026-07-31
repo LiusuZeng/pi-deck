@@ -2,9 +2,12 @@ import type { z } from "zod";
 import type {
   appBootstrapStateSchema,
   appSettingsSchema,
+  attachmentAssignOwnerRequestSchema,
   attachmentDraftSchema,
   attachmentImportDroppedFilesRequestSchema,
   attachmentImportImageRequestSchema,
+  attachmentReleaseOwnerRequestSchema,
+  attachmentReleaseRequestSchema,
   chatCommandSummarySchema,
   chatDeleteAllSessionsRequestSchema,
   chatDeleteAllSessionsResultSchema,
@@ -87,6 +90,15 @@ export type AttachmentImportDroppedFilesRequest = z.infer<
 export type AttachmentImportImageRequest = z.infer<
   typeof attachmentImportImageRequestSchema
 >;
+export type AttachmentReleaseRequest = z.infer<
+  typeof attachmentReleaseRequestSchema
+>;
+export type AttachmentReleaseOwnerRequest = z.infer<
+  typeof attachmentReleaseOwnerRequestSchema
+>;
+export type AttachmentAssignOwnerRequest = z.infer<
+  typeof attachmentAssignOwnerRequestSchema
+>;
 export type PickAttachmentsResult = z.infer<typeof pickAttachmentsResultSchema>;
 
 export interface PiDeckApi {
@@ -153,15 +165,20 @@ export interface PiDeckApi {
     pickProject(): Promise<PickProjectResult>;
   };
   attachments: {
-    pickFiles(request?: {
+    pickFiles(request: {
       projectPath?: string;
+      ownerId: string;
+      sessionId: string;
     }): Promise<PickAttachmentsResult>;
     importDroppedFiles(
       files: File[],
-      request?: { projectPath?: string },
+      request: { projectPath?: string; ownerId: string; sessionId: string },
     ): Promise<PickAttachmentsResult>;
     importImages(
       request: AttachmentImportImageRequest,
     ): Promise<PickAttachmentsResult>;
+    release(request: AttachmentReleaseRequest): Promise<void>;
+    releaseOwner(request: AttachmentReleaseOwnerRequest): Promise<void>;
+    assignOwner(request: AttachmentAssignOwnerRequest): Promise<void>;
   };
 }

@@ -60,6 +60,23 @@ test("fake RPC get_state and get_messages fixtures are deterministic", async () 
   }
 });
 
+test("fake RPC can reject a configured command while retaining the worker", async () => {
+  const client = spawnFakeRpc(["--fail-command", "set_model"]);
+  try {
+    await assert.rejects(
+      client.request("set_model", {
+        provider: "fake-provider",
+        modelId: "fake-model",
+      }),
+      /Fake RPC configured to fail command: set_model/,
+    );
+    const state = (await client.request("get_state")) as JsonObject;
+    assert.equal(state.model, "fake-model");
+  } finally {
+    client.close();
+  }
+});
+
 test("fake RPC prompt fixture emits start, streaming update, and completed end", async () => {
   const client = spawnFakeRpc(["--stream-delay-ms", "1"]);
   try {
@@ -97,6 +114,42 @@ test("fake RPC abort fixture stops work and emits an aborted agent_end", async (
     const abortResult = await client.request("abort");
     assert.equal(abortResult, null);
     await aborted;
+  } finally {
+    client.close();
+  }
+});
+
+test("fake RPC error fixture mirrors Pi 0.81 terminal error events", async () => {
+  const client = spawnFakeRpc(["--prompt-scenario", "error"]);
+  try {
+    const terminal = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "agent_end"),
+    );
+    await client.request("prompt", { message: "trigger provider error" });
+    const events = await terminal;
+    const update = events.find(
+      (event) => event.type === "message_update",
+    ) as JsonObject;
+    const assistantMessage = update.message as JsonObject;
+    const assistantEvent = update.assistantMessageEvent as JsonObject;
+    const nestedError = assistantEvent.error as JsonObject;
+    const agentEnd = events.find(
+      (event) => event.type === "agent_end",
+    ) as JsonObject;
+    const terminalMessages = agentEnd.messages as JsonObject[];
+
+    assert.equal(assistantEvent.type, "error");
+    assert.equal(assistantMessage.stopReason, "error");
+    assert.equal(
+      nestedError.errorMessage,
+      "Usage limit reached for fake provider.",
+    );
+    assert.equal(agentEnd.willRetry, false);
+    assert.equal("status" in agentEnd, false);
+    assert.equal(
+      terminalMessages.at(-1)?.errorMessage,
+      nestedError.errorMessage,
+    );
   } finally {
     client.close();
   }

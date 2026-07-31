@@ -101,8 +101,13 @@ export class SinglePiAdapter implements PiAdapter {
 
   async closeSession(runtimeId: RuntimeSessionId): Promise<void> {
     const worker = this.getWorker(runtimeId);
-    await worker.closeSession();
-    this.workers.delete(runtimeId);
+    try {
+      await worker.closeSession();
+    } finally {
+      // A failed/forced shutdown must not retain a dead worker or consume a
+      // capacity slot indefinitely.
+      this.workers.delete(runtimeId);
+    }
   }
 
   /** Remove a worker that has already emitted its process-exit event. */

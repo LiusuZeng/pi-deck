@@ -20,6 +20,321 @@ function baseSession() {
   } as const;
 }
 
+function productionAssistantMessage(
+  stopReason: "error" | "stop" | "aborted",
+  errorMessage?: string,
+) {
+  return {
+    role: "assistant",
+    content: [],
+    api: "openai-completions",
+    provider: "fake-provider",
+    model: "fake-model",
+    responseId: "response-1",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: 0,
+      },
+    },
+    stopReason,
+    ...(errorMessage === undefined ? {} : { errorMessage }),
+    timestamp: 1,
+  };
+}
+
+function runtimeErrorDiagnostics(session: any): any[] {
+  return session.timeline.filter(
+    (item: any) => item.kind === "diagnostic" && item.tone === "error",
+  );
+}
+
+describe("renderer Pi 0.81 terminal and retry events", () => {
+  it("keeps a production-shaped provider error visible after agent_end", () => {
+    const errorMessage = "Provider quota exhausted.";
+    const failedAssistant = productionAssistantMessage("error", errorMessage);
+    const afterMessage = __rendererTestHooks.reduceRuntimeEvent(
+      {
+        ...baseSession(),
+        status: "working",
+        baseState: "working",
+        overlays: { ...emptyOverlays, streaming: true },
+      } as any,
+      {
+        type: "message_update",
+        runtimeId: "session-1",
+        message: failedAssistant,
+        assistantMessageEvent: {
+          type: "error",
+          reason: "error",
+          error: failedAssistant,
+        },
+      } as any,
+    );
+
+    expect(afterMessage.status).toBe("error");
+    expect(runtimeErrorDiagnostics(afterMessage)).toMatchObject([
+      { content: errorMessage },
+    ]);
+
+    const afterEnd = __rendererTestHooks.reduceRuntimeEvent(afterMessage, {
+      type: "agent_end",
+      runtimeId: "session-1",
+      messages: [failedAssistant],
+      willRetry: false,
+    } as any);
+
+    expect(afterEnd.status).toBe("error");
+    expect(afterEnd.baseState).toBe("error");
+    expect(runtimeErrorDiagnostics(afterEnd)).toHaveLength(1);
+    expect(runtimeErrorDiagnostics(afterEnd)[0]).toMatchObject({
+      content: errorMessage,
+    });
+  });
+
+  it("does not turn a production abort terminal event into a provider error", () => {
+    const abortedAssistant = productionAssistantMessage(
+      "aborted",
+      "Request aborted by user.",
+    );
+    const afterMessage = __rendererTestHooks.reduceRuntimeEvent(
+      {
+        ...baseSession(),
+        status: "working",
+        baseState: "working",
+        overlays: { ...emptyOverlays, streaming: true },
+      } as any,
+      {
+        type: "message_update",
+        runtimeId: "session-1",
+        message: abortedAssistant,
+        assistantMessageEvent: {
+          type: "error",
+          reason: "aborted",
+          error: abortedAssistant,
+        },
+      } as any,
+    );
+    const afterEnd = __rendererTestHooks.reduceRuntimeEvent(afterMessage, {
+      type: "agent_end",
+      runtimeId: "session-1",
+      messages: [abortedAssistant],
+      willRetry: false,
+    } as any);
+
+    expect(afterEnd.status).toBe("idle");
+    expect(runtimeErrorDiagnostics(afterEnd)).toEqual([]);
+  });
+
+  it("derives a terminal error from the final Pi agent_end message", () => {
+    const errorMessage = "Pi returned a terminal provider error.";
+    const failedAssistant = productionAssistantMessage("error", errorMessage);
+    const afterEnd = __rendererTestHooks.reduceRuntimeEvent(
+      {
+        ...baseSession(),
+        status: "working",
+        baseState: "working",
+        overlays: { ...emptyOverlays, streaming: true },
+      } as any,
+      {
+        type: "agent_end",
+        runtimeId: "session-1",
+        messages: [failedAssistant],
+        willRetry: false,
+      } as any,
+    );
+
+    expect(afterEnd.status).toBe("error");
+    expect(runtimeErrorDiagnostics(afterEnd)).toMatchObject([
+      { content: errorMessage },
+    ]);
+  });
+
+  it("keeps Pi retries busy until the eventual successful agent_end", () => {
+    const firstFailure = productionAssistantMessage(
+      "error",
+      "Retryable provider failure.",
+    );
+    let session = __rendererTestHooks.reduceRuntimeEvent(
+      {
+        ...baseSession(),
+        status: "working",
+        baseState: "working",
+        overlays: { ...emptyOverlays, streaming: true },
+      } as any,
+      {
+        type: "agent_end",
+        runtimeId: "session-1",
+        messages: [firstFailure],
+        willRetry: true,
+      } as any,
+    );
+
+    expect(session.status).toBe("working");
+    expect(session.overlays.retrying).toBe(true);
+    expect(__rendererTestHooks.isSessionBusy(session)).toBe(true);
+
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "auto_retry_start",
+      runtimeId: "session-1",
+      attempt: 1,
+      maxAttempts: 2,
+      delayMs: 250,
+      errorMessage: "Retryable provider failure.",
+    } as any);
+    expect(__rendererTestHooks.isSessionBusy(session)).toBe(true);
+
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "auto_retry_end",
+      runtimeId: "session-1",
+      success: true,
+      attempt: 1,
+    } as any);
+    expect(session.status).toBe("working");
+    expect(session.overlays.retrying).toBe(false);
+    expect(__rendererTestHooks.isSessionBusy(session)).toBe(true);
+
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "agent_end",
+      runtimeId: "session-1",
+      messages: [productionAssistantMessage("stop")],
+      willRetry: false,
+    } as any);
+    expect(session.status).toBe("idle");
+    expect(__rendererTestHooks.isSessionBusy(session)).toBe(false);
+
+    expect(
+      __rendererTestHooks.isSessionBusy({
+        ...baseSession(),
+        overlays: { ...emptyOverlays, retrying: true },
+      } as any),
+    ).toBe(true);
+  });
+
+  it("surfaces auto_retry_end finalError without duplicate diagnostics", () => {
+    const finalError = "Retry failed after 2 attempts: quota exhausted.";
+    const failedAssistant = productionAssistantMessage("error", finalError);
+    let session = __rendererTestHooks.reduceRuntimeEvent(
+      {
+        ...baseSession(),
+        status: "working",
+        baseState: "working",
+        overlays: { ...emptyOverlays, streaming: true, retrying: true },
+      } as any,
+      {
+        type: "agent_end",
+        runtimeId: "session-1",
+        messages: [failedAssistant],
+        willRetry: false,
+      } as any,
+    );
+
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "auto_retry_end",
+      runtimeId: "session-1",
+      success: false,
+      attempt: 2,
+      finalError,
+    } as any);
+
+    expect(session.status).toBe("error");
+    expect(session.overlays.retrying).toBe(false);
+    expect(runtimeErrorDiagnostics(session)).toHaveLength(1);
+    expect(runtimeErrorDiagnostics(session)[0]).toMatchObject({
+      content: finalError,
+    });
+  });
+
+  it("treats Pi 0.81 retry cancellation after a user abort as a normal terminal event", () => {
+    const retryableFailure = productionAssistantMessage(
+      "error",
+      "Retryable provider failure.",
+    );
+    let session = __rendererTestHooks.reduceRuntimeEvent(
+      {
+        ...baseSession(),
+        status: "working",
+        baseState: "working",
+        overlays: { ...emptyOverlays, streaming: true },
+      } as any,
+      {
+        type: "agent_end",
+        runtimeId: "session-1",
+        messages: [retryableFailure],
+        willRetry: true,
+      } as any,
+    );
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "auto_retry_start",
+      runtimeId: "session-1",
+      attempt: 1,
+      maxAttempts: 3,
+      delayMs: 1_000,
+      errorMessage: "Retryable provider failure.",
+    } as any);
+
+    // This is the state set synchronously by the Abort control before Pi's
+    // AgentSession.abort() cancels the backoff sleep.
+    session = { ...session, status: "aborting", baseState: "working" };
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "auto_retry_end",
+      runtimeId: "session-1",
+      success: false,
+      attempt: 1,
+      finalError: "Retry cancelled",
+    } as any);
+
+    expect(session.status).toBe("idle");
+    expect(session.baseState).toBe("idle");
+    expect(session.overlays.retrying).toBe(false);
+    expect(__rendererTestHooks.isSessionBusy(session)).toBe(false);
+    expect(session.lastError).toBeUndefined();
+    expect(runtimeErrorDiagnostics(session)).toEqual([]);
+  });
+
+  it("does not treat a prior local error state as a provider terminal failure", () => {
+    const localError = "Attachment picker failed locally.";
+    const afterEnd = __rendererTestHooks.reduceRuntimeEvent(
+      {
+        ...baseSession(),
+        status: "error",
+        baseState: "error",
+        lastError: localError,
+        timeline: [
+          {
+            id: "local-error",
+            kind: "diagnostic",
+            tone: "error",
+            content: localError,
+            createdAt: "Now",
+          },
+        ],
+      } as any,
+      {
+        type: "agent_end",
+        runtimeId: "session-1",
+        messages: [productionAssistantMessage("stop")],
+        willRetry: false,
+      } as any,
+    );
+
+    expect(afterEnd.status).toBe("idle");
+    expect(afterEnd.baseState).toBe("idle");
+    expect(afterEnd.lastError).toBeUndefined();
+    expect(runtimeErrorDiagnostics(afterEnd)).toEqual([
+      expect.objectContaining({ content: localError }),
+    ]);
+  });
+});
+
 describe("renderer per-session composer drafts", () => {
   it("restores text, attachments, and slash state after switching sessions", () => {
     const attachment = {
@@ -108,6 +423,63 @@ describe("renderer per-session composer drafts", () => {
         supportsImages: false,
       }),
     ).toBe("Selected model does not support image input.");
+  });
+});
+
+describe("renderer saved-session deletion ownership", () => {
+  function savedSession(id: string, sessionFile: string) {
+    return {
+      ...baseSession(),
+      id,
+      sessionFile,
+      projectId: "project-a",
+      resumeBacked: true,
+    } as any;
+  }
+
+  it("clears only drafts whose saved session files main confirms removed", () => {
+    const removed = savedSession("saved-a", "/sessions/a.jsonl");
+    const retained = savedSession("saved-b", "/sessions/b.jsonl");
+    const drafts = {
+      [removed.id]: {
+        text: "delete me only after confirmation",
+        attachments: [],
+        slashOpen: false,
+      },
+      [retained.id]: {
+        text: "keep this draft",
+        attachments: [],
+        slashOpen: false,
+      },
+    };
+    const confirmedRemoved = __rendererTestHooks.savedSessionsForDeletedFiles(
+      [removed, retained],
+      [removed.sessionFile],
+    );
+
+    expect(confirmedRemoved).toEqual([removed]);
+    expect(
+      __rendererTestHooks.clearComposerDraftsForSessions(
+        drafts,
+        confirmedRemoved.map((session: any) => session.id),
+      ),
+    ).toEqual({ [retained.id]: drafts[retained.id] });
+  });
+
+  it("retains every draft when a rejected delete has no confirmed removals", () => {
+    const first = savedSession("saved-a", "/sessions/a.jsonl");
+    const second = savedSession("saved-b", "/sessions/b.jsonl");
+    const drafts = {
+      [first.id]: { text: "first", attachments: [], slashOpen: false },
+      [second.id]: { text: "second", attachments: [], slashOpen: false },
+    };
+
+    expect(
+      __rendererTestHooks.savedSessionsForDeletedFiles([first, second], []),
+    ).toEqual([]);
+    expect(__rendererTestHooks.clearComposerDraftsForSessions(drafts, [])).toBe(
+      drafts,
+    );
   });
 });
 
@@ -818,6 +1190,90 @@ describe("renderer message_update reduction", () => {
 
     expect(next.timeline).toEqual(current.timeline);
     expect(next.usageStats).toMatchObject({ inputTokens: 10, outputTokens: 5 });
+  });
+
+  it("preserves title and transcript across metadata-only model and thinking snapshots", () => {
+    const current = {
+      ...baseSession(),
+      title: "Keep this title",
+      projectId: "/projects/original",
+      sessionFile: "/sessions/keep.jsonl",
+      status: "error",
+      baseState: "error",
+      overlays: { ...emptyOverlays, retrying: true },
+      retryPrompt: { text: "retry this", attachments: [] },
+      timeline: [
+        {
+          id: "user-1",
+          kind: "user",
+          content: "Keep this title",
+          createdAt: "now",
+        },
+        {
+          id: "assistant-1",
+          kind: "assistant",
+          content: "Existing response",
+          createdAt: "now",
+        },
+      ],
+    } as any;
+    const afterModel = __rendererTestHooks.mergeSessionUsageFromSnapshot(
+      current,
+      __rendererTestHooks.sessionFromSnapshot({
+        runtimeId: "session-1",
+        backendMode: "real",
+        state: {
+          cwd: "/projects/changed-by-snapshot",
+          provider: "provider-two",
+          model: "model-two",
+        },
+        messages: [],
+      } as any),
+    );
+    const afterThinking = __rendererTestHooks.mergeSessionUsageFromSnapshot(
+      afterModel,
+      __rendererTestHooks.sessionFromSnapshot({
+        runtimeId: "session-1",
+        backendMode: "real",
+        state: {
+          cwd: "/projects/changed-by-snapshot",
+          provider: "provider-two",
+          model: "model-two",
+          thinkingLevel: "high",
+        },
+        messages: [],
+      } as any),
+    );
+
+    expect(afterThinking).toMatchObject({
+      title: "Keep this title",
+      projectId: "/projects/original",
+      sessionFile: "/sessions/keep.jsonl",
+      status: "error",
+      baseState: "error",
+      retryPrompt: { text: "retry this" },
+      modelLabel: "provider-two / model-two",
+      thinkingLevel: "high",
+    });
+    expect(afterThinking.overlays).toEqual(current.overlays);
+    expect(afterThinking.timeline).toEqual(current.timeline);
+  });
+
+  it("uses Pi's production sessionName as the snapshot title", () => {
+    const session = __rendererTestHooks.sessionFromSnapshot({
+      runtimeId: "runtime-1",
+      backendMode: "real",
+      state: { cwd: "/tmp/project", sessionName: "  Named by Pi  " },
+      messages: [
+        {
+          id: "user-1",
+          role: "user",
+          content: "Fallback first prompt",
+        },
+      ],
+    } as any);
+
+    expect(session.title).toBe("Named by Pi");
   });
 
   it("does not render persisted empty assistant messages as waiting forever", () => {

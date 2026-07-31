@@ -307,10 +307,17 @@ test("SinglePiAdapter routes required methods by runtime id", async () => {
     const unsubscribe = adapter.onEvent((event) => events.push(event));
     const state = await adapter.getState(worker.runtimeId);
     assert.equal(state.sessionId, "fake-session-1");
+    // The 1 ms fixture can finish before the steer/follow-up RPCs return when
+    // the full suite is under load. Subscribe before accepting the prompt so
+    // this lifecycle assertion observes the terminal event deterministically.
+    const completed = waitForWorkerEvent(
+      worker,
+      (event) => event.type === "agent_end",
+    );
     await adapter.prompt(worker.runtimeId, { text: "via adapter" });
     await adapter.steer(worker.runtimeId, { text: "via adapter steer" });
     await adapter.followUp(worker.runtimeId, { text: "via adapter follow-up" });
-    await waitForWorkerEvent(worker, (event) => event.type === "agent_end");
+    await completed;
     assert.ok(events.some((event) => event.type === "message_update"));
     unsubscribe();
   } finally {

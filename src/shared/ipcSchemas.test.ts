@@ -8,6 +8,10 @@ import {
   attachmentImportDroppedFilesRequestSchema,
   attachmentImportImageRequestSchema,
   attachmentPickerRequestSchema,
+  attachmentReleaseOwnerRequestSchema,
+  attachmentReleaseRequestSchema,
+  attachmentAssignOwnerRequestSchema,
+  chatDeleteAllSessionsResultSchema,
   chatDeleteSessionRequestSchema,
   chatInterventionRequestSchema,
   chatMessageSchema,
@@ -213,6 +217,24 @@ describe("IPC schemas", () => {
     expect(() => chatDeleteSessionRequestSchema.parse({})).toThrow();
   });
 
+  it("requires exact deleted files for bulk deletion owner cleanup", () => {
+    expect(
+      chatDeleteAllSessionsResultSchema.parse({
+        deleted: true,
+        deletedCount: 1,
+        skippedCount: 1,
+        deletedSessionFiles: ["/tmp/deleted.jsonl"],
+      }),
+    ).toMatchObject({ deletedSessionFiles: ["/tmp/deleted.jsonl"] });
+    expect(() =>
+      chatDeleteAllSessionsResultSchema.parse({
+        deleted: true,
+        deletedCount: 1,
+        skippedCount: 0,
+      }),
+    ).toThrow();
+  });
+
   it("validates strict steer and follow-up intervention payloads", () => {
     expect(
       chatInterventionRequestSchema.parse({
@@ -263,6 +285,7 @@ describe("IPC schemas", () => {
           { selectedPathToken: "token-1", sendMode: "pathReference" },
           { selectedPathToken: "token-2", sendMode: "imageInput" },
         ],
+        attachmentOwnerId: "owner-generation-1",
       }),
     ).toMatchObject({ runtimeId: "runtime-1" });
 
@@ -275,6 +298,16 @@ describe("IPC schemas", () => {
         ],
       }),
     ).toThrow();
+    expect(() =>
+      chatPromptRequestSchema.parse({
+        runtimeId: "runtime-1",
+        text: "Do not duplicate this image",
+        attachments: [
+          { selectedPathToken: "token-1", sendMode: "imageInput" },
+          { selectedPathToken: "token-1", sendMode: "imageInput" },
+        ],
+      }),
+    ).toThrow();
   });
 
   it("validates dropped regular file path import payloads", () => {
@@ -282,15 +315,28 @@ describe("IPC schemas", () => {
       attachmentImportDroppedFilesRequestSchema.parse({
         paths: ["/tmp/a.txt", "/tmp/b.bin"],
         projectPath: "/tmp",
+        ownerId: "owner-generation-1",
+        sessionId: "draft-1",
       }),
-    ).toEqual({ paths: ["/tmp/a.txt", "/tmp/b.bin"], projectPath: "/tmp" });
+    ).toEqual({
+      paths: ["/tmp/a.txt", "/tmp/b.bin"],
+      projectPath: "/tmp",
+      ownerId: "owner-generation-1",
+      sessionId: "draft-1",
+    });
 
     expect(() =>
-      attachmentImportDroppedFilesRequestSchema.parse({ paths: [] }),
+      attachmentImportDroppedFilesRequestSchema.parse({
+        paths: [],
+        ownerId: "owner-generation-1",
+        sessionId: "draft-1",
+      }),
     ).toThrow();
     expect(() =>
       attachmentImportDroppedFilesRequestSchema.parse({
         paths: ["/tmp/a.txt"],
+        ownerId: "owner-generation-1",
+        sessionId: "draft-1",
         recursiveRead: true,
       }),
     ).toThrow();
@@ -307,12 +353,16 @@ describe("IPC schemas", () => {
             dataBase64: "abc123",
           },
         ],
+        ownerId: "owner-generation-1",
+        sessionId: "draft-1",
       }),
     ).toMatchObject({ images: [{ fileName: "screenshot.png" }] });
 
     expect(() =>
       attachmentImportImageRequestSchema.parse({
         images: [{ fileName: "x.png", mimeType: "image/png", path: "/tmp/x" }],
+        ownerId: "owner-generation-1",
+        sessionId: "draft-1",
       }),
     ).toThrow();
   });
@@ -330,14 +380,24 @@ describe("IPC schemas", () => {
     };
 
     expect(
-      attachmentPickerRequestSchema.parse({ projectPath: "/project" }),
+      attachmentPickerRequestSchema.parse({
+        projectPath: "/project",
+        ownerId: "owner-generation-1",
+        sessionId: "draft-1",
+      }),
     ).toEqual({
       projectPath: "/project",
+      ownerId: "owner-generation-1",
+      sessionId: "draft-1",
     });
     expect(attachmentDraftSchema.parse(attachment)).toEqual(attachment);
 
     expect(() =>
-      attachmentPickerRequestSchema.parse({ recursiveRead: true }),
+      attachmentPickerRequestSchema.parse({
+        ownerId: "owner-generation-1",
+        sessionId: "draft-1",
+        recursiveRead: true,
+      }),
     ).toThrow();
     expect(() =>
       attachmentDraftSchema.parse({
@@ -358,6 +418,39 @@ describe("IPC schemas", () => {
       attachmentDraftSchema.parse({
         ...attachment,
         sendMode: "inlineContents",
+      }),
+    ).toThrow();
+
+    expect(
+      attachmentReleaseRequestSchema.parse({
+        ownerId: "runtime-1",
+        selectedPathTokens: ["token-1"],
+      }),
+    ).toMatchObject({ ownerId: "runtime-1" });
+    expect(
+      attachmentAssignOwnerRequestSchema.parse({
+        previousOwnerId: "owner-generation-1",
+        previousSessionId: "draft-1",
+        ownerId: "owner-generation-2",
+        sessionId: "runtime-1",
+        selectedPathTokens: ["token-1"],
+      }),
+    ).toMatchObject({
+      previousOwnerId: "owner-generation-1",
+      previousSessionId: "draft-1",
+      ownerId: "owner-generation-2",
+      sessionId: "runtime-1",
+    });
+    expect(
+      attachmentReleaseOwnerRequestSchema.parse({ ownerId: "runtime-1" }),
+    ).toEqual({ ownerId: "runtime-1" });
+    expect(() =>
+      attachmentReleaseRequestSchema.parse({ selectedPathTokens: ["token-1"] }),
+    ).toThrow();
+    expect(() =>
+      attachmentAssignOwnerRequestSchema.parse({
+        ownerId: "runtime-1",
+        selectedPathTokens: ["token-1"],
       }),
     ).toThrow();
   });
