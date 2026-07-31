@@ -464,6 +464,10 @@ test("saved session deletion control is reachable and activated with the keyboar
   );
   try {
     await expectHealthyPreload(page);
+    await expect(
+      page.getByRole("button", { name: "Delete saved sessions", exact: true }),
+    ).toBeVisible();
+    await expect(page.locator(".sidebar .ui-menu-popover")).toHaveCount(0);
     const sessionRow = page.getByRole("button", {
       name: "Session: keyboard-delete",
     });

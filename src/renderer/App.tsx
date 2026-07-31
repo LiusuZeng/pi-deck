@@ -64,7 +64,6 @@ import {
   Wrench,
   X,
 } from "./components/ui/icons.js";
-import { Menu } from "./components/ui/Menu.js";
 import { RuntimeEventBuffer } from "./runtimeEventBuffer.js";
 
 type LoadState =
@@ -4102,18 +4101,13 @@ function SessionSidebar(props: {
             />
           ) : null}
           {props.realMode ? (
-            <Menu label="Session actions">
-              <Button
-                aria-label="Delete saved sessions"
-                role="menuitem"
-                size="sm"
-                variant="danger"
-                onClick={props.onDeleteAllSessions}
-              >
-                <Trash2 aria-hidden="true" size={14} strokeWidth={1.75} />
-                Delete saved sessions…
-              </Button>
-            </Menu>
+            <IconButton
+              icon={Trash2}
+              label="Delete saved sessions"
+              size="sm"
+              variant="danger"
+              onClick={props.onDeleteAllSessions}
+            />
           ) : null}
         </div>
       </div>
