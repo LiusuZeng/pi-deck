@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-31
+
+Patch release aligning Pi Deck with production Pi RPC lifecycle events and
+hardening project, worker, attachment, and session metadata boundaries.
+
+### Fixed
+
+- Correctly handled production-shaped provider errors, `agent_end` retry state,
+  retry completion/failure, final retry messages, and user cancellation during
+  retry backoff without exposing idle controls while Pi is still busy.
+- Reclaimed workers, runtime maps, locks, and capacity when initial snapshots or
+  draft model/thinking setup fail, while preserving accepted prompts.
+- Preserved session titles, transcripts, identity, and cached metadata when
+  model or thinking changes return metadata-only snapshots, including Pi's
+  `sessionName` field.
+- Preserved composer text and attachment authority across failed and partial
+  session deletion, including failures after an attached runtime has closed.
+- Removed a full-suite race in fake worker terminal-event coverage.
+
+### Security
+
+- Treated renderer-supplied project IDs as opaque `ProjectStore` references and
+  revalidated canonical selected roots before model discovery, scans, worker
+  creation, resume, and deletion.
+- Replaced unbounded attachment payload retention with a count- and byte-bounded,
+  expiring store that consumes tokens only after successful delivery and
+  releases them on removal, owner teardown, runtime exit, deletion, and reset.
+- Separated one-use attachment owner generations from stable session IDs so
+  late picker results cannot resurrect discarded authority while legitimate
+  project navigation, renderer reload, and session resume remain usable.
+
+### Tests
+
+- Added production-shaped fake RPC fixtures and focused unit/Electron E2E
+  regressions for retry/abort behavior, project authorization, worker cleanup,
+  metadata refresh, attachment lifecycle, and transactional deletion failures.
+
 ## [0.1.0] - 2026-07-30
 
 Initial source release of Pi Deck, a local macOS Electron control plane for Pi
@@ -108,5 +145,6 @@ coding-agent sessions.
   crash; persisted sessions can be reopened, but unsaved partial stream text may
   be lost.
 
-[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/LiusuZeng/pi-deck/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/LiusuZeng/pi-deck/releases/tag/v0.1.0
