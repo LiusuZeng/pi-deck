@@ -105,7 +105,7 @@ export function Menu(props: {
         disabled={props.disabled}
         icon={props.icon ?? Ellipsis}
         label={props.label}
-        loading={props.loading}
+        loading={props.loading ?? false}
         pressed={isOpen}
         size="sm"
         onClick={() => setIsOpen((value) => !value)}

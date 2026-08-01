@@ -534,6 +534,26 @@ export function App(): ReactElement {
   currentProjectRef.current = currentProject;
 
   useEffect(() => {
+    const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
+    const applyRendererTheme = (): void => {
+      document.documentElement.dataset.theme =
+        appearanceTheme === "system"
+          ? systemTheme.matches
+            ? "dark"
+            : "light"
+          : appearanceTheme;
+    };
+
+    applyRendererTheme();
+    if (appearanceTheme !== "system") {
+      return;
+    }
+
+    systemTheme.addEventListener("change", applyRendererTheme);
+    return () => systemTheme.removeEventListener("change", applyRendererTheme);
+  }, [appearanceTheme]);
+
+  useEffect(() => {
     let disposed = false;
     let unsubscribe: (() => void) | undefined;
     let eventBuffer: RuntimeEventBuffer | undefined;
