@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-01
+
+Feature release adding a persistent, accessible appearance system across the
+Electron shell and complete Pi Deck interface.
+
 ### Added
 
 - Added a persisted System, Light, and Dark appearance preference that applies
@@ -156,6 +161,7 @@ coding-agent sessions.
   crash; persisted sessions can be reopened, but unsaved partial stream text may
   be lost.
 
-[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/LiusuZeng/pi-deck/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/LiusuZeng/pi-deck/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/LiusuZeng/pi-deck/releases/tag/v0.1.0
