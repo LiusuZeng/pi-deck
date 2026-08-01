@@ -2,6 +2,7 @@ import {
   app,
   BrowserWindow,
   dialog,
+  nativeTheme,
   shell,
   session,
   nativeImage,
@@ -98,6 +99,11 @@ import {
 } from "./security.js";
 import { ProjectStore, resolvePiDeckHome } from "./projects/projectStore.js";
 import { SettingsStore } from "./settings/settingsStore.js";
+import {
+  applyThemePreference,
+  effectiveWindowBackground,
+  updateWindowBackground,
+} from "./theme.js";
 import { formatCanonicalFileReference } from "./attachments.js";
 import { deliverWithAttachmentConsumption } from "./attachmentDelivery.js";
 import {
@@ -181,6 +187,10 @@ async function bootstrap(): Promise<void> {
   await diagnostics.initialize();
   settingsStore = new SettingsStore(app.getPath("userData"), diagnostics);
   await settingsStore.loadIfNeeded();
+  applyAppTheme(await settingsStore.get());
+  nativeTheme.on("updated", () => {
+    updateWindowBackground(mainWindow, nativeTheme);
+  });
   projectStore = new ProjectStore(resolvePiDeckHome(process.env), diagnostics);
   await projectStore.loadIfNeeded();
 
@@ -203,6 +213,7 @@ function createMainWindow(): void {
     minWidth: 900,
     minHeight: 600,
     title: "Pi Deck",
+    backgroundColor: effectiveWindowBackground(nativeTheme),
     show: process.env.PI_DECK_E2E_HIDE_WINDOWS !== "1",
     webPreferences: buildSecureWebPreferences(preloadPath),
   });
@@ -238,6 +249,11 @@ function createMainWindow(): void {
   } else {
     void mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
   }
+}
+
+function applyAppTheme(settings: AppSettings): void {
+  applyThemePreference(nativeTheme, settings.theme);
+  updateWindowBackground(mainWindow, nativeTheme);
 }
 
 function registerDevReloadShortcut(window: BrowserWindow): void {
@@ -316,6 +332,7 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async (patch) => {
       const updated = await store.update(patch);
+      applyAppTheme(updated);
       // App settings are an explicit configuration generation boundary.
       realChatLaunchConfigCache.clear();
       return updated;

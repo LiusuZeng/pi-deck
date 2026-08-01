@@ -8,6 +8,7 @@ import type { AppSettings } from "../../shared/types.js";
 import type { DiagnosticsRecorder } from "../diagnostics/diagnostics.js";
 
 export const defaultAppSettings: AppSettings = Object.freeze({
+  theme: "system",
   maxRunningSessions: 4,
   warmWorkerLimit: 1,
   enableLoginShellEnvCapture: true,

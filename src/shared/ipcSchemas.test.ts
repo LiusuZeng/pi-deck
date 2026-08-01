@@ -29,11 +29,16 @@ describe("IPC schemas", () => {
       maxRunningSessions: 4,
       warmWorkerLimit: 1,
       enableLoginShellEnvCapture: true,
+      theme: "system",
     });
     expect(appSettingsPatchSchema.parse({})).toEqual({});
     expect(() =>
       appSettingsPatchSchema.parse({ maxRunningSessions: 21 }),
     ).toThrow();
+    expect(appSettingsPatchSchema.parse({ theme: "dark" })).toEqual({
+      theme: "dark",
+    });
+    expect(() => appSettingsPatchSchema.parse({ theme: "midnight" })).toThrow();
   });
 
   it("rejects unknown settings keys", () => {

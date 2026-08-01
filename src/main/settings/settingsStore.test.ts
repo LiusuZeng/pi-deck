@@ -44,6 +44,32 @@ describe("SettingsStore", () => {
     });
   });
 
+  it("loads settings written before the theme preference was added", async () => {
+    const dir = await tempUserDataDir();
+    await writeFile(
+      path.join(dir, "settings.json"),
+      JSON.stringify({ maxRunningSessions: 8, warmWorkerLimit: 2 }),
+    );
+
+    await expect(new SettingsStore(dir).get()).resolves.toMatchObject({
+      theme: "system",
+      maxRunningSessions: 8,
+      warmWorkerLimit: 2,
+    });
+  });
+
+  it("persists a valid theme preference", async () => {
+    const dir = await tempUserDataDir();
+    const store = new SettingsStore(dir);
+
+    await expect(store.update({ theme: "dark" })).resolves.toMatchObject({
+      theme: "dark",
+    });
+    await expect(new SettingsStore(dir).get()).resolves.toMatchObject({
+      theme: "dark",
+    });
+  });
+
   it("rejects invalid updates without corrupting current settings", async () => {
     const dir = await tempUserDataDir();
     const store = new SettingsStore(dir);

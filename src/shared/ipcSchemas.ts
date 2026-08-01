@@ -12,6 +12,7 @@ const appSettingsShape = {
     .strict()
     .optional(),
   projectCwd: z.string().min(1).optional(),
+  theme: z.enum(["system", "light", "dark"]),
   maxRunningSessions: z.number().int().min(1).max(20),
   warmWorkerLimit: z.number().int().min(0).max(20),
   enableLoginShellEnvCapture: z.boolean(),
@@ -20,6 +21,7 @@ const appSettingsShape = {
 export const appSettingsSchema = z
   .object({
     ...appSettingsShape,
+    theme: appSettingsShape.theme.default("system"),
     maxRunningSessions: appSettingsShape.maxRunningSessions.default(4),
     warmWorkerLimit: appSettingsShape.warmWorkerLimit.default(1),
     enableLoginShellEnvCapture:
