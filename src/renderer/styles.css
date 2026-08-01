@@ -3,27 +3,40 @@
   --font-sans:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
     "Segoe UI", sans-serif;
+  /* Theme tokens: all product surfaces resolve through this small palette. */
   --color-canvas: #f6f7f5;
   --color-surface: #ffffff;
-  --color-surface-subtle: #fafaf8;
-  --color-surface-muted: #f1f3f1;
-  --color-text: #1f2933;
-  --color-text-strong: #17212b;
-  --color-text-muted: #65727a;
-  --color-text-subtle: #7b8790;
-  --color-border: #dfe4e1;
-  --color-border-strong: #cbd3cf;
-  --color-accent: #4f46e5;
-  --color-accent-hover: #4338ca;
+  --color-surface-raised: #ffffff;
+  --color-surface-subtle: #f9f9f9;
+  --color-surface-muted: #f4f4f4;
+  --color-surface-hover: #ececec;
+  --color-surface-active: #e7e7e7;
+  --color-text: #2f2f2f;
+  --color-text-strong: #212121;
+  --color-text-muted: #6b6b6b;
+  --color-text-subtle: #8f8f8f;
+  --color-border: #e5e5e5;
+  --color-border-strong: #d9d9d9;
+  --color-accent: #10a37f;
+  --color-accent-hover: #0d8f70;
   --color-on-accent: #ffffff;
-  --color-focus: #4f46e5;
-  --color-danger: #c2413b;
-  --color-danger-surface: #fff4f2;
+  --color-focus: #6b6b6b;
+  --color-danger: #b42318;
+  --color-danger-fg: #b42318;
+  --color-danger-surface: #fef3f2;
+  --color-warning: #9a3412;
+  --color-warning-surface: #fff7ed;
+  --color-info: #1e3a8a;
+  --color-info-surface: #eff6ff;
   --color-success: #198754;
-  --shadow-sm: 0 1px 2px rgb(23 33 43 / 6%);
-  --shadow-md: 0 10px 24px rgb(23 33 43 / 8%);
-  --shadow-lg: 0 18px 48px rgb(23 33 43 / 14%);
-  --focus-ring: 0 0 0 3px rgb(79 70 229 / 22%);
+  --color-success-surface: #ecfdf3;
+  --color-code: #111827;
+  --color-code-text: #f9fafb;
+  --color-inverse: #ffffff;
+  --shadow-sm: 0 1px 2px rgb(16 24 40 / 6%);
+  --shadow-md: 0 10px 24px rgb(16 24 40 / 10%);
+  --shadow-lg: 0 18px 48px rgb(16 24 40 / 16%);
+  --focus-ring: 0 0 0 2px rgb(0 0 0 / 10%);
   --radius-sm: 8px;
   --radius-md: 12px;
   --radius-lg: 16px;
@@ -36,19 +49,60 @@
   --control-fg: var(--color-text-muted);
   --control-fg-hover: var(--color-text);
   --control-bg: transparent;
-  --control-bg-hover: rgb(0 0 0 / 5%);
-  --control-bg-active: rgb(0 0 0 / 8%);
+  --control-bg-hover: var(--color-surface-hover);
+  --control-bg-active: var(--color-surface-active);
   --control-border: transparent;
   --control-border-subtle: var(--color-border);
-  --action-solid-bg: #202124;
+  --action-solid-bg: #202020;
   --action-solid-fg: #ffffff;
-  --danger-fg: #b42318;
-  --danger-bg-hover: #fff1f0;
+  --danger-fg: var(--color-danger-fg);
+  --danger-bg-hover: var(--color-danger-surface);
   color: var(--color-text);
   background: var(--color-canvas);
   font-family: var(--font-sans);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --color-canvas: #171a1f;
+    --color-surface: #2a2a2a;
+    --color-surface-raised: #303030;
+    --color-surface-subtle: #171717;
+    --color-surface-muted: #383838;
+    --color-surface-hover: #404040;
+    --color-surface-active: #4a4a4a;
+    --color-text: #ececec;
+    --color-text-strong: #ffffff;
+    --color-text-muted: #b4b4b4;
+    --color-text-subtle: #8e8e8e;
+    --color-border: #424242;
+    --color-border-strong: #575757;
+    --color-accent: #19c37d;
+    --color-accent-hover: #34d399;
+    --color-focus: #d0d0d0;
+    --color-danger: #ff8181;
+    --color-danger-fg: #ff9b9b;
+    --color-danger-surface: #4a2424;
+    --color-warning: #fbbf77;
+    --color-warning-surface: #482d14;
+    --color-info: #a9c7ff;
+    --color-info-surface: #18345b;
+    --color-success: #6ee7b7;
+    --color-success-surface: #153d2e;
+    --color-code: #171717;
+    --color-code-text: #f5f5f5;
+    --color-inverse: #171717;
+    --color-on-accent: #171717;
+    --shadow-sm: 0 1px 2px rgb(0 0 0 / 24%);
+    --shadow-md: 0 10px 24px rgb(0 0 0 / 32%);
+    --shadow-lg: 0 18px 48px rgb(0 0 0 / 45%);
+    --focus-ring: 0 0 0 2px rgb(255 255 255 / 20%);
+    --action-solid-bg: #ececec;
+    --action-solid-fg: #171717;
+  }
 }
 
 * {
@@ -1484,6 +1538,160 @@ h1 {
   }
 }
 
+/* Semantic surfaces retained by legacy content states and overlays. */
+.state-indicator,
+.model-controls label,
+.transcript-loading,
+.thinking-row,
+.pending-agent-message,
+.stream-placeholder,
+.composer-meta,
+.composer-option,
+.attachment-examples,
+.slash-picker small,
+.timeline-attachment em,
+.attachment-chip em,
+.attachment-chip small {
+  color: var(--color-text-muted);
+}
+
+.timeline-attachment {
+  color: var(--color-text);
+  background: var(--color-surface-raised);
+}
+
+.timeline-attachment img,
+.attachment-chip img {
+  background: var(--color-surface-muted);
+}
+
+.usage-stats span,
+.queue-badge,
+.diagnostic-badge,
+.state-banner,
+.diagnostic-message {
+  color: var(--color-info);
+  border-color: color-mix(in srgb, var(--color-info) 42%, var(--color-border));
+  background: var(--color-info-surface);
+}
+
+.usage-stats.empty {
+  color: var(--color-text-muted);
+  border-color: var(--color-border);
+  background: var(--color-surface-subtle);
+}
+
+.diagnostic-badge.error,
+.state-banner.error,
+.diagnostic-message.error,
+.inline-error,
+.composer-error {
+  color: var(--color-danger-fg);
+  border-color: color-mix(in srgb, var(--color-danger) 42%, var(--color-border));
+  background: var(--color-danger-surface);
+}
+
+.state-banner.waiting,
+.extension-ui-card {
+  color: var(--color-warning);
+  border-color: color-mix(in srgb, var(--color-warning) 46%, var(--color-border));
+  background: var(--color-warning-surface);
+}
+
+.extension-ui-card small {
+  color: var(--color-warning);
+}
+
+.extension-ui-form input,
+.extension-ui-form textarea {
+  color: var(--color-text);
+  border-color: color-mix(in srgb, var(--color-warning) 45%, var(--color-border));
+  background: var(--color-surface);
+}
+
+.tool-card.running {
+  border-color: color-mix(in srgb, var(--color-info) 55%, var(--color-border));
+}
+
+.tool-card.success {
+  border-color: color-mix(in srgb, var(--color-success) 55%, var(--color-border));
+}
+
+.tool-card.error {
+  border-color: color-mix(in srgb, var(--color-danger) 55%, var(--color-border));
+}
+
+.markdown-body blockquote {
+  color: var(--color-text-muted);
+  border-color: color-mix(in srgb, var(--color-accent) 45%, var(--color-border));
+}
+
+.markdown-body code {
+  color: var(--color-text);
+  background: var(--color-surface-muted);
+}
+
+.markdown-body pre,
+.tool-card pre {
+  color: var(--color-code-text);
+  background: var(--color-code);
+}
+
+.markdown-body pre code {
+  color: inherit;
+  background: transparent;
+}
+
+.markdown-body a {
+  color: var(--color-accent-hover);
+}
+
+.assistant-avatar,
+.ui-tooltip {
+  color: var(--color-on-accent);
+  background: var(--action-solid-bg);
+}
+
+.ui-tooltip kbd {
+  color: color-mix(in srgb, var(--action-solid-fg) 78%, transparent);
+}
+
+.transcript-loading-spinner,
+.spinner {
+  border-color: var(--color-border-strong);
+  border-top-color: var(--color-accent);
+}
+
+.thinking-row details {
+  border-color: var(--color-border-strong);
+}
+
+.stream-caret,
+.state-indicator.toolRunning .state-dot,
+.state-indicator.working .state-dot {
+  background: var(--color-accent);
+}
+
+.state-indicator.idle .state-dot {
+  background: var(--color-success);
+}
+
+.state-indicator.needsInput .state-dot {
+  background: var(--color-danger);
+}
+
+.state-indicator.error .state-dot {
+  background: var(--color-warning);
+}
+
+.state-indicator.attaching .state-dot,
+.state-indicator.compacting .state-dot,
+.state-indicator.retrying .state-dot,
+.state-indicator.muted .state-dot,
+.state-indicator.queued .state-dot {
+  background: var(--color-text-subtle);
+}
+
 /* Light-neutral foundation shared by renderer controls and content. */
 button,
 input,
@@ -1839,14 +2047,14 @@ h3 {
 .ui-icon-button--solid:hover:not(:disabled),
 .ui-button--solid:hover:not(:disabled) {
   color: var(--action-solid-fg);
-  border-color: #111213;
-  background: #111213;
+  border-color: color-mix(in srgb, var(--action-solid-bg) 88%, var(--color-text));
+  background: color-mix(in srgb, var(--action-solid-bg) 88%, var(--color-text));
 }
 
 .ui-icon-button--solid:active:not(:disabled),
 .ui-button--solid:active:not(:disabled) {
   color: var(--action-solid-fg);
-  background: #000000;
+  background: color-mix(in srgb, var(--action-solid-bg) 76%, var(--color-text));
 }
 
 .ui-icon-button--danger:hover:not(:disabled),
@@ -1988,35 +2196,19 @@ summary::marker {
 }
 
 /* Chat-first layout: quiet navigation, centered conversation, floating composer. */
-:root {
-  --color-canvas: #ffffff;
-  --color-surface-subtle: #f9f9f9;
-  --color-surface-muted: #f4f4f4;
-  --color-border: #e5e5e5;
-  --color-border-strong: #d9d9d9;
-  --color-text: #2f2f2f;
-  --color-text-strong: #212121;
-  --color-text-muted: #6b6b6b;
-  --color-text-subtle: #8f8f8f;
-  --color-accent: #10a37f;
-  --color-accent-hover: #0d8f70;
-  --color-focus: #6b6b6b;
-  --focus-ring: 0 0 0 2px rgb(0 0 0 / 10%);
-}
-
 body {
   font-size: 14px;
 }
 
 .app-shell {
   grid-template-columns: 248px minmax(0, 1fr);
-  background: #ffffff;
+  background: var(--color-canvas);
 }
 
 .sidebar {
   gap: 2px;
   padding: 8px;
-  background: #f9f9f9;
+  background: var(--color-surface-subtle);
   border-right: 0;
   box-shadow: none;
 }
@@ -2039,8 +2231,8 @@ body {
   width: 28px;
   height: 28px;
   border-radius: 999px;
-  color: #ffffff;
-  background: #202020;
+  color: var(--action-solid-fg);
+  background: var(--action-solid-bg);
   font-size: 15px;
   font-weight: 700;
 }
@@ -2065,7 +2257,7 @@ body {
 }
 
 .sidebar-new-chat.ui-button:hover {
-  background: #ececec;
+  background: var(--color-surface-hover);
 }
 
 .session-search-wrap {
@@ -2077,13 +2269,13 @@ body {
   border: 0;
   border-radius: 8px;
   padding-left: 32px;
-  background: #ececec;
+  background: var(--color-surface-hover);
 }
 
 .session-search:focus,
 .session-search:focus-visible {
   border: 0;
-  box-shadow: 0 0 0 1px #c7c7c7;
+  box-shadow: 0 0 0 1px var(--color-border-strong);
 }
 
 .attention-summary {
@@ -2129,7 +2321,7 @@ body {
 
 .session-item:hover,
 .session-item.active {
-  background: #ececec;
+  background: var(--color-surface-hover);
 }
 
 .session-item.active {
@@ -2161,8 +2353,8 @@ body {
   .session-delete-button.ui-control:not(:hover):not(:focus-visible),
 .session-item-wrap:focus-within
   .session-delete-button.ui-control:not(:hover):not(:focus-visible) {
-  background: #ececec;
-  box-shadow: -7px 0 8px #ececec;
+  background: var(--color-surface-hover);
+  box-shadow: -7px 0 8px var(--color-surface-hover);
 }
 
 .state-dot {
@@ -2188,7 +2380,7 @@ body {
   margin: 3px 0 5px;
   border: 0;
   padding: 4px;
-  background: #f0f0f0;
+  background: var(--color-surface-muted);
 }
 
 .active-work-heading {
@@ -2202,7 +2394,7 @@ body {
 .workspace {
   position: relative;
   grid-template-rows: 48px minmax(0, 1fr) auto;
-  background: #ffffff;
+  background: var(--color-canvas);
 }
 
 .workspace > .topbar {
@@ -2223,7 +2415,7 @@ body {
   min-height: 48px;
   padding: 5px 12px;
   border-bottom: 0;
-  background: rgb(255 255 255 / 94%);
+  background: color-mix(in srgb, var(--color-surface) 94%, transparent);
   box-shadow: none;
 }
 
@@ -2366,7 +2558,7 @@ body {
   border-radius: 9px;
   padding: 7px 10px;
   color: var(--color-text-muted);
-  background: rgb(255 255 255 / 96%);
+  background: color-mix(in srgb, var(--color-surface) 96%, transparent);
   box-shadow: var(--shadow-md);
   font-size: 12px;
   text-overflow: ellipsis;
@@ -2433,7 +2625,7 @@ body {
 
 .user-bubble {
   border: 0;
-  background: #f4f4f4;
+  background: var(--color-surface-muted);
 }
 
 .user-bubble time,
@@ -2466,13 +2658,13 @@ body {
   border: 0;
   border-radius: 22px;
   padding: 9px 12px;
-  background: #f4f4f4;
+  background: var(--color-surface-muted);
   box-shadow: none;
 }
 
 .composer-input-wrap:focus-within {
   border: 0;
-  box-shadow: 0 0 0 1px #d4d4d4;
+  box-shadow: 0 0 0 1px var(--color-border-strong);
 }
 
 .composer textarea {
@@ -2485,7 +2677,7 @@ body {
 }
 
 .composer textarea::placeholder {
-  color: #737373;
+  color: var(--color-text-subtle);
 }
 
 .composer-meta {
@@ -2519,7 +2711,7 @@ body {
 
 .pi-configuration-trigger:hover,
 .pi-configuration-trigger[aria-expanded="true"] {
-  background: #e7e7e7;
+  background: var(--color-surface-active);
 }
 
 .pi-configuration-popover,
@@ -2611,4 +2803,56 @@ body {
   .starter-page {
     padding: 16px 10px;
   }
+}
+
+/* Final theme pass: this intentionally follows the chat-first layout layer. */
+.ui-tooltip {
+  color: var(--color-on-accent);
+  background: var(--action-solid-bg);
+}
+
+.ui-tooltip kbd {
+  color: color-mix(in srgb, var(--action-solid-fg) 78%, transparent);
+}
+
+.extension-ui-card {
+  color: var(--color-warning);
+  border-color: color-mix(in srgb, var(--color-warning) 46%, var(--color-border));
+  background: var(--color-warning-surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.extension-ui-card small {
+  color: var(--color-warning);
+}
+
+.extension-ui-form input,
+.extension-ui-form textarea {
+  color: var(--color-text);
+  border-color: color-mix(in srgb, var(--color-warning) 45%, var(--color-border));
+  background: var(--color-surface);
+}
+
+.state-banner,
+.diagnostic-message,
+.usage-stats span,
+.queue-badge,
+.diagnostic-badge {
+  color: var(--color-info);
+  border-color: color-mix(in srgb, var(--color-info) 42%, var(--color-border));
+  background: var(--color-info-surface);
+}
+
+.state-banner.error,
+.diagnostic-message.error,
+.diagnostic-badge.error {
+  color: var(--color-danger-fg);
+  border-color: color-mix(in srgb, var(--color-danger) 42%, var(--color-border));
+  background: var(--color-danger-surface);
+}
+
+.state-banner.waiting {
+  color: var(--color-warning);
+  border-color: color-mix(in srgb, var(--color-warning) 46%, var(--color-border));
+  background: var(--color-warning-surface);
 }
