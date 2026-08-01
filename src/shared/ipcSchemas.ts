@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export const themePreferenceSchema = z.enum(["system", "light", "dark"]);
+
 const appSettingsShape = {
   piBinaryPath: z.string().min(1).optional(),
   agentDir: z.string().min(1).optional(),
@@ -12,7 +14,7 @@ const appSettingsShape = {
     .strict()
     .optional(),
   projectCwd: z.string().min(1).optional(),
-  theme: z.enum(["system", "light", "dark"]),
+  theme: themePreferenceSchema,
   maxRunningSessions: z.number().int().min(1).max(20),
   warmWorkerLimit: z.number().int().min(0).max(20),
   enableLoginShellEnvCapture: z.boolean(),

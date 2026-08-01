@@ -4,7 +4,7 @@
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
     "Segoe UI", sans-serif;
   /* Theme tokens: all product surfaces resolve through this small palette. */
-  --color-canvas: #f6f7f5;
+  --color-canvas: #ffffff;
   --color-surface: #ffffff;
   --color-surface-raised: #ffffff;
   --color-surface-subtle: #f9f9f9;
@@ -53,7 +53,7 @@
   --control-bg-active: var(--color-surface-active);
   --control-border: transparent;
   --control-border-subtle: var(--color-border);
-  --action-solid-bg: #202020;
+  --action-solid-bg: #202124;
   --action-solid-fg: #ffffff;
   --danger-fg: var(--color-danger-fg);
   --danger-bg-hover: var(--color-danger-surface);
@@ -1542,6 +1542,7 @@ h1 {
 .state-indicator,
 .model-controls label,
 .transcript-loading,
+.empty-state,
 .thinking-row,
 .pending-agent-message,
 .stream-placeholder,
@@ -1553,6 +1554,21 @@ h1 {
 .attachment-chip em,
 .attachment-chip small {
   color: var(--color-text-muted);
+}
+
+.transcript-loading h2,
+.empty-state h2 {
+  color: var(--color-text-strong);
+}
+
+.empty-icon {
+  color: var(--color-info);
+  background: var(--color-info-surface);
+}
+
+.pending-agent-message small,
+.recent small {
+  color: var(--color-text-subtle);
 }
 
 .timeline-attachment {
@@ -1682,6 +1698,10 @@ h1 {
 
 .state-indicator.error .state-dot {
   background: var(--color-warning);
+}
+
+.status-mark.waiting {
+  color: var(--color-warning);
 }
 
 .state-indicator.attaching .state-dot,
@@ -2103,6 +2123,10 @@ h3 {
 
 .ui-menu-popover .ui-button {
   width: 100%;
+}
+
+.appearance-menu .ui-menu-popover .ui-button > :last-child {
+  margin-left: auto;
 }
 
 .sr-only {

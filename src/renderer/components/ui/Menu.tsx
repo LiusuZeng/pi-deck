@@ -56,6 +56,38 @@ export function Menu(props: {
     if (event.key === "Escape") {
       event.preventDefault();
       closeAndRestoreFocus();
+      return;
+    }
+    if (!isOpen || !isMenu) {
+      return;
+    }
+
+    const items = Array.from(
+      menuRef.current?.querySelectorAll<HTMLElement>(
+        '[role^="menuitem"]:not([disabled]):not([aria-disabled="true"])',
+      ) ?? [],
+    );
+    if (items.length === 0) {
+      return;
+    }
+    const currentIndex = items.indexOf(document.activeElement as HTMLElement);
+    let nextIndex: number | undefined;
+    if (event.key === "ArrowDown") {
+      nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % items.length;
+    } else if (event.key === "ArrowUp") {
+      nextIndex =
+        currentIndex < 0
+          ? items.length - 1
+          : (currentIndex - 1 + items.length) % items.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = items.length - 1;
+    }
+
+    if (nextIndex !== undefined) {
+      event.preventDefault();
+      items[nextIndex]?.focus();
     }
   }
 

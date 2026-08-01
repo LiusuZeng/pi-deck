@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added a persisted System, Light, and Dark appearance preference that applies
+  through Electron before the first window paint and follows live macOS changes
+  in System mode.
+- Added a keyboard-accessible header appearance menu and semantic dark colors
+  for the complete chat, session, composer, tool, diagnostic, attachment, and
+  extension-request interface.
+- Added settings migration, native-theme helper, menu-navigation, and Electron
+  persistence/relaunch coverage for appearance changes.
+
 ## [0.1.1] - 2026-07-31
 
 Patch release aligning Pi Deck with production Pi RPC lifecycle events and

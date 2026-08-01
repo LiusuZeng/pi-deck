@@ -69,6 +69,12 @@ Each attached conversation has its own `pi --mode rpc` subprocess and event stre
 - Exclude terminal-only commands that do not have a meaningful GUI workflow.
 - Display context usage, input/output tokens, cache reads/writes, and provider cost when Pi reports them.
 
+### Appearance
+
+- Follow the current macOS appearance by default.
+- Choose System, Light, or Dark from the appearance menu in the chat header.
+- Persist an explicit appearance choice across application restarts.
+
 ### Files and images
 
 - Select one or more files through the native macOS picker.
@@ -211,6 +217,10 @@ Useful environment overrides:
 | `PI_DECK_SCAN_PROJECT_SESSION_DIR_CANDIDATE=1` | Explicitly include a trust-dependent project `sessionDir` candidate in bounded scanning |
 
 Pi Deck narrowly reads effective `sessionDir`, `images.blockImages`, and `images.autoResize` values needed before worker launch. Other Pi settings and resource behavior remain owned by Pi.
+
+The appearance menu stores Pi Deck's own `system`, `light`, or `dark`
+preference in the local application settings. System mode responds to macOS
+appearance changes while the app is running.
 
 ## Local data and privacy
 

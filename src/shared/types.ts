@@ -34,8 +34,10 @@ import type {
   pickProjectResultSchema,
   projectListResultSchema,
   projectRefSchema,
+  themePreferenceSchema,
 } from "./ipcSchemas.js";
 
+export type ThemePreference = z.infer<typeof themePreferenceSchema>;
 export type AppSettings = z.infer<typeof appSettingsSchema>;
 export type AppBootstrapState = z.infer<typeof appBootstrapStateSchema>;
 export type DiagnosticsSummary = z.infer<typeof diagnosticsSummarySchema>;

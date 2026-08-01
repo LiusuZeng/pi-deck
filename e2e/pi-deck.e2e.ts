@@ -26,6 +26,39 @@ async function launchPiDeck(
   return { app, page };
 }
 
+type ThemePreference = "system" | "light" | "dark";
+
+function createThemeUserData(theme: ThemePreference): string {
+  const userDataDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-theme-e2e-"),
+  );
+  fs.writeFileSync(
+    path.join(userDataDir, "settings.json"),
+    `${JSON.stringify(
+      {
+        theme,
+        maxRunningSessions: 4,
+        warmWorkerLimit: 1,
+        enableLoginShellEnvCapture: true,
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  return userDataDir;
+}
+
+function persistedTheme(userDataDir: string): string | undefined {
+  try {
+    const settings = JSON.parse(
+      fs.readFileSync(path.join(userDataDir, "settings.json"), "utf8"),
+    ) as { theme?: string };
+    return settings.theme;
+  } catch {
+    return undefined;
+  }
+}
+
 function createFakePiBinary(root: string, extraArgs: string[] = []): string {
   const fakePiPath = path.join(root, "fake-pi.js");
   fs.writeFileSync(
@@ -252,7 +285,11 @@ test("attachment selections release and revoke through preload/main IPC", async 
 });
 
 test("icon controls retain names, neutral styles, and fit a 900×600 viewport", async () => {
-  const { app, page } = await launchPiDeck({ PI_DECK_BACKEND: "fake" });
+  const userDataDir = createThemeUserData("light");
+  const { app, page } = await launchPiDeck({
+    PI_DECK_BACKEND: "fake",
+    PI_DECK_USER_DATA_DIR: userDataDir,
+  });
   try {
     await page.setViewportSize({ width: 900, height: 600 });
     await expectHealthyPreload(page);
@@ -312,6 +349,154 @@ test("icon controls retain names, neutral styles, and fit a 900×600 viewport", 
     await page.screenshot({ path: "test-results/ui-controls-900x600.png" });
   } finally {
     await app.close();
+    fs.rmSync(userDataDir, { recursive: true, force: true });
+  }
+});
+
+test("appearance preference switches themes and persists across relaunch", async () => {
+  const userDataDir = createThemeUserData("dark");
+  const env = {
+    PI_DECK_BACKEND: "fake",
+    PI_DECK_USER_DATA_DIR: userDataDir,
+  };
+  let launched = await launchPiDeck(env);
+
+  try {
+    await launched.page.setViewportSize({ width: 900, height: 600 });
+    await expectHealthyPreload(launched.page);
+    const darkTrigger = launched.page.getByRole("button", {
+      name: "Appearance: Dark",
+    });
+    await expect(darkTrigger).toBeVisible();
+    await expect(launched.page.locator("html")).toHaveCSS(
+      "color-scheme",
+      "dark",
+    );
+    await expect(launched.page.locator(".app-shell")).toHaveCSS(
+      "background-color",
+      "rgb(23, 26, 31)",
+    );
+    await expect(launched.page.locator(".composer-input-wrap")).toHaveCSS(
+      "background-color",
+      "rgb(56, 56, 56)",
+    );
+    await expect
+      .poll(() =>
+        launched.app.evaluate(({ BrowserWindow, nativeTheme }) => ({
+          background:
+            BrowserWindow.getAllWindows()[0]
+              ?.getBackgroundColor()
+              .toLowerCase() ?? "",
+          source: nativeTheme.themeSource,
+        })),
+      )
+      .toEqual({ background: "#171a1f", source: "dark" });
+    await launched.page.screenshot({
+      path: "test-results/ui-controls-dark-900x600.png",
+    });
+
+    await darkTrigger.click();
+    const appearanceMenu = launched.page.getByRole("menu", {
+      name: "Appearance options",
+    });
+    await expect(appearanceMenu).toBeVisible();
+    const systemOption = launched.page.getByRole("menuitemradio", {
+      name: "System",
+      exact: true,
+    });
+    const lightOption = launched.page.getByRole("menuitemradio", {
+      name: "Light",
+      exact: true,
+    });
+    const darkOption = launched.page.getByRole("menuitemradio", {
+      name: "Dark",
+      exact: true,
+    });
+    await expect(darkOption).toHaveAttribute("aria-checked", "true");
+    await expect(lightOption).toHaveAttribute("aria-checked", "false");
+    await expect(systemOption).toBeFocused();
+    await launched.page.keyboard.press("ArrowDown");
+    await expect(lightOption).toBeFocused();
+    await launched.page.keyboard.press("Escape");
+    await expect(darkTrigger).toBeFocused();
+    await expect(appearanceMenu).toHaveCount(0);
+
+    await darkTrigger.click();
+    await expect(systemOption).toBeFocused();
+    await launched.page.keyboard.press("ArrowDown");
+    await launched.page.keyboard.press("Enter");
+    await expect(
+      launched.page.getByRole("button", { name: "Appearance: Light" }),
+    ).toBeVisible();
+    await expect(launched.page.locator("html")).toHaveCSS(
+      "color-scheme",
+      "light",
+    );
+    await expect(launched.page.locator(".app-shell")).toHaveCSS(
+      "background-color",
+      "rgb(255, 255, 255)",
+    );
+    await expect
+      .poll(() =>
+        launched.app.evaluate(({ BrowserWindow, nativeTheme }) => ({
+          background:
+            BrowserWindow.getAllWindows()[0]
+              ?.getBackgroundColor()
+              .toLowerCase() ?? "",
+          source: nativeTheme.themeSource,
+        })),
+      )
+      .toEqual({ background: "#ffffff", source: "light" });
+    await expect.poll(() => persistedTheme(userDataDir)).toBe("light");
+
+    await launched.app.close();
+    launched = await launchPiDeck(env);
+    await launched.page.setViewportSize({ width: 900, height: 600 });
+    await expectHealthyPreload(launched.page);
+    const lightTrigger = launched.page.getByRole("button", {
+      name: "Appearance: Light",
+    });
+    await expect(lightTrigger).toBeVisible();
+
+    await lightTrigger.click();
+    const relaunchedSystemOption = launched.page.getByRole("menuitemradio", {
+      name: "System",
+      exact: true,
+    });
+    const relaunchedDarkOption = launched.page.getByRole("menuitemradio", {
+      name: "Dark",
+      exact: true,
+    });
+    await expect(relaunchedSystemOption).toBeFocused();
+    await launched.page.keyboard.press("End");
+    await expect(relaunchedDarkOption).toBeFocused();
+    await launched.page.keyboard.press("Enter");
+    await expect(
+      launched.page.getByRole("button", { name: "Appearance: Dark" }),
+    ).toBeVisible();
+    await expect.poll(() => persistedTheme(userDataDir)).toBe("dark");
+
+    await launched.page
+      .getByRole("button", { name: "Appearance: Dark" })
+      .click();
+    const finalSystemOption = launched.page.getByRole("menuitemradio", {
+      name: "System",
+      exact: true,
+    });
+    await expect(finalSystemOption).toBeFocused();
+    await launched.page.keyboard.press("Enter");
+    await expect(
+      launched.page.getByRole("button", { name: "Appearance: System" }),
+    ).toBeVisible();
+    await expect.poll(() => persistedTheme(userDataDir)).toBe("system");
+    await expect
+      .poll(() =>
+        launched.app.evaluate(({ nativeTheme }) => nativeTheme.themeSource),
+      )
+      .toBe("system");
+  } finally {
+    await launched.app.close().catch(() => undefined);
+    fs.rmSync(userDataDir, { recursive: true, force: true });
   }
 });
 

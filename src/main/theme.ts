@@ -1,6 +1,4 @@
-import type { AppSettings } from "../shared/types.js";
-
-type ThemePreference = AppSettings["theme"];
+import type { ThemePreference } from "../shared/types.js";
 
 interface NativeThemeController {
   themeSource: ThemePreference;
@@ -13,7 +11,7 @@ interface ThemeWindow {
 
 // These colors must stay aligned with the renderer's --color-canvas token.
 export const windowBackgroundColors = Object.freeze({
-  light: "#f6f7f5",
+  light: "#ffffff",
   dark: "#171a1f",
 });
 

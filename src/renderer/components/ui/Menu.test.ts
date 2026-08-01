@@ -80,6 +80,40 @@ describe("Menu", () => {
     expect(container.querySelector('[role="menu"]')).toBeNull();
   });
 
+  it("moves between enabled menu items with arrow, Home, and End keys", () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    act(() => {
+      root?.render(
+        createElement(
+          Menu,
+          { label: "Appearance" },
+          createElement(Button, { role: "menuitemradio" }, "System"),
+          createElement(Button, { role: "menuitemradio" }, "Light"),
+          createElement(Button, { role: "menuitemradio" }, "Dark"),
+        ),
+      );
+    });
+
+    const trigger = container.querySelector<HTMLButtonElement>("button");
+    act(() => trigger?.click());
+    const menu = container.querySelector('[role="menu"]');
+    const items = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]'),
+    );
+    expect(document.activeElement).toBe(items[0]);
+
+    for (const key of ["ArrowDown", "End", "ArrowDown", "ArrowUp", "Home"]) {
+      act(() => {
+        menu?.dispatchEvent(
+          new KeyboardEvent("keydown", { bubbles: true, key }),
+        );
+      });
+    }
+    expect(document.activeElement).toBe(items[0]);
+  });
+
   it("supports a disabled loading trigger with a contextual icon", () => {
     container = document.createElement("div");
     document.body.append(container);

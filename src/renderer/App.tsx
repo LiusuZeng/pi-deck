@@ -24,6 +24,7 @@ import type {
   DiagnosticsSummary,
   ProjectListResult,
   ProjectRef,
+  ThemePreference,
 } from "../shared/types.js";
 import {
   parseSafeMarkdown,
@@ -98,16 +99,6 @@ type SessionStatus =
   | "reconnecting"
   | "waiting"
   | "error";
-
-/** Kept local until the shared settings schema lands from the persistence worktree. */
-type AppearanceTheme = "system" | "light" | "dark";
-
-function appearanceThemeFromSettings(settings: AppSettings): AppearanceTheme {
-  const theme = (settings as AppSettings & { theme?: unknown }).theme;
-  return theme === "light" || theme === "dark" || theme === "system"
-    ? theme
-    : "system";
-}
 
 type ExtensionUiDialogMethod = "select" | "confirm" | "input" | "editor";
 
@@ -513,8 +504,9 @@ export function App(): ReactElement {
     loadUsageStatsVisiblePreference(),
   );
   const [appearanceTheme, setAppearanceTheme] =
-    useState<AppearanceTheme>("system");
+    useState<ThemePreference>("system");
   const [appearanceThemePending, setAppearanceThemePending] = useState(false);
+  const appearanceThemePendingRef = useRef(false);
   const [uiMessage, setUiMessage] = useState(
     "Starting Pi Deck and resolving the active backend session.",
   );
@@ -686,7 +678,7 @@ export function App(): ReactElement {
           settings: bootstrap.settings,
           diagnostics: bootstrap.diagnostics,
         });
-        setAppearanceTheme(appearanceThemeFromSettings(bootstrap.settings));
+        setAppearanceTheme(bootstrap.settings.theme);
 
         if (bootstrap.backendMode === "real") {
           void api.chat
@@ -2603,24 +2595,21 @@ export function App(): ReactElement {
   }
 
   async function handleAppearanceThemeChange(
-    nextTheme: AppearanceTheme,
+    nextTheme: ThemePreference,
   ): Promise<void> {
-    if (appearanceThemePending || nextTheme === appearanceTheme) {
+    if (appearanceThemePendingRef.current || nextTheme === appearanceTheme) {
       return;
     }
 
     const previousTheme = appearanceTheme;
+    appearanceThemePendingRef.current = true;
     setAppearanceTheme(nextTheme);
     setAppearanceThemePending(true);
     try {
-      // The shared AppSettings theme field is introduced by the persistence
-      // workstream. Keep this bridge narrowly scoped so this UI can merge
-      // cleanly before that branch lands.
-      const patch: Partial<AppSettings> & { theme: AppearanceTheme } = {
+      const settings = await window.piDeck.settings.update({
         theme: nextTheme,
-      };
-      const settings = await window.piDeck.settings.update(patch);
-      setAppearanceTheme(appearanceThemeFromSettings(settings));
+      });
+      setAppearanceTheme(settings.theme);
       setLoadState((current) =>
         current.state === "ready" ? { ...current, settings } : current,
       );
@@ -2632,6 +2621,7 @@ export function App(): ReactElement {
       const message = error instanceof Error ? error.message : String(error);
       setUiMessage(`Could not change appearance: ${message}`);
     } finally {
+      appearanceThemePendingRef.current = false;
       setAppearanceThemePending(false);
     }
   }
@@ -5135,11 +5125,11 @@ function AppHeader(props: {
   realMode: boolean;
   sidebarVisible: boolean;
   usageStatsVisible: boolean;
-  appearanceTheme: AppearanceTheme;
+  appearanceTheme: ThemePreference;
   appearanceThemePending: boolean;
   onToggleSidebar(): void;
   onToggleUsageStats(): void;
-  onAppearanceThemeChange(theme: AppearanceTheme): void;
+  onAppearanceThemeChange(theme: ThemePreference): void;
   onPickProject(): void;
   onSelectRecent(project: ProjectRef): void;
   onModelChange(id: string): void;
@@ -5196,12 +5186,12 @@ function AppHeader(props: {
 }
 
 function AppearanceMenu(props: {
-  theme: AppearanceTheme;
+  theme: ThemePreference;
   pending: boolean;
-  onChange(theme: AppearanceTheme): void;
+  onChange(theme: ThemePreference): void;
 }): ReactElement {
   const options: Array<{
-    theme: AppearanceTheme;
+    theme: ThemePreference;
     label: string;
     icon: LucideIcon;
   }> = [
@@ -5213,6 +5203,7 @@ function AppearanceMenu(props: {
 
   return (
     <Menu
+      className="appearance-menu"
       disabled={props.pending}
       icon={current.icon}
       label={`Appearance: ${current.label}${props.pending ? ", saving" : ""}`}

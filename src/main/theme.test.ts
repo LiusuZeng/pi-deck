@@ -9,7 +9,7 @@ import {
 describe("application theme", () => {
   it("sets Electron's theme source from the persisted preference", () => {
     const nativeTheme = {
-      themeSource: "system" as const,
+      themeSource: "system" as "system" | "light" | "dark",
       shouldUseDarkColors: false,
     };
 
