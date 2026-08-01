@@ -4,7 +4,10 @@
 
 Pi Deck gives Pi a dedicated desktop workspace for running, watching, and steering coding-agent sessions without opening Pi's terminal UI. It keeps projects and conversations organized in a sidebar while Pi continues to use its native models, settings, tools, resources, and session files.
 
-![Pi Deck showing project sessions, a resumed conversation, tool activity, and usage statistics](docs/assets/pi-deck.png)
+<p align="center">
+  <img src="docs/assets/pi-deck.png" alt="Pi Deck in Light mode showing project sessions, a resumed conversation, tool activity, and usage statistics" width="49%">
+  <img src="docs/assets/pi-deck-dark.png" alt="Pi Deck in Dark mode showing a project session, tool activity, and a completed response" width="49%">
+</p>
 
 > **Status:** Pi Deck is an active, pre-release personal MVP. It currently runs from source and targets macOS.
 
