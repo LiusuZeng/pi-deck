@@ -8,11 +8,16 @@ import {
 } from "react";
 import { Ellipsis } from "./icons.js";
 import { IconButton } from "./IconButton.js";
+import type { LucideIcon } from "./icons.js";
 
 export function Menu(props: {
   label: string;
   children: ReactNode;
   className?: string;
+  icon?: LucideIcon;
+  disabled?: boolean;
+  loading?: boolean;
+  menuLabel?: string;
   /** Use false for a non-interactive information popover rather than a menu. */
   menu?: boolean;
 }): ReactNode {
@@ -65,8 +70,10 @@ export function Menu(props: {
         aria-controls={isOpen ? menuId : undefined}
         aria-expanded={isOpen}
         aria-haspopup={isMenu ? "menu" : undefined}
-        icon={Ellipsis}
+        disabled={props.disabled}
+        icon={props.icon ?? Ellipsis}
         label={props.label}
+        loading={props.loading}
         pressed={isOpen}
         size="sm"
         onClick={() => setIsOpen((value) => !value)}
@@ -75,6 +82,7 @@ export function Menu(props: {
         <div
           className="ui-menu-popover"
           id={menuId}
+          aria-label={props.menuLabel}
           role={isMenu ? "menu" : undefined}
           onClick={isMenu ? () => setIsOpen(false) : undefined}
         >

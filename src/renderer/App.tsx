@@ -52,6 +52,8 @@ import {
   History,
   ListPlus,
   LoaderCircle,
+  Monitor,
+  Moon,
   PanelLeft,
   Paperclip,
   Play,
@@ -59,11 +61,14 @@ import {
   Search,
   Square,
   SquarePen,
+  Sun,
   Trash2,
   Unplug,
   Wrench,
   X,
+  type LucideIcon,
 } from "./components/ui/icons.js";
+import { Menu } from "./components/ui/Menu.js";
 import {
   attachmentTokens,
   getOrCreateAttachmentOwnerGeneration,
@@ -93,6 +98,16 @@ type SessionStatus =
   | "reconnecting"
   | "waiting"
   | "error";
+
+/** Kept local until the shared settings schema lands from the persistence worktree. */
+type AppearanceTheme = "system" | "light" | "dark";
+
+function appearanceThemeFromSettings(settings: AppSettings): AppearanceTheme {
+  const theme = (settings as AppSettings & { theme?: unknown }).theme;
+  return theme === "light" || theme === "dark" || theme === "system"
+    ? theme
+    : "system";
+}
 
 type ExtensionUiDialogMethod = "select" | "confirm" | "input" | "editor";
 
@@ -497,6 +512,9 @@ export function App(): ReactElement {
   const [usageStatsVisible, setUsageStatsVisible] = useState(() =>
     loadUsageStatsVisiblePreference(),
   );
+  const [appearanceTheme, setAppearanceTheme] =
+    useState<AppearanceTheme>("system");
+  const [appearanceThemePending, setAppearanceThemePending] = useState(false);
   const [uiMessage, setUiMessage] = useState(
     "Starting Pi Deck and resolving the active backend session.",
   );
@@ -668,6 +686,7 @@ export function App(): ReactElement {
           settings: bootstrap.settings,
           diagnostics: bootstrap.diagnostics,
         });
+        setAppearanceTheme(appearanceThemeFromSettings(bootstrap.settings));
 
         if (bootstrap.backendMode === "real") {
           void api.chat
@@ -2583,6 +2602,40 @@ export function App(): ReactElement {
     );
   }
 
+  async function handleAppearanceThemeChange(
+    nextTheme: AppearanceTheme,
+  ): Promise<void> {
+    if (appearanceThemePending || nextTheme === appearanceTheme) {
+      return;
+    }
+
+    const previousTheme = appearanceTheme;
+    setAppearanceTheme(nextTheme);
+    setAppearanceThemePending(true);
+    try {
+      // The shared AppSettings theme field is introduced by the persistence
+      // workstream. Keep this bridge narrowly scoped so this UI can merge
+      // cleanly before that branch lands.
+      const patch: Partial<AppSettings> & { theme: AppearanceTheme } = {
+        theme: nextTheme,
+      };
+      const settings = await window.piDeck.settings.update(patch);
+      setAppearanceTheme(appearanceThemeFromSettings(settings));
+      setLoadState((current) =>
+        current.state === "ready" ? { ...current, settings } : current,
+      );
+      setUiMessage(
+        `Appearance set to ${nextTheme === "system" ? "System" : nextTheme === "light" ? "Light" : "Dark"}.`,
+      );
+    } catch (error) {
+      setAppearanceTheme(previousTheme);
+      const message = error instanceof Error ? error.message : String(error);
+      setUiMessage(`Could not change appearance: ${message}`);
+    } finally {
+      setAppearanceThemePending(false);
+    }
+  }
+
   const composer = (
     <Composer
       value={draft}
@@ -2658,9 +2711,14 @@ export function App(): ReactElement {
           realMode={isRealBackendMode}
           sidebarVisible={sidebarVisible}
           usageStatsVisible={usageStatsVisible}
+          appearanceTheme={appearanceTheme}
+          appearanceThemePending={appearanceThemePending}
           onToggleSidebar={() => handleSidebarVisibleChange(!sidebarVisible)}
           onToggleUsageStats={() =>
             handleUsageStatsVisibleChange(!usageStatsVisible)
+          }
+          onAppearanceThemeChange={(theme) =>
+            void handleAppearanceThemeChange(theme)
           }
           onPickProject={() => void handlePickProject()}
           onSelectRecent={(project) => void handleSelectProject(project)}
@@ -5077,8 +5135,11 @@ function AppHeader(props: {
   realMode: boolean;
   sidebarVisible: boolean;
   usageStatsVisible: boolean;
+  appearanceTheme: AppearanceTheme;
+  appearanceThemePending: boolean;
   onToggleSidebar(): void;
   onToggleUsageStats(): void;
+  onAppearanceThemeChange(theme: AppearanceTheme): void;
   onPickProject(): void;
   onSelectRecent(project: ProjectRef): void;
   onModelChange(id: string): void;
@@ -5105,6 +5166,11 @@ function AppHeader(props: {
       </div>
 
       <div className="header-right">
+        <AppearanceMenu
+          theme={props.appearanceTheme}
+          pending={props.appearanceThemePending}
+          onChange={props.onAppearanceThemeChange}
+        />
         <UsageStatsToggle
           session={props.selectedSession}
           visible={props.usageStatsVisible}
@@ -5126,6 +5192,58 @@ function AppHeader(props: {
         <LoadStateBadge loadState={props.loadState} />
       </div>
     </header>
+  );
+}
+
+function AppearanceMenu(props: {
+  theme: AppearanceTheme;
+  pending: boolean;
+  onChange(theme: AppearanceTheme): void;
+}): ReactElement {
+  const options: Array<{
+    theme: AppearanceTheme;
+    label: string;
+    icon: LucideIcon;
+  }> = [
+    { theme: "system", label: "System", icon: Monitor },
+    { theme: "light", label: "Light", icon: Sun },
+    { theme: "dark", label: "Dark", icon: Moon },
+  ];
+  const current = options.find((option) => option.theme === props.theme)!;
+
+  return (
+    <Menu
+      disabled={props.pending}
+      icon={current.icon}
+      label={`Appearance: ${current.label}${props.pending ? ", saving" : ""}`}
+      loading={props.pending}
+      menuLabel="Appearance options"
+    >
+      {options.map((option) => {
+        const selected = option.theme === props.theme;
+        const Icon = option.icon;
+        return (
+          <Button
+            aria-checked={selected}
+            disabled={props.pending}
+            key={option.theme}
+            role="menuitemradio"
+            size="sm"
+            variant="menuItem"
+            onClick={() => props.onChange(option.theme)}
+          >
+            <Icon aria-hidden="true" size={14} strokeWidth={1.75} />
+            <span>{option.label}</span>
+            <Check
+              aria-hidden="true"
+              size={14}
+              strokeWidth={1.75}
+              visibility={selected ? "visible" : "hidden"}
+            />
+          </Button>
+        );
+      })}
+    </Menu>
   );
 }
 

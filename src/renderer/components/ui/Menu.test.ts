@@ -5,6 +5,7 @@ import { createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
 import { Button } from "./Button.js";
+import { Moon } from "./icons.js";
 import { Menu } from "./Menu.js";
 
 let root: Root | undefined;
@@ -77,5 +78,31 @@ describe("Menu", () => {
 
     expect(trigger?.getAttribute("aria-expanded")).toBe("false");
     expect(container.querySelector('[role="menu"]')).toBeNull();
+  });
+
+  it("supports a disabled loading trigger with a contextual icon", () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    act(() => {
+      root?.render(
+        createElement(
+          Menu,
+          {
+            disabled: true,
+            icon: Moon,
+            label: "Appearance: Dark",
+            loading: true,
+          },
+          createElement(Button, { role: "menuitem" }, "Dark"),
+        ),
+      );
+    });
+
+    const trigger = container.querySelector<HTMLButtonElement>("button");
+    expect(trigger?.disabled).toBe(true);
+    expect(trigger?.getAttribute("aria-busy")).toBe("true");
+    expect(trigger?.getAttribute("aria-label")).toBe("Appearance: Dark");
+    expect(container.querySelector("svg.lucide-moon")).not.toBeNull();
   });
 });
