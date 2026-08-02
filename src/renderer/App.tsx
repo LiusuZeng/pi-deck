@@ -2510,6 +2510,7 @@ export function App(): ReactElement {
     const session = sessionsRef.current.find((item) => item.id === sessionId);
     if (!canManageWorkspaceMembership(session)) return;
     setWorkspaceDialogBusy(true);
+    blockAttachmentOwner(sessionId);
     try {
       await window.piDeck.workspaces.removeSession({
         workspaceId: session.workspaceId,
@@ -2523,6 +2524,7 @@ export function App(): ReactElement {
         "Removed session from this workspace. Its Pi JSONL file was kept on disk.",
       );
     } catch (error) {
+      unblockAttachmentOwner(sessionId);
       setUiMessage(
         `Failed to remove session from workspace: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -3787,9 +3789,6 @@ function archiveWorkspaceBlockReason(
   workspaceId: string,
   openWorkspaceCount: number,
 ): string | undefined {
-  if (openWorkspaceCount <= 1) {
-    return "Create another workspace before archiving the last open workspace.";
-  }
   if (
     sessions.some(
       (session) => session.workspaceId === workspaceId && session.runtimeBacked,
@@ -3805,6 +3804,9 @@ function archiveWorkspaceBlockReason(
     )
   ) {
     return "Send or clear unsent composer text and attachments before archiving this workspace.";
+  }
+  if (openWorkspaceCount <= 1) {
+    return "Create another workspace before archiving the last open workspace.";
   }
   return undefined;
 }
@@ -6363,6 +6365,7 @@ function WorkspaceManagementDialog(props: {
         <div className="workspace-modal-header">
           <h2 id={`${testId}-title`}>{title}</h2>
           <IconButton
+            disabled={props.busy}
             icon={X}
             label="Close dialog"
             size="sm"

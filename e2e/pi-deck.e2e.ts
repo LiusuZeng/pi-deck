@@ -301,9 +301,7 @@ test("workspace management UI keeps Pi JSONL membership reversible and deletion 
     await page
       .getByRole("button", { name: "Session actions for ui-membership" })
       .click();
-    await page
-      .getByRole("menuitem", { name: "Remove from workspace" })
-      .click();
+    await page.getByRole("menuitem", { name: "Remove from workspace" }).click();
     const removeDialog = page.getByTestId("session-remove-dialog");
     await expect(removeDialog).toBeVisible();
     await removeDialog
@@ -1533,9 +1531,10 @@ test("failed saved-session deletion preserves the composer draft and attachment 
     }, runtimeSessionFile as string);
     expect(validationError).toMatch(/belongs to a different project/i);
 
-    const sessionActions = page.getByRole("button", {
-      name: "Session actions for preserve-draft",
-    });
+    const sessionActions = page
+      .locator(".session-list .session-item.active")
+      .locator("..")
+      .getByRole("button", { name: /^Session actions for / });
     await sessionActions.click();
     await page.getByRole("menuitem", { name: "Delete session…" }).click();
     await confirmDeleteSessionDialog(page);
@@ -1549,6 +1548,10 @@ test("failed saved-session deletion preserves the composer draft and attachment 
         .locator(".composer .attachment-chip")
         .getByText("keep-after-delete-failure.png"),
     ).toBeVisible();
+    await page
+      .getByTestId("session-delete-dialog")
+      .getByRole("button", { name: "Cancel" })
+      .click();
 
     // Stop the unrelated active turn, then prove the retained owner still
     // authorizes delivery. A blanket release would reject this prompt before
@@ -1644,9 +1647,10 @@ test("post-close delete failure keeps the saved file and composer generation res
     });
     await expect(page.getByRole("button", { name: "Abort" })).toBeVisible();
 
-    const sessionActions = page.getByRole("button", {
-      name: "Session actions for post-close-delete",
-    });
+    const sessionActions = page
+      .locator(".session-list .session-item.active")
+      .locator("..")
+      .getByRole("button", { name: /^Session actions for / });
     await sessionActions.click();
     await page.getByRole("menuitem", { name: "Delete session…" }).click();
     await confirmDeleteSessionDialog(page);
@@ -1657,6 +1661,10 @@ test("post-close delete failure keeps the saved file and composer generation res
     expect(fs.existsSync(canonicalSessionFile)).toBe(true);
     await expect(composer).toHaveValue("retain after post-close failure");
     await expect(page.getByText("post-close-retained.png")).toBeVisible();
+    await page
+      .getByTestId("session-delete-dialog")
+      .getByRole("button", { name: "Cancel" })
+      .click();
 
     // The detached row keeps its old composer generation. Resume transfers it
     // to a fresh runtime generation, and successful delivery proves main did

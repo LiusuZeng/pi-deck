@@ -903,7 +903,7 @@ describe("renderer session actions", () => {
     );
   });
 
-  it("blocks archiving the last workspace before attached-runtime checks", () => {
+  it("reports attached-runtime blockers before the last-workspace fallback", () => {
     expect(
       __rendererTestHooks.archiveWorkspaceBlockReason(
         [baseSession()] as any,
@@ -911,7 +911,7 @@ describe("renderer session actions", () => {
         "workspace-a",
         1,
       ),
-    ).toMatch(/another workspace/i);
+    ).toMatch(/close attached sessions/i);
     expect(
       __rendererTestHooks.archiveWorkspaceBlockReason(
         [baseSession()] as any,
@@ -920,6 +920,9 @@ describe("renderer session actions", () => {
         2,
       ),
     ).toMatch(/close attached sessions/i);
+    expect(
+      __rendererTestHooks.archiveWorkspaceBlockReason([], {}, "workspace-a", 1),
+    ).toMatch(/another workspace/i);
   });
 
   it("blocks archive for meaningful composer state but ignores an empty draft", () => {
