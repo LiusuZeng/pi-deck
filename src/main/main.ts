@@ -136,6 +136,13 @@ import {
 } from "./imagePolicy.js";
 
 const isDev = process.env.VITE_DEV_SERVER_URL !== undefined;
+const managedRuntimeProjectId = "pi-deck:managed-runtime-context";
+const managedRuntimeDirectoryName = "runtime-context";
+const managedRuntimeProjectBrand = Symbol("managedRuntimeProject");
+
+type ManagedRuntimeProjectRef = ProjectRef & {
+  readonly [managedRuntimeProjectBrand]: true;
+};
 
 let mainWindow: BrowserWindow | undefined;
 let settingsStore: SettingsStore | undefined;
@@ -1098,9 +1105,7 @@ async function resolveWorkspaceProject(
   const workspace = await requireOpenWorkspace(workspaceId);
   const projectId = requestedProjectId ?? workspace.defaultProjectId;
   if (projectId === undefined) {
-    throw new Error(
-      "This workspace has no default working folder. Choose a working folder before starting a session.",
-    );
+    return resolveManagedRuntimeProject();
   }
   return ensureProjectStore().resolveAuthorizedProject(projectId);
 }
@@ -1117,13 +1122,56 @@ async function resolveWorkspaceRepositoryProject(
       return defaultProject;
     }
   }
-  const activeProject = await ensureProjectStore().getActiveProjectRef();
-  if (activeProject === undefined) {
+  return resolveManagedRuntimeProject();
+}
+
+async function resolveManagedRuntimeProject(): Promise<ManagedRuntimeProjectRef> {
+  const piDeckHome = resolvePiDeckHome(process.env);
+  await fs.mkdir(piDeckHome, { recursive: true, mode: 0o700 });
+  const canonicalHome = await fs.realpath(piDeckHome);
+  const runtimeDirectory = path.join(piDeckHome, managedRuntimeDirectoryName);
+
+  try {
+    await fs.mkdir(runtimeDirectory, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+      throw error;
+    }
+  }
+
+  const runtimeStat = await fs.lstat(runtimeDirectory);
+  if (runtimeStat.isSymbolicLink() || !runtimeStat.isDirectory()) {
     throw new Error(
-      "Choose a working folder before browsing or importing Pi sessions.",
+      "Pi Deck's managed runtime context is not a safe directory.",
     );
   }
-  return ensureProjectStore().resolveAuthorizedProject(activeProject.id);
+  const canonicalRuntimeDirectory = await fs.realpath(runtimeDirectory);
+  if (!isPathInside(canonicalRuntimeDirectory, canonicalHome)) {
+    throw new Error(
+      "Pi Deck's managed runtime context resolved outside its application data directory.",
+    );
+  }
+  await fs.chmod(canonicalRuntimeDirectory, 0o700);
+
+  return {
+    id: managedRuntimeProjectId,
+    path: canonicalRuntimeDirectory,
+    canonicalPath: canonicalRuntimeDirectory,
+    displayName: "Pi Deck managed runtime",
+    lastOpenedAt: 0,
+    [managedRuntimeProjectBrand]: true,
+  };
+}
+
+function isManagedRuntimeProject(
+  project: ProjectRef | undefined,
+): project is ManagedRuntimeProjectRef {
+  return (
+    project !== undefined &&
+    (project as Partial<ManagedRuntimeProjectRef>)[
+      managedRuntimeProjectBrand
+    ] === true
+  );
 }
 
 async function addSessionToWorkspace(
@@ -1863,6 +1911,12 @@ async function resolveRealChatProject(
 ): Promise<ProjectRef> {
   const projects = ensureProjectStore();
   if (requestedProject !== undefined) {
+    if (isManagedRuntimeProject(requestedProject)) {
+      // Managed contexts are constructed and revalidated in main. They are
+      // intentionally absent from ProjectStore and cannot be named by a
+      // renderer-supplied projectId.
+      return resolveManagedRuntimeProject();
+    }
     // Revalidate immediately before configuration/model discovery or spawn.
     // The object originated at the IPC boundary, but the project can still be
     // removed or moved while an earlier request is waiting on async work.
@@ -2308,6 +2362,13 @@ async function projectForWorkspaceSession(
   if (ref === undefined) {
     throw new Error("Session does not belong to this workspace.");
   }
+  const managedProject = await resolveManagedRuntimeProject();
+  const refCwd = ref.cwd
+    ? ((await safeRealpath(ref.cwd)) ?? path.resolve(ref.cwd))
+    : undefined;
+  if (refCwd === managedProject.canonicalPath) {
+    return managedProject;
+  }
   const projects = await ensureProjectStore().list();
   const project = ref.cwd
     ? projects.projects.find((candidate) => candidate.canonicalPath === ref.cwd)
@@ -2568,15 +2629,17 @@ async function removePersistedPiSessionFile(
   // owner. Revoke it only after removal is confirmed; failed validation and
   // per-file bulk failures leave that owner intact for retry.
   attachmentSelections.releaseSession(sessionFile);
-  try {
-    await projectStore?.removeSessionRef(projectId, sessionFile);
-  } catch (error) {
-    // Disk deletion is already final. The next list scan removes a stale cache
-    // ref, so record this persistence failure without falsely reporting that
-    // the session is still available to the renderer.
-    diagnosticsService.recordError(
-      `Failed to remove deleted Pi session cache ref ${sessionFile}: ${error instanceof Error ? error.message : String(error)}`,
-    );
+  if (projectId !== managedRuntimeProjectId) {
+    try {
+      await projectStore?.removeSessionRef(projectId, sessionFile);
+    } catch (error) {
+      // Disk deletion is already final. The next list scan removes a stale cache
+      // ref, so record this persistence failure without falsely reporting that
+      // the session is still available to the renderer.
+      diagnosticsService.recordError(
+        `Failed to remove deleted Pi session cache ref ${sessionFile}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
   if (workspaceId !== undefined) {
     try {
@@ -2962,7 +3025,11 @@ async function getChatSnapshotForRuntime(
         ...(preview !== undefined ? { preview } : {}),
       });
     }
-    if (projectId !== undefined && (hasTranscript || title !== undefined)) {
+    if (
+      projectId !== undefined &&
+      projectId !== managedRuntimeProjectId &&
+      (hasTranscript || title !== undefined)
+    ) {
       const preview = hasTranscript ? previewFromMessages(messages) : undefined;
       await projectStore?.upsertSessionRefFromSnapshot({
         projectId,
@@ -3040,7 +3107,9 @@ async function resolvePromptImageSettings(
   const project =
     projectId === undefined
       ? undefined
-      : await ensureProjectStore().resolveAuthorizedProject(projectId);
+      : projectId === managedRuntimeProjectId
+        ? await resolveManagedRuntimeProject()
+        : await ensureProjectStore().resolveAuthorizedProject(projectId);
   const launch = await resolveRealChatLaunchConfig(store, project);
   return launch.effective.config.imageSettings;
 }
