@@ -4,7 +4,8 @@ import type { ChatSessionSummary } from "../../shared/types.js";
 
 export interface ScanSessionRepositoryOptions {
   sessionDir: string;
-  projectCwd: string;
+  /** Optional legacy filter; omit it to scan every valid Pi session. */
+  projectCwd?: string;
   maxDepth?: number;
   maxFiles?: number;
   maxBytesPerFile?: number;
@@ -28,7 +29,17 @@ export type PiSessionValidationResult =
   | { ok: true; sessionFile: string }
   | { ok: false; reason: string };
 
+export interface ValidatePiSessionFileOptions {
+  sessionFile: string;
+  sessionDir: string;
+}
+
+export type PiSessionFileValidationResult =
+  | { ok: true; sessionFile: string; cwd: string }
+  | { ok: false; reason: string };
+
 interface ParsedSessionFile {
+  header?: PiSessionHeader;
   sessionId?: string;
   cwd?: string;
   title?: string;
@@ -53,9 +64,9 @@ const PI_SESSION_HEADER_MAX_BYTES = 64 * 1024;
  * delete files. This deliberately rechecks the canonical directory, file type,
  * extension, and on-disk Pi session header immediately before Pi acts on one.
  */
-export async function validatePiSession(
-  options: ValidatePiSessionOptions,
-): Promise<PiSessionValidationResult> {
+export async function validatePiSessionFile(
+  options: ValidatePiSessionFileOptions,
+): Promise<PiSessionFileValidationResult> {
   let sessionDir: string;
   try {
     sessionDir = await fs.realpath(options.sessionDir);
@@ -63,26 +74,20 @@ export async function validatePiSession(
     return { ok: false, reason: "configured session directory is unavailable" };
   }
 
-  let projectCwd: string;
-  try {
-    projectCwd = await fs.realpath(options.projectCwd);
-  } catch {
-    return { ok: false, reason: "project directory is unavailable" };
-  }
-
+  const requestedSessionFile = path.resolve(options.sessionFile);
   let sessionFile: string;
   try {
-    sessionFile = await fs.realpath(options.sessionFile);
+    sessionFile = await fs.realpath(requestedSessionFile);
   } catch {
     return { ok: false, reason: "session file is missing or unreadable" };
   }
 
   let sessionDirStat: Awaited<ReturnType<typeof fs.stat>>;
-  let sessionFileStat: Awaited<ReturnType<typeof fs.lstat>>;
+  let requestedSessionFileStat: Awaited<ReturnType<typeof fs.lstat>>;
   try {
-    [sessionDirStat, sessionFileStat] = await Promise.all([
+    [sessionDirStat, requestedSessionFileStat] = await Promise.all([
       fs.stat(sessionDir),
-      fs.lstat(sessionFile),
+      fs.lstat(requestedSessionFile),
     ]);
   } catch {
     return {
@@ -96,9 +101,6 @@ export async function validatePiSession(
       reason: "configured session directory is not a directory",
     };
   }
-  if (!sessionFileStat.isFile()) {
-    return { ok: false, reason: "session path is not a regular file" };
-  }
   if (!sessionFile.endsWith(".jsonl")) {
     return {
       ok: false,
@@ -111,6 +113,12 @@ export async function validatePiSession(
       reason: "session file is outside the configured session directory",
     };
   }
+  if (requestedSessionFileStat.isSymbolicLink()) {
+    return { ok: false, reason: "session path must not be a symbolic link" };
+  }
+  if (!requestedSessionFileStat.isFile()) {
+    return { ok: false, reason: "session path is not a regular file" };
+  }
 
   const header = await readPiSessionHeader(sessionFile);
   if (header === undefined) {
@@ -119,17 +127,36 @@ export async function validatePiSession(
       reason: "session file does not have a valid Pi session header",
     };
   }
-  let headerCwd: string;
+  return {
+    ok: true,
+    sessionFile,
+    cwd: await canonicalOrResolved(header.cwd),
+  };
+}
+
+/**
+ * Compatibility wrapper for legacy callers that intentionally scope sessions
+ * to one registered project. Workspace callers should use
+ * validatePiSessionFile and trust its canonical header cwd instead.
+ */
+export async function validatePiSession(
+  options: ValidatePiSessionOptions,
+): Promise<PiSessionValidationResult> {
+  let projectCwd: string;
   try {
-    headerCwd = await fs.realpath(header.cwd);
+    projectCwd = await fs.realpath(options.projectCwd);
   } catch {
-    return { ok: false, reason: "session header project is unavailable" };
-  }
-  if (headerCwd !== projectCwd) {
-    return { ok: false, reason: "session belongs to a different project" };
+    return { ok: false, reason: "project directory is unavailable" };
   }
 
-  return { ok: true, sessionFile };
+  const validation = await validatePiSessionFile(options);
+  if (!validation.ok) {
+    return validation;
+  }
+  if (validation.cwd !== projectCwd) {
+    return { ok: false, reason: "session belongs to a different project" };
+  }
+  return { ok: true, sessionFile: validation.sessionFile };
 }
 
 export async function scanSessionRepository(
@@ -142,7 +169,10 @@ export async function scanSessionRepository(
   const maxBytesPerFile = options.maxBytesPerFile ?? DEFAULT_MAX_BYTES_PER_FILE;
   const maxTotalBytes = options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES;
   const maxWallTimeMs = options.maxWallTimeMs ?? DEFAULT_MAX_WALL_TIME_MS;
-  const projectCwd = await canonicalOrResolved(options.projectCwd);
+  const projectCwd =
+    options.projectCwd === undefined
+      ? undefined
+      : await canonicalOrResolved(options.projectCwd);
   const sessionDir = await canonicalOrResolved(options.sessionDir);
   const startedAt = Date.now();
   let seenFiles = 0;
@@ -219,6 +249,7 @@ export async function scanSessionRepository(
       seenFiles += 1;
       const result = await summarizeSessionFile(
         entryPath,
+        sessionDir,
         projectCwd,
         Math.min(maxBytesPerFile, remainingBytes),
         diagnostics,
@@ -244,15 +275,26 @@ export async function scanSessionRepository(
 
 async function summarizeSessionFile(
   filePath: string,
-  projectCwd: string,
+  sessionDir: string,
+  projectCwd: string | undefined,
   maxBytes: number,
   diagnostics: string[],
 ): Promise<{ summary?: ChatSessionSummary; bytesRead: number }> {
   let canonicalFile: string;
   let stat: Awaited<ReturnType<typeof fs.stat>>;
   try {
+    const fileLstat = await fs.lstat(filePath);
+    if (fileLstat.isSymbolicLink() || !fileLstat.isFile()) {
+      return { bytesRead: 0 };
+    }
     canonicalFile = await fs.realpath(filePath);
+    if (!isStrictDescendant(canonicalFile, sessionDir)) {
+      return { bytesRead: 0 };
+    }
     stat = await fs.stat(canonicalFile);
+    if (!stat.isFile()) {
+      return { bytesRead: 0 };
+    }
   } catch (error) {
     diagnostics.push(
       `Could not inspect session file ${filePath}: ${errorMessage(error)}`,
@@ -261,8 +303,11 @@ async function summarizeSessionFile(
   }
 
   const parsed = await parseSessionFile(canonicalFile, maxBytes, diagnostics);
-  const cwd = parsed.cwd ? await canonicalOrResolved(parsed.cwd) : undefined;
-  if (cwd !== projectCwd) {
+  if (parsed.header === undefined) {
+    return { bytesRead: parsed.bytesRead };
+  }
+  const cwd = await canonicalOrResolved(parsed.header.cwd);
+  if (projectCwd !== undefined && cwd !== projectCwd) {
     return { bytesRead: parsed.bytesRead };
   }
 
@@ -273,7 +318,7 @@ async function summarizeSessionFile(
     summary: {
       id: canonicalFile,
       sessionFile: canonicalFile,
-      ...(parsed.sessionId ? { sessionId: parsed.sessionId } : {}),
+      sessionId: parsed.header.id,
       cwd,
       title: parsed.title ?? path.basename(canonicalFile, ".jsonl"),
       updatedAtMs,
@@ -285,6 +330,7 @@ async function summarizeSessionFile(
 }
 
 interface PiSessionHeader {
+  id: string;
   cwd: string;
 }
 
@@ -303,21 +349,32 @@ async function readPiSessionHeader(
       if (firstLine === undefined || firstLine.length === 0) {
         return undefined;
       }
-      const record = JSON.parse(firstLine) as unknown;
-      if (!record || typeof record !== "object" || Array.isArray(record)) {
-        return undefined;
-      }
-      const header = record as Record<string, unknown>;
-      return header.type === "session" &&
-        typeof header.id === "string" &&
-        header.id.length > 0 &&
-        typeof header.cwd === "string" &&
-        header.cwd.length > 0
-        ? { cwd: header.cwd }
-        : undefined;
+      return parsePiSessionHeader(firstLine);
     } finally {
       await handle.close();
     }
+  } catch {
+    return undefined;
+  }
+}
+
+function parsePiSessionHeader(value: string): PiSessionHeader | undefined {
+  if (value.length === 0) {
+    return undefined;
+  }
+  try {
+    const record = JSON.parse(value) as unknown;
+    if (!record || typeof record !== "object" || Array.isArray(record)) {
+      return undefined;
+    }
+    const header = record as Record<string, unknown>;
+    return header.type === "session" &&
+      typeof header.id === "string" &&
+      header.id.length > 0 &&
+      typeof header.cwd === "string" &&
+      header.cwd.length > 0
+      ? { id: header.id, cwd: header.cwd }
+      : undefined;
   } catch {
     return undefined;
   }
@@ -339,11 +396,13 @@ async function parseSessionFile(
   diagnostics: string[],
 ): Promise<ParsedSessionFile> {
   let content: string;
+  let bytesRead: number;
   try {
     const handle = await fs.open(filePath, "r");
     try {
       const buffer = Buffer.alloc(maxBytes);
-      const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
+      const result = await handle.read(buffer, 0, maxBytes, 0);
+      bytesRead = result.bytesRead;
       content = buffer.subarray(0, bytesRead).toString("utf8");
     } finally {
       await handle.close();
@@ -355,9 +414,11 @@ async function parseSessionFile(
     return { messageCount: 0, bytesRead: 0 };
   }
 
+  const header = parsePiSessionHeader(content.split(/\r?\n/, 1)[0] ?? "");
   const parsed: ParsedSessionFile = {
     messageCount: 0,
-    bytesRead: Buffer.byteLength(content),
+    bytesRead,
+    ...(header ? { header } : {}),
   };
   for (const line of content.split(/\r?\n/)) {
     if (line.trim().length === 0) {

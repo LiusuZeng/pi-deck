@@ -54,6 +54,15 @@ import {
   pickProjectResultSchema,
   projectListResultSchema,
   projectSelectRequestSchema,
+  workspaceAddSessionRequestSchema,
+  workspaceArchiveRequestSchema,
+  workspaceCreateRequestSchema,
+  workspaceListResultSchema,
+  workspaceMoveSessionRequestSchema,
+  workspaceRemoveSessionRequestSchema,
+  workspaceSelectRequestSchema,
+  workspaceSessionMutationResultSchema,
+  workspaceUpdateRequestSchema,
 } from "../shared/ipcSchemas.js";
 import type {
   AppBootstrapState,
@@ -70,6 +79,8 @@ import type {
   PickAttachmentsResult,
   ProjectRef,
   PickProjectResult,
+  WorkspaceListResult,
+  WorkspaceRef,
 } from "../shared/types.js";
 import { DiagnosticsService } from "./diagnostics/diagnostics.js";
 import { registerValidatedIpc } from "./ipc/registerIpc.js";
@@ -84,6 +95,7 @@ import { selectAvailableRuntime } from "./runtimeSelection.js";
 import {
   scanSessionRepository,
   validatePiSession,
+  validatePiSessionFile,
 } from "./pi/sessionRepository.js";
 import type { PiMessage, PiState, PromptInput } from "./pi/types.js";
 import type {
@@ -98,6 +110,10 @@ import {
   shouldAllowNavigation,
 } from "./security.js";
 import { ProjectStore, resolvePiDeckHome } from "./projects/projectStore.js";
+import {
+  WorkspaceStore,
+  type WorkspaceRecord,
+} from "./workspaces/workspaceStore.js";
 import { SettingsStore } from "./settings/settingsStore.js";
 import {
   applyThemePreference,
@@ -124,6 +140,7 @@ const isDev = process.env.VITE_DEV_SERVER_URL !== undefined;
 let mainWindow: BrowserWindow | undefined;
 let settingsStore: SettingsStore | undefined;
 let projectStore: ProjectStore | undefined;
+let workspaceStore: WorkspaceStore | undefined;
 const realChatLaunchConfigCache = new RealChatLaunchConfigCache();
 let diagnostics: DiagnosticsService | undefined;
 type ChatBackendMode = "fake" | "real";
@@ -138,6 +155,7 @@ const chatRuntimeModes = new Map<string, ChatBackendMode>();
 const chatWorkerCwds = new Map<string, string>();
 const chatRuntimeSessionFiles = new Map<string, string>();
 const chatRuntimeProjectIds = new Map<string, string>();
+const chatRuntimeWorkspaceIds = new Map<string, string>();
 const chatSessionFileLocks = new Map<string, string>();
 const chatSessionResumePromises = new Map<string, Promise<ChatSnapshot>>();
 // A single-delete transaction may detach Pi before filesystem removal commits.
@@ -193,6 +211,12 @@ async function bootstrap(): Promise<void> {
   });
   projectStore = new ProjectStore(resolvePiDeckHome(process.env), diagnostics);
   await projectStore.loadIfNeeded();
+  workspaceStore = new WorkspaceStore(
+    resolvePiDeckHome(process.env),
+    diagnostics,
+  );
+  await workspaceStore.loadIfNeeded();
+  await migrateLegacyProjectsToWorkspaces();
 
   configureCsp();
   registerIpcHandlers(settingsStore, diagnostics);
@@ -364,10 +388,12 @@ function registerIpcHandlers(
     responseSchema: chatListSessionsResultSchema,
     diagnostics: diagnosticsService,
     handler: async (request) =>
-      listChatSessions(
-        store,
-        await authorizeRendererChatProject(request?.projectId),
-      ),
+      request?.workspaceId
+        ? listWorkspaceChatSessions(request.workspaceId)
+        : listChatSessions(
+            store,
+            await authorizeRendererChatProject(request?.projectId),
+          ),
   });
 
   registerValidatedIpc({
@@ -375,13 +401,18 @@ function registerIpcHandlers(
     requestSchema: chatResumeSessionRequestSchema,
     responseSchema: chatSnapshotSchema,
     diagnostics: diagnosticsService,
-    handler: async ({ projectId, sessionFile }) =>
-      resumeChatSession(
+    handler: async ({ workspaceId, projectId, sessionFile }) => {
+      const project = workspaceId
+        ? await projectForWorkspaceSession(workspaceId, sessionFile)
+        : await authorizeRendererChatProject(projectId);
+      return resumeChatSession(
         store,
         diagnosticsService,
         sessionFile,
-        await authorizeRendererChatProject(projectId),
-      ),
+        project,
+        workspaceId,
+      );
+    },
   });
 
   registerValidatedIpc({
@@ -389,13 +420,18 @@ function registerIpcHandlers(
     requestSchema: chatDeleteSessionRequestSchema,
     responseSchema: chatDeleteSessionResultSchema,
     diagnostics: diagnosticsService,
-    handler: async ({ projectId, sessionFile }) =>
-      deleteChatSession(
+    handler: async ({ workspaceId, projectId, sessionFile }) => {
+      const project = workspaceId
+        ? await projectForWorkspaceSession(workspaceId, sessionFile)
+        : await authorizeRendererChatProject(projectId);
+      return deleteChatSession(
         store,
         diagnosticsService,
         sessionFile,
-        await authorizeRendererChatProject(projectId),
-      ),
+        project,
+        workspaceId,
+      );
+    },
   });
 
   registerValidatedIpc({
@@ -404,11 +440,17 @@ function registerIpcHandlers(
     responseSchema: chatDeleteAllSessionsResultSchema,
     diagnostics: diagnosticsService,
     handler: async (request) =>
-      deleteAllChatSessions(
-        store,
-        diagnosticsService,
-        await authorizeRendererChatProject(request?.projectId),
-      ),
+      request?.workspaceId
+        ? deleteAllWorkspaceChatSessions(
+            store,
+            diagnosticsService,
+            request.workspaceId,
+          )
+        : deleteAllChatSessions(
+            store,
+            diagnosticsService,
+            await authorizeRendererChatProject(request?.projectId),
+          ),
   });
 
   registerValidatedIpc({
@@ -416,12 +458,14 @@ function registerIpcHandlers(
     requestSchema: chatListModelsRequestSchema,
     responseSchema: chatListModelsResultSchema,
     diagnostics: diagnosticsService,
-    handler: async ({ runtimeId, projectId }) =>
+    handler: async ({ runtimeId, workspaceId, projectId }) =>
       listChatModels(
         store,
         diagnosticsService,
         runtimeId,
-        await authorizeRendererChatProject(projectId),
+        workspaceId
+          ? await resolveWorkspaceProject(workspaceId, projectId)
+          : await authorizeRendererChatProject(projectId),
       ),
   });
 
@@ -590,12 +634,17 @@ function registerIpcHandlers(
     requestSchema: chatCreateSessionRequestSchema,
     responseSchema: chatSnapshotSchema,
     diagnostics: diagnosticsService,
-    handler: async (request) =>
-      createChatSessionSnapshot(
+    handler: async (request) => {
+      const project = request?.workspaceId
+        ? await resolveWorkspaceProject(request.workspaceId, request.projectId)
+        : await authorizeRendererChatProject(request?.projectId);
+      return createChatSessionSnapshot(
         store,
         diagnosticsService,
-        await authorizeRendererChatProject(request?.projectId),
-      ),
+        project,
+        request?.workspaceId,
+      );
+    },
   });
 
   registerValidatedIpc({
@@ -672,6 +721,137 @@ function registerIpcHandlers(
   });
 
   registerValidatedIpc({
+    channel: ipcChannels.workspaceList,
+    requestSchema: noPayloadSchema,
+    responseSchema: workspaceListResultSchema,
+    diagnostics: diagnosticsService,
+    handler: projectWorkspaceListResult,
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workspaceGetActive,
+    requestSchema: noPayloadSchema,
+    responseSchema: workspaceListResultSchema,
+    diagnostics: diagnosticsService,
+    handler: projectWorkspaceListResult,
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workspaceCreate,
+    requestSchema: workspaceCreateRequestSchema,
+    responseSchema: workspaceListResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async (request) => {
+      if (request.defaultProjectId !== undefined) {
+        await ensureProjectStore().resolveAuthorizedProject(
+          request.defaultProjectId,
+        );
+      }
+      await ensureWorkspaceStore().create(request);
+      return projectWorkspaceListResult();
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workspaceUpdate,
+    requestSchema: workspaceUpdateRequestSchema,
+    responseSchema: workspaceListResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async (request) => {
+      if (typeof request.defaultProjectId === "string") {
+        await ensureProjectStore().resolveAuthorizedProject(
+          request.defaultProjectId,
+        );
+      }
+      await ensureWorkspaceStore().update(request);
+      return projectWorkspaceListResult();
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workspaceSelect,
+    requestSchema: workspaceSelectRequestSchema,
+    responseSchema: workspaceListResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ workspaceId }) => {
+      const workspace = await ensureWorkspaceStore().select(workspaceId);
+      if (workspace.defaultProjectId !== undefined) {
+        const project = await ensureProjectStore().selectProject(
+          workspace.defaultProjectId,
+        );
+        selectedRealProjectCwd = project.canonicalPath;
+      }
+      return projectWorkspaceListResult();
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workspaceArchive,
+    requestSchema: workspaceArchiveRequestSchema,
+    responseSchema: workspaceListResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ workspaceId }) => {
+      await ensureWorkspaceStore().archive(workspaceId);
+      return projectWorkspaceListResult();
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workspaceAddSession,
+    requestSchema: workspaceAddSessionRequestSchema,
+    responseSchema: workspaceSessionMutationResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ workspaceId, sessionFile }) =>
+      addSessionToWorkspace(store, workspaceId, sessionFile),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workspaceMoveSession,
+    requestSchema: workspaceMoveSessionRequestSchema,
+    responseSchema: workspaceSessionMutationResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ sessionFile, toWorkspaceId }) => {
+      await requireOpenWorkspace(toWorkspaceId);
+      const moved = await ensureWorkspaceStore().moveSession(
+        sessionFile,
+        toWorkspaceId,
+      );
+      return { workspaceId: moved.workspaceId, sessionFile: moved.sessionFile };
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workspaceRemoveSession,
+    requestSchema: workspaceRemoveSessionRequestSchema,
+    responseSchema: workspaceSessionMutationResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ workspaceId, sessionFile }) => {
+      const runtimeId = chatSessionFileLocks.get(
+        (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile),
+      );
+      if (runtimeId !== undefined) {
+        throw new Error(
+          "Close the attached session before removing it from a workspace.",
+        );
+      }
+      await ensureWorkspaceStore().removeSession(workspaceId, sessionFile);
+      return {
+        workspaceId,
+        sessionFile:
+          (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile),
+      };
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workspaceListUnassignedSessions,
+    requestSchema: noPayloadSchema,
+    responseSchema: chatListSessionsResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async () => listUnassignedWorkspaceSessions(store),
+  });
+
+  registerValidatedIpc({
     channel: ipcChannels.attachmentsPickFiles,
     requestSchema: attachmentPickerRequestSchema,
     responseSchema: pickAttachmentsResultSchema,
@@ -689,8 +869,10 @@ function registerIpcHandlers(
         return { selected: false } as const;
       }
 
-      const projectRoot = request.projectPath
-        ? await safeRealpath(request.projectPath)
+      const requestedWorkingDirectory =
+        request.workingDirectory ?? request.projectPath;
+      const projectRoot = requestedWorkingDirectory
+        ? await safeRealpath(requestedWorkingDirectory)
         : undefined;
 
       return {
@@ -711,8 +893,10 @@ function registerIpcHandlers(
     responseSchema: pickAttachmentsResultSchema,
     diagnostics: diagnosticsService,
     handler: async (request): Promise<PickAttachmentsResult> => {
-      const projectRoot = request.projectPath
-        ? await safeRealpath(request.projectPath)
+      const requestedWorkingDirectory =
+        request.workingDirectory ?? request.projectPath;
+      const projectRoot = requestedWorkingDirectory
+        ? await safeRealpath(requestedWorkingDirectory)
         : undefined;
       const uniquePaths = [
         ...new Set(request.paths.map((filePath) => path.resolve(filePath))),
@@ -798,6 +982,186 @@ function ensureProjectStore(): ProjectStore {
   return projectStore;
 }
 
+function ensureWorkspaceStore(): WorkspaceStore {
+  if (workspaceStore === undefined) {
+    throw new Error("Workspace store is not initialized");
+  }
+  return workspaceStore;
+}
+
+async function migrateLegacyProjectsToWorkspaces(): Promise<void> {
+  const projects = ensureProjectStore();
+  const listed = await projects.list();
+  if (listed.projects.length === 0) {
+    // Project activation happens lazily during local-only bootstrap. Do not
+    // seal an empty migration before that compatibility project exists.
+    return;
+  }
+  const refs = (
+    await Promise.all(
+      listed.projects.map(async (project) =>
+        (await projects.getSessionRefs(project.id)).map((ref) => ({
+          ...ref,
+          projectId: project.id,
+        })),
+      ),
+    )
+  ).flat();
+  await ensureWorkspaceStore().migrateLegacyProjects({
+    ...(listed.activeProjectId
+      ? { activeProjectId: listed.activeProjectId }
+      : {}),
+    projects: listed.projects.map((project) => ({
+      id: project.id,
+      displayName: project.displayName,
+      createdAtMs: project.lastOpenedAt,
+      updatedAtMs: project.lastOpenedAt,
+      lastOpenedAtMs: project.lastOpenedAt,
+    })),
+    sessionRefs: refs,
+  });
+}
+
+async function projectWorkspaceListResult(): Promise<WorkspaceListResult> {
+  const [listedWorkspaces, listedProjects] = await Promise.all([
+    ensureWorkspaceStore().list(),
+    ensureProjectStore().list(),
+  ]);
+  const projectsById = new Map(
+    listedProjects.projects.map((project) => [project.id, project]),
+  );
+  const toRef = (workspace: WorkspaceRecord): WorkspaceRef => {
+    const defaultProject = workspace.defaultProjectId
+      ? projectsById.get(workspace.defaultProjectId)
+      : undefined;
+    return {
+      id: workspace.id,
+      name: workspace.name,
+      ...(workspace.defaultProjectId
+        ? { defaultProjectId: workspace.defaultProjectId }
+        : {}),
+      ...(defaultProject ? { defaultProject } : {}),
+      lastOpenedAt: workspace.lastOpenedAtMs,
+    };
+  };
+  return {
+    ...(listedWorkspaces.activeWorkspaceId
+      ? { activeWorkspaceId: listedWorkspaces.activeWorkspaceId }
+      : {}),
+    ...(listedWorkspaces.activeWorkspace
+      ? { activeWorkspace: toRef(listedWorkspaces.activeWorkspace) }
+      : {}),
+    workspaces: listedWorkspaces.workspaces.map(toRef),
+  };
+}
+
+async function requireOpenWorkspace(
+  workspaceId: string,
+): Promise<WorkspaceRecord> {
+  const workspace = await ensureWorkspaceStore().getWorkspace(workspaceId);
+  if (workspace === undefined) {
+    throw new Error(`Unknown workspace: ${workspaceId}`);
+  }
+  if (workspace.archivedAtMs !== undefined) {
+    throw new Error(`Workspace is archived: ${workspaceId}`);
+  }
+  return workspace;
+}
+
+async function resolveWorkspaceProject(
+  workspaceId: string,
+  requestedProjectId?: string,
+): Promise<ProjectRef> {
+  const workspace = await requireOpenWorkspace(workspaceId);
+  const projectId = requestedProjectId ?? workspace.defaultProjectId;
+  if (projectId === undefined) {
+    throw new Error(
+      "This workspace has no default working folder. Choose a working folder before starting a session.",
+    );
+  }
+  return ensureProjectStore().resolveAuthorizedProject(projectId);
+}
+
+async function addSessionToWorkspace(
+  settings: SettingsStore,
+  workspaceId: string,
+  sessionFile: string,
+): Promise<{ workspaceId: string; sessionFile: string }> {
+  const project = await resolveWorkspaceProject(workspaceId);
+  const launch = await resolveRealChatLaunchConfig(settings, project);
+  const sessionDir = launch.effective.config.sessionDir;
+  if (sessionDir === undefined) {
+    throw new Error("No Pi session directory is configured.");
+  }
+  const validation = await validatePiSessionFile({ sessionFile, sessionDir });
+  if (!validation.ok) {
+    throw new Error(
+      `Session is not eligible for workspace import: ${validation.reason}.`,
+    );
+  }
+  const stat = await fs.stat(validation.sessionFile);
+  const result = await ensureWorkspaceStore().upsertSessionRef(workspaceId, {
+    id: validation.sessionFile,
+    sessionFile: validation.sessionFile,
+    cwd: validation.cwd,
+    title: path.basename(validation.sessionFile, ".jsonl"),
+    updatedAtMs: stat.mtimeMs,
+    createdAtMs: stat.birthtimeMs,
+    messageCount: 0,
+  });
+  return { workspaceId: result.workspaceId, sessionFile: result.sessionFile };
+}
+
+async function listUnassignedWorkspaceSessions(
+  settings: SettingsStore,
+): Promise<ChatListSessionsResult> {
+  const workspace = await ensureWorkspaceStore().getActiveWorkspace();
+  if (workspace === undefined) {
+    throw new Error("No active workspace is selected.");
+  }
+  const project = await resolveWorkspaceProject(workspace.id);
+  const launch = await resolveRealChatLaunchConfig(settings, project);
+  const sessionDir = launch.effective.config.sessionDir;
+  if (sessionDir === undefined) {
+    return {
+      projectCwd: launch.projectCwd,
+      workspaceId: workspace.id,
+      projectId: launch.projectId,
+      sessions: [],
+      diagnostics: ["No Pi session directory is configured."],
+    };
+  }
+  const scanned = await scanSessionRepository({
+    sessionDir,
+    maxDepth: 4,
+    maxFiles: 20_000,
+    maxTotalBytes: 250 * 1024 * 1024,
+    maxWallTimeMs: 15_000,
+  });
+  const listed = await ensureWorkspaceStore().list();
+  const assignedFiles = new Set(
+    (
+      await Promise.all(
+        listed.workspaces.map(async (item) =>
+          (await ensureWorkspaceStore().getSessionRefs(item.id)).map(
+            (ref) => ref.sessionFile,
+          ),
+        ),
+      )
+    ).flat(),
+  );
+  return {
+    projectCwd: launch.projectCwd,
+    workspaceId: workspace.id,
+    projectId: launch.projectId,
+    sessionDir,
+    sessions: scanned.sessions.filter(
+      (session) => !assignedFiles.has(session.sessionFile),
+    ),
+    diagnostics: scanned.diagnostics,
+  };
+}
+
 /**
  * Convert a renderer-supplied project ID into a main-owned project record.
  *
@@ -845,8 +1209,23 @@ async function getAppBootstrapState(
     mode === "real" && needsProjectActivation
       ? await projects.list()
       : listedProjects;
+  if (mode === "real") {
+    await migrateLegacyProjectsToWorkspaces();
+  }
+  let activeWorkspace = await ensureWorkspaceStore().getActiveWorkspace();
+  if (activeWorkspace === undefined) {
+    activeWorkspace = await ensureWorkspaceStore().create({
+      name: project.displayName,
+      ...(mode === "real" ? { defaultProjectId: project.id } : {}),
+    });
+  }
+  const workspaceList = await projectWorkspaceListResult();
   const cachedSessions =
-    mode === "real" ? await projects.getCachedSessionSummaries(project.id) : [];
+    mode === "real"
+      ? await ensureWorkspaceStore().getCachedSessionSummaries(
+          activeWorkspace.id,
+        )
+      : [];
 
   return {
     backendMode: mode,
@@ -855,6 +1234,10 @@ async function getAppBootstrapState(
     diagnostics: diagnosticsService.getSummary(settings),
     project,
     projects: projectList.projects,
+    workspace:
+      workspaceList.activeWorkspace ??
+      workspaceList.workspaces.find((item) => item.id === activeWorkspace.id),
+    workspaces: workspaceList.workspaces,
     cachedSessions,
   };
 }
@@ -993,12 +1376,19 @@ async function createChatWorker(
   mode: ChatBackendMode,
   capacity: WorkerCapacity,
   project?: ProjectRef,
+  workspaceId?: string,
 ): Promise<ChatWorkerSpec> {
   return serializeChatWorkerCreation(async () => {
     const workerSpec =
       mode === "real"
-        ? await createRealChatWorker(adapter, store, capacity, project)
-        : await createFakeChatWorker(adapter, store, capacity);
+        ? await createRealChatWorker(
+            adapter,
+            store,
+            capacity,
+            project,
+            workspaceId,
+          )
+        : await createFakeChatWorker(adapter, store, capacity, workspaceId);
     registerChatWorker(workerSpec, mode);
     return workerSpec;
   });
@@ -1031,6 +1421,9 @@ function registerChatWorker(
   chatWorkerCwds.set(runtimeId, workerSpec.cwd);
   if (workerSpec.projectId !== undefined) {
     chatRuntimeProjectIds.set(runtimeId, workerSpec.projectId);
+  }
+  if (workerSpec.workspaceId !== undefined) {
+    chatRuntimeWorkspaceIds.set(runtimeId, workerSpec.workspaceId);
   }
 }
 
@@ -1253,6 +1646,7 @@ function forgetChatRuntime(
   }
   chatRuntimeSessionFiles.delete(runtimeId);
   chatRuntimeProjectIds.delete(runtimeId);
+  chatRuntimeWorkspaceIds.delete(runtimeId);
   if (chatRuntimeId === runtimeId) {
     chatRuntimeId = undefined;
   }
@@ -1262,12 +1656,14 @@ interface ChatWorkerSpec {
   worker: ReturnType<SinglePiAdapter["createWorker"]>;
   cwd: string;
   projectId?: string;
+  workspaceId?: string;
 }
 
 async function createFakeChatWorker(
   adapter: SinglePiAdapter,
   store: SettingsStore,
   capacity: WorkerCapacity,
+  workspaceId?: string,
 ): Promise<ChatWorkerSpec> {
   const fakeRpcPath = path.join(__dirname, "pi/fakeRpc/fakeRpcServer.js");
   const cwd = process.cwd();
@@ -1280,7 +1676,7 @@ async function createFakeChatWorker(
         cwd,
         env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
       });
-      return { worker, cwd };
+      return { worker, cwd, ...(workspaceId ? { workspaceId } : {}) };
     },
   );
 }
@@ -1290,6 +1686,7 @@ async function createRealChatWorker(
   store: SettingsStore,
   capacity: WorkerCapacity,
   project?: ProjectRef,
+  workspaceId?: string,
 ): Promise<ChatWorkerSpec> {
   const launch = await resolveRealChatLaunchConfig(store, project);
   return capacity.allocate(
@@ -1305,7 +1702,12 @@ async function createRealChatWorker(
         ),
         commandProtocol: "type-field",
       });
-      return { worker, cwd: launch.projectCwd, projectId: launch.projectId };
+      return {
+        worker,
+        cwd: launch.projectCwd,
+        projectId: launch.projectId,
+        ...(workspaceId ? { workspaceId } : {}),
+      };
     },
   );
 }
@@ -1316,6 +1718,7 @@ async function createRealResumeWorker(
   capacity: WorkerCapacity,
   sessionFile: string,
   project?: ProjectRef,
+  workspaceId?: string,
 ): Promise<ChatWorkerSpec> {
   const launch = await resolveRealChatLaunchConfig(store, project);
   const sessionDir = launch.effective.config.sessionDir;
@@ -1356,6 +1759,7 @@ async function createRealResumeWorker(
         worker,
         cwd: launch.projectCwd,
         projectId: launch.projectId,
+        ...(workspaceId ? { workspaceId } : {}),
       };
     },
   );
@@ -1463,6 +1867,7 @@ async function closeChatWorker(): Promise<void> {
   chatWorkerCwds.clear();
   chatRuntimeSessionFiles.clear();
   chatRuntimeProjectIds.clear();
+  chatRuntimeWorkspaceIds.clear();
   chatSessionFileLocks.clear();
   chatSessionResumePromises.clear();
   attachmentPreservingRuntimeClosures.clear();
@@ -1772,6 +2177,81 @@ async function listChatSessions(
   };
 }
 
+async function listWorkspaceChatSessions(
+  workspaceId: string,
+): Promise<ChatListSessionsResult> {
+  const workspace = await requireOpenWorkspace(workspaceId);
+  const refs = await ensureWorkspaceStore().getCachedSessionSummaries(
+    workspace.id,
+  );
+  const sessions: ChatListSessionsResult["sessions"] = [];
+  const diagnostics: string[] = [];
+  for (const ref of refs) {
+    const canonical = await safeRealpath(ref.sessionFile);
+    if (canonical === undefined) {
+      await ensureWorkspaceStore().markSessionMissing(
+        workspace.id,
+        ref.sessionFile,
+      );
+      diagnostics.push(
+        `Workspace session ref is missing or unreadable and was hidden: ${ref.sessionFile}`,
+      );
+      continue;
+    }
+    const attachedRuntimeId = chatSessionFileLocks.get(canonical);
+    sessions.push({
+      ...ref,
+      id: canonical,
+      sessionFile: canonical,
+      ...(attachedRuntimeId ? { attachedRuntimeId } : {}),
+    });
+  }
+  const defaultProject = workspace.defaultProjectId
+    ? await ensureProjectStore()
+        .resolveAuthorizedProject(workspace.defaultProjectId)
+        .catch(() => undefined)
+    : undefined;
+  return {
+    projectCwd:
+      defaultProject?.canonicalPath ?? sessions[0]?.cwd ?? process.cwd(),
+    workspaceId: workspace.id,
+    ...(defaultProject ? { projectId: defaultProject.id } : {}),
+    sessions: sessions.sort(
+      (left, right) => right.updatedAtMs - left.updatedAtMs,
+    ),
+    diagnostics,
+  };
+}
+
+async function projectForWorkspaceSession(
+  workspaceId: string,
+  sessionFile: string,
+): Promise<ProjectRef> {
+  const workspace = await requireOpenWorkspace(workspaceId);
+  const canonical =
+    (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
+  const ref = (await ensureWorkspaceStore().getSessionRefs(workspace.id)).find(
+    (item) => item.sessionFile === canonical,
+  );
+  if (ref === undefined) {
+    throw new Error("Session does not belong to this workspace.");
+  }
+  const projects = await ensureProjectStore().list();
+  const project = ref.cwd
+    ? projects.projects.find((candidate) => candidate.canonicalPath === ref.cwd)
+    : workspace.defaultProjectId
+      ? projects.projects.find(
+          (candidate) => candidate.id === workspace.defaultProjectId,
+        )
+      : undefined;
+  if (project === undefined) {
+    throw new Error(
+      "The session working folder is not registered. Reopen that folder before resuming this session.",
+    );
+  }
+  return ensureProjectStore().resolveAuthorizedProject(project.id);
+}
+
 async function mergeProjectSessionRefs(
   projectId: string,
   projectCwd: string,
@@ -1820,6 +2300,7 @@ async function deleteChatSession(
   diagnosticsService: DiagnosticsService,
   sessionFile: string,
   project?: ProjectRef,
+  workspaceId?: string,
 ): Promise<ChatDeleteSessionResult> {
   const mode = resolveChatBackendMode();
   if (mode !== "real") {
@@ -1857,6 +2338,7 @@ async function deleteChatSession(
     launch.projectId,
     canonicalSessionFile,
     diagnosticsService,
+    workspaceId,
   );
   if (lockedRuntimeId !== undefined) {
     attachmentPreservingRuntimeClosures.delete(lockedRuntimeId);
@@ -1942,10 +2424,53 @@ async function deleteAllChatSessions(
   return { deleted: true, deletedCount, skippedCount, deletedSessionFiles };
 }
 
+async function deleteAllWorkspaceChatSessions(
+  store: SettingsStore,
+  diagnosticsService: DiagnosticsService,
+  workspaceId: string,
+): Promise<ChatDeleteAllSessionsResult> {
+  const listed = await listWorkspaceChatSessions(workspaceId);
+  const deletedSessionFiles: string[] = [];
+  let skippedCount = 0;
+  for (const session of listed.sessions) {
+    const lockedRuntimeId = chatSessionFileLocks.get(session.sessionFile);
+    if (lockedRuntimeId !== undefined && chatRuntimeIds.has(lockedRuntimeId)) {
+      skippedCount += 1;
+      continue;
+    }
+    try {
+      const project = await projectForWorkspaceSession(
+        workspaceId,
+        session.sessionFile,
+      );
+      const result = await deleteChatSession(
+        store,
+        diagnosticsService,
+        session.sessionFile,
+        project,
+        workspaceId,
+      );
+      deletedSessionFiles.push(result.sessionFile);
+    } catch (error) {
+      skippedCount += 1;
+      diagnosticsService.recordError(
+        `Failed to delete workspace session ${session.sessionFile}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  return {
+    deleted: true,
+    deletedCount: deletedSessionFiles.length,
+    skippedCount,
+    deletedSessionFiles,
+  };
+}
+
 async function removePersistedPiSessionFile(
   projectId: string,
   sessionFile: string,
   diagnosticsService: DiagnosticsService,
+  workspaceId?: string,
 ): Promise<void> {
   try {
     await trashOrRemoveFile(sessionFile);
@@ -1975,6 +2500,15 @@ async function removePersistedPiSessionFile(
     diagnosticsService.recordError(
       `Failed to remove deleted Pi session cache ref ${sessionFile}: ${error instanceof Error ? error.message : String(error)}`,
     );
+  }
+  if (workspaceId !== undefined) {
+    try {
+      await workspaceStore?.removeSession(workspaceId, sessionFile);
+    } catch (error) {
+      diagnosticsService.recordError(
+        `Failed to remove deleted workspace session ref ${sessionFile}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 }
 
@@ -2007,6 +2541,7 @@ async function resumeChatSession(
   diagnosticsService: DiagnosticsService,
   sessionFile: string,
   project?: ProjectRef,
+  workspaceId?: string,
 ): Promise<ChatSnapshot> {
   if (resolveChatBackendMode() !== "real") {
     throw new Error("Session resume is only available in real Pi mode.");
@@ -2048,6 +2583,7 @@ async function resumeChatSession(
     getChatWorkerCapacity(),
     canonicalSessionFile,
     project,
+    workspaceId,
   ).finally(() => {
     chatSessionResumePromises.delete(canonicalSessionFile);
   });
@@ -2061,6 +2597,7 @@ async function attachRealResumeWorker(
   capacity: WorkerCapacity,
   canonicalSessionFile: string,
   project?: ProjectRef,
+  workspaceId?: string,
 ): Promise<ChatSnapshot> {
   const workerSpec = await serializeChatWorkerCreation(() =>
     createRealResumeWorker(
@@ -2069,6 +2606,7 @@ async function attachRealResumeWorker(
       capacity,
       canonicalSessionFile,
       project,
+      workspaceId,
     ),
   );
   const runtimeId = workerSpec.worker.runtimeId;
@@ -2078,6 +2616,9 @@ async function attachRealResumeWorker(
   chatWorkerCwds.set(runtimeId, workerSpec.cwd);
   if (workerSpec.projectId !== undefined) {
     chatRuntimeProjectIds.set(runtimeId, workerSpec.projectId);
+  }
+  if (workerSpec.workspaceId !== undefined) {
+    chatRuntimeWorkspaceIds.set(runtimeId, workerSpec.workspaceId);
   }
   chatRuntimeSessionFiles.set(runtimeId, canonicalSessionFile);
   chatSessionFileLocks.set(canonicalSessionFile, runtimeId);
@@ -2115,6 +2656,7 @@ async function createChatSessionSnapshot(
   store: SettingsStore,
   diagnosticsService: DiagnosticsService,
   project?: ProjectRef,
+  workspaceId?: string,
 ): Promise<ChatSnapshot> {
   const adapter = await ensureChatAdapter(store, diagnosticsService);
   const mode = chatBackendMode ?? resolveChatBackendMode();
@@ -2124,6 +2666,7 @@ async function createChatSessionSnapshot(
     mode,
     getChatWorkerCapacity(),
     project,
+    workspaceId,
   );
   const runtimeId = workerSpec.worker.runtimeId;
   try {
@@ -2308,6 +2851,7 @@ async function getChatSnapshotForRuntime(
 ): Promise<ChatSnapshot> {
   const mode = chatRuntimeModes.get(runtimeId) ?? fallbackMode;
   const projectId = chatRuntimeProjectIds.get(runtimeId);
+  const workspaceId = chatRuntimeWorkspaceIds.get(runtimeId);
   const state = await adapter.getState(runtimeId);
   const messages = options.skipMessages
     ? []
@@ -2325,6 +2869,22 @@ async function getChatSnapshotForRuntime(
       titleFromSessionName(state) ??
       (options.skipMessages ? undefined : titleFromMessages(messages));
     const hasTranscript = !options.skipMessages && messages.length > 0;
+    if (workspaceId !== undefined) {
+      const preview = hasTranscript ? previewFromMessages(messages) : undefined;
+      await workspaceStore?.upsertSessionRefFromSnapshot({
+        workspaceId,
+        sessionFile: canonicalSessionFile,
+        ...(typeof state.sessionId === "string"
+          ? { sessionId: state.sessionId }
+          : {}),
+        ...(typeof state.cwd === "string" ? { cwd: state.cwd } : {}),
+        ...(title !== undefined ? { title } : {}),
+        ...(hasTranscript
+          ? { updatedAtMs: Date.now(), messageCount: messages.length }
+          : {}),
+        ...(preview !== undefined ? { preview } : {}),
+      });
+    }
     if (projectId !== undefined && (hasTranscript || title !== undefined)) {
       const preview = hasTranscript ? previewFromMessages(messages) : undefined;
       await projectStore?.upsertSessionRefFromSnapshot({
@@ -2346,6 +2906,7 @@ async function getChatSnapshotForRuntime(
   return {
     runtimeId,
     backendMode: mode,
+    ...(workspaceId !== undefined ? { workspaceId } : {}),
     ...(projectId !== undefined ? { projectId } : {}),
     state: { ...state, cwd: state.cwd ?? chatWorkerCwds.get(runtimeId) },
     messages,
