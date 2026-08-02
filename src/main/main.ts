@@ -1182,25 +1182,19 @@ async function listUnassignedWorkspaceSessions(
     maxTotalBytes: 250 * 1024 * 1024,
     maxWallTimeMs: 15_000,
   });
-  const listed = await ensureWorkspaceStore().list();
-  const assignedFiles = new Set(
-    (
-      await Promise.all(
-        listed.workspaces.map(async (item) =>
-          (await ensureWorkspaceStore().getSessionRefs(item.id)).map(
-            (ref) => ref.sessionFile,
-          ),
-        ),
-      )
-    ).flat(),
+  const sessionsWithOwners = await Promise.all(
+    scanned.sessions.map(async (session) => ({
+      session,
+      owner: await ensureWorkspaceStore().getSessionOwner(session.sessionFile),
+    })),
   );
   return {
     projectCwd: launch.projectCwd,
     workspaceId: workspace.id,
     projectId: launch.projectId,
     sessionDir,
-    sessions: scanned.sessions.filter(
-      (session) => !assignedFiles.has(session.sessionFile),
+    sessions: sessionsWithOwners.flatMap(({ session, owner }) =>
+      owner === undefined ? [session] : [],
     ),
     diagnostics: scanned.diagnostics,
   };
@@ -2245,26 +2239,14 @@ async function listWorkspaceChatSessions(
       );
       const legacy = await listChatSessions(settings, project);
       diagnostics.push(...legacy.diagnostics);
-      const listed = await ensureWorkspaceStore().list();
-      const ownerByFile = new Map(
-        (
-          await Promise.all(
-            listed.workspaces.map(async (item) =>
-              (await ensureWorkspaceStore().getSessionRefs(item.id)).map(
-                (ref) => [ref.sessionFile, ref.workspaceId] as const,
-              ),
-            ),
-          )
-        ).flat(),
-      );
-      const adoptable = legacy.sessions.filter((session) => {
-        const ownerWorkspaceId = ownerByFile.get(session.sessionFile);
-        return (
-          ownerWorkspaceId === undefined || ownerWorkspaceId === workspace.id
+      if (legacy.sessions.length > 0) {
+        // The store applies discovery atomically: refresh current membership,
+        // claim only unassigned files, preserve legacy-removal exclusions, and
+        // never transfer a ref already owned by another workspace.
+        await ensureWorkspaceStore().upsertSessionRefs(
+          workspace.id,
+          legacy.sessions,
         );
-      });
-      if (adoptable.length > 0) {
-        await ensureWorkspaceStore().upsertSessionRefs(workspace.id, adoptable);
         refs = await ensureWorkspaceStore().getCachedSessionSummaries(
           workspace.id,
         );

@@ -372,9 +372,7 @@ export class WorkspaceStore {
   ): Promise<WorkspaceSessionMutationResult> {
     return this.upsertSessionRefs(workspaceId, [summary], {
       clearLegacyExclusions: true,
-    }).then(
-      (results) => results[0]!,
-    );
+    }).then((results) => results[0]!);
   }
 
   /**
@@ -418,12 +416,26 @@ export class WorkspaceStore {
     let workspaces = this.state.workspaces;
     let workspaceChanged = false;
     const byFile = new Map(refs.map((ref, index) => [ref.sessionFile, index]));
+    const targetLegacyExclusions = new Set(
+      workspaces[targetWorkspaceIndex]?.legacyExcludedSessionFiles ?? [],
+    );
     const results: WorkspaceSessionMutationResult[] = [];
     let changed = false;
     for (const { summary, sessionFile } of canonicalSummaries) {
       const existingIndex = byFile.get(sessionFile);
       const existing =
         existingIndex === undefined ? undefined : refs[existingIndex];
+      // Batched upserts are repository discovery, not an explicit user move.
+      // They may refresh refs already owned by the target or claim unassigned
+      // files, but must not undo a legacy removal or steal another workspace's
+      // membership. Explicit upsertSessionRef/moveSession clear tombstones.
+      if (
+        options.clearLegacyExclusions !== true &&
+        (targetLegacyExclusions.has(sessionFile) ||
+          (existing !== undefined && existing.workspaceId !== id))
+      ) {
+        continue;
+      }
       const candidate = sessionRefFromSummary(
         id,
         sessionFile,
@@ -455,8 +467,7 @@ export class WorkspaceStore {
         const sourceIndex = workspaces.findIndex(
           (workspace) => workspace.id === existing.workspaceId,
         );
-        const source =
-          sourceIndex < 0 ? undefined : workspaces[sourceIndex];
+        const source = sourceIndex < 0 ? undefined : workspaces[sourceIndex];
         if (source?.legacyProjectId !== undefined) {
           const nextSource = addLegacySessionExclusion(
             source,
@@ -555,7 +566,11 @@ export class WorkspaceStore {
     const existing = this.state.sessionRefs[index]!;
     if (existing.workspaceId === targetId) {
       const target = this.state.workspaces[targetWorkspaceIndex]!;
-      const nextTarget = removeLegacySessionExclusions(target, [canonical], Date.now());
+      const nextTarget = removeLegacySessionExclusions(
+        target,
+        [canonical],
+        Date.now(),
+      );
       if (nextTarget !== target) {
         await this.commit({
           ...this.state,
@@ -576,9 +591,7 @@ export class WorkspaceStore {
       (workspace) => workspace.id === existing.workspaceId,
     );
     const source =
-      sourceWorkspaceIndex < 0
-        ? undefined
-        : workspaces[sourceWorkspaceIndex];
+      sourceWorkspaceIndex < 0 ? undefined : workspaces[sourceWorkspaceIndex];
     if (source?.legacyProjectId !== undefined) {
       const nextSource = addLegacySessionExclusion(source, canonical, now);
       if (nextSource !== source) {
@@ -635,7 +648,13 @@ export class WorkspaceStore {
       ...this.state,
       sessionRefs: nextRefs,
       ...(nextWorkspace !== undefined && nextWorkspace !== workspace
-        ? { workspaces: replaceAt(this.state.workspaces, workspaceIndex, nextWorkspace) }
+        ? {
+            workspaces: replaceAt(
+              this.state.workspaces,
+              workspaceIndex,
+              nextWorkspace,
+            ),
+          }
         : {}),
     });
     return true;
@@ -700,7 +719,8 @@ export class WorkspaceStore {
     );
     await this.loadIfNeeded();
     return (
-      this.state.workspaces.find((workspace) => workspace.id === id)
+      this.state.workspaces
+        .find((workspace) => workspace.id === id)
         ?.legacyExcludedSessionFiles?.includes(canonical) ?? false
     );
   }
@@ -940,7 +960,9 @@ function cloneWorkspace(workspace: WorkspaceRecord): WorkspaceRecord {
   return {
     ...workspace,
     ...(workspace.legacyExcludedSessionFiles
-      ? { legacyExcludedSessionFiles: [...workspace.legacyExcludedSessionFiles] }
+      ? {
+          legacyExcludedSessionFiles: [...workspace.legacyExcludedSessionFiles],
+        }
       : {}),
   };
 }
@@ -974,10 +996,14 @@ function removeLegacySessionExclusions(
   const exclusions = workspace.legacyExcludedSessionFiles;
   if (exclusions === undefined || sessionFiles.length === 0) return workspace;
   const removed = new Set(sessionFiles);
-  const nextExclusions = exclusions.filter((sessionFile) => !removed.has(sessionFile));
+  const nextExclusions = exclusions.filter(
+    (sessionFile) => !removed.has(sessionFile),
+  );
   if (nextExclusions.length === exclusions.length) return workspace;
-  const { legacyExcludedSessionFiles: _legacyExcludedSessionFiles, ...withoutExclusions } =
-    workspace;
+  const {
+    legacyExcludedSessionFiles: _legacyExcludedSessionFiles,
+    ...withoutExclusions
+  } = workspace;
   return {
     ...withoutExclusions,
     ...(nextExclusions.length > 0

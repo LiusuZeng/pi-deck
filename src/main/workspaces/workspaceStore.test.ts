@@ -288,7 +288,17 @@ test("WorkspaceStore persists a legacy removal exclusion and explicit re-add cle
     await createLegacyWorkspaceWithSession();
 
   assert.equal(await store.removeSession(workspaceId, sessionFile), true);
-  assert.equal(await store.isLegacySessionExcluded(workspaceId, sessionFile), true);
+  assert.equal(
+    await store.isLegacySessionExcluded(workspaceId, sessionFile),
+    true,
+  );
+
+  await store.upsertSessionRefs(workspaceId, [summary(sessionFile)]);
+  assert.equal(await store.getSessionOwner(sessionFile), undefined);
+  assert.equal(
+    await store.isLegacySessionExcluded(workspaceId, sessionFile),
+    true,
+  );
 
   const reloaded = new WorkspaceStore(home);
   assert.equal(
@@ -312,11 +322,26 @@ test("WorkspaceStore tombstones legacy move sources and clears a move-back targe
   const other = await store.create({ name: "Other" });
 
   await store.moveSession(sessionFile, other.id);
-  assert.equal(await store.isLegacySessionExcluded(workspaceId, sessionFile), true);
-  assert.equal((await store.getSessionOwner(sessionFile))?.workspaceId, other.id);
+  assert.equal(
+    await store.isLegacySessionExcluded(workspaceId, sessionFile),
+    true,
+  );
+  assert.equal(
+    (await store.getSessionOwner(sessionFile))?.workspaceId,
+    other.id,
+  );
+
+  await store.upsertSessionRefs(workspaceId, [summary(sessionFile)]);
+  assert.equal(
+    (await store.getSessionOwner(sessionFile))?.workspaceId,
+    other.id,
+  );
 
   await store.moveSession(sessionFile, workspaceId);
-  assert.equal(await store.isLegacySessionExcluded(workspaceId, sessionFile), false);
+  assert.equal(
+    await store.isLegacySessionExcluded(workspaceId, sessionFile),
+    false,
+  );
   assert.equal(
     (await store.getSessionOwner(sessionFile))?.workspaceId,
     workspaceId,
