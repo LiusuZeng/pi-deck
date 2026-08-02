@@ -1591,9 +1591,42 @@ export function App(): ReactElement {
     let createdRuntimeId: string | undefined;
     let backendSession: SessionViewModel | undefined;
     try {
-      const draftProjectId = draftSession.projectId ?? projectIdForWorkspace(currentWorkspace);
+      let draftProjectId =
+        draftSession.projectId ?? projectIdForWorkspace(currentWorkspace);
       if (draftProjectId === undefined) {
-        throw new Error("Choose a working folder before starting this session.");
+        setUiMessage("Choose a working folder for this session before Pi starts…");
+        const picked = await window.piDeck.projects.pickProject();
+        if (!picked.selected) {
+          unblockAttachmentOwner(draftSession.id);
+          setSessions((items) =>
+            items.map((session) =>
+              session.id === draftSession.id
+                ? {
+                    ...session,
+                    status: "idle",
+                    baseState: "idle",
+                    subtitle: "Idle · choose a working folder before sending",
+                  }
+                : session,
+            ),
+          );
+          setUiMessage("Working-folder picker canceled. This workspace remains folderless.");
+          return;
+        }
+        draftProjectId = picked.project.id;
+        setSessions((items) =>
+          items.map((session) =>
+            session.id === draftSession.id
+              ? {
+                  ...session,
+                  projectId: picked.project.id,
+                  workingDirectory:
+                    picked.project.canonicalPath || picked.project.path,
+                  projectPath: picked.project.canonicalPath || picked.project.path,
+                }
+              : session,
+          ),
+        );
       }
       let snapshot = await createSessionForWorkspace(
         window.piDeck,
