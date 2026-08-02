@@ -82,6 +82,8 @@ import {
   transferAttachmentOwnership,
 } from "./attachmentLifecycle.js";
 import { RuntimeEventBuffer } from "./runtimeEventBuffer.js";
+import { buildActivityInbox } from "./activityInbox.js";
+import { ActivityInbox } from "./components/ActivityInbox.js";
 
 type LoadState =
   | { state: "loading" }
@@ -223,6 +225,8 @@ interface SessionViewModel {
   /** A provider failure observed in a Pi runtime event, not a local UI error. */
   providerErrorObserved?: boolean;
   archivedAtMs?: number;
+  /** Set only after a successful or aborted runtime turn in this renderer run. */
+  completedAtMs?: number | undefined;
 }
 
 /**
@@ -663,6 +667,7 @@ export function App(): ReactElement {
   const [sidebarVisible, setSidebarVisible] = useState(() =>
     loadSidebarVisiblePreference(),
   );
+  const [activityInboxVisible, setActivityInboxVisible] = useState(false);
   const [usageStatsVisible, setUsageStatsVisible] = useState(() =>
     loadUsageStatsVisiblePreference(),
   );
@@ -985,6 +990,15 @@ export function App(): ReactElement {
     sessions.find((session) => session.id === selectedSessionId) ??
     sessions[0] ??
     loadingSession;
+  const activityInboxModel = useMemo(() => {
+    const workspaceNameById = Object.fromEntries(
+      [...workspaces, currentWorkspace].map((workspace) => [
+        workspace.id,
+        workspace.name,
+      ]),
+    );
+    return buildActivityInbox(sessions, workspaceNameById);
+  }, [currentWorkspace, sessions, workspaces]);
   const selectedModel =
     modelOptions.find((model) => model.id === selectedModelId) ??
     modelOptions[0];
@@ -1457,6 +1471,7 @@ export function App(): ReactElement {
   }
 
   function handleSelectSession(sessionId: string): void {
+    setActivityInboxVisible(false);
     const session = sessions.find((item) => item.id === sessionId);
     if (session?.isResuming === true) {
       return;
@@ -1482,6 +1497,13 @@ export function App(): ReactElement {
     if (session?.backendMode === "real" && session.runtimeBacked) {
       loadRealCapabilities(session.id);
     }
+  }
+
+  function handleOpenActivitySession(sessionId: string): void {
+    // Keep the transition local, then use the normal selection flow so
+    // cross-workspace navigation and saved-session resume remain identical.
+    setActivityInboxVisible(false);
+    handleSelectSession(sessionId);
   }
 
   async function resumeSession(
@@ -1700,6 +1722,7 @@ export function App(): ReactElement {
               ...session,
               status: "starting",
               baseState: "attaching",
+              completedAtMs: undefined,
               subtitle: "Starting · launching Pi RPC worker for first prompt",
             }
           : session,
@@ -1868,6 +1891,7 @@ export function App(): ReactElement {
                 : session.title,
               status: "sending",
               baseState: "attaching",
+              completedAtMs: undefined,
               overlays: { ...session.overlays, streaming: false },
               subtitle: `Sending · waiting for ${backendLabel(session)} confirmation`,
               workingStartedAtMs: session.workingStartedAtMs ?? Date.now(),
@@ -3420,7 +3444,10 @@ export function App(): ReactElement {
           archivedSessions={archivedSessions}
           showArchived={showArchived}
           composerDrafts={composerDrafts}
+          activityInboxVisible={activityInboxVisible}
+          activityActionableCount={activityInboxModel.actionableCount}
           onSelect={handleSelectSession}
+          onOpenActivity={() => setActivityInboxVisible(true)}
           onSelectWorkspace={(workspace) =>
             void handleSelectWorkspace(workspace)
           }
@@ -3499,7 +3526,13 @@ export function App(): ReactElement {
           {uiMessage}
         </div>
 
-        {isResuming ? (
+        {activityInboxVisible ? (
+          <ActivityInbox
+            model={activityInboxModel}
+            onOpenSession={handleOpenActivitySession}
+            onClose={() => setActivityInboxVisible(false)}
+          />
+        ) : isResuming ? (
           <TranscriptLoading sessionTitle={selectedSession.title} />
         ) : showStarterPage ? (
           <StarterPage composer={composer} />
@@ -4674,6 +4707,7 @@ function reduceRuntimeEvent(
     case "agent_start":
       return {
         ...session,
+        completedAtMs: undefined,
         awaitingAgentEnd: false,
         status: "working",
         baseState: "working",
@@ -4909,6 +4943,9 @@ function reduceRuntimeEvent(
 
       const nextSession: SessionViewModel = {
         ...session,
+        // Completed activity is intentionally ephemeral and only records an
+        // authoritative, non-error terminal agent_end from this renderer run.
+        completedAtMs: endedWithError ? undefined : Date.now(),
         awaitingAgentEnd: false,
         ...(usageByMessageId !== undefined ? { usageByMessageId } : {}),
         ...(usageByMessageId !== undefined
@@ -5761,7 +5798,10 @@ function SessionSidebar(props: {
   archivedSessions: SessionViewModel[];
   showArchived: boolean;
   composerDrafts: ComposerDraftsBySession;
+  activityInboxVisible: boolean;
+  activityActionableCount: number;
   onSelect(sessionId: string): void;
+  onOpenActivity(): void;
   onSelectWorkspace(workspace: WorkspaceRef): void;
   onRenameWorkspace(workspace: WorkspaceRef): void;
   onArchiveWorkspace(workspace: WorkspaceRef): void;
@@ -6041,6 +6081,22 @@ function SessionSidebar(props: {
           </span>
         </Button>
       ) : null}
+
+      <Button
+        className={`sidebar-new-chat activity-inbox-button ${
+          props.activityInboxVisible ? "active" : ""
+        }`}
+        aria-pressed={props.activityInboxVisible}
+        onClick={props.onOpenActivity}
+      >
+        <History aria-hidden="true" size={16} strokeWidth={1.75} />
+        Activity
+        {props.activityActionableCount > 0 ? (
+          <span className="activity-inbox-badge" aria-live="polite">
+            {props.activityActionableCount}
+          </span>
+        ) : null}
+      </Button>
 
       {activeWork.length > 0 ? (
         <section

@@ -135,6 +135,63 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
     expect(runtimeErrorDiagnostics(afterEnd)).toEqual([]);
   });
 
+  it("records completed activity only for successful or aborted agent_end events", () => {
+    const successful = __rendererTestHooks.reduceRuntimeEvent(
+      {
+        ...baseSession(),
+        status: "working",
+        baseState: "working",
+        overlays: { ...emptyOverlays, streaming: true },
+      } as any,
+      {
+        type: "agent_end",
+        runtimeId: "session-1",
+        messages: [productionAssistantMessage("stop")],
+        willRetry: false,
+      } as any,
+    );
+
+    expect(successful.completedAtMs).toEqual(expect.any(Number));
+
+    const nextTurn = __rendererTestHooks.reduceRuntimeEvent(successful, {
+      type: "agent_start",
+      runtimeId: "session-1",
+    } as any);
+    expect(nextTurn.completedAtMs).toBeUndefined();
+
+    const aborted = __rendererTestHooks.reduceRuntimeEvent(
+      {
+        ...baseSession(),
+        status: "working",
+        baseState: "working",
+        overlays: { ...emptyOverlays, streaming: true },
+      } as any,
+      {
+        type: "agent_end",
+        runtimeId: "session-1",
+        messages: [productionAssistantMessage("aborted")],
+        willRetry: false,
+      } as any,
+    );
+    expect(aborted.completedAtMs).toEqual(expect.any(Number));
+
+    const failed = __rendererTestHooks.reduceRuntimeEvent(
+      {
+        ...baseSession(),
+        status: "working",
+        baseState: "working",
+        overlays: { ...emptyOverlays, streaming: true },
+      } as any,
+      {
+        type: "agent_end",
+        runtimeId: "session-1",
+        messages: [productionAssistantMessage("error", "Provider failed.")],
+        willRetry: false,
+      } as any,
+    );
+    expect(failed.completedAtMs).toBeUndefined();
+  });
+
   it("derives a terminal error from the final Pi agent_end message", () => {
     const errorMessage = "Pi returned a terminal provider error.";
     const failedAssistant = productionAssistantMessage("error", errorMessage);
