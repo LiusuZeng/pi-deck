@@ -162,6 +162,91 @@ describe("preload PiDeck API validation", () => {
     await expect(api.projects.pickProject()).rejects.toThrow();
   });
 
+  it("exposes strict workspace lifecycle IPC methods", async () => {
+    const workspace = {
+      id: "workspace-1",
+      name: "Release planning",
+      lastOpenedAt: 1,
+    };
+    electronMock.ipcRenderer.invoke.mockResolvedValue({
+      ok: true,
+      data: {
+        activeWorkspaceId: workspace.id,
+        activeWorkspace: workspace,
+        workspaces: [workspace],
+      },
+    });
+
+    await api.workspaces.create({ name: "  Release   planning " });
+    await api.workspaces.update({
+      workspaceId: workspace.id,
+      defaultProjectId: null,
+    });
+    await api.workspaces.select({ workspaceId: workspace.id });
+
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
+      1,
+      "workspaces:create",
+      { name: "Release planning" },
+    );
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
+      2,
+      "workspaces:update",
+      { workspaceId: workspace.id, defaultProjectId: null },
+    );
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
+      3,
+      "workspaces:select",
+      { workspaceId: workspace.id },
+    );
+    expect(() =>
+      api.workspaces.create({
+        name: "Release",
+        rootPath: "/not-workspace-identity",
+      } as unknown as { name: string }),
+    ).toThrow();
+  });
+
+  it("exposes strict workspace membership IPC methods", async () => {
+    electronMock.ipcRenderer.invoke.mockResolvedValue({
+      ok: true,
+      data: {
+        workspaceId: "workspace-2",
+        sessionFile: "/sessions/one.jsonl",
+      },
+    });
+
+    await api.workspaces.addSession({
+      workspaceId: "workspace-1",
+      sessionFile: "/sessions/one.jsonl",
+    });
+    await api.workspaces.moveSession({
+      sessionFile: "/sessions/one.jsonl",
+      toWorkspaceId: "workspace-2",
+    });
+    await api.workspaces.removeSession({
+      workspaceId: "workspace-2",
+      sessionFile: "/sessions/one.jsonl",
+    });
+
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
+      1,
+      "workspaces:addSession",
+      {
+        workspaceId: "workspace-1",
+        sessionFile: "/sessions/one.jsonl",
+      },
+    );
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
+      2,
+      "workspaces:moveSession",
+      {
+        sessionFile: "/sessions/one.jsonl",
+        toWorkspaceId: "workspace-2",
+      },
+    );
+  });
+
   it("passes dropped file paths through preload-owned Electron webUtils", async () => {
     const payload = {
       selected: true,

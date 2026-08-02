@@ -35,6 +35,14 @@ import type {
   projectListResultSchema,
   projectRefSchema,
   themePreferenceSchema,
+  workspaceAddSessionRequestSchema,
+  workspaceCreateRequestSchema,
+  workspaceListResultSchema,
+  workspaceMoveSessionRequestSchema,
+  workspaceRefSchema,
+  workspaceRemoveSessionRequestSchema,
+  workspaceSessionMutationResultSchema,
+  workspaceUpdateRequestSchema,
 } from "./ipcSchemas.js";
 
 export type ThemePreference = z.infer<typeof themePreferenceSchema>;
@@ -85,6 +93,26 @@ export type ChatRuntimeEvent = z.infer<typeof chatRuntimeEventSchema>;
 export type ProjectRef = z.infer<typeof projectRefSchema>;
 export type ProjectListResult = z.infer<typeof projectListResultSchema>;
 export type PickProjectResult = z.infer<typeof pickProjectResultSchema>;
+export type WorkspaceRef = z.infer<typeof workspaceRefSchema>;
+export type WorkspaceListResult = z.infer<typeof workspaceListResultSchema>;
+export type WorkspaceCreateRequest = z.infer<
+  typeof workspaceCreateRequestSchema
+>;
+export type WorkspaceUpdateRequest = z.infer<
+  typeof workspaceUpdateRequestSchema
+>;
+export type WorkspaceAddSessionRequest = z.infer<
+  typeof workspaceAddSessionRequestSchema
+>;
+export type WorkspaceMoveSessionRequest = z.infer<
+  typeof workspaceMoveSessionRequestSchema
+>;
+export type WorkspaceRemoveSessionRequest = z.infer<
+  typeof workspaceRemoveSessionRequestSchema
+>;
+export type WorkspaceSessionMutationResult = z.infer<
+  typeof workspaceSessionMutationResultSchema
+>;
 export type AttachmentDraft = z.infer<typeof attachmentDraftSchema>;
 export type AttachmentImportDroppedFilesRequest = z.infer<
   typeof attachmentImportDroppedFilesRequestSchema
@@ -122,10 +150,12 @@ export interface PiDeckApi {
       request?: ChatListSessionsRequest,
     ): Promise<ChatListSessionsResult>;
     resumeSession(request: {
+      workspaceId?: string;
       projectId?: string;
       sessionFile: string;
     }): Promise<ChatSnapshot>;
     deleteSession(request: {
+      workspaceId?: string;
       projectId?: string;
       sessionFile: string;
     }): Promise<ChatDeleteSessionResult>;
@@ -134,6 +164,7 @@ export interface PiDeckApi {
     ): Promise<ChatDeleteAllSessionsResult>;
     listModels(request: {
       runtimeId?: string;
+      workspaceId?: string;
       projectId?: string;
     }): Promise<ChatListModelsResult>;
     listCommands(
@@ -156,7 +187,10 @@ export interface PiDeckApi {
       request: ChatRespondToExtensionUiRequest,
     ): Promise<void>;
     closeSession(request: { runtimeId: string }): Promise<void>;
-    createSession(request?: { projectId?: string }): Promise<ChatSnapshot>;
+    createSession(request?: {
+      workspaceId?: string;
+      projectId?: string;
+    }): Promise<ChatSnapshot>;
     reset(): Promise<ChatSnapshot>;
     onEvent(listener: (event: ChatRuntimeEvent) => void): () => void;
   };
@@ -166,15 +200,39 @@ export interface PiDeckApi {
     select(request: { projectId: string }): Promise<ProjectListResult>;
     pickProject(): Promise<PickProjectResult>;
   };
+  workspaces: {
+    list(): Promise<WorkspaceListResult>;
+    getActive(): Promise<WorkspaceListResult>;
+    create(request: WorkspaceCreateRequest): Promise<WorkspaceListResult>;
+    update(request: WorkspaceUpdateRequest): Promise<WorkspaceListResult>;
+    select(request: { workspaceId: string }): Promise<WorkspaceListResult>;
+    archive(request: { workspaceId: string }): Promise<WorkspaceListResult>;
+    addSession(
+      request: WorkspaceAddSessionRequest,
+    ): Promise<WorkspaceSessionMutationResult>;
+    moveSession(
+      request: WorkspaceMoveSessionRequest,
+    ): Promise<WorkspaceSessionMutationResult>;
+    removeSession(
+      request: WorkspaceRemoveSessionRequest,
+    ): Promise<WorkspaceSessionMutationResult>;
+    listUnassignedSessions(): Promise<ChatListSessionsResult>;
+  };
   attachments: {
     pickFiles(request: {
       projectPath?: string;
+      workingDirectory?: string;
       ownerId: string;
       sessionId: string;
     }): Promise<PickAttachmentsResult>;
     importDroppedFiles(
       files: File[],
-      request: { projectPath?: string; ownerId: string; sessionId: string },
+      request: {
+        projectPath?: string;
+        workingDirectory?: string;
+        ownerId: string;
+        sessionId: string;
+      },
     ): Promise<PickAttachmentsResult>;
     importImages(
       request: AttachmentImportImageRequest,

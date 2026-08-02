@@ -41,6 +41,15 @@ import {
   pickProjectResultSchema,
   projectListResultSchema,
   projectSelectRequestSchema,
+  workspaceAddSessionRequestSchema,
+  workspaceArchiveRequestSchema,
+  workspaceCreateRequestSchema,
+  workspaceListResultSchema,
+  workspaceMoveSessionRequestSchema,
+  workspaceRemoveSessionRequestSchema,
+  workspaceSelectRequestSchema,
+  workspaceSessionMutationResultSchema,
+  workspaceUpdateRequestSchema,
 } from "../shared/ipcSchemas.js";
 import type {
   AppSettings,
@@ -52,6 +61,11 @@ import type {
   ChatRespondToExtensionUiRequest,
   ChatRuntimeEvent,
   PiDeckApi,
+  WorkspaceAddSessionRequest,
+  WorkspaceCreateRequest,
+  WorkspaceMoveSessionRequest,
+  WorkspaceRemoveSessionRequest,
+  WorkspaceUpdateRequest,
 } from "../shared/types.js";
 
 async function invokeValidated<TRequest, TResponse>(options: {
@@ -122,31 +136,46 @@ const api: PiDeckApi = Object.freeze({
         request: chatRuntimeStatusRequestSchema.parse(request),
         responseSchema: chatRuntimeStatusSchema,
       }),
-    listSessions: (request?: { projectId?: string }) =>
+    listSessions: (request?: { workspaceId?: string; projectId?: string }) =>
       invokeValidated({
         channel: ipcChannels.chatListSessions,
         request: chatListSessionsRequestSchema.parse(request),
         responseSchema: chatListSessionsResultSchema,
       }),
-    resumeSession: (request: { projectId?: string; sessionFile: string }) =>
+    resumeSession: (request: {
+      workspaceId?: string;
+      projectId?: string;
+      sessionFile: string;
+    }) =>
       invokeValidated({
         channel: ipcChannels.chatResumeSession,
         request: chatResumeSessionRequestSchema.parse(request),
         responseSchema: chatSnapshotSchema,
       }),
-    deleteSession: (request: { projectId?: string; sessionFile: string }) =>
+    deleteSession: (request: {
+      workspaceId?: string;
+      projectId?: string;
+      sessionFile: string;
+    }) =>
       invokeValidated({
         channel: ipcChannels.chatDeleteSession,
         request: chatDeleteSessionRequestSchema.parse(request),
         responseSchema: chatDeleteSessionResultSchema,
       }),
-    deleteAllSessions: (request?: { projectId?: string }) =>
+    deleteAllSessions: (request?: {
+      workspaceId?: string;
+      projectId?: string;
+    }) =>
       invokeValidated({
         channel: ipcChannels.chatDeleteAllSessions,
         request: chatDeleteAllSessionsRequestSchema.parse(request),
         responseSchema: chatDeleteAllSessionsResultSchema,
       }),
-    listModels: (request: { runtimeId?: string; projectId?: string }) =>
+    listModels: (request: {
+      runtimeId?: string;
+      workspaceId?: string;
+      projectId?: string;
+    }) =>
       invokeValidated({
         channel: ipcChannels.chatListModels,
         request: chatListModelsRequestSchema.parse(request),
@@ -210,7 +239,7 @@ const api: PiDeckApi = Object.freeze({
         request: chatCloseSessionRequestSchema.parse(request),
         responseSchema: z.void(),
       }),
-    createSession: (request?: { projectId?: string }) =>
+    createSession: (request?: { workspaceId?: string; projectId?: string }) =>
       invokeValidated({
         channel: ipcChannels.chatCreateSession,
         request: chatCreateSessionRequestSchema.parse(request),
@@ -263,9 +292,72 @@ const api: PiDeckApi = Object.freeze({
         responseSchema: pickProjectResultSchema,
       }),
   }),
+  workspaces: Object.freeze({
+    list: () =>
+      invokeValidated({
+        channel: ipcChannels.workspaceList,
+        request: undefined,
+        responseSchema: workspaceListResultSchema,
+      }),
+    getActive: () =>
+      invokeValidated({
+        channel: ipcChannels.workspaceGetActive,
+        request: undefined,
+        responseSchema: workspaceListResultSchema,
+      }),
+    create: (request: WorkspaceCreateRequest) =>
+      invokeValidated({
+        channel: ipcChannels.workspaceCreate,
+        request: workspaceCreateRequestSchema.parse(request),
+        responseSchema: workspaceListResultSchema,
+      }),
+    update: (request: WorkspaceUpdateRequest) =>
+      invokeValidated({
+        channel: ipcChannels.workspaceUpdate,
+        request: workspaceUpdateRequestSchema.parse(request),
+        responseSchema: workspaceListResultSchema,
+      }),
+    select: (request: { workspaceId: string }) =>
+      invokeValidated({
+        channel: ipcChannels.workspaceSelect,
+        request: workspaceSelectRequestSchema.parse(request),
+        responseSchema: workspaceListResultSchema,
+      }),
+    archive: (request: { workspaceId: string }) =>
+      invokeValidated({
+        channel: ipcChannels.workspaceArchive,
+        request: workspaceArchiveRequestSchema.parse(request),
+        responseSchema: workspaceListResultSchema,
+      }),
+    addSession: (request: WorkspaceAddSessionRequest) =>
+      invokeValidated({
+        channel: ipcChannels.workspaceAddSession,
+        request: workspaceAddSessionRequestSchema.parse(request),
+        responseSchema: workspaceSessionMutationResultSchema,
+      }),
+    moveSession: (request: WorkspaceMoveSessionRequest) =>
+      invokeValidated({
+        channel: ipcChannels.workspaceMoveSession,
+        request: workspaceMoveSessionRequestSchema.parse(request),
+        responseSchema: workspaceSessionMutationResultSchema,
+      }),
+    removeSession: (request: WorkspaceRemoveSessionRequest) =>
+      invokeValidated({
+        channel: ipcChannels.workspaceRemoveSession,
+        request: workspaceRemoveSessionRequestSchema.parse(request),
+        responseSchema: workspaceSessionMutationResultSchema,
+      }),
+    listUnassignedSessions: () =>
+      invokeValidated({
+        channel: ipcChannels.workspaceListUnassignedSessions,
+        request: undefined,
+        responseSchema: chatListSessionsResultSchema,
+      }),
+  }),
   attachments: Object.freeze({
     pickFiles: (request: {
       projectPath?: string;
+      workingDirectory?: string;
       ownerId: string;
       sessionId: string;
     }) =>
@@ -278,6 +370,7 @@ const api: PiDeckApi = Object.freeze({
       files: File[],
       request: {
         projectPath?: string;
+        workingDirectory?: string;
         ownerId: string;
         sessionId: string;
       },
