@@ -24,6 +24,8 @@ import type {
   DiagnosticsSummary,
   ProjectListResult,
   ProjectRef,
+  WorkspaceListResult,
+  WorkspaceRef as SharedWorkspaceRef,
   ThemePreference,
 } from "../shared/types.js";
 import {
@@ -226,21 +228,8 @@ interface SessionViewModel {
  * not use ProjectRef as its identity: a project is an authorized working
  * folder, whereas a workspace is a durable user-named grouping.
  */
-interface WorkspaceRef {
-  id: string;
-  name: string;
-  defaultProjectId?: string;
-  defaultProject?: ProjectRef;
-  legacyProject?: ProjectRef;
-  lastOpenedAt: number;
-  archivedAtMs?: number;
-}
-
-interface WorkspaceListResultCompat {
-  activeWorkspaceId?: string;
-  activeWorkspace?: WorkspaceRef;
-  workspaces: WorkspaceRef[];
-}
+type WorkspaceRef = SharedWorkspaceRef;
+type WorkspaceListResultCompat = WorkspaceListResult;
 
 type WorkspaceCapableApi = {
   workspaces?: {
@@ -636,16 +625,17 @@ export function App(): ReactElement {
       bootstrap: AppBootstrapState,
       generation: number,
     ): Promise<void> {
+      const workspace =
+        workspaceListFromBootstrap(bootstrap).activeWorkspace ??
+        workspaceFromLegacyProject(bootstrap.project);
       try {
-        const listed = await api.chat.listSessions({
-          projectId: bootstrap.project.id,
-        });
-        // Do not let a late startup scan replace a project the user has since
-        // selected, or overwrite a newer explicit refresh.
+        const listed = await listSessionsForWorkspace(api, workspace);
+        // Do not let a late startup scan replace a workspace the user has
+        // since selected, or overwrite a newer explicit refresh.
         if (
           disposed ||
           generation !== sessionListGeneration.current ||
-          currentProjectRef.current.id !== bootstrap.project.id
+          currentWorkspaceRef.current.id !== workspace.id
         ) {
           return;
         }
@@ -656,21 +646,25 @@ export function App(): ReactElement {
                 item.runtimeBacked ||
                 item.draftSession === true ||
                 hasComposerDraft(composerDraftsRef.current, item.id) ||
-                item.projectId !== bootstrap.project.id,
+                item.workspaceId !== workspace.id,
             ),
             listed.sessions.map((summary) =>
-              sessionFromSummary(summary, bootstrap.project.id),
+              sessionFromSummary(
+                summary,
+                workspace.id,
+                projectIdForWorkspace(workspace),
+              ),
             ),
           ),
         );
         setUiMessage(
-          `Real Pi mode active. Found ${listed.sessions.length} saved session(s) for this project.`,
+          `Real Pi mode active. Found ${listed.sessions.length} saved session(s) for this workspace.`,
         );
       } catch (error) {
         if (
           !disposed &&
           generation === sessionListGeneration.current &&
-          currentProjectRef.current.id === bootstrap.project.id
+          currentWorkspaceRef.current.id === workspace.id
         ) {
           setUiMessage(
             `Saved-session refresh failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -783,15 +777,17 @@ export function App(): ReactElement {
         setAppearanceTheme(bootstrap.settings.theme);
 
         if (bootstrap.backendMode === "real") {
-          void api.chat
-            .listModels({ projectId: bootstrap.project.id })
+          const draftProjectId = projectIdForWorkspace(bootstrapWorkspace);
+          if (draftProjectId !== undefined) {
+            void api.chat
+            .listModels({ projectId: draftProjectId })
             .then((result) => {
               if (!disposed) {
                 setProjectModelConfiguration(result);
                 setSessions((items) =>
                   applyPiDefaultsToDraftSessions(
                     items,
-                    bootstrap.project.id,
+                    draftProjectId,
                     result,
                   ),
                 );
@@ -805,6 +801,7 @@ export function App(): ReactElement {
                 });
               }
             });
+          }
           const generation = ++sessionListGeneration.current;
           // Two animation frames guarantee the ready shell has an opportunity
           // to commit and paint before main begins its potentially expensive
@@ -1348,6 +1345,15 @@ export function App(): ReactElement {
     if (session?.isResuming === true) {
       return;
     }
+    if (session !== undefined && session.workspaceId !== currentWorkspace.id) {
+      const owner = workspaces.find((item) => item.id === session.workspaceId);
+      if (owner !== undefined) {
+        // Opening cross-workspace active work changes the grouping view and
+        // the selected row together; the worker itself is never restarted.
+        void switchWorkspaceView(owner, workspaces, session.id);
+        return;
+      }
+    }
     if (
       session?.backendMode === "real" &&
       session.resumeBacked === true &&
@@ -1387,10 +1393,14 @@ export function App(): ReactElement {
     setUiMessage(`Loading previous context for ${session.title}…`);
     try {
       const snapshot = await window.piDeck.chat.resumeSession({
-        projectId: currentProject.id,
+        workspaceId: session.workspaceId,
+        ...(session.projectId !== undefined ? { projectId: session.projectId } : {}),
         sessionFile: session.sessionFile,
       });
-      const resumed = sessionFromSnapshot(snapshot);
+      const resumed = {
+        ...sessionFromSnapshot(snapshot),
+        workspaceId: session.workspaceId,
+      };
       const draftToMove = composerDraftForSession(
         composerDraftsRef.current,
         session.id,
@@ -1581,9 +1591,15 @@ export function App(): ReactElement {
     let createdRuntimeId: string | undefined;
     let backendSession: SessionViewModel | undefined;
     try {
-      let snapshot = await window.piDeck.chat.createSession({
-        projectId: draftSession.projectId ?? currentProject.id,
-      });
+      const draftProjectId = draftSession.projectId ?? projectIdForWorkspace(currentWorkspace);
+      if (draftProjectId === undefined) {
+        throw new Error("Choose a working folder before starting this session.");
+      }
+      let snapshot = await createSessionForWorkspace(
+        window.piDeck,
+        currentWorkspace,
+        draftProjectId,
+      );
       // Configuration RPCs can fail after main has successfully spawned and
       // registered this worker. Retain the original id so this setup attempt
       // can be rolled back instead of becoming an invisible capacity consumer.
@@ -1625,8 +1641,9 @@ export function App(): ReactElement {
           })),
         );
       }
-      const initializedSession = {
+      const initializedSession: SessionViewModel = {
         ...sessionFromSnapshot(snapshot),
+        workspaceId: draftSession.workspaceId,
         title: draftSession.title,
       };
       backendSession = initializedSession;
@@ -2101,6 +2118,145 @@ export function App(): ReactElement {
   }
 
   /**
+   * Workspace navigation is a view transaction.  Saved rows for the target
+   * are refreshed, but drafts and attached runtimes from every other
+   * workspace stay in memory and therefore remain reachable from Active work.
+   */
+  async function switchWorkspaceView(
+    workspace: WorkspaceRef,
+    nextWorkspaces: WorkspaceRef[],
+    preferredSessionId?: string,
+  ): Promise<void> {
+    const sessionListRequest = ++sessionListGeneration.current;
+    setComposerError(null);
+    setProjectModelConfiguration({ models: [], thinkingLevels: [] });
+    setUiMessage(`Opening ${workspace.name}; active Pi work stays attached…`);
+    try {
+      const listed = await listSessionsForWorkspace(window.piDeck, workspace);
+      if (sessionListRequest !== sessionListGeneration.current) {
+        return;
+      }
+      const savedRows = listed.sessions.map((summary) =>
+        sessionFromSummary(
+          summary,
+          workspace.id,
+          projectIdForWorkspace(workspace),
+        ),
+      );
+      const existingRuntime = sessionsRef.current.find(
+        (session) => session.runtimeBacked && session.workspaceId === workspace.id,
+      );
+      const existingDraft = sessionsRef.current.find(
+        (session) => session.draftSession === true && session.workspaceId === workspace.id,
+      );
+      const selectedId =
+        preferredSessionId ??
+        existingRuntime?.id ??
+        existingDraft?.id ??
+        createId("draft-session");
+      const draft =
+        existingRuntime === undefined && existingDraft === undefined
+          ? draftSessionForWorkspace(workspace, selectedId)
+          : undefined;
+      setSessions((items) =>
+        replaceWorkspaceSavedRows(
+          items,
+          workspace.id,
+          draft ? [...savedRows, draft] : savedRows,
+          composerDraftsRef.current,
+        ),
+      );
+      setCurrentWorkspace(workspace);
+      setWorkspaces(nextWorkspaces);
+      if (workspace.defaultProject !== undefined) {
+        setCurrentProject(workspace.defaultProject);
+      }
+      setSelectedSessionId(selectedId);
+      const projectId = projectIdForWorkspace(workspace);
+      if (projectId !== undefined) {
+        void window.piDeck.chat.listModels({ projectId }).then((result) => {
+          if (sessionListRequest === sessionListGeneration.current) {
+            setProjectModelConfiguration(result);
+          }
+        }).catch(() => undefined);
+      }
+      setUiMessage(`Workspace switched to ${workspace.name}. Active work in other workspaces remains available.`);
+    } catch (error) {
+      setUiMessage(`Failed to open workspace: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  async function handleSelectWorkspace(workspace: WorkspaceRef): Promise<void> {
+    try {
+      if (hasWorkspaceApi(window.piDeck)) {
+        const result = await window.piDeck.workspaces.select({ workspaceId: workspace.id });
+        await switchWorkspaceView(result.activeWorkspace ?? workspace, result.workspaces);
+        return;
+      }
+      // Legacy preload: a migrated workspace maps one-to-one to its project.
+      if (workspace.defaultProject !== undefined) {
+        await handleSelectProject(workspace.defaultProject);
+      }
+    } catch (error) {
+      setUiMessage(`Failed to select workspace: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  async function handleNewWorkspace(): Promise<void> {
+    const name = window.prompt("Workspace name");
+    if (name === null || name.trim().length === 0) {
+      return;
+    }
+    const normalizedName = name.trim().replace(/\s+/g, " ");
+    try {
+      if (hasWorkspaceApi(window.piDeck)) {
+        const result = await window.piDeck.workspaces.create({ name: normalizedName });
+        const workspace = result.activeWorkspace ?? result.workspaces.at(-1);
+        if (workspace !== undefined) {
+          await switchWorkspaceView(workspace, result.workspaces);
+        }
+        return;
+      }
+      const workspace: WorkspaceRef = {
+        id: createId("local-workspace"),
+        name: normalizedName,
+        lastOpenedAt: Date.now(),
+      };
+      await switchWorkspaceView(workspace, [...workspaces, workspace]);
+    } catch (error) {
+      setUiMessage(`Failed to create workspace: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  async function handleChooseDefaultWorkingFolder(): Promise<void> {
+    try {
+      const picked = await window.piDeck.projects.pickProject();
+      if (!picked.selected) return;
+      const workspace: WorkspaceRef = {
+        ...currentWorkspace,
+        defaultProjectId: picked.project.id,
+        defaultProject: picked.project,
+      };
+      if (hasWorkspaceApi(window.piDeck)) {
+        const result = await window.piDeck.workspaces.update({
+          workspaceId: workspace.id,
+          defaultProjectId: picked.project.id,
+        });
+        const updated = result.activeWorkspace ?? result.workspaces.find((item) => item.id === workspace.id) ?? workspace;
+        setCurrentWorkspace(updated);
+        setWorkspaces(result.workspaces);
+      } else {
+        setCurrentWorkspace(workspace);
+        setWorkspaces((items) => items.map((item) => item.id === workspace.id ? workspace : item));
+      }
+      setCurrentProject(picked.project);
+      setUiMessage(`Default working folder set to ${picked.project.displayName}.`);
+    } catch (error) {
+      setUiMessage(`Working-folder picker failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /**
    * Project navigation is deliberately a view transaction, not a worker
    * transaction. The project store changes first; only after the destination
    * session list is available do we replace the visible project rows. Attached
@@ -2244,13 +2400,13 @@ export function App(): ReactElement {
       return;
     }
     const sessionListRequest = ++sessionListGeneration.current;
-    const projectId = currentProject.id;
+    const workspace = currentWorkspace;
     setUiMessage("Refreshing saved Pi sessions…");
     try {
-      const result = await window.piDeck.chat.listSessions({ projectId });
+      const result = await listSessionsForWorkspace(window.piDeck, workspace);
       if (
         sessionListRequest !== sessionListGeneration.current ||
-        currentProjectRef.current.id !== projectId
+        currentWorkspaceRef.current.id !== workspace.id
       ) {
         return;
       }
@@ -2263,12 +2419,16 @@ export function App(): ReactElement {
               hasComposerDraft(composerDraftsRef.current, item.id),
           ),
           result.sessions.map((summary) =>
-            sessionFromSummary(summary, projectId),
+            sessionFromSummary(
+              summary,
+              workspace.id,
+              projectIdForWorkspace(workspace),
+            ),
           ),
         ),
       );
       setUiMessage(
-        `Found ${result.sessions.length} saved session(s) for this project.`,
+        `Found ${result.sessions.length} saved session(s) for this workspace.`,
       );
     } catch (error) {
       setUiMessage(
@@ -2278,8 +2438,8 @@ export function App(): ReactElement {
   }
 
   async function handleDeleteAllSessions(): Promise<void> {
-    const projectId = currentProject.id;
-    const savedSessions = savedSessionsForProject(sessions, projectId);
+    const workspaceId = currentWorkspace.id;
+    const savedSessions = savedSessionsForProject(sessions, workspaceId);
     if (savedSessions.length === 0) {
       setUiMessage("No inactive saved sessions to delete.");
       return;
@@ -2295,7 +2455,10 @@ export function App(): ReactElement {
       blockAttachmentOwner(session.id);
     }
     try {
-      const result = await window.piDeck.chat.deleteAllSessions({ projectId });
+      const result = await window.piDeck.chat.deleteAllSessions({
+        workspaceId,
+        projectId: projectIdForWorkspace(currentWorkspace),
+      });
       // Counts are not enough when Pi skips individual files. Main returns
       // the exact canonical files it removed, so drafts on skipped rows stay
       // intact instead of being blanket-discarded.
@@ -2392,7 +2555,8 @@ export function App(): ReactElement {
     }
     try {
       const result = await window.piDeck.chat.deleteSession({
-        projectId: currentProject.id,
+        workspaceId: session.workspaceId,
+        ...(session.projectId !== undefined ? { projectId: session.projectId } : {}),
         sessionFile,
       });
       finalizeSavedSessionDeletion(
@@ -2555,9 +2719,15 @@ export function App(): ReactElement {
   async function handlePickAttachments(): Promise<void> {
     const sessionId = selectedSession.id;
     const ownerId = attachmentOwnerForSession(sessionId);
+    const workingDirectory = workingDirectoryForSession(
+      selectedSession,
+      currentWorkspace,
+    );
     try {
       const result = await window.piDeck.attachments.pickFiles({
-        projectPath: currentProject.canonicalPath,
+        ...(workingDirectory !== undefined
+          ? { workingDirectory }
+          : {}),
         ownerId,
         sessionId,
       });
@@ -2580,9 +2750,15 @@ export function App(): ReactElement {
   ): Promise<void> {
     const sessionId = selectedSession.id;
     const ownerId = attachmentOwnerForSession(sessionId);
+    const workingDirectory = workingDirectoryForSession(
+      selectedSession,
+      currentWorkspace,
+    );
     try {
       const result = await window.piDeck.attachments.importDroppedFiles(files, {
-        projectPath: currentProject.canonicalPath,
+        ...(workingDirectory !== undefined
+          ? { workingDirectory }
+          : {}),
         ownerId,
         sessionId,
       });
@@ -2656,8 +2832,8 @@ export function App(): ReactElement {
   }
 
   async function handleNewSession(): Promise<void> {
-    const next = draftSessionForProject(
-      currentProject,
+    const next = draftSessionForWorkspace(
+      currentWorkspace,
       createId("draft-session"),
       isRealBackendMode ? "real" : "fake",
       isRealBackendMode ? projectModelConfiguration : undefined,
@@ -2670,7 +2846,7 @@ export function App(): ReactElement {
           (item) =>
             item.draftSession !== true ||
             hasComposerDraft(composerDrafts, item.id) ||
-            item.projectId !== currentProject.id,
+            item.workspaceId !== currentWorkspace.id,
         ),
       ),
     );
@@ -2776,7 +2952,7 @@ export function App(): ReactElement {
           sessions={sessions}
           selectedSessionId={selectedSession.id}
           realMode={isRealBackendMode}
-          currentProject={currentProject}
+          currentWorkspace={currentWorkspace}
           composerDrafts={composerDrafts}
           onSelect={handleSelectSession}
           onHideSidebar={() => handleSidebarVisibleChange(false)}
@@ -2796,8 +2972,8 @@ export function App(): ReactElement {
         <AppHeader
           loadState={loadState}
           selectedSession={selectedSession}
-          currentProject={currentProject}
-          recentProjects={recentProjects}
+          currentWorkspace={currentWorkspace}
+          workspaces={workspaces}
           selectedModelId={selectedModelId}
           selectedThinking={selectedThinking}
           realMode={isRealBackendMode}
@@ -2812,8 +2988,9 @@ export function App(): ReactElement {
           onAppearanceThemeChange={(theme) =>
             void handleAppearanceThemeChange(theme)
           }
-          onPickProject={() => void handlePickProject()}
-          onSelectRecent={(project) => void handleSelectProject(project)}
+          onNewWorkspace={() => void handleNewWorkspace()}
+          onChooseDefaultWorkingFolder={() => void handleChooseDefaultWorkingFolder()}
+          onSelectWorkspace={(workspace) => void handleSelectWorkspace(workspace)}
           onModelChange={setSelectedModelId}
           onThinkingChange={(level) => {
             setSelectedThinking(level);
@@ -2938,7 +3115,9 @@ async function createSessionForWorkspace(
       ...(projectId !== undefined ? { projectId } : {}),
     });
   }
-  return api.chat.createSession({ projectId });
+  return api.chat.createSession(
+    projectId === undefined ? {} : { projectId },
+  );
 }
 
 async function selectProjectIfAvailable(
@@ -2972,6 +3151,7 @@ function projectFromCwd(cwd: string): ProjectRef {
 function startupErrorSession(message: string): SessionViewModel {
   return {
     id: "startup-error",
+    workspaceId: "startup-error-workspace",
     title: "Real Pi backend failed",
     project: "Pi Deck",
     projectPath: "No Pi runtime attached",
@@ -3195,6 +3375,25 @@ function mergeSessions(
   return merged;
 }
 
+/** Replace only stale saved rows in one workspace; never evict hidden work. */
+function replaceWorkspaceSavedRows(
+  sessions: SessionViewModel[],
+  workspaceId: string,
+  savedRows: SessionViewModel[],
+  composerDrafts: ComposerDraftsBySession,
+): SessionViewModel[] {
+  return mergeSessions(
+    sessions.filter(
+      (session) =>
+        session.runtimeBacked ||
+        session.draftSession === true ||
+        hasComposerDraft(composerDrafts, session.id) ||
+        session.workspaceId !== workspaceId,
+    ),
+    savedRows,
+  );
+}
+
 function slashCommandFromWorkerCommand(
   command: ChatCommandSummary,
 ): SlashCommand {
@@ -3243,13 +3442,12 @@ function workspaceFromLegacyProject(project: ProjectRef): WorkspaceRef {
     name: project.displayName,
     defaultProjectId: project.id,
     defaultProject: project,
-    legacyProject: project,
     lastOpenedAt: project.lastOpenedAt,
   };
 }
 
 function defaultWorkingDirectory(workspace: WorkspaceRef): string | undefined {
-  const project = workspace.defaultProject ?? workspace.legacyProject;
+  const project = workspace.defaultProject;
   return project?.canonicalPath || project?.path;
 }
 
@@ -3274,6 +3472,7 @@ function draftSessionForWorkspace(
   backendMode: "fake" | "real" = "real",
   configuration?: ChatListModelsResult,
 ): SessionViewModel {
+  const workingDirectory = defaultWorkingDirectory(workspace);
   return {
     ...(configuration?.activeModel
       ? { modelLabel: modelLabelForChatModel(configuration.activeModel) }
@@ -3283,12 +3482,12 @@ function draftSessionForWorkspace(
       : {}),
     id,
     workspaceId: workspace.id,
-    ...(defaultWorkingDirectory(workspace) !== undefined
-      ? { workingDirectory: defaultWorkingDirectory(workspace) }
+    ...(workingDirectory !== undefined
+      ? { workingDirectory }
       : {}),
     title: "Untitled new session",
     project: workspace.name,
-    projectPath: defaultWorkingDirectory(workspace) ?? "No working folder",
+    projectPath: workingDirectory ?? "No working folder",
     ...(workspace.defaultProjectId !== undefined
       ? { projectId: workspace.defaultProjectId }
       : {}),
@@ -4883,7 +5082,7 @@ function SessionSidebar(props: {
   sessions: SessionViewModel[];
   selectedSessionId: string;
   realMode: boolean;
-  currentProject: ProjectRef;
+  currentWorkspace: WorkspaceRef;
   composerDrafts: ComposerDraftsBySession;
   onSelect(sessionId: string): void;
   onHideSidebar(): void;
@@ -4898,7 +5097,7 @@ function SessionSidebar(props: {
   const sidebarSessions = props.realMode
     ? props.sessions.filter(
         (session) =>
-          sessionBelongsToProject(session, props.currentProject.id) &&
+          sessionBelongsToProject(session, props.currentWorkspace.id) &&
           shouldShowSessionInSidebar(
             session,
             hasComposerDraft(props.composerDrafts, session.id),
@@ -4908,7 +5107,7 @@ function SessionSidebar(props: {
   const activeWork = props.realMode
     ? props.sessions.filter(
         (session) =>
-          !sessionBelongsToProject(session, props.currentProject.id) &&
+          !sessionBelongsToProject(session, props.currentWorkspace.id) &&
           isBackgroundActiveWork(session),
       )
     : [];
@@ -4987,9 +5186,9 @@ function SessionSidebar(props: {
       {activeWork.length > 0 ? (
         <section
           className="active-work-list"
-          aria-label="Active work across projects"
+          aria-label="Active work across workspaces"
         >
-          <p className="active-work-heading">Active work · other projects</p>
+          <p className="active-work-heading">Active work · other workspaces</p>
           {activeWork.map((session) => (
             <Button
               className={`session-item active-work-item ${session.id === props.selectedSessionId ? "active" : ""}`}
@@ -5055,7 +5254,7 @@ function SessionSidebar(props: {
             {props.realMode
               ? sessionFilter.trim().length > 0
                 ? "No sessions match this search."
-                : "No sessions in this project yet."
+                : "No sessions in this workspace yet."
               : "No local demo sessions."}
           </p>
         ) : null}
@@ -5335,8 +5534,8 @@ function StatusMark(props: { status: SessionStatus }): ReactElement {
 function AppHeader(props: {
   loadState: LoadState;
   selectedSession: SessionViewModel;
-  currentProject: ProjectRef;
-  recentProjects: ProjectRef[];
+  currentWorkspace: WorkspaceRef;
+  workspaces: WorkspaceRef[];
   selectedModelId: string;
   selectedThinking: string;
   realMode: boolean;
@@ -5347,8 +5546,9 @@ function AppHeader(props: {
   onToggleSidebar(): void;
   onToggleUsageStats(): void;
   onAppearanceThemeChange(theme: ThemePreference): void;
-  onPickProject(): void;
-  onSelectRecent(project: ProjectRef): void;
+  onNewWorkspace(): void;
+  onChooseDefaultWorkingFolder(): void;
+  onSelectWorkspace(workspace: WorkspaceRef): void;
   onModelChange(id: string): void;
   onThinkingChange(id: string): void;
 }): ReactElement {
@@ -5362,13 +5562,14 @@ function AppHeader(props: {
           pressed={props.sidebarVisible}
           onClick={props.onToggleSidebar}
         />
-        <ProjectHeader
-          project={props.currentProject}
+        <WorkspaceHeader
+          workspace={props.currentWorkspace}
           selectedSession={props.selectedSession}
-          recentProjects={props.recentProjects}
+          workspaces={props.workspaces}
           realMode={props.realMode}
-          onPickProject={props.onPickProject}
-          onSelectRecent={props.onSelectRecent}
+          onNewWorkspace={props.onNewWorkspace}
+          onChooseDefaultWorkingFolder={props.onChooseDefaultWorkingFolder}
+          onSelectWorkspace={props.onSelectWorkspace}
         />
       </div>
 
@@ -5506,6 +5707,122 @@ function UsageStatsPanel(props: { session: SessionViewModel }): ReactElement {
       </span>
     </div>
   );
+}
+
+function WorkspaceHeader(props: {
+  workspace: WorkspaceRef;
+  selectedSession: SessionViewModel;
+  workspaces: WorkspaceRef[];
+  realMode: boolean;
+  onNewWorkspace(): void;
+  onChooseDefaultWorkingFolder(): void;
+  onSelectWorkspace(workspace: WorkspaceRef): void;
+}): ReactElement {
+  return (
+    <div className="title-block project-header">
+      <div className="session-heading-line">
+        <h1>{props.selectedSession.title}</h1>
+        <StatusMark status={props.selectedSession.status} />
+      </div>
+      <div className="project-context" aria-label="Current workspace">
+        <WorkspaceSwitcher
+          activeWorkspace={props.workspace}
+          workspaces={props.workspaces}
+          onSelect={props.onSelectWorkspace}
+        />
+        <Button
+          className="workspace-new-button"
+          size="sm"
+          onClick={props.onNewWorkspace}
+        >
+          New workspace…
+        </Button>
+        <Button
+          className="workspace-folder-button"
+          size="sm"
+          variant="subtle"
+          onClick={props.onChooseDefaultWorkingFolder}
+        >
+          <FolderOpen aria-hidden="true" size={14} strokeWidth={1.75} />
+          {defaultWorkingDirectory(props.workspace)
+            ? "Default folder"
+            : "Choose default working folder…"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function WorkspaceSwitcher(props: {
+  activeWorkspace: WorkspaceRef;
+  workspaces: WorkspaceRef[];
+  onSelect(workspace: WorkspaceRef): void;
+}): ReactElement {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent): void => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  const options = workspaceOptions(props.activeWorkspace, props.workspaces);
+  return (
+    <div className="project-switcher-menu workspace-switcher-menu" ref={rootRef}>
+      <Button
+        aria-expanded={open}
+        aria-haspopup="menu"
+        aria-label={`Switch workspace. Current: ${props.activeWorkspace.name}`}
+        className="project-switcher-trigger"
+        data-workspace-id={props.activeWorkspace.id}
+        size="sm"
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span>{props.activeWorkspace.name}</span>
+        <ChevronDown aria-hidden="true" size={13} strokeWidth={1.75} />
+      </Button>
+      {open ? (
+        <div className="project-switcher-popover" role="menu">
+          {options.map((workspace) => {
+            const active = workspace.id === props.activeWorkspace.id;
+            return (
+              <Button
+                aria-current={active ? "true" : undefined}
+                className="project-switcher-option"
+                data-workspace-id={workspace.id}
+                key={workspace.id}
+                role="menuitem"
+                variant="menuItem"
+                onClick={() => {
+                  setOpen(false);
+                  if (!active) props.onSelect(workspace);
+                }}
+              >
+                <Check aria-hidden="true" className="project-switcher-check" size={14} strokeWidth={1.75} visibility={active ? "visible" : "hidden"} />
+                <span className="project-switcher-copy">
+                  <strong>{workspace.name}</strong>
+                  <small>{defaultWorkingDirectory(workspace) ?? "No default folder"}</small>
+                </span>
+              </Button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function workspaceOptions(
+  activeWorkspace: WorkspaceRef,
+  workspaces: WorkspaceRef[],
+): WorkspaceRef[] {
+  const unique = new Map<string, WorkspaceRef>();
+  for (const workspace of [activeWorkspace, ...workspaces]) {
+    if (!unique.has(workspace.id)) unique.set(workspace.id, workspace);
+  }
+  return [...unique.values()].slice(0, 10);
 }
 
 function ProjectHeader(props: {
@@ -7608,6 +7925,8 @@ export const __rendererTestHooks = {
   savedSessionsForProject,
   savedSessionsForDeletedFiles,
   removeSavedSessionsForProject,
+  replaceWorkspaceSavedRows,
+  workingDirectoryForSession,
   runtimeCapabilitiesFor,
   updateRuntimeCapabilities,
   thinkingLevelsForModel,
