@@ -389,7 +389,7 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async (request) =>
       request?.workspaceId
-        ? listWorkspaceChatSessions(request.workspaceId)
+        ? listWorkspaceChatSessions(store, request.workspaceId)
         : listChatSessions(
             store,
             await authorizeRendererChatProject(request?.projectId),
@@ -2222,14 +2222,56 @@ async function listChatSessions(
 }
 
 async function listWorkspaceChatSessions(
+  settings: SettingsStore,
   workspaceId: string,
 ): Promise<ChatListSessionsResult> {
   const workspace = await requireOpenWorkspace(workspaceId);
-  const refs = await ensureWorkspaceStore().getCachedSessionSummaries(
+  let refs = await ensureWorkspaceStore().getCachedSessionSummaries(
     workspace.id,
   );
-  const sessions: ChatListSessionsResult["sessions"] = [];
   const diagnostics: string[] = [];
+  // Compatibility migration: existing directory-backed projects historically
+  // discovered sessions by cwd instead of persisting explicit membership. Keep
+  // migrated workspaces in sync with newly discovered files, but never reclaim
+  // a session that the user explicitly moved to another workspace.
+  if (workspace.legacyProjectId !== undefined) {
+    try {
+      const project = await ensureProjectStore().resolveAuthorizedProject(
+        workspace.legacyProjectId,
+      );
+      const legacy = await listChatSessions(settings, project);
+      diagnostics.push(...legacy.diagnostics);
+      const listed = await ensureWorkspaceStore().list();
+      const ownerByFile = new Map(
+        (
+          await Promise.all(
+            listed.workspaces.map(async (item) =>
+              (await ensureWorkspaceStore().getSessionRefs(item.id)).map(
+                (ref) => [ref.sessionFile, ref.workspaceId] as const,
+              ),
+            ),
+          )
+        ).flat(),
+      );
+      const adoptable = legacy.sessions.filter((session) => {
+        const ownerWorkspaceId = ownerByFile.get(session.sessionFile);
+        return (
+          ownerWorkspaceId === undefined || ownerWorkspaceId === workspace.id
+        );
+      });
+      if (adoptable.length > 0) {
+        await ensureWorkspaceStore().upsertSessionRefs(workspace.id, adoptable);
+        refs = await ensureWorkspaceStore().getCachedSessionSummaries(
+          workspace.id,
+        );
+      }
+    } catch (error) {
+      diagnostics.push(
+        `Legacy working-folder session discovery failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  const sessions: ChatListSessionsResult["sessions"] = [];
   for (const ref of refs) {
     const canonical = await safeRealpath(ref.sessionFile);
     if (canonical === undefined) {
@@ -2473,7 +2515,7 @@ async function deleteAllWorkspaceChatSessions(
   diagnosticsService: DiagnosticsService,
   workspaceId: string,
 ): Promise<ChatDeleteAllSessionsResult> {
-  const listed = await listWorkspaceChatSessions(workspaceId);
+  const listed = await listWorkspaceChatSessions(store, workspaceId);
   const deletedSessionFiles: string[] = [];
   let skippedCount = 0;
   for (const session of listed.sessions) {

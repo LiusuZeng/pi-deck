@@ -189,6 +189,16 @@ function projectSwitcher(page: Page) {
   return page.locator(".project-switcher-trigger");
 }
 
+async function acceptNextConfirmationInPage(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const nativeConfirm = window.confirm;
+    window.confirm = () => {
+      window.confirm = nativeConfirm;
+      return true;
+    };
+  });
+}
+
 function tinyPngBase64(): string {
   const data = Buffer.alloc(24);
   Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(data);
@@ -1133,7 +1143,7 @@ test("failed saved-session deletion preserves the composer draft and attachment 
     // the same keyboard activation path supported by the accessibility test.
     await deleteSession.focus();
     await expect(deleteSession).toBeFocused();
-    page.once("dialog", (dialog) => void dialog.accept());
+    await acceptNextConfirmationInPage(page);
     await page.keyboard.press("Enter");
 
     await expect(page.locator(".ui-status-message")).toHaveText(
@@ -1244,7 +1254,7 @@ test("post-close delete failure keeps the saved file and composer generation res
       .locator(".session-list .session-delete-button")
       .first();
     await deleteSession.focus();
-    page.once("dialog", (dialog) => void dialog.accept());
+    await acceptNextConfirmationInPage(page);
     await page.keyboard.press("Enter");
 
     await expect(page.locator(".ui-status-message")).toHaveText(
@@ -1410,7 +1420,7 @@ test("saved session deletion control is reachable and activated with the keyboar
     await page.keyboard.press("Tab");
     await expect(deleteSession).toBeFocused();
     await expect(deleteSession).toHaveCSS("opacity", "1");
-    page.once("dialog", (dialog) => void dialog.accept());
+    await acceptNextConfirmationInPage(page);
     await page.keyboard.press("Enter");
 
     await expect(page.getByText("Deleted Pi session.")).toBeVisible();

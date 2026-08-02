@@ -458,6 +458,12 @@ const invalidRecentProject: ProjectRef = {
   invalidReason: "Project folder is missing or no longer readable.",
 };
 
+const invalidDemoWorkspace: WorkspaceRef = {
+  id: "demo-deleted-workspace",
+  name: "Deleted project",
+  lastOpenedAt: invalidRecentProject.lastOpenedAt,
+};
+
 const loadingSession: SessionViewModel = {
   id: "loading-session",
   workspaceId: "pending-workspace",
@@ -757,7 +763,11 @@ export function App(): ReactElement {
         setSelectedSessionId(draft.id);
         setCurrentProject(bootstrap.project);
         setCurrentWorkspace(bootstrapWorkspace);
-        setWorkspaces(bootstrapWorkspaceList.workspaces);
+        setWorkspaces(
+          bootstrap.backendMode === "real"
+            ? bootstrapWorkspaceList.workspaces
+            : [...bootstrapWorkspaceList.workspaces, invalidDemoWorkspace],
+        );
         setRecentProjects(
           bootstrap.backendMode === "real"
             ? bootstrap.projects
@@ -5809,6 +5819,7 @@ function WorkspaceSwitcher(props: {
         aria-haspopup="menu"
         aria-label={`Switch workspace. Current: ${props.activeWorkspace.name}`}
         className="project-switcher-trigger"
+        data-project-id={props.activeWorkspace.defaultProjectId}
         data-workspace-id={props.activeWorkspace.id}
         size="sm"
         onClick={() => setOpen((value) => !value)}
