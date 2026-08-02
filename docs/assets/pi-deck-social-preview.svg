@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title description">
+  <title id="title">Pi Deck</title>
+  <desc id="description">Pi Deck, a macOS desktop app for Pi coding agents, shown beside the app interface.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1020"/>
+      <stop offset="0.55" stop-color="#111b35"/>
+      <stop offset="1" stop-color="#172554"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#67e8f9"/>
+      <stop offset="1" stop-color="#818cf8"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="20" stdDeviation="24" flood-color="#020617" flood-opacity="0.6"/>
+    </filter>
+    <clipPath id="screenshot-clip">
+      <rect x="564" y="104" width="648" height="456" rx="14"/>
+    </clipPath>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#background)"/>
+  <circle cx="88" cy="80" r="250" fill="#312e81" opacity="0.23"/>
+  <circle cx="1180" cy="580" r="300" fill="#0e7490" opacity="0.17"/>
+  <path d="M0 522C176 450 322 551 482 514C646 476 715 358 874 390C1025 420 1116 534 1280 462V640H0Z" fill="#020617" opacity="0.22"/>
+
+  <g transform="translate(68 108)">
+    <rect width="62" height="62" rx="17" fill="url(#accent)"/>
+    <path d="M18 18h19.5a6.5 6.5 0 0 1 0 13H31a6.5 6.5 0 1 0 0 13h13" fill="none" stroke="#0b1020" stroke-linecap="round" stroke-linejoin="round" stroke-width="6"/>
+    <circle cx="45" cy="43" r="4" fill="#0b1020"/>
+  </g>
+  <text x="68" y="226" fill="#f8fafc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="76" font-weight="700" letter-spacing="-3">Pi Deck</text>
+  <rect x="68" y="258" width="112" height="6" rx="3" fill="url(#accent)"/>
+  <text x="68" y="322" fill="#cbd5e1" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="30" font-weight="500">macOS desktop app for</text>
+  <text x="68" y="362" fill="#cbd5e1" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="30" font-weight="500">Pi coding agents</text>
+  <text x="68" y="454" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="19">Run, monitor, and steer multiple sessions</text>
+  <text x="68" y="484" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="19">from one local workspace.</text>
+
+  <rect x="548" y="88" width="680" height="488" rx="20" fill="#020617" opacity="0.58" filter="url(#shadow)"/>
+  <rect x="554" y="94" width="668" height="476" rx="17" fill="#0f172a" stroke="#475569" stroke-opacity="0.55" stroke-width="2"/>
+  <g clip-path="url(#screenshot-clip)">
+    <image href="pi-deck-dark.png" x="564" y="104" width="729.6" height="456" preserveAspectRatio="xMidYMid slice"/>
+  </g>
+  <rect x="564" y="104" width="648" height="456" rx="14" fill="none" stroke="#94a3b8" stroke-opacity="0.26"/>
+</svg>
