@@ -837,31 +837,28 @@ export function App(): ReactElement {
         setAppearanceTheme(bootstrap.settings.theme);
 
         if (bootstrap.backendMode === "real") {
-          const draftProjectId = projectIdForWorkspace(bootstrapWorkspace);
-          if (draftProjectId !== undefined) {
-            void api.chat
-              .listModels({ projectId: draftProjectId })
-              .then((result) => {
-                if (!disposed) {
-                  setProjectModelConfiguration(result);
-                  setSessions((items) =>
-                    applyPiDefaultsToDraftSessions(
-                      items,
-                      draftProjectId,
-                      result,
-                    ),
-                  );
-                }
-              })
-              .catch(() => {
-                if (!disposed) {
-                  setProjectModelConfiguration({
-                    models: [],
-                    thinkingLevels: [],
-                  });
-                }
-              });
-          }
+          void api.chat
+            .listModels(modelDiscoveryRequestForWorkspace(bootstrapWorkspace))
+            .then((result) => {
+              if (!disposed) {
+                setProjectModelConfiguration(result);
+                setSessions((items) =>
+                  applyPiDefaultsToDraftSessions(
+                    items,
+                    bootstrapWorkspace.id,
+                    result,
+                  ),
+                );
+              }
+            })
+            .catch(() => {
+              if (!disposed) {
+                setProjectModelConfiguration({
+                  models: [],
+                  thinkingLevels: [],
+                });
+              }
+            });
           const generation = ++sessionListGeneration.current;
           // Two animation frames guarantee the ready shell has an opportunity
           // to commit and paint before main begins its potentially expensive
@@ -1653,48 +1650,8 @@ export function App(): ReactElement {
     let createdRuntimeId: string | undefined;
     let backendSession: SessionViewModel | undefined;
     try {
-      let draftProjectId =
+      const draftProjectId =
         draftSession.projectId ?? projectIdForWorkspace(currentWorkspace);
-      if (draftProjectId === undefined) {
-        setUiMessage(
-          "Choose a working folder for this session before Pi starts…",
-        );
-        const picked = await window.piDeck.projects.pickProject();
-        if (!picked.selected) {
-          unblockAttachmentOwner(draftSession.id);
-          setSessions((items) =>
-            items.map((session) =>
-              session.id === draftSession.id
-                ? {
-                    ...session,
-                    status: "idle",
-                    baseState: "idle",
-                    subtitle: "Idle · choose a working folder before sending",
-                  }
-                : session,
-            ),
-          );
-          setUiMessage(
-            "Working-folder picker canceled. This workspace remains folderless.",
-          );
-          return;
-        }
-        draftProjectId = picked.project.id;
-        setSessions((items) =>
-          items.map((session) =>
-            session.id === draftSession.id
-              ? {
-                  ...session,
-                  projectId: picked.project.id,
-                  workingDirectory:
-                    picked.project.canonicalPath || picked.project.path,
-                  projectPath:
-                    picked.project.canonicalPath || picked.project.path,
-                }
-              : session,
-          ),
-        );
-      }
       let snapshot = await createSessionForWorkspace(
         window.piDeck,
         currentWorkspace,
@@ -2274,17 +2231,17 @@ export function App(): ReactElement {
         setCurrentProject(workspace.defaultProject);
       }
       setSelectedSessionId(selectedId);
-      const projectId = projectIdForWorkspace(workspace);
-      if (projectId !== undefined) {
-        void window.piDeck.chat
-          .listModels({ projectId })
-          .then((result) => {
-            if (sessionListRequest === sessionListGeneration.current) {
-              setProjectModelConfiguration(result);
-            }
-          })
-          .catch(() => undefined);
-      }
+      void window.piDeck.chat
+        .listModels(modelDiscoveryRequestForWorkspace(workspace))
+        .then((result) => {
+          if (sessionListRequest === sessionListGeneration.current) {
+            setProjectModelConfiguration(result);
+            setSessions((items) =>
+              applyPiDefaultsToDraftSessions(items, workspace.id, result),
+            );
+          }
+        })
+        .catch(() => undefined);
       setUiMessage(
         `Workspace switched to ${workspace.name}. Active work in other workspaces remains available.`,
       );
@@ -2530,43 +2487,6 @@ export function App(): ReactElement {
       );
     } finally {
       setWorkspaceDialogBusy(false);
-    }
-  }
-
-  async function handleChooseDefaultWorkingFolder(): Promise<void> {
-    try {
-      const picked = await window.piDeck.projects.pickProject();
-      if (!picked.selected) return;
-      const workspace: WorkspaceRef = {
-        ...currentWorkspace,
-        defaultProjectId: picked.project.id,
-        defaultProject: picked.project,
-      };
-      if (hasWorkspaceApi(window.piDeck)) {
-        const result = await window.piDeck.workspaces.update({
-          workspaceId: workspace.id,
-          defaultProjectId: picked.project.id,
-        });
-        const updated =
-          result.activeWorkspace ??
-          result.workspaces.find((item) => item.id === workspace.id) ??
-          workspace;
-        setCurrentWorkspace(updated);
-        setWorkspaces(result.workspaces);
-      } else {
-        setCurrentWorkspace(workspace);
-        setWorkspaces((items) =>
-          items.map((item) => (item.id === workspace.id ? workspace : item)),
-        );
-      }
-      setCurrentProject(picked.project);
-      setUiMessage(
-        `Default working folder set to ${picked.project.displayName}.`,
-      );
-    } catch (error) {
-      setUiMessage(
-        `Working-folder picker failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
     }
   }
 
@@ -3328,9 +3248,6 @@ export function App(): ReactElement {
           onNewWorkspace={() => void handleNewWorkspace()}
           onRenameWorkspace={() => setWorkspaceDialog({ kind: "rename" })}
           onArchiveWorkspace={() => setWorkspaceDialog({ kind: "archive" })}
-          onChooseDefaultWorkingFolder={() =>
-            void handleChooseDefaultWorkingFolder()
-          }
           onSelectWorkspace={(workspace) =>
             void handleSelectWorkspace(workspace)
           }
@@ -3466,6 +3383,17 @@ async function listSessionsForWorkspace(
 
 function projectIdForWorkspace(workspace: WorkspaceRef): string | undefined {
   return workspace.defaultProjectId ?? workspace.defaultProject?.id;
+}
+
+function modelDiscoveryRequestForWorkspace(workspace: WorkspaceRef): {
+  workspaceId: string;
+  projectId?: string;
+} {
+  const projectId = projectIdForWorkspace(workspace);
+  return {
+    workspaceId: workspace.id,
+    ...(projectId !== undefined ? { projectId } : {}),
+  };
 }
 
 function workingDirectoryForSession(
@@ -3861,14 +3789,14 @@ function slashCommandFromWorkerCommand(
 
 function applyPiDefaultsToDraftSessions(
   sessions: SessionViewModel[],
-  projectId: string,
+  workspaceId: string,
   configuration: ChatListModelsResult,
 ): SessionViewModel[] {
   const modelLabel = configuration.activeModel
     ? modelLabelForChatModel(configuration.activeModel)
     : undefined;
   return sessions.map((session) =>
-    session.projectId === projectId && session.draftSession === true
+    session.workspaceId === workspaceId && session.draftSession === true
       ? {
           ...session,
           ...(session.modelLabel === undefined && modelLabel !== undefined
@@ -3936,7 +3864,7 @@ function draftSessionForWorkspace(
     ...(workingDirectory !== undefined ? { workingDirectory } : {}),
     title: "Untitled new session",
     project: workspace.name,
-    projectPath: workingDirectory ?? "No working folder",
+    projectPath: workingDirectory ?? "Managed context",
     ...(workspace.defaultProjectId !== undefined
       ? { projectId: workspace.defaultProjectId }
       : {}),
@@ -6062,7 +5990,6 @@ function AppHeader(props: {
   onNewWorkspace(): void;
   onRenameWorkspace(): void;
   onArchiveWorkspace(): void;
-  onChooseDefaultWorkingFolder(): void;
   onSelectWorkspace(workspace: WorkspaceRef): void;
   onModelChange(id: string): void;
   onThinkingChange(id: string): void;
@@ -6085,7 +6012,6 @@ function AppHeader(props: {
           onNewWorkspace={props.onNewWorkspace}
           onRenameWorkspace={props.onRenameWorkspace}
           onArchiveWorkspace={props.onArchiveWorkspace}
-          onChooseDefaultWorkingFolder={props.onChooseDefaultWorkingFolder}
           onSelectWorkspace={props.onSelectWorkspace}
         />
       </div>
@@ -6615,7 +6541,6 @@ function WorkspaceHeader(props: {
   onNewWorkspace(): void;
   onRenameWorkspace(): void;
   onArchiveWorkspace(): void;
-  onChooseDefaultWorkingFolder(): void;
   onSelectWorkspace(workspace: WorkspaceRef): void;
 }): ReactElement {
   return (
@@ -6659,17 +6584,6 @@ function WorkspaceHeader(props: {
             Archive workspace
           </Button>
         </Menu>
-        <Button
-          className="workspace-folder-button"
-          size="sm"
-          variant="subtle"
-          onClick={props.onChooseDefaultWorkingFolder}
-        >
-          <FolderOpen aria-hidden="true" size={14} strokeWidth={1.75} />
-          {defaultWorkingDirectory(props.workspace)
-            ? "Default folder"
-            : "Choose default working folder…"}
-        </Button>
       </div>
     </div>
   );
@@ -6736,9 +6650,6 @@ function WorkspaceSwitcher(props: {
                 />
                 <span className="project-switcher-copy">
                   <strong>{workspace.name}</strong>
-                  <small>
-                    {defaultWorkingDirectory(workspace) ?? "No default folder"}
-                  </small>
                 </span>
               </Button>
             );
@@ -8873,5 +8784,7 @@ export const __rendererTestHooks = {
   thinkingLevelsForModel,
   clampThinkingLevel,
   applyPiDefaultsToDraftSessions,
+  modelDiscoveryRequestForWorkspace,
+  draftSessionForWorkspace,
   draftSessionForProject,
 };

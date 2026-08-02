@@ -641,6 +641,80 @@ describe("Pi draft defaults and thinking capabilities", () => {
     expect(draft.modelLabel).toBe("openai-codex / gpt-5.6-sol");
     expect(draft.thinkingLevel).toBe("xhigh");
   });
+
+  it("discovers models through a folderless workspace", () => {
+    expect(
+      __rendererTestHooks.modelDiscoveryRequestForWorkspace({
+        id: "workspace-folderless",
+        name: "Folderless",
+        lastOpenedAt: 1,
+      }),
+    ).toEqual({ workspaceId: "workspace-folderless" });
+
+    expect(
+      __rendererTestHooks.modelDiscoveryRequestForWorkspace({
+        id: "workspace-migrated",
+        name: "Migrated",
+        defaultProjectId: "project-a",
+        lastOpenedAt: 1,
+      }),
+    ).toEqual({
+      workspaceId: "workspace-migrated",
+      projectId: "project-a",
+    });
+  });
+
+  it("applies folderless workspace defaults without replacing draft choices", () => {
+    const configuration = {
+      models: [],
+      activeModel: {
+        id: "gpt-5.6-sol",
+        name: "GPT-5.6 Sol",
+        provider: "openai-codex",
+      },
+      thinkingLevel: "high",
+      thinkingLevels: ["off", "low", "high"],
+    };
+    const untouchedChoice = {
+      ...baseSession(),
+      id: "chosen-draft",
+      workspaceId: "workspace-folderless",
+      draftSession: true,
+      runtimeBacked: false,
+      modelLabel: "another-provider / chosen-model",
+      thinkingLevel: "low",
+    };
+    const emptyFolderlessDraft = {
+      ...baseSession(),
+      id: "empty-draft",
+      workspaceId: "workspace-folderless",
+      draftSession: true,
+      runtimeBacked: false,
+      projectId: undefined,
+    };
+    const otherWorkspaceDraft = {
+      ...emptyFolderlessDraft,
+      id: "other-draft",
+      workspaceId: "workspace-other",
+    };
+
+    const updated = __rendererTestHooks.applyPiDefaultsToDraftSessions(
+      [untouchedChoice, emptyFolderlessDraft, otherWorkspaceDraft] as any,
+      "workspace-folderless",
+      configuration,
+    );
+
+    expect(updated[0]).toMatchObject({
+      modelLabel: "another-provider / chosen-model",
+      thinkingLevel: "low",
+    });
+    expect(updated[1]).toMatchObject({
+      modelLabel: "openai-codex / gpt-5.6-sol",
+      thinkingLevel: "high",
+    });
+    expect(updated[2]).not.toHaveProperty("modelLabel");
+    expect(updated[2]).not.toHaveProperty("thinkingLevel");
+  });
 });
 
 describe("renderer session actions", () => {
