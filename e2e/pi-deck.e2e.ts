@@ -176,7 +176,8 @@ test("real-mode workspace membership lifecycle stays explicit and reversible", a
         defaultProjectId,
       });
       const source = first.activeWorkspace;
-      if (source === undefined) throw new Error("Source workspace was not selected.");
+      if (source === undefined)
+        throw new Error("Source workspace was not selected.");
       const second = await api.workspaces.create({
         name: "Lifecycle destination",
         defaultProjectId,
@@ -232,7 +233,9 @@ test("real-mode workspace membership lifecycle stays explicit and reversible", a
         destinationAfterRemove: destinationAfterRemove.sessions,
         unassigned: unassigned.sessions,
         activeWorkspaceId: archived.activeWorkspaceId,
-        remainingWorkspaceIds: archived.workspaces.map((workspace) => workspace.id),
+        remainingWorkspaceIds: archived.workspaces.map(
+          (workspace) => workspace.id,
+        ),
       };
     }, canonicalSessionFile);
 
@@ -240,9 +243,9 @@ test("real-mode workspace membership lifecycle stays explicit and reversible", a
       workspaceId: outcome.sourceId,
       sessionFile: canonicalSessionFile,
     });
-    expect(outcome.sourceAfterAdd.map((session) => session.sessionFile)).toEqual([
-      canonicalSessionFile,
-    ]);
+    expect(
+      outcome.sourceAfterAdd.map((session) => session.sessionFile),
+    ).toEqual([canonicalSessionFile]);
     expect(outcome.destinationBeforeMove).toEqual([]);
     expect(outcome.moved).toMatchObject({
       workspaceId: outcome.destinationId,
@@ -264,6 +267,93 @@ test("real-mode workspace membership lifecycle stays explicit and reversible", a
     );
   } finally {
     await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("removed legacy workspace sessions stay excluded and survive bulk delete", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-workspace-exclusion-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const sessionDir = path.join(agentDir, "sessions", "--workspace-exclusion--");
+  const sessionFile = path.join(sessionDir, "keep-on-disk.jsonl");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(sessionDir, { recursive: true });
+  fs.writeFileSync(
+    sessionFile,
+    `${JSON.stringify({
+      type: "session",
+      version: 3,
+      id: "keep-on-disk",
+      timestamp: "2026-08-01T00:00:00.000Z",
+      cwd: projectCwd,
+    })}\n`,
+  );
+  const canonicalSessionFile = fs.realpathSync(sessionFile);
+  const env = fakeRealModeEnv({ root, projectCwd, agentDir });
+
+  const firstLaunch = await launchPiDeck(env);
+  try {
+    await expectHealthyPreload(firstLaunch.page);
+    const outcome = await firstLaunch.page.evaluate(async (sessionFile) => {
+      const api = window.piDeck;
+      const listedWorkspaces = await api.workspaces.getActive();
+      const workspace = listedWorkspaces.activeWorkspace;
+      if (workspace === undefined) {
+        throw new Error("Expected a migrated active workspace.");
+      }
+      const before = await api.chat.listSessions({
+        workspaceId: workspace.id,
+      });
+      await api.workspaces.removeSession({
+        workspaceId: workspace.id,
+        sessionFile,
+      });
+      const afterRemove = await api.chat.listSessions({
+        workspaceId: workspace.id,
+      });
+      const deleted = await api.chat.deleteAllSessions({
+        workspaceId: workspace.id,
+      });
+      return {
+        workspaceId: workspace.id,
+        before: before.sessions,
+        afterRemove: afterRemove.sessions,
+        deleted,
+      };
+    }, canonicalSessionFile);
+
+    expect(outcome.before.map((session) => session.sessionFile)).toContain(
+      canonicalSessionFile,
+    );
+    expect(outcome.afterRemove).toEqual([]);
+    expect(outcome.deleted).toMatchObject({
+      deletedCount: 0,
+      deletedSessionFiles: [],
+    });
+    expect(fs.existsSync(canonicalSessionFile)).toBe(true);
+  } finally {
+    await firstLaunch.app.close().catch(() => undefined);
+  }
+
+  const secondLaunch = await launchPiDeck(env);
+  try {
+    await expectHealthyPreload(secondLaunch.page);
+    const sessions = await secondLaunch.page.evaluate(async () => {
+      const api = window.piDeck;
+      const listedWorkspaces = await api.workspaces.getActive();
+      const workspace = listedWorkspaces.activeWorkspace;
+      if (workspace === undefined) {
+        throw new Error("Expected a migrated active workspace.");
+      }
+      return api.chat.listSessions({ workspaceId: workspace.id });
+    });
+    expect(sessions.sessions).toEqual([]);
+    expect(fs.existsSync(canonicalSessionFile)).toBe(true);
+  } finally {
+    await secondLaunch.app.close().catch(() => undefined);
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
