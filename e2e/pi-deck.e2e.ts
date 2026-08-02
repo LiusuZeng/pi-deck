@@ -134,6 +134,208 @@ async function expectHealthyPreload(page: Page): Promise<void> {
   ).toBeVisible();
 }
 
+function writePiSessionFixture(options: {
+  sessionFile: string;
+  sessionId: string;
+  projectCwd: string;
+}): void {
+  fs.mkdirSync(path.dirname(options.sessionFile), { recursive: true });
+  fs.writeFileSync(
+    options.sessionFile,
+    `${JSON.stringify({
+      type: "session",
+      version: 3,
+      id: options.sessionId,
+      timestamp: "2026-08-01T00:00:00.000Z",
+      cwd: options.projectCwd,
+    })}\n`,
+  );
+}
+
+async function createWorkspaceInUi(page: Page, name: string): Promise<void> {
+  await page.getByRole("button", { name: "New workspace…" }).click();
+  const dialog = page.getByTestId("workspace-create-dialog");
+  await expect(dialog).toBeVisible();
+  await dialog.getByLabel("Workspace name").fill(name);
+  await dialog.getByRole("button", { name: "Create workspace" }).click();
+  await expect(
+    page.getByRole("button", {
+      name: `Switch workspace. Current: ${name}`,
+    }),
+  ).toBeVisible();
+}
+
+async function openWorkspaceActions(page: Page, name: string): Promise<void> {
+  await page
+    .getByRole("button", { name: `Workspace actions for ${name}` })
+    .click();
+}
+
+async function selectWorkspaceInUi(page: Page, name: string): Promise<void> {
+  const switcher = page.getByTestId("workspace-switcher");
+  await switcher.getByRole("button").click();
+  await switcher.getByRole("menuitem", { name }).click();
+  await expect(
+    page.getByRole("button", {
+      name: `Switch workspace. Current: ${name}`,
+    }),
+  ).toBeVisible();
+}
+
+async function confirmDeleteSessionDialog(page: Page): Promise<void> {
+  const dialog = page.getByTestId("session-delete-dialog");
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "Delete session" }).click();
+}
+
+test("workspace management UI keeps Pi JSONL membership reversible and deletion explicit", async () => {
+  // The fixture JSONL is written directly to the deterministic fake-real-mode
+  // repository, then discovered and managed exclusively through visible app
+  // controls. No native picker, prompt, or confirmation dialog is invoked.
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-workspace-management-ui-"),
+  );
+  const projectCwd = path.join(root, "authorized-project");
+  const agentDir = path.join(root, "agent");
+  const sessionFile = path.join(
+    agentDir,
+    "sessions",
+    "--workspace-ui--",
+    "ui-membership.jsonl",
+  );
+  fs.mkdirSync(projectCwd, { recursive: true });
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: ["--stream-delay-ms", "20000"],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+
+    // An attached runtime is a workspace-level archival guard. Exercise it
+    // through the visible confirmation instead of relying on a backend error.
+    await page.getByLabel("Prompt text").fill("keep archive disabled");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(page.getByRole("button", { name: "Abort" })).toBeVisible();
+    await openWorkspaceActions(page, "authorized-project");
+    await page.getByRole("menuitem", { name: "Archive workspace" }).click();
+    const blockedArchiveDialog = page.getByTestId("workspace-archive-dialog");
+    await expect(
+      blockedArchiveDialog.getByRole("button", { name: "Archive workspace" }),
+    ).toBeDisabled();
+    await expect(blockedArchiveDialog).toContainText(
+      "Close attached sessions before archiving this workspace.",
+    );
+    await blockedArchiveDialog.getByRole("button", { name: "Cancel" }).click();
+
+    await createWorkspaceInUi(page, "UI source");
+    await openWorkspaceActions(page, "UI source");
+    await page.getByRole("menuitem", { name: "Rename workspace" }).click();
+    const renameDialog = page.getByTestId("workspace-rename-dialog");
+    await expect(renameDialog).toBeVisible();
+    await renameDialog.getByLabel("Workspace name").fill("UI source renamed");
+    await renameDialog.getByRole("button", { name: "Save name" }).click();
+    await expect(
+      page.getByRole("button", {
+        name: "Switch workspace. Current: UI source renamed",
+      }),
+    ).toBeVisible();
+
+    // Seed after startup so this file has no pre-existing workspace owner.
+    writePiSessionFixture({
+      sessionFile,
+      sessionId: "workspace-ui-membership",
+      projectCwd,
+    });
+    const canonicalSessionFile = fs.realpathSync(sessionFile);
+    await page.getByRole("button", { name: "Add existing session…" }).click();
+    const unassignedDialog = page.getByTestId("unassigned-sessions");
+    await expect(unassignedDialog).toBeVisible();
+    await expect(unassignedDialog.getByText("ui-membership")).toBeVisible();
+    await unassignedDialog.getByRole("checkbox").check();
+    await unassignedDialog
+      .getByRole("button", { name: "Add selected sessions" })
+      .click();
+    const sessionRow = page.getByRole("button", {
+      name: "Session: ui-membership",
+    });
+    await expect(sessionRow).toBeVisible();
+
+    await createWorkspaceInUi(page, "UI destination");
+    await selectWorkspaceInUi(page, "UI source renamed");
+    const sessionActions = page.getByRole("button", {
+      name: "Session actions for ui-membership",
+    });
+    await sessionActions.click();
+    await page.getByRole("menuitem", { name: "Move to workspace…" }).click();
+    const moveDialog = page.getByTestId("session-move-dialog");
+    await expect(moveDialog).toBeVisible();
+    await moveDialog
+      .getByLabel("Destination workspace")
+      .selectOption({ label: "UI destination" });
+    await moveDialog.getByRole("button", { name: "Move session" }).click();
+    await expect(sessionRow).toHaveCount(0);
+    expect(fs.existsSync(canonicalSessionFile)).toBe(true);
+
+    // The source is empty after move. Archiving changes only workspace
+    // metadata, which is intentionally independent from the Pi JSONL file.
+    await openWorkspaceActions(page, "UI source renamed");
+    await page.getByRole("menuitem", { name: "Archive workspace" }).click();
+    const archiveDialog = page.getByTestId("workspace-archive-dialog");
+    await expect(archiveDialog).toBeVisible();
+    await archiveDialog
+      .getByRole("button", { name: "Archive workspace" })
+      .click();
+    await expect(
+      page.getByRole("button", {
+        name: "Switch workspace. Current: UI source renamed",
+      }),
+    ).toHaveCount(0);
+    expect(fs.existsSync(canonicalSessionFile)).toBe(true);
+
+    await selectWorkspaceInUi(page, "UI destination");
+    await expect(sessionRow).toBeVisible();
+    await page
+      .getByRole("button", { name: "Session actions for ui-membership" })
+      .click();
+    await page
+      .getByRole("menuitem", { name: "Remove from workspace" })
+      .click();
+    const removeDialog = page.getByTestId("session-remove-dialog");
+    await expect(removeDialog).toBeVisible();
+    await removeDialog
+      .getByRole("button", { name: "Remove from workspace" })
+      .click();
+    await expect(sessionRow).toHaveCount(0);
+    expect(fs.existsSync(canonicalSessionFile)).toBe(true);
+
+    // Re-importing the now-unassigned file makes the destructive action an
+    // explicit, separately confirmed operation rather than a side effect of
+    // removing workspace membership.
+    await page.getByRole("button", { name: "Add existing session…" }).click();
+    await expect(unassignedDialog).toBeVisible();
+    await expect(unassignedDialog.getByText("ui-membership")).toBeVisible();
+    await unassignedDialog.getByRole("checkbox").check();
+    await unassignedDialog
+      .getByRole("button", { name: "Add selected sessions" })
+      .click();
+    await expect(sessionRow).toBeVisible();
+    await page
+      .getByRole("button", { name: "Session actions for ui-membership" })
+      .click();
+    await page.getByRole("menuitem", { name: "Delete session…" }).click();
+    await confirmDeleteSessionDialog(page);
+    await expect(sessionRow).toHaveCount(0);
+    expect(fs.existsSync(canonicalSessionFile)).toBe(false);
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("real-mode workspace membership lifecycle stays explicit and reversible", async () => {
   // This deliberately calls preload APIs from the hidden Electron window. It
   // never invokes a native dialog or file picker, so it is safe for CI and
@@ -411,16 +613,6 @@ async function stopRuntimeExitTracking(page: Page): Promise<void> {
 
 function projectSwitcher(page: Page) {
   return page.locator(".project-switcher-trigger");
-}
-
-async function acceptNextConfirmationInPage(page: Page): Promise<void> {
-  await page.evaluate(() => {
-    const nativeConfirm = window.confirm;
-    window.confirm = () => {
-      window.confirm = nativeConfirm;
-      return true;
-    };
-  });
 }
 
 function tinyPngBase64(): string {
@@ -1341,17 +1533,12 @@ test("failed saved-session deletion preserves the composer draft and attachment 
     }, runtimeSessionFile as string);
     expect(validationError).toMatch(/belongs to a different project/i);
 
-    const deleteSession = page
-      .locator(".session-list .session-delete-button")
-      .first();
-    await expect(deleteSession).toBeVisible();
-    await expect(deleteSession).toHaveAttribute("aria-label", /^Delete /);
-    // The sidebar row overlaps its trailing icon on this narrow fixture; use
-    // the same keyboard activation path supported by the accessibility test.
-    await deleteSession.focus();
-    await expect(deleteSession).toBeFocused();
-    await acceptNextConfirmationInPage(page);
-    await page.keyboard.press("Enter");
+    const sessionActions = page.getByRole("button", {
+      name: "Session actions for preserve-draft",
+    });
+    await sessionActions.click();
+    await page.getByRole("menuitem", { name: "Delete session…" }).click();
+    await confirmDeleteSessionDialog(page);
 
     await expect(page.locator(".ui-status-message")).toHaveText(
       /Failed to delete session:/,
@@ -1457,12 +1644,12 @@ test("post-close delete failure keeps the saved file and composer generation res
     });
     await expect(page.getByRole("button", { name: "Abort" })).toBeVisible();
 
-    const deleteSession = page
-      .locator(".session-list .session-delete-button")
-      .first();
-    await deleteSession.focus();
-    await acceptNextConfirmationInPage(page);
-    await page.keyboard.press("Enter");
+    const sessionActions = page.getByRole("button", {
+      name: "Session actions for post-close-delete",
+    });
+    await sessionActions.click();
+    await page.getByRole("menuitem", { name: "Delete session…" }).click();
+    await confirmDeleteSessionDialog(page);
 
     await expect(page.locator(".ui-status-message")).toHaveText(
       /Failed to delete session after closing its runtime/,
@@ -1618,17 +1805,20 @@ test("saved session deletion control is reachable and activated with the keyboar
     const sessionRow = page.getByRole("button", {
       name: "Session: keyboard-delete",
     });
-    const deleteSession = page.getByRole("button", {
-      name: "Delete keyboard-delete",
+    const sessionActions = page.getByRole("button", {
+      name: "Session actions for keyboard-delete",
     });
     await expect(sessionRow).toBeVisible();
 
     await sessionRow.focus();
     await page.keyboard.press("Tab");
-    await expect(deleteSession).toBeFocused();
-    await expect(deleteSession).toHaveCSS("opacity", "1");
-    await acceptNextConfirmationInPage(page);
+    await expect(sessionActions).toBeFocused();
     await page.keyboard.press("Enter");
+    await expect(
+      page.getByRole("menuitem", { name: "Delete session…" }),
+    ).toBeVisible();
+    await page.getByRole("menuitem", { name: "Delete session…" }).click();
+    await confirmDeleteSessionDialog(page);
 
     await expect(page.getByText("Deleted Pi session.")).toBeVisible();
     await expect(sessionRow).toHaveCount(0);
