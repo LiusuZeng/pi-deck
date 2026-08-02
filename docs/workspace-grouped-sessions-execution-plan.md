@@ -1,6 +1,6 @@
 # Workspace-Grouped Sessions Execution Plan
 
-Status: implementation in progress  
+Status: implemented and verified
 Date: 2026-08-01  
 Supersedes for new work: `project-grouped-sessions-p0-plan.md`  
 Compatibility baseline: existing directory-backed Projects remain readable during migration
@@ -12,23 +12,33 @@ Introduce a first-class **Workspace** that groups related Pi sessions by user in
 The product vocabulary is:
 
 - **Workspace**: a durable, user-named container for related sessions.
-- **Working folder**: a registered local directory used as a Pi execution context.
-- **Session**: one Pi-native conversation, assigned to exactly one workspace and retaining its own actual `cwd`.
+- **Managed runtime context**: an app-owned internal directory used only because
+  the Pi process requires an OS `cwd`; it is not workspace identity and is not
+  selected by the user.
+- **Session**: one Pi-native conversation assigned to exactly one workspace.
+  Imported/legacy sessions retain their recorded `cwd`; new general sessions
+  use the managed runtime context.
 
-A workspace may have no default working folder. Sessions in one workspace may use different working folders. Pi session JSONL files remain authoritative for conversation history and are never moved or rewritten by this feature.
+A workspace has no required filesystem directory. Compatibility data may retain
+an old project/default reference, but creating or using a new workspace never
+asks for a folder. Pi session JSONL files remain authoritative for conversation
+history and are never moved or rewritten by this feature.
 
 ## 2. Non-Negotiable Invariants
 
 1. Workspace IDs are opaque UUIDs and never filesystem paths.
 2. A canonical `sessionFile` belongs to at most one workspace in the first release.
 3. Workspace membership is explicit and app-owned; cwd inference is used only for migration/import suggestions.
-4. Pi still launches in a concrete cwd:
-   - new session: request working folder, then workspace default, otherwise require a user choice;
-   - resumed session: validated cwd from the Pi JSONL header.
+4. Pi still launches in a concrete cwd as an internal implementation detail:
+   - new general session: Pi Deck's managed runtime context below `PI_DECK_HOME`;
+   - migrated session with an explicit compatibility project: that validated project;
+   - resumed/imported session: validated cwd from the Pi JSONL header.
+   No new-workspace flow opens a folder picker or persists a workspace default.
 5. Workspace archive/removal never deletes Pi session files.
 6. Removing a session from a workspace is distinct from deleting the Pi session from disk.
 7. Renderer-supplied IDs and paths are never filesystem authority. Main resolves stored records and revalidates files immediately before resume/delete.
-8. Models, `.pi` configuration, resources, image settings, and attachment-relative paths are scoped to a runtime/draft working folder, not a workspace.
+8. Model/thinking discovery for a general draft uses the managed runtime context.
+   Imported/legacy sessions continue using configuration from their recorded cwd.
 9. Switching workspaces is a view transaction. Attached workers in other workspaces remain addressable and visible in cross-workspace active work.
 10. The existing fake backend remains functional while the real backend gains workspace semantics.
 
@@ -40,7 +50,7 @@ Workspace metadata is additive and stored in `~/.pideck/workspaces.json` (or `PI
 interface WorkspaceRecord {
   id: string;
   name: string;
-  defaultProjectId?: string; // existing registered directory record; convenience only
+  defaultProjectId?: string; // compatibility-only for migrated directory-backed projects
   legacyProjectId?: string; // idempotent migration/compatibility mapping
   createdAtMs: number;
   updatedAtMs: number;
@@ -120,12 +130,15 @@ chat.createSession({ workspaceId?, projectId? })
 chat.resumeSession({ workspaceId?, sessionFile })
 chat.deleteSession({ workspaceId?, sessionFile })
 chat.deleteAllSessions({ workspaceId? })
-chat.listModels({ runtimeId?, projectId? })
+chat.listModels({ runtimeId?, workspaceId?, projectId? })
 ```
 
 During one compatibility release, omitted `workspaceId` resolves from the active workspace, while legacy `projectId` calls translate through `legacyProjectId`. New snapshots include `workspaceId`; deprecated `projectId` remains available until the renderer migration is complete.
 
-For a draft, model discovery receives a registered working-folder `projectId`. For an attached runtime, `runtimeId` is authoritative.
+For a folder-independent draft, model discovery receives `workspaceId` and main
+resolves the managed runtime context. For an attached runtime, `runtimeId` is
+authoritative. A compatibility `projectId` may override the managed context only
+for migrated/explicit directory-backed sessions.
 
 ## 5. Main-Process Execution Changes
 
@@ -191,11 +204,11 @@ Do not scan all sessions on every workspace switch. A cwd-neutral full scan is r
 New session:
 
 1. Resolve workspace.
-2. Resolve registered working folder from request or workspace default.
-3. Revalidate the folder immediately before launch.
-4. Resolve cwd-specific Pi configuration and start the worker.
-5. Bind runtime to `{ workspaceId, projectId, cwd }`.
-6. As soon as `get_state` reports `sessionFile`, persist membership even when there are zero messages and no title.
+2. Resolve an explicit compatibility project when present; otherwise create and
+   revalidate Pi Deck's managed runtime context below `PI_DECK_HOME`.
+3. Resolve Pi configuration in that execution context and start the worker.
+4. Bind runtime to `{ workspaceId, projectId?, cwd }` without changing workspace metadata.
+5. As soon as `get_state` reports `sessionFile`, persist membership even when there are zero messages and no title.
 
 Resume:
 
@@ -243,16 +256,15 @@ Replace the folder-only project action with:
 
 - workspace switcher;
 - **New workspace…** dialog requiring only a name;
-- optional **Choose default working folder…**;
 - rename and archive actions;
-- visible default-folder subtitle or `No default folder`.
+- no folder requirement, folder picker, or `No default folder` warning.
 
 New session behavior:
 
-- inherit a valid workspace default;
-- otherwise show an explicit working-folder chooser before model discovery/first send;
-- remember the chosen folder on the draft and offer `Make default for this workspace`;
-- show compact cwd badges when one workspace contains multiple working folders.
+- immediately discover model/thinking defaults through the workspace-managed context;
+- send the first prompt without a native folder picker;
+- leave workspace metadata independent of the managed runtime directory;
+- preserve recorded cwd when importing or resuming an existing session.
 
 Session actions add:
 
@@ -264,10 +276,11 @@ An explicit **Add existing session…** / **Unassigned sessions** flow replaces 
 
 ### 6.4 Directory-sensitive UI
 
-- Attachment selection and dropped-file relative paths use the selected session/draft working directory.
-- Draft model discovery waits until a working folder is resolved.
+- Attachment selection and dropped-file relative paths use the selected session's
+  recorded cwd or the managed runtime context for a new general draft.
+- Draft model discovery starts immediately through `workspaceId`.
 - Runtime model/command/image capabilities continue using `runtimeId`.
-- A missing workspace default is a recoverable workspace setting, not an invalid workspace.
+- A workspace has no required default-folder state.
 
 ## 7. Compatibility and Removal Schedule
 
@@ -336,7 +349,9 @@ The primary agent reviews every branch diff, resolves shared contracts centrally
 Unit and contract checks:
 
 - workspace create/rename/select/archive;
-- folderless workspace and duplicate names;
+- directory-independent workspace and duplicate names;
+- managed runtime context containment and symlink rejection;
+- folder-independent model/thinking discovery;
 - atomic/concurrent persistence and corrupt recovery;
 - idempotent legacy migration and duplicate membership resolution;
 - cwd-neutral repository scan;
@@ -351,8 +366,10 @@ E2E scenarios:
 
 1. Upgrade existing `projects.json`; verify workspace/session grouping survives restart.
 2. Create a workspace without a folder; verify no Pi worker starts.
-3. Create its first session, select folder A, send, and persist membership.
-4. Add/resume a session from folder B in the same workspace.
+3. Send its first prompt without a picker; verify the managed cwd is below
+   `PI_DECK_HOME/runtime-context`, model/thinking defaults are visible, and the
+   workspace still has no default project.
+4. Add/resume an imported session with its recorded cwd in the same workspace.
 5. Switch workspaces while work is active and return through Active work.
 6. Move an idle session to another workspace without changing JSONL.
 7. Archive a workspace and verify its JSONL files remain.
@@ -369,11 +386,16 @@ npm run test:e2e
 
 Real-Pi manual smoke:
 
-- two working folders with different `.pi` configuration;
-- models/resources resolve from each session cwd;
+- a new general session uses global Pi configuration from the managed context;
+- an imported session continues resolving configuration from its recorded cwd;
 - both sessions remain grouped in one workspace across restart;
 - no session or attachment leaks across workspace selection.
 
 ## 10. Completion Criteria
 
-The feature is complete when a user can create a named folderless workspace, create or import sessions from multiple working folders, switch away and back without losing or stopping active work, restart Pi Deck and retain grouping, and safely remove/archive grouping metadata without altering Pi-native session files.
+The feature is complete when a user can create a named workspace and send its
+first prompt without choosing a filesystem directory, while Pi runs in an
+app-managed context; import sessions with their own recorded cwd; switch away
+and back without losing or stopping active work; restart Pi Deck and retain
+grouping; and safely remove/archive grouping metadata without altering Pi-native
+session files.

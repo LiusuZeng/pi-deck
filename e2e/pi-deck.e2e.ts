@@ -334,6 +334,116 @@ test("workspace management UI keeps Pi JSONL membership reversible and deletion 
   }
 });
 
+test("new workspaces send with managed context and model defaults without a folder picker", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-managed-workspace-"),
+  );
+  const bootstrapCwd = path.join(root, "bootstrap-project");
+  const agentDir = path.join(root, "agent");
+  const fakePiCwdLog = path.join(root, "fake-pi-cwds.log");
+  const piDeckHome = path.join(root, "pideck-home");
+  const managedCwd = path.join(piDeckHome, "runtime-context");
+  fs.mkdirSync(bootstrapCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd: bootstrapCwd,
+      agentDir,
+      fakePiCwdLog,
+      // If first send regresses to the project picker, it consumes this
+      // cancellation and cannot produce the response asserted below.
+      testPickProjectCwds: ["__cancel__"],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await createWorkspaceInUi(page, "Managed topic");
+
+    await expect(
+      page.getByRole("button", { name: /working folder/i }),
+    ).toHaveCount(0);
+    const configuration = page.locator(".pi-configuration-trigger");
+    await expect(configuration).toHaveAttribute("data-model-id", "fake-model");
+    await expect(configuration).toHaveAttribute(
+      "data-model-provider",
+      "fake-provider",
+    );
+    await expect(configuration).toHaveAttribute(
+      "data-thinking-level",
+      "medium",
+    );
+
+    const beforeSend = await page.evaluate(async () => {
+      const result = await window.piDeck.workspaces.getActive();
+      return result.activeWorkspace;
+    });
+    expect(beforeSend?.name).toBe("Managed topic");
+    expect(beforeSend?.defaultProjectId).toBeUndefined();
+
+    await configuration.click();
+    await page.getByRole("menuitemradio", { name: "max", exact: true }).click();
+    await expect(configuration).toHaveAttribute("data-thinking-level", "max");
+
+    const composer = page.getByLabel("Prompt text");
+    await composer.fill("managed context first prompt");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText(/Fake response to: managed context first prompt/),
+    ).toBeVisible({ timeout: 20_000 });
+
+    const created = await page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      const workspaces = await window.piDeck.workspaces.getActive();
+      return {
+        cwd: snapshot.state.cwd,
+        sessionFile: snapshot.state.sessionFile,
+        thinkingLevel: snapshot.state.thinkingLevel,
+        workspace: workspaces.activeWorkspace,
+      };
+    });
+    expect(created.cwd).toBe(fs.realpathSync(managedCwd));
+    expect(created.thinkingLevel).toBe("max");
+    expect(created.workspace?.defaultProjectId).toBeUndefined();
+    expect(created.sessionFile).toEqual(expect.any(String));
+    const sessionFile = fs.realpathSync(created.sessionFile as string);
+
+    const loggedCwds = fs.readFileSync(fakePiCwdLog, "utf8").trim().split("\n");
+    expect(loggedCwds.at(-1)).toBe(fs.realpathSync(managedCwd));
+
+    const closeRuntime = page.getByRole("button", {
+      name: /^Close runtime for /,
+    });
+    await closeRuntime.focus();
+    await expect(closeRuntime).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.getByText(/Closed the Pi runtime/)).toBeVisible();
+    await page
+      .getByRole("button", { name: "Session: managed context first prompt" })
+      .click();
+    await expect(page.getByText("Resumed saved Pi session.")).toBeVisible();
+    const resumedCwd = await page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      return snapshot.state.cwd;
+    });
+    expect(resumedCwd).toBe(fs.realpathSync(managedCwd));
+
+    await page
+      .locator(".session-list .session-item.active")
+      .locator("..")
+      .getByRole("button", { name: /^Session actions for / })
+      .click();
+    await page.getByRole("menuitem", { name: "Delete session…" }).click();
+    await confirmDeleteSessionDialog(page);
+    await expect(page.getByText("Deleted Pi session.")).toBeVisible();
+    expect(fs.existsSync(sessionFile)).toBe(false);
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("real-mode workspace membership lifecycle stays explicit and reversible", async () => {
   // This deliberately calls preload APIs from the hidden Electron window. It
   // never invokes a native dialog or file picker, so it is safe for CI and
@@ -2211,91 +2321,105 @@ test("real mode authorizes opaque project IDs before any project-scoped Pi work"
   }
 });
 
-test("background worker continues while the workspace default folder changes", async () => {
+test("background worker continues while a directory-independent workspace is created", async () => {
   const root = fs.mkdtempSync(
-    path.join(os.tmpdir(), "pi-deck-e2e-project-resume-"),
+    path.join(os.tmpdir(), "pi-deck-e2e-workspace-background-"),
   );
-  const projectA = path.join(root, "project-a");
-  const projectB = path.join(root, "project-b");
+  const projectCwd = path.join(root, "project");
   const agentDir = path.join(root, "agent");
-  fs.mkdirSync(projectA, { recursive: true });
-  fs.mkdirSync(projectB, { recursive: true });
+  fs.mkdirSync(projectCwd, { recursive: true });
   fs.mkdirSync(agentDir, { recursive: true });
-  const canonicalProjectB = fs.realpathSync(projectB);
 
   const { app, page } = await launchPiDeck(
     fakeRealModeEnv({
       root,
-      projectCwd: projectA,
+      projectCwd,
       agentDir,
-      testPickProjectCwds: [projectB],
       fakePiArgs: ["--stream-delay-ms", "500"],
     }),
   );
   try {
     await expectHealthyPreload(page);
-    await page
-      .getByLabel("Prompt text")
-      .fill("project switch background worker");
+    await page.getByLabel("Prompt text").fill("workspace background worker");
     await page.getByRole("button", { name: "Send" }).click();
     await expect(page.getByRole("button", { name: "Abort" })).toBeVisible();
+    const runtimeId = await page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      return snapshot.runtimeId;
+    });
 
-    await page.getByRole("button", { name: /Default folder/i }).click();
-    await expect(projectSwitcher(page)).toHaveAttribute(
-      "data-project-id",
-      canonicalProjectB,
-    );
-    await expect(page.getByRole("button", { name: "Abort" })).toBeVisible();
+    await createWorkspaceInUi(page, "Background topic");
+    const activeWorkspace = await page.evaluate(async () => {
+      const result = await window.piDeck.workspaces.getActive();
+      return result.activeWorkspace;
+    });
+    expect(activeWorkspace?.name).toBe("Background topic");
+    expect(activeWorkspace?.defaultProjectId).toBeUndefined();
     await expect(
-      page.getByText(/Default working folder set to project-b/),
+      page.getByRole("button", { name: /working folder/i }),
+    ).toHaveCount(0);
+
+    await expect
+      .poll(async () =>
+        page.evaluate(async (id) => {
+          const status = await window.piDeck.chat.getRuntimeStatus({
+            runtimeId: id,
+          });
+          return status.state.isAgentActive;
+        }, runtimeId),
+      )
+      .toBe(false);
+    await selectWorkspaceInUi(page, path.basename(projectCwd));
+    await expect(
+      page.getByText(/Fake response to: workspace background worker/),
     ).toBeVisible();
-    await expect(
-      page.getByText(/Fake response to: project switch background worker/),
-    ).toBeVisible({ timeout: 8_000 });
   } finally {
     await app.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("real mode project picker handoff persists selected cwd with fake Pi", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-project-"));
-  const projectA = path.join(root, "project-a");
-  const projectB = path.join(root, "project-b");
+test("managed workspace context persists across relaunch", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-managed-relaunch-"),
+  );
+  const bootstrapCwd = path.join(root, "bootstrap-project");
   const agentDir = path.join(root, "agent");
   const userDataDir = path.join(root, "user-data");
-  fs.mkdirSync(projectA, { recursive: true });
-  fs.mkdirSync(projectB, { recursive: true });
+  const managedCwd = path.join(root, "pideck-home", "runtime-context");
+  fs.mkdirSync(bootstrapCwd, { recursive: true });
   fs.mkdirSync(agentDir, { recursive: true });
   fs.mkdirSync(userDataDir, { recursive: true });
-  const canonicalProjectA = fs.realpathSync(projectA);
-  const canonicalProjectB = fs.realpathSync(projectB);
 
   const firstLaunch = await launchPiDeck(
     fakeRealModeEnv({
       root,
-      projectCwd: projectA,
+      projectCwd: bootstrapCwd,
       agentDir,
       userDataDir,
-      testPickProjectCwd: projectB,
+      testPickProjectCwds: ["__cancel__"],
     }),
   );
+  let sessionFile: string | undefined;
   try {
     await expectHealthyPreload(firstLaunch.page);
-    await expect(projectSwitcher(firstLaunch.page)).toHaveAttribute(
-      "data-project-id",
-      canonicalProjectA,
-    );
-    await firstLaunch.page
-      .getByRole("button", { name: /Default folder/i })
-      .click();
+    await createWorkspaceInUi(firstLaunch.page, "Persistent topic");
     await expect(
-      firstLaunch.page.getByText(/Default working folder set to project-b/),
+      firstLaunch.page.locator(".pi-configuration-trigger"),
+    ).toHaveAttribute("data-model-id", "fake-model");
+    await firstLaunch.page
+      .getByLabel("Prompt text")
+      .fill("managed relaunch prompt");
+    await firstLaunch.page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      firstLaunch.page.getByText(/Fake response to: managed relaunch prompt/),
     ).toBeVisible();
-    await expect(projectSwitcher(firstLaunch.page)).toHaveAttribute(
-      "data-project-id",
-      canonicalProjectB,
+    const snapshot = await firstLaunch.page.evaluate(() =>
+      window.piDeck.chat.getSnapshot(),
     );
+    expect(snapshot.state.cwd).toBe(fs.realpathSync(managedCwd));
+    sessionFile = snapshot.state.sessionFile;
+    expect(sessionFile).toEqual(expect.any(String));
   } finally {
     await firstLaunch.app.close();
   }
@@ -2305,9 +2429,28 @@ test("real mode project picker handoff persists selected cwd with fake Pi", asyn
   );
   try {
     await expectHealthyPreload(secondLaunch.page);
-    await expect(projectSwitcher(secondLaunch.page)).toHaveAttribute(
-      "data-project-id",
-      canonicalProjectB,
+    await expect(
+      secondLaunch.page.getByRole("button", {
+        name: "Switch workspace. Current: Persistent topic",
+      }),
+    ).toBeVisible();
+    const activeWorkspace = await secondLaunch.page.evaluate(async () => {
+      const result = await window.piDeck.workspaces.getActive();
+      return result.activeWorkspace;
+    });
+    expect(activeWorkspace?.defaultProjectId).toBeUndefined();
+    await secondLaunch.page
+      .getByRole("button", { name: "Session: managed relaunch prompt" })
+      .click();
+    await expect(
+      secondLaunch.page.getByText("Resumed saved Pi session."),
+    ).toBeVisible();
+    const resumed = await secondLaunch.page.evaluate(() =>
+      window.piDeck.chat.getSnapshot(),
+    );
+    expect(resumed.state.cwd).toBe(fs.realpathSync(managedCwd));
+    expect(fs.realpathSync(resumed.state.sessionFile as string)).toBe(
+      fs.realpathSync(sessionFile as string),
     );
   } finally {
     await secondLaunch.app.close();
