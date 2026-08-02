@@ -221,10 +221,14 @@ export class WorkspaceStore {
     return workspace ? { ...workspace } : undefined;
   }
 
-  async getWorkspace(workspaceId: string): Promise<WorkspaceRecord | undefined> {
+  async getWorkspace(
+    workspaceId: string,
+  ): Promise<WorkspaceRecord | undefined> {
     const id = z.string().uuid().parse(workspaceId);
     await this.loadIfNeeded();
-    const workspace = this.state.workspaces.find((workspace) => workspace.id === id);
+    const workspace = this.state.workspaces.find(
+      (workspace) => workspace.id === id,
+    );
     return workspace ? { ...workspace } : undefined;
   }
 
@@ -233,7 +237,9 @@ export class WorkspaceStore {
   ): Promise<WorkspaceRecord | undefined> {
     const id = z.string().min(1).parse(legacyProjectId);
     await this.loadIfNeeded();
-    const workspace = this.state.workspaces.find((workspace) => workspace.legacyProjectId === id);
+    const workspace = this.state.workspaces.find(
+      (workspace) => workspace.legacyProjectId === id,
+    );
     return workspace ? { ...workspace } : undefined;
   }
 
@@ -245,7 +251,9 @@ export class WorkspaceStore {
     const workspace: WorkspaceRecord = {
       id: randomUUID(),
       name,
-      ...(parsed.defaultProjectId ? { defaultProjectId: parsed.defaultProjectId } : {}),
+      ...(parsed.defaultProjectId
+        ? { defaultProjectId: parsed.defaultProjectId }
+        : {}),
       createdAtMs: now,
       updatedAtMs: now,
       lastOpenedAtMs: now,
@@ -260,7 +268,10 @@ export class WorkspaceStore {
 
   async update(input: UpdateWorkspaceInput): Promise<WorkspaceRecord> {
     const parsed = updateWorkspaceInputSchema.parse(input);
-    const name = parsed.name === undefined ? undefined : normalizeWorkspaceName(parsed.name);
+    const name =
+      parsed.name === undefined
+        ? undefined
+        : normalizeWorkspaceName(parsed.name);
     await this.loadIfNeeded();
     const index = this.requireOpenWorkspaceIndex(parsed.workspaceId);
     const existing = this.state.workspaces[index]!;
@@ -319,11 +330,15 @@ export class WorkspaceStore {
       this.state.activeWorkspaceId === id
         ? workspaces
             .filter((workspace) => workspace.archivedAtMs === undefined)
-            .sort((left, right) => right.lastOpenedAtMs - left.lastOpenedAtMs)[0]?.id
+            .sort(
+              (left, right) => right.lastOpenedAtMs - left.lastOpenedAtMs,
+            )[0]?.id
         : this.state.activeWorkspaceId;
     await this.commit({
       ...this.state,
-      ...(nextActiveWorkspaceId ? { activeWorkspaceId: nextActiveWorkspaceId } : { activeWorkspaceId: undefined }),
+      ...(nextActiveWorkspaceId
+        ? { activeWorkspaceId: nextActiveWorkspaceId }
+        : { activeWorkspaceId: undefined }),
       workspaces,
     });
     return { ...archived };
@@ -333,7 +348,9 @@ export class WorkspaceStore {
     workspaceId: string,
     summary: ChatSessionSummary,
   ): Promise<WorkspaceSessionMutationResult> {
-    return this.upsertSessionRefs(workspaceId, [summary]).then((results) => results[0]!);
+    return this.upsertSessionRefs(workspaceId, [summary]).then(
+      (results) => results[0]!,
+    );
   }
 
   /**
@@ -346,13 +363,25 @@ export class WorkspaceStore {
     options: { missingSessionFiles?: readonly string[] } = {},
   ): Promise<WorkspaceSessionMutationResult[]> {
     const id = z.string().uuid().parse(workspaceId);
-    const parsedSummaries = summaries.map((summary) => chatSessionSummarySchema.parse(summary));
-    const missing = (options.missingSessionFiles ?? []).map((file) => z.string().min(1).parse(file));
+    const parsedSummaries = summaries.map((summary) =>
+      chatSessionSummarySchema.parse(summary),
+    );
+    const missing = (options.missingSessionFiles ?? []).map((file) =>
+      z.string().min(1).parse(file),
+    );
     const [canonicalSummaries, canonicalMissing] = await Promise.all([
-      Promise.all(parsedSummaries.map(async (summary) => ({ summary, sessionFile: await canonicalOrResolved(summary.sessionFile) }))),
+      Promise.all(
+        parsedSummaries.map(async (summary) => ({
+          summary,
+          sessionFile: await canonicalOrResolved(summary.sessionFile),
+        })),
+      ),
       Promise.all(missing.map(canonicalOrResolved)),
     ]);
-    ensureDistinct(canonicalSummaries.map((item) => item.sessionFile), "session summaries");
+    ensureDistinct(
+      canonicalSummaries.map((item) => item.sessionFile),
+      "session summaries",
+    );
     await this.loadIfNeeded();
     this.requireOpenWorkspaceIndex(id);
 
@@ -363,10 +392,23 @@ export class WorkspaceStore {
     let changed = false;
     for (const { summary, sessionFile } of canonicalSummaries) {
       const existingIndex = byFile.get(sessionFile);
-      const existing = existingIndex === undefined ? undefined : refs[existingIndex];
-      const candidate = sessionRefFromSummary(id, sessionFile, summary, existing, now);
+      const existing =
+        existingIndex === undefined ? undefined : refs[existingIndex];
+      const candidate = sessionRefFromSummary(
+        id,
+        sessionFile,
+        summary,
+        existing,
+        now,
+      );
       if (existing && sameSessionRefData(existing, candidate)) {
-        results.push({ workspaceId: id, sessionFile, ...(existing.workspaceId === id ? {} : { previousWorkspaceId: existing.workspaceId }) });
+        results.push({
+          workspaceId: id,
+          sessionFile,
+          ...(existing.workspaceId === id
+            ? {}
+            : { previousWorkspaceId: existing.workspaceId }),
+        });
         continue;
       }
       if (existingIndex === undefined) {
@@ -376,7 +418,13 @@ export class WorkspaceStore {
         refs[existingIndex] = candidate;
       }
       changed = true;
-      results.push({ workspaceId: id, sessionFile, ...(existing && existing.workspaceId !== id ? { previousWorkspaceId: existing.workspaceId } : {}) });
+      results.push({
+        workspaceId: id,
+        sessionFile,
+        ...(existing && existing.workspaceId !== id
+          ? { previousWorkspaceId: existing.workspaceId }
+          : {}),
+      });
     }
     for (const sessionFile of canonicalMissing) {
       const index = byFile.get(sessionFile);
@@ -409,7 +457,9 @@ export class WorkspaceStore {
     preview?: string;
   }): Promise<WorkspaceSessionMutationResult> {
     const workspaceId = z.string().uuid().parse(options.workspaceId);
-    const sessionFile = await canonicalOrResolved(z.string().min(1).parse(options.sessionFile));
+    const sessionFile = await canonicalOrResolved(
+      z.string().min(1).parse(options.sessionFile),
+    );
     const summary = chatSessionSummarySchema.parse({
       id: sessionFile,
       sessionFile,
@@ -428,11 +478,16 @@ export class WorkspaceStore {
     toWorkspaceId: string,
   ): Promise<WorkspaceSessionMutationResult> {
     const targetId = z.string().uuid().parse(toWorkspaceId);
-    const canonical = await canonicalOrResolved(z.string().min(1).parse(sessionFile));
+    const canonical = await canonicalOrResolved(
+      z.string().min(1).parse(sessionFile),
+    );
     await this.loadIfNeeded();
     this.requireOpenWorkspaceIndex(targetId);
-    const index = this.state.sessionRefs.findIndex((ref) => ref.sessionFile === canonical);
-    if (index < 0) throw new Error(`Session is not assigned to a workspace: ${canonical}`);
+    const index = this.state.sessionRefs.findIndex(
+      (ref) => ref.sessionFile === canonical,
+    );
+    if (index < 0)
+      throw new Error(`Session is not assigned to a workspace: ${canonical}`);
     const existing = this.state.sessionRefs[index]!;
     if (existing.workspaceId === targetId) {
       await this.persistIfDirty();
@@ -446,7 +501,11 @@ export class WorkspaceStore {
         missingSinceMs: undefined,
       }),
     });
-    return { workspaceId: targetId, sessionFile: canonical, previousWorkspaceId: existing.workspaceId };
+    return {
+      workspaceId: targetId,
+      sessionFile: canonical,
+      previousWorkspaceId: existing.workspaceId,
+    };
   }
 
   async removeSession(
@@ -454,7 +513,9 @@ export class WorkspaceStore {
     sessionFile: string,
   ): Promise<boolean> {
     const id = z.string().uuid().parse(workspaceId);
-    const canonical = await canonicalOrResolved(z.string().min(1).parse(sessionFile));
+    const canonical = await canonicalOrResolved(
+      z.string().min(1).parse(sessionFile),
+    );
     await this.loadIfNeeded();
     const nextRefs = this.state.sessionRefs.filter(
       (ref) => !(ref.workspaceId === id && ref.sessionFile === canonical),
@@ -467,9 +528,14 @@ export class WorkspaceStore {
     return true;
   }
 
-  async markSessionMissing(workspaceId: string, sessionFile: string): Promise<void> {
+  async markSessionMissing(
+    workspaceId: string,
+    sessionFile: string,
+  ): Promise<void> {
     const id = z.string().uuid().parse(workspaceId);
-    const canonical = await canonicalOrResolved(z.string().min(1).parse(sessionFile));
+    const canonical = await canonicalOrResolved(
+      z.string().min(1).parse(sessionFile),
+    );
     await this.loadIfNeeded();
     const index = this.state.sessionRefs.findIndex(
       (ref) => ref.workspaceId === id && ref.sessionFile === canonical,
@@ -497,11 +563,15 @@ export class WorkspaceStore {
   }
 
   /** Return cache only; this deliberately does not touch Pi session files. */
-  async getCachedSessionSummaries(workspaceId: string): Promise<ChatSessionSummary[]> {
+  async getCachedSessionSummaries(
+    workspaceId: string,
+  ): Promise<ChatSessionSummary[]> {
     const id = z.string().uuid().parse(workspaceId);
     await this.loadIfNeeded();
     return this.state.sessionRefs
-      .filter((ref) => ref.workspaceId === id && ref.missingSinceMs === undefined)
+      .filter(
+        (ref) => ref.workspaceId === id && ref.missingSinceMs === undefined,
+      )
       .map(toCachedSummary)
       .sort((left, right) => right.updatedAtMs - left.updatedAtMs);
   }
@@ -510,16 +580,26 @@ export class WorkspaceStore {
    * Import one immutable ProjectStore snapshot. Once marked complete this is a
    * no-op, making restarts and callers' defensive retries safe.
    */
-  async migrateLegacyProjects(input: LegacyProjectMigrationInput): Promise<WorkspaceListResult> {
+  async migrateLegacyProjects(
+    input: LegacyProjectMigrationInput,
+  ): Promise<WorkspaceListResult> {
     const parsed = legacyProjectMigrationInputSchema.parse(input);
-    const projects = parsed.projects.filter((project) => project.archivedAtMs === undefined);
+    const projects = parsed.projects.filter(
+      (project) => project.archivedAtMs === undefined,
+    );
     const projectIds = new Set(projects.map((project) => project.id));
-    const sessionRefs = parsed.sessionRefs.filter((ref) => projectIds.has(ref.projectId));
+    const sessionRefs = parsed.sessionRefs.filter((ref) =>
+      projectIds.has(ref.projectId),
+    );
     const canonicalRefs = await Promise.all(
-      sessionRefs.map(async (ref) => ({ ...ref, sessionFile: await canonicalOrResolved(ref.sessionFile) })),
+      sessionRefs.map(async (ref) => ({
+        ...ref,
+        sessionFile: await canonicalOrResolved(ref.sessionFile),
+      })),
     );
     await this.loadIfNeeded();
-    if (this.state.projectsMigrationCompletedAtMs !== undefined) return this.listSync();
+    if (this.state.projectsMigrationCompletedAtMs !== undefined)
+      return this.listSync();
 
     const now = Date.now();
     const workspaces: WorkspaceRecord[] = projects.map((project) => ({
@@ -545,7 +625,9 @@ export class WorkspaceStore {
     }
     const workspaceByProjectId = new Map(
       workspaces.flatMap((workspace) =>
-        workspace.legacyProjectId ? [[workspace.legacyProjectId, workspace] as const] : [],
+        workspace.legacyProjectId
+          ? [[workspace.legacyProjectId, workspace] as const]
+          : [],
       ),
     );
     const winners = new Map<string, LegacyProjectSessionRef>();
@@ -555,7 +637,12 @@ export class WorkspaceStore {
         winners.set(ref.sessionFile, ref);
         continue;
       }
-      const winner = chooseLegacyRef(ref, previous, parsed.activeProjectId, projects);
+      const winner = chooseLegacyRef(
+        ref,
+        previous,
+        parsed.activeProjectId,
+        projects,
+      );
       const discarded = winner === ref ? previous : ref;
       winners.set(ref.sessionFile, winner);
       this.diagnostics?.recordError(
@@ -590,7 +677,9 @@ export class WorkspaceStore {
         },
       ];
     });
-    const activeWorkspaceId = workspaceByProjectId.get(parsed.activeProjectId ?? "")?.id ?? workspaces[0]?.id;
+    const activeWorkspaceId =
+      workspaceByProjectId.get(parsed.activeProjectId ?? "")?.id ??
+      workspaces[0]?.id;
     await this.commit({
       version: 1,
       ...(activeWorkspaceId ? { activeWorkspaceId } : {}),
@@ -614,7 +703,9 @@ export class WorkspaceStore {
         );
         try {
           await fs.rename(this.storeFile, backup);
-          this.diagnostics?.recordError(`Corrupt Pi Deck workspace metadata moved to ${backup}`);
+          this.diagnostics?.recordError(
+            `Corrupt Pi Deck workspace metadata moved to ${backup}`,
+          );
         } catch {
           // A corrupt backup is best effort; recovery is still safe.
         }
@@ -629,7 +720,9 @@ export class WorkspaceStore {
   private listSync(): WorkspaceListResult {
     const activeWorkspace = this.getActiveWorkspaceSync();
     return {
-      ...(this.state.activeWorkspaceId ? { activeWorkspaceId: this.state.activeWorkspaceId } : {}),
+      ...(this.state.activeWorkspaceId
+        ? { activeWorkspaceId: this.state.activeWorkspaceId }
+        : {}),
       ...(activeWorkspace ? { activeWorkspace: { ...activeWorkspace } } : {}),
       workspaces: this.state.workspaces
         .filter((workspace) => workspace.archivedAtMs === undefined)
@@ -646,7 +739,9 @@ export class WorkspaceStore {
   }
 
   private requireOpenWorkspaceIndex(workspaceId: string): number {
-    const index = this.state.workspaces.findIndex((workspace) => workspace.id === workspaceId);
+    const index = this.state.workspaces.findIndex(
+      (workspace) => workspace.id === workspaceId,
+    );
     if (index < 0) throw new Error(`Unknown workspace: ${workspaceId}`);
     if (this.state.workspaces[index]!.archivedAtMs !== undefined) {
       throw new Error(`Workspace is archived: ${workspaceId}`);
@@ -665,18 +760,25 @@ export class WorkspaceStore {
   }
 
   private async persist(): Promise<void> {
-    this.persistQueue = this.persistQueue.catch(() => undefined).then(async () => {
-      const generation = this.generation;
-      await this.writeStoreFile();
-      this.persistedGeneration = Math.max(this.persistedGeneration, generation);
-    });
+    this.persistQueue = this.persistQueue
+      .catch(() => undefined)
+      .then(async () => {
+        const generation = this.generation;
+        await this.writeStoreFile();
+        this.persistedGeneration = Math.max(
+          this.persistedGeneration,
+          generation,
+        );
+      });
     return this.persistQueue;
   }
 
   private async writeStoreFile(): Promise<void> {
     await fs.mkdir(this.piDeckHome, { recursive: true, mode: 0o700 });
     const tempFile = `${this.storeFile}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    await fs.writeFile(tempFile, `${JSON.stringify(this.state, null, 2)}\n`, { mode: 0o600 });
+    await fs.writeFile(tempFile, `${JSON.stringify(this.state, null, 2)}\n`, {
+      mode: 0o600,
+    });
     await fs.rename(tempFile, this.storeFile);
   }
 }
@@ -684,7 +786,8 @@ export class WorkspaceStore {
 function normalizeWorkspaceName(raw: string): string {
   const normalized = raw.trim().replace(/\s+/g, " ");
   if (!normalized) throw new Error("Workspace name is required.");
-  if (normalized.length > 120) throw new Error("Workspace name must be 120 characters or fewer.");
+  if (normalized.length > 120)
+    throw new Error("Workspace name must be 120 characters or fewer.");
   return normalized;
 }
 
@@ -698,14 +801,31 @@ function sessionRefFromSummary(
   return {
     workspaceId,
     sessionFile,
-    ...(summary.sessionId ? { sessionId: summary.sessionId } : existing?.sessionId ? { sessionId: existing.sessionId } : {}),
-    ...(summary.cwd ? { cwd: summary.cwd } : existing?.cwd ? { cwd: existing.cwd } : {}),
-    title: summary.title || existing?.title || path.basename(sessionFile, ".jsonl"),
-    ...(summary.preview ? { preview: summary.preview } : existing?.preview ? { preview: existing.preview } : {}),
+    ...(summary.sessionId
+      ? { sessionId: summary.sessionId }
+      : existing?.sessionId
+        ? { sessionId: existing.sessionId }
+        : {}),
+    ...(summary.cwd
+      ? { cwd: summary.cwd }
+      : existing?.cwd
+        ? { cwd: existing.cwd }
+        : {}),
+    title:
+      summary.title || existing?.title || path.basename(sessionFile, ".jsonl"),
+    ...(summary.preview
+      ? { preview: summary.preview }
+      : existing?.preview
+        ? { preview: existing.preview }
+        : {}),
     addedAtMs: existing?.addedAtMs ?? now,
     lastSeenAtMs: now,
     lastKnownUpdatedAtMs: summary.updatedAtMs,
-    ...(summary.createdAtMs !== undefined ? { createdAtMs: summary.createdAtMs } : existing?.createdAtMs !== undefined ? { createdAtMs: existing.createdAtMs } : {}),
+    ...(summary.createdAtMs !== undefined
+      ? { createdAtMs: summary.createdAtMs }
+      : existing?.createdAtMs !== undefined
+        ? { createdAtMs: existing.createdAtMs }
+        : {}),
     messageCount: summary.messageCount,
   };
 }
@@ -724,7 +844,10 @@ function toCachedSummary(ref: WorkspaceSessionRef): ChatSessionSummary {
   };
 }
 
-function sameSessionRefData(existing: WorkspaceSessionRef, candidate: WorkspaceSessionRef): boolean {
+function sameSessionRefData(
+  existing: WorkspaceSessionRef,
+  candidate: WorkspaceSessionRef,
+): boolean {
   return (
     existing.workspaceId === candidate.workspaceId &&
     existing.sessionFile === candidate.sessionFile &&
@@ -747,10 +870,13 @@ function chooseLegacyRef(
 ): LegacyProjectSessionRef {
   if (left.projectId === activeProjectId) return left;
   if (right.projectId === activeProjectId) return right;
-  const opened = new Map(projects.map((project) => [project.id, project.lastOpenedAtMs]));
+  const opened = new Map(
+    projects.map((project) => [project.id, project.lastOpenedAtMs]),
+  );
   const leftOpened = opened.get(left.projectId) ?? Number.NEGATIVE_INFINITY;
   const rightOpened = opened.get(right.projectId) ?? Number.NEGATIVE_INFINITY;
-  if (leftOpened !== rightOpened) return leftOpened > rightOpened ? left : right;
+  if (leftOpened !== rightOpened)
+    return leftOpened > rightOpened ? left : right;
   return left.projectId.localeCompare(right.projectId) <= 0 ? left : right;
 }
 
@@ -759,7 +885,8 @@ function replaceAt<T>(items: readonly T[], index: number, replacement: T): T[] {
 }
 
 function ensureDistinct(values: readonly string[], label: string): void {
-  if (new Set(values).size !== values.length) throw new Error(`Duplicate ${label} are not allowed in one batch.`);
+  if (new Set(values).size !== values.length)
+    throw new Error(`Duplicate ${label} are not allowed in one batch.`);
 }
 
 async function canonicalOrResolved(filePath: string): Promise<string> {
@@ -772,7 +899,12 @@ async function canonicalOrResolved(filePath: string): Promise<string> {
 }
 
 function isMissingFile(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "ENOENT"
+  );
 }
 
 function errorToMessage(error: unknown): string {

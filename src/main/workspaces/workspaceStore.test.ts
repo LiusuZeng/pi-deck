@@ -7,11 +7,16 @@ import { WorkspaceStore } from "./workspaceStore.js";
 import type { ChatSessionSummary } from "../../shared/types.js";
 
 async function temporaryHome(): Promise<{ root: string; home: string }> {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-deck-workspace-store-"));
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "pi-deck-workspace-store-"),
+  );
   return { root, home: path.join(root, "home") };
 }
 
-function summary(sessionFile: string, title = "Cached session"): ChatSessionSummary {
+function summary(
+  sessionFile: string,
+  title = "Cached session",
+): ChatSessionSummary {
   return {
     id: sessionFile,
     sessionFile,
@@ -29,7 +34,10 @@ test("WorkspaceStore creates UUID workspaces, normalizes names, and archives the
   const first = await store.create({ name: "  Product   planning  " });
   const second = await store.create({ name: "Product planning" });
 
-  assert.match(first.id, /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+  assert.match(
+    first.id,
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+  );
   assert.equal(first.name, "Product planning");
   assert.equal((await store.list()).workspaces.length, 2);
   assert.equal((await store.getActiveWorkspace())?.id, second.id);
@@ -50,7 +58,10 @@ test("WorkspaceStore removes, rather than serializes, a cleared default project"
   });
 
   await store.update({ workspaceId: workspace.id, defaultProjectId: null });
-  assert.equal((await store.getWorkspace(workspace.id))?.defaultProjectId, undefined);
+  assert.equal(
+    (await store.getWorkspace(workspace.id))?.defaultProjectId,
+    undefined,
+  );
   const persisted = JSON.parse(
     await fs.readFile(path.join(home, "workspaces.json"), "utf8"),
   ) as { workspaces: Array<Record<string, unknown>> };
@@ -89,9 +100,14 @@ test("WorkspaceStore validates an entire refresh batch before changing membershi
   const store = new WorkspaceStore(home);
   const workspace = await store.create({ name: "Batch" });
   const validFile = path.join(root, "valid.jsonl");
-  const invalid = { ...summary(path.join(root, "invalid.jsonl")), messageCount: -1 } as ChatSessionSummary;
+  const invalid = {
+    ...summary(path.join(root, "invalid.jsonl")),
+    messageCount: -1,
+  } as ChatSessionSummary;
 
-  await assert.rejects(store.upsertSessionRefs(workspace.id, [summary(validFile), invalid]));
+  await assert.rejects(
+    store.upsertSessionRefs(workspace.id, [summary(validFile), invalid]),
+  );
   assert.deepEqual(await store.getSessionRefs(workspace.id), []);
 });
 
@@ -103,12 +119,18 @@ test("WorkspaceStore retries a failed equivalent persistence mutation", async ()
   const writeFile = vi.spyOn(fs, "writeFile");
   writeFile.mockRejectedValueOnce(new Error("injected write failure"));
 
-  await assert.rejects(store.upsertSessionRef(workspace.id, summary(sessionFile)), /injected write failure/);
+  await assert.rejects(
+    store.upsertSessionRef(workspace.id, summary(sessionFile)),
+    /injected write failure/,
+  );
   await store.upsertSessionRef(workspace.id, summary(sessionFile));
   writeFile.mockRestore();
 
   const reloaded = new WorkspaceStore(home);
-  assert.equal((await reloaded.getSessionRefs(workspace.id))[0]?.title, "Cached session");
+  assert.equal(
+    (await reloaded.getSessionRefs(workspace.id))[0]?.title,
+    "Cached session",
+  );
 });
 
 test("WorkspaceStore backs up corrupt metadata and recovers an empty store", async () => {
@@ -118,7 +140,11 @@ test("WorkspaceStore backs up corrupt metadata and recovers an empty store", asy
 
   const store = new WorkspaceStore(home);
   assert.deepEqual(await store.list(), { workspaces: [] });
-  assert.ok((await fs.readdir(home)).some((file) => file.startsWith("workspaces.json.corrupt-")));
+  assert.ok(
+    (await fs.readdir(home)).some((file) =>
+      file.startsWith("workspaces.json.corrupt-"),
+    ),
+  );
 });
 
 test("WorkspaceStore migrates legacy projects deterministically and is idempotent", async () => {
@@ -131,25 +157,74 @@ test("WorkspaceStore migrates legacy projects deterministically and is idempoten
   const result = await store.migrateLegacyProjects({
     activeProjectId: "active",
     projects: [
-      { id: "older", displayName: "Older", createdAtMs: now, updatedAtMs: now, lastOpenedAtMs: 20 },
-      { id: "active", displayName: "Active", createdAtMs: now, updatedAtMs: now, lastOpenedAtMs: 10 },
-      { id: "archived", displayName: "Archived", createdAtMs: now, updatedAtMs: now, lastOpenedAtMs: 100, archivedAtMs: now },
+      {
+        id: "older",
+        displayName: "Older",
+        createdAtMs: now,
+        updatedAtMs: now,
+        lastOpenedAtMs: 20,
+      },
+      {
+        id: "active",
+        displayName: "Active",
+        createdAtMs: now,
+        updatedAtMs: now,
+        lastOpenedAtMs: 10,
+      },
+      {
+        id: "archived",
+        displayName: "Archived",
+        createdAtMs: now,
+        updatedAtMs: now,
+        lastOpenedAtMs: 100,
+        archivedAtMs: now,
+      },
     ],
     sessionRefs: [
-      { projectId: "older", sessionFile, addedAtMs: now, lastSeenAtMs: now, title: "Older copy" },
-      { projectId: "active", sessionFile, addedAtMs: now, lastSeenAtMs: now, title: "Active copy" },
-      { projectId: "archived", sessionFile: `${sessionFile}-ignored`, addedAtMs: now, lastSeenAtMs: now },
+      {
+        projectId: "older",
+        sessionFile,
+        addedAtMs: now,
+        lastSeenAtMs: now,
+        title: "Older copy",
+      },
+      {
+        projectId: "active",
+        sessionFile,
+        addedAtMs: now,
+        lastSeenAtMs: now,
+        title: "Active copy",
+      },
+      {
+        projectId: "archived",
+        sessionFile: `${sessionFile}-ignored`,
+        addedAtMs: now,
+        lastSeenAtMs: now,
+      },
     ],
   });
 
   assert.equal(result.workspaces.length, 2);
   assert.equal(result.activeWorkspace?.legacyProjectId, "active");
-  const active = result.workspaces.find((workspace) => workspace.legacyProjectId === "active")!;
-  assert.equal((await store.getSessionRefs(active.id))[0]?.title, "Active copy");
+  const active = result.workspaces.find(
+    (workspace) => workspace.legacyProjectId === "active",
+  )!;
+  assert.equal(
+    (await store.getSessionRefs(active.id))[0]?.title,
+    "Active copy",
+  );
   assert.equal(diagnostics.recordError.mock.calls.length, 1);
 
   const replay = await store.migrateLegacyProjects({
-    projects: [{ id: "new", displayName: "Must not appear", createdAtMs: now, updatedAtMs: now, lastOpenedAtMs: now }],
+    projects: [
+      {
+        id: "new",
+        displayName: "Must not appear",
+        createdAtMs: now,
+        updatedAtMs: now,
+        lastOpenedAtMs: now,
+      },
+    ],
     sessionRefs: [],
   });
   assert.equal(replay.workspaces.length, 2);
