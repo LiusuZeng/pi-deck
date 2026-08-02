@@ -875,6 +875,66 @@ describe("renderer session actions", () => {
       ),
     ).toBe("/folders/session-b");
   });
+
+  it("starts create names empty and prefills rename names", () => {
+    expect(
+      __rendererTestHooks.initialWorkspaceDialogName("create", "Current"),
+    ).toBe("");
+    expect(
+      __rendererTestHooks.initialWorkspaceDialogName("rename", "Current"),
+    ).toBe("Current");
+  });
+
+  it("updates every in-memory label owned by a renamed workspace", () => {
+    const sessions = [
+      { ...baseSession(), id: "a", workspaceId: "workspace-a" },
+      { ...baseSession(), id: "b", workspaceId: "workspace-b" },
+    ] as any;
+    const updated = __rendererTestHooks.updateWorkspaceSessionLabels(
+      sessions,
+      "workspace-a",
+      "Renamed workspace",
+    );
+    expect(updated.find((session: any) => session.id === "a")?.project).toBe(
+      "Renamed workspace",
+    );
+    expect(updated.find((session: any) => session.id === "b")?.project).toBe(
+      "Project",
+    );
+  });
+
+  it("blocks archiving the last workspace before attached-runtime checks", () => {
+    expect(
+      __rendererTestHooks.archiveWorkspaceBlockReason(
+        [baseSession()] as any,
+        "workspace-a",
+        1,
+      ),
+    ).toMatch(/another workspace/i);
+    expect(
+      __rendererTestHooks.archiveWorkspaceBlockReason(
+        [baseSession()] as any,
+        "workspace-a",
+        2,
+      ),
+    ).toMatch(/close attached sessions/i);
+  });
+
+  it("imports unassigned sessions sequentially and reports partial results", async () => {
+    const calls: string[] = [];
+    const result = await __rendererTestHooks.settleSequentialSessionImports(
+      ["first", "second", "third"],
+      async (sessionFile: string) => {
+        calls.push(sessionFile);
+        if (sessionFile === "second") throw new Error("unavailable");
+      },
+    );
+    expect(calls).toEqual(["first", "second", "third"]);
+    expect(result).toEqual({
+      added: ["first", "third"],
+      failed: ["second"],
+    });
+  });
 });
 
 describe("renderer attention-first inbox", () => {

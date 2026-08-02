@@ -893,6 +893,18 @@ h1 {
   margin: 0 3px 0 0;
 }
 
+.session-item-wrap > [data-testid^="session-actions-"] {
+  position: absolute;
+  z-index: 3;
+  top: 3px;
+  right: 3px;
+}
+
+.session-item-wrap:has(.session-close-button)
+  > [data-testid^="session-actions-"] {
+  right: 35px;
+}
+
 .workspace-modal-backdrop {
   position: fixed;
   z-index: 30;

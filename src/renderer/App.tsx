@@ -600,6 +600,8 @@ export function App(): ReactElement {
     ChatSessionSummary[]
   >([]);
   const [workspaceDialogBusy, setWorkspaceDialogBusy] = useState(false);
+  const [unassignedSessionsLoading, setUnassignedSessionsLoading] =
+    useState(false);
   const [selectedModelId, setSelectedModelId] = useState(
     modelOptions[0]?.id ?? "",
   );
@@ -2371,6 +2373,13 @@ export function App(): ReactElement {
         result.workspaces.find((item) => item.id === currentWorkspace.id);
       if (updated !== undefined) setCurrentWorkspace(updated);
       setWorkspaces(result.workspaces);
+      setSessions((items) =>
+        updateWorkspaceSessionLabels(
+          items,
+          currentWorkspace.id,
+          normalizedName,
+        ),
+      );
       setWorkspaceDialog(undefined);
       setUiMessage(`Renamed workspace to ${normalizedName}.`);
     } catch (error) {
@@ -2383,14 +2392,13 @@ export function App(): ReactElement {
   }
 
   async function archiveCurrentWorkspace(): Promise<void> {
-    const hasAttachedRuntime = sessionsRef.current.some(
-      (session) =>
-        session.workspaceId === currentWorkspace.id && session.runtimeBacked,
+    const blockedReason = archiveWorkspaceBlockReason(
+      sessionsRef.current,
+      currentWorkspace.id,
+      workspaces.length,
     );
-    if (hasAttachedRuntime) {
-      setComposerError(
-        "Close attached sessions before archiving this workspace.",
-      );
+    if (blockedReason !== undefined) {
+      setComposerError(blockedReason);
       return;
     }
     setWorkspaceDialogBusy(true);
@@ -2399,12 +2407,11 @@ export function App(): ReactElement {
         workspaceId: currentWorkspace.id,
       });
       const next = result.activeWorkspace ?? result.workspaces[0];
-      setWorkspaceDialog(undefined);
-      if (next !== undefined) {
-        await switchWorkspaceView(next, result.workspaces);
-      } else {
-        setWorkspaces(result.workspaces);
+      if (next === undefined) {
+        throw new Error("Cannot archive the last open workspace.");
       }
+      setWorkspaceDialog(undefined);
+      await switchWorkspaceView(next, result.workspaces);
       setUiMessage("Workspace archived. Pi session files were left untouched.");
     } catch (error) {
       setUiMessage(
@@ -2418,6 +2425,7 @@ export function App(): ReactElement {
   async function openUnassignedSessions(): Promise<void> {
     setWorkspaceDialog({ kind: "unassigned" });
     setWorkspaceDialogBusy(true);
+    setUnassignedSessionsLoading(true);
     try {
       const result = await window.piDeck.workspaces.listUnassignedSessions();
       setUnassignedSessions(result.sessions);
@@ -2428,6 +2436,7 @@ export function App(): ReactElement {
       setUnassignedSessions([]);
     } finally {
       setWorkspaceDialogBusy(false);
+      setUnassignedSessionsLoading(false);
     }
   }
 
@@ -2435,22 +2444,25 @@ export function App(): ReactElement {
     if (sessionFiles.length === 0) return;
     setWorkspaceDialogBusy(true);
     try {
-      await Promise.all(
-        sessionFiles.map((sessionFile) =>
+      const result = await settleSequentialSessionImports(
+        sessionFiles,
+        (sessionFile) =>
           window.piDeck.workspaces.addSession({
             workspaceId: currentWorkspace.id,
             sessionFile,
           }),
-        ),
       );
-      setWorkspaceDialog(undefined);
-      await refreshRealSessions();
+      if (result.added.length > 0) {
+        setUnassignedSessions((items) =>
+          items.filter((item) => !result.added.includes(item.sessionFile)),
+        );
+        await refreshRealSessions();
+      }
+      if (result.failed.length === 0) {
+        setWorkspaceDialog(undefined);
+      }
       setUiMessage(
-        `Added ${sessionFiles.length} session${sessionFiles.length === 1 ? "" : "s"} to this workspace.`,
-      );
-    } catch (error) {
-      setUiMessage(
-        `Failed to add session: ${error instanceof Error ? error.message : String(error)}`,
+        `Added ${result.added.length} session${result.added.length === 1 ? "" : "s"}; failed ${result.failed.length}.`,
       );
     } finally {
       setWorkspaceDialogBusy(false);
@@ -3347,6 +3359,7 @@ export function App(): ReactElement {
             busy={workspaceDialogBusy}
             currentWorkspace={currentWorkspace}
             dialog={workspaceDialog}
+            unassignedLoading={unassignedSessionsLoading}
             sessions={sessions}
             unassignedSessions={unassignedSessions}
             workspaces={workspaces}
@@ -3727,6 +3740,60 @@ function replaceWorkspaceSavedRows(
     ),
     savedRows,
   );
+}
+
+function initialWorkspaceDialogName(
+  kind: Exclude<WorkspaceDialogState, undefined>["kind"],
+  currentName: string,
+): string {
+  return kind === "create" ? "" : currentName;
+}
+
+function updateWorkspaceSessionLabels(
+  sessions: SessionViewModel[],
+  workspaceId: string,
+  workspaceName: string,
+): SessionViewModel[] {
+  return sessions.map((session) =>
+    session.workspaceId === workspaceId
+      ? { ...session, project: workspaceName }
+      : session,
+  );
+}
+
+function archiveWorkspaceBlockReason(
+  sessions: SessionViewModel[],
+  workspaceId: string,
+  openWorkspaceCount: number,
+): string | undefined {
+  if (openWorkspaceCount <= 1) {
+    return "Create another workspace before archiving the last open workspace.";
+  }
+  if (
+    sessions.some(
+      (session) => session.workspaceId === workspaceId && session.runtimeBacked,
+    )
+  ) {
+    return "Close attached sessions before archiving this workspace.";
+  }
+  return undefined;
+}
+
+async function settleSequentialSessionImports(
+  sessionFiles: string[],
+  importSession: (sessionFile: string) => Promise<unknown>,
+): Promise<{ added: string[]; failed: string[] }> {
+  const added: string[] = [];
+  const failed: string[] = [];
+  for (const sessionFile of sessionFiles) {
+    try {
+      await importSession(sessionFile);
+      added.push(sessionFile);
+    } catch {
+      failed.push(sessionFile);
+    }
+  }
+  return { added, failed };
 }
 
 function slashCommandFromWorkerCommand(
@@ -5656,7 +5723,8 @@ function SessionSidebar(props: {
                     props.onCloseRuntime(session.id);
                   }}
                 />
-              ) : canDelete ? (
+              ) : null}
+              {canDelete ? (
                 <span data-testid={`session-actions-${session.id}`}>
                   <Menu
                     className="session-actions-menu"
@@ -6115,6 +6183,7 @@ function WorkspaceManagementDialog(props: {
   dialog: Exclude<WorkspaceDialogState, undefined>;
   sessions: SessionViewModel[];
   unassignedSessions: ChatSessionSummary[];
+  unassignedLoading: boolean;
   workspaces: WorkspaceRef[];
   onAddUnassigned(sessionFiles: string[]): void;
   onArchive(): void;
@@ -6126,9 +6195,13 @@ function WorkspaceManagementDialog(props: {
   onRemove(sessionId: string): void;
   onRename(name: string): void;
 }): ReactElement {
-  const [name, setName] = useState(() => props.currentWorkspace.name);
+  const [name, setName] = useState(() =>
+    initialWorkspaceDialogName(props.dialog.kind, props.currentWorkspace.name),
+  );
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
   const [destinationWorkspaceId, setDestinationWorkspaceId] = useState("");
+  const dialogRef = useRef<HTMLElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
   const sessionId =
     props.dialog.kind === "move" ||
     props.dialog.kind === "remove" ||
@@ -6140,9 +6213,10 @@ function WorkspaceManagementDialog(props: {
       ? props.sessions.find((item) => item.id === sessionId)
       : undefined;
   const membershipMutable = canManageWorkspaceMembership(session);
-  const archiveBlocked = props.sessions.some(
-    (item) =>
-      item.workspaceId === props.currentWorkspace.id && item.runtimeBacked,
+  const archiveBlockedReason = archiveWorkspaceBlockReason(
+    props.sessions,
+    props.currentWorkspace.id,
+    props.workspaces.length,
   );
   const testId =
     props.dialog.kind === "create"
@@ -6177,14 +6251,65 @@ function WorkspaceManagementDialog(props: {
                   ? "Delete session"
                   : "Delete saved sessions";
 
+  useLayoutEffect(() => {
+    returnFocusRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    const dialog = dialogRef.current;
+    const initialFocus =
+      dialog?.querySelector<HTMLElement>("[data-dialog-initial-focus]") ??
+      dialog?.querySelector<HTMLElement>(
+        "input:not([disabled]), select:not([disabled]), button:not([disabled])",
+      );
+    initialFocus?.focus();
+    return () => returnFocusRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    const available = new Set(
+      props.unassignedSessions.map((item) => item.sessionFile),
+    );
+    setSelectedFiles((current) =>
+      current.filter((sessionFile) => available.has(sessionFile)),
+    );
+  }, [props.unassignedSessions]);
+
+  function handleDialogKeyDown(event: KeyboardEvent<HTMLElement>): void {
+    if (event.key === "Escape" && !props.busy) {
+      event.preventDefault();
+      props.onClose();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = Array.from(
+      dialogRef.current?.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ) ?? [],
+    );
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (first === undefined || last === undefined) return;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
   return (
     <div className="workspace-modal-backdrop" role="presentation">
       <section
         aria-labelledby={`${testId}-title`}
+        aria-busy={props.busy}
         aria-modal="true"
         className="workspace-modal"
         data-testid={testId}
+        ref={dialogRef}
         role="dialog"
+        onKeyDown={handleDialogKeyDown}
       >
         <div className="workspace-modal-header">
           <h2 id={`${testId}-title`}>{title}</h2>
@@ -6209,6 +6334,7 @@ function WorkspaceManagementDialog(props: {
               Workspace name
               <input
                 autoFocus
+                data-dialog-initial-focus
                 disabled={props.busy}
                 value={name}
                 onChange={(event) => setName(event.target.value)}
@@ -6242,6 +6368,11 @@ function WorkspaceManagementDialog(props: {
               folders.
             </p>
             <div className="unassigned-session-list">
+              {props.unassignedLoading ? (
+                <p aria-live="polite" role="status">
+                  Loading unassigned sessions…
+                </p>
+              ) : null}
               {props.unassignedSessions.length === 0 && !props.busy ? (
                 <p>No unassigned sessions found.</p>
               ) : null}
@@ -6356,11 +6487,13 @@ function WorkspaceManagementDialog(props: {
         ) : null}
         {props.dialog.kind === "archive" ? (
           <DialogConfirmation
-            blocked={archiveBlocked}
+            blocked={archiveBlockedReason !== undefined}
             busy={props.busy}
             confirmLabel="Archive workspace"
             note="Archiving hides this workspace but never deletes Pi session files."
-            blockedNote="Close attached sessions before archiving this workspace."
+            {...(archiveBlockedReason !== undefined
+              ? { blockedNote: archiveBlockedReason }
+              : {})}
             onClose={props.onClose}
             onConfirm={props.onArchive}
           />
@@ -8677,6 +8810,10 @@ export const __rendererTestHooks = {
   savedSessionsForDeletedFiles,
   removeSavedSessionsForProject,
   replaceWorkspaceSavedRows,
+  initialWorkspaceDialogName,
+  updateWorkspaceSessionLabels,
+  archiveWorkspaceBlockReason,
+  settleSequentialSessionImports,
   workingDirectoryForSession,
   runtimeCapabilitiesFor,
   updateRuntimeCapabilities,
