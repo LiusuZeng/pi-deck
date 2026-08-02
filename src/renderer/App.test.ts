@@ -673,6 +673,29 @@ describe("renderer session actions", () => {
     ).toBe(true);
   });
 
+  it("allows move/remove only for an idle detached saved session", () => {
+    const saved = {
+      ...baseSession(),
+      sessionFile: "/sessions/saved.jsonl",
+      runtimeBacked: false,
+      resumeBacked: true,
+    } as any;
+    expect(__rendererTestHooks.canManageWorkspaceMembership(saved)).toBe(true);
+    expect(
+      __rendererTestHooks.canManageWorkspaceMembership({
+        ...saved,
+        runtimeBacked: true,
+      }),
+    ).toBe(false);
+    expect(
+      __rendererTestHooks.canManageWorkspaceMembership({
+        ...saved,
+        status: "working",
+        baseState: "working",
+      }),
+    ).toBe(false);
+  });
+
   it("preserves a background runtime update when an awaited resume completes", () => {
     const saved = {
       ...baseSession(),

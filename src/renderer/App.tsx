@@ -244,21 +244,51 @@ type WorkspaceCapableApi = {
       name?: string;
       defaultProjectId?: string;
     }): Promise<WorkspaceListResultCompat>;
-    select?(request: { workspaceId: string }): Promise<WorkspaceListResultCompat>;
-    archive?(request: { workspaceId: string }): Promise<WorkspaceListResultCompat>;
-    addSession?(request: { workspaceId: string; sessionFile: string }): Promise<unknown>;
-    moveSession?(request: { sessionFile: string; toWorkspaceId: string }): Promise<unknown>;
-    removeSession?(request: { workspaceId: string; sessionFile: string }): Promise<unknown>;
+    select?(request: {
+      workspaceId: string;
+    }): Promise<WorkspaceListResultCompat>;
+    archive?(request: {
+      workspaceId: string;
+    }): Promise<WorkspaceListResultCompat>;
+    addSession?(request: {
+      workspaceId: string;
+      sessionFile: string;
+    }): Promise<unknown>;
+    moveSession?(request: {
+      sessionFile: string;
+      toWorkspaceId: string;
+    }): Promise<unknown>;
+    removeSession?(request: {
+      workspaceId: string;
+      sessionFile: string;
+    }): Promise<unknown>;
     listUnassignedSessions?(): Promise<{ sessions: ChatSessionSummary[] }>;
   };
   chat: {
-    listSessions?(request?: { workspaceId?: string; projectId?: string }): Promise<{
+    listSessions?(request?: {
+      workspaceId?: string;
+      projectId?: string;
+    }): Promise<{
       sessions: ChatSessionSummary[];
     }>;
-    createSession?(request?: { workspaceId?: string; projectId?: string }): Promise<ChatSnapshot>;
-    resumeSession?(request: { workspaceId?: string; projectId?: string; sessionFile: string }): Promise<ChatSnapshot>;
-    deleteSession?(request: { workspaceId?: string; projectId?: string; sessionFile: string }): Promise<unknown>;
-    deleteAllSessions?(request?: { workspaceId?: string; projectId?: string }): Promise<unknown>;
+    createSession?(request?: {
+      workspaceId?: string;
+      projectId?: string;
+    }): Promise<ChatSnapshot>;
+    resumeSession?(request: {
+      workspaceId?: string;
+      projectId?: string;
+      sessionFile: string;
+    }): Promise<ChatSnapshot>;
+    deleteSession?(request: {
+      workspaceId?: string;
+      projectId?: string;
+      sessionFile: string;
+    }): Promise<unknown>;
+    deleteAllSessions?(request?: {
+      workspaceId?: string;
+      projectId?: string;
+    }): Promise<unknown>;
   };
 };
 
@@ -269,6 +299,17 @@ interface ComposerDraftState {
 }
 
 type ComposerDraftsBySession = Record<string, ComposerDraftState | undefined>;
+
+type WorkspaceDialogState =
+  | { kind: "create" }
+  | { kind: "rename" }
+  | { kind: "archive" }
+  | { kind: "unassigned" }
+  | { kind: "move"; sessionId: string }
+  | { kind: "remove"; sessionId: string }
+  | { kind: "delete"; sessionId: string }
+  | { kind: "deleteAll" }
+  | undefined;
 
 interface ModelOption {
   provider: string;
@@ -553,6 +594,12 @@ export function App(): ReactElement {
     }),
   );
   const [workspaces, setWorkspaces] = useState<WorkspaceRef[]>([]);
+  const [workspaceDialog, setWorkspaceDialog] =
+    useState<WorkspaceDialogState>(undefined);
+  const [unassignedSessions, setUnassignedSessions] = useState<
+    ChatSessionSummary[]
+  >([]);
+  const [workspaceDialogBusy, setWorkspaceDialogBusy] = useState(false);
   const [selectedModelId, setSelectedModelId] = useState(
     modelOptions[0]?.id ?? "",
   );
@@ -790,27 +837,27 @@ export function App(): ReactElement {
           const draftProjectId = projectIdForWorkspace(bootstrapWorkspace);
           if (draftProjectId !== undefined) {
             void api.chat
-            .listModels({ projectId: draftProjectId })
-            .then((result) => {
-              if (!disposed) {
-                setProjectModelConfiguration(result);
-                setSessions((items) =>
-                  applyPiDefaultsToDraftSessions(
-                    items,
-                    draftProjectId,
-                    result,
-                  ),
-                );
-              }
-            })
-            .catch(() => {
-              if (!disposed) {
-                setProjectModelConfiguration({
-                  models: [],
-                  thinkingLevels: [],
-                });
-              }
-            });
+              .listModels({ projectId: draftProjectId })
+              .then((result) => {
+                if (!disposed) {
+                  setProjectModelConfiguration(result);
+                  setSessions((items) =>
+                    applyPiDefaultsToDraftSessions(
+                      items,
+                      draftProjectId,
+                      result,
+                    ),
+                  );
+                }
+              })
+              .catch(() => {
+                if (!disposed) {
+                  setProjectModelConfiguration({
+                    models: [],
+                    thinkingLevels: [],
+                  });
+                }
+              });
           }
           const generation = ++sessionListGeneration.current;
           // Two animation frames guarantee the ready shell has an opportunity
@@ -1404,7 +1451,9 @@ export function App(): ReactElement {
     try {
       const snapshot = await window.piDeck.chat.resumeSession({
         workspaceId: session.workspaceId,
-        ...(session.projectId !== undefined ? { projectId: session.projectId } : {}),
+        ...(session.projectId !== undefined
+          ? { projectId: session.projectId }
+          : {}),
         sessionFile: session.sessionFile,
       });
       const resumed = {
@@ -1604,7 +1653,9 @@ export function App(): ReactElement {
       let draftProjectId =
         draftSession.projectId ?? projectIdForWorkspace(currentWorkspace);
       if (draftProjectId === undefined) {
-        setUiMessage("Choose a working folder for this session before Pi starts…");
+        setUiMessage(
+          "Choose a working folder for this session before Pi starts…",
+        );
         const picked = await window.piDeck.projects.pickProject();
         if (!picked.selected) {
           unblockAttachmentOwner(draftSession.id);
@@ -1620,7 +1671,9 @@ export function App(): ReactElement {
                 : session,
             ),
           );
-          setUiMessage("Working-folder picker canceled. This workspace remains folderless.");
+          setUiMessage(
+            "Working-folder picker canceled. This workspace remains folderless.",
+          );
           return;
         }
         draftProjectId = picked.project.id;
@@ -1632,7 +1685,8 @@ export function App(): ReactElement {
                   projectId: picked.project.id,
                   workingDirectory:
                     picked.project.canonicalPath || picked.project.path,
-                  projectPath: picked.project.canonicalPath || picked.project.path,
+                  projectPath:
+                    picked.project.canonicalPath || picked.project.path,
                 }
               : session,
           ),
@@ -2187,10 +2241,12 @@ export function App(): ReactElement {
         ),
       );
       const existingRuntime = sessionsRef.current.find(
-        (session) => session.runtimeBacked && session.workspaceId === workspace.id,
+        (session) =>
+          session.runtimeBacked && session.workspaceId === workspace.id,
       );
       const existingDraft = sessionsRef.current.find(
-        (session) => session.draftSession === true && session.workspaceId === workspace.id,
+        (session) =>
+          session.draftSession === true && session.workspaceId === workspace.id,
       );
       const selectedId =
         preferredSessionId ??
@@ -2217,23 +2273,35 @@ export function App(): ReactElement {
       setSelectedSessionId(selectedId);
       const projectId = projectIdForWorkspace(workspace);
       if (projectId !== undefined) {
-        void window.piDeck.chat.listModels({ projectId }).then((result) => {
-          if (sessionListRequest === sessionListGeneration.current) {
-            setProjectModelConfiguration(result);
-          }
-        }).catch(() => undefined);
+        void window.piDeck.chat
+          .listModels({ projectId })
+          .then((result) => {
+            if (sessionListRequest === sessionListGeneration.current) {
+              setProjectModelConfiguration(result);
+            }
+          })
+          .catch(() => undefined);
       }
-      setUiMessage(`Workspace switched to ${workspace.name}. Active work in other workspaces remains available.`);
+      setUiMessage(
+        `Workspace switched to ${workspace.name}. Active work in other workspaces remains available.`,
+      );
     } catch (error) {
-      setUiMessage(`Failed to open workspace: ${error instanceof Error ? error.message : String(error)}`);
+      setUiMessage(
+        `Failed to open workspace: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
   async function handleSelectWorkspace(workspace: WorkspaceRef): Promise<void> {
     try {
       if (hasWorkspaceApi(window.piDeck)) {
-        const result = await window.piDeck.workspaces.select({ workspaceId: workspace.id });
-        await switchWorkspaceView(result.activeWorkspace ?? workspace, result.workspaces);
+        const result = await window.piDeck.workspaces.select({
+          workspaceId: workspace.id,
+        });
+        await switchWorkspaceView(
+          result.activeWorkspace ?? workspace,
+          result.workspaces,
+        );
         return;
       }
       // Legacy preload: a migrated workspace maps one-to-one to its project.
@@ -2241,23 +2309,33 @@ export function App(): ReactElement {
         await handleSelectProject(workspace.defaultProject);
       }
     } catch (error) {
-      setUiMessage(`Failed to select workspace: ${error instanceof Error ? error.message : String(error)}`);
+      setUiMessage(
+        `Failed to select workspace: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
   async function handleNewWorkspace(): Promise<void> {
-    const name = window.prompt("Workspace name");
-    if (name === null || name.trim().length === 0) {
+    setWorkspaceDialog({ kind: "create" });
+  }
+
+  async function createWorkspace(name: string): Promise<void> {
+    const normalizedName = name.trim().replace(/\s+/g, " ");
+    if (normalizedName.length === 0) {
+      setComposerError("A workspace name is required.");
       return;
     }
-    const normalizedName = name.trim().replace(/\s+/g, " ");
+    setWorkspaceDialogBusy(true);
     try {
       if (hasWorkspaceApi(window.piDeck)) {
-        const result = await window.piDeck.workspaces.create({ name: normalizedName });
+        const result = await window.piDeck.workspaces.create({
+          name: normalizedName,
+        });
         const workspace = result.activeWorkspace ?? result.workspaces.at(-1);
         if (workspace !== undefined) {
           await switchWorkspaceView(workspace, result.workspaces);
         }
+        setWorkspaceDialog(undefined);
         return;
       }
       const workspace: WorkspaceRef = {
@@ -2266,8 +2344,176 @@ export function App(): ReactElement {
         lastOpenedAt: Date.now(),
       };
       await switchWorkspaceView(workspace, [...workspaces, workspace]);
+      setWorkspaceDialog(undefined);
     } catch (error) {
-      setUiMessage(`Failed to create workspace: ${error instanceof Error ? error.message : String(error)}`);
+      setUiMessage(
+        `Failed to create workspace: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      setWorkspaceDialogBusy(false);
+    }
+  }
+
+  async function renameWorkspace(name: string): Promise<void> {
+    const normalizedName = name.trim().replace(/\s+/g, " ");
+    if (normalizedName.length === 0) {
+      setComposerError("A workspace name is required.");
+      return;
+    }
+    setWorkspaceDialogBusy(true);
+    try {
+      const result = await window.piDeck.workspaces.update({
+        workspaceId: currentWorkspace.id,
+        name: normalizedName,
+      });
+      const updated =
+        result.activeWorkspace ??
+        result.workspaces.find((item) => item.id === currentWorkspace.id);
+      if (updated !== undefined) setCurrentWorkspace(updated);
+      setWorkspaces(result.workspaces);
+      setWorkspaceDialog(undefined);
+      setUiMessage(`Renamed workspace to ${normalizedName}.`);
+    } catch (error) {
+      setUiMessage(
+        `Failed to rename workspace: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      setWorkspaceDialogBusy(false);
+    }
+  }
+
+  async function archiveCurrentWorkspace(): Promise<void> {
+    const hasAttachedRuntime = sessionsRef.current.some(
+      (session) =>
+        session.workspaceId === currentWorkspace.id && session.runtimeBacked,
+    );
+    if (hasAttachedRuntime) {
+      setComposerError(
+        "Close attached sessions before archiving this workspace.",
+      );
+      return;
+    }
+    setWorkspaceDialogBusy(true);
+    try {
+      const result = await window.piDeck.workspaces.archive({
+        workspaceId: currentWorkspace.id,
+      });
+      const next = result.activeWorkspace ?? result.workspaces[0];
+      setWorkspaceDialog(undefined);
+      if (next !== undefined) {
+        await switchWorkspaceView(next, result.workspaces);
+      } else {
+        setWorkspaces(result.workspaces);
+      }
+      setUiMessage("Workspace archived. Pi session files were left untouched.");
+    } catch (error) {
+      setUiMessage(
+        `Failed to archive workspace: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      setWorkspaceDialogBusy(false);
+    }
+  }
+
+  async function openUnassignedSessions(): Promise<void> {
+    setWorkspaceDialog({ kind: "unassigned" });
+    setWorkspaceDialogBusy(true);
+    try {
+      const result = await window.piDeck.workspaces.listUnassignedSessions();
+      setUnassignedSessions(result.sessions);
+    } catch (error) {
+      setUiMessage(
+        `Failed to list unassigned sessions: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      setUnassignedSessions([]);
+    } finally {
+      setWorkspaceDialogBusy(false);
+    }
+  }
+
+  async function addUnassignedSessions(sessionFiles: string[]): Promise<void> {
+    if (sessionFiles.length === 0) return;
+    setWorkspaceDialogBusy(true);
+    try {
+      await Promise.all(
+        sessionFiles.map((sessionFile) =>
+          window.piDeck.workspaces.addSession({
+            workspaceId: currentWorkspace.id,
+            sessionFile,
+          }),
+        ),
+      );
+      setWorkspaceDialog(undefined);
+      await refreshRealSessions();
+      setUiMessage(
+        `Added ${sessionFiles.length} session${sessionFiles.length === 1 ? "" : "s"} to this workspace.`,
+      );
+    } catch (error) {
+      setUiMessage(
+        `Failed to add session: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      setWorkspaceDialogBusy(false);
+    }
+  }
+
+  async function moveSavedSession(
+    sessionId: string,
+    toWorkspaceId: string,
+  ): Promise<void> {
+    const session = sessionsRef.current.find((item) => item.id === sessionId);
+    if (!canManageWorkspaceMembership(session)) return;
+    setWorkspaceDialogBusy(true);
+    try {
+      await window.piDeck.workspaces.moveSession({
+        sessionFile: session.sessionFile,
+        toWorkspaceId,
+      });
+      setSessions((items) =>
+        items.map((item) =>
+          item.id === sessionId
+            ? { ...item, workspaceId: toWorkspaceId }
+            : item,
+        ),
+      );
+      setWorkspaceDialog(undefined);
+      if (selectedSessionIdRef.current === sessionId) {
+        await handleNewSession();
+      }
+      setUiMessage(
+        "Moved session to the selected workspace. The Pi JSONL file was not changed.",
+      );
+    } catch (error) {
+      setUiMessage(
+        `Failed to move session: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      setWorkspaceDialogBusy(false);
+    }
+  }
+
+  async function removeSavedSession(sessionId: string): Promise<void> {
+    const session = sessionsRef.current.find((item) => item.id === sessionId);
+    if (!canManageWorkspaceMembership(session)) return;
+    setWorkspaceDialogBusy(true);
+    try {
+      await window.piDeck.workspaces.removeSession({
+        workspaceId: session.workspaceId,
+        sessionFile: session.sessionFile,
+      });
+      setSessions((items) => removeSessionById(items, sessionId));
+      discardComposerAttachmentOwner(sessionId);
+      setWorkspaceDialog(undefined);
+      if (selectedSessionIdRef.current === sessionId) await handleNewSession();
+      setUiMessage(
+        "Removed session from this workspace. Its Pi JSONL file was kept on disk.",
+      );
+    } catch (error) {
+      setUiMessage(
+        `Failed to remove session from workspace: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      setWorkspaceDialogBusy(false);
     }
   }
 
@@ -2285,17 +2531,26 @@ export function App(): ReactElement {
           workspaceId: workspace.id,
           defaultProjectId: picked.project.id,
         });
-        const updated = result.activeWorkspace ?? result.workspaces.find((item) => item.id === workspace.id) ?? workspace;
+        const updated =
+          result.activeWorkspace ??
+          result.workspaces.find((item) => item.id === workspace.id) ??
+          workspace;
         setCurrentWorkspace(updated);
         setWorkspaces(result.workspaces);
       } else {
         setCurrentWorkspace(workspace);
-        setWorkspaces((items) => items.map((item) => item.id === workspace.id ? workspace : item));
+        setWorkspaces((items) =>
+          items.map((item) => (item.id === workspace.id ? workspace : item)),
+        );
       }
       setCurrentProject(picked.project);
-      setUiMessage(`Default working folder set to ${picked.project.displayName}.`);
+      setUiMessage(
+        `Default working folder set to ${picked.project.displayName}.`,
+      );
     } catch (error) {
-      setUiMessage(`Working-folder picker failed: ${error instanceof Error ? error.message : String(error)}`);
+      setUiMessage(
+        `Working-folder picker failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
@@ -2480,17 +2735,15 @@ export function App(): ReactElement {
     }
   }
 
-  async function handleDeleteAllSessions(): Promise<void> {
+  async function handleDeleteAllSessions(confirmed = false): Promise<void> {
     const workspaceId = currentWorkspace.id;
     const savedSessions = savedSessionsForProject(sessions, workspaceId);
     if (savedSessions.length === 0) {
       setUiMessage("No inactive saved sessions to delete.");
       return;
     }
-    const confirmed = window.confirm(
-      `Delete ${savedSessions.length} inactive saved Pi session${savedSessions.length === 1 ? "" : "s"}? Files will be moved to Trash when possible.`,
-    );
     if (!confirmed) {
+      setWorkspaceDialog({ kind: "deleteAll" });
       return;
     }
 
@@ -2509,6 +2762,7 @@ export function App(): ReactElement {
         savedSessions,
         savedSessionsForDeletedFiles(savedSessions, result.deletedSessionFiles),
       );
+      setWorkspaceDialog(undefined);
       setUiMessage(
         `Deleted ${result.deletedCount} saved session${result.deletedCount === 1 ? "" : "s"}.${result.skippedCount > 0 ? ` Skipped ${result.skippedCount} attached or unavailable session${result.skippedCount === 1 ? "" : "s"}.` : ""}`,
       );
@@ -2572,7 +2826,10 @@ export function App(): ReactElement {
     }
   }
 
-  async function handleDeleteSession(sessionId: string): Promise<void> {
+  async function handleDeleteSession(
+    sessionId: string,
+    confirmed = false,
+  ): Promise<void> {
     const session = sessions.find((item) => item.id === sessionId);
     if (
       session === undefined ||
@@ -2582,13 +2839,11 @@ export function App(): ReactElement {
       setUiMessage("Only saved Pi sessions can be deleted.");
       return;
     }
-    const sessionFile = session.sessionFile;
-    const confirmed = window.confirm(
-      `Delete Pi session “${session.title}”?${session.runtimeBacked ? " This will close it first." : ""} It will be moved to Trash when possible.`,
-    );
     if (!confirmed) {
+      setWorkspaceDialog({ kind: "delete", sessionId });
       return;
     }
+    const sessionFile = session.sessionFile;
 
     blockAttachmentOwner(session.id);
     if (session.runtimeBacked) {
@@ -2599,13 +2854,16 @@ export function App(): ReactElement {
     try {
       const result = await window.piDeck.chat.deleteSession({
         workspaceId: session.workspaceId,
-        ...(session.projectId !== undefined ? { projectId: session.projectId } : {}),
+        ...(session.projectId !== undefined
+          ? { projectId: session.projectId }
+          : {}),
         sessionFile,
       });
       finalizeSavedSessionDeletion(
         [session],
         savedSessionsForDeletedFiles([session], [result.sessionFile]),
       );
+      setWorkspaceDialog(undefined);
       setUiMessage("Deleted Pi session.");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -2768,9 +3026,7 @@ export function App(): ReactElement {
     );
     try {
       const result = await window.piDeck.attachments.pickFiles({
-        ...(workingDirectory !== undefined
-          ? { workingDirectory }
-          : {}),
+        ...(workingDirectory !== undefined ? { workingDirectory } : {}),
         ownerId,
         sessionId,
       });
@@ -2799,9 +3055,7 @@ export function App(): ReactElement {
     );
     try {
       const result = await window.piDeck.attachments.importDroppedFiles(files, {
-        ...(workingDirectory !== undefined
-          ? { workingDirectory }
-          : {}),
+        ...(workingDirectory !== undefined ? { workingDirectory } : {}),
         ownerId,
         sessionId,
       });
@@ -3002,6 +3256,13 @@ export function App(): ReactElement {
           onNewSession={() => void handleNewSession()}
           onCloseRuntime={(sessionId) => void handleCloseRuntime(sessionId)}
           onDeleteSession={(sessionId) => void handleDeleteSession(sessionId)}
+          onMoveSession={(sessionId) =>
+            setWorkspaceDialog({ kind: "move", sessionId })
+          }
+          onRemoveSession={(sessionId) =>
+            setWorkspaceDialog({ kind: "remove", sessionId })
+          }
+          onOpenUnassigned={() => void openUnassignedSessions()}
           onDeleteAllSessions={() => void handleDeleteAllSessions()}
           onRefresh={refreshRealSessions}
         />
@@ -3032,8 +3293,14 @@ export function App(): ReactElement {
             void handleAppearanceThemeChange(theme)
           }
           onNewWorkspace={() => void handleNewWorkspace()}
-          onChooseDefaultWorkingFolder={() => void handleChooseDefaultWorkingFolder()}
-          onSelectWorkspace={(workspace) => void handleSelectWorkspace(workspace)}
+          onRenameWorkspace={() => setWorkspaceDialog({ kind: "rename" })}
+          onArchiveWorkspace={() => setWorkspaceDialog({ kind: "archive" })}
+          onChooseDefaultWorkingFolder={() =>
+            void handleChooseDefaultWorkingFolder()
+          }
+          onSelectWorkspace={(workspace) =>
+            void handleSelectWorkspace(workspace)
+          }
           onModelChange={setSelectedModelId}
           onThinkingChange={(level) => {
             setSelectedThinking(level);
@@ -3075,6 +3342,31 @@ export function App(): ReactElement {
             {composer}
           </>
         )}
+        {workspaceDialog !== undefined ? (
+          <WorkspaceManagementDialog
+            busy={workspaceDialogBusy}
+            currentWorkspace={currentWorkspace}
+            dialog={workspaceDialog}
+            sessions={sessions}
+            unassignedSessions={unassignedSessions}
+            workspaces={workspaces}
+            onAddUnassigned={(sessionFiles) =>
+              void addUnassignedSessions(sessionFiles)
+            }
+            onArchive={() => void archiveCurrentWorkspace()}
+            onClose={() => {
+              if (!workspaceDialogBusy) setWorkspaceDialog(undefined);
+            }}
+            onCreate={(name) => void createWorkspace(name)}
+            onDelete={(sessionId) => void handleDeleteSession(sessionId, true)}
+            onDeleteAll={() => void handleDeleteAllSessions(true)}
+            onMove={(sessionId, workspaceId) =>
+              void moveSavedSession(sessionId, workspaceId)
+            }
+            onRemove={(sessionId) => void removeSavedSession(sessionId)}
+            onRename={(name) => void renameWorkspace(name)}
+          />
+        ) : null}
       </section>
     </main>
   );
@@ -3096,7 +3388,9 @@ async function listProjectsIfAvailable(
   };
 }
 
-function workspaceListFromBootstrap(bootstrap: AppBootstrapState): WorkspaceListResultCompat {
+function workspaceListFromBootstrap(
+  bootstrap: AppBootstrapState,
+): WorkspaceListResultCompat {
   const candidate = bootstrap as AppBootstrapState & {
     workspace?: WorkspaceRef;
     workspaces?: WorkspaceRef[];
@@ -3158,9 +3452,7 @@ async function createSessionForWorkspace(
       ...(projectId !== undefined ? { projectId } : {}),
     });
   }
-  return api.chat.createSession(
-    projectId === undefined ? {} : { projectId },
-  );
+  return api.chat.createSession(projectId === undefined ? {} : { projectId });
 }
 
 async function selectProjectIfAvailable(
@@ -3525,9 +3817,7 @@ function draftSessionForWorkspace(
       : {}),
     id,
     workspaceId: workspace.id,
-    ...(workingDirectory !== undefined
-      ? { workingDirectory }
-      : {}),
+    ...(workingDirectory !== undefined ? { workingDirectory } : {}),
     title: "Untitled new session",
     project: workspace.name,
     projectPath: workingDirectory ?? "No working folder",
@@ -5132,6 +5422,9 @@ function SessionSidebar(props: {
   onNewSession(): void;
   onCloseRuntime(sessionId: string): void;
   onDeleteSession(sessionId: string): void;
+  onMoveSession(sessionId: string): void;
+  onRemoveSession(sessionId: string): void;
+  onOpenUnassigned(): void;
   onDeleteAllSessions(): void;
   onRefresh(): Promise<void>;
 }): ReactElement {
@@ -5225,6 +5518,16 @@ function SessionSidebar(props: {
         <SquarePen aria-hidden="true" size={16} strokeWidth={1.75} />
         New session
       </Button>
+      {props.realMode ? (
+        <Button
+          className="sidebar-add-existing"
+          size="sm"
+          onClick={props.onOpenUnassigned}
+        >
+          <ListPlus aria-hidden="true" size={15} strokeWidth={1.75} />
+          Add existing session…
+        </Button>
+      ) : null}
 
       {activeWork.length > 0 ? (
         <section
@@ -5303,6 +5606,11 @@ function SessionSidebar(props: {
         ) : null}
         {visibleSessions.map((session) => {
           const canDelete = isSessionDeletable(session, props.realMode);
+          const canManageMembership =
+            props.realMode && canManageWorkspaceMembership(session);
+          const membershipDisabledMessage = session.runtimeBacked
+            ? "Close this runtime before moving or removing its workspace membership."
+            : "Only idle saved sessions can be moved or removed from a workspace.";
           const canCloseRuntime =
             props.realMode && session.runtimeBacked && !isSessionBusy(session);
           return (
@@ -5349,18 +5657,50 @@ function SessionSidebar(props: {
                   }}
                 />
               ) : canDelete ? (
-                <IconButton
-                  className="session-delete-button"
-                  icon={Trash2}
-                  label={`Delete ${session.title}`}
-                  size="sm"
-                  variant="danger"
-                  onPointerDown={(event) => event.stopPropagation()}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    props.onDeleteSession(session.id);
-                  }}
-                />
+                <span data-testid={`session-actions-${session.id}`}>
+                  <Menu
+                    className="session-actions-menu"
+                    label={`Session actions for ${session.title}`}
+                    menuLabel={`Session actions for ${session.title}`}
+                  >
+                    <Button
+                      disabled={!canManageMembership}
+                      role="menuitem"
+                      size="sm"
+                      title={
+                        canManageMembership
+                          ? undefined
+                          : membershipDisabledMessage
+                      }
+                      variant="menuItem"
+                      onClick={() => props.onMoveSession(session.id)}
+                    >
+                      Move to workspace…
+                    </Button>
+                    <Button
+                      disabled={!canManageMembership}
+                      role="menuitem"
+                      size="sm"
+                      title={
+                        canManageMembership
+                          ? undefined
+                          : membershipDisabledMessage
+                      }
+                      variant="menuItem"
+                      onClick={() => props.onRemoveSession(session.id)}
+                    >
+                      Remove from workspace
+                    </Button>
+                    <Button
+                      role="menuitem"
+                      size="sm"
+                      variant="danger"
+                      onClick={() => props.onDeleteSession(session.id)}
+                    >
+                      Delete session…
+                    </Button>
+                  </Menu>
+                </span>
               ) : null}
             </div>
           );
@@ -5384,6 +5724,19 @@ function isSessionDeletable(
   return (
     realMode &&
     session.backendMode === "real" &&
+    typeof session.sessionFile === "string" &&
+    session.sessionFile.length > 0
+  );
+}
+
+function canManageWorkspaceMembership(
+  session: SessionViewModel | undefined,
+): session is SessionViewModel & { sessionFile: string } {
+  return (
+    session !== undefined &&
+    session.resumeBacked === true &&
+    !session.runtimeBacked &&
+    !isSessionBusy(session) &&
     typeof session.sessionFile === "string" &&
     session.sessionFile.length > 0
   );
@@ -5590,6 +5943,8 @@ function AppHeader(props: {
   onToggleUsageStats(): void;
   onAppearanceThemeChange(theme: ThemePreference): void;
   onNewWorkspace(): void;
+  onRenameWorkspace(): void;
+  onArchiveWorkspace(): void;
   onChooseDefaultWorkingFolder(): void;
   onSelectWorkspace(workspace: WorkspaceRef): void;
   onModelChange(id: string): void;
@@ -5611,6 +5966,8 @@ function AppHeader(props: {
           workspaces={props.workspaces}
           realMode={props.realMode}
           onNewWorkspace={props.onNewWorkspace}
+          onRenameWorkspace={props.onRenameWorkspace}
+          onArchiveWorkspace={props.onArchiveWorkspace}
           onChooseDefaultWorkingFolder={props.onChooseDefaultWorkingFolder}
           onSelectWorkspace={props.onSelectWorkspace}
         />
@@ -5752,12 +6109,327 @@ function UsageStatsPanel(props: { session: SessionViewModel }): ReactElement {
   );
 }
 
+function WorkspaceManagementDialog(props: {
+  busy: boolean;
+  currentWorkspace: WorkspaceRef;
+  dialog: Exclude<WorkspaceDialogState, undefined>;
+  sessions: SessionViewModel[];
+  unassignedSessions: ChatSessionSummary[];
+  workspaces: WorkspaceRef[];
+  onAddUnassigned(sessionFiles: string[]): void;
+  onArchive(): void;
+  onClose(): void;
+  onCreate(name: string): void;
+  onDelete(sessionId: string): void;
+  onDeleteAll(): void;
+  onMove(sessionId: string, workspaceId: string): void;
+  onRemove(sessionId: string): void;
+  onRename(name: string): void;
+}): ReactElement {
+  const [name, setName] = useState(() => props.currentWorkspace.name);
+  const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
+  const [destinationWorkspaceId, setDestinationWorkspaceId] = useState("");
+  const sessionId =
+    props.dialog.kind === "move" ||
+    props.dialog.kind === "remove" ||
+    props.dialog.kind === "delete"
+      ? props.dialog.sessionId
+      : undefined;
+  const session =
+    sessionId !== undefined
+      ? props.sessions.find((item) => item.id === sessionId)
+      : undefined;
+  const membershipMutable = canManageWorkspaceMembership(session);
+  const archiveBlocked = props.sessions.some(
+    (item) =>
+      item.workspaceId === props.currentWorkspace.id && item.runtimeBacked,
+  );
+  const testId =
+    props.dialog.kind === "create"
+      ? "workspace-create-dialog"
+      : props.dialog.kind === "rename"
+        ? "workspace-rename-dialog"
+        : props.dialog.kind === "archive"
+          ? "workspace-archive-dialog"
+          : props.dialog.kind === "unassigned"
+            ? "unassigned-sessions"
+            : props.dialog.kind === "move"
+              ? "session-move-dialog"
+              : props.dialog.kind === "remove"
+                ? "session-remove-dialog"
+                : props.dialog.kind === "delete"
+                  ? "session-delete-dialog"
+                  : "session-delete-all-dialog";
+  const title =
+    props.dialog.kind === "create"
+      ? "New workspace"
+      : props.dialog.kind === "rename"
+        ? "Rename workspace"
+        : props.dialog.kind === "archive"
+          ? "Archive workspace"
+          : props.dialog.kind === "unassigned"
+            ? "Unassigned sessions"
+            : props.dialog.kind === "move"
+              ? "Move session to workspace"
+              : props.dialog.kind === "remove"
+                ? "Remove session from workspace"
+                : props.dialog.kind === "delete"
+                  ? "Delete session"
+                  : "Delete saved sessions";
+
+  return (
+    <div className="workspace-modal-backdrop" role="presentation">
+      <section
+        aria-labelledby={`${testId}-title`}
+        aria-modal="true"
+        className="workspace-modal"
+        data-testid={testId}
+        role="dialog"
+      >
+        <div className="workspace-modal-header">
+          <h2 id={`${testId}-title`}>{title}</h2>
+          <IconButton
+            icon={X}
+            label="Close dialog"
+            size="sm"
+            onClick={props.onClose}
+          />
+        </div>
+
+        {props.dialog.kind === "create" || props.dialog.kind === "rename" ? (
+          <form
+            className="workspace-modal-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (props.dialog.kind === "create") props.onCreate(name);
+              else props.onRename(name);
+            }}
+          >
+            <label>
+              Workspace name
+              <input
+                autoFocus
+                disabled={props.busy}
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+              />
+            </label>
+            <p className="workspace-modal-note">
+              A workspace groups sessions independently of their working
+              folders.
+            </p>
+            <div className="workspace-modal-actions">
+              <Button disabled={props.busy} onClick={props.onClose}>
+                Cancel
+              </Button>
+              <Button
+                disabled={props.busy || name.trim().length === 0}
+                type="submit"
+                variant="solid"
+              >
+                {props.dialog.kind === "create"
+                  ? "Create workspace"
+                  : "Save name"}
+              </Button>
+            </div>
+          </form>
+        ) : null}
+
+        {props.dialog.kind === "unassigned" ? (
+          <div className="workspace-modal-form">
+            <p className="workspace-modal-note">
+              Add Pi sessions without changing their JSONL files or working
+              folders.
+            </p>
+            <div className="unassigned-session-list">
+              {props.unassignedSessions.length === 0 && !props.busy ? (
+                <p>No unassigned sessions found.</p>
+              ) : null}
+              {props.unassignedSessions.map((item) => {
+                const checked = selectedFiles.includes(item.sessionFile);
+                return (
+                  <label
+                    className="unassigned-session-option"
+                    key={item.sessionFile}
+                  >
+                    <input
+                      checked={checked}
+                      disabled={props.busy}
+                      type="checkbox"
+                      onChange={() =>
+                        setSelectedFiles((current) =>
+                          checked
+                            ? current.filter(
+                                (file) => file !== item.sessionFile,
+                              )
+                            : [...current, item.sessionFile],
+                        )
+                      }
+                    />
+                    <span>
+                      <strong>{item.title}</strong>
+                      <small>{item.cwd ?? "Working folder unavailable"}</small>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+            <div className="workspace-modal-actions">
+              <Button disabled={props.busy} onClick={props.onClose}>
+                Cancel
+              </Button>
+              <Button
+                disabled={props.busy || selectedFiles.length === 0}
+                variant="solid"
+                onClick={() => props.onAddUnassigned(selectedFiles)}
+              >
+                Add selected sessions
+              </Button>
+            </div>
+          </div>
+        ) : null}
+
+        {props.dialog.kind === "move" ? (
+          <div className="workspace-modal-form">
+            <p>
+              Move “{session?.title ?? "this session"}” without changing its Pi
+              JSONL file.
+            </p>
+            {!membershipMutable ? (
+              <p className="workspace-modal-warning">
+                Close the attached runtime before moving this session.
+              </p>
+            ) : null}
+            <label>
+              Destination workspace
+              <select
+                aria-label="Destination workspace"
+                disabled={props.busy || !membershipMutable}
+                value={destinationWorkspaceId}
+                onChange={(event) =>
+                  setDestinationWorkspaceId(event.target.value)
+                }
+              >
+                <option value="">Choose workspace…</option>
+                {props.workspaces
+                  .filter(
+                    (workspace) => workspace.id !== props.currentWorkspace.id,
+                  )
+                  .map((workspace) => (
+                    <option key={workspace.id} value={workspace.id}>
+                      {workspace.name}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <div className="workspace-modal-actions">
+              <Button disabled={props.busy} onClick={props.onClose}>
+                Cancel
+              </Button>
+              <Button
+                disabled={
+                  props.busy ||
+                  !membershipMutable ||
+                  destinationWorkspaceId.length === 0
+                }
+                variant="solid"
+                onClick={() =>
+                  session && props.onMove(session.id, destinationWorkspaceId)
+                }
+              >
+                Move session
+              </Button>
+            </div>
+          </div>
+        ) : null}
+
+        {props.dialog.kind === "remove" ? (
+          <DialogConfirmation
+            blocked={!membershipMutable}
+            busy={props.busy}
+            confirmLabel="Remove from workspace"
+            note="This removes only workspace membership. The Pi JSONL file stays on disk."
+            blockedNote="Close the attached runtime before removing this session from the workspace."
+            onClose={props.onClose}
+            onConfirm={() => session && props.onRemove(session.id)}
+          />
+        ) : null}
+        {props.dialog.kind === "archive" ? (
+          <DialogConfirmation
+            blocked={archiveBlocked}
+            busy={props.busy}
+            confirmLabel="Archive workspace"
+            note="Archiving hides this workspace but never deletes Pi session files."
+            blockedNote="Close attached sessions before archiving this workspace."
+            onClose={props.onClose}
+            onConfirm={props.onArchive}
+          />
+        ) : null}
+        {props.dialog.kind === "delete" ? (
+          <DialogConfirmation
+            busy={props.busy}
+            confirmLabel="Delete session"
+            danger
+            note="This deletes the Pi session file (moved to Trash when possible), unlike Remove from workspace."
+            onClose={props.onClose}
+            onConfirm={() => session && props.onDelete(session.id)}
+          />
+        ) : null}
+        {props.dialog.kind === "deleteAll" ? (
+          <DialogConfirmation
+            busy={props.busy}
+            confirmLabel="Delete saved sessions"
+            danger
+            note="This deletes inactive Pi session files in this workspace (moved to Trash when possible)."
+            onClose={props.onClose}
+            onConfirm={props.onDeleteAll}
+          />
+        ) : null}
+      </section>
+    </div>
+  );
+}
+
+function DialogConfirmation(props: {
+  blocked?: boolean;
+  blockedNote?: string;
+  busy: boolean;
+  confirmLabel: string;
+  danger?: boolean;
+  note: string;
+  onClose(): void;
+  onConfirm(): void;
+}): ReactElement {
+  return (
+    <div className="workspace-modal-form">
+      <p>{props.note}</p>
+      {props.blocked ? (
+        <p className="workspace-modal-warning">{props.blockedNote}</p>
+      ) : null}
+      <div className="workspace-modal-actions">
+        <Button disabled={props.busy} onClick={props.onClose}>
+          Cancel
+        </Button>
+        <Button
+          disabled={props.busy || props.blocked}
+          variant={props.danger ? "danger" : "solid"}
+          onClick={props.onConfirm}
+        >
+          {props.confirmLabel}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function WorkspaceHeader(props: {
   workspace: WorkspaceRef;
   selectedSession: SessionViewModel;
   workspaces: WorkspaceRef[];
   realMode: boolean;
   onNewWorkspace(): void;
+  onRenameWorkspace(): void;
+  onArchiveWorkspace(): void;
   onChooseDefaultWorkingFolder(): void;
   onSelectWorkspace(workspace: WorkspaceRef): void;
 }): ReactElement {
@@ -5780,6 +6452,28 @@ function WorkspaceHeader(props: {
         >
           New workspace…
         </Button>
+        <Menu
+          className="workspace-actions-menu"
+          label={`Workspace actions for ${props.workspace.name}`}
+          menuLabel={`Workspace actions for ${props.workspace.name}`}
+        >
+          <Button
+            role="menuitem"
+            size="sm"
+            variant="menuItem"
+            onClick={props.onRenameWorkspace}
+          >
+            Rename workspace
+          </Button>
+          <Button
+            role="menuitem"
+            size="sm"
+            variant="danger"
+            onClick={props.onArchiveWorkspace}
+          >
+            Archive workspace
+          </Button>
+        </Menu>
         <Button
           className="workspace-folder-button"
           size="sm"
@@ -5813,7 +6507,11 @@ function WorkspaceSwitcher(props: {
   }, [open]);
   const options = workspaceOptions(props.activeWorkspace, props.workspaces);
   return (
-    <div className="project-switcher-menu workspace-switcher-menu" ref={rootRef}>
+    <div
+      className="project-switcher-menu workspace-switcher-menu"
+      data-testid="workspace-switcher"
+      ref={rootRef}
+    >
       <Button
         aria-expanded={open}
         aria-haspopup="menu"
@@ -5844,10 +6542,18 @@ function WorkspaceSwitcher(props: {
                   if (!active) props.onSelect(workspace);
                 }}
               >
-                <Check aria-hidden="true" className="project-switcher-check" size={14} strokeWidth={1.75} visibility={active ? "visible" : "hidden"} />
+                <Check
+                  aria-hidden="true"
+                  className="project-switcher-check"
+                  size={14}
+                  strokeWidth={1.75}
+                  visibility={active ? "visible" : "hidden"}
+                />
                 <span className="project-switcher-copy">
                   <strong>{workspace.name}</strong>
-                  <small>{defaultWorkingDirectory(workspace) ?? "No default folder"}</small>
+                  <small>
+                    {defaultWorkingDirectory(workspace) ?? "No default folder"}
+                  </small>
                 </span>
               </Button>
             );
@@ -7950,6 +8656,7 @@ export const __rendererTestHooks = {
   isMissingSessionFileError,
   isDetachedRuntimeError,
   isSessionDeletable,
+  canManageWorkspaceMembership,
   listProjectsIfAvailable,
   selectProjectIfAvailable,
   projectsForSwitcher,

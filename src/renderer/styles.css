@@ -882,6 +882,128 @@ h1 {
   white-space: nowrap;
 }
 
+.sidebar-add-existing {
+  display: flex;
+  width: 100%;
+  justify-content: center;
+  gap: 6px;
+}
+
+.session-actions-menu {
+  margin: 0 3px 0 0;
+}
+
+.workspace-modal-backdrop {
+  position: fixed;
+  z-index: 30;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgb(15 23 42 / 62%);
+}
+
+.workspace-modal {
+  width: min(100%, 460px);
+  max-height: min(700px, calc(100vh - 40px));
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.workspace-modal-header,
+.workspace-modal-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.workspace-modal-header {
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.workspace-modal-header h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.workspace-modal-form {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+}
+
+.workspace-modal-form label {
+  display: grid;
+  gap: 6px;
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.workspace-modal-form input,
+.workspace-modal-form select {
+  min-height: 34px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 6px 8px;
+  color: var(--color-text);
+  background: var(--color-surface-raised);
+}
+
+.workspace-modal-note,
+.workspace-modal-form p {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.workspace-modal-warning {
+  color: var(--color-warning) !important;
+}
+
+.unassigned-session-list {
+  display: grid;
+  gap: 6px;
+  max-height: 280px;
+  overflow: auto;
+}
+
+.unassigned-session-option {
+  display: flex !important;
+  align-items: start;
+  gap: 9px !important;
+  padding: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  font-weight: 400 !important;
+}
+
+.unassigned-session-option input {
+  min-height: auto;
+  margin-top: 3px;
+}
+
+.unassigned-session-option span,
+.unassigned-session-option small {
+  display: grid;
+  min-width: 0;
+}
+
+.unassigned-session-option small {
+  overflow: hidden;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .recovery-actions {
   display: flex;
   flex-wrap: wrap;
