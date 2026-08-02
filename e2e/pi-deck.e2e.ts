@@ -134,6 +134,140 @@ async function expectHealthyPreload(page: Page): Promise<void> {
   ).toBeVisible();
 }
 
+test("real-mode workspace membership lifecycle stays explicit and reversible", async () => {
+  // This deliberately calls preload APIs from the hidden Electron window. It
+  // never invokes a native dialog or file picker, so it is safe for CI and
+  // other headless desktop environments.
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-workspace-lifecycle-"),
+  );
+  const projectCwd = path.join(root, "authorized-project");
+  const agentDir = path.join(root, "agent");
+  const sessionDir = path.join(agentDir, "sessions", "--workspace-e2e--");
+  const sessionFile = path.join(sessionDir, "move-me.jsonl");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(sessionDir, { recursive: true });
+  fs.writeFileSync(
+    sessionFile,
+    `${JSON.stringify({
+      type: "session",
+      version: 3,
+      id: "workspace-lifecycle-session",
+      timestamp: "2026-08-01T00:00:00.000Z",
+      cwd: projectCwd,
+    })}\n`,
+  );
+  const canonicalSessionFile = fs.realpathSync(sessionFile);
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({ root, projectCwd, agentDir }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    const outcome = await page.evaluate(async (sessionFile) => {
+      const api = window.piDeck;
+      const projects = await api.projects.getActive();
+      const defaultProjectId = projects.activeProject?.id;
+      if (defaultProjectId === undefined) {
+        throw new Error("Expected an authorized default project.");
+      }
+
+      const first = await api.workspaces.create({
+        name: "Lifecycle source",
+        defaultProjectId,
+      });
+      const source = first.activeWorkspace;
+      if (source === undefined) throw new Error("Source workspace was not selected.");
+      const second = await api.workspaces.create({
+        name: "Lifecycle destination",
+        defaultProjectId,
+      });
+      const destination = second.activeWorkspace;
+      if (destination === undefined) {
+        throw new Error("Destination workspace was not selected.");
+      }
+
+      const added = await api.workspaces.addSession({
+        workspaceId: source.id,
+        sessionFile,
+      });
+      const sourceAfterAdd = await api.chat.listSessions({
+        workspaceId: source.id,
+      });
+      const destinationBeforeMove = await api.chat.listSessions({
+        workspaceId: destination.id,
+      });
+
+      const moved = await api.workspaces.moveSession({
+        sessionFile,
+        toWorkspaceId: destination.id,
+      });
+      const sourceAfterMove = await api.chat.listSessions({
+        workspaceId: source.id,
+      });
+      const destinationAfterMove = await api.chat.listSessions({
+        workspaceId: destination.id,
+      });
+
+      // Source is now empty, so archiving it must affect metadata only.
+      const archived = await api.workspaces.archive({ workspaceId: source.id });
+      const removed = await api.workspaces.removeSession({
+        workspaceId: destination.id,
+        sessionFile,
+      });
+      const destinationAfterRemove = await api.chat.listSessions({
+        workspaceId: destination.id,
+      });
+      const unassigned = await api.workspaces.listUnassignedSessions();
+
+      return {
+        sourceId: source.id,
+        destinationId: destination.id,
+        added,
+        moved,
+        removed,
+        sourceAfterAdd: sourceAfterAdd.sessions,
+        destinationBeforeMove: destinationBeforeMove.sessions,
+        sourceAfterMove: sourceAfterMove.sessions,
+        destinationAfterMove: destinationAfterMove.sessions,
+        destinationAfterRemove: destinationAfterRemove.sessions,
+        unassigned: unassigned.sessions,
+        activeWorkspaceId: archived.activeWorkspaceId,
+        remainingWorkspaceIds: archived.workspaces.map((workspace) => workspace.id),
+      };
+    }, canonicalSessionFile);
+
+    expect(outcome.added).toMatchObject({
+      workspaceId: outcome.sourceId,
+      sessionFile: canonicalSessionFile,
+    });
+    expect(outcome.sourceAfterAdd.map((session) => session.sessionFile)).toEqual([
+      canonicalSessionFile,
+    ]);
+    expect(outcome.destinationBeforeMove).toEqual([]);
+    expect(outcome.moved).toMatchObject({
+      workspaceId: outcome.destinationId,
+      sessionFile: canonicalSessionFile,
+    });
+    expect(outcome.sourceAfterMove).toEqual([]);
+    expect(
+      outcome.destinationAfterMove.map((session) => session.sessionFile),
+    ).toEqual([canonicalSessionFile]);
+    expect(outcome.remainingWorkspaceIds).not.toContain(outcome.sourceId);
+    expect(outcome.activeWorkspaceId).not.toBe(outcome.sourceId);
+    expect(outcome.removed).toMatchObject({
+      workspaceId: outcome.destinationId,
+      sessionFile: canonicalSessionFile,
+    });
+    expect(outcome.destinationAfterRemove).toEqual([]);
+    expect(outcome.unassigned.map((session) => session.sessionFile)).toContain(
+      canonicalSessionFile,
+    );
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 async function startRuntimeExitTracking(page: Page): Promise<void> {
   await page.evaluate(() => {
     const testWindow = window as typeof window & {
