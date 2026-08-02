@@ -860,6 +860,28 @@ h1 {
   background: #fff7ed;
 }
 
+/* Workspace controls stay compact in the chat header, while the switcher
+   subtitle makes a folderless workspace explicit instead of treating it as
+   an invalid project. */
+.workspace-new-button,
+.workspace-folder-button {
+  white-space: nowrap;
+}
+
+.workspace-folder-button {
+  max-width: 220px;
+}
+
+.workspace-folder-button svg {
+  flex: 0 0 auto;
+}
+
+.workspace-switcher-menu .project-switcher-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .recovery-actions {
   display: flex;
   flex-wrap: wrap;

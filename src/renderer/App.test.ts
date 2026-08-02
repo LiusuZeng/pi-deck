@@ -5,6 +5,7 @@ import { __rendererTestHooks } from "./App.js";
 function baseSession() {
   return {
     id: "session-1",
+    workspaceId: "workspace-a",
     title: "Session",
     project: "Project",
     projectPath: "/tmp/project",
@@ -747,10 +748,11 @@ describe("renderer session actions", () => {
     expect(afterDelete[0]).toMatchObject({ status: "working" });
   });
 
-  it("counts and removes only saved sessions in the current project", () => {
+  it("filters saved sessions only by workspace ID, never by a folder path", () => {
     const currentSaved = {
       ...baseSession(),
       id: "current-saved",
+      workspaceId: "workspace-a",
       projectId: "/projects/a",
       projectPath: "/projects/a",
       sessionFile: "/sessions/current.jsonl",
@@ -760,8 +762,11 @@ describe("renderer session actions", () => {
     const otherProjectSaved = {
       ...currentSaved,
       id: "other-project-saved",
-      projectId: "/projects/b",
-      projectPath: "/projects/b",
+      workspaceId: "workspace-b",
+      // This deliberately matches the current folder; it must not make the
+      // row visible in the current workspace.
+      projectId: "/projects/a",
+      projectPath: "/projects/a",
       sessionFile: "/sessions/other.jsonl",
     };
     const attachedCurrentProject = {
@@ -778,13 +783,74 @@ describe("renderer session actions", () => {
     ] as any;
 
     expect(
-      __rendererTestHooks.savedSessionsForProject(sessions, "/projects/a"),
+      __rendererTestHooks.savedSessionsForProject(sessions, "workspace-a"),
     ).toEqual([currentSaved]);
     expect(
       __rendererTestHooks
-        .removeSavedSessionsForProject(sessions, "/projects/a")
+        .removeSavedSessionsForProject(sessions, "workspace-a")
         .map((session: any) => session.id),
     ).toEqual(["other-project-saved", "attached-current"]);
+  });
+
+  it("preserves hidden runtimes and typed drafts while refreshing another workspace", () => {
+    const hiddenRuntime = {
+      ...baseSession(),
+      id: "runtime-b",
+      workspaceId: "workspace-b",
+      projectPath: "/same-folder-as-a",
+      runtimeBacked: true,
+    };
+    const hiddenDraft = {
+      ...baseSession(),
+      id: "draft-b",
+      workspaceId: "workspace-b",
+      draftSession: true,
+      runtimeBacked: false,
+    };
+    const staleSavedA = {
+      ...baseSession(),
+      id: "saved-a-stale",
+      workspaceId: "workspace-a",
+      runtimeBacked: false,
+      resumeBacked: true,
+    };
+    const freshSavedA = { ...staleSavedA, id: "saved-a-fresh" };
+
+    const result = __rendererTestHooks.replaceWorkspaceSavedRows(
+      [hiddenRuntime, hiddenDraft, staleSavedA] as any,
+      "workspace-a",
+      [freshSavedA] as any,
+      {
+        "draft-b": { text: "keep this", attachments: [], slashOpen: false },
+      },
+    );
+
+    expect(result.map((session: any) => session.id)).toEqual([
+      "runtime-b",
+      "draft-b",
+      "saved-a-fresh",
+    ]);
+  });
+
+  it("uses the session working folder for attachments over the workspace default", () => {
+    const workspace = {
+      id: "workspace-a",
+      name: "Workspace A",
+      lastOpenedAt: 1,
+      defaultProject: {
+        id: "default-folder",
+        path: "/folders/default",
+        canonicalPath: "/folders/default",
+        displayName: "default",
+        lastOpenedAt: 1,
+      },
+    };
+    expect(
+      __rendererTestHooks.workingDirectoryForSession(
+        { ...baseSession(), workingDirectory: "/folders/session-b" } as any,
+        workspace,
+      ),
+    ).toBe("/folders/session-b");
   });
 });
 
