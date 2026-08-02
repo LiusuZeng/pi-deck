@@ -12,6 +12,10 @@ const workspaceRecordSchema = z
     name: z.string().min(1).max(120),
     defaultProjectId: z.string().min(1).optional(),
     legacyProjectId: z.string().min(1).optional(),
+    // Optional for v1 compatibility: old workspaces.json files have no
+    // exclusions, while migrated legacy workspaces can remember a deliberate
+    // removal without modifying Pi's JSONL file.
+    legacyExcludedSessionFiles: z.array(z.string().min(1)).optional(),
     createdAtMs: z.number(),
     updatedAtMs: z.number(),
     lastOpenedAtMs: z.number(),
@@ -56,6 +60,14 @@ const workspaceStoreFileV1Schema = z
         });
       }
       workspaceIds.add(workspace.id);
+      const exclusions = workspace.legacyExcludedSessionFiles ?? [];
+      if (new Set(exclusions).size !== exclusions.length) {
+        ctx.addIssue({
+          code: "custom",
+          message: "Duplicate legacy session exclusions are not allowed.",
+          path: ["workspaces", index, "legacyExcludedSessionFiles"],
+        });
+      }
     }
     if (
       value.activeWorkspaceId !== undefined &&
@@ -84,6 +96,16 @@ const workspaceStoreFileV1Schema = z
         });
       }
       sessionFiles.add(ref.sessionFile);
+      const owner = value.workspaces.find(
+        (workspace) => workspace.id === ref.workspaceId,
+      );
+      if (owner?.legacyExcludedSessionFiles?.includes(ref.sessionFile)) {
+        ctx.addIssue({
+          code: "custom",
+          message: "A workspace cannot exclude one of its assigned sessions.",
+          path: ["sessionRefs", index, "sessionFile"],
+        });
+      }
     }
   });
 
@@ -218,7 +240,7 @@ export class WorkspaceStore {
   async getActiveWorkspace(): Promise<WorkspaceRecord | undefined> {
     await this.loadIfNeeded();
     const workspace = this.getActiveWorkspaceSync();
-    return workspace ? { ...workspace } : undefined;
+    return workspace ? cloneWorkspace(workspace) : undefined;
   }
 
   async getWorkspace(
@@ -229,7 +251,7 @@ export class WorkspaceStore {
     const workspace = this.state.workspaces.find(
       (workspace) => workspace.id === id,
     );
-    return workspace ? { ...workspace } : undefined;
+    return workspace ? cloneWorkspace(workspace) : undefined;
   }
 
   async getWorkspaceByLegacyProjectId(
@@ -240,7 +262,7 @@ export class WorkspaceStore {
     const workspace = this.state.workspaces.find(
       (workspace) => workspace.legacyProjectId === id,
     );
-    return workspace ? { ...workspace } : undefined;
+    return workspace ? cloneWorkspace(workspace) : undefined;
   }
 
   async create(input: CreateWorkspaceInput): Promise<WorkspaceRecord> {
@@ -263,7 +285,7 @@ export class WorkspaceStore {
       activeWorkspaceId: workspace.id,
       workspaces: [...this.state.workspaces, workspace],
     });
-    return { ...workspace };
+    return cloneWorkspace(workspace);
   }
 
   async update(input: UpdateWorkspaceInput): Promise<WorkspaceRecord> {
@@ -293,7 +315,7 @@ export class WorkspaceStore {
       ...this.state,
       workspaces: replaceAt(this.state.workspaces, index, next),
     });
-    return { ...next };
+    return cloneWorkspace(next);
   }
 
   async select(workspaceId: string): Promise<WorkspaceRecord> {
@@ -312,7 +334,7 @@ export class WorkspaceStore {
       activeWorkspaceId: id,
       workspaces: replaceAt(this.state.workspaces, index, next),
     });
-    return { ...next };
+    return cloneWorkspace(next);
   }
 
   async archive(workspaceId: string): Promise<WorkspaceRecord> {
@@ -341,14 +363,16 @@ export class WorkspaceStore {
         : { activeWorkspaceId: undefined }),
       workspaces,
     });
-    return { ...archived };
+    return cloneWorkspace(archived);
   }
 
   async upsertSessionRef(
     workspaceId: string,
     summary: ChatSessionSummary,
   ): Promise<WorkspaceSessionMutationResult> {
-    return this.upsertSessionRefs(workspaceId, [summary]).then(
+    return this.upsertSessionRefs(workspaceId, [summary], {
+      clearLegacyExclusions: true,
+    }).then(
       (results) => results[0]!,
     );
   }
@@ -360,7 +384,11 @@ export class WorkspaceStore {
   async upsertSessionRefs(
     workspaceId: string,
     summaries: readonly ChatSessionSummary[],
-    options: { missingSessionFiles?: readonly string[] } = {},
+    options: {
+      missingSessionFiles?: readonly string[];
+      /** Set only for an explicit add; automatic legacy discovery must not clear removals. */
+      clearLegacyExclusions?: boolean;
+    } = {},
   ): Promise<WorkspaceSessionMutationResult[]> {
     const id = z.string().uuid().parse(workspaceId);
     const parsedSummaries = summaries.map((summary) =>
@@ -383,10 +411,12 @@ export class WorkspaceStore {
       "session summaries",
     );
     await this.loadIfNeeded();
-    this.requireOpenWorkspaceIndex(id);
+    const targetWorkspaceIndex = this.requireOpenWorkspaceIndex(id);
 
     const now = Date.now();
     const refs = [...this.state.sessionRefs];
+    let workspaces = this.state.workspaces;
+    let workspaceChanged = false;
     const byFile = new Map(refs.map((ref, index) => [ref.sessionFile, index]));
     const results: WorkspaceSessionMutationResult[] = [];
     let changed = false;
@@ -417,6 +447,28 @@ export class WorkspaceStore {
       } else {
         refs[existingIndex] = candidate;
       }
+      if (
+        options.clearLegacyExclusions === true &&
+        existing?.workspaceId !== undefined &&
+        existing.workspaceId !== id
+      ) {
+        const sourceIndex = workspaces.findIndex(
+          (workspace) => workspace.id === existing.workspaceId,
+        );
+        const source =
+          sourceIndex < 0 ? undefined : workspaces[sourceIndex];
+        if (source?.legacyProjectId !== undefined) {
+          const nextSource = addLegacySessionExclusion(
+            source,
+            sessionFile,
+            now,
+          );
+          if (nextSource !== source) {
+            workspaces = replaceAt(workspaces, sourceIndex, nextSource);
+            workspaceChanged = true;
+          }
+        }
+      }
       changed = true;
       results.push({
         workspaceId: id,
@@ -438,8 +490,20 @@ export class WorkspaceStore {
         changed = true;
       }
     }
-    if (changed) {
-      await this.commit({ ...this.state, sessionRefs: refs });
+    if (options.clearLegacyExclusions === true) {
+      const target = workspaces[targetWorkspaceIndex]!;
+      const nextTarget = removeLegacySessionExclusions(
+        target,
+        canonicalSummaries.map((item) => item.sessionFile),
+        now,
+      );
+      if (nextTarget !== target) {
+        workspaces = replaceAt(workspaces, targetWorkspaceIndex, nextTarget);
+        workspaceChanged = true;
+      }
+    }
+    if (changed || workspaceChanged) {
+      await this.commit({ ...this.state, sessionRefs: refs, workspaces });
     } else {
       await this.persistIfDirty();
     }
@@ -482,7 +546,7 @@ export class WorkspaceStore {
       z.string().min(1).parse(sessionFile),
     );
     await this.loadIfNeeded();
-    this.requireOpenWorkspaceIndex(targetId);
+    const targetWorkspaceIndex = this.requireOpenWorkspaceIndex(targetId);
     const index = this.state.sessionRefs.findIndex(
       (ref) => ref.sessionFile === canonical,
     );
@@ -490,11 +554,45 @@ export class WorkspaceStore {
       throw new Error(`Session is not assigned to a workspace: ${canonical}`);
     const existing = this.state.sessionRefs[index]!;
     if (existing.workspaceId === targetId) {
-      await this.persistIfDirty();
+      const target = this.state.workspaces[targetWorkspaceIndex]!;
+      const nextTarget = removeLegacySessionExclusions(target, [canonical], Date.now());
+      if (nextTarget !== target) {
+        await this.commit({
+          ...this.state,
+          workspaces: replaceAt(
+            this.state.workspaces,
+            targetWorkspaceIndex,
+            nextTarget,
+          ),
+        });
+      } else {
+        await this.persistIfDirty();
+      }
       return { workspaceId: targetId, sessionFile: canonical };
+    }
+    const now = Date.now();
+    let workspaces = this.state.workspaces;
+    const sourceWorkspaceIndex = workspaces.findIndex(
+      (workspace) => workspace.id === existing.workspaceId,
+    );
+    const source =
+      sourceWorkspaceIndex < 0
+        ? undefined
+        : workspaces[sourceWorkspaceIndex];
+    if (source?.legacyProjectId !== undefined) {
+      const nextSource = addLegacySessionExclusion(source, canonical, now);
+      if (nextSource !== source) {
+        workspaces = replaceAt(workspaces, sourceWorkspaceIndex, nextSource);
+      }
+    }
+    const target = workspaces[targetWorkspaceIndex]!;
+    const nextTarget = removeLegacySessionExclusions(target, [canonical], now);
+    if (nextTarget !== target) {
+      workspaces = replaceAt(workspaces, targetWorkspaceIndex, nextTarget);
     }
     await this.commit({
       ...this.state,
+      workspaces,
       sessionRefs: replaceAt(this.state.sessionRefs, index, {
         ...existing,
         workspaceId: targetId,
@@ -517,6 +615,11 @@ export class WorkspaceStore {
       z.string().min(1).parse(sessionFile),
     );
     await this.loadIfNeeded();
+    const workspaceIndex = this.state.workspaces.findIndex(
+      (workspace) => workspace.id === id,
+    );
+    const workspace =
+      workspaceIndex < 0 ? undefined : this.state.workspaces[workspaceIndex];
     const nextRefs = this.state.sessionRefs.filter(
       (ref) => !(ref.workspaceId === id && ref.sessionFile === canonical),
     );
@@ -524,7 +627,17 @@ export class WorkspaceStore {
       await this.persistIfDirty();
       return false;
     }
-    await this.commit({ ...this.state, sessionRefs: nextRefs });
+    const nextWorkspace =
+      workspace?.legacyProjectId === undefined
+        ? workspace
+        : addLegacySessionExclusion(workspace, canonical, Date.now());
+    await this.commit({
+      ...this.state,
+      sessionRefs: nextRefs,
+      ...(nextWorkspace !== undefined && nextWorkspace !== workspace
+        ? { workspaces: replaceAt(this.state.workspaces, workspaceIndex, nextWorkspace) }
+        : {}),
+    });
     return true;
   }
 
@@ -560,6 +673,36 @@ export class WorkspaceStore {
     return this.state.sessionRefs
       .filter((ref) => ref.workspaceId === id)
       .map((ref) => ({ ...ref }));
+  }
+
+  /** Searches every stored ref, including refs owned by archived workspaces. */
+  async getSessionOwner(
+    sessionFile: string,
+  ): Promise<WorkspaceSessionRef | undefined> {
+    const canonical = await canonicalOrResolved(
+      z.string().min(1).parse(sessionFile),
+    );
+    await this.loadIfNeeded();
+    const ref = this.state.sessionRefs.find(
+      (item) => item.sessionFile === canonical,
+    );
+    return ref ? { ...ref } : undefined;
+  }
+
+  /** True when a migrated legacy workspace must not re-adopt the file by cwd. */
+  async isLegacySessionExcluded(
+    workspaceId: string,
+    sessionFile: string,
+  ): Promise<boolean> {
+    const id = z.string().uuid().parse(workspaceId);
+    const canonical = await canonicalOrResolved(
+      z.string().min(1).parse(sessionFile),
+    );
+    await this.loadIfNeeded();
+    return (
+      this.state.workspaces.find((workspace) => workspace.id === id)
+        ?.legacyExcludedSessionFiles?.includes(canonical) ?? false
+    );
   }
 
   /** Return cache only; this deliberately does not touch Pi session files. */
@@ -723,11 +866,13 @@ export class WorkspaceStore {
       ...(this.state.activeWorkspaceId
         ? { activeWorkspaceId: this.state.activeWorkspaceId }
         : {}),
-      ...(activeWorkspace ? { activeWorkspace: { ...activeWorkspace } } : {}),
+      ...(activeWorkspace
+        ? { activeWorkspace: cloneWorkspace(activeWorkspace) }
+        : {}),
       workspaces: this.state.workspaces
         .filter((workspace) => workspace.archivedAtMs === undefined)
         .sort((left, right) => right.lastOpenedAtMs - left.lastOpenedAtMs)
-        .map((workspace) => ({ ...workspace })),
+        .map(cloneWorkspace),
     };
   }
 
@@ -789,6 +934,57 @@ function normalizeWorkspaceName(raw: string): string {
   if (normalized.length > 120)
     throw new Error("Workspace name must be 120 characters or fewer.");
   return normalized;
+}
+
+function cloneWorkspace(workspace: WorkspaceRecord): WorkspaceRecord {
+  return {
+    ...workspace,
+    ...(workspace.legacyExcludedSessionFiles
+      ? { legacyExcludedSessionFiles: [...workspace.legacyExcludedSessionFiles] }
+      : {}),
+  };
+}
+
+function addLegacySessionExclusion(
+  workspace: WorkspaceRecord,
+  sessionFile: string,
+  now: number,
+): WorkspaceRecord {
+  if (
+    workspace.legacyProjectId === undefined ||
+    workspace.legacyExcludedSessionFiles?.includes(sessionFile)
+  ) {
+    return workspace;
+  }
+  return {
+    ...workspace,
+    legacyExcludedSessionFiles: [
+      ...(workspace.legacyExcludedSessionFiles ?? []),
+      sessionFile,
+    ],
+    updatedAtMs: now,
+  };
+}
+
+function removeLegacySessionExclusions(
+  workspace: WorkspaceRecord,
+  sessionFiles: readonly string[],
+  now: number,
+): WorkspaceRecord {
+  const exclusions = workspace.legacyExcludedSessionFiles;
+  if (exclusions === undefined || sessionFiles.length === 0) return workspace;
+  const removed = new Set(sessionFiles);
+  const nextExclusions = exclusions.filter((sessionFile) => !removed.has(sessionFile));
+  if (nextExclusions.length === exclusions.length) return workspace;
+  const { legacyExcludedSessionFiles: _legacyExcludedSessionFiles, ...withoutExclusions } =
+    workspace;
+  return {
+    ...withoutExclusions,
+    ...(nextExclusions.length > 0
+      ? { legacyExcludedSessionFiles: nextExclusions }
+      : {}),
+    updatedAtMs: now,
+  };
 }
 
 function sessionRefFromSummary(

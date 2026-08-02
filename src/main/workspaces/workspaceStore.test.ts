@@ -242,3 +242,94 @@ test("WorkspaceStore creates an initial folderless migration workspace when no p
   assert.equal(result.activeWorkspace?.name, "My workspace");
   assert.equal(result.activeWorkspace?.defaultProjectId, undefined);
 });
+
+async function createLegacyWorkspaceWithSession(): Promise<{
+  root: string;
+  home: string;
+  store: WorkspaceStore;
+  workspaceId: string;
+  sessionFile: string;
+}> {
+  const { root, home } = await temporaryHome();
+  const sessionFile = path.join(root, "legacy.jsonl");
+  await fs.writeFile(sessionFile, "");
+  const store = new WorkspaceStore(home);
+  const migrated = await store.migrateLegacyProjects({
+    activeProjectId: "legacy-project",
+    projects: [
+      {
+        id: "legacy-project",
+        displayName: "Legacy",
+        createdAtMs: 1,
+        updatedAtMs: 1,
+        lastOpenedAtMs: 1,
+      },
+    ],
+    sessionRefs: [
+      {
+        projectId: "legacy-project",
+        sessionFile,
+        addedAtMs: 1,
+        lastSeenAtMs: 1,
+      },
+    ],
+  });
+  return {
+    root,
+    home,
+    store,
+    workspaceId: migrated.activeWorkspace!.id,
+    sessionFile: await fs.realpath(sessionFile),
+  };
+}
+
+test("WorkspaceStore persists a legacy removal exclusion and explicit re-add clears it", async () => {
+  const { home, store, workspaceId, sessionFile } =
+    await createLegacyWorkspaceWithSession();
+
+  assert.equal(await store.removeSession(workspaceId, sessionFile), true);
+  assert.equal(await store.isLegacySessionExcluded(workspaceId, sessionFile), true);
+
+  const reloaded = new WorkspaceStore(home);
+  assert.equal(
+    await reloaded.isLegacySessionExcluded(workspaceId, sessionFile),
+    true,
+  );
+  await reloaded.upsertSessionRef(workspaceId, summary(sessionFile));
+  assert.equal(
+    await reloaded.isLegacySessionExcluded(workspaceId, sessionFile),
+    false,
+  );
+  assert.equal(
+    (await reloaded.getSessionOwner(sessionFile))?.workspaceId,
+    workspaceId,
+  );
+});
+
+test("WorkspaceStore tombstones legacy move sources and clears a move-back target", async () => {
+  const { store, workspaceId, sessionFile } =
+    await createLegacyWorkspaceWithSession();
+  const other = await store.create({ name: "Other" });
+
+  await store.moveSession(sessionFile, other.id);
+  assert.equal(await store.isLegacySessionExcluded(workspaceId, sessionFile), true);
+  assert.equal((await store.getSessionOwner(sessionFile))?.workspaceId, other.id);
+
+  await store.moveSession(sessionFile, workspaceId);
+  assert.equal(await store.isLegacySessionExcluded(workspaceId, sessionFile), false);
+  assert.equal(
+    (await store.getSessionOwner(sessionFile))?.workspaceId,
+    workspaceId,
+  );
+});
+
+test("WorkspaceStore reports archived workspace refs as assigned", async () => {
+  const { store, workspaceId, sessionFile } =
+    await createLegacyWorkspaceWithSession();
+  await store.archive(workspaceId);
+
+  assert.equal(
+    (await store.getSessionOwner(sessionFile))?.workspaceId,
+    workspaceId,
+  );
+});
