@@ -263,14 +263,18 @@ export class WorkspaceStore {
     const name = parsed.name === undefined ? undefined : normalizeWorkspaceName(parsed.name);
     await this.loadIfNeeded();
     const index = this.requireOpenWorkspaceIndex(parsed.workspaceId);
-    const existing = this.state.workspaces[index];
+    const existing = this.state.workspaces[index]!;
+    const { defaultProjectId: _defaultProjectId, ...withoutDefaultProjectId } =
+      existing;
+    const base =
+      parsed.defaultProjectId === null ? withoutDefaultProjectId : existing;
     const next: WorkspaceRecord = {
-      ...existing,
+      ...base,
       ...(name === undefined ? {} : { name }),
       ...(parsed.defaultProjectId === undefined
         ? {}
         : parsed.defaultProjectId === null
-          ? { defaultProjectId: undefined }
+          ? {}
           : { defaultProjectId: parsed.defaultProjectId }),
       updatedAtMs: Date.now(),
     };
@@ -285,7 +289,7 @@ export class WorkspaceStore {
     const id = z.string().uuid().parse(workspaceId);
     await this.loadIfNeeded();
     const index = this.requireOpenWorkspaceIndex(id);
-    const existing = this.state.workspaces[index];
+    const existing = this.state.workspaces[index]!;
     const now = Date.now();
     const next = {
       ...existing,
@@ -306,7 +310,7 @@ export class WorkspaceStore {
     const index = this.requireOpenWorkspaceIndex(id);
     const now = Date.now();
     const archived = {
-      ...this.state.workspaces[index],
+      ...this.state.workspaces[index]!,
       updatedAtMs: now,
       archivedAtMs: now,
     };
@@ -377,7 +381,11 @@ export class WorkspaceStore {
     for (const sessionFile of canonicalMissing) {
       const index = byFile.get(sessionFile);
       const existing = index === undefined ? undefined : refs[index];
-      if (existing?.workspaceId === id && existing.missingSinceMs === undefined) {
+      if (
+        index !== undefined &&
+        existing?.workspaceId === id &&
+        existing.missingSinceMs === undefined
+      ) {
         refs[index] = { ...existing, missingSinceMs: now };
         changed = true;
       }
@@ -425,7 +433,7 @@ export class WorkspaceStore {
     this.requireOpenWorkspaceIndex(targetId);
     const index = this.state.sessionRefs.findIndex((ref) => ref.sessionFile === canonical);
     if (index < 0) throw new Error(`Session is not assigned to a workspace: ${canonical}`);
-    const existing = this.state.sessionRefs[index];
+    const existing = this.state.sessionRefs[index]!;
     if (existing.workspaceId === targetId) {
       await this.persistIfDirty();
       return { workspaceId: targetId, sessionFile: canonical };
@@ -625,7 +633,7 @@ export class WorkspaceStore {
       ...(activeWorkspace ? { activeWorkspace: { ...activeWorkspace } } : {}),
       workspaces: this.state.workspaces
         .filter((workspace) => workspace.archivedAtMs === undefined)
-        .sort((left, right) => right.lastOpenedAtMs - left.lastOpenedAtMs),
+        .sort((left, right) => right.lastOpenedAtMs - left.lastOpenedAtMs)
         .map((workspace) => ({ ...workspace })),
     };
   }
@@ -640,7 +648,7 @@ export class WorkspaceStore {
   private requireOpenWorkspaceIndex(workspaceId: string): number {
     const index = this.state.workspaces.findIndex((workspace) => workspace.id === workspaceId);
     if (index < 0) throw new Error(`Unknown workspace: ${workspaceId}`);
-    if (this.state.workspaces[index].archivedAtMs !== undefined) {
+    if (this.state.workspaces[index]!.archivedAtMs !== undefined) {
       throw new Error(`Workspace is archived: ${workspaceId}`);
     }
     return index;

@@ -41,6 +41,22 @@ test("WorkspaceStore creates UUID workspaces, normalizes names, and archives the
   await assert.rejects(store.select(second.id), /archived/i);
 });
 
+test("WorkspaceStore removes, rather than serializes, a cleared default project", async () => {
+  const { home } = await temporaryHome();
+  const store = new WorkspaceStore(home);
+  const workspace = await store.create({
+    name: "With a folder",
+    defaultProjectId: "project-a",
+  });
+
+  await store.update({ workspaceId: workspace.id, defaultProjectId: null });
+  assert.equal((await store.getWorkspace(workspace.id))?.defaultProjectId, undefined);
+  const persisted = JSON.parse(
+    await fs.readFile(path.join(home, "workspaces.json"), "utf8"),
+  ) as { workspaces: Array<Record<string, unknown>> };
+  assert.equal("defaultProjectId" in persisted.workspaces[0]!, false);
+});
+
 test("WorkspaceStore persists membership once by canonical file and projects cached summaries without I/O", async () => {
   const { root, home } = await temporaryHome();
   const sessions = path.join(root, "sessions");
