@@ -2224,6 +2224,7 @@ async function listChatSessions(
 async function listWorkspaceChatSessions(
   settings: SettingsStore,
   workspaceId: string,
+  options: { discoverLegacySessions?: boolean } = {},
 ): Promise<ChatListSessionsResult> {
   const workspace = await requireOpenWorkspace(workspaceId);
   let refs = await ensureWorkspaceStore().getCachedSessionSummaries(
@@ -2234,7 +2235,10 @@ async function listWorkspaceChatSessions(
   // discovered sessions by cwd instead of persisting explicit membership. Keep
   // migrated workspaces in sync with newly discovered files, but never reclaim
   // a session that the user explicitly moved to another workspace.
-  if (workspace.legacyProjectId !== undefined) {
+  if (
+    workspace.legacyProjectId !== undefined &&
+    options.discoverLegacySessions !== false
+  ) {
     try {
       const project = await ensureProjectStore().resolveAuthorizedProject(
         workspace.legacyProjectId,
@@ -2515,7 +2519,12 @@ async function deleteAllWorkspaceChatSessions(
   diagnosticsService: DiagnosticsService,
   workspaceId: string,
 ): Promise<ChatDeleteAllSessionsResult> {
-  const listed = await listWorkspaceChatSessions(store, workspaceId);
+  // Destructive operations must use explicit membership only. A refresh may
+  // discover legacy sessions, but delete-all must never adopt new files as a
+  // side effect immediately before deleting them.
+  const listed = await listWorkspaceChatSessions(store, workspaceId, {
+    discoverLegacySessions: false,
+  });
   const deletedSessionFiles: string[] = [];
   let skippedCount = 0;
   for (const session of listed.sessions) {
