@@ -689,8 +689,10 @@ function registerIpcHandlers(
         return { selected: false } as const;
       }
 
-      const projectRoot = request.projectPath
-        ? await safeRealpath(request.projectPath)
+      const requestedWorkingDirectory =
+        request.workingDirectory ?? request.projectPath;
+      const projectRoot = requestedWorkingDirectory
+        ? await safeRealpath(requestedWorkingDirectory)
         : undefined;
 
       return {
@@ -711,8 +713,10 @@ function registerIpcHandlers(
     responseSchema: pickAttachmentsResultSchema,
     diagnostics: diagnosticsService,
     handler: async (request): Promise<PickAttachmentsResult> => {
-      const projectRoot = request.projectPath
-        ? await safeRealpath(request.projectPath)
+      const requestedWorkingDirectory =
+        request.workingDirectory ?? request.projectPath;
+      const projectRoot = requestedWorkingDirectory
+        ? await safeRealpath(requestedWorkingDirectory)
         : undefined;
       const uniquePaths = [
         ...new Set(request.paths.map((filePath) => path.resolve(filePath))),
