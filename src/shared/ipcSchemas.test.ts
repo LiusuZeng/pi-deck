@@ -21,6 +21,10 @@ import {
   chatRuntimeStatusSchema,
   pickProjectResultSchema,
   projectRefSchema,
+  workspaceCreateRequestSchema,
+  workspaceListResultSchema,
+  workspaceMoveSessionRequestSchema,
+  workspaceUpdateRequestSchema,
 } from "./ipcSchemas.js";
 
 describe("IPC schemas", () => {
@@ -133,6 +137,46 @@ describe("IPC schemas", () => {
       pickProjectResultSchema.parse({
         selected: true,
         project: { ...project, id: 42 },
+      }),
+    ).toThrow();
+  });
+
+  it("validates path-independent workspace contracts", () => {
+    expect(
+      workspaceCreateRequestSchema.parse({ name: "  Release   planning  " }),
+    ).toEqual({ name: "Release planning" });
+    expect(
+      workspaceUpdateRequestSchema.parse({
+        workspaceId: "workspace-1",
+        defaultProjectId: null,
+      }),
+    ).toEqual({ workspaceId: "workspace-1", defaultProjectId: null });
+    expect(() =>
+      workspaceUpdateRequestSchema.parse({ workspaceId: "workspace-1" }),
+    ).toThrow();
+    expect(() =>
+      workspaceMoveSessionRequestSchema.parse({
+        sessionFile: "/sessions/one.jsonl",
+        toWorkspaceId: "workspace-2",
+        copy: true,
+      }),
+    ).toThrow();
+
+    const workspace = {
+      id: "workspace-1",
+      name: "Release planning",
+      lastOpenedAt: 123,
+    };
+    expect(
+      workspaceListResultSchema.parse({
+        activeWorkspaceId: workspace.id,
+        activeWorkspace: workspace,
+        workspaces: [workspace],
+      }),
+    ).toMatchObject({ activeWorkspace: workspace });
+    expect(() =>
+      workspaceListResultSchema.parse({
+        workspaces: [{ ...workspace, rootPath: "/must-not-be-identity" }],
       }),
     ).toThrow();
   });

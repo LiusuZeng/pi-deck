@@ -174,6 +174,7 @@ export const chatSnapshotSchema = z
   .object({
     runtimeId: z.string(),
     backendMode: z.enum(["fake", "real"]),
+    workspaceId: z.string().min(1).optional(),
     // Pi reports cwd, while Pi Deck owns the project identifier. Keep both so
     // renderers never have to turn a filesystem path back into a project ID.
     projectId: z.string().optional(),
@@ -254,6 +255,7 @@ export const bootstrapSessionSummarySchema = chatSessionSummarySchema.omit({
 
 export const chatListSessionsRequestSchema = z
   .object({
+    workspaceId: z.string().min(1).optional(),
     projectId: z.string().min(1).optional(),
   })
   .strict()
@@ -262,6 +264,7 @@ export const chatListSessionsRequestSchema = z
 export const chatListSessionsResultSchema = z
   .object({
     projectCwd: z.string(),
+    workspaceId: z.string().min(1).optional(),
     projectId: z.string().optional(),
     sessionDir: z.string().optional(),
     sessions: z.array(chatSessionSummarySchema),
@@ -271,6 +274,7 @@ export const chatListSessionsResultSchema = z
 
 export const chatResumeSessionRequestSchema = z
   .object({
+    workspaceId: z.string().min(1).optional(),
     projectId: z.string().min(1).optional(),
     sessionFile: z.string().min(1),
   })
@@ -278,6 +282,7 @@ export const chatResumeSessionRequestSchema = z
 
 export const chatDeleteSessionRequestSchema = z
   .object({
+    workspaceId: z.string().min(1).optional(),
     projectId: z.string().min(1).optional(),
     sessionFile: z.string().min(1),
   })
@@ -292,6 +297,7 @@ export const chatDeleteSessionResultSchema = z
 
 export const chatDeleteAllSessionsRequestSchema = z
   .object({
+    workspaceId: z.string().min(1).optional(),
     projectId: z.string().min(1).optional(),
   })
   .strict()
@@ -323,6 +329,7 @@ export const chatModelSummarySchema = z
 export const chatListModelsRequestSchema = z
   .object({
     runtimeId: z.string().optional(),
+    workspaceId: z.string().min(1).optional(),
     projectId: z.string().min(1).optional(),
   })
   .strict();
@@ -452,6 +459,7 @@ export const chatCloseSessionRequestSchema = z
 
 export const chatCreateSessionRequestSchema = z
   .object({
+    workspaceId: z.string().min(1).optional(),
     projectId: z.string().min(1).optional(),
   })
   .strict()
@@ -494,6 +502,81 @@ export const projectSelectRequestSchema = z
   })
   .strict();
 
+export const workspaceRefSchema = z
+  .object({
+    id: z.string().min(1),
+    name: z.string().min(1).max(120),
+    defaultProjectId: z.string().min(1).optional(),
+    defaultProject: projectRefSchema.optional(),
+    lastOpenedAt: z.number(),
+  })
+  .strict();
+
+export const workspaceListResultSchema = z
+  .object({
+    activeWorkspaceId: z.string().min(1).optional(),
+    activeWorkspace: workspaceRefSchema.optional(),
+    workspaces: z.array(workspaceRefSchema),
+  })
+  .strict();
+
+const workspaceNameSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(120)
+  .transform((name) => name.replace(/\s+/g, " "));
+
+export const workspaceCreateRequestSchema = z
+  .object({
+    name: workspaceNameSchema,
+    defaultProjectId: z.string().min(1).optional(),
+  })
+  .strict();
+
+export const workspaceUpdateRequestSchema = z
+  .object({
+    workspaceId: z.string().min(1),
+    name: workspaceNameSchema.optional(),
+    defaultProjectId: z.string().min(1).nullable().optional(),
+  })
+  .strict()
+  .refine(
+    ({ name, defaultProjectId }) =>
+      name !== undefined || defaultProjectId !== undefined,
+    { message: "Workspace update must change at least one field." },
+  );
+
+export const workspaceSelectRequestSchema = z
+  .object({ workspaceId: z.string().min(1) })
+  .strict();
+
+export const workspaceArchiveRequestSchema = workspaceSelectRequestSchema;
+
+export const workspaceAddSessionRequestSchema = z
+  .object({
+    workspaceId: z.string().min(1),
+    sessionFile: z.string().min(1),
+  })
+  .strict();
+
+export const workspaceMoveSessionRequestSchema = z
+  .object({
+    sessionFile: z.string().min(1),
+    toWorkspaceId: z.string().min(1),
+  })
+  .strict();
+
+export const workspaceRemoveSessionRequestSchema =
+  workspaceAddSessionRequestSchema;
+
+export const workspaceSessionMutationResultSchema = z
+  .object({
+    workspaceId: z.string().min(1),
+    sessionFile: z.string().min(1),
+  })
+  .strict();
+
 // Startup projection intentionally excludes runtime state and messages. It is
 // assembled solely from local app/project metadata so rendering it can never
 // create a Pi worker or trigger a session-repository scan.
@@ -505,6 +588,10 @@ export const appBootstrapStateSchema = z
     diagnostics: diagnosticsSummarySchema,
     project: projectRefSchema,
     projects: z.array(projectRefSchema),
+    // Optional for one compatibility release while older main processes only
+    // expose directory-backed Projects.
+    workspace: workspaceRefSchema.optional(),
+    workspaces: z.array(workspaceRefSchema).optional(),
     cachedSessions: z.array(bootstrapSessionSummarySchema),
   })
   .strict();
@@ -514,6 +601,7 @@ export const appBootstrapStateSchema = z
 export const attachmentPickerRequestSchema = z
   .object({
     projectPath: z.string().optional(),
+    workingDirectory: z.string().optional(),
     ownerId: attachmentOwnerIdSchema,
     sessionId: attachmentSessionIdSchema,
   })
@@ -540,6 +628,7 @@ export const attachmentImportDroppedFilesRequestSchema = z
   .object({
     paths: z.array(z.string().min(1)).min(1).max(100),
     projectPath: z.string().optional(),
+    workingDirectory: z.string().optional(),
     ownerId: attachmentOwnerIdSchema,
     sessionId: attachmentSessionIdSchema,
   })
@@ -645,6 +734,16 @@ export const ipcChannels = {
   projectGetActive: "projects:getActive",
   projectSelect: "projects:select",
   projectPickFolder: "project:pickFolder",
+  workspaceList: "workspaces:list",
+  workspaceGetActive: "workspaces:getActive",
+  workspaceCreate: "workspaces:create",
+  workspaceUpdate: "workspaces:update",
+  workspaceSelect: "workspaces:select",
+  workspaceArchive: "workspaces:archive",
+  workspaceAddSession: "workspaces:addSession",
+  workspaceMoveSession: "workspaces:moveSession",
+  workspaceRemoveSession: "workspaces:removeSession",
+  workspaceListUnassignedSessions: "workspaces:listUnassignedSessions",
   attachmentsPickFiles: "attachments:pickFiles",
   attachmentsImportDroppedFiles: "attachments:importDroppedFiles",
   attachmentsImportImages: "attachments:importImages",
