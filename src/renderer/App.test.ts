@@ -907,6 +907,7 @@ describe("renderer session actions", () => {
     expect(
       __rendererTestHooks.archiveWorkspaceBlockReason(
         [baseSession()] as any,
+        {},
         "workspace-a",
         1,
       ),
@@ -914,10 +915,82 @@ describe("renderer session actions", () => {
     expect(
       __rendererTestHooks.archiveWorkspaceBlockReason(
         [baseSession()] as any,
+        {},
         "workspace-a",
         2,
       ),
     ).toMatch(/close attached sessions/i);
+  });
+
+  it("blocks archive for meaningful composer state but ignores an empty draft", () => {
+    const idleDraft = {
+      ...baseSession(),
+      runtimeBacked: false,
+      draftSession: true,
+    } as any;
+    const emptyDrafts = {
+      "session-1": { text: "  ", attachments: [], slashOpen: false },
+    };
+    expect(
+      __rendererTestHooks.archiveWorkspaceBlockReason(
+        [idleDraft],
+        emptyDrafts,
+        "workspace-a",
+        2,
+      ),
+    ).toBeUndefined();
+    expect(
+      __rendererTestHooks.archiveWorkspaceBlockReason(
+        [idleDraft],
+        {
+          "session-1": {
+            text: "unsent prompt",
+            attachments: [],
+            slashOpen: false,
+          },
+        },
+        "workspace-a",
+        2,
+      ),
+    ).toMatch(/send or clear/i);
+    expect(
+      __rendererTestHooks.archiveWorkspaceBlockReason(
+        [idleDraft],
+        {
+          "session-1": {
+            text: "",
+            attachments: [{ id: "attachment" }],
+            slashOpen: false,
+          },
+        } as any,
+        "workspace-a",
+        2,
+      ),
+    ).toMatch(/attachments/i);
+  });
+
+  it("keeps a destructive dialog busy and rejects duplicate transactions", async () => {
+    const gate = { current: false };
+    const busy: boolean[] = [];
+    let release: (() => void) | undefined;
+    const transaction = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const first = __rendererTestHooks.runBusyDialogTransaction(
+      gate,
+      (value: boolean) => busy.push(value),
+      () => transaction,
+    );
+    const duplicate = await __rendererTestHooks.runBusyDialogTransaction(
+      gate,
+      (value: boolean) => busy.push(value),
+      async () => undefined,
+    );
+    expect(duplicate).toBe(false);
+    expect(busy).toEqual([true]);
+    release?.();
+    await first;
+    expect(busy).toEqual([true, false]);
   });
 
   it("imports unassigned sessions sequentially and reports partial results", async () => {

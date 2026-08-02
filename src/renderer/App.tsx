@@ -600,6 +600,7 @@ export function App(): ReactElement {
     ChatSessionSummary[]
   >([]);
   const [workspaceDialogBusy, setWorkspaceDialogBusy] = useState(false);
+  const workspaceDialogBusyRef = useRef(false);
   const [unassignedSessionsLoading, setUnassignedSessionsLoading] =
     useState(false);
   const [selectedModelId, setSelectedModelId] = useState(
@@ -2394,6 +2395,7 @@ export function App(): ReactElement {
   async function archiveCurrentWorkspace(): Promise<void> {
     const blockedReason = archiveWorkspaceBlockReason(
       sessionsRef.current,
+      composerDraftsRef.current,
       currentWorkspace.id,
       workspaces.length,
     );
@@ -2759,36 +2761,44 @@ export function App(): ReactElement {
       return;
     }
 
-    for (const session of savedSessions) {
-      blockAttachmentOwner(session.id);
-    }
-    try {
-      const result = await window.piDeck.chat.deleteAllSessions({
-        workspaceId,
-        projectId: projectIdForWorkspace(currentWorkspace),
-      });
-      // Counts are not enough when Pi skips individual files. Main returns
-      // the exact canonical files it removed, so drafts on skipped rows stay
-      // intact instead of being blanket-discarded.
-      finalizeSavedSessionDeletion(
-        savedSessions,
-        savedSessionsForDeletedFiles(savedSessions, result.deletedSessionFiles),
-      );
-      setWorkspaceDialog(undefined);
-      setUiMessage(
-        `Deleted ${result.deletedCount} saved session${result.deletedCount === 1 ? "" : "s"}.${result.skippedCount > 0 ? ` Skipped ${result.skippedCount} attached or unavailable session${result.skippedCount === 1 ? "" : "s"}.` : ""}`,
-      );
-    } catch (error) {
-      // Main returns successful prefixes as an exact result. A rejected bulk
-      // request therefore has no confirmed removals, so preserve every draft
-      // rather than guessing from a potentially incomplete session scan.
-      for (const session of savedSessions) {
-        unblockAttachmentOwner(session.id);
-      }
-      setUiMessage(
-        `Failed to delete saved sessions: ${error instanceof Error ? error.message : String(error)}. Drafts were retained; refresh before retrying.`,
-      );
-    }
+    await runBusyDialogTransaction(
+      workspaceDialogBusyRef,
+      setWorkspaceDialogBusy,
+      async () => {
+        for (const session of savedSessions) {
+          blockAttachmentOwner(session.id);
+        }
+        try {
+          const result = await window.piDeck.chat.deleteAllSessions({
+            workspaceId,
+            projectId: projectIdForWorkspace(currentWorkspace),
+          });
+          // Counts are not enough when Pi skips individual files. Main returns
+          // the exact canonical files it removed, so drafts on skipped rows stay
+          // intact instead of being blanket-discarded.
+          finalizeSavedSessionDeletion(
+            savedSessions,
+            savedSessionsForDeletedFiles(
+              savedSessions,
+              result.deletedSessionFiles,
+            ),
+          );
+          setWorkspaceDialog(undefined);
+          setUiMessage(
+            `Deleted ${result.deletedCount} saved session${result.deletedCount === 1 ? "" : "s"}.${result.skippedCount > 0 ? ` Skipped ${result.skippedCount} attached or unavailable session${result.skippedCount === 1 ? "" : "s"}.` : ""}`,
+          );
+        } catch (error) {
+          // Main returns successful prefixes as an exact result. A rejected
+          // bulk request has no confirmed removals, so preserve every draft.
+          for (const session of savedSessions) {
+            unblockAttachmentOwner(session.id);
+          }
+          setUiMessage(
+            `Failed to delete saved sessions: ${error instanceof Error ? error.message : String(error)}. Drafts were retained; refresh before retrying.`,
+          );
+        }
+      },
+    );
   }
 
   async function handleCloseRuntime(sessionId: string): Promise<void> {
@@ -2857,60 +2867,69 @@ export function App(): ReactElement {
     }
     const sessionFile = session.sessionFile;
 
-    blockAttachmentOwner(session.id);
-    if (session.runtimeBacked) {
-      // Main must close an attached Pi worker before moving its live session
-      // file. Suppress that expected exit while the delete transaction settles.
-      intentionallyClosingRuntimeIds.current.add(session.id);
-    }
-    try {
-      const result = await window.piDeck.chat.deleteSession({
-        workspaceId: session.workspaceId,
-        ...(session.projectId !== undefined
-          ? { projectId: session.projectId }
-          : {}),
-        sessionFile,
-      });
-      finalizeSavedSessionDeletion(
-        [session],
-        savedSessionsForDeletedFiles([session], [result.sessionFile]),
-      );
-      setWorkspaceDialog(undefined);
-      setUiMessage("Deleted Pi session.");
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      let runtimeDetached = false;
-      if (session.runtimeBacked) {
-        try {
-          await window.piDeck.chat.getRuntimeStatus({
-            runtimeId: session.id,
-          });
-          intentionallyClosingRuntimeIds.current.delete(session.id);
-        } catch (statusError) {
-          runtimeDetached = isDetachedRuntimeError(
-            statusError instanceof Error
-              ? statusError.message
-              : String(statusError),
-          );
-          if (!runtimeDetached) {
-            intentionallyClosingRuntimeIds.current.delete(session.id);
-          }
+    await runBusyDialogTransaction(
+      workspaceDialogBusyRef,
+      setWorkspaceDialogBusy,
+      async () => {
+        blockAttachmentOwner(session.id);
+        if (session.runtimeBacked) {
+          // Main must close an attached Pi worker before moving its live
+          // session file. Suppress that expected exit during the transaction.
+          intentionallyClosingRuntimeIds.current.add(session.id);
         }
-      }
+        try {
+          const result = await window.piDeck.chat.deleteSession({
+            workspaceId: session.workspaceId,
+            ...(session.projectId !== undefined
+              ? { projectId: session.projectId }
+              : {}),
+            sessionFile,
+          });
+          finalizeSavedSessionDeletion(
+            [session],
+            savedSessionsForDeletedFiles([session], [result.sessionFile]),
+          );
+          setWorkspaceDialog(undefined);
+          setUiMessage("Deleted Pi session.");
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          let runtimeDetached = false;
+          if (session.runtimeBacked) {
+            try {
+              await window.piDeck.chat.getRuntimeStatus({
+                runtimeId: session.id,
+              });
+              intentionallyClosingRuntimeIds.current.delete(session.id);
+            } catch (statusError) {
+              runtimeDetached = isDetachedRuntimeError(
+                statusError instanceof Error
+                  ? statusError.message
+                  : String(statusError),
+              );
+              if (!runtimeDetached) {
+                intentionallyClosingRuntimeIds.current.delete(session.id);
+              }
+            }
+          }
 
-      if (runtimeDetached) {
-        // Main deliberately preserved the generation when file removal failed.
-        // Keep the same row/id so a later resume can atomically transfer its
-        // typed draft and still-live attachment tokens to the new runtime.
-        setSessions((items) => closeRuntimeInSessionState(items, session.id));
-      }
-      unblockAttachmentOwner(session.id);
-      setUiMessage(
-        runtimeDetached
-          ? `Failed to delete session after closing its runtime: ${message}. The saved file and draft were retained; click the session to resume.`
-          : `Failed to delete session: ${message}. Draft was retained.`,
-      );
-    }
+          if (runtimeDetached) {
+            // Main deliberately preserved the generation when file removal failed.
+            // Keep the same row/id so a later resume can atomically transfer its
+            // typed draft and still-live attachment tokens to the new runtime.
+            setSessions((items) =>
+              closeRuntimeInSessionState(items, session.id),
+            );
+          }
+          unblockAttachmentOwner(session.id);
+          setUiMessage(
+            runtimeDetached
+              ? `Failed to delete session after closing its runtime: ${message}. The saved file and draft were retained; click the session to resume.`
+              : `Failed to delete session: ${message}. Draft was retained.`,
+          );
+        }
+      },
+    );
   }
 
   function rememberPiDefaults(session: SessionViewModel): void {
@@ -3357,6 +3376,7 @@ export function App(): ReactElement {
         {workspaceDialog !== undefined ? (
           <WorkspaceManagementDialog
             busy={workspaceDialogBusy}
+            composerDrafts={composerDrafts}
             currentWorkspace={currentWorkspace}
             dialog={workspaceDialog}
             unassignedLoading={unassignedSessionsLoading}
@@ -3763,6 +3783,7 @@ function updateWorkspaceSessionLabels(
 
 function archiveWorkspaceBlockReason(
   sessions: SessionViewModel[],
+  composerDrafts: ComposerDraftsBySession,
   workspaceId: string,
   openWorkspaceCount: number,
 ): string | undefined {
@@ -3775,6 +3796,15 @@ function archiveWorkspaceBlockReason(
     )
   ) {
     return "Close attached sessions before archiving this workspace.";
+  }
+  if (
+    sessions.some(
+      (session) =>
+        session.workspaceId === workspaceId &&
+        hasComposerDraft(composerDrafts, session.id),
+    )
+  ) {
+    return "Send or clear unsent composer text and attachments before archiving this workspace.";
   }
   return undefined;
 }
@@ -3794,6 +3824,23 @@ async function settleSequentialSessionImports(
     }
   }
   return { added, failed };
+}
+
+async function runBusyDialogTransaction(
+  gate: { current: boolean },
+  setBusy: (busy: boolean) => void,
+  transaction: () => Promise<void>,
+): Promise<boolean> {
+  if (gate.current) return false;
+  gate.current = true;
+  setBusy(true);
+  try {
+    await transaction();
+    return true;
+  } finally {
+    gate.current = false;
+    setBusy(false);
+  }
 }
 
 function slashCommandFromWorkerCommand(
@@ -6179,6 +6226,7 @@ function UsageStatsPanel(props: { session: SessionViewModel }): ReactElement {
 
 function WorkspaceManagementDialog(props: {
   busy: boolean;
+  composerDrafts: ComposerDraftsBySession;
   currentWorkspace: WorkspaceRef;
   dialog: Exclude<WorkspaceDialogState, undefined>;
   sessions: SessionViewModel[];
@@ -6215,6 +6263,7 @@ function WorkspaceManagementDialog(props: {
   const membershipMutable = canManageWorkspaceMembership(session);
   const archiveBlockedReason = archiveWorkspaceBlockReason(
     props.sessions,
+    props.composerDrafts,
     props.currentWorkspace.id,
     props.workspaces.length,
   );
@@ -8814,6 +8863,7 @@ export const __rendererTestHooks = {
   updateWorkspaceSessionLabels,
   archiveWorkspaceBlockReason,
   settleSequentialSessionImports,
+  runBusyDialogTransaction,
   workingDirectoryForSession,
   runtimeCapabilitiesFor,
   updateRuntimeCapabilities,
