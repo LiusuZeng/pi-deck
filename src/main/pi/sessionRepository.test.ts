@@ -6,6 +6,7 @@ import { describe, it as test } from "vitest";
 import {
   scanSessionRepository,
   validatePiSession,
+  validatePiSessionFile,
 } from "./sessionRepository.js";
 
 test("session repository scans project jsonl sessions without following other projects", async () => {
@@ -43,12 +44,27 @@ test("session repository scans project jsonl sessions without following other pr
 
   const result = await scanSessionRepository({
     sessionDir,
+  });
+  assert.deepEqual(result.sessions.map((session) => session.sessionId).sort(), [
+    "other",
+    "session-one",
+  ]);
+  assert.equal(
+    result.sessions.find((session) => session.sessionId === "session-one")?.cwd,
+    await fs.realpath(project),
+  );
+
+  const filteredResult = await scanSessionRepository({
+    sessionDir,
     projectCwd: project,
   });
-  assert.equal(result.sessions.length, 1);
-  assert.equal(result.sessions[0]?.sessionId, "session-one");
-  assert.equal(result.sessions[0]?.title, "Resume this important session");
-  assert.equal(result.sessions[0]?.messageCount, 1);
+  assert.equal(filteredResult.sessions.length, 1);
+  assert.equal(filteredResult.sessions[0]?.sessionId, "session-one");
+  assert.equal(
+    filteredResult.sessions[0]?.title,
+    "Resume this important session",
+  );
+  assert.equal(filteredResult.sessions[0]?.messageCount, 1);
 });
 
 describe("Pi session eligibility validation", () => {
@@ -94,6 +110,34 @@ describe("Pi session eligibility validation", () => {
     assert.deepEqual(result, {
       ok: true,
       sessionFile: await fs.realpath(sessionFile),
+    });
+  });
+
+  test("validates a contained Pi session independently of its workspace cwd", async () => {
+    const { project, otherProject, sessionDir } = await createSessionFixture();
+    const sessionFile = path.join(sessionDir, "other-workspace.jsonl");
+    const projectAlias = path.join(path.dirname(project), "project-alias");
+    await fs.symlink(otherProject, projectAlias);
+    await fs.writeFile(sessionFile, piHeader(projectAlias));
+
+    const fileValidation = await validatePiSessionFile({
+      sessionFile,
+      sessionDir,
+    });
+    assert.deepEqual(fileValidation, {
+      ok: true,
+      sessionFile: await fs.realpath(sessionFile),
+      cwd: await fs.realpath(otherProject),
+    });
+
+    const legacyValidation = await validatePiSession({
+      sessionFile,
+      sessionDir,
+      projectCwd: project,
+    });
+    assert.deepEqual(legacyValidation, {
+      ok: false,
+      reason: "session belongs to a different project",
     });
   });
 
@@ -208,6 +252,24 @@ describe("Pi session eligibility validation", () => {
     assert.deepEqual(linkedResult, {
       ok: false,
       reason: "session file is outside the configured session directory",
+    });
+  });
+
+  test("rejects symlinks even when their target remains inside the session directory", async () => {
+    const { project, sessionDir } = await createSessionFixture();
+    const target = path.join(sessionDir, "target.jsonl");
+    const linkedFile = path.join(sessionDir, "linked-inside.jsonl");
+    await fs.writeFile(target, piHeader(project));
+    await fs.symlink(target, linkedFile);
+
+    const result = await validatePiSessionFile({
+      sessionFile: linkedFile,
+      sessionDir,
+    });
+
+    assert.deepEqual(result, {
+      ok: false,
+      reason: "session path must not be a symbolic link",
     });
   });
 });
