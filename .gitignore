@@ -24,6 +24,8 @@ dist/
 build/
 out/
 coverage/
+playwright-report/
+test-results/
 
 # Pi/local state
 .pi/local/
