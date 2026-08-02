@@ -182,6 +182,10 @@ interface MessageUsage {
 
 interface SessionViewModel {
   id: string;
+  /** Durable grouping identity. This is never inferred from a filesystem path. */
+  workspaceId: string;
+  /** Pi execution context for this particular session/draft. */
+  workingDirectory?: string;
   title: string;
   project: string;
   projectPath: string;
@@ -216,6 +220,58 @@ interface SessionViewModel {
   /** A provider failure observed in a Pi runtime event, not a local UI error. */
   providerErrorObserved?: boolean;
 }
+
+/**
+ * Renderer-owned projection of the workspace contract.  It deliberately does
+ * not use ProjectRef as its identity: a project is an authorized working
+ * folder, whereas a workspace is a durable user-named grouping.
+ */
+interface WorkspaceRef {
+  id: string;
+  name: string;
+  defaultProjectId?: string;
+  defaultProject?: ProjectRef;
+  legacyProject?: ProjectRef;
+  lastOpenedAt: number;
+  archivedAtMs?: number;
+}
+
+interface WorkspaceListResultCompat {
+  activeWorkspaceId?: string;
+  activeWorkspace?: WorkspaceRef;
+  workspaces: WorkspaceRef[];
+}
+
+type WorkspaceCapableApi = {
+  workspaces?: {
+    list?(): Promise<WorkspaceListResultCompat>;
+    getActive?(): Promise<WorkspaceListResultCompat>;
+    create?(request: {
+      name: string;
+      defaultProjectId?: string;
+    }): Promise<WorkspaceListResultCompat>;
+    update?(request: {
+      workspaceId: string;
+      name?: string;
+      defaultProjectId?: string;
+    }): Promise<WorkspaceListResultCompat>;
+    select?(request: { workspaceId: string }): Promise<WorkspaceListResultCompat>;
+    archive?(request: { workspaceId: string }): Promise<WorkspaceListResultCompat>;
+    addSession?(request: { workspaceId: string; sessionFile: string }): Promise<unknown>;
+    moveSession?(request: { sessionFile: string; toWorkspaceId: string }): Promise<unknown>;
+    removeSession?(request: { workspaceId: string; sessionFile: string }): Promise<unknown>;
+    listUnassignedSessions?(): Promise<{ sessions: ChatSessionSummary[] }>;
+  };
+  chat: {
+    listSessions?(request?: { workspaceId?: string; projectId?: string }): Promise<{
+      sessions: ChatSessionSummary[];
+    }>;
+    createSession?(request?: { workspaceId?: string; projectId?: string }): Promise<ChatSnapshot>;
+    resumeSession?(request: { workspaceId?: string; projectId?: string; sessionFile: string }): Promise<ChatSnapshot>;
+    deleteSession?(request: { workspaceId?: string; projectId?: string; sessionFile: string }): Promise<unknown>;
+    deleteAllSessions?(request?: { workspaceId?: string; projectId?: string }): Promise<unknown>;
+  };
+};
 
 interface ComposerDraftState {
   text: string;
@@ -331,6 +387,8 @@ const slashCommands: SlashCommand[] = [
 const initialSessions: SessionViewModel[] = [
   {
     id: "session-active",
+    workspaceId: "local-demo-workspace",
+    workingDirectory: "Local demo project",
     title: "Local demo session",
     project: "Pi Deck",
     projectPath: "Local demo project",
@@ -413,6 +471,7 @@ const invalidRecentProject: ProjectRef = {
 
 const loadingSession: SessionViewModel = {
   id: "loading-session",
+  workspaceId: "pending-workspace",
   title: "Connecting to Pi…",
   project: "Pi Deck",
   projectPath: "Resolving backend session",
@@ -489,6 +548,16 @@ export function App(): ReactElement {
     lastOpenedAt: appStartedAt,
   }));
   const [recentProjects, setRecentProjects] = useState<ProjectRef[]>([]);
+  const [currentWorkspace, setCurrentWorkspace] = useState<WorkspaceRef>(() =>
+    workspaceFromLegacyProject({
+      id: "pending-workspace",
+      path: "",
+      canonicalPath: "",
+      displayName: "Pi Deck",
+      lastOpenedAt: appStartedAt,
+    }),
+  );
+  const [workspaces, setWorkspaces] = useState<WorkspaceRef[]>([]);
   const [selectedModelId, setSelectedModelId] = useState(
     modelOptions[0]?.id ?? "",
   );
@@ -525,6 +594,7 @@ export function App(): ReactElement {
   const blockedAttachmentOwnerIds = useRef(new Set<string>());
   const selectedSessionIdRef = useRef(selectedSessionId);
   const currentProjectRef = useRef(currentProject);
+  const currentWorkspaceRef = useRef(currentWorkspace);
   const sessionListGeneration = useRef(0);
   const reconciliationRetryTimers = useRef(new Map<string, number>());
   const reconciliationRetryAttempts = useRef(new Map<string, number>());
@@ -532,6 +602,7 @@ export function App(): ReactElement {
   composerDraftsRef.current = composerDrafts;
   selectedSessionIdRef.current = selectedSessionId;
   currentProjectRef.current = currentProject;
+  currentWorkspaceRef.current = currentWorkspace;
 
   useEffect(() => {
     const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
@@ -662,13 +733,22 @@ export function App(): ReactElement {
 
         // A draft is a renderer-only shell. It intentionally has no runtime
         // id, so the first send is the only path that can create a Pi worker.
-        const draft = draftSessionForProject(
-          bootstrap.project,
+        const bootstrapWorkspaceList = workspaceListFromBootstrap(bootstrap);
+        const bootstrapWorkspace =
+          bootstrapWorkspaceList.activeWorkspace ??
+          bootstrapWorkspaceList.workspaces[0] ??
+          workspaceFromLegacyProject(bootstrap.project);
+        const draft = draftSessionForWorkspace(
+          bootstrapWorkspace,
           createId("draft-session"),
           bootstrap.backendMode,
         );
         const cachedRows = bootstrap.cachedSessions.map((summary) =>
-          sessionFromSummary(summary, bootstrap.project.id),
+          sessionFromSummary(
+            summary,
+            bootstrapWorkspace.id,
+            projectIdForWorkspace(bootstrapWorkspace),
+          ),
         );
         setSessions(
           bootstrap.backendMode === "real"
@@ -682,6 +762,8 @@ export function App(): ReactElement {
         );
         setSelectedSessionId(draft.id);
         setCurrentProject(bootstrap.project);
+        setCurrentWorkspace(bootstrapWorkspace);
+        setWorkspaces(bootstrapWorkspaceList.workspaces);
         setRecentProjects(
           bootstrap.backendMode === "real"
             ? bootstrap.projects
@@ -2794,6 +2876,71 @@ async function listProjectsIfAvailable(
   };
 }
 
+function workspaceListFromBootstrap(bootstrap: AppBootstrapState): WorkspaceListResultCompat {
+  const candidate = bootstrap as AppBootstrapState & {
+    workspace?: WorkspaceRef;
+    workspaces?: WorkspaceRef[];
+  };
+  if (candidate.workspace !== undefined) {
+    return {
+      activeWorkspaceId: candidate.workspace.id,
+      activeWorkspace: candidate.workspace,
+      workspaces: candidate.workspaces ?? [candidate.workspace],
+    };
+  }
+  const activeWorkspace = workspaceFromLegacyProject(bootstrap.project);
+  return {
+    activeWorkspaceId: activeWorkspace.id,
+    activeWorkspace,
+    workspaces: bootstrap.projects.map(workspaceFromLegacyProject),
+  };
+}
+
+function workspaceApi(api: typeof window.piDeck): WorkspaceCapableApi {
+  return api as unknown as WorkspaceCapableApi;
+}
+
+function hasWorkspaceApi(api: typeof window.piDeck): boolean {
+  return typeof workspaceApi(api).workspaces?.select === "function";
+}
+
+async function listSessionsForWorkspace(
+  api: typeof window.piDeck,
+  workspace: WorkspaceRef,
+): Promise<{ sessions: ChatSessionSummary[] }> {
+  const chat = workspaceApi(api).chat;
+  if (hasWorkspaceApi(api) && chat.listSessions !== undefined) {
+    return chat.listSessions({ workspaceId: workspace.id });
+  }
+  return api.chat.listSessions({ projectId: workspace.defaultProjectId });
+}
+
+function projectIdForWorkspace(workspace: WorkspaceRef): string | undefined {
+  return workspace.defaultProjectId ?? workspace.defaultProject?.id;
+}
+
+function workingDirectoryForSession(
+  session: SessionViewModel,
+  workspace: WorkspaceRef,
+): string | undefined {
+  return session.workingDirectory ?? defaultWorkingDirectory(workspace);
+}
+
+async function createSessionForWorkspace(
+  api: typeof window.piDeck,
+  workspace: WorkspaceRef,
+  projectId?: string,
+): Promise<ChatSnapshot> {
+  const chat = workspaceApi(api).chat;
+  if (hasWorkspaceApi(api) && chat.createSession !== undefined) {
+    return chat.createSession({
+      workspaceId: workspace.id,
+      ...(projectId !== undefined ? { projectId } : {}),
+    });
+  }
+  return api.chat.createSession({ projectId });
+}
+
 async function selectProjectIfAvailable(
   api: typeof window.piDeck,
   project: ProjectRef,
@@ -3090,8 +3237,39 @@ function modelLabelForChatModel(model: ChatModelSummary): string {
   return model.provider ? `${model.provider} / ${model.id}` : model.id;
 }
 
+function workspaceFromLegacyProject(project: ProjectRef): WorkspaceRef {
+  return {
+    id: project.id,
+    name: project.displayName,
+    defaultProjectId: project.id,
+    defaultProject: project,
+    legacyProject: project,
+    lastOpenedAt: project.lastOpenedAt,
+  };
+}
+
+function defaultWorkingDirectory(workspace: WorkspaceRef): string | undefined {
+  const project = workspace.defaultProject ?? workspace.legacyProject;
+  return project?.canonicalPath || project?.path;
+}
+
+/** Compatibility-only bridge while old preload builds expose Projects. */
 function draftSessionForProject(
   project: ProjectRef,
+  id: string,
+  backendMode: "fake" | "real" = "real",
+  configuration?: ChatListModelsResult,
+): SessionViewModel {
+  return draftSessionForWorkspace(
+    workspaceFromLegacyProject(project),
+    id,
+    backendMode,
+    configuration,
+  );
+}
+
+function draftSessionForWorkspace(
+  workspace: WorkspaceRef,
   id: string,
   backendMode: "fake" | "real" = "real",
   configuration?: ChatListModelsResult,
@@ -3104,10 +3282,16 @@ function draftSessionForProject(
       ? { thinkingLevel: configuration.thinkingLevel }
       : {}),
     id,
+    workspaceId: workspace.id,
+    ...(defaultWorkingDirectory(workspace) !== undefined
+      ? { workingDirectory: defaultWorkingDirectory(workspace) }
+      : {}),
     title: "Untitled new session",
-    project: project.displayName,
-    projectPath: project.path,
-    projectId: project.id,
+    project: workspace.name,
+    projectPath: defaultWorkingDirectory(workspace) ?? "No working folder",
+    ...(workspace.defaultProjectId !== undefined
+      ? { projectId: workspace.defaultProjectId }
+      : {}),
     subtitle: "Idle · Pi starts when you send the first prompt",
     status: "idle",
     updatedAt: "Now",
@@ -3124,18 +3308,17 @@ function draftSessionForProject(
 
 function sessionFromSummary(
   summary: ChatSessionSummary,
+  workspaceId: string,
   projectId?: string,
 ): SessionViewModel {
   return {
     id: summary.attachedRuntimeId ?? summary.id,
+    workspaceId,
+    ...(summary.cwd !== undefined ? { workingDirectory: summary.cwd } : {}),
     title: summary.title,
     project: summary.cwd?.split(/[\\/]/).pop() ?? "Pi project",
     projectPath: summary.cwd ?? "Unknown project",
-    ...(projectId !== undefined
-      ? { projectId }
-      : summary.cwd !== undefined
-        ? { projectId: summary.cwd }
-        : {}),
+    ...(projectId !== undefined ? { projectId } : {}),
     subtitle: summary.attachedRuntimeId
       ? "Idle · attached real Pi session"
       : "Saved · click to resume",
@@ -3162,6 +3345,16 @@ function sessionFromSummary(
   };
 }
 
+function workspaceIdFromSnapshot(snapshot: ChatSnapshot): string {
+  const workspaceId = Reflect.get(snapshot, "workspaceId");
+  if (typeof workspaceId === "string" && workspaceId.length > 0) {
+    return workspaceId;
+  }
+  // Old main processes return only projectId. Treat it as a legacy workspace
+  // mapping, never as a path-based membership predicate.
+  return snapshot.projectId ?? "unassigned-workspace";
+}
+
 function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
   const modelLabel = modelLabelFromState(snapshot.state);
   const { usageStats, usageByMessageId } = usageFromMessages(
@@ -3172,6 +3365,10 @@ function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
 
   const session: SessionViewModel = {
     id: snapshot.runtimeId,
+    workspaceId: workspaceIdFromSnapshot(snapshot),
+    ...(snapshot.state.cwd !== undefined
+      ? { workingDirectory: snapshot.state.cwd }
+      : {}),
     title: titleFromSnapshot(snapshot),
     project: snapshot.state.cwd?.split(/[\\/]/).pop() ?? "pi-deck",
     projectPath:
@@ -4952,9 +5149,9 @@ function isSessionDeletable(
 
 function sessionBelongsToProject(
   session: SessionViewModel,
-  projectId: string,
+  workspaceId: string,
 ): boolean {
-  return session.projectId === projectId || session.projectPath === projectId;
+  return session.workspaceId === workspaceId;
 }
 
 function isBackgroundActiveWork(session: SessionViewModel): boolean {
@@ -6645,6 +6842,8 @@ function fixtureSession(
   const status = toSessionStatus(baseState, overlayPatch);
   const session: SessionViewModel = {
     id,
+    workspaceId: "local-demo-workspace",
+    workingDirectory: "Local demo project",
     title,
     project: "pi-deck",
     projectPath: "Local demo project",
