@@ -1,8 +1,8 @@
-# Pi Deck
+# Pi Deck — macOS desktop app for Pi coding agents
 
-**A local macOS control plane for Pi coding agents.**
+**A local macOS desktop app for Pi coding agents.**
 
-Pi Deck gives Pi a dedicated desktop workspace for running, watching, and steering coding-agent sessions without opening Pi's terminal UI. It keeps projects and conversations organized in a sidebar while Pi continues to use its native models, settings, tools, resources, and session files.
+Pi Deck is a Pi coding-agent GUI that gives Pi a dedicated desktop workspace for running, watching, and steering coding-agent sessions without opening Pi's terminal UI. It keeps projects and conversations organized in a sidebar while Pi continues to use its native models, settings, tools, resources, and session files. Visit [the Pi Deck website](https://liusuzeng.github.io/pi-deck/) for an overview.
 
 <p align="center">
   <img src="docs/assets/pi-deck.png" alt="Pi Deck in Light mode showing project sessions, a resumed conversation, tool activity, and usage statistics" width="49%">

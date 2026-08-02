@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0a0c14" />
+    <title>Pi Deck — macOS Desktop GUI for Pi Coding Agents</title>
+    <meta name="description" content="Pi Deck is a local macOS desktop GUI for running, monitoring, and steering multiple Pi coding-agent sessions from source." />
+    <link rel="canonical" href="https://liusuzeng.github.io/pi-deck/" />
+    <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Pi Deck" />
+    <meta property="og:title" content="Pi Deck — macOS Desktop GUI for Pi Coding Agents" />
+    <meta property="og:description" content="Run, monitor, and steer multiple local Pi coding-agent sessions from one macOS desktop workspace." />
+    <meta property="og:url" content="https://liusuzeng.github.io/pi-deck/" />
+    <meta property="og:image" content="https://liusuzeng.github.io/pi-deck/assets/social-preview.png" />
+    <meta property="og:image:width" content="1280" />
+    <meta property="og:image:height" content="640" />
+    <meta property="og:image:alt" content="Pi Deck desktop interface with Pi coding-agent sessions" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Pi Deck — macOS Desktop GUI for Pi Coding Agents" />
+    <meta name="twitter:description" content="Run, monitor, and steer multiple local Pi coding-agent sessions from one macOS desktop workspace." />
+    <meta name="twitter:image" content="https://liusuzeng.github.io/pi-deck/assets/social-preview.png" />
+    <meta name="twitter:image:alt" content="Pi Deck desktop interface with Pi coding-agent sessions" />
+    <link rel="stylesheet" href="styles.css" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Pi Deck",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "macOS",
+        "description": "A local macOS Electron desktop app for running, monitoring, and steering multiple Pi coding-agent sessions.",
+        "url": "https://liusuzeng.github.io/pi-deck/",
+        "codeRepository": "https://github.com/LiusuZeng/pi-deck"
+      }
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <header class="site-header">
+      <a class="brand" href="./" aria-label="Pi Deck home"><span class="brand-mark" aria-hidden="true">π</span> Pi Deck</a>
+      <nav aria-label="Primary navigation">
+        <a href="#features">Features</a>
+        <a href="#how-it-works">How it works</a>
+        <a href="#faq">FAQ</a>
+        <a class="nav-github" href="https://github.com/LiusuZeng/pi-deck">GitHub <span aria-hidden="true">↗</span></a>
+      </nav>
+    </header>
+
+    <main id="main-content">
+      <section class="hero" aria-labelledby="hero-heading">
+        <div class="hero-copy">
+          <p class="eyebrow">A local workspace for agentic development</p>
+          <h1 id="hero-heading">A macOS desktop GUI for Pi coding agents.</h1>
+          <p class="lede">Pi Deck gives Pi a focused control plane: run multiple sessions, see work as it happens, and keep projects organized without juggling terminal windows.</p>
+          <div class="actions">
+            <a class="button button-primary" href="#run-from-source">Run from source <span aria-hidden="true">↓</span></a>
+            <a class="button button-secondary" href="https://github.com/LiusuZeng/pi-deck">View source on GitHub <span aria-hidden="true">↗</span></a>
+          </div>
+          <p class="status"><span aria-hidden="true">●</span> Active pre-release MVP · macOS · runs locally from source</p>
+        </div>
+        <div class="hero-art" aria-hidden="true">
+          <div class="orbit orbit-one"></div><div class="orbit orbit-two"></div>
+          <div class="hero-window"><div class="window-dots"><i></i><i></i><i></i></div><div class="window-content"><span>PI DECK</span><strong>4 active sessions</strong><em>thinking · tool · waiting</em></div></div>
+        </div>
+      </section>
+
+      <section class="proof" aria-label="Pi Deck capabilities">
+        <div><strong>Multiple workers</strong><span>Independent Pi sessions, one desktop workspace.</span></div>
+        <div><strong>Pi-native by design</strong><span>Uses Pi’s models, settings, tools, and session files.</span></div>
+        <div><strong>Local control plane</strong><span>No hosted Pi Deck backend or account required.</span></div>
+      </section>
+
+      <section class="screenshots section" aria-labelledby="screenshots-heading">
+        <div class="section-heading"><p class="eyebrow">See the work</p><h2 id="screenshots-heading">Your Pi sessions, in focus.</h2><p>Inspect streaming replies, tool execution, thinking, and usage while the work moves forward.</p></div>
+        <div class="screenshot-grid">
+          <figure><img src="assets/pi-deck.png" width="1360" height="850" alt="Pi Deck in light mode showing project sessions, a resumed conversation, tool activity, and usage statistics" /><figcaption>Projects and sessions stay visible beside the live conversation.</figcaption></figure>
+          <figure><img src="assets/pi-deck-dark.png" width="1360" height="850" alt="Pi Deck in dark mode showing a project session, tool activity, and a completed response" /><figcaption>Watch Pi think, call tools, and complete work in real time.</figcaption></figure>
+        </div>
+      </section>
+
+      <section id="features" class="section feature-section" aria-labelledby="features-heading">
+        <div class="section-heading"><p class="eyebrow">Built around Pi</p><h2 id="features-heading">A GUI that keeps you in control.</h2></div>
+        <div class="feature-grid">
+          <article><span class="feature-number">01</span><h3>Manage parallel work</h3><p>Attach independent Pi workers to different conversations, change projects while work continues, and see which sessions need attention.</p></article>
+          <article><span class="feature-number">02</span><h3>Keep Pi’s source of truth</h3><p>Resume Pi JSONL sessions and use the models, provider authentication, resources, commands, and settings you already configured.</p></article>
+          <article><span class="feature-number">03</span><h3>Intervene at the right moment</h3><p>Steer an active turn, queue a follow-up, answer extension requests, retry failed prompts, or abort work without losing the wider project context.</p></article>
+          <article><span class="feature-number">04</span><h3>Work with files and images</h3><p>Reference project files, paste or drop supported images, and restore image previews when you reopen a saved session.</p></article>
+        </div>
+      </section>
+
+      <section id="how-it-works" class="section workflow" aria-labelledby="workflow-heading">
+        <div class="section-heading"><p class="eyebrow">How it works</p><h2 id="workflow-heading">A desktop layer over your existing Pi workflow.</h2></div>
+        <ol>
+          <li><span>1</span><div><h3>Open a local project</h3><p>Choose the repository you are working in and discover its saved Pi sessions.</p></div></li>
+          <li><span>2</span><div><h3>Start or resume a conversation</h3><p>Pi Deck launches a local <code>pi --mode rpc</code> worker when you send the first prompt.</p></div></li>
+          <li><span>3</span><div><h3>Monitor and direct the work</h3><p>Watch live activity, switch contexts, or send the next instruction while Pi continues in the background.</p></div></li>
+        </ol>
+      </section>
+
+      <section id="run-from-source" class="section install" aria-labelledby="install-heading">
+        <div class="install-copy"><p class="eyebrow">Get started</p><h2 id="install-heading">Run Pi Deck from source.</h2><p>Pi Deck is currently a macOS Electron pre-release. You will need Node.js 22.12+, npm, and a working Pi executable with its normal provider authentication configured.</p><a class="button button-primary" href="https://github.com/LiusuZeng/pi-deck#quick-start">Read the setup guide <span aria-hidden="true">↗</span></a></div>
+        <pre aria-label="Installation commands"><code>git clone https://github.com/LiusuZeng/pi-deck.git
+cd pi-deck
+npm ci
+npm run build
+npm run deck:real -- /absolute/path/to/your/project</code></pre>
+      </section>
+
+      <section class="section privacy" aria-labelledby="privacy-heading">
+        <div><p class="eyebrow">Privacy and boundaries</p><h2 id="privacy-heading">Your sessions stay where Pi keeps them.</h2></div>
+        <div><p>Pi Deck has no hosted backend and does not sync application data. Pi-owned JSONL files remain the source of truth for conversations; Pi Deck stores only local metadata needed to organize and reopen them.</p><p>Pi itself may contact configured model providers or run network-capable tools according to your Pi settings and environment.</p><a href="https://github.com/LiusuZeng/pi-deck#local-data-and-privacy">Read the privacy details <span aria-hidden="true">↗</span></a></div>
+      </section>
+
+      <section id="faq" class="section faq" aria-labelledby="faq-heading">
+        <div class="section-heading"><p class="eyebrow">FAQ</p><h2 id="faq-heading">Questions developers ask.</h2></div>
+        <div class="faq-grid">
+          <details><summary>Is Pi Deck a GUI for the Pi coding agent?</summary><p>Yes. Pi Deck is a local macOS desktop GUI and control plane for Pi coding-agent sessions. It complements Pi’s CLI workflow rather than replacing Pi itself.</p></details>
+          <details><summary>Can Pi Deck manage multiple Pi sessions?</summary><p>Yes. Each attached conversation has an independent local Pi worker, so you can monitor active work across projects and sessions from one workspace.</p></details>
+          <details><summary>Does Pi Deck run locally?</summary><p>Yes. Pi Deck is a local Electron desktop app with no Pi Deck-hosted backend. Pi’s own configured providers and tools retain their usual behavior.</p></details>
+          <details><summary>Is there a downloadable macOS installer?</summary><p>Not yet. Pi Deck is an active pre-release MVP that currently runs from source on macOS.</p></details>
+        </div>
+      </section>
+    </main>
+    <footer><span>Pi Deck · A local macOS workspace for Pi coding agents.</span><span><a href="https://github.com/LiusuZeng/pi-deck">Source</a><a href="https://github.com/LiusuZeng/pi-deck/releases">Releases</a><a href="https://github.com/LiusuZeng/pi-deck#how-it-works">Documentation</a></span></footer>
+  </body>
+</html>
