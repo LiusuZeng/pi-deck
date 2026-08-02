@@ -776,10 +776,16 @@ function registerIpcHandlers(
     handler: async ({ workspaceId }) => {
       const workspace = await ensureWorkspaceStore().select(workspaceId);
       if (workspace.defaultProjectId !== undefined) {
-        const project = await ensureProjectStore().selectProject(
-          workspace.defaultProjectId,
-        );
-        selectedRealProjectCwd = project.canonicalPath;
+        try {
+          const project = await ensureProjectStore().selectProject(
+            workspace.defaultProjectId,
+          );
+          selectedRealProjectCwd = project.canonicalPath;
+        } catch (error) {
+          diagnosticsService.recordError(
+            `Selected workspace ${workspace.id}, but its default working folder is unavailable: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
       }
       return projectWorkspaceListResult();
     },
@@ -791,6 +797,16 @@ function registerIpcHandlers(
     responseSchema: workspaceListResultSchema,
     diagnostics: diagnosticsService,
     handler: async ({ workspaceId }) => {
+      if (
+        [...chatRuntimeWorkspaceIds.entries()].some(
+          ([runtimeId, ownerWorkspaceId]) =>
+            ownerWorkspaceId === workspaceId && chatRuntimeIds.has(runtimeId),
+        )
+      ) {
+        throw new Error(
+          "Close attached sessions before archiving this workspace.",
+        );
+      }
       await ensureWorkspaceStore().archive(workspaceId);
       return projectWorkspaceListResult();
     },
@@ -812,8 +828,15 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async ({ sessionFile, toWorkspaceId }) => {
       await requireOpenWorkspace(toWorkspaceId);
+      const canonical =
+        (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
+      if (chatSessionFileLocks.has(canonical)) {
+        throw new Error(
+          "Close the attached session before moving it to another workspace.",
+        );
+      }
       const moved = await ensureWorkspaceStore().moveSession(
-        sessionFile,
+        canonical,
         toWorkspaceId,
       );
       return { workspaceId: moved.workspaceId, sessionFile: moved.sessionFile };
@@ -1082,12 +1105,33 @@ async function resolveWorkspaceProject(
   return ensureProjectStore().resolveAuthorizedProject(projectId);
 }
 
+async function resolveWorkspaceRepositoryProject(
+  workspaceId: string,
+): Promise<ProjectRef> {
+  const workspace = await requireOpenWorkspace(workspaceId);
+  if (workspace.defaultProjectId !== undefined) {
+    const defaultProject = await ensureProjectStore()
+      .resolveAuthorizedProject(workspace.defaultProjectId)
+      .catch(() => undefined);
+    if (defaultProject !== undefined) {
+      return defaultProject;
+    }
+  }
+  const activeProject = await ensureProjectStore().getActiveProjectRef();
+  if (activeProject === undefined) {
+    throw new Error(
+      "Choose a working folder before browsing or importing Pi sessions.",
+    );
+  }
+  return ensureProjectStore().resolveAuthorizedProject(activeProject.id);
+}
+
 async function addSessionToWorkspace(
   settings: SettingsStore,
   workspaceId: string,
   sessionFile: string,
 ): Promise<{ workspaceId: string; sessionFile: string }> {
-  const project = await resolveWorkspaceProject(workspaceId);
+  const project = await resolveWorkspaceRepositoryProject(workspaceId);
   const launch = await resolveRealChatLaunchConfig(settings, project);
   const sessionDir = launch.effective.config.sessionDir;
   if (sessionDir === undefined) {
@@ -1119,7 +1163,7 @@ async function listUnassignedWorkspaceSessions(
   if (workspace === undefined) {
     throw new Error("No active workspace is selected.");
   }
-  const project = await resolveWorkspaceProject(workspace.id);
+  const project = await resolveWorkspaceRepositoryProject(workspace.id);
   const launch = await resolveRealChatLaunchConfig(settings, project);
   const sessionDir = launch.effective.config.sessionDir;
   if (sessionDir === undefined) {
