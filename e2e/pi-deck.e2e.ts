@@ -432,23 +432,6 @@ function tinyPngBase64(): string {
   return data.toString("base64");
 }
 
-async function selectRecentProject(
-  page: Page,
-  projectId: string,
-): Promise<void> {
-  await projectSwitcher(page).click();
-  const options = page.locator(".project-switcher-option");
-  const index = await options.evaluateAll(
-    (elements, id) =>
-      elements.findIndex(
-        (element) => (element as HTMLElement).dataset.projectId === id,
-      ),
-    projectId,
-  );
-  expect(index).toBeGreaterThanOrEqual(0);
-  await options.nth(index).click();
-}
-
 test("fake mode launches with backend runtime and send enabled", async () => {
   const { app, page } = await launchPiDeck({
     PI_DECK_BACKEND: "fake",
@@ -2030,7 +2013,7 @@ test("real mode authorizes opaque project IDs before any project-scoped Pi work"
   }
 });
 
-test("background worker continues through project A → B navigation and return", async () => {
+test("background worker continues while the workspace default folder changes", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-e2e-project-resume-"),
   );
@@ -2040,7 +2023,6 @@ test("background worker continues through project A → B navigation and return"
   fs.mkdirSync(projectA, { recursive: true });
   fs.mkdirSync(projectB, { recursive: true });
   fs.mkdirSync(agentDir, { recursive: true });
-  const canonicalProjectA = fs.realpathSync(projectA);
   const canonicalProjectB = fs.realpathSync(projectB);
 
   const { app, page } = await launchPiDeck(
@@ -2060,33 +2042,15 @@ test("background worker continues through project A → B navigation and return"
     await page.getByRole("button", { name: "Send" }).click();
     await expect(page.getByRole("button", { name: "Abort" })).toBeVisible();
 
-    await page.getByRole("button", { name: /Open project/i }).click();
+    await page.getByRole("button", { name: /Default folder/i }).click();
     await expect(projectSwitcher(page)).toHaveAttribute(
       "data-project-id",
       canonicalProjectB,
     );
-    await expect(page.getByLabel("Active work across projects")).toContainText(
-      "project switch background worker",
-    );
+    await expect(page.getByRole("button", { name: "Abort" })).toBeVisible();
     await expect(
-      page.getByText(
-        /No Pi worker was closed; 1 background active work item remains/,
-      ),
+      page.getByText(/Default working folder set to project-b/),
     ).toBeVisible();
-
-    const recentProjectSwitcher = projectSwitcher(page);
-    await expect(recentProjectSwitcher).toHaveAttribute(
-      "data-project-id",
-      canonicalProjectB,
-    );
-    await recentProjectSwitcher.click();
-    await expect(page.locator(".project-switcher-option")).toHaveCount(2);
-    await page.keyboard.press("Escape");
-    await selectRecentProject(page, canonicalProjectA);
-    await expect(recentProjectSwitcher).toHaveAttribute(
-      "data-project-id",
-      canonicalProjectA,
-    );
     await expect(
       page.getByText(/Fake response to: project switch background worker/),
     ).toBeVisible({ timeout: 8_000 });
@@ -2125,10 +2089,10 @@ test("real mode project picker handoff persists selected cwd with fake Pi", asyn
       canonicalProjectA,
     );
     await firstLaunch.page
-      .getByRole("button", { name: /Open project/i })
+      .getByRole("button", { name: /Default folder/i })
       .click();
     await expect(
-      firstLaunch.page.getByText(/Project view switched to project-b/),
+      firstLaunch.page.getByText(/Default working folder set to project-b/),
     ).toBeVisible();
     await expect(projectSwitcher(firstLaunch.page)).toHaveAttribute(
       "data-project-id",
