@@ -1,8 +1,8 @@
 # Workspace-Grouped Sessions Execution Plan
 
 Status: implemented and verified
-Date: 2026-08-02  
-Supersedes for new work: `project-grouped-sessions-p0-plan.md`  
+Date: 2026-08-02
+Supersedes for new work: `project-grouped-sessions-p0-plan.md`
 Compatibility baseline: existing directory-backed Projects remain readable during migration
 
 ## 1. Outcome
