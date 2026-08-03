@@ -130,6 +130,28 @@ test("WorkspaceStore cascades archive and restores only cascade-owned sessions",
   );
 });
 
+test("WorkspaceStore refreshes archived session metadata without reopening the workspace", async () => {
+  const { root, home } = await temporaryHome();
+  const sessionFile = path.join(root, "archived.jsonl");
+  await fs.writeFile(sessionFile, "session\n");
+  const store = new WorkspaceStore(home);
+  const workspace = await store.create({ name: "Archived metadata" });
+  await store.upsertSessionRef(workspace.id, summary(sessionFile, "Old title"));
+  await store.archive(workspace.id);
+
+  await store.upsertSessionRefs(
+    workspace.id,
+    [summary(sessionFile, "Prompt-derived title")],
+    { allowArchived: true },
+  );
+
+  const archived = await store.getCachedSessionSummaries(workspace.id, {
+    includeArchived: true,
+  });
+  assert.equal(archived[0]?.title, "Prompt-derived title");
+  assert.equal(archived[0]?.archivedAtMs !== undefined, true);
+});
+
 test("WorkspaceStore removes, rather than serializes, a cleared default project", async () => {
   const { home } = await temporaryHome();
   const store = new WorkspaceStore(home);

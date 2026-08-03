@@ -2540,7 +2540,9 @@ async function refreshWorkspaceSessionSummaries(
   }
 
   try {
-    await ensureWorkspaceStore().upsertSessionRefs(workspace.id, refreshed);
+    await ensureWorkspaceStore().upsertSessionRefs(workspace.id, refreshed, {
+      ...(workspace.archivedAtMs !== undefined ? { allowArchived: true } : {}),
+    });
     return ensureWorkspaceStore().getCachedSessionSummaries(workspace.id, {
       includeArchived,
     });

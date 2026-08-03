@@ -515,6 +515,8 @@ export class WorkspaceStore {
       missingSessionFiles?: readonly string[];
       /** Set only for an explicit add; automatic legacy discovery must not clear removals. */
       clearLegacyExclusions?: boolean;
+      /** Permit metadata-only refreshes for refs in an archived workspace. */
+      allowArchived?: boolean;
     } = {},
   ): Promise<WorkspaceSessionMutationResult[]> {
     const id = z.string().uuid().parse(workspaceId);
@@ -538,7 +540,10 @@ export class WorkspaceStore {
       "session summaries",
     );
     await this.loadIfNeeded();
-    const targetWorkspaceIndex = this.requireOpenWorkspaceIndex(id);
+    const targetWorkspaceIndex =
+      options.allowArchived === true
+        ? this.requireWorkspaceIndex(id)
+        : this.requireOpenWorkspaceIndex(id);
 
     const now = Date.now();
     const refs = [...this.state.sessionRefs];
@@ -1119,13 +1124,18 @@ export class WorkspaceStore {
   }
 
   private requireOpenWorkspaceIndex(workspaceId: string): number {
+    const index = this.requireWorkspaceIndex(workspaceId);
+    if (this.state.workspaces[index]!.archivedAtMs !== undefined) {
+      throw new Error(`Workspace is archived: ${workspaceId}`);
+    }
+    return index;
+  }
+
+  private requireWorkspaceIndex(workspaceId: string): number {
     const index = this.state.workspaces.findIndex(
       (workspace) => workspace.id === workspaceId,
     );
     if (index < 0) throw new Error(`Unknown workspace: ${workspaceId}`);
-    if (this.state.workspaces[index]!.archivedAtMs !== undefined) {
-      throw new Error(`Workspace is archived: ${workspaceId}`);
-    }
     return index;
   }
 
