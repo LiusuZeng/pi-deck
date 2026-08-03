@@ -3,6 +3,7 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { checkMacOsGuiLaunch } from "./check-macos-gui-launch.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 export const repoRoot = path.resolve(scriptDir, "..");
@@ -150,6 +151,11 @@ function printBuildError(errors) {
 }
 
 async function main() {
+  if (!checkMacOsGuiLaunch()) {
+    process.exitCode = 2;
+    return;
+  }
+
   const errors = await validateBuiltApp();
   if (errors.length > 0) {
     printBuildError(errors);

@@ -93,9 +93,11 @@ This command deliberately does not build. It verifies that the main process, pre
 The Electron binary is a macOS GUI process. On some macOS releases, launching
 that binary from a sandboxed Codex shell can make LaunchServices abort before
 Pi Deck's main process starts; macOS then shows an “Electron quit unexpectedly”
-dialog. This is an environment/launch-boundary failure, not a Pi Deck
-workspace or session error. Run the same command from Terminal/Finder, or
-approve an unsandboxed GUI launch when validating locally.
+dialog. Pi Deck's development and E2E entrypoints detect Codex's Seatbelt
+sandbox and stop before spawning Electron, with an actionable error instead of
+triggering that dialog. Run the same command from Terminal/Finder, or approve
+an unsandboxed GUI launch when validating locally. This is an
+environment/launch-boundary failure, not a Pi Deck workspace or session error.
 
 For development or CI, use the explicit build-and-launch command:
 
