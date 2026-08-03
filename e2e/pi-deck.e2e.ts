@@ -277,7 +277,14 @@ test("workspace management UI keeps Pi JSONL membership reversible and deletion 
       .getByLabel("Destination workspace")
       .selectOption({ label: "UI destination" });
     await moveDialog.getByRole("button", { name: "Move session" }).click();
-    await expect(sessionRow).toHaveCount(0);
+    // The sidebar now keeps destination workspaces browseable in place. Scope
+    // the source assertion to the active workspace tree instead of assuming
+    // a moved row disappears from the entire sidebar.
+    await expect(
+      page
+        .locator(".workspace-tree-item.active")
+        .getByRole("button", { name: "Session: ui-membership" }),
+    ).toHaveCount(0);
     expect(fs.existsSync(canonicalSessionFile)).toBe(true);
 
     // The source is empty after move. Archiving changes only workspace

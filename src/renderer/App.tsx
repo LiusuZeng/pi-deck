@@ -681,11 +681,17 @@ export function App(): ReactElement {
       bootstrap: AppBootstrapState,
       generation: number,
     ): Promise<void> {
+      const workspaceList = workspaceListFromBootstrap(bootstrap);
       const workspace =
-        workspaceListFromBootstrap(bootstrap).activeWorkspace ??
+        workspaceList.activeWorkspace ??
         workspaceFromLegacyProject(bootstrap.project);
       try {
-        const listed = await listSessionsForWorkspace(api, workspace);
+        const listedSessions = await listSessionsForWorkspaces(
+          api,
+          workspaceList.workspaces.length > 0
+            ? workspaceList.workspaces
+            : [workspace],
+        );
         // Do not let a late startup scan replace a workspace the user has
         // since selected, or overwrite a newer explicit refresh.
         if (
@@ -696,25 +702,15 @@ export function App(): ReactElement {
           return;
         }
         setSessions((items) =>
-          mergeSessions(
-            items.filter(
-              (item) =>
-                item.runtimeBacked ||
-                item.draftSession === true ||
-                hasComposerDraft(composerDraftsRef.current, item.id) ||
-                item.workspaceId !== workspace.id,
-            ),
-            listed.sessions.map((summary) =>
-              sessionFromSummary(
-                summary,
-                workspace.id,
-                projectIdForWorkspace(workspace),
-              ),
-            ),
+          replaceWorkspaceTreeSavedRows(
+            items,
+            workspaceList.workspaces.map((candidate) => candidate.id),
+            listedSessions,
+            composerDraftsRef.current,
           ),
         );
         setUiMessage(
-          `Real Pi mode active. Found ${listed.sessions.length} saved session(s) for this workspace.`,
+          `Real Pi mode active. Found ${listedSessions.length} saved session(s) across ${workspaceList.workspaces.length} workspace(s).`,
         );
       } catch (error) {
         if (
@@ -2189,17 +2185,14 @@ export function App(): ReactElement {
     setProjectModelConfiguration({ models: [], thinkingLevels: [] });
     setUiMessage(`Opening ${workspace.name}; active Pi work stays attached…`);
     try {
-      const listed = await listSessionsForWorkspace(window.piDeck, workspace);
+      const listedSessions = await listSessionsForWorkspaces(
+        window.piDeck,
+        nextWorkspaces.length > 0 ? nextWorkspaces : [workspace],
+      );
       if (sessionListRequest !== sessionListGeneration.current) {
         return;
       }
-      const savedRows = listed.sessions.map((summary) =>
-        sessionFromSummary(
-          summary,
-          workspace.id,
-          projectIdForWorkspace(workspace),
-        ),
-      );
+      const savedRows = listedSessions;
       const existingRuntime = sessionsRef.current.find(
         (session) =>
           session.runtimeBacked && session.workspaceId === workspace.id,
@@ -2218,9 +2211,9 @@ export function App(): ReactElement {
           ? draftSessionForWorkspace(workspace, selectedId)
           : undefined;
       setSessions((items) =>
-        replaceWorkspaceSavedRows(
+        replaceWorkspaceTreeSavedRows(
           items,
-          workspace.id,
+          nextWorkspaces.map((candidate) => candidate.id),
           draft ? [...savedRows, draft] : savedRows,
           composerDraftsRef.current,
         ),
@@ -2243,7 +2236,7 @@ export function App(): ReactElement {
         })
         .catch(() => undefined);
       setUiMessage(
-        `Workspace switched to ${workspace.name}. Active work in other workspaces remains available.`,
+        `Workspace switched to ${workspace.name}. Sessions remain grouped by workspace.`,
       );
     } catch (error) {
       setUiMessage(
@@ -2637,7 +2630,10 @@ export function App(): ReactElement {
     const workspace = currentWorkspace;
     setUiMessage("Refreshing saved Pi sessions…");
     try {
-      const result = await listSessionsForWorkspace(window.piDeck, workspace);
+      const listedSessions = await listSessionsForWorkspaces(
+        window.piDeck,
+        workspaces.length > 0 ? workspaces : [workspace],
+      );
       if (
         sessionListRequest !== sessionListGeneration.current ||
         currentWorkspaceRef.current.id !== workspace.id
@@ -2645,24 +2641,15 @@ export function App(): ReactElement {
         return;
       }
       setSessions((items) =>
-        mergeSessions(
-          items.filter(
-            (item) =>
-              item.runtimeBacked ||
-              item.draftSession === true ||
-              hasComposerDraft(composerDraftsRef.current, item.id),
-          ),
-          result.sessions.map((summary) =>
-            sessionFromSummary(
-              summary,
-              workspace.id,
-              projectIdForWorkspace(workspace),
-            ),
-          ),
+        replaceWorkspaceTreeSavedRows(
+          items,
+          workspaces.map((candidate) => candidate.id),
+          listedSessions,
+          composerDraftsRef.current,
         ),
       );
       setUiMessage(
-        `Found ${result.sessions.length} saved session(s) for this workspace.`,
+        `Found ${listedSessions.length} saved session(s) across ${workspaces.length} workspace(s).`,
       );
     } catch (error) {
       setUiMessage(
@@ -3203,10 +3190,15 @@ export function App(): ReactElement {
           selectedSessionId={selectedSession.id}
           realMode={isRealBackendMode}
           currentWorkspace={currentWorkspace}
+          workspaces={workspaces}
           composerDrafts={composerDrafts}
           onSelect={handleSelectSession}
+          onSelectWorkspace={(workspace) =>
+            void handleSelectWorkspace(workspace)
+          }
           onHideSidebar={() => handleSidebarVisibleChange(false)}
           onNewSession={() => void handleNewSession()}
+          onNewWorkspace={() => void handleNewWorkspace()}
           onCloseRuntime={(sessionId) => void handleCloseRuntime(sessionId)}
           onDeleteSession={(sessionId) => void handleDeleteSession(sessionId)}
           onMoveSession={(sessionId) =>
@@ -3379,6 +3371,35 @@ async function listSessionsForWorkspace(
     return chat.listSessions({ workspaceId: workspace.id });
   }
   return api.chat.listSessions({ projectId: workspace.defaultProjectId });
+}
+
+/**
+ * The sidebar is a workspace tree, so it needs a lightweight summary for
+ * every open workspace rather than only the currently selected one.  Each
+ * workspace is queried independently: a stale or unavailable repository for
+ * one workspace must not hide the rows that are still readable elsewhere.
+ */
+async function listSessionsForWorkspaces(
+  api: typeof window.piDeck,
+  workspaces: WorkspaceRef[],
+): Promise<SessionViewModel[]> {
+  const results = await Promise.all(
+    workspaces.map(async (workspace) => {
+      try {
+        const listed = await listSessionsForWorkspace(api, workspace);
+        return listed.sessions.map((summary) =>
+          sessionFromSummary(
+            summary,
+            workspace.id,
+            projectIdForWorkspace(workspace),
+          ),
+        );
+      } catch {
+        return [];
+      }
+    }),
+  );
+  return results.flat();
 }
 
 function projectIdForWorkspace(workspace: WorkspaceRef): string | undefined {
@@ -3687,6 +3708,26 @@ function replaceWorkspaceSavedRows(
         session.draftSession === true ||
         hasComposerDraft(composerDrafts, session.id) ||
         session.workspaceId !== workspaceId,
+    ),
+    savedRows,
+  );
+}
+
+/** Replace saved rows for every open workspace while retaining active work. */
+function replaceWorkspaceTreeSavedRows(
+  sessions: SessionViewModel[],
+  workspaceIds: readonly string[],
+  savedRows: SessionViewModel[],
+  composerDrafts: ComposerDraftsBySession,
+): SessionViewModel[] {
+  const ids = new Set(workspaceIds);
+  return mergeSessions(
+    sessions.filter(
+      (session) =>
+        session.runtimeBacked ||
+        session.draftSession === true ||
+        hasComposerDraft(composerDrafts, session.id) ||
+        !ids.has(session.workspaceId),
     ),
     savedRows,
   );
@@ -5460,10 +5501,13 @@ function SessionSidebar(props: {
   selectedSessionId: string;
   realMode: boolean;
   currentWorkspace: WorkspaceRef;
+  workspaces: WorkspaceRef[];
   composerDrafts: ComposerDraftsBySession;
   onSelect(sessionId: string): void;
+  onSelectWorkspace(workspace: WorkspaceRef): void;
   onHideSidebar(): void;
   onNewSession(): void;
+  onNewWorkspace(): void;
   onCloseRuntime(sessionId: string): void;
   onDeleteSession(sessionId: string): void;
   onMoveSession(sessionId: string): void;
@@ -5474,42 +5518,60 @@ function SessionSidebar(props: {
 }): ReactElement {
   const [sessionFilter, setSessionFilter] = useState("");
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const sidebarSessions = props.realMode
-    ? props.sessions.filter(
-        (session) =>
-          sessionBelongsToProject(session, props.currentWorkspace.id) &&
-          shouldShowSessionInSidebar(
-            session,
-            hasComposerDraft(props.composerDrafts, session.id),
-          ),
-      )
-    : props.sessions;
+  const [expandedWorkspaceIds, setExpandedWorkspaceIds] = useState<Set<string>>(
+    () => new Set([props.currentWorkspace.id]),
+  );
+  const visibleWorkspaces = props.realMode
+    ? props.workspaces.length > 0
+      ? props.workspaces
+      : [props.currentWorkspace]
+    : [props.currentWorkspace];
+  const workspaceIds = new Set(
+    visibleWorkspaces.map((workspace) => workspace.id),
+  );
+
+  useEffect(() => {
+    setExpandedWorkspaceIds((current) => {
+      const next = new Set(current);
+      next.add(props.currentWorkspace.id);
+      return next;
+    });
+  }, [props.currentWorkspace.id]);
+
+  const normalizedFilter = sessionFilter.trim().toLocaleLowerCase();
+
+  function sessionsForWorkspace(workspace: WorkspaceRef): SessionViewModel[] {
+    const workspaceSessions = props.sessions.filter(
+      (session) =>
+        sessionBelongsToProject(session, workspace.id) &&
+        shouldShowSessionInSidebar(
+          session,
+          hasComposerDraft(props.composerDrafts, session.id),
+        ),
+    );
+    if (!props.realMode) return workspaceSessions;
+    const inbox = buildRealSessionInbox(workspaceSessions, normalizedFilter);
+    return [
+      ...inbox.needsInput,
+      ...inbox.errors,
+      ...inbox.working,
+      ...inbox.queued,
+      ...inbox.attached,
+      ...inbox.idleSaved,
+    ];
+  }
+
   const activeWork = props.realMode
     ? props.sessions.filter(
         (session) =>
-          !sessionBelongsToProject(session, props.currentWorkspace.id) &&
+          !workspaceIds.has(session.workspaceId) &&
           isBackgroundActiveWork(session),
       )
     : [];
+  const allRealSessions = visibleWorkspaces.flatMap(sessionsForWorkspace);
   const allRealInbox = props.realMode
-    ? buildRealSessionInbox(sidebarSessions, "")
+    ? buildRealSessionInbox(allRealSessions, "")
     : undefined;
-  const inbox = props.realMode
-    ? sessionFilter.trim().length === 0
-      ? allRealInbox
-      : buildRealSessionInbox(sidebarSessions, sessionFilter)
-    : undefined;
-  const visibleIdleSavedSessions = inbox?.idleSaved ?? [];
-  const visibleSessions = props.realMode
-    ? [
-        ...(inbox?.needsInput ?? []),
-        ...(inbox?.errors ?? []),
-        ...(inbox?.working ?? []),
-        ...(inbox?.queued ?? []),
-        ...(inbox?.attached ?? []),
-        ...visibleIdleSavedSessions,
-      ]
-    : sidebarSessions;
 
   async function handleRefresh(): Promise<void> {
     setIsRefreshing(true);
@@ -5518,6 +5580,115 @@ function SessionSidebar(props: {
     } finally {
       setIsRefreshing(false);
     }
+  }
+
+  function toggleWorkspace(workspace: WorkspaceRef): void {
+    setExpandedWorkspaceIds((current) => {
+      const next = new Set(current);
+      if (next.has(workspace.id)) next.delete(workspace.id);
+      else next.add(workspace.id);
+      return next;
+    });
+    if (workspace.id !== props.currentWorkspace.id) {
+      props.onSelectWorkspace(workspace);
+    }
+  }
+
+  function renderSession(session: SessionViewModel): ReactElement {
+    const canDelete = isSessionDeletable(session, props.realMode);
+    const canManageMembership =
+      props.realMode && canManageWorkspaceMembership(session);
+    const membershipDisabledMessage = session.runtimeBacked
+      ? "Close this runtime before moving or removing its workspace membership."
+      : "Only idle saved sessions can be moved or removed from a workspace.";
+    const canCloseRuntime =
+      props.realMode && session.runtimeBacked && !isSessionBusy(session);
+    return (
+      <div className="session-item-wrap" key={session.id}>
+        <Button
+          className={`session-item ${session.id === props.selectedSessionId ? "active" : ""}`}
+          aria-label={`Session: ${session.title}`}
+          onClick={() => props.onSelect(session.id)}
+        >
+          <StateIndicator session={session} />
+          <span className="session-copy">
+            <span className="session-title">
+              <span className="session-title-copy">{session.title}</span>
+              {hasComposerDraft(props.composerDrafts, session.id) ? (
+                <span className="session-draft-marker">Draft</span>
+              ) : null}
+            </span>
+            {session.status !== "idle" ? (
+              <span className="session-meta">{session.subtitle}</span>
+            ) : null}
+            {!props.realMode ? (
+              <span className="session-meta">{session.projectPath}</span>
+            ) : null}
+          </span>
+          <span
+            className="session-time"
+            title={formatReadableTimestamp(session.updatedAtMs)}
+          >
+            {session.updatedAt}
+          </span>
+        </Button>
+        {canCloseRuntime ? (
+          <IconButton
+            className="session-delete-button session-close-button"
+            icon={Unplug}
+            label={`Close runtime for ${session.title}`}
+            size="sm"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              props.onCloseRuntime(session.id);
+            }}
+          />
+        ) : null}
+        {canDelete ? (
+          <span data-testid={`session-actions-${session.id}`}>
+            <Menu
+              className="session-actions-menu"
+              label={`Session actions for ${session.title}`}
+              menuLabel={`Session actions for ${session.title}`}
+            >
+              <Button
+                disabled={!canManageMembership}
+                role="menuitem"
+                size="sm"
+                title={
+                  canManageMembership ? undefined : membershipDisabledMessage
+                }
+                variant="menuItem"
+                onClick={() => props.onMoveSession(session.id)}
+              >
+                Move to workspace…
+              </Button>
+              <Button
+                disabled={!canManageMembership}
+                role="menuitem"
+                size="sm"
+                title={
+                  canManageMembership ? undefined : membershipDisabledMessage
+                }
+                variant="menuItem"
+                onClick={() => props.onRemoveSession(session.id)}
+              >
+                Remove from workspace
+              </Button>
+              <Button
+                role="menuitem"
+                size="sm"
+                variant="danger"
+                onClick={() => props.onDeleteSession(session.id)}
+              >
+                Delete session…
+              </Button>
+            </Menu>
+          </span>
+        ) : null}
+      </div>
+    );
   }
 
   return (
@@ -5561,6 +5732,14 @@ function SessionSidebar(props: {
       <Button className="sidebar-new-chat" onClick={props.onNewSession}>
         <SquarePen aria-hidden="true" size={16} strokeWidth={1.75} />
         New session
+      </Button>
+      <Button
+        className="sidebar-new-workspace"
+        size="sm"
+        onClick={props.onNewWorkspace}
+      >
+        <FolderOpen aria-hidden="true" size={15} strokeWidth={1.75} />
+        New workspace
       </Button>
       {props.realMode ? (
         <Button
@@ -5636,120 +5815,56 @@ function SessionSidebar(props: {
       ) : null}
 
       <section
-        className="session-list"
-        aria-label="Session list with priority states"
+        className="session-list workspace-tree"
+        aria-label="Workspaces and sessions"
       >
-        {visibleSessions.length === 0 ? (
-          <p className="empty-session-list">
-            {props.realMode
-              ? sessionFilter.trim().length > 0
-                ? "No sessions match this search."
-                : "No sessions in this workspace yet."
-              : "No local demo sessions."}
-          </p>
-        ) : null}
-        {visibleSessions.map((session) => {
-          const canDelete = isSessionDeletable(session, props.realMode);
-          const canManageMembership =
-            props.realMode && canManageWorkspaceMembership(session);
-          const membershipDisabledMessage = session.runtimeBacked
-            ? "Close this runtime before moving or removing its workspace membership."
-            : "Only idle saved sessions can be moved or removed from a workspace.";
-          const canCloseRuntime =
-            props.realMode && session.runtimeBacked && !isSessionBusy(session);
+        {visibleWorkspaces.map((workspace) => {
+          const workspaceSessions = sessionsForWorkspace(workspace);
+          const expanded = expandedWorkspaceIds.has(workspace.id);
+          const active = workspace.id === props.currentWorkspace.id;
           return (
-            <div className="session-item-wrap" key={session.id}>
+            <div
+              className={`workspace-tree-item ${active ? "active" : ""}`}
+              key={workspace.id}
+            >
               <Button
-                className={`session-item ${session.id === props.selectedSessionId ? "active" : ""}`}
-                aria-label={`Session: ${session.title}`}
-                onClick={() => {
-                  props.onSelect(session.id);
-                }}
+                aria-expanded={expanded}
+                aria-label={`${expanded ? "Collapse" : "Expand"} workspace ${workspace.name}`}
+                className="workspace-tree-row"
+                data-workspace-id={workspace.id}
+                onClick={() => toggleWorkspace(workspace)}
               >
-                <StateIndicator session={session} />
-                <span className="session-copy">
-                  <span className="session-title">
-                    <span className="session-title-copy">{session.title}</span>
-                    {hasComposerDraft(props.composerDrafts, session.id) ? (
-                      <span className="session-draft-marker">Draft</span>
-                    ) : null}
-                  </span>
-                  {session.status !== "idle" ? (
-                    <span className="session-meta">{session.subtitle}</span>
-                  ) : null}
-                  {!props.realMode ? (
-                    <span className="session-meta">{session.projectPath}</span>
-                  ) : null}
-                </span>
-                <span
-                  className="session-time"
-                  title={formatReadableTimestamp(session.updatedAtMs)}
-                >
-                  {session.updatedAt}
+                <ChevronRight
+                  aria-hidden="true"
+                  className={`workspace-tree-chevron ${expanded ? "expanded" : ""}`}
+                  size={14}
+                  strokeWidth={1.75}
+                />
+                <FolderOpen aria-hidden="true" size={15} strokeWidth={1.75} />
+                <span className="workspace-tree-name">{workspace.name}</span>
+                <span className="workspace-tree-count">
+                  {workspaceSessions.length}
                 </span>
               </Button>
-              {canCloseRuntime ? (
-                <IconButton
-                  className="session-delete-button session-close-button"
-                  icon={Unplug}
-                  label={`Close runtime for ${session.title}`}
-                  size="sm"
-                  onPointerDown={(event) => event.stopPropagation()}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    props.onCloseRuntime(session.id);
-                  }}
-                />
-              ) : null}
-              {canDelete ? (
-                <span data-testid={`session-actions-${session.id}`}>
-                  <Menu
-                    className="session-actions-menu"
-                    label={`Session actions for ${session.title}`}
-                    menuLabel={`Session actions for ${session.title}`}
-                  >
-                    <Button
-                      disabled={!canManageMembership}
-                      role="menuitem"
-                      size="sm"
-                      title={
-                        canManageMembership
-                          ? undefined
-                          : membershipDisabledMessage
-                      }
-                      variant="menuItem"
-                      onClick={() => props.onMoveSession(session.id)}
-                    >
-                      Move to workspace…
-                    </Button>
-                    <Button
-                      disabled={!canManageMembership}
-                      role="menuitem"
-                      size="sm"
-                      title={
-                        canManageMembership
-                          ? undefined
-                          : membershipDisabledMessage
-                      }
-                      variant="menuItem"
-                      onClick={() => props.onRemoveSession(session.id)}
-                    >
-                      Remove from workspace
-                    </Button>
-                    <Button
-                      role="menuitem"
-                      size="sm"
-                      variant="danger"
-                      onClick={() => props.onDeleteSession(session.id)}
-                    >
-                      Delete session…
-                    </Button>
-                  </Menu>
-                </span>
+              {expanded ? (
+                <div className="workspace-session-list">
+                  {workspaceSessions.length > 0 ? (
+                    workspaceSessions.map(renderSession)
+                  ) : (
+                    <p className="empty-session-list">
+                      {normalizedFilter.length > 0
+                        ? "No sessions match this search."
+                        : "No sessions yet."}
+                    </p>
+                  )}
+                </div>
               ) : null}
             </div>
           );
         })}
+        {visibleWorkspaces.length === 0 ? (
+          <p className="empty-session-list">No workspaces yet.</p>
+        ) : null}
       </section>
 
       {!props.realMode ? (
@@ -6004,9 +6119,17 @@ function AppHeader(props: {
           pressed={props.sidebarVisible}
           onClick={props.onToggleSidebar}
         />
+        <div className="title-block session-header-title">
+          <div className="session-heading-line">
+            <h1>{props.selectedSession.title}</h1>
+            <StatusMark status={props.selectedSession.status} />
+          </div>
+        </div>
+      </div>
+
+      <div className="header-right">
         <WorkspaceHeader
           workspace={props.currentWorkspace}
-          selectedSession={props.selectedSession}
           workspaces={props.workspaces}
           realMode={props.realMode}
           onNewWorkspace={props.onNewWorkspace}
@@ -6014,9 +6137,6 @@ function AppHeader(props: {
           onArchiveWorkspace={props.onArchiveWorkspace}
           onSelectWorkspace={props.onSelectWorkspace}
         />
-      </div>
-
-      <div className="header-right">
         <AppearanceMenu
           theme={props.appearanceTheme}
           pending={props.appearanceThemePending}
@@ -6535,7 +6655,6 @@ function DialogConfirmation(props: {
 
 function WorkspaceHeader(props: {
   workspace: WorkspaceRef;
-  selectedSession: SessionViewModel;
   workspaces: WorkspaceRef[];
   realMode: boolean;
   onNewWorkspace(): void;
@@ -6544,47 +6663,45 @@ function WorkspaceHeader(props: {
   onSelectWorkspace(workspace: WorkspaceRef): void;
 }): ReactElement {
   return (
-    <div className="title-block project-header">
-      <div className="session-heading-line">
-        <h1>{props.selectedSession.title}</h1>
-        <StatusMark status={props.selectedSession.status} />
-      </div>
-      <div className="project-context" aria-label="Current workspace">
+    <div className="workspace-header-actions">
+      <div className="workspace-location" aria-label="Workspace location">
+        <span className="workspace-location-root">Workspaces</span>
+        <ChevronRight aria-hidden="true" size={13} strokeWidth={1.75} />
         <WorkspaceSwitcher
           activeWorkspace={props.workspace}
           workspaces={props.workspaces}
           onSelect={props.onSelectWorkspace}
         />
-        <Button
-          className="workspace-new-button"
-          size="sm"
-          onClick={props.onNewWorkspace}
-        >
-          New workspace…
-        </Button>
-        <Menu
-          className="workspace-actions-menu"
-          label={`Workspace actions for ${props.workspace.name}`}
-          menuLabel={`Workspace actions for ${props.workspace.name}`}
-        >
-          <Button
-            role="menuitem"
-            size="sm"
-            variant="menuItem"
-            onClick={props.onRenameWorkspace}
-          >
-            Rename workspace
-          </Button>
-          <Button
-            role="menuitem"
-            size="sm"
-            variant="danger"
-            onClick={props.onArchiveWorkspace}
-          >
-            Archive workspace
-          </Button>
-        </Menu>
       </div>
+      <Button
+        className="workspace-new-button"
+        size="sm"
+        onClick={props.onNewWorkspace}
+      >
+        New workspace…
+      </Button>
+      <Menu
+        className="workspace-actions-menu"
+        label={`Workspace actions for ${props.workspace.name}`}
+        menuLabel={`Workspace actions for ${props.workspace.name}`}
+      >
+        <Button
+          role="menuitem"
+          size="sm"
+          variant="menuItem"
+          onClick={props.onRenameWorkspace}
+        >
+          Rename workspace
+        </Button>
+        <Button
+          role="menuitem"
+          size="sm"
+          variant="danger"
+          onClick={props.onArchiveWorkspace}
+        >
+          Archive workspace
+        </Button>
+      </Menu>
     </div>
   );
 }
