@@ -230,6 +230,9 @@ test("workspace management UI keeps Pi JSONL membership reversible and deletion 
     }, busyRuntimeId);
     expect(busyCloseError).toMatch(/finish the active turn/i);
     await openWorkspaceActions(page, "authorized-project");
+    await expect(
+      page.getByRole("menuitem", { name: "Archive workspace" }),
+    ).toHaveCSS("justify-content", "flex-start");
     await page.getByRole("menuitem", { name: "Archive workspace" }).click();
     const blockedArchiveDialog = page.getByTestId("workspace-archive-dialog");
     await expect(

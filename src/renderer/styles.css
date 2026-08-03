@@ -2422,6 +2422,13 @@ h3 {
   width: 100%;
 }
 
+/* Destructive actions still use the same left-aligned menu-item layout. */
+.ui-menu-popover .ui-button--danger {
+  justify-content: flex-start;
+  padding: 0 8px;
+  text-align: left;
+}
+
 .appearance-menu .ui-menu-popover .ui-button > :last-child {
   margin-left: auto;
 }
