@@ -1,7 +1,7 @@
 # Workspace-Grouped Sessions Execution Plan
 
-Status: implemented and verified
-Date: 2026-08-01  
+Status: implemented and verified; sidebar navigation refined
+Date: 2026-08-02  
 Supersedes for new work: `project-grouped-sessions-p0-plan.md`  
 Compatibility baseline: existing directory-backed Projects remain readable during migration
 
@@ -281,6 +281,25 @@ An explicit **Add existing session…** / **Unassigned sessions** flow replaces 
 - Draft model discovery starts immediately through `workspaceId`.
 - Runtime model/command/image capabilities continue using `runtimeId`.
 - A workspace has no required default-folder state.
+
+### 6.5 Sidebar navigation and the default bucket
+
+The sidebar is the primary grouping navigator:
+
+- open workspaces render as expandable folder rows;
+- saved, draft, attached, and attention sessions render as children of their
+  owning workspace;
+- clicking a workspace row both reveals its children and selects that workspace;
+- **New session** and **New workspace** are available without leaving the tree;
+- the header shows a compact `Workspaces / <workspace>` breadcrumb, while
+  workspace actions stay aligned at the right edge.
+
+Use **Default workspace** as the product name for sessions that have no
+explicit user grouping. It should be a directory-independent bucket, not a
+filesystem path. Existing unassigned Pi files should appear there without
+silently rewriting their membership; moving one into a named workspace is an
+explicit metadata action. Keep the default bucket non-archivable and avoid
+using the word “project” for this concept.
 
 ## 7. Compatibility and Removal Schedule
 
