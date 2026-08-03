@@ -88,6 +88,15 @@ npm run launch
 
 This command deliberately does not build. It verifies that the main process, preload, renderer, and completed-build manifest exist and match; if they are missing, incomplete, or older than source/configuration, it prints the exact repair command instead of launching a broken or stale app.
 
+### macOS launch caveat when running from Codex
+
+The Electron binary is a macOS GUI process. On some macOS releases, launching
+that binary from a sandboxed Codex shell can make LaunchServices abort before
+Pi Deck's main process starts; macOS then shows an “Electron quit unexpectedly”
+dialog. This is an environment/launch-boundary failure, not a Pi Deck
+workspace or session error. Run the same command from Terminal/Finder, or
+approve an unsandboxed GUI launch when validating locally.
+
 For development or CI, use the explicit build-and-launch command:
 
 ```bash
