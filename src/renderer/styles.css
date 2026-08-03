@@ -3134,9 +3134,38 @@ body {
   min-width: 0;
 }
 
+.workspace-tree-row-wrap {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) 28px;
+  align-items: center;
+  min-width: 0;
+}
+
+.workspace-tree-chevron-button.ui-icon-button {
+  width: 24px;
+  height: 30px;
+  border: 0;
+  border-radius: 7px;
+  padding: 0;
+  color: var(--color-text-subtle);
+}
+
+.workspace-tree-chevron-button:hover {
+  color: var(--color-text);
+  background: var(--color-surface-hover);
+}
+
+.workspace-tree-chevron-button svg {
+  transition: transform 140ms ease;
+}
+
+.workspace-tree-chevron-button[aria-expanded="true"] svg {
+  transform: rotate(90deg);
+}
+
 .workspace-tree-row.ui-button {
   display: grid;
-  grid-template-columns: 14px 16px minmax(0, 1fr) auto;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
   align-items: center;
   width: 100%;
   min-height: 32px;
@@ -3150,25 +3179,48 @@ body {
 }
 
 .workspace-tree-row:hover,
-.workspace-tree-item.active > .workspace-tree-row {
+.workspace-tree-item.active .workspace-tree-row {
   color: var(--color-text);
   background: var(--color-surface-hover);
 }
 
-.workspace-tree-chevron {
-  transition: transform 140ms ease;
+.workspace-tree-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.workspace-tree-chevron.expanded {
-  transform: rotate(90deg);
+.workspace-tree-actions .ui-icon-button {
+  width: 26px;
+  height: 28px;
+  padding: 0;
+  color: var(--color-text-subtle);
+}
+
+.workspace-tree-actions .ui-icon-button:hover {
+  color: var(--color-text);
+  background: var(--color-surface-hover);
 }
 
 .workspace-tree-name {
+  display: inline-flex;
+  align-items: baseline;
+  min-width: 0;
+  gap: 6px;
   overflow: hidden;
   font-size: 12px;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.workspace-tree-default-label {
+  flex: 0 0 auto;
+  color: var(--color-text-subtle);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
 }
 
 .workspace-tree-count {

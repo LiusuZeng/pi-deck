@@ -289,17 +289,19 @@ The sidebar is the primary grouping navigator:
 - open workspaces render as expandable folder rows;
 - saved, draft, attached, and attention sessions render as children of their
   owning workspace;
-- clicking a workspace row both reveals its children and selects that workspace;
+- clicking the workspace name selects it; its chevron only expands or collapses
+  the row;
 - **New session** and **New workspace** are available without leaving the tree;
-- the header shows a compact `Workspaces / <workspace>` breadcrumb, while
-  workspace actions stay aligned at the right edge.
+- rename/archive actions live in each named workspace row, so the header does
+  not duplicate workspace navigation.
 
-Use **Default workspace** as the product name for sessions that have no
-explicit user grouping. It should be a directory-independent bucket, not a
-filesystem path. Existing unassigned Pi files should appear there without
-silently rewriting their membership; moving one into a named workspace is an
-explicit metadata action. Keep the default bucket non-archivable and avoid
-using the word “project” for this concept.
+The app creates one built-in **Default workspace** automatically. It is a
+durable metadata bucket under `~/.pi-deck`, has no working-folder mapping, and
+is selected on a fresh launch so a user can start a session without first
+creating or choosing a workspace. Existing ungrouped Pi files can be imported
+there without changing their JSONL contents; moving one into a named workspace
+is an explicit metadata action. Keep the default bucket non-renamable and
+non-archivable, and avoid using the word “project” for this concept.
 
 ## 7. Compatibility and Removal Schedule
 

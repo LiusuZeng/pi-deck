@@ -49,6 +49,24 @@ test("WorkspaceStore creates UUID workspaces, normalizes names, and archives the
   await assert.rejects(store.select(second.id), /archived/i);
 });
 
+test("WorkspaceStore provides a stable, folderless default workspace", async () => {
+  const { home } = await temporaryHome();
+  const store = new WorkspaceStore(home);
+  const first = await store.ensureDefaultWorkspace({ activate: true });
+  const second = await store.ensureDefaultWorkspace();
+
+  assert.equal(first.id, second.id);
+  assert.equal(first.name, "Default workspace");
+  assert.equal(first.isDefault, true);
+  assert.equal(first.defaultProjectId, undefined);
+  assert.equal((await store.list()).activeWorkspaceId, first.id);
+  await assert.rejects(
+    store.update({ workspaceId: first.id, name: "Renamed" }),
+    /default workspace/i,
+  );
+  await assert.rejects(store.archive(first.id), /default workspace/i);
+});
+
 test("WorkspaceStore removes, rather than serializes, a cleared default project", async () => {
   const { home } = await temporaryHome();
   const store = new WorkspaceStore(home);

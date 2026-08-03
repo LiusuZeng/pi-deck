@@ -76,7 +76,7 @@ test.skip(
   "Set PI_DECK_E2E_REAL_SMOKE=1 or run npm run test:e2e:real-smoke to exercise real Pi GUI P0 flows.",
 );
 
-test("real Pi GUI P0 smoke: prompt, project switch, restart, resume", async () => {
+test("real Pi GUI P0 smoke: default workspace prompt and resume", async () => {
   test.setTimeout(
     Number(process.env.PI_DECK_E2E_REAL_SMOKE_TIMEOUT_MS ?? 240_000),
   );
@@ -84,16 +84,14 @@ test("real Pi GUI P0 smoke: prompt, project switch, restart, resume", async () =
   test.skip(!piBinary, "Pi binary not found");
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-real-p0-"));
-  const projectA = path.join(root, "project-a");
-  const projectB = path.join(root, "project-b");
   const userDataDir = path.join(root, "user-data");
   const piDeckHome = path.join(root, "pideck-home");
   const sessionDir = path.join(root, "sessions");
-  fs.mkdirSync(projectA, { recursive: true });
-  fs.mkdirSync(projectB, { recursive: true });
+  const projectCwd = path.join(root, "project");
   fs.mkdirSync(userDataDir, { recursive: true });
   fs.mkdirSync(piDeckHome, { recursive: true });
   fs.mkdirSync(sessionDir, { recursive: true });
+  fs.mkdirSync(projectCwd, { recursive: true });
 
   const token = `PI_DECK_REAL_GUI_P0_${Date.now()}`;
   const baseEnv: NodeJS.ProcessEnv = {
@@ -102,19 +100,20 @@ test("real Pi GUI P0 smoke: prompt, project switch, restart, resume", async () =
     PI_DECK_USER_DATA_DIR: userDataDir,
     PI_DECK_HOME: piDeckHome,
     PI_CODING_AGENT_SESSION_DIR: sessionDir,
-    PI_DECK_TEST_PICK_PROJECT_CWDS: JSON.stringify([projectB, projectA]),
   };
 
   try {
     const firstLaunch = await launchPiDeck({
       ...baseEnv,
-      PI_DECK_PROJECT_CWD: projectA,
+      PI_DECK_PROJECT_CWD: projectCwd,
     });
     try {
       await expectHealthyPreload(firstLaunch.page);
       await expect(
-        firstLaunch.page.locator(".project-switcher-trigger"),
-      ).toHaveAttribute("data-project-id", fs.realpathSync(projectA));
+        firstLaunch.page.getByRole("button", {
+          name: "Workspace: Default workspace",
+        }),
+      ).toHaveAttribute("aria-current", "page");
       await expect
         .poll(() => listJsonlFiles(sessionDir).length, {
           message: "Startup must not leave a hidden empty warm-worker session",
@@ -160,35 +159,15 @@ test("real Pi GUI P0 smoke: prompt, project switch, restart, resume", async () =
     const secondLaunch = await launchPiDeck(baseEnv);
     try {
       await expectHealthyPreload(secondLaunch.page);
-      const projectSwitcher = secondLaunch.page.locator(
-        ".project-switcher-trigger",
-      );
-      await expect(projectSwitcher).toHaveAttribute(
-        "data-project-id",
-        fs.realpathSync(projectA),
-      );
+      await expect(
+        secondLaunch.page.getByRole("button", {
+          name: "Workspace: Default workspace",
+        }),
+      ).toHaveAttribute("aria-current", "page");
       await expect(
         secondLaunch.page.locator(".session-list .session-item").first(),
       ).toBeVisible();
 
-      await secondLaunch.page
-        .getByRole("button", { name: /Open project/i })
-        .click();
-      await expect(projectSwitcher).toHaveAttribute(
-        "data-project-id",
-        fs.realpathSync(projectB),
-      );
-      await expect(
-        secondLaunch.page.locator(".session-list .session-item"),
-      ).toHaveCount(0);
-
-      await secondLaunch.page
-        .getByRole("button", { name: /Open project/i })
-        .click();
-      await expect(projectSwitcher).toHaveAttribute(
-        "data-project-id",
-        fs.realpathSync(projectA),
-      );
       const savedSession = secondLaunch.page
         .locator(".session-list .session-item")
         .first();

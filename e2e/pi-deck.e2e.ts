@@ -159,10 +159,8 @@ async function createWorkspaceInUi(page: Page, name: string): Promise<void> {
   await dialog.getByLabel("Workspace name").fill(name);
   await dialog.getByRole("button", { name: "Create workspace" }).click();
   await expect(
-    page.getByRole("button", {
-      name: `Switch workspace. Current: ${name}`,
-    }),
-  ).toBeVisible();
+    page.getByRole("button", { name: `Workspace: ${name}` }),
+  ).toHaveAttribute("aria-current", "page");
 }
 
 async function openWorkspaceActions(page: Page, name: string): Promise<void> {
@@ -172,14 +170,9 @@ async function openWorkspaceActions(page: Page, name: string): Promise<void> {
 }
 
 async function selectWorkspaceInUi(page: Page, name: string): Promise<void> {
-  const switcher = page.getByTestId("workspace-switcher");
-  await switcher.getByRole("button").click();
-  await switcher.getByRole("menuitem", { name }).click();
-  await expect(
-    page.getByRole("button", {
-      name: `Switch workspace. Current: ${name}`,
-    }),
-  ).toBeVisible();
+  const workspace = page.getByRole("button", { name: `Workspace: ${name}` });
+  await workspace.click();
+  await expect(workspace).toHaveAttribute("aria-current", "page");
 }
 
 async function confirmDeleteSessionDialog(page: Page): Promise<void> {
@@ -217,6 +210,7 @@ test("workspace management UI keeps Pi JSONL membership reversible and deletion 
 
     // An attached runtime is a workspace-level archival guard. Exercise it
     // through the visible confirmation instead of relying on a backend error.
+    await selectWorkspaceInUi(page, path.basename(projectCwd));
     await page.getByLabel("Prompt text").fill("keep archive disabled");
     await page.getByRole("button", { name: "Send" }).click();
     await expect(page.getByRole("button", { name: "Abort" })).toBeVisible();
@@ -240,9 +234,9 @@ test("workspace management UI keeps Pi JSONL membership reversible and deletion 
     await renameDialog.getByRole("button", { name: "Save name" }).click();
     await expect(
       page.getByRole("button", {
-        name: "Switch workspace. Current: UI source renamed",
+        name: "Workspace: UI source renamed",
       }),
-    ).toBeVisible();
+    ).toHaveAttribute("aria-current", "page");
 
     // Seed after startup so this file has no pre-existing workspace owner.
     writePiSessionFixture({
@@ -298,7 +292,7 @@ test("workspace management UI keeps Pi JSONL membership reversible and deletion 
       .click();
     await expect(
       page.getByRole("button", {
-        name: "Switch workspace. Current: UI source renamed",
+        name: "Workspace: UI source renamed",
       }),
     ).toHaveCount(0);
     expect(fs.existsSync(canonicalSessionFile)).toBe(true);
@@ -617,10 +611,13 @@ test("removed legacy workspace sessions stay excluded and survive bulk delete", 
     const outcome = await firstLaunch.page.evaluate(async (sessionFile) => {
       const api = window.piDeck;
       const listedWorkspaces = await api.workspaces.getActive();
-      const workspace = listedWorkspaces.activeWorkspace;
+      const workspace = listedWorkspaces.workspaces.find(
+        (candidate) => candidate.defaultProjectId !== undefined,
+      );
       if (workspace === undefined) {
-        throw new Error("Expected a migrated active workspace.");
+        throw new Error("Expected a migrated project workspace.");
       }
+      await api.workspaces.select({ workspaceId: workspace.id });
       const before = await api.chat.listSessions({
         workspaceId: workspace.id,
       });
@@ -661,10 +658,13 @@ test("removed legacy workspace sessions stay excluded and survive bulk delete", 
     const sessions = await secondLaunch.page.evaluate(async () => {
       const api = window.piDeck;
       const listedWorkspaces = await api.workspaces.getActive();
-      const workspace = listedWorkspaces.activeWorkspace;
+      const workspace = listedWorkspaces.workspaces.find(
+        (candidate) => candidate.defaultProjectId !== undefined,
+      );
       if (workspace === undefined) {
-        throw new Error("Expected a migrated active workspace.");
+        throw new Error("Expected a migrated project workspace.");
       }
+      await api.workspaces.select({ workspaceId: workspace.id });
       return api.chat.listSessions({ workspaceId: workspace.id });
     });
     expect(sessions.sessions).toEqual([]);
@@ -726,10 +726,6 @@ async function stopRuntimeExitTracking(page: Page): Promise<void> {
   });
 }
 
-function projectSwitcher(page: Page) {
-  return page.locator(".project-switcher-trigger");
-}
-
 function tinyPngBase64(): string {
   const data = Buffer.alloc(24);
   Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(data);
@@ -746,9 +742,10 @@ test("fake mode launches with backend runtime and send enabled", async () => {
   try {
     await expectHealthyPreload(page);
     await expect(page.getByText(/Local demo mode active/i)).toBeVisible();
-    await projectSwitcher(page).click();
-    await expect(page.getByText("Deleted project")).toBeVisible();
-    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("workspace-tree")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Workspace: Default workspace" }),
+    ).toHaveAttribute("aria-current", "page");
     await page.getByLabel("Prompt text").fill("fake e2e prompt");
     await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
   } finally {
@@ -1422,6 +1419,7 @@ test("metadata-only model and thinking changes preserve session title, transcrip
   );
   try {
     await expectHealthyPreload(page);
+    await selectWorkspaceInUi(page, path.basename(projectCwd));
     await page.getByLabel("Prompt text").fill(prompt);
     await page.getByRole("button", { name: "Send" }).click();
     await expect(
@@ -1569,6 +1567,7 @@ test("failed saved-session deletion preserves the composer draft and attachment 
   );
   try {
     await expectHealthyPreload(page);
+    await selectWorkspaceInUi(page, path.basename(projectCwd));
     await page.getByRole("button", { name: "Session: preserve-draft" }).click();
     await expect(page.getByText("Resumed saved Pi session.")).toBeVisible();
 
@@ -1723,6 +1722,7 @@ test("post-close delete failure keeps the saved file and composer generation res
   });
   try {
     await expectHealthyPreload(page);
+    await selectWorkspaceInUi(page, path.basename(projectCwd));
     await page
       .getByRole("button", { name: "Session: post-close-delete" })
       .click();
@@ -1923,6 +1923,7 @@ test("saved session deletion control is reachable and activated with the keyboar
   );
   try {
     await expectHealthyPreload(page);
+    await selectWorkspaceInUi(page, path.basename(projectCwd));
     await expect(
       page.getByRole("button", { name: "Delete saved sessions", exact: true }),
     ).toBeVisible();
@@ -1980,6 +1981,7 @@ test("real mode can show and resume a saved project session with fake Pi", async
   try {
     await expectHealthyPreload(page);
     await expect(page.getByText(/Real Pi mode active/i)).toBeVisible();
+    await selectWorkspaceInUi(page, path.basename(projectCwd));
     await expect(
       page.getByRole("button", { name: "Session: manual-e2e-session-0" }),
     ).toBeVisible();
@@ -2035,6 +2037,7 @@ test("real mode keeps attention sessions visible, labels queues, searches, and r
   );
   try {
     await expectHealthyPreload(page);
+    await selectWorkspaceInUi(page, path.basename(projectCwd));
     await page.getByLabel("Prompt text").fill("attention stays visible");
     await page.getByRole("button", { name: "Send" }).click();
     const sidebar = page.getByLabel("Sessions");
@@ -2091,6 +2094,7 @@ test("real mode concurrent duplicate resume reuses one runtime with fake Pi", as
   );
   try {
     await expectHealthyPreload(page);
+    await selectWorkspaceInUi(page, path.basename(projectCwd));
     await expect(
       page.getByRole("button", { name: "Session: duplicate-resume" }),
     ).toBeVisible();
@@ -2134,6 +2138,7 @@ test("real mode removes missing saved session after resume failure with fake Pi"
   );
   try {
     await expectHealthyPreload(page);
+    await selectWorkspaceInUi(page, path.basename(projectCwd));
     const missingSession = page.getByRole("button", {
       name: "Session: missing-before-resume",
     });
@@ -2163,6 +2168,7 @@ test("real mode lists a newly prompted session after restart with fake Pi", asyn
   const firstLaunch = await launchPiDeck(env);
   try {
     await expectHealthyPreload(firstLaunch.page);
+    await selectWorkspaceInUi(firstLaunch.page, path.basename(projectCwd));
     await firstLaunch.page
       .getByLabel("Prompt text")
       .fill("persisted restart session");
@@ -2177,6 +2183,7 @@ test("real mode lists a newly prompted session after restart with fake Pi", asyn
   const secondLaunch = await launchPiDeck(env);
   try {
     await expectHealthyPreload(secondLaunch.page);
+    await selectWorkspaceInUi(secondLaunch.page, path.basename(projectCwd));
     const persistedSession = secondLaunch.page.getByRole("button", {
       name: "Session: persisted restart session",
     });
@@ -2232,10 +2239,7 @@ test("real mode authorizes opaque project IDs before any project-scoped Pi work"
   );
   try {
     await expectHealthyPreload(page);
-    await expect(projectSwitcher(page)).toHaveAttribute(
-      "data-project-id",
-      selectedProjectId,
-    );
+    await selectWorkspaceInUi(page, "selected-project");
 
     const rejectionMessages = await page.evaluate(
       async ({ projectId, sessionFile }) => {
@@ -2296,10 +2300,9 @@ test("real mode authorizes opaque project IDs before any project-scoped Pi work"
     );
     expect(snapshot.projectId).toBe(selectedProjectId);
     expect(snapshot.state.cwd).toBe(selectedProject);
-    await expect(projectSwitcher(page)).toHaveAttribute(
-      "data-project-id",
-      selectedProjectId,
-    );
+    await expect(
+      page.getByRole("button", { name: "Workspace: selected-project" }),
+    ).toHaveAttribute("aria-current", "page");
 
     const runtimeProjectRejection = await page.evaluate(
       async ({ runtimeId, projectId }) => {
@@ -2376,7 +2379,7 @@ test("background worker continues while a directory-independent workspace is cre
         }, runtimeId),
       )
       .toBe(false);
-    await selectWorkspaceInUi(page, path.basename(projectCwd));
+    await selectWorkspaceInUi(page, "Default workspace");
     await expect(
       page.getByText(/Fake response to: workspace background worker/),
     ).toBeVisible();
@@ -2438,9 +2441,9 @@ test("managed workspace context persists across relaunch", async () => {
     await expectHealthyPreload(secondLaunch.page);
     await expect(
       secondLaunch.page.getByRole("button", {
-        name: "Switch workspace. Current: Persistent topic",
+        name: "Workspace: Persistent topic",
       }),
-    ).toBeVisible();
+    ).toHaveAttribute("aria-current", "page");
     const activeWorkspace = await secondLaunch.page.evaluate(async () => {
       const result = await window.piDeck.workspaces.getActive();
       return result.activeWorkspace;
@@ -2663,7 +2666,7 @@ test("real mode does not fall back to fake/local UI and can send from active run
   });
   try {
     await expectHealthyPreload(page);
-    await expect(projectSwitcher(page)).toBeVisible();
+    await expect(page.getByTestId("workspace-tree")).toBeVisible();
     await expect(page.getByText(/Real Pi mode active/i)).toBeVisible();
     await expect(page.getByText("Local projects")).toHaveCount(0);
     await expect(page.getByText(/backend fake RPC active/i)).toHaveCount(0);

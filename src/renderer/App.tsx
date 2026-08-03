@@ -302,8 +302,8 @@ type ComposerDraftsBySession = Record<string, ComposerDraftState | undefined>;
 
 type WorkspaceDialogState =
   | { kind: "create" }
-  | { kind: "rename" }
-  | { kind: "archive" }
+  | { kind: "rename"; workspaceId: string }
+  | { kind: "archive"; workspaceId: string }
   | { kind: "unassigned" }
   | { kind: "move"; sessionId: string }
   | { kind: "remove"; sessionId: string }
@@ -2307,7 +2307,10 @@ export function App(): ReactElement {
     }
   }
 
-  async function renameWorkspace(name: string): Promise<void> {
+  async function renameWorkspace(
+    name: string,
+    workspaceId: string,
+  ): Promise<void> {
     const normalizedName = name.trim().replace(/\s+/g, " ");
     if (normalizedName.length === 0) {
       setComposerError("A workspace name is required.");
@@ -2316,20 +2319,16 @@ export function App(): ReactElement {
     setWorkspaceDialogBusy(true);
     try {
       const result = await window.piDeck.workspaces.update({
-        workspaceId: currentWorkspace.id,
+        workspaceId,
         name: normalizedName,
       });
-      const updated =
-        result.activeWorkspace ??
-        result.workspaces.find((item) => item.id === currentWorkspace.id);
-      if (updated !== undefined) setCurrentWorkspace(updated);
+      const updated = result.workspaces.find((item) => item.id === workspaceId);
+      if (updated !== undefined && workspaceId === currentWorkspace.id) {
+        setCurrentWorkspace(updated);
+      }
       setWorkspaces(result.workspaces);
       setSessions((items) =>
-        updateWorkspaceSessionLabels(
-          items,
-          currentWorkspace.id,
-          normalizedName,
-        ),
+        updateWorkspaceSessionLabels(items, workspaceId, normalizedName),
       );
       setWorkspaceDialog(undefined);
       setUiMessage(`Renamed workspace to ${normalizedName}.`);
@@ -2342,11 +2341,11 @@ export function App(): ReactElement {
     }
   }
 
-  async function archiveCurrentWorkspace(): Promise<void> {
+  async function archiveWorkspace(workspaceId: string): Promise<void> {
     const blockedReason = archiveWorkspaceBlockReason(
       sessionsRef.current,
       composerDraftsRef.current,
-      currentWorkspace.id,
+      workspaceId,
       workspaces.length,
     );
     if (blockedReason !== undefined) {
@@ -2356,8 +2355,16 @@ export function App(): ReactElement {
     setWorkspaceDialogBusy(true);
     try {
       const result = await window.piDeck.workspaces.archive({
-        workspaceId: currentWorkspace.id,
+        workspaceId,
       });
+      if (workspaceId !== currentWorkspace.id) {
+        setWorkspaces(result.workspaces);
+        setWorkspaceDialog(undefined);
+        setUiMessage(
+          "Workspace archived. Pi session files were left untouched.",
+        );
+        return;
+      }
       const next = result.activeWorkspace ?? result.workspaces[0];
       if (next === undefined) {
         throw new Error("Cannot archive the last open workspace.");
@@ -3196,6 +3203,12 @@ export function App(): ReactElement {
           onSelectWorkspace={(workspace) =>
             void handleSelectWorkspace(workspace)
           }
+          onRenameWorkspace={(workspace) =>
+            setWorkspaceDialog({ kind: "rename", workspaceId: workspace.id })
+          }
+          onArchiveWorkspace={(workspace) =>
+            setWorkspaceDialog({ kind: "archive", workspaceId: workspace.id })
+          }
           onHideSidebar={() => handleSidebarVisibleChange(false)}
           onNewSession={() => void handleNewSession()}
           onNewWorkspace={() => void handleNewWorkspace()}
@@ -3221,8 +3234,6 @@ export function App(): ReactElement {
         <AppHeader
           loadState={loadState}
           selectedSession={selectedSession}
-          currentWorkspace={currentWorkspace}
-          workspaces={workspaces}
           selectedModelId={selectedModelId}
           selectedThinking={selectedThinking}
           realMode={isRealBackendMode}
@@ -3236,12 +3247,6 @@ export function App(): ReactElement {
           }
           onAppearanceThemeChange={(theme) =>
             void handleAppearanceThemeChange(theme)
-          }
-          onNewWorkspace={() => void handleNewWorkspace()}
-          onRenameWorkspace={() => setWorkspaceDialog({ kind: "rename" })}
-          onArchiveWorkspace={() => setWorkspaceDialog({ kind: "archive" })}
-          onSelectWorkspace={(workspace) =>
-            void handleSelectWorkspace(workspace)
           }
           onModelChange={setSelectedModelId}
           onThinkingChange={(level) => {
@@ -3297,7 +3302,13 @@ export function App(): ReactElement {
             onAddUnassigned={(sessionFiles) =>
               void addUnassignedSessions(sessionFiles)
             }
-            onArchive={() => void archiveCurrentWorkspace()}
+            onArchive={() =>
+              void archiveWorkspace(
+                workspaceDialog.kind === "archive"
+                  ? workspaceDialog.workspaceId
+                  : currentWorkspace.id,
+              )
+            }
             onClose={() => {
               if (!workspaceDialogBusy) setWorkspaceDialog(undefined);
             }}
@@ -3308,7 +3319,14 @@ export function App(): ReactElement {
               void moveSavedSession(sessionId, workspaceId)
             }
             onRemove={(sessionId) => void removeSavedSession(sessionId)}
-            onRename={(name) => void renameWorkspace(name)}
+            onRename={(name) =>
+              void renameWorkspace(
+                name,
+                workspaceDialog.kind === "rename"
+                  ? workspaceDialog.workspaceId
+                  : currentWorkspace.id,
+              )
+            }
           />
         ) : null}
       </section>
@@ -5505,6 +5523,8 @@ function SessionSidebar(props: {
   composerDrafts: ComposerDraftsBySession;
   onSelect(sessionId: string): void;
   onSelectWorkspace(workspace: WorkspaceRef): void;
+  onRenameWorkspace(workspace: WorkspaceRef): void;
+  onArchiveWorkspace(workspace: WorkspaceRef): void;
   onHideSidebar(): void;
   onNewSession(): void;
   onNewWorkspace(): void;
@@ -5521,11 +5541,13 @@ function SessionSidebar(props: {
   const [expandedWorkspaceIds, setExpandedWorkspaceIds] = useState<Set<string>>(
     () => new Set([props.currentWorkspace.id]),
   );
-  const visibleWorkspaces = props.realMode
-    ? props.workspaces.length > 0
-      ? props.workspaces
-      : [props.currentWorkspace]
-    : [props.currentWorkspace];
+  const availableWorkspaces = props.workspaces.filter(
+    (workspace) => workspace.id !== invalidDemoWorkspace.id,
+  );
+  const visibleWorkspaces =
+    availableWorkspaces.length > 0
+      ? availableWorkspaces
+      : [props.currentWorkspace];
   const workspaceIds = new Set(
     visibleWorkspaces.map((workspace) => workspace.id),
   );
@@ -5587,6 +5609,14 @@ function SessionSidebar(props: {
       const next = new Set(current);
       if (next.has(workspace.id)) next.delete(workspace.id);
       else next.add(workspace.id);
+      return next;
+    });
+  }
+
+  function selectWorkspace(workspace: WorkspaceRef): void {
+    setExpandedWorkspaceIds((current) => {
+      const next = new Set(current);
+      next.add(workspace.id);
       return next;
     });
     if (workspace.id !== props.currentWorkspace.id) {
@@ -5739,7 +5769,7 @@ function SessionSidebar(props: {
         onClick={props.onNewWorkspace}
       >
         <FolderOpen aria-hidden="true" size={15} strokeWidth={1.75} />
-        New workspace
+        New workspace…
       </Button>
       {props.realMode ? (
         <Button
@@ -5817,6 +5847,7 @@ function SessionSidebar(props: {
       <section
         className="session-list workspace-tree"
         aria-label="Workspaces and sessions"
+        data-testid="workspace-tree"
       >
         {visibleWorkspaces.map((workspace) => {
           const workspaceSessions = sessionsForWorkspace(workspace);
@@ -5827,25 +5858,60 @@ function SessionSidebar(props: {
               className={`workspace-tree-item ${active ? "active" : ""}`}
               key={workspace.id}
             >
-              <Button
-                aria-expanded={expanded}
-                aria-label={`${expanded ? "Collapse" : "Expand"} workspace ${workspace.name}`}
-                className="workspace-tree-row"
-                data-workspace-id={workspace.id}
-                onClick={() => toggleWorkspace(workspace)}
-              >
-                <ChevronRight
-                  aria-hidden="true"
-                  className={`workspace-tree-chevron ${expanded ? "expanded" : ""}`}
-                  size={14}
-                  strokeWidth={1.75}
+              <div className="workspace-tree-row-wrap">
+                <IconButton
+                  aria-expanded={expanded}
+                  className="workspace-tree-chevron-button"
+                  icon={ChevronRight}
+                  label={`${expanded ? "Collapse" : "Expand"} workspace ${workspace.name}`}
+                  size="sm"
+                  onClick={() => toggleWorkspace(workspace)}
                 />
-                <FolderOpen aria-hidden="true" size={15} strokeWidth={1.75} />
-                <span className="workspace-tree-name">{workspace.name}</span>
-                <span className="workspace-tree-count">
-                  {workspaceSessions.length}
-                </span>
-              </Button>
+                <Button
+                  aria-current={active ? "page" : undefined}
+                  aria-label={`Workspace: ${workspace.name}`}
+                  className="workspace-tree-row"
+                  data-workspace-id={workspace.id}
+                  onClick={() => selectWorkspace(workspace)}
+                >
+                  <FolderOpen aria-hidden="true" size={15} strokeWidth={1.75} />
+                  <span className="workspace-tree-name">
+                    {workspace.name}
+                    {workspace.isDefault ? (
+                      <small className="workspace-tree-default-label">
+                        Default
+                      </small>
+                    ) : null}
+                  </span>
+                  <span className="workspace-tree-count">
+                    {workspaceSessions.length}
+                  </span>
+                </Button>
+                {props.realMode && !workspace.isDefault ? (
+                  <Menu
+                    className="workspace-tree-actions"
+                    label={`Workspace actions for ${workspace.name}`}
+                    menuLabel={`Workspace actions for ${workspace.name}`}
+                  >
+                    <Button
+                      role="menuitem"
+                      size="sm"
+                      variant="menuItem"
+                      onClick={() => props.onRenameWorkspace(workspace)}
+                    >
+                      Rename workspace
+                    </Button>
+                    <Button
+                      role="menuitem"
+                      size="sm"
+                      variant="danger"
+                      onClick={() => props.onArchiveWorkspace(workspace)}
+                    >
+                      Archive workspace
+                    </Button>
+                  </Menu>
+                ) : null}
+              </div>
               {expanded ? (
                 <div className="workspace-session-list">
                   {workspaceSessions.length > 0 ? (
@@ -6090,8 +6156,6 @@ function StatusMark(props: { status: SessionStatus }): ReactElement {
 function AppHeader(props: {
   loadState: LoadState;
   selectedSession: SessionViewModel;
-  currentWorkspace: WorkspaceRef;
-  workspaces: WorkspaceRef[];
   selectedModelId: string;
   selectedThinking: string;
   realMode: boolean;
@@ -6102,10 +6166,6 @@ function AppHeader(props: {
   onToggleSidebar(): void;
   onToggleUsageStats(): void;
   onAppearanceThemeChange(theme: ThemePreference): void;
-  onNewWorkspace(): void;
-  onRenameWorkspace(): void;
-  onArchiveWorkspace(): void;
-  onSelectWorkspace(workspace: WorkspaceRef): void;
   onModelChange(id: string): void;
   onThinkingChange(id: string): void;
 }): ReactElement {
@@ -6128,15 +6188,6 @@ function AppHeader(props: {
       </div>
 
       <div className="header-right">
-        <WorkspaceHeader
-          workspace={props.currentWorkspace}
-          workspaces={props.workspaces}
-          realMode={props.realMode}
-          onNewWorkspace={props.onNewWorkspace}
-          onRenameWorkspace={props.onRenameWorkspace}
-          onArchiveWorkspace={props.onArchiveWorkspace}
-          onSelectWorkspace={props.onSelectWorkspace}
-        />
         <AppearanceMenu
           theme={props.appearanceTheme}
           pending={props.appearanceThemePending}
@@ -6291,8 +6342,15 @@ function WorkspaceManagementDialog(props: {
   onRemove(sessionId: string): void;
   onRename(name: string): void;
 }): ReactElement {
+  const targetWorkspaceId =
+    props.dialog.kind === "rename" || props.dialog.kind === "archive"
+      ? props.dialog.workspaceId
+      : props.currentWorkspace.id;
+  const targetWorkspace =
+    props.workspaces.find((workspace) => workspace.id === targetWorkspaceId) ??
+    props.currentWorkspace;
   const [name, setName] = useState(() =>
-    initialWorkspaceDialogName(props.dialog.kind, props.currentWorkspace.name),
+    initialWorkspaceDialogName(props.dialog.kind, targetWorkspace.name),
   );
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
   const [destinationWorkspaceId, setDestinationWorkspaceId] = useState("");
@@ -6312,7 +6370,7 @@ function WorkspaceManagementDialog(props: {
   const archiveBlockedReason = archiveWorkspaceBlockReason(
     props.sessions,
     props.composerDrafts,
-    props.currentWorkspace.id,
+    targetWorkspace.id,
     props.workspaces.length,
   );
   const testId =
@@ -6651,141 +6709,6 @@ function DialogConfirmation(props: {
       </div>
     </div>
   );
-}
-
-function WorkspaceHeader(props: {
-  workspace: WorkspaceRef;
-  workspaces: WorkspaceRef[];
-  realMode: boolean;
-  onNewWorkspace(): void;
-  onRenameWorkspace(): void;
-  onArchiveWorkspace(): void;
-  onSelectWorkspace(workspace: WorkspaceRef): void;
-}): ReactElement {
-  return (
-    <div className="workspace-header-actions">
-      <div className="workspace-location" aria-label="Workspace location">
-        <span className="workspace-location-root">Workspaces</span>
-        <ChevronRight aria-hidden="true" size={13} strokeWidth={1.75} />
-        <WorkspaceSwitcher
-          activeWorkspace={props.workspace}
-          workspaces={props.workspaces}
-          onSelect={props.onSelectWorkspace}
-        />
-      </div>
-      <Button
-        className="workspace-new-button"
-        size="sm"
-        onClick={props.onNewWorkspace}
-      >
-        New workspace…
-      </Button>
-      <Menu
-        className="workspace-actions-menu"
-        label={`Workspace actions for ${props.workspace.name}`}
-        menuLabel={`Workspace actions for ${props.workspace.name}`}
-      >
-        <Button
-          role="menuitem"
-          size="sm"
-          variant="menuItem"
-          onClick={props.onRenameWorkspace}
-        >
-          Rename workspace
-        </Button>
-        <Button
-          role="menuitem"
-          size="sm"
-          variant="danger"
-          onClick={props.onArchiveWorkspace}
-        >
-          Archive workspace
-        </Button>
-      </Menu>
-    </div>
-  );
-}
-
-function WorkspaceSwitcher(props: {
-  activeWorkspace: WorkspaceRef;
-  workspaces: WorkspaceRef[];
-  onSelect(workspace: WorkspaceRef): void;
-}): ReactElement {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent): void => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
-  const options = workspaceOptions(props.activeWorkspace, props.workspaces);
-  return (
-    <div
-      className="project-switcher-menu workspace-switcher-menu"
-      data-testid="workspace-switcher"
-      ref={rootRef}
-    >
-      <Button
-        aria-expanded={open}
-        aria-haspopup="menu"
-        aria-label={`Switch workspace. Current: ${props.activeWorkspace.name}`}
-        className="project-switcher-trigger"
-        data-project-id={props.activeWorkspace.defaultProjectId}
-        data-workspace-id={props.activeWorkspace.id}
-        size="sm"
-        onClick={() => setOpen((value) => !value)}
-      >
-        <span>{props.activeWorkspace.name}</span>
-        <ChevronDown aria-hidden="true" size={13} strokeWidth={1.75} />
-      </Button>
-      {open ? (
-        <div className="project-switcher-popover" role="menu">
-          {options.map((workspace) => {
-            const active = workspace.id === props.activeWorkspace.id;
-            return (
-              <Button
-                aria-current={active ? "true" : undefined}
-                className="project-switcher-option"
-                data-workspace-id={workspace.id}
-                key={workspace.id}
-                role="menuitem"
-                variant="menuItem"
-                onClick={() => {
-                  setOpen(false);
-                  if (!active) props.onSelect(workspace);
-                }}
-              >
-                <Check
-                  aria-hidden="true"
-                  className="project-switcher-check"
-                  size={14}
-                  strokeWidth={1.75}
-                  visibility={active ? "visible" : "hidden"}
-                />
-                <span className="project-switcher-copy">
-                  <strong>{workspace.name}</strong>
-                </span>
-              </Button>
-            );
-          })}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function workspaceOptions(
-  activeWorkspace: WorkspaceRef,
-  workspaces: WorkspaceRef[],
-): WorkspaceRef[] {
-  const unique = new Map<string, WorkspaceRef>();
-  for (const workspace of [activeWorkspace, ...workspaces]) {
-    if (!unique.has(workspace.id)) unique.set(workspace.id, workspace);
-  }
-  return [...unique.values()].slice(0, 10);
 }
 
 function ProjectHeader(props: {

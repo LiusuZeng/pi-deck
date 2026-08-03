@@ -506,6 +506,7 @@ export const workspaceRefSchema = z
   .object({
     id: z.string().min(1),
     name: z.string().min(1).max(120),
+    isDefault: z.boolean().optional(),
     defaultProjectId: z.string().min(1).optional(),
     defaultProject: projectRefSchema.optional(),
     lastOpenedAt: z.number(),

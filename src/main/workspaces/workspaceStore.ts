@@ -10,6 +10,10 @@ const workspaceRecordSchema = z
   .object({
     id: z.string().uuid(),
     name: z.string().min(1).max(120),
+    // The built-in default bucket is a directory-independent workspace for
+    // sessions that have not been explicitly grouped. Older metadata files
+    // omit this field and continue to represent named workspaces.
+    isDefault: z.boolean().optional(),
     defaultProjectId: z.string().min(1).optional(),
     legacyProjectId: z.string().min(1).optional(),
     // Optional for v1 compatibility: old workspaces.json files have no
@@ -197,6 +201,8 @@ export interface WorkspaceSessionMutationResult {
   previousWorkspaceId?: string;
 }
 
+export const defaultWorkspaceName = "Default workspace";
+
 const emptyStore = (): WorkspaceStoreFileV1 => ({
   version: 1,
   workspaces: [],
@@ -265,6 +271,64 @@ export class WorkspaceStore {
     return workspace ? cloneWorkspace(workspace) : undefined;
   }
 
+  /**
+   * Ensure the built-in directory-independent workspace exists. Creation is
+   * intentionally separate from `create()` so user-created workspaces never
+   * become the implicit default by accident.
+   */
+  async ensureDefaultWorkspace(
+    options: { activate?: boolean } = {},
+  ): Promise<WorkspaceRecord> {
+    await this.loadIfNeeded();
+    const existing = this.state.workspaces.find(
+      (workspace) => workspace.isDefault === true,
+    );
+    if (existing !== undefined) {
+      const shouldActivate =
+        options.activate === true &&
+        this.state.activeWorkspaceId !== existing.id;
+      if (shouldActivate || existing.archivedAtMs !== undefined) {
+        const restored = {
+          ...existing,
+          ...(existing.archivedAtMs !== undefined
+            ? { archivedAtMs: undefined }
+            : {}),
+          updatedAtMs: Date.now(),
+          lastOpenedAtMs: options.activate
+            ? Date.now()
+            : existing.lastOpenedAtMs,
+        };
+        await this.commit({
+          ...this.state,
+          ...(options.activate ? { activeWorkspaceId: existing.id } : {}),
+          workspaces: replaceAt(
+            this.state.workspaces,
+            this.state.workspaces.indexOf(existing),
+            restored,
+          ),
+        });
+        return cloneWorkspace(restored);
+      }
+      return cloneWorkspace(existing);
+    }
+
+    const now = Date.now();
+    const workspace: WorkspaceRecord = {
+      id: randomUUID(),
+      name: defaultWorkspaceName,
+      isDefault: true,
+      createdAtMs: now,
+      updatedAtMs: now,
+      lastOpenedAtMs: now,
+    };
+    await this.commit({
+      ...this.state,
+      ...(options.activate ? { activeWorkspaceId: workspace.id } : {}),
+      workspaces: [...this.state.workspaces, workspace],
+    });
+    return cloneWorkspace(workspace);
+  }
+
   async create(input: CreateWorkspaceInput): Promise<WorkspaceRecord> {
     const parsed = createWorkspaceInputSchema.parse(input);
     const name = normalizeWorkspaceName(parsed.name);
@@ -297,6 +361,11 @@ export class WorkspaceStore {
     await this.loadIfNeeded();
     const index = this.requireOpenWorkspaceIndex(parsed.workspaceId);
     const existing = this.state.workspaces[index]!;
+    if (existing.isDefault === true) {
+      throw new Error(
+        "The default workspace cannot be renamed or assigned a folder.",
+      );
+    }
     const { defaultProjectId: _defaultProjectId, ...withoutDefaultProjectId } =
       existing;
     const base =
@@ -341,6 +410,9 @@ export class WorkspaceStore {
     const id = z.string().uuid().parse(workspaceId);
     await this.loadIfNeeded();
     const index = this.requireOpenWorkspaceIndex(id);
+    if (this.state.workspaces[index]!.isDefault === true) {
+      throw new Error("The default workspace cannot be archived.");
+    }
     const now = Date.now();
     const archived = {
       ...this.state.workspaces[index]!,

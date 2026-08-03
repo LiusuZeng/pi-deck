@@ -223,7 +223,15 @@ async function bootstrap(): Promise<void> {
     diagnostics,
   );
   await workspaceStore.loadIfNeeded();
+  const hadWorkspaceMetadata =
+    (await workspaceStore.list()).workspaces.length > 0;
   await migrateLegacyProjectsToWorkspaces();
+  // Keep a stable, folderless bucket for sessions that are not explicitly
+  // grouped. On a fresh install it is the initial selection; real-mode users
+  // retain their last active named workspace while still seeing the bucket.
+  await workspaceStore.ensureDefaultWorkspace({
+    activate: !hadWorkspaceMetadata || resolveChatBackendMode() === "fake",
+  });
 
   configureCsp();
   registerIpcHandlers(settingsStore, diagnostics);
@@ -1067,6 +1075,7 @@ async function projectWorkspaceListResult(): Promise<WorkspaceListResult> {
     return {
       id: workspace.id,
       name: workspace.name,
+      ...(workspace.isDefault ? { isDefault: true } : {}),
       ...(workspace.defaultProjectId
         ? { defaultProjectId: workspace.defaultProjectId }
         : {}),
@@ -1295,14 +1304,20 @@ async function getAppBootstrapState(
     mode === "real" && needsProjectActivation
       ? await projects.list()
       : listedProjects;
+  const workspaceStateBeforeMigration = await ensureWorkspaceStore().list();
+  const shouldKeepDefaultWorkspaceActive =
+    workspaceStateBeforeMigration.workspaces.length === 0 ||
+    workspaceStateBeforeMigration.activeWorkspace?.isDefault === true;
   if (mode === "real") {
     await migrateLegacyProjectsToWorkspaces();
   }
+  await ensureWorkspaceStore().ensureDefaultWorkspace({
+    activate: shouldKeepDefaultWorkspaceActive,
+  });
   let activeWorkspace = await ensureWorkspaceStore().getActiveWorkspace();
   if (activeWorkspace === undefined) {
-    activeWorkspace = await ensureWorkspaceStore().create({
-      name: project.displayName,
-      ...(mode === "real" ? { defaultProjectId: project.id } : {}),
+    activeWorkspace = await ensureWorkspaceStore().ensureDefaultWorkspace({
+      activate: true,
     });
   }
   const workspaceList = await projectWorkspaceListResult();
