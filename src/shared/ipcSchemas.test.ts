@@ -28,6 +28,7 @@ import {
   workspaceListSessionsRequestSchema,
   workspaceListResultSchema,
   workspaceMoveSessionRequestSchema,
+  workspaceRestoreRequestSchema,
   workspaceUpdateRequestSchema,
 } from "./ipcSchemas.js";
 
@@ -224,6 +225,60 @@ describe("IPC schemas", () => {
         archivedAtMs: 2,
       }).archivedAtMs,
     ).toBe(2);
+  });
+
+  it("rejects malformed workspace and session archive lifecycle payloads", () => {
+    const sessionRequest = {
+      workspaceId: "workspace-1",
+      sessionFile: "/sessions/one.jsonl",
+    };
+    for (const schema of [
+      workspaceArchiveSessionRequestSchema,
+      workspaceRestoreSessionRequestSchema,
+    ]) {
+      expect(() =>
+        schema.parse({ ...sessionRequest, workspaceId: "" }),
+      ).toThrow();
+      expect(() =>
+        schema.parse({ ...sessionRequest, sessionFile: "" }),
+      ).toThrow();
+      expect(() =>
+        schema.parse({ ...sessionRequest, deleteFile: true }),
+      ).toThrow();
+    }
+
+    expect(() =>
+      workspaceRestoreRequestSchema.parse({ workspaceId: "" }),
+    ).toThrow();
+    expect(() =>
+      workspaceRestoreRequestSchema.parse({
+        workspaceId: "workspace-1",
+        restoreFiles: true,
+      }),
+    ).toThrow();
+    expect(() =>
+      workspaceListSessionsRequestSchema.parse({
+        workspaceId: "workspace-1",
+        includeArchived: "yes",
+      }),
+    ).toThrow();
+    expect(() =>
+      workspaceListSessionsRequestSchema.parse({
+        workspaceId: "workspace-1",
+        includeArchived: true,
+        sessionDir: "/outside",
+      }),
+    ).toThrow();
+    expect(() =>
+      chatSessionSummarySchema.parse({
+        id: "saved-1",
+        sessionFile: "/sessions/saved-1.jsonl",
+        title: "Saved",
+        updatedAtMs: 1,
+        messageCount: 1,
+        archivedAtMs: "yesterday",
+      }),
+    ).toThrow();
   });
 
   it("normalizes non-text message content arrays to avoid resume validation failures", () => {

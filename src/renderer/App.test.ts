@@ -1004,6 +1004,65 @@ describe("renderer session actions", () => {
     ).toMatch(/another workspace/i);
   });
 
+  it("allows idle attached sessions but blocks active work and unsent drafts from archive", () => {
+    const idleAttached = {
+      ...baseSession(),
+      sessionFile: "/sessions/idle.jsonl",
+      runtimeBacked: true,
+      resumeBacked: false,
+    } as any;
+    expect(__rendererTestHooks.canManageWorkspaceMembership(idleAttached)).toBe(
+      true,
+    );
+    expect(
+      __rendererTestHooks.archiveWorkspaceBlockReason(
+        [idleAttached],
+        {},
+        "workspace-a",
+        2,
+      ),
+    ).toBeUndefined();
+
+    const active = {
+      ...idleAttached,
+      status: "working",
+      baseState: "working",
+    };
+    expect(__rendererTestHooks.canManageWorkspaceMembership(active)).toBe(
+      false,
+    );
+    expect(
+      __rendererTestHooks.archiveWorkspaceBlockReason(
+        [active],
+        {},
+        "workspace-a",
+        2,
+      ),
+    ).toMatch(/finish active sessions/i);
+
+    const draft = {
+      ...baseSession(),
+      id: "draft-1",
+      runtimeBacked: false,
+      draftSession: true,
+    } as any;
+    expect(__rendererTestHooks.canManageWorkspaceMembership(draft)).toBe(false);
+    expect(
+      __rendererTestHooks.archiveWorkspaceBlockReason(
+        [draft],
+        {
+          "draft-1": {
+            text: "unsent work",
+            attachments: [],
+            slashOpen: false,
+          },
+        },
+        "workspace-a",
+        2,
+      ),
+    ).toMatch(/send or clear/i);
+  });
+
   it("blocks archive for meaningful composer state but ignores an empty draft", () => {
     const idleDraft = {
       ...baseSession(),
