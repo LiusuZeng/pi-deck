@@ -204,6 +204,10 @@ Preserve the existing scan depth/file/byte/wall-time limits and symlink rejectio
 6. Add `attachedRuntimeId` from the existing session-file lock map.
 7. Sort by `updatedAtMs` descending.
 
+Explicit workspace refs are refreshed from their individual Pi JSONL files
+before returning them; this repairs a filename-like cached title after a crash
+or process exit without scanning the entire session repository.
+
 Do not scan all sessions on every workspace switch. A cwd-neutral full scan is reserved for explicit refresh/import and the unassigned view.
 
 ### 5.5 Create and resume

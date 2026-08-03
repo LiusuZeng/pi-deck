@@ -79,6 +79,7 @@ import type {
   ChatListSessionsResult,
   ChatRespondToExtensionUiRequest,
   ChatRuntimeStatus,
+  ChatSessionSummary,
   ChatSnapshot,
   PickAttachmentsResult,
   ProjectRef,
@@ -97,6 +98,7 @@ import { SinglePiAdapter } from "./pi/piAdapter.js";
 import { WorkerCapacity } from "./pi/workerCapacity.js";
 import { selectAvailableRuntime } from "./runtimeSelection.js";
 import {
+  readPiSessionSummary,
   scanSessionRepository,
   validatePiSession,
   validatePiSessionFile,
@@ -1275,15 +1277,22 @@ async function addSessionToWorkspace(
     );
   }
   const stat = await fs.stat(validation.sessionFile);
-  const result = await ensureWorkspaceStore().upsertSessionRef(workspaceId, {
-    id: validation.sessionFile,
+  const refreshed = await readPiSessionSummary({
     sessionFile: validation.sessionFile,
-    cwd: validation.cwd,
-    title: path.basename(validation.sessionFile, ".jsonl"),
-    updatedAtMs: stat.mtimeMs,
-    createdAtMs: stat.birthtimeMs,
-    messageCount: 0,
+    sessionDir,
   });
+  const result = await ensureWorkspaceStore().upsertSessionRef(
+    workspaceId,
+    refreshed.summary ?? {
+      id: validation.sessionFile,
+      sessionFile: validation.sessionFile,
+      cwd: validation.cwd,
+      title: path.basename(validation.sessionFile, ".jsonl"),
+      updatedAtMs: stat.mtimeMs,
+      createdAtMs: stat.birthtimeMs,
+      messageCount: 0,
+    },
+  );
   return { workspaceId: result.workspaceId, sessionFile: result.sessionFile };
 }
 
@@ -2426,6 +2435,13 @@ async function listWorkspaceChatSessions(
       );
     }
   }
+  refs = await refreshWorkspaceSessionSummaries(
+    settings,
+    workspace,
+    refs,
+    options.includeArchived === true,
+    diagnostics,
+  );
   const sessions: ChatListSessionsResult["sessions"] = [];
   for (const ref of refs) {
     const canonical = await safeRealpath(ref.sessionFile);
@@ -2462,6 +2478,78 @@ async function listWorkspaceChatSessions(
     ),
     diagnostics,
   };
+}
+
+/**
+ * Refresh metadata for explicit workspace members without scanning every Pi
+ * session. The cache is populated when a runtime is first created, so a
+ * process exit or crash can leave a filename-like title behind even though
+ * the JSONL already contains the user's first prompt.
+ */
+async function refreshWorkspaceSessionSummaries(
+  settings: SettingsStore,
+  workspace: WorkspaceRecord,
+  refs: ChatSessionSummary[],
+  includeArchived: boolean,
+  diagnostics: string[],
+): Promise<ChatSessionSummary[]> {
+  if (refs.length === 0 || resolveChatBackendMode() !== "real") {
+    return refs;
+  }
+
+  let sessionDir: string | undefined;
+  try {
+    const project =
+      workspace.archivedAtMs === undefined
+        ? await resolveWorkspaceRepositoryProject(workspace.id)
+        : workspace.defaultProjectId === undefined
+          ? await resolveManagedRuntimeProject()
+          : await ensureProjectStore()
+              .resolveAuthorizedProject(workspace.defaultProjectId)
+              .catch(() => resolveManagedRuntimeProject());
+    const launch = await resolveRealChatLaunchConfig(settings, project);
+    sessionDir = launch.effective.config.sessionDir;
+  } catch (error) {
+    diagnostics.push(
+      `Workspace session metadata refresh unavailable: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return refs;
+  }
+  if (sessionDir === undefined) {
+    return refs;
+  }
+
+  const refreshed: ChatSessionSummary[] = [];
+  const refreshBatchSize = 8;
+  for (let index = 0; index < refs.length; index += refreshBatchSize) {
+    const batch = refs.slice(index, index + refreshBatchSize);
+    const results = await Promise.all(
+      batch.map((ref) =>
+        readPiSessionSummary({ sessionFile: ref.sessionFile, sessionDir }),
+      ),
+    );
+    for (const result of results) {
+      diagnostics.push(...result.diagnostics);
+      if (result.summary !== undefined) {
+        refreshed.push(result.summary);
+      }
+    }
+  }
+  if (refreshed.length === 0) {
+    return refs;
+  }
+
+  try {
+    await ensureWorkspaceStore().upsertSessionRefs(workspace.id, refreshed);
+    return ensureWorkspaceStore().getCachedSessionSummaries(workspace.id, {
+      includeArchived,
+    });
+  } catch (error) {
+    diagnostics.push(
+      `Workspace session metadata refresh could not be saved: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return refs;
+  }
 }
 
 async function projectForWorkspaceSession(

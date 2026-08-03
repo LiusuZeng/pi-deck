@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, it as test } from "vitest";
 import {
+  readPiSessionSummary,
   scanSessionRepository,
   validatePiSession,
   validatePiSessionFile,
@@ -65,6 +66,45 @@ test("session repository scans project jsonl sessions without following other pr
     "Resume this important session",
   );
   assert.equal(filteredResult.sessions[0]?.messageCount, 1);
+});
+
+test("refreshes one explicit session summary without scanning the repository", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-deck-summary-"));
+  const project = path.join(root, "project");
+  const sessionDir = path.join(root, "sessions");
+  const sessionFile = path.join(sessionDir, "2026-08-03T03-48-31-582Z.jsonl");
+  await fs.mkdir(project, { recursive: true });
+  await fs.mkdir(sessionDir, { recursive: true });
+  await fs.writeFile(
+    sessionFile,
+    [
+      JSON.stringify({
+        type: "session",
+        version: 3,
+        id: "summary-session",
+        timestamp: "2026-08-03T03:48:31.582Z",
+        cwd: project,
+      }),
+      JSON.stringify({
+        type: "message",
+        timestamp: "2026-08-03T03:48:32.000Z",
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "Use the prompt as the title" }],
+        },
+      }),
+    ].join("\n"),
+  );
+
+  const result = await readPiSessionSummary({
+    sessionFile,
+    sessionDir,
+  });
+
+  assert.deepEqual(result.diagnostics, []);
+  assert.equal(result.summary?.title, "Use the prompt as the title");
+  assert.equal(result.summary?.messageCount, 1);
+  assert.equal(result.summary?.sessionFile, await fs.realpath(sessionFile));
 });
 
 describe("Pi session eligibility validation", () => {

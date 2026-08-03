@@ -2723,6 +2723,31 @@ test("managed workspace context persists across relaunch", async () => {
     await firstLaunch.app.close();
   }
 
+  // Simulate a process exit that happened before the final metadata snapshot
+  // reached the workspace cache. The JSONL remains authoritative and contains
+  // the prompt, so relaunch must repair this filename fallback.
+  const workspaceStorePath = path.join(root, "pideck-home", "workspaces.json");
+  const workspaceStore = JSON.parse(
+    fs.readFileSync(workspaceStorePath, "utf8"),
+  ) as {
+    sessionRefs?: Array<{
+      sessionFile: string;
+      title?: string;
+      messageCount?: number;
+      preview?: string;
+    }>;
+  };
+  const cachedRef = workspaceStore.sessionRefs?.find(
+    (ref) => ref.sessionFile === fs.realpathSync(sessionFile as string),
+  );
+  if (cachedRef === undefined) {
+    throw new Error("Missing managed workspace session cache entry");
+  }
+  cachedRef.title = path.basename(sessionFile as string, ".jsonl");
+  cachedRef.messageCount = 0;
+  delete cachedRef.preview;
+  fs.writeFileSync(workspaceStorePath, `${JSON.stringify(workspaceStore)}\n`);
+
   const secondLaunch = await launchPiDeck(
     fakeRealModeEnv({ root, agentDir, userDataDir }),
   );

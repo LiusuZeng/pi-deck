@@ -38,6 +38,17 @@ export type PiSessionFileValidationResult =
   | { ok: true; sessionFile: string; cwd: string }
   | { ok: false; reason: string };
 
+export interface ReadPiSessionSummaryOptions {
+  sessionFile: string;
+  sessionDir: string;
+  maxBytesPerFile?: number;
+}
+
+export interface ReadPiSessionSummaryResult {
+  summary?: ChatSessionSummary;
+  diagnostics: string[];
+}
+
 interface ParsedSessionFile {
   header?: PiSessionHeader;
   sessionId?: string;
@@ -132,6 +143,28 @@ export async function validatePiSessionFile(
     sessionFile,
     cwd: await canonicalOrResolved(header.cwd),
   };
+}
+
+/**
+ * Refresh one explicit workspace reference without scanning the whole session
+ * repository. Workspace membership is app-owned, but titles/previews are
+ * derived from the Pi JSONL and can change while the runtime is attached.
+ */
+export async function readPiSessionSummary(
+  options: ReadPiSessionSummaryOptions,
+): Promise<ReadPiSessionSummaryResult> {
+  const diagnostics: string[] = [];
+  const sessionDir = await canonicalOrResolved(options.sessionDir);
+  const result = await summarizeSessionFile(
+    options.sessionFile,
+    sessionDir,
+    undefined,
+    options.maxBytesPerFile ?? DEFAULT_MAX_BYTES_PER_FILE,
+    diagnostics,
+  );
+  return result.summary === undefined
+    ? { diagnostics }
+    : { summary: result.summary, diagnostics };
 }
 
 /**
