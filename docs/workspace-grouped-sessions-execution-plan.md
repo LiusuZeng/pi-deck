@@ -1,6 +1,6 @@
 # Workspace-Grouped Sessions Execution Plan
 
-Status: implemented and verified; sidebar navigation refined
+Status: implemented and verified
 Date: 2026-08-02  
 Supersedes for new work: `project-grouped-sessions-p0-plan.md`  
 Compatibility baseline: existing directory-backed Projects remain readable during migration
@@ -32,8 +32,9 @@ history and are never moved or rewritten by this feature.
 4. Pi still launches in a concrete cwd as an internal implementation detail:
    - new general session: Pi Deck's managed runtime context below `PI_DECK_HOME`;
    - migrated session with an explicit compatibility project: that validated project;
-   - resumed/imported session: validated cwd from the Pi JSONL header.
-   No new-workspace flow opens a folder picker or persists a workspace default.
+   - resumed/imported session in a folderless workspace: managed runtime
+     context; directory-backed compatibility session: validated header cwd.
+     No new-workspace flow opens a folder picker or persists a workspace default.
 5. Workspace archive/removal never deletes Pi session files.
 6. Removing a session from a workspace is distinct from deleting the Pi session from disk.
 7. Renderer-supplied IDs and paths are never filesystem authority. Main resolves stored records and revalidates files immediately before resume/delete.
@@ -71,6 +72,9 @@ interface WorkspaceSessionRef {
   createdAtMs?: number;
   messageCount?: number;
   missingSinceMs?: number;
+  archivedAtMs?: number;
+  /** Set only when a workspace archive cascaded to this session. */
+  archivedByWorkspaceId?: string;
 }
 
 interface WorkspaceStoreFileV1 {
@@ -107,6 +111,7 @@ workspaces.create({ name, defaultProjectId? }): Promise<WorkspaceListResult>
 workspaces.update({ workspaceId, name?, defaultProjectId? }): Promise<WorkspaceListResult>
 workspaces.select({ workspaceId }): Promise<WorkspaceListResult>
 workspaces.archive({ workspaceId }): Promise<WorkspaceListResult>
+workspaces.restore({ workspaceId }): Promise<WorkspaceListResult>
 ```
 
 Names are trimmed, whitespace-normalized, and limited to 120 characters. Duplicate names are allowed; identity is the UUID.
@@ -117,10 +122,12 @@ Names are trimmed, whitespace-normalized, and limited to 120 characters. Duplica
 workspaces.addSession({ workspaceId, sessionFile }): Promise<WorkspaceSessionMutationResult>
 workspaces.moveSession({ sessionFile, toWorkspaceId }): Promise<WorkspaceSessionMutationResult>
 workspaces.removeSession({ workspaceId, sessionFile }): Promise<WorkspaceSessionMutationResult>
+workspaces.archiveSession({ workspaceId, sessionFile }): Promise<WorkspaceSessionMutationResult>
+workspaces.restoreSession({ workspaceId, sessionFile }): Promise<WorkspaceSessionMutationResult>
 workspaces.listUnassignedSessions(): Promise<ChatListSessionsResult>
 ```
 
-Adding/importing validates that the file is a regular Pi `.jsonl` session below the configured session directory and reads its canonical header cwd. Move is rejected while an attached runtime owns the file in the first release.
+Adding/importing validates that the file is a regular Pi `.jsonl` session below the configured session directory and reads its canonical header cwd. Main rejects mutations while an attached runtime owns the file; the renderer closes an idle runtime internally before retrying the mutation.
 
 ### 4.3 Chat lifecycle
 
@@ -214,8 +221,9 @@ Resume:
 
 1. Resolve workspace and exact stored membership.
 2. Revalidate session file and obtain header cwd.
-3. Resolve cwd-specific Pi configuration.
-4. Start `pi --mode rpc --session <file>` with the header cwd.
+3. For a folderless workspace, use the revalidated managed runtime context;
+   for a directory-backed compatibility workspace, resolve the registered cwd.
+4. Start `pi --mode rpc --session <file>` with the selected execution cwd.
 5. Verify Pi returns the requested canonical session file.
 6. Bind runtime to the owning workspace and actual cwd.
 
@@ -224,7 +232,16 @@ Resume:
 - **Remove from workspace** removes metadata only.
 - **Delete session** closes its runtime, moves/removes the JSONL file, then removes membership.
 - **Delete all in workspace** iterates only explicit workspace members and returns the exact successfully deleted subset.
-- **Archive workspace** hides the workspace and does not touch sessions or workers; attached work remains discoverable until closed.
+- **Archive workspace** is a reversible metadata operation. It archives every
+  active session membership in the workspace in the same transaction, without
+  touching Pi JSONL files. Sessions already archived independently retain that
+  state. Restoring the workspace restores only memberships archived by that
+  workspace cascade; independently archived sessions remain archived.
+- **Archive session** hides one membership without deleting its Pi JSONL file;
+  restore reverses that metadata change.
+- Runtime processes are an implementation detail. Idle runtimes are closed as
+  part of membership/archive operations when safe; users should not need to
+  manage a separate “close runtime” lifecycle control.
 
 ## 6. Renderer Execution Changes
 
@@ -270,6 +287,7 @@ Session actions add:
 
 - **Move to workspace…**;
 - **Remove from workspace**;
+- **Archive session…** / **Restore session**;
 - existing destructive **Delete session** remains visually and textually distinct.
 
 An explicit **Add existing session…** / **Unassigned sessions** flow replaces silent cwd-based adoption after migration.
@@ -301,7 +319,9 @@ is selected on a fresh launch so a user can start a session without first
 creating or choosing a workspace. Existing ungrouped Pi files can be imported
 there without changing their JSONL contents; moving one into a named workspace
 is an explicit metadata action. Keep the default bucket non-renamable and
-non-archivable, and avoid using the word “project” for this concept.
+non-archivable, and avoid using the word “project” for this concept. Archived
+workspaces and sessions are available from a dedicated archived section so
+archive remains reversible without cluttering the active tree.
 
 ## 7. Compatibility and Removal Schedule
 
@@ -380,6 +400,8 @@ Unit and contract checks:
 - malformed, symlinked, non-JSONL, and outside-session-dir rejection;
 - membership required for resume/delete;
 - metadata-only remove versus file delete;
+- reversible session archive/restore and workspace cascade archive/restore;
+- idle runtime metadata flush before internal shutdown and busy-runtime close rejection;
 - attachment base path follows session cwd;
 - renderer filters solely by workspace ID and preserves hidden drafts/runtimes.
 
@@ -394,7 +416,8 @@ E2E scenarios:
 5. Switch workspaces while work is active and return through Active work.
 6. Move an idle session to another workspace without changing JSONL.
 7. Archive a workspace and verify its JSONL files remain.
-8. Delete all workspace sessions and verify only that workspace's explicit members are affected.
+8. Restore a workspace and verify only cascade-archived sessions return; independently archived sessions remain hidden.
+9. Delete all workspace sessions and verify only that workspace's explicit members are affected.
 
 Required commands after integration:
 
@@ -404,6 +427,10 @@ npm test
 npm run build
 npm run test:e2e
 ```
+
+Current verification: `npm run typecheck`, `npm test` (261 tests), `npm run format`,
+`npm run build`, and the full Electron E2E suite (32 passed, 3 intentionally
+skipped in the headless environment).
 
 Real-Pi manual smoke:
 

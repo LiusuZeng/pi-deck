@@ -1,4 +1,5 @@
 import {
+  Archive,
   ArrowUp,
   Check,
   ChevronDown,
@@ -32,6 +33,7 @@ import {
 
 /** Canonical icons for renderer actions; use these instead of glyphs or local SVGs. */
 export const iconByAction = {
+  archive: Archive,
   abort: Square,
   attach: Paperclip,
   close: X,
@@ -65,6 +67,7 @@ export const iconByAction = {
 } as const;
 
 export {
+  Archive,
   ArrowUp,
   Check,
   ChevronDown,

@@ -21,7 +21,11 @@ import {
   chatRuntimeStatusSchema,
   pickProjectResultSchema,
   projectRefSchema,
+  chatSessionSummarySchema,
   workspaceCreateRequestSchema,
+  workspaceArchiveSessionRequestSchema,
+  workspaceRestoreSessionRequestSchema,
+  workspaceListSessionsRequestSchema,
   workspaceListResultSchema,
   workspaceMoveSessionRequestSchema,
   workspaceUpdateRequestSchema,
@@ -179,6 +183,47 @@ describe("IPC schemas", () => {
         workspaces: [{ ...workspace, rootPath: "/must-not-be-identity" }],
       }),
     ).toThrow();
+
+    expect(
+      workspaceListResultSchema.parse({
+        workspaces: [workspace],
+        archivedWorkspaces: [{ ...workspace, id: "workspace-archived" }],
+      }).archivedWorkspaces,
+    ).toHaveLength(1);
+    expect(
+      workspaceArchiveSessionRequestSchema.parse({
+        workspaceId: workspace.id,
+        sessionFile: "/sessions/one.jsonl",
+      }),
+    ).toEqual({
+      workspaceId: workspace.id,
+      sessionFile: "/sessions/one.jsonl",
+    });
+    expect(
+      workspaceRestoreSessionRequestSchema.parse({
+        workspaceId: workspace.id,
+        sessionFile: "/sessions/one.jsonl",
+      }),
+    ).toEqual({
+      workspaceId: workspace.id,
+      sessionFile: "/sessions/one.jsonl",
+    });
+    expect(
+      workspaceListSessionsRequestSchema.parse({
+        workspaceId: workspace.id,
+        includeArchived: true,
+      }),
+    ).toEqual({ workspaceId: workspace.id, includeArchived: true });
+    expect(
+      chatSessionSummarySchema.parse({
+        id: "saved-1",
+        sessionFile: "/sessions/saved-1.jsonl",
+        title: "Saved",
+        updatedAtMs: 1,
+        messageCount: 1,
+        archivedAtMs: 2,
+      }).archivedAtMs,
+    ).toBe(2);
   });
 
   it("normalizes non-text message content arrays to avoid resume validation failures", () => {

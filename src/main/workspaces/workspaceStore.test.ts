@@ -67,6 +67,69 @@ test("WorkspaceStore provides a stable, folderless default workspace", async () 
   await assert.rejects(store.archive(first.id), /default workspace/i);
 });
 
+test("WorkspaceStore archives session membership without touching the Pi file", async () => {
+  const { root, home } = await temporaryHome();
+  const sessionFile = path.join(root, "session.jsonl");
+  await fs.writeFile(sessionFile, "pi jsonl remains here\n");
+  const store = new WorkspaceStore(home);
+  const workspace = await store.create({ name: "Archive me" });
+  await store.upsertSessionRef(workspace.id, summary(sessionFile));
+
+  await store.archiveSession(workspace.id, sessionFile);
+  assert.deepEqual(await store.getCachedSessionSummaries(workspace.id), []);
+  const archived = await store.getCachedSessionSummaries(workspace.id, {
+    includeArchived: true,
+  });
+  assert.equal(archived[0]?.archivedAtMs !== undefined, true);
+  assert.equal(
+    await fs.readFile(sessionFile, "utf8"),
+    "pi jsonl remains here\n",
+  );
+
+  await store.restoreSession(workspace.id, sessionFile);
+  assert.equal((await store.getCachedSessionSummaries(workspace.id)).length, 1);
+});
+
+test("WorkspaceStore cascades archive and restores only cascade-owned sessions", async () => {
+  const { root, home } = await temporaryHome();
+  const firstFile = path.join(root, "first.jsonl");
+  const secondFile = path.join(root, "second.jsonl");
+  await fs.writeFile(firstFile, "first\n");
+  await fs.writeFile(secondFile, "second\n");
+  const store = new WorkspaceStore(home);
+  const workspace = await store.create({ name: "Cascade" });
+  await store.upsertSessionRef(workspace.id, summary(firstFile, "First"));
+  await store.upsertSessionRef(workspace.id, summary(secondFile, "Second"));
+  await store.archiveSession(workspace.id, firstFile);
+
+  await store.archive(workspace.id);
+  assert.equal((await store.list()).workspaces.length, 0);
+  assert.equal((await store.list()).archivedWorkspaces?.length, 1);
+  assert.equal(
+    (
+      await store.getCachedSessionSummaries(workspace.id, {
+        includeArchived: true,
+      })
+    ).every((session) => session.archivedAtMs !== undefined),
+    true,
+  );
+
+  await store.restore(workspace.id);
+  const restored = await store.getCachedSessionSummaries(workspace.id);
+  assert.deepEqual(
+    restored.map((session) => session.title),
+    ["Second"],
+  );
+  const all = await store.getCachedSessionSummaries(workspace.id, {
+    includeArchived: true,
+  });
+  assert.equal(
+    all.find((session) => session.title === "First")?.archivedAtMs !==
+      undefined,
+    true,
+  );
+});
+
 test("WorkspaceStore removes, rather than serializes, a cleared default project", async () => {
   const { home } = await temporaryHome();
   const store = new WorkspaceStore(home);

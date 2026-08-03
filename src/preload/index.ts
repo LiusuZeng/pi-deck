@@ -42,11 +42,15 @@ import {
   projectListResultSchema,
   projectSelectRequestSchema,
   workspaceAddSessionRequestSchema,
+  workspaceArchiveSessionRequestSchema,
   workspaceArchiveRequestSchema,
   workspaceCreateRequestSchema,
   workspaceListResultSchema,
+  workspaceListSessionsRequestSchema,
   workspaceMoveSessionRequestSchema,
   workspaceRemoveSessionRequestSchema,
+  workspaceRestoreSessionRequestSchema,
+  workspaceRestoreRequestSchema,
   workspaceSelectRequestSchema,
   workspaceSessionMutationResultSchema,
   workspaceUpdateRequestSchema,
@@ -62,9 +66,12 @@ import type {
   ChatRuntimeEvent,
   PiDeckApi,
   WorkspaceAddSessionRequest,
+  WorkspaceArchiveSessionRequest,
   WorkspaceCreateRequest,
+  WorkspaceListSessionsRequest,
   WorkspaceMoveSessionRequest,
   WorkspaceRemoveSessionRequest,
+  WorkspaceRestoreSessionRequest,
   WorkspaceUpdateRequest,
 } from "../shared/types.js";
 
@@ -329,6 +336,12 @@ const api: PiDeckApi = Object.freeze({
         request: workspaceArchiveRequestSchema.parse(request),
         responseSchema: workspaceListResultSchema,
       }),
+    restore: (request: { workspaceId: string }) =>
+      invokeValidated({
+        channel: ipcChannels.workspaceRestore,
+        request: workspaceRestoreRequestSchema.parse(request),
+        responseSchema: workspaceListResultSchema,
+      }),
     addSession: (request: WorkspaceAddSessionRequest) =>
       invokeValidated({
         channel: ipcChannels.workspaceAddSession,
@@ -346,6 +359,24 @@ const api: PiDeckApi = Object.freeze({
         channel: ipcChannels.workspaceRemoveSession,
         request: workspaceRemoveSessionRequestSchema.parse(request),
         responseSchema: workspaceSessionMutationResultSchema,
+      }),
+    archiveSession: (request: WorkspaceArchiveSessionRequest) =>
+      invokeValidated({
+        channel: ipcChannels.workspaceArchiveSession,
+        request: workspaceArchiveSessionRequestSchema.parse(request),
+        responseSchema: workspaceSessionMutationResultSchema,
+      }),
+    restoreSession: (request: WorkspaceRestoreSessionRequest) =>
+      invokeValidated({
+        channel: ipcChannels.workspaceRestoreSession,
+        request: workspaceRestoreSessionRequestSchema.parse(request),
+        responseSchema: workspaceSessionMutationResultSchema,
+      }),
+    listSessions: (request: WorkspaceListSessionsRequest) =>
+      invokeValidated({
+        channel: ipcChannels.workspaceListSessions,
+        request: workspaceListSessionsRequestSchema.parse(request),
+        responseSchema: chatListSessionsResultSchema,
       }),
     listUnassignedSessions: () =>
       invokeValidated({

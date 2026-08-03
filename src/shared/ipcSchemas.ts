@@ -246,6 +246,7 @@ export const chatSessionSummarySchema = z
     messageCount: z.number().int().min(0),
     preview: z.string().optional(),
     attachedRuntimeId: z.string().optional(),
+    archivedAtMs: z.number().optional(),
   })
   .strict();
 
@@ -518,6 +519,7 @@ export const workspaceListResultSchema = z
     activeWorkspaceId: z.string().min(1).optional(),
     activeWorkspace: workspaceRefSchema.optional(),
     workspaces: z.array(workspaceRefSchema),
+    archivedWorkspaces: z.array(workspaceRefSchema).optional(),
   })
   .strict();
 
@@ -553,6 +555,7 @@ export const workspaceSelectRequestSchema = z
   .strict();
 
 export const workspaceArchiveRequestSchema = workspaceSelectRequestSchema;
+export const workspaceRestoreRequestSchema = workspaceSelectRequestSchema;
 
 export const workspaceAddSessionRequestSchema = z
   .object({
@@ -570,6 +573,17 @@ export const workspaceMoveSessionRequestSchema = z
 
 export const workspaceRemoveSessionRequestSchema =
   workspaceAddSessionRequestSchema;
+export const workspaceArchiveSessionRequestSchema =
+  workspaceAddSessionRequestSchema;
+export const workspaceRestoreSessionRequestSchema =
+  workspaceAddSessionRequestSchema;
+
+export const workspaceListSessionsRequestSchema = z
+  .object({
+    workspaceId: z.string().min(1),
+    includeArchived: z.boolean().optional(),
+  })
+  .strict();
 
 export const workspaceSessionMutationResultSchema = z
   .object({
@@ -593,6 +607,7 @@ export const appBootstrapStateSchema = z
     // expose directory-backed Projects.
     workspace: workspaceRefSchema.optional(),
     workspaces: z.array(workspaceRefSchema).optional(),
+    archivedWorkspaces: z.array(workspaceRefSchema).optional(),
     cachedSessions: z.array(bootstrapSessionSummarySchema),
   })
   .strict();
@@ -741,9 +756,13 @@ export const ipcChannels = {
   workspaceUpdate: "workspaces:update",
   workspaceSelect: "workspaces:select",
   workspaceArchive: "workspaces:archive",
+  workspaceRestore: "workspaces:restore",
   workspaceAddSession: "workspaces:addSession",
   workspaceMoveSession: "workspaces:moveSession",
   workspaceRemoveSession: "workspaces:removeSession",
+  workspaceArchiveSession: "workspaces:archiveSession",
+  workspaceRestoreSession: "workspaces:restoreSession",
+  workspaceListSessions: "workspaces:listSessions",
   workspaceListUnassignedSessions: "workspaces:listUnassignedSessions",
   attachmentsPickFiles: "attachments:pickFiles",
   attachmentsImportDroppedFiles: "attachments:importDroppedFiles",

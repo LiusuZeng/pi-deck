@@ -747,7 +747,7 @@ describe("renderer session actions", () => {
     ).toBe(true);
   });
 
-  it("allows move/remove only for an idle detached saved session", () => {
+  it("allows move/remove for an idle saved session before automatic runtime close", () => {
     const saved = {
       ...baseSession(),
       sessionFile: "/sessions/saved.jsonl",
@@ -760,7 +760,7 @@ describe("renderer session actions", () => {
         ...saved,
         runtimeBacked: true,
       }),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       __rendererTestHooks.canManageWorkspaceMembership({
         ...saved,
@@ -977,23 +977,28 @@ describe("renderer session actions", () => {
     );
   });
 
-  it("reports attached-runtime blockers before the last-workspace fallback", () => {
+  it("reports active-turn blockers before the last-workspace fallback", () => {
+    const busy = {
+      ...baseSession(),
+      status: "working",
+      baseState: "working",
+    };
     expect(
       __rendererTestHooks.archiveWorkspaceBlockReason(
-        [baseSession()] as any,
+        [busy] as any,
         {},
         "workspace-a",
         1,
       ),
-    ).toMatch(/close attached sessions/i);
+    ).toMatch(/finish active sessions/i);
     expect(
       __rendererTestHooks.archiveWorkspaceBlockReason(
-        [baseSession()] as any,
+        [busy] as any,
         {},
         "workspace-a",
         2,
       ),
-    ).toMatch(/close attached sessions/i);
+    ).toMatch(/finish active sessions/i);
     expect(
       __rendererTestHooks.archiveWorkspaceBlockReason([], {}, "workspace-a", 1),
     ).toMatch(/another workspace/i);

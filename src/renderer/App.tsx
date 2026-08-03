@@ -42,6 +42,7 @@ import {
 import { Button } from "./components/ui/Button.js";
 import { IconButton } from "./components/ui/IconButton.js";
 import {
+  Archive,
   ArrowUp,
   Check,
   ChevronDown,
@@ -66,7 +67,6 @@ import {
   SquarePen,
   Sun,
   Trash2,
-  Unplug,
   Wrench,
   X,
   type LucideIcon,
@@ -221,6 +221,7 @@ interface SessionViewModel {
   awaitingAgentEnd?: boolean;
   /** A provider failure observed in a Pi runtime event, not a local UI error. */
   providerErrorObserved?: boolean;
+  archivedAtMs?: number;
 }
 
 /**
@@ -250,6 +251,9 @@ type WorkspaceCapableApi = {
     archive?(request: {
       workspaceId: string;
     }): Promise<WorkspaceListResultCompat>;
+    restore?(request: {
+      workspaceId: string;
+    }): Promise<WorkspaceListResultCompat>;
     addSession?(request: {
       workspaceId: string;
       sessionFile: string;
@@ -262,6 +266,18 @@ type WorkspaceCapableApi = {
       workspaceId: string;
       sessionFile: string;
     }): Promise<unknown>;
+    archiveSession?(request: {
+      workspaceId: string;
+      sessionFile: string;
+    }): Promise<unknown>;
+    restoreSession?(request: {
+      workspaceId: string;
+      sessionFile: string;
+    }): Promise<unknown>;
+    listSessions?(request: {
+      workspaceId: string;
+      includeArchived?: boolean;
+    }): Promise<{ sessions: ChatSessionSummary[] }>;
     listUnassignedSessions?(): Promise<{ sessions: ChatSessionSummary[] }>;
   };
   chat: {
@@ -594,6 +610,13 @@ export function App(): ReactElement {
     }),
   );
   const [workspaces, setWorkspaces] = useState<WorkspaceRef[]>([]);
+  const [archivedWorkspaces, setArchivedWorkspaces] = useState<WorkspaceRef[]>(
+    [],
+  );
+  const [archivedSessions, setArchivedSessions] = useState<SessionViewModel[]>(
+    [],
+  );
+  const [showArchived, setShowArchived] = useState(false);
   const [workspaceDialog, setWorkspaceDialog] =
     useState<WorkspaceDialogState>(undefined);
   const [unassignedSessions, setUnassignedSessions] = useState<
@@ -813,6 +836,11 @@ export function App(): ReactElement {
           bootstrap.backendMode === "real"
             ? bootstrapWorkspaceList.workspaces
             : [...bootstrapWorkspaceList.workspaces, invalidDemoWorkspace],
+        );
+        setArchivedWorkspaces(
+          bootstrap.backendMode === "real"
+            ? (bootstrapWorkspaceList.archivedWorkspaces ?? [])
+            : [],
         );
         setRecentProjects(
           bootstrap.backendMode === "real"
@@ -2251,6 +2279,7 @@ export function App(): ReactElement {
         const result = await window.piDeck.workspaces.select({
           workspaceId: workspace.id,
         });
+        setArchivedWorkspaces(result.archivedWorkspaces ?? []);
         await switchWorkspaceView(
           result.activeWorkspace ?? workspace,
           result.workspaces,
@@ -2272,6 +2301,11 @@ export function App(): ReactElement {
     setWorkspaceDialog({ kind: "create" });
   }
 
+  function applyWorkspaceListResult(result: WorkspaceListResultCompat): void {
+    setWorkspaces(result.workspaces);
+    setArchivedWorkspaces(result.archivedWorkspaces ?? []);
+  }
+
   async function createWorkspace(name: string): Promise<void> {
     const normalizedName = name.trim().replace(/\s+/g, " ");
     if (normalizedName.length === 0) {
@@ -2284,6 +2318,7 @@ export function App(): ReactElement {
         const result = await window.piDeck.workspaces.create({
           name: normalizedName,
         });
+        applyWorkspaceListResult(result);
         const workspace = result.activeWorkspace ?? result.workspaces.at(-1);
         if (workspace !== undefined) {
           await switchWorkspaceView(workspace, result.workspaces);
@@ -2326,7 +2361,7 @@ export function App(): ReactElement {
       if (updated !== undefined && workspaceId === currentWorkspace.id) {
         setCurrentWorkspace(updated);
       }
-      setWorkspaces(result.workspaces);
+      applyWorkspaceListResult(result);
       setSessions((items) =>
         updateWorkspaceSessionLabels(items, workspaceId, normalizedName),
       );
@@ -2354,14 +2389,22 @@ export function App(): ReactElement {
     }
     setWorkspaceDialogBusy(true);
     try {
+      const attachedSessions = sessionsRef.current.filter(
+        (session) =>
+          session.workspaceId === workspaceId && session.runtimeBacked,
+      );
+      for (const session of attachedSessions) {
+        if (!(await closeIdleRuntimeForMembershipMutation(session))) return;
+      }
       const result = await window.piDeck.workspaces.archive({
         workspaceId,
       });
+      applyWorkspaceListResult(result);
+      if (showArchived) await refreshArchivedSessions();
       if (workspaceId !== currentWorkspace.id) {
-        setWorkspaces(result.workspaces);
         setWorkspaceDialog(undefined);
         setUiMessage(
-          "Workspace archived. Pi session files were left untouched.",
+          "Workspace archived with its sessions. Pi session files were left untouched.",
         );
         return;
       }
@@ -2371,7 +2414,9 @@ export function App(): ReactElement {
       }
       setWorkspaceDialog(undefined);
       await switchWorkspaceView(next, result.workspaces);
-      setUiMessage("Workspace archived. Pi session files were left untouched.");
+      setUiMessage(
+        "Workspace archived with its sessions. Pi session files were left untouched.",
+      );
     } catch (error) {
       setUiMessage(
         `Failed to archive workspace: ${error instanceof Error ? error.message : String(error)}`,
@@ -2428,14 +2473,52 @@ export function App(): ReactElement {
     }
   }
 
+  async function closeIdleRuntimeForMembershipMutation(
+    session: SessionViewModel,
+  ): Promise<boolean> {
+    if (!session.runtimeBacked) return true;
+    if (isSessionBusy(session)) {
+      setComposerError(
+        "Finish the current turn before changing this session's workspace membership.",
+      );
+      return false;
+    }
+    if (hasComposerDraft(composerDraftsRef.current, session.id)) {
+      setComposerError(
+        "Send or clear unsent composer text and attachments before changing this session.",
+      );
+      return false;
+    }
+    intentionallyClosingRuntimeIds.current.add(session.id);
+    try {
+      await window.piDeck.chat.closeSession({ runtimeId: session.id });
+      discardComposerAttachmentOwner(session.id);
+      setSessions((items) => closeRuntimeInSessionState(items, session.id));
+      return true;
+    } catch (error) {
+      intentionallyClosingRuntimeIds.current.delete(session.id);
+      setComposerError(
+        `Could not prepare the session: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
+    }
+  }
+
   async function moveSavedSession(
     sessionId: string,
     toWorkspaceId: string,
   ): Promise<void> {
     const session = sessionsRef.current.find((item) => item.id === sessionId);
-    if (!canManageWorkspaceMembership(session)) return;
+    if (
+      session === undefined ||
+      !isSessionDeletable(session, isRealBackendMode) ||
+      typeof session.sessionFile !== "string"
+    ) {
+      return;
+    }
     setWorkspaceDialogBusy(true);
     try {
+      if (!(await closeIdleRuntimeForMembershipMutation(session))) return;
       await window.piDeck.workspaces.moveSession({
         sessionFile: session.sessionFile,
         toWorkspaceId,
@@ -2465,10 +2548,20 @@ export function App(): ReactElement {
 
   async function removeSavedSession(sessionId: string): Promise<void> {
     const session = sessionsRef.current.find((item) => item.id === sessionId);
-    if (!canManageWorkspaceMembership(session)) return;
+    if (
+      session === undefined ||
+      !isSessionDeletable(session, isRealBackendMode) ||
+      typeof session.sessionFile !== "string"
+    ) {
+      return;
+    }
     setWorkspaceDialogBusy(true);
     blockAttachmentOwner(sessionId);
     try {
+      if (!(await closeIdleRuntimeForMembershipMutation(session))) {
+        unblockAttachmentOwner(sessionId);
+        return;
+      }
       await window.piDeck.workspaces.removeSession({
         workspaceId: session.workspaceId,
         sessionFile: session.sessionFile,
@@ -2484,6 +2577,92 @@ export function App(): ReactElement {
       unblockAttachmentOwner(sessionId);
       setUiMessage(
         `Failed to remove session from workspace: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      setWorkspaceDialogBusy(false);
+    }
+  }
+
+  async function archiveSavedSession(sessionId: string): Promise<void> {
+    const session = sessionsRef.current.find((item) => item.id === sessionId);
+    if (
+      session === undefined ||
+      !isSessionDeletable(session, isRealBackendMode) ||
+      typeof session.sessionFile !== "string"
+    ) {
+      return;
+    }
+    setWorkspaceDialogBusy(true);
+    try {
+      if (!(await closeIdleRuntimeForMembershipMutation(session))) return;
+      await window.piDeck.workspaces.archiveSession({
+        workspaceId: session.workspaceId,
+        sessionFile: session.sessionFile,
+      });
+      setSessions((items) => removeSessionById(items, sessionId));
+      discardComposerAttachmentOwner(sessionId);
+      setWorkspaceDialog(undefined);
+      await refreshArchivedSessions();
+      if (selectedSessionIdRef.current === sessionId) await handleNewSession();
+      setUiMessage(
+        "Archived session. Its Pi JSONL file was kept on disk and can be restored.",
+      );
+    } catch (error) {
+      setUiMessage(
+        `Failed to archive session: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      setWorkspaceDialogBusy(false);
+    }
+  }
+
+  async function restoreSavedSession(session: SessionViewModel): Promise<void> {
+    if (typeof session.sessionFile !== "string") return;
+    const workspaceIsArchived = archivedWorkspaces.some(
+      (workspace) => workspace.id === session.workspaceId,
+    );
+    if (workspaceIsArchived) {
+      setUiMessage(
+        "Restore the containing workspace before restoring this session.",
+      );
+      return;
+    }
+    setWorkspaceDialogBusy(true);
+    try {
+      await window.piDeck.workspaces.restoreSession({
+        workspaceId: session.workspaceId,
+        sessionFile: session.sessionFile,
+      });
+      setArchivedSessions((items) =>
+        items.filter((item) => item.id !== session.id),
+      );
+      await refreshRealSessions();
+      setUiMessage("Restored session to its workspace.");
+    } catch (error) {
+      setUiMessage(
+        `Failed to restore session: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      setWorkspaceDialogBusy(false);
+    }
+  }
+
+  async function restoreWorkspace(workspaceId: string): Promise<void> {
+    setWorkspaceDialogBusy(true);
+    try {
+      const result = await window.piDeck.workspaces.restore({ workspaceId });
+      applyWorkspaceListResult(result);
+      const restored = result.workspaces.find(
+        (workspace) => workspace.id === workspaceId,
+      );
+      if (restored !== undefined) {
+        await switchWorkspaceView(restored, result.workspaces);
+      }
+      await refreshArchivedSessions();
+      setUiMessage("Restored workspace and its cascaded sessions.");
+    } catch (error) {
+      setUiMessage(
+        `Failed to restore workspace: ${error instanceof Error ? error.message : String(error)}`,
       );
     } finally {
       setWorkspaceDialogBusy(false);
@@ -2665,6 +2844,56 @@ export function App(): ReactElement {
     }
   }
 
+  async function refreshArchivedSessions(): Promise<void> {
+    if (!isRealBackendMode || loadState.state !== "ready") {
+      return;
+    }
+    const listSessions = workspaceApi(window.piDeck).workspaces?.listSessions;
+    if (typeof listSessions !== "function") {
+      setArchivedSessions([]);
+      return;
+    }
+    const workspaceSnapshot = [...workspaces, ...archivedWorkspaces];
+    try {
+      const results = await Promise.allSettled(
+        workspaceSnapshot.map(async (workspace) => ({
+          workspace,
+          result: await listSessions({
+            workspaceId: workspace.id,
+            includeArchived: true,
+          }),
+        })),
+      );
+      const archived = results.flatMap((result) =>
+        result.status === "fulfilled"
+          ? result.value.result.sessions
+              .filter((summary) => summary.archivedAtMs !== undefined)
+              .map((summary) =>
+                sessionFromSummary(
+                  summary,
+                  result.value.workspace.id,
+                  projectIdForWorkspace(result.value.workspace),
+                ),
+              )
+          : [],
+      );
+      setArchivedSessions(archived);
+      const failed = results.filter(
+        (result): result is PromiseRejectedResult =>
+          result.status === "rejected",
+      );
+      if (failed.length > 0) {
+        setUiMessage(
+          `Archived view loaded with ${failed.length} workspace${failed.length === 1 ? "" : "s"} unavailable.`,
+        );
+      }
+    } catch (error) {
+      setUiMessage(
+        `Failed to refresh archived sessions: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   async function handleDeleteAllSessions(confirmed = false): Promise<void> {
     const workspaceId = currentWorkspace.id;
     const savedSessions = savedSessionsForProject(sessions, workspaceId);
@@ -2715,53 +2944,6 @@ export function App(): ReactElement {
         }
       },
     );
-  }
-
-  async function handleCloseRuntime(sessionId: string): Promise<void> {
-    const session = sessions.find((item) => item.id === sessionId);
-    if (session === undefined || !session.runtimeBacked) {
-      return;
-    }
-    if (isSessionBusy(session)) {
-      setUiMessage(
-        "Wait for Pi to complete or reconcile before closing this runtime.",
-      );
-      return;
-    }
-
-    blockAttachmentOwner(session.id);
-    intentionallyClosingRuntimeIds.current.add(session.id);
-    try {
-      await window.piDeck.chat.closeSession({ runtimeId: session.id });
-      discardComposerAttachmentOwner(session.id);
-      // Derive both the visible state and selection fallback from the latest
-      // render, rather than the array captured before closeSession awaited.
-      const remainingSessions = closeRuntimeInSessionState(
-        sessionsRef.current,
-        session.id,
-      );
-      setSessions((items) => closeRuntimeInSessionState(items, session.id));
-      const detached = remainingSessions.some((item) => item.id === session.id);
-      if (selectedSessionIdRef.current === session.id) {
-        const nextSession = remainingSessions.find(
-          (item) => item.id !== session.id && item.runtimeBacked,
-        );
-        if (nextSession !== undefined) {
-          setSelectedSessionId(nextSession.id);
-        } else {
-          await handleNewSession();
-        }
-      }
-      setUiMessage(
-        detached
-          ? "Closed the Pi runtime. The saved session can be resumed later."
-          : "Closed the Pi runtime.",
-      );
-    } catch (error) {
-      intentionallyClosingRuntimeIds.current.delete(session.id);
-      discardComposerAttachmentOwner(session.id);
-      setComposerError(error instanceof Error ? error.message : String(error));
-    }
   }
 
   async function handleDeleteSession(
@@ -3198,6 +3380,9 @@ export function App(): ReactElement {
           realMode={isRealBackendMode}
           currentWorkspace={currentWorkspace}
           workspaces={workspaces}
+          archivedWorkspaces={archivedWorkspaces}
+          archivedSessions={archivedSessions}
+          showArchived={showArchived}
           composerDrafts={composerDrafts}
           onSelect={handleSelectSession}
           onSelectWorkspace={(workspace) =>
@@ -3209,10 +3394,19 @@ export function App(): ReactElement {
           onArchiveWorkspace={(workspace) =>
             setWorkspaceDialog({ kind: "archive", workspaceId: workspace.id })
           }
+          onRestoreWorkspace={(workspace) =>
+            void restoreWorkspace(workspace.id)
+          }
+          onRestoreSession={(session) => void restoreSavedSession(session)}
+          onArchiveSession={(sessionId) => void archiveSavedSession(sessionId)}
+          onToggleArchived={() => {
+            const next = !showArchived;
+            setShowArchived(next);
+            if (next) void refreshArchivedSessions();
+          }}
           onHideSidebar={() => handleSidebarVisibleChange(false)}
           onNewSession={() => void handleNewSession()}
           onNewWorkspace={() => void handleNewWorkspace()}
-          onCloseRuntime={(sessionId) => void handleCloseRuntime(sessionId)}
           onDeleteSession={(sessionId) => void handleDeleteSession(sessionId)}
           onMoveSession={(sessionId) =>
             setWorkspaceDialog({ kind: "move", sessionId })
@@ -3283,7 +3477,6 @@ export function App(): ReactElement {
               onRecoverSession={handleRecoverSelectedSession}
               onRespondToExtensionUi={handleExtensionUiResponse}
               onRetrySession={handleRetrySelectedSession}
-              onCloseSession={() => void handleCloseRuntime(selectedSession.id)}
               onCopyDiagnostics={() => void handleCopySelectedDiagnostics()}
             />
             {composer}
@@ -3356,12 +3549,16 @@ function workspaceListFromBootstrap(
   const candidate = bootstrap as AppBootstrapState & {
     workspace?: WorkspaceRef;
     workspaces?: WorkspaceRef[];
+    archivedWorkspaces?: WorkspaceRef[];
   };
   if (candidate.workspace !== undefined) {
     return {
       activeWorkspaceId: candidate.workspace.id,
       activeWorkspace: candidate.workspace,
       workspaces: candidate.workspaces ?? [candidate.workspace],
+      ...(candidate.archivedWorkspaces
+        ? { archivedWorkspaces: candidate.archivedWorkspaces }
+        : {}),
     };
   }
   const activeWorkspace = workspaceFromLegacyProject(bootstrap.project);
@@ -3778,10 +3975,11 @@ function archiveWorkspaceBlockReason(
 ): string | undefined {
   if (
     sessions.some(
-      (session) => session.workspaceId === workspaceId && session.runtimeBacked,
+      (session) =>
+        session.workspaceId === workspaceId && isSessionBusy(session),
     )
   ) {
-    return "Close attached sessions before archiving this workspace.";
+    return "Finish active sessions before archiving this workspace.";
   }
   if (
     sessions.some(
@@ -3966,6 +4164,9 @@ function sessionFromSummary(
     resumeBacked: summary.attachedRuntimeId === undefined,
     backendMode: "real",
     sessionFile: summary.sessionFile,
+    ...(summary.archivedAtMs !== undefined
+      ? { archivedAtMs: summary.archivedAtMs }
+      : {}),
     timeline: summary.preview
       ? [
           {
@@ -5520,15 +5721,21 @@ function SessionSidebar(props: {
   realMode: boolean;
   currentWorkspace: WorkspaceRef;
   workspaces: WorkspaceRef[];
+  archivedWorkspaces: WorkspaceRef[];
+  archivedSessions: SessionViewModel[];
+  showArchived: boolean;
   composerDrafts: ComposerDraftsBySession;
   onSelect(sessionId: string): void;
   onSelectWorkspace(workspace: WorkspaceRef): void;
   onRenameWorkspace(workspace: WorkspaceRef): void;
   onArchiveWorkspace(workspace: WorkspaceRef): void;
+  onRestoreWorkspace(workspace: WorkspaceRef): void;
+  onRestoreSession(session: SessionViewModel): void;
+  onArchiveSession(sessionId: string): void;
+  onToggleArchived(): void;
   onHideSidebar(): void;
   onNewSession(): void;
   onNewWorkspace(): void;
-  onCloseRuntime(sessionId: string): void;
   onDeleteSession(sessionId: string): void;
   onMoveSession(sessionId: string): void;
   onRemoveSession(sessionId: string): void;
@@ -5627,12 +5834,15 @@ function SessionSidebar(props: {
   function renderSession(session: SessionViewModel): ReactElement {
     const canDelete = isSessionDeletable(session, props.realMode);
     const canManageMembership =
-      props.realMode && canManageWorkspaceMembership(session);
-    const membershipDisabledMessage = session.runtimeBacked
-      ? "Close this runtime before moving or removing its workspace membership."
-      : "Only idle saved sessions can be moved or removed from a workspace.";
-    const canCloseRuntime =
-      props.realMode && session.runtimeBacked && !isSessionBusy(session);
+      props.realMode &&
+      canDelete &&
+      !isSessionBusy(session) &&
+      !hasComposerDraft(props.composerDrafts, session.id);
+    const membershipDisabledMessage = isSessionBusy(session)
+      ? "Finish the active turn before changing this session's workspace membership."
+      : hasComposerDraft(props.composerDrafts, session.id)
+        ? "Send or clear unsent composer text and attachments before changing this session."
+        : "Only saved sessions can be moved, archived, or removed from a workspace.";
     return (
       <div className="session-item-wrap" key={session.id}>
         <Button
@@ -5662,19 +5872,6 @@ function SessionSidebar(props: {
             {session.updatedAt}
           </span>
         </Button>
-        {canCloseRuntime ? (
-          <IconButton
-            className="session-delete-button session-close-button"
-            icon={Unplug}
-            label={`Close runtime for ${session.title}`}
-            size="sm"
-            onPointerDown={(event) => event.stopPropagation()}
-            onClick={(event) => {
-              event.stopPropagation();
-              props.onCloseRuntime(session.id);
-            }}
-          />
-        ) : null}
         {canDelete ? (
           <span data-testid={`session-actions-${session.id}`}>
             <Menu
@@ -5693,6 +5890,18 @@ function SessionSidebar(props: {
                 onClick={() => props.onMoveSession(session.id)}
               >
                 Move to workspace…
+              </Button>
+              <Button
+                disabled={!canManageMembership}
+                role="menuitem"
+                size="sm"
+                title={
+                  canManageMembership ? undefined : membershipDisabledMessage
+                }
+                variant="menuItem"
+                onClick={() => props.onArchiveSession(session.id)}
+              >
+                Archive session
               </Button>
               <Button
                 disabled={!canManageMembership}
@@ -5779,6 +5988,21 @@ function SessionSidebar(props: {
         >
           <ListPlus aria-hidden="true" size={15} strokeWidth={1.75} />
           Add existing session…
+        </Button>
+      ) : null}
+
+      {props.realMode ? (
+        <Button
+          className="sidebar-archived-toggle"
+          size="sm"
+          aria-expanded={props.showArchived}
+          onClick={props.onToggleArchived}
+        >
+          <Archive aria-hidden="true" size={15} strokeWidth={1.75} />
+          {props.showArchived ? "Hide archived" : "Archived"}
+          <span className="sidebar-archived-count">
+            {props.archivedWorkspaces.length + props.archivedSessions.length}
+          </span>
         </Button>
       ) : null}
 
@@ -5933,6 +6157,16 @@ function SessionSidebar(props: {
         ) : null}
       </section>
 
+      {props.realMode && props.showArchived ? (
+        <ArchivedSidebarTree
+          activeWorkspaces={props.workspaces}
+          archivedWorkspaces={props.archivedWorkspaces}
+          archivedSessions={props.archivedSessions}
+          onRestoreWorkspace={props.onRestoreWorkspace}
+          onRestoreSession={props.onRestoreSession}
+        />
+      ) : null}
+
       {!props.realMode ? (
         <div className="sidebar-note">
           Red dot means supported extension UI is waiting for input. Fixture
@@ -5940,6 +6174,107 @@ function SessionSidebar(props: {
         </div>
       ) : null}
     </aside>
+  );
+}
+
+function ArchivedSidebarTree(props: {
+  activeWorkspaces: WorkspaceRef[];
+  archivedWorkspaces: WorkspaceRef[];
+  archivedSessions: SessionViewModel[];
+  onRestoreWorkspace(workspace: WorkspaceRef): void;
+  onRestoreSession(session: SessionViewModel): void;
+}): ReactElement {
+  const archivedWorkspaceIds = new Set(
+    props.archivedWorkspaces.map((workspace) => workspace.id),
+  );
+  const workspaceById = new Map(
+    [...props.activeWorkspaces, ...props.archivedWorkspaces].map(
+      (workspace) => [workspace.id, workspace],
+    ),
+  );
+  const sessionsByWorkspace = new Map<string, SessionViewModel[]>();
+  for (const session of props.archivedSessions) {
+    const existing = sessionsByWorkspace.get(session.workspaceId) ?? [];
+    existing.push(session);
+    sessionsByWorkspace.set(session.workspaceId, existing);
+  }
+  const workspacesWithArchivedSessions = props.activeWorkspaces.filter(
+    (workspace) => sessionsByWorkspace.has(workspace.id),
+  );
+  const groupedWorkspaces = [
+    ...props.archivedWorkspaces,
+    ...workspacesWithArchivedSessions,
+  ];
+
+  return (
+    <section
+      className="archived-tree"
+      aria-label="Archived workspaces and sessions"
+      data-testid="archived-tree"
+    >
+      <p className="archived-tree-heading">Archived</p>
+      {groupedWorkspaces.length === 0 ? (
+        <p className="empty-session-list">
+          No archived workspaces or sessions.
+        </p>
+      ) : (
+        groupedWorkspaces.map((workspace) => {
+          const workspaceSessions = sessionsByWorkspace.get(workspace.id) ?? [];
+          const isArchivedWorkspace = archivedWorkspaceIds.has(workspace.id);
+          return (
+            <div className="archived-tree-workspace" key={workspace.id}>
+              <div className="archived-tree-workspace-row">
+                <FolderOpen aria-hidden="true" size={14} strokeWidth={1.75} />
+                <span className="archived-tree-workspace-name">
+                  {workspaceById.get(workspace.id)?.name ?? workspace.name}
+                </span>
+                {isArchivedWorkspace ? (
+                  <Button
+                    size="sm"
+                    data-testid={`restore-workspace-${workspace.id}`}
+                    onClick={() => props.onRestoreWorkspace(workspace)}
+                  >
+                    Restore workspace
+                  </Button>
+                ) : null}
+              </div>
+              <div className="archived-tree-session-list">
+                {workspaceSessions.map((session) => (
+                  <div
+                    className="archived-tree-session-row"
+                    data-testid={`archived-session-${session.id}`}
+                    key={session.id}
+                  >
+                    <Archive
+                      aria-hidden="true"
+                      className="archived-tree-session-icon"
+                      size={13}
+                      strokeWidth={1.75}
+                    />
+                    <span className="archived-tree-session-copy">
+                      <span>{session.title}</span>
+                      <small>{session.subtitle}</small>
+                    </span>
+                    <Button
+                      size="sm"
+                      disabled={isArchivedWorkspace}
+                      title={
+                        isArchivedWorkspace
+                          ? "Restore the containing workspace first."
+                          : undefined
+                      }
+                      onClick={() => props.onRestoreSession(session)}
+                    >
+                      Restore session
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })
+      )}
+    </section>
   );
 }
 
@@ -5960,8 +6295,7 @@ function canManageWorkspaceMembership(
 ): session is SessionViewModel & { sessionFile: string } {
   return (
     session !== undefined &&
-    session.resumeBacked === true &&
-    !session.runtimeBacked &&
+    (session.resumeBacked === true || session.runtimeBacked === true) &&
     !isSessionBusy(session) &&
     typeof session.sessionFile === "string" &&
     session.sessionFile.length > 0
@@ -6366,7 +6700,10 @@ function WorkspaceManagementDialog(props: {
     sessionId !== undefined
       ? props.sessions.find((item) => item.id === sessionId)
       : undefined;
-  const membershipMutable = canManageWorkspaceMembership(session);
+  const membershipMutable =
+    canManageWorkspaceMembership(session) &&
+    (session === undefined ||
+      !hasComposerDraft(props.composerDrafts, session.id));
   const archiveBlockedReason = archiveWorkspaceBlockReason(
     props.sessions,
     props.composerDrafts,
@@ -6584,7 +6921,8 @@ function WorkspaceManagementDialog(props: {
             </p>
             {!membershipMutable ? (
               <p className="workspace-modal-warning">
-                Close the attached runtime before moving this session.
+                Finish the active turn and clear any unsent draft before moving
+                this session.
               </p>
             ) : null}
             <label>
@@ -6636,7 +6974,7 @@ function WorkspaceManagementDialog(props: {
             busy={props.busy}
             confirmLabel="Remove from workspace"
             note="This removes only workspace membership. The Pi JSONL file stays on disk."
-            blockedNote="Close the attached runtime before removing this session from the workspace."
+            blockedNote="Finish the active turn and clear any unsent draft before removing this session from the workspace."
             onClose={props.onClose}
             onConfirm={() => session && props.onRemove(session.id)}
           />
@@ -7008,7 +7346,6 @@ function ChatTimeline(props: {
     response: { confirmed: boolean } | { value: string } | { cancelled: true },
   ): Promise<void>;
   onRetrySession(): void;
-  onCloseSession(): void;
   onCopyDiagnostics(): void;
 }): ReactElement {
   const hasItems = props.session.timeline.length > 0;
@@ -7080,13 +7417,6 @@ function ChatTimeline(props: {
                   icon={History}
                   label="Reopen saved session"
                   onClick={props.onRecoverSession}
-                />
-              ) : null}
-              {props.session.runtimeBacked ? (
-                <IconButton
-                  icon={Unplug}
-                  label="Close runtime"
-                  onClick={props.onCloseSession}
                 />
               ) : null}
               <IconButton

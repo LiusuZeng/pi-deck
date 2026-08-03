@@ -208,12 +208,27 @@ test("workspace management UI keeps Pi JSONL membership reversible and deletion 
   try {
     await expectHealthyPreload(page);
 
-    // An attached runtime is a workspace-level archival guard. Exercise it
-    // through the visible confirmation instead of relying on a backend error.
+    // A busy runtime is a workspace-level archival guard. Runtime shutdown is
+    // otherwise internal, so users do not need a separate close affordance.
     await selectWorkspaceInUi(page, path.basename(projectCwd));
     await page.getByLabel("Prompt text").fill("keep archive disabled");
     await page.getByRole("button", { name: "Send" }).click();
     await expect(page.getByRole("button", { name: "Abort" })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /Close runtime/i }),
+    ).toHaveCount(0);
+    const busyRuntimeId = await page.evaluate(
+      async () => (await window.piDeck.chat.getSnapshot()).runtimeId,
+    );
+    const busyCloseError = await page.evaluate(async (runtimeId) => {
+      try {
+        await window.piDeck.chat.closeSession({ runtimeId });
+        return "unexpected success";
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    }, busyRuntimeId);
+    expect(busyCloseError).toMatch(/finish the active turn/i);
     await openWorkspaceActions(page, "authorized-project");
     await page.getByRole("menuitem", { name: "Archive workspace" }).click();
     const blockedArchiveDialog = page.getByTestId("workspace-archive-dialog");
@@ -221,7 +236,7 @@ test("workspace management UI keeps Pi JSONL membership reversible and deletion 
       blockedArchiveDialog.getByRole("button", { name: "Archive workspace" }),
     ).toBeDisabled();
     await expect(blockedArchiveDialog).toContainText(
-      "Close attached sessions before archiving this workspace.",
+      "Finish active sessions before archiving this workspace.",
     );
     await blockedArchiveDialog.getByRole("button", { name: "Cancel" }).click();
 
@@ -299,6 +314,62 @@ test("workspace management UI keeps Pi JSONL membership reversible and deletion 
 
     await selectWorkspaceInUi(page, "UI destination");
     await expect(sessionRow).toBeVisible();
+    await page
+      .getByRole("button", { name: "Session actions for ui-membership" })
+      .click();
+    await page.getByRole("menuitem", { name: "Archive session" }).click();
+    await expect(sessionRow).toHaveCount(0);
+    expect(fs.existsSync(canonicalSessionFile)).toBe(true);
+    await page.getByRole("button", { name: /Archived/ }).click();
+    await expect(page.getByTestId("archived-tree")).toContainText(
+      "ui-membership",
+    );
+    await page.getByRole("button", { name: "Restore session" }).click();
+    await expect(sessionRow).toBeVisible();
+
+    await createWorkspaceInUi(page, "Cascade workspace");
+    await selectWorkspaceInUi(page, "UI destination");
+    await page
+      .getByRole("button", { name: "Session actions for ui-membership" })
+      .click();
+    await page.getByRole("menuitem", { name: "Move to workspace…" }).click();
+    const cascadeMoveDialog = page.getByTestId("session-move-dialog");
+    await cascadeMoveDialog
+      .getByLabel("Destination workspace")
+      .selectOption({ label: "Cascade workspace" });
+    await cascadeMoveDialog
+      .getByRole("button", { name: "Move session" })
+      .click();
+    await selectWorkspaceInUi(page, "Cascade workspace");
+    await expect(sessionRow).toBeVisible();
+    await openWorkspaceActions(page, "Cascade workspace");
+    await page.getByRole("menuitem", { name: "Archive workspace" }).click();
+    await page
+      .getByTestId("workspace-archive-dialog")
+      .getByRole("button", { name: "Archive workspace" })
+      .click();
+    await expect(
+      page.getByRole("button", { name: "Workspace: Cascade workspace" }),
+    ).toHaveCount(0);
+    await expect(page.getByTestId("archived-tree")).toContainText(
+      "Cascade workspace",
+    );
+    await expect(
+      page
+        .locator(".archived-tree-workspace")
+        .filter({ hasText: "Cascade workspace" })
+        .getByRole("button", { name: "Restore session" }),
+    ).toBeDisabled();
+    await page
+      .locator(".archived-tree-workspace")
+      .filter({ hasText: "Cascade workspace" })
+      .getByRole("button", { name: "Restore workspace" })
+      .click();
+    await expect(
+      page.getByRole("button", { name: "Workspace: Cascade workspace" }),
+    ).toHaveAttribute("aria-current", "page");
+    await expect(sessionRow).toBeVisible();
+
     await page
       .getByRole("button", { name: "Session actions for ui-membership" })
       .click();
@@ -413,13 +484,21 @@ test("new workspaces send with managed context and model defaults without a fold
     const loggedCwds = fs.readFileSync(fakePiCwdLog, "utf8").trim().split("\n");
     expect(loggedCwds.at(-1)).toBe(fs.realpathSync(managedCwd));
 
-    const closeRuntime = page.getByRole("button", {
-      name: /^Close runtime for /,
-    });
-    await closeRuntime.focus();
-    await expect(closeRuntime).toBeFocused();
-    await page.keyboard.press("Enter");
-    await expect(page.getByText(/Closed the Pi runtime/)).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /Close runtime/i }),
+    ).toHaveCount(0);
+    await page
+      .getByRole("button", {
+        name: "Session actions for managed context first prompt",
+      })
+      .click();
+    await page.getByRole("menuitem", { name: "Archive session" }).click();
+    await expect(page.getByText(/Archived session/)).toBeVisible();
+    await page.getByRole("button", { name: /Archived/ }).click();
+    await expect(page.getByTestId("archived-tree")).toContainText(
+      "managed context first prompt",
+    );
+    await page.getByRole("button", { name: "Restore session" }).click();
     await page
       .getByRole("button", { name: "Session: managed context first prompt" })
       .click();
@@ -520,8 +599,42 @@ test("real-mode workspace membership lifecycle stays explicit and reversible", a
         workspaceId: destination.id,
       });
 
+      const archivedSession = await api.workspaces.archiveSession({
+        workspaceId: destination.id,
+        sessionFile,
+      });
+      const hiddenAfterSessionArchive = await api.chat.listSessions({
+        workspaceId: destination.id,
+      });
+      const archivedSessionList = await api.workspaces.listSessions({
+        workspaceId: destination.id,
+        includeArchived: true,
+      });
+      const restoredSession = await api.workspaces.restoreSession({
+        workspaceId: destination.id,
+        sessionFile,
+      });
+      const visibleAfterSessionRestore = await api.chat.listSessions({
+        workspaceId: destination.id,
+      });
+
       // Source is now empty, so archiving it must affect metadata only.
-      const archived = await api.workspaces.archive({ workspaceId: source.id });
+      const archivedSource = await api.workspaces.archive({
+        workspaceId: source.id,
+      });
+      const archived = await api.workspaces.archive({
+        workspaceId: destination.id,
+      });
+      const archivedWorkspaceSessions = await api.workspaces.listSessions({
+        workspaceId: destination.id,
+        includeArchived: true,
+      });
+      const restoredWorkspace = await api.workspaces.restore({
+        workspaceId: destination.id,
+      });
+      const visibleAfterWorkspaceRestore = await api.chat.listSessions({
+        workspaceId: destination.id,
+      });
       const removed = await api.workspaces.removeSession({
         workspaceId: destination.id,
         sessionFile,
@@ -541,6 +654,17 @@ test("real-mode workspace membership lifecycle stays explicit and reversible", a
         destinationBeforeMove: destinationBeforeMove.sessions,
         sourceAfterMove: sourceAfterMove.sessions,
         destinationAfterMove: destinationAfterMove.sessions,
+        archivedSession,
+        hiddenAfterSessionArchive: hiddenAfterSessionArchive.sessions,
+        archivedSessionList: archivedSessionList.sessions,
+        restoredSession,
+        visibleAfterSessionRestore: visibleAfterSessionRestore.sessions,
+        archivedSourceWorkspaceIds: archivedSource.archivedWorkspaces?.map(
+          (workspace) => workspace.id,
+        ),
+        archivedWorkspaceSessions: archivedWorkspaceSessions.sessions,
+        restoredWorkspaceId: restoredWorkspace.activeWorkspaceId,
+        visibleAfterWorkspaceRestore: visibleAfterWorkspaceRestore.sessions,
         destinationAfterRemove: destinationAfterRemove.sessions,
         unassigned: unassigned.sessions,
         activeWorkspaceId: archived.activeWorkspaceId,
@@ -566,6 +690,33 @@ test("real-mode workspace membership lifecycle stays explicit and reversible", a
     expect(
       outcome.destinationAfterMove.map((session) => session.sessionFile),
     ).toEqual([canonicalSessionFile]);
+    expect(outcome.archivedSession).toMatchObject({
+      workspaceId: outcome.destinationId,
+      sessionFile: canonicalSessionFile,
+    });
+    expect(outcome.hiddenAfterSessionArchive).toEqual([]);
+    expect(outcome.archivedSessionList[0]).toMatchObject({
+      sessionFile: canonicalSessionFile,
+      archivedAtMs: expect.any(Number),
+    });
+    expect(outcome.restoredSession).toMatchObject({
+      workspaceId: outcome.destinationId,
+      sessionFile: canonicalSessionFile,
+    });
+    expect(
+      outcome.visibleAfterSessionRestore.map((session) => session.sessionFile),
+    ).toEqual([canonicalSessionFile]);
+    expect(outcome.archivedSourceWorkspaceIds).toContain(outcome.sourceId);
+    expect(outcome.archivedWorkspaceSessions[0]).toMatchObject({
+      sessionFile: canonicalSessionFile,
+      archivedAtMs: expect.any(Number),
+    });
+    expect(outcome.restoredWorkspaceId).toBe(outcome.destinationId);
+    expect(
+      outcome.visibleAfterWorkspaceRestore.map(
+        (session) => session.sessionFile,
+      ),
+    ).toEqual([canonicalSessionFile]);
     expect(outcome.remainingWorkspaceIds).not.toContain(outcome.sourceId);
     expect(outcome.activeWorkspaceId).not.toBe(outcome.sourceId);
     expect(outcome.removed).toMatchObject({
@@ -578,6 +729,133 @@ test("real-mode workspace membership lifecycle stays explicit and reversible", a
     );
   } finally {
     await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("workspace and session archive state persists across relaunch", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-workspace-archive-relaunch-"),
+  );
+  const projectCwd = path.join(root, "authorized-project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  const sessionDir = path.join(agentDir, "sessions", "--archive-relaunch--");
+  const independentlyArchivedFile = path.join(sessionDir, "independent.jsonl");
+  const cascadeArchivedFile = path.join(sessionDir, "cascade.jsonl");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(sessionDir, { recursive: true });
+  fs.writeFileSync(
+    independentlyArchivedFile,
+    `${JSON.stringify({
+      type: "session",
+      version: 3,
+      id: "independent-archive",
+      timestamp: "2026-08-01T00:00:00.000Z",
+      cwd: projectCwd,
+    })}\n`,
+  );
+  fs.writeFileSync(
+    cascadeArchivedFile,
+    `${JSON.stringify({
+      type: "session",
+      version: 3,
+      id: "cascade-archive",
+      timestamp: "2026-08-01T00:00:00.000Z",
+      cwd: projectCwd,
+    })}\n`,
+  );
+  const env = fakeRealModeEnv({
+    root,
+    projectCwd,
+    agentDir,
+    userDataDir,
+  });
+  const firstLaunch = await launchPiDeck(env);
+  let workspaceId: string | undefined;
+  try {
+    await expectHealthyPreload(firstLaunch.page);
+    workspaceId = await firstLaunch.page.evaluate(
+      async ({ independentlyArchivedFile, cascadeArchivedFile }) => {
+        const api = window.piDeck;
+        const created = await api.workspaces.create({
+          name: "Persistent archive topic",
+        });
+        const workspace = created.activeWorkspace;
+        if (workspace === undefined) {
+          throw new Error("Expected the archive workspace to be active.");
+        }
+        await api.workspaces.addSession({
+          workspaceId: workspace.id,
+          sessionFile: independentlyArchivedFile,
+        });
+        await api.workspaces.addSession({
+          workspaceId: workspace.id,
+          sessionFile: cascadeArchivedFile,
+        });
+        await api.workspaces.archiveSession({
+          workspaceId: workspace.id,
+          sessionFile: independentlyArchivedFile,
+        });
+        await api.workspaces.archive({ workspaceId: workspace.id });
+        return workspace.id;
+      },
+      { independentlyArchivedFile, cascadeArchivedFile },
+    );
+  } finally {
+    await firstLaunch.app.close().catch(() => undefined);
+  }
+
+  const secondLaunch = await launchPiDeck(env);
+  try {
+    await expectHealthyPreload(secondLaunch.page);
+    const persisted = await secondLaunch.page.evaluate(async (workspaceId) => {
+      const api = window.piDeck;
+      const listed = await api.workspaces.getActive();
+      const archivedWorkspace = listed.archivedWorkspaces?.find(
+        (workspace) => workspace.id === workspaceId,
+      );
+      const beforeRestore = await api.workspaces.listSessions({
+        workspaceId,
+        includeArchived: true,
+      });
+      const restored = await api.workspaces.restore({ workspaceId });
+      const afterRestore = await api.chat.listSessions({ workspaceId });
+      const allAfterRestore = await api.workspaces.listSessions({
+        workspaceId,
+        includeArchived: true,
+      });
+      return {
+        archivedWorkspaceName: archivedWorkspace?.name,
+        archivedSessionFiles: beforeRestore.sessions
+          .filter((session) => session.archivedAtMs !== undefined)
+          .map((session) => session.sessionFile),
+        restoredWorkspaceId: restored.activeWorkspaceId,
+        visibleAfterRestore: afterRestore.sessions.map(
+          (session) => session.sessionFile,
+        ),
+        stillArchivedAfterRestore: allAfterRestore.sessions
+          .filter((session) => session.archivedAtMs !== undefined)
+          .map((session) => session.sessionFile),
+      };
+    }, workspaceId);
+
+    expect(persisted.archivedWorkspaceName).toBe("Persistent archive topic");
+    expect(persisted.archivedSessionFiles).toEqual(
+      expect.arrayContaining([
+        fs.realpathSync(independentlyArchivedFile),
+        fs.realpathSync(cascadeArchivedFile),
+      ]),
+    );
+    expect(persisted.restoredWorkspaceId).toBe(workspaceId);
+    expect(persisted.visibleAfterRestore).toEqual([
+      fs.realpathSync(cascadeArchivedFile),
+    ]);
+    expect(persisted.stillArchivedAfterRestore).toEqual([
+      fs.realpathSync(independentlyArchivedFile),
+    ]);
+  } finally {
+    await secondLaunch.app.close().catch(() => undefined);
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -1492,8 +1770,10 @@ test("metadata-only model and thinking changes preserve session title, transcrip
   }
 });
 
-test("closing an attached runtime preserves its saved session for recovery", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-close-"));
+test("idle runtime shutdown stays internal during session archive and restore", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-archive-runtime-"),
+  );
   const projectCwd = path.join(root, "project");
   const agentDir = path.join(root, "agent");
   fs.mkdirSync(projectCwd, { recursive: true });
@@ -1504,29 +1784,35 @@ test("closing an attached runtime preserves its saved session for recovery", asy
   );
   try {
     await expectHealthyPreload(page);
-    await page.getByLabel("Prompt text").fill("close runtime recovery");
+    await page.getByLabel("Prompt text").fill("archive runtime recovery");
     await page.getByRole("button", { name: "Send" }).click();
     await expect(
-      page.getByText(/Fake response to: close runtime recovery/),
+      page.getByText(/Fake response to: archive runtime recovery/),
     ).toBeVisible();
 
     const sessionRow = page.getByRole("button", {
-      name: /Session: close runtime recovery/,
+      name: /Session: archive runtime recovery/,
     });
-    const closeRuntime = page.getByRole("button", {
-      name: /Close runtime for close runtime recovery/,
-    });
-    await sessionRow.focus();
-    await page.keyboard.press("Tab");
-    await expect(closeRuntime).toBeFocused();
-    await expect(closeRuntime).toHaveCSS("opacity", "1");
-    await page.keyboard.press("Enter");
     await expect(
-      page.getByText(/Closed the Pi runtime. The saved session can be resumed/),
-    ).toBeVisible();
+      page.getByRole("button", { name: /Close runtime/i }),
+    ).toHaveCount(0);
     await page
-      .getByRole("button", { name: /Session: close runtime recovery/ })
+      .getByRole("button", {
+        name: "Session actions for archive runtime recovery",
+      })
       .click();
+    await page.getByRole("menuitem", { name: "Archive session" }).click();
+    await expect(page.getByText(/Archived session/)).toBeVisible();
+    await page.getByRole("button", { name: /Archived/ }).click();
+    await page
+      .getByTestId("archived-tree")
+      .getByRole("button", { name: "Restore session" })
+      .click();
+    const restoredRow = page.getByRole("button", {
+      name: "Session: archive runtime recovery",
+    });
+    await expect(restoredRow).toBeVisible();
+    await restoredRow.click();
     await expect(page.getByText("Resumed saved Pi session.")).toBeVisible();
   } finally {
     await app.close();

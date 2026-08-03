@@ -41,6 +41,11 @@ const workspaceSessionRefSchema = z
     createdAtMs: z.number().optional(),
     messageCount: z.number().int().min(0).optional(),
     missingSinceMs: z.number().optional(),
+    archivedAtMs: z.number().optional(),
+    // Set only when the containing workspace archive cascaded to this ref.
+    // An independently archived session leaves this unset so restoring the
+    // workspace does not unexpectedly make it visible again.
+    archivedByWorkspaceId: z.string().uuid().optional(),
   })
   .strict();
 
@@ -193,6 +198,7 @@ export interface WorkspaceListResult {
   activeWorkspaceId?: string;
   activeWorkspace?: WorkspaceRecord;
   workspaces: WorkspaceRecord[];
+  archivedWorkspaces?: WorkspaceRecord[];
 }
 
 export interface WorkspaceSessionMutationResult {
@@ -420,6 +426,15 @@ export class WorkspaceStore {
       archivedAtMs: now,
     };
     const workspaces = replaceAt(this.state.workspaces, index, archived);
+    const sessionRefs = this.state.sessionRefs.map((ref) =>
+      ref.workspaceId === id && ref.archivedAtMs === undefined
+        ? {
+            ...ref,
+            archivedAtMs: now,
+            archivedByWorkspaceId: id,
+          }
+        : ref,
+    );
     const nextActiveWorkspaceId =
       this.state.activeWorkspaceId === id
         ? workspaces
@@ -434,8 +449,50 @@ export class WorkspaceStore {
         ? { activeWorkspaceId: nextActiveWorkspaceId }
         : { activeWorkspaceId: undefined }),
       workspaces,
+      sessionRefs,
     });
     return cloneWorkspace(archived);
+  }
+
+  /** Restore a workspace and only the session refs archived by its cascade. */
+  async restore(workspaceId: string): Promise<WorkspaceRecord> {
+    const id = z.string().uuid().parse(workspaceId);
+    await this.loadIfNeeded();
+    const index = this.state.workspaces.findIndex(
+      (workspace) => workspace.id === id,
+    );
+    if (index < 0) throw new Error(`Unknown workspace: ${workspaceId}`);
+    const existing = this.state.workspaces[index]!;
+    if (existing.isDefault === true) {
+      throw new Error("The default workspace cannot be restored.");
+    }
+    if (existing.archivedAtMs === undefined) {
+      await this.persistIfDirty();
+      return cloneWorkspace(existing);
+    }
+    const now = Date.now();
+    const { archivedAtMs: _archivedAtMs, ...withoutArchive } = existing;
+    const restored = {
+      ...withoutArchive,
+      updatedAtMs: now,
+      lastOpenedAtMs: now,
+    };
+    const sessionRefs = this.state.sessionRefs.map((ref) => {
+      if (ref.archivedByWorkspaceId !== id) return ref;
+      const {
+        archivedAtMs: _sessionArchivedAtMs,
+        archivedByWorkspaceId: _sessionArchivedByWorkspaceId,
+        ...withoutCascadeArchive
+      } = ref;
+      return withoutCascadeArchive;
+    });
+    await this.commit({
+      ...this.state,
+      activeWorkspaceId: id,
+      workspaces: replaceAt(this.state.workspaces, index, restored),
+      sessionRefs,
+    });
+    return cloneWorkspace(restored);
   }
 
   async upsertSessionRef(
@@ -664,6 +721,11 @@ export class WorkspaceStore {
     );
     const source =
       sourceWorkspaceIndex < 0 ? undefined : workspaces[sourceWorkspaceIndex];
+    if (source?.archivedAtMs !== undefined) {
+      throw new Error(
+        "Restore the source workspace before moving its session.",
+      );
+    }
     if (source?.legacyProjectId !== undefined) {
       const nextSource = addLegacySessionExclusion(source, canonical, now);
       if (nextSource !== source) {
@@ -730,6 +792,75 @@ export class WorkspaceStore {
         : {}),
     });
     return true;
+  }
+
+  async archiveSession(
+    workspaceId: string,
+    sessionFile: string,
+  ): Promise<WorkspaceSessionMutationResult> {
+    const id = z.string().uuid().parse(workspaceId);
+    const canonical = await canonicalOrResolved(
+      z.string().min(1).parse(sessionFile),
+    );
+    await this.loadIfNeeded();
+    this.requireOpenWorkspaceIndex(id);
+    const index = this.state.sessionRefs.findIndex(
+      (ref) => ref.workspaceId === id && ref.sessionFile === canonical,
+    );
+    if (index < 0) {
+      throw new Error(
+        `Session is not assigned to this workspace: ${canonical}`,
+      );
+    }
+    const existing = this.state.sessionRefs[index]!;
+    if (existing.archivedAtMs === undefined) {
+      await this.commit({
+        ...this.state,
+        sessionRefs: replaceAt(this.state.sessionRefs, index, {
+          ...existing,
+          archivedAtMs: Date.now(),
+          archivedByWorkspaceId: undefined,
+        }),
+      });
+    } else {
+      await this.persistIfDirty();
+    }
+    return { workspaceId: id, sessionFile: canonical };
+  }
+
+  async restoreSession(
+    workspaceId: string,
+    sessionFile: string,
+  ): Promise<WorkspaceSessionMutationResult> {
+    const id = z.string().uuid().parse(workspaceId);
+    const canonical = await canonicalOrResolved(
+      z.string().min(1).parse(sessionFile),
+    );
+    await this.loadIfNeeded();
+    this.requireOpenWorkspaceIndex(id);
+    const index = this.state.sessionRefs.findIndex(
+      (ref) => ref.workspaceId === id && ref.sessionFile === canonical,
+    );
+    if (index < 0) {
+      throw new Error(
+        `Session is not assigned to this workspace: ${canonical}`,
+      );
+    }
+    const existing = this.state.sessionRefs[index]!;
+    if (existing.archivedAtMs !== undefined) {
+      const {
+        archivedAtMs: _archivedAtMs,
+        archivedByWorkspaceId: _archivedByWorkspaceId,
+        ...restored
+      } = existing;
+      await this.commit({
+        ...this.state,
+        sessionRefs: replaceAt(this.state.sessionRefs, index, restored),
+      });
+    } else {
+      await this.persistIfDirty();
+    }
+    return { workspaceId: id, sessionFile: canonical };
   }
 
   async markSessionMissing(
@@ -800,12 +931,16 @@ export class WorkspaceStore {
   /** Return cache only; this deliberately does not touch Pi session files. */
   async getCachedSessionSummaries(
     workspaceId: string,
+    options: { includeArchived?: boolean } = {},
   ): Promise<ChatSessionSummary[]> {
     const id = z.string().uuid().parse(workspaceId);
     await this.loadIfNeeded();
     return this.state.sessionRefs
       .filter(
-        (ref) => ref.workspaceId === id && ref.missingSinceMs === undefined,
+        (ref) =>
+          ref.workspaceId === id &&
+          ref.missingSinceMs === undefined &&
+          (options.includeArchived === true || ref.archivedAtMs === undefined),
       )
       .map(toCachedSummary)
       .sort((left, right) => right.updatedAtMs - left.updatedAtMs);
@@ -954,6 +1089,16 @@ export class WorkspaceStore {
 
   private listSync(): WorkspaceListResult {
     const activeWorkspace = this.getActiveWorkspaceSync();
+    const workspaces = this.state.workspaces
+      .filter((workspace) => workspace.archivedAtMs === undefined)
+      .sort((left, right) => right.lastOpenedAtMs - left.lastOpenedAtMs)
+      .map(cloneWorkspace);
+    const archivedWorkspaces = this.state.workspaces
+      .filter((workspace) => workspace.archivedAtMs !== undefined)
+      .sort(
+        (left, right) => (right.archivedAtMs ?? 0) - (left.archivedAtMs ?? 0),
+      )
+      .map(cloneWorkspace);
     return {
       ...(this.state.activeWorkspaceId
         ? { activeWorkspaceId: this.state.activeWorkspaceId }
@@ -961,10 +1106,8 @@ export class WorkspaceStore {
       ...(activeWorkspace
         ? { activeWorkspace: cloneWorkspace(activeWorkspace) }
         : {}),
-      workspaces: this.state.workspaces
-        .filter((workspace) => workspace.archivedAtMs === undefined)
-        .sort((left, right) => right.lastOpenedAtMs - left.lastOpenedAtMs)
-        .map(cloneWorkspace),
+      workspaces,
+      ...(archivedWorkspaces.length > 0 ? { archivedWorkspaces } : {}),
     };
   }
 
@@ -1112,6 +1255,12 @@ function sessionRefFromSummary(
       : existing?.preview
         ? { preview: existing.preview }
         : {}),
+    ...(existing?.archivedAtMs !== undefined
+      ? { archivedAtMs: existing.archivedAtMs }
+      : {}),
+    ...(existing?.archivedByWorkspaceId !== undefined
+      ? { archivedByWorkspaceId: existing.archivedByWorkspaceId }
+      : {}),
     addedAtMs: existing?.addedAtMs ?? now,
     lastSeenAtMs: now,
     lastKnownUpdatedAtMs: summary.updatedAtMs,
@@ -1135,6 +1284,9 @@ function toCachedSummary(ref: WorkspaceSessionRef): ChatSessionSummary {
     ...(ref.createdAtMs !== undefined ? { createdAtMs: ref.createdAtMs } : {}),
     messageCount: ref.messageCount ?? 0,
     ...(ref.preview ? { preview: ref.preview } : {}),
+    ...(ref.archivedAtMs !== undefined
+      ? { archivedAtMs: ref.archivedAtMs }
+      : {}),
   };
 }
 

@@ -36,12 +36,16 @@ import type {
   projectRefSchema,
   themePreferenceSchema,
   workspaceAddSessionRequestSchema,
+  workspaceArchiveSessionRequestSchema,
   workspaceCreateRequestSchema,
   workspaceListResultSchema,
+  workspaceListSessionsRequestSchema,
   workspaceMoveSessionRequestSchema,
   workspaceRefSchema,
   workspaceRemoveSessionRequestSchema,
+  workspaceRestoreSessionRequestSchema,
   workspaceSessionMutationResultSchema,
+  workspaceRestoreRequestSchema,
   workspaceUpdateRequestSchema,
 } from "./ipcSchemas.js";
 
@@ -98,11 +102,23 @@ export type WorkspaceListResult = z.infer<typeof workspaceListResultSchema>;
 export type WorkspaceCreateRequest = z.infer<
   typeof workspaceCreateRequestSchema
 >;
+export type WorkspaceRestoreRequest = z.infer<
+  typeof workspaceRestoreRequestSchema
+>;
 export type WorkspaceUpdateRequest = z.infer<
   typeof workspaceUpdateRequestSchema
 >;
 export type WorkspaceAddSessionRequest = z.infer<
   typeof workspaceAddSessionRequestSchema
+>;
+export type WorkspaceArchiveSessionRequest = z.infer<
+  typeof workspaceArchiveSessionRequestSchema
+>;
+export type WorkspaceRestoreSessionRequest = z.infer<
+  typeof workspaceRestoreSessionRequestSchema
+>;
+export type WorkspaceListSessionsRequest = z.infer<
+  typeof workspaceListSessionsRequestSchema
 >;
 export type WorkspaceMoveSessionRequest = z.infer<
   typeof workspaceMoveSessionRequestSchema
@@ -207,6 +223,7 @@ export interface PiDeckApi {
     update(request: WorkspaceUpdateRequest): Promise<WorkspaceListResult>;
     select(request: { workspaceId: string }): Promise<WorkspaceListResult>;
     archive(request: { workspaceId: string }): Promise<WorkspaceListResult>;
+    restore(request: { workspaceId: string }): Promise<WorkspaceListResult>;
     addSession(
       request: WorkspaceAddSessionRequest,
     ): Promise<WorkspaceSessionMutationResult>;
@@ -216,6 +233,15 @@ export interface PiDeckApi {
     removeSession(
       request: WorkspaceRemoveSessionRequest,
     ): Promise<WorkspaceSessionMutationResult>;
+    archiveSession(
+      request: WorkspaceArchiveSessionRequest,
+    ): Promise<WorkspaceSessionMutationResult>;
+    restoreSession(
+      request: WorkspaceRestoreSessionRequest,
+    ): Promise<WorkspaceSessionMutationResult>;
+    listSessions(
+      request: WorkspaceListSessionsRequest,
+    ): Promise<ChatListSessionsResult>;
     listUnassignedSessions(): Promise<ChatListSessionsResult>;
   };
   attachments: {

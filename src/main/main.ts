@@ -55,11 +55,15 @@ import {
   projectListResultSchema,
   projectSelectRequestSchema,
   workspaceAddSessionRequestSchema,
+  workspaceArchiveSessionRequestSchema,
   workspaceArchiveRequestSchema,
   workspaceCreateRequestSchema,
   workspaceListResultSchema,
+  workspaceListSessionsRequestSchema,
   workspaceMoveSessionRequestSchema,
   workspaceRemoveSessionRequestSchema,
+  workspaceRestoreSessionRequestSchema,
+  workspaceRestoreRequestSchema,
   workspaceSelectRequestSchema,
   workspaceSessionMutationResultSchema,
   workspaceUpdateRequestSchema,
@@ -639,6 +643,24 @@ function registerIpcHandlers(
     handler: async ({ runtimeId }) => {
       const adapter = await ensureChatAdapter(store, diagnosticsService);
       const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
+      const status = await getChatRuntimeStatus(activeRuntimeId);
+      if (status.state.isAgentActive) {
+        throw new Error("Finish the active turn before closing this session.");
+      }
+      // Persist the latest session title/preview before an internal idle
+      // shutdown. Without this read, a restored row can fall back to the
+      // generated JSONL filename instead of the user's first prompt.
+      try {
+        await getChatSnapshotForRuntime(
+          adapter,
+          activeRuntimeId,
+          chatRuntimeModes.get(activeRuntimeId) ?? resolveChatBackendMode(),
+        );
+      } catch (error) {
+        diagnosticsService.recordError(
+          `Could not refresh session metadata before closing runtime ${activeRuntimeId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
       await closeAttachedChatRuntime(adapter, activeRuntimeId);
       return undefined;
     },
@@ -828,6 +850,17 @@ function registerIpcHandlers(
   });
 
   registerValidatedIpc({
+    channel: ipcChannels.workspaceRestore,
+    requestSchema: workspaceRestoreRequestSchema,
+    responseSchema: workspaceListResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ workspaceId }) => {
+      await ensureWorkspaceStore().restore(workspaceId);
+      return projectWorkspaceListResult();
+    },
+  });
+
+  registerValidatedIpc({
     channel: ipcChannels.workspaceAddSession,
     requestSchema: workspaceAddSessionRequestSchema,
     responseSchema: workspaceSessionMutationResultSchema,
@@ -879,6 +912,42 @@ function registerIpcHandlers(
           (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile),
       };
     },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workspaceArchiveSession,
+    requestSchema: workspaceArchiveSessionRequestSchema,
+    responseSchema: workspaceSessionMutationResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ workspaceId, sessionFile }) => {
+      const canonical =
+        (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
+      if (chatSessionFileLocks.has(canonical)) {
+        throw new Error("Finish the attached session before archiving it.");
+      }
+      return ensureWorkspaceStore().archiveSession(workspaceId, canonical);
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workspaceRestoreSession,
+    requestSchema: workspaceRestoreSessionRequestSchema,
+    responseSchema: workspaceSessionMutationResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ workspaceId, sessionFile }) =>
+      ensureWorkspaceStore().restoreSession(workspaceId, sessionFile),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workspaceListSessions,
+    requestSchema: workspaceListSessionsRequestSchema,
+    responseSchema: chatListSessionsResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ workspaceId, includeArchived }) =>
+      listWorkspaceChatSessions(store, workspaceId, {
+        ...(includeArchived !== undefined ? { includeArchived } : {}),
+        discoverLegacySessions: false,
+      }),
   });
 
   registerValidatedIpc({
@@ -1091,6 +1160,11 @@ async function projectWorkspaceListResult(): Promise<WorkspaceListResult> {
       ? { activeWorkspace: toRef(listedWorkspaces.activeWorkspace) }
       : {}),
     workspaces: listedWorkspaces.workspaces.map(toRef),
+    ...(listedWorkspaces.archivedWorkspaces?.length
+      ? {
+          archivedWorkspaces: listedWorkspaces.archivedWorkspaces.map(toRef),
+        }
+      : {}),
   };
 }
 
@@ -1339,6 +1413,9 @@ async function getAppBootstrapState(
       workspaceList.activeWorkspace ??
       workspaceList.workspaces.find((item) => item.id === activeWorkspace.id),
     workspaces: workspaceList.workspaces,
+    ...(workspaceList.archivedWorkspaces
+      ? { archivedWorkspaces: workspaceList.archivedWorkspaces }
+      : {}),
     cachedSessions,
   };
 }
@@ -1826,11 +1903,13 @@ async function createRealResumeWorker(
   if (sessionDir === undefined) {
     throw new Error("No Pi session directory is configured.");
   }
-  const validation = await validatePiSession({
-    sessionFile,
-    sessionDir,
-    projectCwd: launch.projectCwd,
-  });
+  const validation = isManagedRuntimeProject(project)
+    ? await validatePiSessionFile({ sessionFile, sessionDir })
+    : await validatePiSession({
+        sessionFile,
+        sessionDir,
+        projectCwd: launch.projectCwd,
+      });
   if (!validation.ok) {
     throw new Error(
       `Session is not eligible for resume: ${validation.reason}.`,
@@ -2287,11 +2366,30 @@ async function listChatSessions(
 async function listWorkspaceChatSessions(
   settings: SettingsStore,
   workspaceId: string,
-  options: { discoverLegacySessions?: boolean } = {},
+  options: {
+    discoverLegacySessions?: boolean;
+    includeArchived?: boolean;
+  } = {},
 ): Promise<ChatListSessionsResult> {
-  const workspace = await requireOpenWorkspace(workspaceId);
+  const storedWorkspace =
+    await ensureWorkspaceStore().getWorkspace(workspaceId);
+  if (storedWorkspace === undefined) {
+    throw new Error(`Unknown workspace: ${workspaceId}`);
+  }
+  if (
+    storedWorkspace.archivedAtMs !== undefined &&
+    options.includeArchived !== true
+  ) {
+    throw new Error(`Workspace is archived: ${workspaceId}`);
+  }
+  const workspace = storedWorkspace;
+  const sessionListOptions =
+    options.includeArchived === undefined
+      ? {}
+      : { includeArchived: options.includeArchived };
   let refs = await ensureWorkspaceStore().getCachedSessionSummaries(
     workspace.id,
+    sessionListOptions,
   );
   const diagnostics: string[] = [];
   // Compatibility migration: existing directory-backed projects historically
@@ -2299,6 +2397,7 @@ async function listWorkspaceChatSessions(
   // migrated workspaces in sync with newly discovered files, but never reclaim
   // a session that the user explicitly moved to another workspace.
   if (
+    workspace.archivedAtMs === undefined &&
     workspace.legacyProjectId !== undefined &&
     options.discoverLegacySessions !== false
   ) {
@@ -2318,6 +2417,7 @@ async function listWorkspaceChatSessions(
         );
         refs = await ensureWorkspaceStore().getCachedSessionSummaries(
           workspace.id,
+          sessionListOptions,
         );
       }
     } catch (error) {
@@ -2378,6 +2478,16 @@ async function projectForWorkspaceSession(
     throw new Error("Session does not belong to this workspace.");
   }
   const managedProject = await resolveManagedRuntimeProject();
+  // A workspace without a default project is intentionally directory
+  // independent. Imported/legacy sessions can retain an old cwd in their Pi
+  // header even after their former project record is gone; requiring the user
+  // to reopen that folder would make the folderless workspace unusable. Run
+  // those sessions in Pi Deck's managed context instead. Directory-backed
+  // workspaces continue through the registered-project authorization path
+  // below.
+  if (workspace.defaultProjectId === undefined) {
+    return managedProject;
+  }
   const refCwd = ref.cwd
     ? ((await safeRealpath(ref.cwd)) ?? path.resolve(ref.cwd))
     : undefined;
@@ -2462,11 +2572,13 @@ async function deleteChatSession(
   if (sessionDir === undefined) {
     throw new Error("No Pi session directory is configured.");
   }
-  const validation = await validatePiSession({
-    sessionFile,
-    sessionDir,
-    projectCwd: launch.projectCwd,
-  });
+  const validation = isManagedRuntimeProject(project)
+    ? await validatePiSessionFile({ sessionFile, sessionDir })
+    : await validatePiSession({
+        sessionFile,
+        sessionDir,
+        projectCwd: launch.projectCwd,
+      });
   if (!validation.ok) {
     throw new Error(
       `Session is not eligible for deletion: ${validation.reason}.`,
@@ -2707,11 +2819,13 @@ async function resumeChatSession(
   if (sessionDir === undefined) {
     throw new Error("No Pi session directory is configured.");
   }
-  const validation = await validatePiSession({
-    sessionFile,
-    sessionDir,
-    projectCwd: launch.projectCwd,
-  });
+  const validation = isManagedRuntimeProject(project)
+    ? await validatePiSessionFile({ sessionFile, sessionDir })
+    : await validatePiSession({
+        sessionFile,
+        sessionDir,
+        projectCwd: launch.projectCwd,
+      });
   if (!validation.ok) {
     throw new Error(
       `Session is not eligible for resume: ${validation.reason}.`,
