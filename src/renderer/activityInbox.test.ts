@@ -50,6 +50,7 @@ describe("buildActivityInbox", () => {
       ["pending", "pending"],
       ["working", "inProgress"],
       ["completed", "completed"],
+      ["idle", "idle"],
     ]);
     expect(inbox.items.map((item) => item.actionLabel)).toEqual([
       "Respond",
@@ -57,6 +58,7 @@ describe("buildActivityInbox", () => {
       "View pending",
       "View progress",
       "View result",
+      "Open session",
     ]);
     expect(inbox.items[0]?.tags).toEqual([
       "workspace:workspace-a",
@@ -106,13 +108,37 @@ describe("buildActivityInbox", () => {
     ).toBe("inProgress");
   });
 
+  it("classifies idle sessions after completion precedence and skips drafts", () => {
+    expect(classifyActivity(source("idle"))).toBe("idle");
+    expect(
+      classifyActivity(source("idle-completed", { completedAtMs: 1 })),
+    ).toBe("completed");
+    expect(classifyActivity(source("draft", { draftSession: true }))).toBe(
+      undefined,
+    );
+    expect(
+      buildActivityInbox([source("draft", { draftSession: true })]),
+    ).toMatchObject({
+      totalCount: 0,
+      counts: { idle: 0 },
+    });
+    expect(buildActivityInbox([source("idle")]).items[0]).toMatchObject({
+      detail: "No active work",
+      actionLabel: "Open session",
+      tags: ["workspace:workspace-a", "status:idle", "kind:session"],
+    });
+  });
+
   it("requires an explicit finite completion timestamp", () => {
-    expect(classifyActivity(source("idle"))).toBeUndefined();
     expect(
-      classifyActivity(source("undefined", { completedAtMs: undefined })),
-    ).toBeUndefined();
+      classifyActivity(
+        source("undefined", { baseState: "working", completedAtMs: undefined }),
+      ),
+    ).toBe("inProgress");
     expect(
-      classifyActivity(source("invalid", { completedAtMs: Number.NaN })),
+      classifyActivity(
+        source("invalid", { baseState: "unloaded", completedAtMs: Number.NaN }),
+      ),
     ).toBeUndefined();
     expect(classifyActivity(source("completed", { completedAtMs: 0 }))).toBe(
       "completed",
