@@ -156,6 +156,10 @@ import {
 } from "./workflows/workflowEngine.js";
 import { WorkflowStore } from "./workflows/workflowStore.js";
 import {
+  WorkflowScheduler,
+  type WorkflowRuntimeEvent,
+} from "./workflows/workflowScheduler.js";
+import {
   AttachmentSelectionStore,
   type AttachmentSelectionEntry,
 } from "./attachmentSelectionStore.js";
@@ -219,16 +223,7 @@ let selectedRealProjectCwd: string | undefined;
 let isQuittingAfterChatWorkerCleanup = false;
 let testProjectPickQueue: string[] | undefined;
 
-type WorkflowScheduler = {
-  schedule(run: WorkflowRun): Promise<WorkflowRun>;
-};
-
-// Workflow execution is persisted and deterministic in this slice. Keeping
-// scheduling behind this interface makes Pi-backed execution an additive
-// change rather than an IPC or storage contract change.
-const workflowScheduler: WorkflowScheduler = {
-  schedule: async (run) => run,
-};
+let workflowScheduler: WorkflowScheduler | undefined;
 
 const maxImportedImageBytes = MAX_IMAGE_BYTES;
 const maxPromptImages = 10;
@@ -273,6 +268,7 @@ async function bootstrap(): Promise<void> {
     diagnostics,
   );
   await workflowStore.loadIfNeeded();
+  workflowScheduler = createWorkflowScheduler(settingsStore, diagnostics);
   const hadWorkspaceMetadata =
     (await workspaceStore.list()).workspaces.length > 0;
   await migrateLegacyProjectsToWorkspaces();
@@ -1093,10 +1089,7 @@ function registerIpcHandlers(
       });
       const persisted = await ensureWorkflowStore().createRun(run);
       emitWorkflowRunEvent(persisted);
-      // The scheduler is intentionally a no-op in this slice. It is an
-      // explicit seam so Pi-backed step execution can be added without
-      // changing persisted run semantics or the renderer API.
-      return workflowScheduler.schedule(persisted);
+      return ensureWorkflowScheduler().schedule(persisted);
     },
   });
 
@@ -1111,7 +1104,7 @@ function registerIpcHandlers(
         stopWorkflowRun(run),
       );
       emitWorkflowRunEvent(updated);
-      return updated;
+      return ensureWorkflowScheduler().update(updated);
     },
   });
 
@@ -1126,7 +1119,7 @@ function registerIpcHandlers(
         retryWorkflowStep(run, stepRunId),
       );
       emitWorkflowRunEvent(updated);
-      return updated;
+      return ensureWorkflowScheduler().update(updated);
     },
   });
 
@@ -1141,7 +1134,7 @@ function registerIpcHandlers(
         approveWorkflowStep(run, stepRunId, action),
       );
       emitWorkflowRunEvent(updated);
-      return updated;
+      return ensureWorkflowScheduler().update(updated);
     },
   });
 
@@ -1288,6 +1281,70 @@ function ensureWorkflowStore(): WorkflowStore {
     throw new Error("Workflow store is not initialized");
   }
   return workflowStore;
+}
+
+function ensureWorkflowScheduler(): WorkflowScheduler {
+  if (workflowScheduler === undefined) {
+    throw new Error("Workflow scheduler is not initialized");
+  }
+  return workflowScheduler;
+}
+
+function createWorkflowScheduler(
+  store: SettingsStore,
+  diagnosticsService: DiagnosticsService,
+): WorkflowScheduler {
+  return new WorkflowScheduler({
+    createSession: async (workspaceId) => {
+      const project = await resolveWorkspaceProject(workspaceId);
+      const snapshot = await createChatSessionSnapshot(
+        store,
+        diagnosticsService,
+        project,
+        workspaceId,
+      );
+      return {
+        runtimeId: snapshot.runtimeId,
+        state: snapshot.state,
+        messages: snapshot.messages,
+      };
+    },
+    prompt: async (runtimeId, text) => {
+      const adapter = chatAdapter;
+      if (adapter === undefined || !adapter.hasRuntime(runtimeId)) {
+        throw new Error(
+          `Workflow chat runtime is no longer attached: ${runtimeId}`,
+        );
+      }
+      await adapter.prompt(runtimeId, { text });
+    },
+    getSnapshot: async (runtimeId) => {
+      const adapter = chatAdapter;
+      if (adapter === undefined || !adapter.hasRuntime(runtimeId)) {
+        throw new Error(
+          `Workflow chat runtime is no longer attached: ${runtimeId}`,
+        );
+      }
+      const snapshot = await getChatSnapshotForRuntime(
+        adapter,
+        runtimeId,
+        chatRuntimeModes.get(runtimeId) ?? resolveChatBackendMode(),
+      );
+      return {
+        runtimeId: snapshot.runtimeId,
+        state: snapshot.state,
+        messages: snapshot.messages,
+      };
+    },
+    closeSession: async (runtimeId) => {
+      const adapter = chatAdapter;
+      if (adapter !== undefined && adapter.hasRuntime(runtimeId)) {
+        await closeAttachedChatRuntime(adapter, runtimeId);
+      }
+    },
+    persist: (run) => ensureWorkflowStore().updateRun(run),
+    emit: emitWorkflowRunEvent,
+  });
 }
 
 async function resolveWorkflowWorkspaceId(
@@ -1743,6 +1800,12 @@ async function initializeChatAdapter(
     }
     trackExtensionUiRuntimeEvent(parsed.data);
     sendChatEventToRenderer(parsed.data);
+    // Workflow handling runs before worker-exit cleanup. agent_end needs the
+    // live worker to read its final transcript; worker_exit itself is handled
+    // as a terminal workflow failure before the adapter forgets the worker.
+    void workflowScheduler?.handleRuntimeEvent(
+      parsed.data as WorkflowRuntimeEvent,
+    );
     if (parsed.data.type === "worker_exit") {
       // A child exit does not go through closeSession(), so remove it from the
       // adapter as well as the UI/runtime maps or it would consume capacity.
