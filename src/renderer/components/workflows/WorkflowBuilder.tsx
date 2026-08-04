@@ -39,17 +39,54 @@ function newInput(index: number): WorkflowInputDefinition {
   };
 }
 
-function materializeTransitions(
+function branchTargetStepIds(transitions: WorkflowTransition[]): Set<string> {
+  const targetIds = new Set<string>();
+  for (const transition of transitions) {
+    if (transition.kind === "always") continue;
+    if (transition.kind === "manualGate") {
+      targetIds.add(transition.toStepId);
+      continue;
+    }
+    for (const target of Object.values(transition.routes)) {
+      if (target?.kind === "step") targetIds.add(target.stepId);
+      if (target?.kind === "manualGate") targetIds.add(target.toStepId);
+    }
+  }
+  return targetIds;
+}
+
+export function missingWorkflowTransitionStepIds(
+  steps: WorkflowStepDefinition[],
+  transitions: WorkflowTransition[],
+): string[] {
+  const branchTargets = branchTargetStepIds(transitions);
+  return steps
+    .slice(0, -1)
+    .filter(
+      (step) =>
+        !transitions.some((transition) => transition.fromStepId === step.id) &&
+        !branchTargets.has(step.id),
+    )
+    .map((step) => step.id);
+}
+
+export function materializeWorkflowTransitions(
   steps: WorkflowStepDefinition[],
   transitions: WorkflowTransition[],
 ): WorkflowTransition[] {
   const materialized = [...transitions];
+  const branchTargets = branchTargetStepIds(transitions);
   for (let index = 0; index < steps.length - 1; index += 1) {
     const fromStep = steps[index]!;
     const toStep = steps[index + 1]!;
     if (
-      materialized.some((transition) => transition.fromStepId === fromStep.id)
+      materialized.some(
+        (transition) => transition.fromStepId === fromStep.id,
+      ) ||
+      branchTargets.has(fromStep.id)
     ) {
+      // A branch target may intentionally be terminal. Do not invent a
+      // transition merely because another step follows it in the editor list.
       continue;
     }
     materialized.push({
@@ -94,7 +131,7 @@ function definitionForTemplate(
       : {}),
     inputs: template.inputs,
     steps,
-    transitions: materializeTransitions(steps, template.transitions),
+    transitions: materializeWorkflowTransitions(steps, template.transitions),
   };
 }
 
@@ -267,15 +304,19 @@ export function WorkflowBuilder(props: {
   const missingTransitionErrors = useMemo(
     () =>
       Object.fromEntries(
-        definition.steps
-          .slice(0, -1)
-          .flatMap((step) =>
-            transitionForStep(step.id) === undefined
-              ? [[step.id, "Choose a persisted transition before saving."]]
-              : [],
-          ),
+        missingWorkflowTransitionStepIds(
+          definition.steps,
+          definition.transitions,
+        ).map((stepId) => [
+          stepId,
+          "Choose a persisted transition before saving.",
+        ]),
       ) as Record<string, string>,
     [definition.steps, definition.transitions],
+  );
+  const branchTargets = useMemo(
+    () => branchTargetStepIds(definition.transitions),
+    [definition.transitions],
   );
   const promptErrors = useMemo(
     () =>
@@ -611,7 +652,7 @@ export function WorkflowBuilder(props: {
                     onStepChange={updateStep}
                     error={transitionErrors[step.id]}
                   />
-                ) : (
+                ) : branchTargets.has(step.id) ? null : (
                   <p
                     className="workflow-error workflow-transition-missing"
                     role="alert"

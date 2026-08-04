@@ -40,13 +40,11 @@ export function WorkflowTransitionCard(props: {
                   props.fromStepId,
               });
             } else {
-              // Conditions cannot fan multiple routes into one step. Keep the
-              // initial condition saveable: YES continues to the next step,
-              // while NO and UNSURE stop until the author chooses distinct
-              // targets explicitly.
-              const nextStep = steps.find(
-                (step) => step.id !== props.fromStepId,
+              const fromIndex = steps.findIndex(
+                (step) => step.id === props.fromStepId,
               );
+              const nextStep =
+                fromIndex >= 0 ? steps[fromIndex + 1] : undefined;
               props.onChange({
                 id: transition.id,
                 fromStepId: props.fromStepId,
@@ -60,7 +58,9 @@ export function WorkflowTransitionCard(props: {
                   no: { kind: "stop" },
                   unsure: { kind: "stop" },
                 },
-                previewBeforeStart: true,
+                // The selected branch runs automatically unless the author
+                // explicitly enables a preview/approval pause below.
+                previewBeforeStart: false,
               });
             }
           }}
@@ -125,27 +125,52 @@ export function WorkflowTransitionCard(props: {
               }
             />
           </label>
+          <label className="workflow-checkbox">
+            <input
+              id={`workflow-${transition.id}-preview`}
+              type="checkbox"
+              checked={transition.previewBeforeStart}
+              aria-describedby={`workflow-${transition.id}-preview-help`}
+              onChange={(event) =>
+                props.onChange({
+                  ...transition,
+                  previewBeforeStart: event.target.checked,
+                })
+              }
+            />
+            <span>Preview selected branch before starting</span>
+          </label>
+          <p
+            id={`workflow-${transition.id}-preview-help`}
+            className="workflow-help"
+          >
+            When enabled, the selected branch waits for approval. Leave this off
+            to start the selected branch automatically.
+          </p>
           <div className="workflow-branch-grid">
             {(["yes", "no", "unsure"] as const).map((decision) => {
               const currentTarget = transition.routes[decision];
               const currentStepId =
                 currentTarget?.kind === "step"
                   ? currentTarget.stepId
-                  : undefined;
+                  : currentTarget?.kind === "manualGate"
+                    ? currentTarget.toStepId
+                    : undefined;
               const targetsUsedByOtherRoutes = new Set(
                 (["yes", "no", "unsure"] as const)
                   .filter((otherDecision) => otherDecision !== decision)
                   .flatMap((otherDecision) => {
                     const target = transition.routes[otherDecision];
-                    return target?.kind === "step" ? [target.stepId] : [];
+                    return target?.kind === "step"
+                      ? [target.stepId]
+                      : target?.kind === "manualGate"
+                        ? [target.toStepId]
+                        : [];
                   }),
               );
               return (
                 <label className="workflow-field" key={decision}>
-                  <span>
-                    If {decision.toUpperCase()}
-                    {decision === "unsure" ? " (manual approval)" : ""}
-                  </span>
+                  <span>If {decision.toUpperCase()}</span>
                   <select
                     value={currentStepId ?? "stop"}
                     onChange={(event) => {
@@ -157,17 +182,18 @@ export function WorkflowTransitionCard(props: {
                           [decision]:
                             value === "stop"
                               ? { kind: "stop" }
-                              : { kind: "step", stepId: value },
+                              : decision === "unsure"
+                                ? { kind: "manualGate", toStepId: value }
+                                : { kind: "step", stepId: value },
                         },
                       });
-                      if (decision === "unsure" && value !== "stop") {
-                        props.onStepChange?.(value, {
-                          startPolicy: "manualApproval",
-                        });
-                      }
                     }}
                   >
-                    <option value="stop">Stop workflow</option>
+                    <option value="stop">
+                      {decision === "unsure"
+                        ? "Stop workflow (default)"
+                        : "Stop workflow"}
+                    </option>
                     {steps
                       .filter(
                         (step) =>
@@ -177,7 +203,9 @@ export function WorkflowTransitionCard(props: {
                       )
                       .map((step) => (
                         <option key={step.id} value={step.id}>
-                          {step.name}
+                          {decision === "unsure"
+                            ? `Request approval at ${step.name}`
+                            : step.name}
                         </option>
                       ))}
                   </select>
@@ -186,10 +214,9 @@ export function WorkflowTransitionCard(props: {
             })}
           </div>
           <p className="workflow-help">
-            UNSURE stops by default. To request manual approval instead, choose
-            a dedicated step that is different from the YES/NO targets; it will
-            be configured as “Ask before starting” so the backend can pause for
-            an explicit approval.
+            UNSURE stops by default. Choosing a step creates a dedicated
+            approval branch, so YES remains automatic even when it shares that
+            step as its target.
           </p>
         </>
       ) : null}
