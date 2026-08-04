@@ -459,6 +459,51 @@ describe("workflowEngine", () => {
     ).toBe(true);
   });
 
+  it("fails recovery when unsure has no configured route", () => {
+    const configured = template({
+      transitions: [
+        {
+          ...template().transitions[0]!,
+          routes: {
+            yes: { kind: "step", stepId: "act" },
+            no: { kind: "step", stepId: "deeper" },
+          },
+        },
+      ],
+    });
+    const run = createWorkflowRun({
+      template: configured,
+      workspaceId: "ws",
+      inputs: {},
+      now: 100,
+    });
+    const started = markWorkflowStepStarted(run, run.stepRuns[0]!.id, 101);
+    const evaluating = markWorkflowStepCompleted(
+      started,
+      run.stepRuns[0]!.id,
+      { finalAnswer: "The result is ambiguous." },
+      102,
+    );
+
+    const recovered = resolveWorkflowCondition(
+      evaluating,
+      evaluating.transitionRuns[0]!.id,
+      "unsure",
+      "No confident answer.",
+      103,
+    );
+
+    expect(recovered.status).toBe("needsAttention");
+    expect(recovered.status).not.toBe("completed");
+    expect(recovered.transitionRuns[0]).toMatchObject({
+      status: "failed",
+      decision: undefined,
+    });
+    expect(recovered.stepRuns.some((step) => step.status === "ready")).toBe(
+      false,
+    );
+  });
+
   it("routes unsure to a manual approval target that supports approve, skip, and stop", () => {
     const configured = template({
       transitions: [
