@@ -157,8 +157,10 @@ import {
   retryWorkflowCondition,
   overrideWorkflowCondition,
   stopWorkflowRun,
-  recoverWorkflowRun,
 } from "./workflows/workflowEngine.js";
+import {
+  rehydrateWorkflowRuns as rehydratePersistedWorkflowRuns,
+} from "./workflows/workflowRehydration.js";
 import { WorkflowStore } from "./workflows/workflowStore.js";
 import {
   WorkflowScheduler,
@@ -1365,15 +1367,13 @@ function ensureWorkflowScheduler(): WorkflowScheduler {
 async function rehydrateWorkflowRuns(): Promise<void> {
   const store = ensureWorkflowStore();
   const scheduler = ensureWorkflowScheduler();
-  const now = Date.now();
-  for (const persisted of await store.listRuns()) {
-    const recovered = recoverWorkflowRun(persisted, now);
-    const run = recovered === persisted ? persisted : await store.updateRun(recovered);
-    if (run !== persisted) emitWorkflowRunEvent(run);
-    if (run.status !== "needsAttention" && run.status !== "stopped" && run.status !== "completed") {
-      await scheduler.schedule(run);
-    }
-  }
+  await rehydratePersistedWorkflowRuns(await store.listRuns(), {
+    resolveWorkspace: (workspaceId) => resolveWorkspaceProject(workspaceId),
+    updateRun: (run) => store.updateRun(run),
+    schedule: (run) => scheduler.schedule(run),
+    emit: (run) => emitWorkflowRunEvent(run),
+    recordError: (message) => diagnostics?.recordError(message),
+  });
 }
 
 function createWorkflowScheduler(

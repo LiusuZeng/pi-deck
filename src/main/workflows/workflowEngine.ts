@@ -444,8 +444,17 @@ function routeTerminalStep(
       } else {
         next = updateTransition(next, transitionRun.id, { status: "skipped", updatedAtMs: now });
         for (const target of Object.values(transition.routes)) {
-          if (target?.kind === "step") {
-            next = updateStepByTemplateId(next, target.stepId, { status: "skipped", updatedAtMs: now });
+          const targetStepId =
+            target?.kind === "step"
+              ? target.stepId
+              : target?.kind === "manualGate"
+                ? target.toStepId
+                : undefined;
+          if (targetStepId !== undefined) {
+            next = updateStepByTemplateId(next, targetStepId, {
+              status: "skipped",
+              updatedAtMs: now,
+            });
           }
         }
       }

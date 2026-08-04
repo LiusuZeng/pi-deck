@@ -249,6 +249,25 @@ describe("workflowEngine", () => {
     expect(resolved.stepRuns.find((step) => step.templateStepId === "act")?.status).toBe("skipped");
   });
 
+  it("skips a manual-gate target when a different condition route is selected", () => {
+    const configured = template({
+      transitions: [{
+        ...template().transitions[0]!,
+        routes: {
+          yes: { kind: "manualGate", toStepId: "deeper" },
+          no: { kind: "step", stepId: "act" },
+          unsure: { kind: "stop" },
+        },
+      }],
+    });
+    const run = createWorkflowRun({ template: configured, workspaceId: "ws", inputs: {}, now: 100 });
+    const started = markWorkflowStepStarted(run, run.stepRuns[0]!.id, 101);
+    const completed = markWorkflowStepCompleted(started, run.stepRuns[0]!.id, { finalAnswer: "No fix yet." }, 102);
+    const resolved = resolveWorkflowCondition(completed, completed.transitionRuns[0]!.id, "no", undefined, 103);
+    expect(resolved.stepRuns.find((step) => step.templateStepId === "act")?.status).toBe("ready");
+    expect(resolved.stepRuns.find((step) => step.templateStepId === "deeper")?.status).toBe("skipped");
+  });
+
   it.todo("rejects a condition judge result outside yes/no/unsure without mutating the run");
 
   it("retries a failed step as ready work and clears its error", () => {
