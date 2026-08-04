@@ -29,6 +29,12 @@ import type {
   WorkspaceRef as SharedWorkspaceRef,
   ThemePreference,
 } from "../shared/types.js";
+import type {
+  WorkflowRun,
+  WorkflowStepRun,
+  WorkflowTemplate,
+  WorkflowTemplateDefinition,
+} from "../shared/workflowSchemas.js";
 import {
   parseSafeMarkdown,
   type InlineToken,
@@ -90,6 +96,11 @@ import {
   type ActivitySourceSession,
 } from "./activityInbox.js";
 import { ActivityInbox } from "./components/ActivityInbox.js";
+import {
+  WorkflowBuilder,
+  WorkflowHome,
+  WorkflowRunView,
+} from "./components/workflows/index.js";
 
 type LoadState =
   | { state: "loading" }
@@ -769,6 +780,19 @@ export function App(): ReactElement {
   const [activityScope, setActivityScope] = useState<ActivityScope>({
     type: "all",
   });
+  const [workflowView, setWorkflowView] = useState<
+    "home" | "builder" | "run" | undefined
+  >();
+  const [workflowTemplates, setWorkflowTemplates] = useState<
+    WorkflowTemplate[]
+  >([]);
+  const [workflowRuns, setWorkflowRuns] = useState<WorkflowRun[]>([]);
+  const [workflowBuilderTemplate, setWorkflowBuilderTemplate] = useState<
+    WorkflowTemplate | undefined
+  >();
+  const [workflowRunId, setWorkflowRunId] = useState<string | undefined>();
+  const [workflowLoading, setWorkflowLoading] = useState(false);
+  const [workflowError, setWorkflowError] = useState<string | undefined>();
   const [usageStatsVisible, setUsageStatsVisible] = useState(() =>
     loadUsageStatsVisiblePreference(),
   );
@@ -1062,6 +1086,69 @@ export function App(): ReactElement {
     };
   }, []);
 
+  useEffect(() => {
+    if (workflowView === undefined) return;
+    let disposed = false;
+    const refresh = async (): Promise<void> => {
+      setWorkflowLoading(true);
+      try {
+        const [templates, runs] = await Promise.all([
+          window.piDeck.workflows.listTemplates(),
+          window.piDeck.workflows.listRuns({
+            workspaceId: currentWorkspaceRef.current.id,
+          }),
+        ]);
+        if (disposed) return;
+        setWorkflowTemplates(templates.templates);
+        setWorkflowRuns(runs.runs);
+        if (workflowRunId !== undefined) {
+          const run = await window.piDeck.workflows.getRun({
+            runId: workflowRunId,
+          });
+          if (!disposed) {
+            setWorkflowRuns((current) => [
+              run,
+              ...current.filter((candidate) => candidate.id !== run.id),
+            ]);
+          }
+        }
+        setWorkflowError(undefined);
+      } catch (error) {
+        if (!disposed) {
+          setWorkflowError(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      } finally {
+        if (!disposed) setWorkflowLoading(false);
+      }
+    };
+    void refresh();
+    const unsubscribe = window.piDeck.workflows.onEvent((event) => {
+      if (event.runId !== workflowRunId) return;
+      void window.piDeck.workflows
+        .getRun({ runId: event.runId })
+        .then((run) => {
+          if (disposed) return;
+          setWorkflowRuns((current) => [
+            run,
+            ...current.filter((candidate) => candidate.id !== run.id),
+          ]);
+        })
+        .catch((error) => {
+          if (!disposed) {
+            setWorkflowError(
+              error instanceof Error ? error.message : String(error),
+            );
+          }
+        });
+    });
+    return () => {
+      disposed = true;
+      unsubscribe();
+    };
+  }, [workflowRunId, workflowView]);
+
   // A renderer reload/disposal loses all composer and retry references. Main
   // retains each selection only by its owner, so revoke every owner we created
   // rather than relying solely on the ten-minute expiry fallback.
@@ -1178,6 +1265,9 @@ export function App(): ReactElement {
   );
   const showStarterPage =
     selectedSession.timeline.length === 0 && selectedSession.status === "idle";
+  const selectedWorkflowRun = workflowRunId
+    ? workflowRuns.find((run) => run.id === workflowRunId)
+    : undefined;
 
   useEffect(() => {
     const compactLayout = window.matchMedia("(max-width: 760px)");
@@ -1595,16 +1685,157 @@ export function App(): ReactElement {
       setActivityInboxVisible(false);
       return;
     }
+    setWorkflowView(undefined);
     setActivityScope({ type: "all" });
     setActivityInboxVisible(true);
   }
 
+  function handleOpenWorkflows(): void {
+    setActivityInboxVisible(false);
+    setWorkflowError(undefined);
+    setWorkflowBuilderTemplate(undefined);
+    setWorkflowRunId(undefined);
+    setWorkflowView("home");
+  }
+
   function handleOpenWorkspaceActivity(workspaceId: string): void {
+    setWorkflowView(undefined);
     setActivityScope({ type: "workspace", workspaceId });
     setActivityInboxVisible(true);
   }
 
+  async function handleSaveWorkflow(
+    definition: WorkflowTemplateDefinition,
+    templateId?: string,
+  ): Promise<void> {
+    try {
+      const template = templateId
+        ? await window.piDeck.workflows.updateTemplate({
+            templateId,
+            ...definition,
+          })
+        : await window.piDeck.workflows.createTemplate(definition);
+      setWorkflowTemplates((current) => [
+        template,
+        ...current.filter((candidate) => candidate.id !== template.id),
+      ]);
+      setWorkflowBuilderTemplate(undefined);
+      setWorkflowView("home");
+      setWorkflowError(undefined);
+    } catch (error) {
+      setWorkflowError(error instanceof Error ? error.message : String(error));
+      throw error;
+    }
+  }
+
+  async function handleStartWorkflow(
+    template: WorkflowTemplate,
+    inputs: Record<string, string>,
+  ): Promise<void> {
+    const run = await window.piDeck.workflows.startRun({
+      templateId: template.id,
+      workspaceId: currentWorkspaceRef.current.id,
+      inputs,
+    });
+    setWorkflowRuns((current) => [
+      run,
+      ...current.filter((candidate) => candidate.id !== run.id),
+    ]);
+    setWorkflowRunId(run.id);
+    setWorkflowView("run");
+    setWorkflowError(undefined);
+  }
+
+  async function handleStopWorkflow(): Promise<void> {
+    if (workflowRunId === undefined) return;
+    const run = await window.piDeck.workflows.stopRun({ runId: workflowRunId });
+    setWorkflowRuns((current) => [
+      run,
+      ...current.filter((candidate) => candidate.id !== run.id),
+    ]);
+  }
+
+  async function handleRetryWorkflowStep(step: WorkflowStepRun): Promise<void> {
+    if (workflowRunId === undefined) return;
+    const run = await window.piDeck.workflows.retryStep({
+      runId: workflowRunId,
+      stepRunId: step.id,
+    });
+    setWorkflowRuns((current) => [
+      run,
+      ...current.filter((candidate) => candidate.id !== run.id),
+    ]);
+  }
+
+  async function handleApproveWorkflowGate(
+    step: WorkflowStepRun,
+    action: "approve" | "skip" | "stop",
+  ): Promise<void> {
+    if (workflowRunId === undefined) return;
+    const run = await window.piDeck.workflows.approveGate({
+      runId: workflowRunId,
+      stepRunId: step.id,
+      action,
+    });
+    setWorkflowRuns((current) => [
+      run,
+      ...current.filter((candidate) => candidate.id !== run.id),
+    ]);
+  }
+
+  async function handleOpenWorkflowStep(step: WorkflowStepRun): Promise<void> {
+    setWorkflowView(undefined);
+    const runtimeSession = step.runtimeId
+      ? sessionsRef.current.find((session) => session.id === step.runtimeId)
+      : undefined;
+    if (runtimeSession !== undefined) {
+      handleSelectSession(runtimeSession.id);
+      return;
+    }
+    const savedSession = step.sessionFile
+      ? sessionsRef.current.find(
+          (session) => session.sessionFile === step.sessionFile,
+        )
+      : undefined;
+    if (savedSession !== undefined) {
+      handleSelectSession(savedSession.id);
+      return;
+    }
+    if (step.sessionFile !== undefined) {
+      try {
+        const snapshot = await window.piDeck.chat.resumeSession({
+          workspaceId: currentWorkspaceRef.current.id,
+          sessionFile: step.sessionFile,
+        });
+        const refreshed = await window.piDeck.chat.listSessions({
+          workspaceId: currentWorkspaceRef.current.id,
+        });
+        const session = refreshed.sessions.find(
+          (candidate) => candidate.sessionFile === snapshot.state.sessionFile,
+        );
+        if (session !== undefined) {
+          setSessions((current) => [
+            ...current.filter(
+              (candidate) => candidate.sessionFile !== session.sessionFile,
+            ),
+            sessionFromSummary(
+              session,
+              currentWorkspaceRef.current.id,
+              projectIdForWorkspace(currentWorkspaceRef.current),
+            ),
+          ]);
+          setSelectedSessionId(session.id);
+        }
+      } catch (error) {
+        setUiMessage(
+          `Could not open workflow session: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  }
+
   function handleSelectSession(sessionId: string): void {
+    setWorkflowView(undefined);
     setActivityInboxVisible(false);
     const session = sessions.find((item) => item.id === sessionId);
     if (session?.isResuming === true) {
@@ -3643,9 +3874,11 @@ export function App(): ReactElement {
           showArchived={showArchived}
           composerDrafts={composerDrafts}
           activityInboxVisible={activityInboxVisible}
+          workflowView={workflowView}
           activityActionableCount={activityInboxModel.actionableCount}
           onSelect={handleSelectSession}
           onOpenActivity={handleToggleActivity}
+          onOpenWorkflows={handleOpenWorkflows}
           onOpenWorkspaceActivity={handleOpenWorkspaceActivity}
           onSelectWorkspace={(workspace) =>
             void handleSelectWorkspace(workspace)
@@ -3684,7 +3917,11 @@ export function App(): ReactElement {
 
       <section
         className="workspace"
-        aria-label="Pi Deck chat workspace"
+        aria-label={
+          workflowView !== undefined
+            ? "Agent Workflows"
+            : "Pi Deck chat workspace"
+        }
         data-load-state={loadState.state}
       >
         <AppHeader
@@ -3725,7 +3962,68 @@ export function App(): ReactElement {
           {uiMessage}
         </div>
 
-        {activityInboxVisible ? (
+        {workflowView !== undefined ? (
+          <div className="workflow-surface">
+            {workflowError ? (
+              <p className="workflow-error" role="alert">
+                {workflowError}
+              </p>
+            ) : null}
+            {workflowLoading && workflowTemplates.length === 0 ? (
+              <div
+                className="workflow-loading"
+                role="status"
+                aria-live="polite"
+              >
+                Loading Agent Workflows…
+              </div>
+            ) : workflowView === "builder" ? (
+              <WorkflowBuilder
+                {...(workflowBuilderTemplate !== undefined
+                  ? { initialTemplate: workflowBuilderTemplate }
+                  : {})}
+                workspaceId={currentWorkspace.id}
+                onSave={handleSaveWorkflow}
+                onCancel={() => {
+                  setWorkflowBuilderTemplate(undefined);
+                  setWorkflowView("home");
+                }}
+              />
+            ) : workflowView === "run" && selectedWorkflowRun !== undefined ? (
+              <WorkflowRunView
+                run={selectedWorkflowRun}
+                onBack={() => {
+                  setWorkflowRunId(undefined);
+                  setWorkflowView("home");
+                }}
+                onStop={handleStopWorkflow}
+                onRetryStep={handleRetryWorkflowStep}
+                onApproveGate={handleApproveWorkflowGate}
+                onOpenSession={(step) => void handleOpenWorkflowStep(step)}
+              />
+            ) : (
+              <WorkflowHome
+                templates={workflowTemplates}
+                recentRuns={workflowRuns}
+                onCreate={() => {
+                  setWorkflowBuilderTemplate(undefined);
+                  setWorkflowView("builder");
+                }}
+                onEdit={(template) => {
+                  setWorkflowBuilderTemplate(template);
+                  setWorkflowView("builder");
+                }}
+                onStart={(template, inputs) =>
+                  handleStartWorkflow(template, inputs)
+                }
+                onOpenRun={(run) => {
+                  setWorkflowRunId(run.id);
+                  setWorkflowView("run");
+                }}
+              />
+            )}
+          </div>
+        ) : activityInboxVisible ? (
           <ActivityInbox
             model={activityInboxModel}
             scope={activityScope}
@@ -6002,9 +6300,11 @@ function SessionSidebar(props: {
   showArchived: boolean;
   composerDrafts: ComposerDraftsBySession;
   activityInboxVisible: boolean;
+  workflowView: "home" | "builder" | "run" | undefined;
   activityActionableCount: number;
   onSelect(sessionId: string): void;
   onOpenActivity(): void;
+  onOpenWorkflows(): void;
   onOpenWorkspaceActivity(workspaceId: string): void;
   onSelectWorkspace(workspace: WorkspaceRef): void;
   onRenameWorkspace(workspace: WorkspaceRef): void;
@@ -6300,6 +6600,16 @@ function SessionSidebar(props: {
             {props.activityActionableCount}
           </span>
         ) : null}
+      </Button>
+      <Button
+        className={`sidebar-new-chat workflow-inbox-button ${
+          props.workflowView !== undefined ? "active" : ""
+        }`}
+        aria-pressed={props.workflowView !== undefined}
+        onClick={props.onOpenWorkflows}
+      >
+        <ListPlus aria-hidden="true" size={16} strokeWidth={1.75} />
+        Agent Workflows
       </Button>
 
       {activeWork.length > 0 ? (
