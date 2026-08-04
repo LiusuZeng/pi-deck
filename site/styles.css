@@ -10,3 +10,17 @@
 @media (max-width: 760px) { .site-header { width: min(100% - 2rem, 1180px); min-height: 68px; } nav a:not(.nav-github) { display: none; } .hero, .section, .proof, footer { width: min(100% - 2rem, 1180px); } .hero { grid-template-columns: 1fr; min-height: auto; padding: 4rem 0 2.5rem; gap: 1rem; } .hero-art { min-height: 290px; }.proof { grid-template-columns: 1fr; }.proof div, .proof div:first-child { padding: 1rem 0; border-right: 0; border-bottom: 1px solid var(--line); }.proof div:last-child { border-bottom: 0; }.section { padding: 4.5rem 0; }.screenshot-grid, .feature-grid, .feature-snapshot-grid, .workflow, .install, .privacy, .faq-grid { grid-template-columns: 1fr; }.feature-grid article { padding: 1.5rem; }.workflow, .privacy { gap: 2rem; }.install { width: 100%; padding: 3rem 1rem; gap: 2rem; }.install h2 { font-size: 2.6rem; } footer { flex-direction: column; } }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
 .screenshot-demo { margin-top: 1.5rem; } .feature-snapshot-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5rem; margin-top: 3rem; } .feature-snapshot-grid figure img { aspect-ratio: 1193 / 776; object-fit: cover; }
+.feature-evidence { border-top: 1px solid var(--line); }
+.evidence-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.5rem; margin-top: 3rem; }
+.evidence-card { min-width: 0; display: flex; flex-direction: column; border: 1px solid var(--line); background: var(--panel); }
+.evidence-copy { padding: 2rem 2rem 1.5rem; }
+.evidence-copy .feature-number { margin-bottom: 1.5rem; }
+.evidence-copy p { color: var(--muted); margin-bottom: 0; }
+.evidence-card > figure { border: 0; border-top: 1px solid var(--line); margin-top: auto; }
+.evidence-media-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; padding: 1rem; border-top: 1px solid var(--line); margin-top: auto; }
+.evidence-media-pair figure { min-width: 0; }
+.evidence-media-pair figcaption { padding: .75rem .85rem; font-size: .8rem; }
+.evidence-media-pair .lightbox-hint { font-size: .72rem; }
+.secondary-controls { border-top: 1px solid var(--line); }
+.secondary-controls .feature-snapshot-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); max-width: 820px; }
+@media (max-width: 760px) { .evidence-grid, .evidence-media-pair, .secondary-controls .feature-snapshot-grid { grid-template-columns: 1fr; } .evidence-copy { padding: 1.5rem; } .evidence-media-pair { padding: .75rem; } }
