@@ -1479,15 +1479,30 @@ test("bootstrap creates no saved session and the first draft send creates one", 
       exact: true,
     });
     await expect(maxThinking).toBeVisible();
+    const firstThinking = page.getByRole("menuitemradio", {
+      name: "off",
+      exact: true,
+    });
+    await expect(firstThinking).toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    await expect(
+      page.getByRole("menuitemradio", { name: "minimal", exact: true }),
+    ).toBeFocused();
     const modelMenuTrigger = page.getByRole("menuitem", {
       name: /Fake model/,
     });
     await expect(modelMenuTrigger).toBeVisible();
-    await modelMenuTrigger.click();
-    await expect(
-      page.getByRole("menu", { name: "Available Pi models" }),
-    ).toBeVisible();
+    await page.keyboard.press("End");
+    await expect(modelMenuTrigger).toBeFocused();
+    await modelMenuTrigger.press("ArrowRight");
+    const modelMenu = page.getByRole("menu", { name: "Available Pi models" });
+    await expect(modelMenu).toBeVisible();
+    await expect(modelMenu.getByRole("menuitemradio").first()).toBeFocused();
     await page.keyboard.press("Escape");
+    await expect(modelMenuTrigger).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(configuration).toBeFocused();
+    await configuration.click();
     await expect(maxThinking).toBeVisible();
     await maxThinking.click();
     await expect(configuration).toHaveAttribute("data-thinking-level", "max");
