@@ -158,9 +158,7 @@ import {
   overrideWorkflowCondition,
   stopWorkflowRun,
 } from "./workflows/workflowEngine.js";
-import {
-  rehydrateWorkflowRuns as rehydratePersistedWorkflowRuns,
-} from "./workflows/workflowRehydration.js";
+import { rehydrateWorkflowRuns as rehydratePersistedWorkflowRuns } from "./workflows/workflowRehydration.js";
 import { WorkflowStore } from "./workflows/workflowStore.js";
 import {
   WorkflowScheduler,
@@ -1020,7 +1018,8 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async ({ templateId }) => {
       const template = await ensureWorkflowStore().getTemplate(templateId);
-      if (template.workspaceId !== undefined) await requireOpenWorkspace(template.workspaceId);
+      if (template.workspaceId !== undefined)
+        await requireOpenWorkspace(template.workspaceId);
       return template;
     },
   });
@@ -1031,9 +1030,12 @@ function registerIpcHandlers(
     responseSchema: workflowTemplateListResultSchema,
     diagnostics: diagnosticsService,
     handler: async () => {
-      const workspaceId = (await ensureWorkspaceStore().getActiveWorkspace())?.id;
+      const workspaceId = (await ensureWorkspaceStore().getActiveWorkspace())
+        ?.id;
       if (workspaceId !== undefined) await requireOpenWorkspace(workspaceId);
-      return { templates: await ensureWorkflowStore().listTemplates(workspaceId) };
+      return {
+        templates: await ensureWorkflowStore().listTemplates(workspaceId),
+      };
     },
   });
 
@@ -1043,7 +1045,8 @@ function registerIpcHandlers(
     responseSchema: workflowTemplateSchema,
     diagnostics: diagnosticsService,
     handler: async (definition) => {
-      if (definition.workspaceId !== undefined) await requireOpenWorkspace(definition.workspaceId);
+      if (definition.workspaceId !== undefined)
+        await requireOpenWorkspace(definition.workspaceId);
       return ensureWorkflowStore().createTemplate(definition);
     },
   });
@@ -1054,9 +1057,11 @@ function registerIpcHandlers(
     responseSchema: workflowTemplateSchema,
     diagnostics: diagnosticsService,
     handler: async ({ templateId, ...definition }) => {
-      if (definition.workspaceId !== undefined) await requireOpenWorkspace(definition.workspaceId);
+      if (definition.workspaceId !== undefined)
+        await requireOpenWorkspace(definition.workspaceId);
       const current = await ensureWorkflowStore().getTemplate(templateId);
-      if (current.workspaceId !== undefined) await requireOpenWorkspace(current.workspaceId);
+      if (current.workspaceId !== undefined)
+        await requireOpenWorkspace(current.workspaceId);
       return ensureWorkflowStore().updateTemplate(templateId, definition);
     },
   });
@@ -1068,7 +1073,8 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async ({ templateId }) => {
       const template = await ensureWorkflowStore().getTemplate(templateId);
-      if (template.workspaceId !== undefined) await requireOpenWorkspace(template.workspaceId);
+      if (template.workspaceId !== undefined)
+        await requireOpenWorkspace(template.workspaceId);
       return ensureWorkflowStore().archiveTemplate(templateId);
     },
   });
@@ -1080,7 +1086,8 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async ({ templateId }) => {
       const template = await ensureWorkflowStore().getTemplate(templateId);
-      if (template.workspaceId !== undefined) await requireOpenWorkspace(template.workspaceId);
+      if (template.workspaceId !== undefined)
+        await requireOpenWorkspace(template.workspaceId);
       return ensureWorkflowStore().duplicateTemplate(templateId);
     },
   });
@@ -1091,8 +1098,11 @@ function registerIpcHandlers(
     responseSchema: workflowRunListResultSchema,
     diagnostics: diagnosticsService,
     handler: async (request) => {
-      const workspaceId = request?.workspaceId ?? (await ensureWorkspaceStore().getActiveWorkspace())?.id;
-      if (workspaceId === undefined) throw new Error("No workspace is selected for workflow runs.");
+      const workspaceId =
+        request?.workspaceId ??
+        (await ensureWorkspaceStore().getActiveWorkspace())?.id;
+      if (workspaceId === undefined)
+        throw new Error("No workspace is selected for workflow runs.");
       await requireOpenWorkspace(workspaceId);
       return { runs: await ensureWorkflowStore().listRuns(workspaceId) };
     },
@@ -1372,13 +1382,18 @@ function ensureWorkflowScheduler(): WorkflowScheduler {
 async function rehydrateWorkflowRuns(workspaceId?: string): Promise<void> {
   const store = ensureWorkflowStore();
   const scheduler = ensureWorkflowScheduler();
-  await rehydratePersistedWorkflowRuns(await store.listRuns(), {
-    resolveWorkspace: (workspaceId) => resolveWorkspaceProject(workspaceId),
-    updateRun: (run) => store.updateRun(run),
-    schedule: (run) => scheduler.schedule(run),
-    emit: (run) => emitWorkflowRunEvent(run),
-    recordError: (message) => diagnostics?.recordError(message),
-  }, Date.now(), workspaceId);
+  await rehydratePersistedWorkflowRuns(
+    await store.listRuns(),
+    {
+      resolveWorkspace: (workspaceId) => resolveWorkspaceProject(workspaceId),
+      updateRun: (run) => store.updateRun(run),
+      schedule: (run) => scheduler.schedule(run),
+      emit: (run) => emitWorkflowRunEvent(run),
+      recordError: (message) => diagnostics?.recordError(message),
+    },
+    Date.now(),
+    workspaceId,
+  );
 }
 
 function createWorkflowScheduler(
@@ -1436,25 +1451,45 @@ function createWorkflowScheduler(
     configureSession: async (runtimeId, settings) => {
       const adapter = chatAdapter;
       if (adapter === undefined || !adapter.hasRuntime(runtimeId)) {
-        throw new Error(`Workflow chat runtime is no longer attached: ${runtimeId}`);
+        throw new Error(
+          `Workflow chat runtime is no longer attached: ${runtimeId}`,
+        );
       }
       if (settings.model !== undefined) {
         await adapter.request(runtimeId, "set_model", settings.model);
       }
       if (settings.thinkingLevel !== undefined) {
-        await adapter.request(runtimeId, "set_thinking_level", { level: settings.thinkingLevel });
+        await adapter.request(runtimeId, "set_thinking_level", {
+          level: settings.thinkingLevel,
+        });
       }
       const state = await adapter.getRuntimeStatus(runtimeId);
       const modelId = typeof state.model === "string" ? state.model : undefined;
-      const provider = typeof state.provider === "string" ? state.provider : undefined;
-      if (settings.model?.modelId !== undefined && modelId !== settings.model.modelId) {
-        throw new Error(`Pi did not apply workflow model override: ${settings.model.modelId}`);
+      const provider =
+        typeof state.provider === "string" ? state.provider : undefined;
+      if (
+        settings.model?.modelId !== undefined &&
+        modelId !== settings.model.modelId
+      ) {
+        throw new Error(
+          `Pi did not apply workflow model override: ${settings.model.modelId}`,
+        );
       }
-      if (settings.model?.provider !== undefined && provider !== settings.model.provider) {
-        throw new Error(`Pi did not apply workflow provider override: ${settings.model.provider}`);
+      if (
+        settings.model?.provider !== undefined &&
+        provider !== settings.model.provider
+      ) {
+        throw new Error(
+          `Pi did not apply workflow provider override: ${settings.model.provider}`,
+        );
       }
-      if (settings.thinkingLevel !== undefined && state.thinkingLevel !== settings.thinkingLevel) {
-        throw new Error(`Pi did not apply workflow thinking override: ${settings.thinkingLevel}`);
+      if (
+        settings.thinkingLevel !== undefined &&
+        state.thinkingLevel !== settings.thinkingLevel
+      ) {
+        throw new Error(
+          `Pi did not apply workflow thinking override: ${settings.thinkingLevel}`,
+        );
       }
     },
     getRun: (runId) => ensureWorkflowStore().getRun(runId),
@@ -1480,8 +1515,13 @@ async function validateWorkflowPaths(
       ? path.resolve(value)
       : path.resolve(project.canonicalPath, value);
     const canonical = await safeRealpath(resolved);
-    if (canonical === undefined || !isPathInside(canonical, project.canonicalPath)) {
-      throw new Error(`Workflow path is unavailable or outside its authorized workspace project: ${value}`);
+    if (
+      canonical === undefined ||
+      !isPathInside(canonical, project.canonicalPath)
+    ) {
+      throw new Error(
+        `Workflow path is unavailable or outside its authorized workspace project: ${value}`,
+      );
     }
   }
 }
@@ -1495,7 +1535,9 @@ async function resolveWorkflowWorkspaceId(
     templateWorkspaceId !== undefined &&
     requestedWorkspaceId !== templateWorkspaceId
   ) {
-    throw new Error("Workflow template is authorized for a different workspace.");
+    throw new Error(
+      "Workflow template is authorized for a different workspace.",
+    );
   }
   const workspaceId =
     templateWorkspaceId ??

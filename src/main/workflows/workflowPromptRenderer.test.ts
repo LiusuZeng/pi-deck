@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { renderStepOutput, renderWorkflowPrompt } from "./workflowPromptRenderer.js";
-import type { WorkflowRun, WorkflowStepDefinition, WorkflowTemplate } from "../../shared/workflowSchemas.js";
+import {
+  renderStepOutput,
+  renderWorkflowPrompt,
+} from "./workflowPromptRenderer.js";
+import type {
+  WorkflowRun,
+  WorkflowStepDefinition,
+  WorkflowTemplate,
+} from "../../shared/workflowSchemas.js";
 
 const step: WorkflowStepDefinition = {
   id: "implement",
@@ -29,7 +36,15 @@ const template: WorkflowTemplate = {
     objective: "Keep the fix small.",
     relevantPaths: ["src/example.ts"],
   },
-  steps: [step, { ...step, id: "investigate", name: "Investigate", promptParts: [{ type: "text", text: "Investigate" }] }],
+  steps: [
+    step,
+    {
+      ...step,
+      id: "investigate",
+      name: "Investigate",
+      promptParts: [{ type: "text", text: "Investigate" }],
+    },
+  ],
   transitions: [],
   createdAtMs: 1,
   updatedAtMs: 1,
@@ -81,32 +96,47 @@ describe("renderWorkflowPrompt", () => {
   });
 
   it("blocks prompts when a referenced parent result is unavailable", () => {
-    expect(() => renderWorkflowPrompt({
-      workflowContext: template.context,
-      step: {
-        ...step,
-        promptParts: [{ type: "text", text: "Do it" }],
-        inputPolicy: { ...step.inputPolicy, includeParentFinalAnswer: true },
-      },
-      run,
-    })).toThrow(/Parent final answer.*unavailable/i);
+    expect(() =>
+      renderWorkflowPrompt({
+        workflowContext: template.context,
+        step: {
+          ...step,
+          promptParts: [{ type: "text", text: "Do it" }],
+          inputPolicy: { ...step.inputPolicy, includeParentFinalAnswer: true },
+        },
+        run,
+      }),
+    ).toThrow(/Parent final answer.*unavailable/i);
   });
 
   it("renders workflow context, inputs, and upstream output", () => {
     const availableRun = { ...run, parentFinalAnswer: "Parent answer" };
-    expect(renderWorkflowPrompt({ workflowContext: template.context, step, run: availableRun })).toContain(
-      "Keep the fix small.",
-    );
-    expect(renderWorkflowPrompt({ workflowContext: template.context, step, run: availableRun })).toContain(
-      "Fix the flaky test",
-    );
-    expect(renderWorkflowPrompt({ workflowContext: template.context, step, run: availableRun })).toContain(
-      "The fixture is shared across tests.",
-    );
+    expect(
+      renderWorkflowPrompt({
+        workflowContext: template.context,
+        step,
+        run: availableRun,
+      }),
+    ).toContain("Keep the fix small.");
+    expect(
+      renderWorkflowPrompt({
+        workflowContext: template.context,
+        step,
+        run: availableRun,
+      }),
+    ).toContain("Fix the flaky test");
+    expect(
+      renderWorkflowPrompt({
+        workflowContext: template.context,
+        step,
+        run: availableRun,
+      }),
+    ).toContain("The fixture is shared across tests.");
   });
 
   it("preserves an upstream transcript when transcript output is referenced", () => {
-    const transcript = "user: inspect the fixture\\nassistant: the fixture is shared";
+    const transcript =
+      "user: inspect the fixture\\nassistant: the fixture is shared";
     const availableRun = {
       ...run,
       stepRuns: [{ ...run.stepRuns[0]!, transcript }],
@@ -115,7 +145,9 @@ describe("renderWorkflowPrompt", () => {
       workflowContext: template.context,
       step: {
         ...step,
-        promptParts: [{ type: "stepOutput", stepId: "investigate", output: "transcript" }],
+        promptParts: [
+          { type: "stepOutput", stepId: "investigate", output: "transcript" },
+        ],
         inputPolicy: { ...step.inputPolicy, includeParentFinalAnswer: false },
       },
       run: availableRun,

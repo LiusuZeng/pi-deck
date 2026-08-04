@@ -60,14 +60,16 @@ const malformedConditionTemplate: WorkflowTemplate = {
     template.steps[0]!,
     { ...template.steps[0]!, id: "next", name: "Next" },
   ],
-  transitions: [{
-    id: "condition",
-    fromStepId: "gate",
-    kind: "condition",
-    question: "Did the review pass?",
-    routes: { yes: { kind: "step", stepId: "next" } },
-    previewBeforeStart: false,
-  }],
+  transitions: [
+    {
+      id: "condition",
+      fromStepId: "gate",
+      kind: "condition",
+      question: "Did the review pass?",
+      routes: { yes: { kind: "step", stepId: "next" } },
+      previewBeforeStart: false,
+    },
+  ],
 };
 
 function malformedConditionRun(): WorkflowRun {
@@ -80,11 +82,13 @@ function malformedConditionRun(): WorkflowRun {
   return {
     ...run,
     status: "needsAttention",
-    transitionRuns: [{
-      ...run.transitionRuns[0]!,
-      status: "failed",
-      error: "Judge output was malformed.",
-    }],
+    transitionRuns: [
+      {
+        ...run.transitionRuns[0]!,
+        status: "failed",
+        error: "Judge output was malformed.",
+      },
+    ],
   };
 }
 
@@ -175,14 +179,18 @@ describe("WorkflowRunView action controls", () => {
     ) as HTMLButtonElement;
     act(() => heading.click());
 
-    expect(container?.textContent).toContain("Rendered prompt with run context");
+    expect(container?.textContent).toContain(
+      "Rendered prompt with run context",
+    );
     expect(container?.textContent).toContain("Ship the renderer");
     expect(container?.textContent).toContain("Final answer");
     expect(container?.textContent).toContain("Short summary");
     expect(container?.textContent).toContain("Transcript output");
     expect(container?.textContent).toContain("claude-sonnet");
     expect(container?.textContent).toContain("high");
-    expect(container?.textContent).not.toContain("Parent-session final answers");
+    expect(container?.textContent).not.toContain(
+      "Parent-session final answers",
+    );
   });
 
   it("exposes retry for a failed agent step", async () => {
@@ -229,6 +237,8 @@ describe("WorkflowRunView action controls", () => {
     });
     await act(async () => button("Override NO").click());
     expect(retried).toEqual([run.transitionRuns[0]!.id]);
-    expect(overrides).toEqual([["no", "The review output is sufficient for the safe branch."]]);
+    expect(overrides).toEqual([
+      ["no", "The review output is sufficient for the safe branch."],
+    ]);
   });
 });

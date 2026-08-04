@@ -191,12 +191,16 @@ export const workflowTemplateDefinitionSchema = z
       }
     }
 
-    const checkTarget = (target: WorkflowRouteTarget, path: (string | number)[]) => {
-      const targetStepId = target.kind === "step"
-        ? target.stepId
-        : target.kind === "manualGate"
-          ? target.toStepId
-          : undefined;
+    const checkTarget = (
+      target: WorkflowRouteTarget,
+      path: (string | number)[],
+    ) => {
+      const targetStepId =
+        target.kind === "step"
+          ? target.stepId
+          : target.kind === "manualGate"
+            ? target.toStepId
+            : undefined;
       if (targetStepId !== undefined && !stepIds.has(targetStepId)) {
         context.addIssue({
           code: "custom",
@@ -219,10 +223,7 @@ export const workflowTemplateDefinitionSchema = z
       if (incomingEdges.has(edgeKey)) return;
       incomingEdges.add(edgeKey);
       incomingCounts.set(toStepId, (incomingCounts.get(toStepId) ?? 0) + 1);
-      edges.set(fromStepId, [
-        ...(edges.get(fromStepId) ?? []),
-        toStepId,
-      ]);
+      edges.set(fromStepId, [...(edges.get(fromStepId) ?? []), toStepId]);
     };
     for (const [index, transition] of value.transitions.entries()) {
       if (transitionIds.has(transition.id)) {
@@ -266,11 +267,12 @@ export const workflowTemplateDefinitionSchema = z
         for (const [label, target] of routeEntries) {
           if (target !== undefined) {
             checkTarget(target, ["transitions", index, "routes", label]);
-            const targetStepId = target.kind === "step"
-              ? target.stepId
-              : target.kind === "manualGate"
-                ? target.toStepId
-                : undefined;
+            const targetStepId =
+              target.kind === "step"
+                ? target.stepId
+                : target.kind === "manualGate"
+                  ? target.toStepId
+                  : undefined;
             if (targetStepId !== undefined && stepIds.has(targetStepId)) {
               addEdge(transition.fromStepId, targetStepId);
             }
@@ -400,7 +402,10 @@ export const workflowRunSchema = z
   })
   .strict()
   .superRefine((value, context) => {
-    if (value.templateId !== undefined && value.templateId !== value.templateSnapshot.id) {
+    if (
+      value.templateId !== undefined &&
+      value.templateId !== value.templateSnapshot.id
+    ) {
       context.addIssue({
         code: "custom",
         path: ["templateId"],
@@ -408,7 +413,9 @@ export const workflowRunSchema = z
       });
     }
 
-    const templateStepIds = new Set(value.templateSnapshot.steps.map((step) => step.id));
+    const templateStepIds = new Set(
+      value.templateSnapshot.steps.map((step) => step.id),
+    );
     const stepRunIds = new Set<string>();
     const stepRunCounts = new Map<string, number>();
     for (const [index, stepRun] of value.stepRuns.entries()) {
@@ -427,7 +434,10 @@ export const workflowRunSchema = z
           message: `Workflow step run references an unknown template step: ${stepRun.templateStepId}`,
         });
       }
-      stepRunCounts.set(stepRun.templateStepId, (stepRunCounts.get(stepRun.templateStepId) ?? 0) + 1);
+      stepRunCounts.set(
+        stepRun.templateStepId,
+        (stepRunCounts.get(stepRun.templateStepId) ?? 0) + 1,
+      );
     }
     for (const step of value.templateSnapshot.steps) {
       if ((stepRunCounts.get(step.id) ?? 0) !== 1) {
@@ -439,7 +449,9 @@ export const workflowRunSchema = z
       }
     }
 
-    const templateTransitionIds = new Set(value.templateSnapshot.transitions.map((transition) => transition.id));
+    const templateTransitionIds = new Set(
+      value.templateSnapshot.transitions.map((transition) => transition.id),
+    );
     const transitionRunIds = new Set<string>();
     const transitionRunCounts = new Map<string, number>();
     for (const [index, transitionRun] of value.transitionRuns.entries()) {
@@ -458,7 +470,10 @@ export const workflowRunSchema = z
           message: `Workflow transition run references an unknown template transition: ${transitionRun.templateTransitionId}`,
         });
       }
-      transitionRunCounts.set(transitionRun.templateTransitionId, (transitionRunCounts.get(transitionRun.templateTransitionId) ?? 0) + 1);
+      transitionRunCounts.set(
+        transitionRun.templateTransitionId,
+        (transitionRunCounts.get(transitionRun.templateTransitionId) ?? 0) + 1,
+      );
     }
     for (const transition of value.templateSnapshot.transitions) {
       if ((transitionRunCounts.get(transition.id) ?? 0) !== 1) {
@@ -470,7 +485,9 @@ export const workflowRunSchema = z
       }
     }
 
-    const inputIds = new Set(value.templateSnapshot.inputs.map((input) => input.id));
+    const inputIds = new Set(
+      value.templateSnapshot.inputs.map((input) => input.id),
+    );
     for (const inputId of Object.keys(value.inputs)) {
       if (!inputIds.has(inputId)) {
         context.addIssue({
@@ -488,7 +505,10 @@ export const workflowRunSchema = z
       ),
     );
     for (const input of value.templateSnapshot.inputs) {
-      if ((input.required || referencedInputIds.has(input.id)) && !(input.id in value.inputs)) {
+      if (
+        (input.required || referencedInputIds.has(input.id)) &&
+        !(input.id in value.inputs)
+      ) {
         context.addIssue({
           code: "custom",
           path: ["inputs", input.id],
@@ -512,11 +532,13 @@ export const workflowGetTemplateRequestSchema = z
   .object({ templateId: workflowIdSchema })
   .strict();
 
-export const workflowCreateTemplateRequestSchema = workflowTemplateDefinitionSchema;
+export const workflowCreateTemplateRequestSchema =
+  workflowTemplateDefinitionSchema;
 
-export const workflowUpdateTemplateRequestSchema = workflowTemplateDefinitionSchema
-  .extend({ templateId: workflowIdSchema })
-  .strict();
+export const workflowUpdateTemplateRequestSchema =
+  workflowTemplateDefinitionSchema
+    .extend({ templateId: workflowIdSchema })
+    .strict();
 
 export const workflowArchiveTemplateRequestSchema = z
   .object({ templateId: workflowIdSchema })
@@ -571,28 +593,58 @@ export const workflowOverrideConditionRequestSchema = z
 
 export const workflowEventSchema = z.discriminatedUnion("type", [
   z
-    .object({ type: z.literal("workflow_run_updated"), runId: workflowIdSchema, status: workflowRunStatusSchema })
+    .object({
+      type: z.literal("workflow_run_updated"),
+      runId: workflowIdSchema,
+      status: workflowRunStatusSchema,
+    })
     .strict(),
   z
-    .object({ type: z.literal("workflow_step_updated"), runId: workflowIdSchema, stepRunId: workflowIdSchema, status: workflowStepStatusSchema })
+    .object({
+      type: z.literal("workflow_step_updated"),
+      runId: workflowIdSchema,
+      stepRunId: workflowIdSchema,
+      status: workflowStepStatusSchema,
+    })
     .strict(),
   z
-    .object({ type: z.literal("workflow_transition_updated"), runId: workflowIdSchema, transitionRunId: workflowIdSchema, status: z.enum(["waiting", "evaluating", "resolved", "failed", "skipped"]) })
+    .object({
+      type: z.literal("workflow_transition_updated"),
+      runId: workflowIdSchema,
+      transitionRunId: workflowIdSchema,
+      status: z.enum([
+        "waiting",
+        "evaluating",
+        "resolved",
+        "failed",
+        "skipped",
+      ]),
+    })
     .strict(),
   z
-    .object({ type: z.literal("workflow_attention_required"), runId: workflowIdSchema, reason: z.string().min(1) })
+    .object({
+      type: z.literal("workflow_attention_required"),
+      runId: workflowIdSchema,
+      reason: z.string().min(1),
+    })
     .strict(),
 ]);
 
 export type WorkflowModelOverride = z.infer<typeof workflowModelOverrideSchema>;
-export type WorkflowInputDefinition = z.infer<typeof workflowInputDefinitionSchema>;
+export type WorkflowInputDefinition = z.infer<
+  typeof workflowInputDefinitionSchema
+>;
 export type WorkflowContext = z.infer<typeof workflowContextSchema>;
 export type WorkflowPromptPart = z.infer<typeof workflowPromptPartSchema>;
 export type WorkflowInputPolicy = z.infer<typeof workflowInputPolicySchema>;
-export type WorkflowStepDefinition = z.infer<typeof workflowStepDefinitionSchema>;
+export type WorkflowStepDefinition = z.infer<
+  typeof workflowStepDefinitionSchema
+>;
 export type WorkflowRouteTarget = z.infer<typeof workflowRouteTargetSchema>;
 export type WorkflowTransition = z.infer<typeof workflowTransitionSchema>;
-export type WorkflowTemplateDefinition = z.infer<typeof workflowTemplateDefinitionSchema>;
+export type WorkflowTemplateDefinition = z.infer<
+  typeof workflowTemplateDefinitionSchema
+>;
 export type WorkflowTemplate = z.infer<typeof workflowTemplateSchema>;
 export type WorkflowStepStatus = z.infer<typeof workflowStepStatusSchema>;
 export type WorkflowRunStatus = z.infer<typeof workflowRunStatusSchema>;

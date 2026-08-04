@@ -31,9 +31,7 @@ const linearTemplate = {
       id: "investigate",
       name: "Investigate",
       kind: "agent" as const,
-      promptParts: [
-        { type: "workflowInput" as const, inputId: "issue" },
-      ],
+      promptParts: [{ type: "workflowInput" as const, inputId: "issue" }],
       inputPolicy,
       startPolicy: "auto" as const,
     },
@@ -42,7 +40,11 @@ const linearTemplate = {
       name: "Fix",
       kind: "agent" as const,
       promptParts: [
-        { type: "stepOutput" as const, stepId: "investigate", output: "finalAnswer" as const },
+        {
+          type: "stepOutput" as const,
+          stepId: "investigate",
+          output: "finalAnswer" as const,
+        },
       ],
       inputPolicy: { ...inputPolicy, includeParentFinalAnswer: true },
       startPolicy: "auto" as const,
@@ -85,12 +87,18 @@ describe("workflowTemplateDefinitionSchema", () => {
         {
           ...linearTemplate.steps[1],
           promptParts: [
-            { type: "stepOutput" as const, stepId: "investigate", output: "transcript" as const },
+            {
+              type: "stepOutput" as const,
+              stepId: "investigate",
+              output: "transcript" as const,
+            },
           ],
         },
       ],
     };
-    expect(workflowTemplateDefinitionSchema.parse(withTranscript)).toEqual(withTranscript);
+    expect(workflowTemplateDefinitionSchema.parse(withTranscript)).toEqual(
+      withTranscript,
+    );
   });
 
   it("rejects a blank workflow with no agent steps", () => {
@@ -101,7 +109,9 @@ describe("workflowTemplateDefinitionSchema", () => {
     });
     expect(result.success).toBe(false);
     if (result.success) return;
-    expect(result.error.issues.some((issue) => issue.path.join(".") === "steps")).toBe(true);
+    expect(
+      result.error.issues.some((issue) => issue.path.join(".") === "steps"),
+    ).toBe(true);
   });
 
   it("rejects dangling steps and input references", () => {
@@ -177,7 +187,12 @@ describe("workflowTemplateDefinitionSchema", () => {
         { ...linearTemplate.steps[0], id: "other", name: "Other" },
       ],
       transitions: [
-        { id: "one", fromStepId: "investigate", kind: "always", toStepId: "fix" },
+        {
+          id: "one",
+          fromStepId: "investigate",
+          kind: "always",
+          toStepId: "fix",
+        },
         { id: "two", fromStepId: "other", kind: "always", toStepId: "fix" },
       ],
     });
@@ -190,8 +205,18 @@ describe("workflowTemplateDefinitionSchema", () => {
     const cyclic = workflowTemplateDefinitionSchema.safeParse({
       ...linearTemplate,
       transitions: [
-        { id: "one", fromStepId: "investigate", kind: "always", toStepId: "fix" },
-        { id: "two", fromStepId: "fix", kind: "always", toStepId: "investigate" },
+        {
+          id: "one",
+          fromStepId: "investigate",
+          kind: "always",
+          toStepId: "fix",
+        },
+        {
+          id: "two",
+          fromStepId: "fix",
+          kind: "always",
+          toStepId: "investigate",
+        },
       ],
     });
     expect(cyclic.success).toBe(false);
@@ -206,8 +231,18 @@ describe("workflowTemplateDefinitionSchema", () => {
     const duplicate = workflowTemplateDefinitionSchema.safeParse({
       ...linearTemplate,
       transitions: [
-        { id: "same", fromStepId: "investigate", kind: "always", toStepId: "fix" },
-        { id: "same", fromStepId: "investigate", kind: "always", toStepId: "fix" },
+        {
+          id: "same",
+          fromStepId: "investigate",
+          kind: "always",
+          toStepId: "fix",
+        },
+        {
+          id: "same",
+          fromStepId: "investigate",
+          kind: "always",
+          toStepId: "fix",
+        },
       ],
     });
     expect(duplicate.success).toBe(false);
@@ -308,7 +343,7 @@ describe("workflowRunSchema", () => {
         },
         inputs: { issue: "Fix test" },
         stepRuns: template.steps.map((step, index) => ({
-          id: `00000000-0000-4000-8000-00000000000${index + 1}`, 
+          id: `00000000-0000-4000-8000-00000000000${index + 1}`,
           templateStepId: step.id,
           name: step.name,
           status: index === 0 ? "ready" : "waiting",
@@ -332,11 +367,13 @@ describe("workflowRunSchema", () => {
 describe("workflow action request schemas", () => {
   it("accepts all manual approval actions", () => {
     for (const action of ["approve", "skip", "stop"] as const) {
-      expect(workflowApproveGateRequestSchema.parse({
-        runId: "b1b1b1b1-b1b1-41b1-81b1-b1b1b1b1b1b1",
-        stepRunId: "c1c1c1c1-c1c1-41c1-81c1-c1c1c1c1c1c1",
-        action,
-      }).action).toBe(action);
+      expect(
+        workflowApproveGateRequestSchema.parse({
+          runId: "b1b1b1b1-b1b1-41b1-81b1-b1b1b1b1b1b1",
+          stepRunId: "c1c1c1c1-c1c1-41c1-81c1-c1c1c1c1c1c1",
+          action,
+        }).action,
+      ).toBe(action);
     }
   });
 
@@ -346,16 +383,20 @@ describe("workflow action request schemas", () => {
       transitionRunId: "c1c1c1c1-c1c1-41c1-81c1-c1c1c1c1c1c1",
     };
     expect(workflowRetryConditionRequestSchema.parse(ids)).toEqual(ids);
-    expect(workflowOverrideConditionRequestSchema.parse({
-      ...ids,
-      decision: "no",
-      rationale: "The judge output was malformed; select the safe branch.",
-    })).toMatchObject({ decision: "no" });
-    expect(workflowOverrideConditionRequestSchema.safeParse({
-      ...ids,
-      decision: "yes",
-      rationale: " ",
-    }).success).toBe(false);
+    expect(
+      workflowOverrideConditionRequestSchema.parse({
+        ...ids,
+        decision: "no",
+        rationale: "The judge output was malformed; select the safe branch.",
+      }),
+    ).toMatchObject({ decision: "no" });
+    expect(
+      workflowOverrideConditionRequestSchema.safeParse({
+        ...ids,
+        decision: "yes",
+        rationale: " ",
+      }).success,
+    ).toBe(false);
   });
 });
 

@@ -332,8 +332,12 @@ export interface PiDeckApi {
     startRun(request: WorkflowStartRunRequest): Promise<WorkflowRun>;
     stopRun(request: WorkflowStopRunRequest): Promise<WorkflowRun>;
     retryStep(request: WorkflowRetryStepRequest): Promise<WorkflowRun>;
-    retryCondition(request: WorkflowRetryConditionRequest): Promise<WorkflowRun>;
-    overrideCondition(request: WorkflowOverrideConditionRequest): Promise<WorkflowRun>;
+    retryCondition(
+      request: WorkflowRetryConditionRequest,
+    ): Promise<WorkflowRun>;
+    overrideCondition(
+      request: WorkflowOverrideConditionRequest,
+    ): Promise<WorkflowRun>;
     approveGate(request: WorkflowApproveGateRequest): Promise<WorkflowRun>;
     onEvent(listener: (event: WorkflowEvent) => void): () => void;
   };

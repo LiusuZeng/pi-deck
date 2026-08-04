@@ -17,46 +17,75 @@ export function renderWorkflowPrompt({
   run,
 }: RenderWorkflowPromptOptions): string {
   const sections: string[] = [];
-  if (step.inputPolicy.includeWorkflowContext && workflowContext !== undefined) {
+  if (
+    step.inputPolicy.includeWorkflowContext &&
+    workflowContext !== undefined
+  ) {
     const context = renderWorkflowContext(workflowContext, run.inputs);
     if (context.length > 0) sections.push(`Workflow context:\n${context}`);
   }
   if (step.inputPolicy.includeParentFinalAnswer) {
-    sections.push(`Parent final answer:\n${requireAvailable(run.parentFinalAnswer, "Parent final answer")}`);
+    sections.push(
+      `Parent final answer:\n${requireAvailable(run.parentFinalAnswer, "Parent final answer")}`,
+    );
   }
   if (step.inputPolicy.includeParentSummary) {
-    sections.push(`Parent summary:\n${requireAvailable(run.parentSummary, "Parent summary")}`);
+    sections.push(
+      `Parent summary:\n${requireAvailable(run.parentSummary, "Parent summary")}`,
+    );
   }
   if (step.inputPolicy.includeParentTranscript) {
-    sections.push(`Parent transcript:\n${requireAvailable(run.parentTranscript, "Parent transcript")}`);
+    sections.push(
+      `Parent transcript:\n${requireAvailable(run.parentTranscript, "Parent transcript")}`,
+    );
   }
 
   const prompt = step.promptParts
     .map((part) => {
       if (part.type === "text") return part.text;
       if (part.type === "workflowInput") {
-        return requireAvailable(run.inputs[part.inputId], `Workflow input ${part.inputId}`);
+        return requireAvailable(
+          run.inputs[part.inputId],
+          `Workflow input ${part.inputId}`,
+        );
       }
-      const source = run.stepRuns.find((item) => item.templateStepId === part.stepId);
+      const source = run.stepRuns.find(
+        (item) => item.templateStepId === part.stepId,
+      );
       return renderStepOutput(source, part.output);
     })
     .join("");
   sections.push(prompt);
-  return sections.filter((section) => section.trim().length > 0).join("\n\n").trim();
+  return sections
+    .filter((section) => section.trim().length > 0)
+    .join("\n\n")
+    .trim();
 }
 
 export function renderStepOutput(
   step: WorkflowStepRun | undefined,
   output: "finalAnswer" | "summary" | "transcript",
 ): string {
-  if (step === undefined) throw new Error("Workflow prompt is blocked: referenced upstream step is unavailable.");
+  if (step === undefined)
+    throw new Error(
+      "Workflow prompt is blocked: referenced upstream step is unavailable.",
+    );
   if (output === "finalAnswer") {
-    return requireAvailable(step.finalAnswer, `Upstream final answer for ${step.templateStepId}`);
+    return requireAvailable(
+      step.finalAnswer,
+      `Upstream final answer for ${step.templateStepId}`,
+    );
   }
   if (output === "summary") {
-    return requireAvailable(step.summary ?? step.finalAnswer, `Upstream summary for ${step.templateStepId}`);
+    return requireAvailable(
+      step.summary ?? step.finalAnswer,
+      `Upstream summary for ${step.templateStepId}`,
+    );
   }
-  return requireAvailable(step.transcript, `Upstream transcript for ${step.templateStepId}`);
+  return requireAvailable(
+    step.transcript,
+    `Upstream transcript for ${step.templateStepId}`,
+  );
 }
 
 function requireAvailable(value: string | undefined, label: string): string {
@@ -83,7 +112,11 @@ function renderWorkflowContext(
   return lines.join("\n");
 }
 
-function addLine(lines: string[], label: string, value: string | undefined): void {
+function addLine(
+  lines: string[],
+  label: string,
+  value: string | undefined,
+): void {
   if (value === undefined || value.trim().length === 0) return;
   lines.push(`${label}:\n${value}`);
 }

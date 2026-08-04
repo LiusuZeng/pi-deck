@@ -54,9 +54,12 @@ export class WorkflowStore {
   async listTemplates(workspaceId?: string): Promise<WorkflowTemplate[]> {
     await this.loadIfNeeded();
     return this.state.templates
-      .filter((template) =>
-        template.archivedAtMs === undefined &&
-        (workspaceId === undefined || template.workspaceId === undefined || template.workspaceId === workspaceId),
+      .filter(
+        (template) =>
+          template.archivedAtMs === undefined &&
+          (workspaceId === undefined ||
+            template.workspaceId === undefined ||
+            template.workspaceId === workspaceId),
       )
       .sort((left, right) => right.updatedAtMs - left.updatedAtMs)
       .map(clone);
@@ -64,7 +67,9 @@ export class WorkflowStore {
 
   async getTemplate(templateId: string): Promise<WorkflowTemplate> {
     await this.loadIfNeeded();
-    const template = this.state.templates.find((item) => item.id === templateId);
+    const template = this.state.templates.find(
+      (item) => item.id === templateId,
+    );
     if (template === undefined || template.archivedAtMs !== undefined) {
       throw new Error(`Unknown workflow template: ${templateId}`);
     }
@@ -83,7 +88,10 @@ export class WorkflowStore {
       createdAtMs: now,
       updatedAtMs: now,
     });
-    await this.commit({ ...this.state, templates: [...this.state.templates, template] });
+    await this.commit({
+      ...this.state,
+      templates: [...this.state.templates, template],
+    });
     return clone(template);
   }
 
@@ -92,7 +100,9 @@ export class WorkflowStore {
     definition: WorkflowTemplateDefinition,
   ): Promise<WorkflowTemplate> {
     await this.loadIfNeeded();
-    const index = this.state.templates.findIndex((item) => item.id === templateId);
+    const index = this.state.templates.findIndex(
+      (item) => item.id === templateId,
+    );
     if (index < 0 || this.state.templates[index]!.archivedAtMs !== undefined) {
       throw new Error(`Unknown workflow template: ${templateId}`);
     }
@@ -116,11 +126,17 @@ export class WorkflowStore {
 
   async archiveTemplate(templateId: string): Promise<WorkflowTemplate> {
     await this.loadIfNeeded();
-    const index = this.state.templates.findIndex((item) => item.id === templateId);
+    const index = this.state.templates.findIndex(
+      (item) => item.id === templateId,
+    );
     if (index < 0) throw new Error(`Unknown workflow template: ${templateId}`);
     const current = this.state.templates[index]!;
     if (current.archivedAtMs !== undefined) return clone(current);
-    const archived = { ...current, archivedAtMs: this.now(), updatedAtMs: this.now() };
+    const archived = {
+      ...current,
+      archivedAtMs: this.now(),
+      updatedAtMs: this.now(),
+    };
     const templates = [...this.state.templates];
     templates[index] = archived;
     await this.commit({ ...this.state, templates });
@@ -153,7 +169,9 @@ export class WorkflowStore {
   async listRuns(workspaceId?: string): Promise<WorkflowRun[]> {
     await this.loadIfNeeded();
     return this.state.runs
-      .filter((run) => workspaceId === undefined || run.workspaceId === workspaceId)
+      .filter(
+        (run) => workspaceId === undefined || run.workspaceId === workspaceId,
+      )
       .sort((left, right) => right.updatedAtMs - left.updatedAtMs)
       .map(clone);
   }
@@ -220,11 +238,18 @@ export class WorkflowStore {
         const generation = this.generation;
         const tempFile = `${this.storeFile}.tmp-${process.pid}-${this.now()}-${Math.random().toString(36).slice(2)}`;
         await fs.mkdir(this.piDeckHome, { recursive: true, mode: 0o700 });
-        await fs.writeFile(tempFile, `${JSON.stringify(this.state, null, 2)}\n`, {
-          mode: 0o600,
-        });
+        await fs.writeFile(
+          tempFile,
+          `${JSON.stringify(this.state, null, 2)}\n`,
+          {
+            mode: 0o600,
+          },
+        );
         await fs.rename(tempFile, this.storeFile);
-        this.persistedGeneration = Math.max(this.persistedGeneration, generation);
+        this.persistedGeneration = Math.max(
+          this.persistedGeneration,
+          generation,
+        );
       });
     return this.persistQueue;
   }
@@ -236,7 +261,10 @@ function clone<T>(value: T): T {
 
 function isMissingFile(error: unknown): boolean {
   return Boolean(
-    error && typeof error === "object" && "code" in error && error.code === "ENOENT",
+    error &&
+    typeof error === "object" &&
+    "code" in error &&
+    error.code === "ENOENT",
   );
 }
 

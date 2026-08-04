@@ -42,7 +42,10 @@ export interface WorkflowSchedulerDependencies {
   closeSession(runtimeId: string): Promise<void>;
   configureSession?(
     runtimeId: string,
-    settings: { model?: { provider?: string; modelId?: string }; thinkingLevel?: string },
+    settings: {
+      model?: { provider?: string; modelId?: string };
+      thinkingLevel?: string;
+    },
   ): Promise<void>;
   getRun?(runId: string): Promise<WorkflowRun>;
   persist(run: WorkflowRun): Promise<WorkflowRun>;
@@ -61,10 +64,12 @@ interface ActiveStep {
 
 type RuntimeOwnership = { runtimeId: string; active: ActiveStep };
 
-const conditionJudgeSchema = z.object({
-  decision: z.enum(["yes", "no", "unsure"]),
-  rationale: z.string().min(1).max(4_000),
-}).strict();
+const conditionJudgeSchema = z
+  .object({
+    decision: z.enum(["yes", "no", "unsure"]),
+    rationale: z.string().min(1).max(4_000),
+  })
+  .strict();
 
 /**
  * Runs one ready agent step at a time. A Pi worker is deliberately treated as
@@ -108,7 +113,10 @@ export class WorkflowScheduler {
   /** Apply a newly persisted stop/retry/approval mutation from IPC. */
   async update(run: WorkflowRun): Promise<WorkflowRun> {
     this.runs.set(run.id, run);
-    this.mutationVersions.set(run.id, (this.mutationVersions.get(run.id) ?? 0) + 1);
+    this.mutationVersions.set(
+      run.id,
+      (this.mutationVersions.get(run.id) ?? 0) + 1,
+    );
     // Any externally persisted mutation supersedes the runtime that was
     // started from the previous generation. This also prevents a retry or
     // approval update from leaving an old worker able to report completion.
@@ -202,11 +210,15 @@ export class WorkflowScheduler {
       if (current === undefined) return;
       const finalAssistant = findFinalAssistant(snapshot.messages);
       if (active.kind === "condition" && active.transitionRunId !== undefined) {
-        if (finalAssistant?.error === true || finalAssistant?.content === undefined) {
+        if (
+          finalAssistant?.error === true ||
+          finalAssistant?.content === undefined
+        ) {
           await this.finishConditionFailed(
             current,
             active.transitionRunId,
-            finalAssistant?.errorMessage ?? "Condition judge returned no JSON result.",
+            finalAssistant?.errorMessage ??
+              "Condition judge returned no JSON result.",
             ownership,
           );
         } else {
@@ -257,7 +269,10 @@ export class WorkflowScheduler {
     } catch (error) {
       const current = await this.getOwnedRun(ownership);
       if (current !== undefined) {
-        if (active.kind === "condition" && active.transitionRunId !== undefined) {
+        if (
+          active.kind === "condition" &&
+          active.transitionRunId !== undefined
+        ) {
           await this.finishConditionFailed(
             current,
             active.transitionRunId,
@@ -298,15 +313,19 @@ export class WorkflowScheduler {
         return run;
       }
       const step = readyWorkflowSteps(run)[0];
-      const conditionEntry = step === undefined
-        ? run.transitionRuns.find((candidate) => candidate.status === "evaluating")
-        : undefined;
+      const conditionEntry =
+        step === undefined
+          ? run.transitionRuns.find(
+              (candidate) => candidate.status === "evaluating",
+            )
+          : undefined;
       if (step === undefined && conditionEntry === undefined) return run;
-      const definition = step === undefined
-        ? undefined
-        : run.templateSnapshot.steps.find(
-            (candidate) => candidate.id === step.templateStepId,
-          );
+      const definition =
+        step === undefined
+          ? undefined
+          : run.templateSnapshot.steps.find(
+              (candidate) => candidate.id === step.templateStepId,
+            );
       if (step !== undefined && definition === undefined) {
         return this.finishFailed(
           run,
@@ -346,7 +365,11 @@ export class WorkflowScheduler {
       const latest = this.dependencies.getRun
         ? await this.dependencies.getRun(runId)
         : this.runs.get(runId);
-      if (latest === undefined || latest.status === "stopped" || version !== (this.mutationVersions.get(runId) ?? 0)) {
+      if (
+        latest === undefined ||
+        latest.status === "stopped" ||
+        version !== (this.mutationVersions.get(runId) ?? 0)
+      ) {
         await this.closeQuietly(session.runtimeId);
         if (latest !== undefined) this.runsSet(latest);
         return latest ?? run;
@@ -384,8 +407,12 @@ export class WorkflowScheduler {
               ? {
                   ...candidate,
                   renderedPrompt,
-                  ...(typeof sessionState.sessionFile === "string" ? { sessionFile: sessionState.sessionFile } : {}),
-                  ...(typeof sessionState.sessionId === "string" ? { sessionId: sessionState.sessionId } : {}),
+                  ...(typeof sessionState.sessionFile === "string"
+                    ? { sessionFile: sessionState.sessionFile }
+                    : {}),
+                  ...(typeof sessionState.sessionId === "string"
+                    ? { sessionId: sessionState.sessionId }
+                    : {}),
                 }
               : candidate,
           ),
@@ -397,9 +424,15 @@ export class WorkflowScheduler {
           stepRunId: step.id,
         };
         this.activeByRuntime.set(session.runtimeId, active);
-        await this.persistAndEmit(this.runsSet(withMetadata), { runtimeId: session.runtimeId, active });
+        await this.persistAndEmit(this.runsSet(withMetadata), {
+          runtimeId: session.runtimeId,
+          active,
+        });
         try {
-          const owned = await this.getOwnedRun({ runtimeId: session.runtimeId, active });
+          const owned = await this.getOwnedRun({
+            runtimeId: session.runtimeId,
+            active,
+          });
           if (owned === undefined) return this.runs.get(runId)!;
           await this.applyStepSettings(session.runtimeId, owned, definition);
           await this.dependencies.prompt(session.runtimeId, renderedPrompt);
@@ -407,21 +440,40 @@ export class WorkflowScheduler {
           const ownership = { runtimeId: session.runtimeId, active };
           const owned = await this.getOwnedRun(ownership);
           if (owned !== undefined) {
-            await this.finishFailed(owned, step.id, error instanceof Error ? error.message : String(error), ownership);
+            await this.finishFailed(
+              owned,
+              step.id,
+              error instanceof Error ? error.message : String(error),
+              ownership,
+            );
           }
-          if (await this.releaseOwnership(ownership)) await this.closeQuietly(session.runtimeId);
+          if (await this.releaseOwnership(ownership))
+            await this.closeQuietly(session.runtimeId);
         }
       } else {
         const transition = run.templateSnapshot.transitions.find(
-          (candidate): candidate is Extract<WorkflowTransition, { kind: "condition" }> =>
-            candidate.id === run.transitionRuns.find((item) => item.id === conditionEntry!.id)?.templateTransitionId && candidate.kind === "condition",
+          (
+            candidate,
+          ): candidate is Extract<WorkflowTransition, { kind: "condition" }> =>
+            candidate.id ===
+              run.transitionRuns.find((item) => item.id === conditionEntry!.id)
+                ?.templateTransitionId && candidate.kind === "condition",
         );
         if (transition === undefined) {
           await this.closeQuietly(session.runtimeId);
-          return this.finishConditionFailed(latest, conditionEntry!.id, "Unknown condition transition.");
+          return this.finishConditionFailed(
+            latest,
+            conditionEntry!.id,
+            "Unknown condition transition.",
+          );
         }
-        const source = latest.stepRuns.find((candidate) => candidate.templateStepId === transition.fromStepId);
-        const prompt = renderConditionJudgePrompt(transition, source?.finalAnswer);
+        const source = latest.stepRuns.find(
+          (candidate) => candidate.templateStepId === transition.fromStepId,
+        );
+        const prompt = renderConditionJudgePrompt(
+          transition,
+          source?.finalAnswer,
+        );
         const active: ActiveStep = {
           runId,
           version,
@@ -430,16 +482,25 @@ export class WorkflowScheduler {
         };
         this.activeByRuntime.set(session.runtimeId, active);
         try {
-          const owned = await this.getOwnedRun({ runtimeId: session.runtimeId, active });
+          const owned = await this.getOwnedRun({
+            runtimeId: session.runtimeId,
+            active,
+          });
           if (owned === undefined) return this.runs.get(runId)!;
           await this.dependencies.prompt(session.runtimeId, prompt);
         } catch (error) {
           const ownership = { runtimeId: session.runtimeId, active };
           const owned = await this.getOwnedRun(ownership);
           if (owned !== undefined) {
-            await this.finishConditionFailed(owned, conditionEntry!.id, error instanceof Error ? error.message : String(error), ownership);
+            await this.finishConditionFailed(
+              owned,
+              conditionEntry!.id,
+              error instanceof Error ? error.message : String(error),
+              ownership,
+            );
           }
-          if (await this.releaseOwnership(ownership)) await this.closeQuietly(session.runtimeId);
+          if (await this.releaseOwnership(ownership))
+            await this.closeQuietly(session.runtimeId);
         }
       }
       return this.runs.get(runId)!;
@@ -464,7 +525,12 @@ export class WorkflowScheduler {
     error: string,
     ownership?: RuntimeOwnership,
   ): Promise<WorkflowRun> {
-    const failed = failWorkflowCondition(run, transitionRunId, error, this.now());
+    const failed = failWorkflowCondition(
+      run,
+      transitionRunId,
+      error,
+      this.now(),
+    );
     return this.persistAndEmit(this.runsSet(failed), ownership);
   }
 
@@ -474,17 +540,24 @@ export class WorkflowScheduler {
     definition: WorkflowStepDefinition,
   ): Promise<void> {
     const model = definition.modelOverride ?? run.templateSnapshot.defaultModel;
-    const thinkingLevel = definition.thinkingOverride ?? run.templateSnapshot.defaultThinkingLevel;
+    const thinkingLevel =
+      definition.thinkingOverride ?? run.templateSnapshot.defaultThinkingLevel;
     if (model === undefined && thinkingLevel === undefined) return;
     if (this.dependencies.configureSession === undefined) {
-      throw new Error("Workflow step settings cannot be applied by this Pi runtime.");
+      throw new Error(
+        "Workflow step settings cannot be applied by this Pi runtime.",
+      );
     }
     await this.dependencies.configureSession(runtimeId, {
       ...(model !== undefined
         ? {
             model: {
-              ...(model.provider !== undefined ? { provider: model.provider } : {}),
-              ...(model.modelId !== undefined ? { modelId: model.modelId } : {}),
+              ...(model.provider !== undefined
+                ? { provider: model.provider }
+                : {}),
+              ...(model.modelId !== undefined
+                ? { modelId: model.modelId }
+                : {}),
             },
           }
         : {}),
@@ -501,7 +574,10 @@ export class WorkflowScheduler {
     run: WorkflowRun,
     ownership?: RuntimeOwnership,
   ): Promise<WorkflowRun> {
-    if (ownership !== undefined && (await this.getOwnedRun(ownership)) === undefined) {
+    if (
+      ownership !== undefined &&
+      (await this.getOwnedRun(ownership)) === undefined
+    ) {
       return this.runs.get(run.id) ?? run;
     }
     const persisted = await this.dependencies.persist(run);
@@ -518,23 +594,32 @@ export class WorkflowScheduler {
   private isCurrentOwner(ownership: RuntimeOwnership): boolean {
     return (
       this.activeByRuntime.get(ownership.runtimeId) === ownership.active &&
-      (this.mutationVersions.get(ownership.active.runId) ?? 0) === ownership.active.version
+      (this.mutationVersions.get(ownership.active.runId) ?? 0) ===
+        ownership.active.version
     );
   }
 
-  private async getOwnedRun(ownership: RuntimeOwnership): Promise<WorkflowRun | undefined> {
+  private async getOwnedRun(
+    ownership: RuntimeOwnership,
+  ): Promise<WorkflowRun | undefined> {
     if (!this.isCurrentOwner(ownership)) return undefined;
     const current = this.dependencies.getRun
       ? await this.dependencies.getRun(ownership.active.runId)
       : this.runs.get(ownership.active.runId);
-    if (!this.isCurrentOwner(ownership) || current === undefined || isTerminalRun(current)) {
+    if (
+      !this.isCurrentOwner(ownership) ||
+      current === undefined ||
+      isTerminalRun(current)
+    ) {
       return undefined;
     }
     this.runsSet(current);
     return current;
   }
 
-  private async releaseOwnership(ownership: RuntimeOwnership): Promise<boolean> {
+  private async releaseOwnership(
+    ownership: RuntimeOwnership,
+  ): Promise<boolean> {
     if (!this.isCurrentOwner(ownership)) return false;
     this.activeByRuntime.delete(ownership.runtimeId);
     return true;
@@ -584,7 +669,9 @@ function renderConditionJudgePrompt(
   ].join("\n");
 }
 
-function parseConditionDecision(content: string): { decision: "yes" | "no" | "unsure"; rationale: string } | undefined {
+function parseConditionDecision(
+  content: string,
+): { decision: "yes" | "no" | "unsure"; rationale: string } | undefined {
   try {
     const parsed = conditionJudgeSchema.safeParse(JSON.parse(content));
     return parsed.success ? parsed.data : undefined;

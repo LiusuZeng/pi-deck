@@ -10,7 +10,11 @@ import type { WorkflowTemplate } from "../../shared/workflowSchemas.js";
 const tempDirs: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(tempDirs.splice(0).map((directory) => fs.rm(directory, { recursive: true, force: true })));
+  await Promise.all(
+    tempDirs
+      .splice(0)
+      .map((directory) => fs.rm(directory, { recursive: true, force: true })),
+  );
 });
 
 const template: WorkflowTemplate = {
@@ -133,21 +137,25 @@ describe("workflow rehydration", () => {
       now: 10,
     });
     const scheduled: string[] = [];
-    await rehydrateWorkflowRuns([run], {
-      resolveWorkspace: async (workspaceId) => {
-        const restored = await workspaces.getWorkspace(workspaceId);
-        if (restored === undefined || restored.archivedAtMs !== undefined) {
-          throw new Error(`Workspace is archived: ${workspaceId}`);
-        }
+    await rehydrateWorkflowRuns(
+      [run],
+      {
+        resolveWorkspace: async (workspaceId) => {
+          const restored = await workspaces.getWorkspace(workspaceId);
+          if (restored === undefined || restored.archivedAtMs !== undefined) {
+            throw new Error(`Workspace is archived: ${workspaceId}`);
+          }
+        },
+        updateRun: async (next) => next,
+        schedule: async (next) => {
+          scheduled.push(next.id);
+          return next;
+        },
+        emit: () => undefined,
+        recordError: () => undefined,
       },
-      updateRun: async (next) => next,
-      schedule: async (next) => {
-        scheduled.push(next.id);
-        return next;
-      },
-      emit: () => undefined,
-      recordError: () => undefined,
-    }, 20);
+      20,
+    );
 
     expect(scheduled).toEqual([run.id]);
     expect(run.status).toBe("waiting");

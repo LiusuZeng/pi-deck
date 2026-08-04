@@ -66,17 +66,32 @@ const conditionTemplate: WorkflowTemplate = {
   id: "00000000-0000-4000-8000-000000000002",
   steps: [
     { ...template.steps[0]!, id: "source", name: "Source" },
-    { ...template.steps[1]!, id: "yes", name: "Yes", promptParts: [{ type: "text", text: "yes" }] },
-    { ...template.steps[1]!, id: "no", name: "No", promptParts: [{ type: "text", text: "no" }] },
+    {
+      ...template.steps[1]!,
+      id: "yes",
+      name: "Yes",
+      promptParts: [{ type: "text", text: "yes" }],
+    },
+    {
+      ...template.steps[1]!,
+      id: "no",
+      name: "No",
+      promptParts: [{ type: "text", text: "no" }],
+    },
   ],
-  transitions: [{
-    id: "condition-1",
-    fromStepId: "source",
-    kind: "condition",
-    question: "Did it succeed?",
-    routes: { yes: { kind: "step", stepId: "yes" }, no: { kind: "step", stepId: "no" } },
-    previewBeforeStart: false,
-  }],
+  transitions: [
+    {
+      id: "condition-1",
+      fromStepId: "source",
+      kind: "condition",
+      question: "Did it succeed?",
+      routes: {
+        yes: { kind: "step", stepId: "yes" },
+        no: { kind: "step", stepId: "no" },
+      },
+      previewBeforeStart: false,
+    },
+  ],
 };
 
 function snapshot(
@@ -105,7 +120,13 @@ function snapshot(
   };
 }
 
-function setup(options: { capacity?: boolean; conditionAnswer?: string; delaySnapshot?: boolean } = {}) {
+function setup(
+  options: {
+    capacity?: boolean;
+    conditionAnswer?: string;
+    delaySnapshot?: boolean;
+  } = {},
+) {
   const prompts: string[] = [];
   const persisted: WorkflowRun[] = [];
   const closed: string[] = [];
@@ -113,7 +134,9 @@ function setup(options: { capacity?: boolean; conditionAnswer?: string; delaySna
   let created = 0;
   let releaseSnapshot = () => undefined;
   const snapshotGate = options.delaySnapshot
-    ? new Promise<void>((resolve) => { releaseSnapshot = resolve; })
+    ? new Promise<void>((resolve) => {
+        releaseSnapshot = resolve;
+      })
     : Promise.resolve();
   const scheduler = new WorkflowScheduler({
     createSession: async () => {
@@ -197,7 +220,12 @@ describe("WorkflowScheduler", () => {
 
   it("persists a bounded transcript from the completed Pi snapshot", async () => {
     const fixture = setup();
-    const run = createWorkflowRun({ template, workspaceId: "workspace", inputs: {}, now: 1 });
+    const run = createWorkflowRun({
+      template,
+      workspaceId: "workspace",
+      inputs: {},
+      now: 1,
+    });
     await fixture.scheduler.schedule(run);
     fixture.sessions.set("runtime-1", {
       ...fixture.sessions.get("runtime-1")!,
@@ -231,24 +259,38 @@ describe("WorkflowScheduler", () => {
       })),
     );
     expect(transcript).toBeDefined();
-    expect(transcript!.length).toBeLessThanOrEqual(WORKFLOW_TRANSCRIPT_MAX_CHARS);
+    expect(transcript!.length).toBeLessThanOrEqual(
+      WORKFLOW_TRANSCRIPT_MAX_CHARS,
+    );
     expect(transcript).toContain("249:");
-    expect(renderWorkflowTranscript([{ role: "assistant", content: [{ type: "toolCall" }] }])).toBeUndefined();
+    expect(
+      renderWorkflowTranscript([
+        { role: "assistant", content: [{ type: "toolCall" }] },
+      ]),
+    ).toBeUndefined();
   });
 
   it("blocks unavailable referenced outputs before prompting Pi", async () => {
     const fixture = setup();
     const blockedTemplate: WorkflowTemplate = {
       ...template,
-      steps: [{
-        ...template.steps[0]!,
-        inputPolicy: {
-          ...template.steps[0]!.inputPolicy,
-          includeParentFinalAnswer: true,
+      steps: [
+        {
+          ...template.steps[0]!,
+          inputPolicy: {
+            ...template.steps[0]!.inputPolicy,
+            includeParentFinalAnswer: true,
+          },
         },
-      }, template.steps[1]!],
+        template.steps[1]!,
+      ],
     };
-    const run = createWorkflowRun({ template: blockedTemplate, workspaceId: "workspace", inputs: {}, now: 1 });
+    const run = createWorkflowRun({
+      template: blockedTemplate,
+      workspaceId: "workspace",
+      inputs: {},
+      now: 1,
+    });
     await fixture.scheduler.schedule(run);
     expect(fixture.prompts).toEqual([]);
     expect(fixture.persisted.at(-1)?.status).toBe("needsAttention");
@@ -259,19 +301,26 @@ describe("WorkflowScheduler", () => {
     const fixture = setup();
     const optionalInputTemplate: WorkflowTemplate = {
       ...template,
-      inputs: [{ id: "context", label: "Context", type: "text", required: false }],
-      steps: [{
-        ...template.steps[0]!,
-        promptParts: [{ type: "workflowInput", inputId: "context" }],
-      }, template.steps[1]!],
+      inputs: [
+        { id: "context", label: "Context", type: "text", required: false },
+      ],
+      steps: [
+        {
+          ...template.steps[0]!,
+          promptParts: [{ type: "workflowInput", inputId: "context" }],
+        },
+        template.steps[1]!,
+      ],
     };
 
-    expect(() => createWorkflowRun({
-      template: optionalInputTemplate,
-      workspaceId: "workspace",
-      inputs: {},
-      now: 1,
-    })).toThrow(/required.*context/i);
+    expect(() =>
+      createWorkflowRun({
+        template: optionalInputTemplate,
+        workspaceId: "workspace",
+        inputs: {},
+        now: 1,
+      }),
+    ).toThrow(/required.*context/i);
     expect(fixture.prompts).toEqual([]);
     expect(fixture.persisted).toEqual([]);
   });
@@ -353,7 +402,12 @@ describe("WorkflowScheduler", () => {
 
   it("does not let a delayed completion overwrite a concurrent stop", async () => {
     const fixture = setup({ delaySnapshot: true });
-    const run = createWorkflowRun({ template, workspaceId: "workspace", inputs: {}, now: 1 });
+    const run = createWorkflowRun({
+      template,
+      workspaceId: "workspace",
+      inputs: {},
+      now: 1,
+    });
     await fixture.scheduler.schedule(run);
     const completion = fixture.scheduler.handleRuntimeEvent({
       type: "agent_end",
@@ -365,31 +419,73 @@ describe("WorkflowScheduler", () => {
     await fixture.scheduler.update(stopped);
     fixture.releaseSnapshot();
     await completion;
-    expect(fixture.persisted.some((item) => item.status === "completed")).toBe(false);
-    expect(fixture.persisted.some((item) => item.status === "stopped")).toBe(false);
+    expect(fixture.persisted.some((item) => item.status === "completed")).toBe(
+      false,
+    );
+    expect(fixture.persisted.some((item) => item.status === "stopped")).toBe(
+      false,
+    );
   });
 
   it("judges a condition with strict JSON and starts only the selected branch", async () => {
-    const fixture = setup({ conditionAnswer: '{"decision":"yes","rationale":"The result confirms success."}' });
-    const run = createWorkflowRun({ template: conditionTemplate, workspaceId: "workspace", inputs: {}, now: 1 });
+    const fixture = setup({
+      conditionAnswer:
+        '{"decision":"yes","rationale":"The result confirms success."}',
+    });
+    const run = createWorkflowRun({
+      template: conditionTemplate,
+      workspaceId: "workspace",
+      inputs: {},
+      now: 1,
+    });
     await fixture.scheduler.schedule(run);
-    await fixture.scheduler.handleRuntimeEvent({ type: "agent_end", runtimeId: "runtime-1", status: "completed" });
-    await fixture.scheduler.handleRuntimeEvent({ type: "agent_end", runtimeId: "runtime-2", status: "completed" });
+    await fixture.scheduler.handleRuntimeEvent({
+      type: "agent_end",
+      runtimeId: "runtime-1",
+      status: "completed",
+    });
+    await fixture.scheduler.handleRuntimeEvent({
+      type: "agent_end",
+      runtimeId: "runtime-2",
+      status: "completed",
+    });
     const latest = fixture.persisted.at(-1)!;
-    expect(latest.transitionRuns[0]).toMatchObject({ decision: "yes", rationale: "The result confirms success." });
-    expect(latest.stepRuns.find((step) => step.templateStepId === "yes")?.status).toBe("running");
-    expect(latest.stepRuns.find((step) => step.templateStepId === "no")?.status).toBe("skipped");
+    expect(latest.transitionRuns[0]).toMatchObject({
+      decision: "yes",
+      rationale: "The result confirms success.",
+    });
+    expect(
+      latest.stepRuns.find((step) => step.templateStepId === "yes")?.status,
+    ).toBe("running");
+    expect(
+      latest.stepRuns.find((step) => step.templateStepId === "no")?.status,
+    ).toBe("skipped");
   });
 
   it("turns malformed condition output into attention without selecting a branch", async () => {
     const fixture = setup({ conditionAnswer: "yes, definitely" });
-    const run = createWorkflowRun({ template: conditionTemplate, workspaceId: "workspace", inputs: {}, now: 1 });
+    const run = createWorkflowRun({
+      template: conditionTemplate,
+      workspaceId: "workspace",
+      inputs: {},
+      now: 1,
+    });
     await fixture.scheduler.schedule(run);
-    await fixture.scheduler.handleRuntimeEvent({ type: "agent_end", runtimeId: "runtime-1", status: "completed" });
-    await fixture.scheduler.handleRuntimeEvent({ type: "agent_end", runtimeId: "runtime-2", status: "completed" });
+    await fixture.scheduler.handleRuntimeEvent({
+      type: "agent_end",
+      runtimeId: "runtime-1",
+      status: "completed",
+    });
+    await fixture.scheduler.handleRuntimeEvent({
+      type: "agent_end",
+      runtimeId: "runtime-2",
+      status: "completed",
+    });
     const latest = fixture.persisted.at(-1)!;
     expect(latest.status).toBe("needsAttention");
     expect(latest.transitionRuns[0]?.status).toBe("failed");
-    expect(latest.stepRuns.find((step) => step.templateStepId === "yes")?.status).toBe("waiting");
+    expect(
+      latest.stepRuns.find((step) => step.templateStepId === "yes")?.status,
+    ).toBe("waiting");
   });
 });
