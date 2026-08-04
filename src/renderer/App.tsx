@@ -6791,7 +6791,18 @@ function WorkspaceManagementDialog(props: {
         "input:not([disabled]), select:not([disabled]), button:not([disabled])",
       );
     initialFocus?.focus();
-    return () => returnFocusRef.current?.focus();
+    return () => {
+      const returnFocus = returnFocusRef.current;
+      if (returnFocus?.isConnected) {
+        returnFocus.focus();
+        return;
+      }
+      document
+        .querySelector<HTMLElement>(
+          '[data-testid="workspace-tree"] button:not([disabled]), button[aria-label="New session"]',
+        )
+        ?.focus();
+    };
   }, []);
 
   useEffect(() => {
@@ -7299,7 +7310,7 @@ function ModelThinkingControls(props: {
         <span>{selectedModel?.contextWindow ?? "Context unknown"}</span>
         <span>Thinking: {selectedThinking?.label ?? "Unsupported"}</span>
         {selectedModel?.unavailableReason ? (
-          <span className="inline-error">
+          <span className="inline-error" role="alert">
             {selectedModel.unavailableReason}
           </span>
         ) : null}
@@ -7667,7 +7678,11 @@ function ExtensionUiCard(props: {
           </div>
         </form>
       ) : null}
-      {error ? <p className="inline-error">{error}</p> : null}
+      {error ? (
+        <p className="inline-error" role="alert">
+          {error}
+        </p>
+      ) : null}
     </article>
   );
 }
@@ -7748,7 +7763,10 @@ function TimelineRow(props: { item: TimelineItem }): ReactElement {
   }
 
   return (
-    <article className={`diagnostic-message ${props.item.tone}`}>
+    <article
+      className={`diagnostic-message ${props.item.tone}`}
+      role={props.item.tone === "error" ? "alert" : undefined}
+    >
       <strong>{props.item.tone === "error" ? "Error" : "Diagnostic"}</strong>
       <span>{props.item.content}</span>
     </article>
@@ -8137,6 +8155,7 @@ function Composer(props: {
   const [activeCommandIndex, setActiveCommandIndex] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const slashPickerId = useId();
+  const composerErrorId = useId();
   const isActionPending = isLifecycleTransition(props.status);
   const hasSlashCommands = props.slashCommands.length > 0;
   const selectedCommandIndex = hasSlashCommands
@@ -8246,7 +8265,9 @@ function Composer(props: {
           }
           aria-autocomplete="list"
           aria-controls={props.slashOpen ? slashPickerId : undefined}
+          aria-describedby={props.error !== null ? composerErrorId : undefined}
           aria-expanded={props.slashOpen}
+          aria-invalid={props.error !== null ? true : undefined}
           role="combobox"
           ref={textareaRef}
           onChange={(event) => {
@@ -8289,20 +8310,22 @@ function Composer(props: {
             />
           ) : null}
           {props.error !== null ? (
-            <span className="composer-error">{props.error}</span>
+            <span className="composer-error" id={composerErrorId} role="alert">
+              {props.error}
+            </span>
           ) : isActionPending ? (
             <span>
               {statusLabel(props.status)} · waiting for Pi confirmation…
             </span>
           ) : props.knownExtensionCommand !== undefined ? (
-            <span className="composer-error">
+            <span className="composer-error" role="alert">
               {props.knownExtensionCommand} is an extension command. It runs
               immediately and cannot be queued.
             </span>
           ) : props.isWorking ? (
             <span>Working in {props.backendLabel}…</span>
           ) : hasImageWarning ? (
-            <span className="composer-error">
+            <span className="composer-error" role="alert">
               Selected model does not support image input.
             </span>
           ) : null}

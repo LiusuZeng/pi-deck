@@ -2836,7 +2836,9 @@ test("real mode surfaces asynchronous provider errors with fake Pi", async () =>
     await page.getByLabel("Prompt text").fill("trigger usage limit");
     await page.getByRole("button", { name: "Send" }).click();
     await expect(
-      page.getByText("Usage limit reached for fake provider.").first(),
+      page.locator('[role="alert"]').filter({
+        hasText: "Usage limit reached for fake provider.",
+      }),
     ).toBeVisible();
     await expect(page.getByText("Agent is working…")).toHaveCount(0);
     await expect(page.getByText("Error").first()).toBeVisible();
@@ -2947,12 +2949,19 @@ test("real mode compact plus creates another attached session with fake Pi", asy
     await expect(
       page.getByText(/Fake response to: start draft session/),
     ).toBeVisible();
-    await page.getByLabel("Prompt text").fill("/");
-    await expect(page.getByText("/fake-worker-command")).toBeVisible();
-    await page.getByText("/fake-worker-command").click();
-    await expect(page.getByLabel("Prompt text")).toHaveValue(
-      "/fake-worker-command ",
-    );
+    const composer = page.getByLabel("Prompt text");
+    await composer.fill("/");
+    await expect(composer).toHaveAttribute("role", "combobox");
+    await expect(composer).toHaveAttribute("aria-expanded", "true");
+    const workerCommand = page.getByRole("option", {
+      name: /\/fake-worker-command/,
+    });
+    await expect(workerCommand).toBeVisible();
+    await composer.press("End");
+    await expect(workerCommand).toHaveAttribute("aria-selected", "true");
+    await composer.press("Enter");
+    await expect(composer).toHaveValue("/fake-worker-command ");
+    await expect(composer).toHaveAttribute("aria-expanded", "false");
     await page
       .getByLabel("Prompt text")
       .fill("new session e2e prompt without sending");
