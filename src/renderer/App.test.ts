@@ -337,6 +337,17 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
 });
 
 describe("renderer per-session composer drafts", () => {
+  it("cycles model menu focus and honors Home and End", () => {
+    const { nextMenuItemIndex } = __rendererTestHooks;
+
+    expect(nextMenuItemIndex("ArrowDown", 0, 3)).toBe(1);
+    expect(nextMenuItemIndex("ArrowDown", 2, 3)).toBe(0);
+    expect(nextMenuItemIndex("ArrowUp", 0, 3)).toBe(2);
+    expect(nextMenuItemIndex("Home", 2, 3)).toBe(0);
+    expect(nextMenuItemIndex("End", 0, 3)).toBe(2);
+    expect(nextMenuItemIndex("ArrowDown", 0, 0)).toBeUndefined();
+  });
+
   it("cycles slash picker selection and honors Home and End", () => {
     const { nextSlashCommandIndex } = __rendererTestHooks;
 

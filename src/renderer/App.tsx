@@ -7915,6 +7915,26 @@ function InlineTokens(props: { tokens: InlineToken[] }): ReactElement {
 
 type MenuNavigationKey = "ArrowDown" | "ArrowUp" | "Home" | "End";
 
+function nextMenuItemIndex(
+  key: MenuNavigationKey,
+  currentIndex: number,
+  itemCount: number,
+): number | undefined {
+  if (itemCount === 0) {
+    return undefined;
+  }
+  if (key === "Home") {
+    return 0;
+  }
+  if (key === "End") {
+    return itemCount - 1;
+  }
+  if (key === "ArrowDown") {
+    return currentIndex < 0 ? 0 : (currentIndex + 1) % itemCount;
+  }
+  return currentIndex <= 0 ? itemCount - 1 : currentIndex - 1;
+}
+
 function directMenuItems(menu: HTMLElement | null): HTMLElement[] {
   if (!menu) {
     return [];
@@ -7937,17 +7957,10 @@ function focusMenuItem(
     return;
   }
   const currentIndex = items.indexOf(currentTarget as HTMLElement);
-  let nextIndex: number;
-  if (key === "Home") {
-    nextIndex = 0;
-  } else if (key === "End") {
-    nextIndex = items.length - 1;
-  } else if (key === "ArrowDown") {
-    nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % items.length;
-  } else {
-    nextIndex = currentIndex <= 0 ? items.length - 1 : currentIndex - 1;
+  const nextIndex = nextMenuItemIndex(key, currentIndex, items.length);
+  if (nextIndex !== undefined) {
+    items[nextIndex]?.focus();
   }
-  items[nextIndex]?.focus();
 }
 
 export function PiModelThinkingMenu(props: {
@@ -9338,6 +9351,7 @@ export const __rendererTestHooks = {
   projectsForSwitcher,
   findKnownExtensionCommand,
   nextSlashCommandIndex,
+  nextMenuItemIndex,
   buildRealSessionInbox,
   queueBadgeLabels,
   isSessionBusy,
