@@ -3028,3 +3028,50 @@ test("real mode does not fall back to fake/local UI and can send from active run
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("Activity inbox scopes work by workspace and opens a row with the keyboard", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-activity-"));
+  const projectCwd = path.join(root, "activity-source");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: ["--stream-delay-ms", "20000"],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await page.getByLabel("Prompt text").fill("activity keyboard route");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(page.getByRole("button", { name: "Abort" })).toBeVisible();
+
+    await createWorkspaceInUi(page, "Activity secondary");
+    await page.getByRole("button", { name: /^Activity/ }).click();
+    await expect(page.getByRole("heading", { name: "Activity" })).toBeVisible();
+    await expect(page.getByLabel("Activity workspace")).toHaveValue("all");
+    await expect(
+      page.getByRole("button", { name: /^In progress \d+$/ }),
+    ).toBeVisible();
+
+    await page.getByLabel("Activity workspace").selectOption({
+      label: "Default workspace (1)",
+    });
+    await expect(
+      page.getByRole("heading", { name: /Activity · Default workspace/i }),
+    ).toBeVisible();
+    const activityRow = page.getByRole("button", {
+      name: /^In progress: activity keyboard route,/i,
+    });
+    await activityRow.focus();
+    await activityRow.press("Enter");
+    await expect(page.getByLabel("Prompt text")).toBeVisible();
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

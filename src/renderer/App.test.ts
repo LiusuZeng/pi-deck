@@ -135,6 +135,63 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
     expect(runtimeErrorDiagnostics(afterEnd)).toEqual([]);
   });
 
+  it("records completed activity only for successful or aborted agent_end events", () => {
+    const successful = __rendererTestHooks.reduceRuntimeEvent(
+      {
+        ...baseSession(),
+        status: "working",
+        baseState: "working",
+        overlays: { ...emptyOverlays, streaming: true },
+      } as any,
+      {
+        type: "agent_end",
+        runtimeId: "session-1",
+        messages: [productionAssistantMessage("stop")],
+        willRetry: false,
+      } as any,
+    );
+
+    expect(successful.completedAtMs).toEqual(expect.any(Number));
+
+    const nextTurn = __rendererTestHooks.reduceRuntimeEvent(successful, {
+      type: "agent_start",
+      runtimeId: "session-1",
+    } as any);
+    expect(nextTurn.completedAtMs).toBeUndefined();
+
+    const aborted = __rendererTestHooks.reduceRuntimeEvent(
+      {
+        ...baseSession(),
+        status: "working",
+        baseState: "working",
+        overlays: { ...emptyOverlays, streaming: true },
+      } as any,
+      {
+        type: "agent_end",
+        runtimeId: "session-1",
+        messages: [productionAssistantMessage("aborted")],
+        willRetry: false,
+      } as any,
+    );
+    expect(aborted.completedAtMs).toEqual(expect.any(Number));
+
+    const failed = __rendererTestHooks.reduceRuntimeEvent(
+      {
+        ...baseSession(),
+        status: "working",
+        baseState: "working",
+        overlays: { ...emptyOverlays, streaming: true },
+      } as any,
+      {
+        type: "agent_end",
+        runtimeId: "session-1",
+        messages: [productionAssistantMessage("error", "Provider failed.")],
+        willRetry: false,
+      } as any,
+    );
+    expect(failed.completedAtMs).toBeUndefined();
+  });
+
   it("derives a terminal error from the final Pi agent_end message", () => {
     const errorMessage = "Pi returned a terminal provider error.";
     const failedAssistant = productionAssistantMessage("error", errorMessage);
@@ -333,6 +390,73 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
     expect(runtimeErrorDiagnostics(afterEnd)).toEqual([
       expect.objectContaining({ content: localError }),
     ]);
+  });
+});
+
+describe("Activity inbox App projection", () => {
+  it("retains cross-workspace sources with canonical saved-session identity", () => {
+    const sources = __rendererTestHooks.activitySourceSessions(
+      [
+        {
+          ...baseSession(),
+          id: "runtime-a",
+          sessionId: "saved-a",
+          sessionFile: "/sessions/a.jsonl",
+          runtimeBacked: true,
+          status: "working",
+          baseState: "working",
+        },
+        {
+          ...baseSession(),
+          id: "saved-b",
+          workspaceId: "workspace-b",
+          project: "Fallback workspace",
+          title: "Saved elsewhere",
+          sessionId: "saved-b",
+          sessionFile: "/sessions/b.jsonl",
+          runtimeBacked: false,
+          resumeBacked: true,
+        },
+      ] as any,
+      { "workspace-a": "Workspace A", "workspace-b": "Workspace B" },
+    );
+
+    expect(sources).toMatchObject([
+      {
+        workspaceId: "workspace-a",
+        workspaceName: "Workspace A",
+        sessionFile: "/sessions/a.jsonl",
+        sessionId: "saved-a",
+        runtimeId: "runtime-a",
+      },
+      {
+        workspaceId: "workspace-b",
+        workspaceName: "Workspace B",
+        sessionFile: "/sessions/b.jsonl",
+        sessionId: "saved-b",
+      },
+    ]);
+  });
+
+  it("finds activity rows by saved-session identity before transient runtime ids", () => {
+    const session = {
+      ...baseSession(),
+      id: "runtime-current",
+      workspaceId: "workspace-b",
+      sessionId: "saved-b",
+      sessionFile: "/sessions/b.jsonl",
+      runtimeBacked: true,
+    } as any;
+
+    expect(
+      __rendererTestHooks.activitySessionForItem([session], {
+        workspaceId: "workspace-b",
+        sessionKey: "/sessions/b.jsonl",
+        sessionFile: "/sessions/b.jsonl",
+        sessionId: "saved-b",
+        runtimeId: "runtime-old",
+      } as any),
+    ).toBe(session);
   });
 });
 
