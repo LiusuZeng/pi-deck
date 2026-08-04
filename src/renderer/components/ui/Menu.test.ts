@@ -56,7 +56,7 @@ describe("Menu", () => {
     expect(document.activeElement).toBe(trigger);
   });
 
-  it("closes after an item is activated", () => {
+  it("closes after an item is activated and restores focus to the trigger", () => {
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -78,6 +78,7 @@ describe("Menu", () => {
 
     expect(trigger?.getAttribute("aria-expanded")).toBe("false");
     expect(container.querySelector('[role="menu"]')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
   });
 
   it("moves between enabled menu items with arrow, Home, and End keys", () => {

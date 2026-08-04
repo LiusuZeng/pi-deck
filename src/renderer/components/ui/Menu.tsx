@@ -116,7 +116,7 @@ export function Menu(props: {
           id={menuId}
           aria-label={props.menuLabel}
           role={isMenu ? "menu" : undefined}
-          onClick={isMenu ? () => setIsOpen(false) : undefined}
+          onClick={isMenu ? closeAndRestoreFocus : undefined}
         >
           {props.children}
         </div>
