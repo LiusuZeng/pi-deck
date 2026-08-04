@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { createWorkflowRun, stopWorkflowRun } from "./workflowEngine.js";
 import {
+  renderWorkflowTranscript,
   WorkflowScheduler,
+  WORKFLOW_TRANSCRIPT_MAX_CHARS,
   type WorkflowSessionSnapshot,
 } from "./workflowScheduler.js";
 import type {
@@ -187,6 +189,47 @@ describe("WorkflowScheduler", () => {
         }),
       ]),
     );
+  });
+
+  it("persists a bounded transcript from the completed Pi snapshot", async () => {
+    const fixture = setup();
+    const run = createWorkflowRun({ template, workspaceId: "workspace", inputs: {}, now: 1 });
+    await fixture.scheduler.schedule(run);
+    fixture.sessions.set("runtime-1", {
+      ...fixture.sessions.get("runtime-1")!,
+      messages: [
+        { role: "user", content: "first prompt" },
+        { role: "assistant", content: "answer runtime-1" },
+      ],
+    });
+
+    await fixture.scheduler.handleRuntimeEvent({
+      type: "agent_end",
+      runtimeId: "runtime-1",
+      status: "completed",
+    });
+
+    expect(fixture.persisted.at(-1)?.stepRuns).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          templateStepId: "first",
+          transcript: "user: first prompt\nassistant: answer runtime-1",
+        }),
+      ]),
+    );
+  });
+
+  it("bounds transcript handoffs and omits snapshots without text", () => {
+    const transcript = renderWorkflowTranscript(
+      Array.from({ length: 250 }, (_, index) => ({
+        role: "assistant",
+        content: `${index}:${"x".repeat(300)}`,
+      })),
+    );
+    expect(transcript).toBeDefined();
+    expect(transcript!.length).toBeLessThanOrEqual(WORKFLOW_TRANSCRIPT_MAX_CHARS);
+    expect(transcript).toContain("249:");
+    expect(renderWorkflowTranscript([{ role: "assistant", content: [{ type: "toolCall" }] }])).toBeUndefined();
   });
 
   it("blocks unavailable referenced outputs before prompting Pi", async () => {

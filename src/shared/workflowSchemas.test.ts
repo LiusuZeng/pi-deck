@@ -149,6 +149,26 @@ describe("workflowTemplateDefinitionSchema", () => {
     expect(result.success).toBe(true);
   });
 
+  it("treats mutually-exclusive condition routes to one target as one incoming edge", () => {
+    const result = workflowTemplateDefinitionSchema.safeParse({
+      ...linearTemplate,
+      transitions: [
+        {
+          id: "condition",
+          fromStepId: "investigate",
+          kind: "condition",
+          question: "Should the fix run?",
+          routes: {
+            yes: { kind: "step", stepId: "fix" },
+            no: { kind: "manualGate", toStepId: "fix" },
+          },
+          previewBeforeStart: false,
+        },
+      ],
+    });
+    expect(result.success).toBe(true);
+  });
+
   it("rejects duplicate transitions, fan-in, cycles, and graphs without a root", () => {
     const fanIn = workflowTemplateDefinitionSchema.safeParse({
       ...linearTemplate,

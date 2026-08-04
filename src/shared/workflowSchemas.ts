@@ -208,7 +208,22 @@ export const workflowTemplateDefinitionSchema = z
 
     const transitionIds = new Set<string>();
     const incomingCounts = new Map<string, number>();
+    // A condition's mutually-exclusive outcomes are alternatives, not
+    // separate incoming edges. Keep the graph validation conservative for
+    // genuine fan-in from different source steps while treating repeated
+    // routes from the same source to the same target as one edge.
+    const incomingEdges = new Set<string>();
     const edges = new Map<string, string[]>();
+    const addEdge = (fromStepId: string, toStepId: string): void => {
+      const edgeKey = `${fromStepId}\u0000${toStepId}`;
+      if (incomingEdges.has(edgeKey)) return;
+      incomingEdges.add(edgeKey);
+      incomingCounts.set(toStepId, (incomingCounts.get(toStepId) ?? 0) + 1);
+      edges.set(fromStepId, [
+        ...(edges.get(fromStepId) ?? []),
+        toStepId,
+      ]);
+    };
     for (const [index, transition] of value.transitions.entries()) {
       if (transitionIds.has(transition.id)) {
         context.addIssue({
@@ -233,11 +248,7 @@ export const workflowTemplateDefinitionSchema = z
             message: `Unknown workflow step target: ${transition.toStepId}`,
           });
         } else {
-          incomingCounts.set(transition.toStepId, (incomingCounts.get(transition.toStepId) ?? 0) + 1);
-          edges.set(transition.fromStepId, [
-            ...(edges.get(transition.fromStepId) ?? []),
-            transition.toStepId,
-          ]);
+          addEdge(transition.fromStepId, transition.toStepId);
         }
       } else {
         const routeEntries = [
@@ -261,11 +272,7 @@ export const workflowTemplateDefinitionSchema = z
                 ? target.toStepId
                 : undefined;
             if (targetStepId !== undefined && stepIds.has(targetStepId)) {
-              incomingCounts.set(targetStepId, (incomingCounts.get(targetStepId) ?? 0) + 1);
-              edges.set(transition.fromStepId, [
-                ...(edges.get(transition.fromStepId) ?? []),
-                targetStepId,
-              ]);
+              addEdge(transition.fromStepId, targetStepId);
             }
           }
         }

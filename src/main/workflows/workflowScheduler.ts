@@ -222,12 +222,16 @@ export class WorkflowScheduler {
             ownership,
           );
         } else {
+          const transcript = renderWorkflowTranscript(snapshot.messages);
           const completed = markWorkflowStepCompleted(
             current,
             active.stepRunId,
-            finalAssistant?.content !== undefined
-              ? { finalAnswer: finalAssistant.content }
-              : {},
+            {
+              ...(finalAssistant?.content !== undefined
+                ? { finalAnswer: finalAssistant.content }
+                : {}),
+              ...(transcript !== undefined ? { transcript } : {}),
+            },
             this.now(),
           );
           await this.persistAndEmit(this.runsSet(completed), ownership);
@@ -590,6 +594,36 @@ interface FinalAssistant {
   content?: string;
   error?: boolean;
   errorMessage?: string;
+}
+
+/** Maximum persisted size for a step handoff transcript. */
+export const WORKFLOW_TRANSCRIPT_MAX_CHARS = 32_000;
+const WORKFLOW_TRANSCRIPT_MAX_MESSAGES = 200;
+
+/**
+ * Convert the Pi snapshot into a compact, human-readable handoff. Tool calls
+ * and other non-text blocks are intentionally omitted because they cannot be
+ * rendered reliably across Pi runtimes. An absent result remains absent so a
+ * transcript prompt is blocked rather than claiming unsupported data.
+ */
+export function renderWorkflowTranscript(
+  messages: WorkflowMessage[],
+): string | undefined {
+  const entries = messages.flatMap((message) => {
+    const content = contentText(message.content);
+    if (content === undefined || content.trim().length === 0) return [];
+    const role = message.role.trim() || "unknown";
+    return [`${role}: ${content}`];
+  });
+  if (entries.length === 0) return undefined;
+
+  const omittedMessages = entries.length > WORKFLOW_TRANSCRIPT_MAX_MESSAGES;
+  let transcript = entries.slice(-WORKFLOW_TRANSCRIPT_MAX_MESSAGES).join("\n");
+  if (omittedMessages) transcript = `[Earlier messages omitted]\n${transcript}`;
+  if (transcript.length <= WORKFLOW_TRANSCRIPT_MAX_CHARS) return transcript;
+
+  const marker = "[Earlier transcript omitted]\n";
+  return `${marker}${transcript.slice(-(WORKFLOW_TRANSCRIPT_MAX_CHARS - marker.length))}`;
 }
 
 function findFinalAssistant(
