@@ -21,7 +21,7 @@ const workspaces: ActivityWorkspace[] = [
 function activity(
   status: ActivityItem["status"],
   suffix: string,
-  workspace = workspaces[0],
+  workspace = workspaces[0]!,
 ): ActivityItem {
   return {
     id: `${status}-${suffix}`,

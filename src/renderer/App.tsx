@@ -265,7 +265,9 @@ function activitySourceSessions(
     ...(session.completedAtMs !== undefined
       ? { completedAtMs: session.completedAtMs }
       : {}),
-    ...(session.lastError !== undefined ? { lastError: session.lastError } : {}),
+    ...(session.lastError !== undefined
+      ? { lastError: session.lastError }
+      : {}),
     ...(session.archivedAtMs !== undefined
       ? { archivedAtMs: session.archivedAtMs }
       : {}),
@@ -282,7 +284,8 @@ function activitySessionForItem(
       ((item.sessionFile !== undefined &&
         session.sessionFile === item.sessionFile) ||
         (item.runtimeId !== undefined && session.id === item.runtimeId) ||
-        (item.sessionId !== undefined && session.sessionId === item.sessionId) ||
+        (item.sessionId !== undefined &&
+          session.sessionId === item.sessionId) ||
         (item.sessionFile === undefined &&
           item.runtimeId === undefined &&
           item.sessionId === undefined &&
@@ -296,17 +299,18 @@ function sessionForActivityItem(
 ): SessionViewModel {
   const id =
     item.runtimeId ?? item.sessionId ?? item.sessionFile ?? item.sessionKey;
+  const projectId = projectIdForWorkspace(workspace);
   return {
     id,
     workspaceId: item.workspaceId,
-    ...(item.sessionFile !== undefined ? { sessionFile: item.sessionFile } : {}),
+    ...(item.sessionFile !== undefined
+      ? { sessionFile: item.sessionFile }
+      : {}),
     ...(item.sessionId !== undefined ? { sessionId: item.sessionId } : {}),
     title: item.title,
     project: workspace.name,
     projectPath: defaultWorkingDirectory(workspace) ?? "Unknown project",
-    ...(projectIdForWorkspace(workspace) !== undefined
-      ? { projectId: projectIdForWorkspace(workspace) }
-      : {}),
+    ...(projectId !== undefined ? { projectId } : {}),
     subtitle: item.sessionFile
       ? "Saved · click to resume"
       : "Idle · activity session",
@@ -1087,7 +1091,10 @@ export function App(): ReactElement {
     sessions[0] ??
     loadingSession;
   const activityWorkspaces = useMemo(
-    () => workspaceOptions(currentWorkspace, workspaces),
+    () => [
+      currentWorkspace,
+      ...workspaces.filter((workspace) => workspace.id !== currentWorkspace.id),
+    ],
     [currentWorkspace, workspaces],
   );
   const activityWorkspaceNameById = useMemo(
@@ -1635,7 +1642,9 @@ export function App(): ReactElement {
       (workspace) => workspace.id === item.workspaceId,
     );
     if (targetWorkspace === undefined) {
-      setUiMessage("This activity item belongs to a workspace that is unavailable.");
+      setUiMessage(
+        "This activity item belongs to a workspace that is unavailable.",
+      );
       return;
     }
 

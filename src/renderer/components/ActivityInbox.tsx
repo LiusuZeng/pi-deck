@@ -104,7 +104,8 @@ export function ActivityInbox({
         (result, kind) => {
           result[kind] = scopedItems
             .filter((item) => item.status === kind)
-            .toSorted((left, right) => right.updatedAtMs - left.updatedAtMs);
+            .slice()
+            .sort((left, right) => right.updatedAtMs - left.updatedAtMs);
           return result;
         },
         {} as Record<ActivityStatus, ActivityItem[]>,
