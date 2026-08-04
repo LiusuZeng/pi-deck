@@ -108,16 +108,12 @@ export class WorkflowStore {
     }
     const current = this.state.templates[index]!;
     const validated = workflowTemplateDefinitionSchema.parse(definition);
-    // Scope is an update field, so preserve the existing scope only when the
-    // definition omits workspaceId. This lets an explicit workspace selector
-    // move a global template while avoiding accidental scope changes from
-    // renderer context being supplied separately.
-    const workspaceId = Object.hasOwn(definition, "workspaceId")
-      ? validated.workspaceId
-      : current.workspaceId;
+    // The builder includes the current scope for scoped edits and omits
+    // workspaceId when the user explicitly selects the global scope. Treat the
+    // validated definition as authoritative so scoped templates can be reset
+    // to global without preserving stale scope metadata.
     const updated = workflowTemplateSchema.parse({
       ...validated,
-      ...(workspaceId !== undefined ? { workspaceId } : {}),
       id: current.id,
       createdAtMs: current.createdAtMs,
       updatedAtMs: this.now(),
