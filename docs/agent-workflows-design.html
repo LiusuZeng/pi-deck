@@ -1,0 +1,818 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Agent Workflows Design · Pi Deck</title><style>
+:root{color-scheme:light dark;--bg:#f6f7fb;--panel:#fff;--text:#18202f;--muted:#637083;--border:#d9dfeb;--accent:#6f5cff;--accent-soft:#eeeafd;--code-bg:#f1f3f8;--shadow:0 24px 80px rgba(18,25,38,.10)}@media(prefers-color-scheme:dark){:root{--bg:#0f1117;--panel:#171a22;--text:#edf0f7;--muted:#9aa4b5;--border:#2a3040;--accent:#9d8cff;--accent-soft:#27213f;--code-bg:#11141c;--shadow:0 24px 80px rgba(0,0,0,.35)}}*{box-sizing:border-box}body{margin:0;font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(circle at top left,var(--accent-soft),transparent 34rem),var(--bg);color:var(--text)}.shell{max-width:1120px;margin:0 auto;padding:40px 20px 72px}.doc{background:var(--panel);border:1px solid var(--border);border-radius:24px;box-shadow:var(--shadow);overflow:hidden}header{padding:36px 44px 24px;border-bottom:1px solid var(--border)}.eyebrow{color:var(--accent);font-weight:700;letter-spacing:.08em;text-transform:uppercase;font-size:12px}h1{margin:8px 0 10px;font-size:clamp(34px,6vw,58px);line-height:1.05;letter-spacing:-.04em}.meta{color:var(--muted);margin:0}main{padding:12px 44px 48px}h2{margin-top:38px;padding-top:8px;font-size:28px;letter-spacing:-.02em;border-top:1px solid var(--border)}h3{margin-top:28px;font-size:21px}h4{margin-top:22px;font-size:17px}p{margin:14px 0}ul,ol{padding-left:1.5rem}li{margin:6px 0}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:.92em;background:var(--code-bg);border:1px solid var(--border);border-radius:6px;padding:1px 5px}pre{background:var(--code-bg);border:1px solid var(--border);border-radius:14px;padding:16px;overflow:auto}pre code{background:transparent;border:0;padding:0;font-size:13px;line-height:1.5}table{width:100%;border-collapse:collapse;margin:18px 0}th,td{border:1px solid var(--border);padding:10px 12px;text-align:left;vertical-align:top}th{background:var(--accent-soft)}blockquote{margin:18px 0;padding:12px 16px;border-left:4px solid var(--accent);background:var(--accent-soft);border-radius:10px}.toolbar{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}.button{display:inline-flex;padding:8px 12px;border-radius:999px;border:1px solid var(--border);color:var(--text);background:var(--panel);font-size:14px}@media(max-width:720px){header,main{padding-left:22px;padding-right:22px}}
+</style></head><body><div class="shell"><article class="doc"><header><div class="eyebrow">Pi Deck Design Proposal</div><h1>Agent Workflows</h1><p class="meta">Rendered from <code>docs/agent-workflows-design.md</code> · generated 2026-08-03 21:01</p><div class="toolbar"><a class="button" href="agent-workflows-design.md">Open Markdown</a><a class="button" href="#6-mvp-scope">Jump to MVP scope</a><a class="button" href="#9-engineering-design">Jump to Engineering</a></div></header><main><h1 id="agent-workflows-design">Agent Workflows Design</h1>
+<p>Status: proposed feature design Date: 2026-08-04 Owner: TBD Related docs: <code>docs/requirements.md</code>, <code>docs/technical-architecture.md</code>, <code>docs/workspace-grouped-sessions-execution-plan.md</code>, <code>docs/activity-inbox-tagged-filtering-plan.md</code></p>
+<h2 id="1-summary">1. Summary</h2>
+<p><strong>Agent Workflows</strong> are a focused orchestration layer for Pi Deck. A workflow lets a user define a small graph of Pi agent steps ahead of time, then Pi Deck queues and starts those sessions as upstream steps complete.</p>
+<p>The first version intentionally avoids a user-facing DSL. Users configure workflows through a dedicated card-based UI with agent steps and transition rules. Conditions are written in natural language and evaluated by a dedicated Pi judge step that returns one of a small set of branch labels.</p>
+<p>Pi Deck remains a local Pi agent harness:</p>
+<ul>
+<li>each agent step is a Pi-native session backed by a normal <code>pi --mode rpc</code> worker when running;</li>
+<li>workflow state is Pi Deck-owned orchestration metadata;</li>
+<li>session transcripts remain Pi-owned JSONL files;</li>
+<li>the existing chat/session UI remains the worker cockpit;</li>
+<li>the new Agent Workflows UI becomes the orchestration cockpit.</li>
+</ul>
+<p>Product differentiator to preserve throughout the design:</p>
+<blockquote><strong>Skills are reusable agent abilities. Agent Workflows are reusable agent orchestration plans.</strong></blockquote>
+<p>Agent Workflows should compose Pi-native skills, slash commands, prompt templates, models, thinking levels, and session files rather than replacing them.</p>
+<h2 id="2-product-goals">2. Product goals</h2>
+<ol>
+<li>Let users define multi-agent work before waiting for the first agent to finish.</li>
+<li>Save user time by automatically queueing downstream agents when dependencies resolve.</li>
+<li>Keep orchestration understandable without code, scripts, or DSL syntax.</li>
+<li>Preserve user control with manual approval gates and branch preview options.</li>
+<li>Build on existing Pi Deck concepts: workspaces, sessions, Work inbox, runtime state, model/thinking controls, attachments, steer/follow-up/abort.</li>
+</ol>
+<h2 id="3-non-goals-for-the-first-release">3. Non-goals for the first release</h2>
+<ul>
+<li>No arbitrary scripting language.</li>
+<li>No loops.</li>
+<li>No general variable/expression system.</li>
+<li>No full visual programming canvas in the first slice.</li>
+<li>No automatic source-code editing outside what Pi agents already do.</li>
+<li>No cross-machine/cloud workflow execution.</li>
+<li>No guaranteed semantic correctness of condition judging; conditions are an orchestration aid, not formal proof.</li>
+<li>No metrics/ops dashboard as part of this feature.</li>
+</ul>
+<h2 id="4-core-vocabulary">4. Core vocabulary</h2>
+<table><thead><tr><th>Term</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><strong>Workflow Template</strong></td><td>Reusable user-defined orchestration plan.</td></tr>
+<tr><td><strong>Workflow Run</strong></td><td>One execution instance of a template.</td></tr>
+<tr><td><strong>Agent Step</strong></td><td>A Pi session definition: prompt, model, thinking, inputs, workspace target.</td></tr>
+<tr><td><strong>Transition</strong></td><td>A rule that decides what can run after a step completes.</td></tr>
+<tr><td><strong>Condition</strong></td><td>A natural-language question evaluated against upstream output.</td></tr>
+<tr><td><strong>Judge Step</strong></td><td>A hidden or collapsible Pi step that evaluates a condition and returns <code>yes</code>, <code>no</code>, or <code>unsure</code>.</td></tr>
+<tr><td><strong>Manual Gate</strong></td><td>A pause point where the user approves, edits, skips, or reroutes the next step.</td></tr>
+<tr><td><strong>Step Output</strong></td><td>Final assistant response, transcript summary, session link, selected files changed summary when available later.</td></tr>
+</tbody></table>
+<h2 id="5-relationship-to-pi-skills">5. Relationship to Pi skills</h2>
+<p>Agent Workflows are intentionally different from Pi skills.</p>
+<table><thead><tr><th>Concept</th><th>Pi Skill</th><th>Agent Workflow</th></tr></thead><tbody>
+<tr><td>Product layer</td><td>Agent capability/context</td><td>Multi-agent orchestration</td></tr>
+<tr><td>Runs inside</td><td>One Pi session</td><td>Pi Deck-managed workflow run across one or more sessions</td></tr>
+<tr><td>Main job</td><td>Teach an agent how to perform a task</td><td>Decide what agents run, when they run, and how outputs flow</td></tr>
+<tr><td>Logic/state</td><td>Mostly prompt/resource content</td><td>Step status, transitions, branches, gates, queueing</td></tr>
+<tr><td>Output handling</td><td>Current agent decides what to do next</td><td>Pi Deck can pass output to downstream steps</td></tr>
+</tbody></table>
+<p>A workflow step may invoke a skill, for example a review step can use <code>/skill:code-review</code>. The workflow itself should not duplicate skill content. It should orchestrate Pi-native capabilities by deciding:</p>
+<ul>
+<li>when to start a session;</li>
+<li>what prompt/context to send;</li>
+<li>which skill or command a step should use;</li>
+<li>which previous outputs to include;</li>
+<li>which branch to take;</li>
+<li>when to ask the user;</li>
+<li>when to stop.</li>
+</ul>
+<p>This boundary keeps Pi Deck focused as a harness and orchestration framework rather than a replacement for Pi&#x27;s resource system.</p>
+<h2 id="6-mvp-scope">6. MVP scope</h2>
+<p>The MVP should support four primitives:</p>
+<ol>
+<li><strong>Agent step</strong></li>
+</ol>
+<ul>
+<li>prompt body;</li>
+<li>model and thinking defaults;</li>
+<li>optional referenced paths/images using existing attachment token flow at run start;</li>
+<li>input source selection from upstream steps.</li>
+</ul>
+<ol>
+<li><strong>Always-after transition</strong></li>
+</ol>
+<ul>
+<li>run step B after step A completes successfully.</li>
+</ul>
+<ol>
+<li><strong>Natural-language if/else transition</strong></li>
+</ol>
+<ul>
+<li>ask a yes/no/unsure question about step A&#x27;s result;</li>
+<li>map each result to one next step or to a manual gate.</li>
+</ul>
+<ol>
+<li><strong>Manual approval gate</strong></li>
+</ol>
+<ul>
+<li>pause workflow;</li>
+<li>let user approve, edit next prompt, skip, or stop the workflow.</li>
+</ul>
+<p>The MVP should also support saving templates and running a template in a selected workspace.</p>
+<h2 id="7-user-experience-design">7. User experience design</h2>
+<h3 id="7-1-entry-points">7.1 Entry points</h3>
+<p>Add an <strong>Agent Workflows</strong> entry point without disrupting the current chat/session UI.</p>
+<p>Recommended entry points:</p>
+<ol>
+<li>Sidebar top-level item: <strong>Agent Workflows</strong>.</li>
+<li>Workspace header action: <strong>New workflow</strong>.</li>
+<li>Completed session action: <strong>Create workflow from this session</strong>.</li>
+<li>Chat action menu: <strong>Queue downstream agent</strong> as a small bridge into the workflow builder.</li>
+</ol>
+<p>The first two are primary. The latter two are convenience paths after the initial screen exists.</p>
+<h3 id="7-2-top-level-agent-workflows-screen">7.2 Top-level Agent Workflows screen</h3>
+<p>The screen has two tabs or segmented controls:</p>
+<pre><code class="language-text">Agent Workflows
+[ Templates ] [ Runs ]
+
+Templates
+- Bug triage → fix → review
+- Feature plan → implement → docs
+- Investigate flaky test
+
+Runs
+- Bug triage #12        Running
+- Feature plan #4       Waiting for approval
+- Flaky test #8         Completed</code></pre>
+<p>Template row actions:</p>
+<ul>
+<li>Run</li>
+<li>Edit</li>
+<li>Duplicate</li>
+<li>Archive</li>
+</ul>
+<p>Run row actions:</p>
+<ul>
+<li>Open run</li>
+<li>Pause/Resume when supported later</li>
+<li>Stop remaining queued steps</li>
+<li>Open active session</li>
+</ul>
+<h3 id="7-3-workflow-builder">7.3 Workflow Builder</h3>
+<p>Use a vertical card builder, not a node canvas for MVP.</p>
+<p>Example layout:</p>
+<pre><code class="language-text">Workflow: Fix failing tests
+Workspace: Current workspace
+
+Step 1 · Agent
+Name: Investigate failing test
+Prompt:
+  Find the root cause of the failing test. Do not change code yet.
+Model: [default / picker]
+Thinking: [default / picker]
+Inputs: [Current workspace] [Referenced paths...]
+
+After Step 1
+[ Ask a condition ]
+Question:
+  Did the investigation identify a concrete and safe code fix?
+
+If YES → Step 2A · Agent
+  Name: Implement fix
+  Prompt:
+    Use the investigation output below and implement the smallest safe fix.
+    {{Step 1 final answer}}
+
+If NO → Step 2B · Agent
+  Name: Investigate deeper
+  Prompt:
+    Continue investigation. Focus on reproducing and collecting evidence.
+    {{Step 1 final answer}}
+
+If UNSURE → Manual approval</code></pre>
+<p>Builder principles:</p>
+<ul>
+<li>Every card has a plain-language title.</li>
+<li>Users choose rule types from dropdowns instead of writing syntax.</li>
+<li>Prompt insertion uses chips/placeholders, not mustache syntax in the UI. Internally placeholders may be stored as structured references.</li>
+<li>Conditions have preview copy explaining that Pi Deck will ask a small judge agent to answer <code>yes</code>, <code>no</code>, or <code>unsure</code>.</li>
+<li>Invalid workflows show inline card-level validation.</li>
+</ul>
+<h3 id="7-4-agent-step-card">7.4 Agent Step card</h3>
+<p>Fields:</p>
+<ul>
+<li>Name.</li>
+<li>Prompt.</li>
+<li>Model: inherit workflow default or override.</li>
+<li>Thinking: inherit workflow default or override.</li>
+<li>Input context:</li>
+<li>No upstream context.</li>
+<li>Explicit previous-agent result chips: final answer, summary, or bounded transcript.</li>
+<li>Workflow inputs and shared workflow context.</li>
+</ul>
+<p>Parent-session policy toggles and arbitrary transcript selection are intentionally not exposed in the first release. Handoffs are explicit prompt parts so a step cannot silently request context that is unavailable.</p>
+<ul>
+<li>Multiple upstream outputs in later fan-in versions.</li>
+<li>Attachments/referenced paths:</li>
+<li>use existing picker UX;</li>
+<li>tokens are not persisted long term; template stores references only when safe, such as explicit paths.</li>
+<li>Run behavior:</li>
+<li>auto-start when ready;</li>
+<li>require approval before start.</li>
+</ul>
+<h3 id="7-5-transition-card">7.5 Transition card</h3>
+<p>Supported MVP transition types:</p>
+<ol>
+<li><strong>Always continue</strong></li>
+</ol>
+<pre><code class="language-text">After [Investigate] completes, run [Implement].</code></pre>
+<ol>
+<li><strong>Ask a condition</strong></li>
+</ol>
+<pre><code class="language-text">After [Investigate] completes, ask:
+&quot;Did it find a concrete root cause?&quot;
+
+YES    → Implement fix
+NO     → Investigate deeper
+UNSURE → Ask me</code></pre>
+<ol>
+<li><strong>Ask me</strong></li>
+</ol>
+<pre><code class="language-text">After [Implement] completes, wait for my approval before running [Review].</code></pre>
+<h3 id="7-6-workflow-run-view">7.6 Workflow Run view</h3>
+<p>The run view shows real execution state.</p>
+<pre><code class="language-text">Fix failing tests — Running
+
+✓ Step 1 Investigate failing test
+  Session: Open
+  Output: Root cause appears to be stale fixture setup...
+
+✓ Condition: concrete safe fix?
+  Judge result: YES
+  Rationale: The upstream agent identified one localized fixture bug.
+
+● Step 2A Implement fix
+  Running · Open session
+
+○ Step 3 Review final changes
+  Waiting for Step 2A</code></pre>
+<p>Each step row/card includes:</p>
+<ul>
+<li>status: waiting, queued, starting, running, completed, failed, skipped, blocked, needs approval;</li>
+<li>session link when a Pi session exists;</li>
+<li>prompt preview;</li>
+<li>output summary;</li>
+<li>branch decision details;</li>
+<li>actions: open session, approve, edit prompt before start, skip, retry, stop downstream.</li>
+</ul>
+<h3 id="7-7-relationship-with-work-inbox">7.7 Relationship with Work inbox</h3>
+<p>Workflow runs should appear in the Work inbox as orchestration items while keeping individual sessions visible.</p>
+<p>Recommended model:</p>
+<ul>
+<li>Work inbox row for the workflow run:</li>
+<li><code>Workflow · Fix failing tests · Running</code>;</li>
+<li>badge if any step needs attention or failed.</li>
+<li>Existing session rows continue to show each Pi session.</li>
+<li>Session rows spawned by a workflow include a small workflow label, e.g. <code>Fix failing tests / Step 2A</code>.</li>
+</ul>
+<h3 id="7-8-running-without-waiting">7.8 Running without waiting</h3>
+<p>A key feature is defining downstream steps before upstream results exist.</p>
+<p>UX requirements:</p>
+<ul>
+<li>Users can create all branch steps with unresolved placeholders.</li>
+<li>Pi Deck validates structure, not future content.</li>
+<li>Ready steps run immediately when dependencies resolve.</li>
+<li>Downstream prompts are rendered only at execution time after parent outputs are available.</li>
+<li>Condition transitions default to automatic selected-branch execution. A <code>Preview selected branch before starting</code> control can turn the selected step into a manual approval gate.</li>
+<li>An <code>UNSURE</code> route should target a dedicated approval-configured step, or stop when no approval step is defined.</li>
+</ul>
+<h3 id="7-9-parameterized-workflow-templates">7.9 Parameterized workflow templates</h3>
+<p>Reusable workflows should be parameterized through <strong>workflow inputs</strong>, not a DSL.</p>
+<p>Template authors define inputs such as:</p>
+<ul>
+<li>issue or task description;</li>
+<li>relevant files/folders;</li>
+<li>desired outcome;</li>
+<li>constraints or non-goals;</li>
+<li>optional review checklist.</li>
+</ul>
+<p>When a user runs the template, Pi Deck shows a <strong>Run workflow</strong> form. Agent prompts reference inputs through insertable chips/placeholders in the prompt editor.</p>
+<p>Example UX:</p>
+<pre><code class="language-text">Run workflow: Investigate and fix issue
+
+Required inputs
+Issue / task description: [ ... ]
+Relevant paths:          [ + Add paths ]
+Desired outcome:         [ ... ]
+Constraints:             [ ... ]
+
+[ Start workflow ]</code></pre>
+<p>Prompt editor behavior:</p>
+<pre><code class="language-text">Investigate this issue:
+[Issue / task description]
+
+Focus on:
+[Relevant paths]
+
+Constraints:
+[Constraints]</code></pre>
+<p>The UI should show chips, not raw variable syntax. Internally, these chips can be stored as structured prompt parts.</p>
+<p>Template actions should include:</p>
+<ul>
+<li>duplicate;</li>
+<li>edit inputs;</li>
+<li>save as new template;</li>
+<li>run with current workspace;</li>
+<li>create workflow from an existing completed session.</li>
+</ul>
+<h3 id="7-10-card-status-model">7.10 Card status model</h3>
+<p>Cards are the primary status surface. The same card layout should work in two modes.</p>
+<p><strong>Template mode</strong> shows configuration state:</p>
+<ul>
+<li>complete;</li>
+<li>incomplete;</li>
+<li>missing prompt;</li>
+<li>missing input mapping;</li>
+<li>missing branch target;</li>
+<li>references workflow inputs;</li>
+<li>uses model/thinking override.</li>
+</ul>
+<p><strong>Run mode</strong> shows execution state:</p>
+<ul>
+<li>idle/not started;</li>
+<li>waiting;</li>
+<li>queued;</li>
+<li>starting;</li>
+<li>in progress;</li>
+<li>paused / needs approval;</li>
+<li>failed;</li>
+<li>completed;</li>
+<li>skipped;</li>
+<li>blocked.</li>
+</ul>
+<p>Collapsed run card example:</p>
+<pre><code class="language-text">● Step 2 · Implement fix
+In progress · 3m 12s · Open session</code></pre>
+<p>Expanded run card shows prompt, model, thinking level, resolved inputs, upstream output used, runtime/session link, latest status, and actions.</p>
+<h3 id="7-11-subagent-display-in-card-view">7.11 Subagent display in card view</h3>
+<p>Any Pi Deck-orchestrated agent session should be visible in the workflow UI.</p>
+<p>MVP rule:</p>
+<blockquote>One Agent Step card maps to one visible Pi session when it runs.</blockquote>
+<p>Later, a group/fan-out card can contain child agent cards:</p>
+<pre><code class="language-text">Step 2 · Parallel follow-up work
+  ├─ Agent: Backend implementation     Running
+  ├─ Agent: Test update                Queued
+  └─ Agent: Docs update                Waiting</code></pre>
+<p>Condition judge steps are different: they may be hidden by default because they are orchestration internals. However, users should be able to expand the condition card to inspect judge input, decision, and rationale.</p>
+<h3 id="7-12-card-interaction-model">7.12 Card interaction model</h3>
+<p>Do not start with drag-and-connect as the primary interaction. MVP should use a structured builder that is easier to learn and harder to break.</p>
+<p>Primary interactions:</p>
+<ul>
+<li><code>+ Add agent step</code>;</li>
+<li><code>+ Add condition</code>;</li>
+<li><code>+ Add manual approval</code>;</li>
+<li><code>After this step...</code> dropdown;</li>
+<li>branch target dropdowns;</li>
+<li>expand/collapse cards;</li>
+<li>inline validation and quick fixes.</li>
+</ul>
+<p>Cards are arranged as a guided vertical flow with indentation for branches:</p>
+<pre><code class="language-text">Step 1 · Investigate
+└─ Condition: concrete fix?
+   ├─ YES → Step 2A · Implement
+   ├─ NO → Step 2B · Investigate deeper
+   └─ UNSURE → Ask me</code></pre>
+<p>Expanded Agent Step cards contain:</p>
+<ul>
+<li>prompt editor;</li>
+<li>model picker;</li>
+<li>thinking picker;</li>
+<li>workflow input chips;</li>
+<li>upstream output chips;</li>
+<li>attachment/path reference picker;</li>
+<li>run policy controls.</li>
+</ul>
+<p>A freeform graph canvas can be considered later after the core orchestration model is proven.</p>
+<h3 id="7-13-shared-workflow-context">7.13 Shared workflow context</h3>
+<p>Agent Workflows should support explicit shared context without silently stuffing everything into every prompt.</p>
+<p>Add a <strong>Workflow Context</strong> card near the top of the builder:</p>
+<ul>
+<li>objective;</li>
+<li>constraints;</li>
+<li>relevant files/folders;</li>
+<li>coding standards;</li>
+<li>do-not-do instructions;</li>
+<li>run inputs.</li>
+</ul>
+<p>Each Agent Step chooses what shared context it includes:</p>
+<pre><code class="language-text">Context for this step
+[x] Workflow objective
+[x] Run inputs
+[x] Relevant paths
+[ ] Full previous transcript
+[x] Previous step final answer</code></pre>
+<p>Recommended context layers:</p>
+<ol>
+<li><strong>Workflow inputs</strong>: reusable parameters filled at run time.</li>
+<li><strong>Shared workflow context</strong>: common instructions available to steps.</li>
+<li><strong>Step-local prompt</strong>: what this specific agent should do.</li>
+<li><strong>Upstream outputs</strong>: selected parent result, summary, or transcript.</li>
+<li><strong>Pi-native resources</strong>: skills, prompt templates, project markdown, memories, and extensions loaded by Pi itself.</li>
+</ol>
+<p>This keeps context composition visible and reinforces the distinction between workflows and skills.</p>
+<h2 id="8-execution-semantics">8. Execution semantics</h2>
+<h3 id="8-1-step-lifecycle">8.1 Step lifecycle</h3>
+<pre><code class="language-text">waiting → ready → queued → starting → running → completed
+                         ↘ failed
+                         ↘ skipped
+                         ↘ blocked
+                         ↘ needs_approval</code></pre>
+<p>Definitions:</p>
+<ul>
+<li><strong>waiting</strong>: dependencies not resolved.</li>
+<li><strong>ready</strong>: dependencies resolved, but not yet admitted to worker capacity.</li>
+<li><strong>queued</strong>: accepted by workflow scheduler but waiting for session capacity.</li>
+<li><strong>starting</strong>: Pi Deck is creating/resuming a Pi runtime.</li>
+<li><strong>running</strong>: Pi agent is active.</li>
+<li><strong>completed</strong>: terminal success state.</li>
+<li><strong>failed</strong>: worker or prompt failed.</li>
+<li><strong>skipped</strong>: branch not selected or user skipped.</li>
+<li><strong>blocked</strong>: missing input, invalid template, unavailable model, missing attachment path, or capacity disabled.</li>
+<li><strong>needs_approval</strong>: waiting for user decision.</li>
+</ul>
+<h3 id="8-2-completion-detection">8.2 Completion detection</h3>
+<p>An Agent Step is complete when the associated Pi runtime reaches a terminal idle state after an accepted prompt and Pi Deck has reconciled current messages/status.</p>
+<p>Use existing runtime events and reconciliation:</p>
+<ul>
+<li><code>agent_start</code></li>
+<li><code>message_update</code></li>
+<li><code>agent_end</code></li>
+<li><code>worker_exit</code></li>
+<li>runtime status snapshots for missed terminal events</li>
+</ul>
+<h3 id="8-3-judge-conditions">8.3 Judge conditions</h3>
+<p>For MVP, conditions are evaluated by a generated judge prompt in a separate Pi session or a lightweight hidden worker.</p>
+<p>Input to judge:</p>
+<ul>
+<li>condition question;</li>
+<li>upstream final answer;</li>
+<li>optional upstream transcript summary;</li>
+<li>strict instruction to return structured JSON with one of <code>yes</code>, <code>no</code>, <code>unsure</code>.</li>
+</ul>
+<p>Example internal judge prompt:</p>
+<pre><code class="language-text">You are evaluating a Pi Deck workflow condition.
+Question: Did the investigation identify a concrete and safe code fix?
+
+Upstream final answer:
+...
+
+Return only JSON:
+{&quot;decision&quot;:&quot;yes&quot;|&quot;no&quot;|&quot;unsure&quot;,&quot;rationale&quot;:&quot;short reason&quot;}</code></pre>
+<p>Design notes:</p>
+<ul>
+<li>The UI should not expose this as a DSL.</li>
+<li>Judge output must be parsed defensively.</li>
+<li>Invalid judge output never selects a branch automatically. The run enters <code>needs attention</code> with retry and explicit YES/NO override actions.</li>
+<li>Users can inspect the judge rationale.</li>
+<li>Users can review or override a branch decision before downstream starts when the template enables branch preview.</li>
+</ul>
+<h3 id="8-4-prompt-rendering">8.4 Prompt rendering</h3>
+<p>Prompts are stored as structured parts, not raw string interpolation where possible.</p>
+<p>Conceptual shape:</p>
+<pre><code class="language-ts">type WorkflowPromptPart =
+  | { type: &quot;text&quot;; text: string }
+  | { type: &quot;stepFinalAnswer&quot;; stepId: string }
+  | { type: &quot;stepSummary&quot;; stepId: string }
+  | { type: &quot;stepTranscript&quot;; stepId: string };</code></pre>
+<p>At execution time, Pi Deck resolves parts to a final prompt string and image inputs/path references.</p>
+<p>If an upstream output is missing, the step becomes <code>blocked</code> with an actionable message.</p>
+<h3 id="8-5-failure-behavior">8.5 Failure behavior</h3>
+<p>Default MVP failure policy:</p>
+<ul>
+<li>If an Agent Step fails, dependent steps do not start.</li>
+<li>The run enters <code>needs_attention</code>.</li>
+<li>User can retry failed step, edit and retry, skip, or stop downstream.</li>
+<li>If a Judge Step fails or returns malformed output, pause the run in <code>needs attention</code>; the user can retry the judge or explicitly override YES/NO. This avoids silently taking a code-changing branch.</li>
+</ul>
+<p>Later policies may add <code>continue on failure</code>, but avoid it initially.</p>
+<h2 id="9-engineering-design">9. Engineering design</h2>
+<h3 id="9-1-new-modules">9.1 New modules</h3>
+<p>Recommended main-process modules:</p>
+<pre><code class="language-text">src/main/workflows/workflowStore.ts
+src/main/workflows/workflowEngine.ts
+src/main/workflows/workflowScheduler.ts
+src/main/workflows/workflowPromptRenderer.ts
+src/main/workflows/workflowJudge.ts</code></pre>
+<p>Recommended renderer modules:</p>
+<pre><code class="language-text">src/renderer/workflows/workflowDomain.ts
+src/renderer/components/WorkflowList.tsx
+src/renderer/components/WorkflowBuilder.tsx
+src/renderer/components/WorkflowRunView.tsx
+src/renderer/components/WorkflowStepCard.tsx
+src/renderer/components/WorkflowTransitionCard.tsx</code></pre>
+<p>Shared contracts:</p>
+<pre><code class="language-text">src/shared/workflowSchemas.ts</code></pre>
+<p>or fold into <code>src/shared/ipcSchemas.ts</code> initially if the repo prefers one schema file. If adding many workflow schemas, a dedicated shared schema file may keep <code>ipcSchemas.ts</code> manageable.</p>
+<h3 id="9-2-persistence">9.2 Persistence</h3>
+<p>Store workflow metadata under <code>PI_DECK_HOME</code> next to workspace metadata.</p>
+<p>Suggested file:</p>
+<pre><code class="language-text">~/.pideck/workflows.json</code></pre>
+<p>Template and run metadata are app-owned. Pi sessions remain Pi-owned JSONL files and are referenced by path/session id once created.</p>
+<h4 id="template-schema-v1">Template schema v1</h4>
+<pre><code class="language-ts">interface WorkflowTemplateRecordV1 {
+  id: string; // uuid
+  name: string;
+  description?: string;
+  workspaceId?: string; // optional default target
+  defaultModel?: { provider?: string; modelId?: string };
+  defaultThinkingLevel?: string;
+  steps: WorkflowStepTemplate[];
+  transitions: WorkflowTransitionTemplate[];
+  createdAtMs: number;
+  updatedAtMs: number;
+  archivedAtMs?: number;
+}
+
+interface WorkflowStepTemplate {
+  id: string; // stable within template
+  name: string;
+  kind: &quot;agent&quot;;
+  promptParts: WorkflowPromptPart[];
+  modelOverride?: { provider?: string; modelId?: string };
+  thinkingOverride?: string;
+  inputPolicy: {
+    includeParentFinalAnswer?: boolean;
+    includeParentSummary?: boolean;
+    includeParentTranscript?: boolean;
+  };
+  startPolicy: &quot;auto&quot; | &quot;manualApproval&quot;;
+  referencedPaths?: Array&lt;{
+    path: string;
+    label?: string;
+  }&gt;;
+}
+
+type WorkflowTransitionTemplate =
+  | {
+      id: string;
+      fromStepId: string;
+      kind: &quot;always&quot;;
+      toStepId: string;
+    }
+  | {
+      id: string;
+      fromStepId: string;
+      kind: &quot;condition&quot;;
+      question: string;
+      routes: {
+        yes?: WorkflowRouteTarget;
+        no?: WorkflowRouteTarget;
+        unsure?: WorkflowRouteTarget;
+      };
+      previewBeforeStart?: boolean;
+    }
+  | {
+      id: string;
+      fromStepId: string;
+      kind: &quot;manualGate&quot;;
+      toStepId: string;
+      prompt?: string;
+    };
+
+type WorkflowRouteTarget =
+  | { kind: &quot;step&quot;; stepId: string }
+  | { kind: &quot;manualGate&quot; }
+  | { kind: &quot;stop&quot; };</code></pre>
+<h4 id="run-schema-v1">Run schema v1</h4>
+<pre><code class="language-ts">interface WorkflowRunRecordV1 {
+  id: string; // uuid
+  templateId?: string;
+  name: string;
+  workspaceId: string;
+  status:
+    | &quot;waiting&quot;
+    | &quot;running&quot;
+    | &quot;needs_attention&quot;
+    | &quot;completed&quot;
+    | &quot;failed&quot;
+    | &quot;stopped&quot;;
+  templateSnapshot: WorkflowTemplateRecordV1;
+  stepRuns: WorkflowStepRunRecord[];
+  transitionRuns: WorkflowTransitionRunRecord[];
+  createdAtMs: number;
+  updatedAtMs: number;
+  completedAtMs?: number;
+}
+
+interface WorkflowStepRunRecord {
+  id: string; // uuid or template step run key
+  templateStepId: string;
+  name: string;
+  status:
+    | &quot;waiting&quot;
+    | &quot;ready&quot;
+    | &quot;queued&quot;
+    | &quot;starting&quot;
+    | &quot;running&quot;
+    | &quot;completed&quot;
+    | &quot;failed&quot;
+    | &quot;skipped&quot;
+    | &quot;blocked&quot;
+    | &quot;needs_approval&quot;;
+  runtimeId?: string;
+  sessionFile?: string;
+  sessionId?: string;
+  renderedPrompt?: string;
+  finalAnswer?: string;
+  summary?: string;
+  error?: string;
+  startedAtMs?: number;
+  completedAtMs?: number;
+  updatedAtMs: number;
+}
+
+interface WorkflowTransitionRunRecord {
+  id: string;
+  templateTransitionId: string;
+  status: &quot;waiting&quot; | &quot;evaluating&quot; | &quot;resolved&quot; | &quot;failed&quot; | &quot;skipped&quot;;
+  decision?: &quot;yes&quot; | &quot;no&quot; | &quot;unsure&quot;;
+  rationale?: string;
+  selectedTarget?: WorkflowRouteTarget;
+  judgeRuntimeId?: string;
+  error?: string;
+  updatedAtMs: number;
+}</code></pre>
+<p>Implementation notes:</p>
+<ul>
+<li>Persist the full template snapshot on run start so edits to templates do not mutate existing runs.</li>
+<li>Use serialized atomic writes like <code>WorkspaceStore</code>.</li>
+<li>Validate with Zod and back up corrupt files.</li>
+<li>Store only paths and metadata plus bounded step outputs needed for workflow continuity. A bounded transcript projection may be persisted on the step run; the Pi session JSONL remains the authoritative full transcript.</li>
+</ul>
+<h3 id="9-3-ipc-api">9.3 IPC API</h3>
+<p>Add workflow channels with strict schemas.</p>
+<p>Suggested API surface:</p>
+<pre><code class="language-ts">workflows.listTemplates(): Promise&lt;WorkflowTemplateListResult&gt;
+workflows.getTemplate({ templateId }): Promise&lt;WorkflowTemplateResult&gt;
+workflows.createTemplate(input): Promise&lt;WorkflowTemplateResult&gt;
+workflows.updateTemplate(input): Promise&lt;WorkflowTemplateResult&gt;
+workflows.archiveTemplate({ templateId }): Promise&lt;WorkflowTemplateListResult&gt;
+workflows.duplicateTemplate({ templateId }): Promise&lt;WorkflowTemplateResult&gt;
+
+workflows.listRuns({ workspaceId? }): Promise&lt;WorkflowRunListResult&gt;
+workflows.getRun({ runId }): Promise&lt;WorkflowRunResult&gt;
+workflows.startRun({ templateId, workspaceId?, initialInputs? }): Promise&lt;WorkflowRunResult&gt;
+workflows.stopRun({ runId }): Promise&lt;WorkflowRunResult&gt;
+workflows.retryStep({ runId, stepRunId }): Promise&lt;WorkflowRunResult&gt;
+workflows.approveGate({ runId, gateId, target }): Promise&lt;WorkflowRunResult&gt;
+workflows.skipStep({ runId, stepRunId }): Promise&lt;WorkflowRunResult&gt;
+workflows.onEvent(listener): Unsubscribe</code></pre>
+<p>Renderer never supplies filesystem authority directly for dangerous operations. It supplies workflow/template IDs; main resolves stored records and validates workspace/session/path access.</p>
+<h3 id="9-4-workflow-engine-responsibilities">9.4 Workflow engine responsibilities</h3>
+<p><code>workflowEngine</code> owns deterministic orchestration state transitions:</p>
+<ul>
+<li>instantiate run from template;</li>
+<li>compute ready steps;</li>
+<li>route transitions;</li>
+<li>mark unselected branches skipped;</li>
+<li>handle manual approvals;</li>
+<li>handle retries;</li>
+<li>compute aggregate run status;</li>
+<li>emit workflow events for renderer and Work inbox refresh.</li>
+</ul>
+<p>Keep this domain logic pure where possible and unit-testable without Electron or Pi.</p>
+<h3 id="9-5-workflow-scheduler-responsibilities">9.5 Workflow scheduler responsibilities</h3>
+<p><code>workflowScheduler</code> bridges ready workflow steps to existing chat/session runtime operations.</p>
+<p>Responsibilities:</p>
+<ul>
+<li>respect <code>settings.maxRunningSessions</code> and existing worker capacity;</li>
+<li>enqueue ready steps when capacity is full;</li>
+<li>create a Pi session through the same pathway as <code>chat.createSession</code>;</li>
+<li>prompt the session with rendered prompt and resolved attachments/images;</li>
+<li>attach runtime/session IDs back to the step run;</li>
+<li>monitor runtime events and reconcile completion;</li>
+<li>release capacity and advance engine on terminal states.</li>
+</ul>
+<p>This should share or sit above existing worker capacity logic (<code>workerCapacity.ts</code>) instead of duplicating hard-cap enforcement.</p>
+<h3 id="9-6-session-creation-strategy">9.6 Session creation strategy</h3>
+<p>For each Agent Step, create a normal Pi Deck session in the run workspace.</p>
+<p>Minimum viable strategy:</p>
+<ol>
+<li>Resolve workspace.</li>
+<li>Call internal equivalent of <code>chat.createSession({ workspaceId })</code>.</li>
+<li>Apply model/thinking overrides if configured.</li>
+<li>Render prompt.</li>
+<li>Send prompt through existing <code>prompt</code> path.</li>
+<li>Persist returned <code>runtimeId</code>, eventual <code>sessionFile</code>, and <code>sessionId</code> on the step run.</li>
+</ol>
+<p>Do not create Pi sessions for branch steps until their branch is selected. This avoids hidden empty persisted sessions and matches the current lazy session design.</p>
+<h3 id="9-7-event-model">9.7 Event model</h3>
+<p>Add workflow events separate from chat runtime events.</p>
+<pre><code class="language-ts">type WorkflowRuntimeEvent =
+  | { type: &quot;workflow_run_updated&quot;; runId: string; status: string }
+  | { type: &quot;workflow_step_updated&quot;; runId: string; stepRunId: string; status: string }
+  | { type: &quot;workflow_transition_updated&quot;; runId: string; transitionRunId: string; status: string }
+  | { type: &quot;workflow_attention_required&quot;; runId: string; reason: string };</code></pre>
+<p>The renderer can merge these into the Work inbox using the same general pattern as runtime event overlays.</p>
+<h3 id="9-8-work-inbox-integration">9.8 Work inbox integration</h3>
+<p>Extend activity source models to optionally include workflow runs.</p>
+<p>Potential new activity kind tags:</p>
+<pre><code class="language-ts">type ActivityTag =
+  | `workspace:${string}`
+  | `status:${ActivityStatus}`
+  | &quot;kind:session&quot;
+  | &quot;kind:workflow&quot;
+  | &quot;visibility:archived&quot;;</code></pre>
+<p>Workflow status classification:</p>
+<ul>
+<li><code>needsAttention</code>: approval needed, failed step, blocked step.</li>
+<li><code>pending</code>: ready/queued steps exist but not running.</li>
+<li><code>inProgress</code>: any step running/evaluating.</li>
+<li><code>completed</code>: run completed.</li>
+<li><code>idle</code>: saved template only should not appear in Work inbox; templates live in Agent Workflows screen.</li>
+</ul>
+<h3 id="9-9-security-and-authority-boundaries">9.9 Security and authority boundaries</h3>
+<ul>
+<li>Renderer may create/edit workflow metadata but cannot directly open arbitrary session files.</li>
+<li>Main validates workspace IDs, template IDs, run IDs, and stored referenced paths before use.</li>
+<li>Persisted referenced paths should be labeled as references, not uploaded content.</li>
+<li>Attachment tokens are runtime-scoped and should not be persisted in templates. Template attachments should be path references or user re-selected file tokens at run start.</li>
+<li>Judge prompts are normal Pi prompts and may contact configured providers like any other Pi run.</li>
+<li>Existing sandboxed renderer and validated IPC requirements remain unchanged.</li>
+</ul>
+<h2 id="10-validation-and-testing-plan">10. Validation and testing plan</h2>
+<h3 id="10-1-unit-tests">10.1 Unit tests</h3>
+<ul>
+<li>Workflow store validation, corrupt-file recovery, atomic writes.</li>
+<li>Template validation:</li>
+<li>missing start step;</li>
+<li>dangling transition targets;</li>
+<li>duplicate step IDs;</li>
+<li>unreachable step warnings;</li>
+<li>invalid branch routes.</li>
+<li>Engine transitions:</li>
+<li>always-after;</li>
+<li>condition yes/no/unsure;</li>
+<li>manual gate approval;</li>
+<li>failed step blocks dependents;</li>
+<li>branch-not-selected steps become skipped.</li>
+<li>Prompt renderer:</li>
+<li>final-answer placeholder;</li>
+<li>transcript placeholder;</li>
+<li>missing output blocks step;</li>
+<li>path references render clearly.</li>
+<li>Judge parser:</li>
+<li>valid JSON yes/no/unsure;</li>
+<li>malformed output maps to unsure;</li>
+<li>rationale truncation.</li>
+</ul>
+<h3 id="10-2-integration-tests-with-fake-rpc">10.2 Integration tests with fake RPC</h3>
+<ul>
+<li>Start workflow with Step A then Step B always-after.</li>
+<li>Conditional workflow routes to YES branch.</li>
+<li>Conditional malformed judge output routes to manual approval.</li>
+<li>Capacity full puts ready steps in queued state.</li>
+<li>Failed worker marks run needs attention and does not start downstream.</li>
+<li>Retry failed step continues downstream after success.</li>
+</ul>
+<h3 id="10-3-renderer-tests">10.3 Renderer tests</h3>
+<ul>
+<li>Builder creates valid template without DSL syntax.</li>
+<li>Inline validation for dangling or empty cards.</li>
+<li>Run view updates step states from workflow events.</li>
+<li>Manual gate approval starts selected next step.</li>
+<li>Session link opens existing chat session.</li>
+<li>Work inbox shows workflow run attention state.</li>
+</ul>
+<h3 id="10-4-e2e-tests">10.4 E2E tests</h3>
+<ul>
+<li>Create template → run → two fake Pi sessions execute in sequence.</li>
+<li>Create conditional template → fake judge YES → selected branch session starts, other branch skipped.</li>
+<li>Approval gate pauses run and resumes after approval.</li>
+<li>Relaunch app while run is waiting/queued; state persists and can continue.</li>
+</ul>
+<h2 id="11-phased-implementation-plan">11. Phased implementation plan</h2>
+<h3 id="phase-1-design-skeleton-and-storage">Phase 1: Design skeleton and storage</h3>
+<ul>
+<li>Add shared workflow schemas and types.</li>
+<li>Implement <code>WorkflowStore</code> with templates and runs.</li>
+<li>Add template CRUD IPC.</li>
+<li>Add simple Agent Workflows list screen.</li>
+</ul>
+<h3 id="phase-2-linear-workflows">Phase 2: Linear workflows</h3>
+<ul>
+<li>Implement Agent Step and always-after transitions.</li>
+<li>Add workflow run instantiation and scheduler bridge to chat session creation/prompt.</li>
+<li>Add run view with step state.</li>
+<li>Fake RPC E2E for Step A → Step B.</li>
+</ul>
+<h3 id="phase-3-conditions-and-manual-gates">Phase 3: Conditions and manual gates</h3>
+<ul>
+<li>Add condition transition card.</li>
+<li>Add judge prompt execution and parser.</li>
+<li>Add yes/no/unsure route handling.</li>
+<li>Add manual approval gate UI.</li>
+<li>Add branch decision override before downstream start.</li>
+</ul>
+<h3 id="phase-4-work-inbox-and-polish">Phase 4: Work inbox and polish</h3>
+<ul>
+<li>Add workflow run rows to Work inbox.</li>
+<li>Add session workflow labels.</li>
+<li>Add retry/skip/stop downstream actions.</li>
+<li>Add template duplicate/archive.</li>
+</ul>
+<h2 id="12-open-decisions">12. Open decisions</h2>
+<ol>
+<li>Should judge steps use the same model/thinking as the parent step, workflow defaults, or a dedicated configurable lightweight model?</li>
+<li>Should judge steps create visible Pi sessions, hidden workflow-internal sessions, or collapsible sessions visible only in run details?</li>
+<li>How much upstream transcript should be available by default before warning about context size?</li>
+<li>Should branch preview be default-on for early safety, or default-off for faster automation?</li>
+<li>How should workflow templates reference files that may move or become unreadable between runs?</li>
+<li>Should templates be workspace-scoped by default or global with optional workspace default?</li>
+</ol>
+<h2 id="13-recommended-first-user-facing-slice">13. Recommended first user-facing slice</h2>
+<p>Build the smallest valuable slice as:</p>
+<blockquote>A user can create an Agent Workflow with two visible agent steps connected by &quot;always after&quot;, run it in the current workspace, and watch Pi Deck start the second Pi session automatically when the first completes.</blockquote>
+<p>Then add:</p>
+<blockquote>A user can replace the always-after rule with a yes/no/unsure natural-language condition and define separate YES and NO branch agent steps.</blockquote>
+<p>This proves the product direction without introducing a DSL, graph editor, joins, loops, or complex boolean logic.</p></main></article></div></body></html>
