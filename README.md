@@ -5,8 +5,12 @@
 Pi Deck is a Pi coding-agent GUI that gives Pi a dedicated desktop workspace for running, watching, and steering coding-agent sessions without opening Pi's terminal UI. It organizes sessions into named workspaces while Pi continues to use its native models, settings, tools, resources, and session files. Visit [the Pi Deck website](https://liusuzeng.github.io/pi-deck/) for an overview.
 
 <p align="center">
-  <img src="docs/assets/pi-deck.png" alt="Pi Deck in Light mode showing workspace navigation, an active session, attachment previews, and a completed response" width="49%">
-  <img src="docs/assets/pi-deck-dark.png" alt="Pi Deck in Dark mode showing the Work inbox with workspace and status filters across parallel sessions" width="49%">
+  <a href="docs/assets/pi-deck.png" title="Open the light mode screenshot full size">
+    <img src="docs/assets/pi-deck.png" alt="Pi Deck in Light mode showing workspace navigation, an active session, attachment previews, and a completed response" width="49%">
+  </a>
+  <a href="docs/assets/pi-deck-dark.png" title="Open the dark mode Work inbox screenshot full size">
+    <img src="docs/assets/pi-deck-dark.png" alt="Pi Deck in Dark mode showing the Work inbox with workspace and status filters across parallel sessions" width="49%">
+  </a>
 </p>
 
 > **Status:** Pi Deck is an active, pre-release personal MVP. It currently runs from source and targets macOS.
