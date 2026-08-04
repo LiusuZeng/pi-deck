@@ -13,6 +13,7 @@ import {
   recoverWorkflowRun,
   approveWorkflowStep,
   retryWorkflowCondition,
+  retryWorkflowStep,
   overrideWorkflowCondition,
 } from "./workflowEngine.js";
 import type { WorkflowTemplate } from "../../shared/workflowSchemas.js";
