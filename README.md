@@ -2,11 +2,11 @@
 
 **A local macOS desktop app for Pi coding agents.**
 
-Pi Deck is a Pi coding-agent GUI that gives Pi a dedicated desktop workspace for running, watching, and steering coding-agent sessions without opening Pi's terminal UI. It keeps projects and conversations organized in a sidebar while Pi continues to use its native models, settings, tools, resources, and session files. Visit [the Pi Deck website](https://liusuzeng.github.io/pi-deck/) for an overview.
+Pi Deck is a Pi coding-agent GUI that gives Pi a dedicated desktop workspace for running, watching, and steering coding-agent sessions without opening Pi's terminal UI. It organizes sessions into named workspaces while Pi continues to use its native models, settings, tools, resources, and session files. Visit [the Pi Deck website](https://liusuzeng.github.io/pi-deck/) for an overview.
 
 <p align="center">
-  <img src="docs/assets/pi-deck.png" alt="Pi Deck in Light mode showing project sessions, a resumed conversation, tool activity, and usage statistics" width="49%">
-  <img src="docs/assets/pi-deck-dark.png" alt="Pi Deck in Dark mode showing a project session, tool activity, and a completed response" width="49%">
+  <img src="docs/assets/pi-deck.png" alt="Pi Deck in Light mode showing workspace navigation, sessions, a resumed conversation, tool activity, and usage statistics" width="49%">
+  <img src="docs/assets/pi-deck-dark.png" alt="Pi Deck in Dark mode showing workspace sessions, tool activity, and a completed response" width="49%">
 </p>
 
 > **Status:** Pi Deck is an active, pre-release personal MVP. It currently runs from source and targets macOS.
@@ -15,9 +15,10 @@ Pi Deck is a Pi coding-agent GUI that gives Pi a dedicated desktop workspace for
 
 Pi Deck is a **local agent harness** for developers who already use Pi and want a clearer way to manage ongoing work:
 
-- Open a project and continue its previous Pi sessions.
+- Organize related Pi sessions into named workspaces independent of their folders.
+- Open a project and continue its previous Pi sessions from the appropriate workspace.
 - Run multiple independent Pi workers without managing terminal windows.
-- Switch projects while active work remains attached in the background.
+- Switch workspaces and projects while active work remains attached in the background.
 - Send prompts, files, and images from a graphical composer.
 - Change models and thinking levels from the session workspace.
 - Watch streaming replies, thinking, tool execution, usage, and errors.
@@ -27,18 +28,23 @@ Pi Deck is **not** an IDE, source editor, terminal wrapper, or hosted agent serv
 
 ## Features
 
-### Projects and Pi-native sessions
+### Workspaces, projects, and Pi-native sessions
 
-- Open local project folders with the macOS directory picker.
-- Persist recent projects and group sessions by canonical project path.
-- Discover existing Pi JSONL sessions for the active project.
+- Create, rename, select, archive, and restore named workspaces.
+- Keep workspace membership independent from Pi JSONL files and working folders.
+- Open local project folders with the macOS directory picker and associate them with sessions.
+- Persist recent projects and discover existing Pi JSONL sessions for their active project.
+- Start with a default workspace for sessions that have not been assigned elsewhere.
 - Create a lightweight draft without starting Pi; the worker starts on first send.
 - Resume saved sessions with their transcript and persisted image inputs.
-- Search, refresh, close, resume, and delete sessions from the sidebar.
+- Search, refresh, close, resume, move, remove, archive, restore, and delete sessions.
 - Close an idle runtime without deleting its session, then reopen it later.
 - Move deleted session files to Trash when possible.
-- Keep active workers attached when navigating to another project.
-- Surface cross-project background work in a dedicated sidebar section.
+- Keep active workers attached when navigating to another workspace or project.
+
+### Work inbox
+
+The Work inbox gives parallel work a single place to review. Open it globally across all workspaces or scope it to one workspace, then filter sessions by **Needs attention**, **Failed**, **Pending**, **In progress**, **Completed**, or **Idle**. Idle saved sessions remain discoverable without increasing the actionable counts, so the inbox stays useful for both triage and history.
 
 ### Multi-session control
 
@@ -108,12 +114,13 @@ A background request marks its session as needing input without stealing focus. 
 ┌──────────────────────── Electron app ────────────────────────┐
 │                                                              │
 │  React renderer                                              │
-│  Projects · Sessions · Timeline · Composer                   │
+│  Work inbox · Workspaces · Sessions · Timeline · Composer    │
 │              │                                               │
 │              │ validated, typed IPC                          │
 │              ▼                                               │
 │  Electron main process                                      │
-│  Project store · Session index · Attachments · Runtime state │
+│  Workspace/project stores · Session index · Attachments      │
+│  Runtime state                                               │
 │              │                                               │
 │              │ PiAdapter + strict JSONL transport            │
 │              ▼                                               │
@@ -125,7 +132,7 @@ A background request marks its session as needing input without stealing focus. 
        Pi settings, provider auth, resources, and sessions
 ```
 
-The renderer has no direct filesystem or process access. Electron main owns Pi subprocesses, selected-file tokens, project metadata, and session validation. Pi's session files remain the source of truth for conversation history; Pi Deck stores only the metadata needed to organize and reopen them.
+The renderer has no direct filesystem or process access. Electron main owns Pi subprocesses, selected-file tokens, workspace and project metadata, and session validation. Pi's session files remain the source of truth for conversation history; Pi Deck stores only the metadata needed to organize, filter, and reopen them. Workspace membership is Pi Deck metadata and does not require moving Pi's JSONL files or changing working folders.
 
 ## Requirements
 
@@ -188,13 +195,13 @@ npm run deck:real -- --dry-run /absolute/path/to/your/project
 
 ## Typical workflow
 
-1. Launch Pi Deck for a project or select one with **Open project**.
-2. Choose a saved session, or create a **New session** draft.
-3. Select the model and thinking level from the composer.
-4. Add referenced files or image inputs if needed.
-5. Send the prompt; Pi starts lazily and streams into the timeline.
-6. Switch sessions or projects while other attached workers continue.
-7. Use **Steer**, **Follow-up**, or **Abort** while a turn is active.
+1. Launch Pi Deck and choose or create a workspace.
+2. Open a project with **Open project**, or select an existing session in the workspace.
+3. Use **Work inbox** to review activity across all workspaces or filter the current workspace by status.
+4. Choose a saved session, or create a **New session** draft.
+5. Select the model and thinking level, add referenced files or image inputs, and send a prompt.
+6. Pi starts lazily and streams into the timeline while other workers remain attached in the background.
+7. Use **Steer**, **Follow-up**, or **Abort** while a turn is active; return to the Work inbox to triage the next session.
 8. Close an idle runtime to free capacity while keeping its saved session resumable.
 
 Press **Enter** to send or steer. Use **Shift+Enter** for a newline.
@@ -215,7 +222,7 @@ Useful environment overrides:
 | `PI_DECK_PROJECT_CWD`                          | Initial project directory                                                               |
 | `PI_CODING_AGENT_DIR`                          | Override Pi's agent/configuration directory                                             |
 | `PI_CODING_AGENT_SESSION_DIR`                  | Override Pi's session directory                                                         |
-| `PI_DECK_HOME`                                 | Override Pi Deck's project-metadata directory                                           |
+| `PI_DECK_HOME`                                 | Override Pi Deck's local metadata directory                                             |
 | `PI_DECK_REAL_RPC_TIMEOUT_MS`                  | Override the RPC command-response timeout                                               |
 | `PI_DECK_SCAN_PROJECT_SESSION_DIR_CANDIDATE=1` | Explicitly include a trust-dependent project `sessionDir` candidate in bounded scanning |
 
@@ -230,7 +237,8 @@ appearance changes while the app is running.
 Pi Deck has no hosted backend and does not sync app data.
 
 - **Conversation history:** Pi-owned JSONL session files in Pi's resolved session directory.
-- **Project grouping:** `~/.pideck/projects.json` by default.
+- **Workspace metadata:** `~/.pideck/workspaces.json` by default.
+- **Project metadata:** `~/.pideck/projects.json` by default.
 - **App settings and diagnostics:** Electron's local user-data directory.
 - **Provider authentication and Pi resources:** Pi's normal agent directory, `~/.pi/agent` by default.
 
@@ -288,7 +296,7 @@ The prompt and GUI smoke commands require working provider authentication and ma
 ## Repository layout
 
 ```text
-src/main/       Electron backend, Pi workers, projects, sessions, attachments
+src/main/       Electron backend, Pi workers, workspaces, projects, sessions, attachments
 src/preload/    Sandboxed, validated renderer API
 src/renderer/   React chat workspace and runtime-state reduction
 src/shared/     IPC schemas and shared TypeScript types
