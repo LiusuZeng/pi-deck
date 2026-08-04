@@ -174,6 +174,56 @@ describe("WorkflowStore", () => {
     expect(copy.name).toBe("Linear workflow copy");
   });
 
+  it("captures each queued persistence snapshot before a newer update", async () => {
+    const store = await newStore();
+    const original = await store.createTemplate(definition);
+    let releasePersist!: () => void;
+    const persistGate = new Promise<void>((resolve) => {
+      releasePersist = resolve;
+    });
+    const enteredMkdir = new Promise<void>((resolve) => {
+      let blocked = true;
+      const originalMkdir = fs.mkdir.bind(fs);
+      vi.spyOn(fs, "mkdir").mockImplementation(async (...args) => {
+        if (blocked) {
+          blocked = false;
+          resolve();
+          await persistGate;
+        }
+        return originalMkdir(...args);
+      });
+    });
+    const writeFileSpy = vi.spyOn(fs, "writeFile");
+
+    try {
+      const firstUpdate = store.updateTemplate(original.id, {
+        ...definition,
+        name: "First queued update",
+      });
+      await enteredMkdir;
+      const secondUpdate = store.updateTemplate(original.id, {
+        ...definition,
+        name: "Second queued update",
+      });
+      releasePersist();
+      await Promise.all([firstUpdate, secondUpdate]);
+
+      const snapshots = writeFileSpy.mock.calls.map(
+        (call) =>
+          JSON.parse(String(call[1])) as { templates: Array<{ name: string }> },
+      );
+      expect(snapshots.map((snapshot) => snapshot.templates[0]?.name)).toEqual([
+        "First queued update",
+        "Second queued update",
+      ]);
+      expect((await store.getTemplate(original.id)).name).toBe(
+        "Second queued update",
+      );
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
   it("recovers from corrupt metadata", async () => {
     const store = await newStore();
     await fs.writeFile(store.storeFile, "not-json");

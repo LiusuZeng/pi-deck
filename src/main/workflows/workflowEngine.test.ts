@@ -178,6 +178,67 @@ describe("workflowEngine", () => {
     ).toThrow(/stopped/i);
   });
 
+  it("skips nested descendants of an unselected condition branch", () => {
+    const base = template();
+    const configured = template({
+      steps: [
+        ...base.steps,
+        {
+          id: "deeper-result",
+          name: "Deeper result",
+          kind: "agent",
+          promptParts: [{ type: "text", text: "Use the deeper result." }],
+          inputPolicy: policy,
+          startPolicy: "auto",
+        },
+      ],
+      transitions: [
+        ...base.transitions,
+        {
+          id: "deeper-to-result",
+          fromStepId: "deeper",
+          kind: "always",
+          toStepId: "deeper-result",
+        },
+      ],
+    });
+    const run = createWorkflowRun({
+      template: configured,
+      workspaceId: "ws",
+      inputs: {},
+      now: 100,
+    });
+    const started = markWorkflowStepStarted(run, run.stepRuns[0]!.id, 101);
+    const completed = markWorkflowStepCompleted(
+      started,
+      run.stepRuns[0]!.id,
+      { finalAnswer: "A fix is clear." },
+      102,
+    );
+    const resolved = resolveWorkflowCondition(
+      completed,
+      completed.transitionRuns.find(
+        (transition) => transition.templateTransitionId === "branch",
+      )!.id,
+      "yes",
+      undefined,
+      103,
+    );
+
+    expect(
+      resolved.stepRuns.find((step) => step.templateStepId === "deeper-result")
+        ?.status,
+    ).toBe("skipped");
+    expect(
+      resolved.transitionRuns.find(
+        (transition) => transition.templateTransitionId === "deeper-to-result",
+      )?.status,
+    ).toBe("skipped");
+    expect(
+      readyWorkflowSteps(resolved).map((step) => step.templateStepId),
+    ).toEqual(["act"]);
+  });
+
   it("stops evaluating branches and skips future children", () => {
     const run = createWorkflowRun({
       template: template(),
