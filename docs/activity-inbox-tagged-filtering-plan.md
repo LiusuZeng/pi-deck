@@ -6,9 +6,9 @@ Baseline: `origin/main` (`v0.3.0`, workspace feature complete)
 
 ## 1. Outcome
 
-Activity is one operational inbox over all live and recently completed session
-work. The global inbox and each workspace inbox are the same view with a
-different pre-applied filter:
+Activity is one operational inbox over live, recently completed, and idle
+saved-session work. The global inbox and each workspace inbox are the same
+view with a different pre-applied filter:
 
 - **All workspaces**: no workspace filter; aggregate activity across every
   non-archived workspace.
@@ -53,7 +53,8 @@ type ActivityStatus =
   | "failed"
   | "pending"
   | "inProgress"
-  | "completed";
+  | "completed"
+  | "idle";
 
 type ActivityTag =
   | `workspace:${string}`
@@ -74,10 +75,13 @@ Status precedence remains explicit and mutually exclusive:
 3. `pending`
 4. `inProgress`
 5. `completed`
+6. `idle`
 
-An idle/saved session with no current-run completion timestamp is omitted from
-the inbox. Archived workspace/session memberships are omitted by default and
-carry `visibility:archived` when an archived view is eventually added.
+An idle saved session with no current-run completion timestamp is classified as
+`idle` and remains visible. Unsaved draft sessions are omitted because they do
+not represent work yet. Archived workspace/session memberships are omitted by
+default and carry `visibility:archived` when an archived view is eventually
+added.
 
 ### 2.3 Counts and badges
 
@@ -88,6 +92,8 @@ carry `visibility:archived` when an archived view is eventually added.
   workspace tag.
 - `inProgress` and `completed` remain visible in the inbox but do not increase
   the actionable badge.
+- `idle` remains visible for browsing but does not increase the actionable
+  badge.
 
 ### 2.4 Row navigation
 
@@ -126,6 +132,7 @@ interface ActivitySourceSession {
   status?: SessionStatus;
   completedAtMs?: number;
   lastError?: string;
+  draftSession?: boolean;
   archivedAtMs?: number;
 }
 ```
@@ -308,6 +315,8 @@ Unit/domain:
 - workspace filter excludes every other workspace;
 - status filters are tag intersections and retain precedence;
 - archived memberships are hidden by default;
+- idle saved sessions appear under All, workspace scopes, and the Idle filter;
+- unsaved draft sessions remain out of the inbox;
 - IDs remain stable across workspace rename;
 - actionable counts are correct per scope.
 

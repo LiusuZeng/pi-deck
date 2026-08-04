@@ -458,6 +458,15 @@ describe("Activity inbox App projection", () => {
       } as any),
     ).toBe(session);
   });
+
+  it("preserves draft identity so unsent sessions stay out of the inbox", () => {
+    const [source] = __rendererTestHooks.activitySourceSessions(
+      [{ ...baseSession(), draftSession: true } as any],
+      { "workspace-a": "Workspace A" },
+    );
+
+    expect(source).toMatchObject({ draftSession: true });
+  });
 });
 
 describe("renderer per-session composer drafts", () => {

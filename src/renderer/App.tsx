@@ -265,6 +265,7 @@ function activitySourceSessions(
     ...(session.completedAtMs !== undefined
       ? { completedAtMs: session.completedAtMs }
       : {}),
+    ...(session.draftSession === true ? { draftSession: true } : {}),
     ...(session.lastError !== undefined
       ? { lastError: session.lastError }
       : {}),
