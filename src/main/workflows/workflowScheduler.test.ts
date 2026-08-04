@@ -208,6 +208,27 @@ describe("WorkflowScheduler", () => {
     expect(fixture.persisted.at(-1)?.stepRuns[0]?.status).toBe("failed");
   });
 
+  it("does not start with an empty prompt when an optional input is unavailable", async () => {
+    const fixture = setup();
+    const optionalInputTemplate: WorkflowTemplate = {
+      ...template,
+      inputs: [{ id: "context", label: "Context", type: "text", required: false }],
+      steps: [{
+        ...template.steps[0]!,
+        promptParts: [{ type: "workflowInput", inputId: "context" }],
+      }, template.steps[1]!],
+    };
+    const run = createWorkflowRun({ template: optionalInputTemplate, workspaceId: "workspace", inputs: {}, now: 1 });
+    await fixture.scheduler.schedule(run);
+    expect(fixture.prompts).toEqual([]);
+    const latest = fixture.persisted.at(-1)!;
+    expect(latest.status).toBe("needsAttention");
+    expect(latest.stepRuns.find((step) => step.templateStepId === "first")).toMatchObject({
+      status: "failed",
+      error: expect.stringMatching(/input context.*unavailable/i),
+    });
+  });
+
   it("ignores a stale completion after the run is stopped", async () => {
     const fixture = setup();
     const run = createWorkflowRun({

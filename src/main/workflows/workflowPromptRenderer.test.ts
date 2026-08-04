@@ -104,4 +104,22 @@ describe("renderWorkflowPrompt", () => {
       "The fixture is shared across tests.",
     );
   });
+
+  it("preserves an upstream transcript when transcript output is referenced", () => {
+    const transcript = "user: inspect the fixture\\nassistant: the fixture is shared";
+    const availableRun = {
+      ...run,
+      stepRuns: [{ ...run.stepRuns[0]!, transcript }],
+    };
+    const prompt = renderWorkflowPrompt({
+      workflowContext: template.context,
+      step: {
+        ...step,
+        promptParts: [{ type: "stepOutput", stepId: "investigate", output: "transcript" }],
+        inputPolicy: { ...step.inputPolicy, includeParentFinalAnswer: false },
+      },
+      run: availableRun,
+    });
+    expect(prompt).toContain(transcript);
+  });
 });

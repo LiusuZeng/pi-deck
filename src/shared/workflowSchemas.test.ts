@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  workflowApproveGateRequestSchema,
   workflowEventSchema,
   workflowModelOverrideSchema,
+  workflowOverrideConditionRequestSchema,
+  workflowRetryConditionRequestSchema,
   workflowRunSchema,
   workflowTemplateDefinitionSchema,
 } from "./workflowSchemas.js";
@@ -72,6 +75,22 @@ describe("workflowTemplateDefinitionSchema", () => {
     expect(workflowTemplateDefinitionSchema.parse(linearTemplate)).toEqual(
       linearTemplate,
     );
+  });
+
+  it("round-trips transcript prompt parts as a supported handoff reference", () => {
+    const withTranscript = {
+      ...linearTemplate,
+      steps: [
+        linearTemplate.steps[0],
+        {
+          ...linearTemplate.steps[1],
+          promptParts: [
+            { type: "stepOutput" as const, stepId: "investigate", output: "transcript" as const },
+          ],
+        },
+      ],
+    };
+    expect(workflowTemplateDefinitionSchema.parse(withTranscript)).toEqual(withTranscript);
   });
 
   it("rejects a blank workflow with no agent steps", () => {
@@ -287,6 +306,36 @@ describe("workflowRunSchema", () => {
         updatedAtMs: now,
       }),
     ).toBeTruthy();
+  });
+});
+
+describe("workflow action request schemas", () => {
+  it("accepts all manual approval actions", () => {
+    for (const action of ["approve", "skip", "stop"] as const) {
+      expect(workflowApproveGateRequestSchema.parse({
+        runId: "b1b1b1b1-b1b1-41b1-81b1-b1b1b1b1b1b1",
+        stepRunId: "c1c1c1c1-c1c1-41c1-81c1-c1c1c1c1c1c1",
+        action,
+      }).action).toBe(action);
+    }
+  });
+
+  it("validates condition judge retry and override payloads", () => {
+    const ids = {
+      runId: "b1b1b1b1-b1b1-41b1-81b1-b1b1b1b1b1b1",
+      transitionRunId: "c1c1c1c1-c1c1-41c1-81c1-c1c1c1c1c1c1",
+    };
+    expect(workflowRetryConditionRequestSchema.parse(ids)).toEqual(ids);
+    expect(workflowOverrideConditionRequestSchema.parse({
+      ...ids,
+      decision: "no",
+      rationale: "The judge output was malformed; select the safe branch.",
+    })).toMatchObject({ decision: "no" });
+    expect(workflowOverrideConditionRequestSchema.safeParse({
+      ...ids,
+      decision: "yes",
+      rationale: " ",
+    }).success).toBe(false);
   });
 });
 
