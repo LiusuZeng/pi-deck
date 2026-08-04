@@ -196,7 +196,18 @@ export const workflowTemplateDefinitionSchema = z
       }
     };
 
+    const transitionIds = new Set<string>();
+    const incomingCounts = new Map<string, number>();
+    const edges = new Map<string, string[]>();
     for (const [index, transition] of value.transitions.entries()) {
+      if (transitionIds.has(transition.id)) {
+        context.addIssue({
+          code: "custom",
+          path: ["transitions", index, "id"],
+          message: `Duplicate workflow transition id: ${transition.id}`,
+        });
+      }
+      transitionIds.add(transition.id);
       if (!stepIds.has(transition.fromStepId)) {
         context.addIssue({
           code: "custom",
@@ -211,6 +222,12 @@ export const workflowTemplateDefinitionSchema = z
             path: ["transitions", index, "toStepId"],
             message: `Unknown workflow step target: ${transition.toStepId}`,
           });
+        } else {
+          incomingCounts.set(transition.toStepId, (incomingCounts.get(transition.toStepId) ?? 0) + 1);
+          edges.set(transition.fromStepId, [
+            ...(edges.get(transition.fromStepId) ?? []),
+            transition.toStepId,
+          ]);
         }
       } else {
         const routeEntries = [
@@ -228,9 +245,61 @@ export const workflowTemplateDefinitionSchema = z
         for (const [label, target] of routeEntries) {
           if (target !== undefined) {
             checkTarget(target, ["transitions", index, "routes", label]);
+            if (target.kind === "manualGate") {
+              context.addIssue({
+                code: "custom",
+                path: ["transitions", index, "routes", label],
+                message: "Condition manual gates are unsupported; use a manualGate transition to an approval step.",
+              });
+            }
+            if (target.kind === "step" && stepIds.has(target.stepId)) {
+              incomingCounts.set(target.stepId, (incomingCounts.get(target.stepId) ?? 0) + 1);
+              edges.set(transition.fromStepId, [
+                ...(edges.get(transition.fromStepId) ?? []),
+                target.stepId,
+              ]);
+            }
           }
         }
       }
+    }
+
+    for (const [stepId, count] of incomingCounts) {
+      if (count > 1) {
+        context.addIssue({
+          code: "custom",
+          path: ["steps"],
+          message: `Workflow step has unsupported fan-in: ${stepId}`,
+        });
+      }
+    }
+
+    const roots = value.steps.filter((step) => !incomingCounts.has(step.id));
+    if (roots.length === 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["steps"],
+        message: "Workflow must have at least one root step.",
+      });
+    }
+
+    const visiting = new Set<string>();
+    const visited = new Set<string>();
+    const visit = (stepId: string): boolean => {
+      if (visiting.has(stepId)) return true;
+      if (visited.has(stepId)) return false;
+      visiting.add(stepId);
+      const hasCycle = (edges.get(stepId) ?? []).some(visit);
+      visiting.delete(stepId);
+      visited.add(stepId);
+      return hasCycle;
+    };
+    if (value.steps.some((step) => visit(step.id))) {
+      context.addIssue({
+        code: "custom",
+        path: ["transitions"],
+        message: "Workflow transitions must form an acyclic graph.",
+      });
     }
   });
 
@@ -275,6 +344,7 @@ export const workflowStepRunSchema = z
     renderedPrompt: z.string().optional(),
     finalAnswer: z.string().optional(),
     summary: z.string().optional(),
+    transcript: z.string().optional(),
     error: z.string().optional(),
     startedAtMs: z.number().finite().optional(),
     completedAtMs: z.number().finite().optional(),
@@ -309,8 +379,102 @@ export const workflowRunSchema = z
     createdAtMs: z.number().finite(),
     updatedAtMs: z.number().finite(),
     completedAtMs: z.number().finite().optional(),
+    parentFinalAnswer: z.string().optional(),
+    parentSummary: z.string().optional(),
+    parentTranscript: z.string().optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if (value.templateId !== undefined && value.templateId !== value.templateSnapshot.id) {
+      context.addIssue({
+        code: "custom",
+        path: ["templateId"],
+        message: "Workflow run templateId must match its template snapshot.",
+      });
+    }
+
+    const templateStepIds = new Set(value.templateSnapshot.steps.map((step) => step.id));
+    const stepRunIds = new Set<string>();
+    const stepRunCounts = new Map<string, number>();
+    for (const [index, stepRun] of value.stepRuns.entries()) {
+      if (stepRunIds.has(stepRun.id)) {
+        context.addIssue({
+          code: "custom",
+          path: ["stepRuns", index, "id"],
+          message: `Duplicate workflow step run id: ${stepRun.id}`,
+        });
+      }
+      stepRunIds.add(stepRun.id);
+      if (!templateStepIds.has(stepRun.templateStepId)) {
+        context.addIssue({
+          code: "custom",
+          path: ["stepRuns", index, "templateStepId"],
+          message: `Workflow step run references an unknown template step: ${stepRun.templateStepId}`,
+        });
+      }
+      stepRunCounts.set(stepRun.templateStepId, (stepRunCounts.get(stepRun.templateStepId) ?? 0) + 1);
+    }
+    for (const step of value.templateSnapshot.steps) {
+      if ((stepRunCounts.get(step.id) ?? 0) !== 1) {
+        context.addIssue({
+          code: "custom",
+          path: ["stepRuns"],
+          message: `Workflow run must contain exactly one step run for: ${step.id}`,
+        });
+      }
+    }
+
+    const templateTransitionIds = new Set(value.templateSnapshot.transitions.map((transition) => transition.id));
+    const transitionRunIds = new Set<string>();
+    const transitionRunCounts = new Map<string, number>();
+    for (const [index, transitionRun] of value.transitionRuns.entries()) {
+      if (transitionRunIds.has(transitionRun.id)) {
+        context.addIssue({
+          code: "custom",
+          path: ["transitionRuns", index, "id"],
+          message: `Duplicate workflow transition run id: ${transitionRun.id}`,
+        });
+      }
+      transitionRunIds.add(transitionRun.id);
+      if (!templateTransitionIds.has(transitionRun.templateTransitionId)) {
+        context.addIssue({
+          code: "custom",
+          path: ["transitionRuns", index, "templateTransitionId"],
+          message: `Workflow transition run references an unknown template transition: ${transitionRun.templateTransitionId}`,
+        });
+      }
+      transitionRunCounts.set(transitionRun.templateTransitionId, (transitionRunCounts.get(transitionRun.templateTransitionId) ?? 0) + 1);
+    }
+    for (const transition of value.templateSnapshot.transitions) {
+      if ((transitionRunCounts.get(transition.id) ?? 0) !== 1) {
+        context.addIssue({
+          code: "custom",
+          path: ["transitionRuns"],
+          message: `Workflow run must contain exactly one transition run for: ${transition.id}`,
+        });
+      }
+    }
+
+    const inputIds = new Set(value.templateSnapshot.inputs.map((input) => input.id));
+    for (const inputId of Object.keys(value.inputs)) {
+      if (!inputIds.has(inputId)) {
+        context.addIssue({
+          code: "custom",
+          path: ["inputs", inputId],
+          message: `Workflow run contains an unknown input: ${inputId}`,
+        });
+      }
+    }
+    for (const input of value.templateSnapshot.inputs) {
+      if (input.required && !(input.id in value.inputs)) {
+        context.addIssue({
+          code: "custom",
+          path: ["inputs", input.id],
+          message: `Workflow run is missing required input: ${input.id}`,
+        });
+      }
+    }
+  });
 
 export const workflowTemplateListResultSchema = z
   .object({ templates: z.array(workflowTemplateSchema) })

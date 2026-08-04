@@ -21,6 +21,15 @@ export function renderWorkflowPrompt({
     const context = renderWorkflowContext(workflowContext, run.inputs);
     if (context.length > 0) sections.push(`Workflow context:\n${context}`);
   }
+  if (step.inputPolicy.includeParentFinalAnswer) {
+    sections.push(`Parent final answer:\n${run.parentFinalAnswer ?? "[Parent final answer unavailable]"}`);
+  }
+  if (step.inputPolicy.includeParentSummary) {
+    sections.push(`Parent summary:\n${run.parentSummary ?? "[Parent summary unavailable]"}`);
+  }
+  if (step.inputPolicy.includeParentTranscript) {
+    sections.push(`Parent transcript:\n${run.parentTranscript ?? "[Parent transcript unavailable]"}`);
+  }
 
   const prompt = step.promptParts
     .map((part) => {
@@ -47,7 +56,7 @@ export function renderStepOutput(
   if (output === "summary") {
     return step.summary ?? step.finalAnswer ?? "[Upstream step has no summary yet]";
   }
-  return step.finalAnswer ?? step.summary ?? "[Upstream transcript is unavailable]";
+  return step.transcript ?? "[Upstream transcript is unavailable]";
 }
 
 function renderWorkflowContext(

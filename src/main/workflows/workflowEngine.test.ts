@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  beginWorkflowConditionEvaluation,
   createWorkflowRun,
   markWorkflowStepCompleted,
   markWorkflowStepFailed,
   markWorkflowStepStarted,
+  markWorkflowStepQueued,
+  readyWorkflowSteps,
   resolveWorkflowCondition,
+  stopWorkflowRun,
 } from "./workflowEngine.js";
 import type { WorkflowTemplate } from "../../shared/workflowSchemas.js";
 
@@ -56,7 +60,7 @@ function template(overrides: Partial<WorkflowTemplate> = {}): WorkflowTemplate {
         routes: {
           yes: { kind: "step", stepId: "act" },
           no: { kind: "step", stepId: "deeper" },
-          unsure: { kind: "manualGate" },
+          unsure: { kind: "stop" }
         },
         previewBeforeStart: false,
       },
@@ -68,23 +72,48 @@ function template(overrides: Partial<WorkflowTemplate> = {}): WorkflowTemplate {
 }
 
 describe("workflowEngine", () => {
+  it("does not evaluate a condition before its source completes", () => {
+    const run = createWorkflowRun({ template: template(), workspaceId: "ws", inputs: {}, now: 100 });
+    const transitionRunId = run.transitionRuns[0]!.id;
+    expect(() => beginWorkflowConditionEvaluation(run, transitionRunId, 101)).toThrow(/source step/);
+    expect(() => resolveWorkflowCondition(run, transitionRunId, "yes", undefined, 101)).toThrow(/evaluating/);
+  });
+
   it("starts root steps and routes a condition to yes", () => {
     const run = createWorkflowRun({ template: template(), workspaceId: "ws", inputs: {}, now: 100 });
     expect(run.stepRuns.find((step) => step.templateStepId === "investigate")?.status).toBe("ready");
     const started = markWorkflowStepStarted(run, run.stepRuns[0]!.id, 101, "runtime-1");
     const completed = markWorkflowStepCompleted(started, run.stepRuns[0]!.id, { finalAnswer: "A fix is clear." }, 102);
     expect(completed.transitionRuns[0]?.status).toBe("evaluating");
+    expect(completed.status).toBe("running");
+    expect(completed.updatedAtMs).toBe(102);
     const resolved = resolveWorkflowCondition(completed, completed.transitionRuns[0]!.id, "yes", "A clear fix was identified.", 103);
     expect(resolved.stepRuns.find((step) => step.templateStepId === "act")?.status).toBe("ready");
     expect(resolved.stepRuns.find((step) => step.templateStepId === "deeper")?.status).toBe("skipped");
   });
 
-  it("routes unsure to attention without starting a branch", () => {
+  it("stops scheduling and hides ready steps", () => {
+    const run = createWorkflowRun({ template: template(), workspaceId: "ws", inputs: {}, now: 100 });
+    const stopped = stopWorkflowRun(run, 101);
+    expect(stopped.updatedAtMs).toBe(101);
+    expect(readyWorkflowSteps(stopped)).toEqual([]);
+    expect(() => markWorkflowStepQueued(stopped, run.stepRuns[0]!.id, 102)).toThrow(/stopped/i);
+    expect(() => markWorkflowStepStarted(stopped, run.stepRuns[0]!.id, 102)).toThrow(/stopped/i);
+  });
+
+  it("marks queued scheduling as running and updates the aggregate timestamp", () => {
+    const run = createWorkflowRun({ template: template(), workspaceId: "ws", inputs: {}, now: 100 });
+    const queued = markWorkflowStepQueued(run, run.stepRuns[0]!.id, 101);
+    expect(queued.status).toBe("running");
+    expect(queued.updatedAtMs).toBe(101);
+  });
+
+  it("routes unsure to stop without starting a branch", () => {
     const run = createWorkflowRun({ template: template(), workspaceId: "ws", inputs: {}, now: 100 });
     const started = markWorkflowStepStarted(run, run.stepRuns[0]!.id, 101);
     const completed = markWorkflowStepCompleted(started, run.stepRuns[0]!.id, { finalAnswer: "Unclear." }, 102);
     const resolved = resolveWorkflowCondition(completed, completed.transitionRuns[0]!.id, "unsure", "The result was ambiguous.", 103);
-    expect(resolved.status).toBe("needsAttention");
+    expect(resolved.status).toBe("stopped");
     expect(resolved.stepRuns.every((step) => step.templateStepId === "investigate" || step.status === "skipped")).toBe(true);
   });
 

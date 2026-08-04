@@ -88,6 +88,75 @@ describe("workflowTemplateDefinitionSchema", () => {
     );
   });
 
+  it("rejects unsupported condition manual gates", () => {
+    const result = workflowTemplateDefinitionSchema.safeParse({
+      ...linearTemplate,
+      transitions: [
+        {
+          id: "condition",
+          fromStepId: "investigate",
+          kind: "condition",
+          question: "Need approval?",
+          routes: { yes: { kind: "manualGate" } },
+          previewBeforeStart: false,
+        },
+      ],
+    });
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.issues.map((issue) => issue.message)).toContain(
+      "Condition manual gates are unsupported; use a manualGate transition to an approval step.",
+    );
+  });
+
+  it("rejects duplicate transitions, fan-in, cycles, and graphs without a root", () => {
+    const fanIn = workflowTemplateDefinitionSchema.safeParse({
+      ...linearTemplate,
+      steps: [
+        ...linearTemplate.steps,
+        { ...linearTemplate.steps[0], id: "other", name: "Other" },
+      ],
+      transitions: [
+        { id: "one", fromStepId: "investigate", kind: "always", toStepId: "fix" },
+        { id: "two", fromStepId: "other", kind: "always", toStepId: "fix" },
+      ],
+    });
+    expect(fanIn.success).toBe(false);
+    if (fanIn.success) return;
+    expect(fanIn.error.issues.map((issue) => issue.message)).toContain(
+      "Workflow step has unsupported fan-in: fix",
+    );
+
+    const cyclic = workflowTemplateDefinitionSchema.safeParse({
+      ...linearTemplate,
+      transitions: [
+        { id: "one", fromStepId: "investigate", kind: "always", toStepId: "fix" },
+        { id: "two", fromStepId: "fix", kind: "always", toStepId: "investigate" },
+      ],
+    });
+    expect(cyclic.success).toBe(false);
+    if (cyclic.success) return;
+    expect(cyclic.error.issues.map((issue) => issue.message)).toEqual(
+      expect.arrayContaining([
+        "Workflow must have at least one root step.",
+        "Workflow transitions must form an acyclic graph.",
+      ]),
+    );
+
+    const duplicate = workflowTemplateDefinitionSchema.safeParse({
+      ...linearTemplate,
+      transitions: [
+        { id: "same", fromStepId: "investigate", kind: "always", toStepId: "fix" },
+        { id: "same", fromStepId: "investigate", kind: "always", toStepId: "fix" },
+      ],
+    });
+    expect(duplicate.success).toBe(false);
+    if (duplicate.success) return;
+    expect(duplicate.error.issues.map((issue) => issue.message)).toContain(
+      "Duplicate workflow transition id: same",
+    );
+  });
+
   it("requires at least one condition route", () => {
     const result = workflowTemplateDefinitionSchema.safeParse({
       ...linearTemplate,
@@ -131,7 +200,14 @@ describe("workflowRunSchema", () => {
           status: index === 0 ? "ready" : "waiting",
           updatedAtMs: now,
         })),
-        transitionRuns: [],
+        transitionRuns: [
+          {
+            id: "c1c1c1c1-c1c1-41c1-81c1-c1c1c1c1c1c1",
+            templateTransitionId: "investigate-to-fix",
+            status: "waiting",
+            updatedAtMs: now,
+          },
+        ],
         createdAtMs: now,
         updatedAtMs: now,
       }),

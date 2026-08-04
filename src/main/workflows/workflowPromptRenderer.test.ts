@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderWorkflowPrompt } from "./workflowPromptRenderer.js";
+import { renderStepOutput, renderWorkflowPrompt } from "./workflowPromptRenderer.js";
 import type { WorkflowRun, WorkflowStepDefinition, WorkflowTemplate } from "../../shared/workflowSchemas.js";
 
 const step: WorkflowStepDefinition = {
@@ -59,6 +59,27 @@ const run: WorkflowRun = {
 };
 
 describe("renderWorkflowPrompt", () => {
+  it("honors parent input policy and keeps transcript distinct from answer", () => {
+    const prompt = renderWorkflowPrompt({
+      workflowContext: template.context,
+      step: {
+        ...step,
+        promptParts: [{ type: "text", text: "Do it" }],
+        inputPolicy: { ...step.inputPolicy, includeParentTranscript: true },
+      },
+      run: {
+        ...run,
+        parentFinalAnswer: "Parent answer",
+        parentTranscript: "Parent transcript",
+      },
+    });
+    expect(prompt).toContain("Parent final answer:\nParent answer");
+    expect(prompt).toContain("Parent transcript:\nParent transcript");
+    expect(renderStepOutput(run.stepRuns[0], "transcript")).toBe(
+      "[Upstream transcript is unavailable]",
+    );
+  });
+
   it("renders workflow context, inputs, and upstream output", () => {
     expect(renderWorkflowPrompt({ workflowContext: template.context, step, run })).toContain(
       "Keep the fix small.",

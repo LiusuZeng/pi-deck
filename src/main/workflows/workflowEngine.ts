@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   workflowRunSchema,
+  workflowTemplateSchema,
   type WorkflowRouteTarget,
   type WorkflowRun,
   type WorkflowRunStatus,
@@ -19,7 +20,7 @@ export function createWorkflowRun(options: {
   now?: number;
 }): WorkflowRun {
   const now = options.now ?? Date.now();
-  const template = options.template;
+  const template = workflowTemplateSchema.parse(options.template);
   const inputs = validateRunInputs(template, options.inputs);
   const incoming = new Set(
     template.transitions.flatMap((transition) => transitionTargets(transition)),
@@ -81,6 +82,7 @@ export function markWorkflowStepStarted(
   now = Date.now(),
   runtimeId?: string,
 ): WorkflowRun {
+  assertRunSchedulable(run);
   const step = requireStepRun(run, stepRunId);
   if (step.status !== "ready" && step.status !== "queued" && step.status !== "starting") {
     throw new Error(`Workflow step is not ready to start: ${step.name}`);
@@ -97,14 +99,26 @@ export function markWorkflowStepStarted(
 export function markWorkflowStepCompleted(
   run: WorkflowRun,
   stepRunId: string,
-  output: { finalAnswer?: string; summary?: string },
+  output: { finalAnswer?: string; summary?: string; transcript?: string },
   now = Date.now(),
 ): WorkflowRun {
   const step = requireStepRun(run, stepRunId);
+  if (run.status === "stopped") {
+    const next = updateStep(run, stepRunId, {
+      status: "completed",
+      ...(output.finalAnswer !== undefined ? { finalAnswer: output.finalAnswer } : {}),
+      ...(output.summary !== undefined ? { summary: output.summary } : {}),
+      ...(output.transcript !== undefined ? { transcript: output.transcript } : {}),
+      completedAtMs: now,
+      updatedAtMs: now,
+    });
+    return withRunStatus(next, "stopped", now);
+  }
   const next = updateStep(run, stepRunId, {
     status: "completed",
     ...(output.finalAnswer !== undefined ? { finalAnswer: output.finalAnswer } : {}),
     ...(output.summary !== undefined ? { summary: output.summary } : {}),
+    ...(output.transcript !== undefined ? { transcript: output.transcript } : {}),
     completedAtMs: now,
     updatedAtMs: now,
   });
@@ -123,7 +137,7 @@ export function markWorkflowStepFailed(
     error,
     updatedAtMs: now,
   });
-  return withRunStatus(next, "needsAttention", now);
+  return withRunStatus(next, run.status === "stopped" ? "stopped" : "needsAttention", now);
 }
 
 export function markWorkflowStepQueued(
@@ -131,7 +145,9 @@ export function markWorkflowStepQueued(
   stepRunId: string,
   now = Date.now(),
 ): WorkflowRun {
-  return updateStep(run, stepRunId, { status: "queued", updatedAtMs: now });
+  assertRunSchedulable(run);
+  const next = updateStep(run, stepRunId, { status: "queued", updatedAtMs: now });
+  return withRunStatus(next, undefined, now);
 }
 
 export function resolveWorkflowCondition(
@@ -141,12 +157,17 @@ export function resolveWorkflowCondition(
   rationale?: string,
   now = Date.now(),
 ): WorkflowRun {
+  assertRunSchedulable(run);
   const transitionRun = run.transitionRuns.find((item) => item.id === transitionRunId);
   if (transitionRun === undefined) throw new Error(`Unknown workflow transition run: ${transitionRunId}`);
   const transition = requireTransition(run, transitionRun.templateTransitionId);
   if (transition.kind !== "condition") throw new Error("Workflow transition is not a condition.");
-  if (transitionRun.status !== "evaluating" && transitionRun.status !== "waiting") {
-    throw new Error("Workflow condition has already been resolved.");
+  if (transitionRun.status !== "evaluating") {
+    throw new Error("Workflow condition is not evaluating.");
+  }
+  const source = requireStepByTemplateId(run, transition.fromStepId);
+  if (source.status !== "completed") {
+    throw new Error("Workflow condition source step must be completed before resolution.");
   }
 
   const target = transition.routes[decision];
@@ -195,10 +216,18 @@ export function beginWorkflowConditionEvaluation(
   transitionRunId: string,
   now = Date.now(),
 ): WorkflowRun {
+  assertRunSchedulable(run);
   const transition = run.transitionRuns.find((item) => item.id === transitionRunId);
   if (transition === undefined) throw new Error(`Unknown workflow transition run: ${transitionRunId}`);
   if (transition.status !== "waiting") throw new Error("Workflow condition is not waiting.");
-  return updateTransition(run, transitionRunId, { status: "evaluating", updatedAtMs: now });
+  const definition = requireTransition(run, transition.templateTransitionId);
+  if (definition.kind !== "condition") throw new Error("Workflow transition is not a condition.");
+  const source = requireStepByTemplateId(run, definition.fromStepId);
+  if (source.status !== "completed") {
+    throw new Error("Workflow condition source step must be completed before evaluation.");
+  }
+  const next = updateTransition(run, transitionRunId, { status: "evaluating", updatedAtMs: now });
+  return withRunStatus(next, undefined, now);
 }
 
 export function approveWorkflowStep(
@@ -207,6 +236,7 @@ export function approveWorkflowStep(
   action: "approve" | "skip" | "stop",
   now = Date.now(),
 ): WorkflowRun {
+  assertRunSchedulable(run);
   const step = requireStepRun(run, stepRunId);
   if (step.status !== "needsApproval") throw new Error("Workflow step is not awaiting approval.");
   if (action === "stop") return withRunStatus(run, "stopped", now);
@@ -222,6 +252,7 @@ export function stopWorkflowRun(run: WorkflowRun, now = Date.now()): WorkflowRun
 }
 
 export function retryWorkflowStep(run: WorkflowRun, stepRunId: string, now = Date.now()): WorkflowRun {
+  assertRunSchedulable(run);
   const step = requireStepRun(run, stepRunId);
   if (step.status !== "failed" && step.status !== "blocked") {
     throw new Error("Only failed or blocked workflow steps can be retried.");
@@ -235,10 +266,12 @@ export function retryWorkflowStep(run: WorkflowRun, stepRunId: string, now = Dat
 }
 
 export function readyWorkflowSteps(run: WorkflowRun): WorkflowStepRun[] {
+  if (run.status === "stopped") return [];
   return run.stepRuns.filter((step) => step.status === "ready").map((step) => ({ ...step }));
 }
 
 function routeCompletedStep(run: WorkflowRun, templateStepId: string, now: number): WorkflowRun {
+  if (run.status === "stopped") return withRunStatus(run, "stopped", now);
   let next = run;
   const outgoing = run.templateSnapshot.transitions.filter(
     (transition) => transition.fromStepId === templateStepId,
@@ -288,6 +321,10 @@ function transitionTargets(transition: WorkflowTransition): string[] {
   return Object.values(transition.routes).flatMap((target) =>
     target?.kind === "step" ? [target.stepId] : [],
   );
+}
+
+function assertRunSchedulable(run: WorkflowRun): void {
+  if (run.status === "stopped") throw new Error("Stopped workflow runs cannot be scheduled.");
 }
 
 function requireStepRun(run: WorkflowRun, stepRunId: string): WorkflowStepRun {
@@ -367,8 +404,11 @@ function withRunStatus(
   if (run.stepRuns.some((step) => step.status === "failed" || step.status === "blocked")) {
     return workflowRunSchema.parse({ ...run, status: "needsAttention", updatedAtMs: now });
   }
+  const active =
+    run.stepRuns.some((step) => ["starting", "running", "queued"].includes(step.status)) ||
+    run.transitionRuns.some((transition) => transition.status === "evaluating");
   const allTerminal = run.stepRuns.every((step) => step.status === "completed" || step.status === "skipped");
-  if (allTerminal) {
+  if (allTerminal && !active) {
     return workflowRunSchema.parse({
       ...run,
       status: "completed",
@@ -376,7 +416,6 @@ function withRunStatus(
       updatedAtMs: now,
     });
   }
-  const active = run.stepRuns.some((step) => ["starting", "running", "queued"].includes(step.status));
   return workflowRunSchema.parse({
     ...run,
     status: active ? "running" : "waiting",
