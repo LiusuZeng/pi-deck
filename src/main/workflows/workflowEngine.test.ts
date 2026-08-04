@@ -249,6 +249,32 @@ describe("workflowEngine", () => {
     expect(resolved.stepRuns.find((step) => step.templateStepId === "act")?.status).toBe("skipped");
   });
 
+  it("completes a selected branch that is intentionally terminal", () => {
+    const configured = template({
+      steps: [
+        template().steps[0]!,
+        { ...template().steps[1]!, id: "terminal", name: "Terminal" },
+      ],
+      transitions: [{
+        ...template().transitions[0]!,
+        routes: { yes: { kind: "step", stepId: "terminal" } },
+      }],
+    });
+    const run = createWorkflowRun({ template: configured, workspaceId: "ws", inputs: {}, now: 100 });
+    const source = markWorkflowStepStarted(run, run.stepRuns[0]!.id, 101);
+    const sourceCompleted = markWorkflowStepCompleted(source, source.stepRuns[0]!.id, { finalAnswer: "done" }, 102);
+    const routed = resolveWorkflowCondition(sourceCompleted, sourceCompleted.transitionRuns[0]!.id, "yes", undefined, 103);
+    const terminal = routed.stepRuns.find((step) => step.templateStepId === "terminal")!;
+    expect(terminal.status).toBe("ready");
+    const terminalStarted = markWorkflowStepStarted(routed, terminal.id, 104);
+    const finished = markWorkflowStepCompleted(terminalStarted, terminal.id, { finalAnswer: "finished" }, 105);
+    expect(finished.status).toBe("completed");
+    expect(finished.stepRuns.find((step) => step.templateStepId === "terminal")).toMatchObject({
+      status: "completed",
+      finalAnswer: "finished",
+    });
+  });
+
   it("skips a manual-gate target when a different condition route is selected", () => {
     const configured = template({
       transitions: [{

@@ -53,6 +53,41 @@ function runWithStep(status: "needsApproval" | "failed"): WorkflowRun {
   };
 }
 
+const malformedConditionTemplate: WorkflowTemplate = {
+  ...template,
+  id: "22222222-2222-4222-8222-222222222222",
+  steps: [
+    template.steps[0]!,
+    { ...template.steps[0]!, id: "next", name: "Next" },
+  ],
+  transitions: [{
+    id: "condition",
+    fromStepId: "gate",
+    kind: "condition",
+    question: "Did the review pass?",
+    routes: { yes: { kind: "step", stepId: "next" } },
+    previewBeforeStart: false,
+  }],
+};
+
+function malformedConditionRun(): WorkflowRun {
+  const run = createWorkflowRun({
+    template: malformedConditionTemplate,
+    workspaceId: "workspace",
+    inputs: {},
+    now: 1,
+  });
+  return {
+    ...run,
+    status: "needsAttention",
+    transitionRuns: [{
+      ...run.transitionRuns[0]!,
+      status: "failed",
+      error: "Judge output was malformed.",
+    }],
+  };
+}
+
 describe("WorkflowRunView action controls", () => {
   let root: Root | undefined;
   let container: HTMLDivElement | undefined;
@@ -161,5 +196,39 @@ describe("WorkflowRunView action controls", () => {
     ) as HTMLButtonElement;
     await act(async () => retry.click());
     expect(retried).toEqual([run.stepRuns[0]!.id]);
+  });
+
+  it("keeps a malformed judge recoverable through retry or an explained override", async () => {
+    const retried: string[] = [];
+    const overrides: Array<[string, string]> = [];
+    const run = malformedConditionRun();
+    render(run, {
+      onRetryCondition: (transition) => retried.push(transition.id),
+      onOverrideCondition: (_transition, decision, rationale) =>
+        overrides.push([decision, rationale]),
+    });
+    expect(container?.textContent).toContain("condition judge failed");
+    const button = (label: string) =>
+      [...(container?.querySelectorAll("button") ?? [])].find(
+        (candidate) => candidate.textContent?.trim() === label,
+      ) as HTMLButtonElement;
+    await act(async () => button("Retry condition judge").click());
+    const rationale = container?.querySelector(
+      'textarea[aria-label="Rationale for condition Did the review pass?"]',
+    ) as HTMLTextAreaElement;
+    act(() => {
+      const setValue = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        "value",
+      )!.set!;
+      setValue.call(
+        rationale,
+        "The review output is sufficient for the safe branch.",
+      );
+      rationale.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => button("Override NO").click());
+    expect(retried).toEqual([run.transitionRuns[0]!.id]);
+    expect(overrides).toEqual([["no", "The review output is sufficient for the safe branch."]]);
   });
 });

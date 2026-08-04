@@ -93,6 +93,7 @@ test("workflow API creates a template, starts a fake run, and persists both acro
       });
       return {
         templateId: template.id,
+        templateScope: template.workspaceId,
         runId: run.id,
         workspaceId: active.activeWorkspace.id,
       };
@@ -128,6 +129,7 @@ test("workflow API creates a template, starts a fake run, and persists both acro
       },
       created,
     );
+    expect(created.templateScope).toBeUndefined();
     expect(persisted).toMatchObject({
       templateName: "Release workflow E2E",
       runId: created.runId,
