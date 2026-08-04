@@ -3511,6 +3511,9 @@ export function App(): ReactElement {
   }
 
   async function handleNewSession(): Promise<void> {
+    // Starting a session is a navigation action. Leave the work inbox so the
+    // newly selected session and its composer are visible immediately.
+    setActivityInboxVisible(false);
     const next = draftSessionForWorkspace(
       currentWorkspace,
       createId("draft-session"),
