@@ -232,32 +232,37 @@ describe("workflowTemplateDefinitionSchema", () => {
       ...linearTemplate,
       steps: [
         ...linearTemplate.steps,
-        { ...linearTemplate.steps[0], id: "unreferenced", name: "Unreferenced" },
+        {
+          ...linearTemplate.steps[0],
+          id: "unreferenced",
+          name: "Unreferenced",
+        },
       ],
     });
     expect(multipleRoots.success).toBe(false);
     if (!multipleRoots.success) {
-      expect(multipleRoots.error.issues.map((issue) => issue.message)).toContain(
-        "Workflow must have exactly one root step.",
-      );
+      expect(
+        multipleRoots.error.issues.map((issue) => issue.message),
+      ).toContain("Workflow must have exactly one root step.");
     }
 
-    const disconnectedFromSingleRoot = workflowTemplateDefinitionSchema.safeParse({
-      ...linearTemplate,
-      steps: [
-        ...linearTemplate.steps,
-        { ...linearTemplate.steps[0], id: "detached", name: "Detached" },
-      ],
-      transitions: [
-        ...linearTemplate.transitions,
-        {
-          id: "detached-cycle",
-          fromStepId: "detached",
-          kind: "always",
-          toStepId: "detached",
-        },
-      ],
-    });
+    const disconnectedFromSingleRoot =
+      workflowTemplateDefinitionSchema.safeParse({
+        ...linearTemplate,
+        steps: [
+          ...linearTemplate.steps,
+          { ...linearTemplate.steps[0], id: "detached", name: "Detached" },
+        ],
+        transitions: [
+          ...linearTemplate.transitions,
+          {
+            id: "detached-cycle",
+            fromStepId: "detached",
+            kind: "always",
+            toStepId: "detached",
+          },
+        ],
+      });
     expect(disconnectedFromSingleRoot.success).toBe(false);
     if (!disconnectedFromSingleRoot.success) {
       expect(
@@ -274,7 +279,11 @@ describe("workflowTemplateDefinitionSchema", () => {
       ...linearTemplate,
       steps: [
         ...linearTemplate.steps,
-        { ...linearTemplate.steps[0], id: "disconnected", name: "Disconnected" },
+        {
+          ...linearTemplate.steps[0],
+          id: "disconnected",
+          name: "Disconnected",
+        },
       ],
       transitions: [
         {
