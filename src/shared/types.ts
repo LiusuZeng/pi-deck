@@ -48,6 +48,25 @@ import type {
   workspaceRestoreRequestSchema,
   workspaceUpdateRequestSchema,
 } from "./ipcSchemas.js";
+import type {
+  workflowApproveGateRequestSchema,
+  workflowArchiveTemplateRequestSchema,
+  workflowCreateTemplateRequestSchema,
+  workflowDuplicateTemplateRequestSchema,
+  workflowEventSchema,
+  workflowGetRunRequestSchema,
+  workflowGetTemplateRequestSchema,
+  workflowListRunsRequestSchema,
+  workflowRetryStepRequestSchema,
+  workflowRunListResultSchema,
+  workflowRunSchema,
+  workflowStartRunRequestSchema,
+  workflowStopRunRequestSchema,
+  workflowTemplateDefinitionSchema,
+  workflowTemplateListResultSchema,
+  workflowTemplateSchema,
+  workflowUpdateTemplateRequestSchema,
+} from "./workflowSchemas.js";
 
 export type ThemePreference = z.infer<typeof themePreferenceSchema>;
 export type AppSettings = z.infer<typeof appSettingsSchema>;
@@ -146,6 +165,47 @@ export type AttachmentAssignOwnerRequest = z.infer<
   typeof attachmentAssignOwnerRequestSchema
 >;
 export type PickAttachmentsResult = z.infer<typeof pickAttachmentsResultSchema>;
+export type WorkflowTemplate = z.infer<typeof workflowTemplateSchema>;
+export type WorkflowTemplateDefinition = z.infer<
+  typeof workflowTemplateDefinitionSchema
+>;
+export type WorkflowRun = z.infer<typeof workflowRunSchema>;
+export type WorkflowEvent = z.infer<typeof workflowEventSchema>;
+export type WorkflowTemplateListResult = z.infer<
+  typeof workflowTemplateListResultSchema
+>;
+export type WorkflowRunListResult = z.infer<typeof workflowRunListResultSchema>;
+export type WorkflowGetTemplateRequest = z.infer<
+  typeof workflowGetTemplateRequestSchema
+>;
+export type WorkflowCreateTemplateRequest = z.infer<
+  typeof workflowCreateTemplateRequestSchema
+>;
+export type WorkflowUpdateTemplateRequest = z.infer<
+  typeof workflowUpdateTemplateRequestSchema
+>;
+export type WorkflowArchiveTemplateRequest = z.infer<
+  typeof workflowArchiveTemplateRequestSchema
+>;
+export type WorkflowDuplicateTemplateRequest = z.infer<
+  typeof workflowDuplicateTemplateRequestSchema
+>;
+export type WorkflowListRunsRequest = z.infer<
+  typeof workflowListRunsRequestSchema
+>;
+export type WorkflowGetRunRequest = z.infer<typeof workflowGetRunRequestSchema>;
+export type WorkflowStartRunRequest = z.infer<
+  typeof workflowStartRunRequestSchema
+>;
+export type WorkflowStopRunRequest = z.infer<
+  typeof workflowStopRunRequestSchema
+>;
+export type WorkflowRetryStepRequest = z.infer<
+  typeof workflowRetryStepRequestSchema
+>;
+export type WorkflowApproveGateRequest = z.infer<
+  typeof workflowApproveGateRequestSchema
+>;
 
 export interface PiDeckApi {
   app: {
@@ -243,6 +303,29 @@ export interface PiDeckApi {
       request: WorkspaceListSessionsRequest,
     ): Promise<ChatListSessionsResult>;
     listUnassignedSessions(): Promise<ChatListSessionsResult>;
+  };
+  workflows: {
+    getTemplate(request: WorkflowGetTemplateRequest): Promise<WorkflowTemplate>;
+    listTemplates(): Promise<WorkflowTemplateListResult>;
+    createTemplate(
+      request: WorkflowCreateTemplateRequest,
+    ): Promise<WorkflowTemplate>;
+    updateTemplate(
+      request: WorkflowUpdateTemplateRequest,
+    ): Promise<WorkflowTemplate>;
+    archiveTemplate(
+      request: WorkflowArchiveTemplateRequest,
+    ): Promise<WorkflowTemplate>;
+    duplicateTemplate(
+      request: WorkflowDuplicateTemplateRequest,
+    ): Promise<WorkflowTemplate>;
+    listRuns(request?: WorkflowListRunsRequest): Promise<WorkflowRunListResult>;
+    getRun(request: WorkflowGetRunRequest): Promise<WorkflowRun>;
+    startRun(request: WorkflowStartRunRequest): Promise<WorkflowRun>;
+    stopRun(request: WorkflowStopRunRequest): Promise<WorkflowRun>;
+    retryStep(request: WorkflowRetryStepRequest): Promise<WorkflowRun>;
+    approveGate(request: WorkflowApproveGateRequest): Promise<WorkflowRun>;
+    onEvent(listener: (event: WorkflowEvent) => void): () => void;
   };
   attachments: {
     pickFiles(request: {

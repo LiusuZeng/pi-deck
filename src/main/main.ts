@@ -68,6 +68,25 @@ import {
   workspaceSessionMutationResultSchema,
   workspaceUpdateRequestSchema,
 } from "../shared/ipcSchemas.js";
+import {
+  workflowApproveGateRequestSchema,
+  workflowArchiveTemplateRequestSchema,
+  workflowCreateTemplateRequestSchema,
+  workflowDuplicateTemplateRequestSchema,
+  workflowEventSchema,
+  workflowGetRunRequestSchema,
+  workflowGetTemplateRequestSchema,
+  workflowListRunsRequestSchema,
+  workflowRetryStepRequestSchema,
+  workflowRunListResultSchema,
+  workflowRunSchema,
+  workflowStartRunRequestSchema,
+  workflowStopRunRequestSchema,
+  workflowTemplateDefinitionSchema,
+  workflowTemplateListResultSchema,
+  workflowTemplateSchema,
+  workflowUpdateTemplateRequestSchema,
+} from "../shared/workflowSchemas.js";
 import type {
   AppBootstrapState,
   AppSettings,
@@ -86,6 +105,7 @@ import type {
   PickProjectResult,
   WorkspaceListResult,
   WorkspaceRef,
+  WorkflowRun,
 } from "../shared/types.js";
 import { DiagnosticsService } from "./diagnostics/diagnostics.js";
 import { registerValidatedIpc } from "./ipc/registerIpc.js";
@@ -129,6 +149,13 @@ import {
 import { formatCanonicalFileReference } from "./attachments.js";
 import { deliverWithAttachmentConsumption } from "./attachmentDelivery.js";
 import {
+  approveWorkflowStep,
+  createWorkflowRun,
+  retryWorkflowStep,
+  stopWorkflowRun,
+} from "./workflows/workflowEngine.js";
+import { WorkflowStore } from "./workflows/workflowStore.js";
+import {
   AttachmentSelectionStore,
   type AttachmentSelectionEntry,
 } from "./attachmentSelectionStore.js";
@@ -154,6 +181,7 @@ let mainWindow: BrowserWindow | undefined;
 let settingsStore: SettingsStore | undefined;
 let projectStore: ProjectStore | undefined;
 let workspaceStore: WorkspaceStore | undefined;
+let workflowStore: WorkflowStore | undefined;
 const realChatLaunchConfigCache = new RealChatLaunchConfigCache();
 let diagnostics: DiagnosticsService | undefined;
 type ChatBackendMode = "fake" | "real";
@@ -190,6 +218,17 @@ let chatEventUnsubscribe: (() => void) | undefined;
 let selectedRealProjectCwd: string | undefined;
 let isQuittingAfterChatWorkerCleanup = false;
 let testProjectPickQueue: string[] | undefined;
+
+type WorkflowScheduler = {
+  schedule(run: WorkflowRun): Promise<WorkflowRun>;
+};
+
+// Workflow execution is persisted and deterministic in this slice. Keeping
+// scheduling behind this interface makes Pi-backed execution an additive
+// change rather than an IPC or storage contract change.
+const workflowScheduler: WorkflowScheduler = {
+  schedule: async (run) => run,
+};
 
 const maxImportedImageBytes = MAX_IMAGE_BYTES;
 const maxPromptImages = 10;
@@ -229,6 +268,11 @@ async function bootstrap(): Promise<void> {
     diagnostics,
   );
   await workspaceStore.loadIfNeeded();
+  workflowStore = new WorkflowStore(
+    resolvePiDeckHome(process.env),
+    diagnostics,
+  );
+  await workflowStore.loadIfNeeded();
   const hadWorkspaceMetadata =
     (await workspaceStore.list()).workspaces.length > 0;
   await migrateLegacyProjectsToWorkspaces();
@@ -961,6 +1005,147 @@ function registerIpcHandlers(
   });
 
   registerValidatedIpc({
+    channel: ipcChannels.workflowGetTemplate,
+    requestSchema: workflowGetTemplateRequestSchema,
+    responseSchema: workflowTemplateSchema,
+    diagnostics: diagnosticsService,
+    handler: ({ templateId }) => ensureWorkflowStore().getTemplate(templateId),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowListTemplates,
+    requestSchema: noPayloadSchema,
+    responseSchema: workflowTemplateListResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async () => ({
+      templates: await ensureWorkflowStore().listTemplates(),
+    }),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowCreateTemplate,
+    requestSchema: workflowCreateTemplateRequestSchema,
+    responseSchema: workflowTemplateSchema,
+    diagnostics: diagnosticsService,
+    handler: (definition) => ensureWorkflowStore().createTemplate(definition),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowUpdateTemplate,
+    requestSchema: workflowUpdateTemplateRequestSchema,
+    responseSchema: workflowTemplateSchema,
+    diagnostics: diagnosticsService,
+    handler: ({ templateId, ...definition }) =>
+      ensureWorkflowStore().updateTemplate(templateId, definition),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowArchiveTemplate,
+    requestSchema: workflowArchiveTemplateRequestSchema,
+    responseSchema: workflowTemplateSchema,
+    diagnostics: diagnosticsService,
+    handler: ({ templateId }) =>
+      ensureWorkflowStore().archiveTemplate(templateId),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowDuplicateTemplate,
+    requestSchema: workflowDuplicateTemplateRequestSchema,
+    responseSchema: workflowTemplateSchema,
+    diagnostics: diagnosticsService,
+    handler: ({ templateId }) =>
+      ensureWorkflowStore().duplicateTemplate(templateId),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowListRuns,
+    requestSchema: workflowListRunsRequestSchema,
+    responseSchema: workflowRunListResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async (request) => ({
+      runs: await ensureWorkflowStore().listRuns(request?.workspaceId),
+    }),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowGetRun,
+    requestSchema: workflowGetRunRequestSchema,
+    responseSchema: workflowRunSchema,
+    diagnostics: diagnosticsService,
+    handler: ({ runId }) => ensureWorkflowStore().getRun(runId),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowStartRun,
+    requestSchema: workflowStartRunRequestSchema,
+    responseSchema: workflowRunSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ templateId, workspaceId, inputs }) => {
+      const template = await ensureWorkflowStore().getTemplate(templateId);
+      const resolvedWorkspaceId = await resolveWorkflowWorkspaceId(
+        workspaceId,
+        template.workspaceId,
+      );
+      const run = createWorkflowRun({
+        template,
+        workspaceId: resolvedWorkspaceId,
+        inputs,
+      });
+      const persisted = await ensureWorkflowStore().createRun(run);
+      emitWorkflowRunEvent(persisted);
+      // The scheduler is intentionally a no-op in this slice. It is an
+      // explicit seam so Pi-backed step execution can be added without
+      // changing persisted run semantics or the renderer API.
+      return workflowScheduler.schedule(persisted);
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowStopRun,
+    requestSchema: workflowStopRunRequestSchema,
+    responseSchema: workflowRunSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runId }) => {
+      const run = await ensureWorkflowStore().getRun(runId);
+      const updated = await ensureWorkflowStore().updateRun(
+        stopWorkflowRun(run),
+      );
+      emitWorkflowRunEvent(updated);
+      return updated;
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowRetryStep,
+    requestSchema: workflowRetryStepRequestSchema,
+    responseSchema: workflowRunSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runId, stepRunId }) => {
+      const run = await ensureWorkflowStore().getRun(runId);
+      const updated = await ensureWorkflowStore().updateRun(
+        retryWorkflowStep(run, stepRunId),
+      );
+      emitWorkflowRunEvent(updated);
+      return updated;
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowApproveGate,
+    requestSchema: workflowApproveGateRequestSchema,
+    responseSchema: workflowRunSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runId, stepRunId, action }) => {
+      const run = await ensureWorkflowStore().getRun(runId);
+      const updated = await ensureWorkflowStore().updateRun(
+        approveWorkflowStep(run, stepRunId, action),
+      );
+      emitWorkflowRunEvent(updated);
+      return updated;
+    },
+  });
+
+  registerValidatedIpc({
     channel: ipcChannels.attachmentsPickFiles,
     requestSchema: attachmentPickerRequestSchema,
     responseSchema: pickAttachmentsResultSchema,
@@ -1096,6 +1281,28 @@ function ensureWorkspaceStore(): WorkspaceStore {
     throw new Error("Workspace store is not initialized");
   }
   return workspaceStore;
+}
+
+function ensureWorkflowStore(): WorkflowStore {
+  if (workflowStore === undefined) {
+    throw new Error("Workflow store is not initialized");
+  }
+  return workflowStore;
+}
+
+async function resolveWorkflowWorkspaceId(
+  requestedWorkspaceId: string | undefined,
+  templateWorkspaceId: string | undefined,
+): Promise<string> {
+  const workspaceId =
+    requestedWorkspaceId ??
+    templateWorkspaceId ??
+    (await ensureWorkspaceStore().getActiveWorkspace())?.id;
+  if (workspaceId === undefined) {
+    throw new Error("No workspace is selected for this workflow run.");
+  }
+  await requireOpenWorkspace(workspaceId);
+  return workspaceId;
 }
 
 async function migrateLegacyProjectsToWorkspaces(): Promise<void> {
@@ -1760,6 +1967,23 @@ function sendChatEventToRenderer(
     return;
   }
   window.webContents.send(ipcChannels.chatEvent, event);
+}
+
+function emitWorkflowRunEvent(run: WorkflowRun): void {
+  const event = workflowEventSchema.parse({
+    type: "workflow_run_updated",
+    runId: run.id,
+    status: run.status,
+  });
+  const window = mainWindow;
+  if (
+    window === undefined ||
+    window.isDestroyed() ||
+    window.webContents.isDestroyed()
+  ) {
+    return;
+  }
+  window.webContents.send(ipcChannels.workflowEvent, event);
 }
 
 function resolveChatBackendMode(): ChatBackendMode {

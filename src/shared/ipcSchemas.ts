@@ -770,6 +770,19 @@ export const ipcChannels = {
   attachmentsRelease: "attachments:release",
   attachmentsReleaseOwner: "attachments:releaseOwner",
   attachmentsAssignOwner: "attachments:assignOwner",
+  workflowGetTemplate: "workflows:getTemplate",
+  workflowListTemplates: "workflows:listTemplates",
+  workflowCreateTemplate: "workflows:createTemplate",
+  workflowUpdateTemplate: "workflows:updateTemplate",
+  workflowArchiveTemplate: "workflows:archiveTemplate",
+  workflowDuplicateTemplate: "workflows:duplicateTemplate",
+  workflowListRuns: "workflows:listRuns",
+  workflowGetRun: "workflows:getRun",
+  workflowStartRun: "workflows:startRun",
+  workflowStopRun: "workflows:stopRun",
+  workflowRetryStep: "workflows:retryStep",
+  workflowApproveGate: "workflows:approveGate",
+  workflowEvent: "workflows:event",
 } as const;
 
 export type IpcChannel = (typeof ipcChannels)[keyof typeof ipcChannels];
