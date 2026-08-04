@@ -320,7 +320,7 @@ function sessionForActivityItem(
     timeline: [],
     baseState: "idle",
     overlays: { ...emptyOverlays },
-    runtimeBacked: false,
+    runtimeBacked: item.runtimeId !== undefined,
     backendMode: "real",
     resumeBacked: item.sessionFile !== undefined,
   };
@@ -1658,9 +1658,14 @@ export function App(): ReactElement {
           await switchWorkspaceView(
             result.activeWorkspace ?? targetWorkspace,
             result.workspaces,
+            item.runtimeId ?? item.sessionId,
           );
         } else {
-          await switchWorkspaceView(targetWorkspace, activityWorkspaces);
+          await switchWorkspaceView(
+            targetWorkspace,
+            activityWorkspaces,
+            item.runtimeId ?? item.sessionId,
+          );
         }
       } catch (error) {
         setUiMessage(

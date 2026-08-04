@@ -5,7 +5,12 @@ import type {
   ActivityScope,
   ActivityStatus,
 } from "../activityInbox.js";
-import { ACTIVITY_STATUSES, workspaceTag } from "../activityInbox.js";
+import {
+  ACTIVITY_STATUSES,
+  filterActivityItems,
+  tagsForScope,
+  tagsForStatus,
+} from "../activityInbox.js";
 import { Check, CircleAlert, CircleDot, LoaderCircle, X } from "./ui/icons.js";
 
 type ActivityFilter = "all" | ActivityStatus;
@@ -77,20 +82,16 @@ export function ActivityInbox({
       ? workspaces.find((workspace) => workspace.id === scope.workspaceId)?.name
       : undefined;
   const scopedItems = useMemo(
-    () =>
-      model.items.filter(
-        (item) =>
-          scope.type === "all" ||
-          item.tags.includes(workspaceTag(scope.workspaceId)),
-      ),
+    () => filterActivityItems(model.items, tagsForScope(scope)),
     [model.items, scope],
   );
   const counts = useMemo(
     () =>
       ACTIVITY_STATUSES.reduce(
         (result, kind) => {
-          result[kind] = scopedItems.filter(
-            (item) => item.status === kind,
+          result[kind] = filterActivityItems(
+            scopedItems,
+            tagsForStatus(kind),
           ).length;
           return result;
         },
@@ -102,8 +103,7 @@ export function ActivityInbox({
     () =>
       ACTIVITY_STATUSES.reduce(
         (result, kind) => {
-          result[kind] = scopedItems
-            .filter((item) => item.status === kind)
+          result[kind] = filterActivityItems(scopedItems, tagsForStatus(kind))
             .slice()
             .sort((left, right) => right.updatedAtMs - left.updatedAtMs);
           return result;

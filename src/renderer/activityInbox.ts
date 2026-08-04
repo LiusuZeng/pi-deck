@@ -83,7 +83,7 @@ export interface ActivityInboxModel {
   counts: Record<ActivityStatus, number>;
   actionableCount: number;
   totalCount: number;
-  /** Total visible items per workspace after the active filter is applied. */
+  /** Total non-archived items per workspace before scope/status filtering. */
   availableWorkspaceCounts: Readonly<Record<string, number>>;
 }
 
@@ -101,8 +101,15 @@ export function buildActivityInbox(
   sources: readonly ActivitySourceSession[],
   filter: ActivityFilter = {},
 ): ActivityInboxModel {
+  const normalizedItems = sources.flatMap((source) =>
+    normalizeActivity(source),
+  );
+  const availableWorkspaceItems = filterActivityItems(
+    normalizedItems,
+    withDefaultArchiveExclusion({}),
+  );
   const items = filterActivityItems(
-    sources.flatMap((source) => normalizeActivity(source)),
+    normalizedItems,
     withDefaultArchiveExclusion(filter),
   );
   const groups = createEmptyGroups();
@@ -123,7 +130,7 @@ export function buildActivityInbox(
     counts,
     actionableCount: actionableActivityCount(counts),
     totalCount: orderedItems.length,
-    availableWorkspaceCounts: countActivityWorkspaces(orderedItems),
+    availableWorkspaceCounts: countActivityWorkspaces(availableWorkspaceItems),
   };
 }
 
