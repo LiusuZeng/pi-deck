@@ -497,7 +497,7 @@ describe("workflowEngine", () => {
     expect(recovered.status).not.toBe("completed");
     expect(recovered.transitionRuns[0]).toMatchObject({
       status: "failed",
-      decision: undefined,
+      decision: "unsure",
     });
     expect(recovered.stepRuns.some((step) => step.status === "ready")).toBe(
       false,
