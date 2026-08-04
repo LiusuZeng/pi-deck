@@ -40,7 +40,11 @@ export function WorkflowTransitionCard(props: {
                   props.fromStepId,
               });
             } else {
-              const approvalStep = steps.find(
+              // Conditions cannot fan multiple routes into one step. Keep the
+              // initial condition saveable: YES continues to the next step,
+              // while NO and UNSURE stop until the author chooses distinct
+              // targets explicitly.
+              const nextStep = steps.find(
                 (step) => step.id !== props.fromStepId,
               );
               props.onChange({
@@ -50,23 +54,14 @@ export function WorkflowTransitionCard(props: {
                 question:
                   "Did this agent produce a result ready for the next step?",
                 routes: {
-                  yes: approvalStep
-                    ? { kind: "step", stepId: approvalStep.id }
+                  yes: nextStep
+                    ? { kind: "step", stepId: nextStep.id }
                     : undefined,
                   no: { kind: "stop" },
-                  // UNSURE resolves through a real step-level manual approval;
-                  // condition manual gates are rejected by the backend.
-                  unsure: approvalStep
-                    ? { kind: "step", stepId: approvalStep.id }
-                    : { kind: "stop" },
+                  unsure: { kind: "stop" },
                 },
                 previewBeforeStart: true,
               });
-              if (approvalStep) {
-                props.onStepChange?.(approvalStep.id, {
-                  startPolicy: "manualApproval",
-                });
-              }
             }
           }}
         >
@@ -131,52 +126,70 @@ export function WorkflowTransitionCard(props: {
             />
           </label>
           <div className="workflow-branch-grid">
-            {(["yes", "no", "unsure"] as const).map((decision) => (
-              <label className="workflow-field" key={decision}>
-                <span>
-                  If {decision.toUpperCase()}
-                  {decision === "unsure" ? " (manual approval)" : ""}
-                </span>
-                <select
-                  value={
-                    transition.routes[decision]?.kind === "step"
-                      ? transition.routes[decision].stepId
-                      : (transition.routes[decision]?.kind ?? "stop")
-                  }
-                  onChange={(event) => {
-                    const value = event.target.value;
-                    props.onChange({
-                      ...transition,
-                      routes: {
-                        ...transition.routes,
-                        [decision]:
-                          value === "stop"
-                            ? { kind: "stop" }
-                            : { kind: "step", stepId: value },
-                      },
-                    });
-                    if (decision === "unsure" && value !== "stop") {
-                      props.onStepChange?.(value, {
-                        startPolicy: "manualApproval",
+            {(["yes", "no", "unsure"] as const).map((decision) => {
+              const currentTarget = transition.routes[decision];
+              const currentStepId =
+                currentTarget?.kind === "step"
+                  ? currentTarget.stepId
+                  : undefined;
+              const targetsUsedByOtherRoutes = new Set(
+                (["yes", "no", "unsure"] as const)
+                  .filter((otherDecision) => otherDecision !== decision)
+                  .flatMap((otherDecision) => {
+                    const target = transition.routes[otherDecision];
+                    return target?.kind === "step" ? [target.stepId] : [];
+                  }),
+              );
+              return (
+                <label className="workflow-field" key={decision}>
+                  <span>
+                    If {decision.toUpperCase()}
+                    {decision === "unsure" ? " (manual approval)" : ""}
+                  </span>
+                  <select
+                    value={currentStepId ?? "stop"}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      props.onChange({
+                        ...transition,
+                        routes: {
+                          ...transition.routes,
+                          [decision]:
+                            value === "stop"
+                              ? { kind: "stop" }
+                              : { kind: "step", stepId: value },
+                        },
                       });
-                    }
-                  }}
-                >
-                  <option value="stop">Stop workflow</option>
-                  {steps
-                    .filter((step) => step.id !== props.fromStepId)
-                    .map((step) => (
-                      <option key={step.id} value={step.id}>
-                        {step.name}
-                      </option>
-                    ))}
-                </select>
-              </label>
-            ))}
+                      if (decision === "unsure" && value !== "stop") {
+                        props.onStepChange?.(value, {
+                          startPolicy: "manualApproval",
+                        });
+                      }
+                    }}
+                  >
+                    <option value="stop">Stop workflow</option>
+                    {steps
+                      .filter(
+                        (step) =>
+                          step.id !== props.fromStepId &&
+                          (step.id === currentStepId ||
+                            !targetsUsedByOtherRoutes.has(step.id)),
+                      )
+                      .map((step) => (
+                        <option key={step.id} value={step.id}>
+                          {step.name}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+              );
+            })}
           </div>
           <p className="workflow-help">
-            UNSURE routes to a step configured “Ask before starting” so the
-            backend can pause for an explicit approval.
+            UNSURE stops by default. To request manual approval instead, choose
+            a dedicated step that is different from the YES/NO targets; it will
+            be configured as “Ask before starting” so the backend can pause for
+            an explicit approval.
           </p>
         </>
       ) : null}

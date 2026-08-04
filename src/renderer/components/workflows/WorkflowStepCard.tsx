@@ -161,54 +161,10 @@ export function WorkflowStepCard(props: {
                   />
                   Shared workflow context
                 </label>
-                <label className="workflow-checkbox">
-                  <input
-                    type="checkbox"
-                    checked={props.step.inputPolicy.includeParentFinalAnswer}
-                    onChange={(event) =>
-                      props.onChange?.({
-                        inputPolicy: {
-                          ...props.step.inputPolicy,
-                          includeParentFinalAnswer: event.target.checked,
-                        },
-                      })
-                    }
-                  />
-                  Parent session final answer
-                </label>
-                <label className="workflow-checkbox">
-                  <input
-                    type="checkbox"
-                    checked={props.step.inputPolicy.includeParentSummary}
-                    onChange={(event) =>
-                      props.onChange?.({
-                        inputPolicy: {
-                          ...props.step.inputPolicy,
-                          includeParentSummary: event.target.checked,
-                        },
-                      })
-                    }
-                  />
-                  Parent session summary
-                </label>
-                <label className="workflow-checkbox">
-                  <input
-                    type="checkbox"
-                    checked={props.step.inputPolicy.includeParentTranscript}
-                    onChange={(event) =>
-                      props.onChange?.({
-                        inputPolicy: {
-                          ...props.step.inputPolicy,
-                          includeParentTranscript: event.target.checked,
-                        },
-                      })
-                    }
-                  />
-                  Parent session transcript
-                </label>
                 <p className="workflow-help">
-                  Shared context and parent-session handoffs are preserved with
-                  this workflow and included when selected.
+                  Parent-session final answers, summaries, and transcripts are
+                  not available to workflows. Add a previous-agent result chip
+                  in the prompt above when you need a supported handoff.
                 </p>
               </fieldset>
             </>
