@@ -781,6 +781,8 @@ export const ipcChannels = {
   workflowStartRun: "workflows:startRun",
   workflowStopRun: "workflows:stopRun",
   workflowRetryStep: "workflows:retryStep",
+  workflowRetryCondition: "workflows:retryCondition",
+  workflowOverrideCondition: "workflows:overrideCondition",
   workflowApproveGate: "workflows:approveGate",
   workflowEvent: "workflows:event",
 } as const;

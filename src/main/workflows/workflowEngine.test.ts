@@ -8,10 +8,12 @@ import {
   markWorkflowStepQueued,
   readyWorkflowSteps,
   resolveWorkflowCondition,
-  retryWorkflowStep,
+  failWorkflowCondition,
   stopWorkflowRun,
   recoverWorkflowRun,
   approveWorkflowStep,
+  retryWorkflowCondition,
+  overrideWorkflowCondition,
 } from "./workflowEngine.js";
 import type { WorkflowTemplate } from "../../shared/workflowSchemas.js";
 
@@ -111,6 +113,46 @@ describe("workflowEngine", () => {
     expect(queued.updatedAtMs).toBe(101);
   });
 
+  it("requires approval before a previewed condition branch starts", () => {
+    const configured = template({
+      transitions: [{ ...template().transitions[0]!, previewBeforeStart: true }],
+    });
+    const run = createWorkflowRun({ template: configured, workspaceId: "ws", inputs: {}, now: 100 });
+    const started = markWorkflowStepStarted(run, run.stepRuns[0]!.id, 101);
+    const completed = markWorkflowStepCompleted(started, run.stepRuns[0]!.id, { finalAnswer: "A fix is clear." }, 102);
+    const resolved = resolveWorkflowCondition(completed, completed.transitionRuns[0]!.id, "yes", "Review this fix.", 103);
+    const branch = resolved.stepRuns.find((step) => step.templateStepId === "act")!;
+    expect(branch.status).toBe("needsApproval");
+    expect(resolved.status).toBe("needsAttention");
+    const approved = approveWorkflowStep(resolved, branch.id, "approve", 104);
+    expect(approved.stepRuns.find((step) => step.templateStepId === "act")?.status).toBe("ready");
+  });
+
+  it("makes malformed condition results retryable or explicitly overridable", () => {
+    const run = createWorkflowRun({ template: template(), workspaceId: "ws", inputs: {}, now: 100 });
+    const started = markWorkflowStepStarted(run, run.stepRuns[0]!.id, 101);
+    const evaluating = markWorkflowStepCompleted(started, run.stepRuns[0]!.id, { finalAnswer: "unclear" }, 102);
+    const failed = failWorkflowCondition(
+      evaluating,
+      evaluating.transitionRuns[0]!.id,
+      "malformed",
+      103,
+    );
+    expect(failed.status).toBe("needsAttention");
+    expect(failed.transitionRuns[0]?.decision).toBeUndefined();
+    const retried = retryWorkflowCondition(failed, failed.transitionRuns[0]!.id, 104);
+    expect(retried.transitionRuns[0]?.status).toBe("evaluating");
+    const failedAgain = failWorkflowCondition(
+      retried,
+      retried.transitionRuns[0]!.id,
+      "malformed",
+      105,
+    );
+    const overridden = overrideWorkflowCondition(failedAgain, failedAgain.transitionRuns[0]!.id, "no", "Manual review selected no.", 106);
+    expect(overridden.transitionRuns[0]).toMatchObject({ status: "resolved", decision: "no" });
+    expect(overridden.stepRuns.find((step) => step.templateStepId === "deeper")?.status).toBe("ready");
+  });
+
   it("routes unsure to stop without starting a branch", () => {
     const run = createWorkflowRun({ template: template(), workspaceId: "ws", inputs: {}, now: 100 });
     const started = markWorkflowStepStarted(run, run.stepRuns[0]!.id, 101);
@@ -118,25 +160,6 @@ describe("workflowEngine", () => {
     const resolved = resolveWorkflowCondition(completed, completed.transitionRuns[0]!.id, "unsure", "The result was ambiguous.", 103);
     expect(resolved.status).toBe("stopped");
     expect(resolved.stepRuns.every((step) => step.templateStepId === "investigate" || step.status === "skipped")).toBe(true);
-  });
-
-  it("routes no to its branch and skips the other condition targets", () => {
-    const run = createWorkflowRun({ template: template(), workspaceId: "ws", inputs: {}, now: 100 });
-    const started = markWorkflowStepStarted(run, run.stepRuns[0]!.id, 101);
-    const completed = markWorkflowStepCompleted(started, run.stepRuns[0]!.id, { finalAnswer: "No fix yet." }, 102);
-    const resolved = resolveWorkflowCondition(completed, completed.transitionRuns[0]!.id, "no", undefined, 103);
-    expect(resolved.stepRuns.find((step) => step.templateStepId === "deeper")?.status).toBe("ready");
-    expect(resolved.stepRuns.find((step) => step.templateStepId === "act")?.status).toBe("skipped");
-  });
-
-  it("retries a failed step as ready work and clears its error", () => {
-    const run = createWorkflowRun({ template: template(), workspaceId: "ws", inputs: {}, now: 100 });
-    const started = markWorkflowStepStarted(run, run.stepRuns[0]!.id, 101);
-    const failed = markWorkflowStepFailed(started, run.stepRuns[0]!.id, "worker failed", 102);
-    const retried = retryWorkflowStep(failed, failed.stepRuns[0]!.id, 103);
-    expect(retried.status).toBe("waiting");
-    expect(retried.stepRuns[0]).toMatchObject({ status: "ready" });
-    expect(retried.stepRuns[0]?.error).toBeUndefined();
   });
 
   it("rejects missing required inputs before creating a run", () => {

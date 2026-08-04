@@ -22,20 +22,20 @@ export function renderWorkflowPrompt({
     if (context.length > 0) sections.push(`Workflow context:\n${context}`);
   }
   if (step.inputPolicy.includeParentFinalAnswer) {
-    sections.push(`Parent final answer:\n${run.parentFinalAnswer ?? "[Parent final answer unavailable]"}`);
+    sections.push(`Parent final answer:\n${requireAvailable(run.parentFinalAnswer, "Parent final answer")}`);
   }
   if (step.inputPolicy.includeParentSummary) {
-    sections.push(`Parent summary:\n${run.parentSummary ?? "[Parent summary unavailable]"}`);
+    sections.push(`Parent summary:\n${requireAvailable(run.parentSummary, "Parent summary")}`);
   }
   if (step.inputPolicy.includeParentTranscript) {
-    sections.push(`Parent transcript:\n${run.parentTranscript ?? "[Parent transcript unavailable]"}`);
+    sections.push(`Parent transcript:\n${requireAvailable(run.parentTranscript, "Parent transcript")}`);
   }
 
   const prompt = step.promptParts
     .map((part) => {
       if (part.type === "text") return part.text;
       if (part.type === "workflowInput") {
-        return run.inputs[part.inputId] ?? `[Missing workflow input: ${part.inputId}]`;
+        return requireAvailable(run.inputs[part.inputId], `Workflow input ${part.inputId}`);
       }
       const source = run.stepRuns.find((item) => item.templateStepId === part.stepId);
       return renderStepOutput(source, part.output);
@@ -49,14 +49,21 @@ export function renderStepOutput(
   step: WorkflowStepRun | undefined,
   output: "finalAnswer" | "summary" | "transcript",
 ): string {
-  if (step === undefined) return "[Missing upstream step output]";
+  if (step === undefined) throw new Error("Workflow prompt is blocked: referenced upstream step is unavailable.");
   if (output === "finalAnswer") {
-    return step.finalAnswer ?? "[Upstream step has no final answer yet]";
+    return requireAvailable(step.finalAnswer, `Upstream final answer for ${step.templateStepId}`);
   }
   if (output === "summary") {
-    return step.summary ?? step.finalAnswer ?? "[Upstream step has no summary yet]";
+    return requireAvailable(step.summary ?? step.finalAnswer, `Upstream summary for ${step.templateStepId}`);
   }
-  return step.transcript ?? "[Upstream transcript is unavailable]";
+  return requireAvailable(step.transcript, `Upstream transcript for ${step.templateStepId}`);
+}
+
+function requireAvailable(value: string | undefined, label: string): string {
+  if (value === undefined || value.trim().length === 0) {
+    throw new Error(`Workflow prompt is blocked: ${label} is unavailable.`);
+  }
+  return value;
 }
 
 function renderWorkflowContext(

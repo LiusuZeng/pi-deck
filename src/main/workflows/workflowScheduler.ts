@@ -52,10 +52,14 @@ export interface WorkflowSchedulerDependencies {
 
 interface ActiveStep {
   runId: string;
+  /** Scheduler mutation generation that owns this runtime. */
+  version: number;
   kind: "step" | "condition";
   stepRunId?: string;
   transitionRunId?: string;
 }
+
+type RuntimeOwnership = { runtimeId: string; active: ActiveStep };
 
 const conditionJudgeSchema = z.object({
   decision: z.enum(["yes", "no", "unsure"]),
@@ -89,15 +93,16 @@ export class WorkflowScheduler {
   async update(run: WorkflowRun): Promise<WorkflowRun> {
     this.runs.set(run.id, run);
     this.mutationVersions.set(run.id, (this.mutationVersions.get(run.id) ?? 0) + 1);
-    if (run.status === "stopped" || run.status === "failed") {
-      for (const [runtimeId, active] of this.activeByRuntime) {
-        if (active.runId === run.id) {
-          this.activeByRuntime.delete(runtimeId);
-          await this.closeQuietly(runtimeId);
-        }
+    // Any externally persisted mutation supersedes the runtime that was
+    // started from the previous generation. This also prevents a retry or
+    // approval update from leaving an old worker able to report completion.
+    for (const [runtimeId, active] of this.activeByRuntime) {
+      if (active.runId === run.id) {
+        this.activeByRuntime.delete(runtimeId);
+        await this.closeQuietly(runtimeId);
       }
-      return run;
     }
+    if (run.status === "stopped" || run.status === "failed") return run;
     return this.pump(run.id);
   }
 
@@ -108,126 +113,153 @@ export class WorkflowScheduler {
       return;
     }
 
+    // Pi can emit an intermediate error agent_end before its automatic retry.
+    // Keep ownership of the runtime until the authoritative terminal event.
+    if (event.type === "agent_end" && event.willRetry === true) return;
+    const ownership: RuntimeOwnership = { runtimeId: event.runtimeId, active };
+    const run = await this.getOwnedRun(ownership);
+    if (run === undefined) return;
+
     if (event.type === "worker_exit") {
-      this.activeByRuntime.delete(event.runtimeId);
-      const run = this.runs.get(active.runId);
-      if (run !== undefined && !isTerminalRun(run)) {
+      try {
         if (active.kind === "step" && active.stepRunId !== undefined) {
           await this.finishFailed(
             run,
             active.stepRunId,
             "The Pi worker exited before the workflow step completed.",
+            ownership,
           );
         } else if (active.transitionRunId !== undefined) {
           await this.finishConditionFailed(
             run,
             active.transitionRunId,
             "The Pi worker exited before the condition judge completed.",
+            ownership,
           );
         }
+      } finally {
+        const released = await this.releaseOwnership(ownership);
+        if (released) await this.closeQuietly(event.runtimeId);
       }
       await this.pumpQueuedRuns();
       return;
     }
     if (event.type !== "agent_end") return;
-    // Pi can emit an intermediate error agent_end before its automatic retry.
-    // Keep ownership of the runtime until the authoritative terminal event.
-    if (event.willRetry === true) return;
-    const run = this.runs.get(active.runId);
-    if (run === undefined || isTerminalRun(run)) return;
 
-    this.activeByRuntime.delete(event.runtimeId);
     const status = typeof event.status === "string" ? event.status : undefined;
     if (status === "error" || status === "aborted") {
-      if (active.kind === "step" && active.stepRunId !== undefined) {
-        await this.finishFailed(
-          run,
-          active.stepRunId,
-          typeof event.error === "string"
-            ? event.error
-            : `Pi agent ended with status: ${status}.`,
-        );
-      } else if (active.transitionRunId !== undefined) {
-        await this.finishConditionFailed(
-          run,
-          active.transitionRunId,
-          typeof event.error === "string"
-            ? event.error
-            : `Condition judge ended with status: ${status}.`,
-        );
+      try {
+        const current = await this.getOwnedRun(ownership);
+        if (current === undefined) return;
+        if (active.kind === "step" && active.stepRunId !== undefined) {
+          await this.finishFailed(
+            current,
+            active.stepRunId,
+            typeof event.error === "string"
+              ? event.error
+              : `Pi agent ended with status: ${status}.`,
+            ownership,
+          );
+        } else if (active.transitionRunId !== undefined) {
+          await this.finishConditionFailed(
+            current,
+            active.transitionRunId,
+            typeof event.error === "string"
+              ? event.error
+              : `Condition judge ended with status: ${status}.`,
+            ownership,
+          );
+        }
+      } finally {
+        const released = await this.releaseOwnership(ownership);
+        if (released) await this.closeQuietly(event.runtimeId);
       }
-      await this.closeQuietly(event.runtimeId);
       await this.pumpQueuedRuns();
       return;
     }
 
     try {
       const snapshot = await this.dependencies.getSnapshot(event.runtimeId);
+      // A stop/retry/update may have removed ownership while the snapshot was
+      // being read. Never apply an old completion to that newer mutation.
+      const current = await this.getOwnedRun(ownership);
+      if (current === undefined) return;
       const finalAssistant = findFinalAssistant(snapshot.messages);
       if (active.kind === "condition" && active.transitionRunId !== undefined) {
         if (finalAssistant?.error === true || finalAssistant?.content === undefined) {
           await this.finishConditionFailed(
-            run,
+            current,
             active.transitionRunId,
             finalAssistant?.errorMessage ?? "Condition judge returned no JSON result.",
+            ownership,
           );
         } else {
           const parsed = parseConditionDecision(finalAssistant.content);
           if (parsed === undefined) {
             await this.finishConditionFailed(
-              run,
+              current,
               active.transitionRunId,
               "Condition judge returned malformed output; expected strict yes/no/unsure JSON.",
+              ownership,
             );
           } else {
             const resolved = resolveWorkflowCondition(
-              run,
+              current,
               active.transitionRunId,
               parsed.decision,
               parsed.rationale,
               this.now(),
             );
-            await this.persistAndEmit(this.runsSet(resolved));
+            await this.persistAndEmit(this.runsSet(resolved), ownership);
           }
         }
       } else if (active.stepRunId !== undefined) {
         if (finalAssistant?.error === true) {
           await this.finishFailed(
-            run,
+            current,
             active.stepRunId,
             finalAssistant.errorMessage ?? "Pi returned an assistant error.",
+            ownership,
           );
         } else {
           const completed = markWorkflowStepCompleted(
-            run,
+            current,
             active.stepRunId,
             finalAssistant?.content !== undefined
               ? { finalAnswer: finalAssistant.content }
               : {},
             this.now(),
           );
-          await this.persistAndEmit(this.runsSet(completed));
+          await this.persistAndEmit(this.runsSet(completed), ownership);
           // The final answer is persisted before close can emit worker_exit.
         }
       }
     } catch (error) {
-      if (active.kind === "condition" && active.transitionRunId !== undefined) {
-        await this.finishConditionFailed(
-          run,
-          active.transitionRunId,
-          error instanceof Error ? error.message : String(error),
-        );
-      } else if (active.stepRunId !== undefined) {
-        await this.finishFailed(
-          run,
-          active.stepRunId,
-          error instanceof Error ? error.message : String(error),
-        );
+      const current = await this.getOwnedRun(ownership);
+      if (current !== undefined) {
+        if (active.kind === "condition" && active.transitionRunId !== undefined) {
+          await this.finishConditionFailed(
+            current,
+            active.transitionRunId,
+            error instanceof Error ? error.message : String(error),
+            ownership,
+          );
+        } else if (active.stepRunId !== undefined) {
+          await this.finishFailed(
+            current,
+            active.stepRunId,
+            error instanceof Error ? error.message : String(error),
+            ownership,
+          );
+        }
       }
     } finally {
-      await this.closeQuietly(event.runtimeId);
-      await this.pump(run.id);
-      await this.pumpQueuedRuns();
+      const released = await this.releaseOwnership(ownership);
+      if (released) {
+        await this.closeQuietly(event.runtimeId);
+        await this.pump(run.id);
+        await this.pumpQueuedRuns();
+      }
     }
   }
 
@@ -302,13 +334,23 @@ export class WorkflowScheduler {
 
       const sessionState = session.state;
       if (step !== undefined && definition !== undefined) {
-        const renderedPrompt = renderWorkflowPrompt({
-          ...(run.templateSnapshot.context !== undefined
-            ? { workflowContext: run.templateSnapshot.context }
-            : {}),
-          step: definition,
-          run,
-        });
+        let renderedPrompt: string;
+        try {
+          renderedPrompt = renderWorkflowPrompt({
+            ...(run.templateSnapshot.context !== undefined
+              ? { workflowContext: run.templateSnapshot.context }
+              : {}),
+            step: definition,
+            run: latest,
+          });
+        } catch (error) {
+          await this.closeQuietly(session.runtimeId);
+          return this.finishFailed(
+            latest,
+            step.id,
+            error instanceof Error ? error.message : String(error),
+          );
+        }
         const started = markWorkflowStepStarted(
           latest,
           step.id,
@@ -328,15 +370,26 @@ export class WorkflowScheduler {
               : candidate,
           ),
         };
-        this.activeByRuntime.set(session.runtimeId, { runId, kind: "step", stepRunId: step.id });
-        await this.persistAndEmit(this.runsSet(withMetadata));
+        const active: ActiveStep = {
+          runId,
+          version,
+          kind: "step",
+          stepRunId: step.id,
+        };
+        this.activeByRuntime.set(session.runtimeId, active);
+        await this.persistAndEmit(this.runsSet(withMetadata), { runtimeId: session.runtimeId, active });
         try {
-          await this.applyStepSettings(session.runtimeId, latest, definition);
+          const owned = await this.getOwnedRun({ runtimeId: session.runtimeId, active });
+          if (owned === undefined) return this.runs.get(runId)!;
+          await this.applyStepSettings(session.runtimeId, owned, definition);
           await this.dependencies.prompt(session.runtimeId, renderedPrompt);
         } catch (error) {
-          this.activeByRuntime.delete(session.runtimeId);
-          await this.finishFailed(withMetadata, step.id, error instanceof Error ? error.message : String(error));
-          await this.closeQuietly(session.runtimeId);
+          const ownership = { runtimeId: session.runtimeId, active };
+          const owned = await this.getOwnedRun(ownership);
+          if (owned !== undefined) {
+            await this.finishFailed(owned, step.id, error instanceof Error ? error.message : String(error), ownership);
+          }
+          if (await this.releaseOwnership(ownership)) await this.closeQuietly(session.runtimeId);
         }
       } else {
         const transition = run.templateSnapshot.transitions.find(
@@ -349,13 +402,24 @@ export class WorkflowScheduler {
         }
         const source = latest.stepRuns.find((candidate) => candidate.templateStepId === transition.fromStepId);
         const prompt = renderConditionJudgePrompt(transition, source?.finalAnswer);
-        this.activeByRuntime.set(session.runtimeId, { runId, kind: "condition", transitionRunId: conditionEntry!.id });
+        const active: ActiveStep = {
+          runId,
+          version,
+          kind: "condition",
+          transitionRunId: conditionEntry!.id,
+        };
+        this.activeByRuntime.set(session.runtimeId, active);
         try {
+          const owned = await this.getOwnedRun({ runtimeId: session.runtimeId, active });
+          if (owned === undefined) return this.runs.get(runId)!;
           await this.dependencies.prompt(session.runtimeId, prompt);
         } catch (error) {
-          this.activeByRuntime.delete(session.runtimeId);
-          await this.finishConditionFailed(latest, conditionEntry!.id, error instanceof Error ? error.message : String(error));
-          await this.closeQuietly(session.runtimeId);
+          const ownership = { runtimeId: session.runtimeId, active };
+          const owned = await this.getOwnedRun(ownership);
+          if (owned !== undefined) {
+            await this.finishConditionFailed(owned, conditionEntry!.id, error instanceof Error ? error.message : String(error), ownership);
+          }
+          if (await this.releaseOwnership(ownership)) await this.closeQuietly(session.runtimeId);
         }
       }
       return this.runs.get(runId)!;
@@ -368,18 +432,20 @@ export class WorkflowScheduler {
     run: WorkflowRun,
     stepRunId: string,
     error: string,
+    ownership?: RuntimeOwnership,
   ): Promise<WorkflowRun> {
     const failed = markWorkflowStepFailed(run, stepRunId, error, this.now());
-    return this.persistAndEmit(this.runsSet(failed));
+    return this.persistAndEmit(this.runsSet(failed), ownership);
   }
 
   private async finishConditionFailed(
     run: WorkflowRun,
     transitionRunId: string,
     error: string,
+    ownership?: RuntimeOwnership,
   ): Promise<WorkflowRun> {
     const failed = failWorkflowCondition(run, transitionRunId, error, this.now());
-    return this.persistAndEmit(this.runsSet(failed));
+    return this.persistAndEmit(this.runsSet(failed), ownership);
   }
 
   private async applyStepSettings(
@@ -411,11 +477,47 @@ export class WorkflowScheduler {
     return run;
   }
 
-  private async persistAndEmit(run: WorkflowRun): Promise<WorkflowRun> {
+  private async persistAndEmit(
+    run: WorkflowRun,
+    ownership?: RuntimeOwnership,
+  ): Promise<WorkflowRun> {
+    if (ownership !== undefined && (await this.getOwnedRun(ownership)) === undefined) {
+      return this.runs.get(run.id) ?? run;
+    }
     const persisted = await this.dependencies.persist(run);
+    // The persist call may have yielded to a stop/retry/update. Do not publish
+    // or retain a terminal result that no longer owns the runtime mutation.
+    if (ownership !== undefined && !this.isCurrentOwner(ownership)) {
+      return this.runs.get(run.id) ?? persisted;
+    }
     this.runs.set(persisted.id, persisted);
     this.dependencies.emit(persisted);
     return persisted;
+  }
+
+  private isCurrentOwner(ownership: RuntimeOwnership): boolean {
+    return (
+      this.activeByRuntime.get(ownership.runtimeId) === ownership.active &&
+      (this.mutationVersions.get(ownership.active.runId) ?? 0) === ownership.active.version
+    );
+  }
+
+  private async getOwnedRun(ownership: RuntimeOwnership): Promise<WorkflowRun | undefined> {
+    if (!this.isCurrentOwner(ownership)) return undefined;
+    const current = this.dependencies.getRun
+      ? await this.dependencies.getRun(ownership.active.runId)
+      : this.runs.get(ownership.active.runId);
+    if (!this.isCurrentOwner(ownership) || current === undefined || isTerminalRun(current)) {
+      return undefined;
+    }
+    this.runsSet(current);
+    return current;
+  }
+
+  private async releaseOwnership(ownership: RuntimeOwnership): Promise<boolean> {
+    if (!this.isCurrentOwner(ownership)) return false;
+    this.activeByRuntime.delete(ownership.runtimeId);
+    return true;
   }
 
   private async closeQuietly(runtimeId: string): Promise<void> {

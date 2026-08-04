@@ -196,12 +196,16 @@ export function resolveWorkflowCondition(
     const step = requireStepByTemplateId(next, target.stepId);
     const definition = requireStepDefinition(next, target.stepId);
     next = updateStepByTemplateId(next, target.stepId, {
-      status: definition.startPolicy === "manualApproval" ? "needsApproval" : "ready",
+      status: transition.previewBeforeStart || definition.startPolicy === "manualApproval"
+        ? "needsApproval"
+        : "ready",
       updatedAtMs: now,
     });
     if (step.status === "skipped") {
       next = updateStepByTemplateId(next, target.stepId, {
-        status: "ready",
+        status: transition.previewBeforeStart || definition.startPolicy === "manualApproval"
+          ? "needsApproval"
+          : "ready",
         updatedAtMs: now,
       });
     }
@@ -223,12 +227,51 @@ export function failWorkflowCondition(
   if (transitionRun.status !== "evaluating") throw new Error("Workflow condition is not evaluating.");
   const next = updateTransition(run, transitionRunId, {
     status: "failed",
-    decision: "unsure",
     error,
-    rationale: "The condition judge returned an invalid result; no branch was selected.",
+    rationale: "The condition judge returned an invalid result; no branch was selected. Retry the judge or explicitly override the decision.",
     updatedAtMs: now,
   });
   return withRunStatus(next, "needsAttention", now);
+}
+
+export function retryWorkflowCondition(
+  run: WorkflowRun,
+  transitionRunId: string,
+  now = Date.now(),
+): WorkflowRun {
+  assertRunSchedulable(run);
+  const transition = run.transitionRuns.find((item) => item.id === transitionRunId);
+  if (transition === undefined) throw new Error(`Unknown workflow transition run: ${transitionRunId}`);
+  if (transition.status !== "failed") throw new Error("Only failed workflow conditions can be retried.");
+  const next = updateTransition(run, transitionRunId, {
+    status: "evaluating",
+    decision: undefined,
+    rationale: undefined,
+    error: undefined,
+    updatedAtMs: now,
+  });
+  return withRunStatus(next, "running", now);
+}
+
+export function overrideWorkflowCondition(
+  run: WorkflowRun,
+  transitionRunId: string,
+  decision: WorkflowDecision,
+  rationale: string,
+  now = Date.now(),
+): WorkflowRun {
+  assertRunSchedulable(run);
+  const transition = run.transitionRuns.find((item) => item.id === transitionRunId);
+  if (transition === undefined) throw new Error(`Unknown workflow transition run: ${transitionRunId}`);
+  if (transition.status !== "failed") throw new Error("Only failed workflow conditions can be overridden.");
+  const evaluating = updateTransition(run, transitionRunId, {
+    status: "evaluating",
+    decision: undefined,
+    rationale: undefined,
+    error: undefined,
+    updatedAtMs: now,
+  });
+  return resolveWorkflowCondition(evaluating, transitionRunId, decision, rationale, now);
 }
 
 export function beginWorkflowConditionEvaluation(

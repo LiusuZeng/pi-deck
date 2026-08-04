@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createWorkflowRun } from "./workflowEngine.js";
+import { createWorkflowRun, stopWorkflowRun } from "./workflowEngine.js";
 import {
   WorkflowScheduler,
   type WorkflowSessionSnapshot,
@@ -99,11 +99,15 @@ function snapshot(
   };
 }
 
-function setup(options: { capacity?: boolean; conditionAnswer?: string } = {}) {
+function setup(options: { capacity?: boolean; conditionAnswer?: string; delaySnapshot?: boolean } = {}) {
   const prompts: string[] = [];
   const persisted: WorkflowRun[] = [];
   const sessions = new Map<string, WorkflowSessionSnapshot>();
   let created = 0;
+  let releaseSnapshot = () => undefined;
+  const snapshotGate = options.delaySnapshot
+    ? new Promise<void>((resolve) => { releaseSnapshot = resolve; })
+    : Promise.resolve();
   const scheduler = new WorkflowScheduler({
     createSession: async () => {
       if (options.capacity && created > 0) {
@@ -134,7 +138,10 @@ function setup(options: { capacity?: boolean; conditionAnswer?: string } = {}) {
         ],
       });
     },
-    getSnapshot: async (runtimeId) => sessions.get(runtimeId)!,
+    getSnapshot: async (runtimeId) => {
+      await snapshotGate;
+      return sessions.get(runtimeId)!;
+    },
     closeSession: async () => undefined,
     persist: async (run) => {
       persisted.push(run);
@@ -143,7 +150,7 @@ function setup(options: { capacity?: boolean; conditionAnswer?: string } = {}) {
     emit: () => undefined,
     now: () => 10,
   });
-  return { scheduler, prompts, persisted, sessions };
+  return { scheduler, prompts, persisted, sessions, releaseSnapshot };
 }
 
 describe("WorkflowScheduler", () => {
@@ -179,27 +186,23 @@ describe("WorkflowScheduler", () => {
     );
   });
 
-  it("marks a worker failure as retryable and closes the failed worker", async () => {
+  it("blocks unavailable referenced outputs before prompting Pi", async () => {
     const fixture = setup();
-    const run = createWorkflowRun({
-      template,
-      workspaceId: "workspace",
-      inputs: {},
-      now: 1,
-    });
+    const blockedTemplate: WorkflowTemplate = {
+      ...template,
+      steps: [{
+        ...template.steps[0]!,
+        inputPolicy: {
+          ...template.steps[0]!.inputPolicy,
+          includeParentFinalAnswer: true,
+        },
+      }, template.steps[1]!],
+    };
+    const run = createWorkflowRun({ template: blockedTemplate, workspaceId: "workspace", inputs: {}, now: 1 });
     await fixture.scheduler.schedule(run);
-    await fixture.scheduler.handleRuntimeEvent({
-      type: "agent_end",
-      runtimeId: "runtime-1",
-      status: "error",
-      error: "fake worker failed",
-    });
-
+    expect(fixture.prompts).toEqual([]);
     expect(fixture.persisted.at(-1)?.status).toBe("needsAttention");
-    expect(fixture.persisted.at(-1)?.stepRuns[0]).toMatchObject({
-      status: "failed",
-      error: "fake worker failed",
-    });
+    expect(fixture.persisted.at(-1)?.stepRuns[0]?.status).toBe("failed");
   });
 
   it("persists a queued step when worker capacity is unavailable", async () => {
@@ -222,6 +225,24 @@ describe("WorkflowScheduler", () => {
     expect(
       queued?.stepRuns.find((step) => step.templateStepId === "second")?.status,
     ).toBe("queued");
+  });
+
+  it("does not let a delayed completion overwrite a concurrent stop", async () => {
+    const fixture = setup({ delaySnapshot: true });
+    const run = createWorkflowRun({ template, workspaceId: "workspace", inputs: {}, now: 1 });
+    await fixture.scheduler.schedule(run);
+    const completion = fixture.scheduler.handleRuntimeEvent({
+      type: "agent_end",
+      runtimeId: "runtime-1",
+      status: "completed",
+    });
+    await Promise.resolve();
+    const stopped = stopWorkflowRun(run, 20);
+    await fixture.scheduler.update(stopped);
+    fixture.releaseSnapshot();
+    await completion;
+    expect(fixture.persisted.some((item) => item.status === "completed")).toBe(false);
+    expect(fixture.persisted.some((item) => item.status === "stopped")).toBe(false);
   });
 
   it("judges a condition with strict JSON and starts only the selected branch", async () => {

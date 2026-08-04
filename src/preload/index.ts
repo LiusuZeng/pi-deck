@@ -65,6 +65,8 @@ import {
   workflowGetTemplateRequestSchema,
   workflowListRunsRequestSchema,
   workflowRetryStepRequestSchema,
+  workflowRetryConditionRequestSchema,
+  workflowOverrideConditionRequestSchema,
   workflowRunListResultSchema,
   workflowRunSchema,
   workflowStartRunRequestSchema,
@@ -92,6 +94,8 @@ import type {
   WorkspaceRestoreSessionRequest,
   WorkspaceUpdateRequest,
   WorkflowApproveGateRequest,
+  WorkflowRetryConditionRequest,
+  WorkflowOverrideConditionRequest,
   WorkflowCreateTemplateRequest,
   WorkflowStartRunRequest,
   WorkflowUpdateTemplateRequest,
@@ -473,6 +477,18 @@ const api: PiDeckApi = Object.freeze({
       invokeValidated({
         channel: ipcChannels.workflowRetryStep,
         request: workflowRetryStepRequestSchema.parse(request),
+        responseSchema: workflowRunSchema,
+      }),
+    retryCondition: (request: WorkflowRetryConditionRequest) =>
+      invokeValidated({
+        channel: ipcChannels.workflowRetryCondition,
+        request: workflowRetryConditionRequestSchema.parse(request),
+        responseSchema: workflowRunSchema,
+      }),
+    overrideCondition: (request: WorkflowOverrideConditionRequest) =>
+      invokeValidated({
+        channel: ipcChannels.workflowOverrideCondition,
+        request: workflowOverrideConditionRequestSchema.parse(request),
         responseSchema: workflowRunSchema,
       }),
     approveGate: (request: WorkflowApproveGateRequest) =>

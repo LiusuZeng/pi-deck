@@ -78,6 +78,8 @@ import {
   workflowGetTemplateRequestSchema,
   workflowListRunsRequestSchema,
   workflowRetryStepRequestSchema,
+  workflowRetryConditionRequestSchema,
+  workflowOverrideConditionRequestSchema,
   workflowRunListResultSchema,
   workflowRunSchema,
   workflowStartRunRequestSchema,
@@ -152,6 +154,8 @@ import {
   approveWorkflowStep,
   createWorkflowRun,
   retryWorkflowStep,
+  retryWorkflowCondition,
+  overrideWorkflowCondition,
   stopWorkflowRun,
   recoverWorkflowRun,
 } from "./workflows/workflowEngine.js";
@@ -1159,6 +1163,38 @@ function registerIpcHandlers(
   });
 
   registerValidatedIpc({
+    channel: ipcChannels.workflowRetryCondition,
+    requestSchema: workflowRetryConditionRequestSchema,
+    responseSchema: workflowRunSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runId, transitionRunId }) => {
+      const run = await ensureWorkflowStore().getRun(runId);
+      await requireOpenWorkspace(run.workspaceId);
+      const updated = await ensureWorkflowStore().updateRun(
+        retryWorkflowCondition(run, transitionRunId),
+      );
+      emitWorkflowRunEvent(updated);
+      return ensureWorkflowScheduler().update(updated);
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowOverrideCondition,
+    requestSchema: workflowOverrideConditionRequestSchema,
+    responseSchema: workflowRunSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runId, transitionRunId, decision, rationale }) => {
+      const run = await ensureWorkflowStore().getRun(runId);
+      await requireOpenWorkspace(run.workspaceId);
+      const updated = await ensureWorkflowStore().updateRun(
+        overrideWorkflowCondition(run, transitionRunId, decision, rationale),
+      );
+      emitWorkflowRunEvent(updated);
+      return ensureWorkflowScheduler().update(updated);
+    },
+  });
+
+  registerValidatedIpc({
     channel: ipcChannels.workflowApproveGate,
     requestSchema: workflowApproveGateRequestSchema,
     responseSchema: workflowRunSchema,
@@ -1438,9 +1474,9 @@ async function validateWorkflowPaths(
     const resolved = path.isAbsolute(value)
       ? path.resolve(value)
       : path.resolve(project.canonicalPath, value);
-    const canonical = (await safeRealpath(resolved)) ?? resolved;
-    if (!isPathInside(canonical, project.canonicalPath)) {
-      throw new Error(`Workflow path is outside its authorized workspace project: ${value}`);
+    const canonical = await safeRealpath(resolved);
+    if (canonical === undefined || !isPathInside(canonical, project.canonicalPath)) {
+      throw new Error(`Workflow path is unavailable or outside its authorized workspace project: ${value}`);
     }
   }
 }

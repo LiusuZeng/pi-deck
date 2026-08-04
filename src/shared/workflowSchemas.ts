@@ -532,6 +532,19 @@ export const workflowApproveGateRequestSchema = z
   })
   .strict();
 
+export const workflowRetryConditionRequestSchema = z
+  .object({ runId: workflowIdSchema, transitionRunId: workflowIdSchema })
+  .strict();
+
+export const workflowOverrideConditionRequestSchema = z
+  .object({
+    runId: workflowIdSchema,
+    transitionRunId: workflowIdSchema,
+    decision: z.enum(["yes", "no", "unsure"]),
+    rationale: z.string().trim().min(1).max(4_000),
+  })
+  .strict();
+
 export const workflowEventSchema = z.discriminatedUnion("type", [
   z
     .object({ type: z.literal("workflow_run_updated"), runId: workflowIdSchema, status: workflowRunStatusSchema })
