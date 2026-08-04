@@ -85,6 +85,12 @@ Each attached conversation has its own `pi --mode rpc` subprocess and event stre
 
 The conversation view shows the composer, image attachment preview, Pi tool execution, streaming response, and controls for steering, following up, or aborting.
 
+<p align="center">
+  <a href="docs/assets/pi-deck-conversation.gif" title="Open the Pi Deck conversation walkthrough full size">
+    <img src="docs/assets/pi-deck-conversation.gif" alt="Animated Pi Deck walkthrough showing an image attachment, tool execution, streaming response, and intervention controls" width="78%">
+  </a>
+</p>
+
 _A short real-mode walkthrough: attach an image, send the prompt, watch Pi execute a tool, and follow the response as it streams._
 
 - Streaming assistant responses rendered as safe Markdown.
