@@ -1793,6 +1793,30 @@ describe("renderer message_update reduction", () => {
     expect(session.title).toBe("Named by Pi");
   });
 
+  it("upserts a runtime snapshot so workflow runtime sessions can be selected", () => {
+    const existing = {
+      ...baseSession(),
+      id: "runtime-1",
+      title: "Stale title",
+    };
+    const sessions = __rendererTestHooks.upsertRuntimeSession(
+      [existing] as any,
+      {
+        runtimeId: "runtime-1",
+        backendMode: "real",
+        state: { cwd: "/tmp/project", sessionName: "Live workflow step" },
+        messages: [],
+      } as any,
+    );
+
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]).toMatchObject({
+      id: "runtime-1",
+      title: "Live workflow step",
+      runtimeBacked: true,
+    });
+  });
+
   it("does not render persisted empty assistant messages as waiting forever", () => {
     const session = __rendererTestHooks.sessionFromSnapshot({
       runtimeId: "runtime-1",

@@ -396,6 +396,7 @@ type WorkspaceCapableApi = {
     listUnassignedSessions?(): Promise<{ sessions: ChatSessionSummary[] }>;
   };
   chat: {
+    getSnapshot?(request?: { runtimeId?: string }): Promise<ChatSnapshot>;
     listSessions?(request?: {
       workspaceId?: string;
       projectId?: string;
@@ -1827,12 +1828,27 @@ export function App(): ReactElement {
   }
 
   async function handleOpenWorkflowStep(step: WorkflowStepRun): Promise<void> {
-    setWorkflowView(undefined);
     const runtimeSession = step.runtimeId
       ? sessionsRef.current.find((session) => session.id === step.runtimeId)
       : undefined;
     if (runtimeSession !== undefined) {
       handleSelectSession(runtimeSession.id);
+      return;
+    }
+    if (step.runtimeId !== undefined) {
+      try {
+        const snapshot = await window.piDeck.chat.getSnapshot({
+          runtimeId: step.runtimeId,
+        });
+        const session = sessionFromSnapshot(snapshot);
+        setSessions((current) => upsertRuntimeSession(current, snapshot));
+        setSelectedSessionId(session.id);
+        setWorkflowView(undefined);
+      } catch (error) {
+        setUiMessage(
+          `Could not open workflow session: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
       return;
     }
     const savedSession = step.sessionFile
@@ -1868,6 +1884,7 @@ export function App(): ReactElement {
             ),
           ]);
           setSelectedSessionId(session.id);
+          setWorkflowView(undefined);
         }
       } catch (error) {
         setUiMessage(
@@ -4808,6 +4825,17 @@ function workspaceIdFromSnapshot(snapshot: ChatSnapshot): string {
   // Old main processes return only projectId. Treat it as a legacy workspace
   // mapping, never as a path-based membership predicate.
   return snapshot.projectId ?? "unassigned-workspace";
+}
+
+function upsertRuntimeSession(
+  sessions: readonly SessionViewModel[],
+  snapshot: ChatSnapshot,
+): SessionViewModel[] {
+  const session = sessionFromSnapshot(snapshot);
+  return [
+    ...sessions.filter((candidate) => candidate.id !== session.id),
+    session,
+  ];
 }
 
 function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
@@ -9968,6 +9996,7 @@ export function findKnownExtensionCommand(
 export const __rendererTestHooks = {
   reduceRuntimeEvent,
   sessionFromSnapshot,
+  upsertRuntimeSession,
   mergeSessionUsageFromSnapshot,
   composerDraftForSession,
   updateComposerDraft,
