@@ -8259,7 +8259,7 @@ function Composer(props: {
         <textarea
           aria-label="Prompt text"
           aria-activedescendant={
-            selectedCommandIndex >= 0
+            props.slashOpen && selectedCommandIndex >= 0
               ? `${slashPickerId}-option-${selectedCommandIndex}`
               : undefined
           }
