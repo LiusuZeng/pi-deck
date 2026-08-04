@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-03
+
+Feature release introducing grouped workspaces and a more resilient,
+keyboard-accessible session management experience.
+
+### Added
+
+- Added directory-independent workspaces for grouping related Pi sessions by topic.
+- Added sidebar workspace navigation with session browsing, workspace creation
+  and renaming, session add/move/remove/delete actions, and workspace/session
+  archive and restore flows.
+- Added a default workspace for ungrouped sessions and managed runtime context
+  under Pi Deck's metadata directory.
+- Added active-workspace, keyboard-navigation, and error-announcement
+  accessibility coverage.
+
+### Changed
+
+- Made the sidebar the primary workspace navigator and clarified the active
+  workspace with a compact checkmark indicator.
+- Kept workspace membership independent from Pi JSONL files and working folders, including across relaunches.
+- Made runtime shutdown internal to session lifecycle management rather than a user-facing workspace action.
+
+### Fixed
+
+- Prevented sandboxed macOS GUI launches from surfacing avoidable Electron crash dialogs during development.
+- Preserved workspace and session metadata when saved-session titles or archived state refresh.
+- Made slash-command and model/thinking menus keyboard accessible with reliable focus restoration.
+- Announced composer, extension, timeline, and provider errors to assistive technologies.
+
+### Tests
+
+- Added workspace lifecycle, relaunch, archive/restore, membership, and directory-independent E2E coverage.
+- Added keyboard accessibility regressions for slash commands, menus, focus restoration, and active-workspace state.
+
 ## [0.2.0] - 2026-08-01
 
 Feature release adding a persistent, accessible appearance system across the
@@ -161,7 +196,8 @@ coding-agent sessions.
   crash; persisted sessions can be reopened, but unsaved partial stream text may
   be lost.
 
-[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/LiusuZeng/pi-deck/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/LiusuZeng/pi-deck/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/LiusuZeng/pi-deck/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/LiusuZeng/pi-deck/releases/tag/v0.1.0
