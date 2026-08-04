@@ -4,15 +4,6 @@
 
 Pi Deck is a Pi coding-agent GUI that gives Pi a dedicated desktop workspace for running, watching, and steering coding-agent sessions without opening Pi's terminal UI. It organizes sessions into named workspaces while Pi continues to use its native models, settings, tools, resources, and session files. Visit [the Pi Deck website](https://liusuzeng.github.io/pi-deck/) for an overview.
 
-<p align="center">
-  <a href="docs/assets/pi-deck.png" title="Open the workspace screenshot full size">
-    <img src="docs/assets/pi-deck.png" alt="Pi Deck showing workspace navigation, active sessions, and the new session composer" width="49%">
-  </a>
-  <a href="docs/assets/pi-deck-dark.png" title="Open the global Work inbox screenshot full size">
-    <img src="docs/assets/pi-deck-dark.png" alt="Pi Deck showing the global Work inbox with workspace scope and idle session filtering" width="49%">
-  </a>
-</p>
-
 > **Status:** Pi Deck is an active, pre-release personal MVP. It currently runs from source and targets macOS.
 
 ## At a glance
@@ -36,46 +27,15 @@ Pi Deck is a **local agent harness** for developers who already use Pi and want 
 
 Pi Deck is **not** an IDE, source editor, terminal wrapper, or hosted agent service. Keep using your preferred editor for code navigation and editing; Pi Deck coordinates the agents working alongside it.
 
-## See it in action
-
-<p align="center">
-  <a href="docs/assets/pi-deck-conversation.png" title="Open the live conversation screenshot full size">
-    <img src="docs/assets/pi-deck-conversation.png" alt="Pi Deck showing a live Pi conversation with an image attachment, tool execution card, streaming response, and intervention controls" width="49%">
-  </a>
-  <a href="docs/assets/pi-deck-inbox.png" title="Open the workspace Work inbox screenshot full size">
-    <img src="docs/assets/pi-deck-inbox.png" alt="Pi Deck showing a workspace-scoped Work inbox with idle sessions and status filters" width="49%">
-  </a>
-</p>
-
-<p align="center">
-  <a href="docs/assets/pi-deck-conversation.gif" title="Open the Pi Deck conversation walkthrough full size">
-    <img src="docs/assets/pi-deck-conversation.gif" alt="Animated Pi Deck walkthrough showing an image attachment, tool execution, streaming response, and intervention controls" width="78%">
-  </a>
-</p>
-
-_A short real-mode walkthrough: attach an image, send the prompt, watch Pi execute a tool, and follow the response as it streams._
-
-The conversation view shows the composer, image attachment preview, Pi tool execution, streaming response, and controls for steering, following up, or aborting. The workspace inbox keeps saved work grouped and easy to reopen.
-
-## Feature snapshots
-
-<p align="center">
-  <a href="docs/assets/pi-deck-models.png" title="Open the model and thinking controls screenshot full size">
-    <img src="docs/assets/pi-deck-models.png" alt="Pi Deck showing thinking levels and available Pi models in the configuration menu" width="32%">
-  </a>
-  <a href="docs/assets/pi-deck-appearance.png" title="Open the appearance menu screenshot full size">
-    <img src="docs/assets/pi-deck-appearance.png" alt="Pi Deck showing System, Light, and Dark appearance options" width="32%">
-  </a>
-  <a href="docs/assets/pi-deck-extension.png" title="Open the extension request screenshot full size">
-    <img src="docs/assets/pi-deck-extension.png" alt="Pi Deck showing a blocking Pi extension request while the session waits for user input" width="32%">
-  </a>
-</p>
-
-_Models and thinking · appearance preferences · extension requests waiting for input._
-
 ## Features
 
 ### Workspaces, projects, and Pi-native sessions
+
+<p align="center">
+  <a href="docs/assets/pi-deck.png" title="Open the workspace screenshot full size">
+    <img src="docs/assets/pi-deck.png" alt="Pi Deck showing workspace navigation, active sessions, and the new session composer" width="78%">
+  </a>
+</p>
 
 - Create, rename, select, archive, and restore named workspaces.
 - Keep workspace membership independent from Pi JSONL files and working folders.
@@ -93,6 +53,17 @@ _Models and thinking · appearance preferences · extension requests waiting for
 
 The Work inbox gives parallel work a single place to review. Open it globally across all workspaces or scope it to one workspace, then filter sessions by **Needs attention**, **Failed**, **Pending**, **In progress**, **Completed**, or **Idle**. Idle saved sessions remain discoverable without increasing the actionable counts, so the inbox stays useful for both triage and history.
 
+<p align="center">
+  <a href="docs/assets/pi-deck-dark.png" title="Open the global Work inbox screenshot full size">
+    <img src="docs/assets/pi-deck-dark.png" alt="Pi Deck showing the global Work inbox with workspace scope and idle session filtering" width="49%">
+  </a>
+  <a href="docs/assets/pi-deck-inbox.png" title="Open the workspace Work inbox screenshot full size">
+    <img src="docs/assets/pi-deck-inbox.png" alt="Pi Deck showing a workspace-scoped Work inbox with idle sessions and status filters" width="49%">
+  </a>
+</p>
+
+The workspace inbox keeps saved work grouped and easy to reopen.
+
 ### Multi-session control
 
 Each attached conversation has its own `pi --mode rpc` subprocess and event stream. Pi Deck routes actions by runtime ID so a stale prompt, abort, or close request cannot be redirected to the wrong conversation.
@@ -106,6 +77,16 @@ Each attached conversation has its own `pi --mode rpc` subprocess and event stre
 
 ### Chat and intervention controls
 
+<p align="center">
+  <a href="docs/assets/pi-deck-conversation.png" title="Open the live conversation screenshot full size">
+    <img src="docs/assets/pi-deck-conversation.png" alt="Pi Deck showing a live Pi conversation with an image attachment, tool execution card, streaming response, and intervention controls" width="78%">
+  </a>
+</p>
+
+The conversation view shows the composer, image attachment preview, Pi tool execution, streaming response, and controls for steering, following up, or aborting.
+
+_A short real-mode walkthrough: attach an image, send the prompt, watch Pi execute a tool, and follow the response as it streams._
+
 - Streaming assistant responses rendered as safe Markdown.
 - Collapsible thinking sections.
 - Expandable tool cards with running, success, and error states.
@@ -118,6 +99,12 @@ Each attached conversation has its own `pi --mode rpc` subprocess and event stre
 
 ### Models, thinking, commands, and usage
 
+<p align="center">
+  <a href="docs/assets/pi-deck-models.png" title="Open the model and thinking controls screenshot full size">
+    <img src="docs/assets/pi-deck-models.png" alt="Pi Deck showing thinking levels and available Pi models in the configuration menu" width="49%">
+  </a>
+</p>
+
 - Discover available models from the active Pi runtime.
 - Use model capability metadata such as image input, reasoning, and context window to gate available controls and report usage.
 - Switch model and thinking level per session.
@@ -126,6 +113,12 @@ Each attached conversation has its own `pi --mode rpc` subprocess and event stre
 - Display context usage, input/output tokens, cache reads/writes, and provider cost when Pi reports them.
 
 ### Appearance
+
+<p align="center">
+  <a href="docs/assets/pi-deck-appearance.png" title="Open the appearance menu screenshot full size">
+    <img src="docs/assets/pi-deck-appearance.png" alt="Pi Deck showing System, Light, and Dark appearance options" width="49%">
+  </a>
+</p>
 
 - Follow the current macOS appearance by default.
 - Choose System, Light, or Dark from the appearance menu in the chat header.
@@ -145,6 +138,12 @@ Each attached conversation has its own `pi --mode rpc` subprocess and event stre
 - Prefer project-relative references and warn when a path is outside the project, missing, unreadable, binary, or unusually large.
 
 ### Extension requests
+
+<p align="center">
+  <a href="docs/assets/pi-deck-extension.png" title="Open the extension request screenshot full size">
+    <img src="docs/assets/pi-deck-extension.png" alt="Pi Deck showing a blocking Pi extension request while the session waits for user input" width="49%">
+  </a>
+</p>
 
 Pi Deck can render and answer the blocking extension UI methods currently covered by the desktop bridge:
 
