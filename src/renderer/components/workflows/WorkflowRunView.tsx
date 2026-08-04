@@ -2,6 +2,7 @@ import { useState, type ReactElement } from "react";
 import type {
   WorkflowRun,
   WorkflowStepRun,
+  WorkflowTransitionRun,
 } from "../../../shared/workflowSchemas.js";
 import {
   runProgress,
@@ -16,6 +17,12 @@ export function WorkflowRunView(props: {
   onBack(): void;
   onStop(): Promise<void> | void;
   onRetryStep?(step: WorkflowStepRun): Promise<void> | void;
+  onRetryCondition?(transition: WorkflowTransitionRun): Promise<void> | void;
+  onOverrideCondition?(
+    transition: WorkflowTransitionRun,
+    decision: "yes" | "no",
+    rationale: string,
+  ): Promise<void> | void;
   onApproveGate?(
     step: WorkflowStepRun,
     action: "approve" | "skip" | "stop",
@@ -27,6 +34,9 @@ export function WorkflowRunView(props: {
   );
   const [busyAction, setBusyAction] = useState<string | undefined>();
   const [actionError, setActionError] = useState<string | undefined>();
+  const [conditionRationales, setConditionRationales] = useState<
+    Record<string, string>
+  >({});
   const progress = runProgress(props.run);
   const template = props.run.templateSnapshot;
   const transitionForStep = (stepId: string) =>
@@ -283,6 +293,102 @@ export function WorkflowRunView(props: {
                           {" "}
                           · Error: {transition.error}
                         </span>
+                      ) : null}
+                      {transition.status === "failed" &&
+                      definition?.kind === "condition" ? (
+                        <div
+                          className="workflow-condition-recovery"
+                          role="group"
+                          aria-label={`Recovery actions for ${definition.question}`}
+                        >
+                          <p>
+                            The condition judge failed. Retry the judge, or
+                            choose YES or NO and explain the override.
+                          </p>
+                          <textarea
+                            rows={3}
+                            aria-label={`Rationale for condition ${definition.question}`}
+                            placeholder="Why is this override correct?"
+                            value={conditionRationales[transition.id] ?? ""}
+                            onChange={(event) =>
+                              setConditionRationales((current) => ({
+                                ...current,
+                                [transition.id]: event.target.value,
+                              }))
+                            }
+                          />
+                          <div className="workflow-gate-actions">
+                            {props.onRetryCondition ? (
+                              <button
+                                type="button"
+                                className="workflow-secondary-button"
+                                disabled={busyAction !== undefined}
+                                onClick={() =>
+                                  void perform(
+                                    `retry-condition:${transition.id}`,
+                                    () => props.onRetryCondition!(transition),
+                                  )
+                                }
+                              >
+                                Retry condition judge
+                              </button>
+                            ) : null}
+                            {props.onOverrideCondition ? (
+                              <>
+                                <button
+                                  type="button"
+                                  className="workflow-primary-button"
+                                  disabled={
+                                    busyAction !== undefined ||
+                                    !(
+                                      conditionRationales[transition.id] ?? ""
+                                    ).trim()
+                                  }
+                                  onClick={() =>
+                                    void perform(
+                                      `override-yes:${transition.id}`,
+                                      () =>
+                                        props.onOverrideCondition!(
+                                          transition,
+                                          "yes",
+                                          conditionRationales[
+                                            transition.id
+                                          ]!.trim(),
+                                        ),
+                                    )
+                                  }
+                                >
+                                  Override YES
+                                </button>
+                                <button
+                                  type="button"
+                                  className="workflow-secondary-button"
+                                  disabled={
+                                    busyAction !== undefined ||
+                                    !(
+                                      conditionRationales[transition.id] ?? ""
+                                    ).trim()
+                                  }
+                                  onClick={() =>
+                                    void perform(
+                                      `override-no:${transition.id}`,
+                                      () =>
+                                        props.onOverrideCondition!(
+                                          transition,
+                                          "no",
+                                          conditionRationales[
+                                            transition.id
+                                          ]!.trim(),
+                                        ),
+                                    )
+                                  }
+                                >
+                                  Override NO
+                                </button>
+                              </>
+                            ) : null}
+                          </div>
+                        </div>
                       ) : null}
                     </li>
                   );

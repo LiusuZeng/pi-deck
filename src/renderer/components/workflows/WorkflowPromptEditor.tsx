@@ -31,6 +31,7 @@ export function WorkflowPromptEditor(props: {
   inputRef?: RefObject<HTMLTextAreaElement | null> | undefined;
   invalid?: boolean | undefined;
   errorId?: string | undefined;
+  showOptionalReferenceWarning?: boolean | undefined;
 }): ReactElement {
   const addPart = (part: WorkflowPromptPart) =>
     props.onChange([...props.parts, part]);
@@ -74,6 +75,23 @@ export function WorkflowPromptEditor(props: {
                     props.previousSteps,
                   )}
                 </strong>
+                {props.showOptionalReferenceWarning &&
+                part.type === "workflowInput" &&
+                (() => {
+                  const input = props.inputs.find(
+                    (candidate) => candidate.id === part.inputId,
+                  );
+                  return (
+                    input !== undefined &&
+                    !input.required &&
+                    !input.defaultValue?.trim()
+                  );
+                })() ? (
+                  <span className="workflow-reference-warning" role="alert">
+                    Optional input needs a value or default before this workflow
+                    can run.
+                  </span>
+                ) : null}
                 <button
                   type="button"
                   className="workflow-chip-remove"
@@ -112,14 +130,16 @@ export function WorkflowPromptEditor(props: {
             </option>
           ))}
           {props.previousSteps.flatMap((step) =>
-            (["finalAnswer", "summary"] as const).map((output) => (
-              <option
-                key={`output:${step.id}:${output}`}
-                value={`output:${step.id}:${output}`}
-              >
-                {step.name}: {output === "finalAnswer" ? "result" : output}
-              </option>
-            )),
+            (["finalAnswer", "summary", "transcript"] as const).map(
+              (output) => (
+                <option
+                  key={`output:${step.id}:${output}`}
+                  value={`output:${step.id}:${output}`}
+                >
+                  {step.name}: {output === "finalAnswer" ? "result" : output}
+                </option>
+              ),
+            ),
           )}
         </select>
       </div>

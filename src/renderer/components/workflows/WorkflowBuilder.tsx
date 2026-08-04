@@ -64,40 +64,27 @@ function materializeTransitions(
 
 function definitionForTemplate(
   template: WorkflowTemplate,
-  workspaceId?: string,
 ): WorkflowTemplateDefinition {
-  const steps = template.steps
-    .map((step) => ({
-      ...step,
-      promptParts: step.promptParts.filter(
-        (part) => part.type !== "stepOutput" || part.output !== "transcript",
-      ),
-      inputPolicy: {
-        ...step.inputPolicy,
-        // Parent-session wiring is not available yet. Do not preserve settings
-        // that would render an unavailable placeholder into a new run.
-        includeParentFinalAnswer: false,
-        includeParentSummary: false,
-        includeParentTranscript: false,
-      },
-    }))
-    .map((step) => ({
-      ...step,
-      promptParts:
-        step.promptParts.length > 0
-          ? step.promptParts
-          : [{ type: "text" as const, text: "" }],
-    }));
+  const steps = template.steps.map((step) => ({
+    ...step,
+    // Keep every persisted prompt part and input policy when editing. The
+    // editor must not silently discard transcript handoffs or parent context.
+    promptParts:
+      step.promptParts.length > 0
+        ? step.promptParts
+        : [{ type: "text" as const, text: "" }],
+    inputPolicy: { ...step.inputPolicy },
+  }));
   return {
     name: template.name,
     ...(template.description !== undefined
       ? { description: template.description }
       : {}),
-    ...(workspaceId !== undefined
-      ? { workspaceId }
-      : template.workspaceId !== undefined
-        ? { workspaceId: template.workspaceId }
-        : {}),
+    // An omitted workspaceId is the global template scope. Never replace it
+    // with the workspace currently selected in the renderer while editing.
+    ...(template.workspaceId !== undefined
+      ? { workspaceId: template.workspaceId }
+      : {}),
     ...(template.context !== undefined ? { context: template.context } : {}),
     ...(template.defaultModel !== undefined
       ? { defaultModel: template.defaultModel }
@@ -116,7 +103,7 @@ function initialDefinition(
   workspaceId?: string,
 ): WorkflowTemplateDefinition {
   if (template) {
-    return definitionForTemplate(template, workspaceId);
+    return definitionForTemplate(template);
   }
   return {
     name: "New agent workflow",
@@ -237,6 +224,42 @@ export function WorkflowBuilder(props: {
     }));
   };
 
+  const workflowInputReferenceErrors = useMemo(() => {
+    const inputsById = new Map(
+      definition.inputs.map((input) => [input.id, input]),
+    );
+    const errors = new Set<string>();
+    for (const step of definition.steps) {
+      for (const part of step.promptParts) {
+        if (part.type !== "workflowInput") continue;
+        const input = inputsById.get(part.inputId);
+        if (input && !input.required && !input.defaultValue?.trim()) {
+          errors.add(
+            `Optional input “${input.label || "Unnamed input"}” is referenced by an agent but has no default value. Make it required or add a default before saving.`,
+          );
+        }
+      }
+    }
+    return [...errors];
+  }, [definition.inputs, definition.steps]);
+
+  const unsureApprovalErrors = useMemo(() => {
+    const errors: Record<string, string> = {};
+    for (const transition of definition.transitions) {
+      if (transition.kind !== "condition") continue;
+      const target = transition.routes.unsure;
+      if (target?.kind !== "step") continue;
+      const step = definition.steps.find(
+        (candidate) => candidate.id === target.stepId,
+      );
+      if (step && step.startPolicy !== "manualApproval") {
+        errors[transition.fromStepId] =
+          `UNSURE must route to “${step.name}” configured as a manual approval step.`;
+      }
+    }
+    return errors;
+  }, [definition.steps, definition.transitions]);
+
   const transitionForStep = (stepId: string) =>
     definition.transitions.find(
       (transition) => transition.fromStepId === stepId,
@@ -288,7 +311,10 @@ export function WorkflowBuilder(props: {
   }, [definition]);
   const transitionErrors = useMemo(() => {
     const result = workflowTemplateDefinitionSchema.safeParse(definition);
-    const errors: Record<string, string> = { ...missingTransitionErrors };
+    const errors: Record<string, string> = {
+      ...missingTransitionErrors,
+      ...unsureApprovalErrors,
+    };
     if (!result.success) {
       for (const issue of result.error.issues) {
         const transitionIndex =
@@ -306,7 +332,7 @@ export function WorkflowBuilder(props: {
       }
     }
     return errors;
-  }, [definition, missingTransitionErrors]);
+  }, [definition, missingTransitionErrors, unsureApprovalErrors]);
   const validation = useMemo(() => {
     const result = workflowTemplateDefinitionSchema.safeParse(definition);
     const schemaErrors = result.success
@@ -315,9 +341,17 @@ export function WorkflowBuilder(props: {
     return [
       ...Object.values(promptErrors),
       ...Object.values(missingTransitionErrors),
+      ...workflowInputReferenceErrors,
+      ...Object.values(unsureApprovalErrors),
       ...schemaErrors,
     ];
-  }, [definition, missingTransitionErrors, promptErrors]);
+  }, [
+    definition,
+    missingTransitionErrors,
+    promptErrors,
+    unsureApprovalErrors,
+    workflowInputReferenceErrors,
+  ]);
 
   const save = async () => {
     const firstBlankStep = definition.steps.find(
@@ -369,10 +403,18 @@ export function WorkflowBuilder(props: {
             Define the orchestration plan now. Pi Deck starts each selected
             agent session only when its dependencies are ready.
           </p>
-          {props.workspaceId ? (
+          {props.initialTemplate ? (
             <p className="workflow-workspace-context">
-              Workspace:{" "}
-              <strong>{props.workspaceName ?? props.workspaceId}</strong>
+              Scope:{" "}
+              <strong>
+                {props.initialTemplate.workspaceId === undefined
+                  ? "All workspaces (global)"
+                  : (props.workspaceName ?? props.initialTemplate.workspaceId)}
+              </strong>
+            </p>
+          ) : props.workspaceId ? (
+            <p className="workflow-workspace-context">
+              Scope: <strong>{props.workspaceName ?? props.workspaceId}</strong>
             </p>
           ) : null}
         </div>
@@ -498,6 +540,21 @@ export function WorkflowBuilder(props: {
                 />{" "}
                 Required
               </label>
+              {!input.required ? (
+                <label className="workflow-field">
+                  <span>Default (optional)</span>
+                  <input
+                    aria-label={`Input ${index + 1} default`}
+                    value={input.defaultValue ?? ""}
+                    placeholder="Leave blank to require a value"
+                    onChange={(event) =>
+                      updateInput(input.id, {
+                        defaultValue: event.target.value || undefined,
+                      })
+                    }
+                  />
+                </label>
+              ) : null}
               <button
                 type="button"
                 className="workflow-icon-text-button"
@@ -551,6 +608,7 @@ export function WorkflowBuilder(props: {
                     steps={definition.steps}
                     fromStepId={step.id}
                     onChange={updateTransition}
+                    onStepChange={updateStep}
                     error={transitionErrors[step.id]}
                   />
                 ) : (

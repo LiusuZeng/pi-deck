@@ -32,6 +32,7 @@ import type {
 import type {
   WorkflowRun,
   WorkflowStepRun,
+  WorkflowTransitionRun,
   WorkflowTemplate,
   WorkflowTemplateDefinition,
 } from "../shared/workflowSchemas.js";
@@ -1770,6 +1771,38 @@ export function App(): ReactElement {
     const run = await window.piDeck.workflows.retryStep({
       runId: workflowRunId,
       stepRunId: step.id,
+    });
+    setWorkflowRuns((current) => [
+      run,
+      ...current.filter((candidate) => candidate.id !== run.id),
+    ]);
+  }
+
+  async function handleRetryWorkflowCondition(
+    transition: WorkflowTransitionRun,
+  ): Promise<void> {
+    if (workflowRunId === undefined) return;
+    const run = await window.piDeck.workflows.retryCondition({
+      runId: workflowRunId,
+      transitionRunId: transition.id,
+    });
+    setWorkflowRuns((current) => [
+      run,
+      ...current.filter((candidate) => candidate.id !== run.id),
+    ]);
+  }
+
+  async function handleOverrideWorkflowCondition(
+    transition: WorkflowTransitionRun,
+    decision: "yes" | "no",
+    rationale: string,
+  ): Promise<void> {
+    if (workflowRunId === undefined) return;
+    const run = await window.piDeck.workflows.overrideCondition({
+      runId: workflowRunId,
+      transitionRunId: transition.id,
+      decision,
+      rationale,
     });
     setWorkflowRuns((current) => [
       run,
@@ -4011,6 +4044,8 @@ export function App(): ReactElement {
                 }}
                 onStop={handleStopWorkflow}
                 onRetryStep={handleRetryWorkflowStep}
+                onRetryCondition={handleRetryWorkflowCondition}
+                onOverrideCondition={handleOverrideWorkflowCondition}
                 onApproveGate={handleApproveWorkflowGate}
                 onOpenSession={(step) => void handleOpenWorkflowStep(step)}
               />

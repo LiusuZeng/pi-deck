@@ -32,11 +32,32 @@ function WorkflowStartForm(props: {
       ),
     [props.template.inputs, values],
   );
+  const blankReferencedOptional = useMemo(() => {
+    const referencedIds = new Set(
+      props.template.steps.flatMap((step) =>
+        step.promptParts.flatMap((part) =>
+          part.type === "workflowInput" ? [part.inputId] : [],
+        ),
+      ),
+    );
+    return props.template.inputs.find(
+      (input) =>
+        referencedIds.has(input.id) &&
+        !input.required &&
+        !values[input.id]?.trim(),
+    );
+  }, [props.template.inputs, props.template.steps, values]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (missing) {
       setError(`${missing.label} is required.`);
+      return;
+    }
+    if (blankReferencedOptional) {
+      setError(
+        `${blankReferencedOptional.label} is optional, but an agent references it. Add a value or remove that reference before starting this workflow.`,
+      );
       return;
     }
     setStarting(true);

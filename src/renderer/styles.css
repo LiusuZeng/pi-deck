@@ -4304,6 +4304,38 @@ body {
   text-transform: uppercase;
 }
 
+.workflow-reference-warning {
+  color: var(--color-danger-fg);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.workflow-condition-recovery {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--color-warning);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-warning) 8%, transparent);
+}
+
+.workflow-condition-recovery p {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+.workflow-condition-recovery textarea {
+  width: 100%;
+  min-height: 72px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  color: var(--color-text);
+  background: var(--color-surface);
+  resize: vertical;
+}
+
 .workflow-output-preview {
   border-left: 3px solid var(--color-accent);
   padding-left: 10px;

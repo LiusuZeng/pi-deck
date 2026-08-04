@@ -84,6 +84,7 @@ export function WorkflowStepCard(props: {
                 previousSteps={props.previousSteps ?? []}
                 onChange={(promptParts) => props.onChange?.({ promptParts })}
                 inputRef={promptRef}
+                showOptionalReferenceWarning
                 invalid={props.promptError !== undefined}
                 errorId={
                   props.promptError
@@ -160,10 +161,54 @@ export function WorkflowStepCard(props: {
                   />
                   Shared workflow context
                 </label>
+                <label className="workflow-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={props.step.inputPolicy.includeParentFinalAnswer}
+                    onChange={(event) =>
+                      props.onChange?.({
+                        inputPolicy: {
+                          ...props.step.inputPolicy,
+                          includeParentFinalAnswer: event.target.checked,
+                        },
+                      })
+                    }
+                  />
+                  Parent session final answer
+                </label>
+                <label className="workflow-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={props.step.inputPolicy.includeParentSummary}
+                    onChange={(event) =>
+                      props.onChange?.({
+                        inputPolicy: {
+                          ...props.step.inputPolicy,
+                          includeParentSummary: event.target.checked,
+                        },
+                      })
+                    }
+                  />
+                  Parent session summary
+                </label>
+                <label className="workflow-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={props.step.inputPolicy.includeParentTranscript}
+                    onChange={(event) =>
+                      props.onChange?.({
+                        inputPolicy: {
+                          ...props.step.inputPolicy,
+                          includeParentTranscript: event.target.checked,
+                        },
+                      })
+                    }
+                  />
+                  Parent session transcript
+                </label>
                 <p className="workflow-help">
-                  Parent-session result, summary, and transcript inputs are not
-                  available yet. Add an explicit run-input or previous-agent
-                  result reference above instead.
+                  Shared context and parent-session handoffs are preserved with
+                  this workflow and included when selected.
                 </p>
               </fieldset>
             </>
@@ -173,37 +218,31 @@ export function WorkflowStepCard(props: {
                 <span className="workflow-field-label">
                   Instructions and handoffs
                 </span>
-                {props.step.promptParts
-                  .filter(
-                    (part) =>
-                      part.type !== "stepOutput" ||
-                      part.output !== "transcript",
-                  )
-                  .map((part, partIndex) =>
-                    part.type === "text" ? (
-                      <p key={`text-${partIndex}`}>
-                        {part.text || "No written instructions."}
-                      </p>
-                    ) : (
-                      <span
-                        className="workflow-reference-chip"
-                        key={`${part.type}-${partIndex}`}
-                      >
-                        <span className="workflow-reference-kind">
-                          {part.type === "workflowInput"
-                            ? "Run input"
-                            : "Previous result"}
-                        </span>
-                        <strong>
-                          {workflowPromptPartLabel(
-                            part,
-                            props.inputs ?? [],
-                            props.previousSteps ?? [],
-                          )}
-                        </strong>
+                {props.step.promptParts.map((part, partIndex) =>
+                  part.type === "text" ? (
+                    <p key={`text-${partIndex}`}>
+                      {part.text || "No written instructions."}
+                    </p>
+                  ) : (
+                    <span
+                      className="workflow-reference-chip"
+                      key={`${part.type}-${partIndex}`}
+                    >
+                      <span className="workflow-reference-kind">
+                        {part.type === "workflowInput"
+                          ? "Run input"
+                          : "Previous result"}
                       </span>
-                    ),
-                  )}
+                      <strong>
+                        {workflowPromptPartLabel(
+                          part,
+                          props.inputs ?? [],
+                          props.previousSteps ?? [],
+                        )}
+                      </strong>
+                    </span>
+                  ),
+                )}
               </div>
               {props.run?.finalAnswer ? (
                 <div className="workflow-output-preview">

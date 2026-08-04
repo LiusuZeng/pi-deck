@@ -9,6 +9,7 @@ export function WorkflowTransitionCard(props: {
   steps: WorkflowStepDefinition[];
   fromStepId: string;
   onChange(transition: WorkflowTransition): void;
+  onStepChange?(stepId: string, patch: Partial<WorkflowStepDefinition>): void;
   error?: string | undefined;
 }): ReactElement {
   const { transition, steps } = props;
@@ -39,6 +40,9 @@ export function WorkflowTransitionCard(props: {
                   props.fromStepId,
               });
             } else {
+              const approvalStep = steps.find(
+                (step) => step.id !== props.fromStepId,
+              );
               props.onChange({
                 id: transition.id,
                 fromStepId: props.fromStepId,
@@ -46,17 +50,23 @@ export function WorkflowTransitionCard(props: {
                 question:
                   "Did this agent produce a result ready for the next step?",
                 routes: {
-                  yes: {
-                    kind: "step",
-                    stepId:
-                      steps.find((step) => step.id !== props.fromStepId)?.id ??
-                      props.fromStepId,
-                  },
+                  yes: approvalStep
+                    ? { kind: "step", stepId: approvalStep.id }
+                    : undefined,
                   no: { kind: "stop" },
-                  unsure: { kind: "stop" },
+                  // UNSURE resolves through a real step-level manual approval;
+                  // condition manual gates are rejected by the backend.
+                  unsure: approvalStep
+                    ? { kind: "step", stepId: approvalStep.id }
+                    : { kind: "stop" },
                 },
                 previewBeforeStart: true,
               });
+              if (approvalStep) {
+                props.onStepChange?.(approvalStep.id, {
+                  startPolicy: "manualApproval",
+                });
+              }
             }
           }}
         >
@@ -123,7 +133,10 @@ export function WorkflowTransitionCard(props: {
           <div className="workflow-branch-grid">
             {(["yes", "no", "unsure"] as const).map((decision) => (
               <label className="workflow-field" key={decision}>
-                <span>If {decision.toUpperCase()}</span>
+                <span>
+                  If {decision.toUpperCase()}
+                  {decision === "unsure" ? " (manual approval)" : ""}
+                </span>
                 <select
                   value={
                     transition.routes[decision]?.kind === "step"
@@ -142,6 +155,11 @@ export function WorkflowTransitionCard(props: {
                             : { kind: "step", stepId: value },
                       },
                     });
+                    if (decision === "unsure" && value !== "stop") {
+                      props.onStepChange?.(value, {
+                        startPolicy: "manualApproval",
+                      });
+                    }
                   }}
                 >
                   <option value="stop">Stop workflow</option>
@@ -156,6 +174,10 @@ export function WorkflowTransitionCard(props: {
               </label>
             ))}
           </div>
+          <p className="workflow-help">
+            UNSURE routes to a step configured “Ask before starting” so the
+            backend can pause for an explicit approval.
+          </p>
         </>
       ) : null}
     </section>
