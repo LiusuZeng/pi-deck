@@ -2,12 +2,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import gifenc from "gifenc";
 import { _electron as electron } from "playwright";
+import { PNG } from "pngjs";
 import electronPath from "electron";
 
+const { applyPalette, GIFEncoder, quantize } = gifenc;
 const repoRoot = fileURLToPath(new URL("../", import.meta.url));
 const mainEntry = path.join(repoRoot, "dist/main/main.js");
-const outputPairs = [
+const siteOutputs = [
   {
     name: "pi-deck.png",
     width: 1193,
@@ -19,8 +22,58 @@ const outputPairs = [
     height: 672,
   },
 ];
+const additionalOutputs = [
+  {
+    name: "pi-deck-inbox.png",
+    width: 1193,
+    height: 776,
+  },
+  {
+    name: "pi-deck-conversation.png",
+    width: 1193,
+    height: 776,
+  },
+];
+const animatedOutputs = [
+  {
+    name: "pi-deck-conversation.gif",
+    width: 896,
+    height: 582,
+  },
+];
 
-function createFakePiBinary(root) {
+function encodeGif(frames, width, height) {
+  const rgbaFrames = frames.map(({ screenshot }) => {
+    const decoded = PNG.sync.read(screenshot);
+    if (decoded.width !== width || decoded.height !== height) {
+      throw new Error(
+        `Expected GIF frame ${width}x${height}, got ${decoded.width}x${decoded.height}`,
+      );
+    }
+    return decoded.data;
+  });
+  const combined = new Uint8Array(
+    rgbaFrames.reduce((total, frame) => total + frame.length, 0),
+  );
+  let offset = 0;
+  for (const frame of rgbaFrames) {
+    combined.set(frame, offset);
+    offset += frame.length;
+  }
+  const palette = quantize(combined, 256);
+  const gif = GIFEncoder();
+  for (const [index, frame] of rgbaFrames.entries()) {
+    gif.writeFrame(applyPalette(frame, palette), width, height, {
+      palette: index === 0 ? palette : undefined,
+      delay: frames[index].delay,
+      repeat: index === 0 ? 0 : undefined,
+    });
+  }
+  gif.finish();
+  return Buffer.from(gif.bytes());
+}
+
+function createFakePiBinary(root, extraArgs = []) {
   const fakePiPath = path.join(root, "fake-pi.js");
   fs.writeFileSync(
     fakePiPath,
@@ -34,6 +87,7 @@ if (process.argv.includes("--list-models")) {
   console.log("fake-provider  fake-model  128K     32K      yes       yes");
   process.exit(0);
 }
+process.argv.push(...${JSON.stringify(extraArgs)});
 require(${JSON.stringify(path.join(repoRoot, "dist/main/pi/fakeRpc/fakeRpcServer.js"))});
 `,
     { mode: 0o755 },
@@ -116,6 +170,10 @@ async function main() {
       session.ageMs,
     );
   }
+  const attachmentImageBase64 = fs.readFileSync(
+    path.join(repoRoot, "docs/assets/pi-deck-dark.png"),
+    "base64",
+  );
 
   const app = await electron.launch({
     executablePath: electronPath,
@@ -125,7 +183,12 @@ async function main() {
       ...process.env,
       PI_DECK_BACKEND: "real",
       PI_DECK_E2E_HIDE_WINDOWS: "1",
-      PI_DECK_PI_BINARY: createFakePiBinary(root),
+      PI_DECK_PI_BINARY: createFakePiBinary(root, [
+        "--prompt-scenario",
+        "tool",
+        "--stream-delay-ms",
+        "2000",
+      ]),
       PI_DECK_PROJECT_CWD: projectCwd,
       PI_CODING_AGENT_DIR: agentDir,
       PI_CODING_AGENT_SESSION_DIR: sessionDir,
@@ -212,16 +275,20 @@ async function main() {
       .click();
     await page.getByRole("status").waitFor({ state: "hidden" });
 
-    const workspaceOutput = outputPairs[0];
+    const capturedScreenshots = new Map();
+    const workspaceOutput = siteOutputs[0];
     const workspaceScreenshot = path.join(root, workspaceOutput.name);
     await page.setViewportSize({
       width: workspaceOutput.width,
       height: workspaceOutput.height,
     });
     await page.screenshot({ path: workspaceScreenshot });
+    capturedScreenshots.set(workspaceOutput.name, workspaceScreenshot);
 
+    const inboxOutput = siteOutputs[1];
     await page.getByRole("button", { name: "Work inbox", exact: true }).click();
     await page.getByRole("heading", { name: "Work inbox" }).waitFor();
+    await page.getByRole("status").waitFor({ state: "hidden" });
     await page
       .getByRole("complementary", { name: "Sessions" })
       .getByLabel("Hide sessions")
@@ -229,17 +296,141 @@ async function main() {
     await page
       .getByRole("complementary", { name: "Sessions" })
       .waitFor({ state: "detached" });
-    const inboxOutput = outputPairs[1];
     await page.setViewportSize({
       width: inboxOutput.width,
       height: inboxOutput.height,
     });
     const inboxScreenshot = path.join(root, inboxOutput.name);
     await page.screenshot({ path: inboxScreenshot });
+    capturedScreenshots.set(inboxOutput.name, inboxScreenshot);
 
-    for (const output of outputPairs) {
-      const source =
-        output.name === "pi-deck.png" ? workspaceScreenshot : inboxScreenshot;
+    await page.getByLabel("Show sessions").click();
+    await page.getByRole("complementary", { name: "Sessions" }).waitFor();
+    await page.getByRole("button", { name: "Work inbox", exact: true }).click();
+    await page.getByRole("heading", { name: "Work inbox" }).waitFor({
+      state: "detached",
+    });
+    await page.getByRole("button", { name: "Workspace: pi-deck" }).click();
+    await page.waitForFunction(
+      () =>
+        document.querySelector(
+          '[aria-label="Workspace: pi-deck"][aria-current="page"]',
+        ) !== null,
+    );
+    await page
+      .getByRole("button", { name: "Workspace actions for pi-deck" })
+      .click();
+    await page
+      .getByRole("menuitem", { name: "View work inbox", exact: true })
+      .click();
+    await page
+      .getByRole("heading", { name: /Work inbox · pi-deck/i })
+      .waitFor();
+    await page.getByRole("status").waitFor({ state: "hidden" });
+    const workspaceInboxOutput = additionalOutputs[0];
+    const workspaceInboxScreenshot = path.join(root, workspaceInboxOutput.name);
+    await page.setViewportSize({
+      width: workspaceInboxOutput.width,
+      height: workspaceInboxOutput.height,
+    });
+    await page.screenshot({ path: workspaceInboxScreenshot });
+    capturedScreenshots.set(
+      workspaceInboxOutput.name,
+      workspaceInboxScreenshot,
+    );
+
+    await page.getByRole("button", { name: "Work inbox", exact: true }).click();
+    await page.getByRole("heading", { name: /Work inbox · pi-deck/i }).waitFor({
+      state: "detached",
+    });
+    await page
+      .getByRole("button", { name: "New session", exact: true })
+      .click();
+    await page.getByLabel("Prompt text").waitFor();
+    await page
+      .getByLabel("Prompt text")
+      .fill("Review this workspace and summarize the next steps.");
+    await page.evaluate((dataBase64) => {
+      const bytes = Uint8Array.from(atob(dataBase64), (character) =>
+        character.charCodeAt(0),
+      );
+      const image = new File([bytes], "workspace-reference.png", {
+        type: "image/png",
+      });
+      const clipboard = new DataTransfer();
+      clipboard.items.add(image);
+      const textarea = document.querySelector(
+        'textarea[aria-label="Prompt text"]',
+      );
+      if (textarea === null) {
+        throw new Error("Prompt textarea is unavailable.");
+      }
+      textarea.dispatchEvent(
+        new ClipboardEvent("paste", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: clipboard,
+        }),
+      );
+    }, attachmentImageBase64);
+    await page.getByText("workspace-reference.png").waitFor();
+    const gifOutput = animatedOutputs[0];
+    const gifFrames = [];
+    const captureGifFrame = async (delay) => {
+      gifFrames.push({ screenshot: await page.screenshot(), delay });
+    };
+    await page.setViewportSize({
+      width: gifOutput.width,
+      height: gifOutput.height,
+    });
+    await captureGifFrame(900);
+    await page.getByRole("button", { name: "Send" }).click();
+    await page.getByRole("button", { name: "Abort" }).waitFor();
+    await page.locator(".tool-card").waitFor();
+    await page
+      .locator(".tool-card .tool-title")
+      .filter({ hasText: /^read$/ })
+      .waitFor();
+    await page.getByRole("button", { name: "Steer" }).waitFor();
+    await page.getByRole("button", { name: "Follow-up" }).waitFor();
+    await captureGifFrame(900);
+    await page.waitForTimeout(2_100);
+    await captureGifFrame(700);
+    await page.waitForTimeout(2_100);
+    await captureGifFrame(700);
+    await page.waitForTimeout(2_100);
+    await captureGifFrame(700);
+    await page.getByRole("status").waitFor({ state: "hidden" });
+    const conversationOutput = additionalOutputs[1];
+    const conversationScreenshot = path.join(root, conversationOutput.name);
+    await page.setViewportSize({
+      width: conversationOutput.width,
+      height: conversationOutput.height,
+    });
+    await page.screenshot({ path: conversationScreenshot });
+    capturedScreenshots.set(conversationOutput.name, conversationScreenshot);
+    await page.setViewportSize({
+      width: gifOutput.width,
+      height: gifOutput.height,
+    });
+    await page.waitForTimeout(1_800);
+    await captureGifFrame(1_400);
+    const conversationGif = path.join(root, gifOutput.name);
+    fs.writeFileSync(
+      conversationGif,
+      encodeGif(gifFrames, gifOutput.width, gifOutput.height),
+    );
+    capturedScreenshots.set(gifOutput.name, conversationGif);
+
+    for (const output of [
+      ...siteOutputs,
+      ...additionalOutputs,
+      ...animatedOutputs,
+    ]) {
+      const source = capturedScreenshots.get(output.name);
+      if (source === undefined) {
+        throw new Error(`Missing captured screenshot for ${output.name}`);
+      }
       for (const directory of [
         path.join(repoRoot, "docs/assets"),
         path.join(repoRoot, "site/assets"),

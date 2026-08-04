@@ -15,6 +15,12 @@ Pi Deck is a Pi coding-agent GUI that gives Pi a dedicated desktop workspace for
 
 > **Status:** Pi Deck is an active, pre-release personal MVP. It currently runs from source and targets macOS.
 
+## At a glance
+
+| Organize the work | Triage what matters | Run in parallel | Direct the next step |
+| --- | --- | --- | --- |
+| Named workspaces keep related sessions organized independently of folders. [Explore workspaces](#workspaces-projects-and-pi-native-sessions) | Work inbox surfaces attention, failures, progress, and idle history. [Explore Work inbox](#work-inbox) | Independent Pi workers let several conversations run at once. [Explore multi-session control](#multi-session-control) | Chat, tools, model controls, files, and images stay in one composer. [Explore chat controls](#chat-and-intervention-controls) |
+
 ## What Pi Deck is
 
 Pi Deck is a **local agent harness** for developers who already use Pi and want a clearer way to manage ongoing work:
@@ -29,6 +35,27 @@ Pi Deck is a **local agent harness** for developers who already use Pi and want 
 - Steer, queue a follow-up, answer extension requests, or abort a turn.
 
 Pi Deck is **not** an IDE, source editor, terminal wrapper, or hosted agent service. Keep using your preferred editor for code navigation and editing; Pi Deck coordinates the agents working alongside it.
+
+## See it in action
+
+<p align="center">
+  <a href="docs/assets/pi-deck-conversation.png" title="Open the live conversation screenshot full size">
+    <img src="docs/assets/pi-deck-conversation.png" alt="Pi Deck showing a live Pi conversation with an image attachment, tool execution card, streaming response, and intervention controls" width="49%">
+  </a>
+  <a href="docs/assets/pi-deck-inbox.png" title="Open the workspace Work inbox screenshot full size">
+    <img src="docs/assets/pi-deck-inbox.png" alt="Pi Deck showing a workspace-scoped Work inbox with idle sessions and status filters" width="49%">
+  </a>
+</p>
+
+<p align="center">
+  <a href="docs/assets/pi-deck-conversation.gif" title="Open the Pi Deck conversation walkthrough full size">
+    <img src="docs/assets/pi-deck-conversation.gif" alt="Animated Pi Deck walkthrough showing an image attachment, tool execution, streaming response, and intervention controls" width="78%">
+  </a>
+</p>
+
+_A short real-mode walkthrough: attach an image, send the prompt, watch Pi execute a tool, and follow the response as it streams._
+
+The conversation view shows the composer, image attachment preview, Pi tool execution, streaming response, and controls for steering, following up, or aborting. The workspace inbox keeps saved work grouped and easy to reopen.
 
 ## Features
 
@@ -199,9 +226,10 @@ npm run deck:real -- --dry-run /absolute/path/to/your/project
 
 ### Refreshing documentation screenshots
 
-The checked-in screenshots are generated from the Electron renderer in real Pi
-mode with deterministic local session fixtures, so they stay aligned with the
-workspace and Work inbox UI without requiring provider credentials:
+The checked-in PNG and GIF assets are generated from the Electron renderer in
+real Pi mode with deterministic local session fixtures, so they stay aligned
+with the workspace, Work inbox, and conversation UI without requiring provider
+credentials. The command refreshes both `docs/assets` and `site/assets`:
 
 ```bash
 npm run docs:capture

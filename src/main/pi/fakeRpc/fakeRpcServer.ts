@@ -619,17 +619,18 @@ class FakeRpcServer {
       this.write({
         type: "tool_execution_start",
         toolCallId: "tool_fake_1",
-        name: "read",
-        title: "Read fixture file",
+        toolName: "read",
       });
       this.write({
         type: "tool_execution_update",
         toolCallId: "tool_fake_1",
+        toolName: "read",
         output: "partial tool output",
       });
       this.write({
         type: "tool_execution_end",
         toolCallId: "tool_fake_1",
+        toolName: "read",
         status: "completed",
         output: "final tool output",
       });
