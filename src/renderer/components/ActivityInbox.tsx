@@ -37,6 +37,7 @@ const ACTIVITY_META: Record<
     Icon: LoaderCircle,
   },
   completed: { emptyLabel: "Completed", label: "Completed", Icon: Check },
+  idle: { emptyLabel: "Idle", label: "Idle", Icon: CircleDot },
 };
 
 function formatRelativeTime(timestamp: number): string {

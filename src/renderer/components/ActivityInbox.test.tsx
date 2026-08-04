@@ -42,7 +42,9 @@ function activity(
             ? "View pending"
             : status === "inProgress"
               ? "View progress"
-              : "View result",
+              : status === "completed"
+                ? "View result"
+                : "Open session",
   };
 }
 
@@ -53,6 +55,7 @@ function modelWithEveryKind(): ActivityInboxModel {
     pending: [activity("pending", "pending")],
     inProgress: [activity("inProgress", "progress")],
     completed: [activity("completed", "complete")],
+    idle: [activity("idle", "idle")],
   };
   return {
     items: Object.values(groups).flat(),
@@ -61,9 +64,9 @@ function modelWithEveryKind(): ActivityInboxModel {
       Object.entries(groups).map(([kind, items]) => [kind, items.length]),
     ) as ActivityInboxModel["counts"],
     actionableCount: 3,
-    totalCount: 5,
+    totalCount: 6,
     availableWorkspaceCounts: {
-      "workspace-atlas": 4,
+      "workspace-atlas": 5,
       "workspace-borealis": 1,
     },
   };
@@ -116,6 +119,7 @@ describe("ActivityInbox", () => {
     );
     expect(view.textContent).toContain("Respond");
     expect(view.textContent).toContain("Review failure");
+    expect(view.textContent).toContain("Idle");
   });
 
   it("changes workspace scope through the selector and uses scoped status counts", () => {
