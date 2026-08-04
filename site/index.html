@@ -75,8 +75,18 @@
       <section class="screenshots section" aria-labelledby="screenshots-heading">
         <div class="section-heading"><p class="eyebrow">See the work</p><h2 id="screenshots-heading">Your Pi sessions, in focus.</h2><p>Inspect streaming replies, tool execution, thinking, and usage while the work moves forward.</p></div>
         <div class="screenshot-grid">
-          <figure><img src="assets/pi-deck.png" width="1360" height="850" alt="Pi Deck in light mode showing workspace navigation, an active session, attachment previews, and a completed response" /><figcaption>Workspaces and sessions stay visible beside the live conversation.</figcaption></figure>
-          <figure><img src="assets/pi-deck-dark.png" width="1360" height="850" alt="Pi Deck in dark mode showing the Work inbox with workspace and status filters across parallel sessions" /><figcaption>Review parallel work across workspaces, then filter by the status that matters.</figcaption></figure>
+          <figure>
+            <a class="lightbox-trigger" href="assets/pi-deck.png" aria-label="Open the light mode Pi Deck screenshot full size">
+              <img src="assets/pi-deck.png" width="1360" height="850" alt="Pi Deck in light mode showing workspace navigation, an active session, attachment previews, and a completed response" />
+            </a>
+            <figcaption>Workspaces and sessions stay visible beside the live conversation.<span class="lightbox-hint">Click the image to enlarge.</span></figcaption>
+          </figure>
+          <figure>
+            <a class="lightbox-trigger" href="assets/pi-deck-dark.png" aria-label="Open the dark mode Work inbox screenshot full size">
+              <img src="assets/pi-deck-dark.png" width="1360" height="850" alt="Pi Deck in dark mode showing the Work inbox with workspace and status filters across parallel sessions" />
+            </a>
+            <figcaption>Review parallel work across workspaces, then filter by the status that matters.<span class="lightbox-hint">Click the image to enlarge.</span></figcaption>
+          </figure>
         </div>
       </section>
 
@@ -124,6 +134,41 @@ npm run deck:real -- /absolute/path/to/your/project</code></pre>
         </div>
       </section>
     </main>
+    <dialog class="image-lightbox" aria-label="Expanded Pi Deck screenshot">
+      <button class="image-lightbox-close" type="button" aria-label="Close enlarged screenshot">Close</button>
+      <img alt="" />
+    </dialog>
     <footer><span>Pi Deck · A local macOS workspace for Pi coding agents.</span><span><a href="https://github.com/LiusuZeng/pi-deck">Source</a><a href="https://github.com/LiusuZeng/pi-deck/releases">Releases</a><a href="https://github.com/LiusuZeng/pi-deck#how-it-works">Documentation</a></span></footer>
+    <script>
+      (() => {
+        const dialog = document.querySelector(".image-lightbox");
+        const image = dialog?.querySelector("img");
+        const closeButton = dialog?.querySelector(".image-lightbox-close");
+        if (!(dialog instanceof HTMLDialogElement) || !image || !closeButton) return;
+
+        let lastTrigger;
+        document.querySelectorAll(".lightbox-trigger").forEach((trigger) => {
+          trigger.addEventListener("click", (event) => {
+            if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+            event.preventDefault();
+            lastTrigger = trigger;
+            image.src = trigger.href;
+            image.alt = trigger.querySelector("img")?.alt ?? "";
+            dialog.showModal();
+            closeButton.focus();
+          });
+        });
+
+        closeButton.addEventListener("click", () => dialog.close());
+        dialog.addEventListener("click", (event) => {
+          if (event.target === dialog) dialog.close();
+        });
+        dialog.addEventListener("close", () => {
+          image.removeAttribute("src");
+          lastTrigger?.focus();
+          lastTrigger = undefined;
+        });
+      })();
+    </script>
   </body>
 </html>
