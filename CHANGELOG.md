@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-03
+
+Feature release adding a unified Work inbox for parallel session management.
+
+### Added
+
+- Added a global Work inbox covering all workspaces and workspace-scoped views.
+- Added tag-based workspace and status filtering for needs attention, failed,
+  pending, in progress, completed, and idle sessions.
+- Added idle saved-session rows so existing sessions remain discoverable from
+  the inbox without increasing actionable counts.
+
+### Changed
+
+- Renamed the sidebar entry to Work inbox and compacted workspace actions into
+  overflow menus to keep the workspace tree readable.
+
+### Fixed
+
+- Starting a new session now exits the Work inbox and immediately shows the
+  new session composer.
+
+### Tests
+
+- Added domain, renderer, and Electron end-to-end coverage for scoped inbox
+  filtering, idle sessions, draft exclusion, and new-session navigation.
+
 ## [0.3.0] - 2026-08-03
 
 Feature release introducing grouped workspaces and a more resilient,
@@ -196,7 +223,8 @@ coding-agent sessions.
   crash; persisted sessions can be reopened, but unsaved partial stream text may
   be lost.
 
-[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/LiusuZeng/pi-deck/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/LiusuZeng/pi-deck/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/LiusuZeng/pi-deck/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/LiusuZeng/pi-deck/compare/v0.1.0...v0.1.1
