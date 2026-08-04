@@ -7913,7 +7913,44 @@ function InlineTokens(props: { tokens: InlineToken[] }): ReactElement {
   );
 }
 
-function PiModelThinkingMenu(props: {
+type MenuNavigationKey = "ArrowDown" | "ArrowUp" | "Home" | "End";
+
+function directMenuItems(menu: HTMLElement | null): HTMLElement[] {
+  if (!menu) {
+    return [];
+  }
+  return Array.from(menu.children).filter(
+    (element): element is HTMLElement =>
+      element instanceof HTMLElement &&
+      element.getAttribute("role")?.startsWith("menuitem") === true &&
+      !element.matches(":disabled, [aria-disabled='true']"),
+  );
+}
+
+function focusMenuItem(
+  menu: HTMLElement | null,
+  currentTarget: EventTarget | null,
+  key: MenuNavigationKey,
+): void {
+  const items = directMenuItems(menu);
+  if (items.length === 0) {
+    return;
+  }
+  const currentIndex = items.indexOf(currentTarget as HTMLElement);
+  let nextIndex: number;
+  if (key === "Home") {
+    nextIndex = 0;
+  } else if (key === "End") {
+    nextIndex = items.length - 1;
+  } else if (key === "ArrowDown") {
+    nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % items.length;
+  } else {
+    nextIndex = currentIndex <= 0 ? items.length - 1 : currentIndex - 1;
+  }
+  items[nextIndex]?.focus();
+}
+
+export function PiModelThinkingMenu(props: {
   models: ChatModelSummary[];
   selectedModel: ChatModelSummary | undefined;
   thinkingLevels: string[];
@@ -7926,7 +7963,10 @@ function PiModelThinkingMenu(props: {
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
   const modelTriggerRef = useRef<HTMLButtonElement>(null);
+  const modelMenuRef = useRef<HTMLDivElement>(null);
+  const focusModelMenuOnOpenRef = useRef(false);
 
   useEffect(() => {
     if (!open) {
@@ -7942,12 +7982,35 @@ function PiModelThinkingMenu(props: {
     return () => document.removeEventListener("mousedown", closeOnOutsideClick);
   }, [open]);
 
+  useEffect(() => {
+    if (open) {
+      directMenuItems(popoverRef.current)[0]?.focus();
+    }
+  }, [open]);
+
+  useEffect(() => {
+    if (!modelMenuOpen || !focusModelMenuOnOpenRef.current) {
+      return;
+    }
+    focusModelMenuOnOpenRef.current = false;
+    directMenuItems(modelMenuRef.current)[0]?.focus();
+  }, [modelMenuOpen]);
+
   function close(restoreFocus = false): void {
     setOpen(false);
     setModelMenuOpen(false);
     if (restoreFocus) {
       triggerRef.current?.focus();
     }
+  }
+
+  function openModelMenu(focusFirstItem: boolean): void {
+    if (focusFirstItem && modelMenuOpen) {
+      directMenuItems(modelMenuRef.current)[0]?.focus();
+      return;
+    }
+    focusModelMenuOnOpenRef.current = focusFirstItem;
+    setModelMenuOpen(true);
   }
 
   const modelName =
@@ -7967,13 +8030,15 @@ function PiModelThinkingMenu(props: {
           } else {
             close(true);
           }
+          return;
         }
         if (
           event.key === "ArrowRight" &&
           event.target === modelTriggerRef.current
         ) {
           event.preventDefault();
-          setModelMenuOpen(true);
+          openModelMenu(true);
+          return;
         }
         if (
           event.key === "ArrowLeft" &&
@@ -7982,6 +8047,20 @@ function PiModelThinkingMenu(props: {
           event.preventDefault();
           setModelMenuOpen(false);
           modelTriggerRef.current?.focus();
+          return;
+        }
+        if (
+          event.key === "ArrowDown" ||
+          event.key === "ArrowUp" ||
+          event.key === "Home" ||
+          event.key === "End"
+        ) {
+          const target = event.target as HTMLElement;
+          const menu = target.closest<HTMLElement>("[role='menu']");
+          if (menu === popoverRef.current || menu === modelMenuRef.current) {
+            event.preventDefault();
+            focusMenuItem(menu, event.target, event.key);
+          }
         }
       }}
     >
@@ -8008,6 +8087,7 @@ function PiModelThinkingMenu(props: {
         <div
           aria-label="Model and thinking options"
           className="pi-configuration-popover"
+          ref={popoverRef}
           role="menu"
         >
           <span className="pi-configuration-heading">Thinking</span>
@@ -8023,7 +8103,7 @@ function PiModelThinkingMenu(props: {
                 size="sm"
                 variant="menuItem"
                 onClick={() => {
-                  close();
+                  close(true);
                   if (!selected) {
                     props.onSelectThinking(level);
                   }
@@ -8050,8 +8130,8 @@ function PiModelThinkingMenu(props: {
                 role="menuitem"
                 size="sm"
                 variant="menuItem"
-                onClick={() => setModelMenuOpen(true)}
-                onMouseEnter={() => setModelMenuOpen(true)}
+                onClick={() => openModelMenu(true)}
+                onMouseEnter={() => openModelMenu(false)}
               >
                 <span title={modelName}>{modelName}</span>
                 <ChevronRight aria-hidden="true" size={14} strokeWidth={1.75} />
@@ -8060,6 +8140,7 @@ function PiModelThinkingMenu(props: {
                 <div
                   aria-label="Available Pi models"
                   className="pi-model-submenu"
+                  ref={modelMenuRef}
                   role="menu"
                 >
                   {props.models.map((model) => {
@@ -8078,7 +8159,7 @@ function PiModelThinkingMenu(props: {
                         size="sm"
                         variant="menuItem"
                         onClick={() => {
-                          close();
+                          close(true);
                           if (!selected && model.provider) {
                             props.onSelectModel(model.provider, model.id);
                           }
