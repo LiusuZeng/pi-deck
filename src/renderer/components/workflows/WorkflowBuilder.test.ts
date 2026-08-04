@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
 import type {
   WorkflowStepDefinition,
+  WorkflowTemplateDefinition,
   WorkflowTransition,
 } from "../../../shared/workflowSchemas.js";
 import {
@@ -25,6 +26,41 @@ const step = (id: string): WorkflowStepDefinition => ({
   },
   startPolicy: "auto",
 });
+
+const branchTemplate = {
+  id: "a1a1a1a1-a1a1-41a1-81a1-a1a1a1a1a1a1",
+  name: "Branch handoff",
+  inputs: [],
+  steps: [
+    step("source"),
+    step("no-branch"),
+    {
+      ...step("yes-branch"),
+      promptParts: [
+        {
+          type: "stepOutput" as const,
+          stepId: "source",
+          output: "finalAnswer" as const,
+        },
+      ],
+    },
+  ],
+  transitions: [
+    {
+      id: "source-condition",
+      fromStepId: "source",
+      kind: "condition" as const,
+      question: "Should the YES branch run?",
+      routes: {
+        yes: { kind: "step" as const, stepId: "yes-branch" },
+        no: { kind: "step" as const, stepId: "no-branch" },
+      },
+      previewBeforeStart: false,
+    },
+  ],
+  createdAtMs: 1,
+  updatedAtMs: 1,
+};
 
 describe("workflow builder transition validation", () => {
   let root: Root | undefined;
@@ -114,5 +150,65 @@ describe("workflow builder transition validation", () => {
         transitions,
       ),
     ).toEqual([]);
+  });
+
+  it("offers only graph predecessors for branch handoffs and preserves valid references", () => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    const saved: WorkflowTemplateDefinition[] = [];
+    root = createRoot(container);
+    act(() => {
+      root?.render(
+        createElement(WorkflowBuilder, {
+          initialTemplate: branchTemplate,
+          onSave: (definition) => {
+            saved.push(definition);
+          },
+          onCancel: () => undefined,
+        }),
+      );
+    });
+
+    const yesHeading = [
+      ...container.querySelectorAll("button.workflow-card-heading"),
+    ].find((button) => button.textContent?.includes("yes-branch"));
+    expect(yesHeading).toBeDefined();
+    act(() => {
+      (yesHeading as HTMLButtonElement).click();
+    });
+
+    const yesCard = [
+      ...container.querySelectorAll("article.workflow-step-card"),
+    ].find((card) => card.textContent?.includes("yes-branch"));
+    expect(yesCard).toBeDefined();
+    const referenceSelect = yesCard?.querySelector(
+      'select[aria-label="Add a workflow reference"]',
+    ) as HTMLSelectElement;
+    const referenceValues = [...referenceSelect.options].map(
+      (option) => option.value,
+    );
+    expect(referenceValues).toEqual(
+      expect.arrayContaining([
+        "output:source:finalAnswer",
+        "output:source:summary",
+        "output:source:transcript",
+      ]),
+    );
+    expect(
+      referenceValues.filter((value) => value.startsWith("output:no-branch:")),
+    ).toEqual([]);
+    expect(yesCard?.textContent).toContain("source result");
+
+    act(() => {
+      (
+        container?.querySelector(
+          "button.workflow-primary-button",
+        ) as HTMLButtonElement
+      ).click();
+    });
+    expect(saved).toHaveLength(1);
+    expect(
+      saved[0]?.steps.find((step) => step.id === "yes-branch")?.promptParts,
+    ).toEqual(branchTemplate.steps[2]?.promptParts);
   });
 });
