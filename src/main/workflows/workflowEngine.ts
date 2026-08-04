@@ -211,6 +211,26 @@ export function resolveWorkflowCondition(
   return withRunStatus(next, undefined, now);
 }
 
+export function failWorkflowCondition(
+  run: WorkflowRun,
+  transitionRunId: string,
+  error: string,
+  now = Date.now(),
+): WorkflowRun {
+  assertRunSchedulable(run);
+  const transitionRun = run.transitionRuns.find((item) => item.id === transitionRunId);
+  if (transitionRun === undefined) throw new Error(`Unknown workflow transition run: ${transitionRunId}`);
+  if (transitionRun.status !== "evaluating") throw new Error("Workflow condition is not evaluating.");
+  const next = updateTransition(run, transitionRunId, {
+    status: "failed",
+    decision: "unsure",
+    error,
+    rationale: "The condition judge returned an invalid result; no branch was selected.",
+    updatedAtMs: now,
+  });
+  return withRunStatus(next, "needsAttention", now);
+}
+
 export function beginWorkflowConditionEvaluation(
   run: WorkflowRun,
   transitionRunId: string,
@@ -244,7 +264,12 @@ export function approveWorkflowStep(
     status: action === "approve" ? "ready" : "skipped",
     updatedAtMs: now,
   });
-  return withRunStatus(next, undefined, now);
+  // A skipped approval is still a deliberate terminal choice. Resolve its
+  // outgoing always edges so a gate cannot leave the graph permanently
+  // waiting on a step that will never produce an answer.
+  return action === "skip"
+    ? routeSkippedStep(next, step.templateStepId, now)
+    : withRunStatus(next, undefined, now);
 }
 
 export function stopWorkflowRun(run: WorkflowRun, now = Date.now()): WorkflowRun {
@@ -270,8 +295,63 @@ export function readyWorkflowSteps(run: WorkflowRun): WorkflowStepRun[] {
   return run.stepRuns.filter((step) => step.status === "ready").map((step) => ({ ...step }));
 }
 
+/** Convert in-flight state from a previous main-process lifetime into state
+ * that can safely be resumed. RPC workers cannot be reattached after a crash. */
+export function recoverWorkflowRun(run: WorkflowRun, now = Date.now()): WorkflowRun {
+  if (["completed", "failed", "stopped"].includes(run.status)) return run;
+  const stepRuns = run.stepRuns.map((step) =>
+    step.status === "running" || step.status === "starting"
+      ? {
+          ...step,
+          status: "failed" as const,
+          error: "The previous Pi worker was lost when the app restarted; retry this step.",
+          runtimeId: undefined,
+          updatedAtMs: now,
+        }
+      : step.status === "queued"
+        ? { ...step, status: "ready" as const, runtimeId: undefined, updatedAtMs: now }
+        : step,
+  );
+  const transitionRuns = run.transitionRuns.map((transition) =>
+    transition.status === "evaluating"
+      ? {
+          ...transition,
+          status: "failed" as const,
+          decision: "unsure" as const,
+          error: "The previous condition judge was lost when the app restarted; review and retry the workflow.",
+          updatedAtMs: now,
+        }
+      : transition,
+  );
+  return workflowRunSchema.parse({
+    ...run,
+    stepRuns,
+    transitionRuns,
+    status:
+      stepRuns.some((step) => step.status === "failed") ||
+      transitionRuns.some((transition) => transition.status === "failed")
+        ? "needsAttention"
+        : "waiting",
+    updatedAtMs: now,
+  });
+}
+
 function routeCompletedStep(run: WorkflowRun, templateStepId: string, now: number): WorkflowRun {
   if (run.status === "stopped") return withRunStatus(run, "stopped", now);
+  return routeTerminalStep(run, templateStepId, now, true);
+}
+
+function routeSkippedStep(run: WorkflowRun, templateStepId: string, now: number): WorkflowRun {
+  if (run.status === "stopped") return withRunStatus(run, "stopped", now);
+  return routeTerminalStep(run, templateStepId, now, false);
+}
+
+function routeTerminalStep(
+  run: WorkflowRun,
+  templateStepId: string,
+  now: number,
+  completed: boolean,
+): WorkflowRun {
   let next = run;
   const outgoing = run.templateSnapshot.transitions.filter(
     (transition) => transition.fromStepId === templateStepId,
@@ -282,7 +362,16 @@ function routeCompletedStep(run: WorkflowRun, templateStepId: string, now: numbe
     );
     if (transitionRun === undefined) continue;
     if (transition.kind === "condition") {
-      next = updateTransition(next, transitionRun.id, { status: "evaluating", updatedAtMs: now });
+      if (completed) {
+        next = updateTransition(next, transitionRun.id, { status: "evaluating", updatedAtMs: now });
+      } else {
+        next = updateTransition(next, transitionRun.id, { status: "skipped", updatedAtMs: now });
+        for (const target of Object.values(transition.routes)) {
+          if (target?.kind === "step") {
+            next = updateStepByTemplateId(next, target.stepId, { status: "skipped", updatedAtMs: now });
+          }
+        }
+      }
       continue;
     }
     if (transition.kind === "manualGate") {

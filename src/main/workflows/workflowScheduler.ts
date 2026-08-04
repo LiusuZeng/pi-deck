@@ -4,9 +4,16 @@ import {
   markWorkflowStepQueued,
   markWorkflowStepStarted,
   readyWorkflowSteps,
+  resolveWorkflowCondition,
+  failWorkflowCondition,
 } from "./workflowEngine.js";
 import { renderWorkflowPrompt } from "./workflowPromptRenderer.js";
-import type { WorkflowRun } from "../../shared/workflowSchemas.js";
+import type {
+  WorkflowRun,
+  WorkflowStepDefinition,
+  WorkflowTransition,
+} from "../../shared/workflowSchemas.js";
+import { z } from "zod";
 interface WorkflowMessage {
   role: string;
   content?: unknown;
@@ -33,6 +40,11 @@ export interface WorkflowSchedulerDependencies {
   prompt(runtimeId: string, text: string): Promise<void>;
   getSnapshot(runtimeId: string): Promise<WorkflowSessionSnapshot>;
   closeSession(runtimeId: string): Promise<void>;
+  configureSession?(
+    runtimeId: string,
+    settings: { model?: { provider?: string; modelId?: string }; thinkingLevel?: string },
+  ): Promise<void>;
+  getRun?(runId: string): Promise<WorkflowRun>;
   persist(run: WorkflowRun): Promise<WorkflowRun>;
   emit(run: WorkflowRun): void;
   now?: () => number;
@@ -40,8 +52,15 @@ export interface WorkflowSchedulerDependencies {
 
 interface ActiveStep {
   runId: string;
-  stepRunId: string;
+  kind: "step" | "condition";
+  stepRunId?: string;
+  transitionRunId?: string;
 }
+
+const conditionJudgeSchema = z.object({
+  decision: z.enum(["yes", "no", "unsure"]),
+  rationale: z.string().min(1).max(4_000),
+}).strict();
 
 /**
  * Runs one ready agent step at a time. A Pi worker is deliberately treated as
@@ -52,6 +71,7 @@ export class WorkflowScheduler {
   private readonly runs = new Map<string, WorkflowRun>();
   private readonly activeByRuntime = new Map<string, ActiveStep>();
   private readonly pumping = new Set<string>();
+  private readonly mutationVersions = new Map<string, number>();
   private readonly now: () => number;
 
   constructor(private readonly dependencies: WorkflowSchedulerDependencies) {
@@ -60,6 +80,7 @@ export class WorkflowScheduler {
 
   async schedule(run: WorkflowRun): Promise<WorkflowRun> {
     this.runs.set(run.id, run);
+    this.mutationVersions.set(run.id, (this.mutationVersions.get(run.id) ?? 0) + 1);
     if (isTerminalRun(run)) return run;
     return this.pump(run.id);
   }
@@ -67,6 +88,7 @@ export class WorkflowScheduler {
   /** Apply a newly persisted stop/retry/approval mutation from IPC. */
   async update(run: WorkflowRun): Promise<WorkflowRun> {
     this.runs.set(run.id, run);
+    this.mutationVersions.set(run.id, (this.mutationVersions.get(run.id) ?? 0) + 1);
     if (run.status === "stopped" || run.status === "failed") {
       for (const [runtimeId, active] of this.activeByRuntime) {
         if (active.runId === run.id) {
@@ -90,11 +112,19 @@ export class WorkflowScheduler {
       this.activeByRuntime.delete(event.runtimeId);
       const run = this.runs.get(active.runId);
       if (run !== undefined && !isTerminalRun(run)) {
-        await this.finishFailed(
-          run,
-          active.stepRunId,
-          "The Pi worker exited before the workflow step completed.",
-        );
+        if (active.kind === "step" && active.stepRunId !== undefined) {
+          await this.finishFailed(
+            run,
+            active.stepRunId,
+            "The Pi worker exited before the workflow step completed.",
+          );
+        } else if (active.transitionRunId !== undefined) {
+          await this.finishConditionFailed(
+            run,
+            active.transitionRunId,
+            "The Pi worker exited before the condition judge completed.",
+          );
+        }
       }
       await this.pumpQueuedRuns();
       return;
@@ -109,13 +139,23 @@ export class WorkflowScheduler {
     this.activeByRuntime.delete(event.runtimeId);
     const status = typeof event.status === "string" ? event.status : undefined;
     if (status === "error" || status === "aborted") {
-      await this.finishFailed(
-        run,
-        active.stepRunId,
-        typeof event.error === "string"
-          ? event.error
-          : `Pi agent ended with status: ${status}.`,
-      );
+      if (active.kind === "step" && active.stepRunId !== undefined) {
+        await this.finishFailed(
+          run,
+          active.stepRunId,
+          typeof event.error === "string"
+            ? event.error
+            : `Pi agent ended with status: ${status}.`,
+        );
+      } else if (active.transitionRunId !== undefined) {
+        await this.finishConditionFailed(
+          run,
+          active.transitionRunId,
+          typeof event.error === "string"
+            ? event.error
+            : `Condition judge ended with status: ${status}.`,
+        );
+      }
       await this.closeQuietly(event.runtimeId);
       await this.pumpQueuedRuns();
       return;
@@ -124,30 +164,66 @@ export class WorkflowScheduler {
     try {
       const snapshot = await this.dependencies.getSnapshot(event.runtimeId);
       const finalAssistant = findFinalAssistant(snapshot.messages);
-      if (finalAssistant?.error === true) {
+      if (active.kind === "condition" && active.transitionRunId !== undefined) {
+        if (finalAssistant?.error === true || finalAssistant?.content === undefined) {
+          await this.finishConditionFailed(
+            run,
+            active.transitionRunId,
+            finalAssistant?.errorMessage ?? "Condition judge returned no JSON result.",
+          );
+        } else {
+          const parsed = parseConditionDecision(finalAssistant.content);
+          if (parsed === undefined) {
+            await this.finishConditionFailed(
+              run,
+              active.transitionRunId,
+              "Condition judge returned malformed output; expected strict yes/no/unsure JSON.",
+            );
+          } else {
+            const resolved = resolveWorkflowCondition(
+              run,
+              active.transitionRunId,
+              parsed.decision,
+              parsed.rationale,
+              this.now(),
+            );
+            await this.persistAndEmit(this.runsSet(resolved));
+          }
+        }
+      } else if (active.stepRunId !== undefined) {
+        if (finalAssistant?.error === true) {
+          await this.finishFailed(
+            run,
+            active.stepRunId,
+            finalAssistant.errorMessage ?? "Pi returned an assistant error.",
+          );
+        } else {
+          const completed = markWorkflowStepCompleted(
+            run,
+            active.stepRunId,
+            finalAssistant?.content !== undefined
+              ? { finalAnswer: finalAssistant.content }
+              : {},
+            this.now(),
+          );
+          await this.persistAndEmit(this.runsSet(completed));
+          // The final answer is persisted before close can emit worker_exit.
+        }
+      }
+    } catch (error) {
+      if (active.kind === "condition" && active.transitionRunId !== undefined) {
+        await this.finishConditionFailed(
+          run,
+          active.transitionRunId,
+          error instanceof Error ? error.message : String(error),
+        );
+      } else if (active.stepRunId !== undefined) {
         await this.finishFailed(
           run,
           active.stepRunId,
-          finalAssistant.errorMessage ?? "Pi returned an assistant error.",
+          error instanceof Error ? error.message : String(error),
         );
-      } else {
-        const completed = markWorkflowStepCompleted(
-          run,
-          active.stepRunId,
-          finalAssistant?.content !== undefined
-            ? { finalAnswer: finalAssistant.content }
-            : {},
-          this.now(),
-        );
-        await this.persistAndEmit(this.runsSet(completed));
-        // The final answer is persisted before close can emit worker_exit.
       }
-    } catch (error) {
-      await this.finishFailed(
-        run,
-        active.stepRunId,
-        error instanceof Error ? error.message : String(error),
-      );
     } finally {
       await this.closeQuietly(event.runtimeId);
       await this.pump(run.id);
@@ -170,17 +246,23 @@ export class WorkflowScheduler {
         return run;
       }
       const step = readyWorkflowSteps(run)[0];
-      if (step === undefined) return run;
-      const definition = run.templateSnapshot.steps.find(
-        (candidate) => candidate.id === step.templateStepId,
-      );
-      if (definition === undefined) {
+      const conditionEntry = step === undefined
+        ? run.transitionRuns.find((candidate) => candidate.status === "evaluating")
+        : undefined;
+      if (step === undefined && conditionEntry === undefined) return run;
+      const definition = step === undefined
+        ? undefined
+        : run.templateSnapshot.steps.find(
+            (candidate) => candidate.id === step.templateStepId,
+          );
+      if (step !== undefined && definition === undefined) {
         return this.finishFailed(
           run,
           step.id,
           `Unknown workflow step: ${step.templateStepId}`,
         );
       }
+      const version = this.mutationVersions.get(runId) ?? 0;
 
       let session: WorkflowSessionSnapshot;
       try {
@@ -189,63 +271,92 @@ export class WorkflowScheduler {
         // Capacity is intentionally not inferred from an arbitrary error. A
         // failed allocation is safe to leave queued; startup/configuration
         // errors are actionable and must not masquerade as queued work.
-        if (isCapacityError(error)) {
+        if (isCapacityError(error) && step !== undefined) {
           const queued = markWorkflowStepQueued(run, step.id, this.now());
           return this.persistAndEmit(this.runsSet(queued));
         }
-        return this.finishFailed(
+        if (step !== undefined) {
+          return this.finishFailed(
+            run,
+            step.id,
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        return this.finishConditionFailed(
           run,
-          step.id,
+          conditionEntry!.id,
           error instanceof Error ? error.message : String(error),
         );
       }
 
-      const renderedPrompt = renderWorkflowPrompt({
-        ...(run.templateSnapshot.context !== undefined
-          ? { workflowContext: run.templateSnapshot.context }
-          : {}),
-        step: definition,
-        run,
-      });
-      const started = markWorkflowStepStarted(
-        run,
-        step.id,
-        this.now(),
-        session.runtimeId,
-      );
-      const sessionState = session.state;
-      const withMetadata: WorkflowRun = {
-        ...started,
-        stepRuns: started.stepRuns.map((candidate) =>
-          candidate.id === step.id
-            ? {
-                ...candidate,
-                renderedPrompt,
-                ...(typeof sessionState.sessionFile === "string"
-                  ? { sessionFile: sessionState.sessionFile }
-                  : {}),
-                ...(typeof sessionState.sessionId === "string"
-                  ? { sessionId: sessionState.sessionId }
-                  : {}),
-              }
-            : candidate,
-        ),
-      };
-      this.activeByRuntime.set(session.runtimeId, {
-        runId,
-        stepRunId: step.id,
-      });
-      await this.persistAndEmit(this.runsSet(withMetadata));
-      try {
-        await this.dependencies.prompt(session.runtimeId, renderedPrompt);
-      } catch (error) {
-        this.activeByRuntime.delete(session.runtimeId);
-        await this.finishFailed(
-          withMetadata,
-          step.id,
-          error instanceof Error ? error.message : String(error),
-        );
+      // Stopping a run can race worker allocation. Re-read persisted state and
+      // check the mutation generation before recording any runtime metadata.
+      const latest = this.dependencies.getRun
+        ? await this.dependencies.getRun(runId)
+        : this.runs.get(runId);
+      if (latest === undefined || latest.status === "stopped" || version !== (this.mutationVersions.get(runId) ?? 0)) {
         await this.closeQuietly(session.runtimeId);
+        if (latest !== undefined) this.runsSet(latest);
+        return latest ?? run;
+      }
+
+      const sessionState = session.state;
+      if (step !== undefined && definition !== undefined) {
+        const renderedPrompt = renderWorkflowPrompt({
+          ...(run.templateSnapshot.context !== undefined
+            ? { workflowContext: run.templateSnapshot.context }
+            : {}),
+          step: definition,
+          run,
+        });
+        const started = markWorkflowStepStarted(
+          latest,
+          step.id,
+          this.now(),
+          session.runtimeId,
+        );
+        const withMetadata: WorkflowRun = {
+          ...started,
+          stepRuns: started.stepRuns.map((candidate) =>
+            candidate.id === step.id
+              ? {
+                  ...candidate,
+                  renderedPrompt,
+                  ...(typeof sessionState.sessionFile === "string" ? { sessionFile: sessionState.sessionFile } : {}),
+                  ...(typeof sessionState.sessionId === "string" ? { sessionId: sessionState.sessionId } : {}),
+                }
+              : candidate,
+          ),
+        };
+        this.activeByRuntime.set(session.runtimeId, { runId, kind: "step", stepRunId: step.id });
+        await this.persistAndEmit(this.runsSet(withMetadata));
+        try {
+          await this.applyStepSettings(session.runtimeId, latest, definition);
+          await this.dependencies.prompt(session.runtimeId, renderedPrompt);
+        } catch (error) {
+          this.activeByRuntime.delete(session.runtimeId);
+          await this.finishFailed(withMetadata, step.id, error instanceof Error ? error.message : String(error));
+          await this.closeQuietly(session.runtimeId);
+        }
+      } else {
+        const transition = run.templateSnapshot.transitions.find(
+          (candidate): candidate is Extract<WorkflowTransition, { kind: "condition" }> =>
+            candidate.id === run.transitionRuns.find((item) => item.id === conditionEntry!.id)?.templateTransitionId && candidate.kind === "condition",
+        );
+        if (transition === undefined) {
+          await this.closeQuietly(session.runtimeId);
+          return this.finishConditionFailed(latest, conditionEntry!.id, "Unknown condition transition.");
+        }
+        const source = latest.stepRuns.find((candidate) => candidate.templateStepId === transition.fromStepId);
+        const prompt = renderConditionJudgePrompt(transition, source?.finalAnswer);
+        this.activeByRuntime.set(session.runtimeId, { runId, kind: "condition", transitionRunId: conditionEntry!.id });
+        try {
+          await this.dependencies.prompt(session.runtimeId, prompt);
+        } catch (error) {
+          this.activeByRuntime.delete(session.runtimeId);
+          await this.finishConditionFailed(latest, conditionEntry!.id, error instanceof Error ? error.message : String(error));
+          await this.closeQuietly(session.runtimeId);
+        }
       }
       return this.runs.get(runId)!;
     } finally {
@@ -260,6 +371,39 @@ export class WorkflowScheduler {
   ): Promise<WorkflowRun> {
     const failed = markWorkflowStepFailed(run, stepRunId, error, this.now());
     return this.persistAndEmit(this.runsSet(failed));
+  }
+
+  private async finishConditionFailed(
+    run: WorkflowRun,
+    transitionRunId: string,
+    error: string,
+  ): Promise<WorkflowRun> {
+    const failed = failWorkflowCondition(run, transitionRunId, error, this.now());
+    return this.persistAndEmit(this.runsSet(failed));
+  }
+
+  private async applyStepSettings(
+    runtimeId: string,
+    run: WorkflowRun,
+    definition: WorkflowStepDefinition,
+  ): Promise<void> {
+    const model = definition.modelOverride ?? run.templateSnapshot.defaultModel;
+    const thinkingLevel = definition.thinkingOverride ?? run.templateSnapshot.defaultThinkingLevel;
+    if (model === undefined && thinkingLevel === undefined) return;
+    if (this.dependencies.configureSession === undefined) {
+      throw new Error("Workflow step settings cannot be applied by this Pi runtime.");
+    }
+    await this.dependencies.configureSession(runtimeId, {
+      ...(model !== undefined
+        ? {
+            model: {
+              ...(model.provider !== undefined ? { provider: model.provider } : {}),
+              ...(model.modelId !== undefined ? { modelId: model.modelId } : {}),
+            },
+          }
+        : {}),
+      ...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
+    });
   }
 
   private runsSet(run: WorkflowRun): WorkflowRun {
@@ -301,6 +445,29 @@ export class WorkflowScheduler {
         await this.pump(run.id);
       }
     }
+  }
+}
+
+function renderConditionJudgePrompt(
+  transition: Extract<WorkflowTransition, { kind: "condition" }>,
+  sourceAnswer: string | undefined,
+): string {
+  return [
+    "You are a workflow condition judge.",
+    "Answer the question using only the completed agent result below.",
+    'Return exactly one JSON object with exactly these keys: {"decision":"yes"|"no"|"unsure","rationale":"brief explanation"}.',
+    "Do not include markdown, code fences, or any other text.",
+    `Question: ${transition.question}`,
+    `Completed agent result: ${sourceAnswer ?? "(no result)"}`,
+  ].join("\n");
+}
+
+function parseConditionDecision(content: string): { decision: "yes" | "no" | "unsure"; rationale: string } | undefined {
+  try {
+    const parsed = conditionJudgeSchema.safeParse(JSON.parse(content));
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
   }
 }
 

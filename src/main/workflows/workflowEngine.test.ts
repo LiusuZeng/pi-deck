@@ -9,6 +9,8 @@ import {
   readyWorkflowSteps,
   resolveWorkflowCondition,
   stopWorkflowRun,
+  recoverWorkflowRun,
+  approveWorkflowStep,
 } from "./workflowEngine.js";
 import type { WorkflowTemplate } from "../../shared/workflowSchemas.js";
 
@@ -130,5 +132,41 @@ describe("workflowEngine", () => {
     const failed = markWorkflowStepFailed(started, run.stepRuns[0]!.id, "worker failed", 102);
     expect(failed.status).toBe("needsAttention");
     expect(failed.stepRuns[0]?.error).toBe("worker failed");
+  });
+
+  it("rehydrates running steps as retryable attention and keeps ready work resumable", () => {
+    const run = createWorkflowRun({ template: template(), workspaceId: "ws", inputs: {}, now: 100 });
+    const started = markWorkflowStepStarted(run, run.stepRuns[0]!.id, 101, "lost-runtime");
+    const recovered = recoverWorkflowRun(started, 200);
+    expect(recovered.status).toBe("needsAttention");
+    expect(recovered.stepRuns[0]).toMatchObject({
+      status: "failed",
+      error: expect.stringMatching(/previous Pi worker/),
+      updatedAtMs: 200,
+    });
+    const ready = recoverWorkflowRun(run, 201);
+    expect(ready.status).toBe("waiting");
+    expect(ready.stepRuns[0]?.status).toBe("ready");
+  });
+
+  it("routes downstream work when an approval step is skipped", () => {
+    const configured = template({
+      steps: [
+        { ...template().steps[0]!, id: "first", startPolicy: "auto" },
+        { ...template().steps[1]!, id: "gate", promptParts: [{ type: "text", text: "gate" }], startPolicy: "manualApproval" },
+        { ...template().steps[2]!, id: "after", promptParts: [{ type: "text", text: "after" }], startPolicy: "auto" },
+      ],
+      transitions: [
+        { id: "to-gate", fromStepId: "first", kind: "manualGate", toStepId: "gate" },
+        { id: "after-gate", fromStepId: "gate", kind: "always", toStepId: "after" },
+      ],
+    });
+    const run = createWorkflowRun({ template: configured, workspaceId: "ws", inputs: {}, now: 100 });
+    const first = run.stepRuns.find((step) => step.templateStepId === "first")!;
+    const started = markWorkflowStepStarted(run, first.id, 101);
+    const completed = markWorkflowStepCompleted(started, first.id, { finalAnswer: "done" }, 102);
+    const gate = completed.stepRuns.find((step) => step.templateStepId === "gate")!;
+    const skipped = approveWorkflowStep(completed, gate.id, "skip", 103);
+    expect(skipped.stepRuns.find((step) => step.templateStepId === "after")?.status).toBe("ready");
   });
 });

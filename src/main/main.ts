@@ -153,6 +153,7 @@ import {
   createWorkflowRun,
   retryWorkflowStep,
   stopWorkflowRun,
+  recoverWorkflowRun,
 } from "./workflows/workflowEngine.js";
 import { WorkflowStore } from "./workflows/workflowStore.js";
 import {
@@ -278,6 +279,7 @@ async function bootstrap(): Promise<void> {
   await workspaceStore.ensureDefaultWorkspace({
     activate: !hadWorkspaceMetadata || resolveChatBackendMode() === "fake",
   });
+  await rehydrateWorkflowRuns();
 
   configureCsp();
   registerIpcHandlers(settingsStore, diagnostics);
@@ -1005,7 +1007,11 @@ function registerIpcHandlers(
     requestSchema: workflowGetTemplateRequestSchema,
     responseSchema: workflowTemplateSchema,
     diagnostics: diagnosticsService,
-    handler: ({ templateId }) => ensureWorkflowStore().getTemplate(templateId),
+    handler: async ({ templateId }) => {
+      const template = await ensureWorkflowStore().getTemplate(templateId);
+      if (template.workspaceId !== undefined) await requireOpenWorkspace(template.workspaceId);
+      return template;
+    },
   });
 
   registerValidatedIpc({
@@ -1013,9 +1019,11 @@ function registerIpcHandlers(
     requestSchema: noPayloadSchema,
     responseSchema: workflowTemplateListResultSchema,
     diagnostics: diagnosticsService,
-    handler: async () => ({
-      templates: await ensureWorkflowStore().listTemplates(),
-    }),
+    handler: async () => {
+      const workspaceId = (await ensureWorkspaceStore().getActiveWorkspace())?.id;
+      if (workspaceId !== undefined) await requireOpenWorkspace(workspaceId);
+      return { templates: await ensureWorkflowStore().listTemplates(workspaceId) };
+    },
   });
 
   registerValidatedIpc({
@@ -1023,7 +1031,10 @@ function registerIpcHandlers(
     requestSchema: workflowCreateTemplateRequestSchema,
     responseSchema: workflowTemplateSchema,
     diagnostics: diagnosticsService,
-    handler: (definition) => ensureWorkflowStore().createTemplate(definition),
+    handler: async (definition) => {
+      if (definition.workspaceId !== undefined) await requireOpenWorkspace(definition.workspaceId);
+      return ensureWorkflowStore().createTemplate(definition);
+    },
   });
 
   registerValidatedIpc({
@@ -1031,8 +1042,12 @@ function registerIpcHandlers(
     requestSchema: workflowUpdateTemplateRequestSchema,
     responseSchema: workflowTemplateSchema,
     diagnostics: diagnosticsService,
-    handler: ({ templateId, ...definition }) =>
-      ensureWorkflowStore().updateTemplate(templateId, definition),
+    handler: async ({ templateId, ...definition }) => {
+      if (definition.workspaceId !== undefined) await requireOpenWorkspace(definition.workspaceId);
+      const current = await ensureWorkflowStore().getTemplate(templateId);
+      if (current.workspaceId !== undefined) await requireOpenWorkspace(current.workspaceId);
+      return ensureWorkflowStore().updateTemplate(templateId, definition);
+    },
   });
 
   registerValidatedIpc({
@@ -1040,8 +1055,11 @@ function registerIpcHandlers(
     requestSchema: workflowArchiveTemplateRequestSchema,
     responseSchema: workflowTemplateSchema,
     diagnostics: diagnosticsService,
-    handler: ({ templateId }) =>
-      ensureWorkflowStore().archiveTemplate(templateId),
+    handler: async ({ templateId }) => {
+      const template = await ensureWorkflowStore().getTemplate(templateId);
+      if (template.workspaceId !== undefined) await requireOpenWorkspace(template.workspaceId);
+      return ensureWorkflowStore().archiveTemplate(templateId);
+    },
   });
 
   registerValidatedIpc({
@@ -1049,8 +1067,11 @@ function registerIpcHandlers(
     requestSchema: workflowDuplicateTemplateRequestSchema,
     responseSchema: workflowTemplateSchema,
     diagnostics: diagnosticsService,
-    handler: ({ templateId }) =>
-      ensureWorkflowStore().duplicateTemplate(templateId),
+    handler: async ({ templateId }) => {
+      const template = await ensureWorkflowStore().getTemplate(templateId);
+      if (template.workspaceId !== undefined) await requireOpenWorkspace(template.workspaceId);
+      return ensureWorkflowStore().duplicateTemplate(templateId);
+    },
   });
 
   registerValidatedIpc({
@@ -1058,9 +1079,12 @@ function registerIpcHandlers(
     requestSchema: workflowListRunsRequestSchema,
     responseSchema: workflowRunListResultSchema,
     diagnostics: diagnosticsService,
-    handler: async (request) => ({
-      runs: await ensureWorkflowStore().listRuns(request?.workspaceId),
-    }),
+    handler: async (request) => {
+      const workspaceId = request?.workspaceId ?? (await ensureWorkspaceStore().getActiveWorkspace())?.id;
+      if (workspaceId === undefined) throw new Error("No workspace is selected for workflow runs.");
+      await requireOpenWorkspace(workspaceId);
+      return { runs: await ensureWorkflowStore().listRuns(workspaceId) };
+    },
   });
 
   registerValidatedIpc({
@@ -1068,7 +1092,11 @@ function registerIpcHandlers(
     requestSchema: workflowGetRunRequestSchema,
     responseSchema: workflowRunSchema,
     diagnostics: diagnosticsService,
-    handler: ({ runId }) => ensureWorkflowStore().getRun(runId),
+    handler: async ({ runId }) => {
+      const run = await ensureWorkflowStore().getRun(runId);
+      await requireOpenWorkspace(run.workspaceId);
+      return run;
+    },
   });
 
   registerValidatedIpc({
@@ -1081,6 +1109,11 @@ function registerIpcHandlers(
       const resolvedWorkspaceId = await resolveWorkflowWorkspaceId(
         workspaceId,
         template.workspaceId,
+      );
+      await validateWorkflowPaths(
+        template,
+        inputs,
+        await resolveWorkspaceProject(resolvedWorkspaceId),
       );
       const run = createWorkflowRun({
         template,
@@ -1100,6 +1133,7 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async ({ runId }) => {
       const run = await ensureWorkflowStore().getRun(runId);
+      await requireOpenWorkspace(run.workspaceId);
       const updated = await ensureWorkflowStore().updateRun(
         stopWorkflowRun(run),
       );
@@ -1115,6 +1149,7 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async ({ runId, stepRunId }) => {
       const run = await ensureWorkflowStore().getRun(runId);
+      await requireOpenWorkspace(run.workspaceId);
       const updated = await ensureWorkflowStore().updateRun(
         retryWorkflowStep(run, stepRunId),
       );
@@ -1130,6 +1165,7 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async ({ runId, stepRunId, action }) => {
       const run = await ensureWorkflowStore().getRun(runId);
+      await requireOpenWorkspace(run.workspaceId);
       const updated = await ensureWorkflowStore().updateRun(
         approveWorkflowStep(run, stepRunId, action),
       );
@@ -1290,6 +1326,20 @@ function ensureWorkflowScheduler(): WorkflowScheduler {
   return workflowScheduler;
 }
 
+async function rehydrateWorkflowRuns(): Promise<void> {
+  const store = ensureWorkflowStore();
+  const scheduler = ensureWorkflowScheduler();
+  const now = Date.now();
+  for (const persisted of await store.listRuns()) {
+    const recovered = recoverWorkflowRun(persisted, now);
+    const run = recovered === persisted ? persisted : await store.updateRun(recovered);
+    if (run !== persisted) emitWorkflowRunEvent(run);
+    if (run.status !== "needsAttention" && run.status !== "stopped" && run.status !== "completed") {
+      await scheduler.schedule(run);
+    }
+  }
+}
+
 function createWorkflowScheduler(
   store: SettingsStore,
   diagnosticsService: DiagnosticsService,
@@ -1342,18 +1392,73 @@ function createWorkflowScheduler(
         await closeAttachedChatRuntime(adapter, runtimeId);
       }
     },
+    configureSession: async (runtimeId, settings) => {
+      const adapter = chatAdapter;
+      if (adapter === undefined || !adapter.hasRuntime(runtimeId)) {
+        throw new Error(`Workflow chat runtime is no longer attached: ${runtimeId}`);
+      }
+      if (settings.model !== undefined) {
+        await adapter.request(runtimeId, "set_model", settings.model);
+      }
+      if (settings.thinkingLevel !== undefined) {
+        await adapter.request(runtimeId, "set_thinking_level", { level: settings.thinkingLevel });
+      }
+      const state = await adapter.getRuntimeStatus(runtimeId);
+      const modelId = typeof state.model === "string" ? state.model : undefined;
+      const provider = typeof state.provider === "string" ? state.provider : undefined;
+      if (settings.model?.modelId !== undefined && modelId !== settings.model.modelId) {
+        throw new Error(`Pi did not apply workflow model override: ${settings.model.modelId}`);
+      }
+      if (settings.model?.provider !== undefined && provider !== settings.model.provider) {
+        throw new Error(`Pi did not apply workflow provider override: ${settings.model.provider}`);
+      }
+      if (settings.thinkingLevel !== undefined && state.thinkingLevel !== settings.thinkingLevel) {
+        throw new Error(`Pi did not apply workflow thinking override: ${settings.thinkingLevel}`);
+      }
+    },
+    getRun: (runId) => ensureWorkflowStore().getRun(runId),
     persist: (run) => ensureWorkflowStore().updateRun(run),
     emit: emitWorkflowRunEvent,
   });
+}
+
+async function validateWorkflowPaths(
+  template: import("../shared/workflowSchemas.js").WorkflowTemplate,
+  inputs: Record<string, string>,
+  project: ProjectRef,
+): Promise<void> {
+  const values = [
+    ...(template.context?.relevantPaths ?? []),
+    ...template.inputs
+      .filter((input) => input.type === "path")
+      .map((input) => inputs[input.id] ?? input.defaultValue)
+      .filter((value): value is string => value !== undefined),
+  ];
+  for (const value of values) {
+    const resolved = path.isAbsolute(value)
+      ? path.resolve(value)
+      : path.resolve(project.canonicalPath, value);
+    const canonical = (await safeRealpath(resolved)) ?? resolved;
+    if (!isPathInside(canonical, project.canonicalPath)) {
+      throw new Error(`Workflow path is outside its authorized workspace project: ${value}`);
+    }
+  }
 }
 
 async function resolveWorkflowWorkspaceId(
   requestedWorkspaceId: string | undefined,
   templateWorkspaceId: string | undefined,
 ): Promise<string> {
+  if (
+    requestedWorkspaceId !== undefined &&
+    templateWorkspaceId !== undefined &&
+    requestedWorkspaceId !== templateWorkspaceId
+  ) {
+    throw new Error("Workflow template is authorized for a different workspace.");
+  }
   const workspaceId =
-    requestedWorkspaceId ??
     templateWorkspaceId ??
+    requestedWorkspaceId ??
     (await ensureWorkspaceStore().getActiveWorkspace())?.id;
   if (workspaceId === undefined) {
     throw new Error("No workspace is selected for this workflow run.");

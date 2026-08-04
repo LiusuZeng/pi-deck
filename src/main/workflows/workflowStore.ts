@@ -51,10 +51,13 @@ export class WorkflowStore {
     await this.loadPromise;
   }
 
-  async listTemplates(): Promise<WorkflowTemplate[]> {
+  async listTemplates(workspaceId?: string): Promise<WorkflowTemplate[]> {
     await this.loadIfNeeded();
     return this.state.templates
-      .filter((template) => template.archivedAtMs === undefined)
+      .filter((template) =>
+        template.archivedAtMs === undefined &&
+        (workspaceId === undefined || template.workspaceId === undefined || template.workspaceId === workspaceId),
+      )
       .sort((left, right) => right.updatedAtMs - left.updatedAtMs)
       .map(clone);
   }

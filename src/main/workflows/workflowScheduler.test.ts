@@ -55,6 +55,24 @@ const template: WorkflowTemplate = {
   updatedAtMs: 1,
 };
 
+const conditionTemplate: WorkflowTemplate = {
+  ...template,
+  id: "00000000-0000-4000-8000-000000000002",
+  steps: [
+    { ...template.steps[0]!, id: "source", name: "Source" },
+    { ...template.steps[1]!, id: "yes", name: "Yes", promptParts: [{ type: "text", text: "yes" }] },
+    { ...template.steps[1]!, id: "no", name: "No", promptParts: [{ type: "text", text: "no" }] },
+  ],
+  transitions: [{
+    id: "condition-1",
+    fromStepId: "source",
+    kind: "condition",
+    question: "Did it succeed?",
+    routes: { yes: { kind: "step", stepId: "yes" }, no: { kind: "step", stepId: "no" } },
+    previewBeforeStart: false,
+  }],
+};
+
 function snapshot(
   runtimeId: string,
   prompt: string,
@@ -81,7 +99,7 @@ function snapshot(
   };
 }
 
-function setup(options: { capacity?: boolean } = {}) {
+function setup(options: { capacity?: boolean; conditionAnswer?: string } = {}) {
   const prompts: string[] = [];
   const persisted: WorkflowRun[] = [];
   const sessions = new Map<string, WorkflowSessionSnapshot>();
@@ -106,7 +124,13 @@ function setup(options: { capacity?: boolean } = {}) {
       sessions.set(runtimeId, {
         ...value,
         messages: [
-          { id: "a", role: "assistant", content: `answer ${runtimeId}` },
+          {
+            id: "a",
+            role: "assistant",
+            content: text.startsWith("You are a workflow condition judge.")
+              ? (options.conditionAnswer ?? `answer ${runtimeId}`)
+              : `answer ${runtimeId}`,
+          },
         ],
       });
     },
@@ -175,5 +199,29 @@ describe("WorkflowScheduler", () => {
     expect(
       queued?.stepRuns.find((step) => step.templateStepId === "second")?.status,
     ).toBe("queued");
+  });
+
+  it("judges a condition with strict JSON and starts only the selected branch", async () => {
+    const fixture = setup({ conditionAnswer: '{"decision":"yes","rationale":"The result confirms success."}' });
+    const run = createWorkflowRun({ template: conditionTemplate, workspaceId: "workspace", inputs: {}, now: 1 });
+    await fixture.scheduler.schedule(run);
+    await fixture.scheduler.handleRuntimeEvent({ type: "agent_end", runtimeId: "runtime-1", status: "completed" });
+    await fixture.scheduler.handleRuntimeEvent({ type: "agent_end", runtimeId: "runtime-2", status: "completed" });
+    const latest = fixture.persisted.at(-1)!;
+    expect(latest.transitionRuns[0]).toMatchObject({ decision: "yes", rationale: "The result confirms success." });
+    expect(latest.stepRuns.find((step) => step.templateStepId === "yes")?.status).toBe("running");
+    expect(latest.stepRuns.find((step) => step.templateStepId === "no")?.status).toBe("skipped");
+  });
+
+  it("turns malformed condition output into attention without selecting a branch", async () => {
+    const fixture = setup({ conditionAnswer: "yes, definitely" });
+    const run = createWorkflowRun({ template: conditionTemplate, workspaceId: "workspace", inputs: {}, now: 1 });
+    await fixture.scheduler.schedule(run);
+    await fixture.scheduler.handleRuntimeEvent({ type: "agent_end", runtimeId: "runtime-1", status: "completed" });
+    await fixture.scheduler.handleRuntimeEvent({ type: "agent_end", runtimeId: "runtime-2", status: "completed" });
+    const latest = fixture.persisted.at(-1)!;
+    expect(latest.status).toBe("needsAttention");
+    expect(latest.transitionRuns[0]?.status).toBe("failed");
+    expect(latest.stepRuns.find((step) => step.templateStepId === "yes")?.status).toBe("waiting");
   });
 });
