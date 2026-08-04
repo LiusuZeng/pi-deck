@@ -67,7 +67,7 @@ export interface ActivityInboxProps {
   onClose: () => void;
 }
 
-/** A scoped, presentational activity feed. Classification and tags remain domain-owned. */
+/** A scoped, presentational work inbox. Classification and tags remain domain-owned. */
 export function ActivityInbox({
   model,
   scope,
@@ -122,17 +122,17 @@ export function ActivityInbox({
       <header className="activity-inbox-header">
         <div>
           <p className="activity-inbox-eyebrow">
-            {scope.type === "all" ? "All workspaces" : "Workspace activity"}
+            {scope.type === "all" ? "All workspaces" : "Workspace work inbox"}
           </p>
           <h1 id="activity-inbox-title">
-            {workspaceName ? `Activity · ${workspaceName}` : "Activity"}
+            {workspaceName ? `Work inbox · ${workspaceName}` : "Work inbox"}
           </h1>
           <p className="activity-inbox-description">
-            Monitor work in progress and jump to sessions that need you.
+            Monitor parallel work and jump to sessions that need you.
           </p>
         </div>
         <button
-          aria-label="Close activity inbox"
+          aria-label="Close work inbox"
           className="activity-inbox-close"
           onClick={onClose}
           type="button"
@@ -142,9 +142,9 @@ export function ActivityInbox({
       </header>
 
       <label className="activity-inbox-workspace-filter">
-        <span>Workspace</span>
+        <span>Workspace scope</span>
         <select
-          aria-label="Activity workspace"
+          aria-label="Work inbox workspace"
           onChange={(event) =>
             onScopeChange(
               event.target.value === "all"
@@ -168,7 +168,7 @@ export function ActivityInbox({
 
       <div
         className="activity-inbox-filters"
-        aria-label="Filter activity status"
+        aria-label="Filter work inbox status"
       >
         <button
           aria-pressed={selectedFilter === "all"}
@@ -231,12 +231,12 @@ function EmptyState({
 }) {
   const message =
     filter === "all"
-      ? `No activity in ${scopeLabel}. Start work in a session to see it here.`
-      : `No ${ACTIVITY_META[filter].emptyLabel.toLowerCase()} activity in ${scopeLabel}.`;
+      ? `No work in ${scopeLabel}. Start work in a session to see it here.`
+      : `No ${ACTIVITY_META[filter].emptyLabel.toLowerCase()} work in ${scopeLabel}.`;
 
   return (
     <div className="activity-inbox-empty" role="status">
-      <h2>{filter === "all" ? "No activity yet" : "Nothing here"}</h2>
+      <h2>{filter === "all" ? "No work yet" : "Nothing here"}</h2>
       <p>{message}</p>
     </div>
   );

@@ -6290,7 +6290,7 @@ function SessionSidebar(props: {
         onClick={props.onOpenActivity}
       >
         <History aria-hidden="true" size={16} strokeWidth={1.75} />
-        Activity
+        Work inbox
         {props.activityActionableCount > 0 ? (
           <span className="activity-inbox-badge" aria-live="polite">
             {props.activityActionableCount}
@@ -6412,37 +6412,40 @@ function SessionSidebar(props: {
                     {workspaceSessions.length}
                   </span>
                 </Button>
-                <Button
-                  className="workspace-activity-button"
-                  size="sm"
-                  onClick={() => props.onOpenWorkspaceActivity(workspace.id)}
+                <Menu
+                  className="workspace-tree-actions"
+                  label={`Workspace actions for ${workspace.name}`}
+                  menuLabel={`Workspace actions for ${workspace.name}`}
                 >
-                  View activity
-                </Button>
-                {props.realMode && !workspace.isDefault ? (
-                  <Menu
-                    className="workspace-tree-actions"
-                    label={`Workspace actions for ${workspace.name}`}
-                    menuLabel={`Workspace actions for ${workspace.name}`}
+                  <Button
+                    role="menuitem"
+                    size="sm"
+                    variant="menuItem"
+                    onClick={() => props.onOpenWorkspaceActivity(workspace.id)}
                   >
-                    <Button
-                      role="menuitem"
-                      size="sm"
-                      variant="menuItem"
-                      onClick={() => props.onRenameWorkspace(workspace)}
-                    >
-                      Rename workspace
-                    </Button>
-                    <Button
-                      role="menuitem"
-                      size="sm"
-                      variant="danger"
-                      onClick={() => props.onArchiveWorkspace(workspace)}
-                    >
-                      Archive workspace
-                    </Button>
-                  </Menu>
-                ) : null}
+                    View work inbox
+                  </Button>
+                  {props.realMode && !workspace.isDefault ? (
+                    <>
+                      <Button
+                        role="menuitem"
+                        size="sm"
+                        variant="menuItem"
+                        onClick={() => props.onRenameWorkspace(workspace)}
+                      >
+                        Rename workspace
+                      </Button>
+                      <Button
+                        role="menuitem"
+                        size="sm"
+                        variant="danger"
+                        onClick={() => props.onArchiveWorkspace(workspace)}
+                      >
+                        Archive workspace
+                      </Button>
+                    </>
+                  ) : null}
+                </Menu>
               </div>
               {expanded ? (
                 <div className="workspace-session-list">
