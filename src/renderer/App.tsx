@@ -1155,6 +1155,8 @@ export function App(): ReactElement {
   }, [currentWorkspace.id, workflowRunId, workflowView]);
 
   useEffect(() => {
+    setWorkflowTemplates([]);
+    setWorkflowRuns([]);
     setWorkflowRunId(undefined);
     setWorkflowBuilderTemplate(undefined);
     setWorkflowError(undefined);
@@ -1844,12 +1846,15 @@ export function App(): ReactElement {
         setSessions((current) => upsertRuntimeSession(current, snapshot));
         setSelectedSessionId(session.id);
         setWorkflowView(undefined);
+        return;
       } catch (error) {
-        setUiMessage(
-          `Could not open workflow session: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        if (step.sessionFile === undefined) {
+          setUiMessage(
+            `Could not open workflow session: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return;
+        }
       }
-      return;
     }
     const savedSession = step.sessionFile
       ? sessionsRef.current.find(
