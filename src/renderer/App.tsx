@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -429,6 +430,31 @@ const slashCommands: SlashCommand[] = [
     source: "extension",
   },
 ];
+
+function nextSlashCommandIndex(
+  key: string,
+  activeIndex: number,
+  commandCount: number,
+): number | undefined {
+  if (commandCount === 0) {
+    return undefined;
+  }
+
+  const current = Math.min(Math.max(activeIndex, 0), commandCount - 1);
+  if (key === "ArrowDown") {
+    return (current + 1) % commandCount;
+  }
+  if (key === "ArrowUp") {
+    return (current - 1 + commandCount) % commandCount;
+  }
+  if (key === "Home") {
+    return 0;
+  }
+  if (key === "End") {
+    return commandCount - 1;
+  }
+  return undefined;
+}
 
 const initialSessions: SessionViewModel[] = [
   {
@@ -1417,6 +1443,15 @@ export function App(): ReactElement {
         ...current,
         text: value,
         slashOpen: value.trimStart().startsWith("/"),
+      })),
+    );
+  }
+
+  function handleDismissSlashPicker(): void {
+    setComposerDrafts((items) =>
+      updateComposerDraft(items, selectedSession.id, (current) => ({
+        ...current,
+        slashOpen: false,
       })),
     );
   }
@@ -3350,6 +3385,7 @@ export function App(): ReactElement {
       allowAttachments={true}
       onChange={handleDraftChange}
       onKeyDown={handleComposerKeyDown}
+      onDismissSlashPicker={handleDismissSlashPicker}
       onSend={handleSend}
       onSteer={handleSteer}
       onFollowUp={handleFollowUp}
@@ -8069,6 +8105,7 @@ function Composer(props: {
   allowAttachments: boolean;
   onChange(value: string): void;
   onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void;
+  onDismissSlashPicker(): void;
   onSend(): void;
   onSteer(): void;
   onFollowUp(): void;
@@ -8097,7 +8134,18 @@ function Composer(props: {
     activeRealModel ??
     (props.realModels.length === 1 ? props.realModels[0] : undefined);
   const [dragActive, setDragActive] = useState(false);
+  const [activeCommandIndex, setActiveCommandIndex] = useState(0);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const slashPickerId = useId();
   const isActionPending = isLifecycleTransition(props.status);
+  const hasSlashCommands = props.slashCommands.length > 0;
+  const selectedCommandIndex = hasSlashCommands
+    ? Math.min(activeCommandIndex, props.slashCommands.length - 1)
+    : -1;
+
+  useEffect(() => {
+    setActiveCommandIndex(0);
+  }, [props.slashCommands, props.slashOpen]);
 
   function handleDrop(event: DragEvent<HTMLElement>): void {
     event.preventDefault();
@@ -8115,6 +8163,46 @@ function Composer(props: {
         props.onImportImageAttachments(imageFiles);
       }
     }
+  }
+
+  function selectSlashCommand(command: SlashCommand): void {
+    props.onSelectCommand(command);
+    textareaRef.current?.focus();
+  }
+
+  function handleTextareaKeyDown(
+    event: KeyboardEvent<HTMLTextAreaElement>,
+  ): void {
+    if (props.slashOpen) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        props.onDismissSlashPicker();
+        return;
+      }
+
+      if (hasSlashCommands) {
+        const nextCommandIndex = nextSlashCommandIndex(
+          event.key,
+          selectedCommandIndex,
+          props.slashCommands.length,
+        );
+        if (nextCommandIndex !== undefined) {
+          event.preventDefault();
+          setActiveCommandIndex(nextCommandIndex);
+          return;
+        }
+        if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+          event.preventDefault();
+          const command = props.slashCommands[selectedCommandIndex];
+          if (command !== undefined) {
+            selectSlashCommand(command);
+          }
+          return;
+        }
+      }
+    }
+
+    props.onKeyDown(event);
   }
 
   function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>): void {
@@ -8151,10 +8239,20 @@ function Composer(props: {
         ) : null}
         <textarea
           aria-label="Prompt text"
+          aria-activedescendant={
+            selectedCommandIndex >= 0
+              ? `${slashPickerId}-option-${selectedCommandIndex}`
+              : undefined
+          }
+          aria-autocomplete="list"
+          aria-controls={props.slashOpen ? slashPickerId : undefined}
+          aria-expanded={props.slashOpen}
+          role="combobox"
+          ref={textareaRef}
           onChange={(event) => {
             props.onChange(event.target.value);
           }}
-          onKeyDown={props.onKeyDown}
+          onKeyDown={handleTextareaKeyDown}
           onPaste={handlePaste}
           disabled={isActionPending}
           placeholder="Ask Pi…"
@@ -8163,8 +8261,10 @@ function Composer(props: {
         />
         {props.slashOpen ? (
           <SlashPicker
+            activeCommandIndex={selectedCommandIndex}
             commands={props.slashCommands}
-            onSelect={props.onSelectCommand}
+            id={slashPickerId}
+            onSelect={selectSlashCommand}
           />
         ) : null}
         <div className="composer-meta">
@@ -8335,12 +8435,15 @@ function AttachmentChipRow(props: {
 }
 
 function SlashPicker(props: {
+  activeCommandIndex: number;
   commands: SlashCommand[];
+  id: string;
   onSelect(command: SlashCommand): void;
 }): ReactElement {
   return (
     <div
       className="slash-picker"
+      id={props.id}
       role="listbox"
       aria-label="Slash command picker"
     >
@@ -8349,10 +8452,13 @@ function SlashPicker(props: {
           No active-worker commands match. TUI-only commands are not listed.
         </p>
       ) : (
-        props.commands.map((command) => (
+        props.commands.map((command, index) => (
           <Button
+            aria-selected={index === props.activeCommandIndex}
+            id={`${props.id}-option-${index}`}
             key={command.name}
             role="option"
+            onMouseDown={(event) => event.preventDefault()}
             onClick={() => props.onSelect(command)}
           >
             <strong>{command.name}</strong>
@@ -9127,6 +9233,7 @@ export const __rendererTestHooks = {
   selectProjectIfAvailable,
   projectsForSwitcher,
   findKnownExtensionCommand,
+  nextSlashCommandIndex,
   buildRealSessionInbox,
   queueBadgeLabels,
   isSessionBusy,

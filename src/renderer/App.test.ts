@@ -337,6 +337,16 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
 });
 
 describe("renderer per-session composer drafts", () => {
+  it("cycles slash picker selection and honors Home and End", () => {
+    const { nextSlashCommandIndex } = __rendererTestHooks;
+
+    expect(nextSlashCommandIndex("ArrowDown", 0, 3)).toBe(1);
+    expect(nextSlashCommandIndex("ArrowUp", 0, 3)).toBe(2);
+    expect(nextSlashCommandIndex("Home", 2, 3)).toBe(0);
+    expect(nextSlashCommandIndex("End", 0, 3)).toBe(2);
+    expect(nextSlashCommandIndex("ArrowDown", 0, 0)).toBeUndefined();
+  });
+
   it("restores text, attachments, and slash state after switching sessions", () => {
     const attachment = {
       id: "attachment-a",
