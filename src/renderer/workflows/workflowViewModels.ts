@@ -1,8 +1,10 @@
 import type {
   WorkflowRun,
   WorkflowRunStatus,
+  WorkflowStepDefinition,
   WorkflowStepStatus,
   WorkflowTemplate,
+  WorkflowTransition,
 } from "../../shared/workflowSchemas.js";
 
 export function workflowRunStatusLabel(status: WorkflowRunStatus): string {
@@ -66,6 +68,34 @@ export function workflowStepStatusTone(
   if (status === "failed" || status === "blocked") return "danger";
   if (status === "needsApproval") return "warning";
   return "neutral";
+}
+
+export function workflowPredecessorSteps(
+  steps: WorkflowStepDefinition[],
+  transitions: WorkflowTransition[],
+  targetStepId: string,
+): WorkflowStepDefinition[] {
+  const predecessorIds = new Set<string>();
+  for (const transition of transitions) {
+    const targetStepIds =
+      transition.kind === "condition"
+        ? Object.values(transition.routes).flatMap((target) =>
+            target?.kind === "step"
+              ? [target.stepId]
+              : target?.kind === "manualGate"
+                ? [target.toStepId]
+                : [],
+          )
+        : [
+            transition.kind === "always" || transition.kind === "manualGate"
+              ? transition.toStepId
+              : undefined,
+          ].flatMap((stepId) => (stepId === undefined ? [] : [stepId]));
+    if (targetStepIds.includes(targetStepId)) {
+      predecessorIds.add(transition.fromStepId);
+    }
+  }
+  return steps.filter((step) => predecessorIds.has(step.id));
 }
 
 export function templateValidationErrors(template: WorkflowTemplate): string[] {

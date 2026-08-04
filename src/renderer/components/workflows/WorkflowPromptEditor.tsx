@@ -142,6 +142,11 @@ export function WorkflowPromptEditor(props: {
             ),
           )}
         </select>
+        {props.previousSteps.length === 0 ? (
+          <p className="workflow-help" role="status">
+            No upstream agent results are available for this step.
+          </p>
+        ) : null}
       </div>
     </div>
   );

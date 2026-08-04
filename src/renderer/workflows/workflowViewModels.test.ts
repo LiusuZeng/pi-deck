@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   runProgress,
   templateValidationErrors,
+  workflowPredecessorSteps,
   workflowRunStatusLabel,
   workflowStepStatusLabel,
   workflowStepStatusTone,
@@ -96,6 +97,57 @@ describe("workflow view models", () => {
 
   it("counts completed and skipped steps for progress", () => {
     expect(runProgress(run("running"))).toEqual({ completed: 2, total: 2 });
+  });
+
+  it("follows persisted transition routes for valid upstream results", () => {
+    const steps = [
+      { ...template.steps[0], id: "always-source", name: "Always source" },
+      { ...template.steps[0], id: "manual-source", name: "Manual source" },
+      {
+        ...template.steps[0],
+        id: "condition-source",
+        name: "Condition source",
+      },
+      { ...template.steps[0], id: "sibling", name: "Skipped sibling" },
+      { ...template.steps[0], id: "target", name: "Target" },
+    ];
+    const transitions = [
+      {
+        id: "always",
+        fromStepId: "always-source",
+        kind: "always" as const,
+        toStepId: "target",
+      },
+      {
+        id: "manual",
+        fromStepId: "manual-source",
+        kind: "manualGate" as const,
+        toStepId: "target",
+      },
+      {
+        id: "condition",
+        fromStepId: "condition-source",
+        kind: "condition" as const,
+        question: "Continue?",
+        routes: {
+          yes: { kind: "step" as const, stepId: "target" },
+          no: { kind: "step" as const, stepId: "sibling" },
+          unsure: { kind: "manualGate" as const, toStepId: "target" },
+        },
+        previewBeforeStart: false,
+      },
+    ];
+
+    expect(
+      workflowPredecessorSteps(steps, transitions, "target").map(
+        (step) => step.id,
+      ),
+    ).toEqual(["always-source", "manual-source", "condition-source"]);
+    expect(
+      workflowPredecessorSteps(steps, transitions, "sibling").map(
+        (step) => step.id,
+      ),
+    ).toEqual(["condition-source"]);
   });
 
   it("reports missing prompts before saving a template", () => {

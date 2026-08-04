@@ -8,6 +8,7 @@ import type {
   WorkflowTransition,
 } from "../../../shared/workflowSchemas.js";
 import { workflowTemplateDefinitionSchema } from "../../../shared/workflowSchemas.js";
+import { workflowPredecessorSteps } from "../../workflows/workflowViewModels.js";
 import { WorkflowContextCard } from "./WorkflowContextCard.js";
 import { WorkflowStepCard } from "./WorkflowStepCard.js";
 import { WorkflowTransitionCard } from "./WorkflowTransitionCard.js";
@@ -663,7 +664,11 @@ export function WorkflowBuilder(props: {
               }
               onChange={(patch) => updateStep(step.id, patch)}
               inputs={definition.inputs}
-              previousSteps={definition.steps.slice(0, index)}
+              previousSteps={workflowPredecessorSteps(
+                definition.steps,
+                definition.transitions,
+                step.id,
+              )}
               promptError={promptErrors[step.id]}
               stepError={stepErrors[step.id]}
               focusPrompt={focusPromptStepId === step.id}

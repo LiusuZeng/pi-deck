@@ -6,6 +6,7 @@ import type {
 } from "../../../shared/workflowSchemas.js";
 import {
   runProgress,
+  workflowPredecessorSteps,
   workflowRunStatusLabel,
 } from "../../workflows/workflowViewModels.js";
 import { WorkflowContextCard } from "./WorkflowContextCard.js";
@@ -159,7 +160,11 @@ export function WorkflowRunView(props: {
                     index={index}
                     expanded={expandedSteps[step.id] === true}
                     inputs={template.inputs}
-                    previousSteps={template.steps.slice(0, index)}
+                    previousSteps={workflowPredecessorSteps(
+                      template.steps,
+                      template.transitions,
+                      step.id,
+                    )}
                     {...(template.context !== undefined
                       ? { context: template.context }
                       : {})}
