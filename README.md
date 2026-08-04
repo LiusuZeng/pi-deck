@@ -243,7 +243,7 @@ npm run deck:real -- --dry-run /absolute/path/to/your/project
 ### Refreshing documentation screenshots
 
 The checked-in PNG and GIF assets are generated from the Electron renderer in
-real Pi mode with deterministic local session fixtures, so they stay aligned
+real Pi mode with deterministic, production-shaped local session fixtures, so they stay aligned
 with the workspace, Work inbox, and conversation UI without requiring provider
 credentials. The command refreshes both `docs/assets` and `site/assets`:
 

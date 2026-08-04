@@ -60,6 +60,49 @@ test("fake RPC get_state and get_messages fixtures are deterministic", async () 
   }
 });
 
+test("fake RPC production-shaped profile uses realistic documentation labels", async () => {
+  const client = spawnFakeRpc([
+    "--production-shaped",
+    "--extra-model",
+    "--prompt-scenario",
+    "extension-ui",
+    "--stream-delay-ms",
+    "1",
+  ]);
+  try {
+    const state = (await client.request("get_state")) as JsonObject;
+    assert.equal(state.provider, "anthropic");
+
+    const modelsResponse = (await client.request(
+      "get_available_models",
+    )) as JsonObject;
+    const models = modelsResponse.models as JsonObject[];
+    assert.deepEqual(
+      models.map((model) => [model.provider, model.name]),
+      [
+        ["anthropic", "Claude Sonnet 4.5"],
+        ["openai", "GPT-5 Codex"],
+      ],
+    );
+
+    const extensionRequest = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "extension_ui_request"),
+    );
+    await client.request("prompt", { message: "Review this workspace." });
+    const events = await extensionRequest;
+    const request = events.find(
+      (event) => event.type === "extension_ui_request",
+    ) as JsonObject;
+    assert.equal(request.title, "Workspace approval");
+    assert.equal(
+      request.message,
+      "Allow Pi to continue with this workspace action?",
+    );
+  } finally {
+    client.close();
+  }
+});
+
 test("fake RPC can reject a configured command while retaining the worker", async () => {
   const client = spawnFakeRpc(["--fail-command", "set_model"]);
   try {

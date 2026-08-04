@@ -101,7 +101,8 @@ if (process.argv.includes("--version")) {
 }
 if (process.argv.includes("--list-models")) {
   console.log("provider  model       context  max-out  thinking  images");
-  console.log("fake-provider  fake-model  128K     32K      yes       yes");
+  console.log("anthropic  claude-sonnet-4.5  200K     32K      yes       yes");
+  console.log("openai     gpt-5-codex       128K     32K      yes       no");
   process.exit(0);
 }
 process.argv.push(...${JSON.stringify(extraArgs)});
@@ -167,6 +168,7 @@ async function captureExtensionScreenshot(root, output) {
         "extension-ui",
         "--stream-delay-ms",
         "400",
+        "--production-shaped",
       ]),
       PI_DECK_PROJECT_CWD: projectCwd,
       PI_CODING_AGENT_DIR: agentDir,
@@ -185,7 +187,9 @@ async function captureExtensionScreenshot(root, output) {
       .fill("Approve this extension request.");
     await page.getByRole("button", { name: "Send" }).click();
     await page
-      .getByText("Approve fake extension UI request?", { exact: true })
+      .getByText("Allow Pi to continue with this workspace action?", {
+        exact: true,
+      })
       .waitFor();
     await page.getByRole("button", { name: "Confirm", exact: true }).waitFor();
     await page
@@ -271,6 +275,7 @@ async function main() {
         "--stream-delay-ms",
         "2000",
         "--extra-model",
+        "--production-shaped",
       ]),
       PI_DECK_PROJECT_CWD: projectCwd,
       PI_CODING_AGENT_DIR: agentDir,
@@ -357,7 +362,7 @@ async function main() {
       .getByRole("menu", { name: "Model and thinking options" })
       .waitFor();
     const modelMenuItem = page.getByRole("menuitem", {
-      name: "Fake model",
+      name: "Claude Sonnet 4.5",
       exact: true,
     });
     await modelMenuItem.waitFor();

@@ -30,6 +30,7 @@ interface FakeOptions {
   dropCompletionEvents: boolean;
   extensionUiMethod: "select" | "confirm" | "input" | "editor";
   extraModel: boolean;
+  productionShaped: boolean;
   noSession: boolean;
   sessionFile?: string;
 }
@@ -53,6 +54,7 @@ function parseOptions(argv: string[]): FakeOptions {
     dropCompletionEvents: false,
     extensionUiMethod: "confirm",
     extraModel: false,
+    productionShaped: false,
     noSession: false,
   };
 
@@ -94,6 +96,8 @@ function parseOptions(argv: string[]): FakeOptions {
       index += 1;
     } else if (arg === "--extra-model") {
       options.extraModel = true;
+    } else if (arg === "--production-shaped") {
+      options.productionShaped = true;
     } else if (arg === "--no-session") {
       options.noSession = true;
     } else if (arg === "--session") {
@@ -166,7 +170,9 @@ class FakeRpcServer {
   private currentTimers: NodeJS.Timeout[] = [];
   private agentActive = false;
   private currentModel = "fake-model";
-  private currentProvider = "fake-provider";
+  private currentProvider = this.options.productionShaped
+    ? "anthropic"
+    : "fake-provider";
   private currentThinkingLevel = "medium";
   private pendingExtensionUi:
     | {
@@ -186,6 +192,20 @@ class FakeRpcServer {
       createdAt: 1,
     },
   ];
+
+  private modelDisplayName(modelId: string): string {
+    if (this.options.productionShaped) {
+      return modelId === "fake-model-2" ? "GPT-5 Codex" : "Claude Sonnet 4.5";
+    }
+    return modelId === "fake-model-2" ? "Fake model 2" : "Fake model";
+  }
+
+  private modelDisplayProvider(modelId: string): string {
+    if (this.options.productionShaped) {
+      return modelId === "fake-model-2" ? "openai" : "anthropic";
+    }
+    return "fake-provider";
+  }
 
   start(): void {
     this.ensurePersistedSessionRecord();
@@ -341,8 +361,8 @@ class FakeRpcServer {
           models: [
             {
               id: "fake-model",
-              name: "Fake model",
-              provider: "fake-provider",
+              name: this.modelDisplayName("fake-model"),
+              provider: this.modelDisplayProvider("fake-model"),
               reasoning: true,
               thinkingLevelMap: {
                 minimal: "minimal",
@@ -355,8 +375,8 @@ class FakeRpcServer {
               ? [
                   {
                     id: "fake-model-2",
-                    name: "Fake model 2",
-                    provider: "fake-provider",
+                    name: this.modelDisplayName("fake-model-2"),
+                    provider: this.modelDisplayProvider("fake-model-2"),
                     reasoning: true,
                     input: ["text", "image"],
                   },
@@ -380,10 +400,7 @@ class FakeRpcServer {
         }
         this.respond(command.id, name, {
           id: this.currentModel,
-          name:
-            this.currentModel === "fake-model-2"
-              ? "Fake model 2"
-              : "Fake model",
+          name: this.modelDisplayName(this.currentModel),
           provider: this.currentProvider,
           reasoning: true,
           input: ["text", "image"],
@@ -537,7 +554,9 @@ class FakeRpcServer {
   }
 
   private completePrompt(assistantId: string, text: string): void {
-    const chunks = ["Fake response", " to: ", text || "(empty prompt)"];
+    const chunks = this.options.productionShaped
+      ? ["I’ll review the workspace", " and summarize the next steps."]
+      : ["Fake response", " to: ", text || "(empty prompt)"];
     let accumulated = "";
     chunks.forEach((chunk, index) => {
       this.currentTimers.push(
@@ -643,9 +662,15 @@ class FakeRpcServer {
         id: "ext_fake_dialog_1",
         messageId: assistantId,
         method,
-        title: `Fake ${method}`,
+        title: this.options.productionShaped
+          ? "Workspace approval"
+          : `Fake ${method}`,
         ...(method === "confirm"
-          ? { message: "Approve fake extension UI request?" }
+          ? {
+              message: this.options.productionShaped
+                ? "Allow Pi to continue with this workspace action?"
+                : "Approve fake extension UI request?",
+            }
           : {}),
         ...(method === "select" ? { options: ["Allow", "Block"] } : {}),
         ...(method === "input" ? { placeholder: "Type a fake value" } : {}),
