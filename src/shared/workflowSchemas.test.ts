@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  workflowEventSchema,
+  workflowModelOverrideSchema,
   workflowRunSchema,
   workflowTemplateDefinitionSchema,
 } from "./workflowSchemas.js";
@@ -52,6 +54,18 @@ const linearTemplate = {
     },
   ],
 };
+
+describe("workflowModelOverrideSchema", () => {
+  it("accepts provider/model overrides and rejects an empty override", () => {
+    expect(workflowModelOverrideSchema.parse({ provider: "openai" })).toEqual({
+      provider: "openai",
+    });
+    expect(workflowModelOverrideSchema.parse({ modelId: "gpt-test" })).toEqual({
+      modelId: "gpt-test",
+    });
+    expect(workflowModelOverrideSchema.safeParse({}).success).toBe(false);
+  });
+});
 
 describe("workflowTemplateDefinitionSchema", () => {
   it("accepts a reusable linear workflow with input and output references", () => {
@@ -168,6 +182,26 @@ describe("workflowTemplateDefinitionSchema", () => {
     );
   });
 
+  it("retains preview-before-start for a valid condition transition", () => {
+    const parsed = workflowTemplateDefinitionSchema.parse({
+      ...linearTemplate,
+      transitions: [
+        {
+          id: "condition",
+          fromStepId: "investigate",
+          kind: "condition",
+          question: "Did it find a fix?",
+          routes: { yes: { kind: "step", stepId: "fix" } },
+          previewBeforeStart: true,
+        },
+      ],
+    });
+    expect(parsed.transitions[0]).toMatchObject({
+      kind: "condition",
+      previewBeforeStart: true,
+    });
+  });
+
   it("requires at least one condition route", () => {
     const result = workflowTemplateDefinitionSchema.safeParse({
       ...linearTemplate,
@@ -187,6 +221,40 @@ describe("workflowTemplateDefinitionSchema", () => {
 });
 
 describe("workflowRunSchema", () => {
+  it("rejects a persisted run with a missing transition materialization", () => {
+    const now = Date.now();
+    const template = workflowTemplateDefinitionSchema.parse(linearTemplate);
+    const result = workflowRunSchema.safeParse({
+      id: "b1b1b1b1-b1b1-41b1-81b1-b1b1b1b1b1b1",
+      templateId: "a1a1a1a1-a1a1-41a1-81a1-a1a1a1a1a1a1",
+      name: template.name,
+      workspaceId: "workspace-1",
+      status: "waiting",
+      templateSnapshot: {
+        ...template,
+        id: "a1a1a1a1-a1a1-41a1-81a1-a1a1a1a1a1a1",
+        createdAtMs: now,
+        updatedAtMs: now,
+      },
+      inputs: { issue: "Fix test" },
+      stepRuns: template.steps.map((step, index) => ({
+        id: `00000000-0000-4000-8000-00000000000${index + 1}`,
+        templateStepId: step.id,
+        name: step.name,
+        status: index === 0 ? "ready" : "waiting",
+        updatedAtMs: now,
+      })),
+      transitionRuns: [],
+      createdAtMs: now,
+      updatedAtMs: now,
+    });
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.issues.map((issue) => issue.message)).toContain(
+      "Workflow run must contain exactly one transition run for: investigate-to-fix",
+    );
+  });
+
   it("accepts persisted run snapshots", () => {
     const now = Date.now();
     const template = workflowTemplateDefinitionSchema.parse(linearTemplate);
@@ -223,5 +291,27 @@ describe("workflowRunSchema", () => {
         updatedAtMs: now,
       }),
     ).toBeTruthy();
+  });
+});
+
+describe("workflowEventSchema", () => {
+  it("accepts every run status used to refresh the workflow home", () => {
+    const statuses = [
+      "waiting",
+      "running",
+      "needsAttention",
+      "completed",
+      "failed",
+      "stopped",
+    ] as const;
+    for (const status of statuses) {
+      expect(
+        workflowEventSchema.parse({
+          type: "workflow_run_updated",
+          runId: "b1b1b1b1-b1b1-41b1-81b1-b1b1b1b1b1b1",
+          status,
+        }),
+      ).toMatchObject({ status });
+    }
   });
 });

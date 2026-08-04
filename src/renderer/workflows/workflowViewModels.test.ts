@@ -3,6 +3,7 @@ import {
   runProgress,
   templateValidationErrors,
   workflowRunStatusLabel,
+  workflowStepStatusLabel,
   workflowStepStatusTone,
 } from "./workflowViewModels.js";
 import type {
@@ -78,6 +79,19 @@ describe("workflow view models", () => {
     expect(workflowStepStatusTone("needsApproval")).toBe("warning");
     expect(workflowStepStatusTone("completed")).toBe("success");
     expect(workflowStepStatusTone("waiting")).toBe("neutral");
+  });
+
+  it("maps every persisted step status to a user-facing label", () => {
+    expect(workflowStepStatusLabel("waiting")).toBe("Waiting");
+    expect(workflowStepStatusLabel("ready")).toBe("Ready");
+    expect(workflowStepStatusLabel("queued")).toBe("Queued");
+    expect(workflowStepStatusLabel("starting")).toBe("Starting");
+    expect(workflowStepStatusLabel("running")).toBe("In progress");
+    expect(workflowStepStatusLabel("completed")).toBe("Completed");
+    expect(workflowStepStatusLabel("failed")).toBe("Failed");
+    expect(workflowStepStatusLabel("skipped")).toBe("Skipped");
+    expect(workflowStepStatusLabel("blocked")).toBe("Blocked");
+    expect(workflowStepStatusLabel("needsApproval")).toBe("Needs approval");
   });
 
   it("counts completed and skipped steps for progress", () => {

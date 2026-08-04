@@ -102,6 +102,7 @@ function snapshot(
 function setup(options: { capacity?: boolean; conditionAnswer?: string; delaySnapshot?: boolean } = {}) {
   const prompts: string[] = [];
   const persisted: WorkflowRun[] = [];
+  const closed: string[] = [];
   const sessions = new Map<string, WorkflowSessionSnapshot>();
   let created = 0;
   let releaseSnapshot = () => undefined;
@@ -142,7 +143,9 @@ function setup(options: { capacity?: boolean; conditionAnswer?: string; delaySna
       await snapshotGate;
       return sessions.get(runtimeId)!;
     },
-    closeSession: async () => undefined,
+    closeSession: async (runtimeId) => {
+      closed.push(runtimeId);
+    },
     persist: async (run) => {
       persisted.push(run);
       return run;
@@ -150,7 +153,7 @@ function setup(options: { capacity?: boolean; conditionAnswer?: string; delaySna
     emit: () => undefined,
     now: () => 10,
   });
-  return { scheduler, prompts, persisted, sessions, releaseSnapshot };
+  return { scheduler, prompts, persisted, closed, sessions, releaseSnapshot };
 }
 
 describe("WorkflowScheduler", () => {
@@ -204,6 +207,40 @@ describe("WorkflowScheduler", () => {
     expect(fixture.persisted.at(-1)?.status).toBe("needsAttention");
     expect(fixture.persisted.at(-1)?.stepRuns[0]?.status).toBe("failed");
   });
+
+  it("ignores a stale completion after the run is stopped", async () => {
+    const fixture = setup();
+    const run = createWorkflowRun({
+      template,
+      workspaceId: "workspace",
+      inputs: {},
+      now: 1,
+    });
+    await fixture.scheduler.schedule(run);
+    const stopped = {
+      ...run,
+      status: "stopped" as const,
+      updatedAtMs: 20,
+    };
+
+    await Promise.all([
+      fixture.scheduler.update(stopped),
+      fixture.scheduler.handleRuntimeEvent({
+        type: "agent_end",
+        runtimeId: "runtime-1",
+        status: "completed",
+      }),
+    ]);
+
+    expect(fixture.prompts).toEqual(["first prompt"]);
+    expect(fixture.persisted.at(-1)?.stepRuns[0]?.status).toBe("running");
+    expect(fixture.persisted.at(-1)?.stepRuns[0]?.finalAnswer).toBeUndefined();
+    expect(fixture.closed).toEqual(["runtime-1"]);
+  });
+
+  it.todo(
+    "does not send a prompt when rendering exposes an unavailable upstream output",
+  );
 
   it("persists a queued step when worker capacity is unavailable", async () => {
     const fixture = setup({ capacity: true });
