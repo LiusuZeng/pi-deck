@@ -1105,7 +1105,10 @@ export function App(): ReactElement {
           const run = await window.piDeck.workflows.getRun({
             runId: workflowRunId,
           });
-          if (!disposed) {
+          if (run.workspaceId !== currentWorkspaceRef.current.id) {
+            setWorkflowRunId(undefined);
+            setWorkflowView("home");
+          } else if (!disposed) {
             setWorkflowRuns((current) => [
               run,
               ...current.filter((candidate) => candidate.id !== run.id),
@@ -1147,7 +1150,7 @@ export function App(): ReactElement {
       disposed = true;
       unsubscribe();
     };
-  }, [workflowRunId, workflowView]);
+  }, [currentWorkspace.id, workflowRunId, workflowView]);
 
   // A renderer reload/disposal loses all composer and retry references. Main
   // retains each selection only by its owner, so revoke every owner we created

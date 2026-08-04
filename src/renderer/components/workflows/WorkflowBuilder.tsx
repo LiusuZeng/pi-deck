@@ -90,6 +90,7 @@ export function WorkflowBuilder(props: {
     [definition.steps[0]!.id]: true,
   });
   const [error, setError] = useState<string | undefined>();
+  const [focusPromptStepId, setFocusPromptStepId] = useState<string | undefined>();
   const [saving, setSaving] = useState(false);
 
   const updateInput = (
@@ -140,11 +141,12 @@ export function WorkflowBuilder(props: {
     setDefinition((current) => {
       const step = newStep(current.steps.length);
       const previous = current.steps.at(-1);
-      const transitions = previous
+      const hasPreviousTransition = current.transitions.some(
+        (transition) => transition.fromStepId === previous?.id,
+      );
+      const transitions = previous && !hasPreviousTransition
         ? [
-            ...current.transitions.filter(
-              (transition) => transition.fromStepId !== previous.id,
-            ),
+            ...current.transitions,
             {
               id: `transition-${Date.now()}`,
               fromStepId: previous.id,
@@ -181,14 +183,35 @@ export function WorkflowBuilder(props: {
     definition.transitions.find(
       (transition) => transition.fromStepId === stepId,
     );
+  const promptErrors = useMemo(
+    () =>
+      Object.fromEntries(
+        definition.steps.flatMap((step) => {
+          const hasPrompt = step.promptParts.some(
+            (part) =>
+              part.type !== "text" || part.text.trim().length > 0,
+          );
+          return hasPrompt ? [] : [[step.id, "Add instructions for this agent."]];
+        }),
+      ) as Record<string, string>,
+    [definition.steps],
+  );
   const validation = useMemo(() => {
     const result = workflowTemplateDefinitionSchema.safeParse(definition);
-    return result.success
+    const schemaErrors = result.success
       ? []
       : result.error.issues.map((issue) => issue.message);
-  }, [definition]);
+    return [...Object.values(promptErrors), ...schemaErrors];
+  }, [definition, promptErrors]);
 
   const save = async () => {
+    const firstBlankStep = definition.steps.find(
+      (step) => promptErrors[step.id] !== undefined,
+    );
+    if (firstBlankStep !== undefined) {
+      setExpandedSteps((current) => ({ ...current, [firstBlankStep.id]: true }));
+      setFocusPromptStepId(firstBlankStep.id);
+    }
     if (validation.length > 0) {
       setError(validation[0]);
       return;
@@ -391,6 +414,8 @@ export function WorkflowBuilder(props: {
               onChange={(patch) => updateStep(step.id, patch)}
               inputs={definition.inputs}
               previousSteps={definition.steps.slice(0, index)}
+              promptError={promptErrors[step.id]}
+              focusPrompt={focusPromptStepId === step.id}
             />
             {index < definition.steps.length - 1 ? (
               <div className="workflow-transition-wrap">

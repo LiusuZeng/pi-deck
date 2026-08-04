@@ -1,4 +1,4 @@
-import type { ReactElement } from "react";
+import { useEffect, useRef, type ReactElement } from "react";
 import type {
   WorkflowInputDefinition,
   WorkflowStepDefinition,
@@ -23,8 +23,14 @@ export function WorkflowStepCard(props: {
   onOpenSession?(step: WorkflowStepRun): void;
   inputs?: WorkflowInputDefinition[];
   previousSteps?: WorkflowStepDefinition[];
+  promptError?: string | undefined;
+  focusPrompt?: boolean | undefined;
 }): ReactElement {
   const status = props.run?.status;
+  const promptRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    if (props.focusPrompt) promptRef.current?.focus();
+  }, [props.focusPrompt]);
   const tone = status ? workflowStepStatusTone(status) : "neutral";
   return (
     <article
@@ -66,7 +72,15 @@ export function WorkflowStepCard(props: {
                 inputs={props.inputs ?? []}
                 previousSteps={props.previousSteps ?? []}
                 onChange={(promptParts) => props.onChange?.({ promptParts })}
+                inputRef={promptRef}
+                invalid={props.promptError !== undefined}
+                errorId={props.promptError ? `workflow-${props.step.id}-prompt-error` : undefined}
               />
+              {props.promptError ? (
+                <p id={`workflow-${props.step.id}-prompt-error`} className="workflow-field-error" role="alert">
+                  {props.promptError}
+                </p>
+              ) : null}
               <div className="workflow-inline-fields">
                 <label className="workflow-field">
                   <span>Start behavior</span>

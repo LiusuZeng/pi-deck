@@ -1,4 +1,4 @@
-import type { ReactElement } from "react";
+import type { RefObject, ReactElement } from "react";
 import type {
   WorkflowInputDefinition,
   WorkflowPromptPart,
@@ -28,6 +28,9 @@ export function WorkflowPromptEditor(props: {
   inputs: WorkflowInputDefinition[];
   previousSteps: WorkflowStepDefinition[];
   onChange(parts: WorkflowPromptPart[]): void;
+  inputRef?: RefObject<HTMLTextAreaElement | null> | undefined;
+  invalid?: boolean | undefined;
+  errorId?: string | undefined;
 }): ReactElement {
   const addPart = (part: WorkflowPromptPart) =>
     props.onChange([...props.parts, part]);
@@ -45,6 +48,9 @@ export function WorkflowPromptEditor(props: {
             {part.type === "text" ? (
               <textarea
                 aria-label={`Instruction ${index + 1}`}
+                aria-invalid={props.invalid || undefined}
+                aria-describedby={props.invalid ? props.errorId : undefined}
+                ref={index === 0 ? props.inputRef : undefined}
                 rows={4}
                 value={part.text}
                 onChange={(event) => {

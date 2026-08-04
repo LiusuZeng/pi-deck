@@ -4047,6 +4047,7 @@ body {
 }
 
 .workflow-run-status {
+  min-width: max-content;
   color: var(--color-text-muted);
   font-size: 12px;
   font-weight: 700;
@@ -4130,6 +4131,18 @@ body {
 .workflow-field small {
   color: var(--color-text-subtle);
   font-weight: 500;
+}
+
+.workflow-field-error {
+  margin: -6px 0 0;
+  color: var(--color-danger-fg);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.workflow-prompt-editor textarea[aria-invalid="true"] {
+  border-color: var(--color-danger);
+  outline: 2px solid color-mix(in srgb, var(--color-danger) 22%, transparent);
 }
 
 .workflow-inline-fields,
@@ -4470,6 +4483,12 @@ body {
   }
 
   .workflow-run-status {
-    display: none;
+    align-self: flex-start;
+    white-space: normal;
+    text-align: left;
+  }
+
+  .workflow-run-row {
+    align-items: flex-start;
   }
 }

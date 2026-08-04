@@ -7,7 +7,7 @@ import type {
 import {
   runProgress,
   workflowRunStatusLabel,
-  workflowStepStatusTone,
+  workflowRunStatusTone,
 } from "../../workflows/workflowViewModels.js";
 
 function WorkflowStartForm(props: {
@@ -295,7 +295,7 @@ export function WorkflowHome(props: {
                   onClick={() => props.onOpenRun(run)}
                 >
                   <span
-                    className={`workflow-status-dot workflow-tone-${workflowStepStatusTone(run.stepRuns.find((step) => step.status === "running")?.status ?? "waiting")}`}
+                    className={`workflow-status-dot workflow-tone-${workflowRunStatusTone(run.status)}`}
                     aria-hidden="true"
                   />
                   <span className="workflow-run-row-copy">
@@ -305,7 +305,7 @@ export function WorkflowHome(props: {
                       {new Date(run.updatedAtMs).toLocaleString()}
                     </small>
                   </span>
-                  <span className="workflow-run-status">
+                  <span className="workflow-run-status" aria-label={`Workflow status: ${workflowRunStatusLabel(run.status)}`}>
                     {workflowRunStatusLabel(run.status)}
                   </span>
                 </button>

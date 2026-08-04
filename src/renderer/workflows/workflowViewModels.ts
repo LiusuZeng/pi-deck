@@ -47,6 +47,16 @@ export function workflowStepStatusLabel(status: WorkflowStepStatus): string {
   }
 }
 
+export function workflowRunStatusTone(
+  status: WorkflowRunStatus,
+): "neutral" | "active" | "success" | "danger" | "warning" {
+  if (status === "running" || status === "waiting") return "active";
+  if (status === "completed") return "success";
+  if (status === "failed") return "danger";
+  if (status === "needsAttention") return "warning";
+  return "neutral";
+}
+
 export function workflowStepStatusTone(
   status: WorkflowStepStatus,
 ): "neutral" | "active" | "success" | "danger" | "warning" {

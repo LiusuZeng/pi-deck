@@ -25,6 +25,7 @@ export function WorkflowRunView(props: {
     {},
   );
   const [busyAction, setBusyAction] = useState<string | undefined>();
+  const [actionError, setActionError] = useState<string | undefined>();
   const progress = runProgress(props.run);
   const template = props.run.templateSnapshot;
 
@@ -34,7 +35,10 @@ export function WorkflowRunView(props: {
   ) => {
     setBusyAction(action);
     try {
+      setActionError(undefined);
       await callback();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
     } finally {
       setBusyAction(undefined);
     }
@@ -53,7 +57,7 @@ export function WorkflowRunView(props: {
           </button>
           <span className="workflow-kicker">Workflow run</span>
           <h2>{props.run.name}</h2>
-          <p>
+          <p aria-live="polite">
             {workflowRunStatusLabel(props.run.status)} · {progress.completed} of{" "}
             {progress.total} agents complete
           </p>
@@ -74,6 +78,11 @@ export function WorkflowRunView(props: {
             {workflowRunStatusLabel(props.run.status)}
           </span>
         </div>
+        {actionError ? (
+          <p className="workflow-error workflow-run-action-error" role="alert" aria-live="assertive">
+            {actionError}
+          </p>
+        ) : null}
       </div>
       <div className="workflow-run-layout">
         <main>
@@ -89,6 +98,8 @@ export function WorkflowRunView(props: {
             </div>
             <div
               className="workflow-progress-track"
+              aria-label={`${progress.completed} of ${progress.total} agents complete`}
+              aria-live="polite"
               role="progressbar"
               aria-valuemin={0}
               aria-valuemax={progress.total}

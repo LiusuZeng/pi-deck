@@ -52,7 +52,7 @@ export function WorkflowTransitionCard(props: {
                       props.fromStepId,
                   },
                   no: { kind: "stop" },
-                  unsure: { kind: "manualGate" },
+                  unsure: { kind: "stop" },
                 },
                 previewBeforeStart: true,
               });
@@ -130,16 +130,14 @@ export function WorkflowTransitionCard(props: {
                       ...transition,
                       routes: {
                         ...transition.routes,
-                        [decision]:
-                          value === "manualGate" || value === "stop"
-                            ? { kind: value }
-                            : { kind: "step", stepId: value },
+                        [decision]: value === "stop"
+                          ? { kind: "stop" }
+                          : { kind: "step", stepId: value },
                       },
                     });
                   }}
                 >
                   <option value="stop">Stop workflow</option>
-                  <option value="manualGate">Ask me</option>
                   {steps
                     .filter((step) => step.id !== props.fromStepId)
                     .map((step) => (
