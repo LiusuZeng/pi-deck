@@ -237,13 +237,7 @@ export function resolveWorkflowCondition(
     transition.routes.unsure,
   ]
     .filter((item): item is WorkflowRouteTarget => item !== undefined)
-    .flatMap((item) =>
-      item.kind === "step"
-        ? [item.stepId]
-        : item.kind === "manualGate"
-          ? [item.toStepId]
-          : [],
-    );
+    .flatMap(routeTargetStepIds);
   const selectedStepId =
     target?.kind === "step"
       ? target.stepId
@@ -252,10 +246,7 @@ export function resolveWorkflowCondition(
         : undefined;
   for (const candidateStepId of allTargets) {
     if (candidateStepId !== selectedStepId) {
-      next = updateStepByTemplateId(next, candidateStepId, {
-        status: "skipped",
-        updatedAtMs: now,
-      });
+      next = skipWorkflowStepSubtree(next, candidateStepId, now);
     }
   }
 
@@ -560,17 +551,8 @@ function routeTerminalStep(
           updatedAtMs: now,
         });
         for (const target of Object.values(transition.routes)) {
-          const targetStepId =
-            target?.kind === "step"
-              ? target.stepId
-              : target?.kind === "manualGate"
-                ? target.toStepId
-                : undefined;
-          if (targetStepId !== undefined) {
-            next = updateStepByTemplateId(next, targetStepId, {
-              status: "skipped",
-              updatedAtMs: now,
-            });
+          for (const targetStepId of routeTargetStepIds(target)) {
+            next = skipWorkflowStepSubtree(next, targetStepId, now);
           }
         }
       }
@@ -613,13 +595,61 @@ function stepStartStatus(
 function transitionTargets(transition: WorkflowTransition): string[] {
   if (transition.kind === "always" || transition.kind === "manualGate")
     return [transition.toStepId];
-  return Object.values(transition.routes).flatMap((target) =>
-    target?.kind === "step"
-      ? [target.stepId]
-      : target?.kind === "manualGate"
-        ? [target.toStepId]
-        : [],
+  return Object.values(transition.routes).flatMap(routeTargetStepIds);
+}
+
+function routeTargetStepIds(target: WorkflowRouteTarget | undefined): string[] {
+  if (target?.kind === "step") return [target.stepId];
+  if (target?.kind === "manualGate") return [target.toStepId];
+  return [];
+}
+
+/**
+ * Mark a branch and every transition/step below it as skipped. Condition
+ * routes can point at a step with further transitions, including manual-gate
+ * targets, so skipping only the first target would leave unreachable work
+ * available to the scheduler.
+ */
+function skipWorkflowStepSubtree(
+  run: WorkflowRun,
+  stepId: string,
+  now: number,
+  visited = new Set<string>(),
+): WorkflowRun {
+  if (visited.has(stepId)) return run;
+  visited.add(stepId);
+
+  let next = updateStepByTemplateId(run, stepId, {
+    status: "skipped",
+    runtimeId: undefined,
+    updatedAtMs: now,
+  });
+  const outgoing = next.templateSnapshot.transitions.filter(
+    (transition) => transition.fromStepId === stepId,
   );
+  for (const transition of outgoing) {
+    const transitionRun = next.transitionRuns.find(
+      (item) => item.templateTransitionId === transition.id,
+    );
+    if (transitionRun !== undefined) {
+      next = updateTransition(next, transitionRun.id, {
+        status: "skipped",
+        decision: undefined,
+        rationale: undefined,
+        selectedTarget: undefined,
+        error: undefined,
+        updatedAtMs: now,
+      });
+    }
+    const targets =
+      transition.kind === "condition"
+        ? Object.values(transition.routes).flatMap(routeTargetStepIds)
+        : [transition.toStepId];
+    for (const targetStepId of targets) {
+      next = skipWorkflowStepSubtree(next, targetStepId, now, visited);
+    }
+  }
+  return next;
 }
 
 function assertRunSchedulable(run: WorkflowRun): void {

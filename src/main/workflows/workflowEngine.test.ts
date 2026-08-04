@@ -682,6 +682,114 @@ describe("workflowEngine", () => {
     ).toBe("skipped");
   });
 
+  it("recursively skips nested transitions below an unselected condition branch", () => {
+    const base = template();
+    const configured = template({
+      steps: [
+        ...base.steps,
+        {
+          ...base.steps[2]!,
+          id: "nested-source",
+          name: "Nested source",
+          promptParts: [{ type: "text", text: "nested source" }],
+        },
+        {
+          ...base.steps[2]!,
+          id: "nested-result",
+          name: "Nested result",
+          promptParts: [{ type: "text", text: "nested result" }],
+        },
+        {
+          ...base.steps[2]!,
+          id: "nested-gate",
+          name: "Nested gate",
+          promptParts: [{ type: "text", text: "nested gate" }],
+        },
+      ],
+      transitions: [
+        base.transitions[0]!,
+        {
+          id: "deeper-to-nested",
+          fromStepId: "deeper",
+          kind: "always",
+          toStepId: "nested-source",
+        },
+        {
+          id: "nested-condition",
+          fromStepId: "nested-source",
+          kind: "condition",
+          question: "Continue nested work?",
+          routes: {
+            yes: { kind: "step", stepId: "nested-result" },
+            no: { kind: "manualGate", toStepId: "nested-gate" },
+          },
+          previewBeforeStart: false,
+        },
+      ],
+    });
+    const run = createWorkflowRun({
+      template: configured,
+      workspaceId: "ws",
+      inputs: {},
+      now: 100,
+    });
+    const started = markWorkflowStepStarted(run, run.stepRuns[0]!.id, 101);
+    const completed = markWorkflowStepCompleted(
+      started,
+      run.stepRuns[0]!.id,
+      { finalAnswer: "A fix is clear." },
+      102,
+    );
+    const resolved = resolveWorkflowCondition(
+      completed,
+      completed.transitionRuns[0]!.id,
+      "yes",
+      undefined,
+      103,
+    );
+
+    expect(
+      resolved.stepRuns.find((step) => step.templateStepId === "act")?.status,
+    ).toBe("ready");
+    expect(
+      resolved.stepRuns
+        .filter(
+          (step) =>
+            step.templateStepId !== "investigate" &&
+            step.templateStepId !== "act",
+        )
+        .every(
+          (step) => step.status === "skipped" || step.status === "waiting",
+        ),
+    ).toBe(true);
+    expect(
+      resolved.stepRuns.find((step) => step.templateStepId === "deeper")
+        ?.status,
+    ).toBe("skipped");
+    expect(
+      resolved.stepRuns.find((step) => step.templateStepId === "nested-source")
+        ?.status,
+    ).toBe("skipped");
+    expect(
+      resolved.stepRuns.find((step) => step.templateStepId === "nested-result")
+        ?.status,
+    ).toBe("skipped");
+    expect(
+      resolved.stepRuns.find((step) => step.templateStepId === "nested-gate")
+        ?.status,
+    ).toBe("skipped");
+    expect(
+      resolved.transitionRuns.find(
+        (item) => item.templateTransitionId === "deeper-to-nested",
+      )?.status,
+    ).toBe("skipped");
+    expect(
+      resolved.transitionRuns.find(
+        (item) => item.templateTransitionId === "nested-condition",
+      )?.status,
+    ).toBe("skipped");
+  });
+
   it.todo(
     "rejects a condition judge result outside yes/no/unsure without mutating the run",
   );

@@ -298,6 +298,31 @@ export const workflowTemplateDefinitionSchema = z
         path: ["steps"],
         message: "Workflow must have at least one root step.",
       });
+    } else if (roots.length > 1) {
+      context.addIssue({
+        code: "custom",
+        path: ["steps"],
+        message: "Workflow must have exactly one root step.",
+      });
+    } else {
+      const reachable = new Set<string>();
+      const visitReachable = (stepId: string): void => {
+        if (reachable.has(stepId)) return;
+        reachable.add(stepId);
+        for (const targetStepId of edges.get(stepId) ?? []) {
+          visitReachable(targetStepId);
+        }
+      };
+      visitReachable(roots[0]!.id);
+      for (const step of value.steps) {
+        if (!reachable.has(step.id)) {
+          context.addIssue({
+            code: "custom",
+            path: ["steps"],
+            message: `Workflow step is disconnected from the root: ${step.id}`,
+          });
+        }
+      }
     }
 
     const visiting = new Set<string>();

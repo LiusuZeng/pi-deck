@@ -232,19 +232,19 @@ export class WorkflowStore {
   }
 
   private async persist(): Promise<void> {
+    // Capture the exact committed state before enqueueing. The queued callback
+    // may run after a later commit has replaced this.state; serializing the
+    // live object there can write the wrong snapshot for this queue entry.
+    const snapshot = structuredClone(this.state);
+    const generation = this.generation;
     this.persistQueue = this.persistQueue
       .catch(() => undefined)
       .then(async () => {
-        const generation = this.generation;
         const tempFile = `${this.storeFile}.tmp-${process.pid}-${this.now()}-${Math.random().toString(36).slice(2)}`;
         await fs.mkdir(this.piDeckHome, { recursive: true, mode: 0o700 });
-        await fs.writeFile(
-          tempFile,
-          `${JSON.stringify(this.state, null, 2)}\n`,
-          {
-            mode: 0o600,
-          },
-        );
+        await fs.writeFile(tempFile, `${JSON.stringify(snapshot, null, 2)}\n`, {
+          mode: 0o600,
+        });
         await fs.rename(tempFile, this.storeFile);
         this.persistedGeneration = Math.max(
           this.persistedGeneration,

@@ -228,6 +228,51 @@ describe("workflowTemplateDefinitionSchema", () => {
       ]),
     );
 
+    const multipleRoots = workflowTemplateDefinitionSchema.safeParse({
+      ...linearTemplate,
+      steps: [
+        ...linearTemplate.steps,
+        {
+          ...linearTemplate.steps[0],
+          id: "unreferenced",
+          name: "Unreferenced",
+        },
+      ],
+    });
+    expect(multipleRoots.success).toBe(false);
+    if (multipleRoots.success) return;
+    expect(multipleRoots.error.issues.map((issue) => issue.message)).toContain(
+      "Workflow must have exactly one root step.",
+    );
+
+    const disconnectedFromSingleRoot =
+      workflowTemplateDefinitionSchema.safeParse({
+        ...linearTemplate,
+        steps: [
+          ...linearTemplate.steps,
+          { ...linearTemplate.steps[0], id: "detached", name: "Detached" },
+        ],
+        transitions: [
+          ...linearTemplate.transitions,
+          {
+            id: "detached-cycle",
+            fromStepId: "detached",
+            kind: "always",
+            toStepId: "detached",
+          },
+        ],
+      });
+    expect(disconnectedFromSingleRoot.success).toBe(false);
+    if (disconnectedFromSingleRoot.success) return;
+    expect(
+      disconnectedFromSingleRoot.error.issues.map((issue) => issue.message),
+    ).toEqual(
+      expect.arrayContaining([
+        "Workflow step is disconnected from the root: detached",
+        "Workflow transitions must form an acyclic graph.",
+      ]),
+    );
+
     const duplicate = workflowTemplateDefinitionSchema.safeParse({
       ...linearTemplate,
       transitions: [

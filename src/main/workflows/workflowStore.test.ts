@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkflowStore } from "./workflowStore.js";
 import { createWorkflowRun } from "./workflowEngine.js";
 import type { WorkflowTemplateDefinition } from "../../shared/workflowSchemas.js";
@@ -9,6 +9,7 @@ import type { WorkflowTemplateDefinition } from "../../shared/workflowSchemas.js
 const tempDirs: string[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(
     tempDirs
       .splice(0)
@@ -63,6 +64,56 @@ describe("WorkflowStore", () => {
     expect(
       (await reopened.listRuns("workspace-1")).map((item) => item.id),
     ).toEqual([run.id]);
+  });
+
+  it("captures each queued persistence snapshot before a later commit", async () => {
+    const store = await newStore();
+    await store.createTemplate(definition);
+
+    let releaseFirstPersist!: () => void;
+    const firstPersist = new Promise<void>((resolve) => {
+      releaseFirstPersist = resolve;
+    });
+    let firstPersistStarted!: () => void;
+    const firstPersistStartedPromise = new Promise<void>((resolve) => {
+      firstPersistStarted = resolve;
+    });
+    const originalMkdir = fs.mkdir.bind(fs);
+    let delayed = false;
+    vi.spyOn(fs, "mkdir").mockImplementation(async (...args) => {
+      if (!delayed) {
+        delayed = true;
+        firstPersistStarted();
+        await firstPersist;
+      }
+      return originalMkdir(...args);
+    });
+
+    const payloads: string[] = [];
+    const originalWriteFile = fs.writeFile.bind(fs);
+    vi.spyOn(fs, "writeFile").mockImplementation((...args) => {
+      payloads.push(String(args[1]));
+      return originalWriteFile(...args);
+    });
+
+    const first = store.createTemplate({ ...definition, name: "First" });
+    await firstPersistStartedPromise;
+    const second = store.createTemplate({ ...definition, name: "Second" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    releaseFirstPersist();
+    await Promise.all([first, second]);
+
+    expect(payloads).toHaveLength(2);
+    expect(
+      JSON.parse(payloads[0]!).templates.map(
+        (item: { name: string }) => item.name,
+      ),
+    ).toEqual(["Linear workflow", "First"]);
+    expect(
+      JSON.parse(payloads[1]!).templates.map(
+        (item: { name: string }) => item.name,
+      ),
+    ).toEqual(["Linear workflow", "First", "Second"]);
   });
 
   it("keeps a global template global when workspaceId is omitted", async () => {
