@@ -60,6 +60,17 @@ describe("workflowTemplateDefinitionSchema", () => {
     );
   });
 
+  it("rejects a blank workflow with no agent steps", () => {
+    const result = workflowTemplateDefinitionSchema.safeParse({
+      ...linearTemplate,
+      steps: [],
+      transitions: [],
+    });
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.issues.some((issue) => issue.path.join(".") === "steps")).toBe(true);
+  });
+
   it("rejects dangling steps and input references", () => {
     const result = workflowTemplateDefinitionSchema.safeParse({
       ...linearTemplate,

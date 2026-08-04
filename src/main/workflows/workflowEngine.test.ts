@@ -8,6 +8,7 @@ import {
   markWorkflowStepQueued,
   readyWorkflowSteps,
   resolveWorkflowCondition,
+  retryWorkflowStep,
   stopWorkflowRun,
   recoverWorkflowRun,
   approveWorkflowStep,
@@ -117,6 +118,25 @@ describe("workflowEngine", () => {
     const resolved = resolveWorkflowCondition(completed, completed.transitionRuns[0]!.id, "unsure", "The result was ambiguous.", 103);
     expect(resolved.status).toBe("stopped");
     expect(resolved.stepRuns.every((step) => step.templateStepId === "investigate" || step.status === "skipped")).toBe(true);
+  });
+
+  it("routes no to its branch and skips the other condition targets", () => {
+    const run = createWorkflowRun({ template: template(), workspaceId: "ws", inputs: {}, now: 100 });
+    const started = markWorkflowStepStarted(run, run.stepRuns[0]!.id, 101);
+    const completed = markWorkflowStepCompleted(started, run.stepRuns[0]!.id, { finalAnswer: "No fix yet." }, 102);
+    const resolved = resolveWorkflowCondition(completed, completed.transitionRuns[0]!.id, "no", undefined, 103);
+    expect(resolved.stepRuns.find((step) => step.templateStepId === "deeper")?.status).toBe("ready");
+    expect(resolved.stepRuns.find((step) => step.templateStepId === "act")?.status).toBe("skipped");
+  });
+
+  it("retries a failed step as ready work and clears its error", () => {
+    const run = createWorkflowRun({ template: template(), workspaceId: "ws", inputs: {}, now: 100 });
+    const started = markWorkflowStepStarted(run, run.stepRuns[0]!.id, 101);
+    const failed = markWorkflowStepFailed(started, run.stepRuns[0]!.id, "worker failed", 102);
+    const retried = retryWorkflowStep(failed, failed.stepRuns[0]!.id, 103);
+    expect(retried.status).toBe("waiting");
+    expect(retried.stepRuns[0]).toMatchObject({ status: "ready" });
+    expect(retried.stepRuns[0]?.error).toBeUndefined();
   });
 
   it("rejects missing required inputs before creating a run", () => {

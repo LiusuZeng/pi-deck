@@ -179,6 +179,29 @@ describe("WorkflowScheduler", () => {
     );
   });
 
+  it("marks a worker failure as retryable and closes the failed worker", async () => {
+    const fixture = setup();
+    const run = createWorkflowRun({
+      template,
+      workspaceId: "workspace",
+      inputs: {},
+      now: 1,
+    });
+    await fixture.scheduler.schedule(run);
+    await fixture.scheduler.handleRuntimeEvent({
+      type: "agent_end",
+      runtimeId: "runtime-1",
+      status: "error",
+      error: "fake worker failed",
+    });
+
+    expect(fixture.persisted.at(-1)?.status).toBe("needsAttention");
+    expect(fixture.persisted.at(-1)?.stepRuns[0]).toMatchObject({
+      status: "failed",
+      error: "fake worker failed",
+    });
+  });
+
   it("persists a queued step when worker capacity is unavailable", async () => {
     const fixture = setup({ capacity: true });
     const run = createWorkflowRun({

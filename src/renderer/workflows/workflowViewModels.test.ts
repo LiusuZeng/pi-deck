@@ -68,8 +68,16 @@ function run(status: WorkflowRun["status"]): WorkflowRun {
 describe("workflow view models", () => {
   it("labels run states and maps step states to visual tones", () => {
     expect(workflowRunStatusLabel("needsAttention")).toBe("Needs attention");
+    expect(workflowRunStatusLabel("waiting")).toBe("Waiting");
+    expect(workflowRunStatusLabel("running")).toBe("Running");
+    expect(workflowRunStatusLabel("completed")).toBe("Completed");
+    expect(workflowRunStatusLabel("failed")).toBe("Failed");
+    expect(workflowRunStatusLabel("stopped")).toBe("Stopped");
     expect(workflowStepStatusTone("running")).toBe("active");
     expect(workflowStepStatusTone("failed")).toBe("danger");
+    expect(workflowStepStatusTone("needsApproval")).toBe("warning");
+    expect(workflowStepStatusTone("completed")).toBe("success");
+    expect(workflowStepStatusTone("waiting")).toBe("neutral");
   });
 
   it("counts completed and skipped steps for progress", () => {
