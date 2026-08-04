@@ -57,6 +57,22 @@ _A short real-mode walkthrough: attach an image, send the prompt, watch Pi execu
 
 The conversation view shows the composer, image attachment preview, Pi tool execution, streaming response, and controls for steering, following up, or aborting. The workspace inbox keeps saved work grouped and easy to reopen.
 
+## Feature snapshots
+
+<p align="center">
+  <a href="docs/assets/pi-deck-models.png" title="Open the model and thinking controls screenshot full size">
+    <img src="docs/assets/pi-deck-models.png" alt="Pi Deck showing thinking levels and available Pi models in the configuration menu" width="32%">
+  </a>
+  <a href="docs/assets/pi-deck-appearance.png" title="Open the appearance menu screenshot full size">
+    <img src="docs/assets/pi-deck-appearance.png" alt="Pi Deck showing System, Light, and Dark appearance options" width="32%">
+  </a>
+  <a href="docs/assets/pi-deck-extension.png" title="Open the extension request screenshot full size">
+    <img src="docs/assets/pi-deck-extension.png" alt="Pi Deck showing a blocking Pi extension request while the session waits for user input" width="32%">
+  </a>
+</p>
+
+_Models and thinking · appearance preferences · extension requests waiting for input._
+
 ## Features
 
 ### Workspaces, projects, and Pi-native sessions

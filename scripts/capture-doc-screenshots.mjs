@@ -34,6 +34,23 @@ const additionalOutputs = [
     height: 776,
   },
 ];
+const featureOutputs = [
+  {
+    name: "pi-deck-models.png",
+    width: 1193,
+    height: 776,
+  },
+  {
+    name: "pi-deck-appearance.png",
+    width: 1193,
+    height: 776,
+  },
+  {
+    name: "pi-deck-extension.png",
+    width: 1193,
+    height: 776,
+  },
+];
 const animatedOutputs = [
   {
     name: "pi-deck-conversation.gif",
@@ -122,6 +139,71 @@ async function waitForReady(page) {
   await page.getByTestId("workspace-tree").waitFor();
 }
 
+async function captureExtensionScreenshot(root, output) {
+  const extensionRoot = path.join(root, "extension-capture");
+  const projectCwd = path.join(extensionRoot, "project");
+  const agentDir = path.join(extensionRoot, "agent");
+  const sessionDir = path.join(extensionRoot, "sessions");
+  const userDataDir = path.join(extensionRoot, "user-data");
+  const piDeckHome = path.join(extensionRoot, "pideck-home");
+  for (const directory of [projectCwd, agentDir, sessionDir, userDataDir]) {
+    fs.mkdirSync(directory, { recursive: true });
+  }
+  fs.writeFileSync(
+    path.join(userDataDir, "settings.json"),
+    `${JSON.stringify({ theme: "dark" })}\n`,
+  );
+
+  const app = await electron.launch({
+    executablePath: electronPath,
+    args: [mainEntry],
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PI_DECK_BACKEND: "real",
+      PI_DECK_E2E_HIDE_WINDOWS: "1",
+      PI_DECK_PI_BINARY: createFakePiBinary(extensionRoot, [
+        "--prompt-scenario",
+        "extension-ui",
+        "--stream-delay-ms",
+        "400",
+      ]),
+      PI_DECK_PROJECT_CWD: projectCwd,
+      PI_CODING_AGENT_DIR: agentDir,
+      PI_CODING_AGENT_SESSION_DIR: sessionDir,
+      PI_DECK_HOME: piDeckHome,
+      PI_DECK_USER_DATA_DIR: userDataDir,
+    },
+  });
+
+  try {
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    await waitForReady(page);
+    await page
+      .getByLabel("Prompt text")
+      .fill("Approve this extension request.");
+    await page.getByRole("button", { name: "Send" }).click();
+    await page
+      .getByText("Approve fake extension UI request?", { exact: true })
+      .waitFor();
+    await page.getByRole("button", { name: "Confirm", exact: true }).waitFor();
+    await page
+      .locator(".session-item")
+      .filter({ hasText: "Waiting · extension input required" })
+      .waitFor();
+    await page.setViewportSize({
+      width: output.width,
+      height: output.height,
+    });
+    const screenshot = path.join(root, output.name);
+    await page.screenshot({ path: screenshot });
+    return screenshot;
+  } finally {
+    await app.close();
+  }
+}
+
 async function main() {
   if (!fs.existsSync(mainEntry)) {
     throw new Error("Build Pi Deck first with: npm run build");
@@ -188,6 +270,7 @@ async function main() {
         "tool",
         "--stream-delay-ms",
         "2000",
+        "--extra-model",
       ]),
       PI_DECK_PROJECT_CWD: projectCwd,
       PI_CODING_AGENT_DIR: agentDir,
@@ -271,11 +354,44 @@ async function main() {
 
     await page.getByLabel(/Model and thinking\. Current model:/).click();
     await page
+      .getByRole("menu", { name: "Model and thinking options" })
+      .waitFor();
+    const modelMenuItem = page.getByRole("menuitem", {
+      name: "Fake model",
+      exact: true,
+    });
+    await modelMenuItem.waitFor();
+    await modelMenuItem.hover();
+    await page.getByRole("menu", { name: "Available Pi models" }).waitFor();
+    const modelOutput = featureOutputs[0];
+    await page.setViewportSize({
+      width: modelOutput.width,
+      height: modelOutput.height,
+    });
+    const modelScreenshot = path.join(root, modelOutput.name);
+    await page.screenshot({ path: modelScreenshot });
+    const capturedScreenshots = new Map();
+    capturedScreenshots.set(modelOutput.name, modelScreenshot);
+    await page
       .getByRole("menuitemradio", { name: "high", exact: true })
       .click();
     await page.getByRole("status").waitFor({ state: "hidden" });
 
-    const capturedScreenshots = new Map();
+    const appearanceTrigger = page.getByRole("button", {
+      name: "Appearance: Dark",
+    });
+    await appearanceTrigger.click();
+    await page.getByRole("menu", { name: "Appearance options" }).waitFor();
+    const appearanceOutput = featureOutputs[1];
+    await page.setViewportSize({
+      width: appearanceOutput.width,
+      height: appearanceOutput.height,
+    });
+    const appearanceScreenshot = path.join(root, appearanceOutput.name);
+    await page.screenshot({ path: appearanceScreenshot });
+    capturedScreenshots.set(appearanceOutput.name, appearanceScreenshot);
+    await page.keyboard.press("Escape");
+
     const workspaceOutput = siteOutputs[0];
     const workspaceScreenshot = path.join(root, workspaceOutput.name);
     await page.setViewportSize({
@@ -422,9 +538,16 @@ async function main() {
     );
     capturedScreenshots.set(gifOutput.name, conversationGif);
 
+    const extensionOutput = featureOutputs[2];
+    capturedScreenshots.set(
+      extensionOutput.name,
+      await captureExtensionScreenshot(root, extensionOutput),
+    );
+
     for (const output of [
       ...siteOutputs,
       ...additionalOutputs,
+      ...featureOutputs,
       ...animatedOutputs,
     ]) {
       const source = capturedScreenshots.get(output.name);
