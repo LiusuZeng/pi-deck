@@ -906,6 +906,11 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async ({ workspaceId }) => {
       await ensureWorkspaceStore().restore(workspaceId);
+      // Workspace restoration is also a workflow lifecycle boundary. Runs
+      // retained while the workspace was archived may be waiting or queued;
+      // schedule them before returning so the renderer does not need a relaunch
+      // (or a second workflow action) to resume them.
+      await rehydrateWorkflowRuns(workspaceId);
       return projectWorkspaceListResult();
     },
   });
@@ -1364,7 +1369,7 @@ function ensureWorkflowScheduler(): WorkflowScheduler {
   return workflowScheduler;
 }
 
-async function rehydrateWorkflowRuns(): Promise<void> {
+async function rehydrateWorkflowRuns(workspaceId?: string): Promise<void> {
   const store = ensureWorkflowStore();
   const scheduler = ensureWorkflowScheduler();
   await rehydratePersistedWorkflowRuns(await store.listRuns(), {
@@ -1373,7 +1378,7 @@ async function rehydrateWorkflowRuns(): Promise<void> {
     schedule: (run) => scheduler.schedule(run),
     emit: (run) => emitWorkflowRunEvent(run),
     recordError: (message) => diagnostics?.recordError(message),
-  });
+  }, Date.now(), workspaceId);
 }
 
 function createWorkflowScheduler(

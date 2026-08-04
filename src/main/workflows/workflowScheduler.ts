@@ -83,10 +83,26 @@ export class WorkflowScheduler {
   }
 
   async schedule(run: WorkflowRun): Promise<WorkflowRun> {
-    this.runs.set(run.id, run);
-    this.mutationVersions.set(run.id, (this.mutationVersions.get(run.id) ?? 0) + 1);
-    if (isTerminalRun(run)) return run;
-    return this.pump(run.id);
+    // Queued is an allocation outcome, not a durable pause. A run restored
+    // after workspace recovery must get another allocation attempt without
+    // waiting for an unrelated worker_exit event.
+    const resumable = run.stepRuns.some((step) => step.status === "queued")
+      ? {
+          ...run,
+          stepRuns: run.stepRuns.map((step) =>
+            step.status === "queued"
+              ? { ...step, status: "ready" as const, updatedAtMs: this.now() }
+              : step,
+          ),
+        }
+      : run;
+    this.runs.set(resumable.id, resumable);
+    this.mutationVersions.set(
+      resumable.id,
+      (this.mutationVersions.get(resumable.id) ?? 0) + 1,
+    );
+    if (isTerminalRun(resumable)) return resumable;
+    return this.pump(resumable.id);
   }
 
   /** Apply a newly persisted stop/retry/approval mutation from IPC. */

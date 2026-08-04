@@ -28,6 +28,40 @@ const template: WorkflowTemplate = {
 };
 
 describe("workflow rehydration", () => {
+  it("rehydrates only the workspace released by a restore", async () => {
+    const restoredRun = createWorkflowRun({
+      template,
+      workspaceId: "restored-workspace",
+      inputs: {},
+      now: 10,
+    });
+    const unrelatedRun = createWorkflowRun({
+      template,
+      workspaceId: "other-workspace",
+      inputs: {},
+      now: 10,
+    });
+    const scheduledIds: string[] = [];
+
+    await rehydrateWorkflowRuns(
+      [restoredRun, unrelatedRun],
+      {
+        resolveWorkspace: async () => undefined,
+        updateRun: async (next) => next,
+        schedule: async (next) => {
+          scheduledIds.push(next.id);
+          return next;
+        },
+        emit: () => undefined,
+        recordError: () => undefined,
+      },
+      20,
+      "restored-workspace",
+    );
+
+    expect(scheduledIds).toEqual([restoredRun.id]);
+  });
+
   it("keeps an archived workspace run resumable without throwing", async () => {
     const run = createWorkflowRun({
       template,

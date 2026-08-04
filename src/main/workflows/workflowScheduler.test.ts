@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { createWorkflowRun, stopWorkflowRun } from "./workflowEngine.js";
+import {
+  createWorkflowRun,
+  markWorkflowStepQueued,
+  stopWorkflowRun,
+} from "./workflowEngine.js";
 import {
   renderWorkflowTranscript,
   WorkflowScheduler,
@@ -305,6 +309,25 @@ describe("WorkflowScheduler", () => {
   it.todo(
     "does not send a prompt when rendering exposes an unavailable upstream output",
   );
+
+  it("reschedules a queued step when a workspace is restored", async () => {
+    const fixture = setup();
+    const run = createWorkflowRun({
+      template,
+      workspaceId: "workspace",
+      inputs: {},
+      now: 1,
+    });
+    const queued = markWorkflowStepQueued(run, run.stepRuns[0]!.id, 2);
+
+    await fixture.scheduler.schedule(queued);
+
+    expect(fixture.prompts).toEqual(["first prompt"]);
+    expect(fixture.persisted.at(-1)?.stepRuns[0]).toMatchObject({
+      templateStepId: "first",
+      status: "running",
+    });
+  });
 
   it("persists a queued step when worker capacity is unavailable", async () => {
     const fixture = setup({ capacity: true });

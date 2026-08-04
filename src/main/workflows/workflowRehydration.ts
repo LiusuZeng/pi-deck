@@ -13,13 +13,19 @@ export interface WorkflowRehydrationDependencies {
  * Restore persisted runs without allowing a stale workspace to abort startup.
  * Runs that cannot currently resolve their workspace remain persisted as-is;
  * they can be scheduled after the workspace is restored on a later startup.
+ * A workspace id may be supplied to rehydrate only runs released by an IPC
+ * workspace restore without touching unrelated runs.
  */
 export async function rehydrateWorkflowRuns(
   persistedRuns: readonly WorkflowRun[],
   dependencies: WorkflowRehydrationDependencies,
   now = Date.now(),
+  workspaceId?: string,
 ): Promise<void> {
   for (const persisted of persistedRuns) {
+    if (workspaceId !== undefined && persisted.workspaceId !== workspaceId) {
+      continue;
+    }
     const recovered = recoverWorkflowRun(persisted, now);
     const run =
       recovered === persisted
