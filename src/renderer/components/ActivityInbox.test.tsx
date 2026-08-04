@@ -104,7 +104,7 @@ describe("ActivityInbox", () => {
   it("shows global rows, workspace context, selector counts, and status chips", () => {
     const { view } = renderInbox(modelWithEveryKind());
 
-    expect(view.querySelector("h1")?.textContent).toBe("Activity");
+    expect(view.querySelector("h1")?.textContent).toBe("Work inbox");
     expect(view.textContent).toContain("All workspaces");
     expect(view.textContent).toContain("Project Atlas");
     expect(view.textContent).toContain("Project Borealis");
@@ -129,7 +129,7 @@ describe("ActivityInbox", () => {
     const selector = view.querySelector<HTMLSelectElement>("select");
 
     expect(view.querySelector("h1")?.textContent).toBe(
-      "Activity · Project Atlas",
+      "Work inbox · Project Atlas",
     );
     expect(view.textContent).not.toContain("failed session failure");
     expect(view.textContent).not.toContain("Project Borealis");
@@ -158,7 +158,7 @@ describe("ActivityInbox", () => {
 
     expect(failedFilter?.getAttribute("aria-pressed")).toBe("true");
     expect(view.querySelector('[role="status"]')?.textContent).toContain(
-      "No failed activity in Project Atlas.",
+      "No failed work in Project Atlas.",
     );
   });
 

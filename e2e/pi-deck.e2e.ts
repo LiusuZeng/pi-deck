@@ -3029,7 +3029,7 @@ test("real mode does not fall back to fake/local UI and can send from active run
   }
 });
 
-test("Activity inbox scopes work by workspace and opens a row with the keyboard", async () => {
+test("Work inbox scopes work by workspace and opens a row with the keyboard", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-activity-"));
   const projectCwd = path.join(root, "activity-source");
   const agentDir = path.join(root, "agent");
@@ -3051,18 +3051,28 @@ test("Activity inbox scopes work by workspace and opens a row with the keyboard"
     await expect(page.getByRole("button", { name: "Abort" })).toBeVisible();
 
     await createWorkspaceInUi(page, "Activity secondary");
-    await page.getByRole("button", { name: /^Activity/ }).click();
-    await expect(page.getByRole("heading", { name: "Activity" })).toBeVisible();
-    await expect(page.getByLabel("Activity workspace")).toHaveValue("all");
+    await page
+      .getByRole("button", { name: "Workspace actions for Activity secondary" })
+      .click();
+    await expect(
+      page.getByRole("menuitem", { name: "View work inbox" }),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
+
+    await page.getByRole("button", { name: "Work inbox" }).click();
+    await expect(
+      page.getByRole("heading", { name: "Work inbox" }),
+    ).toBeVisible();
+    await expect(page.getByLabel("Work inbox workspace")).toHaveValue("all");
     await expect(
       page.getByRole("button", { name: /^In progress \d+$/ }),
     ).toBeVisible();
 
-    await page.getByLabel("Activity workspace").selectOption({
+    await page.getByLabel("Work inbox workspace").selectOption({
       label: "Default workspace (1)",
     });
     await expect(
-      page.getByRole("heading", { name: /Activity · Default workspace/i }),
+      page.getByRole("heading", { name: /Work inbox · Default workspace/i }),
     ).toBeVisible();
     const activityRow = page.getByRole("button", {
       name: /^In progress: activity keyboard route,/i,
