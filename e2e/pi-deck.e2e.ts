@@ -3059,13 +3059,13 @@ test("Activity inbox scopes work by workspace and opens a row with the keyboard"
     ).toBeVisible();
 
     await page.getByLabel("Activity workspace").selectOption({
-      label: "activity-source (1)",
+      label: "Default workspace (1)",
     });
     await expect(
-      page.getByRole("heading", { name: /Activity · activity-source/i }),
+      page.getByRole("heading", { name: /Activity · Default workspace/i }),
     ).toBeVisible();
     const activityRow = page.getByRole("button", {
-      name: /activity keyboard route/i,
+      name: /^In progress: activity keyboard route,/i,
     });
     await activityRow.focus();
     await activityRow.press("Enter");
