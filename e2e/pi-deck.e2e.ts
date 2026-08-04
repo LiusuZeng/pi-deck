@@ -3055,7 +3055,7 @@ test("Activity inbox scopes work by workspace and opens a row with the keyboard"
     await expect(page.getByRole("heading", { name: "Activity" })).toBeVisible();
     await expect(page.getByLabel("Activity workspace")).toHaveValue("all");
     await expect(
-      page.getByRole("button", { name: /In progress/ }),
+      page.getByRole("button", { name: /^In progress \d+$/ }),
     ).toBeVisible();
 
     await page.getByLabel("Activity workspace").selectOption({
