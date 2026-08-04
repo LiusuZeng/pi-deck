@@ -82,7 +82,13 @@ import {
   transferAttachmentOwnership,
 } from "./attachmentLifecycle.js";
 import { RuntimeEventBuffer } from "./runtimeEventBuffer.js";
-import { buildActivityInbox } from "./activityInbox.js";
+import {
+  buildActivityInbox,
+  tagsForScope,
+  type ActivityItem,
+  type ActivityScope,
+  type ActivitySourceSession,
+} from "./activityInbox.js";
 import { ActivityInbox } from "./components/ActivityInbox.js";
 
 type LoadState =
@@ -211,6 +217,8 @@ interface SessionViewModel {
   runtimeBacked: boolean;
   backendMode?: "fake" | "real";
   sessionFile?: string;
+  /** Durable Pi session identity when a runtime id is currently attached. */
+  sessionId?: string;
   resumeBacked?: boolean;
   /** A local placeholder; its Pi worker is created only on first send. */
   draftSession?: boolean;
@@ -227,6 +235,91 @@ interface SessionViewModel {
   archivedAtMs?: number;
   /** Set only after a successful or aborted runtime turn in this renderer run. */
   completedAtMs?: number | undefined;
+}
+
+/**
+ * Activity has a canonical identity that does not depend on the current
+ * workspace view. Keep this projection separate from chat-specific fields so
+ * hidden runtimes and saved rows remain usable across workspace switches.
+ */
+function activitySourceSessions(
+  sessions: readonly SessionViewModel[],
+  workspaceNameById: Readonly<Record<string, string>>,
+): ActivitySourceSession[] {
+  return sessions.map((session) => ({
+    id: session.id,
+    workspaceId: session.workspaceId,
+    ...(session.sessionFile !== undefined
+      ? { sessionFile: session.sessionFile }
+      : {}),
+    ...(session.sessionId !== undefined
+      ? { sessionId: session.sessionId }
+      : {}),
+    ...(session.runtimeBacked ? { runtimeId: session.id } : {}),
+    title: session.title,
+    workspaceName: workspaceNameById[session.workspaceId] ?? session.project,
+    updatedAtMs: session.updatedAtMs,
+    baseState: session.baseState,
+    overlays: session.overlays,
+    status: session.status,
+    ...(session.completedAtMs !== undefined
+      ? { completedAtMs: session.completedAtMs }
+      : {}),
+    ...(session.lastError !== undefined ? { lastError: session.lastError } : {}),
+    ...(session.archivedAtMs !== undefined
+      ? { archivedAtMs: session.archivedAtMs }
+      : {}),
+  }));
+}
+
+function activitySessionForItem(
+  sessions: readonly SessionViewModel[],
+  item: ActivityItem,
+): SessionViewModel | undefined {
+  return sessions.find(
+    (session) =>
+      session.workspaceId === item.workspaceId &&
+      ((item.sessionFile !== undefined &&
+        session.sessionFile === item.sessionFile) ||
+        (item.runtimeId !== undefined && session.id === item.runtimeId) ||
+        (item.sessionId !== undefined && session.sessionId === item.sessionId) ||
+        (item.sessionFile === undefined &&
+          item.runtimeId === undefined &&
+          item.sessionId === undefined &&
+          session.id === item.sessionKey)),
+  );
+}
+
+function sessionForActivityItem(
+  item: ActivityItem,
+  workspace: WorkspaceRef,
+): SessionViewModel {
+  const id =
+    item.runtimeId ?? item.sessionId ?? item.sessionFile ?? item.sessionKey;
+  return {
+    id,
+    workspaceId: item.workspaceId,
+    ...(item.sessionFile !== undefined ? { sessionFile: item.sessionFile } : {}),
+    ...(item.sessionId !== undefined ? { sessionId: item.sessionId } : {}),
+    title: item.title,
+    project: workspace.name,
+    projectPath: defaultWorkingDirectory(workspace) ?? "Unknown project",
+    ...(projectIdForWorkspace(workspace) !== undefined
+      ? { projectId: projectIdForWorkspace(workspace) }
+      : {}),
+    subtitle: item.sessionFile
+      ? "Saved · click to resume"
+      : "Idle · activity session",
+    status: "idle",
+    updatedAt: formatRelativeTime(item.updatedAtMs),
+    updatedAtMs: item.updatedAtMs,
+    timeline: [],
+    baseState: "idle",
+    overlays: { ...emptyOverlays },
+    runtimeBacked: false,
+    backendMode: "real",
+    resumeBacked: item.sessionFile !== undefined,
+  };
 }
 
 /**
@@ -668,6 +761,9 @@ export function App(): ReactElement {
     loadSidebarVisiblePreference(),
   );
   const [activityInboxVisible, setActivityInboxVisible] = useState(false);
+  const [activityScope, setActivityScope] = useState<ActivityScope>({
+    type: "all",
+  });
   const [usageStatsVisible, setUsageStatsVisible] = useState(() =>
     loadUsageStatsVisiblePreference(),
   );
@@ -990,15 +1086,31 @@ export function App(): ReactElement {
     sessions.find((session) => session.id === selectedSessionId) ??
     sessions[0] ??
     loadingSession;
+  const activityWorkspaces = useMemo(
+    () => workspaceOptions(currentWorkspace, workspaces),
+    [currentWorkspace, workspaces],
+  );
+  const activityWorkspaceNameById = useMemo(
+    () =>
+      Object.fromEntries(
+        [...activityWorkspaces, ...archivedWorkspaces].map((workspace) => [
+          workspace.id,
+          workspace.name,
+        ]),
+      ),
+    [activityWorkspaces, archivedWorkspaces],
+  );
+  const activitySources = useMemo(
+    () =>
+      activitySourceSessions(
+        [...sessions, ...archivedSessions],
+        activityWorkspaceNameById,
+      ),
+    [activityWorkspaceNameById, archivedSessions, sessions],
+  );
   const activityInboxModel = useMemo(() => {
-    const workspaceNameById = Object.fromEntries(
-      [...workspaces, currentWorkspace].map((workspace) => [
-        workspace.id,
-        workspace.name,
-      ]),
-    );
-    return buildActivityInbox(sessions, workspaceNameById);
-  }, [currentWorkspace, sessions, workspaces]);
+    return buildActivityInbox(activitySources, tagsForScope(activityScope));
+  }, [activityScope, activitySources]);
   const selectedModel =
     modelOptions.find((model) => model.id === selectedModelId) ??
     modelOptions[0];
@@ -1470,6 +1582,20 @@ export function App(): ReactElement {
     );
   }
 
+  function handleToggleActivity(): void {
+    if (activityInboxVisible) {
+      setActivityInboxVisible(false);
+      return;
+    }
+    setActivityScope({ type: "all" });
+    setActivityInboxVisible(true);
+  }
+
+  function handleOpenWorkspaceActivity(workspaceId: string): void {
+    setActivityScope({ type: "workspace", workspaceId });
+    setActivityInboxVisible(true);
+  }
+
   function handleSelectSession(sessionId: string): void {
     setActivityInboxVisible(false);
     const session = sessions.find((item) => item.id === sessionId);
@@ -1499,11 +1625,58 @@ export function App(): ReactElement {
     }
   }
 
-  function handleOpenActivitySession(sessionId: string): void {
-    // Keep the transition local, then use the normal selection flow so
-    // cross-workspace navigation and saved-session resume remain identical.
+  function handleOpenActivityItem(item: ActivityItem): void {
+    void openActivityItem(item);
+  }
+
+  async function openActivityItem(item: ActivityItem): Promise<void> {
     setActivityInboxVisible(false);
-    handleSelectSession(sessionId);
+    const targetWorkspace = activityWorkspaces.find(
+      (workspace) => workspace.id === item.workspaceId,
+    );
+    if (targetWorkspace === undefined) {
+      setUiMessage("This activity item belongs to a workspace that is unavailable.");
+      return;
+    }
+
+    if (currentWorkspaceRef.current.id !== item.workspaceId) {
+      try {
+        if (hasWorkspaceApi(window.piDeck)) {
+          const result = await window.piDeck.workspaces.select({
+            workspaceId: item.workspaceId,
+          });
+          setArchivedWorkspaces(result.archivedWorkspaces ?? []);
+          await switchWorkspaceView(
+            result.activeWorkspace ?? targetWorkspace,
+            result.workspaces,
+          );
+        } else {
+          await switchWorkspaceView(targetWorkspace, activityWorkspaces);
+        }
+      } catch (error) {
+        setUiMessage(
+          `Failed to open activity workspace: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return;
+      }
+    }
+
+    const session =
+      activitySessionForItem(sessionsRef.current, item) ??
+      sessionForActivityItem(item, targetWorkspace);
+    if (session.runtimeBacked) {
+      setSelectedSessionId(session.id);
+      loadRealCapabilities(session.id);
+      return;
+    }
+    if (session.sessionFile !== undefined) {
+      // Resume only from the canonical saved-session identity. This is kept
+      // separate from new-session creation, so Activity never opens a folder
+      // picker when navigating an existing row.
+      await resumeSession(session);
+      return;
+    }
+    setSelectedSessionId(session.id);
   }
 
   async function resumeSession(
@@ -2333,6 +2506,13 @@ export function App(): ReactElement {
   }
 
   async function handleSelectWorkspace(workspace: WorkspaceRef): Promise<void> {
+    if (activityInboxVisible) {
+      setActivityScope((scope) =>
+        scope.type === "workspace"
+          ? { type: "workspace", workspaceId: workspace.id }
+          : scope,
+      );
+    }
     try {
       if (hasWorkspaceApi(window.piDeck)) {
         const result = await window.piDeck.workspaces.select({
@@ -3447,7 +3627,8 @@ export function App(): ReactElement {
           activityInboxVisible={activityInboxVisible}
           activityActionableCount={activityInboxModel.actionableCount}
           onSelect={handleSelectSession}
-          onOpenActivity={() => setActivityInboxVisible(true)}
+          onOpenActivity={handleToggleActivity}
+          onOpenWorkspaceActivity={handleOpenWorkspaceActivity}
           onSelectWorkspace={(workspace) =>
             void handleSelectWorkspace(workspace)
           }
@@ -3529,7 +3710,10 @@ export function App(): ReactElement {
         {activityInboxVisible ? (
           <ActivityInbox
             model={activityInboxModel}
-            onOpenSession={handleOpenActivitySession}
+            scope={activityScope}
+            workspaces={activityWorkspaces}
+            onScopeChange={setActivityScope}
+            onOpenActivityItem={handleOpenActivityItem}
             onClose={() => setActivityInboxVisible(false)}
           />
         ) : isResuming ? (
@@ -4216,6 +4400,7 @@ function sessionFromSummary(
   return {
     id: summary.attachedRuntimeId ?? summary.id,
     workspaceId,
+    sessionId: summary.id,
     ...(summary.cwd !== undefined ? { workingDirectory: summary.cwd } : {}),
     title: summary.title,
     project: summary.cwd?.split(/[\\/]/).pop() ?? "Pi project",
@@ -5802,6 +5987,7 @@ function SessionSidebar(props: {
   activityActionableCount: number;
   onSelect(sessionId: string): void;
   onOpenActivity(): void;
+  onOpenWorkspaceActivity(workspaceId: string): void;
   onSelectWorkspace(workspace: WorkspaceRef): void;
   onRenameWorkspace(workspace: WorkspaceRef): void;
   onArchiveWorkspace(workspace: WorkspaceRef): void;
@@ -6211,6 +6397,13 @@ function SessionSidebar(props: {
                   <span className="workspace-tree-count">
                     {workspaceSessions.length}
                   </span>
+                </Button>
+                <Button
+                  className="workspace-activity-button"
+                  size="sm"
+                  onClick={() => props.onOpenWorkspaceActivity(workspace.id)}
+                >
+                  View activity
                 </Button>
                 {props.realMode && !workspace.isDefault ? (
                   <Menu
@@ -9402,6 +9595,9 @@ export const __rendererTestHooks = {
   clearComposerDraftsForSessions,
   moveComposerDraft,
   hasComposerDraft,
+  activitySourceSessions,
+  activitySessionForItem,
+  sessionForActivityItem,
   validateComposerInput,
   mergeAttachmentDrafts: (
     existing: AttachmentDraft[],

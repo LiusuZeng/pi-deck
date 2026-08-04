@@ -393,6 +393,73 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
   });
 });
 
+describe("Activity inbox App projection", () => {
+  it("retains cross-workspace sources with canonical saved-session identity", () => {
+    const sources = __rendererTestHooks.activitySourceSessions(
+      [
+        {
+          ...baseSession(),
+          id: "runtime-a",
+          sessionId: "saved-a",
+          sessionFile: "/sessions/a.jsonl",
+          runtimeBacked: true,
+          status: "working",
+          baseState: "working",
+        },
+        {
+          ...baseSession(),
+          id: "saved-b",
+          workspaceId: "workspace-b",
+          project: "Fallback workspace",
+          title: "Saved elsewhere",
+          sessionId: "saved-b",
+          sessionFile: "/sessions/b.jsonl",
+          runtimeBacked: false,
+          resumeBacked: true,
+        },
+      ] as any,
+      { "workspace-a": "Workspace A", "workspace-b": "Workspace B" },
+    );
+
+    expect(sources).toMatchObject([
+      {
+        workspaceId: "workspace-a",
+        workspaceName: "Workspace A",
+        sessionFile: "/sessions/a.jsonl",
+        sessionId: "saved-a",
+        runtimeId: "runtime-a",
+      },
+      {
+        workspaceId: "workspace-b",
+        workspaceName: "Workspace B",
+        sessionFile: "/sessions/b.jsonl",
+        sessionId: "saved-b",
+      },
+    ]);
+  });
+
+  it("finds activity rows by saved-session identity before transient runtime ids", () => {
+    const session = {
+      ...baseSession(),
+      id: "runtime-current",
+      workspaceId: "workspace-b",
+      sessionId: "saved-b",
+      sessionFile: "/sessions/b.jsonl",
+      runtimeBacked: true,
+    } as any;
+
+    expect(
+      __rendererTestHooks.activitySessionForItem([session], {
+        workspaceId: "workspace-b",
+        sessionKey: "/sessions/b.jsonl",
+        sessionFile: "/sessions/b.jsonl",
+        sessionId: "saved-b",
+        runtimeId: "runtime-old",
+      } as any),
+    ).toBe(session);
+  });
+});
+
 describe("renderer per-session composer drafts", () => {
   it("cycles model menu focus and honors Home and End", () => {
     const { nextMenuItemIndex } = __rendererTestHooks;
