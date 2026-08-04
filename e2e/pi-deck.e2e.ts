@@ -158,9 +158,11 @@ async function createWorkspaceInUi(page: Page, name: string): Promise<void> {
   await expect(dialog).toBeVisible();
   await dialog.getByLabel("Workspace name").fill(name);
   await dialog.getByRole("button", { name: "Create workspace" }).click();
+  const workspace = page.getByRole("button", { name: `Workspace: ${name}` });
+  await expect(workspace).toHaveAttribute("aria-current", "page");
   await expect(
-    page.getByRole("button", { name: `Workspace: ${name}` }),
-  ).toHaveAttribute("aria-current", "page");
+    workspace.locator(".workspace-tree-active-indicator"),
+  ).toBeVisible();
 }
 
 async function openWorkspaceActions(page: Page, name: string): Promise<void> {
@@ -173,6 +175,9 @@ async function selectWorkspaceInUi(page: Page, name: string): Promise<void> {
   const workspace = page.getByRole("button", { name: `Workspace: ${name}` });
   await workspace.click();
   await expect(workspace).toHaveAttribute("aria-current", "page");
+  await expect(
+    workspace.locator(".workspace-tree-active-indicator"),
+  ).toBeVisible();
 }
 
 async function confirmDeleteSessionDialog(page: Page): Promise<void> {

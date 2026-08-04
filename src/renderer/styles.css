@@ -3297,7 +3297,7 @@ body {
 
 .workspace-tree-row.ui-button {
   display: grid;
-  grid-template-columns: 16px minmax(0, 1fr) auto;
+  grid-template-columns: 16px minmax(0, 1fr) auto auto;
   align-items: center;
   width: 100%;
   min-height: 32px;
@@ -3353,6 +3353,19 @@ body {
   font-weight: 500;
   letter-spacing: 0.02em;
   text-transform: uppercase;
+}
+
+.workspace-tree-active-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  color: var(--color-accent);
+}
+
+.workspace-tree-active-indicator svg {
+  flex: 0 0 auto;
 }
 
 .workspace-tree-count {

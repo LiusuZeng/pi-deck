@@ -6143,6 +6143,15 @@ function SessionSidebar(props: {
                       </small>
                     ) : null}
                   </span>
+                  {active ? (
+                    <span
+                      aria-hidden="true"
+                      className="workspace-tree-active-indicator"
+                      title="Active workspace"
+                    >
+                      <Check size={13} strokeWidth={2.25} />
+                    </span>
+                  ) : null}
                   <span className="workspace-tree-count">
                     {workspaceSessions.length}
                   </span>
