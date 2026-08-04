@@ -52,6 +52,16 @@ export const workflowPromptPartSchema = z.discriminatedUnion("type", [
     .strict(),
 ]);
 
+export const workflowContextSchema = z
+  .object({
+    objective: z.string().max(4_000).optional(),
+    constraints: z.string().max(4_000).optional(),
+    relevantPaths: z.array(z.string().min(1)).max(100),
+    standards: z.string().max(4_000).optional(),
+    doNotDo: z.string().max(4_000).optional(),
+  })
+  .strict();
+
 export const workflowInputPolicySchema = z
   .object({
     includeWorkflowContext: z.boolean(),
@@ -127,6 +137,7 @@ export const workflowTemplateDefinitionSchema = z
     name: z.string().trim().min(1).max(160),
     description: z.string().trim().max(500).optional(),
     workspaceId: z.string().min(1).optional(),
+    context: workflowContextSchema.optional(),
     defaultModel: workflowModelOverrideSchema.optional(),
     defaultThinkingLevel: z.string().min(1).optional(),
     inputs: z.array(workflowInputDefinitionSchema).max(50),
@@ -374,6 +385,7 @@ export const workflowEventSchema = z.discriminatedUnion("type", [
 
 export type WorkflowModelOverride = z.infer<typeof workflowModelOverrideSchema>;
 export type WorkflowInputDefinition = z.infer<typeof workflowInputDefinitionSchema>;
+export type WorkflowContext = z.infer<typeof workflowContextSchema>;
 export type WorkflowPromptPart = z.infer<typeof workflowPromptPartSchema>;
 export type WorkflowInputPolicy = z.infer<typeof workflowInputPolicySchema>;
 export type WorkflowStepDefinition = z.infer<typeof workflowStepDefinitionSchema>;
