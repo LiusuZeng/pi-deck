@@ -4,24 +4,24 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#0a0c14" />
-    <title>Pi Deck — macOS Desktop GUI for Pi Coding Agents</title>
-    <meta name="description" content="Pi Deck is a local macOS desktop GUI for running, monitoring, and steering multiple Pi coding-agent sessions from source." />
+    <title>Pi Deck — macOS Workspaces for Pi Coding Agents</title>
+    <meta name="description" content="Pi Deck is a local macOS desktop GUI for organizing Pi coding-agent workspaces, monitoring sessions, and finding work that needs attention." />
     <link rel="canonical" href="https://liusuzeng.github.io/pi-deck/" />
     <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Pi Deck" />
-    <meta property="og:title" content="Pi Deck — macOS Desktop GUI for Pi Coding Agents" />
-    <meta property="og:description" content="Run, monitor, and steer multiple local Pi coding-agent sessions from one macOS desktop workspace." />
+    <meta property="og:title" content="Pi Deck — macOS Workspaces for Pi Coding Agents" />
+    <meta property="og:description" content="Organize local Pi coding-agent sessions into workspaces, then monitor all your work from one macOS desktop inbox." />
     <meta property="og:url" content="https://liusuzeng.github.io/pi-deck/" />
     <meta property="og:image" content="https://liusuzeng.github.io/pi-deck/assets/social-preview.png" />
     <meta property="og:image:width" content="1280" />
     <meta property="og:image:height" content="640" />
-    <meta property="og:image:alt" content="Pi Deck desktop interface with Pi coding-agent sessions" />
+    <meta property="og:image:alt" content="Pi Deck desktop interface for monitoring Pi coding-agent sessions" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Pi Deck — macOS Desktop GUI for Pi Coding Agents" />
-    <meta name="twitter:description" content="Run, monitor, and steer multiple local Pi coding-agent sessions from one macOS desktop workspace." />
+    <meta name="twitter:title" content="Pi Deck — macOS Workspaces for Pi Coding Agents" />
+    <meta name="twitter:description" content="Organize local Pi coding-agent sessions into workspaces, then monitor all your work from one macOS desktop inbox." />
     <meta name="twitter:image" content="https://liusuzeng.github.io/pi-deck/assets/social-preview.png" />
-    <meta name="twitter:image:alt" content="Pi Deck desktop interface with Pi coding-agent sessions" />
+    <meta name="twitter:image:alt" content="Pi Deck desktop interface for monitoring Pi coding-agent sessions" />
     <link rel="stylesheet" href="styles.css" />
     <script type="application/ld+json">
       {
@@ -30,7 +30,7 @@
         "name": "Pi Deck",
         "applicationCategory": "DeveloperApplication",
         "operatingSystem": "macOS",
-        "description": "A local macOS Electron desktop app for running, monitoring, and steering multiple Pi coding-agent sessions.",
+        "description": "A local macOS Electron desktop app for organizing Pi coding-agent workspaces, monitoring sessions, and filtering work by status.",
         "url": "https://liusuzeng.github.io/pi-deck/",
         "codeRepository": "https://github.com/LiusuZeng/pi-deck"
       }
@@ -52,8 +52,8 @@
       <section class="hero" aria-labelledby="hero-heading">
         <div class="hero-copy">
           <p class="eyebrow">A local workspace for agentic development</p>
-          <h1 id="hero-heading">A macOS desktop GUI for Pi coding agents.</h1>
-          <p class="lede">Pi Deck gives Pi a focused control plane: run multiple sessions, see work as it happens, and keep projects organized without juggling terminal windows.</p>
+          <h1 id="hero-heading">Organize the work behind your Pi agents.</h1>
+          <p class="lede">Pi Deck gives Pi a focused control plane: create named workspaces, run multiple sessions, and use the Work inbox to see what needs attention without juggling terminal windows.</p>
           <div class="actions">
             <a class="button button-primary" href="#run-from-source">Run from source <span aria-hidden="true">↓</span></a>
             <a class="button button-secondary" href="https://github.com/LiusuZeng/pi-deck">View source on GitHub <span aria-hidden="true">↗</span></a>
@@ -67,9 +67,9 @@
       </section>
 
       <section class="proof" aria-label="Pi Deck capabilities">
-        <div><strong>Multiple workers</strong><span>Independent Pi sessions, one desktop workspace.</span></div>
+        <div><strong>Named workspaces</strong><span>Group related sessions by work, not by folder.</span></div>
+        <div><strong>Work inbox</strong><span>See all work—or narrow it by workspace and status.</span></div>
         <div><strong>Pi-native by design</strong><span>Uses Pi’s models, settings, tools, and session files.</span></div>
-        <div><strong>Local control plane</strong><span>No hosted Pi Deck backend or account required.</span></div>
       </section>
 
       <section class="screenshots section" aria-labelledby="screenshots-heading">
@@ -83,19 +83,19 @@
       <section id="features" class="section feature-section" aria-labelledby="features-heading">
         <div class="section-heading"><p class="eyebrow">Built around Pi</p><h2 id="features-heading">A GUI that keeps you in control.</h2></div>
         <div class="feature-grid">
-          <article><span class="feature-number">01</span><h3>Manage parallel work</h3><p>Attach independent Pi workers to different conversations, change projects while work continues, and see which sessions need attention.</p></article>
-          <article><span class="feature-number">02</span><h3>Keep Pi’s source of truth</h3><p>Resume Pi JSONL sessions and use the models, provider authentication, resources, commands, and settings you already configured.</p></article>
-          <article><span class="feature-number">03</span><h3>Intervene at the right moment</h3><p>Steer an active turn, queue a follow-up, answer extension requests, retry failed prompts, or abort work without losing the wider project context.</p></article>
-          <article><span class="feature-number">04</span><h3>Work with files and images</h3><p>Reference project files, paste or drop supported images, and restore image previews when you reopen a saved session.</p></article>
+          <article><span class="feature-number">01</span><h3>Organize by workspace</h3><p>Create named workspaces for projects, clients, experiments, or any other way you divide your work. Select a workspace to see its sessions, independent of the folders they use.</p></article>
+          <article><span class="feature-number">02</span><h3>Find work in one inbox</h3><p>Use the global Work inbox to scan every workspace, or scope it to the workspace you are in. Filter by needs attention, failed, pending, in progress, completed, or idle.</p></article>
+          <article><span class="feature-number">03</span><h3>Keep Pi’s source of truth</h3><p>Resume Pi JSONL sessions and use the models, provider authentication, resources, commands, and settings you already configured.</p></article>
+          <article><span class="feature-number">04</span><h3>Intervene at the right moment</h3><p>Steer an active turn, queue a follow-up, answer extension requests, retry failed prompts, or abort work while other workers continue in the background.</p></article>
         </div>
       </section>
 
       <section id="how-it-works" class="section workflow" aria-labelledby="workflow-heading">
         <div class="section-heading"><p class="eyebrow">How it works</p><h2 id="workflow-heading">A desktop layer over your existing Pi workflow.</h2></div>
         <ol>
-          <li><span>1</span><div><h3>Open a local project</h3><p>Choose the repository you are working in and discover its saved Pi sessions.</p></div></li>
-          <li><span>2</span><div><h3>Start or resume a conversation</h3><p>Pi Deck launches a local <code>pi --mode rpc</code> worker when you send the first prompt.</p></div></li>
-          <li><span>3</span><div><h3>Monitor and direct the work</h3><p>Watch live activity, switch contexts, or send the next instruction while Pi continues in the background.</p></div></li>
+          <li><span>1</span><div><h3>Create or select a workspace</h3><p>Choose a named workspace for the work you want to organize. Add existing Pi sessions or open a project folder when you are ready to start one.</p></div></li>
+          <li><span>2</span><div><h3>Start or resume a conversation</h3><p>Pi Deck launches a local <code>pi --mode rpc</code> worker when you send the first prompt, and keeps the saved session available in its workspace.</p></div></li>
+          <li><span>3</span><div><h3>Monitor and direct the work</h3><p>Open the Work inbox to scan all work or the current workspace, filter by status, and jump into a session to steer the next step.</p></div></li>
         </ol>
       </section>
 
@@ -117,7 +117,8 @@ npm run deck:real -- /absolute/path/to/your/project</code></pre>
         <div class="section-heading"><p class="eyebrow">FAQ</p><h2 id="faq-heading">Questions developers ask.</h2></div>
         <div class="faq-grid">
           <details><summary>Is Pi Deck a GUI for the Pi coding agent?</summary><p>Yes. Pi Deck is a local macOS desktop GUI and control plane for Pi coding-agent sessions. It complements Pi’s CLI workflow rather than replacing Pi itself.</p></details>
-          <details><summary>Can Pi Deck manage multiple Pi sessions?</summary><p>Yes. Each attached conversation has an independent local Pi worker, so you can monitor active work across projects and sessions from one workspace.</p></details>
+          <details><summary>What is a Pi Deck workspace?</summary><p>A workspace is a named way to organize Pi sessions. It is independent of the folders those sessions use, so you can group work by project, client, topic, or any other context. A default workspace keeps ungrouped sessions discoverable.</p></details>
+          <details><summary>Can Pi Deck manage multiple Pi sessions?</summary><p>Yes. Each attached conversation has an independent local Pi worker. The Work inbox lets you monitor sessions across every workspace or narrow the view to one workspace and a status.</p></details>
           <details><summary>Does Pi Deck run locally?</summary><p>Yes. Pi Deck is a local Electron desktop app with no Pi Deck-hosted backend. Pi’s own configured providers and tools retain their usual behavior.</p></details>
           <details><summary>Is there a downloadable macOS installer?</summary><p>Not yet. Pi Deck is an active pre-release MVP that currently runs from source on macOS.</p></details>
         </div>
