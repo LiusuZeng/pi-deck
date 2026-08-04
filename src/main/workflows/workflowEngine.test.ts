@@ -359,6 +359,76 @@ describe("workflowEngine", () => {
     ).toBe("ready");
   });
 
+  it("requires attention when unsure has no route and leaves branches untouched", () => {
+    const configured = template({
+      transitions: [
+        {
+          ...template().transitions[0]!,
+          routes: {
+            yes: { kind: "step", stepId: "act" },
+            no: { kind: "step", stepId: "deeper" },
+          },
+        },
+      ],
+    });
+    const run = createWorkflowRun({
+      template: configured,
+      workspaceId: "ws",
+      inputs: {},
+      now: 100,
+    });
+    const started = markWorkflowStepStarted(run, run.stepRuns[0]!.id, 101);
+    const completed = markWorkflowStepCompleted(
+      started,
+      run.stepRuns[0]!.id,
+      { finalAnswer: "Unclear." },
+      102,
+    );
+    const attention = resolveWorkflowCondition(
+      completed,
+      completed.transitionRuns[0]!.id,
+      "unsure",
+      "The result was ambiguous.",
+      103,
+    );
+    expect(attention.status).toBe("needsAttention");
+    expect(attention.transitionRuns[0]).toMatchObject({
+      status: "failed",
+      decision: "unsure",
+      error: expect.stringMatching(/Retry.*override/i),
+    });
+    expect(
+      attention.stepRuns.find((step) => step.templateStepId === "act")?.status,
+    ).toBe("waiting");
+    expect(
+      attention.stepRuns.find((step) => step.templateStepId === "deeper")
+        ?.status,
+    ).toBe("waiting");
+
+    const retried = retryWorkflowCondition(
+      attention,
+      attention.transitionRuns[0]!.id,
+      104,
+    );
+    const failedAgain = failWorkflowCondition(
+      retried,
+      retried.transitionRuns[0]!.id,
+      "UNSURE still has no configured route.",
+      105,
+    );
+    const overridden = overrideWorkflowCondition(
+      failedAgain,
+      failedAgain.transitionRuns[0]!.id,
+      "yes",
+      "Explicitly selecting the yes branch.",
+      106,
+    );
+    expect(overridden.transitionRuns[0]?.status).toBe("resolved");
+    expect(
+      overridden.stepRuns.find((step) => step.templateStepId === "act")?.status,
+    ).toBe("ready");
+  });
+
   it("routes unsure to stop without starting a branch", () => {
     const run = createWorkflowRun({
       template: template(),

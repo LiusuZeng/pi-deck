@@ -65,20 +65,31 @@ describe("WorkflowStore", () => {
     ).toEqual([run.id]);
   });
 
-  it("keeps a global template global after an edit", async () => {
+  it("keeps a global template global when workspaceId is omitted", async () => {
     const store = await newStore();
     const original = await store.createTemplate(definition);
     expect(original.workspaceId).toBeUndefined();
     const updated = await store.updateTemplate(original.id, {
       ...definition,
       name: "Edited global workflow",
-      workspaceId: "workspace-that-opened-the-editor",
     });
     expect(updated.name).toBe("Edited global workflow");
     expect(updated.workspaceId).toBeUndefined();
     expect(
       (await store.listTemplates("another-workspace")).map((item) => item.id),
     ).toEqual([original.id]);
+  });
+
+  it("moves a global template when workspaceId is explicitly selected", async () => {
+    const store = await newStore();
+    const original = await store.createTemplate(definition);
+    const updated = await store.updateTemplate(original.id, {
+      ...definition,
+      workspaceId: "selected-workspace",
+    });
+    expect(updated.workspaceId).toBe("selected-workspace");
+    expect(await store.listTemplates("selected-workspace")).toHaveLength(1);
+    expect(await store.listTemplates("another-workspace")).toEqual([]);
   });
 
   it("duplicates a template without sharing its identity", async () => {

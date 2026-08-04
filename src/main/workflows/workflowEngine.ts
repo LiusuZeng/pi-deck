@@ -208,6 +208,21 @@ export function resolveWorkflowCondition(
   }
 
   const target = transition.routes[decision];
+  if (decision === "unsure" && target === undefined) {
+    const attention = updateTransition(run, transitionRunId, {
+      status: "failed",
+      decision,
+      ...(rationale !== undefined ? { rationale } : {}),
+      error:
+        "The condition returned UNSURE, but no UNSURE route is configured. Retry the condition or explicitly override the decision with YES or NO.",
+      updatedAtMs: now,
+    });
+    // A missing UNSURE route is an actionable configuration/result mismatch,
+    // not an implicit stop. Leave every branch untouched so neither branch
+    // can run until the condition is retried or explicitly overridden.
+    return withRunStatus(attention, "needsAttention", now);
+  }
+
   let next = updateTransition(run, transitionRunId, {
     status: "resolved",
     decision,
