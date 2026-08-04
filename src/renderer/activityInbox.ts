@@ -9,7 +9,8 @@ export type ActivityStatus =
   | "failed"
   | "pending"
   | "inProgress"
-  | "completed";
+  | "completed"
+  | "idle";
 
 /** @deprecated Use ActivityStatus. */
 export type ActivityKind = ActivityStatus;
@@ -20,6 +21,7 @@ export const ACTIVITY_STATUSES = [
   "pending",
   "inProgress",
   "completed",
+  "idle",
 ] as const satisfies readonly ActivityStatus[];
 
 /** @deprecated Use ACTIVITY_STATUSES. */
@@ -55,6 +57,8 @@ export interface ActivitySourceSession {
   status?: string;
   completedAtMs?: number;
   lastError?: string;
+  /** Unsaved composer/session draft; drafts are not activity items. */
+  draftSession?: boolean;
   /** Present for either an archived session or archived workspace membership. */
   archivedAtMs?: number;
 }
@@ -93,6 +97,7 @@ const actionLabels: Record<ActivityStatus, string> = {
   pending: "View pending",
   inProgress: "View progress",
   completed: "View result",
+  idle: "Open session",
 };
 
 const archivedTag: ActivityTag = "visibility:archived";
@@ -169,6 +174,9 @@ export function statusTag(status: ActivityStatus): ActivityTag {
 export function classifyActivity(
   source: ActivitySourceSession,
 ): ActivityStatus | undefined {
+  if (source.draftSession === true) {
+    return undefined;
+  }
   if (
     source.baseState === "waitingForInput" ||
     source.overlays.needsUserInput
@@ -184,7 +192,10 @@ export function classifyActivity(
   if (isInProgress(source)) {
     return "inProgress";
   }
-  return hasCompletionTimestamp(source.completedAtMs) ? "completed" : undefined;
+  if (hasCompletionTimestamp(source.completedAtMs)) {
+    return "completed";
+  }
+  return source.baseState === "idle" ? "idle" : undefined;
 }
 
 export function countActivityStatuses(
@@ -272,6 +283,7 @@ function createEmptyGroups(): Record<ActivityStatus, ActivityItem[]> {
     pending: [],
     inProgress: [],
     completed: [],
+    idle: [],
   };
 }
 
@@ -308,6 +320,8 @@ function activityDetail(
       return inProgressDetail(source);
     case "completed":
       return "Latest turn completed";
+    case "idle":
+      return "No active work";
   }
 }
 
