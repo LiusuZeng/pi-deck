@@ -5,11 +5,11 @@
 Pi Deck is a Pi coding-agent GUI that gives Pi a dedicated desktop workspace for running, watching, and steering coding-agent sessions without opening Pi's terminal UI. It organizes sessions into named workspaces while Pi continues to use its native models, settings, tools, resources, and session files. Visit [the Pi Deck website](https://liusuzeng.github.io/pi-deck/) for an overview.
 
 <p align="center">
-  <a href="docs/assets/pi-deck.png" title="Open the light mode screenshot full size">
-    <img src="docs/assets/pi-deck.png" alt="Pi Deck in Light mode showing workspace navigation, an active session, attachment previews, and a completed response" width="49%">
+  <a href="docs/assets/pi-deck.png" title="Open the workspace screenshot full size">
+    <img src="docs/assets/pi-deck.png" alt="Pi Deck showing workspace navigation, active sessions, and the new session composer" width="49%">
   </a>
-  <a href="docs/assets/pi-deck-dark.png" title="Open the dark mode Work inbox screenshot full size">
-    <img src="docs/assets/pi-deck-dark.png" alt="Pi Deck in Dark mode showing the Work inbox with workspace and status filters across parallel sessions" width="49%">
+  <a href="docs/assets/pi-deck-dark.png" title="Open the global Work inbox screenshot full size">
+    <img src="docs/assets/pi-deck-dark.png" alt="Pi Deck showing the global Work inbox with workspace scope and idle session filtering" width="49%">
   </a>
 </p>
 
@@ -195,6 +195,16 @@ See every launcher option without starting the app:
 ```bash
 npm run deck -- --help
 npm run deck:real -- --dry-run /absolute/path/to/your/project
+```
+
+### Refreshing documentation screenshots
+
+The checked-in screenshots are generated from the Electron renderer in real Pi
+mode with deterministic local session fixtures, so they stay aligned with the
+workspace and Work inbox UI without requiring provider credentials:
+
+```bash
+npm run docs:capture
 ```
 
 ## Typical workflow
