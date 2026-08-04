@@ -288,7 +288,8 @@ export function WorkflowStepCard(props: {
               {props.run?.error ? (
                 <p className="workflow-error">{props.run.error}</p>
               ) : null}
-              {props.run?.sessionFile && props.onOpenSession ? (
+              {(props.run?.runtimeId || props.run?.sessionFile) &&
+              props.onOpenSession ? (
                 <button
                   type="button"
                   className="workflow-secondary-button"
