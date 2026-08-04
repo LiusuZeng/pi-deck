@@ -98,13 +98,18 @@ describe("workflowEngine", () => {
     expect(resolved.stepRuns.find((step) => step.templateStepId === "deeper")?.status).toBe("skipped");
   });
 
-  it("stops scheduling and hides ready steps", () => {
+  it("stops scheduling and terminalizes active child state", () => {
     const run = createWorkflowRun({ template: template(), workspaceId: "ws", inputs: {}, now: 100 });
-    const stopped = stopWorkflowRun(run, 101);
-    expect(stopped.updatedAtMs).toBe(101);
+    const started = markWorkflowStepStarted(run, run.stepRuns[0]!.id, 101, "runtime-1");
+    const completed = markWorkflowStepCompleted(started, run.stepRuns[0]!.id, { finalAnswer: "done" }, 102);
+    expect(completed.transitionRuns[0]?.status).toBe("evaluating");
+    const stopped = stopWorkflowRun(completed, 103);
+    expect(stopped.updatedAtMs).toBe(103);
+    expect(stopped.transitionRuns[0]?.status).toBe("skipped");
+    expect(stopped.stepRuns.find((step) => step.templateStepId === "act")?.status).toBe("skipped");
     expect(readyWorkflowSteps(stopped)).toEqual([]);
-    expect(() => markWorkflowStepQueued(stopped, run.stepRuns[0]!.id, 102)).toThrow(/stopped/i);
-    expect(() => markWorkflowStepStarted(stopped, run.stepRuns[0]!.id, 102)).toThrow(/stopped/i);
+    expect(() => markWorkflowStepQueued(stopped, run.stepRuns[0]!.id, 104)).toThrow(/stopped/i);
+    expect(() => markWorkflowStepStarted(stopped, run.stepRuns[0]!.id, 104)).toThrow(/stopped/i);
   });
 
   it("marks queued scheduling as running and updates the aggregate timestamp", () => {
@@ -163,6 +168,29 @@ describe("workflowEngine", () => {
     expect(resolved.stepRuns.every((step) => step.templateStepId === "investigate" || step.status === "skipped")).toBe(true);
   });
 
+  it("routes unsure to a manual approval target that supports approve, skip, and stop", () => {
+    const configured = template({
+      transitions: [{
+        ...template().transitions[0]!,
+        routes: {
+          yes: { kind: "step", stepId: "act" },
+          no: { kind: "stop" },
+          unsure: { kind: "manualGate", toStepId: "deeper" },
+        },
+      }],
+    });
+    const run = createWorkflowRun({ template: configured, workspaceId: "ws", inputs: {}, now: 100 });
+    const started = markWorkflowStepStarted(run, run.stepRuns[0]!.id, 101);
+    const completed = markWorkflowStepCompleted(started, run.stepRuns[0]!.id, { finalAnswer: "Unclear." }, 102);
+    const resolved = resolveWorkflowCondition(completed, completed.transitionRuns[0]!.id, "unsure", "Review needed.", 103);
+    const gate = resolved.stepRuns.find((step) => step.templateStepId === "deeper")!
+    expect(gate.status).toBe("needsApproval");
+    expect(resolved.status).toBe("needsAttention");
+    expect(approveWorkflowStep(resolved, gate.id, "approve", 104).stepRuns.find((step) => step.id === gate.id)?.status).toBe("ready");
+    expect(approveWorkflowStep(resolved, gate.id, "skip", 104).stepRuns.find((step) => step.id === gate.id)?.status).toBe("skipped");
+    expect(approveWorkflowStep(resolved, gate.id, "stop", 104).status).toBe("stopped");
+  });
+
   it("routes no to its branch and skips the other condition targets", () => {
     const run = createWorkflowRun({ template: template(), workspaceId: "ws", inputs: {}, now: 100 });
     const started = markWorkflowStepStarted(run, run.stepRuns[0]!.id, 101);
@@ -183,11 +211,24 @@ describe("workflowEngine", () => {
     expect(retried.stepRuns[0]).toMatchObject({ status: "ready" });
     expect(retried.stepRuns[0]?.error).toBeUndefined();
   });
-  it("rejects missing required inputs before creating a run", () => {
+  it("rejects missing required and referenced inputs before creating a run", () => {
     const configured = template({
-      inputs: [{ id: "issue", label: "Issue", type: "text", required: true }],
+      inputs: [{ id: "issue", label: "Issue", type: "text", required: false }],
+      steps: [{
+        ...template().steps[0]!,
+        promptParts: [{ type: "workflowInput", inputId: "issue" }],
+      }, ...template().steps.slice(1)],
     });
     expect(() => createWorkflowRun({ template: configured, workspaceId: "ws", inputs: {} })).toThrow(/required/);
+  });
+
+  it("marks a root manual approval step as needing attention", () => {
+    const configured = template({
+      steps: [{ ...template().steps[0]!, startPolicy: "manualApproval" }, ...template().steps.slice(1)],
+    });
+    const run = createWorkflowRun({ template: configured, workspaceId: "ws", inputs: {}, now: 100 });
+    expect(run.stepRuns[0]?.status).toBe("needsApproval");
+    expect(run.status).toBe("needsAttention");
   });
 
   it("marks a failed step as needing attention", () => {

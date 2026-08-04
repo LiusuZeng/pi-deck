@@ -42,7 +42,9 @@ export function createWorkflowRun(options: {
     templateId: template.id,
     name: template.name,
     workspaceId: options.workspaceId,
-    status: "waiting",
+    status: stepRuns.some((step) => step.status === "needsApproval")
+      ? "needsAttention"
+      : "waiting",
     templateSnapshot: template,
     inputs,
     stepRuns,
@@ -63,9 +65,16 @@ export function validateRunInputs(
 ): Record<string, string> {
   const allowed = new Set(template.inputs.map((input) => input.id));
   const result: Record<string, string> = {};
+  const referencedInputIds = new Set(
+    template.steps.flatMap((step) =>
+      step.promptParts.flatMap((part) =>
+        part.type === "workflowInput" ? [part.inputId] : [],
+      ),
+    ),
+  );
   for (const input of template.inputs) {
     const value = inputs[input.id] ?? input.defaultValue;
-    if (input.required && (!value || value.trim().length === 0)) {
+    if ((input.required || referencedInputIds.has(input.id)) && (!value || value.trim().length === 0)) {
       throw new Error(`Workflow input is required: ${input.label}`);
     }
     if (value !== undefined) result[input.id] = value;
@@ -181,34 +190,36 @@ export function resolveWorkflowCondition(
 
   const allTargets = [transition.routes.yes, transition.routes.no, transition.routes.unsure]
     .filter((item): item is WorkflowRouteTarget => item !== undefined)
-    .filter((item): item is Extract<WorkflowRouteTarget, { kind: "step" }> => item.kind === "step");
-  const selectedStepId = target?.kind === "step" ? target.stepId : undefined;
-  for (const candidate of allTargets) {
-    if (candidate.stepId !== selectedStepId) {
-      next = updateStepByTemplateId(next, candidate.stepId, {
+    .flatMap((item) =>
+      item.kind === "step"
+        ? [item.stepId]
+        : item.kind === "manualGate"
+          ? [item.toStepId]
+          : [],
+    );
+  const selectedStepId = target?.kind === "step"
+    ? target.stepId
+    : target?.kind === "manualGate"
+      ? target.toStepId
+      : undefined;
+  for (const candidateStepId of allTargets) {
+    if (candidateStepId !== selectedStepId) {
+      next = updateStepByTemplateId(next, candidateStepId, {
         status: "skipped",
         updatedAtMs: now,
       });
     }
   }
 
-  if (target?.kind === "step") {
-    const step = requireStepByTemplateId(next, target.stepId);
-    const definition = requireStepDefinition(next, target.stepId);
-    next = updateStepByTemplateId(next, target.stepId, {
-      status: transition.previewBeforeStart || definition.startPolicy === "manualApproval"
+  if (target?.kind === "step" || target?.kind === "manualGate") {
+    const targetStepId = target.kind === "step" ? target.stepId : target.toStepId;
+    const definition = requireStepDefinition(next, targetStepId);
+    next = updateStepByTemplateId(next, targetStepId, {
+      status: target.kind === "manualGate" || transition.previewBeforeStart || definition.startPolicy === "manualApproval"
         ? "needsApproval"
         : "ready",
       updatedAtMs: now,
     });
-    if (step.status === "skipped") {
-      next = updateStepByTemplateId(next, target.stepId, {
-        status: transition.previewBeforeStart || definition.startPolicy === "manualApproval"
-          ? "needsApproval"
-          : "ready",
-        updatedAtMs: now,
-      });
-    }
   }
   if (target?.kind === "manualGate") return withRunStatus(next, "needsAttention", now);
   if (target?.kind === "stop") return withRunStatus(next, "stopped", now);
@@ -302,7 +313,7 @@ export function approveWorkflowStep(
   assertRunSchedulable(run);
   const step = requireStepRun(run, stepRunId);
   if (step.status !== "needsApproval") throw new Error("Workflow step is not awaiting approval.");
-  if (action === "stop") return withRunStatus(run, "stopped", now);
+  if (action === "stop") return stopWorkflowRun(run, now);
   const next = updateStep(run, stepRunId, {
     status: action === "approve" ? "ready" : "skipped",
     updatedAtMs: now,
@@ -316,7 +327,30 @@ export function approveWorkflowStep(
 }
 
 export function stopWorkflowRun(run: WorkflowRun, now = Date.now()): WorkflowRun {
-  return withRunStatus(run, "stopped", now);
+  const stepRuns = run.stepRuns.map((step) =>
+    ["completed", "failed", "skipped"].includes(step.status)
+      ? step
+      : {
+          ...step,
+          status: "skipped" as const,
+          runtimeId: undefined,
+          updatedAtMs: now,
+        },
+  );
+  const transitionRuns = run.transitionRuns.map((transition) =>
+    transition.status === "evaluating"
+      ? {
+          ...transition,
+          status: "skipped" as const,
+          decision: undefined,
+          rationale: undefined,
+          selectedTarget: undefined,
+          error: undefined,
+          updatedAtMs: now,
+        }
+      : transition,
+  );
+  return withRunStatus({ ...run, stepRuns, transitionRuns }, "stopped", now);
 }
 
 export function retryWorkflowStep(run: WorkflowRun, stepRunId: string, now = Date.now()): WorkflowRun {
@@ -451,7 +485,11 @@ function stepStartStatus(run: WorkflowRun, stepId: string): "ready" | "needsAppr
 function transitionTargets(transition: WorkflowTransition): string[] {
   if (transition.kind === "always" || transition.kind === "manualGate") return [transition.toStepId];
   return Object.values(transition.routes).flatMap((target) =>
-    target?.kind === "step" ? [target.stepId] : [],
+    target?.kind === "step"
+      ? [target.stepId]
+      : target?.kind === "manualGate"
+        ? [target.toStepId]
+        : [],
   );
 }
 

@@ -86,7 +86,12 @@ export const workflowStepDefinitionSchema = z
 
 export const workflowRouteTargetSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("step"), stepId: workflowStepIdSchema }).strict(),
-  z.object({ kind: z.literal("manualGate") }).strict(),
+  z
+    .object({
+      kind: z.literal("manualGate"),
+      toStepId: workflowStepIdSchema,
+    })
+    .strict(),
   z.object({ kind: z.literal("stop") }).strict(),
 ]);
 
@@ -187,11 +192,16 @@ export const workflowTemplateDefinitionSchema = z
     }
 
     const checkTarget = (target: WorkflowRouteTarget, path: (string | number)[]) => {
-      if (target.kind === "step" && !stepIds.has(target.stepId)) {
+      const targetStepId = target.kind === "step"
+        ? target.stepId
+        : target.kind === "manualGate"
+          ? target.toStepId
+          : undefined;
+      if (targetStepId !== undefined && !stepIds.has(targetStepId)) {
         context.addIssue({
           code: "custom",
           path,
-          message: `Unknown workflow step target: ${target.stepId}`,
+          message: `Unknown workflow step target: ${targetStepId}`,
         });
       }
     };
@@ -245,18 +255,16 @@ export const workflowTemplateDefinitionSchema = z
         for (const [label, target] of routeEntries) {
           if (target !== undefined) {
             checkTarget(target, ["transitions", index, "routes", label]);
-            if (target.kind === "manualGate") {
-              context.addIssue({
-                code: "custom",
-                path: ["transitions", index, "routes", label],
-                message: "Condition manual gates are unsupported; use a manualGate transition to an approval step.",
-              });
-            }
-            if (target.kind === "step" && stepIds.has(target.stepId)) {
-              incomingCounts.set(target.stepId, (incomingCounts.get(target.stepId) ?? 0) + 1);
+            const targetStepId = target.kind === "step"
+              ? target.stepId
+              : target.kind === "manualGate"
+                ? target.toStepId
+                : undefined;
+            if (targetStepId !== undefined && stepIds.has(targetStepId)) {
+              incomingCounts.set(targetStepId, (incomingCounts.get(targetStepId) ?? 0) + 1);
               edges.set(transition.fromStepId, [
                 ...(edges.get(transition.fromStepId) ?? []),
-                target.stepId,
+                targetStepId,
               ]);
             }
           }
@@ -465,12 +473,21 @@ export const workflowRunSchema = z
         });
       }
     }
+    const referencedInputIds = new Set(
+      value.templateSnapshot.steps.flatMap((step) =>
+        step.promptParts.flatMap((part) =>
+          part.type === "workflowInput" ? [part.inputId] : [],
+        ),
+      ),
+    );
     for (const input of value.templateSnapshot.inputs) {
-      if (input.required && !(input.id in value.inputs)) {
+      if ((input.required || referencedInputIds.has(input.id)) && !(input.id in value.inputs)) {
         context.addIssue({
           code: "custom",
           path: ["inputs", input.id],
-          message: `Workflow run is missing required input: ${input.id}`,
+          message: input.required
+            ? `Workflow run is missing required input: ${input.id}`
+            : `Workflow run is missing referenced input: ${input.id}`,
         });
       }
     }

@@ -113,7 +113,7 @@ describe("workflowTemplateDefinitionSchema", () => {
     );
   });
 
-  it("rejects unsupported condition manual gates", () => {
+  it("accepts condition manual gates with an approval target step", () => {
     const result = workflowTemplateDefinitionSchema.safeParse({
       ...linearTemplate,
       transitions: [
@@ -122,16 +122,12 @@ describe("workflowTemplateDefinitionSchema", () => {
           fromStepId: "investigate",
           kind: "condition",
           question: "Need approval?",
-          routes: { yes: { kind: "manualGate" } },
+          routes: { yes: { kind: "manualGate", toStepId: "fix" } },
           previewBeforeStart: false,
         },
       ],
     });
-    expect(result.success).toBe(false);
-    if (result.success) return;
-    expect(result.error.issues.map((issue) => issue.message)).toContain(
-      "Condition manual gates are unsupported; use a manualGate transition to an approval step.",
-    );
+    expect(result.success).toBe(true);
   });
 
   it("rejects duplicate transitions, fan-in, cycles, and graphs without a root", () => {
