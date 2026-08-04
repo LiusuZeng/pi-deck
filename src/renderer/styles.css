@@ -4283,6 +4283,62 @@ body {
   white-space: pre-wrap;
 }
 
+.workflow-prompt-preview pre {
+  margin: 0;
+  max-height: 280px;
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  color: var(--color-text);
+  background: var(--color-surface-subtle);
+  font: inherit;
+  white-space: pre-wrap;
+}
+
+.workflow-run-context-preview {
+  display: grid;
+  gap: 4px;
+  border-left: 3px solid var(--color-border-strong);
+  padding-left: 10px;
+  color: var(--color-text-muted);
+}
+
+.workflow-run-context-preview p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.workflow-run-context-preview strong {
+  color: var(--color-text-subtle);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.workflow-run-metadata {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.workflow-run-metadata div {
+  display: flex;
+  gap: 6px;
+}
+
+.workflow-run-metadata dt {
+  color: var(--color-text-subtle);
+  font-weight: 700;
+}
+
+.workflow-run-metadata dd {
+  margin: 0;
+  color: var(--color-text);
+}
+
 .workflow-reference-chip {
   display: inline-flex;
   width: fit-content;

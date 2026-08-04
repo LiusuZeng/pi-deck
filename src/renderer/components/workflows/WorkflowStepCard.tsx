@@ -1,6 +1,8 @@
 import { useEffect, useRef, type ReactElement } from "react";
 import type {
+  WorkflowContext,
   WorkflowInputDefinition,
+  WorkflowModelOverride,
   WorkflowStepDefinition,
   WorkflowStepRun,
 } from "../../../shared/workflowSchemas.js";
@@ -23,6 +25,9 @@ export function WorkflowStepCard(props: {
   onOpenSession?(step: WorkflowStepRun): void;
   inputs?: WorkflowInputDefinition[];
   previousSteps?: WorkflowStepDefinition[];
+  context?: WorkflowContext;
+  defaultModel?: WorkflowModelOverride;
+  defaultThinkingLevel?: string;
   promptError?: string | undefined;
   stepError?: string | undefined;
   focusPrompt?: boolean | undefined;
@@ -172,38 +177,112 @@ export function WorkflowStepCard(props: {
             <>
               <div className="workflow-prompt-preview">
                 <span className="workflow-field-label">
-                  Instructions and handoffs
+                  {props.run?.renderedPrompt !== undefined
+                    ? "Rendered prompt"
+                    : "Instructions and handoffs"}
                 </span>
-                {props.step.promptParts.map((part, partIndex) =>
-                  part.type === "text" ? (
-                    <p key={`text-${partIndex}`}>
-                      {part.text || "No written instructions."}
-                    </p>
-                  ) : (
-                    <span
-                      className="workflow-reference-chip"
-                      key={`${part.type}-${partIndex}`}
-                    >
-                      <span className="workflow-reference-kind">
-                        {part.type === "workflowInput"
-                          ? "Run input"
-                          : "Previous result"}
+                {props.run?.renderedPrompt !== undefined ? (
+                  <pre>{props.run.renderedPrompt || "No rendered prompt."}</pre>
+                ) : (
+                  props.step.promptParts.map((part, partIndex) =>
+                    part.type === "text" ? (
+                      <p key={`text-${partIndex}`}>
+                        {part.text || "No written instructions."}
+                      </p>
+                    ) : (
+                      <span
+                        className="workflow-reference-chip"
+                        key={`${part.type}-${partIndex}`}
+                      >
+                        <span className="workflow-reference-kind">
+                          {part.type === "workflowInput"
+                            ? "Run input"
+                            : "Previous result"}
+                        </span>
+                        <strong>
+                          {workflowPromptPartLabel(
+                            part,
+                            props.inputs ?? [],
+                            props.previousSteps ?? [],
+                          )}
+                        </strong>
                       </span>
-                      <strong>
-                        {workflowPromptPartLabel(
-                          part,
-                          props.inputs ?? [],
-                          props.previousSteps ?? [],
-                        )}
-                      </strong>
-                    </span>
-                  ),
+                    ),
+                  )
                 )}
               </div>
-              {props.run?.finalAnswer ? (
+              {props.context !== undefined &&
+              props.step.inputPolicy.includeWorkflowContext ? (
+                <div className="workflow-run-context-preview">
+                  <span className="workflow-field-label">Shared context</span>
+                  {props.context.objective ? (
+                    <p>
+                      <strong>Objective:</strong> {props.context.objective}
+                    </p>
+                  ) : null}
+                  {props.context.constraints ? (
+                    <p>
+                      <strong>Constraints:</strong> {props.context.constraints}
+                    </p>
+                  ) : null}
+                  {props.context.relevantPaths.length > 0 ? (
+                    <p>
+                      <strong>Relevant paths:</strong>{" "}
+                      {props.context.relevantPaths.join(", ")}
+                    </p>
+                  ) : null}
+                  {props.context.standards ? (
+                    <p>
+                      <strong>Standards:</strong> {props.context.standards}
+                    </p>
+                  ) : null}
+                  {props.context.doNotDo ? (
+                    <p>
+                      <strong>Do not do:</strong> {props.context.doNotDo}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+              {(() => {
+                const model = props.step.modelOverride ?? props.defaultModel;
+                const modelLabel = model
+                  ? [model.provider, model.modelId].filter(Boolean).join("/")
+                  : undefined;
+                const thinking =
+                  props.step.thinkingOverride ?? props.defaultThinkingLevel;
+                return modelLabel !== undefined || thinking !== undefined ? (
+                  <dl className="workflow-run-metadata">
+                    {modelLabel !== undefined ? (
+                      <div>
+                        <dt>Model</dt>
+                        <dd>{modelLabel}</dd>
+                      </div>
+                    ) : null}
+                    {thinking !== undefined ? (
+                      <div>
+                        <dt>Thinking</dt>
+                        <dd>{thinking}</dd>
+                      </div>
+                    ) : null}
+                  </dl>
+                ) : null;
+              })()}
+              {props.run?.finalAnswer !== undefined ? (
                 <div className="workflow-output-preview">
-                  <span>Latest output</span>
-                  <p>{props.run.finalAnswer}</p>
+                  <span>Final output</span>
+                  <p>{props.run.finalAnswer || "No final output."}</p>
+                </div>
+              ) : null}
+              {props.run?.summary !== undefined ? (
+                <div className="workflow-output-preview">
+                  <span>Summary</span>
+                  <p>{props.run.summary || "No summary."}</p>
+                </div>
+              ) : null}
+              {props.run?.transcript !== undefined ? (
+                <div className="workflow-output-preview">
+                  <span>Transcript</span>
+                  <p>{props.run.transcript || "No transcript."}</p>
                 </div>
               ) : null}
               {props.run?.error ? (

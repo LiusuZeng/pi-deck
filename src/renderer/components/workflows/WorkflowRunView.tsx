@@ -160,6 +160,15 @@ export function WorkflowRunView(props: {
                     expanded={expandedSteps[step.id] === true}
                     inputs={template.inputs}
                     previousSteps={template.steps.slice(0, index)}
+                    {...(template.context !== undefined
+                      ? { context: template.context }
+                      : {})}
+                    {...(template.defaultModel !== undefined
+                      ? { defaultModel: template.defaultModel }
+                      : {})}
+                    {...(template.defaultThinkingLevel !== undefined
+                      ? { defaultThinkingLevel: template.defaultThinkingLevel }
+                      : {})}
                     onToggle={() =>
                       setExpandedSteps((current) => ({
                         ...current,

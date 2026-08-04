@@ -137,7 +137,6 @@ function definitionForTemplate(
 
 function initialDefinition(
   template?: WorkflowTemplate,
-  workspaceId?: string,
 ): WorkflowTemplateDefinition {
   if (template) {
     return definitionForTemplate(template);
@@ -148,7 +147,6 @@ function initialDefinition(
     context: { relevantPaths: [] },
     steps: [newStep(0)],
     transitions: [],
-    ...(workspaceId !== undefined ? { workspaceId } : {}),
   };
 }
 
@@ -163,7 +161,7 @@ export function WorkflowBuilder(props: {
   onCancel(): void;
 }): ReactElement {
   const [definition, setDefinition] = useState<WorkflowTemplateDefinition>(() =>
-    initialDefinition(props.initialTemplate, props.workspaceId),
+    initialDefinition(props.initialTemplate),
   );
   const [expandedSteps, setExpandedSteps] = useState<Record<string, boolean>>({
     [definition.steps[0]!.id]: true,
@@ -225,8 +223,11 @@ export function WorkflowBuilder(props: {
       const hasPreviousTransition = current.transitions.some(
         (transition) => transition.fromStepId === previous?.id,
       );
+      const previousIsTerminalBranchTarget =
+        previous !== undefined &&
+        branchTargetStepIds(current.transitions).has(previous.id);
       const transitions =
-        previous && !hasPreviousTransition
+        previous && !hasPreviousTransition && !previousIsTerminalBranchTarget
           ? [
               ...current.transitions,
               {
@@ -444,20 +445,16 @@ export function WorkflowBuilder(props: {
             Define the orchestration plan now. Pi Deck starts each selected
             agent session only when its dependencies are ready.
           </p>
-          {props.initialTemplate ? (
-            <p className="workflow-workspace-context">
-              Scope:{" "}
-              <strong>
-                {props.initialTemplate.workspaceId === undefined
-                  ? "All workspaces (global)"
-                  : (props.workspaceName ?? props.initialTemplate.workspaceId)}
-              </strong>
-            </p>
-          ) : props.workspaceId ? (
-            <p className="workflow-workspace-context">
-              Scope: <strong>{props.workspaceName ?? props.workspaceId}</strong>
-            </p>
-          ) : null}
+          <p className="workflow-workspace-context">
+            Scope:{" "}
+            <strong>
+              {definition.workspaceId === undefined
+                ? "All workspaces (global)"
+                : definition.workspaceId === props.workspaceId
+                  ? (props.workspaceName ?? definition.workspaceId)
+                  : definition.workspaceId}
+            </strong>
+          </p>
         </div>
         <div className="workflow-heading-actions">
           <button
@@ -505,6 +502,36 @@ export function WorkflowBuilder(props: {
                 }))
               }
             />
+          </label>
+          <label className="workflow-field">
+            <span>Workflow scope</span>
+            <select
+              aria-label="Workflow scope"
+              value={definition.workspaceId ?? ""}
+              onChange={(event) =>
+                setDefinition((current) => {
+                  if (event.target.value) {
+                    return { ...current, workspaceId: event.target.value };
+                  }
+                  const { workspaceId: _workspaceId, ...globalDefinition } =
+                    current;
+                  return globalDefinition;
+                })
+              }
+            >
+              <option value="">All workspaces (global)</option>
+              {props.workspaceId !== undefined ? (
+                <option value={props.workspaceId}>
+                  {props.workspaceName ?? props.workspaceId}
+                </option>
+              ) : null}
+              {definition.workspaceId !== undefined &&
+              definition.workspaceId !== props.workspaceId ? (
+                <option value={definition.workspaceId}>
+                  {definition.workspaceId} (saved scope)
+                </option>
+              ) : null}
+            </select>
           </label>
         </div>
       </section>

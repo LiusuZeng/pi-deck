@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+/** @vitest-environment jsdom */
+import { act, createElement } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, describe, expect, it } from "vitest";
 import type {
   WorkflowStepDefinition,
   WorkflowTransition,
@@ -6,6 +9,7 @@ import type {
 import {
   materializeWorkflowTransitions,
   missingWorkflowTransitionStepIds,
+  WorkflowBuilder,
 } from "./WorkflowBuilder.js";
 
 const step = (id: string): WorkflowStepDefinition => ({
@@ -23,6 +27,45 @@ const step = (id: string): WorkflowStepDefinition => ({
 });
 
 describe("workflow builder transition validation", () => {
+  let root: Root | undefined;
+  let container: HTMLDivElement | undefined;
+
+  afterEach(() => {
+    act(() => root?.unmount());
+    container?.remove();
+    root = undefined;
+    container = undefined;
+  });
+
+  it("starts new templates global and scopes them only after explicit selection", () => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root?.render(
+        createElement(WorkflowBuilder, {
+          workspaceId: "current-workspace",
+          workspaceName: "Current workspace",
+          onSave: () => undefined,
+          onCancel: () => undefined,
+        }),
+      );
+    });
+
+    const scope = container.querySelector(
+      'select[aria-label="Workflow scope"]',
+    ) as HTMLSelectElement;
+    expect(scope.value).toBe("");
+    expect(container.textContent).toContain("All workspaces (global)");
+
+    act(() => {
+      scope.value = "current-workspace";
+      scope.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(scope.value).toBe("current-workspace");
+    expect(container.textContent).toContain("Current workspace");
+  });
+
   it("keeps ordinary linear missing-transition validation", () => {
     expect(
       missingWorkflowTransitionStepIds(

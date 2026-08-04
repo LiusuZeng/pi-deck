@@ -100,6 +100,56 @@ describe("WorkflowRunView action controls", () => {
     expect(actions).toEqual(["approve", "skip", "stop"]);
   });
 
+  it("shows rendered execution details without parent-session controls", () => {
+    const detailedTemplate: WorkflowTemplate = {
+      ...template,
+      context: {
+        objective: "Ship the renderer",
+        constraints: "Keep the workflow boundary explicit",
+        relevantPaths: ["src/renderer"],
+      },
+      defaultModel: { provider: "anthropic", modelId: "claude-sonnet" },
+      defaultThinkingLevel: "high",
+      steps: [
+        {
+          ...template.steps[0]!,
+          inputPolicy: {
+            ...template.steps[0]!.inputPolicy,
+            includeWorkflowContext: true,
+          },
+        },
+      ],
+    };
+    const run = createWorkflowRun({
+      template: detailedTemplate,
+      workspaceId: "workspace",
+      inputs: {},
+      now: 1,
+    });
+    run.stepRuns[0] = {
+      ...run.stepRuns[0]!,
+      status: "completed",
+      renderedPrompt: "Rendered prompt with run context",
+      finalAnswer: "Final answer",
+      summary: "Short summary",
+      transcript: "Transcript output",
+    };
+    render(run);
+    const heading = [...(container?.querySelectorAll("button") ?? [])].find(
+      (candidate) => candidate.textContent?.includes("Review"),
+    ) as HTMLButtonElement;
+    act(() => heading.click());
+
+    expect(container?.textContent).toContain("Rendered prompt with run context");
+    expect(container?.textContent).toContain("Ship the renderer");
+    expect(container?.textContent).toContain("Final answer");
+    expect(container?.textContent).toContain("Short summary");
+    expect(container?.textContent).toContain("Transcript output");
+    expect(container?.textContent).toContain("claude-sonnet");
+    expect(container?.textContent).toContain("high");
+    expect(container?.textContent).not.toContain("Parent-session final answers");
+  });
+
   it("exposes retry for a failed agent step", async () => {
     const retried: string[] = [];
     const run = runWithStep("failed");
