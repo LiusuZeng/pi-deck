@@ -9,6 +9,7 @@ export function WorkflowTransitionCard(props: {
   steps: WorkflowStepDefinition[];
   fromStepId: string;
   onChange(transition: WorkflowTransition): void;
+  error?: string | undefined;
 }): ReactElement {
   const { transition, steps } = props;
   return (
@@ -102,6 +103,11 @@ export function WorkflowTransitionCard(props: {
           </select>
         </label>
       ) : null}
+      {props.error ? (
+        <p className="workflow-field-error" role="alert" aria-live="assertive">
+          {props.error}
+        </p>
+      ) : null}
       {transition.kind === "condition" ? (
         <>
           <label className="workflow-field">
@@ -130,9 +136,10 @@ export function WorkflowTransitionCard(props: {
                       ...transition,
                       routes: {
                         ...transition.routes,
-                        [decision]: value === "stop"
-                          ? { kind: "stop" }
-                          : { kind: "step", stepId: value },
+                        [decision]:
+                          value === "stop"
+                            ? { kind: "stop" }
+                            : { kind: "step", stepId: value },
                       },
                     });
                   }}

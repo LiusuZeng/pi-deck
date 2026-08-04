@@ -24,6 +24,7 @@ export function WorkflowStepCard(props: {
   inputs?: WorkflowInputDefinition[];
   previousSteps?: WorkflowStepDefinition[];
   promptError?: string | undefined;
+  stepError?: string | undefined;
   focusPrompt?: boolean | undefined;
 }): ReactElement {
   const status = props.run?.status;
@@ -61,12 +62,22 @@ export function WorkflowStepCard(props: {
               <label className="workflow-field">
                 <span>Step name</span>
                 <input
+                  aria-invalid={props.stepError ? true : undefined}
                   value={props.step.name}
                   onChange={(event) =>
                     props.onChange?.({ name: event.target.value })
                   }
                 />
               </label>
+              {props.stepError ? (
+                <p
+                  className="workflow-field-error"
+                  role="alert"
+                  aria-live="assertive"
+                >
+                  {props.stepError}
+                </p>
+              ) : null}
               <WorkflowPromptEditor
                 parts={props.step.promptParts}
                 inputs={props.inputs ?? []}
@@ -74,10 +85,18 @@ export function WorkflowStepCard(props: {
                 onChange={(promptParts) => props.onChange?.({ promptParts })}
                 inputRef={promptRef}
                 invalid={props.promptError !== undefined}
-                errorId={props.promptError ? `workflow-${props.step.id}-prompt-error` : undefined}
+                errorId={
+                  props.promptError
+                    ? `workflow-${props.step.id}-prompt-error`
+                    : undefined
+                }
               />
               {props.promptError ? (
-                <p id={`workflow-${props.step.id}-prompt-error`} className="workflow-field-error" role="alert">
+                <p
+                  id={`workflow-${props.step.id}-prompt-error`}
+                  className="workflow-field-error"
+                  role="alert"
+                >
                   {props.promptError}
                 </p>
               ) : null}
@@ -141,36 +160,11 @@ export function WorkflowStepCard(props: {
                   />
                   Shared workflow context
                 </label>
-                <label className="workflow-checkbox">
-                  <input
-                    type="checkbox"
-                    checked={props.step.inputPolicy.includeParentFinalAnswer}
-                    onChange={(event) =>
-                      props.onChange?.({
-                        inputPolicy: {
-                          ...props.step.inputPolicy,
-                          includeParentFinalAnswer: event.target.checked,
-                        },
-                      })
-                    }
-                  />
-                  Parent session result
-                </label>
-                <label className="workflow-checkbox">
-                  <input
-                    type="checkbox"
-                    checked={props.step.inputPolicy.includeParentSummary}
-                    onChange={(event) =>
-                      props.onChange?.({
-                        inputPolicy: {
-                          ...props.step.inputPolicy,
-                          includeParentSummary: event.target.checked,
-                        },
-                      })
-                    }
-                  />
-                  Parent session summary
-                </label>
+                <p className="workflow-help">
+                  Parent-session result, summary, and transcript inputs are not
+                  available yet. Add an explicit run-input or previous-agent
+                  result reference above instead.
+                </p>
               </fieldset>
             </>
           ) : (
@@ -179,31 +173,37 @@ export function WorkflowStepCard(props: {
                 <span className="workflow-field-label">
                   Instructions and handoffs
                 </span>
-                {props.step.promptParts.map((part, partIndex) =>
-                  part.type === "text" ? (
-                    <p key={`text-${partIndex}`}>
-                      {part.text || "No written instructions."}
-                    </p>
-                  ) : (
-                    <span
-                      className="workflow-reference-chip"
-                      key={`${part.type}-${partIndex}`}
-                    >
-                      <span className="workflow-reference-kind">
-                        {part.type === "workflowInput"
-                          ? "Run input"
-                          : "Previous result"}
+                {props.step.promptParts
+                  .filter(
+                    (part) =>
+                      part.type !== "stepOutput" ||
+                      part.output !== "transcript",
+                  )
+                  .map((part, partIndex) =>
+                    part.type === "text" ? (
+                      <p key={`text-${partIndex}`}>
+                        {part.text || "No written instructions."}
+                      </p>
+                    ) : (
+                      <span
+                        className="workflow-reference-chip"
+                        key={`${part.type}-${partIndex}`}
+                      >
+                        <span className="workflow-reference-kind">
+                          {part.type === "workflowInput"
+                            ? "Run input"
+                            : "Previous result"}
+                        </span>
+                        <strong>
+                          {workflowPromptPartLabel(
+                            part,
+                            props.inputs ?? [],
+                            props.previousSteps ?? [],
+                          )}
+                        </strong>
                       </span>
-                      <strong>
-                        {workflowPromptPartLabel(
-                          part,
-                          props.inputs ?? [],
-                          props.previousSteps ?? [],
-                        )}
-                      </strong>
-                    </span>
-                  ),
-                )}
+                    ),
+                  )}
               </div>
               {props.run?.finalAnswer ? (
                 <div className="workflow-output-preview">

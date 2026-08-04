@@ -1089,23 +1089,32 @@ export function App(): ReactElement {
   useEffect(() => {
     if (workflowView === undefined) return;
     let disposed = false;
+    const workspaceId = currentWorkspace.id;
+    const refreshRuns = async (): Promise<void> => {
+      const runs = await window.piDeck.workflows.listRuns({ workspaceId });
+      if (!disposed && currentWorkspaceRef.current.id === workspaceId) {
+        setWorkflowRuns(
+          runs.runs.filter((run) => run.workspaceId === workspaceId),
+        );
+      }
+    };
     const refresh = async (): Promise<void> => {
       setWorkflowLoading(true);
       try {
         const [templates, runs] = await Promise.all([
           window.piDeck.workflows.listTemplates(),
-          window.piDeck.workflows.listRuns({
-            workspaceId: currentWorkspaceRef.current.id,
-          }),
+          window.piDeck.workflows.listRuns({ workspaceId }),
         ]);
         if (disposed) return;
         setWorkflowTemplates(templates.templates);
-        setWorkflowRuns(runs.runs);
+        setWorkflowRuns(
+          runs.runs.filter((run) => run.workspaceId === workspaceId),
+        );
         if (workflowRunId !== undefined) {
           const run = await window.piDeck.workflows.getRun({
             runId: workflowRunId,
           });
-          if (run.workspaceId !== currentWorkspaceRef.current.id) {
+          if (run.workspaceId !== workspaceId) {
             setWorkflowRunId(undefined);
             setWorkflowView("home");
           } else if (!disposed) {
@@ -1127,30 +1136,28 @@ export function App(): ReactElement {
       }
     };
     void refresh();
-    const unsubscribe = window.piDeck.workflows.onEvent((event) => {
-      if (event.runId !== workflowRunId) return;
-      void window.piDeck.workflows
-        .getRun({ runId: event.runId })
-        .then((run) => {
-          if (disposed) return;
-          setWorkflowRuns((current) => [
-            run,
-            ...current.filter((candidate) => candidate.id !== run.id),
-          ]);
-        })
-        .catch((error) => {
-          if (!disposed) {
-            setWorkflowError(
-              error instanceof Error ? error.message : String(error),
-            );
-          }
-        });
+    const unsubscribe = window.piDeck.workflows.onEvent(() => {
+      // Recent runs are workspace-scoped even when no run detail is open.
+      void refreshRuns().catch((error) => {
+        if (!disposed) {
+          setWorkflowError(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      });
     });
     return () => {
       disposed = true;
       unsubscribe();
     };
   }, [currentWorkspace.id, workflowRunId, workflowView]);
+
+  useEffect(() => {
+    setWorkflowRunId(undefined);
+    setWorkflowBuilderTemplate(undefined);
+    setWorkflowError(undefined);
+    if (workflowView !== undefined) setWorkflowView("home");
+  }, [currentWorkspace.id]);
 
   // A renderer reload/disposal loses all composer and retry references. Main
   // retains each selection only by its owner, so revoke every owner we created
@@ -3982,10 +3989,12 @@ export function App(): ReactElement {
               </div>
             ) : workflowView === "builder" ? (
               <WorkflowBuilder
+                key={`${currentWorkspace.id}:${workflowBuilderTemplate?.id ?? "new"}`}
                 {...(workflowBuilderTemplate !== undefined
                   ? { initialTemplate: workflowBuilderTemplate }
                   : {})}
                 workspaceId={currentWorkspace.id}
+                workspaceName={currentWorkspace.name}
                 onSave={handleSaveWorkflow}
                 onCancel={() => {
                   setWorkflowBuilderTemplate(undefined);
@@ -3995,6 +4004,7 @@ export function App(): ReactElement {
             ) : workflowView === "run" && selectedWorkflowRun !== undefined ? (
               <WorkflowRunView
                 run={selectedWorkflowRun}
+                workspaceName={currentWorkspace.name}
                 onBack={() => {
                   setWorkflowRunId(undefined);
                   setWorkflowView("home");
@@ -4007,6 +4017,7 @@ export function App(): ReactElement {
             ) : (
               <WorkflowHome
                 templates={workflowTemplates}
+                workspaceName={currentWorkspace.name}
                 recentRuns={workflowRuns}
                 onCreate={() => {
                   setWorkflowBuilderTemplate(undefined);

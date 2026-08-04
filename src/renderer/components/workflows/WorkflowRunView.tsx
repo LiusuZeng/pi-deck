@@ -12,6 +12,7 @@ import { WorkflowStepCard } from "./WorkflowStepCard.js";
 
 export function WorkflowRunView(props: {
   run: WorkflowRun;
+  workspaceName?: string;
   onBack(): void;
   onStop(): Promise<void> | void;
   onRetryStep?(step: WorkflowStepRun): Promise<void> | void;
@@ -28,6 +29,14 @@ export function WorkflowRunView(props: {
   const [actionError, setActionError] = useState<string | undefined>();
   const progress = runProgress(props.run);
   const template = props.run.templateSnapshot;
+  const transitionForStep = (stepId: string) =>
+    template.transitions.find((transition) => transition.fromStepId === stepId);
+  const targetLabel = (target?: { kind: string; stepId?: string }): string => {
+    if (target === undefined || target.kind === "stop")
+      return "stop the workflow";
+    if (target.kind === "manualGate") return "request another approval";
+    return `continue with ${template.steps.find((step) => step.id === target.stepId)?.name ?? "the selected next step"}`;
+  };
 
   const perform = async (
     action: string,
@@ -61,6 +70,10 @@ export function WorkflowRunView(props: {
             {workflowRunStatusLabel(props.run.status)} · {progress.completed} of{" "}
             {progress.total} agents complete
           </p>
+          <p className="workflow-workspace-context">
+            Workspace:{" "}
+            <strong>{props.workspaceName ?? props.run.workspaceId}</strong>
+          </p>
         </div>
         <div className="workflow-heading-actions">
           {props.run.status !== "completed" &&
@@ -79,7 +92,11 @@ export function WorkflowRunView(props: {
           </span>
         </div>
         {actionError ? (
-          <p className="workflow-error workflow-run-action-error" role="alert" aria-live="assertive">
+          <p
+            className="workflow-error workflow-run-action-error"
+            role="alert"
+            aria-live="assertive"
+          >
             {actionError}
           </p>
         ) : null}
@@ -150,7 +167,23 @@ export function WorkflowRunView(props: {
                       role="group"
                       aria-label={`Approval actions for ${step.name}`}
                     >
-                      <span>This agent is waiting for your decision.</span>
+                      <span>
+                        This agent is waiting for your decision. Approve to{" "}
+                        {(() => {
+                          const transition = transitionForStep(step.id);
+                          if (
+                            transition?.kind === "always" ||
+                            transition?.kind === "manualGate"
+                          ) {
+                            return targetLabel({
+                              kind: "step",
+                              stepId: transition.toStepId,
+                            });
+                          }
+                          return "continue with the next configured action";
+                        })()}
+                        .
+                      </span>
                       <button
                         type="button"
                         className="workflow-primary-button"
@@ -219,19 +252,41 @@ export function WorkflowRunView(props: {
                 </div>
               </div>
               <ul>
-                {props.run.transitionRuns.map((transition) => (
-                  <li key={transition.id}>
-                    <strong>
-                      {transition.status === "resolved"
-                        ? "Resolved"
-                        : transition.status}
-                    </strong>
-                    {transition.decision
-                      ? ` · ${transition.decision.toUpperCase()}`
-                      : ""}
-                    {transition.rationale ? ` · ${transition.rationale}` : ""}
-                  </li>
-                ))}
+                {props.run.transitionRuns.map((transition) => {
+                  const definition = template.transitions.find(
+                    (candidate) =>
+                      candidate.id === transition.templateTransitionId,
+                  );
+                  return (
+                    <li key={transition.id}>
+                      <strong>
+                        {transition.status === "resolved"
+                          ? "Resolved"
+                          : transition.status}
+                      </strong>
+                      {definition?.kind === "condition" ? (
+                        <span> · Question: {definition.question}</span>
+                      ) : null}
+                      {transition.decision
+                        ? ` · Decision: ${transition.decision.toUpperCase()}`
+                        : ""}
+                      {transition.selectedTarget ? (
+                        <span>
+                          {" "}
+                          · Selected target:{" "}
+                          {targetLabel(transition.selectedTarget)}
+                        </span>
+                      ) : null}
+                      {transition.rationale ? ` · ${transition.rationale}` : ""}
+                      {transition.error ? (
+                        <span className="workflow-error">
+                          {" "}
+                          · Error: {transition.error}
+                        </span>
+                      ) : null}
+                    </li>
+                  );
+                })}
               </ul>
             </section>
           ) : null}

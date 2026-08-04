@@ -39,30 +39,84 @@ function newInput(index: number): WorkflowInputDefinition {
   };
 }
 
+function materializeTransitions(
+  steps: WorkflowStepDefinition[],
+  transitions: WorkflowTransition[],
+): WorkflowTransition[] {
+  const materialized = [...transitions];
+  for (let index = 0; index < steps.length - 1; index += 1) {
+    const fromStep = steps[index]!;
+    const toStep = steps[index + 1]!;
+    if (
+      materialized.some((transition) => transition.fromStepId === fromStep.id)
+    ) {
+      continue;
+    }
+    materialized.push({
+      id: `transition-${fromStep.id}-${toStep.id}`,
+      fromStepId: fromStep.id,
+      kind: "always",
+      toStepId: toStep.id,
+    });
+  }
+  return materialized;
+}
+
+function definitionForTemplate(
+  template: WorkflowTemplate,
+  workspaceId?: string,
+): WorkflowTemplateDefinition {
+  const steps = template.steps
+    .map((step) => ({
+      ...step,
+      promptParts: step.promptParts.filter(
+        (part) => part.type !== "stepOutput" || part.output !== "transcript",
+      ),
+      inputPolicy: {
+        ...step.inputPolicy,
+        // Parent-session wiring is not available yet. Do not preserve settings
+        // that would render an unavailable placeholder into a new run.
+        includeParentFinalAnswer: false,
+        includeParentSummary: false,
+        includeParentTranscript: false,
+      },
+    }))
+    .map((step) => ({
+      ...step,
+      promptParts:
+        step.promptParts.length > 0
+          ? step.promptParts
+          : [{ type: "text" as const, text: "" }],
+    }));
+  return {
+    name: template.name,
+    ...(template.description !== undefined
+      ? { description: template.description }
+      : {}),
+    ...(workspaceId !== undefined
+      ? { workspaceId }
+      : template.workspaceId !== undefined
+        ? { workspaceId: template.workspaceId }
+        : {}),
+    ...(template.context !== undefined ? { context: template.context } : {}),
+    ...(template.defaultModel !== undefined
+      ? { defaultModel: template.defaultModel }
+      : {}),
+    ...(template.defaultThinkingLevel !== undefined
+      ? { defaultThinkingLevel: template.defaultThinkingLevel }
+      : {}),
+    inputs: template.inputs,
+    steps,
+    transitions: materializeTransitions(steps, template.transitions),
+  };
+}
+
 function initialDefinition(
   template?: WorkflowTemplate,
   workspaceId?: string,
 ): WorkflowTemplateDefinition {
   if (template) {
-    return {
-      name: template.name,
-      ...(template.description !== undefined
-        ? { description: template.description }
-        : {}),
-      ...(template.workspaceId !== undefined
-        ? { workspaceId: template.workspaceId }
-        : {}),
-      ...(template.context !== undefined ? { context: template.context } : {}),
-      ...(template.defaultModel !== undefined
-        ? { defaultModel: template.defaultModel }
-        : {}),
-      ...(template.defaultThinkingLevel !== undefined
-        ? { defaultThinkingLevel: template.defaultThinkingLevel }
-        : {}),
-      inputs: template.inputs,
-      steps: template.steps,
-      transitions: template.transitions,
-    };
+    return definitionForTemplate(template, workspaceId);
   }
   return {
     name: "New agent workflow",
@@ -77,6 +131,7 @@ function initialDefinition(
 export function WorkflowBuilder(props: {
   initialTemplate?: WorkflowTemplate;
   workspaceId?: string;
+  workspaceName?: string;
   onSave(
     definition: WorkflowTemplateDefinition,
     templateId?: string,
@@ -90,7 +145,9 @@ export function WorkflowBuilder(props: {
     [definition.steps[0]!.id]: true,
   });
   const [error, setError] = useState<string | undefined>();
-  const [focusPromptStepId, setFocusPromptStepId] = useState<string | undefined>();
+  const [focusPromptStepId, setFocusPromptStepId] = useState<
+    string | undefined
+  >();
   const [saving, setSaving] = useState(false);
 
   const updateInput = (
@@ -144,17 +201,18 @@ export function WorkflowBuilder(props: {
       const hasPreviousTransition = current.transitions.some(
         (transition) => transition.fromStepId === previous?.id,
       );
-      const transitions = previous && !hasPreviousTransition
-        ? [
-            ...current.transitions,
-            {
-              id: `transition-${Date.now()}`,
-              fromStepId: previous.id,
-              kind: "always" as const,
-              toStepId: step.id,
-            },
-          ]
-        : current.transitions;
+      const transitions =
+        previous && !hasPreviousTransition
+          ? [
+              ...current.transitions,
+              {
+                id: `transition-${Date.now()}`,
+                fromStepId: previous.id,
+                kind: "always" as const,
+                toStepId: step.id,
+              },
+            ]
+          : current.transitions;
       setExpandedSteps((expanded) => ({ ...expanded, [step.id]: true }));
       return { ...current, steps: [...current.steps, step], transitions };
     });
@@ -183,33 +241,93 @@ export function WorkflowBuilder(props: {
     definition.transitions.find(
       (transition) => transition.fromStepId === stepId,
     );
+  const missingTransitionErrors = useMemo(
+    () =>
+      Object.fromEntries(
+        definition.steps
+          .slice(0, -1)
+          .flatMap((step) =>
+            transitionForStep(step.id) === undefined
+              ? [[step.id, "Choose a persisted transition before saving."]]
+              : [],
+          ),
+      ) as Record<string, string>,
+    [definition.steps, definition.transitions],
+  );
   const promptErrors = useMemo(
     () =>
       Object.fromEntries(
         definition.steps.flatMap((step) => {
           const hasPrompt = step.promptParts.some(
-            (part) =>
-              part.type !== "text" || part.text.trim().length > 0,
+            (part) => part.type !== "text" || part.text.trim().length > 0,
           );
-          return hasPrompt ? [] : [[step.id, "Add instructions for this agent."]];
+          return hasPrompt
+            ? []
+            : [[step.id, "Add instructions for this agent."]];
         }),
       ) as Record<string, string>,
     [definition.steps],
   );
+  const stepErrors = useMemo(() => {
+    const result = workflowTemplateDefinitionSchema.safeParse(definition);
+    const errors: Record<string, string> = {};
+    if (!result.success) {
+      for (const issue of result.error.issues) {
+        const stepIndex =
+          issue.path[0] === "steps" && typeof issue.path[1] === "number"
+            ? issue.path[1]
+            : undefined;
+        const step =
+          stepIndex === undefined ? undefined : definition.steps[stepIndex];
+        if (step !== undefined && errors[step.id] === undefined) {
+          errors[step.id] = issue.message;
+        }
+      }
+    }
+    return errors;
+  }, [definition]);
+  const transitionErrors = useMemo(() => {
+    const result = workflowTemplateDefinitionSchema.safeParse(definition);
+    const errors: Record<string, string> = { ...missingTransitionErrors };
+    if (!result.success) {
+      for (const issue of result.error.issues) {
+        const transitionIndex =
+          issue.path[0] === "transitions" && typeof issue.path[1] === "number"
+            ? issue.path[1]
+            : undefined;
+        if (transitionIndex === undefined) continue;
+        const transition = definition.transitions[transitionIndex];
+        if (
+          transition !== undefined &&
+          errors[transition.fromStepId] === undefined
+        ) {
+          errors[transition.fromStepId] = issue.message;
+        }
+      }
+    }
+    return errors;
+  }, [definition, missingTransitionErrors]);
   const validation = useMemo(() => {
     const result = workflowTemplateDefinitionSchema.safeParse(definition);
     const schemaErrors = result.success
       ? []
       : result.error.issues.map((issue) => issue.message);
-    return [...Object.values(promptErrors), ...schemaErrors];
-  }, [definition, promptErrors]);
+    return [
+      ...Object.values(promptErrors),
+      ...Object.values(missingTransitionErrors),
+      ...schemaErrors,
+    ];
+  }, [definition, missingTransitionErrors, promptErrors]);
 
   const save = async () => {
     const firstBlankStep = definition.steps.find(
       (step) => promptErrors[step.id] !== undefined,
     );
     if (firstBlankStep !== undefined) {
-      setExpandedSteps((current) => ({ ...current, [firstBlankStep.id]: true }));
+      setExpandedSteps((current) => ({
+        ...current,
+        [firstBlankStep.id]: true,
+      }));
       setFocusPromptStepId(firstBlankStep.id);
     }
     if (validation.length > 0) {
@@ -251,6 +369,12 @@ export function WorkflowBuilder(props: {
             Define the orchestration plan now. Pi Deck starts each selected
             agent session only when its dependencies are ready.
           </p>
+          {props.workspaceId ? (
+            <p className="workflow-workspace-context">
+              Workspace:{" "}
+              <strong>{props.workspaceName ?? props.workspaceId}</strong>
+            </p>
+          ) : null}
         </div>
         <div className="workflow-heading-actions">
           <button
@@ -263,7 +387,8 @@ export function WorkflowBuilder(props: {
           <button
             type="button"
             className="workflow-primary-button"
-            disabled={saving || validation.length > 0}
+            disabled={saving}
+            aria-disabled={validation.length > 0 || undefined}
             onClick={() => void save()}
           >
             {saving ? "Saving…" : "Save workflow"}
@@ -415,30 +540,38 @@ export function WorkflowBuilder(props: {
               inputs={definition.inputs}
               previousSteps={definition.steps.slice(0, index)}
               promptError={promptErrors[step.id]}
+              stepError={stepErrors[step.id]}
               focusPrompt={focusPromptStepId === step.id}
             />
             {index < definition.steps.length - 1 ? (
               <div className="workflow-transition-wrap">
-                <WorkflowTransitionCard
-                  transition={
-                    transitionForStep(step.id) ?? {
-                      id: `transition-${step.id}`,
-                      fromStepId: step.id,
-                      kind: "always",
-                      toStepId: definition.steps[index + 1]!.id,
-                    }
-                  }
-                  steps={definition.steps}
-                  fromStepId={step.id}
-                  onChange={updateTransition}
-                />
+                {transitionForStep(step.id) ? (
+                  <WorkflowTransitionCard
+                    transition={transitionForStep(step.id)!}
+                    steps={definition.steps}
+                    fromStepId={step.id}
+                    onChange={updateTransition}
+                    error={transitionErrors[step.id]}
+                  />
+                ) : (
+                  <p
+                    className="workflow-error workflow-transition-missing"
+                    role="alert"
+                  >
+                    {missingTransitionErrors[step.id]}
+                  </p>
+                )}
               </div>
             ) : null}
           </div>
         ))}
       </div>
       {error || validation.length > 0 ? (
-        <p className="workflow-error workflow-builder-error">
+        <p
+          className="workflow-error workflow-builder-error"
+          role="alert"
+          aria-live="assertive"
+        >
           {error ?? validation[0]}
         </p>
       ) : null}

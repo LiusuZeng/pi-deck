@@ -135,6 +135,7 @@ function WorkflowStartForm(props: {
 
 export function WorkflowHome(props: {
   templates: WorkflowTemplate[];
+  workspaceName?: string;
   recentRuns?: WorkflowRun[];
   onCreate(): void;
   onEdit(template: WorkflowTemplate): void;
@@ -179,6 +180,11 @@ export function WorkflowHome(props: {
             what runs next; Pi skills remain capabilities inside each agent
             session.
           </p>
+          {props.workspaceName ? (
+            <p className="workflow-workspace-context">
+              Workspace: <strong>{props.workspaceName}</strong>
+            </p>
+          ) : null}
         </div>
         <button
           type="button"
@@ -305,7 +311,10 @@ export function WorkflowHome(props: {
                       {new Date(run.updatedAtMs).toLocaleString()}
                     </small>
                   </span>
-                  <span className="workflow-run-status" aria-label={`Workflow status: ${workflowRunStatusLabel(run.status)}`}>
+                  <span
+                    className="workflow-run-status"
+                    aria-label={`Workflow status: ${workflowRunStatusLabel(run.status)}`}
+                  >
                     {workflowRunStatusLabel(run.status)}
                   </span>
                 </button>

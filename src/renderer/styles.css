@@ -3843,6 +3843,11 @@ body {
   color: var(--color-text-muted);
 }
 
+.workflow-workspace-context {
+  color: var(--color-text-subtle);
+  font-size: 12px;
+}
+
 .workflow-kicker,
 .workflow-template-mark,
 .workflow-field-label {
@@ -4264,6 +4269,10 @@ body {
   border-radius: var(--radius-md);
   padding: 12px;
   background: var(--color-surface-subtle);
+}
+
+.workflow-transition-missing {
+  margin: 0;
 }
 
 .workflow-prompt-preview {

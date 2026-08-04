@@ -61,6 +61,18 @@ export function WorkflowContextCard(props: {
           />
         </label>
         <label className="workflow-field">
+          <span>Standards</span>
+          <textarea
+            rows={2}
+            disabled={props.readOnly}
+            placeholder="Project conventions, quality bar, or acceptance criteria"
+            value={props.context.standards ?? ""}
+            onChange={(event) =>
+              update({ standards: event.target.value || undefined })
+            }
+          />
+        </label>
+        <label className="workflow-field">
           <span>Do not do</span>
           <textarea
             rows={2}
