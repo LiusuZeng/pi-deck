@@ -62,7 +62,7 @@ describe("WorkflowStore", () => {
     });
     expect(updated.name).toBe("Edited global workflow");
     expect(updated.workspaceId).toBeUndefined();
-    expect((await store.listTemplates("another-workspace"))[0]?.workspaceId).toBeUndefined();
+    expect((await store.listTemplates("another-workspace")).map((item) => item.id)).toEqual([original.id]);
   });
 
   it("duplicates a template without sharing its identity", async () => {

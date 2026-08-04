@@ -100,6 +100,10 @@ export class WorkflowStore {
     const validated = workflowTemplateDefinitionSchema.parse(definition);
     const updated = workflowTemplateSchema.parse({
       ...validated,
+      // A global template must remain global when a renderer update includes
+      // the current workspace as context. Scoped templates keep the existing
+      // update behavior and may change scope through the definition.
+      ...(current.workspaceId === undefined ? { workspaceId: undefined } : {}),
       id: current.id,
       createdAtMs: current.createdAtMs,
       updatedAtMs: this.now(),
