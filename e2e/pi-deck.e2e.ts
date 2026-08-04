@@ -3068,6 +3068,18 @@ test("Work inbox scopes work by workspace and opens a row with the keyboard", as
       page.getByRole("button", { name: /^In progress \d+$/ }),
     ).toBeVisible();
 
+    await page
+      .getByRole("button", { name: "New session", exact: true })
+      .click();
+    await expect(page.getByRole("heading", { name: "Work inbox" })).toHaveCount(
+      0,
+    );
+    await expect(page.getByLabel("Prompt text")).toBeVisible();
+    await page.getByRole("button", { name: "Work inbox", exact: true }).click();
+    await expect(
+      page.getByRole("heading", { name: "Work inbox" }),
+    ).toBeVisible();
+
     await page.getByLabel("Work inbox workspace").selectOption({
       label: "Default workspace (1)",
     });
