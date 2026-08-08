@@ -35,6 +35,56 @@ describe("WorkflowStepCard", () => {
     container = undefined;
   });
 
+  it("uses accessible dropdowns for model and thinking overrides", () => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const onChange = vi.fn();
+    const editableStep = {
+      ...step,
+      inputPolicy: {
+        includeWorkflowContext: true,
+        includeParentFinalAnswer: false,
+        includeParentSummary: false,
+        includeParentTranscript: false,
+      },
+    };
+
+    act(() => {
+      root?.render(
+        createElement(WorkflowStepCard, {
+          step: editableStep,
+          index: 0,
+          expanded: true,
+          onToggle: () => undefined,
+          onChange,
+          modelChoices: [
+            { provider: "anthropic", modelId: "claude-sonnet" },
+            { provider: "openai", modelId: "gpt-codex" },
+          ],
+          thinkingChoices: ["low", "high"],
+        }),
+      );
+    });
+
+    const model = container.querySelector(
+      'select[aria-label="Model override"]',
+    ) as HTMLSelectElement;
+    const thinking = container.querySelector(
+      'select[aria-label="Thinking level"]',
+    ) as HTMLSelectElement;
+    expect(model.options[0]?.textContent).toBe("Inherit from Pi Deck");
+    expect(thinking.options[0]?.textContent).toBe("Inherit from Pi Deck");
+    expect(model.options).toHaveLength(3);
+    expect(thinking.options).toHaveLength(3);
+    expect(
+      container.querySelector('input[aria-label="Model override"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('input[aria-label="Thinking level"]'),
+    ).toBeNull();
+  });
+
   it("offers the Pi session action for a runtime-only running step", () => {
     container = document.createElement("div");
     document.body.appendChild(container);

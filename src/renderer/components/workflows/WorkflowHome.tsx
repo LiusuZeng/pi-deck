@@ -108,30 +108,18 @@ function WorkflowStartForm(props: {
                 {input.required ? " *" : ""}
               </span>
               {input.description ? <small>{input.description}</small> : null}
-              {input.type === "path" ? (
-                <input
-                  type="text"
-                  placeholder="Path or file reference"
-                  value={values[input.id] ?? ""}
-                  onChange={(event) =>
-                    setValues((current) => ({
-                      ...current,
-                      [input.id]: event.target.value,
-                    }))
-                  }
-                />
-              ) : (
-                <textarea
-                  rows={3}
-                  value={values[input.id] ?? ""}
-                  onChange={(event) =>
-                    setValues((current) => ({
-                      ...current,
-                      [input.id]: event.target.value,
-                    }))
-                  }
-                />
-              )}
+              <textarea
+                aria-label={input.label}
+                rows={4}
+                placeholder="Enter instructions or other run-specific context…"
+                value={values[input.id] ?? ""}
+                onChange={(event) =>
+                  setValues((current) => ({
+                    ...current,
+                    [input.id]: event.target.value,
+                  }))
+                }
+              />
             </label>
           ))}
         </div>
@@ -170,6 +158,14 @@ export function WorkflowHome(props: {
     WorkflowTemplate | undefined
   >();
   const runs = props.recentRuns ?? [];
+
+  const startTemplate = (template: WorkflowTemplate) => {
+    if (template.inputs.length === 0) {
+      void props.onStart(template, {});
+      return;
+    }
+    setStartingTemplate(template);
+  };
 
   if (startingTemplate) {
     return (
@@ -282,7 +278,7 @@ export function WorkflowHome(props: {
                   <button
                     type="button"
                     className="workflow-primary-button"
-                    onClick={() => setStartingTemplate(template)}
+                    onClick={() => startTemplate(template)}
                   >
                     Start run
                   </button>

@@ -6,6 +6,7 @@ import type {
   WorkflowTemplate,
   WorkflowTemplateDefinition,
   WorkflowTransition,
+  WorkflowModelOverride,
 } from "../../../shared/workflowSchemas.js";
 import { workflowTemplateDefinitionSchema } from "../../../shared/workflowSchemas.js";
 import { workflowPredecessorSteps } from "../../workflows/workflowViewModels.js";
@@ -155,6 +156,8 @@ export function WorkflowBuilder(props: {
   initialTemplate?: WorkflowTemplate;
   workspaceId?: string;
   workspaceName?: string;
+  modelChoices?: WorkflowModelOverride[];
+  thinkingChoices?: string[];
   onSave(
     definition: WorkflowTemplateDefinition,
     templateId?: string,
@@ -557,8 +560,8 @@ export function WorkflowBuilder(props: {
           </button>
         </div>
         <p className="workflow-help">
-          Inputs are collected when a workflow starts and included in steps that
-          opt into shared context.
+          Inputs are collected when a workflow starts and can be referenced by
+          the agent instructions.
         </p>
         {definition.inputs.length === 0 ? (
           <p className="workflow-empty-inline">
@@ -578,22 +581,6 @@ export function WorkflowBuilder(props: {
                   }
                 />
               </label>
-              <label className="workflow-field">
-                <span>Type</span>
-                <select
-                  aria-label={`Input ${index + 1} type`}
-                  value={input.type}
-                  onChange={(event) =>
-                    updateInput(input.id, {
-                      type: event.target
-                        .value as WorkflowInputDefinition["type"],
-                    })
-                  }
-                >
-                  <option value="text">Text</option>
-                  <option value="path">Path reference</option>
-                </select>
-              </label>
               <label className="workflow-checkbox">
                 <input
                   type="checkbox"
@@ -612,8 +599,9 @@ export function WorkflowBuilder(props: {
               {!input.required ? (
                 <label className="workflow-field">
                   <span>Default (optional)</span>
-                  <input
+                  <textarea
                     aria-label={`Input ${index + 1} default`}
+                    rows={3}
                     value={input.defaultValue ?? ""}
                     placeholder="Leave blank to require a value"
                     onChange={(event) =>
@@ -672,6 +660,12 @@ export function WorkflowBuilder(props: {
               promptError={promptErrors[step.id]}
               stepError={stepErrors[step.id]}
               focusPrompt={focusPromptStepId === step.id}
+              {...(props.modelChoices !== undefined
+                ? { modelChoices: props.modelChoices }
+                : {})}
+              {...(props.thinkingChoices !== undefined
+                ? { thinkingChoices: props.thinkingChoices }
+                : {})}
             />
             {index < definition.steps.length - 1 ? (
               <div className="workflow-transition-wrap">
