@@ -69,6 +69,12 @@ import type {
   workflowTemplateSchema,
   workflowUpdateTemplateRequestSchema,
 } from "./workflowSchemas.js";
+import type {
+  workflowCreateRequestSchema,
+  workflowDefinitionSchema,
+  workflowListRequestSchema,
+  workflowUpdateRequestSchema,
+} from "./workflowV2Schemas.js";
 
 export type ThemePreference = z.infer<typeof themePreferenceSchema>;
 export type AppSettings = z.infer<typeof appSettingsSchema>;
@@ -167,6 +173,10 @@ export type AttachmentAssignOwnerRequest = z.infer<
   typeof attachmentAssignOwnerRequestSchema
 >;
 export type PickAttachmentsResult = z.infer<typeof pickAttachmentsResultSchema>;
+export type WorkflowDefinition = z.infer<typeof workflowDefinitionSchema>;
+export type WorkflowListRequest = z.infer<typeof workflowListRequestSchema>;
+export type WorkflowCreateRequest = z.infer<typeof workflowCreateRequestSchema>;
+export type WorkflowUpdateRequest = z.infer<typeof workflowUpdateRequestSchema>;
 export type WorkflowTemplate = z.infer<typeof workflowTemplateSchema>;
 export type WorkflowTemplateDefinition = z.infer<
   typeof workflowTemplateDefinitionSchema
@@ -313,6 +323,9 @@ export interface PiDeckApi {
     listUnassignedSessions(): Promise<ChatListSessionsResult>;
   };
   workflows: {
+    listWorkflows(request: WorkflowListRequest): Promise<WorkflowDefinition[]>;
+    createWorkflow(request: WorkflowCreateRequest): Promise<WorkflowDefinition>;
+    updateWorkflow(request: WorkflowUpdateRequest): Promise<WorkflowDefinition>;
     getTemplate(request: WorkflowGetTemplateRequest): Promise<WorkflowTemplate>;
     listTemplates(): Promise<WorkflowTemplateListResult>;
     createTemplate(

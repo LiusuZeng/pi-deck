@@ -1,7 +1,7 @@
 /** @vitest-environment jsdom */
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkflowV2Builder } from "./WorkflowV2Builder.js";
 import {
   defaultV2Definition,
@@ -15,14 +15,17 @@ describe("WorkflowV2Builder", () => {
     act(() => root?.unmount());
     container?.remove();
   });
-  const render = () => {
+  const render = (
+    onSave: (definition: ReturnType<typeof defaultV2Definition>) => void = () =>
+      undefined,
+  ) => {
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
     act(() =>
       root?.render(
         createElement(WorkflowV2Builder, {
-          onSave: () => undefined,
+          onSave,
           onCancel: () => undefined,
         }),
       ),
@@ -34,6 +37,25 @@ describe("WorkflowV2Builder", () => {
         .find((button) => button.textContent === text)
         ?.dispatchEvent(new MouseEvent("click", { bubbles: true })),
     );
+  it("passes a canonical workflow to Save", async () => {
+    const onSave = vi.fn();
+    render(onSave);
+    await act(async () => {
+      container!
+        .querySelectorAll("button")
+        .forEach(
+          (button) => button.textContent === "Save workflow" && button.click(),
+        );
+    });
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        format: "pi-deck.agent-workflow",
+        schemaVersion: 2,
+        id: expect.stringMatching(/^workflow-/),
+      }),
+    );
+  });
+
   it("offers exactly the four canonical roles and a focused inspector", () => {
     render();
     expect(

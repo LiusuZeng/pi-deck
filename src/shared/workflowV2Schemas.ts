@@ -155,6 +155,19 @@ export const workflowDefinitionSchema = z
   .strict()
   .superRefine(validateWorkflowGraph);
 
+/** IPC requests retain workspace authorization outside the canonical document. */
+const workspaceIdSchema = z.string().min(1).max(120);
+export const workflowListRequestSchema = z
+  .object({ workspaceId: workspaceIdSchema })
+  .strict();
+export const workflowCreateRequestSchema = z
+  .object({
+    workspaceId: workspaceIdSchema,
+    workflow: workflowDefinitionSchema,
+  })
+  .strict();
+export const workflowUpdateRequestSchema = workflowCreateRequestSchema;
+
 /** A static execution of a node. Repetition creates separate occurrences. */
 export const nodeOccurrenceSchema = z.discriminatedUnion("role", [
   z

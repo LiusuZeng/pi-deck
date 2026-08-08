@@ -75,6 +75,20 @@ describe("WorkflowStore v2 migration foundation", () => {
     expect(JSON.stringify(disk)).not.toContain('"templates"');
   });
 
+  it("validates and updates canonical v2 workflows without coercing them to v1", async () => {
+    const store = await fresh();
+    await store.createWorkflow(v2());
+    await expect(store.createWorkflow(v2())).rejects.toThrow(
+      "Workflow already exists: native",
+    );
+    await expect(
+      store.updateWorkflow({ ...v2(), name: "Updated native", revision: 2 }),
+    ).resolves.toMatchObject({ name: "Updated native", revision: 2 });
+    await expect(
+      store.updateWorkflow({ ...v2(), entryNodeId: "missing" }),
+    ).rejects.toThrow(/Entry node/);
+  });
+
   it("backs up v1, migrates templates to nodes, and preserves runs unchanged", async () => {
     const source = await fresh();
     const legacy = await source.createTemplate(legacyDefinition);

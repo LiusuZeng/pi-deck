@@ -276,7 +276,7 @@ export function WorkflowV2Builder(props: {
                             | "approval"
                             | "choice",
                         },
-                      })
+                      } as WorkflowV2Node)
                     }
                   >
                     <option value="input">Input</option>
@@ -312,7 +312,7 @@ export function WorkflowV2Builder(props: {
                 .map((edge) => (
                   <p key={edge.id}>
                     {edge.when ? String(edge.when.equals) : "then"} →{" "}
-                    {edge.to.nodeId ?? edge.to.end}
+                    {"nodeId" in edge.to ? edge.to.nodeId : edge.to.end}
                   </p>
                 ))}
               <label className="workflow-field">

@@ -29,6 +29,7 @@ import type {
   WorkspaceRef as SharedWorkspaceRef,
   ThemePreference,
 } from "../shared/types.js";
+import type { WorkflowDefinition } from "../shared/workflowV2Schemas.js";
 import type {
   WorkflowRun,
   WorkflowStepRun,
@@ -1788,6 +1789,24 @@ export function App(): ReactElement {
       setWorkflowBuilderTemplate(undefined);
       setWorkflowView("home");
       setWorkflowError(undefined);
+    } catch (error) {
+      setWorkflowError(error instanceof Error ? error.message : String(error));
+      throw error;
+    }
+  }
+
+  async function handleSaveWorkflowV2(
+    workflow: WorkflowDefinition,
+  ): Promise<void> {
+    try {
+      await window.piDeck.workflows.createWorkflow({
+        workspaceId: currentWorkspaceRef.current.id,
+        workflow,
+      });
+      setWorkflowBuilderTemplate(undefined);
+      setWorkflowView("home");
+      setWorkflowError(undefined);
+      setUiMessage(`Saved ${workflow.name}.`);
     } catch (error) {
       setWorkflowError(error instanceof Error ? error.message : String(error));
       throw error;
@@ -4108,13 +4127,7 @@ export function App(): ReactElement {
               ) : (
                 <WorkflowV2Builder
                   key={`${currentWorkspace.id}:new-v2`}
-                  // Persistence is deliberately rejected until the main-process v2
-                  // store is available; never coerce a canonical document into v1.
-                  onSave={async () => {
-                    throw new Error(
-                      "Saving v2 workflows requires the v2 workflow store. Existing v1 workflows remain available in the legacy editor.",
-                    );
-                  }}
+                  onSave={handleSaveWorkflowV2}
                   onCancel={() => {
                     setWorkflowBuilderTemplate(undefined);
                     setWorkflowView("home");

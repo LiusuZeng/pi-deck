@@ -53,6 +53,64 @@ describe("preload PiDeck API validation", () => {
     expect(electronMock.ipcRenderer.invoke).not.toHaveBeenCalled();
   });
 
+  it("exposes canonical v2 workflow IPC methods with strict workspace scope", async () => {
+    const workflow = {
+      format: "pi-deck.agent-workflow" as const,
+      schemaVersion: 2 as const,
+      id: "workflow-1",
+      revision: 1,
+      name: "Workflow",
+      inputs: [],
+      entryNodeId: "worker-1",
+      nodes: [
+        {
+          id: "worker-1",
+          name: "Worker",
+          role: "worker" as const,
+          config: { instructions: "Do the work" },
+        },
+      ],
+      relationships: [],
+    };
+    electronMock.ipcRenderer.invoke.mockResolvedValue({
+      ok: true,
+      data: workflow,
+    });
+
+    await api.workflows.createWorkflow({
+      workspaceId: "workspace-1",
+      workflow,
+    });
+    await api.workflows.updateWorkflow({
+      workspaceId: "workspace-1",
+      workflow,
+    });
+    electronMock.ipcRenderer.invoke.mockResolvedValueOnce({
+      ok: true,
+      data: [workflow],
+    });
+    await expect(
+      api.workflows.listWorkflows({ workspaceId: "workspace-1" }),
+    ).resolves.toEqual([workflow]);
+
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
+      1,
+      "workflows:create",
+      { workspaceId: "workspace-1", workflow },
+    );
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
+      2,
+      "workflows:update",
+      { workspaceId: "workspace-1", workflow },
+    );
+    expect(() =>
+      api.workflows.createWorkflow({
+        workspaceId: "workspace-1",
+        workflow: { ...workflow, extra: true },
+      } as never),
+    ).toThrow();
+  });
+
   it("exposes strict steer and follow-up IPC methods", async () => {
     electronMock.ipcRenderer.invoke.mockResolvedValue({
       ok: true,
