@@ -89,6 +89,12 @@ import {
   workflowTemplateSchema,
   workflowUpdateTemplateRequestSchema,
 } from "../shared/workflowSchemas.js";
+import {
+  workflowCreateRequestSchema,
+  workflowDefinitionSchema,
+  workflowListRequestSchema,
+  workflowUpdateRequestSchema,
+} from "../shared/workflowV2Schemas.js";
 import type {
   AppBootstrapState,
   AppSettings,
@@ -1009,6 +1015,39 @@ function registerIpcHandlers(
     responseSchema: chatListSessionsResultSchema,
     diagnostics: diagnosticsService,
     handler: async () => listUnassignedWorkspaceSessions(store),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowListWorkflows,
+    requestSchema: workflowListRequestSchema,
+    responseSchema: workflowDefinitionSchema.array(),
+    diagnostics: diagnosticsService,
+    handler: async ({ workspaceId }) => {
+      await requireOpenWorkspace(workspaceId);
+      return ensureWorkflowStore().listWorkflows();
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowCreateWorkflow,
+    requestSchema: workflowCreateRequestSchema,
+    responseSchema: workflowDefinitionSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ workspaceId, workflow }) => {
+      await requireOpenWorkspace(workspaceId);
+      return ensureWorkflowStore().createWorkflow(workflow);
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowUpdateWorkflow,
+    requestSchema: workflowUpdateRequestSchema,
+    responseSchema: workflowDefinitionSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ workspaceId, workflow }) => {
+      await requireOpenWorkspace(workspaceId);
+      return ensureWorkflowStore().updateWorkflow(workflow);
+    },
   });
 
   registerValidatedIpc({

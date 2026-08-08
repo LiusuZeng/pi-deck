@@ -7,7 +7,19 @@ import {
   resolveWorkflowCondition,
   failWorkflowCondition,
 } from "./workflowEngine.js";
-import { renderWorkflowPrompt } from "./workflowPromptRenderer.js";
+import {
+  renderWorkflowPrompt,
+  renderWorkflowOccurrencePrompt,
+} from "./workflowPromptRenderer.js";
+import {
+  completeWorkflowOccurrence,
+  failWorkflowOccurrence,
+  queueWorkflowOccurrence,
+  readyWorkflowOccurrences,
+  startWorkflowOccurrence,
+  startWorkflowOrchestrator,
+  type WorkflowRoleRun,
+} from "./workflowV2Runtime.js";
 import type {
   WorkflowRun,
   WorkflowStepDefinition,
@@ -749,6 +761,215 @@ function findFinalAssistant(
       : {}),
     ...(errorMessage !== undefined ? { errorMessage } : {}),
   };
+}
+
+/**
+ * Small occurrence scheduler used by v2 callers.  It has a separate store
+ * contract so the existing v1 IPC/store remains byte-for-byte compatible.
+ * Unlike WorkflowScheduler it intentionally claims every ready occurrence;
+ * worker capacity is the only concurrency limiter.
+ */
+export class WorkflowOccurrenceScheduler {
+  private readonly runs = new Map<string, WorkflowRoleRun>();
+  /** A runtime is owned by one occurrence; deleting it before mutation makes late events harmless. */
+  private readonly active = new Map<
+    string,
+    { runId: string; occurrenceId: string }
+  >();
+  private readonly now: () => number;
+  constructor(
+    private readonly dependencies: Omit<
+      WorkflowSchedulerDependencies,
+      "getRun" | "persist" | "emit"
+    > & {
+      getRun?(runId: string): Promise<WorkflowRoleRun>;
+      persist(run: WorkflowRoleRun): Promise<WorkflowRoleRun>;
+      emit(run: WorkflowRoleRun): void;
+    },
+  ) {
+    this.now = dependencies.now ?? (() => Date.now());
+  }
+  async schedule(run: WorkflowRoleRun): Promise<WorkflowRoleRun> {
+    const now = this.now();
+    // Only scheduler-capacity queues are revived here. Fan-out queues remain
+    // owned by their Orchestrator, which releases them as concurrency slots open.
+    const resumable = {
+      ...run,
+      occurrences: run.occurrences.map((item) =>
+        item.status === "queued" && !item.parentOrchestratorRunId
+          ? { ...item, status: "ready" as const, updatedAtMs: now }
+          : item,
+      ),
+      updatedAtMs: now,
+    };
+    this.runs.set(resumable.id, resumable);
+    return this.pump(resumable.id);
+  }
+  async handleRuntimeEvent(event: WorkflowRuntimeEvent): Promise<void> {
+    if (event.type !== "agent_end") return;
+    const owner = this.active.get(event.runtimeId);
+    if (!owner) return;
+    this.active.delete(event.runtimeId);
+    try {
+      const run = await this.current(owner.runId);
+      if (!run) return;
+      const occurrence = run.occurrences.find(
+        (item) => item.id === owner.occurrenceId,
+      );
+      if (
+        !occurrence ||
+        occurrence.runtimeId !== event.runtimeId ||
+        occurrence.status !== "running"
+      )
+        return;
+      if (event.status === "error" || event.status === "aborted") {
+        await this.save(
+          failWorkflowOccurrence(
+            run,
+            occurrence.id,
+            String(event.error ?? "Pi worker failed."),
+            this.now(),
+          ),
+        );
+        return;
+      }
+      const answer = findFinalAssistant(
+        (await this.dependencies.getSnapshot(event.runtimeId)).messages,
+      );
+      if (!answer?.content || answer.error) {
+        await this.save(
+          failWorkflowOccurrence(
+            run,
+            occurrence.id,
+            answer?.errorMessage ?? "Pi returned no assistant result.",
+            this.now(),
+          ),
+        );
+        return;
+      }
+      if (occurrence.role === "decider") {
+        const parsed = answer.content.trim();
+        if (parsed !== "true" && parsed !== "false")
+          await this.save(
+            failWorkflowOccurrence(
+              run,
+              occurrence.id,
+              "Decider returned malformed output; expected strict boolean.",
+              this.now(),
+            ),
+          );
+        else
+          await this.save(
+            completeWorkflowOccurrence(
+              run,
+              occurrence.id,
+              parsed === "true",
+              this.now(),
+            ),
+          );
+      } else
+        await this.save(
+          completeWorkflowOccurrence(
+            run,
+            occurrence.id,
+            answer.content,
+            this.now(),
+          ),
+        );
+    } finally {
+      await this.closeQuietly(event.runtimeId);
+      await this.pump(owner.runId);
+    }
+  }
+  private async pump(runId: string): Promise<WorkflowRoleRun> {
+    let run = await this.current(runId);
+    if (!run || ["stopped", "completed", "failed"].includes(run.status))
+      return run!;
+    let advanced = false;
+    for (const occurrence of readyWorkflowOccurrences(run)) {
+      if (occurrence.role === "orchestrator") {
+        run = await this.save(
+          startWorkflowOrchestrator(run, occurrence.id, this.now()),
+        );
+        advanced = true;
+        continue;
+      }
+      if (occurrence.role === "human") continue;
+      let runtimeId: string | undefined;
+      try {
+        const session = await this.dependencies.createSession(run.workspaceId);
+        runtimeId = session.runtimeId;
+        const prompt = renderWorkflowOccurrencePrompt(run, occurrence);
+        run = await this.save(
+          startWorkflowOccurrence(
+            run,
+            occurrence.id,
+            runtimeId,
+            session.state.sessionId,
+            this.now(),
+          ),
+        );
+        this.active.set(runtimeId, { runId, occurrenceId: occurrence.id });
+        const node = run.definition.nodes.find(
+          (item) => item.id === occurrence.nodeId,
+        );
+        if (
+          node &&
+          node.role !== "human" &&
+          node.role !== "orchestrator" &&
+          node.execution &&
+          this.dependencies.configureSession
+        )
+          await this.dependencies.configureSession(runtimeId, {
+            ...(node.execution.model
+              ? { model: { modelId: node.execution.model } }
+              : {}),
+            ...(node.execution.thinking
+              ? { thinkingLevel: node.execution.thinking }
+              : {}),
+          });
+        await this.dependencies.prompt(runtimeId, prompt);
+      } catch (error) {
+        if (runtimeId) {
+          this.active.delete(runtimeId);
+          await this.closeQuietly(runtimeId);
+        }
+        run = await this.save(
+          isCapacityError(error)
+            ? queueWorkflowOccurrence(run, occurrence.id, this.now())
+            : failWorkflowOccurrence(
+                run,
+                occurrence.id,
+                error instanceof Error ? error.message : String(error),
+                this.now(),
+              ),
+        );
+      }
+    }
+    return advanced && readyWorkflowOccurrences(run).length > 0
+      ? this.pump(runId)
+      : run;
+  }
+  private async current(id: string): Promise<WorkflowRoleRun | undefined> {
+    const run = this.dependencies.getRun
+      ? await this.dependencies.getRun(id)
+      : this.runs.get(id);
+    if (run) this.runs.set(id, run);
+    return run;
+  }
+  private async save(run: WorkflowRoleRun): Promise<WorkflowRoleRun> {
+    const saved = await this.dependencies.persist(run);
+    this.runs.set(saved.id, saved);
+    this.dependencies.emit(saved);
+    return saved;
+  }
+  private async closeQuietly(runtimeId: string): Promise<void> {
+    try {
+      await this.dependencies.closeSession(runtimeId);
+    } catch {
+      /* already closed */
+    }
+  }
 }
 
 function contentText(content: unknown): string | undefined {

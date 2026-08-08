@@ -40,6 +40,68 @@ describe("WorkflowHome start flow", () => {
     container = undefined;
   });
 
+  it("exposes one creation action for an empty workflow list", () => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const onCreate = vi.fn();
+
+    act(() => {
+      root?.render(
+        createElement(WorkflowHome, {
+          templates: [],
+          onCreate,
+          onEdit: () => undefined,
+          onStart: () => undefined,
+          onOpenRun: () => undefined,
+        }),
+      );
+    });
+
+    const newWorkflowButtons = [...container.querySelectorAll("button")].filter(
+      (button) => button.textContent?.trim() === "New workflow",
+    );
+    const firstWorkflowButtons = [
+      ...container.querySelectorAll("button"),
+    ].filter(
+      (button) => button.textContent?.trim() === "Create your first workflow",
+    );
+
+    expect(newWorkflowButtons).toHaveLength(1);
+    expect(firstWorkflowButtons).toHaveLength(0);
+    expect(container.textContent?.toLowerCase()).not.toContain("skills");
+
+    act(() => newWorkflowButtons[0]?.click());
+    expect(onCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the creation action available when workflows exist", () => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const onCreate = vi.fn();
+
+    act(() => {
+      root?.render(
+        createElement(WorkflowHome, {
+          templates: [template],
+          onCreate,
+          onEdit: () => undefined,
+          onStart: () => undefined,
+          onOpenRun: () => undefined,
+        }),
+      );
+    });
+
+    const newWorkflowButtons = [...container.querySelectorAll("button")].filter(
+      (button) => button.textContent?.trim() === "New workflow",
+    );
+
+    expect(newWorkflowButtons).toHaveLength(1);
+    act(() => newWorkflowButtons[0]?.click());
+    expect(onCreate).toHaveBeenCalledTimes(1);
+  });
+
   it("starts a workflow directly when it has no inputs", async () => {
     container = document.createElement("div");
     document.body.appendChild(container);

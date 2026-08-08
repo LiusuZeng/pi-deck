@@ -75,6 +75,12 @@ import {
   workflowTemplateSchema,
   workflowUpdateTemplateRequestSchema,
 } from "../shared/workflowSchemas.js";
+import {
+  workflowCreateRequestSchema,
+  workflowDefinitionSchema,
+  workflowListRequestSchema,
+  workflowUpdateRequestSchema,
+} from "../shared/workflowV2Schemas.js";
 import type {
   AppSettings,
   AttachmentAssignOwnerRequest,
@@ -96,7 +102,10 @@ import type {
   WorkflowApproveGateRequest,
   WorkflowRetryConditionRequest,
   WorkflowOverrideConditionRequest,
+  WorkflowCreateRequest,
   WorkflowCreateTemplateRequest,
+  WorkflowListRequest,
+  WorkflowUpdateRequest,
   WorkflowStartRunRequest,
   WorkflowUpdateTemplateRequest,
   WorkflowEvent,
@@ -413,6 +422,24 @@ const api: PiDeckApi = Object.freeze({
       }),
   }),
   workflows: Object.freeze({
+    listWorkflows: (request: WorkflowListRequest) =>
+      invokeValidated({
+        channel: ipcChannels.workflowListWorkflows,
+        request: workflowListRequestSchema.parse(request),
+        responseSchema: workflowDefinitionSchema.array(),
+      }),
+    createWorkflow: (request: WorkflowCreateRequest) =>
+      invokeValidated({
+        channel: ipcChannels.workflowCreateWorkflow,
+        request: workflowCreateRequestSchema.parse(request),
+        responseSchema: workflowDefinitionSchema,
+      }),
+    updateWorkflow: (request: WorkflowUpdateRequest) =>
+      invokeValidated({
+        channel: ipcChannels.workflowUpdateWorkflow,
+        request: workflowUpdateRequestSchema.parse(request),
+        responseSchema: workflowDefinitionSchema,
+      }),
     getTemplate: (request: { templateId: string }) =>
       invokeValidated({
         channel: ipcChannels.workflowGetTemplate,

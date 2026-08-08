@@ -29,6 +29,7 @@ import type {
   WorkspaceRef as SharedWorkspaceRef,
   ThemePreference,
 } from "../shared/types.js";
+import type { WorkflowDefinition } from "../shared/workflowV2Schemas.js";
 import type {
   WorkflowRun,
   WorkflowStepRun,
@@ -97,11 +98,9 @@ import {
   type ActivitySourceSession,
 } from "./activityInbox.js";
 import { ActivityInbox } from "./components/ActivityInbox.js";
-import {
-  WorkflowBuilder,
-  WorkflowHome,
-  WorkflowRunView,
-} from "./components/workflows/index.js";
+import { WorkflowHome, WorkflowRunView } from "./components/workflows/index.js";
+import { WorkflowBuilder } from "./components/workflows/WorkflowBuilder.js";
+import { WorkflowV2Builder } from "./components/workflows/WorkflowV2Builder.js";
 
 type LoadState =
   | { state: "loading" }
@@ -1215,6 +1214,15 @@ export function App(): ReactElement {
     ],
     [currentWorkspace, workspaces],
   );
+  const workflowWorkspaceChoices = useMemo(
+    () =>
+      workflowWorkspaceChoicesFor(
+        currentWorkspace,
+        workspaces,
+        archivedWorkspaces,
+      ),
+    [archivedWorkspaces, currentWorkspace, workspaces],
+  );
   const activityWorkspaceNameById = useMemo(
     () =>
       Object.fromEntries(
@@ -1758,13 +1766,47 @@ export function App(): ReactElement {
             ...definition,
           })
         : await window.piDeck.workflows.createTemplate(definition);
-      setWorkflowTemplates((current) => [
-        template,
-        ...current.filter((candidate) => candidate.id !== template.id),
-      ]);
+      const currentWorkspaceId = currentWorkspaceRef.current.id;
+      setWorkflowTemplates((current) => {
+        const withoutSavedTemplate = current.filter(
+          (candidate) => candidate.id !== template.id,
+        );
+        return workflowTemplateIsVisibleInWorkspace(
+          template,
+          currentWorkspaceId,
+        )
+          ? [template, ...withoutSavedTemplate]
+          : withoutSavedTemplate;
+      });
+      if (!workflowTemplateIsVisibleInWorkspace(template, currentWorkspaceId)) {
+        const scopeName = workflowWorkspaceChoices.find(
+          (workspace) => workspace.id === template.workspaceId,
+        )?.name;
+        setUiMessage(
+          `Saved ${template.name} to ${scopeName ?? template.workspaceId}. Switch to that workspace to run it.`,
+        );
+      }
       setWorkflowBuilderTemplate(undefined);
       setWorkflowView("home");
       setWorkflowError(undefined);
+    } catch (error) {
+      setWorkflowError(error instanceof Error ? error.message : String(error));
+      throw error;
+    }
+  }
+
+  async function handleSaveWorkflowV2(
+    workflow: WorkflowDefinition,
+  ): Promise<void> {
+    try {
+      await window.piDeck.workflows.createWorkflow({
+        workspaceId: currentWorkspaceRef.current.id,
+        workflow,
+      });
+      setWorkflowBuilderTemplate(undefined);
+      setWorkflowView("home");
+      setWorkflowError(undefined);
+      setUiMessage(`Saved ${workflow.name}.`);
     } catch (error) {
       setWorkflowError(error instanceof Error ? error.message : String(error));
       throw error;
@@ -4072,21 +4114,26 @@ export function App(): ReactElement {
                 Loading Agent Workflows…
               </div>
             ) : workflowView === "builder" ? (
-              <WorkflowBuilder
-                key={`${currentWorkspace.id}:${workflowBuilderTemplate?.id ?? "new"}`}
-                {...(workflowBuilderTemplate !== undefined
-                  ? { initialTemplate: workflowBuilderTemplate }
-                  : {})}
-                workspaceId={currentWorkspace.id}
-                workspaceName={currentWorkspace.name}
-                modelChoices={workflowModelChoices}
-                thinkingChoices={workflowThinkingChoices}
-                onSave={handleSaveWorkflow}
-                onCancel={() => {
-                  setWorkflowBuilderTemplate(undefined);
-                  setWorkflowView("home");
-                }}
-              />
+              workflowBuilderTemplate !== undefined ? (
+                <WorkflowBuilder
+                  key={`${currentWorkspace.id}:${workflowBuilderTemplate.id}`}
+                  initialTemplate={workflowBuilderTemplate}
+                  onSave={handleSaveWorkflow}
+                  onCancel={() => {
+                    setWorkflowBuilderTemplate(undefined);
+                    setWorkflowView("home");
+                  }}
+                />
+              ) : (
+                <WorkflowV2Builder
+                  key={`${currentWorkspace.id}:new-v2`}
+                  onSave={handleSaveWorkflowV2}
+                  onCancel={() => {
+                    setWorkflowBuilderTemplate(undefined);
+                    setWorkflowView("home");
+                  }}
+                />
+              )
             ) : workflowView === "run" && selectedWorkflowRun !== undefined ? (
               <WorkflowRunView
                 run={selectedWorkflowRun}
@@ -4794,6 +4841,37 @@ function workspaceFromLegacyProject(project: ProjectRef): WorkspaceRef {
     defaultProject: project,
     lastOpenedAt: project.lastOpenedAt,
   };
+}
+
+function workflowWorkspaceChoicesFor(
+  currentWorkspace: WorkspaceRef,
+  activeWorkspaces: readonly WorkspaceRef[],
+  archivedWorkspaces: readonly WorkspaceRef[],
+): Array<Pick<WorkspaceRef, "id" | "name">> {
+  const archivedIds = new Set(
+    archivedWorkspaces.map((workspace) => workspace.id),
+  );
+  const seen = new Set<string>();
+  return [currentWorkspace, ...activeWorkspaces].flatMap((workspace) => {
+    if (
+      workspace.id === invalidDemoWorkspace.id ||
+      archivedIds.has(workspace.id) ||
+      seen.has(workspace.id)
+    ) {
+      return [];
+    }
+    seen.add(workspace.id);
+    return [{ id: workspace.id, name: workspace.name }];
+  });
+}
+
+function workflowTemplateIsVisibleInWorkspace(
+  template: Pick<WorkflowTemplate, "workspaceId">,
+  workspaceId: string,
+): boolean {
+  return (
+    template.workspaceId === undefined || template.workspaceId === workspaceId
+  );
 }
 
 function defaultWorkingDirectory(workspace: WorkspaceRef): string | undefined {
@@ -10127,6 +10205,8 @@ export const __rendererTestHooks = {
   updateRuntimeCapabilities,
   workflowModelChoicesFor,
   workflowThinkingChoicesFor,
+  workflowWorkspaceChoicesFor,
+  workflowTemplateIsVisibleInWorkspace,
   thinkingLevelsForModel,
   clampThinkingLevel,
   applyPiDefaultsToDraftSessions,
