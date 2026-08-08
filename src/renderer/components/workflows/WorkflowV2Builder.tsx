@@ -1,4 +1,11 @@
-import { useMemo, useState, type ReactElement } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactElement,
+} from "react";
 import {
   defaultV2Definition,
   definitionJson,
@@ -81,6 +88,9 @@ export function WorkflowV2Builder(props: {
   const [jsonError, setJsonError] = useState<string>();
   const [saveError, setSaveError] = useState<string>();
   const [showStepPicker, setShowStepPicker] = useState(false);
+  const stepPickerRef = useRef<HTMLDivElement>(null);
+  const addStepButtonRef = useRef<HTMLButtonElement>(null);
+  const stepPickerInitialFocusRef = useRef(0);
   const selected =
     definition.nodes.find((n) => n.id === selectedId) ?? definition.nodes[0]!;
   const edges = useMemo(() => graphEdges(definition), [definition]);
@@ -101,6 +111,55 @@ export function WorkflowV2Builder(props: {
     update({ ...definition, nodes: [...definition.nodes, node] });
     setSelectedId(node.id);
     setShowStepPicker(false);
+  };
+  useEffect(() => {
+    if (!showStepPicker) return;
+    const items =
+      stepPickerRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]');
+    items?.[stepPickerInitialFocusRef.current]?.focus();
+    stepPickerInitialFocusRef.current = 0;
+    const dismissOnOutsidePointer = (event: PointerEvent) => {
+      if (!stepPickerRef.current?.contains(event.target as Node))
+        setShowStepPicker(false);
+    };
+    const dismissOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setShowStepPicker(false);
+      addStepButtonRef.current?.focus();
+    };
+    document.addEventListener("pointerdown", dismissOnOutsidePointer);
+    document.addEventListener("keydown", dismissOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", dismissOnOutsidePointer);
+      document.removeEventListener("keydown", dismissOnEscape);
+    };
+  }, [showStepPicker]);
+  const moveStepPickerFocus = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const items = Array.from(
+      stepPickerRef.current?.querySelectorAll<HTMLElement>(
+        '[role="menuitem"]:not([disabled]):not([aria-disabled="true"])',
+      ) ?? [],
+    );
+    const currentIndex = items.indexOf(document.activeElement as HTMLElement);
+    let nextIndex: number | undefined;
+    if (event.key === "ArrowDown")
+      nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % items.length;
+    else if (event.key === "ArrowUp")
+      nextIndex =
+        currentIndex < 0
+          ? items.length - 1
+          : (currentIndex - 1 + items.length) % items.length;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = items.length - 1;
+    if (nextIndex !== undefined) {
+      event.preventDefault();
+      items[nextIndex]?.focus();
+    }
+  };
+  const changeView = (next: View) => {
+    setShowStepPicker(false);
+    setView(next);
   };
   const apply = () => {
     const result = validateJsonDraft(draft);
@@ -167,7 +226,7 @@ export function WorkflowV2Builder(props: {
             role="tab"
             aria-selected={view === item}
             className={view === item ? "is-active" : ""}
-            onClick={() => setView(item)}
+            onClick={() => changeView(item)}
           >
             {item.toUpperCase()}
           </button>
@@ -188,13 +247,28 @@ export function WorkflowV2Builder(props: {
                 }
               />
             </label>
-            <div className="workflow-v2-add">
+            <div ref={stepPickerRef} className="workflow-v2-add">
               <button
+                ref={addStepButtonRef}
                 type="button"
                 className="workflow-secondary-button"
+                aria-haspopup="menu"
                 aria-expanded={showStepPicker}
                 aria-controls="workflow-step-picker"
-                onClick={() => setShowStepPicker((open) => !open)}
+                onClick={() => {
+                  stepPickerInitialFocusRef.current = 0;
+                  setShowStepPicker((open) => !open);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== "ArrowDown" && event.key !== "ArrowUp")
+                    return;
+                  event.preventDefault();
+                  stepPickerInitialFocusRef.current =
+                    event.key === "ArrowDown"
+                      ? 0
+                      : workflowRoleTemplates.length - 1;
+                  setShowStepPicker(true);
+                }}
               >
                 + Add step
               </button>
@@ -204,6 +278,7 @@ export function WorkflowV2Builder(props: {
                   className="workflow-v2-step-picker"
                   role="menu"
                   aria-label="Choose step type"
+                  onKeyDown={moveStepPickerFocus}
                 >
                   {workflowRoleTemplates.map((role) => (
                     <button
@@ -409,7 +484,7 @@ export function WorkflowV2Builder(props: {
                     aria-current={selected.id === node.id}
                     onClick={() => {
                       setSelectedId(node.id);
-                      setView("build");
+                      changeView("build");
                     }}
                   >
                     <strong>{node.name}</strong> (
