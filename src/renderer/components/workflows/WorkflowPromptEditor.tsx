@@ -43,14 +43,14 @@ export function WorkflowPromptEditor(props: {
       part.type === "text",
   );
   const instructions = textParts.map((part) => part.text).join("\n\n");
+  const hasLegacyReferences = props.parts.some((part) => part.type !== "text");
 
   const updateInstructions = (text: string) => {
-    const nonTextParts = props.parts.filter((part) => part.type !== "text");
-    props.onChange([{ type: "text", text }, ...nonTextParts]);
+    props.onChange([{ type: "text", text }]);
   };
 
   return (
-    <label className="workflow-prompt-editor workflow-field">
+    <div className="workflow-prompt-editor workflow-field">
       <span className="workflow-field-label">Instructions</span>
       <textarea
         aria-label="Instructions"
@@ -59,14 +59,25 @@ export function WorkflowPromptEditor(props: {
         ref={props.inputRef}
         rows={5}
         value={instructions}
+        readOnly={hasLegacyReferences}
         onChange={(event) => updateInstructions(event.target.value)}
         placeholder="Tell this agent what to accomplish…"
       />
-      {props.parts.some((part) => part.type !== "text") ? (
-        <span className="workflow-help">
-          Existing structured prompt data is retained for this workflow run.
-        </span>
+      {hasLegacyReferences ? (
+        <div className="workflow-legacy-prompt-note">
+          <span className="workflow-help">
+            This saved workflow uses legacy prompt references and will run
+            unchanged until you replace them.
+          </span>
+          <button
+            type="button"
+            className="workflow-secondary-button"
+            onClick={() => updateInstructions(instructions)}
+          >
+            Replace with prompt-only instructions
+          </button>
+        </div>
       ) : null}
-    </label>
+    </div>
   );
 }

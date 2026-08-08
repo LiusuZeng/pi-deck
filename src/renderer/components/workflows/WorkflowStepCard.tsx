@@ -21,6 +21,7 @@ export interface WorkflowModelChoice {
   label: string;
   disabled?: boolean;
   note?: string;
+  thinkingChoices?: WorkflowThinkingChoice[];
 }
 
 export interface WorkflowThinkingChoice {
@@ -83,6 +84,19 @@ export function WorkflowStepCard(props: {
     if (props.focusPrompt) promptRef.current?.focus();
   }, [props.focusPrompt]);
   const tone = status ? workflowStepStatusTone(status) : "neutral";
+  const modelChoices = props.modelChoices ?? [];
+  const effectiveModel = props.step.modelOverride ?? props.defaultModel;
+  const effectiveModelChoice =
+    effectiveModel === undefined
+      ? undefined
+      : modelChoices.find(
+          (choice) =>
+            modelChoiceValue(choice) === modelChoiceValue(effectiveModel),
+        );
+  const effectiveThinkingChoices =
+    effectiveModelChoice?.thinkingChoices ??
+    props.thinkingChoices ??
+    defaultThinkingChoices;
   return (
     <article
       className={`workflow-card workflow-step-card workflow-tone-${tone}`}
@@ -180,7 +194,7 @@ export function WorkflowStepCard(props: {
                     }
                   >
                     <option value="">Inherit from Pi Deck</option>
-                    {(props.thinkingChoices ?? defaultThinkingChoices)
+                    {effectiveThinkingChoices
                       .filter(
                         (choice, index, choices) =>
                           choices.findIndex(
@@ -189,9 +203,7 @@ export function WorkflowStepCard(props: {
                       )
                       .concat(
                         props.step.thinkingOverride !== undefined &&
-                          !(
-                            props.thinkingChoices ?? defaultThinkingChoices
-                          ).some(
+                          !effectiveThinkingChoices.some(
                             (choice) =>
                               choice.id === props.step.thinkingOverride,
                           )
@@ -225,10 +237,29 @@ export function WorkflowStepCard(props: {
                         : modelChoiceValue(props.step.modelOverride)
                     }
                     onChange={(event) => {
-                      const selected = (props.modelChoices ?? []).find(
+                      const selected = modelChoices.find(
                         (choice) =>
                           modelChoiceValue(choice) === event.target.value,
                       );
+                      const inheritedChoice =
+                        props.defaultModel === undefined
+                          ? undefined
+                          : modelChoices.find(
+                              (choice) =>
+                                modelChoiceValue(choice) ===
+                                modelChoiceValue(props.defaultModel!),
+                            );
+                      const nextThinkingChoices =
+                        (selected ?? inheritedChoice)?.thinkingChoices ??
+                        props.thinkingChoices ??
+                        defaultThinkingChoices;
+                      const thinkingOverride = props.step.thinkingOverride;
+                      const thinkingIsUnsupported =
+                        thinkingOverride !== undefined &&
+                        !nextThinkingChoices.some(
+                          (choice) =>
+                            choice.id === thinkingOverride && !choice.disabled,
+                        );
                       props.onChange?.({
                         modelOverride:
                           selected === undefined
@@ -239,11 +270,14 @@ export function WorkflowStepCard(props: {
                                   : {}),
                                 modelId: selected.id,
                               },
+                        ...(thinkingIsUnsupported
+                          ? { thinkingOverride: undefined }
+                          : {}),
                       });
                     }}
                   >
                     <option value="">Inherit from Pi Deck</option>
-                    {(props.modelChoices ?? [])
+                    {modelChoices
                       .filter(
                         (choice, index, choices) =>
                           choices.findIndex(
@@ -254,7 +288,7 @@ export function WorkflowStepCard(props: {
                       )
                       .concat(
                         props.step.modelOverride !== undefined &&
-                          !(props.modelChoices ?? []).some(
+                          !modelChoices.some(
                             (choice) =>
                               modelChoiceValue(choice) ===
                               modelChoiceValue(props.step.modelOverride!),
@@ -275,8 +309,10 @@ export function WorkflowStepCard(props: {
                         <option
                           key={modelChoiceValue(choice)}
                           value={modelChoiceValue(choice)}
+                          disabled={choice.disabled}
                         >
                           {modelChoiceLabel(choice)}
+                          {choice.note ? ` — ${choice.note}` : ""}
                         </option>
                       ))}
                   </select>

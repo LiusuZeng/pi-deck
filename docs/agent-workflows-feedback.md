@@ -130,15 +130,27 @@ Prompt-first implementation commits currently include:
 The continuation branch is pushed at:
 `origin/dev/agent-workflows-prompt-first`
 
-The isolated implementation branches are also pushed for review/recovery:
+The isolated implementation lanes were consolidated into the continuation
+branch and their remote refs were retired after integration:
 
-- `origin/aw/v1-ux`
-- `origin/aw/v1-contracts`
-- `origin/aw/v1-app`
+- `aw/v1-ux`
+- `aw/v1-contracts`
+- `aw/v1-app`
 
-Final validation after integration: 372 tests passed, 2 intentional TODOs;
-typecheck, build, format, and diff checks passed. Full Playwright E2E passed 35
-with 3 environment-skipped. Backend compatibility review approved; the final
-UX blocker about the shared prompt label was fixed and pushed in `3d6e024`.
-Do not push unrelated site/screenshot work; that work remains isolated in the
-local `pi-deck-site-capture` worktree.
+Release-worktree hardening additionally:
+
+- prevents duplicate no-input and input-form launches while a start is pending;
+- reports immediate-launch failures without leaving the workflow home;
+- preserves legacy structured prompt references until the user explicitly
+  replaces them with prompt-only instructions;
+- migrates all legacy shared-context content into the prompt-first shape when it
+  is edited; and
+- disables unavailable model choices and constrains thinking choices to the
+  effective workflow model.
+
+Final validation after consolidation and hardening: 378 tests passed with 2
+intentional TODOs; typecheck, production build, format, and diff checks passed.
+Full Playwright E2E passed 37 with 1 environment-skipped real-Pi smoke test.
+Backend compatibility review approved; the shared prompt label fix from
+`3d6e024` is included. Do not push unrelated site/screenshot work; that work
+remains isolated in the local `pi-deck-site-capture` worktree.

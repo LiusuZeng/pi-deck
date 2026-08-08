@@ -466,6 +466,7 @@ interface WorkflowModelChoice {
   label: string;
   disabled?: boolean;
   note?: string;
+  thinkingChoices?: WorkflowThinkingChoice[];
 }
 
 interface WorkflowThinkingChoice {
@@ -1254,13 +1255,18 @@ export function App(): ReactElement {
           activeRealModel,
           projectModelConfiguration.thinkingLevels,
         );
-  const workflowModelChoices = workflowModelChoicesFor(realModels);
-  const workflowThinkingChoices = workflowThinkingChoicesFor(
+  const workflowAvailableThinkingLevels =
     selectedSession.backendMode === "real" &&
-      (runtimeThinkingLevels.length > 0 ||
-        projectModelConfiguration.thinkingLevels.length > 0)
+    (runtimeThinkingLevels.length > 0 ||
+      projectModelConfiguration.thinkingLevels.length > 0)
       ? availableRealThinkingLevels
-      : [],
+      : [];
+  const workflowThinkingChoices = workflowThinkingChoicesFor(
+    workflowAvailableThinkingLevels,
+  );
+  const workflowModelChoices = workflowModelChoicesFor(
+    realModels,
+    workflowAvailableThinkingLevels,
   );
   const realCommands = selectedRealCapabilities?.commands ?? [];
   const composerDraft = composerDraftForSession(
@@ -4739,6 +4745,7 @@ function modelLabelForChatModel(model: ChatModelSummary): string {
 
 function workflowModelChoicesFor(
   models: readonly ChatModelSummary[],
+  fallbackThinkingLevels: readonly string[] = [],
 ): WorkflowModelChoice[] {
   if (models.length === 0) {
     return modelOptions.map((model) => ({
@@ -4754,6 +4761,9 @@ function workflowModelChoicesFor(
     provider: model.provider ?? "",
     id: model.id,
     label: model.name ?? modelLabelForChatModel(model),
+    thinkingChoices: workflowThinkingChoicesFor(
+      thinkingLevelsForModel(model, [...fallbackThinkingLevels]),
+    ),
   }));
 }
 

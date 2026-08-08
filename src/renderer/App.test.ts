@@ -783,6 +783,7 @@ describe("Pi draft defaults and thinking capabilities", () => {
         provider: "provider-1",
         id: "model-1",
         label: "Discovered model",
+        thinkingChoices: [{ id: "off", label: "Off" }],
       },
     ]);
 

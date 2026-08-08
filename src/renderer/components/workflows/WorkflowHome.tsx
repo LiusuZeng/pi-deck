@@ -1,4 +1,10 @@
-import { useMemo, useState, type FormEvent, type ReactElement } from "react";
+import {
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactElement,
+} from "react";
 import type {
   WorkflowInputDefinition,
   WorkflowRun,
@@ -14,6 +20,7 @@ function WorkflowStartForm(props: {
   template: WorkflowTemplate;
   onCancel(): void;
   onStart(inputs: Record<string, string>): Promise<void> | void;
+  onStartingChange?(starting: boolean): void;
 }): ReactElement {
   const [values, setValues] = useState<Record<string, string>>(() =>
     Object.fromEntries(
@@ -25,6 +32,7 @@ function WorkflowStartForm(props: {
   );
   const [error, setError] = useState<string | undefined>();
   const [starting, setStarting] = useState(false);
+  const startingRef = useRef(false);
   const missing = useMemo(
     () =>
       props.template.inputs.find(
@@ -50,6 +58,7 @@ function WorkflowStartForm(props: {
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
+    if (startingRef.current) return;
     if (missing) {
       setError(`${missing.label} is required.`);
       return;
@@ -60,7 +69,9 @@ function WorkflowStartForm(props: {
       );
       return;
     }
+    startingRef.current = true;
     setStarting(true);
+    props.onStartingChange?.(true);
     setError(undefined);
     try {
       await props.onStart(values);
@@ -69,7 +80,9 @@ function WorkflowStartForm(props: {
         startError instanceof Error ? startError.message : String(startError),
       );
     } finally {
+      startingRef.current = false;
       setStarting(false);
+      props.onStartingChange?.(false);
     }
   };
 
@@ -86,6 +99,7 @@ function WorkflowStartForm(props: {
         <button
           type="button"
           className="workflow-secondary-button"
+          disabled={starting}
           onClick={props.onCancel}
         >
           Cancel
@@ -157,14 +171,37 @@ export function WorkflowHome(props: {
   const [startingTemplate, setStartingTemplate] = useState<
     WorkflowTemplate | undefined
   >();
+  const [formStarting, setFormStarting] = useState(false);
+  const [quickStartingTemplateId, setQuickStartingTemplateId] = useState<
+    string | undefined
+  >();
+  const [quickStartError, setQuickStartError] = useState<string | undefined>();
+  const quickStarts = useRef(new Set<string>());
   const runs = props.recentRuns ?? [];
 
-  const startTemplate = (template: WorkflowTemplate) => {
-    if (template.inputs.length === 0) {
-      void props.onStart(template, {});
+  const startTemplate = async (template: WorkflowTemplate) => {
+    if (template.inputs.length > 0) {
+      setFormStarting(false);
+      setStartingTemplate(template);
       return;
     }
-    setStartingTemplate(template);
+    if (quickStarts.current.has(template.id)) return;
+
+    quickStarts.current.add(template.id);
+    setQuickStartingTemplateId(template.id);
+    setQuickStartError(undefined);
+    try {
+      await props.onStart(template, {});
+    } catch (startError) {
+      setQuickStartError(
+        startError instanceof Error ? startError.message : String(startError),
+      );
+    } finally {
+      quickStarts.current.delete(template.id);
+      setQuickStartingTemplateId((current) =>
+        current === template.id ? undefined : current,
+      );
+    }
   };
 
   if (startingTemplate) {
@@ -173,6 +210,7 @@ export function WorkflowHome(props: {
         <button
           type="button"
           className="workflow-back-button"
+          disabled={formStarting}
           onClick={() => setStartingTemplate(undefined)}
         >
           ← Agent Workflows
@@ -181,6 +219,7 @@ export function WorkflowHome(props: {
           template={startingTemplate}
           onCancel={() => setStartingTemplate(undefined)}
           onStart={(inputs) => props.onStart(startingTemplate, inputs)}
+          onStartingChange={setFormStarting}
         />
       </div>
     );
@@ -229,6 +268,11 @@ export function WorkflowHome(props: {
           </div>
           <span className="workflow-count">{props.templates.length}</span>
         </div>
+        {quickStartError ? (
+          <p className="workflow-error" role="alert">
+            {quickStartError}
+          </p>
+        ) : null}
         {props.templates.length === 0 ? (
           <div className="workflow-empty-state">
             <h3>Build a repeatable agent handoff</h3>
@@ -278,9 +322,12 @@ export function WorkflowHome(props: {
                   <button
                     type="button"
                     className="workflow-primary-button"
-                    onClick={() => startTemplate(template)}
+                    disabled={quickStartingTemplateId === template.id}
+                    onClick={() => void startTemplate(template)}
                   >
-                    Start run
+                    {quickStartingTemplateId === template.id
+                      ? "Starting…"
+                      : "Start run"}
                   </button>
                   <button
                     type="button"

@@ -4150,6 +4150,23 @@ body {
   outline: 2px solid color-mix(in srgb, var(--color-danger) 22%, transparent);
 }
 
+.workflow-prompt-editor textarea[readonly] {
+  color: var(--color-text-muted);
+  background: var(--color-surface-subtle);
+}
+
+.workflow-legacy-prompt-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+
+.workflow-legacy-prompt-note .workflow-help {
+  margin: 0;
+}
+
 .workflow-inline-fields,
 .workflow-branch-grid {
   display: grid;

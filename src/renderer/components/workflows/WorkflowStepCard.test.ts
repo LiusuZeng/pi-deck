@@ -64,7 +64,13 @@ describe("WorkflowStepCard", () => {
               id: "claude-sonnet",
               label: "Claude Sonnet",
             },
-            { provider: "openai", id: "gpt-codex", label: "GPT Codex" },
+            {
+              provider: "openai",
+              id: "gpt-codex",
+              label: "GPT Codex",
+              disabled: true,
+              note: "Authentication required",
+            },
           ],
           thinkingChoices: [
             { id: "low", label: "Low" },
@@ -83,6 +89,10 @@ describe("WorkflowStepCard", () => {
     expect(model.options[0]?.textContent).toBe("Inherit from Pi Deck");
     expect(thinking.options[0]?.textContent).toBe("Inherit from Pi Deck");
     expect(model.options).toHaveLength(3);
+    expect(model.options[2]?.disabled).toBe(true);
+    expect(model.options[2]?.textContent).toBe(
+      "GPT Codex — Authentication required",
+    );
     expect(thinking.options).toHaveLength(3);
     expect(
       container.querySelector('input[aria-label="Model override"]'),
@@ -90,6 +100,75 @@ describe("WorkflowStepCard", () => {
     expect(
       container.querySelector('input[aria-label="Thinking level"]'),
     ).toBeNull();
+  });
+
+  it("clears a thinking override that the newly selected model cannot use", () => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const onChange = vi.fn();
+    const editableStep: WorkflowStepDefinition = {
+      ...step,
+      modelOverride: { provider: "provider", modelId: "reasoning" },
+      thinkingOverride: "high",
+      inputPolicy: {
+        includeWorkflowContext: true,
+        includeParentFinalAnswer: false,
+        includeParentSummary: false,
+        includeParentTranscript: false,
+      },
+    };
+
+    act(() => {
+      root?.render(
+        createElement(WorkflowStepCard, {
+          step: editableStep,
+          index: 0,
+          expanded: true,
+          onToggle: () => undefined,
+          onChange,
+          modelChoices: [
+            {
+              provider: "provider",
+              id: "reasoning",
+              label: "Reasoning model",
+              thinkingChoices: [{ id: "high", label: "High" }],
+            },
+            {
+              provider: "provider",
+              id: "basic",
+              label: "Basic model",
+              thinkingChoices: [{ id: "off", label: "Off" }],
+            },
+          ],
+          thinkingChoices: [
+            { id: "off", label: "Off" },
+            { id: "high", label: "High" },
+          ],
+        }),
+      );
+    });
+
+    const thinking = container.querySelector(
+      'select[aria-label="Thinking level"]',
+    ) as HTMLSelectElement;
+    expect([...thinking.options].map((option) => option.value)).toEqual([
+      "",
+      "high",
+    ]);
+
+    const model = container.querySelector(
+      'select[aria-label="Model override"]',
+    ) as HTMLSelectElement;
+    act(() => {
+      model.value = "provider\u0000basic";
+      model.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    expect(onChange).toHaveBeenCalledWith({
+      modelOverride: { provider: "provider", modelId: "basic" },
+      thinkingOverride: undefined,
+    });
   });
 
   it("offers the Pi session action for a runtime-only running step", () => {
