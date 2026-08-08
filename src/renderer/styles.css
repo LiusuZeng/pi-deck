@@ -4606,3 +4606,19 @@ body {
     align-items: flex-start;
   }
 }
+
+/* v2 workflow builder: compact list plus a single focused inspector. */
+.workflow-v2-tabs { display: flex; gap: 4px; margin: 0 0 16px; border-bottom: 1px solid var(--border, #334155); }
+.workflow-v2-tabs button { padding: 8px 13px; border: 0; background: transparent; color: inherit; border-bottom: 2px solid transparent; cursor: pointer; }
+.workflow-v2-tabs button.is-active { border-bottom-color: var(--accent, #60a5fa); font-weight: 700; }
+.workflow-v2-build { display: grid; grid-template-columns: minmax(230px, .8fr) minmax(320px, 1.2fr); gap: 16px; align-items: start; }
+.workflow-v2-cards { display: grid; gap: 8px; }
+.workflow-v2-step-card { text-align: left; display: grid; gap: 4px; padding: 12px; border: 1px solid var(--border, #334155); border-radius: 8px; background: var(--surface, transparent); color: inherit; cursor: pointer; }
+.workflow-v2-step-card.is-selected { border-color: var(--accent, #60a5fa); box-shadow: 0 0 0 1px var(--accent, #60a5fa); }
+.workflow-v2-step-card span, .workflow-v2-step-card small { opacity: .72; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workflow-v2-inspector, .workflow-v2-graph, .workflow-v2-json { padding: 16px; border: 1px solid var(--border, #334155); border-radius: 8px; }
+.workflow-v2-inspector fieldset { margin: 14px 0; border: 0; padding: 0; }
+.workflow-v2-roles { display: flex; flex-wrap: wrap; gap: 6px; }
+.workflow-v2-roles button[aria-pressed="true"] { outline: 2px solid var(--accent, #60a5fa); }
+.workflow-v2-json textarea { width: 100%; box-sizing: border-box; font-family: ui-monospace, SFMono-Regular, monospace; }
+@media (max-width: 720px) { .workflow-v2-build { grid-template-columns: 1fr; } }

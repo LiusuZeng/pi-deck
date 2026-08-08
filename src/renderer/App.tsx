@@ -98,10 +98,10 @@ import {
 } from "./activityInbox.js";
 import { ActivityInbox } from "./components/ActivityInbox.js";
 import {
-  WorkflowBuilder,
   WorkflowHome,
   WorkflowRunView,
 } from "./components/workflows/index.js";
+import { WorkflowV2Builder } from "./components/workflows/WorkflowV2Builder.js";
 
 type LoadState =
   | { state: "loading" }
@@ -4097,14 +4097,11 @@ export function App(): ReactElement {
                 Loading Agent Workflows…
               </div>
             ) : workflowView === "builder" ? (
-              <WorkflowBuilder
+              <WorkflowV2Builder
                 key={`${currentWorkspace.id}:${workflowBuilderTemplate?.id ?? "new"}`}
                 {...(workflowBuilderTemplate !== undefined
                   ? { initialTemplate: workflowBuilderTemplate }
                   : {})}
-                workspaceChoices={workflowWorkspaceChoices}
-                modelChoices={workflowModelChoices}
-                thinkingChoices={workflowThinkingChoices}
                 onSave={handleSaveWorkflow}
                 onCancel={() => {
                   setWorkflowBuilderTemplate(undefined);
