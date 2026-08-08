@@ -74,28 +74,49 @@ export function renderWorkflowOccurrencePrompt(
   run: WorkflowRoleRun,
   occurrence: WorkflowOccurrence,
 ): string {
-  const node = run.definition.nodes.find((item) => item.id === occurrence.nodeId);
-  if (node === undefined) throw new Error(`Unknown role node: ${occurrence.nodeId}`);
+  const node = run.definition.nodes.find(
+    (item) => item.id === occurrence.nodeId,
+  );
+  if (node === undefined)
+    throw new Error(`Unknown role node: ${occurrence.nodeId}`);
   if (node.role === "human" || node.role === "orchestrator") return "";
-  const source = node.role === "worker"
-    ? node.config.instructions
-    : [
-        "You are a workflow decision maker.",
-        `Question: ${node.config.question}`,
-        "Return exactly true or false, with no other text.",
-      ].join("\n");
+  const source =
+    node.role === "worker"
+      ? node.config.instructions
+      : [
+          "You are a workflow decision maker.",
+          `Question: ${node.config.question}`,
+          "Return exactly true or false, with no other text.",
+        ].join("\n");
   const parents = occurrence.parentOccurrenceIds.map((id) => {
     const parent = run.occurrences.find((item) => item.id === id);
-    if (parent === undefined) throw new Error("Workflow prompt is blocked: parent occurrence is unavailable.");
+    if (parent === undefined)
+      throw new Error(
+        "Workflow prompt is blocked: parent occurrence is unavailable.",
+      );
     return parent;
   });
   const parentOutput = (parent: WorkflowOccurrence): string =>
-    requireAvailable(typeof parent.output === "string" ? parent.output : Array.isArray(parent.output) ? parent.output.join("\n") : parent.output === undefined ? undefined : String(parent.output), `Parent output for ${parent.nodeId}`);
+    requireAvailable(
+      typeof parent.output === "string"
+        ? parent.output
+        : Array.isArray(parent.output)
+          ? parent.output.join("\n")
+          : parent.output === undefined
+            ? undefined
+            : String(parent.output),
+      `Parent output for ${parent.nodeId}`,
+    );
   const context = [
     ...Object.entries(run.inputs).map(([key, value]) => `${key}: ${value}`),
     ...parents.map(parentOutput),
-  ].filter(Boolean).join("\n\n");
-  return [source, context ? `Context:\n${context}` : ""].filter(Boolean).join("\n\n").trim();
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  return [source, context ? `Context:\n${context}` : ""]
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
 }
 
 export function renderStepOutput(

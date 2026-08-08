@@ -1,53 +1,548 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { workflowV2DefinitionSchema, type WorkflowV2Definition, type WorkflowV2Node, type WorkflowV2Role } from "../../shared/workflowV2Schemas.js";
+import {
+  workflowV2DefinitionSchema,
+  type WorkflowV2Definition,
+  type WorkflowV2Node,
+  type WorkflowV2Role,
+} from "../../shared/workflowV2Schemas.js";
 
 export { workflowV2DefinitionSchema } from "../../shared/workflowV2Schemas.js";
 export type { WorkflowV2Definition } from "../../shared/workflowV2Schemas.js";
 /** Compatibility alias for callers introduced during the v2 branch. */
 export type WorkflowRoleDefinition = WorkflowV2Definition;
 const output = z.string().max(32_000);
-export const workflowOccurrenceStatusSchema = z.enum(["ready", "queued", "running", "waitingHuman", "completed", "failed", "skipped", "cancelled"]);
-export const workflowOccurrenceSchema = z.object({
-  id: z.string().uuid(), nodeId: z.string(), role: z.enum(["worker", "decider", "orchestrator", "human"]), parentOrchestratorRunId: z.string().uuid().optional(), parentOccurrenceIds: z.array(z.string().uuid()).default([]), iteration: z.number().int().positive().default(1), attempt: z.number().int().positive(), status: workflowOccurrenceStatusSchema,
-  output: z.union([output, z.boolean(), z.array(output)]).optional(), sessionId: z.string().optional(), runtimeId: z.string().optional(), error: z.string().max(4_000).optional(), managedChildren: z.array(z.string().uuid()).default([]), aggregation: z.array(output).default([]), createdAtMs: z.number().finite(), startedAtMs: z.number().finite().optional(), completedAtMs: z.number().finite().optional(), updatedAtMs: z.number().finite(),
-}).strict();
-export const workflowRoleRunSchema = z.object({ version: z.literal(2), id: z.string().uuid(), name: z.string(), workspaceId: z.string(), status: z.enum(["waiting", "running", "needsAttention", "completed", "failed", "stopped"]), definition: workflowV2DefinitionSchema, inputs: z.record(z.string(), z.string()), occurrences: z.array(workflowOccurrenceSchema), createdAtMs: z.number(), updatedAtMs: z.number(), completedAtMs: z.number().optional() }).strict();
+export const workflowOccurrenceStatusSchema = z.enum([
+  "ready",
+  "queued",
+  "running",
+  "waitingHuman",
+  "completed",
+  "failed",
+  "skipped",
+  "cancelled",
+]);
+export const workflowOccurrenceSchema = z
+  .object({
+    id: z.string().uuid(),
+    nodeId: z.string(),
+    role: z.enum(["worker", "decider", "orchestrator", "human"]),
+    parentOrchestratorRunId: z.string().uuid().optional(),
+    parentOccurrenceIds: z.array(z.string().uuid()).default([]),
+    iteration: z.number().int().positive().default(1),
+    attempt: z.number().int().positive(),
+    status: workflowOccurrenceStatusSchema,
+    output: z.union([output, z.boolean(), z.array(output)]).optional(),
+    sessionId: z.string().optional(),
+    runtimeId: z.string().optional(),
+    error: z.string().max(4_000).optional(),
+    managedChildren: z.array(z.string().uuid()).default([]),
+    aggregation: z.array(output).default([]),
+    createdAtMs: z.number().finite(),
+    startedAtMs: z.number().finite().optional(),
+    completedAtMs: z.number().finite().optional(),
+    updatedAtMs: z.number().finite(),
+  })
+  .strict();
+export const workflowRoleRunSchema = z
+  .object({
+    version: z.literal(2),
+    id: z.string().uuid(),
+    name: z.string(),
+    workspaceId: z.string(),
+    status: z.enum([
+      "waiting",
+      "running",
+      "needsAttention",
+      "completed",
+      "failed",
+      "stopped",
+    ]),
+    definition: workflowV2DefinitionSchema,
+    inputs: z.record(z.string(), z.string()),
+    occurrences: z.array(workflowOccurrenceSchema),
+    createdAtMs: z.number(),
+    updatedAtMs: z.number(),
+    completedAtMs: z.number().optional(),
+  })
+  .strict();
 export type WorkflowOccurrence = z.infer<typeof workflowOccurrenceSchema>;
 export type WorkflowRoleRun = z.infer<typeof workflowRoleRunSchema>;
 
-export function createWorkflowRoleRun(definition: WorkflowV2Definition, workspaceId: string, inputs: Record<string, string> = {}, now = Date.now()): WorkflowRoleRun {
-  const parsed = workflowV2DefinitionSchema.parse(definition); const inputIds = new Set(parsed.inputs.map(input => input.id));
-  for (const key of Object.keys(inputs)) if (!inputIds.has(key)) throw new Error(`Unknown workflow input: ${key}`);
-  const resolved = Object.fromEntries(parsed.inputs.map(input => [input.id, inputs[input.id] ?? input.defaultValue]).filter(([, value]) => value !== undefined)) as Record<string, string>;
-  for (const input of parsed.inputs) if (input.required && !resolved[input.id]?.trim()) throw new Error(`Workflow input is required: ${input.id}`);
-  const entry = node(parsed, parsed.entryNodeId); const run = { version: 2 as const, id: randomUUID(), name: parsed.name, workspaceId, status: "waiting" as const, definition: structuredClone(parsed), inputs: resolved, occurrences: [newOccurrence(entry, [], undefined, 1, now)], createdAtMs: now, updatedAtMs: now };
+export function createWorkflowRoleRun(
+  definition: WorkflowV2Definition,
+  workspaceId: string,
+  inputs: Record<string, string> = {},
+  now = Date.now(),
+): WorkflowRoleRun {
+  const parsed = workflowV2DefinitionSchema.parse(definition);
+  const inputIds = new Set(parsed.inputs.map((input) => input.id));
+  for (const key of Object.keys(inputs))
+    if (!inputIds.has(key)) throw new Error(`Unknown workflow input: ${key}`);
+  const resolved = Object.fromEntries(
+    parsed.inputs
+      .map((input) => [input.id, inputs[input.id]])
+      .filter(([, value]) => value !== undefined),
+  ) as Record<string, string>;
+  for (const input of parsed.inputs)
+    if (input.required && !resolved[input.id]?.trim())
+      throw new Error(`Workflow input is required: ${input.id}`);
+  const entry = node(parsed, parsed.entryNodeId);
+  const run = {
+    version: 2 as const,
+    id: randomUUID(),
+    name: parsed.name,
+    workspaceId,
+    status: "waiting" as const,
+    definition: structuredClone(parsed),
+    inputs: resolved,
+    occurrences: [newOccurrence(entry, [], undefined, 1, now)],
+    createdAtMs: now,
+    updatedAtMs: now,
+  };
   return derive(run, now);
 }
-export function readyWorkflowOccurrences(run: WorkflowRoleRun): WorkflowOccurrence[] { return run.status === "stopped" ? [] : run.occurrences.filter(item => item.status === "ready").map(item => structuredClone(item)); }
-export function startWorkflowOccurrence(run: WorkflowRoleRun, occurrenceId: string, runtimeId: string, sessionId?: string, now = Date.now()): WorkflowRoleRun { const occurrence = occurrenceOf(run, occurrenceId); if (!["worker", "decider"].includes(occurrence.role) || !["ready", "queued"].includes(occurrence.status)) throw new Error("Only ready Worker or Decider occurrences may own Pi sessions."); return derive(patch(run, occurrenceId, { status: "running", runtimeId, ...(sessionId ? { sessionId } : {}), startedAtMs: occurrence.startedAtMs ?? now, updatedAtMs: now }), now); }
-export function startWorkflowOrchestrator(run: WorkflowRoleRun, occurrenceId: string, now = Date.now()): WorkflowRoleRun { const occurrence = occurrenceOf(run, occurrenceId); if (occurrence.role !== "orchestrator" || occurrence.status !== "ready") throw new Error("Orchestrator occurrence is not ready."); const config = node(run.definition, occurrence.nodeId).config as Extract<WorkflowV2Node, { role: "orchestrator" }>["config"]; let next = patch(run, occurrenceId, { status: "running", startedAtMs: now, updatedAtMs: now }); let children = config.agents.map(id => newOccurrence(node(next.definition, id), [occurrence.id], occurrence.id, 1, now));
-  if (config.mode === "fanout") children = children.map((child, index) => index < config.maxConcurrency ? child : { ...child, status: "queued" as const });
-  next = add(next, children); return derive(patch(next, occurrenceId, { managedChildren: children.map(child => child.id), updatedAtMs: now }), now); }
-export function completeWorkflowOccurrence(run: WorkflowRoleRun, occurrenceId: string, value: string | boolean, now = Date.now()): WorkflowRoleRun { const occurrence = occurrenceOf(run, occurrenceId); if (occurrence.status !== "running") throw new Error("Workflow occurrence is not running."); if (occurrence.role === "decider" && typeof value !== "boolean") throw new Error("Decider occurrences must return a boolean."); if (occurrence.role === "worker" && typeof value !== "string") throw new Error("Worker occurrences must return text."); let next = patch(run, occurrenceId, { status: "completed", output: typeof value === "string" ? bound(value) : value, completedAtMs: now, updatedAtMs: now }); next = occurrence.parentOrchestratorRunId ? advanceOrchestrator(next, occurrence.parentOrchestratorRunId, occurrenceId, now) : route(next, occurrenceId, now); return derive(next, now); }
-export function answerWorkflowHumanOccurrence(run: WorkflowRoleRun, occurrenceId: string, value: string | boolean, now = Date.now()): WorkflowRoleRun { const occurrence = occurrenceOf(run, occurrenceId); const role = node(run.definition, occurrence.nodeId); if (occurrence.role !== "human" || occurrence.status !== "waitingHuman" || role.role !== "human") throw new Error("Human occurrence is not awaiting input."); if (role.config.interaction === "input" && typeof value !== "string") throw new Error("Human input requires text."); if (role.config.interaction === "approval" && typeof value !== "boolean") throw new Error("Human approval requires a boolean."); if (role.config.interaction === "choice" && (typeof value !== "string" || !role.config.options.some(option => option.id === value))) throw new Error("Human choice must be a configured option."); let next = patch(run, occurrenceId, { status: "completed", output: typeof value === "string" ? bound(value) : value, completedAtMs: now, updatedAtMs: now }); return derive(route(next, occurrenceId, now), now); }
-export function failWorkflowOccurrence(run: WorkflowRoleRun, occurrenceId: string, error: string, now = Date.now()): WorkflowRoleRun { const occurrence = occurrenceOf(run, occurrenceId); if (["completed", "cancelled", "skipped"].includes(occurrence.status)) return run; const next = patch(run, occurrenceId, { status: "failed", error: bound(error, 4_000), updatedAtMs: now }); return derive(occurrence.parentOrchestratorRunId ? advanceOrchestrator(next, occurrence.parentOrchestratorRunId, occurrenceId, now) : next, now); }
-export function queueWorkflowOccurrence(run: WorkflowRoleRun, occurrenceId: string, now = Date.now()): WorkflowRoleRun { const occurrence = occurrenceOf(run, occurrenceId); if (occurrence.status !== "ready") throw new Error("Only ready occurrences may be queued."); return derive(patch(run, occurrenceId, { status: "queued", updatedAtMs: now }), now); }
-export function retryWorkflowOccurrence(run: WorkflowRoleRun, occurrenceId: string, now = Date.now()): WorkflowRoleRun { const prior = occurrenceOf(run, occurrenceId); if (!['failed', 'cancelled'].includes(prior.status)) throw new Error("Only failed or cancelled occurrences may retry."); return derive(add(run, [newOccurrence(node(run.definition, prior.nodeId), prior.parentOccurrenceIds, prior.parentOrchestratorRunId, prior.iteration, now, prior.attempt + 1)]), now); }
-export function stopWorkflowRoleRun(run: WorkflowRoleRun, now = Date.now()): WorkflowRoleRun { return { ...run, status: "stopped", occurrences: run.occurrences.map(item => ["ready", "queued", "running", "waitingHuman"].includes(item.status) ? { ...item, status: "cancelled" as const, updatedAtMs: now } : item), updatedAtMs: now, completedAtMs: now }; }
+export function readyWorkflowOccurrences(
+  run: WorkflowRoleRun,
+): WorkflowOccurrence[] {
+  return run.status === "stopped"
+    ? []
+    : run.occurrences
+        .filter((item) => item.status === "ready")
+        .map((item) => structuredClone(item));
+}
+export function startWorkflowOccurrence(
+  run: WorkflowRoleRun,
+  occurrenceId: string,
+  runtimeId: string,
+  sessionId?: string,
+  now = Date.now(),
+): WorkflowRoleRun {
+  const occurrence = occurrenceOf(run, occurrenceId);
+  if (
+    !["worker", "decider"].includes(occurrence.role) ||
+    !["ready", "queued"].includes(occurrence.status)
+  )
+    throw new Error(
+      "Only ready Worker or Decider occurrences may own Pi sessions.",
+    );
+  return derive(
+    patch(run, occurrenceId, {
+      status: "running",
+      runtimeId,
+      ...(sessionId ? { sessionId } : {}),
+      startedAtMs: occurrence.startedAtMs ?? now,
+      updatedAtMs: now,
+    }),
+    now,
+  );
+}
+export function startWorkflowOrchestrator(
+  run: WorkflowRoleRun,
+  occurrenceId: string,
+  now = Date.now(),
+): WorkflowRoleRun {
+  const occurrence = occurrenceOf(run, occurrenceId);
+  if (occurrence.role !== "orchestrator" || occurrence.status !== "ready")
+    throw new Error("Orchestrator occurrence is not ready.");
+  const config = node(run.definition, occurrence.nodeId).config as Extract<
+    WorkflowV2Node,
+    { role: "orchestrator" }
+  >["config"];
+  let next = patch(run, occurrenceId, {
+    status: "running",
+    startedAtMs: now,
+    updatedAtMs: now,
+  });
+  let children = config.agents.map((id) =>
+    newOccurrence(
+      node(next.definition, id),
+      [occurrence.id],
+      occurrence.id,
+      1,
+      now,
+    ),
+  );
+  if (config.mode === "fanout")
+    children = children.map((child, index) =>
+      index < config.maxConcurrency
+        ? child
+        : { ...child, status: "queued" as const },
+    );
+  next = add(next, children);
+  return derive(
+    patch(next, occurrenceId, {
+      managedChildren: children.map((child) => child.id),
+      updatedAtMs: now,
+    }),
+    now,
+  );
+}
+export function completeWorkflowOccurrence(
+  run: WorkflowRoleRun,
+  occurrenceId: string,
+  value: string | boolean,
+  now = Date.now(),
+): WorkflowRoleRun {
+  const occurrence = occurrenceOf(run, occurrenceId);
+  if (occurrence.status !== "running")
+    throw new Error("Workflow occurrence is not running.");
+  if (occurrence.role === "decider" && typeof value !== "boolean")
+    throw new Error("Decider occurrences must return a boolean.");
+  if (occurrence.role === "worker" && typeof value !== "string")
+    throw new Error("Worker occurrences must return text.");
+  let next = patch(run, occurrenceId, {
+    status: "completed",
+    output: typeof value === "string" ? bound(value) : value,
+    completedAtMs: now,
+    updatedAtMs: now,
+  });
+  next = occurrence.parentOrchestratorRunId
+    ? advanceOrchestrator(
+        next,
+        occurrence.parentOrchestratorRunId,
+        occurrenceId,
+        now,
+      )
+    : route(next, occurrenceId, now);
+  return derive(next, now);
+}
+export function answerWorkflowHumanOccurrence(
+  run: WorkflowRoleRun,
+  occurrenceId: string,
+  value: string | boolean,
+  now = Date.now(),
+): WorkflowRoleRun {
+  const occurrence = occurrenceOf(run, occurrenceId);
+  const role = node(run.definition, occurrence.nodeId);
+  if (
+    occurrence.role !== "human" ||
+    occurrence.status !== "waitingHuman" ||
+    role.role !== "human"
+  )
+    throw new Error("Human occurrence is not awaiting input.");
+  if (role.config.interaction === "input" && typeof value !== "string")
+    throw new Error("Human input requires text.");
+  if (role.config.interaction === "approval" && typeof value !== "boolean")
+    throw new Error("Human approval requires a boolean.");
+  if (
+    role.config.interaction === "choice" &&
+    (typeof value !== "string" || !role.config.options.includes(value))
+  )
+    throw new Error("Human choice must be a configured option.");
+  let next = patch(run, occurrenceId, {
+    status: "completed",
+    output: typeof value === "string" ? bound(value) : value,
+    completedAtMs: now,
+    updatedAtMs: now,
+  });
+  return derive(route(next, occurrenceId, now), now);
+}
+export function failWorkflowOccurrence(
+  run: WorkflowRoleRun,
+  occurrenceId: string,
+  error: string,
+  now = Date.now(),
+): WorkflowRoleRun {
+  const occurrence = occurrenceOf(run, occurrenceId);
+  if (["completed", "cancelled", "skipped"].includes(occurrence.status))
+    return run;
+  const next = patch(run, occurrenceId, {
+    status: "failed",
+    error: bound(error, 4_000),
+    updatedAtMs: now,
+  });
+  return derive(
+    occurrence.parentOrchestratorRunId
+      ? advanceOrchestrator(
+          next,
+          occurrence.parentOrchestratorRunId,
+          occurrenceId,
+          now,
+        )
+      : next,
+    now,
+  );
+}
+export function queueWorkflowOccurrence(
+  run: WorkflowRoleRun,
+  occurrenceId: string,
+  now = Date.now(),
+): WorkflowRoleRun {
+  const occurrence = occurrenceOf(run, occurrenceId);
+  if (occurrence.status !== "ready")
+    throw new Error("Only ready occurrences may be queued.");
+  return derive(
+    patch(run, occurrenceId, { status: "queued", updatedAtMs: now }),
+    now,
+  );
+}
+export function retryWorkflowOccurrence(
+  run: WorkflowRoleRun,
+  occurrenceId: string,
+  now = Date.now(),
+): WorkflowRoleRun {
+  const prior = occurrenceOf(run, occurrenceId);
+  if (!["failed", "cancelled"].includes(prior.status))
+    throw new Error("Only failed or cancelled occurrences may retry.");
+  return derive(
+    add(run, [
+      newOccurrence(
+        node(run.definition, prior.nodeId),
+        prior.parentOccurrenceIds,
+        prior.parentOrchestratorRunId,
+        prior.iteration,
+        now,
+        prior.attempt + 1,
+      ),
+    ]),
+    now,
+  );
+}
+export function stopWorkflowRoleRun(
+  run: WorkflowRoleRun,
+  now = Date.now(),
+): WorkflowRoleRun {
+  return {
+    ...run,
+    status: "stopped",
+    occurrences: run.occurrences.map((item) =>
+      ["ready", "queued", "running", "waitingHuman"].includes(item.status)
+        ? { ...item, status: "cancelled" as const, updatedAtMs: now }
+        : item,
+    ),
+    updatedAtMs: now,
+    completedAtMs: now,
+  };
+}
 
-function advanceOrchestrator(run: WorkflowRoleRun, orchestratorId: string, childId: string, now: number): WorkflowRoleRun { const orchestrator = occurrenceOf(run, orchestratorId); const config = node(run.definition, orchestrator.nodeId).config as Extract<WorkflowV2Node, { role: "orchestrator" }>["config"]; const child = occurrenceOf(run, childId); if (child.status === "failed") return failWorkflowOccurrence(run, orchestratorId, `Managed ${child.role} failed: ${child.error ?? "unknown error"}`, now); const current = run.occurrences.filter(item => item.parentOrchestratorRunId === orchestratorId && item.iteration === child.iteration);
-  if (config.mode === "fanout") { const done = current.filter(item => item.role === "worker" && item.status === "completed"); const allDone = current.filter(item => item.role === "worker").every(item => ["completed", "failed", "cancelled"].includes(item.status)); if (config.completion === "any" && done.length || config.completion === "all" && allDone) { let next = patch(run, orchestratorId, { status: "completed", output: done.map(item => String(item.output ?? "")), aggregation: done.map(item => String(item.output ?? "")), completedAtMs: now, updatedAtMs: now }); next = { ...next, occurrences: next.occurrences.map(item => item.parentOrchestratorRunId === orchestratorId && ["ready", "queued"].includes(item.status) ? { ...item, status: "skipped" as const, updatedAtMs: now } : item) }; return route(next, orchestratorId, now); }
-    const active = current.filter(item => item.role === "worker" && ["ready", "running"].includes(item.status)).length;
-    if (active < config.maxConcurrency) { const queued = current.find(item => item.role === "worker" && item.status === "queued"); if (queued) return patch(run, queued.id, { status: "ready", updatedAtMs: now }); }
-    return run; }
-  const workers = current.filter(item => item.role === "worker"); if (child.role === "worker" && workers.length === config.agents.length && workers.every(item => item.status === "completed")) { const decider = newOccurrence(node(run.definition, config.decider), workers.map(item => item.id), orchestratorId, child.iteration, now); return add(patch(run, orchestratorId, { managedChildren: [...orchestrator.managedChildren, decider.id], aggregation: workers.map(item => String(item.output ?? "")), updatedAtMs: now }), [decider]); }
-  if (child.role === "decider") { if (child.output === true) { let next = patch(run, orchestratorId, { status: "completed", output: orchestrator.aggregation, completedAtMs: now, updatedAtMs: now }); return route(next, orchestratorId, now); } if (child.iteration >= config.maxIterations) return failWorkflowOccurrence(run, orchestratorId, `Loop limit (${config.maxIterations}) reached.`, now); const workersNext = config.agents.map(id => newOccurrence(node(run.definition, id), [child.id], orchestratorId, child.iteration + 1, now)); return add(patch(run, orchestratorId, { managedChildren: [...orchestrator.managedChildren, ...workersNext.map(item => item.id)], updatedAtMs: now }), workersNext); } return run; }
-function route(run: WorkflowRoleRun, sourceId: string, now: number): WorkflowRoleRun { const source = occurrenceOf(run, sourceId); const outgoing = run.definition.relationships.filter(item => item.from === source.nodeId && (item.when === undefined || item.when.equals === source.output)); let next = run; for (const relationship of outgoing) if ("nodeId" in relationship.to) next = add(next, [newOccurrence(node(next.definition, relationship.to.nodeId), [source.id], undefined, 1, now)]); return next; }
-function newOccurrence(role: WorkflowV2Node, parents: string[], parentOrchestratorRunId: string | undefined, iteration: number, now: number, attempt = 1): WorkflowOccurrence { return { id: randomUUID(), nodeId: role.id, role: role.role as WorkflowV2Role, ...(parentOrchestratorRunId ? { parentOrchestratorRunId } : {}), parentOccurrenceIds: parents, iteration, attempt, status: role.role === "human" ? "waitingHuman" : "ready", managedChildren: [], aggregation: [], createdAtMs: now, updatedAtMs: now }; }
-function node(definition: WorkflowV2Definition, id: string): WorkflowV2Node { const result = definition.nodes.find(item => item.id === id); if (!result) throw new Error(`Unknown workflow node: ${id}`); return result; }
-function occurrenceOf(run: WorkflowRoleRun, id: string): WorkflowOccurrence { const result = run.occurrences.find(item => item.id === id); if (!result) throw new Error(`Unknown workflow occurrence: ${id}`); return result; }
-function patch(run: WorkflowRoleRun, id: string, changes: Partial<WorkflowOccurrence>): WorkflowRoleRun { return { ...run, occurrences: run.occurrences.map(item => item.id === id ? { ...item, ...changes } : item) }; }
-function add(run: WorkflowRoleRun, occurrences: WorkflowOccurrence[]): WorkflowRoleRun { return { ...run, occurrences: [...run.occurrences, ...occurrences] }; }
-function bound(value: string, limit = 32_000): string { return value.length > limit ? value.slice(0, limit) : value; }
-function derive(run: WorkflowRoleRun, now: number): WorkflowRoleRun { if (run.status === "stopped") return run; const status = run.occurrences.some(item => item.status === "failed") ? "needsAttention" : run.occurrences.some(item => item.status === "waitingHuman") ? "needsAttention" : run.occurrences.some(item => ["ready", "queued", "running"].includes(item.status)) ? (run.occurrences.some(item => item.status === "running") ? "running" : "waiting") : "completed"; return workflowRoleRunSchema.parse({ ...run, status, updatedAtMs: now, ...(status === "completed" ? { completedAtMs: run.completedAtMs ?? now } : {}) }); }
+function advanceOrchestrator(
+  run: WorkflowRoleRun,
+  orchestratorId: string,
+  childId: string,
+  now: number,
+): WorkflowRoleRun {
+  const orchestrator = occurrenceOf(run, orchestratorId);
+  const config = node(run.definition, orchestrator.nodeId).config as Extract<
+    WorkflowV2Node,
+    { role: "orchestrator" }
+  >["config"];
+  const child = occurrenceOf(run, childId);
+  if (child.status === "failed")
+    return failWorkflowOccurrence(
+      run,
+      orchestratorId,
+      `Managed ${child.role} failed: ${child.error ?? "unknown error"}`,
+      now,
+    );
+  const current = run.occurrences.filter(
+    (item) =>
+      item.parentOrchestratorRunId === orchestratorId &&
+      item.iteration === child.iteration,
+  );
+  if (config.mode === "fanout") {
+    const done = current.filter(
+      (item) => item.role === "worker" && item.status === "completed",
+    );
+    const allDone = current
+      .filter((item) => item.role === "worker")
+      .every((item) =>
+        ["completed", "failed", "cancelled"].includes(item.status),
+      );
+    if (
+      (config.completion === "any" && done.length) ||
+      (config.completion === "all" && allDone)
+    ) {
+      let next = patch(run, orchestratorId, {
+        status: "completed",
+        output: done.map((item) => String(item.output ?? "")),
+        aggregation: done.map((item) => String(item.output ?? "")),
+        completedAtMs: now,
+        updatedAtMs: now,
+      });
+      next = {
+        ...next,
+        occurrences: next.occurrences.map((item) =>
+          item.parentOrchestratorRunId === orchestratorId &&
+          ["ready", "queued"].includes(item.status)
+            ? { ...item, status: "skipped" as const, updatedAtMs: now }
+            : item,
+        ),
+      };
+      return route(next, orchestratorId, now);
+    }
+    const active = current.filter(
+      (item) =>
+        item.role === "worker" && ["ready", "running"].includes(item.status),
+    ).length;
+    if (active < config.maxConcurrency) {
+      const queued = current.find(
+        (item) => item.role === "worker" && item.status === "queued",
+      );
+      if (queued)
+        return patch(run, queued.id, { status: "ready", updatedAtMs: now });
+    }
+    return run;
+  }
+  const workers = current.filter((item) => item.role === "worker");
+  if (
+    child.role === "worker" &&
+    workers.length === config.agents.length &&
+    workers.every((item) => item.status === "completed")
+  ) {
+    const decider = newOccurrence(
+      node(run.definition, config.decider),
+      workers.map((item) => item.id),
+      orchestratorId,
+      child.iteration,
+      now,
+    );
+    return add(
+      patch(run, orchestratorId, {
+        managedChildren: [...orchestrator.managedChildren, decider.id],
+        aggregation: workers.map((item) => String(item.output ?? "")),
+        updatedAtMs: now,
+      }),
+      [decider],
+    );
+  }
+  if (child.role === "decider") {
+    if (child.output === true) {
+      let next = patch(run, orchestratorId, {
+        status: "completed",
+        output: orchestrator.aggregation,
+        completedAtMs: now,
+        updatedAtMs: now,
+      });
+      return route(next, orchestratorId, now);
+    }
+    if (child.iteration >= config.maxIterations)
+      return failWorkflowOccurrence(
+        run,
+        orchestratorId,
+        `Loop limit (${config.maxIterations}) reached.`,
+        now,
+      );
+    const workersNext = config.agents.map((id) =>
+      newOccurrence(
+        node(run.definition, id),
+        [child.id],
+        orchestratorId,
+        child.iteration + 1,
+        now,
+      ),
+    );
+    return add(
+      patch(run, orchestratorId, {
+        managedChildren: [
+          ...orchestrator.managedChildren,
+          ...workersNext.map((item) => item.id),
+        ],
+        updatedAtMs: now,
+      }),
+      workersNext,
+    );
+  }
+  return run;
+}
+function route(
+  run: WorkflowRoleRun,
+  sourceId: string,
+  now: number,
+): WorkflowRoleRun {
+  const source = occurrenceOf(run, sourceId);
+  const outgoing = run.definition.relationships.filter(
+    (item) =>
+      item.from === source.nodeId &&
+      (item.when === undefined || item.when.equals === source.output),
+  );
+  let next = run;
+  for (const relationship of outgoing)
+    if ("nodeId" in relationship.to)
+      next = add(next, [
+        newOccurrence(
+          node(next.definition, relationship.to.nodeId),
+          [source.id],
+          undefined,
+          1,
+          now,
+        ),
+      ]);
+  return next;
+}
+function newOccurrence(
+  role: WorkflowV2Node,
+  parents: string[],
+  parentOrchestratorRunId: string | undefined,
+  iteration: number,
+  now: number,
+  attempt = 1,
+): WorkflowOccurrence {
+  return {
+    id: randomUUID(),
+    nodeId: role.id,
+    role: role.role as WorkflowV2Role,
+    ...(parentOrchestratorRunId ? { parentOrchestratorRunId } : {}),
+    parentOccurrenceIds: parents,
+    iteration,
+    attempt,
+    status: role.role === "human" ? "waitingHuman" : "ready",
+    managedChildren: [],
+    aggregation: [],
+    createdAtMs: now,
+    updatedAtMs: now,
+  };
+}
+function node(definition: WorkflowV2Definition, id: string): WorkflowV2Node {
+  const result = definition.nodes.find((item) => item.id === id);
+  if (!result) throw new Error(`Unknown workflow node: ${id}`);
+  return result;
+}
+function occurrenceOf(run: WorkflowRoleRun, id: string): WorkflowOccurrence {
+  const result = run.occurrences.find((item) => item.id === id);
+  if (!result) throw new Error(`Unknown workflow occurrence: ${id}`);
+  return result;
+}
+function patch(
+  run: WorkflowRoleRun,
+  id: string,
+  changes: Partial<WorkflowOccurrence>,
+): WorkflowRoleRun {
+  return {
+    ...run,
+    occurrences: run.occurrences.map((item) =>
+      item.id === id ? { ...item, ...changes } : item,
+    ),
+  };
+}
+function add(
+  run: WorkflowRoleRun,
+  occurrences: WorkflowOccurrence[],
+): WorkflowRoleRun {
+  return { ...run, occurrences: [...run.occurrences, ...occurrences] };
+}
+function bound(value: string, limit = 32_000): string {
+  return value.length > limit ? value.slice(0, limit) : value;
+}
+function derive(run: WorkflowRoleRun, now: number): WorkflowRoleRun {
+  if (run.status === "stopped") return run;
+  const status = run.occurrences.some((item) => item.status === "failed")
+    ? "needsAttention"
+    : run.occurrences.some((item) => item.status === "waitingHuman")
+      ? "needsAttention"
+      : run.occurrences.some((item) =>
+            ["ready", "queued", "running"].includes(item.status),
+          )
+        ? run.occurrences.some((item) => item.status === "running")
+          ? "running"
+          : "waiting"
+        : "completed";
+  return workflowRoleRunSchema.parse({
+    ...run,
+    status,
+    updatedAtMs: now,
+    ...(status === "completed"
+      ? { completedAtMs: run.completedAtMs ?? now }
+      : {}),
+  });
+}

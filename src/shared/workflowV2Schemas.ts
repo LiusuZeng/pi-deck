@@ -146,7 +146,7 @@ export const workflowDefinitionSchema = z
     id: workflowIdSchema,
     revision: z.number().int().min(1),
     name: z.string().trim().min(1).max(160),
-    description: z.string().max(4_000),
+    description: z.string().max(4_000).optional(),
     inputs: z.array(workflowInputV2Schema).max(50),
     entryNodeId: nodeIdSchema,
     nodes: z.array(workflowNodeSchema).min(1).max(100),
@@ -268,6 +268,13 @@ export type WorkflowNode = z.infer<typeof workflowNodeSchema>;
 export type WorkflowRelationship = z.infer<typeof relationshipSchema>;
 export type WorkflowOccurrence = z.infer<typeof workflowOccurrenceSchema>;
 export type NodeOccurrence = z.infer<typeof nodeOccurrenceSchema>;
+
+// Names retained for the runtime implementation while the public v2 contract
+// uses the shorter WorkflowDefinition/WorkflowNode names above.
+export const workflowV2DefinitionSchema = workflowDefinitionSchema;
+export type WorkflowV2Definition = WorkflowDefinition;
+export type WorkflowV2Node = WorkflowNode;
+export type WorkflowV2Role = WorkflowNode["role"];
 
 function validateWorkflowGraph(
   value: z.infer<typeof workflowDefinitionSchema>,
