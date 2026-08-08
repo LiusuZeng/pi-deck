@@ -97,10 +97,8 @@ import {
   type ActivitySourceSession,
 } from "./activityInbox.js";
 import { ActivityInbox } from "./components/ActivityInbox.js";
-import {
-  WorkflowHome,
-  WorkflowRunView,
-} from "./components/workflows/index.js";
+import { WorkflowHome, WorkflowRunView } from "./components/workflows/index.js";
+import { WorkflowBuilder } from "./components/workflows/WorkflowBuilder.js";
 import { WorkflowV2Builder } from "./components/workflows/WorkflowV2Builder.js";
 
 type LoadState =
@@ -4097,17 +4095,32 @@ export function App(): ReactElement {
                 Loading Agent Workflows…
               </div>
             ) : workflowView === "builder" ? (
-              <WorkflowV2Builder
-                key={`${currentWorkspace.id}:${workflowBuilderTemplate?.id ?? "new"}`}
-                {...(workflowBuilderTemplate !== undefined
-                  ? { initialTemplate: workflowBuilderTemplate }
-                  : {})}
-                onSave={handleSaveWorkflow}
-                onCancel={() => {
-                  setWorkflowBuilderTemplate(undefined);
-                  setWorkflowView("home");
-                }}
-              />
+              workflowBuilderTemplate !== undefined ? (
+                <WorkflowBuilder
+                  key={`${currentWorkspace.id}:${workflowBuilderTemplate.id}`}
+                  initialTemplate={workflowBuilderTemplate}
+                  onSave={handleSaveWorkflow}
+                  onCancel={() => {
+                    setWorkflowBuilderTemplate(undefined);
+                    setWorkflowView("home");
+                  }}
+                />
+              ) : (
+                <WorkflowV2Builder
+                  key={`${currentWorkspace.id}:new-v2`}
+                  // Persistence is deliberately rejected until the main-process v2
+                  // store is available; never coerce a canonical document into v1.
+                  onSave={async () => {
+                    throw new Error(
+                      "Saving v2 workflows requires the v2 workflow store. Existing v1 workflows remain available in the legacy editor.",
+                    );
+                  }}
+                  onCancel={() => {
+                    setWorkflowBuilderTemplate(undefined);
+                    setWorkflowView("home");
+                  }}
+                />
+              )
             ) : workflowView === "run" && selectedWorkflowRun !== undefined ? (
               <WorkflowRunView
                 run={selectedWorkflowRun}
