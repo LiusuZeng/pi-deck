@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   workflowApproveGateRequestSchema,
+  workflowContextSchema,
   workflowEventSchema,
   workflowModelOverrideSchema,
   workflowOverrideConditionRequestSchema,
@@ -69,6 +70,30 @@ describe("workflowModelOverrideSchema", () => {
       modelId: "gpt-test",
     });
     expect(workflowModelOverrideSchema.safeParse({}).success).toBe(false);
+  });
+});
+
+describe("workflowContextSchema", () => {
+  it("accepts prompt-first context without relevant paths", () => {
+    const context = {
+      prompt: "Implement the requested change and keep the diff focused.",
+      doNotDo: "Do not modify generated files.",
+    };
+    expect(workflowContextSchema.parse(context)).toEqual({
+      ...context,
+      relevantPaths: [],
+    });
+  });
+
+  it("continues accepting legacy structured context", () => {
+    const context = {
+      objective: "Keep the fix small.",
+      constraints: "Preserve existing behavior.",
+      relevantPaths: ["src/example.ts"],
+      standards: "Use the existing test conventions.",
+      doNotDo: "Do not broaden the scope.",
+    };
+    expect(workflowContextSchema.parse(context)).toEqual(context);
   });
 });
 

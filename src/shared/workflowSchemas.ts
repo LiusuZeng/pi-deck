@@ -54,11 +54,15 @@ export const workflowPromptPartSchema = z.discriminatedUnion("type", [
 
 export const workflowContextSchema = z
   .object({
+    // Prompt-first contexts are used by new workflow templates. The remaining
+    // fields stay optional so snapshots of templates created by older versions
+    // continue to validate and render unchanged.
+    prompt: z.string().max(4_000).optional(),
+    doNotDo: z.string().max(4_000).optional(),
     objective: z.string().max(4_000).optional(),
     constraints: z.string().max(4_000).optional(),
-    relevantPaths: z.array(z.string().min(1)).max(100),
+    relevantPaths: z.array(z.string().min(1)).max(100).default([]),
     standards: z.string().max(4_000).optional(),
-    doNotDo: z.string().max(4_000).optional(),
   })
   .strict();
 

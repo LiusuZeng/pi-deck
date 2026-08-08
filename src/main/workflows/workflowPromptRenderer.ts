@@ -100,11 +100,18 @@ function renderWorkflowContext(
   inputs: Record<string, string>,
 ): string {
   const lines: string[] = [];
-  addLine(lines, "Objective", context.objective);
-  addLine(lines, "Constraints", context.constraints);
-  addLine(lines, "Relevant paths", context.relevantPaths.join("\n"));
-  addLine(lines, "Standards", context.standards);
-  addLine(lines, "Do not do", context.doNotDo);
+  if (context.prompt !== undefined && context.prompt.trim().length > 0) {
+    addLine(lines, "Prompt", context.prompt);
+    addLine(lines, "Don't do", context.doNotDo);
+  } else {
+    // Older persisted templates use the structured context fields. Keep their
+    // rendering intact when no prompt-first context is present.
+    addLine(lines, "Objective", context.objective);
+    addLine(lines, "Constraints", context.constraints);
+    addLine(lines, "Relevant paths", context.relevantPaths?.join("\n"));
+    addLine(lines, "Standards", context.standards);
+    addLine(lines, "Do not do", context.doNotDo);
+  }
   const runInputs = Object.entries(inputs)
     .map(([key, value]) => `${key}: ${value}`)
     .join("\n");
