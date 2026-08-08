@@ -7,168 +7,187 @@ import {
   type ReactElement,
 } from "react";
 import {
+  addRole,
   defaultV2Definition,
   definitionJson,
   graphEdges,
+  setLoopDecider,
+  setManagedWorkers,
   validateJsonDraft,
   workflowRoleTemplates,
   type WorkflowRole,
   type WorkflowV2Definition,
   type WorkflowV2Node,
 } from "../../workflows/workflowV2.js";
+import { WorkflowV2Graph } from "./v2/WorkflowV2Graph.js";
 
 type View = "build" | "graph" | "json";
-
-const rolePresentation: Record<
-  WorkflowRole,
-  { label: string; action: string }
-> = {
-  worker: { label: "Agent task", action: "Add agent task" },
-  decider: { label: "Decision", action: "Add decision" },
-  orchestrator: { label: "Coordinate tasks", action: "Add coordination" },
-  human: { label: "Approval / input", action: "Add checkpoint" },
+const presentation: Record<WorkflowRole, string> = {
+  worker: "Agent task",
+  decider: "Decision",
+  orchestrator: "Coordinate tasks",
+  human: "Approval / input",
 };
-const nodeFor = (role: WorkflowRole, number: number): WorkflowV2Node => {
-  const id = `${role}-${number}`;
-  if (role === "worker")
-    return {
-      id,
-      name: "New worker",
-      role,
-      config: { instructions: "Describe the work to perform." },
-    };
-  if (role === "decider")
-    return {
-      id,
-      name: "New decision",
-      role,
-      config: { question: "Is this ready?" },
-    };
-  if (role === "orchestrator")
-    return {
-      id,
-      name: "New orchestration",
-      role,
-      config: {
-        mode: "fanout",
-        agents: ["worker-1"],
-        maxConcurrency: 1,
-        completion: "all",
-      },
-    };
-  return {
-    id,
-    name: "Checkpoint",
-    role,
-    config: { interaction: "approval", prompt: "Approve this result?" },
-  };
+const addAction: Record<WorkflowRole, string> = {
+  worker: "Add agent task",
+  decider: "Add decision",
+  orchestrator: "Add coordination",
+  human: "Add checkpoint",
 };
-function summary(node: WorkflowV2Node): string {
-  switch (node.role) {
-    case "worker":
-      return node.config.instructions;
-    case "decider":
-      return node.config.question;
-    case "orchestrator":
-      return `${node.config.mode} · ${node.config.agents.length} managed role${node.config.agents.length === 1 ? "" : "s"}`;
-    case "human":
-      return `${node.config.interaction}: ${node.config.prompt}`;
-  }
-}
+const updateNode = (
+  definition: WorkflowV2Definition,
+  node: WorkflowV2Node,
+) => ({
+  ...definition,
+  nodes: definition.nodes.map((item) => (item.id === node.id ? node : item)),
+});
+const optional = (value: string) => value || undefined;
 
-/** Canonical v2 editor. Graph is derived only; JSON retains a last-valid draft until Apply. */
+/** Canonical v2 editor. Build mutations only update the canonical workflow document. */
 export function WorkflowV2Builder(props: {
+  initialDefinition?: WorkflowV2Definition;
   onSave(definition: WorkflowV2Definition): Promise<void> | void;
   onCancel(): void;
 }): ReactElement {
-  const [definition, setDefinition] = useState(defaultV2Definition);
+  const [definition, setDefinition] = useState(
+    () => props.initialDefinition ?? defaultV2Definition(),
+  );
   const [view, setView] = useState<View>("build");
   const [selectedId, setSelectedId] = useState(definition.entryNodeId);
   const [draft, setDraft] = useState(definitionJson(definition));
   const [jsonError, setJsonError] = useState<string>();
   const [saveError, setSaveError] = useState<string>();
-  const [showStepPicker, setShowStepPicker] = useState(false);
-  const stepPickerRef = useRef<HTMLDivElement>(null);
-  const addStepButtonRef = useRef<HTMLButtonElement>(null);
-  const stepPickerInitialFocusRef = useRef(0);
+  const [showPicker, setShowPicker] = useState(false);
+  const pickerRef = useRef<HTMLDivElement>(null);
+  const addRef = useRef<HTMLButtonElement>(null);
+  const initialFocus = useRef(0);
   const selected =
-    definition.nodes.find((n) => n.id === selectedId) ?? definition.nodes[0]!;
+    definition.nodes.find((node) => node.id === selectedId) ??
+    definition.nodes[0]!;
   const edges = useMemo(() => graphEdges(definition), [definition]);
   const update = (next: WorkflowV2Definition) => {
     setDefinition(next);
     setDraft(definitionJson(next));
     setJsonError(undefined);
   };
-  const patch = (node: WorkflowV2Node) =>
+  const patch = (node: WorkflowV2Node) => update(updateNode(definition, node));
+  useEffect(() => {
+    if (!showPicker) return;
+    pickerRef.current
+      ?.querySelectorAll<HTMLElement>('[role="menuitem"]')
+      [initialFocus.current]?.focus();
+    initialFocus.current = 0;
+    const outside = (event: PointerEvent) => {
+      if (!pickerRef.current?.contains(event.target as Node))
+        setShowPicker(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setShowPicker(false);
+        addRef.current?.focus();
+      }
+    };
+    document.addEventListener("pointerdown", outside);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("pointerdown", outside);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [showPicker]);
+  const pickerKeys = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const items = Array.from(
+      pickerRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ??
+        [],
+    );
+    const index = items.indexOf(document.activeElement as HTMLElement);
+    const next =
+      event.key === "ArrowDown"
+        ? (index + 1 + items.length) % items.length
+        : event.key === "ArrowUp"
+          ? (index - 1 + items.length) % items.length
+          : event.key === "Home"
+            ? 0
+            : event.key === "End"
+              ? items.length - 1
+              : undefined;
+    if (next !== undefined) {
+      event.preventDefault();
+      items[next]?.focus();
+    }
+  };
+  const topLevel = definition.nodes.filter((node) => !node.managedBy);
+  const relationship = (
+    from: string,
+    equals: boolean | string | undefined,
+    value: string,
+  ) => {
+    const to = value.startsWith("end:")
+      ? { end: value.slice(4) }
+      : { nodeId: value };
+    const existing = definition.relationships.find(
+      (edge) =>
+        edge.from === from &&
+        (equals === undefined ? !edge.when : edge.when?.equals === equals),
+    );
+    const edge = {
+      id:
+        existing?.id ??
+        `relationship-${from}-${String(equals ?? "then")}-${definition.relationships.length + 1}`,
+      from,
+      ...(equals === undefined ? {} : { when: { equals } }),
+      to,
+    };
     update({
       ...definition,
-      nodes: definition.nodes.map((item) =>
-        item.id === node.id ? node : item,
-      ),
+      relationships: [
+        ...definition.relationships.filter((item) => item !== existing),
+        edge,
+      ],
     });
-  const add = (role: WorkflowRole) => {
-    const node = nodeFor(role, definition.nodes.length + 1);
-    update({ ...definition, nodes: [...definition.nodes, node] });
+  };
+  const changeMode = (
+    node: Extract<WorkflowV2Node, { role: "orchestrator" }>,
+    mode: "loop" | "fanout",
+  ) => {
+    if (mode === "fanout")
+      return patch({
+        ...node,
+        config: {
+          mode,
+          agents: node.config.agents,
+          maxConcurrency: 1,
+          completion: "all",
+        },
+      });
+    const deciderId = `decider-${definition.nodes.length + 1}`;
+    const decider: WorkflowV2Node = {
+      id: deciderId,
+      name: "Loop completion",
+      role: "decider",
+      managedBy: node.id,
+      config: { question: "Is the loop complete?" },
+    };
+    update({ ...definition, nodes: [...definition.nodes, decider] });
+    // The second update intentionally establishes the loop config after the child exists.
+    const next = {
+      ...definition,
+      nodes: [
+        ...definition.nodes.filter((item) => item.id !== node.id),
+        {
+          ...node,
+          config: {
+            mode,
+            agents: node.config.agents,
+            decider: deciderId,
+            maxIterations: 1,
+          },
+        },
+        decider,
+      ],
+    } as WorkflowV2Definition;
+    update(next);
     setSelectedId(node.id);
-    setShowStepPicker(false);
-  };
-  useEffect(() => {
-    if (!showStepPicker) return;
-    const items =
-      stepPickerRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]');
-    items?.[stepPickerInitialFocusRef.current]?.focus();
-    stepPickerInitialFocusRef.current = 0;
-    const dismissOnOutsidePointer = (event: PointerEvent) => {
-      if (!stepPickerRef.current?.contains(event.target as Node))
-        setShowStepPicker(false);
-    };
-    const dismissOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      setShowStepPicker(false);
-      addStepButtonRef.current?.focus();
-    };
-    document.addEventListener("pointerdown", dismissOnOutsidePointer);
-    document.addEventListener("keydown", dismissOnEscape);
-    return () => {
-      document.removeEventListener("pointerdown", dismissOnOutsidePointer);
-      document.removeEventListener("keydown", dismissOnEscape);
-    };
-  }, [showStepPicker]);
-  const moveStepPickerFocus = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    const items = Array.from(
-      stepPickerRef.current?.querySelectorAll<HTMLElement>(
-        '[role="menuitem"]:not([disabled]):not([aria-disabled="true"])',
-      ) ?? [],
-    );
-    const currentIndex = items.indexOf(document.activeElement as HTMLElement);
-    let nextIndex: number | undefined;
-    if (event.key === "ArrowDown")
-      nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % items.length;
-    else if (event.key === "ArrowUp")
-      nextIndex =
-        currentIndex < 0
-          ? items.length - 1
-          : (currentIndex - 1 + items.length) % items.length;
-    else if (event.key === "Home") nextIndex = 0;
-    else if (event.key === "End") nextIndex = items.length - 1;
-    if (nextIndex !== undefined) {
-      event.preventDefault();
-      items[nextIndex]?.focus();
-    }
-  };
-  const changeView = (next: View) => {
-    setShowStepPicker(false);
-    setView(next);
-  };
-  const apply = () => {
-    const result = validateJsonDraft(draft);
-    if (!result.definition) {
-      setJsonError(result.error);
-      return;
-    }
-    update(result.definition);
-    setSelectedId(result.definition.entryNodeId);
   };
   const save = async () => {
     const result = validateJsonDraft(definitionJson(definition));
@@ -183,6 +202,23 @@ export function WorkflowV2Builder(props: {
       setSaveError(error instanceof Error ? error.message : String(error));
     }
   };
+  const destinationOptions = (includeEnd = true) => (
+    <>
+      {includeEnd && (
+        <>
+          <option value="end:completed">Terminal: completed</option>
+          <option value="end:rejected">Terminal: rejected</option>
+        </>
+      )}
+      {topLevel
+        .filter((node) => node.id !== selected.id)
+        .map((node) => (
+          <option key={node.id} value={node.id}>
+            {node.name}
+          </option>
+        ))}
+    </>
+  );
   return (
     <div className="workflow-v2-builder">
       <header className="workflow-page-heading">
@@ -194,7 +230,11 @@ export function WorkflowV2Builder(props: {
           >
             ← Agent Workflows
           </button>
-          <h2>New agent workflow</h2>
+          <h2>
+            {props.initialDefinition
+              ? `Edit ${props.initialDefinition.name}`
+              : "New agent workflow"}
+          </h2>
           <p>Add tasks, decisions, coordination, and checkpoints.</p>
         </div>
         <div className="workflow-heading-actions">
@@ -226,7 +266,10 @@ export function WorkflowV2Builder(props: {
             role="tab"
             aria-selected={view === item}
             className={view === item ? "is-active" : ""}
-            onClick={() => changeView(item)}
+            onClick={() => {
+              setShowPicker(false);
+              setView(item);
+            }}
           >
             {item.toUpperCase()}
           </button>
@@ -247,48 +290,45 @@ export function WorkflowV2Builder(props: {
                 }
               />
             </label>
-            <div ref={stepPickerRef} className="workflow-v2-add">
+            <div ref={pickerRef} className="workflow-v2-add">
               <button
-                ref={addStepButtonRef}
+                ref={addRef}
                 type="button"
                 className="workflow-secondary-button"
                 aria-haspopup="menu"
-                aria-expanded={showStepPicker}
-                aria-controls="workflow-step-picker"
-                onClick={() => {
-                  stepPickerInitialFocusRef.current = 0;
-                  setShowStepPicker((open) => !open);
-                }}
-                onKeyDown={(event) => {
-                  if (event.key !== "ArrowDown" && event.key !== "ArrowUp")
-                    return;
-                  event.preventDefault();
-                  stepPickerInitialFocusRef.current =
-                    event.key === "ArrowDown"
-                      ? 0
-                      : workflowRoleTemplates.length - 1;
-                  setShowStepPicker(true);
+                aria-expanded={showPicker}
+                onClick={() => setShowPicker((open) => !open)}
+                onKeyDown={(e) => {
+                  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                    e.preventDefault();
+                    initialFocus.current = e.key === "ArrowDown" ? 0 : 3;
+                    setShowPicker(true);
+                  }
                 }}
               >
                 + Add step
               </button>
-              {showStepPicker && (
+              {showPicker && (
                 <div
-                  id="workflow-step-picker"
                   className="workflow-v2-step-picker"
                   role="menu"
                   aria-label="Choose step type"
-                  onKeyDown={moveStepPickerFocus}
+                  onKeyDown={pickerKeys}
                 >
                   {workflowRoleTemplates.map((role) => (
                     <button
                       key={role.id}
                       type="button"
                       role="menuitem"
-                      onClick={() => add(role.id)}
+                      onClick={() => {
+                        const next = addRole(definition, role.id);
+                        update(next.definition);
+                        setSelectedId(next.selectedId);
+                        setShowPicker(false);
+                      }}
                     >
-                      <strong>{rolePresentation[role.id].action}</strong>
-                      <small>{rolePresentation[role.id].label}</small>
+                      <strong>{addAction[role.id]}</strong>
+                      <small>{presentation[role.id]}</small>
                     </button>
                   ))}
                 </div>
@@ -304,10 +344,21 @@ export function WorkflowV2Builder(props: {
               >
                 <span className="workflow-v2-card-heading">
                   <b>{index + 1}</b>
-                  <i>{rolePresentation[node.role].label}</i>
+                  <i>
+                    {presentation[node.role]}
+                    {node.managedBy ? " (managed)" : ""}
+                  </i>
                 </span>
                 <strong>{node.name}</strong>
-                <small>{summary(node)}</small>
+                <small>
+                  {node.role === "orchestrator"
+                    ? `${node.config.mode}: ${node.config.agents.length} managed worker${node.config.agents.length === 1 ? "" : "s"}`
+                    : node.role === "human"
+                      ? `${node.config.interaction}: ${node.config.prompt}`
+                      : node.role === "worker"
+                        ? node.config.instructions
+                        : node.config.question}
+                </small>
                 {edges
                   .filter((edge) => edge.from === node.id)
                   .map((edge) => (
@@ -324,7 +375,7 @@ export function WorkflowV2Builder(props: {
             className="workflow-v2-inspector"
             aria-label="Focused role inspector"
           >
-            <h3>{rolePresentation[selected.role].label}</h3>
+            <h3>{presentation[selected.role]}</h3>
             <label className="workflow-field">
               <span>Name</span>
               <input
@@ -335,35 +386,119 @@ export function WorkflowV2Builder(props: {
               />
             </label>
             {selected.role === "worker" && (
-              <label className="workflow-field">
-                <span>Instructions</span>
-                <textarea
-                  value={selected.config.instructions}
-                  onChange={(e) =>
-                    patch({
-                      ...selected,
-                      config: {
-                        ...selected.config,
-                        instructions: e.target.value,
-                      },
-                    })
-                  }
-                />
-              </label>
+              <>
+                <label className="workflow-field">
+                  <span>Instructions</span>
+                  <textarea
+                    value={selected.config.instructions}
+                    onChange={(e) =>
+                      patch({
+                        ...selected,
+                        config: {
+                          ...selected.config,
+                          instructions: e.target.value,
+                        },
+                      })
+                    }
+                  />
+                </label>
+                <label className="workflow-field">
+                  <span>Input (optional)</span>
+                  <textarea
+                    value={selected.config.input ?? ""}
+                    onChange={(e) =>
+                      patch({
+                        ...selected,
+                        config: {
+                          ...selected.config,
+                          input: optional(e.target.value),
+                        },
+                      })
+                    }
+                  />
+                </label>
+                <label className="workflow-field">
+                  <span>Expected output (optional)</span>
+                  <input
+                    value={selected.config.expectedOutput ?? ""}
+                    onChange={(e) =>
+                      patch({
+                        ...selected,
+                        config: {
+                          ...selected.config,
+                          expectedOutput: optional(e.target.value),
+                        },
+                      })
+                    }
+                  />
+                </label>
+              </>
             )}
             {selected.role === "decider" && (
-              <label className="workflow-field">
-                <span>Question</span>
-                <textarea
-                  value={selected.config.question}
-                  onChange={(e) =>
-                    patch({
-                      ...selected,
-                      config: { ...selected.config, question: e.target.value },
-                    })
-                  }
-                />
-              </label>
+              <>
+                <label className="workflow-field">
+                  <span>Question</span>
+                  <textarea
+                    value={selected.config.question}
+                    onChange={(e) =>
+                      patch({
+                        ...selected,
+                        config: {
+                          ...selected.config,
+                          question: e.target.value,
+                        },
+                      })
+                    }
+                  />
+                </label>
+                <label className="workflow-field">
+                  <span>Input (optional)</span>
+                  <textarea
+                    value={selected.config.input ?? ""}
+                    onChange={(e) =>
+                      patch({
+                        ...selected,
+                        config: {
+                          ...selected.config,
+                          input: optional(e.target.value),
+                        },
+                      })
+                    }
+                  />
+                </label>
+                <label className="workflow-field">
+                  <span>True label</span>
+                  <input
+                    value={selected.config.trueLabel ?? ""}
+                    placeholder="Yes"
+                    onChange={(e) =>
+                      patch({
+                        ...selected,
+                        config: {
+                          ...selected.config,
+                          trueLabel: optional(e.target.value),
+                        },
+                      })
+                    }
+                  />
+                </label>
+                <label className="workflow-field">
+                  <span>False label</span>
+                  <input
+                    value={selected.config.falseLabel ?? ""}
+                    placeholder="No"
+                    onChange={(e) =>
+                      patch({
+                        ...selected,
+                        config: {
+                          ...selected.config,
+                          falseLabel: optional(e.target.value),
+                        },
+                      })
+                    }
+                  />
+                </label>
+              </>
             )}
             {selected.role === "human" && (
               <>
@@ -371,18 +506,29 @@ export function WorkflowV2Builder(props: {
                   <span>Interaction</span>
                   <select
                     value={selected.config.interaction}
-                    onChange={(e) =>
+                    onChange={(e) => {
+                      const interaction = e.target.value as
+                        | "input"
+                        | "approval"
+                        | "choice";
                       patch({
                         ...selected,
-                        config: {
-                          ...selected.config,
-                          interaction: e.target.value as
-                            | "input"
-                            | "approval"
-                            | "choice",
-                        },
-                      } as WorkflowV2Node)
-                    }
+                        config:
+                          interaction === "choice"
+                            ? {
+                                interaction,
+                                prompt: selected.config.prompt,
+                                options: ["Option 1"],
+                              }
+                            : {
+                                interaction,
+                                prompt: selected.config.prompt,
+                                ...(selected.config.input
+                                  ? { input: selected.config.input }
+                                  : {}),
+                              },
+                      } as WorkflowV2Node);
+                    }}
                   >
                     <option value="input">Input</option>
                     <option value="approval">Approval</option>
@@ -397,121 +543,322 @@ export function WorkflowV2Builder(props: {
                       patch({
                         ...selected,
                         config: { ...selected.config, prompt: e.target.value },
-                      })
+                      } as WorkflowV2Node)
                     }
                   />
                 </label>
+                <label className="workflow-field">
+                  <span>Input (optional)</span>
+                  <textarea
+                    value={selected.config.input ?? ""}
+                    onChange={(e) =>
+                      patch({
+                        ...selected,
+                        config: {
+                          ...selected.config,
+                          input: optional(e.target.value),
+                        },
+                      } as WorkflowV2Node)
+                    }
+                  />
+                </label>
+                {selected.config.interaction === "choice" && (
+                  <label className="workflow-field">
+                    <span>Choice options (one per line)</span>
+                    <textarea
+                      value={selected.config.options.join("\n")}
+                      onChange={(e) =>
+                        patch({
+                          ...selected,
+                          config: {
+                            ...selected.config,
+                            options: e.target.value.split("\n").filter(Boolean),
+                          },
+                        } as WorkflowV2Node)
+                      }
+                    />
+                  </label>
+                )}
               </>
             )}
             {selected.role === "orchestrator" && (
-              <p>
-                {selected.config.mode === "loop"
-                  ? `Loop limit: ${selected.config.maxIterations ?? "required"}`
-                  : `Fan-out concurrency: ${selected.config.maxConcurrency ?? "required"}`}
-              </p>
-            )}
-            <fieldset>
-              <legend>Relationships</legend>
-              {definition.relationships
-                .filter((edge) => edge.from === selected.id)
-                .map((edge) => (
-                  <p key={edge.id}>
-                    {edge.when ? String(edge.when.equals) : "then"} →{" "}
-                    {"nodeId" in edge.to ? edge.to.nodeId : edge.to.end}
-                  </p>
-                ))}
-              <label className="workflow-field">
-                <span>Connect to</span>
-                <select
-                  aria-label="Connect selected role to"
-                  defaultValue=""
-                  onChange={(e) => {
-                    if (!e.target.value) return;
-                    const target = e.target.value;
-                    update({
-                      ...definition,
-                      relationships: [
-                        ...definition.relationships,
-                        {
-                          id: `relationship-${selected.id}-${target}-${definition.relationships.length + 1}`,
-                          from: selected.id,
-                          to: { nodeId: target },
-                        },
-                      ],
-                    });
-                    e.currentTarget.value = "";
-                  }}
-                >
-                  <option value="">Choose role…</option>
+              <>
+                <label className="workflow-field">
+                  <span>Mode</span>
+                  <select
+                    value={selected.config.mode}
+                    onChange={(e) =>
+                      changeMode(selected, e.target.value as "loop" | "fanout")
+                    }
+                  >
+                    <option value="fanout">Fan-out</option>
+                    <option value="loop">Loop</option>
+                  </select>
+                </label>
+                <fieldset>
+                  <legend>Managed workers (fixed list)</legend>
                   {definition.nodes
                     .filter(
-                      (n) =>
-                        n.id !== selected.id &&
-                        !("managedBy" in n && n.managedBy),
+                      (node) =>
+                        node.role === "worker" &&
+                        (!node.managedBy || node.managedBy === selected.id),
                     )
-                    .map((n) => (
-                      <option key={n.id} value={n.id}>
-                        {n.name}
-                      </option>
+                    .map((node) => (
+                      <label key={node.id} className="workflow-v2-check">
+                        <input
+                          type="checkbox"
+                          checked={selected.config.agents.includes(node.id)}
+                          disabled={
+                            selected.config.agents.length === 1 &&
+                            selected.config.agents.includes(node.id)
+                          }
+                          onChange={(e) =>
+                            update(
+                              setManagedWorkers(
+                                definition,
+                                selected.id,
+                                e.target.checked
+                                  ? [...selected.config.agents, node.id]
+                                  : selected.config.agents.filter(
+                                      (id) => id !== node.id,
+                                    ),
+                              ),
+                            )
+                          }
+                        />
+                        {node.name}
+                      </label>
                     ))}
-                </select>
-              </label>
-            </fieldset>
-            <details>
-              <summary>Advanced execution settings</summary>
-              <p>
-                Model-backed roles may inherit model, thinking, attempts, and
-                timeout settings.
-              </p>
-            </details>
+                  <p>
+                    Derived fan-out worker count:{" "}
+                    <strong>{selected.config.agents.length}</strong>
+                  </p>
+                </fieldset>
+                {selected.config.mode === "loop" ? (
+                  <>
+                    <label className="workflow-field">
+                      <span>Loop decider</span>
+                      <select
+                        value={selected.config.decider}
+                        onChange={(e) =>
+                          update(
+                            setLoopDecider(
+                              definition,
+                              selected.id,
+                              e.target.value,
+                            ),
+                          )
+                        }
+                      >
+                        {definition.nodes
+                          .filter(
+                            (node) =>
+                              node.role === "decider" &&
+                              (!node.managedBy ||
+                                node.managedBy === selected.id),
+                          )
+                          .map((node) => (
+                            <option key={node.id} value={node.id}>
+                              {node.name}
+                            </option>
+                          ))}
+                      </select>
+                    </label>
+                    <label className="workflow-field">
+                      <span>Maximum iterations</span>
+                      <input
+                        type="number"
+                        min="1"
+                        value={selected.config.maxIterations}
+                        onChange={(e) =>
+                          patch({
+                            ...selected,
+                            config: {
+                              ...selected.config,
+                              maxIterations: Number(e.target.value),
+                            },
+                          } as WorkflowV2Node)
+                        }
+                      />
+                    </label>
+                  </>
+                ) : (
+                  <>
+                    <label className="workflow-field">
+                      <span>Maximum concurrency</span>
+                      <input
+                        type="number"
+                        min="1"
+                        value={selected.config.maxConcurrency}
+                        onChange={(e) =>
+                          patch({
+                            ...selected,
+                            config: {
+                              ...selected.config,
+                              maxConcurrency: Number(e.target.value),
+                            },
+                          } as WorkflowV2Node)
+                        }
+                      />
+                    </label>
+                    <label className="workflow-field">
+                      <span>Completion policy</span>
+                      <select
+                        value={selected.config.completion}
+                        onChange={(e) =>
+                          patch({
+                            ...selected,
+                            config: {
+                              ...selected.config,
+                              completion: e.target.value as "all" | "any",
+                            },
+                          } as WorkflowV2Node)
+                        }
+                      >
+                        <option value="all">All workers</option>
+                        <option value="any">Any worker</option>
+                      </select>
+                    </label>
+                  </>
+                )}
+              </>
+            )}
+            {!selected.managedBy && (
+              <fieldset>
+                <legend>Relationships</legend>
+                {definition.relationships
+                  .filter((edge) => edge.from === selected.id)
+                  .map((edge) => (
+                    <p key={edge.id}>
+                      {edge.when ? String(edge.when.equals) : "then"} →{" "}
+                      {"nodeId" in edge.to ? edge.to.nodeId : edge.to.end}{" "}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          update({
+                            ...definition,
+                            relationships: definition.relationships.filter(
+                              (item) => item.id !== edge.id,
+                            ),
+                          })
+                        }
+                      >
+                        Remove
+                      </button>
+                    </p>
+                  ))}
+                {selected.role === "decider" ? (
+                  <>
+                    <label className="workflow-field">
+                      <span>
+                        {selected.config.trueLabel ?? "Yes"} destination
+                      </span>
+                      <select
+                        aria-label="True destination"
+                        value=""
+                        onChange={(e) => {
+                          if (e.target.value)
+                            relationship(selected.id, true, e.target.value);
+                        }}
+                      >
+                        <option value="">Choose destination…</option>
+                        {destinationOptions()}
+                      </select>
+                    </label>
+                    <label className="workflow-field">
+                      <span>
+                        {selected.config.falseLabel ?? "No"} destination
+                      </span>
+                      <select
+                        aria-label="False destination"
+                        value=""
+                        onChange={(e) => {
+                          if (e.target.value)
+                            relationship(selected.id, false, e.target.value);
+                        }}
+                      >
+                        <option value="">Choose destination…</option>
+                        {destinationOptions()}
+                      </select>
+                    </label>
+                  </>
+                ) : (
+                  <label className="workflow-field">
+                    <span>Connect to</span>
+                    <select
+                      aria-label="Connect selected role to"
+                      value=""
+                      onChange={(e) => {
+                        if (e.target.value)
+                          relationship(selected.id, undefined, e.target.value);
+                      }}
+                    >
+                      <option value="">Choose destination…</option>
+                      {destinationOptions()}
+                    </select>
+                  </label>
+                )}
+              </fieldset>
+            )}
+            {selected.role !== "human" && (
+              <details>
+                <summary>Advanced execution settings</summary>
+                {(
+                  [
+                    "model",
+                    "thinking",
+                    "maxAttempts",
+                    "timeoutSeconds",
+                  ] as const
+                ).map((field) => (
+                  <label className="workflow-field" key={field}>
+                    <span>
+                      {field === "maxAttempts"
+                        ? "Max attempts"
+                        : field === "timeoutSeconds"
+                          ? "Timeout seconds"
+                          : field}
+                    </span>
+                    <input
+                      type={
+                        field === "maxAttempts" || field === "timeoutSeconds"
+                          ? "number"
+                          : "text"
+                      }
+                      value={selected.execution?.[field] ?? ""}
+                      onChange={(e) => {
+                        const value =
+                          field === "maxAttempts" || field === "timeoutSeconds"
+                            ? e.target.value
+                              ? Number(e.target.value)
+                              : undefined
+                            : optional(e.target.value);
+                        patch({
+                          ...selected,
+                          execution: { ...selected.execution, [field]: value },
+                        } as WorkflowV2Node);
+                      }}
+                    />
+                  </label>
+                ))}
+              </details>
+            )}
           </aside>
         </div>
       )}
       {view === "graph" && (
-        <section
-          className="workflow-v2-graph"
-          aria-label="Read-only workflow graph"
-        >
-          <h3>Workflow graph</h3>
-          <p>Derived and read-only. Use Build to change relationships.</p>
-          <ul>
-            {definition.nodes
-              .filter((n) => !("managedBy" in n && n.managedBy))
-              .map((node) => (
-                <li key={node.id}>
-                  <button
-                    type="button"
-                    aria-current={selected.id === node.id}
-                    onClick={() => {
-                      setSelectedId(node.id);
-                      changeView("build");
-                    }}
-                  >
-                    <strong>{node.name}</strong> (
-                    {rolePresentation[node.role].label})
-                  </button>
-                  {edges
-                    .filter((e) => e.from === node.id)
-                    .map((e) => (
-                      <span key={`${e.from}-${e.to}-${e.label}`}>
-                        {" "}
-                        {e.label} →{" "}
-                        {definition.nodes.find((n) => n.id === e.to)?.name ??
-                          "end"}
-                      </span>
-                    ))}
-                </li>
-              ))}
-          </ul>
-        </section>
+        <WorkflowV2Graph
+          definition={definition}
+          selectedNodeId={selected.id}
+          onSelectNode={(nodeId) => {
+            setSelectedId(nodeId);
+            setView("build");
+          }}
+        />
       )}
       {view === "json" && (
         <section className="workflow-v2-json">
           <h3>JSON draft</h3>
-          <p>
-            Parse, schema, and semantic validation occur before Apply. Invalid
-            drafts never replace the last valid workflow.
-          </p>
           <textarea
             aria-label="Workflow JSON draft"
             rows={22}
@@ -539,13 +886,8 @@ export function WorkflowV2Builder(props: {
               onClick={() => {
                 try {
                   setDraft(JSON.stringify(JSON.parse(draft), null, 2));
-                  setJsonError(undefined);
-                } catch (error) {
-                  setJsonError(
-                    error instanceof Error
-                      ? `Invalid JSON: ${error.message}`
-                      : "Invalid JSON.",
-                  );
+                } catch {
+                  setJsonError("Invalid JSON.");
                 }
               }}
             >
@@ -554,7 +896,13 @@ export function WorkflowV2Builder(props: {
             <button
               type="button"
               className="workflow-primary-button"
-              onClick={apply}
+              onClick={() => {
+                const result = validateJsonDraft(draft);
+                if (result.definition) {
+                  update(result.definition);
+                  setSelectedId(result.definition.entryNodeId);
+                } else setJsonError(result.error);
+              }}
             >
               Apply
             </button>

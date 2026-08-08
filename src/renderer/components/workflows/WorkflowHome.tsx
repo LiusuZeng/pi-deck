@@ -4,6 +4,7 @@ import {
   useState,
   type FormEvent,
   type ReactElement,
+  type ReactNode,
 } from "react";
 import type {
   WorkflowInputDefinition,
@@ -160,6 +161,8 @@ export function WorkflowHome(props: {
   templates: WorkflowTemplate[];
   workspaceName?: string;
   recentRuns?: WorkflowRun[];
+  additionalWorkflowCount?: number;
+  additionalWorkflowSection?: ReactNode;
   onCreate(): void;
   onEdit(template: WorkflowTemplate): void;
   onStart(
@@ -255,14 +258,17 @@ export function WorkflowHome(props: {
             <span className="workflow-kicker">Reusable plans</span>
             <h3>Your agent workflows</h3>
           </div>
-          <span className="workflow-count">{props.templates.length}</span>
+          <span className="workflow-count">
+            {props.templates.length + (props.additionalWorkflowCount ?? 0)}
+          </span>
         </div>
         {quickStartError ? (
           <p className="workflow-error" role="alert">
             {quickStartError}
           </p>
         ) : null}
-        {props.templates.length === 0 ? (
+        {props.templates.length === 0 &&
+        (props.additionalWorkflowCount ?? 0) === 0 ? (
           <div className="workflow-empty-state">
             <h3>Build a repeatable agent handoff</h3>
             <p>
@@ -270,7 +276,7 @@ export function WorkflowHome(props: {
               transitions between agent sessions.
             </p>
           </div>
-        ) : (
+        ) : props.templates.length > 0 ? (
           <div className="workflow-template-grid">
             {props.templates.map((template) => (
               <article
@@ -322,7 +328,8 @@ export function WorkflowHome(props: {
               </article>
             ))}
           </div>
-        )}
+        ) : null}
+        {props.additionalWorkflowSection}
       </section>
       <section className="workflow-runs-section">
         <div className="workflow-section-heading">

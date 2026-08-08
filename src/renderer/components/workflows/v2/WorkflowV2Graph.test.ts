@@ -1,0 +1,183 @@
+/** @vitest-environment jsdom */
+import { act, createElement } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { WorkflowDefinition } from "../../../../shared/workflowV2Schemas.js";
+import { WorkflowV2Graph } from "./WorkflowV2Graph.js";
+
+const semanticGraphDefinition: WorkflowDefinition = {
+  format: "pi-deck.agent-workflow",
+  schemaVersion: 2,
+  id: "semantic-graph",
+  revision: 1,
+  name: "Semantic graph",
+  inputs: [],
+  entryNodeId: "prepare",
+  nodes: [
+    {
+      id: "prepare",
+      name: "Prepare",
+      role: "worker",
+      config: { instructions: "Prepare." },
+    },
+    {
+      id: "iterate",
+      name: "Iterate",
+      role: "orchestrator",
+      config: {
+        mode: "loop",
+        agents: ["implement"],
+        decider: "ready",
+        maxIterations: 3,
+      },
+    },
+    {
+      id: "implement",
+      name: "Implement",
+      role: "worker",
+      managedBy: "iterate",
+      config: { instructions: "Implement." },
+    },
+    {
+      id: "ready",
+      name: "Ready?",
+      role: "decider",
+      managedBy: "iterate",
+      config: { question: "Ready?" },
+    },
+    {
+      id: "parallel",
+      name: "Parallel review",
+      role: "orchestrator",
+      config: {
+        mode: "fanout",
+        agents: ["review", "test"],
+        maxConcurrency: 1,
+        completion: "any",
+      },
+    },
+    {
+      id: "review",
+      name: "Review",
+      role: "worker",
+      managedBy: "parallel",
+      config: { instructions: "Review." },
+    },
+    {
+      id: "test",
+      name: "Test",
+      role: "worker",
+      managedBy: "parallel",
+      config: { instructions: "Test." },
+    },
+    {
+      id: "approve",
+      name: "Approve",
+      role: "human",
+      config: { interaction: "approval", prompt: "Approve?" },
+    },
+    {
+      id: "decide",
+      name: "Ship?",
+      role: "decider",
+      config: { question: "Ship?", trueLabel: "Ship", falseLabel: "Stop" },
+    },
+  ],
+  relationships: [
+    { id: "prepare-iterate", from: "prepare", to: { nodeId: "iterate" } },
+    { id: "iterate-parallel", from: "iterate", to: { nodeId: "parallel" } },
+    { id: "parallel-approve", from: "parallel", to: { nodeId: "approve" } },
+    {
+      id: "approve-decide",
+      from: "approve",
+      when: { equals: true },
+      to: { nodeId: "decide" },
+    },
+    {
+      id: "approve-stop",
+      from: "approve",
+      when: { equals: false },
+      to: { end: "rejected" },
+    },
+    {
+      id: "decide-ship",
+      from: "decide",
+      when: { equals: true },
+      to: { end: "completed" },
+    },
+    {
+      id: "decide-stop",
+      from: "decide",
+      when: { equals: false },
+      to: { end: "stopped" },
+    },
+  ],
+};
+
+describe("WorkflowV2Graph", () => {
+  let root: Root | undefined;
+  let container: HTMLDivElement | undefined;
+  const onSelectNode = vi.fn();
+
+  afterEach(() => {
+    act(() => root?.unmount());
+    container?.remove();
+    onSelectNode.mockReset();
+  });
+
+  const render = () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    act(() =>
+      root?.render(
+        createElement(WorkflowV2Graph, {
+          definition: semanticGraphDefinition,
+          selectedNodeId: "prepare",
+          onSelectNode,
+        }),
+      ),
+    );
+  };
+
+  it("renders semantic loop, fan-out, human, decision routes, and terminals", () => {
+    render();
+    expect(container!.textContent).toContain("maximum 3 iterations");
+    expect(container!.textContent).toContain("completion Decider ready");
+    expect(container!.textContent).toContain("2 Workers");
+    expect(container!.textContent).toContain("maximum concurrency 1");
+    expect(container!.textContent).toContain("completes when any");
+    expect(container!.textContent).toContain("Human interaction: approval");
+    expect(container!.textContent).toContain("true (Ship)");
+    expect(container!.textContent).toContain("false (Stop)");
+    expect(
+      container!.querySelector('[aria-label="Terminal outcomes"]')?.textContent,
+    ).toContain("completed");
+    expect(
+      container!.querySelector('[aria-label="Managed roles for Iterate"]')
+        ?.textContent,
+    ).toContain("Implement");
+  });
+
+  it("uses native keyboard-selectable buttons to select top-level and managed nodes", () => {
+    render();
+    const managed = [
+      ...container!.querySelectorAll<HTMLButtonElement>("button"),
+    ].find((button) => button.textContent === "Implement")!;
+    expect(managed).not.toBeNull();
+    act(() => {
+      managed.focus();
+      managed.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+      managed.click();
+    });
+    expect(document.activeElement).toBe(managed);
+    expect(onSelectNode).toHaveBeenCalledWith("implement");
+    expect(
+      container!
+        .querySelector<HTMLButtonElement>("button")
+        ?.getAttribute("aria-pressed"),
+    ).toBe("true");
+  });
+});

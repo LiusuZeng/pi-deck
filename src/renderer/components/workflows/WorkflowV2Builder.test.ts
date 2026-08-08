@@ -6,7 +6,9 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkflowV2Builder } from "./WorkflowV2Builder.js";
 import {
+  addRole,
   defaultV2Definition,
+  setManagedWorkers,
   validateJsonDraft,
 } from "../../workflows/workflowV2.js";
 
@@ -55,6 +57,41 @@ describe("WorkflowV2Builder", () => {
         schemaVersion: 2,
         id: expect.stringMatching(/^workflow-/),
       }),
+    );
+  });
+
+  it("creates a schema-valid fixed-list fan-out canonical document", () => {
+    const added = addRole(defaultV2Definition(), "orchestrator").definition;
+    const canonical = {
+      ...added,
+      relationships: [
+        { id: "start", from: "worker-1", to: { nodeId: "orchestrator-2" } },
+        { id: "end", from: "orchestrator-2", to: { end: "completed" } },
+      ],
+    };
+    expect(validateJsonDraft(JSON.stringify(canonical))).toMatchObject({
+      definition: expect.anything(),
+    });
+    const orchestrator = canonical.nodes.find(
+      (node) => node.role === "orchestrator",
+    )!;
+    const worker = canonical.nodes.find(
+      (node) => node.managedBy === orchestrator.id,
+    )!;
+    expect(orchestrator.config.agents).toEqual([worker.id]);
+  });
+
+  it("updates ownership without mutating unrelated nodes", () => {
+    const withWorker = addRole(defaultV2Definition(), "worker").definition;
+    const withOrchestrator = addRole(withWorker, "orchestrator").definition;
+    const result = setManagedWorkers(withOrchestrator, "orchestrator-3", [
+      "worker-2",
+    ]);
+    expect(result.nodes.find((node) => node.id === "worker-1")).toEqual(
+      withOrchestrator.nodes.find((node) => node.id === "worker-1"),
+    );
+    expect(result.nodes.find((node) => node.id === "worker-2")?.managedBy).toBe(
+      "orchestrator-3",
     );
   });
 

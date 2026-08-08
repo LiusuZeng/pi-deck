@@ -102,6 +102,131 @@ describe("v2 occurrence runtime", () => {
     expect(run.status).toBe("completed");
   });
 
+  it("completes all fan-out children within bounded concurrency and routes once", () => {
+    const definition: WorkflowRoleDefinition = {
+      ...base,
+      entryNodeId: "fan",
+      nodes: [
+        {
+          id: "fan",
+          name: "Fan",
+          role: "orchestrator",
+          config: {
+            mode: "fanout",
+            agents: ["a", "b", "c"],
+            maxConcurrency: 2,
+            completion: "all",
+          },
+        },
+        ...["a", "b", "c"].map((id) => ({
+          id,
+          name: id.toUpperCase(),
+          role: "worker" as const,
+          managedBy: "fan",
+          config: { instructions: id },
+        })),
+        {
+          id: "after",
+          name: "After",
+          role: "worker",
+          config: { instructions: "after" },
+        },
+      ],
+      relationships: [
+        { id: "fan-after", from: "fan", to: { nodeId: "after" } },
+      ],
+    };
+    let run = createWorkflowRoleRun(definition, "workspace", {}, 1);
+    run = startWorkflowOrchestrator(run, run.occurrences[0]!.id, 2);
+    let ready = readyWorkflowOccurrences(run);
+    expect(ready.map((item) => item.nodeId).sort()).toEqual(["a", "b"]);
+    for (const [index, child] of ready.entries())
+      run = startWorkflowOccurrence(
+        run,
+        child.id,
+        child.nodeId,
+        undefined,
+        3 + index,
+      );
+    run = completeWorkflowOccurrence(run, ready[0]!.id, "A", 5);
+    ready = readyWorkflowOccurrences(run);
+    expect(ready.map((item) => item.nodeId)).toEqual(["c"]);
+    run = startWorkflowOccurrence(run, ready[0]!.id, "c", undefined, 6);
+    const b = run.occurrences.find(
+      (item) => item.nodeId === "b" && item.status === "running",
+    )!;
+    run = completeWorkflowOccurrence(run, b.id, "B", 7);
+    run = completeWorkflowOccurrence(run, ready[0]!.id, "C", 8);
+    expect(run.status).toBe("waiting");
+    expect(
+      run.occurrences.filter((item) => item.nodeId === "after"),
+    ).toHaveLength(1);
+    expect(readyWorkflowOccurrences(run).map((item) => item.nodeId)).toEqual([
+      "after",
+    ]);
+  });
+
+  it("finishes fan-out any once and ignores a late running sibling completion", () => {
+    const definition: WorkflowRoleDefinition = {
+      ...base,
+      entryNodeId: "fan",
+      nodes: [
+        {
+          id: "fan",
+          name: "Fan",
+          role: "orchestrator",
+          config: {
+            mode: "fanout",
+            agents: ["a", "b", "c"],
+            maxConcurrency: 2,
+            completion: "any",
+          },
+        },
+        ...["a", "b", "c"].map((id) => ({
+          id,
+          name: id.toUpperCase(),
+          role: "worker" as const,
+          managedBy: "fan",
+          config: { instructions: id },
+        })),
+        {
+          id: "after",
+          name: "After",
+          role: "worker",
+          config: { instructions: "after" },
+        },
+      ],
+      relationships: [
+        { id: "fan-after", from: "fan", to: { nodeId: "after" } },
+      ],
+    };
+    let run = createWorkflowRoleRun(definition, "workspace", {}, 1);
+    run = startWorkflowOrchestrator(run, run.occurrences[0]!.id, 2);
+    const [a, b] = readyWorkflowOccurrences(run);
+    run = startWorkflowOccurrence(run, a!.id, "a", undefined, 3);
+    run = startWorkflowOccurrence(run, b!.id, "b", undefined, 4);
+    run = completeWorkflowOccurrence(run, a!.id, "A", 5);
+    const fan = run.occurrences.find((item) => item.nodeId === "fan")!;
+    expect(fan.status).toBe("completed");
+    expect(fan.output).toEqual(["A"]);
+    expect(run.occurrences.find((item) => item.nodeId === "c")?.status).toBe(
+      "skipped",
+    );
+    expect(
+      run.occurrences.filter((item) => item.nodeId === "after"),
+    ).toHaveLength(1);
+    run = completeWorkflowOccurrence(run, b!.id, "B", 6);
+    expect(run.occurrences.find((item) => item.id === fan.id)?.output).toEqual([
+      "A",
+    ]);
+    expect(
+      run.occurrences.filter((item) => item.nodeId === "after"),
+    ).toHaveLength(1);
+    expect(run.occurrences.find((item) => item.id === b!.id)?.status).toBe(
+      "completed",
+    );
+  });
+
   it("fans out workers with distinct child occurrences", () => {
     const definition: WorkflowRoleDefinition = {
       ...base,

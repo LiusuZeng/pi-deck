@@ -323,6 +323,10 @@ function advanceOrchestrator(
   now: number,
 ): WorkflowRoleRun {
   const orchestrator = occurrenceOf(run, orchestratorId);
+  // Fan-out `any` deliberately lets already-started siblings finish because the
+  // runtime owns no session-cancellation primitive. Their terminal events must
+  // not advance an Orchestrator that was completed by an earlier sibling.
+  if (orchestrator.status !== "running") return run;
   const config = node(run.definition, orchestrator.nodeId).config as Extract<
     WorkflowV2Node,
     { role: "orchestrator" }
