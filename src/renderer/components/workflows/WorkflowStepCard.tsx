@@ -280,29 +280,6 @@ export function WorkflowStepCard(props: {
                   </select>
                 </label>
               </div>
-              <fieldset className="workflow-policy-fieldset">
-                <legend>Include with this agent</legend>
-                <label className="workflow-checkbox">
-                  <input
-                    type="checkbox"
-                    aria-label="Include shared workflow context"
-                    checked={props.step.inputPolicy.includeWorkflowContext}
-                    onChange={(event) =>
-                      props.onChange?.({
-                        inputPolicy: {
-                          ...props.step.inputPolicy,
-                          includeWorkflowContext: event.target.checked,
-                        },
-                      })
-                    }
-                  />
-                  Shared workflow context
-                </label>
-                <p className="workflow-help">
-                  Add the shared context when this agent needs the workflow-wide
-                  instructions.
-                </p>
-              </fieldset>
             </>
           ) : (
             <>
@@ -310,7 +287,7 @@ export function WorkflowStepCard(props: {
                 <span className="workflow-field-label">
                   {props.run?.renderedPrompt !== undefined
                     ? "Rendered prompt"
-                    : "Instructions and handoffs"}
+                    : "Instructions"}
                 </span>
                 {props.run?.renderedPrompt !== undefined ? (
                   <pre>{props.run.renderedPrompt || "No rendered prompt."}</pre>

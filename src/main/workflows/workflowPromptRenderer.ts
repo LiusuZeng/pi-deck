@@ -100,7 +100,7 @@ function renderWorkflowContext(
   inputs: Record<string, string>,
 ): string {
   const lines: string[] = [];
-  if (context.prompt !== undefined && context.prompt.trim().length > 0) {
+  if (context.prompt !== undefined) {
     addLine(lines, "Prompt", context.prompt);
     addLine(lines, "Don't do", context.doNotDo);
   } else {
