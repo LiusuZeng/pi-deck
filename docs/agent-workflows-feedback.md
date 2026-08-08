@@ -1,7 +1,7 @@
 # Agent Workflows — Product Feedback and Continuation Notes
 
-**Status:** prompt-first v1 simplification integrated locally; final E2E/review pending  
-**Feedback captured:** 2026-08-07  
+**Status:** prompt-first v1 simplification integrated locally; final E2E/review pending<br>
+**Feedback captured:** 2026-08-07<br>
 **Continuation branch:** `dev/agent-workflows-prompt-first`
 
 This is the working product-feedback log for Agent Workflows. Keep new UX findings,

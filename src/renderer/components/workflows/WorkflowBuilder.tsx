@@ -35,6 +35,15 @@ function newStep(index: number): WorkflowStepDefinition {
   };
 }
 
+function newInput(index: number): WorkflowInputDefinition {
+  return {
+    id: `input-${Date.now()}-${index}`,
+    label: `Run prompt ${index + 1}`,
+    type: "text",
+    required: true,
+  };
+}
+
 function branchTargetStepIds(transitions: WorkflowTransition[]): Set<string> {
   const targetIds = new Set<string>();
   for (const transition of transitions) {
@@ -213,6 +222,13 @@ export function WorkflowBuilder(props: {
 
   const updateContext = (context: WorkflowContext) =>
     setDefinition((current) => ({ ...current, context }));
+
+  const addInput = () => {
+    setDefinition((current) => ({
+      ...current,
+      inputs: [...current.inputs, newInput(current.inputs.length)],
+    }));
+  };
 
   const addStep = () => {
     setDefinition((current) => {
@@ -605,13 +621,22 @@ export function WorkflowBuilder(props: {
           <span className="workflow-kicker">Agent steps</span>
           <h3>What should Pi agents do?</h3>
         </div>
-        <button
-          type="button"
-          className="workflow-secondary-button"
-          onClick={addStep}
-        >
-          + Add agent step
-        </button>
+        <div className="workflow-heading-actions">
+          <button
+            type="button"
+            className="workflow-secondary-button"
+            onClick={addInput}
+          >
+            + Add run prompt
+          </button>
+          <button
+            type="button"
+            className="workflow-secondary-button"
+            onClick={addStep}
+          >
+            + Add agent step
+          </button>
+        </div>
       </div>
       <div className="workflow-flow-list">
         {definition.steps.map((step, index) => (

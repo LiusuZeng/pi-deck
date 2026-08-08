@@ -16,7 +16,7 @@ import {
 } from "./WorkflowPromptEditor.js";
 
 export interface WorkflowModelChoice {
-  provider: string;
+  provider?: string;
   id: string;
   label: string;
   disabled?: boolean;
@@ -45,7 +45,7 @@ function modelChoiceValue(
     | Pick<WorkflowModelOverride, "provider" | "modelId">
     | WorkflowModelChoice,
 ): string {
-  if ("id" in model) return `${model.provider}\u0000${model.id}`;
+  if ("id" in model) return `${model.provider ?? ""}\u0000${model.id}`;
   return `${model.provider ?? ""}\u0000${model.modelId ?? ""}`;
 }
 
@@ -234,7 +234,9 @@ export function WorkflowStepCard(props: {
                           selected === undefined
                             ? undefined
                             : {
-                                provider: selected.provider,
+                                ...(selected.provider
+                                  ? { provider: selected.provider }
+                                  : {}),
                                 modelId: selected.id,
                               },
                       });
