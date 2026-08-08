@@ -1,6 +1,6 @@
 # Agent Workflows — Product Feedback and Continuation Notes
 
-**Status:** prompt-first v1 simplification integrated locally; final E2E/review pending<br>
+**Status:** prompt-first v1 simplification integrated, validated, and pushed<br>
 **Feedback captured:** 2026-08-07<br>
 **Continuation branch:** `dev/agent-workflows-prompt-first`
 
@@ -36,7 +36,7 @@ language.
 - [x] Make model and thinking overrides dropdowns using session-style choices.
 - [x] Limit new run inputs to text/prompt values; defer path/file/link UX.
 - [x] Avoid the empty second “Start workflow” screen for no-input workflows.
-- [ ] Recheck copy, spacing, and mobile layout after the simplification.
+- [x] Recheck copy, spacing, and mobile layout after the simplification.
 - [x] Add/update renderer and backend compatibility tests.
 - [x] Push the continuation branch and isolated implementation branches; run final validation.
 
@@ -136,7 +136,9 @@ The isolated implementation branches are also pushed for review/recovery:
 - `origin/aw/v1-contracts`
 - `origin/aw/v1-app`
 
-Current focused validation after integration: 372 tests passed, 2 intentional
-TODOs; typecheck, build, and format passed. Full Playwright E2E and final UI
-review remain to be recorded. Do not push unrelated site/screenshot work; that
-work remains isolated in the local `pi-deck-site-capture` worktree.
+Final validation after integration: 372 tests passed, 2 intentional TODOs;
+typecheck, build, format, and diff checks passed. Full Playwright E2E passed 35
+with 3 environment-skipped. Backend compatibility review approved; the final
+UX blocker about the shared prompt label was fixed and pushed in `3d6e024`.
+Do not push unrelated site/screenshot work; that work remains isolated in the
+local `pi-deck-site-capture` worktree.
