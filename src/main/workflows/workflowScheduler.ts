@@ -14,6 +14,7 @@ import {
   queueWorkflowOccurrence,
   readyWorkflowOccurrences,
   startWorkflowOccurrence,
+  startWorkflowOrchestrator,
   type WorkflowRoleRun,
 } from "./workflowV2Runtime.js";
 import type {
@@ -767,98 +768,38 @@ function findFinalAssistant(
  */
 export class WorkflowOccurrenceScheduler {
   private readonly runs = new Map<string, WorkflowRoleRun>();
+  /** A runtime is owned by one occurrence; deleting it before mutation makes late events harmless. */
   private readonly active = new Map<string, { runId: string; occurrenceId: string }>();
   private readonly now: () => number;
-
-  constructor(private readonly dependencies: Omit<WorkflowSchedulerDependencies, "getRun" | "persist" | "emit"> & {
-    getRun?(runId: string): Promise<WorkflowRoleRun>;
-    persist(run: WorkflowRoleRun): Promise<WorkflowRoleRun>;
-    emit(run: WorkflowRoleRun): void;
-  }) { this.now = dependencies.now ?? (() => Date.now()); }
-
-  async schedule(run: WorkflowRoleRun): Promise<WorkflowRoleRun> {
-    // Queued means an allocation was unavailable, never an intentional pause.
-    // A later schedule call (normally after worker_exit) retries it.
-    const resumable = run.occurrences.some(item => item.status === "queued")
-      ? { ...run, occurrences: run.occurrences.map(item => item.status === "queued" ? { ...item, status: "ready" as const, updatedAtMs: this.now() } : item), status: "waiting" as const, updatedAtMs: this.now() }
-      : run;
-    this.runs.set(resumable.id, resumable);
-    return this.pump(resumable.id);
-  }
-
+  constructor(private readonly dependencies: Omit<WorkflowSchedulerDependencies, "getRun" | "persist" | "emit"> & { getRun?(runId: string): Promise<WorkflowRoleRun>; persist(run: WorkflowRoleRun): Promise<WorkflowRoleRun>; emit(run: WorkflowRoleRun): void }) { this.now = dependencies.now ?? (() => Date.now()); }
+  async schedule(run: WorkflowRoleRun): Promise<WorkflowRoleRun> { const now = this.now();
+    // Only scheduler-capacity queues are revived here. Fan-out queues remain
+    // owned by their Orchestrator, which releases them as concurrency slots open.
+    const resumable = { ...run, occurrences: run.occurrences.map(item => item.status === "queued" && !item.parentOrchestratorRunId ? { ...item, status: "ready" as const, updatedAtMs: now } : item), updatedAtMs: now };
+    this.runs.set(resumable.id, resumable); return this.pump(resumable.id); }
   async handleRuntimeEvent(event: WorkflowRuntimeEvent): Promise<void> {
-    const active = this.active.get(event.runtimeId);
-    if (!active || event.type !== "agent_end") return;
+    if (event.type !== "agent_end") return;
+    const owner = this.active.get(event.runtimeId); if (!owner) return;
     this.active.delete(event.runtimeId);
-    try {
-      const run = await this.current(active.runId);
-      if (!run) return;
-      if (event.status === "error" || event.status === "aborted") {
-        await this.save(failWorkflowOccurrence(run, active.occurrenceId, typeof event.error === "string" ? event.error : "Pi worker failed.", this.now()));
-        return;
-      }
-      const snapshot = await this.dependencies.getSnapshot(event.runtimeId);
-      const answer = findFinalAssistant(snapshot.messages);
-      const occurrence = run.occurrences.find(item => item.id === active.occurrenceId);
-      if (!occurrence || answer?.error || answer?.content === undefined) {
-        await this.save(failWorkflowOccurrence(run, active.occurrenceId, answer?.errorMessage ?? "Pi returned no assistant result.", this.now()));
-        return;
-      }
-      if (occurrence.role === "decider") {
-        const decision = parseConditionDecision(answer.content);
-        if (!decision) await this.save(failWorkflowOccurrence(run, occurrence.id, "Decider returned malformed output; expected strict yes/no/unsure JSON.", this.now()));
-        else await this.save(completeWorkflowOccurrence(run, occurrence.id, decision, this.now()));
-      } else {
-        const transcript = renderWorkflowTranscript(snapshot.messages);
-        await this.save(completeWorkflowOccurrence(run, occurrence.id, {
-          finalAnswer: answer.content,
-          ...(transcript === undefined ? {} : { transcript }),
-        }, this.now()));
-      }
-    } finally {
-      await this.closeQuietly(event.runtimeId);
-      await this.pump(active.runId);
-    }
+    try { const run = await this.current(owner.runId); if (!run) return; const occurrence = run.occurrences.find(item => item.id === owner.occurrenceId); if (!occurrence || occurrence.runtimeId !== event.runtimeId || occurrence.status !== "running") return;
+      if (event.status === "error" || event.status === "aborted") { await this.save(failWorkflowOccurrence(run, occurrence.id, String(event.error ?? "Pi worker failed."), this.now())); return; }
+      const answer = findFinalAssistant((await this.dependencies.getSnapshot(event.runtimeId)).messages);
+      if (!answer?.content || answer.error) { await this.save(failWorkflowOccurrence(run, occurrence.id, answer?.errorMessage ?? "Pi returned no assistant result.", this.now())); return; }
+      if (occurrence.role === "decider") { const parsed = answer.content.trim(); if (parsed !== "true" && parsed !== "false") await this.save(failWorkflowOccurrence(run, occurrence.id, "Decider returned malformed output; expected strict boolean.", this.now())); else await this.save(completeWorkflowOccurrence(run, occurrence.id, parsed === "true", this.now())); }
+      else await this.save(completeWorkflowOccurrence(run, occurrence.id, answer.content, this.now()));
+    } finally { await this.closeQuietly(event.runtimeId); await this.pump(owner.runId); }
   }
-
-  private async pump(runId: string): Promise<WorkflowRoleRun> {
-    let run = await this.current(runId);
-    if (!run || ["stopped", "completed", "failed"].includes(run.status)) return run!;
-    for (const occurrence of readyWorkflowOccurrences(run)) {
-      // Persist the queued allocation outcome so a crash cannot duplicate a
-      // fan-out occurrence before it has acquired a worker.
-      try {
-        const session = await this.dependencies.createSession(run.workspaceId);
-        const prompt = renderWorkflowOccurrencePrompt(run, occurrence);
-        run = await this.save(startWorkflowOccurrence(run, occurrence.id, session.runtimeId, prompt, this.now()));
-        this.active.set(session.runtimeId, { runId, occurrenceId: occurrence.id });
-        try {
-          const node = run.definition.nodes.find(item => item.id === occurrence.nodeId);
-          if (node?.role === "worker" && this.dependencies.configureSession && (node.modelOverride || node.thinkingOverride)) {
-            await this.dependencies.configureSession(session.runtimeId, {
-              ...(node.modelOverride === undefined ? {} : { model: {
-                ...(node.modelOverride.provider === undefined ? {} : { provider: node.modelOverride.provider }),
-                ...(node.modelOverride.modelId === undefined ? {} : { modelId: node.modelOverride.modelId }),
-              } }),
-              ...(node.thinkingOverride === undefined ? {} : { thinkingLevel: node.thinkingOverride }),
-            });
-          }
-          await this.dependencies.prompt(session.runtimeId, prompt); }
-        catch (error) {
-          this.active.delete(session.runtimeId);
-          run = await this.save(failWorkflowOccurrence(run, occurrence.id, error instanceof Error ? error.message : String(error), this.now()));
-          await this.closeQuietly(session.runtimeId);
-        }
-      } catch (error) {
-        if (isCapacityError(error)) run = await this.save(queueWorkflowOccurrence(run, occurrence.id, this.now()));
-        else run = await this.save(failWorkflowOccurrence(run, occurrence.id, error instanceof Error ? error.message : String(error), this.now()));
-      }
+  private async pump(runId: string): Promise<WorkflowRoleRun> { let run = await this.current(runId); if (!run || ["stopped", "completed", "failed"].includes(run.status)) return run!;
+    let advanced = false;
+    for (const occurrence of readyWorkflowOccurrences(run)) { if (occurrence.role === "orchestrator") { run = await this.save(startWorkflowOrchestrator(run, occurrence.id, this.now())); advanced = true; continue; } if (occurrence.role === "human") continue;
+      let runtimeId: string | undefined;
+      try { const session = await this.dependencies.createSession(run.workspaceId); runtimeId = session.runtimeId; const prompt = renderWorkflowOccurrencePrompt(run, occurrence); run = await this.save(startWorkflowOccurrence(run, occurrence.id, runtimeId, session.state.sessionId, this.now())); this.active.set(runtimeId, { runId, occurrenceId: occurrence.id }); const node = run.definition.nodes.find(item => item.id === occurrence.nodeId); if (node && node.role !== "human" && node.role !== "orchestrator" && node.execution && this.dependencies.configureSession) await this.dependencies.configureSession(runtimeId, { ...(node.execution.model ? { model: { modelId: node.execution.model } } : {}), ...(node.execution.thinking ? { thinkingLevel: node.execution.thinking } : {}) }); await this.dependencies.prompt(runtimeId, prompt); }
+      catch (error) { if (runtimeId) { this.active.delete(runtimeId); await this.closeQuietly(runtimeId); } run = await this.save(isCapacityError(error) ? queueWorkflowOccurrence(run, occurrence.id, this.now()) : failWorkflowOccurrence(run, occurrence.id, error instanceof Error ? error.message : String(error), this.now())); }
     }
-    return run;
-  }
+    return advanced && readyWorkflowOccurrences(run).length > 0 ? this.pump(runId) : run; }
   private async current(id: string): Promise<WorkflowRoleRun | undefined> { const run = this.dependencies.getRun ? await this.dependencies.getRun(id) : this.runs.get(id); if (run) this.runs.set(id, run); return run; }
   private async save(run: WorkflowRoleRun): Promise<WorkflowRoleRun> { const saved = await this.dependencies.persist(run); this.runs.set(saved.id, saved); this.dependencies.emit(saved); return saved; }
-  private async closeQuietly(runtimeId: string): Promise<void> { try { await this.dependencies.closeSession(runtimeId); } catch { /* result was persisted */ } }
+  private async closeQuietly(runtimeId: string): Promise<void> { try { await this.dependencies.closeSession(runtimeId); } catch { /* already closed */ } }
 }
 
 function contentText(content: unknown): string | undefined {

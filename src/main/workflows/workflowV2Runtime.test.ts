@@ -1,64 +1,59 @@
 import { describe, expect, it } from "vitest";
-import {
-  answerWorkflowHumanOccurrence,
-  completeWorkflowOccurrence,
-  createWorkflowRoleRun,
-  readyWorkflowOccurrences,
-  startWorkflowOccurrence,
-  type WorkflowRoleDefinition,
-} from "./workflowV2Runtime.js";
-import { renderWorkflowOccurrencePrompt } from "./workflowPromptRenderer.js";
+import { answerWorkflowHumanOccurrence, completeWorkflowOccurrence, createWorkflowRoleRun, readyWorkflowOccurrences, startWorkflowOccurrence, startWorkflowOrchestrator, type WorkflowRoleDefinition } from "./workflowV2Runtime.js";
 
-const definition: WorkflowRoleDefinition = {
-  version: 2,
-  name: "roles",
-  inputs: { issue: "one" },
-  nodes: [
-    { id: "worker", name: "Worker", role: "worker", prompt: "Fix {{input.issue}}" },
-    { id: "left", name: "Left", role: "worker", prompt: "L: {{parent.finalAnswer}}" },
-    { id: "right", name: "Right", role: "worker", prompt: "R: {{parent.finalAnswer}}" },
-    { id: "human", name: "Human", role: "human", prompt: "Review" },
-  ],
-  edges: [
-    { id: "left-edge", fromNodeId: "worker", toNodeId: "left" },
-    { id: "right-edge", fromNodeId: "worker", toNodeId: "right" },
-    { id: "human-edge", fromNodeId: "left", toNodeId: "human" },
-  ],
-};
+const base = { format: "pi-deck.agent-workflow" as const, schemaVersion: 2 as const, id: "workflow", revision: 1, name: "Workflow", inputs: [], relationships: [] };
 
-describe("workflow v2 occurrence runtime", () => {
-  it("creates independent deterministic fan-out occurrences and keeps human work local", () => {
+describe("v2 occurrence runtime", () => {
+  it("uses boolean deciders and records each bounded loop occurrence", () => {
+    const definition: WorkflowRoleDefinition = { ...base, entryNodeId: "loop", nodes: [
+      { id: "loop", name: "Loop", role: "orchestrator", config: { mode: "loop", agents: ["work"], decider: "ready", maxIterations: 2 } },
+      { id: "work", name: "Work", role: "worker", managedBy: "loop", config: { instructions: "work" } },
+      { id: "ready", name: "Ready", role: "decider", managedBy: "loop", config: { question: "done?" } },
+    ] };
     let run = createWorkflowRoleRun(definition, "workspace", {}, 1);
-    const root = readyWorkflowOccurrences(run)[0]!;
-    expect(renderWorkflowOccurrencePrompt(run, root)).toBe("Fix one");
-    run = startWorkflowOccurrence(run, root.id, "runtime", "Fix one", 2);
-    run = completeWorkflowOccurrence(run, root.id, { finalAnswer: "done" }, 3);
-    const children = readyWorkflowOccurrences(run);
-    expect(children.map((item) => item.nodeId)).toEqual(["left", "right"]);
-    expect(renderWorkflowOccurrencePrompt(run, children[0]!)).toBe("L: done");
-    run = startWorkflowOccurrence(run, children[0]!.id, "left-runtime", "", 4);
-    run = completeWorkflowOccurrence(run, children[0]!.id, { finalAnswer: "left done" }, 5);
-    const gate = run.occurrences.find((item) => item.nodeId === "human")!;
-    expect(gate.status).toBe("waitingHuman");
-    run = answerWorkflowHumanOccurrence(run, gate.id, "approve", 6);
-    expect(run.occurrences.find((item) => item.id === gate.id)?.status).toBe("completed");
+    const orchestration = readyWorkflowOccurrences(run)[0]!;
+    run = startWorkflowOrchestrator(run, orchestration.id, 2);
+    let work = readyWorkflowOccurrences(run)[0]!;
+    run = startWorkflowOccurrence(run, work.id, "r1", "s1", 3);
+    run = completeWorkflowOccurrence(run, work.id, "first", 4);
+    let decider = readyWorkflowOccurrences(run)[0]!;
+    run = startWorkflowOccurrence(run, decider.id, "r2", "s2", 5);
+    expect(() => completeWorkflowOccurrence(run, decider.id, "unsure", 6)).toThrow("boolean");
+    run = completeWorkflowOccurrence(run, decider.id, false, 6);
+    work = readyWorkflowOccurrences(run)[0]!;
+    expect(work.iteration).toBe(2);
+    run = startWorkflowOccurrence(run, work.id, "r3", "s3", 7);
+    run = completeWorkflowOccurrence(run, work.id, "second", 8);
+    decider = readyWorkflowOccurrences(run)[0]!;
+    run = startWorkflowOccurrence(run, decider.id, "r4", "s4", 9);
+    run = completeWorkflowOccurrence(run, decider.id, true, 10);
+    expect(run.status).toBe("completed");
+    expect(run.occurrences.filter(item => item.nodeId === "work")).toHaveLength(2);
   });
 
-  it("enforces a bounded loop instead of silently completing it", () => {
-    const loop: WorkflowRoleDefinition = {
-      version: 2, name: "loop", inputs: {},
-      nodes: [{ id: "a", name: "A", role: "worker", prompt: "go" }],
-      edges: [{ id: "loop", fromNodeId: "a", toNodeId: "a", maxIterations: 1 }],
-    };
-    let run = createWorkflowRoleRun(loop, "workspace", {}, 1);
-    const first = readyWorkflowOccurrences(run)[0]!;
-    run = startWorkflowOccurrence(run, first.id, "r1", "go", 2);
-    run = completeWorkflowOccurrence(run, first.id, { finalAnswer: "one" }, 3);
-    const second = readyWorkflowOccurrences(run)[0]!;
-    expect(second.iteration).toBe(1);
-    run = startWorkflowOccurrence(run, second.id, "r2", "go", 4);
-    run = completeWorkflowOccurrence(run, second.id, { finalAnswer: "two" }, 5);
-    expect(run.status).toBe("needsAttention");
-    expect(run.occurrences.find((item) => item.id === second.id)?.error).toContain("Loop limit");
+  it("pauses Human input, approval, and choice without a Pi session", () => {
+    const definition: WorkflowRoleDefinition = { ...base, entryNodeId: "pick", nodes: [{ id: "pick", name: "Pick", role: "human", config: { interaction: "choice", prompt: "Pick", options: [{ id: "a", label: "A" }] } }], relationships: [{ id: "end", from: "pick", when: { equals: "a" }, to: { end: "done" } }] };
+    let run = createWorkflowRoleRun(definition, "workspace", {}, 1);
+    const human = run.occurrences[0]!;
+    expect(human.status).toBe("waitingHuman");
+    expect(human.sessionId).toBeUndefined();
+    run = answerWorkflowHumanOccurrence(run, human.id, "a", 2);
+    expect(run.occurrences[0]?.output).toBe("a");
+    expect(run.status).toBe("completed");
+  });
+
+  it("fans out workers with distinct child occurrences", () => {
+    const definition: WorkflowRoleDefinition = { ...base, entryNodeId: "fan", nodes: [
+      { id: "fan", name: "Fan", role: "orchestrator", config: { mode: "fanout", agents: ["a", "b"], maxConcurrency: 1, completion: "all" } },
+      { id: "a", name: "A", role: "worker", managedBy: "fan", config: { instructions: "a" } }, { id: "b", name: "B", role: "worker", managedBy: "fan", config: { instructions: "b" } },
+    ] };
+    let run = createWorkflowRoleRun(definition, "workspace", {}, 1); run = startWorkflowOrchestrator(run, run.occurrences[0]!.id, 2);
+    const a = readyWorkflowOccurrences(run)[0]!;
+    expect(run.occurrences.filter(item => item.status === "ready")).toHaveLength(1);
+    run = startWorkflowOccurrence(run, a.id, "a", undefined, 3); run = completeWorkflowOccurrence(run, a.id, "A", 4);
+    const b = readyWorkflowOccurrences(run)[0]!;
+    expect(a.id).not.toBe(b.id);
+    run = startWorkflowOccurrence(run, b.id, "b", undefined, 5); run = completeWorkflowOccurrence(run, b.id, "B", 6);
+    expect(run.status).toBe("completed");
   });
 });
