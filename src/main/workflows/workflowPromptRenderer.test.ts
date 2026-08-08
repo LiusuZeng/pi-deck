@@ -34,7 +34,10 @@ const template: WorkflowTemplate = {
   inputs: [{ id: "issue", label: "Issue", type: "text", required: true }],
   context: {
     objective: "Keep the fix small.",
+    constraints: "Preserve existing behavior.",
     relevantPaths: ["src/example.ts"],
+    standards: "Use the existing test conventions.",
+    doNotDo: "Do not broaden the scope.",
   },
   steps: [
     step,
@@ -74,6 +77,28 @@ const run: WorkflowRun = {
 };
 
 describe("renderWorkflowPrompt", () => {
+  it("renders prompt-first context without requiring relevant paths", () => {
+    const prompt = renderWorkflowPrompt({
+      workflowContext: {
+        prompt: "Implement the requested change and keep the diff focused.",
+        doNotDo: "Do not modify generated files.",
+      },
+      step: {
+        ...step,
+        promptParts: [{ type: "text", text: "Proceed." }],
+        inputPolicy: { ...step.inputPolicy, includeParentFinalAnswer: false },
+      },
+      run,
+    });
+
+    expect(prompt).toContain(
+      "Prompt:\nImplement the requested change and keep the diff focused.",
+    );
+    expect(prompt).toContain("Don't do:\nDo not modify generated files.");
+    expect(prompt).not.toContain("Objective:");
+    expect(prompt).not.toContain("Relevant paths:");
+  });
+
   it("honors parent input policy and keeps transcript distinct from answer", () => {
     const prompt = renderWorkflowPrompt({
       workflowContext: template.context,
@@ -111,20 +136,17 @@ describe("renderWorkflowPrompt", () => {
 
   it("renders workflow context, inputs, and upstream output", () => {
     const availableRun = { ...run, parentFinalAnswer: "Parent answer" };
-    expect(
-      renderWorkflowPrompt({
-        workflowContext: template.context,
-        step,
-        run: availableRun,
-      }),
-    ).toContain("Keep the fix small.");
-    expect(
-      renderWorkflowPrompt({
-        workflowContext: template.context,
-        step,
-        run: availableRun,
-      }),
-    ).toContain("Fix the flaky test");
+    const prompt = renderWorkflowPrompt({
+      workflowContext: template.context,
+      step,
+      run: availableRun,
+    });
+    expect(prompt).toContain("Keep the fix small.");
+    expect(prompt).toContain("Constraints:\nPreserve existing behavior.");
+    expect(prompt).toContain("Relevant paths:\nsrc/example.ts");
+    expect(prompt).toContain("Standards:\nUse the existing test conventions.");
+    expect(prompt).toContain("Do not do:\nDo not broaden the scope.");
+    expect(prompt).toContain("Fix the flaky test");
     expect(
       renderWorkflowPrompt({
         workflowContext: template.context,
