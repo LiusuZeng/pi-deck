@@ -15,26 +15,47 @@ import {
   WorkflowPromptEditor,
 } from "./WorkflowPromptEditor.js";
 
-const defaultThinkingChoices = [
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
+export interface WorkflowModelChoice {
+  provider: string;
+  id: string;
+  label: string;
+  disabled?: boolean;
+  note?: string;
+}
+
+export interface WorkflowThinkingChoice {
+  id: string;
+  label: string;
+  disabled?: boolean;
+  note?: string;
+}
+
+const defaultThinkingChoices: WorkflowThinkingChoice[] = [
+  { id: "off", label: "Off" },
+  { id: "minimal", label: "Minimal" },
+  { id: "low", label: "Low" },
+  { id: "medium", label: "Medium" },
+  { id: "high", label: "High" },
+  { id: "xhigh", label: "Xhigh" },
+  { id: "max", label: "Max" },
 ];
 
-function modelChoiceValue(model: WorkflowModelOverride): string {
+function modelChoiceValue(
+  model:
+    | Pick<WorkflowModelOverride, "provider" | "modelId">
+    | WorkflowModelChoice,
+): string {
+  if ("id" in model) return `${model.provider}\u0000${model.id}`;
   return `${model.provider ?? ""}\u0000${model.modelId ?? ""}`;
 }
 
-function modelChoiceLabel(model: WorkflowModelOverride): string {
+function modelChoiceLabel(
+  model:
+    | Pick<WorkflowModelOverride, "provider" | "modelId">
+    | WorkflowModelChoice,
+): string {
+  if ("id" in model) return model.label;
   return [model.provider, model.modelId].filter(Boolean).join("/") || "Model";
-}
-
-function thinkingChoiceLabel(choice: string): string {
-  return choice.charAt(0).toUpperCase() + choice.slice(1);
 }
 
 export function WorkflowStepCard(props: {
@@ -50,8 +71,8 @@ export function WorkflowStepCard(props: {
   context?: WorkflowContext;
   defaultModel?: WorkflowModelOverride;
   defaultThinkingLevel?: string;
-  modelChoices?: WorkflowModelOverride[];
-  thinkingChoices?: string[];
+  modelChoices?: WorkflowModelChoice[];
+  thinkingChoices?: WorkflowThinkingChoice[];
   promptError?: string | undefined;
   stepError?: string | undefined;
   focusPrompt?: boolean | undefined;
@@ -162,19 +183,34 @@ export function WorkflowStepCard(props: {
                     {(props.thinkingChoices ?? defaultThinkingChoices)
                       .filter(
                         (choice, index, choices) =>
-                          choices.indexOf(choice) === index,
+                          choices.findIndex(
+                            (candidate) => candidate.id === choice.id,
+                          ) === index,
                       )
                       .concat(
                         props.step.thinkingOverride !== undefined &&
                           !(
                             props.thinkingChoices ?? defaultThinkingChoices
-                          ).includes(props.step.thinkingOverride)
-                          ? [props.step.thinkingOverride]
+                          ).some(
+                            (choice) =>
+                              choice.id === props.step.thinkingOverride,
+                          )
+                          ? [
+                              {
+                                id: props.step.thinkingOverride,
+                                label: props.step.thinkingOverride,
+                              },
+                            ]
                           : [],
                       )
                       .map((choice) => (
-                        <option key={choice} value={choice}>
-                          {thinkingChoiceLabel(choice)}
+                        <option
+                          key={choice.id}
+                          value={choice.id}
+                          disabled={choice.disabled}
+                        >
+                          {choice.label}
+                          {choice.note ? ` — ${choice.note}` : ""}
                         </option>
                       ))}
                   </select>
@@ -194,7 +230,13 @@ export function WorkflowStepCard(props: {
                           modelChoiceValue(choice) === event.target.value,
                       );
                       props.onChange?.({
-                        modelOverride: selected,
+                        modelOverride:
+                          selected === undefined
+                            ? undefined
+                            : {
+                                provider: selected.provider,
+                                modelId: selected.id,
+                              },
                       });
                     }}
                   >
@@ -215,7 +257,16 @@ export function WorkflowStepCard(props: {
                               modelChoiceValue(choice) ===
                               modelChoiceValue(props.step.modelOverride!),
                           )
-                          ? [props.step.modelOverride]
+                          ? [
+                              {
+                                provider:
+                                  props.step.modelOverride.provider ?? "",
+                                id: props.step.modelOverride.modelId ?? "",
+                                label: modelChoiceLabel(
+                                  props.step.modelOverride,
+                                ),
+                              },
+                            ]
                           : [],
                       )
                       .map((choice) => (
@@ -295,10 +346,10 @@ export function WorkflowStepCard(props: {
               props.step.inputPolicy.includeWorkflowContext ? (
                 <div className="workflow-run-context-preview">
                   <span className="workflow-field-label">Shared context</span>
-                  {props.context.objective ? (
+                  {(props.context.prompt ?? props.context.objective) ? (
                     <p>
                       <strong>Shared instructions:</strong>{" "}
-                      {props.context.objective}
+                      {props.context.prompt ?? props.context.objective}
                     </p>
                   ) : null}
                   {props.context.doNotDo ? (

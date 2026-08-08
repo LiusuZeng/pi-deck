@@ -28,9 +28,9 @@ export function WorkflowContextCard(props: {
             aria-label="Shared instructions"
             rows={5}
             disabled={props.readOnly}
-            value={props.context.objective ?? ""}
+            value={props.context.prompt ?? props.context.objective ?? ""}
             onChange={(event) =>
-              update({ objective: event.target.value || undefined })
+              update({ prompt: event.target.value || undefined })
             }
             placeholder="Give every selected agent the context they need…"
           />

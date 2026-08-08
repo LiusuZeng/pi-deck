@@ -41,7 +41,7 @@ describe("WorkflowContextCard", () => {
       container.querySelector('textarea[aria-label="Shared instructions"]'),
     ).not.toBeNull();
     expect(
-      container.querySelector('textarea[aria-label="Don't do"]'),
+      container.querySelector('textarea[aria-label="Don\'t do"]'),
     ).not.toBeNull();
     expect(container.querySelectorAll("textarea")).toHaveLength(2);
     expect(container.textContent).not.toContain("Objective");

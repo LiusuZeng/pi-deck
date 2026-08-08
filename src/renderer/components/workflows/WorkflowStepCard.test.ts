@@ -59,10 +59,17 @@ describe("WorkflowStepCard", () => {
           onToggle: () => undefined,
           onChange,
           modelChoices: [
-            { provider: "anthropic", modelId: "claude-sonnet" },
-            { provider: "openai", modelId: "gpt-codex" },
+            {
+              provider: "anthropic",
+              id: "claude-sonnet",
+              label: "Claude Sonnet",
+            },
+            { provider: "openai", id: "gpt-codex", label: "GPT Codex" },
           ],
-          thinkingChoices: ["low", "high"],
+          thinkingChoices: [
+            { id: "low", label: "Low" },
+            { id: "high", label: "High" },
+          ],
         }),
       );
     });

@@ -6,12 +6,15 @@ import type {
   WorkflowTemplate,
   WorkflowTemplateDefinition,
   WorkflowTransition,
-  WorkflowModelOverride,
 } from "../../../shared/workflowSchemas.js";
 import { workflowTemplateDefinitionSchema } from "../../../shared/workflowSchemas.js";
 import { workflowPredecessorSteps } from "../../workflows/workflowViewModels.js";
 import { WorkflowContextCard } from "./WorkflowContextCard.js";
-import { WorkflowStepCard } from "./WorkflowStepCard.js";
+import {
+  WorkflowStepCard,
+  type WorkflowModelChoice,
+  type WorkflowThinkingChoice,
+} from "./WorkflowStepCard.js";
 import { WorkflowTransitionCard } from "./WorkflowTransitionCard.js";
 
 const defaultPolicy = {
@@ -146,7 +149,7 @@ function initialDefinition(
   return {
     name: "New agent workflow",
     inputs: [],
-    context: { relevantPaths: [] },
+    context: { prompt: "", relevantPaths: [] },
     steps: [newStep(0)],
     transitions: [],
   };
@@ -156,8 +159,8 @@ export function WorkflowBuilder(props: {
   initialTemplate?: WorkflowTemplate;
   workspaceId?: string;
   workspaceName?: string;
-  modelChoices?: WorkflowModelOverride[];
-  thinkingChoices?: string[];
+  modelChoices?: WorkflowModelChoice[];
+  thinkingChoices?: WorkflowThinkingChoice[];
   onSave(
     definition: WorkflowTemplateDefinition,
     templateId?: string,
@@ -541,7 +544,7 @@ export function WorkflowBuilder(props: {
       </section>
 
       <WorkflowContextCard
-        context={definition.context ?? { relevantPaths: [] }}
+        context={definition.context ?? { prompt: "", relevantPaths: [] }}
         onChange={updateContext}
       />
 

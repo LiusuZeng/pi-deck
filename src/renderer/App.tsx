@@ -475,17 +475,6 @@ interface WorkflowThinkingChoice {
   note?: string;
 }
 
-type WorkflowBuilderChoiceProps = {
-  modelChoices: WorkflowModelChoice[];
-  thinkingChoices: WorkflowThinkingChoice[];
-};
-
-// WorkflowBuilder forwards these renderer choices to its step editor. Keep the
-// cast local while older workflow bundles still expose the pre-choice props.
-const WorkflowBuilderWithChoices = WorkflowBuilder as unknown as (
-  props: Parameters<typeof WorkflowBuilder>[0] & WorkflowBuilderChoiceProps,
-) => ReactElement;
-
 interface SlashCommand {
   name: string;
   description: string;
@@ -4077,7 +4066,7 @@ export function App(): ReactElement {
                 Loading Agent Workflows…
               </div>
             ) : workflowView === "builder" ? (
-              <WorkflowBuilderWithChoices
+              <WorkflowBuilder
                 key={`${currentWorkspace.id}:${workflowBuilderTemplate?.id ?? "new"}`}
                 {...(workflowBuilderTemplate !== undefined
                   ? { initialTemplate: workflowBuilderTemplate }
