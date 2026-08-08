@@ -15,6 +15,28 @@ import {
   WorkflowPromptEditor,
 } from "./WorkflowPromptEditor.js";
 
+const defaultThinkingChoices = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+
+function modelChoiceValue(model: WorkflowModelOverride): string {
+  return `${model.provider ?? ""}\u0000${model.modelId ?? ""}`;
+}
+
+function modelChoiceLabel(model: WorkflowModelOverride): string {
+  return [model.provider, model.modelId].filter(Boolean).join("/") || "Model";
+}
+
+function thinkingChoiceLabel(choice: string): string {
+  return choice.charAt(0).toUpperCase() + choice.slice(1);
+}
+
 export function WorkflowStepCard(props: {
   step: WorkflowStepDefinition;
   run?: WorkflowStepRun;
@@ -28,6 +50,8 @@ export function WorkflowStepCard(props: {
   context?: WorkflowContext;
   defaultModel?: WorkflowModelOverride;
   defaultThinkingLevel?: string;
+  modelChoices?: WorkflowModelOverride[];
+  thinkingChoices?: string[];
   promptError?: string | undefined;
   stepError?: string | undefined;
   focusPrompt?: boolean | undefined;
@@ -110,6 +134,7 @@ export function WorkflowStepCard(props: {
                 <label className="workflow-field">
                   <span>Start behavior</span>
                   <select
+                    aria-label="Start behavior"
                     value={props.step.startPolicy}
                     onChange={(event) =>
                       props.onChange?.({
@@ -124,29 +149,84 @@ export function WorkflowStepCard(props: {
                 </label>
                 <label className="workflow-field">
                   <span>Thinking level</span>
-                  <input
-                    placeholder="Inherit from Pi Deck"
+                  <select
+                    aria-label="Thinking level"
                     value={props.step.thinkingOverride ?? ""}
                     onChange={(event) =>
                       props.onChange?.({
                         thinkingOverride: event.target.value || undefined,
                       })
                     }
-                  />
+                  >
+                    <option value="">Inherit from Pi Deck</option>
+                    {(props.thinkingChoices ?? defaultThinkingChoices)
+                      .filter(
+                        (choice, index, choices) =>
+                          choices.indexOf(choice) === index,
+                      )
+                      .concat(
+                        props.step.thinkingOverride !== undefined &&
+                          !(
+                            props.thinkingChoices ?? defaultThinkingChoices
+                          ).includes(props.step.thinkingOverride)
+                          ? [props.step.thinkingOverride]
+                          : [],
+                      )
+                      .map((choice) => (
+                        <option key={choice} value={choice}>
+                          {thinkingChoiceLabel(choice)}
+                        </option>
+                      ))}
+                  </select>
                 </label>
                 <label className="workflow-field">
                   <span>Model override</span>
-                  <input
-                    placeholder="Optional model id"
-                    value={props.step.modelOverride?.modelId ?? ""}
-                    onChange={(event) =>
-                      props.onChange?.({
-                        modelOverride: event.target.value
-                          ? { modelId: event.target.value }
-                          : undefined,
-                      })
+                  <select
+                    aria-label="Model override"
+                    value={
+                      props.step.modelOverride === undefined
+                        ? ""
+                        : modelChoiceValue(props.step.modelOverride)
                     }
-                  />
+                    onChange={(event) => {
+                      const selected = (props.modelChoices ?? []).find(
+                        (choice) =>
+                          modelChoiceValue(choice) === event.target.value,
+                      );
+                      props.onChange?.({
+                        modelOverride: selected,
+                      });
+                    }}
+                  >
+                    <option value="">Inherit from Pi Deck</option>
+                    {(props.modelChoices ?? [])
+                      .filter(
+                        (choice, index, choices) =>
+                          choices.findIndex(
+                            (candidate) =>
+                              modelChoiceValue(candidate) ===
+                              modelChoiceValue(choice),
+                          ) === index,
+                      )
+                      .concat(
+                        props.step.modelOverride !== undefined &&
+                          !(props.modelChoices ?? []).some(
+                            (choice) =>
+                              modelChoiceValue(choice) ===
+                              modelChoiceValue(props.step.modelOverride!),
+                          )
+                          ? [props.step.modelOverride]
+                          : [],
+                      )
+                      .map((choice) => (
+                        <option
+                          key={modelChoiceValue(choice)}
+                          value={modelChoiceValue(choice)}
+                        >
+                          {modelChoiceLabel(choice)}
+                        </option>
+                      ))}
+                  </select>
                 </label>
               </div>
               <fieldset className="workflow-policy-fieldset">
@@ -154,6 +234,7 @@ export function WorkflowStepCard(props: {
                 <label className="workflow-checkbox">
                   <input
                     type="checkbox"
+                    aria-label="Include shared workflow context"
                     checked={props.step.inputPolicy.includeWorkflowContext}
                     onChange={(event) =>
                       props.onChange?.({
@@ -167,9 +248,8 @@ export function WorkflowStepCard(props: {
                   Shared workflow context
                 </label>
                 <p className="workflow-help">
-                  Parent-session final answers, summaries, and transcripts are
-                  not available to workflows. Add a previous-agent result chip
-                  in the prompt above when you need a supported handoff.
+                  Add the shared context when this agent needs the workflow-wide
+                  instructions.
                 </p>
               </fieldset>
             </>
@@ -217,28 +297,13 @@ export function WorkflowStepCard(props: {
                   <span className="workflow-field-label">Shared context</span>
                   {props.context.objective ? (
                     <p>
-                      <strong>Objective:</strong> {props.context.objective}
-                    </p>
-                  ) : null}
-                  {props.context.constraints ? (
-                    <p>
-                      <strong>Constraints:</strong> {props.context.constraints}
-                    </p>
-                  ) : null}
-                  {props.context.relevantPaths.length > 0 ? (
-                    <p>
-                      <strong>Relevant paths:</strong>{" "}
-                      {props.context.relevantPaths.join(", ")}
-                    </p>
-                  ) : null}
-                  {props.context.standards ? (
-                    <p>
-                      <strong>Standards:</strong> {props.context.standards}
+                      <strong>Shared instructions:</strong>{" "}
+                      {props.context.objective}
                     </p>
                   ) : null}
                   {props.context.doNotDo ? (
                     <p>
-                      <strong>Do not do:</strong> {props.context.doNotDo}
+                      <strong>Don't do:</strong> {props.context.doNotDo}
                     </p>
                   ) : null}
                 </div>

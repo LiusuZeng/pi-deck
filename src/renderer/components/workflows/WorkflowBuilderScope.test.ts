@@ -35,7 +35,7 @@ describe("WorkflowBuilder template scope", () => {
     });
 
     const prompt = container.querySelector(
-      'textarea[aria-label="Instruction 1"]',
+      'textarea[aria-label="Instructions"]',
     ) as HTMLTextAreaElement;
     act(() => {
       const setValue = Object.getOwnPropertyDescriptor(

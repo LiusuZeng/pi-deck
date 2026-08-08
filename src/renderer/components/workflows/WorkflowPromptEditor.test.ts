@@ -15,7 +15,7 @@ describe("WorkflowPromptEditor", () => {
     container = undefined;
   });
 
-  it("explains when no upstream agent result can be selected", () => {
+  it("keeps the agent editor to one instructions prompt", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -30,9 +30,12 @@ describe("WorkflowPromptEditor", () => {
       );
     });
 
-    expect(container.textContent).toContain(
-      "No upstream agent results are available for this step.",
-    );
-    expect(container.querySelector('[role="status"]')).not.toBeNull();
+    expect(
+      container.querySelector('textarea[aria-label="Instructions"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('select[aria-label="Add a workflow reference"]'),
+    ).toBeNull();
+    expect(container.textContent).not.toContain("structured handoff");
   });
 });

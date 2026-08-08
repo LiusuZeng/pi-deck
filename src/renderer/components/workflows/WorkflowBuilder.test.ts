@@ -181,23 +181,10 @@ describe("workflow builder transition validation", () => {
       ...container.querySelectorAll("article.workflow-step-card"),
     ].find((card) => card.textContent?.includes("yes-branch"));
     expect(yesCard).toBeDefined();
-    const referenceSelect = yesCard?.querySelector(
-      'select[aria-label="Add a workflow reference"]',
-    ) as HTMLSelectElement;
-    const referenceValues = [...referenceSelect.options].map(
-      (option) => option.value,
-    );
-    expect(referenceValues).toEqual(
-      expect.arrayContaining([
-        "output:source:finalAnswer",
-        "output:source:summary",
-        "output:source:transcript",
-      ]),
-    );
     expect(
-      referenceValues.filter((value) => value.startsWith("output:no-branch:")),
-    ).toEqual([]);
-    expect(yesCard?.textContent).toContain("source result");
+      yesCard?.querySelector('select[aria-label="Add a workflow reference"]'),
+    ).toBeNull();
+    expect(yesCard?.textContent).not.toContain("Add structured handoff");
 
     act(() => {
       (
