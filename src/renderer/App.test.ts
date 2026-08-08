@@ -769,6 +769,48 @@ describe("Pi draft defaults and thinking capabilities", () => {
     ).toEqual(["off", "low", "medium", "high", "max"]);
   });
 
+  it("derives workflow choices from discovered models without losing provider ids", () => {
+    expect(
+      __rendererTestHooks.workflowModelChoicesFor([
+        {
+          id: "model-1",
+          name: "Discovered model",
+          provider: "provider-1",
+        },
+      ]),
+    ).toEqual([
+      {
+        provider: "provider-1",
+        id: "model-1",
+        label: "Discovered model",
+      },
+    ]);
+
+    const fallback = __rendererTestHooks.workflowModelChoicesFor([]);
+    expect(fallback).toContainEqual({
+      provider: "local",
+      id: "offline-placeholder",
+      label: "Offline placeholder",
+      disabled: true,
+      note: "Unavailable until provider/auth setup is complete",
+    });
+  });
+
+  it("derives workflow thinking choices from runtime levels with static fallback", () => {
+    expect(
+      __rendererTestHooks.workflowThinkingChoicesFor(["minimal", "xhigh"]),
+    ).toEqual([
+      { id: "minimal", label: "Minimal" },
+      { id: "xhigh", label: "Xhigh" },
+    ]);
+    expect(__rendererTestHooks.workflowThinkingChoicesFor([])).toContainEqual({
+      id: "max",
+      label: "Max",
+      disabled: true,
+      note: "Unsupported by current model",
+    });
+  });
+
   it("initializes a draft with Pi's effective model and thinking defaults", () => {
     const draft = __rendererTestHooks.draftSessionForProject(
       {

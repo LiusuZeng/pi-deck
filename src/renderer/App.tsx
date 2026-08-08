@@ -460,6 +460,32 @@ interface ThinkingOption {
   note?: string;
 }
 
+interface WorkflowModelChoice {
+  provider: string;
+  id: string;
+  label: string;
+  disabled?: boolean;
+  note?: string;
+}
+
+interface WorkflowThinkingChoice {
+  id: string;
+  label: string;
+  disabled?: boolean;
+  note?: string;
+}
+
+type WorkflowBuilderChoiceProps = {
+  modelChoices: WorkflowModelChoice[];
+  thinkingChoices: WorkflowThinkingChoice[];
+};
+
+// WorkflowBuilder forwards these renderer choices to its step editor. Keep the
+// cast local while older workflow bundles still expose the pre-choice props.
+const WorkflowBuilderWithChoices = WorkflowBuilder as unknown as (
+  props: Parameters<typeof WorkflowBuilder>[0] & WorkflowBuilderChoiceProps,
+) => ReactElement;
+
 interface SlashCommand {
   name: string;
   description: string;
@@ -1239,6 +1265,14 @@ export function App(): ReactElement {
           activeRealModel,
           projectModelConfiguration.thinkingLevels,
         );
+  const workflowModelChoices = workflowModelChoicesFor(realModels);
+  const workflowThinkingChoices = workflowThinkingChoicesFor(
+    selectedSession.backendMode === "real" &&
+      (runtimeThinkingLevels.length > 0 ||
+        projectModelConfiguration.thinkingLevels.length > 0)
+      ? availableRealThinkingLevels
+      : [],
+  );
   const realCommands = selectedRealCapabilities?.commands ?? [];
   const composerDraft = composerDraftForSession(
     composerDrafts,
@@ -4043,13 +4077,15 @@ export function App(): ReactElement {
                 Loading Agent Workflows…
               </div>
             ) : workflowView === "builder" ? (
-              <WorkflowBuilder
+              <WorkflowBuilderWithChoices
                 key={`${currentWorkspace.id}:${workflowBuilderTemplate?.id ?? "new"}`}
                 {...(workflowBuilderTemplate !== undefined
                   ? { initialTemplate: workflowBuilderTemplate }
                   : {})}
                 workspaceId={currentWorkspace.id}
                 workspaceName={currentWorkspace.name}
+                modelChoices={workflowModelChoices}
+                thinkingChoices={workflowThinkingChoices}
                 onSave={handleSaveWorkflow}
                 onCancel={() => {
                   setWorkflowBuilderTemplate(undefined);
@@ -4710,6 +4746,45 @@ function applyPiDefaultsToDraftSessions(
 
 function modelLabelForChatModel(model: ChatModelSummary): string {
   return model.provider ? `${model.provider} / ${model.id}` : model.id;
+}
+
+function workflowModelChoicesFor(
+  models: readonly ChatModelSummary[],
+): WorkflowModelChoice[] {
+  if (models.length === 0) {
+    return modelOptions.map((model) => ({
+      provider: model.provider,
+      id: model.id,
+      label: model.displayName,
+      ...(model.unavailableReason !== undefined
+        ? { disabled: true, note: model.unavailableReason }
+        : {}),
+    }));
+  }
+  return models.map((model) => ({
+    provider: model.provider ?? "",
+    id: model.id,
+    label: model.name ?? modelLabelForChatModel(model),
+  }));
+}
+
+function workflowThinkingChoicesFor(
+  levels: readonly string[],
+): WorkflowThinkingChoice[] {
+  if (levels.length === 0) {
+    return thinkingOptions.map((option) => ({
+      id: option.id,
+      label: option.label,
+      ...(option.supported ? {} : { disabled: true }),
+      ...(option.note !== undefined ? { note: option.note } : {}),
+    }));
+  }
+  return levels.map((level) => ({
+    id: level,
+    label:
+      thinkingOptions.find((option) => option.id === level)?.label ??
+      level.slice(0, 1).toUpperCase() + level.slice(1),
+  }));
 }
 
 function workspaceFromLegacyProject(project: ProjectRef): WorkspaceRef {
@@ -10051,6 +10126,8 @@ export const __rendererTestHooks = {
   workingDirectoryForSession,
   runtimeCapabilitiesFor,
   updateRuntimeCapabilities,
+  workflowModelChoicesFor,
+  workflowThinkingChoicesFor,
   thinkingLevelsForModel,
   clampThinkingLevel,
   applyPiDefaultsToDraftSessions,
