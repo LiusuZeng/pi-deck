@@ -1,6 +1,6 @@
 # Agent Workflows v2 — Completion Gap and Parallel Plan
 
-**Status:** active implementation coordination
+**Status:** Build/Graph/home completion integrated; occurrence-run UI wiring remains tracked
 **Date:** 2026-08-08
 **Design source:** [Role-Based Agent Workflows v2](agent-workflows-role-based-design.md)
 **Baseline:** `dev/agent-workflows-prompt-first` at merge `c5b41ba`
@@ -221,7 +221,35 @@ finished.
 - The UI does not imply v2 runs are supported until occurrence execution is wired
   end to end.
 
-## 7. Required lane handoff
+## 7. Integrated result — 2026-08-08
+
+Completed in the release worktree:
+
+- Build can author fixed-list Fan-out and Loop Orchestrators, including managed
+  ownership, concurrency/completion, loop Decider, and iteration limits.
+- Decider and Human boolean/choice branches have explicit conditional
+  destinations; role-specific optional and execution fields are editable.
+- Graph is a deterministic read-only semantic projection with managed-role
+  containers, labeled outcomes, limits, policies, and terminal outcomes.
+- V2 definitions remain visible/editable through a workspace-scoped native list
+  while legacy templates and runs retain their compatibility surface.
+- Fan-out `any` handles success-first, failure-first, late sibling completion or
+  failure, and all-failed outcomes without duplicate downstream routing.
+- Mobile uses a full-screen inspector sheet with focus entry/restoration. Tablet
+  currently uses a sticky inspector rather than the optional drawer treatment.
+
+Deferred explicitly:
+
+- V2 occurrence execution is not yet wired through the normal App run UI and
+  scheduler IPC, so Start remains disabled with an accessible explanation.
+- Dynamic input-generated fan-out remains out of scope; count is derived from the
+  fixed managed-Worker list.
+
+Validation after integration: 58 Vitest files passed with 436 tests and 2 TODOs;
+main and renderer typechecks, Prettier, production build, and diff checks passed.
+Independent fresh-context release review reported no blockers.
+
+## 8. Required lane handoff
 
 Each worker reports:
 

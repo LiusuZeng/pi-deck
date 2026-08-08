@@ -3,6 +3,7 @@ import {
   answerWorkflowHumanOccurrence,
   completeWorkflowOccurrence,
   createWorkflowRoleRun,
+  failWorkflowOccurrence,
   readyWorkflowOccurrences,
   startWorkflowOccurrence,
   startWorkflowOrchestrator,
@@ -18,6 +19,40 @@ const base = {
   inputs: [],
   relationships: [],
 };
+
+function fanoutDefinition(completion: "all" | "any"): WorkflowRoleDefinition {
+  return {
+    ...base,
+    entryNodeId: "fan",
+    nodes: [
+      {
+        id: "fan",
+        name: "Fan",
+        role: "orchestrator",
+        config: {
+          mode: "fanout",
+          agents: ["a", "b"],
+          maxConcurrency: 2,
+          completion,
+        },
+      },
+      ...["a", "b"].map((id) => ({
+        id,
+        name: id.toUpperCase(),
+        role: "worker" as const,
+        managedBy: "fan",
+        config: { instructions: id },
+      })),
+      {
+        id: "after",
+        name: "After",
+        role: "worker",
+        config: { instructions: "after" },
+      },
+    ],
+    relationships: [{ id: "fan-after", from: "fan", to: { nodeId: "after" } }],
+  };
+}
 
 describe("v2 occurrence runtime", () => {
   it("uses boolean deciders and records each bounded loop occurrence", () => {
@@ -225,6 +260,121 @@ describe("v2 occurrence runtime", () => {
     expect(run.occurrences.find((item) => item.id === b!.id)?.status).toBe(
       "completed",
     );
+    expect(run.status).toBe("waiting");
+    expect(() => completeWorkflowOccurrence(run, b!.id, "again", 7)).toThrow(
+      "not running",
+    );
+  });
+
+  it("keeps a late any fan-out sibling failure as history without downgrading the run", () => {
+    let run = createWorkflowRoleRun(
+      fanoutDefinition("any"),
+      "workspace",
+      {},
+      1,
+    );
+    run = startWorkflowOrchestrator(run, run.occurrences[0]!.id, 2);
+    const [a, b] = readyWorkflowOccurrences(run);
+    run = startWorkflowOccurrence(run, a!.id, "a", undefined, 3);
+    run = startWorkflowOccurrence(run, b!.id, "b", undefined, 4);
+    run = completeWorkflowOccurrence(run, a!.id, "A", 5);
+
+    const fan = run.occurrences.find((item) => item.nodeId === "fan")!;
+    expect(fan.output).toEqual(["A"]);
+    expect(
+      run.occurrences.filter((item) => item.nodeId === "after"),
+    ).toHaveLength(1);
+
+    run = failWorkflowOccurrence(run, b!.id, "late failure", 6);
+    expect(run.status).toBe("waiting");
+    expect(run.occurrences.find((item) => item.id === b!.id)).toMatchObject({
+      status: "failed",
+      error: "late failure",
+    });
+    expect(run.occurrences.find((item) => item.id === fan.id)?.output).toEqual([
+      "A",
+    ]);
+    expect(
+      run.occurrences.filter((item) => item.nodeId === "after"),
+    ).toHaveLength(1);
+
+    run = failWorkflowOccurrence(run, b!.id, "duplicate late failure", 7);
+    expect(run.status).toBe("waiting");
+    expect(run.occurrences.find((item) => item.id === b!.id)?.error).toBe(
+      "duplicate late failure",
+    );
+  });
+
+  it("allows a running sibling to satisfy fan-out any after an earlier failure", () => {
+    let run = createWorkflowRoleRun(
+      fanoutDefinition("any"),
+      "workspace",
+      {},
+      1,
+    );
+    run = startWorkflowOrchestrator(run, run.occurrences[0]!.id, 2);
+    const [a, b] = readyWorkflowOccurrences(run);
+    run = startWorkflowOccurrence(run, a!.id, "a", undefined, 3);
+    run = startWorkflowOccurrence(run, b!.id, "b", undefined, 4);
+
+    run = failWorkflowOccurrence(run, a!.id, "first failed", 5);
+    expect(run.occurrences.find((item) => item.nodeId === "fan")?.status).toBe(
+      "running",
+    );
+    expect(run.status).toBe("running");
+
+    run = completeWorkflowOccurrence(run, b!.id, "B", 6);
+    expect(run.occurrences.find((item) => item.nodeId === "fan")).toMatchObject(
+      { status: "completed", output: ["B"] },
+    );
+    expect(
+      run.occurrences.filter((item) => item.nodeId === "after"),
+    ).toHaveLength(1);
+    expect(run.status).toBe("waiting");
+  });
+
+  it("fails fan-out any when every managed worker fails", () => {
+    let run = createWorkflowRoleRun(
+      fanoutDefinition("any"),
+      "workspace",
+      {},
+      1,
+    );
+    run = startWorkflowOrchestrator(run, run.occurrences[0]!.id, 2);
+    const [a, b] = readyWorkflowOccurrences(run);
+    run = startWorkflowOccurrence(run, a!.id, "a", undefined, 3);
+    run = startWorkflowOccurrence(run, b!.id, "b", undefined, 4);
+    run = failWorkflowOccurrence(run, a!.id, "a failed", 5);
+    run = failWorkflowOccurrence(run, b!.id, "b failed", 6);
+
+    expect(run.status).toBe("needsAttention");
+    expect(run.occurrences.find((item) => item.nodeId === "fan")?.status).toBe(
+      "failed",
+    );
+    expect(
+      run.occurrences.filter((item) => item.nodeId === "after"),
+    ).toHaveLength(0);
+  });
+
+  it("keeps all fan-out failures needing attention", () => {
+    let run = createWorkflowRoleRun(
+      fanoutDefinition("all"),
+      "workspace",
+      {},
+      1,
+    );
+    run = startWorkflowOrchestrator(run, run.occurrences[0]!.id, 2);
+    const [a] = readyWorkflowOccurrences(run);
+    run = startWorkflowOccurrence(run, a!.id, "a", undefined, 3);
+    run = failWorkflowOccurrence(run, a!.id, "failure", 4);
+
+    expect(run.status).toBe("needsAttention");
+    expect(run.occurrences.find((item) => item.nodeId === "fan")?.status).toBe(
+      "failed",
+    );
+    expect(
+      run.occurrences.filter((item) => item.nodeId === "after"),
+    ).toHaveLength(0);
   });
 
   it("fans out workers with distinct child occurrences", () => {

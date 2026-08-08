@@ -101,6 +101,7 @@ import { ActivityInbox } from "./components/ActivityInbox.js";
 import { WorkflowHome, WorkflowRunView } from "./components/workflows/index.js";
 import { WorkflowBuilder } from "./components/workflows/WorkflowBuilder.js";
 import { WorkflowV2Builder } from "./components/workflows/WorkflowV2Builder.js";
+import { WorkflowV2Home } from "./components/workflows/v2/WorkflowV2Home.js";
 
 type LoadState =
   | { state: "loading" }
@@ -803,9 +804,15 @@ export function App(): ReactElement {
   const [workflowTemplates, setWorkflowTemplates] = useState<
     WorkflowTemplate[]
   >([]);
+  const [workflowDefinitions, setWorkflowDefinitions] = useState<
+    WorkflowDefinition[]
+  >([]);
   const [workflowRuns, setWorkflowRuns] = useState<WorkflowRun[]>([]);
   const [workflowBuilderTemplate, setWorkflowBuilderTemplate] = useState<
     WorkflowTemplate | undefined
+  >();
+  const [workflowBuilderDefinition, setWorkflowBuilderDefinition] = useState<
+    WorkflowDefinition | undefined
   >();
   const [workflowRunId, setWorkflowRunId] = useState<string | undefined>();
   const [workflowLoading, setWorkflowLoading] = useState(false);
@@ -1118,12 +1125,14 @@ export function App(): ReactElement {
     const refresh = async (): Promise<void> => {
       setWorkflowLoading(true);
       try {
-        const [templates, runs] = await Promise.all([
+        const [templates, definitions, runs] = await Promise.all([
           window.piDeck.workflows.listTemplates(),
+          window.piDeck.workflows.listWorkflows({ workspaceId }),
           window.piDeck.workflows.listRuns({ workspaceId }),
         ]);
         if (disposed) return;
         setWorkflowTemplates(templates.templates);
+        setWorkflowDefinitions(definitions);
         setWorkflowRuns(
           runs.runs.filter((run) => run.workspaceId === workspaceId),
         );
@@ -1171,9 +1180,11 @@ export function App(): ReactElement {
 
   useEffect(() => {
     setWorkflowTemplates([]);
+    setWorkflowDefinitions([]);
     setWorkflowRuns([]);
     setWorkflowRunId(undefined);
     setWorkflowBuilderTemplate(undefined);
+    setWorkflowBuilderDefinition(undefined);
     setWorkflowError(undefined);
     if (workflowView !== undefined) setWorkflowView("home");
   }, [currentWorkspace.id]);
@@ -1319,7 +1330,10 @@ export function App(): ReactElement {
   const selectedWorkflowRun = workflowRunId
     ? workflowRuns.find((run) => run.id === workflowRunId)
     : undefined;
-
+  const roleBasedWorkflowDefinitions = useMemo(
+    () => roleBasedWorkflowsForHome(workflowDefinitions, workflowTemplates),
+    [workflowDefinitions, workflowTemplates],
+  );
   useEffect(() => {
     const compactLayout = window.matchMedia("(max-width: 760px)");
     const collapseSidebarForCompactLayout = (): void => {
@@ -1745,6 +1759,7 @@ export function App(): ReactElement {
     setActivityInboxVisible(false);
     setWorkflowError(undefined);
     setWorkflowBuilderTemplate(undefined);
+    setWorkflowBuilderDefinition(undefined);
     setWorkflowRunId(undefined);
     setWorkflowView("home");
   }
@@ -1799,11 +1814,22 @@ export function App(): ReactElement {
     workflow: WorkflowDefinition,
   ): Promise<void> {
     try {
-      await window.piDeck.workflows.createWorkflow({
-        workspaceId: currentWorkspaceRef.current.id,
-        workflow,
-      });
+      const workspaceId = currentWorkspaceRef.current.id;
+      const saved = workflowBuilderDefinition
+        ? await window.piDeck.workflows.updateWorkflow({
+            workspaceId,
+            workflow,
+          })
+        : await window.piDeck.workflows.createWorkflow({
+            workspaceId,
+            workflow,
+          });
+      setWorkflowDefinitions((current) => [
+        saved,
+        ...current.filter((candidate) => candidate.id !== saved.id),
+      ]);
       setWorkflowBuilderTemplate(undefined);
+      setWorkflowBuilderDefinition(undefined);
       setWorkflowView("home");
       setWorkflowError(undefined);
       setUiMessage(`Saved ${workflow.name}.`);
@@ -4126,10 +4152,14 @@ export function App(): ReactElement {
                 />
               ) : (
                 <WorkflowV2Builder
-                  key={`${currentWorkspace.id}:new-v2`}
+                  key={`${currentWorkspace.id}:${workflowBuilderDefinition?.id ?? "new-v2"}`}
+                  {...(workflowBuilderDefinition === undefined
+                    ? {}
+                    : { initialDefinition: workflowBuilderDefinition })}
                   onSave={handleSaveWorkflowV2}
                   onCancel={() => {
                     setWorkflowBuilderTemplate(undefined);
+                    setWorkflowBuilderDefinition(undefined);
                     setWorkflowView("home");
                   }}
                 />
@@ -4154,11 +4184,33 @@ export function App(): ReactElement {
                 templates={workflowTemplates}
                 workspaceName={currentWorkspace.name}
                 recentRuns={workflowRuns}
+                additionalWorkflowCount={roleBasedWorkflowDefinitions.length}
+                additionalWorkflowSection={
+                  roleBasedWorkflowDefinitions.length > 0 ? (
+                    <WorkflowV2Home
+                      embedded
+                      workflows={roleBasedWorkflowDefinitions}
+                      onCreate={() => {
+                        setWorkflowBuilderTemplate(undefined);
+                        setWorkflowBuilderDefinition(undefined);
+                        setWorkflowView("builder");
+                      }}
+                      onEdit={(workflow) => {
+                        setWorkflowBuilderTemplate(undefined);
+                        setWorkflowBuilderDefinition(workflow);
+                        setWorkflowView("builder");
+                      }}
+                      onStart={async () => undefined}
+                    />
+                  ) : undefined
+                }
                 onCreate={() => {
                   setWorkflowBuilderTemplate(undefined);
+                  setWorkflowBuilderDefinition(undefined);
                   setWorkflowView("builder");
                 }}
                 onEdit={(template) => {
+                  setWorkflowBuilderDefinition(undefined);
                   setWorkflowBuilderTemplate(template);
                   setWorkflowView("builder");
                 }}
@@ -4872,6 +4924,14 @@ function workflowTemplateIsVisibleInWorkspace(
   return (
     template.workspaceId === undefined || template.workspaceId === workspaceId
   );
+}
+
+function roleBasedWorkflowsForHome(
+  definitions: readonly WorkflowDefinition[],
+  legacyTemplates: readonly Pick<WorkflowTemplate, "id">[],
+): WorkflowDefinition[] {
+  const legacyIds = new Set(legacyTemplates.map((template) => template.id));
+  return definitions.filter((definition) => !legacyIds.has(definition.id));
 }
 
 function defaultWorkingDirectory(workspace: WorkspaceRef): string | undefined {
@@ -10207,6 +10267,7 @@ export const __rendererTestHooks = {
   workflowThinkingChoicesFor,
   workflowWorkspaceChoicesFor,
   workflowTemplateIsVisibleInWorkspace,
+  roleBasedWorkflowsForHome,
   thinkingLevelsForModel,
   clampThinkingLevel,
   applyPiDefaultsToDraftSessions,

@@ -8,7 +8,9 @@ import { WorkflowV2Builder } from "./WorkflowV2Builder.js";
 import {
   addRole,
   defaultV2Definition,
+  setLoopDecider,
   setManagedWorkers,
+  setOrchestratorMode,
   validateJsonDraft,
 } from "../../workflows/workflowV2.js";
 
@@ -18,10 +20,12 @@ describe("WorkflowV2Builder", () => {
   afterEach(() => {
     act(() => root?.unmount());
     container?.remove();
+    vi.unstubAllGlobals();
   });
   const render = (
     onSave: (definition: ReturnType<typeof defaultV2Definition>) => void = () =>
       undefined,
+    initialDefinition?: ReturnType<typeof defaultV2Definition>,
   ) => {
     container = document.createElement("div");
     document.body.append(container);
@@ -31,6 +35,7 @@ describe("WorkflowV2Builder", () => {
         createElement(WorkflowV2Builder, {
           onSave,
           onCancel: () => undefined,
+          initialDefinition,
         }),
       ),
     );
@@ -65,8 +70,8 @@ describe("WorkflowV2Builder", () => {
     const canonical = {
       ...added,
       relationships: [
-        { id: "start", from: "worker-1", to: { nodeId: "orchestrator-2" } },
-        { id: "end", from: "orchestrator-2", to: { end: "completed" } },
+        { id: "start", from: "worker-1", to: { nodeId: "orchestrator-1" } },
+        { id: "end", from: "orchestrator-1", to: { end: "completed" } },
       ],
     };
     expect(validateJsonDraft(JSON.stringify(canonical))).toMatchObject({
@@ -81,17 +86,147 @@ describe("WorkflowV2Builder", () => {
     expect(orchestrator.config.agents).toEqual([worker.id]);
   });
 
+  it("uses collision-safe IDs and reconciles managed mode changes", () => {
+    const base = {
+      ...defaultV2Definition(),
+      nodes: [
+        {
+          id: "worker-1",
+          name: "First",
+          role: "worker" as const,
+          config: { instructions: "x" },
+        },
+        {
+          id: "orchestrator-1",
+          name: "Owner",
+          role: "orchestrator" as const,
+          config: {
+            mode: "fanout" as const,
+            agents: ["worker-1"],
+            maxConcurrency: 1,
+            completion: "all" as const,
+          },
+        },
+      ],
+    };
+    const added = addRole(base, "orchestrator").definition;
+    expect(new Set(added.nodes.map((node) => node.id)).size).toBe(
+      added.nodes.length,
+    );
+    const loop = setOrchestratorMode(added, "orchestrator-2", "loop");
+    const loopOwner = loop.nodes.find((node) => node.id === "orchestrator-2")!;
+    expect(
+      loopOwner.role === "orchestrator" && loopOwner.config.mode === "loop",
+    ).toBe(true);
+    const fanout = setOrchestratorMode(loop, "orchestrator-2", "fanout");
+    expect(
+      fanout.nodes.some(
+        (node) =>
+          node.role === "decider" && node.managedBy === "orchestrator-2",
+      ),
+    ).toBe(false);
+  });
+
   it("updates ownership without mutating unrelated nodes", () => {
     const withWorker = addRole(defaultV2Definition(), "worker").definition;
     const withOrchestrator = addRole(withWorker, "orchestrator").definition;
-    const result = setManagedWorkers(withOrchestrator, "orchestrator-3", [
+    const result = setManagedWorkers(withOrchestrator, "orchestrator-1", [
       "worker-2",
     ]);
     expect(result.nodes.find((node) => node.id === "worker-1")).toEqual(
       withOrchestrator.nodes.find((node) => node.id === "worker-1"),
     );
     expect(result.nodes.find((node) => node.id === "worker-2")?.managedBy).toBe(
-      "orchestrator-3",
+      "orchestrator-1",
+    );
+  });
+
+  it("removes old loop decider routes when selecting another loop decider", () => {
+    const withOwner = setOrchestratorMode(
+      addRole(defaultV2Definition(), "orchestrator").definition,
+      "orchestrator-1",
+      "loop",
+    );
+    const candidate = addRole(withOwner, "decider").definition;
+    const result = setLoopDecider(candidate, "orchestrator-1", "decider-2");
+    expect(result.nodes.some((node) => node.name === "Loop completion")).toBe(
+      false,
+    );
+    expect(
+      result.nodes.find((node) => node.id === "decider-2")?.managedBy,
+    ).toBe("orchestrator-1");
+  });
+
+  it("preserves Orchestrator input across both mode switches", () => {
+    const fanout = addRole(defaultV2Definition(), "orchestrator").definition;
+    const withInput = {
+      ...fanout,
+      nodes: fanout.nodes.map((node) =>
+        node.role === "orchestrator"
+          ? { ...node, config: { ...node.config, input: "request context" } }
+          : node,
+      ),
+    };
+    const loop = setOrchestratorMode(withInput, "orchestrator-1", "loop");
+    const restored = setOrchestratorMode(loop, "orchestrator-1", "fanout");
+    for (const definition of [loop, restored]) {
+      const owner = definition.nodes.find(
+        (node) => node.id === "orchestrator-1",
+      );
+      expect(owner?.role === "orchestrator" && owner.config.input).toBe(
+        "request context",
+      );
+    }
+  });
+
+  it("offers Human approval, choice, and input-compatible routes", () => {
+    render();
+    click("+ Add step");
+    click("Add checkpointApproval / input");
+    expect(
+      container!.querySelector('[aria-label="True destination"]'),
+    ).not.toBeNull();
+    const interaction = [...container!.querySelectorAll("select")].find(
+      (select) => select.value === "approval",
+    )!;
+    act(() => {
+      interaction.value = "choice";
+      interaction.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(container!.textContent).toContain("Option 1 destination");
+    act(() => {
+      interaction.value = "input";
+      interaction.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(
+      container!.querySelector('[aria-label="Connect selected role to"]'),
+    ).not.toBeNull();
+  });
+
+  it("moves focus into the mobile inspector and restores the originating card", () => {
+    vi.stubGlobal("matchMedia", () => ({ matches: true }));
+    render();
+    const card = container!.querySelector<HTMLButtonElement>(
+      ".workflow-v2-step-card",
+    )!;
+    act(() => card.click());
+    expect(document.activeElement?.textContent).toBe("Close inspector");
+    click("Close inspector");
+    expect(document.activeElement).toBe(card);
+  });
+
+  it("restores the selected Build card after opening it from the mobile Graph", () => {
+    vi.stubGlobal("matchMedia", () => ({ matches: true }));
+    render();
+    click("GRAPH");
+    const graphNode = container!.querySelector<HTMLButtonElement>(
+      '[aria-label="Read-only workflow graph"] article button',
+    )!;
+    act(() => graphNode.click());
+    expect(document.activeElement?.textContent).toBe("Close inspector");
+    click("Close inspector");
+    expect((document.activeElement as HTMLElement).dataset.workflowNodeId).toBe(
+      "worker-1",
     );
   });
 

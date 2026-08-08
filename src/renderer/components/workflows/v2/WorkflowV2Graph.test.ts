@@ -125,14 +125,14 @@ describe("WorkflowV2Graph", () => {
     onSelectNode.mockReset();
   });
 
-  const render = () => {
+  const render = (definition = semanticGraphDefinition) => {
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
     act(() =>
       root?.render(
         createElement(WorkflowV2Graph, {
-          definition: semanticGraphDefinition,
+          definition,
           selectedNodeId: "prepare",
           onSelectNode,
         }),
@@ -157,6 +157,57 @@ describe("WorkflowV2Graph", () => {
       container!.querySelector('[aria-label="Managed roles for Iterate"]')
         ?.textContent,
     ).toContain("Implement");
+  });
+
+  it("renders duplicate same-endpoint routes independently", () => {
+    render({
+      ...semanticGraphDefinition,
+      relationships: [
+        ...semanticGraphDefinition.relationships,
+        {
+          id: "prepare-iterate-again",
+          from: "prepare",
+          to: { nodeId: "iterate" },
+        },
+      ],
+    });
+
+    expect(
+      container!.querySelectorAll('[aria-label="Routes from Prepare"] li'),
+    ).toHaveLength(2);
+  });
+
+  it("renders Human choice option labels on their routes", () => {
+    render({
+      ...semanticGraphDefinition,
+      nodes: semanticGraphDefinition.nodes.map((node) =>
+        node.id === "approve"
+          ? {
+              ...node,
+              config: {
+                interaction: "choice" as const,
+                prompt: "Choose a disposition",
+                options: ["Ship now", "Request changes"],
+              },
+            }
+          : node,
+      ),
+      relationships: semanticGraphDefinition.relationships.map(
+        (relationship) => {
+          if (relationship.id === "approve-decide")
+            return { ...relationship, when: { equals: "Ship now" } };
+          if (relationship.id === "approve-stop")
+            return { ...relationship, when: { equals: "Request changes" } };
+          return relationship;
+        },
+      ),
+    });
+
+    const routes = container!.querySelector(
+      '[aria-label="Routes from Approve"]',
+    );
+    expect(routes?.textContent).toContain("Ship now");
+    expect(routes?.textContent).toContain("Request changes");
   });
 
   it("uses native keyboard-selectable buttons to select top-level and managed nodes", () => {

@@ -76,7 +76,9 @@ export function WorkflowV2Home(props: WorkflowV2HomeProps): ReactElement {
           <div>
             <span className="workflow-kicker">Role-based workflows</span>
             <h3 id="workflow-v2-list-title">
-              {props.embedded ? "Role-based definitions" : "Your agent workflows"}
+              {props.embedded
+                ? "Role-based definitions"
+                : "Your agent workflows"}
             </h3>
           </div>
           <span

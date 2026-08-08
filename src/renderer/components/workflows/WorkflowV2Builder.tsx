@@ -13,6 +13,7 @@ import {
   graphEdges,
   setLoopDecider,
   setManagedWorkers,
+  setOrchestratorMode,
   validateJsonDraft,
   workflowRoleTemplates,
   type WorkflowRole,
@@ -58,13 +59,20 @@ export function WorkflowV2Builder(props: {
   const [jsonError, setJsonError] = useState<string>();
   const [saveError, setSaveError] = useState<string>();
   const [showPicker, setShowPicker] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
   const addRef = useRef<HTMLButtonElement>(null);
+  const inspectorCloseRef = useRef<HTMLButtonElement>(null);
+  const originCardRef = useRef<HTMLButtonElement>(null);
   const initialFocus = useRef(0);
   const selected =
     definition.nodes.find((node) => node.id === selectedId) ??
     definition.nodes[0]!;
   const edges = useMemo(() => graphEdges(definition), [definition]);
+  const validationError = useMemo(
+    () => validateJsonDraft(definitionJson(definition)).error,
+    [definition],
+  );
   const update = (next: WorkflowV2Definition) => {
     setDefinition(next);
     setDraft(definitionJson(next));
@@ -95,6 +103,10 @@ export function WorkflowV2Builder(props: {
       document.removeEventListener("keydown", escape);
     };
   }, [showPicker]);
+  useEffect(() => {
+    if (inspectorOpen && window.matchMedia?.("(max-width: 720px)").matches)
+      inspectorCloseRef.current?.focus();
+  }, [inspectorOpen, selectedId, view]);
   const pickerKeys = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     const items = Array.from(
       pickerRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ??
@@ -133,7 +145,15 @@ export function WorkflowV2Builder(props: {
     const edge = {
       id:
         existing?.id ??
-        `relationship-${from}-${String(equals ?? "then")}-${definition.relationships.length + 1}`,
+        `relationship-${from}-${String(equals ?? "then")}-${(() => {
+          let n = 1;
+          const ids = new Set(definition.relationships.map((item) => item.id));
+          while (
+            ids.has(`relationship-${from}-${String(equals ?? "then")}-${n}`)
+          )
+            n += 1;
+          return n;
+        })()}`,
       from,
       ...(equals === undefined ? {} : { when: { equals } }),
       to,
@@ -149,46 +169,7 @@ export function WorkflowV2Builder(props: {
   const changeMode = (
     node: Extract<WorkflowV2Node, { role: "orchestrator" }>,
     mode: "loop" | "fanout",
-  ) => {
-    if (mode === "fanout")
-      return patch({
-        ...node,
-        config: {
-          mode,
-          agents: node.config.agents,
-          maxConcurrency: 1,
-          completion: "all",
-        },
-      });
-    const deciderId = `decider-${definition.nodes.length + 1}`;
-    const decider: WorkflowV2Node = {
-      id: deciderId,
-      name: "Loop completion",
-      role: "decider",
-      managedBy: node.id,
-      config: { question: "Is the loop complete?" },
-    };
-    update({ ...definition, nodes: [...definition.nodes, decider] });
-    // The second update intentionally establishes the loop config after the child exists.
-    const next = {
-      ...definition,
-      nodes: [
-        ...definition.nodes.filter((item) => item.id !== node.id),
-        {
-          ...node,
-          config: {
-            mode,
-            agents: node.config.agents,
-            decider: deciderId,
-            maxIterations: 1,
-          },
-        },
-        decider,
-      ],
-    } as WorkflowV2Definition;
-    update(next);
-    setSelectedId(node.id);
-  };
+  ) => update(setOrchestratorMode(definition, node.id, mode));
   const save = async () => {
     const result = validateJsonDraft(definitionJson(definition));
     if (!result.definition) {
@@ -338,9 +319,14 @@ export function WorkflowV2Builder(props: {
               <button
                 key={node.id}
                 type="button"
+                data-workflow-node-id={node.id}
                 className={`workflow-v2-step-card ${selected.id === node.id ? "is-selected" : ""}`}
                 aria-pressed={selected.id === node.id}
-                onClick={() => setSelectedId(node.id)}
+                onClick={(event) => {
+                  originCardRef.current = event.currentTarget;
+                  setSelectedId(node.id);
+                  setInspectorOpen(true);
+                }}
               >
                 <span className="workflow-v2-card-heading">
                   <b>{index + 1}</b>
@@ -372,10 +358,37 @@ export function WorkflowV2Builder(props: {
             ))}
           </section>
           <aside
-            className="workflow-v2-inspector"
+            className={`workflow-v2-inspector ${inspectorOpen ? "is-open" : ""}`}
             aria-label="Focused role inspector"
           >
-            <h3>{presentation[selected.role]}</h3>
+            <div className="workflow-v2-inspector-heading">
+              <h3>{presentation[selected.role]}</h3>
+              <button
+                ref={inspectorCloseRef}
+                type="button"
+                className="workflow-v2-inspector-close"
+                onClick={() => {
+                  setInspectorOpen(false);
+                  const origin = originCardRef.current?.isConnected
+                    ? originCardRef.current
+                    : Array.from(
+                        document.querySelectorAll<HTMLButtonElement>(
+                          "[data-workflow-node-id]",
+                        ),
+                      ).find(
+                        (card) => card.dataset.workflowNodeId === selected.id,
+                      );
+                  (origin ?? addRef.current)?.focus();
+                }}
+              >
+                Close inspector
+              </button>
+            </div>
+            {validationError && (
+              <p className="workflow-v2-validation" role="alert">
+                {validationError}
+              </p>
+            )}
             <label className="workflow-field">
               <span>Name</span>
               <input
@@ -511,23 +524,32 @@ export function WorkflowV2Builder(props: {
                         | "input"
                         | "approval"
                         | "choice";
-                      patch({
-                        ...selected,
-                        config:
-                          interaction === "choice"
-                            ? {
-                                interaction,
-                                prompt: selected.config.prompt,
-                                options: ["Option 1"],
-                              }
-                            : {
-                                interaction,
-                                prompt: selected.config.prompt,
-                                ...(selected.config.input
-                                  ? { input: selected.config.input }
-                                  : {}),
-                              },
-                      } as WorkflowV2Node);
+                      const config =
+                        interaction === "choice"
+                          ? {
+                              interaction,
+                              prompt: selected.config.prompt,
+                              ...(selected.config.input
+                                ? { input: selected.config.input }
+                                : {}),
+                              options: ["Option 1"],
+                            }
+                          : {
+                              interaction,
+                              prompt: selected.config.prompt,
+                              ...(selected.config.input
+                                ? { input: selected.config.input }
+                                : {}),
+                            };
+                      update({
+                        ...updateNode(definition, {
+                          ...selected,
+                          config,
+                        } as WorkflowV2Node),
+                        relationships: definition.relationships.filter(
+                          (edge) => edge.from !== selected.id,
+                        ),
+                      });
                     }}
                   >
                     <option value="input">Input</option>
@@ -567,15 +589,25 @@ export function WorkflowV2Builder(props: {
                     <span>Choice options (one per line)</span>
                     <textarea
                       value={selected.config.options.join("\n")}
-                      onChange={(e) =>
-                        patch({
-                          ...selected,
-                          config: {
-                            ...selected.config,
-                            options: e.target.value.split("\n").filter(Boolean),
-                          },
-                        } as WorkflowV2Node)
-                      }
+                      onChange={(e) => {
+                        const options = e.target.value
+                          .split("\n")
+                          .map((option) => option.trim())
+                          .filter(Boolean);
+                        update({
+                          ...updateNode(definition, {
+                            ...selected,
+                            config: { ...selected.config, options },
+                          } as WorkflowV2Node),
+                          relationships: definition.relationships.filter(
+                            (edge) =>
+                              edge.from !== selected.id ||
+                              !edge.when ||
+                              (typeof edge.when.equals === "string" &&
+                                options.includes(edge.when.equals)),
+                          ),
+                        });
+                      }}
                     />
                   </label>
                 )}
@@ -594,6 +626,21 @@ export function WorkflowV2Builder(props: {
                     <option value="fanout">Fan-out</option>
                     <option value="loop">Loop</option>
                   </select>
+                </label>
+                <label className="workflow-field">
+                  <span>Input (optional)</span>
+                  <textarea
+                    value={selected.config.input ?? ""}
+                    onChange={(e) =>
+                      patch({
+                        ...selected,
+                        config: {
+                          ...selected.config,
+                          input: optional(e.target.value),
+                        },
+                      } as WorkflowV2Node)
+                    }
+                  />
                 </label>
                 <fieldset>
                   <legend>Managed workers (fixed list)</legend>
@@ -629,6 +676,10 @@ export function WorkflowV2Builder(props: {
                         {node.name}
                       </label>
                     ))}
+                  <p className="workflow-v2-policy">
+                    Workers are owned exclusively. Removing an assigned worker
+                    deletes it and its routes; at least one worker is required.
+                  </p>
                   <p>
                     Derived fan-out worker count:{" "}
                     <strong>{selected.config.agents.length}</strong>
@@ -747,11 +798,16 @@ export function WorkflowV2Builder(props: {
                       </button>
                     </p>
                   ))}
-                {selected.role === "decider" ? (
+                {selected.role === "decider" ||
+                (selected.role === "human" &&
+                  selected.config.interaction === "approval") ? (
                   <>
                     <label className="workflow-field">
                       <span>
-                        {selected.config.trueLabel ?? "Yes"} destination
+                        {selected.role === "human"
+                          ? "Approved"
+                          : (selected.config.trueLabel ?? "Yes")}{" "}
+                        destination
                       </span>
                       <select
                         aria-label="True destination"
@@ -767,7 +823,10 @@ export function WorkflowV2Builder(props: {
                     </label>
                     <label className="workflow-field">
                       <span>
-                        {selected.config.falseLabel ?? "No"} destination
+                        {selected.role === "human"
+                          ? "Rejected"
+                          : (selected.config.falseLabel ?? "No")}{" "}
+                        destination
                       </span>
                       <select
                         aria-label="False destination"
@@ -781,6 +840,26 @@ export function WorkflowV2Builder(props: {
                         {destinationOptions()}
                       </select>
                     </label>
+                  </>
+                ) : selected.role === "human" &&
+                  selected.config.interaction === "choice" ? (
+                  <>
+                    {selected.config.options.map((option) => (
+                      <label className="workflow-field" key={option}>
+                        <span>{option} destination</span>
+                        <select
+                          aria-label={`${option} destination`}
+                          value=""
+                          onChange={(e) => {
+                            if (e.target.value)
+                              relationship(selected.id, option, e.target.value);
+                          }}
+                        >
+                          <option value="">Choose destination…</option>
+                          {destinationOptions()}
+                        </select>
+                      </label>
+                    ))}
                   </>
                 ) : (
                   <label className="workflow-field">
@@ -851,7 +930,9 @@ export function WorkflowV2Builder(props: {
           definition={definition}
           selectedNodeId={selected.id}
           onSelectNode={(nodeId) => {
+            originCardRef.current = null;
             setSelectedId(nodeId);
+            setInspectorOpen(true);
             setView("build");
           }}
         />

@@ -32,6 +32,11 @@ const v2StoreSchema = z
     workflows: z.array(workflowDefinitionSchema),
     occurrences: z.array(workflowOccurrenceSchema),
     legacyRuns: z.array(workflowRunSchema),
+    // Scope is store metadata, never part of the canonical v2 document.
+    // Omitted entries are global for compatibility with already-persisted v2 files.
+    workflowScopes: z
+      .record(z.string(), z.string().min(1).max(120))
+      .default({}),
   })
   .strict();
 type V1Store = z.infer<typeof v1StoreSchema>;
@@ -41,6 +46,7 @@ const emptyStore = (): WorkflowStoreFile => ({
   workflows: [],
   occurrences: [],
   legacyRuns: [],
+  workflowScopes: {},
 });
 
 /** Version-aware store. v1 runs remain in `legacyRuns`; they are never forged into v2 occurrences. */
@@ -65,9 +71,16 @@ export class WorkflowStore {
       await this.loadPromise;
     }
   }
-  async listWorkflows(): Promise<WorkflowDefinition[]> {
+  async listWorkflows(workspaceId?: string): Promise<WorkflowDefinition[]> {
     await this.loadIfNeeded();
-    return clone(this.state.workflows).sort((a, b) => b.revision - a.revision);
+    return clone(
+      this.state.workflows.filter(
+        (workflow) =>
+          workspaceId === undefined ||
+          this.state.workflowScopes[workflow.id] === undefined ||
+          this.state.workflowScopes[workflow.id] === workspaceId,
+      ),
+    ).sort((a, b) => b.revision - a.revision);
   }
   async getWorkflow(id: string): Promise<WorkflowDefinition> {
     await this.loadIfNeeded();
@@ -77,6 +90,7 @@ export class WorkflowStore {
   }
   async createWorkflow(
     workflow: WorkflowDefinition,
+    workspaceId?: string,
   ): Promise<WorkflowDefinition> {
     await this.loadIfNeeded();
     const parsed = workflowDefinitionSchema.parse(workflow);
@@ -85,11 +99,16 @@ export class WorkflowStore {
     await this.commit({
       ...this.state,
       workflows: [...this.state.workflows, parsed],
+      workflowScopes:
+        workspaceId === undefined
+          ? this.state.workflowScopes
+          : { ...this.state.workflowScopes, [parsed.id]: workspaceId },
     });
     return clone(parsed);
   }
   async updateWorkflow(
     workflow: WorkflowDefinition,
+    workspaceId?: string,
   ): Promise<WorkflowDefinition> {
     await this.loadIfNeeded();
     const parsed = workflowDefinitionSchema.parse(workflow);
@@ -97,6 +116,11 @@ export class WorkflowStore {
       (item) => item.id === parsed.id,
     );
     if (index < 0) throw new Error(`Unknown workflow: ${parsed.id}`);
+    const scope = this.state.workflowScopes[parsed.id];
+    if (scope !== undefined && workspaceId !== scope)
+      throw new Error(
+        `Workflow ${parsed.id} is not available in this workspace`,
+      );
     const workflows = [...this.state.workflows];
     workflows[index] = parsed;
     await this.commit({ ...this.state, workflows });
@@ -123,7 +147,12 @@ export class WorkflowStore {
   async listTemplates(workspaceId?: string): Promise<WorkflowTemplate[]> {
     await this.loadIfNeeded();
     return this.state.workflows
-      .map(workflowToLegacyTemplate)
+      .map((workflow) =>
+        workflowToLegacyTemplate(
+          workflow,
+          this.state.workflowScopes[workflow.id],
+        ),
+      )
       .filter((item): item is WorkflowTemplate => item !== undefined)
       .filter(
         (item) =>
@@ -151,7 +180,10 @@ export class WorkflowStore {
       createdAtMs: now,
       updatedAtMs: now,
     });
-    await this.createWorkflow(migrateV1Template(template));
+    await this.createWorkflow(
+      migrateV1Template(template),
+      template.workspaceId,
+    );
     return template;
   }
   async updateTemplate(
@@ -166,7 +198,7 @@ export class WorkflowStore {
       createdAtMs: current.createdAtMs,
       updatedAtMs: this.now(),
     });
-    await this.updateWorkflow(migrateV1Template(template));
+    await this.updateWorkflow(migrateV1Template(template), current.workspaceId);
     return template;
   }
   async archiveTemplate(templateId: string): Promise<WorkflowTemplate> {
@@ -290,6 +322,13 @@ export function migrateV1(file: V1Store): WorkflowStoreFile {
     workflows: file.templates.map(migrateV1Template),
     occurrences: [],
     legacyRuns: file.runs.map(preserveLegacyRun),
+    workflowScopes: Object.fromEntries(
+      file.templates.flatMap((template) =>
+        template.workspaceId === undefined
+          ? []
+          : [[template.id, template.workspaceId]],
+      ),
+    ),
   });
 }
 export class UnsupportedWorkflowStoreVersionError extends Error {
@@ -300,6 +339,7 @@ export class UnsupportedWorkflowStoreVersionError extends Error {
 }
 function workflowToLegacyTemplate(
   workflow: WorkflowDefinition,
+  workspaceId?: string,
 ): WorkflowTemplate | undefined {
   // A v2 workflow may contain roles the v1 runtime cannot execute. Do not
   // misrepresent it as a template in the legacy UI.
@@ -313,6 +353,7 @@ function workflowToLegacyTemplate(
     id: workflow.id,
     name: workflow.name,
     ...(workflow.description ? { description: workflow.description } : {}),
+    ...(workspaceId === undefined ? {} : { workspaceId }),
     inputs: workflow.inputs,
     steps: workflow.nodes.map((node) => {
       // The preflight above excludes other roles, but narrow here as well so

@@ -94,7 +94,7 @@ export function WorkflowV2Graph(props: WorkflowV2GraphProps): ReactElement {
               {model.routes
                 .filter((route) => route.from === node.id)
                 .map((route) => (
-                  <li key={`${route.from}-${route.to}-${route.label}`}>
+                  <li key={route.id}>
                     <span>{route.label}</span> →{" "}
                     {route.terminal ? "Terminal outcome: " : ""}
                     <strong>

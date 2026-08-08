@@ -332,18 +332,21 @@ function advanceOrchestrator(
     { role: "orchestrator" }
   >["config"];
   const child = occurrenceOf(run, childId);
-  if (child.status === "failed")
+  const current = run.occurrences.filter(
+    (item) =>
+      item.parentOrchestratorRunId === orchestratorId &&
+      item.iteration === child.iteration,
+  );
+  if (
+    child.status === "failed" &&
+    !(config.mode === "fanout" && config.completion === "any")
+  )
     return failWorkflowOccurrence(
       run,
       orchestratorId,
       `Managed ${child.role} failed: ${child.error ?? "unknown error"}`,
       now,
     );
-  const current = run.occurrences.filter(
-    (item) =>
-      item.parentOrchestratorRunId === orchestratorId &&
-      item.iteration === child.iteration,
-  );
   if (config.mode === "fanout") {
     const done = current.filter(
       (item) => item.role === "worker" && item.status === "completed",
@@ -352,6 +355,13 @@ function advanceOrchestrator(
       .filter((item) => item.role === "worker")
       .every((item) =>
         ["completed", "failed", "cancelled"].includes(item.status),
+      );
+    if (config.completion === "any" && allDone && done.length === 0)
+      return failWorkflowOccurrence(
+        run,
+        orchestratorId,
+        `No managed Worker completed successfully: ${child.error ?? "all workers stopped"}`,
+        now,
       );
     if (
       (config.completion === "any" && done.length) ||
@@ -528,9 +538,32 @@ function add(
 function bound(value: string, limit = 32_000): string {
   return value.length > limit ? value.slice(0, limit) : value;
 }
+function isNonFatalFanoutAnyFailure(
+  run: WorkflowRoleRun,
+  occurrence: WorkflowOccurrence,
+): boolean {
+  if (!occurrence.parentOrchestratorRunId) return false;
+  const orchestrator = run.occurrences.find(
+    (item) => item.id === occurrence.parentOrchestratorRunId,
+  );
+  if (
+    orchestrator?.status !== "running" &&
+    orchestrator?.status !== "completed"
+  )
+    return false;
+  const role = node(run.definition, orchestrator.nodeId);
+  return (
+    role.role === "orchestrator" &&
+    role.config.mode === "fanout" &&
+    role.config.completion === "any"
+  );
+}
 function derive(run: WorkflowRoleRun, now: number): WorkflowRoleRun {
   if (run.status === "stopped") return run;
-  const status = run.occurrences.some((item) => item.status === "failed")
+  const status = run.occurrences.some(
+    (item) =>
+      item.status === "failed" && !isNonFatalFanoutAnyFailure(run, item),
+  )
     ? "needsAttention"
     : run.occurrences.some((item) => item.status === "waitingHuman")
       ? "needsAttention"

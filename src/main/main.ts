@@ -1024,7 +1024,7 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async ({ workspaceId }) => {
       await requireOpenWorkspace(workspaceId);
-      return ensureWorkflowStore().listWorkflows();
+      return ensureWorkflowStore().listWorkflows(workspaceId);
     },
   });
 
@@ -1035,7 +1035,7 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async ({ workspaceId, workflow }) => {
       await requireOpenWorkspace(workspaceId);
-      return ensureWorkflowStore().createWorkflow(workflow);
+      return ensureWorkflowStore().createWorkflow(workflow, workspaceId);
     },
   });
 
@@ -1046,7 +1046,7 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async ({ workspaceId, workflow }) => {
       await requireOpenWorkspace(workspaceId);
-      return ensureWorkflowStore().updateWorkflow(workflow);
+      return ensureWorkflowStore().updateWorkflow(workflow, workspaceId);
     },
   });
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { emptyOverlays } from "./sessionState.js";
+import { defaultV2Definition } from "./workflows/workflowV2.js";
 import { __rendererTestHooks } from "./App.js";
 
 function baseSession() {
@@ -776,6 +777,17 @@ describe("workflow workspace scope choices", () => {
       { id: "workspace-default", name: "Default workspace" },
       { id: "workspace-project", name: "liusu_pi_gui" },
     ]);
+  });
+
+  it("deduplicates definitions already represented by legacy templates", () => {
+    const overlapping = { ...defaultV2Definition(), id: "shared" };
+    const roleBased = { ...defaultV2Definition(), id: "role-based" };
+    expect(
+      __rendererTestHooks.roleBasedWorkflowsForHome(
+        [overlapping, roleBased],
+        [{ id: "shared" }],
+      ),
+    ).toEqual([roleBased]);
   });
 
   it("matches the workflow store's global-or-current visibility rule", () => {

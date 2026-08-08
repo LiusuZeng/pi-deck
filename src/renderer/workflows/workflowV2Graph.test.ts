@@ -144,4 +144,61 @@ describe("deriveWorkflowV2Graph", () => {
       deriveWorkflowV2Graph(definition).topLevelNodes.map((node) => node.id),
     ).toEqual(["prepare", "iterate", "parallel", "approve", "decide"]);
   });
+
+  it("retains relationship IDs for duplicate unconditional same-endpoint routes", () => {
+    const graph = deriveWorkflowV2Graph({
+      ...definition,
+      relationships: [
+        ...definition.relationships,
+        {
+          id: "prepare-iterate-again",
+          from: "prepare",
+          to: { nodeId: "iterate" },
+        },
+      ],
+    });
+
+    expect(
+      graph.routes
+        .filter((route) => route.from === "prepare" && route.to === "iterate")
+        .map((route) => route.id),
+    ).toEqual(["prepare-iterate", "prepare-iterate-again"]);
+  });
+
+  it("labels Human choice routes with their declared options", () => {
+    const graph = deriveWorkflowV2Graph({
+      ...definition,
+      nodes: definition.nodes.map((node) =>
+        node.id === "approve"
+          ? {
+              ...node,
+              config: {
+                interaction: "choice" as const,
+                prompt: "Choose a disposition",
+                options: ["Ship now", "Request changes"],
+              },
+            }
+          : node,
+      ),
+      relationships: definition.relationships.map((relationship) => {
+        if (relationship.id === "approve-decide")
+          return {
+            ...relationship,
+            when: { equals: "Ship now" },
+          };
+        if (relationship.id === "approve-stop")
+          return {
+            ...relationship,
+            when: { equals: "Request changes" },
+          };
+        return relationship;
+      }),
+    });
+
+    expect(
+      graph.routes
+        .filter((route) => route.from === "approve")
+        .map((route) => route.label),
+    ).toEqual(["Ship now", "Request changes"]);
+  });
 });

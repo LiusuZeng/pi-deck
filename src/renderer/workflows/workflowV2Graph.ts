@@ -4,6 +4,8 @@ import type {
 } from "../../shared/workflowV2Schemas.js";
 
 export interface WorkflowV2GraphRoute {
+  /** Canonical relationship ID, retained for stable rendering identity. */
+  id: string;
   from: string;
   to: string;
   label: string;
@@ -61,6 +63,7 @@ export function deriveWorkflowV2Graph(
   const nodesById = new Map(definition.nodes.map((node) => [node.id, node]));
   const topLevel = definition.nodes.filter((node) => !node.managedBy);
   const routes = definition.relationships.map((relationship) => ({
+    id: relationship.id,
     from: relationship.from,
     to:
       "nodeId" in relationship.to

@@ -1,7 +1,7 @@
 # Agent Workflows v2 — Role-Based Design
 
-**Status:** Product direction approved; implementation not started  
-**Date:** 2026-08-07  
+**Status:** Product direction approved; Build, Graph, persistence, and core role runtime implemented; occurrence-run UI integration remains in progress
+**Date:** 2026-08-07
 **Tracking item:** [Agent Workflows feedback item 2](agent-workflows-feedback.md#2-replace-the-field-heavy-step-model-with-four-execution-roles)
 
 This document is the implementation-oriented design for replacing the current

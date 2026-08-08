@@ -89,6 +89,27 @@ describe("WorkflowStore v2 migration foundation", () => {
     ).rejects.toThrow(/Entry node/);
   });
 
+  it("filters scoped workflows while retaining global definitions and rejects cross-workspace updates", async () => {
+    const store = await fresh();
+    const global = { ...v2(), id: "global" };
+    const scoped = { ...v2(), id: "scoped" };
+    await store.createWorkflow(global);
+    await store.createWorkflow(scoped, "workspace-a");
+
+    expect(
+      (await store.listWorkflows("workspace-a")).map(({ id }) => id),
+    ).toEqual(["global", "scoped"]);
+    expect(
+      (await store.listWorkflows("workspace-b")).map(({ id }) => id),
+    ).toEqual(["global"]);
+    await expect(
+      store.updateWorkflow({ ...scoped, revision: 2 }, "workspace-b"),
+    ).rejects.toThrow("not available in this workspace");
+    expect(
+      JSON.stringify(await fs.readFile(store.storeFile, "utf8")),
+    ).not.toContain('"workspaceId"');
+  });
+
   it("backs up v1, migrates templates to nodes, and preserves runs unchanged", async () => {
     const source = await fresh();
     const legacy = await source.createTemplate(legacyDefinition);
@@ -113,6 +134,23 @@ describe("WorkflowStore v2 migration foundation", () => {
     const disk = JSON.parse(await fs.readFile(source.storeFile, "utf8"));
     expect(disk.legacyRuns).toEqual([run]);
     expect(disk.occurrences).toEqual([]);
+  });
+
+  it("preserves a legacy template workspace scope during migration", async () => {
+    const store = await fresh();
+    const template = await store.createTemplate({
+      ...legacyDefinition,
+      workspaceId: "workspace-a",
+    });
+    await fs.writeFile(
+      store.storeFile,
+      JSON.stringify({ version: 1, templates: [template], runs: [] }),
+    );
+    const migrated = new WorkflowStore(path.dirname(store.storeFile));
+    expect(
+      (await migrated.listWorkflows("workspace-a")).map(({ id }) => id),
+    ).toEqual([template.id]);
+    expect(await migrated.listWorkflows("workspace-b")).toEqual([]);
   });
 
   it("migrates approval before a non-entry legacy step without disconnecting it", async () => {

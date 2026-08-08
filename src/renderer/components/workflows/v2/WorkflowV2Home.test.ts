@@ -136,4 +136,24 @@ describe("WorkflowV2Home", () => {
     await act(async () => start.click());
     expect(props.onStart).toHaveBeenCalledWith(workflow);
   });
+
+  it("prevents concurrent starts for the same v2 definition", async () => {
+    let resolveStart: (() => void) | undefined;
+    const onStart = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveStart = resolve;
+        }),
+    );
+    render({ startCapability: { enabled: true }, onStart });
+    const start = [...container!.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Start run",
+    )!;
+    act(() => {
+      start.click();
+      start.click();
+    });
+    expect(onStart).toHaveBeenCalledOnce();
+    await act(async () => resolveStart?.());
+  });
 });

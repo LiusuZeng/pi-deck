@@ -4731,3 +4731,52 @@ body {
     grid-template-columns: 1fr;
   }
 }
+
+.workflow-v2-inspector-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.workflow-v2-inspector-close {
+  display: none;
+}
+.workflow-v2-validation {
+  margin: 0 0 12px;
+  color: var(--color-danger, #dc2626);
+  font-size: 13px;
+}
+.workflow-v2-policy {
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+@media (min-width: 721px) and (max-width: 980px) {
+  .workflow-v2-build {
+    grid-template-columns: minmax(210px, 0.8fr) minmax(300px, 1.2fr);
+  }
+  .workflow-v2-inspector {
+    position: sticky;
+    top: 12px;
+    max-height: calc(100vh - 24px);
+    overflow: auto;
+  }
+}
+@media (max-width: 720px) {
+  .workflow-v2-inspector {
+    display: none;
+  }
+  .workflow-v2-inspector.is-open {
+    position: fixed;
+    z-index: 20;
+    inset: 0;
+    display: block;
+    box-sizing: border-box;
+    overflow: auto;
+    border: 0;
+    border-radius: 0;
+    background: var(--color-surface-raised, #fff);
+  }
+  .workflow-v2-inspector-close {
+    display: inline-block;
+  }
+}
