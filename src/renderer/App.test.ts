@@ -750,6 +750,56 @@ describe("renderer project API compatibility", () => {
   });
 });
 
+describe("workflow workspace scope choices", () => {
+  const workspace = (id: string, name: string) => ({
+    id,
+    name,
+    lastOpenedAt: 1,
+  });
+
+  it("keeps unique active workspaces and excludes archived and invalid demo rows", () => {
+    const current = workspace("workspace-default", "Default workspace");
+    const archived = workspace("workspace-archived", "Archived workspace");
+
+    expect(
+      __rendererTestHooks.workflowWorkspaceChoicesFor(
+        current,
+        [
+          current,
+          workspace("workspace-project", "liusu_pi_gui"),
+          archived,
+          workspace("demo-deleted-workspace", "Deleted project"),
+        ],
+        [archived],
+      ),
+    ).toEqual([
+      { id: "workspace-default", name: "Default workspace" },
+      { id: "workspace-project", name: "liusu_pi_gui" },
+    ]);
+  });
+
+  it("matches the workflow store's global-or-current visibility rule", () => {
+    expect(
+      __rendererTestHooks.workflowTemplateIsVisibleInWorkspace(
+        {},
+        "workspace-default",
+      ),
+    ).toBe(true);
+    expect(
+      __rendererTestHooks.workflowTemplateIsVisibleInWorkspace(
+        { workspaceId: "workspace-default" },
+        "workspace-default",
+      ),
+    ).toBe(true);
+    expect(
+      __rendererTestHooks.workflowTemplateIsVisibleInWorkspace(
+        { workspaceId: "workspace-project" },
+        "workspace-default",
+      ),
+    ).toBe(false);
+  });
+});
+
 describe("Pi draft defaults and thinking capabilities", () => {
   it("uses Pi's model-specific levels, including max and unsupported holes", () => {
     expect(

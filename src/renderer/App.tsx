@@ -1215,6 +1215,15 @@ export function App(): ReactElement {
     ],
     [currentWorkspace, workspaces],
   );
+  const workflowWorkspaceChoices = useMemo(
+    () =>
+      workflowWorkspaceChoicesFor(
+        currentWorkspace,
+        workspaces,
+        archivedWorkspaces,
+      ),
+    [archivedWorkspaces, currentWorkspace, workspaces],
+  );
   const activityWorkspaceNameById = useMemo(
     () =>
       Object.fromEntries(
@@ -1758,10 +1767,26 @@ export function App(): ReactElement {
             ...definition,
           })
         : await window.piDeck.workflows.createTemplate(definition);
-      setWorkflowTemplates((current) => [
-        template,
-        ...current.filter((candidate) => candidate.id !== template.id),
-      ]);
+      const currentWorkspaceId = currentWorkspaceRef.current.id;
+      setWorkflowTemplates((current) => {
+        const withoutSavedTemplate = current.filter(
+          (candidate) => candidate.id !== template.id,
+        );
+        return workflowTemplateIsVisibleInWorkspace(
+          template,
+          currentWorkspaceId,
+        )
+          ? [template, ...withoutSavedTemplate]
+          : withoutSavedTemplate;
+      });
+      if (!workflowTemplateIsVisibleInWorkspace(template, currentWorkspaceId)) {
+        const scopeName = workflowWorkspaceChoices.find(
+          (workspace) => workspace.id === template.workspaceId,
+        )?.name;
+        setUiMessage(
+          `Saved ${template.name} to ${scopeName ?? template.workspaceId}. Switch to that workspace to run it.`,
+        );
+      }
       setWorkflowBuilderTemplate(undefined);
       setWorkflowView("home");
       setWorkflowError(undefined);
@@ -4077,8 +4102,7 @@ export function App(): ReactElement {
                 {...(workflowBuilderTemplate !== undefined
                   ? { initialTemplate: workflowBuilderTemplate }
                   : {})}
-                workspaceId={currentWorkspace.id}
-                workspaceName={currentWorkspace.name}
+                workspaceChoices={workflowWorkspaceChoices}
                 modelChoices={workflowModelChoices}
                 thinkingChoices={workflowThinkingChoices}
                 onSave={handleSaveWorkflow}
@@ -4794,6 +4818,37 @@ function workspaceFromLegacyProject(project: ProjectRef): WorkspaceRef {
     defaultProject: project,
     lastOpenedAt: project.lastOpenedAt,
   };
+}
+
+function workflowWorkspaceChoicesFor(
+  currentWorkspace: WorkspaceRef,
+  activeWorkspaces: readonly WorkspaceRef[],
+  archivedWorkspaces: readonly WorkspaceRef[],
+): Array<Pick<WorkspaceRef, "id" | "name">> {
+  const archivedIds = new Set(
+    archivedWorkspaces.map((workspace) => workspace.id),
+  );
+  const seen = new Set<string>();
+  return [currentWorkspace, ...activeWorkspaces].flatMap((workspace) => {
+    if (
+      workspace.id === invalidDemoWorkspace.id ||
+      archivedIds.has(workspace.id) ||
+      seen.has(workspace.id)
+    ) {
+      return [];
+    }
+    seen.add(workspace.id);
+    return [{ id: workspace.id, name: workspace.name }];
+  });
+}
+
+function workflowTemplateIsVisibleInWorkspace(
+  template: Pick<WorkflowTemplate, "workspaceId">,
+  workspaceId: string,
+): boolean {
+  return (
+    template.workspaceId === undefined || template.workspaceId === workspaceId
+  );
 }
 
 function defaultWorkingDirectory(workspace: WorkspaceRef): string | undefined {
@@ -10127,6 +10182,8 @@ export const __rendererTestHooks = {
   updateRuntimeCapabilities,
   workflowModelChoicesFor,
   workflowThinkingChoicesFor,
+  workflowWorkspaceChoicesFor,
+  workflowTemplateIsVisibleInWorkspace,
   thinkingLevelsForModel,
   clampThinkingLevel,
   applyPiDefaultsToDraftSessions,
