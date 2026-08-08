@@ -10,38 +10,24 @@ import {
   type WorkflowTemplate,
   type WorkflowTemplateDefinition,
 } from "../../shared/workflowSchemas.js";
-import {
-  roleWorkflowSchema,
-  workflowOccurrenceSchema,
-  type RoleWorkflow,
-  type WorkflowOccurrence,
-} from "../../shared/workflowV2Schemas.js";
 import type { DiagnosticsRecorder } from "../diagnostics/diagnostics.js";
 
-const workflowStoreFileV1Schema = z
+const workflowStoreFileSchema = z
   .object({
     version: z.literal(1),
     templates: z.array(workflowTemplateSchema),
     runs: z.array(workflowRunSchema),
   })
   .strict();
-const workflowStoreFileSchema = z
-  .object({
-    version: z.literal(2),
-    roleWorkflows: z.array(roleWorkflowSchema),
-    occurrences: z.array(workflowOccurrenceSchema),
-  })
-  .strict();
+
 type WorkflowStoreFile = z.infer<typeof workflowStoreFileSchema>;
-type WorkflowStoreFileV1 = z.infer<typeof workflowStoreFileV1Schema>;
+
 const emptyStore = (): WorkflowStoreFile => ({
-  version: 2,
-  roleWorkflows: [],
-  occurrences: [],
+  version: 1,
+  templates: [],
+  runs: [],
 });
 
-/** Persistent v2 store. The v1-named methods are intentionally adapters while
- * IPC/runtime move independently; on disk only role workflows/occurrences are written. */
 export class WorkflowStore {
   readonly storeFile: string;
   private state: WorkflowStoreFile = emptyStore();
@@ -49,6 +35,7 @@ export class WorkflowStore {
   private loadPromise: Promise<void> | undefined;
   private persistQueue: Promise<void> = Promise.resolve();
   private generation = 0;
+  private persistedGeneration = 0;
 
   constructor(
     private readonly piDeckHome: string,
@@ -57,35 +44,38 @@ export class WorkflowStore {
   ) {
     this.storeFile = path.join(piDeckHome, "workflows.json");
   }
+
   async loadIfNeeded(): Promise<void> {
-    if (!this.loaded) {
-      this.loadPromise ??= this.load();
-      await this.loadPromise;
-    }
+    if (this.loaded) return;
+    this.loadPromise ??= this.load();
+    await this.loadPromise;
   }
 
   async listTemplates(workspaceId?: string): Promise<WorkflowTemplate[]> {
     await this.loadIfNeeded();
-    return this.state.roleWorkflows
+    return this.state.templates
       .filter(
-        (item) =>
-          item.archivedAtMs === undefined &&
+        (template) =>
+          template.archivedAtMs === undefined &&
           (workspaceId === undefined ||
-            item.workspaceId === undefined ||
-            item.workspaceId === workspaceId),
+            template.workspaceId === undefined ||
+            template.workspaceId === workspaceId),
       )
-      .sort((a, b) => b.updatedAtMs - a.updatedAtMs)
-      .map((item) => clone(roleWorkflowToTemplate(item)));
+      .sort((left, right) => right.updatedAtMs - left.updatedAtMs)
+      .map(clone);
   }
+
   async getTemplate(templateId: string): Promise<WorkflowTemplate> {
     await this.loadIfNeeded();
-    const item = this.state.roleWorkflows.find(
-      (candidate) => candidate.id === templateId,
+    const template = this.state.templates.find(
+      (item) => item.id === templateId,
     );
-    if (!item || item.archivedAtMs !== undefined)
+    if (template === undefined || template.archivedAtMs !== undefined) {
       throw new Error(`Unknown workflow template: ${templateId}`);
-    return clone(roleWorkflowToTemplate(item));
+    }
+    return clone(template);
   }
+
   async createTemplate(
     definition: WorkflowTemplateDefinition,
   ): Promise<WorkflowTemplate> {
@@ -100,136 +90,122 @@ export class WorkflowStore {
     });
     await this.commit({
       ...this.state,
-      roleWorkflows: [
-        ...this.state.roleWorkflows,
-        templateToRoleWorkflow(template),
-      ],
+      templates: [...this.state.templates, template],
     });
     return clone(template);
   }
+
   async updateTemplate(
     templateId: string,
     definition: WorkflowTemplateDefinition,
   ): Promise<WorkflowTemplate> {
     await this.loadIfNeeded();
-    const index = this.state.roleWorkflows.findIndex(
+    const index = this.state.templates.findIndex(
       (item) => item.id === templateId,
     );
-    if (
-      index < 0 ||
-      this.state.roleWorkflows[index]!.archivedAtMs !== undefined
-    )
+    if (index < 0 || this.state.templates[index]!.archivedAtMs !== undefined) {
       throw new Error(`Unknown workflow template: ${templateId}`);
-    const current = this.state.roleWorkflows[index]!;
+    }
+    const current = this.state.templates[index]!;
     const validated = workflowTemplateDefinitionSchema.parse(definition);
+    // The builder includes the current scope for scoped edits and omits
+    // workspaceId when the user explicitly selects the global scope. Treat the
+    // validated definition as authoritative so scoped templates can be reset
+    // to global without preserving stale scope metadata.
     const updated = workflowTemplateSchema.parse({
       ...validated,
       id: current.id,
       createdAtMs: current.createdAtMs,
       updatedAtMs: this.now(),
     });
-    const roleWorkflows = [...this.state.roleWorkflows];
-    roleWorkflows[index] = templateToRoleWorkflow(updated);
-    await this.commit({ ...this.state, roleWorkflows });
+    const templates = [...this.state.templates];
+    templates[index] = updated;
+    await this.commit({ ...this.state, templates });
     return clone(updated);
   }
+
   async archiveTemplate(templateId: string): Promise<WorkflowTemplate> {
     await this.loadIfNeeded();
-    const index = this.state.roleWorkflows.findIndex(
+    const index = this.state.templates.findIndex(
       (item) => item.id === templateId,
     );
     if (index < 0) throw new Error(`Unknown workflow template: ${templateId}`);
-    const current = this.state.roleWorkflows[index]!;
-    if (current.archivedAtMs !== undefined)
-      return clone(roleWorkflowToTemplate(current));
-    const archived = roleWorkflowSchema.parse({
+    const current = this.state.templates[index]!;
+    if (current.archivedAtMs !== undefined) return clone(current);
+    const archived = {
       ...current,
       archivedAtMs: this.now(),
       updatedAtMs: this.now(),
-    });
-    const roleWorkflows = [...this.state.roleWorkflows];
-    roleWorkflows[index] = archived;
-    await this.commit({ ...this.state, roleWorkflows });
-    return clone(roleWorkflowToTemplate(archived));
+    };
+    const templates = [...this.state.templates];
+    templates[index] = archived;
+    await this.commit({ ...this.state, templates });
+    return clone(archived);
   }
+
   async duplicateTemplate(templateId: string): Promise<WorkflowTemplate> {
     const source = await this.getTemplate(templateId);
     return this.createTemplate({
       name: `${source.name} copy`,
-      ...(source.description === undefined
-        ? {}
-        : { description: source.description }),
-      ...(source.workspaceId === undefined
-        ? {}
-        : { workspaceId: source.workspaceId }),
-      ...(source.context === undefined ? {} : { context: source.context }),
-      ...(source.defaultModel === undefined
-        ? {}
-        : { defaultModel: source.defaultModel }),
-      ...(source.defaultThinkingLevel === undefined
-        ? {}
-        : { defaultThinkingLevel: source.defaultThinkingLevel }),
+      ...(source.description !== undefined
+        ? { description: source.description }
+        : {}),
+      ...(source.workspaceId !== undefined
+        ? { workspaceId: source.workspaceId }
+        : {}),
+      ...(source.context !== undefined ? { context: source.context } : {}),
+      ...(source.defaultModel !== undefined
+        ? { defaultModel: source.defaultModel }
+        : {}),
+      ...(source.defaultThinkingLevel !== undefined
+        ? { defaultThinkingLevel: source.defaultThinkingLevel }
+        : {}),
       inputs: source.inputs,
       steps: source.steps,
       transitions: source.transitions,
     });
   }
+
   async listRuns(workspaceId?: string): Promise<WorkflowRun[]> {
     await this.loadIfNeeded();
-    return this.state.occurrences
+    return this.state.runs
       .filter(
-        (item) => workspaceId === undefined || item.workspaceId === workspaceId,
+        (run) => workspaceId === undefined || run.workspaceId === workspaceId,
       )
-      .sort((a, b) => b.updatedAtMs - a.updatedAtMs)
-      .map((item) => clone(occurrenceToRun(item)));
+      .sort((left, right) => right.updatedAtMs - left.updatedAtMs)
+      .map(clone);
   }
+
   async getRun(runId: string): Promise<WorkflowRun> {
     await this.loadIfNeeded();
-    const item = this.state.occurrences.find(
-      (candidate) => candidate.id === runId,
-    );
-    if (!item) throw new Error(`Unknown workflow run: ${runId}`);
-    return clone(occurrenceToRun(item));
+    const run = this.state.runs.find((item) => item.id === runId);
+    if (run === undefined) throw new Error(`Unknown workflow run: ${runId}`);
+    return clone(run);
   }
+
   async createRun(run: WorkflowRun): Promise<WorkflowRun> {
     await this.loadIfNeeded();
     const validated = workflowRunSchema.parse(run);
-    await this.commit({
-      ...this.state,
-      occurrences: [...this.state.occurrences, runToOccurrence(validated)],
-    });
+    await this.commit({ ...this.state, runs: [...this.state.runs, validated] });
     return clone(validated);
   }
+
   async updateRun(run: WorkflowRun): Promise<WorkflowRun> {
     await this.loadIfNeeded();
     const validated = workflowRunSchema.parse(run);
-    const index = this.state.occurrences.findIndex(
-      (item) => item.id === validated.id,
-    );
+    const index = this.state.runs.findIndex((item) => item.id === validated.id);
     if (index < 0) throw new Error(`Unknown workflow run: ${validated.id}`);
-    const occurrences = [...this.state.occurrences];
-    occurrences[index] = runToOccurrence(validated);
-    await this.commit({ ...this.state, occurrences });
+    const runs = [...this.state.runs];
+    runs[index] = validated;
+    await this.commit({ ...this.state, runs });
     return clone(validated);
   }
 
   private async load(): Promise<void> {
     await fs.mkdir(this.piDeckHome, { recursive: true, mode: 0o700 });
     try {
-      const parsed: unknown = JSON.parse(
-        await fs.readFile(this.storeFile, "utf8"),
-      );
-      const version = z
-        .object({ version: z.number() })
-        .passthrough()
-        .parse(parsed).version;
-      if (version === 1) {
-        this.state = migrateV1(workflowStoreFileV1Schema.parse(parsed));
-        this.generation += 1;
-        await this.persist();
-      } else if (version === 2)
-        this.state = workflowStoreFileSchema.parse(parsed);
-      else throw new Error(`Unsupported workflow metadata version: ${version}`);
+      const raw = await fs.readFile(this.storeFile, "utf8");
+      this.state = workflowStoreFileSchema.parse(JSON.parse(raw));
     } catch (error) {
       if (!isMissingFile(error)) {
         const backup = `${this.storeFile}.corrupt-${this.now()}`;
@@ -239,7 +215,7 @@ export class WorkflowStore {
         try {
           await fs.rename(this.storeFile, backup);
         } catch {
-          /* recovery is still safe */
+          // Recovery remains safe even when the corrupt backup cannot be made.
         }
       }
       this.state = emptyStore();
@@ -248,12 +224,17 @@ export class WorkflowStore {
     }
     this.loaded = true;
   }
+
   private async commit(next: WorkflowStoreFile): Promise<void> {
     this.state = workflowStoreFileSchema.parse(next);
     this.generation += 1;
     await this.persist();
   }
+
   private async persist(): Promise<void> {
+    // Capture the exact committed state before enqueueing. The queued callback
+    // may run after a later commit has replaced this.state; serializing the
+    // live object there can write the wrong snapshot for this queue entry.
     const snapshot = structuredClone(this.state);
     const generation = this.generation;
     this.persistQueue = this.persistQueue
@@ -265,58 +246,19 @@ export class WorkflowStore {
           mode: 0o600,
         });
         await fs.rename(tempFile, this.storeFile);
-        void generation;
+        this.persistedGeneration = Math.max(
+          this.persistedGeneration,
+          generation,
+        );
       });
     return this.persistQueue;
   }
 }
 
-/** Pure, lossless and idempotent v1 -> v2 migration. */
-export function migrateV1(file: WorkflowStoreFileV1): WorkflowStoreFile {
-  return workflowStoreFileSchema.parse({
-    version: 2,
-    roleWorkflows: file.templates.map(templateToRoleWorkflow),
-    occurrences: file.runs.map(runToOccurrence),
-  });
-}
-function templateToRoleWorkflow(template: WorkflowTemplate): RoleWorkflow {
-  const { steps, ...rest } = template;
-  return roleWorkflowSchema.parse({ ...rest, roles: steps });
-}
-function roleWorkflowToTemplate(workflow: RoleWorkflow): WorkflowTemplate {
-  const { roles, ...rest } = workflow;
-  return workflowTemplateSchema.parse({ ...rest, steps: roles });
-}
-function runToOccurrence(run: WorkflowRun): WorkflowOccurrence {
-  const { templateId, templateSnapshot, stepRuns, transitionRuns, ...rest } =
-    run;
-  return workflowOccurrenceSchema.parse({
-    ...rest,
-    ...(templateId === undefined ? {} : { roleWorkflowId: templateId }),
-    roleWorkflowSnapshot: templateToRoleWorkflow(templateSnapshot),
-    roleOccurrences: stepRuns,
-    transitionOccurrences: transitionRuns,
-  });
-}
-function occurrenceToRun(occurrence: WorkflowOccurrence): WorkflowRun {
-  const {
-    roleWorkflowId,
-    roleWorkflowSnapshot,
-    roleOccurrences,
-    transitionOccurrences,
-    ...rest
-  } = occurrence;
-  return workflowRunSchema.parse({
-    ...rest,
-    ...(roleWorkflowId === undefined ? {} : { templateId: roleWorkflowId }),
-    templateSnapshot: roleWorkflowToTemplate(roleWorkflowSnapshot),
-    stepRuns: roleOccurrences,
-    transitionRuns: transitionOccurrences,
-  });
-}
 function clone<T>(value: T): T {
   return structuredClone(value);
 }
+
 function isMissingFile(error: unknown): boolean {
   return Boolean(
     error &&
@@ -325,6 +267,7 @@ function isMissingFile(error: unknown): boolean {
     error.code === "ENOENT",
   );
 }
+
 function errorToMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
