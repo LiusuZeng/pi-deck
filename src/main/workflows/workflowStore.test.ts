@@ -105,12 +105,12 @@ describe("WorkflowStore", () => {
 
     expect(payloads).toHaveLength(2);
     expect(
-      JSON.parse(payloads[0]!).templates.map(
+      JSON.parse(payloads[0]!).roleWorkflows.map(
         (item: { name: string }) => item.name,
       ),
     ).toEqual(["Linear workflow", "First"]);
     expect(
-      JSON.parse(payloads[1]!).templates.map(
+      JSON.parse(payloads[1]!).roleWorkflows.map(
         (item: { name: string }) => item.name,
       ),
     ).toEqual(["Linear workflow", "First", "Second"]);
@@ -210,18 +210,59 @@ describe("WorkflowStore", () => {
 
       const snapshots = writeFileSpy.mock.calls.map(
         (call) =>
-          JSON.parse(String(call[1])) as { templates: Array<{ name: string }> },
+          JSON.parse(String(call[1])) as {
+            roleWorkflows: Array<{ name: string }>;
+          },
       );
-      expect(snapshots.map((snapshot) => snapshot.templates[0]?.name)).toEqual([
-        "First queued update",
-        "Second queued update",
-      ]);
+      expect(
+        snapshots.map((snapshot) => snapshot.roleWorkflows[0]?.name),
+      ).toEqual(["First queued update", "Second queued update"]);
       expect((await store.getTemplate(original.id)).name).toBe(
         "Second queued update",
       );
     } finally {
       vi.restoreAllMocks();
     }
+  });
+
+  it("migrates valid v1 metadata losslessly and does not rewrite v2 on reopen", async () => {
+    const source = await newStore();
+    const template = await source.createTemplate({
+      ...definition,
+      workspaceId: "workspace-1",
+    });
+    const run = createWorkflowRun({
+      template,
+      workspaceId: "workspace-1",
+      inputs: {},
+    });
+    await fs.writeFile(
+      source.storeFile,
+      `${JSON.stringify({ version: 1, templates: [template], runs: [run] })}\n`,
+    );
+
+    const migrated = new WorkflowStore(path.dirname(source.storeFile));
+    expect((await migrated.getTemplate(template.id)).steps).toEqual(
+      template.steps,
+    );
+    expect((await migrated.getRun(run.id)).stepRuns).toEqual(run.stepRuns);
+    const firstWrite = JSON.parse(await fs.readFile(source.storeFile, "utf8"));
+    expect(firstWrite).toMatchObject({ version: 2 });
+    expect(firstWrite.roleWorkflows[0]).toMatchObject({
+      id: template.id,
+      roles: template.steps,
+    });
+    expect(firstWrite.occurrences[0]).toMatchObject({
+      id: run.id,
+      roleWorkflowId: template.id,
+      roleOccurrences: run.stepRuns,
+    });
+
+    const reopened = new WorkflowStore(path.dirname(source.storeFile));
+    await reopened.listRuns();
+    expect(JSON.parse(await fs.readFile(source.storeFile, "utf8"))).toEqual(
+      firstWrite,
+    );
   });
 
   it("recovers from corrupt metadata", async () => {
@@ -232,5 +273,8 @@ describe("WorkflowStore", () => {
     expect(
       files.some((file) => file.startsWith("workflows.json.corrupt-")),
     ).toBe(true);
+    expect(
+      JSON.parse(await fs.readFile(store.storeFile, "utf8")),
+    ).toMatchObject({ version: 2 });
   });
 });
