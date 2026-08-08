@@ -23,9 +23,9 @@ export function WorkflowContextCard(props: {
       </p>
       <div className="workflow-field-grid">
         <label className="workflow-field">
-          <span>Shared instructions</span>
+          <span>Prompt</span>
           <textarea
-            aria-label="Shared instructions"
+            aria-label="Prompt"
             rows={5}
             disabled={props.readOnly}
             value={props.context.prompt ?? props.context.objective ?? ""}
