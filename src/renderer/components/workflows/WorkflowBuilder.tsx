@@ -155,10 +155,14 @@ function initialDefinition(
   };
 }
 
+export interface WorkflowWorkspaceChoice {
+  id: string;
+  name: string;
+}
+
 export function WorkflowBuilder(props: {
   initialTemplate?: WorkflowTemplate;
-  workspaceId?: string;
-  workspaceName?: string;
+  workspaceChoices?: readonly WorkflowWorkspaceChoice[];
   modelChoices?: WorkflowModelChoice[];
   thinkingChoices?: WorkflowThinkingChoice[];
   onSave(
@@ -457,9 +461,9 @@ export function WorkflowBuilder(props: {
             <strong>
               {definition.workspaceId === undefined
                 ? "All workspaces (global)"
-                : definition.workspaceId === props.workspaceId
-                  ? (props.workspaceName ?? definition.workspaceId)
-                  : definition.workspaceId}
+                : (props.workspaceChoices?.find(
+                    (workspace) => workspace.id === definition.workspaceId,
+                  )?.name ?? definition.workspaceId)}
             </strong>
           </p>
         </div>
@@ -527,13 +531,15 @@ export function WorkflowBuilder(props: {
               }
             >
               <option value="">All workspaces (global)</option>
-              {props.workspaceId !== undefined ? (
-                <option value={props.workspaceId}>
-                  {props.workspaceName ?? props.workspaceId}
+              {props.workspaceChoices?.map((workspace) => (
+                <option key={workspace.id} value={workspace.id}>
+                  {workspace.name}
                 </option>
-              ) : null}
+              ))}
               {definition.workspaceId !== undefined &&
-              definition.workspaceId !== props.workspaceId ? (
+              !props.workspaceChoices?.some(
+                (workspace) => workspace.id === definition.workspaceId,
+              ) ? (
                 <option value={definition.workspaceId}>
                   {definition.workspaceId} (saved scope)
                 </option>

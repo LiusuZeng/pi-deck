@@ -80,8 +80,9 @@ describe("workflow builder transition validation", () => {
     act(() => {
       root?.render(
         createElement(WorkflowBuilder, {
-          workspaceId: "current-workspace",
-          workspaceName: "Current workspace",
+          workspaceChoices: [
+            { id: "current-workspace", name: "Current workspace" },
+          ],
           onSave: () => undefined,
           onCancel: () => undefined,
         }),
