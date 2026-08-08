@@ -233,8 +233,7 @@ export function WorkflowHome(props: {
           <h2>Agent Workflows</h2>
           <p>
             Coordinate reusable sequences of Pi agent sessions. Workflows decide
-            what runs next; Pi skills remain capabilities inside each agent
-            session.
+            what runs next.
           </p>
           {props.workspaceName ? (
             <p className="workflow-workspace-context">
@@ -250,16 +249,6 @@ export function WorkflowHome(props: {
           New workflow
         </button>
       </div>
-      <section
-        className="workflow-boundary-note"
-        aria-label="Workflows and skills distinction"
-      >
-        <strong>Workflows coordinate. Skills equip.</strong>
-        <span>
-          Use a workflow for multi-agent handoffs and approvals. Skills stay
-          Pi-native and are discovered by the active agent.
-        </span>
-      </section>
       <section className="workflow-template-section">
         <div className="workflow-section-heading">
           <div>
@@ -280,13 +269,6 @@ export function WorkflowHome(props: {
               Create a workflow with shared context, run inputs, and explicit
               transitions between agent sessions.
             </p>
-            <button
-              type="button"
-              className="workflow-secondary-button"
-              onClick={props.onCreate}
-            >
-              Create your first workflow
-            </button>
           </div>
         ) : (
           <div className="workflow-template-grid">

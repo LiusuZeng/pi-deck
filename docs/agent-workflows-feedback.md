@@ -8,6 +8,90 @@ This is the working product-feedback log for Agent Workflows. Keep new UX findin
 implementation decisions, and validation notes here so the work can continue from
 another laptop without relying on chat history.
 
+## Open numbered feedback and bugs
+
+### 1. Empty workflow screen has two creation actions
+
+- **Status:** Resolved — the page-header action is now the sole creation CTA.
+- **Reported:** 2026-08-07.
+- **Area:** Agent Workflows home, empty-template state.
+- **Screenshot:** [Duplicate create-workflow actions](assets/agent-workflows-feedback/workflow-home-duplicate-create-actions.png).
+- **Observed behavior:** The page simultaneously shows a primary **New workflow**
+  button in the page header and a **Create your first workflow** button inside the
+  empty state. Both invoke the same `onCreate` callback, so they are not distinct
+  workflow-creation paths.
+- **Why this needs follow-up:** Two controls for the same action compete for
+  attention, weaken the primary-action hierarchy, and add redundant keyboard and
+  screen-reader stops. A follow-up session should decide which single creation
+  action is appropriate in the empty state while preserving an obvious way to
+  create additional workflows after templates exist.
+- **Implementation context:** Both controls are in
+  `src/renderer/components/workflows/WorkflowHome.tsx` (the header action near
+  lines 245–251 and empty-state action near lines 282–289). Focused coverage
+  belongs in `src/renderer/components/workflows/WorkflowHome.test.ts`.
+- **Completion signal:** The empty state exposes exactly one clear creation CTA;
+  the populated state still exposes a clear way to create another workflow; and
+  tests cover both states and the `onCreate` callback.
+
+### 2. Replace the field-heavy step model with four execution roles
+
+- **Status:** Product direction and JSON-first representation agreed; tracking
+  only and not being implemented in this session.
+- **Reported:** 2026-08-07.
+- **Area:** Workflow concepts, authoring model, and agent-step configuration UX.
+- **Detailed implementation design:** [Role-Based Agent Workflows v2](agent-workflows-role-based-design.md).
+- **Screenshot:** [Current field-heavy agent-step editor](assets/agent-workflows-feedback/agent-step-editor-role-model.png).
+- **Problem:** The current editor mixes an agent's instructions with graph wiring,
+  start behavior, model overrides, thinking settings, and transition controls in
+  one large form. Users must understand low-level workflow mechanics before they
+  can describe what an agent should do.
+- **Agreed core roles:**
+  1. **Worker** — performs concrete work with optional input and output.
+  2. **Decider** — evaluates input and emits a structured true/false decision;
+     it may use worker machinery internally, but remains a separate UX concept.
+  3. **Orchestrator** — manages and monitors other agents without performing the
+     domain work itself; its initial coordination modes are loop and fan-out.
+  4. **Human checkpoint** — collects input, approval, or a choice without being
+     represented as a model-backed agent.
+- **Abstraction boundary:** Planner, researcher, implementer, reviewer, tester,
+  writer, and similar application concepts are configured uses of these roles,
+  not additional role types or additional role templates. For example, a
+  reviewer that writes findings configures a Worker, while a reviewer that only
+  approves or rejects configures a Decider.
+- **Agreed design summary:** Expose exactly four generic role templates. A
+  workflow fills their configuration inputs and relates the configured role
+  instances. Use canonical versioned JSON with no first-version YAML or custom
+  DSL. Author with compact cards and a focused inspector; visualize through a
+  separate auto-laid-out, read-only graph; and provide synchronized Build, Graph,
+  and JSON views over one document. See the detailed design linked above for the
+  exact role contracts, JSON shape, runtime semantics, migration requirements,
+  implementation phases, and test plan.
+- **Completion signal:** A future implementation delivers a versioned JSON schema,
+  compact role-configuration cards with a focused inspector, and an auto-laid-out
+  read-only graph without adding planner/reviewer/etc. as core concepts.
+
+### 3. Workflow scope selector omits existing workspaces
+
+- **Status:** Open.
+- **Reported:** 2026-08-07.
+- **Area:** New/edit Agent Workflow, workflow scope selector.
+- **Observed behavior:** The sidebar shows an existing `liusu_pi_gui` workspace
+  with 13 saved sessions, but the workflow scope selector offers only **All
+  workspaces (global)** and **Default workspace**. The existing workspace cannot
+  be selected as the workflow's scope.
+- **Expected behavior:** The selector should list every active workspace that can
+  own a workflow, including `liusu_pi_gui`, rather than only the current/default
+  workspace.
+- **Implementation context:** `WorkflowBuilder.tsx` renders only the single
+  `workspaceId`/`workspaceName` pair supplied by `App.tsx`. `App.tsx` currently
+  passes `currentWorkspace`, so the builder has no collection from which to
+  render the other active workspaces. The fix should pass validated workspace
+  choices into the builder while preserving global scope and any saved scope.
+- **Completion signal:** All active workspaces appear by name in the workflow
+  scope selector; selecting one persists its ID; archived workspaces are not
+  offered for new selections; and focused renderer tests cover multiple
+  workspaces, global scope, and editing a previously scoped workflow.
+
 ## Latest product direction
 
 The first version should feel like a prompt editor, not a workflow programming
@@ -39,6 +123,7 @@ language.
 - [x] Recheck copy, spacing, and mobile layout after the simplification.
 - [x] Add/update renderer and backend compatibility tests.
 - [x] Push the continuation branch and isolated implementation branches; run final validation.
+- [ ] Populate the workflow scope selector with all active workspaces.
 
 ## Captured screenshots
 

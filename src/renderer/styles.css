@@ -3919,21 +3919,6 @@ body {
   outline-offset: 2px;
 }
 
-.workflow-boundary-note {
-  display: grid;
-  gap: 3px;
-  margin-bottom: 26px;
-  padding: 14px 16px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  color: var(--color-text-muted);
-  background: var(--color-surface-subtle);
-}
-
-.workflow-boundary-note strong {
-  color: var(--color-text-strong);
-}
-
 .workflow-card {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
