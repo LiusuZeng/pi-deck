@@ -38,7 +38,7 @@ describe("WorkflowContextCard", () => {
     });
 
     expect(
-      container.querySelector('textarea[aria-label="Shared instructions"]'),
+      container.querySelector('textarea[aria-label="Prompt"]'),
     ).not.toBeNull();
     expect(
       container.querySelector('textarea[aria-label="Don\'t do"]'),

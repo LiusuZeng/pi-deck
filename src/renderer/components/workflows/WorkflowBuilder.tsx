@@ -38,7 +38,7 @@ function newStep(index: number): WorkflowStepDefinition {
 function newInput(index: number): WorkflowInputDefinition {
   return {
     id: `input-${Date.now()}-${index}`,
-    label: `Input ${index + 1}`,
+    label: `Run prompt ${index + 1}`,
     type: "text",
     required: true,
   };
@@ -223,6 +223,13 @@ export function WorkflowBuilder(props: {
   const updateContext = (context: WorkflowContext) =>
     setDefinition((current) => ({ ...current, context }));
 
+  const addInput = () => {
+    setDefinition((current) => ({
+      ...current,
+      inputs: [...current.inputs, newInput(current.inputs.length)],
+    }));
+  };
+
   const addStep = () => {
     setDefinition((current) => {
       const step = newStep(current.steps.length);
@@ -248,13 +255,6 @@ export function WorkflowBuilder(props: {
       setExpandedSteps((expanded) => ({ ...expanded, [step.id]: true }));
       return { ...current, steps: [...current.steps, step], transitions };
     });
-  };
-
-  const addInput = () => {
-    setDefinition((current) => ({
-      ...current,
-      inputs: [...current.inputs, newInput(current.inputs.length)],
-    }));
   };
 
   const updateTransition = (transition: WorkflowTransition) => {
@@ -548,97 +548,95 @@ export function WorkflowBuilder(props: {
         onChange={updateContext}
       />
 
-      <section className="workflow-card workflow-inputs-card">
-        <div className="workflow-section-heading">
-          <div>
-            <span className="workflow-kicker">Reusable inputs</span>
-            <h3>Ask for run-specific information</h3>
+      {definition.inputs.length > 0 ? (
+        <section className="workflow-card workflow-inputs-card">
+          <div className="workflow-section-heading">
+            <div>
+              <span className="workflow-kicker">Run prompts</span>
+              <h3>Existing run-specific prompts</h3>
+            </div>
           </div>
-          <button
-            type="button"
-            className="workflow-secondary-button"
-            onClick={addInput}
-          >
-            + Add input
-          </button>
-        </div>
-        <p className="workflow-help">
-          Inputs are collected when a workflow starts and can be referenced by
-          the agent instructions.
-        </p>
-        {definition.inputs.length === 0 ? (
-          <p className="workflow-empty-inline">
-            No inputs. This workflow can run without a setup form.
+          <p className="workflow-help">
+            These saved prompts are collected once when the workflow starts.
           </p>
-        ) : null}
-        <div className="workflow-input-list">
-          {definition.inputs.map((input, index) => (
-            <div className="workflow-input-row" key={input.id}>
-              <label className="workflow-field">
-                <span>Input {index + 1} label</span>
-                <input
-                  aria-label={`Input ${index + 1} label`}
-                  value={input.label}
-                  onChange={(event) =>
-                    updateInput(input.id, { label: event.target.value })
-                  }
-                />
-              </label>
-              <label className="workflow-checkbox">
-                <input
-                  type="checkbox"
-                  checked={input.required}
-                  onChange={(event) =>
-                    updateInput(input.id, {
-                      required: event.target.checked,
-                      ...(event.target.checked
-                        ? { defaultValue: undefined }
-                        : {}),
-                    })
-                  }
-                />{" "}
-                Required
-              </label>
-              {!input.required ? (
+          <div className="workflow-input-list">
+            {definition.inputs.map((input, index) => (
+              <div className="workflow-input-row" key={input.id}>
                 <label className="workflow-field">
-                  <span>Default (optional)</span>
-                  <textarea
-                    aria-label={`Input ${index + 1} default`}
-                    rows={3}
-                    value={input.defaultValue ?? ""}
-                    placeholder="Leave blank to require a value"
+                  <span>Input {index + 1} label</span>
+                  <input
+                    aria-label={`Input ${index + 1} label`}
+                    value={input.label}
                     onChange={(event) =>
-                      updateInput(input.id, {
-                        defaultValue: event.target.value || undefined,
-                      })
+                      updateInput(input.id, { label: event.target.value })
                     }
                   />
                 </label>
-              ) : null}
-              <button
-                type="button"
-                className="workflow-icon-text-button"
-                onClick={() => removeInput(input.id)}
-              >
-                Remove
-              </button>
-            </div>
-          ))}
-        </div>
-      </section>
+                <label className="workflow-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={input.required}
+                    onChange={(event) =>
+                      updateInput(input.id, {
+                        required: event.target.checked,
+                        ...(event.target.checked
+                          ? { defaultValue: undefined }
+                          : {}),
+                      })
+                    }
+                  />{" "}
+                  Required
+                </label>
+                {!input.required ? (
+                  <label className="workflow-field">
+                    <span>Default (optional)</span>
+                    <textarea
+                      aria-label={`Input ${index + 1} default`}
+                      rows={3}
+                      value={input.defaultValue ?? ""}
+                      placeholder="Leave blank to require a value"
+                      onChange={(event) =>
+                        updateInput(input.id, {
+                          defaultValue: event.target.value || undefined,
+                        })
+                      }
+                    />
+                  </label>
+                ) : null}
+                <button
+                  type="button"
+                  className="workflow-icon-text-button"
+                  onClick={() => removeInput(input.id)}
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       <div className="workflow-flow-heading">
         <div>
           <span className="workflow-kicker">Agent steps</span>
           <h3>What should Pi agents do?</h3>
         </div>
-        <button
-          type="button"
-          className="workflow-secondary-button"
-          onClick={addStep}
-        >
-          + Add agent step
-        </button>
+        <div className="workflow-heading-actions">
+          <button
+            type="button"
+            className="workflow-secondary-button"
+            onClick={addInput}
+          >
+            + Add run prompt
+          </button>
+          <button
+            type="button"
+            className="workflow-secondary-button"
+            onClick={addStep}
+          >
+            + Add agent step
+          </button>
+        </div>
       </div>
       <div className="workflow-flow-list">
         {definition.steps.map((step, index) => (

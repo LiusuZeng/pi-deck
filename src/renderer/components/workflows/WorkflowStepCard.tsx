@@ -16,7 +16,7 @@ import {
 } from "./WorkflowPromptEditor.js";
 
 export interface WorkflowModelChoice {
-  provider: string;
+  provider?: string;
   id: string;
   label: string;
   disabled?: boolean;
@@ -45,7 +45,7 @@ function modelChoiceValue(
     | Pick<WorkflowModelOverride, "provider" | "modelId">
     | WorkflowModelChoice,
 ): string {
-  if ("id" in model) return `${model.provider}\u0000${model.id}`;
+  if ("id" in model) return `${model.provider ?? ""}\u0000${model.id}`;
   return `${model.provider ?? ""}\u0000${model.modelId ?? ""}`;
 }
 
@@ -234,7 +234,9 @@ export function WorkflowStepCard(props: {
                           selected === undefined
                             ? undefined
                             : {
-                                provider: selected.provider,
+                                ...(selected.provider
+                                  ? { provider: selected.provider }
+                                  : {}),
                                 modelId: selected.id,
                               },
                       });
@@ -280,29 +282,6 @@ export function WorkflowStepCard(props: {
                   </select>
                 </label>
               </div>
-              <fieldset className="workflow-policy-fieldset">
-                <legend>Include with this agent</legend>
-                <label className="workflow-checkbox">
-                  <input
-                    type="checkbox"
-                    aria-label="Include shared workflow context"
-                    checked={props.step.inputPolicy.includeWorkflowContext}
-                    onChange={(event) =>
-                      props.onChange?.({
-                        inputPolicy: {
-                          ...props.step.inputPolicy,
-                          includeWorkflowContext: event.target.checked,
-                        },
-                      })
-                    }
-                  />
-                  Shared workflow context
-                </label>
-                <p className="workflow-help">
-                  Add the shared context when this agent needs the workflow-wide
-                  instructions.
-                </p>
-              </fieldset>
             </>
           ) : (
             <>
@@ -310,7 +289,7 @@ export function WorkflowStepCard(props: {
                 <span className="workflow-field-label">
                   {props.run?.renderedPrompt !== undefined
                     ? "Rendered prompt"
-                    : "Instructions and handoffs"}
+                    : "Instructions"}
                 </span>
                 {props.run?.renderedPrompt !== undefined ? (
                   <pre>{props.run.renderedPrompt || "No rendered prompt."}</pre>

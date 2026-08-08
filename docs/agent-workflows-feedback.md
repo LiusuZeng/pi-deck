@@ -1,7 +1,7 @@
 # Agent Workflows — Product Feedback and Continuation Notes
 
-**Status:** prompt-first v1 simplification in progress  
-**Feedback captured:** 2026-08-07  
+**Status:** prompt-first v1 simplification integrated, validated, and pushed<br>
+**Feedback captured:** 2026-08-07<br>
 **Continuation branch:** `dev/agent-workflows-prompt-first`
 
 This is the working product-feedback log for Agent Workflows. Keep new UX findings,
@@ -31,14 +31,14 @@ language.
 
 ## Feedback tracker
 
-- [ ] Simplify the shared-context editor to Prompt + Don’t do.
-- [ ] Simplify each agent step to Instructions; remove structured handoff UI.
-- [ ] Make model and thinking overrides dropdowns using session-style choices.
-- [ ] Limit new run inputs to text/prompt values; defer path/file/link UX.
-- [ ] Avoid the empty second “Start workflow” screen for no-input workflows.
-- [ ] Recheck copy, spacing, and mobile layout after the simplification.
-- [ ] Add/update renderer and backend compatibility tests.
-- [ ] Run full validation and push the resulting commits to the continuation branch.
+- [x] Simplify the shared-context editor to Prompt + Don’t do.
+- [x] Simplify each agent step to Instructions; remove structured handoff UI.
+- [x] Make model and thinking overrides dropdowns using session-style choices.
+- [x] Limit new run inputs to text/prompt values; defer path/file/link UX.
+- [x] Avoid the empty second “Start workflow” screen for no-input workflows.
+- [x] Recheck copy, spacing, and mobile layout after the simplification.
+- [x] Add/update renderer and backend compatibility tests.
+- [x] Push the continuation branch and isolated implementation branches; run final validation.
 
 ## Captured screenshots
 
@@ -120,6 +120,25 @@ Before this feedback pass, the integrated workflow feature had passed:
 - Full Playwright E2E: 35 passed, 3 environment-skipped.
 - Independent backend and UI blocker-only reviews.
 
-After prompt-first changes land, update this section with the new counts and any
-remaining intentional skips. Do not push unrelated site/screenshot work; that
-work remains isolated in the local `pi-deck-site-capture` worktree.
+Prompt-first implementation commits currently include:
+
+- `674e289` — App model/thinking choice derivation and workflow-editor props.
+- `011a8cf` — Prompt-first context schema/rendering compatibility.
+- `19299a8` — Prompt-first renderer editor and run-flow UX.
+- `ac05e11` — Parent integration fixes for choice types and compatibility fields.
+
+The continuation branch is pushed at:
+`origin/dev/agent-workflows-prompt-first`
+
+The isolated implementation branches are also pushed for review/recovery:
+
+- `origin/aw/v1-ux`
+- `origin/aw/v1-contracts`
+- `origin/aw/v1-app`
+
+Final validation after integration: 372 tests passed, 2 intentional TODOs;
+typecheck, build, format, and diff checks passed. Full Playwright E2E passed 35
+with 3 environment-skipped. Backend compatibility review approved; the final
+UX blocker about the shared prompt label was fixed and pushed in `3d6e024`.
+Do not push unrelated site/screenshot work; that work remains isolated in the
+local `pi-deck-site-capture` worktree.

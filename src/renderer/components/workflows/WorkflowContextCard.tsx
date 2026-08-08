@@ -18,14 +18,14 @@ export function WorkflowContextCard(props: {
         <span className="workflow-context-badge">Explicit</span>
       </div>
       <p className="workflow-help">
-        Every selected agent can receive these instructions. Workspace files and
-        project resources are implicit and remain Pi-native.
+        Every agent receives these instructions. Workspace files and project
+        resources are implicit and remain Pi-native.
       </p>
       <div className="workflow-field-grid">
         <label className="workflow-field">
-          <span>Shared instructions</span>
+          <span>Prompt</span>
           <textarea
-            aria-label="Shared instructions"
+            aria-label="Prompt"
             rows={5}
             disabled={props.readOnly}
             value={props.context.prompt ?? props.context.objective ?? ""}
