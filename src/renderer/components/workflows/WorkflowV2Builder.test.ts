@@ -56,18 +56,27 @@ describe("WorkflowV2Builder", () => {
     );
   });
 
-  it("offers exactly the four canonical roles and a focused inspector", () => {
+  it("uses one friendly add-step picker and a focused inspector", () => {
     render();
     expect(
-      [...container!.querySelectorAll(".workflow-v2-add button")].map(
+      container!.querySelector(".workflow-v2-add button")?.textContent,
+    ).toBe("+ Add step");
+    click("+ Add step");
+    expect(
+      [...container!.querySelectorAll('[role="menuitem"]')].map(
         (x) => x.textContent,
       ),
-    ).toEqual(["Add Worker", "Add Decider", "Add Orchestrator", "Add Human"]);
-    click("Add Human");
+    ).toEqual([
+      "Add agent taskAgent task",
+      "Add decisionDecision",
+      "Add coordinationCoordinate tasks",
+      "Add checkpointApproval / input",
+    ]);
+    click("Add checkpointApproval / input");
     expect(
       container!.querySelector('[aria-label="Focused role inspector"]')
         ?.textContent,
-    ).toContain("Human inspector");
+    ).toContain("Approval / input");
   });
   it("does not replace last-valid state when JSON syntax or semantic validation fails", () => {
     render();

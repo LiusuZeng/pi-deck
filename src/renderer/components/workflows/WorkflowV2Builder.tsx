@@ -3,7 +3,6 @@ import {
   defaultV2Definition,
   definitionJson,
   graphEdges,
-  roleTemplate,
   validateJsonDraft,
   workflowRoleTemplates,
   type WorkflowRole,
@@ -12,6 +11,16 @@ import {
 } from "../../workflows/workflowV2.js";
 
 type View = "build" | "graph" | "json";
+
+const rolePresentation: Record<
+  WorkflowRole,
+  { label: string; action: string }
+> = {
+  worker: { label: "Agent task", action: "Add agent task" },
+  decider: { label: "Decision", action: "Add decision" },
+  orchestrator: { label: "Coordinate tasks", action: "Add coordination" },
+  human: { label: "Approval / input", action: "Add checkpoint" },
+};
 const nodeFor = (role: WorkflowRole, number: number): WorkflowV2Node => {
   const id = `${role}-${number}`;
   if (role === "worker")
@@ -71,6 +80,7 @@ export function WorkflowV2Builder(props: {
   const [draft, setDraft] = useState(definitionJson(definition));
   const [jsonError, setJsonError] = useState<string>();
   const [saveError, setSaveError] = useState<string>();
+  const [showStepPicker, setShowStepPicker] = useState(false);
   const selected =
     definition.nodes.find((n) => n.id === selectedId) ?? definition.nodes[0]!;
   const edges = useMemo(() => graphEdges(definition), [definition]);
@@ -90,6 +100,7 @@ export function WorkflowV2Builder(props: {
     const node = nodeFor(role, definition.nodes.length + 1);
     update({ ...definition, nodes: [...definition.nodes, node] });
     setSelectedId(node.id);
+    setShowStepPicker(false);
   };
   const apply = () => {
     const result = validateJsonDraft(draft);
@@ -125,9 +136,7 @@ export function WorkflowV2Builder(props: {
             ← Agent Workflows
           </button>
           <h2>New agent workflow</h2>
-          <p>
-            Canonical v2 workflow. Build, Graph, and JSON share one document.
-          </p>
+          <p>Add tasks, decisions, coordination, and checkpoints.</p>
         </div>
         <div className="workflow-heading-actions">
           <button
@@ -179,16 +188,36 @@ export function WorkflowV2Builder(props: {
                 }
               />
             </label>
-            <div className="workflow-v2-add" aria-label="Add role">
-              {workflowRoleTemplates.map((role) => (
-                <button
-                  key={role.id}
-                  type="button"
-                  onClick={() => add(role.id)}
+            <div className="workflow-v2-add">
+              <button
+                type="button"
+                className="workflow-secondary-button"
+                aria-expanded={showStepPicker}
+                aria-controls="workflow-step-picker"
+                onClick={() => setShowStepPicker((open) => !open)}
+              >
+                + Add step
+              </button>
+              {showStepPicker && (
+                <div
+                  id="workflow-step-picker"
+                  className="workflow-v2-step-picker"
+                  role="menu"
+                  aria-label="Choose step type"
                 >
-                  Add {role.label}
-                </button>
-              ))}
+                  {workflowRoleTemplates.map((role) => (
+                    <button
+                      key={role.id}
+                      type="button"
+                      role="menuitem"
+                      onClick={() => add(role.id)}
+                    >
+                      <strong>{rolePresentation[role.id].action}</strong>
+                      <small>{rolePresentation[role.id].label}</small>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
             {definition.nodes.map((node, index) => (
               <button
@@ -198,20 +227,21 @@ export function WorkflowV2Builder(props: {
                 aria-pressed={selected.id === node.id}
                 onClick={() => setSelectedId(node.id)}
               >
-                <span>
-                  Role {index + 1} · {roleTemplate(node.role).label}
+                <span className="workflow-v2-card-heading">
+                  <b>{index + 1}</b>
+                  <i>{rolePresentation[node.role].label}</i>
                 </span>
                 <strong>{node.name}</strong>
                 <small>{summary(node)}</small>
-                <em>
-                  {edges
-                    .filter((edge) => edge.from === node.id)
-                    .map(
-                      (edge) =>
-                        `${edge.label} → ${definition.nodes.find((n) => n.id === edge.to)?.name ?? "end"}`,
-                    )
-                    .join("; ") || "No outgoing relationship"}
-                </em>
+                {edges
+                  .filter((edge) => edge.from === node.id)
+                  .map((edge) => (
+                    <em key={`${edge.from}-${edge.to}-${edge.label}`}>
+                      {edge.label} →{" "}
+                      {definition.nodes.find((n) => n.id === edge.to)?.name ??
+                        "End"}
+                    </em>
+                  ))}
               </button>
             ))}
           </section>
@@ -219,7 +249,7 @@ export function WorkflowV2Builder(props: {
             className="workflow-v2-inspector"
             aria-label="Focused role inspector"
           >
-            <h3>{roleTemplate(selected.role).label} inspector</h3>
+            <h3>{rolePresentation[selected.role].label}</h3>
             <label className="workflow-field">
               <span>Name</span>
               <input
@@ -382,7 +412,8 @@ export function WorkflowV2Builder(props: {
                       setView("build");
                     }}
                   >
-                    <strong>{node.name}</strong> ({node.role})
+                    <strong>{node.name}</strong> (
+                    {rolePresentation[node.role].label})
                   </button>
                   {edges
                     .filter((e) => e.from === node.id)

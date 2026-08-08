@@ -4607,7 +4607,7 @@ body {
   }
 }
 
-/* v2 workflow builder: compact list plus a single focused inspector. */
+/* Agent workflow builder: compact flow cards plus a focused inspector. */
 .workflow-v2-tabs {
   display: flex;
   gap: 4px;
@@ -4634,7 +4634,41 @@ body {
 }
 .workflow-v2-cards {
   display: grid;
-  gap: 8px;
+  gap: 10px;
+}
+.workflow-v2-add {
+  position: relative;
+}
+.workflow-v2-step-picker {
+  position: absolute;
+  z-index: 2;
+  top: calc(100% + 8px);
+  left: 0;
+  display: grid;
+  width: min(320px, 100%);
+  padding: 6px;
+  border: 1px solid var(--border, #334155);
+  border-radius: 10px;
+  background: var(--surface-raised, var(--surface, #fff));
+  box-shadow: 0 12px 28px rgb(15 23 42 / 18%);
+}
+.workflow-v2-step-picker button {
+  display: grid;
+  gap: 2px;
+  padding: 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.workflow-v2-step-picker button:hover,
+.workflow-v2-step-picker button:focus-visible {
+  background: color-mix(in srgb, var(--accent, #60a5fa) 12%, transparent);
+}
+.workflow-v2-step-picker small {
+  opacity: 0.72;
 }
 .workflow-v2-step-card {
   text-align: left;
@@ -4651,12 +4685,35 @@ body {
   border-color: var(--accent, #60a5fa);
   box-shadow: 0 0 0 1px var(--accent, #60a5fa);
 }
-.workflow-v2-step-card span,
 .workflow-v2-step-card small {
   opacity: 0.72;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.workflow-v2-card-heading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  opacity: 0.8;
+}
+.workflow-v2-card-heading b {
+  display: inline-grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent, #60a5fa) 16%, transparent);
+}
+.workflow-v2-card-heading i {
+  font-style: normal;
+}
+.workflow-v2-step-card em {
+  margin-top: 2px;
+  color: var(--accent, #60a5fa);
+  font-size: 13px;
+  font-style: normal;
 }
 .workflow-v2-inspector,
 .workflow-v2-graph,
