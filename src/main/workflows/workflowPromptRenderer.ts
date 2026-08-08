@@ -4,6 +4,10 @@ import type {
   WorkflowStepDefinition,
   WorkflowStepRun,
 } from "../../shared/workflowSchemas.js";
+import type {
+  WorkflowOccurrence,
+  WorkflowRoleRun,
+} from "./workflowV2Runtime.js";
 
 export interface RenderWorkflowPromptOptions {
   workflowContext?: WorkflowContext;
@@ -60,6 +64,43 @@ export function renderWorkflowPrompt({
     .filter((section) => section.trim().length > 0)
     .join("\n\n")
     .trim();
+}
+
+/** Render a role-node prompt against its particular occurrence lineage.
+ * `{{parent.finalAnswer}}` is intentionally singular: fan-out/loop work has
+ * no globally unambiguous "step output". `{{parents.finalAnswer}}` provides
+ * a stable, creation-order joined handoff when a node has multiple parents. */
+export function renderWorkflowOccurrencePrompt(
+  run: WorkflowRoleRun,
+  occurrence: WorkflowOccurrence,
+): string {
+  const node = run.definition.nodes.find((item) => item.id === occurrence.nodeId);
+  if (node === undefined) throw new Error(`Unknown role node: ${occurrence.nodeId}`);
+  const source = node.role === "worker"
+    ? node.prompt
+    : node.role === "decider"
+      ? [
+          node.prompt ?? "You are a workflow decision maker.",
+          `Question: ${node.question}`,
+          'Return exactly one JSON object: {"decision":"yes"|"no"|"unsure","rationale":"brief explanation"}.',
+          "Do not include markdown or other text.",
+        ].join("\n")
+      : (node.prompt ?? "");
+  const parents = occurrence.parentOccurrenceIds.map((id) => {
+    const parent = run.occurrences.find((item) => item.id === id);
+    if (parent === undefined) throw new Error("Workflow prompt is blocked: parent occurrence is unavailable.");
+    return parent;
+  });
+  const parentOutput = (parent: WorkflowOccurrence): string =>
+    requireAvailable(parent.finalAnswer ?? parent.summary ?? parent.transcript, `Parent output for ${parent.nodeId}`);
+  return source.replace(/{{\s*(input\.[\w.-]+|parent\.finalAnswer|parents\.finalAnswer)\s*}}/g, (_token, reference: string) => {
+    if (reference.startsWith("input.")) return requireAvailable(run.inputs[reference.slice(6)], `Workflow input ${reference.slice(6)}`);
+    if (reference === "parent.finalAnswer") {
+      if (parents.length !== 1) throw new Error("Workflow prompt is blocked: parent.finalAnswer requires exactly one parent occurrence.");
+      return parentOutput(parents[0]!);
+    }
+    return requireAvailable(parents.map(parentOutput).join("\n\n"), "Parent outputs");
+  }).trim();
 }
 
 export function renderStepOutput(
