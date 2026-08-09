@@ -1,13 +1,17 @@
-# Agent Workflows v2 — Role-Based Design
+# Agent Workflows — Canonical Role-Based Design
 
 **Status:** Product direction approved; Build, Graph, persistence, and core role runtime implemented; occurrence-run UI integration remains in progress
 **Date:** 2026-08-07
 **Tracking item:** [Agent Workflows feedback item 2](agent-workflows-feedback.md#2-replace-the-field-heavy-step-model-with-four-execution-roles)
 
-This document is the implementation-oriented design for replacing the current
-field-heavy agent-step editor and agent-only workflow contract with four generic
-role templates, a versioned JSON workflow definition, compact configuration
-cards, and a derived read-only graph.
+This is the single implementation-oriented product design for Agent Workflows.
+It replaces the field-heavy agent-step editor and agent-only workflow contract
+with four generic role templates, one canonical versioned JSON workflow
+definition, compact configuration cards, and a derived read-only graph.
+
+Storage schema numbers are migration details, not product variants. The UI,
+documentation, and runtime expose one Agent Workflows model: Worker, Decider,
+Orchestrator, and Human.
 
 ## 1. Goals
 
@@ -228,7 +232,7 @@ policy, not a role type.
 
 ## 6. Canonical JSON workflow definition
 
-The v2 workflow definition is one strict, versioned JSON document. The role
+The workflow definition is one strict, versioned JSON document. The role
 templates are fixed by the schema and are not repeated in every workflow. Each
 node directly identifies one role and supplies that role's configuration.
 
@@ -366,7 +370,7 @@ The first version should avoid an expression language and named data ports.
 - Roles may omit output when no downstream role requires it.
 
 The exact persisted representation of explicit non-default input binding remains
-an implementation detail to settle before supporting arbitrary bindings. V2 must
+an implementation detail to settle before supporting arbitrary bindings. The canonical workflow model must
 not add a custom expression or interpolation DSL.
 
 ## 8. Relationship semantics
@@ -397,8 +401,8 @@ Validation rules:
 
 ## 9. Runtime model
 
-Current runs materialize exactly one run record per static step. V2 loops and
-fan-out require occurrence-based runtime records.
+Older runs materialize exactly one run record per static step. Canonical loops
+and fan-out require occurrence-based runtime records.
 
 Each execution creates a node occurrence:
 
@@ -417,7 +421,7 @@ Each execution creates a node occurrence:
 
 Requirements:
 
-- A run stores an immutable snapshot of the resolved v2 workflow definition.
+- A run stores an immutable snapshot of the resolved canonical workflow definition.
 - Loop iterations, retries, and fan-out children produce distinct occurrences.
 - Worker and Decider occurrences may own Pi sessions.
 - Human occurrences pause without creating a Pi session.
@@ -506,8 +510,9 @@ JSON is a direct editor for the canonical workflow source.
 
 ## 12. Persistence, versioning, and migration
 
-The current workflow store is strict version 1 and treats parse failures as
-corruption. V2 must add version-aware loading before changing persisted shapes.
+The workflow store must perform version-aware loading before parsing or changing
+persisted shapes. Storage versions are internal migration boundaries and must not
+create parallel product behavior.
 
 Required behavior:
 
@@ -523,7 +528,7 @@ Required behavior:
 8. Preserve existing run snapshots. Completed/in-progress v1 runs should remain
    readable through a legacy path rather than being rewritten as fabricated v2
    occurrences.
-9. New v2 runs use occurrence-based runtime state.
+9. New canonical runs use occurrence-based runtime state.
 10. Template edits never mutate existing run snapshots.
 
 ## 13. Validation layers
@@ -545,7 +550,7 @@ run creation.
 
 ### Phase 1 — Contracts and migration foundation
 
-- Add v2 definition and occurrence schemas as strict discriminated unions.
+- Add canonical definition and occurrence schemas as strict discriminated unions.
 - Add semantic graph validation.
 - Add version-aware store loading and non-destructive migration infrastructure.
 - Add fixtures and round-trip tests before changing the UI.

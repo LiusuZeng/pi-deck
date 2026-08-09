@@ -66,7 +66,7 @@ export function WorkflowPromptEditor(props: {
       {hasLegacyReferences ? (
         <div className="workflow-legacy-prompt-note">
           <span className="workflow-help">
-            This saved workflow uses legacy prompt references and will run
+            This saved workflow uses older prompt references and will run
             unchanged until you replace them.
           </span>
           <button

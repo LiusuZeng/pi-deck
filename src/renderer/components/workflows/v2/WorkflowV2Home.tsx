@@ -25,9 +25,9 @@ export interface WorkflowV2HomeProps {
 
 const roles: WorkflowV2Role[] = ["worker", "decider", "orchestrator", "human"];
 const defaultStartUnavailable =
-  "Starting v2 workflows is unavailable until occurrence execution is connected.";
+  "Starting this workflow is unavailable until role execution is connected.";
 
-/** A v2-native workflow list; it intentionally never converts documents to legacy templates. */
+/** Canonical role-based workflow list; compatibility conversion stays outside this surface. */
 export function WorkflowV2Home(props: WorkflowV2HomeProps): ReactElement {
   const [startingId, setStartingId] = useState<string>();
   const [startError, setStartError] = useState<string>();
@@ -71,29 +71,31 @@ export function WorkflowV2Home(props: WorkflowV2HomeProps): ReactElement {
           </button>
         </div>
       ) : null}
-      <section aria-labelledby="workflow-v2-list-title">
-        <div className="workflow-section-heading">
-          <div>
-            <span className="workflow-kicker">Role-based workflows</span>
-            <h3 id="workflow-v2-list-title">
-              {props.embedded
-                ? "Role-based definitions"
-                : "Your agent workflows"}
-            </h3>
+      <section
+        {...(props.embedded
+          ? { "aria-label": "Additional workflow definitions" }
+          : { "aria-labelledby": "workflow-role-list-title" })}
+      >
+        {!props.embedded ? (
+          <div className="workflow-section-heading">
+            <div>
+              <span className="workflow-kicker">Workflow definitions</span>
+              <h3 id="workflow-role-list-title">Your agent workflows</h3>
+            </div>
+            <span
+              className="workflow-count"
+              aria-label={`${props.workflows.length} workflows`}
+            >
+              {props.workflows.length}
+            </span>
           </div>
-          <span
-            className="workflow-count"
-            aria-label={`${props.workflows.length} workflows`}
-          >
-            {props.workflows.length}
-          </span>
-        </div>
+        ) : null}
         {startError ? (
           <p className="workflow-error" role="alert">
             {startError}
           </p>
         ) : null}
-        {props.workflows.length === 0 ? (
+        {props.workflows.length === 0 && !props.embedded ? (
           <div className="workflow-empty-state">
             <h3>Create a role-based workflow</h3>
             <p>
@@ -115,9 +117,7 @@ export function WorkflowV2Home(props: WorkflowV2HomeProps): ReactElement {
                 >
                   <div className="workflow-template-card-heading">
                     <div>
-                      <span className="workflow-template-mark">
-                        V2 workflow
-                      </span>
+                      <span className="workflow-template-mark">Workflow</span>
                       <h3>{card.name}</h3>
                     </div>
                     <span className="workflow-step-count">

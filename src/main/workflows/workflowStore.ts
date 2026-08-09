@@ -39,6 +39,13 @@ const v2StoreSchema = z
       .default({}),
   })
   .strict();
+const emptyV3StoreSchema = z
+  .object({
+    version: z.literal(3),
+    workflows: z.tuple([]),
+    runs: z.tuple([]),
+  })
+  .strict();
 type V1Store = z.infer<typeof v1StoreSchema>;
 type WorkflowStoreFile = z.infer<typeof v2StoreSchema>;
 const emptyStore = (): WorkflowStoreFile => ({
@@ -233,7 +240,7 @@ export class WorkflowStore {
   async getRun(runId: string): Promise<WorkflowRun> {
     await this.loadIfNeeded();
     const run = this.state.legacyRuns.find((item) => item.id === runId);
-    if (!run) throw new Error(`Unknown legacy workflow run: ${runId}`);
+    if (!run) throw new Error(`Unknown workflow run: ${runId}`);
     return clone(run);
   }
   async createRun(run: WorkflowRun): Promise<WorkflowRun> {
@@ -251,7 +258,7 @@ export class WorkflowStore {
     const index = this.state.legacyRuns.findIndex(
       (item) => item.id === parsed.id,
     );
-    if (index < 0) throw new Error(`Unknown legacy workflow run: ${parsed.id}`);
+    if (index < 0) throw new Error(`Unknown workflow run: ${parsed.id}`);
     const legacyRuns = [...this.state.legacyRuns];
     legacyRuns[index] = parsed;
     await this.commit({ ...this.state, legacyRuns });
@@ -275,9 +282,14 @@ export class WorkflowStore {
         this.state = migrateV1(v1);
         await this.persist();
       } else if (version === 2) this.state = v2StoreSchema.parse(parsed);
-      else throw new UnsupportedWorkflowStoreVersionError(version);
+      else if (version === 3 && emptyV3StoreSchema.safeParse(parsed).success) {
+        await this.migrateEmptyV3(raw);
+      } else throw new UnsupportedWorkflowStoreVersionError(version);
     } catch (error) {
-      if (error instanceof UnsupportedWorkflowStoreVersionError) {
+      if (
+        error instanceof UnsupportedWorkflowStoreVersionError ||
+        error instanceof WorkflowStoreMigrationError
+      ) {
         this.diagnostics?.recordError(error.message);
         throw error;
       }
@@ -296,6 +308,31 @@ export class WorkflowStore {
       await this.persist();
     }
     this.loaded = true;
+  }
+  private async migrateEmptyV3(raw: string): Promise<void> {
+    try {
+      await this.writeRawBackupAtomically(raw, "v3-backup");
+      this.state = emptyStore();
+      await this.persist();
+    } catch (error) {
+      throw new WorkflowStoreMigrationError(error);
+    }
+  }
+  private async writeRawBackupAtomically(
+    raw: string,
+    kind: string,
+  ): Promise<void> {
+    const backup = `${this.storeFile}.${kind}-${this.now()}`;
+    const temp = `${backup}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
+    try {
+      await fs.writeFile(temp, raw, { mode: 0o600, flag: "wx" });
+      // link creates the final backup name without replacing an existing backup.
+      await fs.link(temp, backup);
+      await fs.rm(temp);
+    } catch (error) {
+      await fs.rm(temp, { force: true }).catch(() => undefined);
+      throw error;
+    }
   }
   private async commit(next: WorkflowStoreFile): Promise<void> {
     this.state = v2StoreSchema.parse(next);
@@ -337,12 +374,20 @@ export class UnsupportedWorkflowStoreVersionError extends Error {
     this.name = "UnsupportedWorkflowStoreVersionError";
   }
 }
+class WorkflowStoreMigrationError extends Error {
+  constructor(error: unknown) {
+    super(
+      `Could not migrate empty v3 workflow metadata: ${errorToMessage(error)}`,
+    );
+    this.name = "WorkflowStoreMigrationError";
+  }
+}
 function workflowToLegacyTemplate(
   workflow: WorkflowDefinition,
   workspaceId?: string,
 ): WorkflowTemplate | undefined {
-  // A v2 workflow may contain roles the v1 runtime cannot execute. Do not
-  // misrepresent it as a template in the legacy UI.
+  // Canonical role workflows may exceed the compatibility runtime. Do not
+  // misrepresent them as compatibility templates.
   if (
     workflow.nodes.some((node) => node.role !== "worker" || node.managedBy) ||
     workflow.relationships.some((edge) => edge.when || !("nodeId" in edge.to))

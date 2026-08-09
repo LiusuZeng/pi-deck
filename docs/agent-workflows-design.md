@@ -1,8 +1,12 @@
 # Agent Workflows Design
 
-Status: proposed feature design  
-Date: 2026-08-04  
-Owner: TBD  
+Status: historical — superseded by `docs/agent-workflows-role-based-design.md`
+Date: 2026-08-04
+Owner: TBD
+
+> This document records the pre-role implementation direction. It is not an
+> active product specification. The canonical role-based design is the only
+> current Agent Workflows product contract.
 Related docs: `docs/requirements.md`, `docs/technical-architecture.md`, `docs/workspace-grouped-sessions-execution-plan.md`, `docs/activity-inbox-tagged-filtering-plan.md`, `docs/agent-workflows-parallel-implementation-plan.md`
 
 ## 1. Summary

@@ -1,6 +1,6 @@
 # Agent Workflows — Product Feedback and Continuation Notes
 
-**Status:** prompt-first v1 simplification integrated, validated, and pushed<br>
+**Status:** canonical role-based authoring integrated; run wiring and remaining UX feedback tracked<br>
 **Feedback captured:** 2026-08-07<br>
 **Continuation branch:** `dev/agent-workflows-prompt-first`
 
@@ -35,11 +35,11 @@ another laptop without relying on chat history.
 
 ### 2. Replace the field-heavy step model with four execution roles
 
-- **Status:** Product direction and JSON-first representation agreed; tracking
-  only and not being implemented in this session.
+- **Status:** Canonical role-based authoring, graph, persistence, and core runtime
+  implemented; end-to-end occurrence-run UI wiring remains tracked.
 - **Reported:** 2026-08-07.
 - **Area:** Workflow concepts, authoring model, and agent-step configuration UX.
-- **Detailed implementation design:** [Role-Based Agent Workflows v2](agent-workflows-role-based-design.md).
+- **Canonical product design:** [Role-Based Agent Workflows](agent-workflows-role-based-design.md).
 - **Screenshot:** [Current field-heavy agent-step editor](assets/agent-workflows-feedback/agent-step-editor-role-model.png).
 - **Problem:** The current editor mixes an agent's instructions with graph wiring,
   start behavior, model overrides, thinking settings, and transition controls in
@@ -66,7 +66,7 @@ another laptop without relying on chat history.
   and JSON views over one document. See the detailed design linked above for the
   exact role contracts, JSON shape, runtime semantics, migration requirements,
   implementation phases, and test plan.
-- **Completion signal:** A future implementation delivers a versioned JSON schema,
+- **Completion signal:** The implementation delivers a versioned JSON schema,
   compact role-configuration cards with a focused inspector, and an auto-laid-out
   read-only graph without adding planner/reviewer/etc. as core concepts.
 

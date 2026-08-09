@@ -39,6 +39,24 @@ async function launch(
   return { app, page };
 }
 
+function seedWorkflowStore(
+  piDeckHome: string,
+  store: unknown,
+): { storeFile: string; bytes: Buffer } {
+  fs.mkdirSync(piDeckHome, { recursive: true });
+  const bytes = Buffer.from(`${JSON.stringify(store, null, 2)}\n`);
+  const storeFile = path.join(piDeckHome, "workflows.json");
+  fs.writeFileSync(storeFile, bytes);
+  return { storeFile, bytes };
+}
+
+async function expectWorkflowStoreUnavailable(page: Page): Promise<void> {
+  await page.getByRole("button", { name: "Agent Workflows" }).click();
+  await expect(page.getByRole("alert")).toContainText(
+    /workflow.*(?:unavailable|unsupported)|(?:unavailable|unsupported).*workflow/i,
+  );
+}
+
 test("workflow API creates a template, starts a fake run, and persists both across reopen", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-e2e-agent-workflow-"),
@@ -154,6 +172,94 @@ test("workflow API creates a template, starts a fake run, and persists both acro
     expect(reopened.templateIds).toContain(created.templateId);
     expect(reopened.runIds).toContain(created.runId);
     expect(reopened.run.stepRuns[0]?.status).toBe("completed");
+  } finally {
+    await app?.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a non-empty unsupported workflow store leaves the shell usable and remains unchanged", async () => {
+  // Depends on Lane B: bootstrap must retain the workflow-store error instead
+  // of propagating it before the BrowserWindow is created. The unavailable
+  // surface is intentionally asserted through the visible navigation path.
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-workflow-store-skew-"),
+  );
+  const piDeckHome = path.join(root, "pideck-home");
+  const fixture = seedWorkflowStore(piDeckHome, {
+    version: 3,
+    workflows: [{ futureWorkflowField: "must-not-be-lost" }],
+    occurrences: [],
+    legacyRuns: [],
+    workflowScopes: {},
+  });
+  let app: ElectronApplication | undefined;
+  try {
+    // Both metadata locations are isolated so this production-shaped launch
+    // cannot read from or write to a developer's normal Electron profile.
+    ({ app } = await launch({
+      PI_DECK_BACKEND: "fake",
+      PI_DECK_HOME: piDeckHome,
+      PI_DECK_USER_DATA_DIR: path.join(root, "user-data"),
+    }));
+    const page = await app.firstWindow();
+
+    await expect(
+      page.locator('.workspace[data-load-state="ready"]'),
+    ).toBeVisible();
+    await expectWorkflowStoreUnavailable(page);
+    expect(fs.readFileSync(fixture.storeFile)).toEqual(fixture.bytes);
+  } finally {
+    await app?.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the known empty v3 workflow store boots only through the v3 compatibility migration", async () => {
+  // Depends on Lane A's deliberately narrow v3 compatibility rule and its
+  // atomic backup. This fixture is the known empty shape; the preceding test
+  // covers the non-empty case that must never take this migration path.
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-empty-v3-workflow-store-"),
+  );
+  const piDeckHome = path.join(root, "pideck-home");
+  const fixture = seedWorkflowStore(piDeckHome, {
+    version: 3,
+    workflows: [],
+    runs: [],
+  });
+  let app: ElectronApplication | undefined;
+  try {
+    ({ app } = await launch({
+      PI_DECK_BACKEND: "fake",
+      PI_DECK_HOME: piDeckHome,
+      PI_DECK_USER_DATA_DIR: path.join(root, "user-data"),
+    }));
+    const page = await app.firstWindow();
+    await expect(
+      page.locator('.workspace[data-load-state="ready"]'),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Agent Workflows" }).click();
+    await expect(
+      page.getByRole("heading", { name: "Agent Workflows", exact: true }),
+    ).toBeVisible();
+    await expect(page.getByRole("alert")).toHaveCount(0);
+
+    const migrated = JSON.parse(fs.readFileSync(fixture.storeFile, "utf8"));
+    expect(migrated).toMatchObject({
+      version: 2,
+      workflows: [],
+      occurrences: [],
+      legacyRuns: [],
+      workflowScopes: {},
+    });
+    const backup = fs
+      .readdirSync(piDeckHome)
+      .find((name) => /^workflows\.json\.v3-backup-/.test(name));
+    expect(backup).toBeDefined();
+    expect(fs.readFileSync(path.join(piDeckHome, backup as string))).toEqual(
+      fixture.bytes,
+    );
   } finally {
     await app?.close().catch(() => undefined);
     fs.rmSync(root, { recursive: true, force: true });

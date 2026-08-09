@@ -167,6 +167,11 @@ import {
 import { rehydrateWorkflowRuns as rehydratePersistedWorkflowRuns } from "./workflows/workflowRehydration.js";
 import { WorkflowStore } from "./workflows/workflowStore.js";
 import {
+  initializeWorkflows,
+  requireAgentWorkflows,
+  type WorkflowInitialization,
+} from "./workflows/workflowAvailability.js";
+import {
   WorkflowScheduler,
   type WorkflowRuntimeEvent,
 } from "./workflows/workflowScheduler.js";
@@ -196,7 +201,7 @@ let mainWindow: BrowserWindow | undefined;
 let settingsStore: SettingsStore | undefined;
 let projectStore: ProjectStore | undefined;
 let workspaceStore: WorkspaceStore | undefined;
-let workflowStore: WorkflowStore | undefined;
+let workflowInitialization: WorkflowInitialization<WorkflowStore> | undefined;
 const realChatLaunchConfigCache = new RealChatLaunchConfigCache();
 let diagnostics: DiagnosticsService | undefined;
 type ChatBackendMode = "fake" | "real";
@@ -274,12 +279,19 @@ async function bootstrap(): Promise<void> {
     diagnostics,
   );
   await workspaceStore.loadIfNeeded();
-  workflowStore = new WorkflowStore(
-    resolvePiDeckHome(process.env),
-    diagnostics,
-  );
-  await workflowStore.loadIfNeeded();
-  workflowScheduler = createWorkflowScheduler(settingsStore, diagnostics);
+  workflowInitialization = await initializeWorkflows(async () => {
+    const store = new WorkflowStore(
+      resolvePiDeckHome(process.env),
+      diagnostics,
+    );
+    await store.loadIfNeeded();
+    return store;
+  });
+  if (workflowInitialization.status === "available") {
+    workflowScheduler = createWorkflowScheduler(settingsStore, diagnostics);
+  } else {
+    diagnostics.recordError(workflowInitialization.diagnostic);
+  }
   const hadWorkspaceMetadata =
     (await workspaceStore.list()).workspaces.length > 0;
   await migrateLegacyProjectsToWorkspaces();
@@ -1405,13 +1417,11 @@ function ensureWorkspaceStore(): WorkspaceStore {
 }
 
 function ensureWorkflowStore(): WorkflowStore {
-  if (workflowStore === undefined) {
-    throw new Error("Workflow store is not initialized");
-  }
-  return workflowStore;
+  return requireAgentWorkflows(workflowInitialization);
 }
 
 function ensureWorkflowScheduler(): WorkflowScheduler {
+  requireAgentWorkflows(workflowInitialization);
   if (workflowScheduler === undefined) {
     throw new Error("Workflow scheduler is not initialized");
   }
@@ -1419,6 +1429,9 @@ function ensureWorkflowScheduler(): WorkflowScheduler {
 }
 
 async function rehydrateWorkflowRuns(workspaceId?: string): Promise<void> {
+  if (workflowInitialization?.status !== "available") {
+    return;
+  }
   const store = ensureWorkflowStore();
   const scheduler = ensureWorkflowScheduler();
   await rehydratePersistedWorkflowRuns(

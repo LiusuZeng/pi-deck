@@ -1,9 +1,12 @@
 # Agent Workflows Parallel Implementation Plan
 
-Status: proposed fanout plan  
-Date: 2026-08-04  
-Design source: `docs/agent-workflows-design.md`  
-Purpose: prepare Agent Workflows work for parallel subagent implementation using isolated git worktrees.
+Status: historical implementation record — not a product specification
+Date: 2026-08-04
+Design source: superseded by `docs/agent-workflows-role-based-design.md`
+Purpose: record the original parallel implementation approach.
+
+> Use the canonical role-based design for all current product and runtime
+> decisions. Lane names and slice labels below are historical only.
 
 ## 1. Goal
 

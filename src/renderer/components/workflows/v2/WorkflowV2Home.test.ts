@@ -121,7 +121,7 @@ describe("WorkflowV2Home", () => {
     const explanation = start.getAttribute("aria-describedby");
     expect(explanation).toBeTruthy();
     expect(document.getElementById(explanation!)?.textContent).toContain(
-      "occurrence execution",
+      "role execution",
     );
     act(() => start.click());
     expect(props.onStart).not.toHaveBeenCalled();

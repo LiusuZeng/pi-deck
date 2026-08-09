@@ -1,20 +1,21 @@
-# Agent Workflows v2 — Completion Gap and Parallel Plan
+# Agent Workflows — Completion Gap and Parallel Plan
 
 **Status:** Build/Graph/home completion integrated; occurrence-run UI wiring remains tracked
 **Date:** 2026-08-08
-**Design source:** [Role-Based Agent Workflows v2](agent-workflows-role-based-design.md)
+**Design source:** [Canonical Role-Based Agent Workflows](agent-workflows-role-based-design.md)
 **Baseline:** `dev/agent-workflows-prompt-first` at merge `c5b41ba`
 
 ## 1. Goal
 
 Finish the role-based authoring experience described by the approved design. The
-canonical schema and occurrence runtime already contain substantial v2 support,
-but the Build and Graph views do not currently let a user author or understand
-that model.
+canonical schema and occurrence runtime already contain substantial role
+support, but the Build and Graph views did not initially let a user author or
+understand that model.
 
-This plan is the shared contract for isolated implementation worktrees. The
-primary agent owns integration, contract reconciliation, App/main wiring, and the
-combined verification suite.
+This is an implementation coordination record, not a competing product design.
+The primary agent owns integration, contract reconciliation, App/main wiring, and
+the combined verification suite. Internal versioned code identifiers mentioned
+below are migration details only.
 
 ## 2. Confirmed gaps
 
@@ -44,7 +45,7 @@ combined verification suite.
 
 ### Lifecycle and runtime gaps
 
-- The v2 store and list/create/update IPC exist, but the current renderer home
+- The canonical store and list/create/update IPC exist, but the current renderer home
   still consumes the legacy template list. Workflows containing role nodes are
   filtered out by the compatibility conversion and can disappear from the home
   UI after save.
@@ -74,7 +75,7 @@ combined verification suite.
    both the Orchestrator references and the child's `managedBy`. Managed roles
    cannot retain top-level relationships. The UI must prevent or explicitly
    resolve conflicting ownership rather than silently creating invalid JSON.
-6. **One canonical document:** Build and Graph mutate/project the same v2 document;
+6. **One canonical document:** Build and Graph mutate/project the same workflow document;
    JSON remains the escape hatch, not the only way to configure core semantics.
 7. **No DSL, drag-connect requirement, or dynamic fan-out generation.**
 
@@ -150,7 +151,7 @@ Delivers:
 
 Must not alter shared schemas, renderer files, IPC, store, or scheduler wiring.
 
-### Lane D — V2 lifecycle/home integration design and additive UI
+### Lane D — Canonical lifecycle/home integration and additive UI
 
 Owns additive files only:
 
@@ -159,15 +160,16 @@ Owns additive files only:
 - `src/renderer/workflows/workflowV2ViewModels.ts`
 - `src/renderer/workflows/workflowV2ViewModels.test.ts`
 
-Delivers a standalone v2 workflow list/card surface using
+Delivers a standalone canonical workflow list/card surface using
 `WorkflowDefinition[]`, with create/edit/start callbacks and summaries for all
-four roles. It must not convert v2 workflows through legacy templates. The
+four roles. It must not round-trip canonical workflows through compatibility
+templates. The
 handoff must state the minimal App integration contract and any occurrence-run UI
 that remains blocked on backend wiring.
 
 Must not edit App, WorkflowHome, main/preload/shared IPC, store, or runtime. The
 primary agent will integrate the existing `listWorkflows` API and reconcile the
-legacy/v2 home surfaces.
+compatibility and canonical home surfaces.
 
 ## 5. Integration order
 
@@ -177,7 +179,7 @@ legacy/v2 home surfaces.
 4. Merge Lane A Build authoring; replace its temporary graph rendering with Lane
    B through the frozen component contract.
 5. Merge Lane D additive home/view-model surface.
-6. Primary agent wires App to `listWorkflows`, v2 create/update/edit, and the
+6. Primary agent wires App to `listWorkflows`, canonical create/update/edit, and the
    unified home. No role workflow may disappear after save.
 7. Run focused tests, full Vitest, typecheck, format, production build, and a fake
    user-flow check. Add a fresh-context review wave before release.
@@ -216,9 +218,9 @@ finished.
 
 ### Lifecycle
 
-- Saved v2 workflows remain visible and editable through a v2-native list path.
+- Saved workflows remain visible and editable through the canonical list path.
 - Legacy workflows and runs remain readable through their compatibility path.
-- The UI does not imply v2 runs are supported until occurrence execution is wired
+- The UI does not imply role runs are supported until occurrence execution is wired
   end to end.
 
 ## 7. Integrated result — 2026-08-08
@@ -231,7 +233,7 @@ Completed in the release worktree:
   destinations; role-specific optional and execution fields are editable.
 - Graph is a deterministic read-only semantic projection with managed-role
   containers, labeled outcomes, limits, policies, and terminal outcomes.
-- V2 definitions remain visible/editable through a workspace-scoped native list
+- Canonical definitions remain visible/editable through a workspace-scoped native list
   while legacy templates and runs retain their compatibility surface.
 - Fan-out `any` handles success-first, failure-first, late sibling completion or
   failure, and all-failed outcomes without duplicate downstream routing.
@@ -240,14 +242,17 @@ Completed in the release worktree:
 
 Deferred explicitly:
 
-- V2 occurrence execution is not yet wired through the normal App run UI and
+- Canonical occurrence execution is not yet wired through the normal App run UI and
   scheduler IPC, so Start remains disabled with an accessible explanation.
 - Dynamic input-generated fan-out remains out of scope; count is derived from the
   fixed managed-Worker list.
 
-Validation after integration: 58 Vitest files passed with 436 tests and 2 TODOs;
-main and renderer typechecks, Prettier, production build, and diff checks passed.
-Independent fresh-context release review reported no blockers.
+Validation after launch hardening: 59 Vitest files passed with 447 tests and 2
+TODOs; main and renderer typechecks, Prettier, production build, and diff checks
+passed. Three focused Electron tests passed for normal workflow persistence,
+unsupported-store degraded startup with byte preservation, and exact empty-store
+compatibility migration. Independent fresh-context release review reported no
+blockers.
 
 ## 8. Release hardening incident — workflow store version skew
 

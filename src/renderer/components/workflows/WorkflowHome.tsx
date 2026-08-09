@@ -289,13 +289,11 @@ export function WorkflowHome(props: {
                     <h3>{template.name}</h3>
                   </div>
                   <span className="workflow-step-count">
-                    {template.steps.length} agents
+                    {template.steps.length} role
+                    {template.steps.length === 1 ? "" : "s"}
                   </span>
                 </div>
-                <p>
-                  {template.description ??
-                    "A reusable sequence of Pi agent sessions."}
-                </p>
+                <p>{template.description ?? "A reusable Agent Workflow."}</p>
                 <div className="workflow-card-facts">
                   <span>
                     {template.inputs.length} reusable input
@@ -360,7 +358,7 @@ export function WorkflowHome(props: {
                   <span className="workflow-run-row-copy">
                     <strong>{run.name}</strong>
                     <small>
-                      {progress.completed}/{progress.total} agents complete ·{" "}
+                      {progress.completed}/{progress.total} roles complete ·{" "}
                       {new Date(run.updatedAtMs).toLocaleString()}
                     </small>
                   </span>

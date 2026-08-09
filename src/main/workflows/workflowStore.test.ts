@@ -190,22 +190,59 @@ describe("WorkflowStore v2 migration foundation", () => {
     ).toBe("human");
   });
 
-  it("does not overwrite or rename unsupported stores", async () => {
+  it("backs up and migrates the exact empty v3 store shape to an empty v2 store", async () => {
+    const store = await fresh();
+    const original = '{"version":3,"workflows":[],"runs":[]}';
+    await fs.writeFile(store.storeFile, original);
+
+    expect(await store.listWorkflows()).toEqual([]);
+    expect(await fs.readFile(`${store.storeFile}.v3-backup-123`, "utf8")).toBe(
+      original,
+    );
+    expect(JSON.parse(await fs.readFile(store.storeFile, "utf8"))).toEqual({
+      version: 2,
+      workflows: [],
+      occurrences: [],
+      legacyRuns: [],
+      workflowScopes: {},
+    });
+  });
+
+  it("preserves a non-empty v3 store byte-for-byte and rejects it", async () => {
     const store = await fresh();
     const original = JSON.stringify({
       version: 3,
-      workflows: [{ future: true }],
+      workflows: [{ workspaceId: "workspace", definition: v2() }],
+      runs: [],
     });
     await fs.writeFile(store.storeFile, original);
+
     await expect(store.listWorkflows()).rejects.toBeInstanceOf(
       UnsupportedWorkflowStoreVersionError,
     );
     expect(await fs.readFile(store.storeFile, "utf8")).toBe(original);
-    expect(
-      (await fs.readdir(path.dirname(store.storeFile))).some((name) =>
-        name.includes("corrupt"),
-      ),
-    ).toBe(false);
+    expect(await fs.readdir(path.dirname(store.storeFile))).not.toContain(
+      "workflows.json.v3-backup-123",
+    );
+  });
+
+  it("preserves malformed v3 and future stores byte-for-byte and rejects them", async () => {
+    const store = await fresh();
+    const malformedV3 = '{"version":3,"workflows":[]}';
+    await fs.writeFile(store.storeFile, malformedV3);
+
+    await expect(store.listWorkflows()).rejects.toBeInstanceOf(
+      UnsupportedWorkflowStoreVersionError,
+    );
+    expect(await fs.readFile(store.storeFile, "utf8")).toBe(malformedV3);
+
+    const futureStore = '{"version":4,"workflows":[],"runs":[]}';
+    await fs.writeFile(store.storeFile, futureStore);
+    const reloaded = new WorkflowStore(path.dirname(store.storeFile));
+    await expect(reloaded.listWorkflows()).rejects.toBeInstanceOf(
+      UnsupportedWorkflowStoreVersionError,
+    );
+    expect(await fs.readFile(store.storeFile, "utf8")).toBe(futureStore);
   });
 
   it("backs up corrupt metadata before initializing an empty v2 store", async () => {

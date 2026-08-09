@@ -62,7 +62,7 @@ function RoleNode(props: {
   );
 }
 
-/** Read-only semantic projection of a canonical v2 workflow definition. */
+/** Read-only semantic projection of the canonical workflow definition. */
 export function WorkflowV2Graph(props: WorkflowV2GraphProps): ReactElement {
   const model = deriveWorkflowV2Graph(props.definition);
   const names = new Map(

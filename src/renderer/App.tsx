@@ -4210,8 +4210,13 @@ export function App(): ReactElement {
                   setWorkflowView("builder");
                 }}
                 onEdit={(template) => {
-                  setWorkflowBuilderDefinition(undefined);
-                  setWorkflowBuilderTemplate(template);
+                  const canonical = workflowDefinitions.find(
+                    (definition) => definition.id === template.id,
+                  );
+                  setWorkflowBuilderDefinition(canonical);
+                  setWorkflowBuilderTemplate(
+                    canonical === undefined ? template : undefined,
+                  );
                   setWorkflowView("builder");
                 }}
                 onStart={(template, inputs) =>
