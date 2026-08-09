@@ -178,13 +178,24 @@ describe("AgentWorkflowHome", () => {
     await act(async () => button("Start run").click());
     act(() => button("Edit").click());
     act(() => button("Open run").click());
-    act(() => button("View workflows").click());
     act(() => button("View all runs").click());
     expect(props.onStart).toHaveBeenCalledWith(workflow, {});
     expect(props.onEdit).toHaveBeenCalledWith(workflow);
     expect(props.onOpenRun).toHaveBeenCalledWith(run);
-    expect(props.onShowWorkflows).toHaveBeenCalledOnce();
+    expect(props.onShowWorkflows).not.toHaveBeenCalled();
     expect(props.onShowRuns).toHaveBeenCalledOnce();
+    expect(container?.textContent).not.toContain("View workflows");
+    expect(container?.querySelector(".workflow-run-layout")).toBeNull();
+  });
+
+  it("navigates to the focused definitions collection from the overview", () => {
+    const props = render({ workflows: [workflow, semanticWorkflow], runs: [] });
+    act(() =>
+      container
+        ?.querySelector<HTMLButtonElement>(".agent-workflow-overview-card")
+        ?.click(),
+    );
+    expect(props.onShowWorkflows).toHaveBeenCalledOnce();
   });
 
   it("opens required run inputs and reports start failures from the summary", async () => {

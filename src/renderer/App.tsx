@@ -36,13 +36,6 @@ import type {
   WorkflowDefinition,
   WorkflowRunEnvelope,
 } from "../shared/agentWorkflowSchemas.js";
-import type {
-  WorkflowRun,
-  WorkflowStepRun,
-  WorkflowTransitionRun,
-  WorkflowTemplate,
-  WorkflowTemplateDefinition,
-} from "../shared/workflowSchemas.js";
 import {
   parseSafeMarkdown,
   type InlineToken,
@@ -109,21 +102,6 @@ import {
   nextMenuItemIndex,
 } from "./components/PiModelThinkingMenu.js";
 
-const WorkflowHome = lazy(() =>
-  import("./components/workflows/WorkflowHome.js").then((module) => ({
-    default: module.WorkflowHome,
-  })),
-);
-const WorkflowRunView = lazy(() =>
-  import("./components/workflows/WorkflowRunView.js").then((module) => ({
-    default: module.WorkflowRunView,
-  })),
-);
-const WorkflowBuilder = lazy(() =>
-  import("./components/workflows/WorkflowBuilder.js").then((module) => ({
-    default: module.WorkflowBuilder,
-  })),
-);
 const AgentWorkflowBuilder = lazy(() =>
   import("./components/workflows/AgentWorkflowBuilder.js").then((module) => ({
     default: module.AgentWorkflowBuilder,
@@ -836,32 +814,17 @@ export function App(): ReactElement {
     type: "all",
   });
   const [workflowView, setWorkflowView] = useState<
-    | "home"
-    | "agentHome"
-    | "workflows"
-    | "runs"
-    | "builder"
-    | "run"
-    | "occurrenceRun"
-    | undefined
+    "agentHome" | "workflows" | "runs" | "builder" | "occurrenceRun" | undefined
   >();
-  const [workflowTemplates, setWorkflowTemplates] = useState<
-    WorkflowTemplate[]
-  >([]);
   const [workflowDefinitions, setWorkflowDefinitions] = useState<
     WorkflowDefinition[]
   >([]);
-  const [workflowRuns, setWorkflowRuns] = useState<WorkflowRun[]>([]);
   const [workflowOccurrenceRuns, setWorkflowOccurrenceRuns] = useState<
     WorkflowRunEnvelope[]
   >([]);
-  const [workflowBuilderTemplate, setWorkflowBuilderTemplate] = useState<
-    WorkflowTemplate | undefined
-  >();
   const [workflowBuilderDefinition, setWorkflowBuilderDefinition] = useState<
     WorkflowDefinition | undefined
   >();
-  const [workflowRunId, setWorkflowRunId] = useState<string | undefined>();
   const [workflowOccurrenceRunId, setWorkflowOccurrenceRunId] = useState<
     string | undefined
   >();
@@ -1174,35 +1137,15 @@ export function App(): ReactElement {
     if (workflowView === undefined) return;
     let disposed = false;
     const workspaceId = currentWorkspace.id;
-    const refreshRuns = async (): Promise<void> => {
-      const [runs, canonicalRuns] = await Promise.all([
-        window.piDeck.workflows.listRuns({ workspaceId }),
-        window.piDeck.workflows.canonicalListRuns({ workspaceId }),
-      ]);
-      if (!disposed && currentWorkspaceRef.current.id === workspaceId) {
-        setWorkflowRuns(
-          runs.runs.filter((run) => run.workspaceId === workspaceId),
-        );
-        setWorkflowOccurrenceRuns(canonicalRuns);
-      }
-    };
     const refresh = async (): Promise<void> => {
       setWorkflowLoading(true);
       try {
-        const [templates, definitions, runs, canonicalRuns] = await Promise.all(
-          [
-            window.piDeck.workflows.listTemplates(),
-            window.piDeck.workflows.listWorkflows({ workspaceId }),
-            window.piDeck.workflows.listRuns({ workspaceId }),
-            window.piDeck.workflows.canonicalListRuns({ workspaceId }),
-          ],
-        );
+        const [definitions, canonicalRuns] = await Promise.all([
+          window.piDeck.workflows.listWorkflows({ workspaceId }),
+          window.piDeck.workflows.canonicalListRuns({ workspaceId }),
+        ]);
         if (disposed) return;
-        setWorkflowTemplates(templates.templates);
         setWorkflowDefinitions(definitions);
-        setWorkflowRuns(
-          runs.runs.filter((run) => run.workspaceId === workspaceId),
-        );
         setWorkflowOccurrenceRuns(canonicalRuns);
         if (workflowOccurrenceRunId !== undefined) {
           const run = await window.piDeck.workflows.canonicalGetRun({
@@ -1210,24 +1153,11 @@ export function App(): ReactElement {
           });
           if (run.workspaceId !== workspaceId) {
             setWorkflowOccurrenceRunId(undefined);
-            setWorkflowView("home");
-          } else if (!disposed)
+            setWorkflowView("runs");
+          } else if (!disposed) {
             setWorkflowOccurrenceRuns((current) => [
               run,
               ...current.filter((item) => item.id !== run.id),
-            ]);
-        }
-        if (workflowRunId !== undefined) {
-          const run = await window.piDeck.workflows.getRun({
-            runId: workflowRunId,
-          });
-          if (run.workspaceId !== workspaceId) {
-            setWorkflowRunId(undefined);
-            setWorkflowView("home");
-          } else if (!disposed) {
-            setWorkflowRuns((current) => [
-              run,
-              ...current.filter((candidate) => candidate.id !== run.id),
             ]);
           }
         }
@@ -1243,38 +1173,18 @@ export function App(): ReactElement {
       }
     };
     void refresh();
-    const unsubscribe = window.piDeck.workflows.onEvent(() => {
-      // Recent runs are workspace-scoped even when no run detail is open.
-      void refreshRuns().catch((error) => {
-        if (!disposed) {
-          setWorkflowError(
-            error instanceof Error ? error.message : String(error),
-          );
-        }
-      });
-    });
     return () => {
       disposed = true;
-      unsubscribe();
     };
-  }, [
-    currentWorkspace.id,
-    workflowRunId,
-    workflowOccurrenceRunId,
-    workflowView,
-  ]);
+  }, [currentWorkspace.id, workflowOccurrenceRunId, workflowView]);
 
   useEffect(() => {
-    setWorkflowTemplates([]);
     setWorkflowDefinitions([]);
-    setWorkflowRuns([]);
     setWorkflowOccurrenceRuns([]);
-    setWorkflowRunId(undefined);
     setWorkflowOccurrenceRunId(undefined);
-    setWorkflowBuilderTemplate(undefined);
     setWorkflowBuilderDefinition(undefined);
     setWorkflowError(undefined);
-    if (workflowView !== undefined) setWorkflowView("home");
+    if (workflowView !== undefined) setWorkflowView("agentHome");
   }, [currentWorkspace.id]);
 
   // A renderer reload/disposal loses all composer and retry references. Main
@@ -1312,15 +1222,6 @@ export function App(): ReactElement {
       ...workspaces.filter((workspace) => workspace.id !== currentWorkspace.id),
     ],
     [currentWorkspace, workspaces],
-  );
-  const workflowWorkspaceChoices = useMemo(
-    () =>
-      workflowWorkspaceChoicesFor(
-        currentWorkspace,
-        workspaces,
-        archivedWorkspaces,
-      ),
-    [archivedWorkspaces, currentWorkspace, workspaces],
   );
   const activityWorkspaceNameById = useMemo(
     () =>
@@ -1415,15 +1316,12 @@ export function App(): ReactElement {
   );
   const showStarterPage =
     selectedSession.timeline.length === 0 && selectedSession.status === "idle";
-  const selectedWorkflowRun = workflowRunId
-    ? workflowRuns.find((run) => run.id === workflowRunId)
-    : undefined;
   const selectedWorkflowOccurrenceRun = workflowOccurrenceRunId
     ? workflowOccurrenceRuns.find((run) => run.id === workflowOccurrenceRunId)
     : undefined;
   const agentWorkflowDefinitions = useMemo(
-    () => agentWorkflowsForHome(workflowDefinitions, workflowTemplates),
-    [workflowDefinitions, workflowTemplates],
+    () => agentWorkflowsForHome(workflowDefinitions),
+    [workflowDefinitions],
   );
   useEffect(() => {
     const compactLayout = window.matchMedia("(max-width: 760px)");
@@ -1849,9 +1747,7 @@ export function App(): ReactElement {
   function handleOpenWorkflows(): void {
     setActivityInboxVisible(false);
     setWorkflowError(undefined);
-    setWorkflowBuilderTemplate(undefined);
     setWorkflowBuilderDefinition(undefined);
-    setWorkflowRunId(undefined);
     setWorkflowView("agentHome");
   }
 
@@ -1859,46 +1755,6 @@ export function App(): ReactElement {
     setWorkflowView(undefined);
     setActivityScope({ type: "workspace", workspaceId });
     setActivityInboxVisible(true);
-  }
-
-  async function handleSaveWorkflow(
-    definition: WorkflowTemplateDefinition,
-    templateId?: string,
-  ): Promise<void> {
-    try {
-      const template = templateId
-        ? await window.piDeck.workflows.updateTemplate({
-            templateId,
-            ...definition,
-          })
-        : await window.piDeck.workflows.createTemplate(definition);
-      const currentWorkspaceId = currentWorkspaceRef.current.id;
-      setWorkflowTemplates((current) => {
-        const withoutSavedTemplate = current.filter(
-          (candidate) => candidate.id !== template.id,
-        );
-        return workflowTemplateIsVisibleInWorkspace(
-          template,
-          currentWorkspaceId,
-        )
-          ? [template, ...withoutSavedTemplate]
-          : withoutSavedTemplate;
-      });
-      if (!workflowTemplateIsVisibleInWorkspace(template, currentWorkspaceId)) {
-        const scopeName = workflowWorkspaceChoices.find(
-          (workspace) => workspace.id === template.workspaceId,
-        )?.name;
-        setUiMessage(
-          `Saved ${template.name} to ${scopeName ?? template.workspaceId}. Switch to that workspace to run it.`,
-        );
-      }
-      setWorkflowBuilderTemplate(undefined);
-      setWorkflowView("home");
-      setWorkflowError(undefined);
-    } catch (error) {
-      setWorkflowError(error instanceof Error ? error.message : String(error));
-      throw error;
-    }
   }
 
   async function handleSaveAgentWorkflow(
@@ -1919,7 +1775,6 @@ export function App(): ReactElement {
         saved,
         ...current.filter((candidate) => candidate.id !== saved.id),
       ]);
-      setWorkflowBuilderTemplate(undefined);
       setWorkflowBuilderDefinition(undefined);
       setWorkflowView("workflows");
       setWorkflowError(undefined);
@@ -1930,96 +1785,10 @@ export function App(): ReactElement {
     }
   }
 
-  async function handleStartWorkflow(
-    template: WorkflowTemplate,
-    inputs: Record<string, string>,
-  ): Promise<void> {
-    const run = await window.piDeck.workflows.startRun({
-      templateId: template.id,
-      workspaceId: currentWorkspaceRef.current.id,
-      inputs,
-    });
-    setWorkflowRuns((current) => [
-      run,
-      ...current.filter((candidate) => candidate.id !== run.id),
-    ]);
-    setWorkflowRunId(run.id);
-    setWorkflowView("run");
-    setWorkflowError(undefined);
-  }
-
-  async function handleStopWorkflow(): Promise<void> {
-    if (workflowRunId === undefined) return;
-    const run = await window.piDeck.workflows.stopRun({ runId: workflowRunId });
-    setWorkflowRuns((current) => [
-      run,
-      ...current.filter((candidate) => candidate.id !== run.id),
-    ]);
-  }
-
-  async function handleRetryWorkflowStep(step: WorkflowStepRun): Promise<void> {
-    if (workflowRunId === undefined) return;
-    const run = await window.piDeck.workflows.retryStep({
-      runId: workflowRunId,
-      stepRunId: step.id,
-    });
-    setWorkflowRuns((current) => [
-      run,
-      ...current.filter((candidate) => candidate.id !== run.id),
-    ]);
-  }
-
-  async function handleRetryWorkflowCondition(
-    transition: WorkflowTransitionRun,
-  ): Promise<void> {
-    if (workflowRunId === undefined) return;
-    const run = await window.piDeck.workflows.retryCondition({
-      runId: workflowRunId,
-      transitionRunId: transition.id,
-    });
-    setWorkflowRuns((current) => [
-      run,
-      ...current.filter((candidate) => candidate.id !== run.id),
-    ]);
-  }
-
-  async function handleOverrideWorkflowCondition(
-    transition: WorkflowTransitionRun,
-    decision: "yes" | "no",
-    rationale: string,
-  ): Promise<void> {
-    if (workflowRunId === undefined) return;
-    const run = await window.piDeck.workflows.overrideCondition({
-      runId: workflowRunId,
-      transitionRunId: transition.id,
-      decision,
-      rationale,
-    });
-    setWorkflowRuns((current) => [
-      run,
-      ...current.filter((candidate) => candidate.id !== run.id),
-    ]);
-  }
-
-  async function handleApproveWorkflowGate(
-    step: WorkflowStepRun,
-    action: "approve" | "skip" | "stop",
-  ): Promise<void> {
-    if (workflowRunId === undefined) return;
-    const run = await window.piDeck.workflows.approveGate({
-      runId: workflowRunId,
-      stepRunId: step.id,
-      action,
-    });
-    setWorkflowRuns((current) => [
-      run,
-      ...current.filter((candidate) => candidate.id !== run.id),
-    ]);
-  }
-
-  async function handleOpenWorkflowSession(
-    sessionReference: Pick<WorkflowStepRun, "runtimeId" | "sessionFile">,
-  ): Promise<void> {
+  async function handleOpenWorkflowSession(sessionReference: {
+    runtimeId?: string | undefined;
+    sessionFile?: string | undefined;
+  }): Promise<void> {
     const runtimeSession = sessionReference.runtimeId
       ? sessionsRef.current.find(
           (session) => session.id === sessionReference.runtimeId,
@@ -2087,10 +1856,6 @@ export function App(): ReactElement {
         `Could not open the saved Pi session: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-  }
-
-  async function handleOpenWorkflowStep(step: WorkflowStepRun): Promise<void> {
-    await handleOpenWorkflowSession(step);
   }
 
   async function handleOpenWorkflowOccurrence(
@@ -4141,7 +3906,9 @@ export function App(): ReactElement {
           showArchived={showArchived}
           composerDrafts={composerDrafts}
           activityInboxVisible={activityInboxVisible}
-          workflowView={workflowView === "occurrenceRun" ? "run" : workflowView}
+          workflowView={
+            workflowView === "occurrenceRun" ? "runs" : workflowView
+          }
           activityActionableCount={activityInboxModel.actionableCount}
           onSelect={handleSelectSession}
           onOpenActivity={handleToggleActivity}
@@ -4247,7 +4014,7 @@ export function App(): ReactElement {
                 </div>
               }
             >
-              {workflowLoading && workflowTemplates.length === 0 ? (
+              {workflowLoading && workflowDefinitions.length === 0 ? (
                 <div
                   className="workflow-loading"
                   role="status"
@@ -4256,32 +4023,19 @@ export function App(): ReactElement {
                   Loading Agent Workflows…
                 </div>
               ) : workflowView === "builder" ? (
-                workflowBuilderTemplate !== undefined ? (
-                  <WorkflowBuilder
-                    key={`${currentWorkspace.id}:${workflowBuilderTemplate.id}`}
-                    initialTemplate={workflowBuilderTemplate}
-                    onSave={handleSaveWorkflow}
-                    onCancel={() => {
-                      setWorkflowBuilderTemplate(undefined);
-                      setWorkflowView("home");
-                    }}
-                  />
-                ) : (
-                  <AgentWorkflowBuilder
-                    key={`${currentWorkspace.id}:${workflowBuilderDefinition?.id ?? "new-agent-workflow"}`}
-                    {...(workflowBuilderDefinition === undefined
-                      ? {}
-                      : { initialDefinition: workflowBuilderDefinition })}
-                    modelChoices={workflowModelChoices}
-                    thinkingChoices={workflowThinkingChoices}
-                    onSave={handleSaveAgentWorkflow}
-                    onCancel={() => {
-                      setWorkflowBuilderTemplate(undefined);
-                      setWorkflowBuilderDefinition(undefined);
-                      setWorkflowView("workflows");
-                    }}
-                  />
-                )
+                <AgentWorkflowBuilder
+                  key={`${currentWorkspace.id}:${workflowBuilderDefinition?.id ?? "new-agent-workflow"}`}
+                  {...(workflowBuilderDefinition === undefined
+                    ? {}
+                    : { initialDefinition: workflowBuilderDefinition })}
+                  modelChoices={workflowModelChoices}
+                  thinkingChoices={workflowThinkingChoices}
+                  onSave={handleSaveAgentWorkflow}
+                  onCancel={() => {
+                    setWorkflowBuilderDefinition(undefined);
+                    setWorkflowView("workflows");
+                  }}
+                />
               ) : workflowView === "occurrenceRun" &&
                 selectedWorkflowOccurrenceRun !== undefined ? (
                 <WorkflowOccurrenceRunView
@@ -4323,22 +4077,6 @@ export function App(): ReactElement {
                     void handleOpenWorkflowOccurrence(occurrence)
                   }
                 />
-              ) : workflowView === "run" &&
-                selectedWorkflowRun !== undefined ? (
-                <WorkflowRunView
-                  run={selectedWorkflowRun}
-                  workspaceName={currentWorkspace.name}
-                  onBack={() => {
-                    setWorkflowRunId(undefined);
-                    setWorkflowView("home");
-                  }}
-                  onStop={handleStopWorkflow}
-                  onRetryStep={handleRetryWorkflowStep}
-                  onRetryCondition={handleRetryWorkflowCondition}
-                  onOverrideCondition={handleOverrideWorkflowCondition}
-                  onApproveGate={handleApproveWorkflowGate}
-                  onOpenSession={(step) => void handleOpenWorkflowStep(step)}
-                />
               ) : workflowView === "agentHome" ||
                 workflowView === "workflows" ||
                 workflowView === "runs" ? (
@@ -4360,12 +4098,10 @@ export function App(): ReactElement {
                     setWorkflowView("occurrenceRun");
                   }}
                   onCreate={() => {
-                    setWorkflowBuilderTemplate(undefined);
                     setWorkflowBuilderDefinition(undefined);
                     setWorkflowView("builder");
                   }}
                   onEdit={(workflow) => {
-                    setWorkflowBuilderTemplate(undefined);
                     setWorkflowBuilderDefinition(workflow);
                     setWorkflowView("builder");
                   }}
@@ -4385,36 +4121,7 @@ export function App(): ReactElement {
                     setWorkflowView("occurrenceRun");
                   }}
                 />
-              ) : (
-                <WorkflowHome
-                  templates={workflowTemplates}
-                  workspaceName={currentWorkspace.name}
-                  recentRuns={workflowRuns}
-                  additionalWorkflowCount={0}
-                  onCreate={() => {
-                    setWorkflowBuilderTemplate(undefined);
-                    setWorkflowBuilderDefinition(undefined);
-                    setWorkflowView("builder");
-                  }}
-                  onEdit={(template) => {
-                    const canonical = workflowDefinitions.find(
-                      (definition) => definition.id === template.id,
-                    );
-                    setWorkflowBuilderDefinition(canonical);
-                    setWorkflowBuilderTemplate(
-                      canonical === undefined ? template : undefined,
-                    );
-                    setWorkflowView("builder");
-                  }}
-                  onStart={(template, inputs) =>
-                    handleStartWorkflow(template, inputs)
-                  }
-                  onOpenRun={(run) => {
-                    setWorkflowRunId(run.id);
-                    setWorkflowView("run");
-                  }}
-                />
-              )}
+              ) : null}
             </Suspense>
           </div>
         ) : activityInboxVisible ? (
@@ -5088,43 +4795,9 @@ function workspaceFromLegacyProject(project: ProjectRef): WorkspaceRef {
   };
 }
 
-function workflowWorkspaceChoicesFor(
-  currentWorkspace: WorkspaceRef,
-  activeWorkspaces: readonly WorkspaceRef[],
-  archivedWorkspaces: readonly WorkspaceRef[],
-): Array<Pick<WorkspaceRef, "id" | "name">> {
-  const archivedIds = new Set(
-    archivedWorkspaces.map((workspace) => workspace.id),
-  );
-  const seen = new Set<string>();
-  return [currentWorkspace, ...activeWorkspaces].flatMap((workspace) => {
-    if (
-      workspace.id === invalidDemoWorkspace.id ||
-      archivedIds.has(workspace.id) ||
-      seen.has(workspace.id)
-    ) {
-      return [];
-    }
-    seen.add(workspace.id);
-    return [{ id: workspace.id, name: workspace.name }];
-  });
-}
-
-function workflowTemplateIsVisibleInWorkspace(
-  template: Pick<WorkflowTemplate, "workspaceId">,
-  workspaceId: string,
-): boolean {
-  return (
-    template.workspaceId === undefined || template.workspaceId === workspaceId
-  );
-}
-
 function agentWorkflowsForHome(
   definitions: readonly WorkflowDefinition[],
-  _legacyTemplates: readonly Pick<WorkflowTemplate, "id">[],
 ): WorkflowDefinition[] {
-  // The canonical definition list is the active product surface. Compatibility
-  // templates remain readable only when no canonical definitions exist.
   return [...definitions];
 }
 
@@ -10146,7 +9819,7 @@ export function findKnownExtensionCommand(
 
 function workflowOccurrenceSessionReference(
   occurrence: CanonicalNodeOccurrence,
-): Pick<WorkflowStepRun, "runtimeId" | "sessionFile"> {
+): { runtimeId?: string | undefined; sessionFile?: string | undefined } {
   return {
     ...(occurrence.runtimeId === undefined
       ? {}
@@ -10213,8 +9886,6 @@ export const __rendererTestHooks = {
   updateRuntimeCapabilities,
   workflowModelChoicesFor,
   workflowThinkingChoicesFor,
-  workflowWorkspaceChoicesFor,
-  workflowTemplateIsVisibleInWorkspace,
   agentWorkflowsForHome,
   thinkingLevelsForModel,
   clampThinkingLevel,

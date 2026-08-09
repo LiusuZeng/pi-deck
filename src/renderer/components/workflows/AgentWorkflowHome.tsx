@@ -284,14 +284,6 @@ export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
                   <button
                     type="button"
                     className="workflow-secondary-button"
-                    onClick={props.onShowWorkflows}
-                    disabled={!props.onShowWorkflows}
-                  >
-                    View workflows
-                  </button>
-                  <button
-                    type="button"
-                    className="workflow-secondary-button"
                     onClick={() => props.onEdit(onlyWorkflow)}
                   >
                     Edit
@@ -435,7 +427,7 @@ export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
               <strong>Workflows</strong>
               <span>{props.workflows.length} saved</span>
               <span className="agent-workflow-overview-link">
-                View workflows
+                Browse definitions
               </span>
             </button>
             <button

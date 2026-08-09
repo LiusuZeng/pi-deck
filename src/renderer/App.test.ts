@@ -806,64 +806,14 @@ describe("renderer project API compatibility", () => {
   });
 });
 
-describe("workflow workspace scope choices", () => {
-  const workspace = (id: string, name: string) => ({
-    id,
-    name,
-    lastOpenedAt: 1,
-  });
-
-  it("keeps unique active workspaces and excludes archived and invalid demo rows", () => {
-    const current = workspace("workspace-default", "Default workspace");
-    const archived = workspace("workspace-archived", "Archived workspace");
-
-    expect(
-      __rendererTestHooks.workflowWorkspaceChoicesFor(
-        current,
-        [
-          current,
-          workspace("workspace-project", "liusu_pi_gui"),
-          archived,
-          workspace("demo-deleted-workspace", "Deleted project"),
-        ],
-        [archived],
-      ),
-    ).toEqual([
-      { id: "workspace-default", name: "Default workspace" },
-      { id: "workspace-project", name: "liusu_pi_gui" },
+describe("canonical workflow collection", () => {
+  it("keeps canonical definitions visible without legacy compatibility records", () => {
+    const first = { ...defaultAgentWorkflowDefinition(), id: "first" };
+    const second = { ...defaultAgentWorkflowDefinition(), id: "second" };
+    expect(__rendererTestHooks.agentWorkflowsForHome([first, second])).toEqual([
+      first,
+      second,
     ]);
-  });
-
-  it("keeps canonical definitions visible even when legacy compatibility records overlap", () => {
-    const overlapping = { ...defaultAgentWorkflowDefinition(), id: "shared" };
-    const canonical = { ...defaultAgentWorkflowDefinition(), id: "canonical" };
-    expect(
-      __rendererTestHooks.agentWorkflowsForHome(
-        [overlapping, canonical],
-        [{ id: "shared" }],
-      ),
-    ).toEqual([overlapping, canonical]);
-  });
-
-  it("matches the workflow store's global-or-current visibility rule", () => {
-    expect(
-      __rendererTestHooks.workflowTemplateIsVisibleInWorkspace(
-        {},
-        "workspace-default",
-      ),
-    ).toBe(true);
-    expect(
-      __rendererTestHooks.workflowTemplateIsVisibleInWorkspace(
-        { workspaceId: "workspace-default" },
-        "workspace-default",
-      ),
-    ).toBe(true);
-    expect(
-      __rendererTestHooks.workflowTemplateIsVisibleInWorkspace(
-        { workspaceId: "workspace-project" },
-        "workspace-default",
-      ),
-    ).toBe(false);
   });
 });
 
