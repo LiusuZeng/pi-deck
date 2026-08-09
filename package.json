@@ -36,6 +36,7 @@
     "format": "prettier --check \"index.html\" \"package*.json\" \"*.config.ts\" \"tsconfig*.json\" \"scripts/**/*.mjs\" \"src/**/*.{ts,tsx,css}\" \"e2e/**/*.ts\""
   },
   "dependencies": {
+    "@dagrejs/dagre": "^3.1.1",
     "lucide-react": "^1.25.0",
     "react": "19.2.7",
     "react-dom": "19.2.7",

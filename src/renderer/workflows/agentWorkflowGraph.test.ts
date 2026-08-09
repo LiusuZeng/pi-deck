@@ -3,7 +3,10 @@ import type {
   CanonicalNodeOccurrence,
   WorkflowDefinition,
 } from "../../shared/agentWorkflowSchemas.js";
-import { deriveAgentWorkflowGraph } from "./agentWorkflowGraph.js";
+import {
+  deriveAgentWorkflowGraph,
+  layoutAgentWorkflowGraph,
+} from "./agentWorkflowGraph.js";
 
 const definition: WorkflowDefinition = {
   format: "pi-deck.agent-workflow",
@@ -140,6 +143,21 @@ describe("deriveAgentWorkflowGraph", () => {
       "completed",
       "stopped",
     ]);
+  });
+
+  it("lays out fan-out children and loop feedback as routed graph edges", () => {
+    const graph = layoutAgentWorkflowGraph(definition);
+    expect(graph.nodes.map((node) => node.id)).toEqual(
+      expect.arrayContaining(["iterate", "implement", "ready", "parallel", "review", "test"]),
+    );
+    expect(graph.edges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ from: "parallel", to: "review", ownership: true }),
+        expect.objectContaining({ from: "parallel", to: "test", ownership: true }),
+        expect.objectContaining({ from: "ready", to: "iterate", feedback: true }),
+      ]),
+    );
+    expect(graph.edges.every((edge) => edge.points.length >= 2)).toBe(true);
   });
 
   it("keeps entry routing first and uses document order for disconnected ties", () => {

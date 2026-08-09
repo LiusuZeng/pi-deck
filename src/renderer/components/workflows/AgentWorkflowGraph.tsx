@@ -5,7 +5,7 @@ import type {
 } from "../../../shared/agentWorkflowSchemas.js";
 import {
   deriveAgentWorkflowGraph,
-  type AgentWorkflowGraphModel,
+  layoutAgentWorkflowGraph,
   type AgentWorkflowGraphNode,
   type WorkflowGraphStatus,
 } from "../../workflows/agentWorkflowGraph.js";
@@ -79,37 +79,28 @@ function RoleNode(props: {
 }
 
 function GraphCanvas(props: {
-  model: AgentWorkflowGraphModel;
+  definition: WorkflowDefinition;
+  occurrences?: CanonicalNodeOccurrence[] | undefined;
   selectedNodeId?: string | undefined;
   onSelectNode(nodeId: string): void;
 }): ReactElement {
-  const { model } = props;
-  const nodeWidth = 240;
-  const nodeGap = 72;
-  const nodeHeight = 230;
-  const positions = new Map(model.topLevelNodes.map((node, index) => [node.id, index]));
-  const width = Math.max(640, model.topLevelNodes.length * (nodeWidth + nodeGap));
+  const graph = layoutAgentWorkflowGraph(props.definition, props.occurrences);
   return (
     <div className="agent-workflow-graph-viewport" tabIndex={0} aria-label="Workflow graph canvas. Use the node buttons to inspect a step.">
-      <div className="agent-workflow-graph-canvas" style={{ "--graph-width": `${width}px` } as CSSProperties}>
-        <svg className="agent-workflow-graph-links" width={width} height={nodeHeight} aria-hidden="true">
+      <div className="agent-workflow-graph-canvas" style={{ "--graph-width": `${graph.width}px`, "--graph-height": `${graph.height}px` } as CSSProperties}>
+        <svg className="agent-workflow-graph-links" width={graph.width} height={graph.height} aria-hidden="true">
           <defs><marker id="workflow-graph-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" /></marker></defs>
-          {model.routes.map((route) => {
-            const from = positions.get(route.from);
-            const to = positions.get(route.to);
-            if (from === undefined) return null;
-            const x1 = from * (nodeWidth + nodeGap) + nodeWidth;
-            const x2 = to === undefined ? Math.min(width - 18, x1 + nodeGap) : to * (nodeWidth + nodeGap);
-            const x = (x1 + x2) / 2;
-            return <g key={route.id} className={route.status ? `is-${route.status}` : ""}>
-              <line x1={x1} y1="108" x2={x2} y2="108" markerEnd="url(#workflow-graph-arrow)" />
-              <text x={x} y="96" textAnchor="middle">{route.label}{route.status ? ` · ${route.status.replace("_", " ")}` : ""}</text>
-              {route.terminal && <text x={x2} y="128" textAnchor="end">End: {route.to}</text>}
+          {graph.edges.map((edge) => {
+            const points = edge.points.map((point) => `${point.x},${point.y}`).join(" ");
+            const midpoint = edge.points[Math.floor(edge.points.length / 2)];
+            return <g key={edge.id} className={`${edge.status ? `is-${edge.status}` : ""}${edge.ownership ? " is-ownership" : ""}${edge.feedback ? " is-feedback" : ""}`}>
+              <polyline points={points} markerEnd="url(#workflow-graph-arrow)" />
+              {midpoint && <text x={midpoint.x} y={midpoint.y - 8} textAnchor="middle">{edge.label}{edge.status ? ` · ${edge.status.replace("_", " ")}` : ""}</text>}
             </g>;
           })}
         </svg>
-        {model.topLevelNodes.map((node, index) => (
-          <div key={node.id} className="agent-workflow-graph-canvas-node" style={{ left: index * (nodeWidth + nodeGap), width: nodeWidth }}>
+        {graph.nodes.map((node) => (
+          <div key={node.id} className="agent-workflow-graph-canvas-node" style={{ left: node.x - node.width / 2, top: node.y - node.height / 2, width: node.width }}>
             <RoleNode node={node} selectedNodeId={props.selectedNodeId} onSelectNode={props.onSelectNode} />
           </div>
         ))}
@@ -129,7 +120,7 @@ export function AgentWorkflowGraph(props: AgentWorkflowGraphProps): ReactElement
         <h2>{live ? "Execution graph" : "Workflow graph"}</h2>
         <p>{live ? "Live scheduler state is shown on the canonical workflow definition. Select a node for details." : "Derived and read-only. Select a role to focus it in Build."}</p>
       </header>
-      <GraphCanvas model={model} selectedNodeId={props.selectedNodeId} onSelectNode={props.onSelectNode} />
+      <GraphCanvas definition={props.definition} occurrences={props.occurrences} selectedNodeId={props.selectedNodeId} onSelectNode={props.onSelectNode} />
       <details className="agent-workflow-graph-text-alternative">
         <summary>Text alternative: nodes and routes</summary>
         <ol className="agent-workflow-graph-flow" aria-label="Top-level workflow flow">

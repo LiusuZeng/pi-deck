@@ -5019,12 +5019,11 @@ body {
 .agent-workflow-graph-canvas {
   position: relative;
   width: var(--graph-width);
-  min-height: 230px;
-  padding: 18px 0;
+  min-height: var(--graph-height, 230px);
 }
 .agent-workflow-graph-links {
   position: absolute;
-  top: 18px;
+  top: 0;
   left: 0;
   overflow: visible;
   pointer-events: none;

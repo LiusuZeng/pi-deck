@@ -1,3 +1,4 @@
+import { Graph, layout } from "@dagrejs/dagre";
 import type {
   CanonicalNodeOccurrence,
   WorkflowDefinition,
@@ -40,6 +41,30 @@ export interface AgentWorkflowGraphModel {
   topLevelNodes: AgentWorkflowGraphNode[];
   routes: AgentWorkflowGraphRoute[];
   terminalOutcomes: string[];
+}
+
+export interface WorkflowGraphLayoutNode extends AgentWorkflowGraphNode {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  containerId?: string;
+}
+export interface WorkflowGraphLayoutEdge {
+  id: string;
+  from: string;
+  to: string;
+  label: string;
+  status?: AgentWorkflowGraphRoute["status"];
+  ownership?: boolean;
+  feedback?: boolean;
+  points: Array<{ x: number; y: number }>;
+}
+export interface WorkflowGraphLayout {
+  width: number;
+  height: number;
+  nodes: WorkflowGraphLayoutNode[];
+  edges: WorkflowGraphLayoutEdge[];
 }
 
 function routeLabel(node: WorkflowNode, value: boolean | string | undefined) {
@@ -168,5 +193,54 @@ export function deriveAgentWorkflowGraph(
     topLevelNodes: orderedIds.map((id) => project(nodesById.get(id)!)),
     routes,
     terminalOutcomes: [...new Set(routes.filter((route) => route.terminal).map((route) => route.to))],
+  };
+}
+
+/** Deterministic compound-node layout used by both definition and live graphs. */
+export function layoutAgentWorkflowGraph(
+  definition: WorkflowDefinition,
+  occurrences: CanonicalNodeOccurrence[] = [],
+): WorkflowGraphLayout {
+  const model = deriveAgentWorkflowGraph(definition, occurrences);
+  const projected = new Map<string, AgentWorkflowGraphNode>();
+  const collect = (node: AgentWorkflowGraphNode): void => {
+    projected.set(node.id, node);
+    node.managedNodes.forEach(collect);
+  };
+  model.topLevelNodes.forEach(collect);
+  const graph = new Graph({ multigraph: true });
+  graph.setGraph({ rankdir: "LR", ranksep: 100, nodesep: 54, marginx: 36, marginy: 36 });
+  graph.setDefaultEdgeLabel(() => ({}));
+  for (const node of definition.nodes) {
+    graph.setNode(node.id, { width: 240, height: node.role === "orchestrator" ? 280 : 190 });
+  }
+  const edges: Omit<WorkflowGraphLayoutEdge, "points">[] = [];
+  for (const route of model.routes) {
+    if (route.terminal) continue;
+    graph.setEdge(route.from, route.to, { weight: 3 }, route.id);
+    edges.push({ id: route.id, from: route.from, to: route.to, label: route.label, status: route.status });
+  }
+  for (const node of definition.nodes) {
+    if (!node.managedBy) continue;
+    const ownershipId = `ownership:${node.managedBy}:${node.id}`;
+    graph.setEdge(node.managedBy, node.id, { weight: 1, minlen: 1 }, ownershipId);
+    edges.push({ id: ownershipId, from: node.managedBy, to: node.id, label: "manages", ownership: true });
+  }
+  for (const node of definition.nodes) {
+    if (node.role !== "orchestrator" || node.config.mode !== "loop") continue;
+    const id = `feedback:${node.config.decider}:${node.id}`;
+    graph.setEdge(node.config.decider, node.id, { weight: 0, minlen: 2 }, id);
+    edges.push({ id, from: node.config.decider, to: node.id, label: "next iteration", feedback: true });
+  }
+  layout(graph);
+  const nodes = definition.nodes.map((node) => {
+    const positioned = graph.node(node.id) as { x: number; y: number; width: number; height: number };
+    return { ...projected.get(node.id)!, x: positioned.x, y: positioned.y, width: positioned.width, height: positioned.height, ...(node.managedBy ? { containerId: node.managedBy } : {}) };
+  });
+  return {
+    width: graph.graph().width,
+    height: graph.graph().height,
+    nodes,
+    edges: edges.map((edge) => ({ ...edge, points: (graph.edge({ v: edge.from, w: edge.to, name: edge.id }) as { points: Array<{ x: number; y: number }> }).points })),
   };
 }
