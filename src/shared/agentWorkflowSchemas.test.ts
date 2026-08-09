@@ -91,6 +91,46 @@ describe("canonical node occurrence schema", () => {
 });
 
 describe("agentWorkflow workflow contracts", () => {
+  it("accepts ordered explicit bindings from an upstream top-level node", () => {
+    const definition = base();
+    const approval = definition.nodes.find((node) => node.id === "approval");
+    if (!approval) throw new Error("fixture");
+    approval.inputBindings = [
+      {
+        sourceNodeId: "plan",
+        sourceValue: "finalOutput",
+        label: "Delivery plan",
+      },
+    ];
+    expect(
+      workflowDefinitionSchema
+        .parse(definition)
+        .nodes.find((node) => node.id === "approval")?.inputBindings,
+    ).toHaveLength(1);
+  });
+
+  it("rejects downstream and managed-node input bindings", () => {
+    const definition = base();
+    const plan = definition.nodes.find((node) => node.id === "plan");
+    const implement = definition.nodes.find((node) => node.id === "implement");
+    if (!plan || !implement) throw new Error("fixture");
+    plan.inputBindings = [
+      { sourceNodeId: "approval", sourceValue: "finalOutput" },
+    ];
+    implement.inputBindings = [
+      { sourceNodeId: "plan", sourceValue: "finalOutput" },
+    ];
+    const errors = workflowDefinitionSchema.safeParse(definition);
+    expect(errors.success).toBe(false);
+    if (errors.success) throw new Error("fixture");
+    expect(errors.error.issues.map((issue) => issue.message)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("upstream"),
+        expect.stringContaining("top-level nodes"),
+      ]),
+    );
+  });
+
   it("accepts exactly the four native roles and canonical fields", () => {
     const parsed = workflowDefinitionSchema.parse(base());
     expect(parsed.nodes.map((node) => node.role)).toEqual([

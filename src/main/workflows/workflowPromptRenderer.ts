@@ -110,16 +110,24 @@ export function renderWorkflowOccurrencePrompt(
   // `context` is captured when an occurrence is created. In particular managed
   // children must not require the still-running Orchestrator to have output.
   const configuredInput = node.config.input ? [node.config.input] : [];
+  // A persisted explicit binding is authoritative: do not leak every run
+  // input or an incidental immediate parent into a deliberately scoped prompt.
+  // Undefined keeps v2 runs on their original relationship-handoff behavior.
+  const explicitInputs = occurrence.resolvedInputBindings?.map((binding) =>
+    binding.label ? `${binding.label}:\n${binding.value}` : binding.value,
+  );
   const context = [
-    ...Object.entries(run.inputs).map(([key, value]) => `${key}: ${value}`),
+    ...(explicitInputs ?? [
+      ...Object.entries(run.inputs).map(([key, value]) => `${key}: ${value}`),
+      ...parents
+        .filter(
+          (parent) =>
+            parent.role !== "orchestrator" || parent.output !== undefined,
+        )
+        .map(parentOutput),
+    ]),
     ...configuredInput,
     ...occurrence.context,
-    ...parents
-      .filter(
-        (parent) =>
-          parent.role !== "orchestrator" || parent.output !== undefined,
-      )
-      .map(parentOutput),
   ]
     .filter(Boolean)
     .join("\n\n");

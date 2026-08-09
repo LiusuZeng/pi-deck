@@ -22,10 +22,23 @@ const executionSchema = z
   })
   .strict();
 
+export const workflowNodeInputBindingSchema = z
+  .object({
+    sourceNodeId: nodeIdSchema,
+    sourceValue: z.literal("finalOutput"),
+    label: z.string().trim().min(1).max(120).optional(),
+  })
+  .strict();
+
 const nodeBaseSchema = z.object({
   id: nodeIdSchema,
   name: z.string().trim().min(1).max(160),
   managedBy: nodeIdSchema.optional(),
+  /**
+   * Optional explicit upstream handoffs. Omission preserves the v2 default:
+   * immediate relationship-parent output is supplied by the runtime.
+   */
+  inputBindings: z.array(workflowNodeInputBindingSchema).max(50).optional(),
 });
 
 export const workerNodeSchema = nodeBaseSchema
@@ -305,12 +318,19 @@ export const workflowOccurrenceSchema = z
 export type WorkflowDefinition = z.infer<typeof workflowDefinitionSchema>;
 export type WorkflowNode = z.infer<typeof workflowNodeSchema>;
 export type WorkflowRelationship = z.infer<typeof relationshipSchema>;
+export type WorkflowNodeInputBinding = z.infer<
+  typeof workflowNodeInputBindingSchema
+>;
 /** @deprecated Migration-only record retained to read pre-canonical occurrence data. */
 export type WorkflowOccurrence = z.infer<typeof workflowOccurrenceSchema>;
 export type NodeOccurrence = z.infer<typeof nodeOccurrenceSchema>;
 
 /** The single persisted envelope for new role workflow executions. */
 const boundedRunTextSchema = z.string().max(32_000);
+export const resolvedWorkflowNodeInputBindingSchema =
+  workflowNodeInputBindingSchema
+    .extend({ value: boundedRunTextSchema })
+    .strict();
 export const canonicalNodeOccurrenceSchema = z
   .object({
     id: z.string().uuid(),
@@ -320,6 +340,11 @@ export const canonicalNodeOccurrenceSchema = z
     parentOccurrenceIds: z.array(z.string().uuid()).default([]),
     /** Explicit creation-time context. This avoids requiring an in-progress parent's output. */
     context: z.array(boundedRunTextSchema).max(100).default([]),
+    /** Immutable values resolved from the node's explicit inputBindings. */
+    resolvedInputBindings: z
+      .array(resolvedWorkflowNodeInputBindingSchema)
+      .max(50)
+      .optional(),
     iteration: z.number().int().positive().default(1),
     attempt: z.number().int().positive(),
     status: z.enum([
@@ -526,6 +551,43 @@ function validateWorkflowGraph(
       });
   }
 
+  for (const [index, node] of value.nodes.entries()) {
+    const seenBindings = new Set<string>();
+    for (const [bindingIndex, binding] of (
+      node.inputBindings ?? []
+    ).entries()) {
+      const bindingPath = ["nodes", index, "inputBindings", bindingIndex];
+      const source = nodes.get(binding.sourceNodeId);
+      const key = `${binding.sourceNodeId}\u0000${binding.sourceValue}`;
+      if (seenBindings.has(key))
+        ctx.addIssue({
+          code: "custom",
+          path: bindingPath,
+          message: `Duplicate input binding: ${binding.sourceNodeId}`,
+        });
+      seenBindings.add(key);
+      if (!source)
+        ctx.addIssue({
+          code: "custom",
+          path: [...bindingPath, "sourceNodeId"],
+          message: `Input binding source node does not exist: ${binding.sourceNodeId}`,
+        });
+      else if (source.id === node.id)
+        ctx.addIssue({
+          code: "custom",
+          path: [...bindingPath, "sourceNodeId"],
+          message: "A node cannot use its own output as an input binding.",
+        });
+      else if (source.managedBy || node.managedBy)
+        ctx.addIssue({
+          code: "custom",
+          path: [...bindingPath, "sourceNodeId"],
+          message:
+            "Explicit input bindings may only connect top-level nodes; managed nodes use their orchestrator lineage.",
+        });
+    }
+  }
+
   const relationshipIds = new Set<string>();
   const edges = new Map<string, string[]>();
   const routes = new Map<string, Set<boolean | string>>();
@@ -585,6 +647,35 @@ function validateWorkflowGraph(
           "Boolean and choice outputs require conditional relationships.",
       });
   });
+  const reaches = (from: string, target: string): boolean => {
+    const visited = new Set<string>();
+    const visit = (id: string): boolean => {
+      if (id === target) return true;
+      if (visited.has(id)) return false;
+      visited.add(id);
+      return (edges.get(id) ?? []).some(visit);
+    };
+    return visit(from);
+  };
+  value.nodes.forEach((node, index) => {
+    for (const [bindingIndex, binding] of (
+      node.inputBindings ?? []
+    ).entries()) {
+      const source = nodes.get(binding.sourceNodeId);
+      if (
+        source &&
+        !source.managedBy &&
+        !node.managedBy &&
+        !reaches(source.id, node.id)
+      )
+        ctx.addIssue({
+          code: "custom",
+          path: ["nodes", index, "inputBindings", bindingIndex, "sourceNodeId"],
+          message: `Input binding source must be upstream of ${node.id}: ${source.id}`,
+        });
+    }
+  });
+
   for (const node of value.nodes)
     if (!node.managedBy && requiresConditionalRoutes(node)) {
       const expected =

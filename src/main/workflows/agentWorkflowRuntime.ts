@@ -8,6 +8,7 @@ import {
   type AgentWorkflowRole,
   type WorkflowRunEnvelope,
   type CanonicalNodeOccurrence,
+  type WorkflowNodeInputBinding,
 } from "../../shared/agentWorkflowSchemas.js";
 
 export { agentWorkflowDefinitionSchema } from "../../shared/agentWorkflowSchemas.js";
@@ -272,6 +273,8 @@ export function retryWorkflowOccurrence(
         prior.iteration,
         now,
         prior.attempt + 1,
+        [],
+        prior.resolvedInputBindings,
       ),
     ],
   );
@@ -476,6 +479,9 @@ function route(
           undefined,
           1,
           now,
+          1,
+          [],
+          resolveInputBindings(next, relationship.to.nodeId),
         ),
       ]);
     } else {
@@ -493,6 +499,7 @@ function newOccurrence(
   now: number,
   attempt = 1,
   context: string[] = [],
+  resolvedInputBindings?: Array<WorkflowNodeInputBinding & { value: string }>,
 ): WorkflowOccurrence {
   return {
     id: randomUUID(),
@@ -501,6 +508,14 @@ function newOccurrence(
     ...(parentOrchestratorRunId ? { parentOrchestratorRunId } : {}),
     parentOccurrenceIds: parents,
     context: context.map((value) => bound(value)),
+    ...(resolvedInputBindings !== undefined
+      ? {
+          resolvedInputBindings: resolvedInputBindings.map((binding) => ({
+            ...binding,
+            value: bound(binding.value),
+          })),
+        }
+      : {}),
     iteration,
     attempt,
     status: role.role === "human" ? "waitingHuman" : "ready",
@@ -522,7 +537,44 @@ function managedContext(
     .flatMap((value) =>
       value === undefined ? [] : Array.isArray(value) ? value : [String(value)],
     );
-  return [...configured, ...parents];
+  return [
+    ...configured,
+    ...(orchestrator.resolvedInputBindings?.map((binding) => binding.value) ??
+      []),
+    ...parents,
+  ];
+}
+
+/** Resolve configured handoffs while the source occurrence output is still
+ * available. The resulting immutable values are persisted on the child so a
+ * retry/restart never depends on process memory or a later graph revision. */
+function resolveInputBindings(
+  run: WorkflowRoleRun,
+  nodeId: string,
+): Array<WorkflowNodeInputBinding & { value: string }> | undefined {
+  const target = node(run.definition, nodeId);
+  if (target.inputBindings === undefined) return undefined;
+  return target.inputBindings.map((binding) => {
+    const source = run.occurrences
+      .filter(
+        (occurrence) =>
+          occurrence.nodeId === binding.sourceNodeId &&
+          occurrence.status === "completed",
+      )
+      .at(-1);
+    if (source === undefined || source.output === undefined)
+      throw new Error(
+        `Workflow input binding is unavailable: ${binding.sourceNodeId} has not completed.`,
+      );
+    const value = Array.isArray(source.output)
+      ? source.output.join("\n")
+      : String(source.output);
+    if (!value.trim())
+      throw new Error(
+        `Workflow input binding is unavailable: ${binding.sourceNodeId} produced no final output.`,
+      );
+    return { ...binding, value: bound(value) };
+  });
 }
 function node(
   definition: AgentWorkflowDefinition,

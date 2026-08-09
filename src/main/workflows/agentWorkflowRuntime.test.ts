@@ -58,6 +58,62 @@ function fanoutDefinition(completion: "all" | "any"): WorkflowRoleDefinition {
 }
 
 describe("agentWorkflow occurrence runtime", () => {
+  it("captures only configured upstream outputs in a durable ordered binding snapshot", () => {
+    const definition: WorkflowRoleDefinition = {
+      ...base,
+      entryNodeId: "plan",
+      nodes: [
+        {
+          id: "plan",
+          name: "Plan",
+          role: "worker",
+          config: { instructions: "plan" },
+        },
+        {
+          id: "review",
+          name: "Review",
+          role: "worker",
+          config: { instructions: "review" },
+        },
+        {
+          id: "deliver",
+          name: "Deliver",
+          role: "worker",
+          inputBindings: [
+            {
+              sourceNodeId: "plan",
+              sourceValue: "finalOutput",
+              label: "Selected plan",
+            },
+          ],
+          config: { instructions: "deliver" },
+        },
+      ],
+      relationships: [
+        { id: "plan-review", from: "plan", to: { nodeId: "review" } },
+        { id: "review-deliver", from: "review", to: { nodeId: "deliver" } },
+      ],
+    };
+    let run = createWorkflowRoleRun(definition, "workspace");
+    const plan = run.occurrences[0]!;
+    run = startWorkflowOccurrence(run, plan.id, "plan-runtime");
+    run = completeWorkflowOccurrence(run, plan.id, "chosen plan");
+    const review = run.occurrences.find((item) => item.nodeId === "review")!;
+    run = startWorkflowOccurrence(run, review.id, "review-runtime");
+    run = completeWorkflowOccurrence(run, review.id, "incidental review");
+    const deliver = run.occurrences.find((item) => item.nodeId === "deliver")!;
+    expect(deliver.resolvedInputBindings).toEqual([
+      {
+        sourceNodeId: "plan",
+        sourceValue: "finalOutput",
+        label: "Selected plan",
+        value: "chosen plan",
+      },
+    ]);
+    const prompt = renderWorkflowOccurrencePrompt(run, deliver);
+    expect(prompt).toContain("Selected plan:\nchosen plan");
+    expect(prompt).not.toContain("incidental review");
+  });
   it("renders the configured first managed context without an Orchestrator output", () => {
     const definition = fanoutDefinition("all");
     const orchestrator = definition.nodes.find((node) => node.id === "fan");
