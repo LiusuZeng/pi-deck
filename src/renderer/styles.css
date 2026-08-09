@@ -5311,7 +5311,8 @@ body {
   border-left-color: #14b8a6;
 }
 .agent-workflow-graph-node.is-in_progress {
-  border-color: var(--color-accent, #60a5fa);
+  border-color: var(--color-info);
+  border-style: dashed;
 }
 .agent-workflow-graph-node.is-waiting_human {
   border-color: #f59e0b;

@@ -2,7 +2,10 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { WorkflowDefinition } from "../../../../shared/agentWorkflowSchemas.js";
+import type {
+  CanonicalNodeOccurrence,
+  WorkflowDefinition,
+} from "../../../../shared/agentWorkflowSchemas.js";
 import { AgentWorkflowGraph } from "./AgentWorkflowGraph.js";
 
 const semanticGraphDefinition: WorkflowDefinition = {
@@ -125,7 +128,10 @@ describe("AgentWorkflowGraph", () => {
     onSelectNode.mockReset();
   });
 
-  const render = (definition = semanticGraphDefinition) => {
+  const render = (
+    definition = semanticGraphDefinition,
+    occurrences?: CanonicalNodeOccurrence[],
+  ) => {
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -133,6 +139,7 @@ describe("AgentWorkflowGraph", () => {
       root?.render(
         createElement(AgentWorkflowGraph, {
           definition,
+          occurrences,
           selectedNodeId: "prepare",
           onSelectNode,
         }),
@@ -157,6 +164,50 @@ describe("AgentWorkflowGraph", () => {
       container!.querySelector('[aria-label="Managed roles for Iterate"]')
         ?.textContent,
     ).toContain("Implement");
+  });
+
+  it("distinguishes in-progress execution from completed execution", () => {
+    render(semanticGraphDefinition, [
+      {
+        id: "00000000-0000-4000-8000-000000000001",
+        nodeId: "prepare",
+        role: "worker",
+        parentOccurrenceIds: [],
+        context: [],
+        iteration: 1,
+        attempt: 1,
+        status: "running",
+        managedChildren: [],
+        aggregation: [],
+        createdAtMs: 1,
+        updatedAtMs: 2,
+      },
+      {
+        id: "00000000-0000-4000-8000-000000000002",
+        nodeId: "iterate",
+        role: "orchestrator",
+        parentOccurrenceIds: [],
+        context: [],
+        iteration: 1,
+        attempt: 1,
+        status: "completed",
+        managedChildren: [],
+        aggregation: [],
+        createdAtMs: 1,
+        updatedAtMs: 2,
+      },
+    ]);
+
+    const inProgress = container!.querySelector(
+      ".agent-workflow-graph-node.is-in_progress",
+    )!;
+    const completed = container!.querySelector(
+      ".agent-workflow-graph-node.is-completed",
+    )!;
+    expect(inProgress.getAttribute("aria-label")).toContain("In progress");
+    expect(inProgress.textContent).toContain("Status: In progress");
+    expect(completed.getAttribute("aria-label")).toContain("Completed");
+    expect(completed.textContent).toContain("Status: Completed");
   });
 
   it("renders duplicate same-endpoint routes independently", () => {
