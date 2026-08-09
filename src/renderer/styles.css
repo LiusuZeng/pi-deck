@@ -4711,9 +4711,44 @@ body {
   color: inherit;
   cursor: pointer;
 }
-.agent-workflow-step-card.is-selected {
+.agent-workflow-step-card:hover {
+  border-color: var(--color-border-strong, var(--accent, #60a5fa));
+  background: var(--color-surface-hover, var(--surface, transparent));
+}
+.agent-workflow-step-card:focus-visible {
+  outline: 2px solid var(--color-focus, var(--accent, #60a5fa));
+  outline-offset: 2px;
+}
+.agent-workflow-step-card.is-selected,
+.agent-workflow-step-card[aria-expanded="true"] {
   border-color: var(--accent, #60a5fa);
   box-shadow: 0 0 0 1px var(--accent, #60a5fa);
+}
+.agent-workflow-card-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.agent-workflow-card-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+.agent-workflow-card-chevron,
+.agent-workflow-section-chevron {
+  display: inline-block;
+  font-size: 16px;
+  line-height: 1;
+  transition: transform 150ms ease;
+}
+.agent-workflow-step-card.is-selected .agent-workflow-card-chevron,
+.agent-workflow-step-card[aria-expanded="true"] .agent-workflow-card-chevron,
+.agent-workflow-inspector-section[open] .agent-workflow-section-chevron {
+  transform: rotate(180deg);
 }
 .agent-workflow-step-card small {
   opacity: 0.72;
@@ -4793,6 +4828,27 @@ body {
 .agent-workflow-policy {
   color: var(--color-text-muted);
   font-size: 13px;
+}
+.agent-workflow-inspector-section {
+  margin-top: 14px;
+}
+.agent-workflow-inspector-section summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-radius: 6px;
+  padding: 8px;
+  cursor: pointer;
+  font-weight: 700;
+}
+.agent-workflow-inspector-section summary:hover,
+.agent-workflow-inspector-section[open] summary {
+  background: var(--color-surface-hover);
+}
+.agent-workflow-inspector-section summary:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
 }
 .agent-workflow-execution-configuration {
   display: flex;

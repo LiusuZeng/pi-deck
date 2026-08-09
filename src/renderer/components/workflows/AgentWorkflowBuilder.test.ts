@@ -521,16 +521,45 @@ describe("AgentWorkflowBuilder", () => {
     ).not.toBeNull();
   });
 
-  it("moves focus into the mobile inspector and restores the originating card", () => {
+  it("makes compact cards accessible inspector disclosures", () => {
     vi.stubGlobal("matchMedia", () => ({ matches: true }));
     render();
     const card = container!.querySelector<HTMLButtonElement>(
       ".agent-workflow-step-card",
     )!;
+    const inspector = container!.querySelector<HTMLElement>(
+      '[aria-label="Focused role inspector"]',
+    )!;
+    expect(card.getAttribute("aria-expanded")).toBe("false");
+    expect(card.getAttribute("aria-controls")).toBe(inspector.id);
+    expect(card.getAttribute("aria-current")).toBe("step");
+    expect(card.getAttribute("aria-label")).toBe("Edit Do the work details");
+    expect(card.textContent).toContain("Edit⌄");
+
     act(() => card.click());
-    expect(document.activeElement?.textContent).toBe("Close inspector");
+    expect(card.getAttribute("aria-expanded")).toBe("true");
+    expect(inspector.classList.contains("is-open")).toBe(true);
+
     click("Close inspector");
+    expect(card.getAttribute("aria-expanded")).toBe("false");
     expect(document.activeElement).toBe(card);
+  });
+
+  it("uses a native, visible advanced-settings disclosure", () => {
+    render();
+    const card = container!.querySelector<HTMLButtonElement>(
+      ".agent-workflow-step-card",
+    )!;
+    expect(card.getAttribute("aria-expanded")).toBeNull();
+    expect(card.getAttribute("aria-controls")).toBeNull();
+    const section = container!.querySelector<HTMLDetailsElement>(
+      ".agent-workflow-inspector-section",
+    )!;
+    const summary = section.querySelector("summary")!;
+    expect(summary.textContent).toContain("Advanced execution settings⌄");
+    expect(section.open).toBe(false);
+    act(() => summary.click());
+    expect(section.open).toBe(true);
   });
 
   it("restores the selected Build card after opening it from the mobile Graph", () => {

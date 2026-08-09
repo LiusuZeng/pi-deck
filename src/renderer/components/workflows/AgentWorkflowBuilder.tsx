@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -71,6 +72,9 @@ const destinationLabel = (
     : `End workflow: ${target.end}`;
 const connectionLabel = (equals: boolean | string | undefined): string =>
   equals === undefined ? "On completion" : `When ${String(equals)}`;
+const isCompactViewport = () =>
+  typeof window !== "undefined" &&
+  window.matchMedia?.("(max-width: 720px)").matches === true;
 
 /** Canonical agentWorkflow editor. Build mutations only update the canonical workflow document. */
 export function AgentWorkflowBuilder(props: {
@@ -90,6 +94,8 @@ export function AgentWorkflowBuilder(props: {
   const [saveError, setSaveError] = useState<string>();
   const [showPicker, setShowPicker] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [compactLayout, setCompactLayout] = useState(isCompactViewport);
+  const inspectorId = useId();
   const pickerRef = useRef<HTMLDivElement>(null);
   const addRef = useRef<HTMLButtonElement>(null);
   const inspectorCloseRef = useRef<HTMLButtonElement>(null);
@@ -152,6 +158,13 @@ export function AgentWorkflowBuilder(props: {
   };
   const patch = (node: AgentWorkflowNode) =>
     update(updateNode(definition, node));
+  useEffect(() => {
+    const media = window.matchMedia?.("(max-width: 720px)");
+    const updateLayout = () => setCompactLayout(media?.matches === true);
+    updateLayout();
+    media?.addEventListener?.("change", updateLayout);
+    return () => media?.removeEventListener?.("change", updateLayout);
+  }, []);
   useEffect(() => {
     if (!showPicker) return;
     pickerRef.current
@@ -470,7 +483,14 @@ export function AgentWorkflowBuilder(props: {
                 type="button"
                 data-workflow-node-id={node.id}
                 className={`agent-workflow-step-card ${selected.id === node.id ? "is-selected" : ""}`}
-                aria-pressed={selected.id === node.id}
+                aria-label={`Edit ${node.name || "workflow step"} details`}
+                aria-current={selected.id === node.id ? "step" : undefined}
+                {...(compactLayout
+                  ? {
+                      "aria-controls": inspectorId,
+                      "aria-expanded": selected.id === node.id && inspectorOpen,
+                    }
+                  : {})}
                 onClick={(event) => {
                   originCardRef.current = event.currentTarget;
                   setSelectedId(node.id);
@@ -488,7 +508,18 @@ export function AgentWorkflowBuilder(props: {
                         : ""}
                   </i>
                 </span>
-                <strong>{node.name}</strong>
+                <span className="agent-workflow-card-title">
+                  <strong>{node.name}</strong>
+                  <span className="agent-workflow-card-action">
+                    <span>Edit</span>
+                    <span
+                      className="agent-workflow-card-chevron"
+                      aria-hidden="true"
+                    >
+                      ⌄
+                    </span>
+                  </span>
+                </span>
                 <small>
                   {node.role === "orchestrator"
                     ? `${node.config.mode}: ${node.config.agents.length} managed worker${node.config.agents.length === 1 ? "" : "s"}`
@@ -513,6 +544,7 @@ export function AgentWorkflowBuilder(props: {
             ))}
           </section>
           <aside
+            id={inspectorId}
             className={`agent-workflow-inspector ${inspectorOpen ? "is-open" : ""}`}
             aria-label="Focused role inspector"
           >
@@ -1061,8 +1093,16 @@ export function AgentWorkflowBuilder(props: {
               </fieldset>
             )}
             {selected.role !== "human" && (
-              <details>
-                <summary>Advanced execution settings</summary>
+              <details className="agent-workflow-inspector-section">
+                <summary>
+                  <span>Advanced execution settings</span>
+                  <span
+                    className="agent-workflow-section-chevron"
+                    aria-hidden="true"
+                  >
+                    ⌄
+                  </span>
+                </summary>
                 <div className="agent-workflow-execution-configuration">
                   <PiModelThinkingMenu
                     models={menuModels}
