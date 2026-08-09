@@ -8,44 +8,44 @@ import { AgentWorkflowHome } from "./AgentWorkflowHome.js";
 const workflow: WorkflowDefinition = {
   format: "pi-deck.agent-workflow",
   schemaVersion: 2,
-  id: "delivery",
+  id: "00000000-0000-4000-8000-000000000701",
   revision: 1,
   name: "Delivery",
   inputs: [],
-  entryNodeId: "work",
+  entryNodeId: "00000000-0000-4000-8000-000000000702",
   nodes: [
     {
-      id: "work",
+      id: "00000000-0000-4000-8000-000000000702",
       name: "Work",
       role: "worker",
       config: { instructions: "Implement" },
     },
     {
-      id: "decide",
+      id: "00000000-0000-4000-8000-000000000703",
       name: "Decide",
       role: "decider",
       config: { question: "Ready?" },
     },
     {
-      id: "coordinate",
+      id: "00000000-0000-4000-8000-000000000704",
       name: "Coordinate",
       role: "orchestrator",
       config: {
         mode: "fanout",
-        agents: ["verify"],
+        agents: ["00000000-0000-4000-8000-000000000705"],
         maxConcurrency: 1,
         completion: "all",
       },
     },
     {
-      id: "verify",
+      id: "00000000-0000-4000-8000-000000000705",
       name: "Verify",
       role: "worker",
-      managedBy: "coordinate",
+      managedBy: "00000000-0000-4000-8000-000000000704",
       config: { instructions: "Verify" },
     },
     {
-      id: "approve",
+      id: "00000000-0000-4000-8000-000000000706",
       name: "Approve",
       role: "human",
       config: { interaction: "approval", prompt: "Approve" },
@@ -56,60 +56,68 @@ const workflow: WorkflowDefinition = {
 
 const semanticWorkflow: WorkflowDefinition = {
   ...workflow,
-  id: "semantic",
+  id: "00000000-0000-4000-8000-000000000707",
   name: "Semantic delivery",
-  entryNodeId: "prepare",
+  entryNodeId: "00000000-0000-4000-8000-000000000708",
   nodes: [
     {
-      id: "prepare",
+      id: "00000000-0000-4000-8000-000000000708",
       name: "Prepare",
       role: "worker",
       config: { instructions: "Prepare" },
     },
     {
-      id: "iterate",
+      id: "00000000-0000-4000-8000-000000000709",
       name: "Iterate",
       role: "orchestrator",
       config: {
         mode: "loop",
-        agents: ["implement"],
-        decider: "ready",
+        agents: ["00000000-0000-4000-8000-000000000710"],
+        decider: "00000000-0000-4000-8000-000000000711",
         maxIterations: 3,
       },
     },
     {
-      id: "implement",
+      id: "00000000-0000-4000-8000-000000000710",
       name: "Implement",
       role: "worker",
-      managedBy: "iterate",
+      managedBy: "00000000-0000-4000-8000-000000000709",
       config: { instructions: "Implement" },
     },
     {
-      id: "ready",
+      id: "00000000-0000-4000-8000-000000000711",
       name: "Ready?",
       role: "decider",
-      managedBy: "iterate",
+      managedBy: "00000000-0000-4000-8000-000000000709",
       config: { question: "Ready?" },
     },
     {
-      id: "ship",
+      id: "00000000-0000-4000-8000-000000000712",
       name: "Ship?",
       role: "decider",
       config: { question: "Ship?", trueLabel: "Ship", falseLabel: "Stop" },
     },
   ],
   relationships: [
-    { id: "prepare-iterate", from: "prepare", to: { nodeId: "iterate" } },
-    { id: "iterate-ship", from: "iterate", to: { nodeId: "ship" } },
     {
-      id: "ship-complete",
-      from: "ship",
+      id: "00000000-0000-4000-8000-000000000713",
+      from: "00000000-0000-4000-8000-000000000708",
+      to: { nodeId: "00000000-0000-4000-8000-000000000709" },
+    },
+    {
+      id: "00000000-0000-4000-8000-000000000714",
+      from: "00000000-0000-4000-8000-000000000709",
+      to: { nodeId: "00000000-0000-4000-8000-000000000712" },
+    },
+    {
+      id: "00000000-0000-4000-8000-000000000715",
+      from: "00000000-0000-4000-8000-000000000712",
       when: { equals: true },
       to: { end: "completed" },
     },
     {
-      id: "ship-stop",
-      from: "ship",
+      id: "00000000-0000-4000-8000-000000000716",
+      from: "00000000-0000-4000-8000-000000000712",
       when: { equals: false },
       to: { end: "stopped" },
     },
@@ -166,7 +174,7 @@ describe("AgentWorkflowHome", () => {
     const props = render();
     const summary = container!.querySelector(".agent-workflow-summary");
     expect(summary?.getAttribute("aria-labelledby")).toBe(
-      "agent-workflow-delivery-summary-title",
+      "agent-workflow-00000000-0000-4000-8000-000000000701-summary-title",
     );
     expect(summary?.textContent).toContain("Workflow structure");
     expect(summary?.textContent).toContain("Work");
@@ -321,7 +329,11 @@ describe("AgentWorkflowHome", () => {
     act(() => root?.unmount());
     container?.remove();
 
-    const secondWorkflow = { ...workflow, id: "review", name: "Review" };
+    const secondWorkflow = {
+      ...workflow,
+      id: "00000000-0000-4000-8000-000000000717",
+      name: "Review",
+    };
     const multiple = render({ workflows: [workflow, secondWorkflow] });
     expect(
       container?.querySelectorAll(".agent-workflow-overview-card"),
@@ -337,7 +349,7 @@ describe("AgentWorkflowHome", () => {
     expect(container?.textContent).toContain("Worker: 2");
     expect(
       container?.querySelector("article")?.getAttribute("aria-labelledby"),
-    ).toBe("agent-workflow-delivery-title");
+    ).toBe("agent-workflow-00000000-0000-4000-8000-000000000701-title");
     act(() => button("New workflow").click());
     act(() => button("Edit").click());
     await act(async () => button("Start run").click());

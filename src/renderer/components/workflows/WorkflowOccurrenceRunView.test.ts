@@ -10,20 +10,26 @@ describe("WorkflowOccurrenceRunView", () => {
     const definition = {
       format: "pi-deck.agent-workflow" as const,
       schemaVersion: 2 as const,
-      id: "worker",
+      id: "00000000-0000-4000-8000-000000000301",
       revision: 1,
       name: "Worker flow",
       inputs: [],
-      entryNodeId: "work",
+      entryNodeId: "00000000-0000-4000-8000-000000000302",
       nodes: [
         {
-          id: "work",
+          id: "00000000-0000-4000-8000-000000000302",
           name: "Work",
           role: "worker" as const,
           config: { instructions: "Work." },
         },
       ],
-      relationships: [{ id: "end", from: "work", to: { end: "completed" } }],
+      relationships: [
+        {
+          id: "00000000-0000-4000-8000-000000000303",
+          from: "00000000-0000-4000-8000-000000000302",
+          to: { end: "completed" },
+        },
+      ],
     };
     const initial = createWorkflowRoleRun(definition, "workspace");
     const run = {
@@ -70,20 +76,26 @@ describe("WorkflowOccurrenceRunView", () => {
     const definition = {
       format: "pi-deck.agent-workflow" as const,
       schemaVersion: 2 as const,
-      id: "worker",
+      id: "00000000-0000-4000-8000-000000000301",
       revision: 1,
       name: "Worker flow",
       inputs: [],
-      entryNodeId: "work",
+      entryNodeId: "00000000-0000-4000-8000-000000000302",
       nodes: [
         {
-          id: "work",
+          id: "00000000-0000-4000-8000-000000000302",
           name: "Work",
           role: "worker" as const,
           config: { instructions: "Work." },
         },
       ],
-      relationships: [{ id: "end", from: "work", to: { end: "completed" } }],
+      relationships: [
+        {
+          id: "00000000-0000-4000-8000-000000000303",
+          from: "00000000-0000-4000-8000-000000000302",
+          to: { end: "completed" },
+        },
+      ],
     };
     const initial = createWorkflowRoleRun(definition, "workspace");
     const completed = {
@@ -143,14 +155,14 @@ describe("WorkflowOccurrenceRunView", () => {
     const definition = {
       format: "pi-deck.agent-workflow" as const,
       schemaVersion: 2 as const,
-      id: "human",
+      id: "00000000-0000-4000-8000-000000000304",
       revision: 1,
       name: "Human flow",
       inputs: [],
-      entryNodeId: "ask",
+      entryNodeId: "00000000-0000-4000-8000-000000000305",
       nodes: [
         {
-          id: "ask",
+          id: "00000000-0000-4000-8000-000000000305",
           name: "Approve",
           role: "human" as const,
           config: { interaction: "approval" as const, prompt: "Approve this?" },
@@ -158,14 +170,14 @@ describe("WorkflowOccurrenceRunView", () => {
       ],
       relationships: [
         {
-          id: "yes",
-          from: "ask",
+          id: "00000000-0000-4000-8000-000000000306",
+          from: "00000000-0000-4000-8000-000000000305",
           when: { equals: true },
           to: { end: "completed" },
         },
         {
-          id: "no",
-          from: "ask",
+          id: "00000000-0000-4000-8000-000000000307",
+          from: "00000000-0000-4000-8000-000000000305",
           when: { equals: false },
           to: { end: "rejected" },
         },
@@ -198,20 +210,26 @@ describe("WorkflowOccurrenceRunView", () => {
     const definition = {
       format: "pi-deck.agent-workflow" as const,
       schemaVersion: 2 as const,
-      id: "retry",
+      id: "00000000-0000-4000-8000-000000000308",
       revision: 1,
       name: "Retry flow",
       inputs: [],
-      entryNodeId: "work",
+      entryNodeId: "00000000-0000-4000-8000-000000000302",
       nodes: [
         {
-          id: "work",
+          id: "00000000-0000-4000-8000-000000000302",
           name: "Work",
           role: "worker" as const,
           config: { instructions: "Do the raw work." },
         },
       ],
-      relationships: [{ id: "end", from: "work", to: { end: "completed" } }],
+      relationships: [
+        {
+          id: "00000000-0000-4000-8000-000000000303",
+          from: "00000000-0000-4000-8000-000000000302",
+          to: { end: "completed" },
+        },
+      ],
     };
     const initial = createWorkflowRoleRun(definition, "workspace");
     const first = {
@@ -222,7 +240,7 @@ describe("WorkflowOccurrenceRunView", () => {
     };
     const second = {
       ...first,
-      id: "second-attempt",
+      id: "00000000-0000-4000-8000-000000000309",
       status: "completed" as const,
       attempt: 2,
       output: "Raw worker output",

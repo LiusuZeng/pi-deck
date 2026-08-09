@@ -110,20 +110,26 @@ describe("Daily North America Heat Check canonical execution", () => {
     const definition = {
       format: "pi-deck.agent-workflow" as const,
       schemaVersion: 2 as const,
-      id: "missing-session-file",
+      id: "00000000-0000-4000-8000-000000000201",
       revision: 1,
       name: "Missing session file",
       inputs: [],
-      entryNodeId: "work",
+      entryNodeId: "00000000-0000-4000-8000-000000000202",
       nodes: [
         {
-          id: "work",
+          id: "00000000-0000-4000-8000-000000000202",
           name: "Work",
           role: "worker" as const,
           config: { instructions: "work" },
         },
       ],
-      relationships: [{ id: "end", from: "work", to: { end: "completed" } }],
+      relationships: [
+        {
+          id: "00000000-0000-4000-8000-000000000203",
+          from: "00000000-0000-4000-8000-000000000202",
+          to: { end: "completed" },
+        },
+      ],
     };
     const closed: string[] = [];
     const scheduler = new WorkflowOccurrenceScheduler({

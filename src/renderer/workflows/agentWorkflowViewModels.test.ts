@@ -8,66 +8,78 @@ import {
 const workflow: WorkflowDefinition = {
   format: "pi-deck.agent-workflow",
   schemaVersion: 2,
-  id: "delivery",
+  id: "00000000-0000-4000-8000-000000000601",
   revision: 1,
   name: "Delivery",
   description: "Deliver a reviewed change.",
   inputs: [],
-  entryNodeId: "work",
+  entryNodeId: "00000000-0000-4000-8000-000000000602",
   nodes: [
     {
-      id: "work",
+      id: "00000000-0000-4000-8000-000000000602",
       name: "Work",
       role: "worker",
       config: { instructions: "Implement", expectedOutput: "A patch" },
     },
     {
-      id: "decide",
+      id: "00000000-0000-4000-8000-000000000603",
       name: "Decide",
       role: "decider",
       config: { question: "Ready?" },
     },
     {
-      id: "coordinate",
+      id: "00000000-0000-4000-8000-000000000604",
       name: "Coordinate",
       role: "orchestrator",
       config: {
         mode: "fanout",
-        agents: ["verify"],
+        agents: ["00000000-0000-4000-8000-000000000605"],
         maxConcurrency: 1,
         completion: "all",
       },
     },
     {
-      id: "verify",
+      id: "00000000-0000-4000-8000-000000000605",
       name: "Verify",
       role: "worker",
-      managedBy: "coordinate",
+      managedBy: "00000000-0000-4000-8000-000000000604",
       config: { instructions: "Verify" },
     },
     {
-      id: "approve",
+      id: "00000000-0000-4000-8000-000000000606",
       name: "Approve",
       role: "human",
       config: { interaction: "approval", prompt: "Approve the patch" },
     },
   ],
   relationships: [
-    { id: "work-decide", from: "work", to: { nodeId: "decide" } },
     {
-      id: "decide-coordinate",
-      from: "decide",
+      id: "00000000-0000-4000-8000-000000000607",
+      from: "00000000-0000-4000-8000-000000000602",
+      to: { nodeId: "00000000-0000-4000-8000-000000000603" },
+    },
+    {
+      id: "00000000-0000-4000-8000-000000000608",
+      from: "00000000-0000-4000-8000-000000000603",
       when: { equals: true },
-      to: { nodeId: "coordinate" },
+      to: { nodeId: "00000000-0000-4000-8000-000000000604" },
     },
     {
-      id: "decide-approve",
-      from: "decide",
+      id: "00000000-0000-4000-8000-000000000609",
+      from: "00000000-0000-4000-8000-000000000603",
       when: { equals: false },
-      to: { nodeId: "approve" },
+      to: { nodeId: "00000000-0000-4000-8000-000000000606" },
     },
-    { id: "coordinate-end", from: "coordinate", to: { end: "completed" } },
-    { id: "approve-end", from: "approve", to: { end: "rejected" } },
+    {
+      id: "00000000-0000-4000-8000-000000000610",
+      from: "00000000-0000-4000-8000-000000000604",
+      to: { end: "completed" },
+    },
+    {
+      id: "00000000-0000-4000-8000-000000000611",
+      from: "00000000-0000-4000-8000-000000000606",
+      to: { end: "rejected" },
+    },
   ],
 };
 
@@ -84,7 +96,7 @@ describe("workflow agentWorkflow view models", () => {
 
   it("derives role counts and workflow facts without legacy conversion", () => {
     expect(agentWorkflowCardViewModel(workflow)).toMatchObject({
-      id: "delivery",
+      id: "00000000-0000-4000-8000-000000000601",
       nodeCount: 5,
       relationshipCount: 5,
       roleCounts: { worker: 2, decider: 1, orchestrator: 1, human: 1 },

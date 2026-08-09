@@ -11,106 +11,121 @@ import { AgentWorkflowGraph } from "./AgentWorkflowGraph.js";
 const semanticGraphDefinition: WorkflowDefinition = {
   format: "pi-deck.agent-workflow",
   schemaVersion: 2,
-  id: "semantic-graph",
+  id: "00000000-0000-4000-8000-000000000501",
   revision: 1,
   name: "Semantic graph",
   inputs: [],
-  entryNodeId: "prepare",
+  entryNodeId: "00000000-0000-4000-8000-000000000502",
   nodes: [
     {
-      id: "prepare",
+      id: "00000000-0000-4000-8000-000000000502",
       name: "Prepare",
       role: "worker",
       config: { instructions: "Prepare." },
     },
     {
-      id: "iterate",
+      id: "00000000-0000-4000-8000-000000000503",
       name: "Iterate",
       role: "orchestrator",
       config: {
         mode: "loop",
-        agents: ["implement"],
-        decider: "ready",
+        agents: ["00000000-0000-4000-8000-000000000504"],
+        decider: "00000000-0000-4000-8000-000000000505",
         maxIterations: 3,
       },
     },
     {
-      id: "implement",
+      id: "00000000-0000-4000-8000-000000000504",
       name: "Implement",
       role: "worker",
-      managedBy: "iterate",
+      managedBy: "00000000-0000-4000-8000-000000000503",
       config: { instructions: "Implement." },
     },
     {
-      id: "ready",
+      id: "00000000-0000-4000-8000-000000000505",
       name: "Ready?",
       role: "decider",
-      managedBy: "iterate",
+      managedBy: "00000000-0000-4000-8000-000000000503",
       config: { question: "Ready?" },
     },
     {
-      id: "parallel",
+      id: "00000000-0000-4000-8000-000000000506",
       name: "Parallel review",
       role: "orchestrator",
       config: {
         mode: "fanout",
-        agents: ["review", "test"],
+        agents: [
+          "00000000-0000-4000-8000-000000000507",
+          "00000000-0000-4000-8000-000000000508",
+        ],
         maxConcurrency: 1,
         completion: "any",
       },
     },
     {
-      id: "review",
+      id: "00000000-0000-4000-8000-000000000507",
       name: "Review",
       role: "worker",
-      managedBy: "parallel",
+      managedBy: "00000000-0000-4000-8000-000000000506",
       config: { instructions: "Review." },
     },
     {
-      id: "test",
+      id: "00000000-0000-4000-8000-000000000508",
       name: "Test",
       role: "worker",
-      managedBy: "parallel",
+      managedBy: "00000000-0000-4000-8000-000000000506",
       config: { instructions: "Test." },
     },
     {
-      id: "approve",
+      id: "00000000-0000-4000-8000-000000000509",
       name: "Approve",
       role: "human",
       config: { interaction: "approval", prompt: "Approve?" },
     },
     {
-      id: "decide",
+      id: "00000000-0000-4000-8000-000000000510",
       name: "Ship?",
       role: "decider",
       config: { question: "Ship?", trueLabel: "Ship", falseLabel: "Stop" },
     },
   ],
   relationships: [
-    { id: "prepare-iterate", from: "prepare", to: { nodeId: "iterate" } },
-    { id: "iterate-parallel", from: "iterate", to: { nodeId: "parallel" } },
-    { id: "parallel-approve", from: "parallel", to: { nodeId: "approve" } },
     {
-      id: "approve-decide",
-      from: "approve",
-      when: { equals: true },
-      to: { nodeId: "decide" },
+      id: "00000000-0000-4000-8000-000000000511",
+      from: "00000000-0000-4000-8000-000000000502",
+      to: { nodeId: "00000000-0000-4000-8000-000000000503" },
     },
     {
-      id: "approve-stop",
-      from: "approve",
+      id: "00000000-0000-4000-8000-000000000512",
+      from: "00000000-0000-4000-8000-000000000503",
+      to: { nodeId: "00000000-0000-4000-8000-000000000506" },
+    },
+    {
+      id: "00000000-0000-4000-8000-000000000513",
+      from: "00000000-0000-4000-8000-000000000506",
+      to: { nodeId: "00000000-0000-4000-8000-000000000509" },
+    },
+    {
+      id: "00000000-0000-4000-8000-000000000514",
+      from: "00000000-0000-4000-8000-000000000509",
+      when: { equals: true },
+      to: { nodeId: "00000000-0000-4000-8000-000000000510" },
+    },
+    {
+      id: "00000000-0000-4000-8000-000000000515",
+      from: "00000000-0000-4000-8000-000000000509",
       when: { equals: false },
       to: { end: "rejected" },
     },
     {
-      id: "decide-ship",
-      from: "decide",
+      id: "00000000-0000-4000-8000-000000000516",
+      from: "00000000-0000-4000-8000-000000000510",
       when: { equals: true },
       to: { end: "completed" },
     },
     {
-      id: "decide-stop",
-      from: "decide",
+      id: "00000000-0000-4000-8000-000000000517",
+      from: "00000000-0000-4000-8000-000000000510",
       when: { equals: false },
       to: { end: "stopped" },
     },
@@ -140,7 +155,7 @@ describe("AgentWorkflowGraph", () => {
         createElement(AgentWorkflowGraph, {
           definition,
           occurrences,
-          selectedNodeId: "prepare",
+          selectedNodeId: "00000000-0000-4000-8000-000000000502",
           onSelectNode,
         }),
       ),
@@ -150,7 +165,7 @@ describe("AgentWorkflowGraph", () => {
   it("renders semantic loop, fan-out, human, decision routes, and terminals", () => {
     render();
     expect(container!.textContent).toContain("maximum 3 iterations");
-    expect(container!.textContent).toContain("completion Decider ready");
+    expect(container!.textContent).toContain("completion Decider 00000000-0000-4000-8000-000000000505");
     expect(container!.textContent).toContain("2 Workers");
     expect(container!.textContent).toContain("maximum concurrency 1");
     expect(container!.textContent).toContain("completes when any");
@@ -177,7 +192,7 @@ describe("AgentWorkflowGraph", () => {
     render(semanticGraphDefinition, [
       {
         id: "00000000-0000-4000-8000-000000000001",
-        nodeId: "prepare",
+        nodeId: "00000000-0000-4000-8000-000000000502",
         role: "worker",
         parentOccurrenceIds: [],
         context: [],
@@ -191,7 +206,7 @@ describe("AgentWorkflowGraph", () => {
       },
       {
         id: "00000000-0000-4000-8000-000000000002",
-        nodeId: "iterate",
+        nodeId: "00000000-0000-4000-8000-000000000503",
         role: "orchestrator",
         parentOccurrenceIds: [],
         context: [],
@@ -223,9 +238,9 @@ describe("AgentWorkflowGraph", () => {
       relationships: [
         ...semanticGraphDefinition.relationships,
         {
-          id: "prepare-iterate-again",
-          from: "prepare",
-          to: { nodeId: "iterate" },
+          id: "00000000-0000-4000-8000-000000000518",
+          from: "00000000-0000-4000-8000-000000000502",
+          to: { nodeId: "00000000-0000-4000-8000-000000000503" },
         },
       ],
     });
@@ -239,7 +254,7 @@ describe("AgentWorkflowGraph", () => {
     render({
       ...semanticGraphDefinition,
       nodes: semanticGraphDefinition.nodes.map((node) =>
-        node.id === "approve"
+        node.id === "00000000-0000-4000-8000-000000000509"
           ? {
               ...node,
               config: {
@@ -252,9 +267,9 @@ describe("AgentWorkflowGraph", () => {
       ),
       relationships: semanticGraphDefinition.relationships.map(
         (relationship) => {
-          if (relationship.id === "approve-decide")
+          if (relationship.id === "00000000-0000-4000-8000-000000000514")
             return { ...relationship, when: { equals: "Ship now" } };
-          if (relationship.id === "approve-stop")
+          if (relationship.id === "00000000-0000-4000-8000-000000000515")
             return { ...relationship, when: { equals: "Request changes" } };
           return relationship;
         },
@@ -282,7 +297,9 @@ describe("AgentWorkflowGraph", () => {
       managed.click();
     });
     expect(document.activeElement).toBe(managed);
-    expect(onSelectNode).toHaveBeenCalledWith("implement");
+    expect(onSelectNode).toHaveBeenCalledWith(
+      "00000000-0000-4000-8000-000000000504",
+    );
     expect(
       container!
         .querySelector<HTMLButtonElement>("button")

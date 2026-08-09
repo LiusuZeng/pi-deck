@@ -13,10 +13,31 @@ import {
 } from "./agentWorkflowRuntime.js";
 import { renderWorkflowOccurrencePrompt } from "./workflowPromptRenderer.js";
 
+const ids = {
+  workflow: "00000000-0000-4000-8000-000000000001",
+  fan: "00000000-0000-4000-8000-000000000002",
+  a: "00000000-0000-4000-8000-000000000003",
+  b: "00000000-0000-4000-8000-000000000004",
+  c: "00000000-0000-4000-8000-000000000005",
+  after: "00000000-0000-4000-8000-000000000006",
+  plan: "00000000-0000-4000-8000-000000000007",
+  review: "00000000-0000-4000-8000-000000000008",
+  deliver: "00000000-0000-4000-8000-000000000009",
+  worker: "00000000-0000-4000-8000-000000000010",
+  loop: "00000000-0000-4000-8000-000000000011",
+  work: "00000000-0000-4000-8000-000000000012",
+  ready: "00000000-0000-4000-8000-000000000013",
+  pick: "00000000-0000-4000-8000-000000000014",
+  end: "00000000-0000-4000-8000-000000000015",
+  fanAfter: "00000000-0000-4000-8000-000000000016",
+  planReview: "00000000-0000-4000-8000-000000000017",
+  reviewDeliver: "00000000-0000-4000-8000-000000000018",
+} as const;
+
 const base = {
   format: "pi-deck.agent-workflow" as const,
   schemaVersion: 2 as const,
-  id: "workflow",
+  id: ids.workflow,
   revision: 1,
   name: "Workflow",
   inputs: [],
@@ -26,34 +47,39 @@ const base = {
 function fanoutDefinition(completion: "all" | "any"): WorkflowRoleDefinition {
   return {
     ...base,
-    entryNodeId: "fan",
+    entryNodeId: ids.fan,
     nodes: [
       {
-        id: "fan",
+        id: ids.fan,
         name: "Fan",
         role: "orchestrator",
         config: {
           mode: "fanout",
-          agents: ["a", "b"],
+          agents: [ids.a, ids.b],
           maxConcurrency: 2,
           completion,
         },
       },
-      ...["a", "b"].map((id) => ({
+      ...[
+        { id: ids.a, name: "a" },
+        { id: ids.b, name: "b" },
+      ].map(({ id, name }) => ({
         id,
-        name: id.toUpperCase(),
+        name: name.toUpperCase(),
         role: "worker" as const,
-        managedBy: "fan",
-        config: { instructions: id },
+        managedBy: ids.fan,
+        config: { instructions: name },
       })),
       {
-        id: "after",
+        id: ids.after,
         name: "After",
         role: "worker",
         config: { instructions: "after" },
       },
     ],
-    relationships: [{ id: "fan-after", from: "fan", to: { nodeId: "after" } }],
+    relationships: [
+      { id: ids.fanAfter, from: ids.fan, to: { nodeId: ids.after } },
+    ],
   };
 }
 
@@ -61,27 +87,27 @@ describe("agentWorkflow occurrence runtime", () => {
   it("captures only configured upstream outputs in a durable ordered binding snapshot", () => {
     const definition: WorkflowRoleDefinition = {
       ...base,
-      entryNodeId: "plan",
+      entryNodeId: ids.plan,
       nodes: [
         {
-          id: "plan",
+          id: ids.plan,
           name: "Plan",
           role: "worker",
           config: { instructions: "plan" },
         },
         {
-          id: "review",
+          id: ids.review,
           name: "Review",
           role: "worker",
           config: { instructions: "review" },
         },
         {
-          id: "deliver",
+          id: ids.deliver,
           name: "Deliver",
           role: "worker",
           inputBindings: [
             {
-              sourceNodeId: "plan",
+              sourceNodeId: ids.plan,
               sourceValue: "finalOutput",
               label: "Selected plan",
             },
@@ -90,21 +116,27 @@ describe("agentWorkflow occurrence runtime", () => {
         },
       ],
       relationships: [
-        { id: "plan-review", from: "plan", to: { nodeId: "review" } },
-        { id: "review-deliver", from: "review", to: { nodeId: "deliver" } },
+        { id: ids.planReview, from: ids.plan, to: { nodeId: ids.review } },
+        {
+          id: ids.reviewDeliver,
+          from: ids.review,
+          to: { nodeId: ids.deliver },
+        },
       ],
     };
     let run = createWorkflowRoleRun(definition, "workspace");
     const plan = run.occurrences[0]!;
     run = startWorkflowOccurrence(run, plan.id, "plan-runtime");
     run = completeWorkflowOccurrence(run, plan.id, "chosen plan");
-    const review = run.occurrences.find((item) => item.nodeId === "review")!;
+    const review = run.occurrences.find((item) => item.nodeId === ids.review)!;
     run = startWorkflowOccurrence(run, review.id, "review-runtime");
     run = completeWorkflowOccurrence(run, review.id, "incidental review");
-    const deliver = run.occurrences.find((item) => item.nodeId === "deliver")!;
+    const deliver = run.occurrences.find(
+      (item) => item.nodeId === ids.deliver,
+    )!;
     expect(deliver.resolvedInputBindings).toEqual([
       {
-        sourceNodeId: "plan",
+        sourceNodeId: ids.plan,
         sourceValue: "finalOutput",
         label: "Selected plan",
         value: "chosen plan",
@@ -116,13 +148,13 @@ describe("agentWorkflow occurrence runtime", () => {
   });
   it("renders the configured first managed context without an Orchestrator output", () => {
     const definition = fanoutDefinition("all");
-    const orchestrator = definition.nodes.find((node) => node.id === "fan");
+    const orchestrator = definition.nodes.find((node) => node.id === ids.fan);
     if (!orchestrator || orchestrator.role !== "orchestrator")
       throw new Error("fixture");
     orchestrator.config.input = "shared orchestration input";
     let run = createWorkflowRoleRun(definition, "workspace", {});
     run = startWorkflowOrchestrator(run, run.occurrences[0].id);
-    const child = run.occurrences.find((item) => item.nodeId === "a");
+    const child = run.occurrences.find((item) => item.nodeId === ids.a);
     if (!child) throw new Error("fixture");
     expect(renderWorkflowOccurrencePrompt(run, child)).toContain(
       "shared orchestration input",
@@ -132,16 +164,18 @@ describe("agentWorkflow occurrence runtime", () => {
   it("retains the saved Pi session file on a running occurrence", () => {
     const definition: WorkflowRoleDefinition = {
       ...base,
-      entryNodeId: "worker",
+      entryNodeId: ids.worker,
       nodes: [
         {
-          id: "worker",
+          id: ids.worker,
           name: "Worker",
           role: "worker",
           config: { instructions: "do" },
         },
       ],
-      relationships: [{ id: "end", from: "worker", to: { end: "completed" } }],
+      relationships: [
+        { id: ids.end, from: ids.worker, to: { end: "completed" } },
+      ],
     };
     let run = createWorkflowRoleRun(definition, "workspace");
     run = startWorkflowOccurrence(
@@ -162,16 +196,18 @@ describe("agentWorkflow occurrence runtime", () => {
   it("keeps sessionFile but removes the live runtime when an occurrence closes", () => {
     const definition: WorkflowRoleDefinition = {
       ...base,
-      entryNodeId: "worker",
+      entryNodeId: ids.worker,
       nodes: [
         {
-          id: "worker",
+          id: ids.worker,
           name: "Worker",
           role: "worker",
           config: { instructions: "do" },
         },
       ],
-      relationships: [{ id: "end", from: "worker", to: { end: "completed" } }],
+      relationships: [
+        { id: ids.end, from: ids.worker, to: { end: "completed" } },
+      ],
     };
     const start = () => {
       let run = createWorkflowRoleRun(definition, "workspace");
@@ -218,16 +254,18 @@ describe("agentWorkflow occurrence runtime", () => {
   it("supersedes a failed attempt so a retry can complete the run", () => {
     const definition: WorkflowRoleDefinition = {
       ...base,
-      entryNodeId: "worker",
+      entryNodeId: ids.worker,
       nodes: [
         {
-          id: "worker",
+          id: ids.worker,
           name: "Worker",
           role: "worker",
           config: { instructions: "do" },
         },
       ],
-      relationships: [{ id: "end", from: "worker", to: { end: "completed" } }],
+      relationships: [
+        { id: ids.end, from: ids.worker, to: { end: "completed" } },
+      ],
     };
     let run = createWorkflowRoleRun(definition, "workspace");
     run = startWorkflowOccurrence(run, run.occurrences[0].id, "runtime");
@@ -243,16 +281,18 @@ describe("agentWorkflow occurrence runtime", () => {
   it("records named terminal outcomes without treating rejection as a failure", () => {
     const definition: WorkflowRoleDefinition = {
       ...base,
-      entryNodeId: "worker",
+      entryNodeId: ids.worker,
       nodes: [
         {
-          id: "worker",
+          id: ids.worker,
           name: "Worker",
           role: "worker",
           config: { instructions: "do" },
         },
       ],
-      relationships: [{ id: "end", from: "worker", to: { end: "rejected" } }],
+      relationships: [
+        { id: ids.end, from: ids.worker, to: { end: "rejected" } },
+      ],
     };
     let run = createWorkflowRoleRun(definition, "workspace");
     const occurrence = run.occurrences[0];
@@ -267,16 +307,18 @@ describe("agentWorkflow occurrence runtime", () => {
   it("maps only the stopped terminal outcome to stopped", () => {
     const definition: WorkflowRoleDefinition = {
       ...base,
-      entryNodeId: "worker",
+      entryNodeId: ids.worker,
       nodes: [
         {
-          id: "worker",
+          id: ids.worker,
           name: "Worker",
           role: "worker",
           config: { instructions: "do" },
         },
       ],
-      relationships: [{ id: "end", from: "worker", to: { end: "stopped" } }],
+      relationships: [
+        { id: ids.end, from: ids.worker, to: { end: "stopped" } },
+      ],
     };
     let run = createWorkflowRoleRun(definition, "workspace");
     run = startWorkflowOccurrence(
@@ -294,31 +336,31 @@ describe("agentWorkflow occurrence runtime", () => {
   it("uses boolean deciders and records each bounded loop occurrence", () => {
     const definition: WorkflowRoleDefinition = {
       ...base,
-      entryNodeId: "loop",
+      entryNodeId: ids.loop,
       nodes: [
         {
-          id: "loop",
+          id: ids.loop,
           name: "Loop",
           role: "orchestrator",
           config: {
             mode: "loop",
-            agents: ["work"],
-            decider: "ready",
+            agents: [ids.work],
+            decider: ids.ready,
             maxIterations: 2,
           },
         },
         {
-          id: "work",
+          id: ids.work,
           name: "Work",
           role: "worker",
-          managedBy: "loop",
+          managedBy: ids.loop,
           config: { instructions: "work" },
         },
         {
-          id: "ready",
+          id: ids.ready,
           name: "Ready",
           role: "decider",
-          managedBy: "loop",
+          managedBy: ids.loop,
           config: { question: "done?" },
         },
       ],
@@ -344,24 +386,29 @@ describe("agentWorkflow occurrence runtime", () => {
     run = completeWorkflowOccurrence(run, decider.id, true, 10);
     expect(run.status).toBe("completed");
     expect(
-      run.occurrences.filter((item) => item.nodeId === "work"),
+      run.occurrences.filter((item) => item.nodeId === ids.work),
     ).toHaveLength(2);
   });
 
   it("pauses Human input, approval, and choice without a Pi session", () => {
     const definition: WorkflowRoleDefinition = {
       ...base,
-      entryNodeId: "pick",
+      entryNodeId: ids.pick,
       nodes: [
         {
-          id: "pick",
+          id: ids.pick,
           name: "Pick",
           role: "human",
           config: { interaction: "choice", prompt: "Pick", options: ["a"] },
         },
       ],
       relationships: [
-        { id: "end", from: "pick", when: { equals: "a" }, to: { end: "done" } },
+        {
+          id: ids.end,
+          from: ids.pick,
+          when: { equals: "a" },
+          to: { end: "done" },
+        },
       ],
     };
     let run = createWorkflowRoleRun(definition, "workspace", {}, 1);
@@ -376,41 +423,45 @@ describe("agentWorkflow occurrence runtime", () => {
   it("completes all fan-out children within bounded concurrency and routes once", () => {
     const definition: WorkflowRoleDefinition = {
       ...base,
-      entryNodeId: "fan",
+      entryNodeId: ids.fan,
       nodes: [
         {
-          id: "fan",
+          id: ids.fan,
           name: "Fan",
           role: "orchestrator",
           config: {
             mode: "fanout",
-            agents: ["a", "b", "c"],
+            agents: [ids.a, ids.b, ids.c],
             maxConcurrency: 2,
             completion: "all",
           },
         },
-        ...["a", "b", "c"].map((id) => ({
+        ...[
+          { id: ids.a, name: "a" },
+          { id: ids.b, name: "b" },
+          { id: ids.c, name: "c" },
+        ].map(({ id, name }) => ({
           id,
-          name: id.toUpperCase(),
+          name: name.toUpperCase(),
           role: "worker" as const,
-          managedBy: "fan",
-          config: { instructions: id },
+          managedBy: ids.fan,
+          config: { instructions: name },
         })),
         {
-          id: "after",
+          id: ids.after,
           name: "After",
           role: "worker",
           config: { instructions: "after" },
         },
       ],
       relationships: [
-        { id: "fan-after", from: "fan", to: { nodeId: "after" } },
+        { id: ids.fanAfter, from: ids.fan, to: { nodeId: ids.after } },
       ],
     };
     let run = createWorkflowRoleRun(definition, "workspace", {}, 1);
     run = startWorkflowOrchestrator(run, run.occurrences[0]!.id, 2);
     let ready = readyWorkflowOccurrences(run);
-    expect(ready.map((item) => item.nodeId).sort()).toEqual(["a", "b"]);
+    expect(ready.map((item) => item.nodeId).sort()).toEqual([ids.a, ids.b]);
     for (const [index, child] of ready.entries())
       run = startWorkflowOccurrence(
         run,
@@ -421,54 +472,58 @@ describe("agentWorkflow occurrence runtime", () => {
       );
     run = completeWorkflowOccurrence(run, ready[0]!.id, "A", 5);
     ready = readyWorkflowOccurrences(run);
-    expect(ready.map((item) => item.nodeId)).toEqual(["c"]);
+    expect(ready.map((item) => item.nodeId)).toEqual([ids.c]);
     run = startWorkflowOccurrence(run, ready[0]!.id, "c", undefined, 6);
     const b = run.occurrences.find(
-      (item) => item.nodeId === "b" && item.status === "running",
+      (item) => item.nodeId === ids.b && item.status === "running",
     )!;
     run = completeWorkflowOccurrence(run, b.id, "B", 7);
     run = completeWorkflowOccurrence(run, ready[0]!.id, "C", 8);
     expect(run.status).toBe("waiting");
     expect(
-      run.occurrences.filter((item) => item.nodeId === "after"),
+      run.occurrences.filter((item) => item.nodeId === ids.after),
     ).toHaveLength(1);
     expect(readyWorkflowOccurrences(run).map((item) => item.nodeId)).toEqual([
-      "after",
+      ids.after,
     ]);
   });
 
   it("finishes fan-out any once and ignores a late running sibling completion", () => {
     const definition: WorkflowRoleDefinition = {
       ...base,
-      entryNodeId: "fan",
+      entryNodeId: ids.fan,
       nodes: [
         {
-          id: "fan",
+          id: ids.fan,
           name: "Fan",
           role: "orchestrator",
           config: {
             mode: "fanout",
-            agents: ["a", "b", "c"],
+            agents: [ids.a, ids.b, ids.c],
             maxConcurrency: 2,
             completion: "any",
           },
         },
-        ...["a", "b", "c"].map((id) => ({
+        ...[
+          { id: ids.a, name: "a" },
+          { id: ids.b, name: "b" },
+          { id: ids.c, name: "c" },
+        ].map(({ id, name }) => ({
           id,
-          name: id.toUpperCase(),
+          name: name.toUpperCase(),
           role: "worker" as const,
-          managedBy: "fan",
-          config: { instructions: id },
+          managedBy: ids.fan,
+          config: { instructions: name },
         })),
         {
-          id: "after",
+          id: ids.after,
           name: "After",
           role: "worker",
           config: { instructions: "after" },
         },
       ],
       relationships: [
-        { id: "fan-after", from: "fan", to: { nodeId: "after" } },
+        { id: ids.fanAfter, from: ids.fan, to: { nodeId: ids.after } },
       ],
     };
     let run = createWorkflowRoleRun(definition, "workspace", {}, 1);
@@ -477,21 +532,21 @@ describe("agentWorkflow occurrence runtime", () => {
     run = startWorkflowOccurrence(run, a!.id, "a", undefined, 3);
     run = startWorkflowOccurrence(run, b!.id, "b", undefined, 4);
     run = completeWorkflowOccurrence(run, a!.id, "A", 5);
-    const fan = run.occurrences.find((item) => item.nodeId === "fan")!;
+    const fan = run.occurrences.find((item) => item.nodeId === ids.fan)!;
     expect(fan.status).toBe("completed");
     expect(fan.output).toEqual(["A"]);
-    expect(run.occurrences.find((item) => item.nodeId === "c")?.status).toBe(
+    expect(run.occurrences.find((item) => item.nodeId === ids.c)?.status).toBe(
       "skipped",
     );
     expect(
-      run.occurrences.filter((item) => item.nodeId === "after"),
+      run.occurrences.filter((item) => item.nodeId === ids.after),
     ).toHaveLength(1);
     run = completeWorkflowOccurrence(run, b!.id, "B", 6);
     expect(run.occurrences.find((item) => item.id === fan.id)?.output).toEqual([
       "A",
     ]);
     expect(
-      run.occurrences.filter((item) => item.nodeId === "after"),
+      run.occurrences.filter((item) => item.nodeId === ids.after),
     ).toHaveLength(1);
     expect(run.occurrences.find((item) => item.id === b!.id)?.status).toBe(
       "completed",
@@ -515,10 +570,10 @@ describe("agentWorkflow occurrence runtime", () => {
     run = startWorkflowOccurrence(run, b!.id, "b", undefined, 4);
     run = completeWorkflowOccurrence(run, a!.id, "A", 5);
 
-    const fan = run.occurrences.find((item) => item.nodeId === "fan")!;
+    const fan = run.occurrences.find((item) => item.nodeId === ids.fan)!;
     expect(fan.output).toEqual(["A"]);
     expect(
-      run.occurrences.filter((item) => item.nodeId === "after"),
+      run.occurrences.filter((item) => item.nodeId === ids.after),
     ).toHaveLength(1);
 
     run = failWorkflowOccurrence(run, b!.id, "late failure", 6);
@@ -531,7 +586,7 @@ describe("agentWorkflow occurrence runtime", () => {
       "A",
     ]);
     expect(
-      run.occurrences.filter((item) => item.nodeId === "after"),
+      run.occurrences.filter((item) => item.nodeId === ids.after),
     ).toHaveLength(1);
 
     run = failWorkflowOccurrence(run, b!.id, "duplicate late failure", 7);
@@ -554,17 +609,17 @@ describe("agentWorkflow occurrence runtime", () => {
     run = startWorkflowOccurrence(run, b!.id, "b", undefined, 4);
 
     run = failWorkflowOccurrence(run, a!.id, "first failed", 5);
-    expect(run.occurrences.find((item) => item.nodeId === "fan")?.status).toBe(
-      "running",
-    );
+    expect(
+      run.occurrences.find((item) => item.nodeId === ids.fan)?.status,
+    ).toBe("running");
     expect(run.status).toBe("running");
 
     run = completeWorkflowOccurrence(run, b!.id, "B", 6);
-    expect(run.occurrences.find((item) => item.nodeId === "fan")).toMatchObject(
-      { status: "completed", output: ["B"] },
-    );
     expect(
-      run.occurrences.filter((item) => item.nodeId === "after"),
+      run.occurrences.find((item) => item.nodeId === ids.fan),
+    ).toMatchObject({ status: "completed", output: ["B"] });
+    expect(
+      run.occurrences.filter((item) => item.nodeId === ids.after),
     ).toHaveLength(1);
     expect(run.status).toBe("waiting");
   });
@@ -584,11 +639,11 @@ describe("agentWorkflow occurrence runtime", () => {
     run = failWorkflowOccurrence(run, b!.id, "b failed", 6);
 
     expect(run.status).toBe("needsAttention");
-    expect(run.occurrences.find((item) => item.nodeId === "fan")?.status).toBe(
-      "failed",
-    );
     expect(
-      run.occurrences.filter((item) => item.nodeId === "after"),
+      run.occurrences.find((item) => item.nodeId === ids.fan)?.status,
+    ).toBe("failed");
+    expect(
+      run.occurrences.filter((item) => item.nodeId === ids.after),
     ).toHaveLength(0);
   });
 
@@ -605,42 +660,42 @@ describe("agentWorkflow occurrence runtime", () => {
     run = failWorkflowOccurrence(run, a!.id, "failure", 4);
 
     expect(run.status).toBe("needsAttention");
-    expect(run.occurrences.find((item) => item.nodeId === "fan")?.status).toBe(
-      "failed",
-    );
     expect(
-      run.occurrences.filter((item) => item.nodeId === "after"),
+      run.occurrences.find((item) => item.nodeId === ids.fan)?.status,
+    ).toBe("failed");
+    expect(
+      run.occurrences.filter((item) => item.nodeId === ids.after),
     ).toHaveLength(0);
   });
 
   it("fans out workers with distinct child occurrences", () => {
     const definition: WorkflowRoleDefinition = {
       ...base,
-      entryNodeId: "fan",
+      entryNodeId: ids.fan,
       nodes: [
         {
-          id: "fan",
+          id: ids.fan,
           name: "Fan",
           role: "orchestrator",
           config: {
             mode: "fanout",
-            agents: ["a", "b"],
+            agents: [ids.a, ids.b],
             maxConcurrency: 1,
             completion: "all",
           },
         },
         {
-          id: "a",
+          id: ids.a,
           name: "A",
           role: "worker",
-          managedBy: "fan",
+          managedBy: ids.fan,
           config: { instructions: "a" },
         },
         {
-          id: "b",
+          id: ids.b,
           name: "B",
           role: "worker",
-          managedBy: "fan",
+          managedBy: ids.fan,
           config: { instructions: "b" },
         },
       ],

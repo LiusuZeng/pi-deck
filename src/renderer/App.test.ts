@@ -808,8 +808,14 @@ describe("renderer project API compatibility", () => {
 
 describe("canonical workflow collection", () => {
   it("keeps canonical definitions visible without legacy compatibility records", () => {
-    const first = { ...defaultAgentWorkflowDefinition(), id: "first" };
-    const second = { ...defaultAgentWorkflowDefinition(), id: "second" };
+    const first = {
+      ...defaultAgentWorkflowDefinition(),
+      id: "00000000-0000-4000-8000-000000000801",
+    };
+    const second = {
+      ...defaultAgentWorkflowDefinition(),
+      id: "00000000-0000-4000-8000-000000000802",
+    };
     expect(__rendererTestHooks.agentWorkflowsForHome([first, second])).toEqual([
       first,
       second,

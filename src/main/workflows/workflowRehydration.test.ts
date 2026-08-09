@@ -53,20 +53,26 @@ describe("workflow rehydration", () => {
     const definition = {
       format: "pi-deck.agent-workflow" as const,
       schemaVersion: 2 as const,
-      id: "queued",
+      id: "00000000-0000-4000-8000-000000000101",
       revision: 1,
       name: "Queued",
       inputs: [],
-      entryNodeId: "work",
+      entryNodeId: "00000000-0000-4000-8000-000000000104",
       nodes: [
         {
-          id: "work",
+          id: "00000000-0000-4000-8000-000000000104",
           name: "Work",
           role: "worker" as const,
           config: { instructions: "work" },
         },
       ],
-      relationships: [{ id: "end", from: "work", to: { end: "completed" } }],
+      relationships: [
+        {
+          id: "00000000-0000-4000-8000-000000000105",
+          from: "00000000-0000-4000-8000-000000000104",
+          to: { end: "completed" },
+        },
+      ],
     };
     const initial = createWorkflowRoleRun(definition, "workspace");
     const queued = {
@@ -100,20 +106,26 @@ describe("workflow rehydration", () => {
     const definition = {
       format: "pi-deck.agent-workflow" as const,
       schemaVersion: 2 as const,
-      id: "running",
+      id: "00000000-0000-4000-8000-000000000102",
       revision: 1,
       name: "Running",
       inputs: [],
-      entryNodeId: "work",
+      entryNodeId: "00000000-0000-4000-8000-000000000104",
       nodes: [
         {
-          id: "work",
+          id: "00000000-0000-4000-8000-000000000104",
           name: "Work",
           role: "worker" as const,
           config: { instructions: "work" },
         },
       ],
-      relationships: [{ id: "end", from: "work", to: { end: "completed" } }],
+      relationships: [
+        {
+          id: "00000000-0000-4000-8000-000000000105",
+          from: "00000000-0000-4000-8000-000000000104",
+          to: { end: "completed" },
+        },
+      ],
     };
     const initial = createWorkflowRoleRun(definition, "workspace");
     const running = startWorkflowOccurrence(
@@ -155,20 +167,26 @@ describe("workflow rehydration", () => {
     const definition = {
       format: "pi-deck.agent-workflow" as const,
       schemaVersion: 2 as const,
-      id: "completed",
+      id: "00000000-0000-4000-8000-000000000103",
       revision: 1,
       name: "Completed",
       inputs: [],
-      entryNodeId: "work",
+      entryNodeId: "00000000-0000-4000-8000-000000000104",
       nodes: [
         {
-          id: "work",
+          id: "00000000-0000-4000-8000-000000000104",
           name: "Work",
           role: "worker" as const,
           config: { instructions: "work" },
         },
       ],
-      relationships: [{ id: "end", from: "work", to: { end: "completed" } }],
+      relationships: [
+        {
+          id: "00000000-0000-4000-8000-000000000105",
+          from: "00000000-0000-4000-8000-000000000104",
+          to: { end: "completed" },
+        },
+      ],
     };
     const initial = createWorkflowRoleRun(definition, "workspace");
     const completed = {
