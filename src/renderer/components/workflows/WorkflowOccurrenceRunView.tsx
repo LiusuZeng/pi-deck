@@ -4,6 +4,7 @@ import type {
   WorkflowNode,
   WorkflowRunEnvelope,
 } from "../../../shared/agentWorkflowSchemas.js";
+import { AgentWorkflowGraph } from "./AgentWorkflowGraph.js";
 
 export interface WorkflowOccurrenceRunViewProps {
   run: WorkflowRunEnvelope;
@@ -35,9 +36,6 @@ const outputText = (output: CanonicalNodeOccurrence["output"]) =>
     : output === undefined
       ? ""
       : String(output);
-
-const preview = (value: string) =>
-  value.length > 180 ? `${value.slice(0, 177)}…` : value;
 
 function executionPath(run: WorkflowRunEnvelope) {
   const nodeNames = new Map(
@@ -74,27 +72,6 @@ function executionPath(run: WorkflowRunEnvelope) {
     ];
     return [names.join(" + ")];
   });
-}
-
-function retryCount(occurrences: CanonicalNodeOccurrence[]) {
-  const invocations = new Map<string, CanonicalNodeOccurrence[]>();
-  for (const occurrence of occurrences) {
-    const key = `${occurrence.parentOrchestratorRunId ?? "root"}:${occurrence.iteration}`;
-    const attempts = invocations.get(key) ?? [];
-    attempts.push(occurrence);
-    invocations.set(key, attempts);
-  }
-  return [...invocations.values()].reduce(
-    (total, attempts) =>
-      total + Math.max(...attempts.map((item) => item.attempt)) - 1,
-    0,
-  );
-}
-
-function latestOccurrence(occurrences: CanonicalNodeOccurrence[]) {
-  return [...occurrences].sort(
-    (a, b) => b.updatedAtMs - a.updatedAtMs || b.attempt - a.attempt,
-  )[0]!;
 }
 
 function NodeDetails(props: {
@@ -376,64 +353,28 @@ export function WorkflowOccurrenceRunView(
 
       <section aria-labelledby="workflow-logical-nodes">
         <h3 id="workflow-logical-nodes">Logical execution</h3>
-        <p className="workflow-help">
-          Select a node to inspect attempts, raw prompts and output, errors, and
-          Pi session details.
-        </p>
-        <ol className="workflow-run-steps" aria-label="Logical workflow nodes">
-          {groups.map(({ node, occurrences }) => {
-            const latest = latestOccurrence(occurrences);
-            const selected = selectedNodeId === node.id;
-            const retries = retryCount(occurrences);
-            const failed = [...occurrences]
-              .reverse()
-              .find((item) => item.status === "failed");
-            const summary = latest.error
-              ? preview(latest.error)
-              : latest.output !== undefined || latest.aggregation.length
-                ? "Output available — select for details"
-                : "No output yet";
-            return (
-              <li key={node.id} className="workflow-run-step">
-                <button
-                  type="button"
-                  className="workflow-run-node-toggle"
-                  aria-expanded={selected}
-                  aria-controls={`workflow-node-${node.id}`}
-                  onClick={() =>
-                    setSelectedNodeId(selected ? undefined : node.id)
-                  }
-                >
-                  <span className="workflow-template-mark">{node.role}</span>
-                  <strong>{node.name}</strong>
-                  <span className="workflow-step-status">
-                    {statusLabel(latest.status)}
-                  </span>
-                  {retries ? (
-                    <span>
-                      {" "}
-                      · {retries} {retries === 1 ? "retry" : "retries"}
-                    </span>
-                  ) : null}
-                  <span className="workflow-node-preview">{summary}</span>
-                </button>
-                {failed?.error ? (
-                  <p className="workflow-error">
-                    Latest error: {preview(failed.error)}
-                  </p>
-                ) : null}
-                {selected ? (
-                  <NodeDetails
-                    node={node}
-                    occurrences={occurrences}
-                    onRetry={props.onRetry}
-                    onOpenSession={props.onOpenSession}
-                  />
-                ) : null}
-              </li>
-            );
-          })}
-        </ol>
+        <AgentWorkflowGraph
+          definition={props.run.definition}
+          occurrences={props.run.occurrences}
+          selectedNodeId={selectedNodeId}
+          onSelectNode={(nodeId) =>
+            setSelectedNodeId(selectedNodeId === nodeId ? undefined : nodeId)
+          }
+        />
+        {selectedNodeId ? (() => {
+          const node = nodes.find((item) => item.id === selectedNodeId);
+          const occurrences = props.run.occurrences.filter(
+            (item) => item.nodeId === selectedNodeId,
+          );
+          return node ? (
+            <NodeDetails
+              node={node}
+              occurrences={occurrences}
+              onRetry={props.onRetry}
+              onOpenSession={props.onOpenSession}
+            />
+          ) : null;
+        })() : null}
       </section>
     </section>
   );
