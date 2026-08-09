@@ -964,8 +964,11 @@ export function AgentWorkflowBuilder(props: {
               </>
             )}
             {!selected.managedBy && (
-              <fieldset>
-                <legend>Workflow connection</legend>
+              <fieldset className="agent-workflow-connection-section">
+                <legend>
+                  <span>Workflow connection</span>
+                  <small>Choose where this step sends work next.</small>
+                </legend>
                 {definition.relationships
                   .filter((edge) => edge.from === selected.id)
                   .map((edge) => (

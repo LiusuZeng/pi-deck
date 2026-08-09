@@ -209,6 +209,12 @@ describe("AgentWorkflowBuilder", () => {
     const inspector = container!.querySelector(
       '[aria-label="Focused role inspector"]',
     )!;
+    const connection = inspector.querySelector(
+      ".agent-workflow-connection-section",
+    )!;
+    expect(connection.querySelector("legend")?.textContent).toContain(
+      "Choose where this step sends work next.",
+    );
     expect(inspector.textContent).toContain(
       "On completion → Find the United States' highest temperature",
     );

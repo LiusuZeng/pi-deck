@@ -4879,6 +4879,33 @@ body {
   border: 0;
   padding: 0;
 }
+.agent-workflow-inspector .agent-workflow-connection-section {
+  display: grid;
+  gap: 10px;
+  margin: 24px 0 0;
+  border-top: 1px solid var(--color-border);
+  padding-top: 18px;
+}
+.agent-workflow-connection-section legend {
+  width: 100%;
+  padding: 0;
+  color: var(--color-text-strong);
+  font-size: 16px;
+  font-weight: 700;
+}
+.agent-workflow-connection-section legend span,
+.agent-workflow-connection-section legend small {
+  display: block;
+}
+.agent-workflow-connection-section legend small {
+  margin-top: 3px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+.agent-workflow-connection-section .workflow-field {
+  margin: 0;
+}
 .agent-workflow-roles {
   display: flex;
   flex-wrap: wrap;
