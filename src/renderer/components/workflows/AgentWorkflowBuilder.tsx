@@ -343,6 +343,34 @@ export function AgentWorkflowBuilder(props: {
   const canClearRelationship = (equals: boolean | string | undefined) =>
     relationshipValue(equals) !== "" &&
     canSetRelationship(selected.id, equals, "");
+  const inputBindingDefinition = (
+    sourceNodeId: string,
+    checked: boolean,
+  ): AgentWorkflowDefinition => {
+    const current = selected.inputBindings ?? [];
+    const inputBindings = checked
+      ? current.some((binding) => binding.sourceNodeId === sourceNodeId)
+        ? current
+        : [...current, { sourceNodeId, sourceValue: "finalOutput" as const }]
+      : current.filter((binding) => binding.sourceNodeId !== sourceNodeId);
+    return updateNode(definition, {
+      ...selected,
+      ...(inputBindings.length > 0
+        ? { inputBindings }
+        : { inputBindings: undefined }),
+    } as AgentWorkflowNode);
+  };
+  const canSetInputBinding = (sourceNodeId: string, checked: boolean) =>
+    validateJsonDraft(
+      definitionJson(inputBindingDefinition(sourceNodeId, checked)),
+    ).definition !== undefined;
+  const inputSourceOptions = topLevel.filter(
+    (node) => node.id !== selected.id && canSetInputBinding(node.id, true),
+  );
+  const setInputBinding = (sourceNodeId: string, checked: boolean) => {
+    const next = inputBindingDefinition(sourceNodeId, checked);
+    if (validateJsonDraft(definitionJson(next)).definition) update(next);
+  };
   return (
     <div className="agent-workflow-builder">
       <header className="workflow-page-heading">
@@ -969,6 +997,31 @@ export function AgentWorkflowBuilder(props: {
                   <span>Workflow connection</span>
                   <small>Choose where this step sends work next.</small>
                 </legend>
+                {selected.role !== "human" && inputSourceOptions.length > 0 ? (
+                  <fieldset className="agent-workflow-input-sources">
+                    <legend>Input sources (optional)</legend>
+                    <small>
+                      Use the final output from selected earlier steps.
+                    </small>
+                    {inputSourceOptions.map((node) => (
+                      <label key={node.id} className="agent-workflow-check">
+                        <input
+                          type="checkbox"
+                          aria-label={`Use ${node.name} final output as input`}
+                          checked={
+                            selected.inputBindings?.some(
+                              (binding) => binding.sourceNodeId === node.id,
+                            ) ?? false
+                          }
+                          onChange={(event) =>
+                            setInputBinding(node.id, event.target.checked)
+                          }
+                        />
+                        {node.name}
+                      </label>
+                    ))}
+                  </fieldset>
+                ) : null}
                 {definition.relationships
                   .filter((edge) => edge.from === selected.id)
                   .map((edge) => (

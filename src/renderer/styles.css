@@ -4906,6 +4906,22 @@ body {
 .agent-workflow-connection-section .workflow-field {
   margin: 0;
 }
+.agent-workflow-connection-section .agent-workflow-input-sources {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+}
+.agent-workflow-input-sources legend {
+  width: auto;
+  padding: 0 4px;
+  font-size: 14px;
+}
+.agent-workflow-input-sources > small {
+  color: var(--color-text-muted);
+}
 .agent-workflow-roles {
   display: flex;
   flex-wrap: wrap;

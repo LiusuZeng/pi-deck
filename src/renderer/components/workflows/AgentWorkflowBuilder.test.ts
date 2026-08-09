@@ -237,6 +237,72 @@ describe("AgentWorkflowBuilder", () => {
     );
   });
 
+  it("configures named upstream final-output sources in Workflow connection", async () => {
+    const onSave = vi.fn();
+    const definition = {
+      ...defaultAgentWorkflowDefinition(),
+      entryNodeId: "canada",
+      nodes: [
+        {
+          id: "canada",
+          name: "Find Canada's highest temperature",
+          role: "worker" as const,
+          config: { instructions: "Find Canada's high." },
+        },
+        {
+          id: "mexico",
+          name: "Find Mexico's highest temperature",
+          role: "worker" as const,
+          config: { instructions: "Find Mexico's high." },
+        },
+        {
+          id: "compare",
+          name: "Compare temperatures",
+          role: "worker" as const,
+          config: { instructions: "Compare results." },
+        },
+      ],
+      relationships: [
+        { id: "canada-mexico", from: "canada", to: { nodeId: "mexico" } },
+        { id: "mexico-compare", from: "mexico", to: { nodeId: "compare" } },
+      ],
+    };
+    render(onSave, definition);
+    act(() =>
+      container!
+        .querySelector<HTMLButtonElement>('[data-workflow-node-id="compare"]')
+        ?.click(),
+    );
+    const canada = container!.querySelector<HTMLInputElement>(
+      '[aria-label="Use Find Canada\'s highest temperature final output as input"]',
+    )!;
+    expect(canada).not.toBeNull();
+    expect(
+      container!.querySelector(
+        '[aria-label="Use Find Mexico\'s highest temperature final output as input"]',
+      ),
+    ).not.toBeNull();
+    expect(
+      container!.querySelector(
+        '[aria-label="Use Compare temperatures final output as input"]',
+      ),
+    ).toBeNull();
+    act(() => canada.click());
+    await act(async () => click("Save workflow"));
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        nodes: expect.arrayContaining([
+          expect.objectContaining({
+            id: "compare",
+            inputBindings: [
+              { sourceNodeId: "canada", sourceValue: "finalOutput" },
+            ],
+          }),
+        ]),
+      }),
+    );
+  });
+
   it("allows only valid sequential retargets and removals", async () => {
     const definition = {
       ...defaultAgentWorkflowDefinition(),
