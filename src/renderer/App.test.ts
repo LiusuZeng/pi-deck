@@ -59,6 +59,42 @@ function runtimeErrorDiagnostics(session: any): any[] {
   );
 }
 
+describe("worker exit lifecycle", () => {
+  it("keeps a deliberately closed durable session resumable when SIGTERM is reported as 143", () => {
+    const next = __rendererTestHooks.reduceRuntimeEvent(
+      { ...baseSession(), sessionFile: "/tmp/workflow-step.jsonl" } as any,
+      {
+        type: "worker_exit",
+        runtimeId: "session-1",
+        code: 143,
+        signal: null,
+        intentional: true,
+      } as any,
+    );
+
+    expect(next).toMatchObject({
+      status: "idle",
+      baseState: "idle",
+      runtimeBacked: false,
+      resumeBacked: true,
+      subtitle: "Saved · click to resume",
+    });
+    expect(runtimeErrorDiagnostics(next)).toEqual([]);
+  });
+
+  it("continues to report an unplanned worker exit as an error", () => {
+    const next = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {
+      type: "worker_exit",
+      runtimeId: "session-1",
+      code: 143,
+      signal: null,
+    } as any);
+
+    expect(next.baseState).toBe("error");
+    expect(runtimeErrorDiagnostics(next)).toHaveLength(1);
+  });
+});
+
 describe("canonical occurrence Pi-session navigation", () => {
   it("keeps active runtime and completed saved-session identities distinct", () => {
     expect(

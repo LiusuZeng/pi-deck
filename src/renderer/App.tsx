@@ -2068,26 +2068,17 @@ export function App(): ReactElement {
         workspaceId: currentWorkspaceRef.current.id,
         sessionFile: sessionReference.sessionFile,
       });
-      const refreshed = await window.piDeck.chat.listSessions({
-        workspaceId: currentWorkspaceRef.current.id,
-      });
-      const session = refreshed.sessions.find(
-        (candidate) => candidate.sessionFile === snapshot.state.sessionFile,
-      );
-      if (session === undefined) {
-        throw new Error(
-          "Pi resumed the session but it was not returned by the workspace session list.",
-        );
-      }
+      // Keep the runtime returned by resume attached to this row. Replacing it
+      // with a saved-session summary loses that runtime id, so its expected
+      // SIGTERM/143 close is later applied as an unrelated backend error.
+      const session = sessionFromSnapshot(snapshot);
       setSessions((current) => [
         ...current.filter(
-          (candidate) => candidate.sessionFile !== session.sessionFile,
+          (candidate) =>
+            candidate.id !== session.id &&
+            candidate.sessionFile !== session.sessionFile,
         ),
-        sessionFromSummary(
-          session,
-          currentWorkspaceRef.current.id,
-          projectIdForWorkspace(currentWorkspaceRef.current),
-        ),
+        session,
       ]);
       setSelectedSessionId(session.id);
       setWorkflowView(undefined);
@@ -6003,7 +5994,22 @@ function reduceRuntimeEvent(
         tone: getString(event, "level") === "error" ? "error" : "info",
         content: getString(event, "message") ?? "Backend diagnostic event",
       });
-    case "worker_exit":
+    case "worker_exit": {
+      const intentional = getUnknown(event, "intentional") === true;
+      // SIGTERM is expected when Pi Deck detaches a completed session. Shell
+      // launchers may expose it as code 143; preserve its durable file as a
+      // resumable row rather than presenting a backend failure.
+      if (intentional && session.sessionFile !== undefined) {
+        return {
+          ...session,
+          status: "idle",
+          baseState: "idle",
+          awaitingAgentEnd: false,
+          runtimeBacked: false,
+          resumeBacked: true,
+          subtitle: "Saved · click to resume",
+        };
+      }
       // An intentional close already detached this runtime and preserved the
       // saved-session row. Its late process-exit event must not turn that row
       // into an error.
@@ -6027,6 +6033,7 @@ function reduceRuntimeEvent(
           content: `${backendLabel(session)} worker exited (code=${String(getUnknown(event, "code") ?? "null")}).`,
         },
       );
+    }
     default:
       return session;
   }

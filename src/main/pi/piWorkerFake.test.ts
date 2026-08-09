@@ -219,9 +219,15 @@ test("PiWorker abort path emits a sensible aborted end state", async () => {
 
 test("PiWorker intentional close does not create error diagnostic", async () => {
   const worker = createWorker();
+  const exit = waitForWorkerEvent(
+    worker,
+    (event) => event.type === "worker_exit",
+  );
   await worker.getState();
   await worker.closeSession();
 
+  const exitEvent = await exit;
+  assert.equal((exitEvent as { intentional?: boolean }).intentional, true);
   const diagnostics = worker.getDiagnostics().recentDiagnostics;
   assert.equal(
     diagnostics.some((diagnostic) => diagnostic.level === "error"),

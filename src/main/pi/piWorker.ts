@@ -112,11 +112,15 @@ export class PiWorker {
         );
       }
 
+      // A SIGTERM may be reported by a launcher as exit code 143 instead of a
+      // signal. Preserve our lifecycle intent so consumers do not mistake the
+      // deliberate close for an RPC/backend crash.
       this.emitEvent({
         type: "worker_exit",
         runtimeId: this.runtimeId,
         code,
         signal,
+        intentional: this.isClosingIntentionally,
       } as RuntimeEvent);
     });
   }
@@ -183,8 +187,6 @@ export class PiWorker {
     if (this.health === "closed") {
       return;
     }
-    this.health = "closed";
-    this.isClosingIntentionally = true;
 
     const child = this.client.child;
     if (child.exitCode !== null || child.signalCode !== null || child.killed) {
@@ -207,7 +209,15 @@ export class PiWorker {
         clearTimeout(timer);
         done();
       });
-      child.kill("SIGTERM");
+      // Mark the exit expected only after SIGTERM was actually sent. A worker
+      // that races us to an unplanned exit must retain its crash diagnostic.
+      if (child.kill("SIGTERM")) {
+        this.health = "closed";
+        this.isClosingIntentionally = true;
+      } else {
+        clearTimeout(timer);
+        done();
+      }
     });
   }
 
