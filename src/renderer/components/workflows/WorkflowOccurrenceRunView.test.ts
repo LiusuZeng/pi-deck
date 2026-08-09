@@ -108,6 +108,10 @@ describe("WorkflowOccurrenceRunView", () => {
         }),
       ),
     );
+    const completedToggle = container.querySelector<HTMLButtonElement>(
+      ".workflow-run-node-toggle",
+    )!;
+    await act(async () => completedToggle.click());
     expect(container.textContent).toContain("Open Pi session");
 
     const noReference = {
@@ -128,6 +132,10 @@ describe("WorkflowOccurrenceRunView", () => {
         }),
       ),
     );
+    const noReferenceToggle = container.querySelector<HTMLButtonElement>(
+      ".workflow-run-node-toggle",
+    )!;
+    await act(async () => noReferenceToggle.click());
     expect(container.textContent).not.toContain("Open Pi session");
   });
 
