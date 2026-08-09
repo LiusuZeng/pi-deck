@@ -100,18 +100,87 @@ describe("AgentWorkflowHome", () => {
       (item) => item.textContent?.trim() === name,
     )!;
 
-  it("is an overview with separate workflow and run destinations", () => {
+  it("uses a single workflow overview as a compact summary with accessible actions", async () => {
     const props = render();
-    expect(container?.querySelector("h2")?.textContent).toBe("Agent Workflows");
-    expect(container?.textContent).toContain("1 saved");
-    expect(container?.textContent).toContain("1 in this workspace");
-    const overviewCards = container!.querySelectorAll(
-      ".agent-workflow-overview-card",
+    const summary = container!.querySelector(".agent-workflow-summary");
+    expect(summary?.getAttribute("aria-labelledby")).toBe(
+      "agent-workflow-delivery-summary-title",
     );
-    act(() => (overviewCards[0] as HTMLButtonElement).click());
-    act(() => (overviewCards[1] as HTMLButtonElement).click());
-    expect(props.onShowWorkflows).toHaveBeenCalledOnce();
+    expect(summary?.textContent).toContain("Workflow structure");
+    expect(summary?.textContent).toContain("Work");
+    expect(summary?.textContent).toContain("Manages Verify");
+    expect(summary?.textContent).toContain("2 Workers");
+    expect(summary?.textContent).toContain("Waiting to start");
+    expect(summary?.textContent).not.toContain("Performs a configured task.");
+
+    await act(async () => button("Start run").click());
+    act(() => button("Edit").click());
+    act(() => button("Open run").click());
+    act(() => button("View all runs").click());
+    expect(props.onStart).toHaveBeenCalledWith(workflow, {});
+    expect(props.onEdit).toHaveBeenCalledWith(workflow);
+    expect(props.onOpenRun).toHaveBeenCalledWith(run);
     expect(props.onShowRuns).toHaveBeenCalledOnce();
+  });
+
+  it("opens required run inputs and reports start failures from the summary", async () => {
+    const inputWorkflow = {
+      ...workflow,
+      inputs: [
+        {
+          id: "target",
+          label: "Target",
+          type: "text" as const,
+          required: true,
+        },
+      ],
+    };
+    const props = render({ workflows: [inputWorkflow] });
+    act(() => button("Start run").click());
+    const dialog = container!.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain("Target");
+    const dialogStart = [...dialog!.querySelectorAll("button")].find(
+      (item) => item.textContent?.trim() === "Start run",
+    )!;
+    act(() => dialogStart.click());
+    expect(dialog?.querySelector("input")?.getAttribute("aria-invalid")).toBe(
+      "true",
+    );
+    expect(props.onStart).not.toHaveBeenCalled();
+    act(() => root?.unmount());
+    container?.remove();
+
+    const failingStart = vi.fn().mockRejectedValue(new Error("Unavailable"));
+    render({ onStart: failingStart });
+    await act(async () => button("Start run").click());
+    expect(container?.querySelector('[role="alert"]')?.textContent).toContain(
+      "Unavailable",
+    );
+  });
+
+  it("keeps an intentional empty activity state for one workflow", () => {
+    render({ runs: [] });
+    expect(container?.textContent).toContain("No activity yet");
+    expect(container?.textContent).toContain("Start a run when it is ready.");
+  });
+
+  it("keeps collection destinations for empty and multiple workflow density states", () => {
+    const empty = render({ workflows: [], runs: [] });
+    expect(
+      container?.querySelectorAll(".agent-workflow-overview-card"),
+    ).toHaveLength(2);
+    expect(container?.textContent).toContain("0 saved");
+    act(() => root?.unmount());
+    container?.remove();
+
+    const secondWorkflow = { ...workflow, id: "review", name: "Review" };
+    const multiple = render({ workflows: [workflow, secondWorkflow] });
+    expect(
+      container?.querySelectorAll(".agent-workflow-overview-card"),
+    ).toHaveLength(2);
+    expect(container?.textContent).toContain("2 saved");
+    expect(multiple.onShowWorkflows).not.toHaveBeenCalled();
+    expect(empty.onShowRuns).not.toHaveBeenCalled();
   });
 
   it("keeps create, start, and edit in the focused Workflows view", async () => {

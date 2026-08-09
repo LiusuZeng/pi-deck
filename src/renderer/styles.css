@@ -3940,10 +3940,174 @@ body {
   margin-top: 12px;
 }
 
+.agent-workflow-home {
+  width: min(1360px, 100%);
+}
+
 .agent-workflow-overview {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 12px;
+}
+
+.agent-workflow-summary {
+  display: grid;
+  gap: 22px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: clamp(20px, 3vw, 32px);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.agent-workflow-summary-header,
+.agent-workflow-summary-content,
+.agent-workflow-activity-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.agent-workflow-summary-header h3,
+.agent-workflow-summary h4 {
+  margin: 4px 0 0;
+  color: var(--color-text-strong);
+}
+
+.agent-workflow-summary-header h3 {
+  font-size: clamp(24px, 3vw, 32px);
+  letter-spacing: -0.025em;
+}
+
+.agent-workflow-summary-header p,
+.agent-workflow-activity-empty p {
+  max-width: 680px;
+  margin: 8px 0 0;
+  color: var(--color-text-muted);
+}
+
+.agent-workflow-summary-actions {
+  display: grid;
+  min-width: max-content;
+  align-content: start;
+  justify-items: end;
+  gap: 10px;
+}
+
+.agent-workflow-summary-actions .workflow-help {
+  max-width: 280px;
+  margin: 0;
+}
+
+.agent-workflow-role-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 16px;
+}
+
+.agent-workflow-role-badges span {
+  border-radius: 999px;
+  padding: 5px 9px;
+  color: var(--color-text-muted);
+  background: var(--color-surface-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.agent-workflow-summary-content {
+  align-items: stretch;
+}
+
+.agent-workflow-flow-preview,
+.agent-workflow-activity {
+  min-width: 0;
+  flex: 1;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 18px;
+  background: var(--color-surface-muted);
+}
+
+.agent-workflow-flow-preview ol,
+.agent-workflow-activity-list {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agent-workflow-flow-preview li {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 3px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+}
+
+.agent-workflow-flow-preview li:not(:last-child)::after {
+  position: absolute;
+  bottom: -14px;
+  left: 22px;
+  z-index: 1;
+  color: var(--color-text-subtle);
+  content: "↓";
+}
+
+.agent-workflow-flow-preview li strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-workflow-flow-preview li > span,
+.agent-workflow-flow-preview small {
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.agent-workflow-flow-preview small {
+  grid-column: 1 / -1;
+}
+
+.agent-workflow-activity-heading {
+  align-items: start;
+}
+
+.agent-workflow-activity-heading .workflow-back-button {
+  flex: 0 0 auto;
+}
+
+.agent-workflow-activity-empty {
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-sm);
+}
+
+.agent-workflow-activity-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+
+.agent-workflow-activity-list li:first-child {
+  border-top: 0;
+}
+
+.agent-workflow-activity-list strong {
+  color: var(--color-text-strong);
 }
 
 .agent-workflow-overview-card {
@@ -4682,6 +4846,12 @@ body {
   }
 }
 
+@media (max-width: 820px) {
+  .agent-workflow-summary-content {
+    flex-direction: column;
+  }
+}
+
 @media (max-width: 620px) {
   .workflow-surface {
     padding: 18px 12px 32px;
@@ -4689,8 +4859,29 @@ body {
 
   .workflow-page-heading,
   .workflow-section-heading,
-  .workflow-flow-heading {
+  .workflow-flow-heading,
+  .agent-workflow-summary-header {
     align-items: stretch;
+    flex-direction: column;
+  }
+
+  .agent-workflow-summary {
+    gap: 16px;
+    padding: 18px;
+  }
+
+  .agent-workflow-summary-actions {
+    min-width: 0;
+    justify-items: start;
+  }
+
+  .agent-workflow-activity-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .agent-workflow-activity-list li {
+    align-items: flex-start;
     flex-direction: column;
   }
 
