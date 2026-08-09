@@ -126,10 +126,7 @@ function NodeDetails(props: {
         {[...occurrences]
           .sort((a, b) => a.createdAtMs - b.createdAtMs)
           .map((occurrence) => {
-            const hasSession =
-              occurrence.runtimeId ||
-              occurrence.sessionFile ||
-              occurrence.sessionId;
+            const hasSession = occurrence.runtimeId || occurrence.sessionFile;
             return (
               <li key={occurrence.id}>
                 <div className="workflow-template-card-heading">

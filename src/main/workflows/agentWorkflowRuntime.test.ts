@@ -8,6 +8,7 @@ import {
   retryWorkflowOccurrence,
   startWorkflowOccurrence,
   startWorkflowOrchestrator,
+  stopWorkflowRoleRun,
   type WorkflowRoleDefinition,
 } from "./agentWorkflowRuntime.js";
 import { renderWorkflowOccurrencePrompt } from "./workflowPromptRenderer.js";
@@ -100,6 +101,62 @@ describe("agentWorkflow occurrence runtime", () => {
       sessionId: "session",
       sessionFile: "/tmp/workflow-session.jsonl",
     });
+  });
+
+  it("keeps sessionFile but removes the live runtime when an occurrence closes", () => {
+    const definition: WorkflowRoleDefinition = {
+      ...base,
+      entryNodeId: "worker",
+      nodes: [
+        {
+          id: "worker",
+          name: "Worker",
+          role: "worker",
+          config: { instructions: "do" },
+        },
+      ],
+      relationships: [{ id: "end", from: "worker", to: { end: "completed" } }],
+    };
+    const start = () => {
+      let run = createWorkflowRoleRun(definition, "workspace");
+      return startWorkflowOccurrence(
+        run,
+        run.occurrences[0].id,
+        "runtime",
+        "session",
+        2,
+        "/tmp/workflow-session.jsonl",
+      );
+    };
+
+    const completedStart = start();
+    const completed = completeWorkflowOccurrence(
+      completedStart,
+      completedStart.occurrences[0].id,
+      "done",
+    );
+    expect(completed.occurrences[0]).toMatchObject({
+      sessionFile: "/tmp/workflow-session.jsonl",
+    });
+    expect(completed.occurrences[0]).not.toHaveProperty("runtimeId");
+
+    const failedStart = start();
+    const failed = failWorkflowOccurrence(
+      failedStart,
+      failedStart.occurrences[0].id,
+      "failed",
+    );
+    expect(failed.occurrences[0]).toMatchObject({
+      sessionFile: "/tmp/workflow-session.jsonl",
+    });
+    expect(failed.occurrences[0]).not.toHaveProperty("runtimeId");
+
+    const stopped = stopWorkflowRoleRun(start());
+    expect(stopped.occurrences[0]).toMatchObject({
+      status: "cancelled",
+      sessionFile: "/tmp/workflow-session.jsonl",
+    });
+    expect(stopped.occurrences[0]).not.toHaveProperty("runtimeId");
   });
 
   it("supersedes a failed attempt so a retry can complete the run", () => {
