@@ -5252,9 +5252,12 @@ body {
   overflow: visible;
   pointer-events: none;
 }
-.agent-workflow-graph-links line {
+.agent-workflow-graph-links polyline {
+  fill: none;
   stroke: var(--color-text-muted);
-  stroke-width: 2;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 .agent-workflow-graph-links marker path {
   fill: var(--color-text-muted);
@@ -5264,16 +5267,16 @@ body {
   font-size: 12px;
   font-weight: 650;
 }
-.agent-workflow-graph-links .is-active line,
-.agent-workflow-graph-links .is-taken line {
+.agent-workflow-graph-links .is-active polyline,
+.agent-workflow-graph-links .is-taken polyline {
   stroke: var(--color-accent, #60a5fa);
 }
 .agent-workflow-graph-links .is-active marker path,
 .agent-workflow-graph-links .is-taken marker path {
   fill: var(--color-accent, #60a5fa);
 }
-.agent-workflow-graph-links .is-not_taken line,
-.agent-workflow-graph-links .is-blocked line {
+.agent-workflow-graph-links .is-not_taken polyline,
+.agent-workflow-graph-links .is-blocked polyline {
   stroke-dasharray: 5 4;
   opacity: 0.55;
 }

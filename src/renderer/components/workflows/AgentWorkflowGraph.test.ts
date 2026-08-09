@@ -164,6 +164,13 @@ describe("AgentWorkflowGraph", () => {
       container!.querySelector('[aria-label="Managed roles for Iterate"]')
         ?.textContent,
     ).toContain("Implement");
+    const routes = container!.querySelectorAll(
+      ".agent-workflow-graph-links polyline",
+    );
+    expect(routes.length).toBeGreaterThan(0);
+    expect(routes[0]?.getAttribute("marker-end")).toBe(
+      "url(#workflow-graph-arrow)",
+    );
   });
 
   it("distinguishes in-progress execution from completed execution", () => {
