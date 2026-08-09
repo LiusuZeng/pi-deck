@@ -121,10 +121,21 @@ describe("workflow rehydration", () => {
       initial.occurrences[0].id,
       "runtime",
     );
+    const withSavedFile = {
+      ...running,
+      occurrences: running.occurrences.map((item) => ({
+        ...item,
+        sessionFile: "/tmp/interrupted.jsonl",
+      })),
+    };
+    const updated: (typeof initial)[] = [];
     const scheduled: (typeof initial)[] = [];
-    await rehydrateCanonicalWorkflowRuns([running], {
+    await rehydrateCanonicalWorkflowRuns([withSavedFile], {
       resolveWorkspace: async () => undefined,
-      updateRun: async (run) => run,
+      updateRun: async (run) => {
+        updated.push(run);
+        return run;
+      },
       schedule: async (run) => {
         scheduled.push(run);
         return run;
@@ -133,6 +144,67 @@ describe("workflow rehydration", () => {
       recordError: () => undefined,
     });
     expect(scheduled).toHaveLength(0);
+    expect(updated[0]?.occurrences[0]).toMatchObject({
+      status: "failed",
+      sessionFile: "/tmp/interrupted.jsonl",
+    });
+    expect(updated[0]?.occurrences[0]).not.toHaveProperty("runtimeId");
+  });
+
+  it("removes stale runtime IDs from completed records but keeps reopen files", async () => {
+    const definition = {
+      format: "pi-deck.agent-workflow" as const,
+      schemaVersion: 2 as const,
+      id: "completed",
+      revision: 1,
+      name: "Completed",
+      inputs: [],
+      entryNodeId: "work",
+      nodes: [
+        {
+          id: "work",
+          name: "Work",
+          role: "worker" as const,
+          config: { instructions: "work" },
+        },
+      ],
+      relationships: [{ id: "end", from: "work", to: { end: "completed" } }],
+    };
+    const initial = createWorkflowRoleRun(definition, "workspace");
+    const completed = {
+      ...initial,
+      status: "completed" as const,
+      occurrences: initial.occurrences.map((item) => ({
+        ...item,
+        status: "completed" as const,
+        runtimeId: "stale-runtime",
+        sessionFile: "/tmp/completed.jsonl",
+      })),
+    };
+    const updated: (typeof initial)[] = [];
+    const emitted: (typeof initial)[] = [];
+    const scheduled: (typeof initial)[] = [];
+    await rehydrateCanonicalWorkflowRuns([completed], {
+      resolveWorkspace: async () => undefined,
+      updateRun: async (run) => {
+        updated.push(run);
+        return run;
+      },
+      schedule: async (run) => {
+        scheduled.push(run);
+        return run;
+      },
+      emit: (run) => emitted.push(run),
+      recordError: () => undefined,
+    });
+    expect(updated).toHaveLength(1);
+    expect(emitted).toHaveLength(1);
+    expect(scheduled).toHaveLength(0);
+    expect(updated[0]).toMatchObject({ status: "completed" });
+    expect(updated[0]?.occurrences[0]).toMatchObject({
+      sessionFile: "/tmp/completed.jsonl",
+    });
+    expect(updated[0]?.occurrences[0]).not.toHaveProperty("runtimeId");
   });
   it("rehydrates only the workspace released by a restore", async () => {
     const restoredRun = createWorkflowRun({

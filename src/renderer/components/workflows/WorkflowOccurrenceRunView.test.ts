@@ -62,6 +62,71 @@ describe("WorkflowOccurrenceRunView", () => {
     );
   });
 
+  it("offers a completed occurrence's saved session but not sessionId alone", async () => {
+    const definition = {
+      format: "pi-deck.agent-workflow" as const,
+      schemaVersion: 2 as const,
+      id: "worker",
+      revision: 1,
+      name: "Worker flow",
+      inputs: [],
+      entryNodeId: "work",
+      nodes: [
+        {
+          id: "work",
+          name: "Work",
+          role: "worker" as const,
+          config: { instructions: "Work." },
+        },
+      ],
+      relationships: [{ id: "end", from: "work", to: { end: "completed" } }],
+    };
+    const initial = createWorkflowRoleRun(definition, "workspace");
+    const completed = {
+      ...initial,
+      status: "completed" as const,
+      occurrences: initial.occurrences.map((occurrence) => ({
+        ...occurrence,
+        status: "completed" as const,
+        sessionId: "not-a-reopen-reference",
+        sessionFile: "/tmp/completed.jsonl",
+      })),
+    };
+    const container = document.createElement("div");
+    await act(async () =>
+      createRoot(container).render(
+        createElement(WorkflowOccurrenceRunView, {
+          run: completed,
+          onBack: vi.fn(),
+          onStop: vi.fn(),
+          onRetry: vi.fn(),
+          onAnswer: vi.fn(),
+        }),
+      ),
+    );
+    expect(container.textContent).toContain("Open Pi session");
+
+    const noReference = {
+      ...completed,
+      occurrences: completed.occurrences.map((occurrence) => {
+        const { sessionFile: _sessionFile, ...withoutSessionFile } = occurrence;
+        return withoutSessionFile;
+      }),
+    };
+    await act(async () =>
+      createRoot(container).render(
+        createElement(WorkflowOccurrenceRunView, {
+          run: noReference,
+          onBack: vi.fn(),
+          onStop: vi.fn(),
+          onRetry: vi.fn(),
+          onAnswer: vi.fn(),
+        }),
+      ),
+    );
+    expect(container.textContent).not.toContain("Open Pi session");
+  });
+
   it("renders occurrence details and submits Human approval without a session", async () => {
     const definition = {
       format: "pi-deck.agent-workflow" as const,

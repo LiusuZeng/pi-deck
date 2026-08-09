@@ -95,6 +95,63 @@ describe("Daily North America Heat Check canonical execution", () => {
       terminalOutcome: "completed",
     });
     expect(persisted.occurrences).toHaveLength(4);
-    expect(persisted.occurrences[0]?.sessionFile).toBe("/tmp/session-1.jsonl");
+    expect(persisted.occurrences).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ sessionFile: "/tmp/session-1.jsonl" }),
+      ]),
+    );
+    for (const occurrence of persisted.occurrences) {
+      expect(occurrence).not.toHaveProperty("runtimeId");
+      expect(occurrence.sessionFile).toMatch(/^\/tmp\/session-\d+\.jsonl$/);
+    }
+  });
+
+  it("fails a workflow-created session without a durable reopen file", async () => {
+    const definition = {
+      format: "pi-deck.agent-workflow" as const,
+      schemaVersion: 2 as const,
+      id: "missing-session-file",
+      revision: 1,
+      name: "Missing session file",
+      inputs: [],
+      entryNodeId: "work",
+      nodes: [
+        {
+          id: "work",
+          name: "Work",
+          role: "worker" as const,
+          config: { instructions: "work" },
+        },
+      ],
+      relationships: [{ id: "end", from: "work", to: { end: "completed" } }],
+    };
+    const closed: string[] = [];
+    const scheduler = new WorkflowOccurrenceScheduler({
+      createSession: async () => ({
+        runtimeId: "runtime-without-file",
+        state: { sessionId: "session" },
+        messages: [],
+      }),
+      prompt: async () => undefined,
+      getSnapshot: async () => ({
+        runtimeId: "unused",
+        state: {},
+        messages: [],
+      }),
+      closeSession: async (runtimeId) => {
+        closed.push(runtimeId);
+      },
+      persist: async (run) => run,
+      emit: () => undefined,
+    });
+    const run = await scheduler.schedule(
+      createWorkflowRoleRun(definition, "workspace"),
+    );
+    expect(run.occurrences[0]).toMatchObject({
+      status: "failed",
+      error: "Workflow Pi session has no saved session file for reopening.",
+    });
+    expect(run.occurrences[0]).not.toHaveProperty("runtimeId");
+    expect(closed).toEqual(["runtime-without-file"]);
   });
 });

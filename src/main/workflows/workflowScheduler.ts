@@ -957,6 +957,12 @@ export class WorkflowOccurrenceScheduler {
       try {
         const session = await this.dependencies.createSession(run.workspaceId);
         runtimeId = session.runtimeId;
+        const sessionFile = session.state.sessionFile;
+        if (typeof sessionFile !== "string" || !sessionFile.trim()) {
+          throw new Error(
+            "Workflow Pi session has no saved session file for reopening.",
+          );
+        }
         const prompt = renderWorkflowOccurrencePrompt(run, occurrence);
         run = await this.save(
           startWorkflowOccurrence(
@@ -965,7 +971,7 @@ export class WorkflowOccurrenceScheduler {
             runtimeId,
             session.state.sessionId,
             this.now(),
-            session.state.sessionFile,
+            sessionFile,
           ),
         );
         this.active.set(runtimeId, { runId, occurrenceId: occurrence.id });

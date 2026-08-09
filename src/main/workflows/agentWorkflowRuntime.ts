@@ -155,7 +155,7 @@ export function completeWorkflowOccurrence(
     throw new Error("Decider occurrences must return a boolean.");
   if (occurrence.role === "worker" && typeof value !== "string")
     throw new Error("Worker occurrences must return text.");
-  let next = patch(run, occurrenceId, {
+  let next = patch(clearRuntimeId(run, occurrenceId), occurrenceId, {
     status: "completed",
     output: typeof value === "string" ? bound(value) : value,
     completedAtMs: now,
@@ -211,7 +211,7 @@ export function failWorkflowOccurrence(
   const occurrence = occurrenceOf(run, occurrenceId);
   if (["completed", "cancelled", "skipped"].includes(occurrence.status))
     return run;
-  const next = patch(run, occurrenceId, {
+  const next = patch(clearRuntimeId(run, occurrenceId), occurrenceId, {
     status: "failed",
     error: bound(error, 4_000),
     updatedAtMs: now,
@@ -256,7 +256,11 @@ export function retryWorkflowOccurrence(
       // preserved but no longer participates in terminal derivation.
       occurrences: run.occurrences.map((item) =>
         item.id === prior.id
-          ? { ...item, status: "skipped" as const, updatedAtMs: now }
+          ? {
+              ...withoutRuntimeId(item),
+              status: "skipped" as const,
+              updatedAtMs: now,
+            }
           : item,
       ),
     },
@@ -290,7 +294,11 @@ export function stopWorkflowRoleRun(
     status: "stopped",
     occurrences: run.occurrences.map((item) =>
       ["ready", "queued", "running", "waitingHuman"].includes(item.status)
-        ? { ...item, status: "cancelled" as const, updatedAtMs: now }
+        ? {
+            ...withoutRuntimeId(item),
+            status: "cancelled" as const,
+            updatedAtMs: now,
+          }
         : item,
     ),
     updatedAtMs: now,
@@ -528,6 +536,20 @@ function occurrenceOf(run: WorkflowRoleRun, id: string): WorkflowOccurrence {
   const result = run.occurrences.find((item) => item.id === id);
   if (!result) throw new Error(`Unknown workflow occurrence: ${id}`);
   return result;
+}
+function clearRuntimeId(run: WorkflowRoleRun, id: string): WorkflowRoleRun {
+  return {
+    ...run,
+    occurrences: run.occurrences.map((item) =>
+      item.id === id ? withoutRuntimeId(item) : item,
+    ),
+  };
+}
+function withoutRuntimeId(
+  occurrence: WorkflowOccurrence,
+): Omit<WorkflowOccurrence, "runtimeId"> {
+  const { runtimeId: _runtimeId, ...withoutRuntime } = occurrence;
+  return withoutRuntime;
 }
 function patch(
   run: WorkflowRoleRun,

@@ -45,26 +45,39 @@ export async function rehydrateCanonicalWorkflowRuns(
     const hasQueued = persisted.occurrences.some(
       (item) => item.status === "queued",
     );
+    // runtimeId is process-local. Normalize old terminal records too, while
+    // retaining sessionFile as the durable Pi transcript reopen reference.
+    const hasRuntimeId = persisted.occurrences.some(
+      (item) => item.runtimeId !== undefined,
+    );
     const recovered =
-      lostRunning || hasQueued
+      lostRunning || hasQueued || hasRuntimeId
         ? workflowRunEnvelopeSchema.parse({
             ...persisted,
-            status: lostRunning ? "needsAttention" : "waiting",
+            status: lostRunning
+              ? "needsAttention"
+              : hasQueued
+                ? "waiting"
+                : persisted.status,
             updatedAtMs: now,
-            occurrences: persisted.occurrences.map((item) =>
-              item.status === "running"
+            occurrences: persisted.occurrences.map((item) => {
+              const { runtimeId: _runtimeId, ...withoutRuntimeId } = item;
+              return item.status === "running"
                 ? {
-                    ...item,
+                    ...withoutRuntimeId,
                     status: "failed" as const,
                     error:
                       "Pi session was interrupted by restart; retry this occurrence.",
-                    runtimeId: undefined,
                     updatedAtMs: now,
                   }
                 : item.status === "queued"
-                  ? { ...item, status: "ready" as const, updatedAtMs: now }
-                  : item,
-            ),
+                  ? {
+                      ...withoutRuntimeId,
+                      status: "ready" as const,
+                      updatedAtMs: now,
+                    }
+                  : withoutRuntimeId;
+            }),
           })
         : persisted;
     const run =

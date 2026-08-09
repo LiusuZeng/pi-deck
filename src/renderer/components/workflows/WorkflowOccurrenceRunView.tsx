@@ -98,9 +98,7 @@ export function WorkflowOccurrenceRunView(
                 {occurrence.error ? (
                   <p className="workflow-error">{occurrence.error}</p>
                 ) : null}
-                {occurrence.runtimeId ||
-                occurrence.sessionFile ||
-                occurrence.sessionId ? (
+                {occurrence.runtimeId || occurrence.sessionFile ? (
                   <button
                     type="button"
                     className="workflow-secondary-button"

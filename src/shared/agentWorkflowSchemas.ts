@@ -342,6 +342,7 @@ export const canonicalNodeOccurrenceSchema = z
     sessionId: z.string().min(1).optional(),
     /** Saved Pi identity retained after the runtime is closed for transcript reopening. */
     sessionFile: z.string().min(1).optional(),
+    /** Ephemeral live Pi runtime handle; never retained after closure or restart. */
     runtimeId: z.string().min(1).optional(),
     error: z.string().max(4_000).optional(),
     managedChildren: z.array(z.string().uuid()).default([]),
