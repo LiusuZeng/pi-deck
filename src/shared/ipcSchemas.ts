@@ -788,6 +788,13 @@ export const ipcChannels = {
   workflowOverrideCondition: "workflows:overrideCondition",
   workflowApproveGate: "workflows:approveGate",
   workflowEvent: "workflows:event",
+  canonicalWorkflowListRuns: "workflows:canonicalListRuns",
+  canonicalWorkflowGetRun: "workflows:canonicalGetRun",
+  canonicalWorkflowStartRun: "workflows:canonicalStartRun",
+  canonicalWorkflowStopRun: "workflows:canonicalStopRun",
+  canonicalWorkflowRetryOccurrence: "workflows:canonicalRetryOccurrence",
+  canonicalWorkflowAnswerHuman: "workflows:canonicalAnswerHuman",
+  canonicalWorkflowEvent: "workflows:canonicalEvent",
 } as const;
 
 export type IpcChannel = (typeof ipcChannels)[keyof typeof ipcChannels];

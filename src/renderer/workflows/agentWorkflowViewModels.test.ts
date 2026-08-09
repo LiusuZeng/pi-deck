@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { WorkflowDefinition } from "../../shared/workflowV2Schemas.js";
+import type { WorkflowDefinition } from "../../shared/agentWorkflowSchemas.js";
 import {
-  workflowV2CardViewModel,
-  workflowV2RoleSummary,
-} from "./workflowV2ViewModels.js";
+  agentWorkflowCardViewModel,
+  agentWorkflowRoleSummary,
+} from "./agentWorkflowViewModels.js";
 
 const workflow: WorkflowDefinition = {
   format: "pi-deck.agent-workflow",
@@ -71,9 +71,9 @@ const workflow: WorkflowDefinition = {
   ],
 };
 
-describe("workflow v2 view models", () => {
+describe("workflow agentWorkflow view models", () => {
   it("summarizes each of the four roles", () => {
-    const summaries = workflow.nodes.map(workflowV2RoleSummary);
+    const summaries = workflow.nodes.map(agentWorkflowRoleSummary);
 
     expect(summaries[0]).toBe("Produces: A patch");
     expect(summaries[1]).toBe("Decides: Ready?");
@@ -83,7 +83,7 @@ describe("workflow v2 view models", () => {
   });
 
   it("derives role counts and workflow facts without legacy conversion", () => {
-    expect(workflowV2CardViewModel(workflow)).toMatchObject({
+    expect(agentWorkflowCardViewModel(workflow)).toMatchObject({
       id: "delivery",
       nodeCount: 5,
       relationshipCount: 5,

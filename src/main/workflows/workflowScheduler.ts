@@ -18,8 +18,11 @@ import {
   readyWorkflowOccurrences,
   startWorkflowOccurrence,
   startWorkflowOrchestrator,
+  stopWorkflowRoleRun,
+  retryWorkflowOccurrence,
+  answerWorkflowHumanOccurrence,
   type WorkflowRoleRun,
-} from "./workflowV2Runtime.js";
+} from "./agentWorkflowRuntime.js";
 import type {
   WorkflowRun,
   WorkflowStepDefinition,
@@ -696,6 +699,19 @@ function isTerminalRun(run: WorkflowRun): boolean {
   return ["completed", "failed", "stopped"].includes(run.status);
 }
 
+export function workflowExecutionModelSetting(
+  value: string | undefined,
+): { provider?: string; modelId?: string } | undefined {
+  if (value === undefined || value === "inherit") return undefined;
+  const separator = value.indexOf("/");
+  return separator > 0
+    ? {
+        provider: value.slice(0, separator),
+        modelId: value.slice(separator + 1),
+      }
+    : { modelId: value };
+}
+
 function isCapacityError(error: unknown): boolean {
   return (
     error instanceof Error &&
@@ -764,7 +780,7 @@ function findFinalAssistant(
 }
 
 /**
- * Small occurrence scheduler used by v2 callers.  It has a separate store
+ * Small occurrence scheduler used by agentWorkflow callers.  It has a separate store
  * contract so the existing v1 IPC/store remains byte-for-byte compatible.
  * Unlike WorkflowScheduler it intentionally claims every ready occurrence;
  * worker capacity is the only concurrency limiter.
@@ -805,10 +821,48 @@ export class WorkflowOccurrenceScheduler {
     this.runs.set(resumable.id, resumable);
     return this.pump(resumable.id);
   }
+  /** Stops owned sessions before persisting cancellation, so late completions lose ownership. */
+  async stop(runId: string): Promise<WorkflowRoleRun> {
+    const run = await this.current(runId);
+    if (!run) throw new Error(`Unknown workflow run: ${runId}`);
+    const owned = [...this.active.entries()].filter(
+      ([, owner]) => owner.runId === runId,
+    );
+    for (const [runtimeId] of owned) {
+      this.active.delete(runtimeId);
+      await this.closeQuietly(runtimeId);
+    }
+    return this.save(stopWorkflowRoleRun(run, this.now()));
+  }
+  async retry(runId: string, occurrenceId: string): Promise<WorkflowRoleRun> {
+    const run = await this.current(runId);
+    if (!run) throw new Error(`Unknown workflow run: ${runId}`);
+    const next = await this.save(
+      retryWorkflowOccurrence(run, occurrenceId, this.now()),
+    );
+    return this.pump(next.id);
+  }
+  async answerHuman(
+    runId: string,
+    occurrenceId: string,
+    value: string | boolean,
+  ): Promise<WorkflowRoleRun> {
+    const run = await this.current(runId);
+    if (!run) throw new Error(`Unknown workflow run: ${runId}`);
+    const next = await this.save(
+      answerWorkflowHumanOccurrence(run, occurrenceId, value, this.now()),
+    );
+    return this.pump(next.id);
+  }
   async handleRuntimeEvent(event: WorkflowRuntimeEvent): Promise<void> {
-    if (event.type !== "agent_end") return;
+    // A worker process exit has the same ownership and failure semantics as an
+    // error end event; completed occurrences are never recreated by this path.
+    if (event.type !== "agent_end" && event.type !== "worker_exit") return;
     const owner = this.active.get(event.runtimeId);
     if (!owner) return;
+    // Pi may emit an intermediate failed end while retaining this runtime for
+    // automatic retry. Keep ownership so its eventual completion is accepted.
+    if (event.type === "agent_end" && event.willRetry === true) return;
     this.active.delete(event.runtimeId);
     try {
       const run = await this.current(owner.runId);
@@ -822,7 +876,11 @@ export class WorkflowOccurrenceScheduler {
         occurrence.status !== "running"
       )
         return;
-      if (event.status === "error" || event.status === "aborted") {
+      if (
+        event.type === "worker_exit" ||
+        event.status === "error" ||
+        event.status === "aborted"
+      ) {
         await this.save(
           failWorkflowOccurrence(
             run,
@@ -907,6 +965,7 @@ export class WorkflowOccurrenceScheduler {
             runtimeId,
             session.state.sessionId,
             this.now(),
+            session.state.sessionFile,
           ),
         );
         this.active.set(runtimeId, { runId, occurrenceId: occurrence.id });
@@ -919,15 +978,17 @@ export class WorkflowOccurrenceScheduler {
           node.role !== "orchestrator" &&
           node.execution &&
           this.dependencies.configureSession
-        )
+        ) {
+          const model = workflowExecutionModelSetting(node.execution.model);
+          const thinkingLevel =
+            node.execution.thinking === "inherit"
+              ? undefined
+              : node.execution.thinking;
           await this.dependencies.configureSession(runtimeId, {
-            ...(node.execution.model
-              ? { model: { modelId: node.execution.model } }
-              : {}),
-            ...(node.execution.thinking
-              ? { thinkingLevel: node.execution.thinking }
-              : {}),
+            ...(model ? { model } : {}),
+            ...(thinkingLevel ? { thinkingLevel } : {}),
           });
+        }
         await this.dependencies.prompt(runtimeId, prompt);
       } catch (error) {
         if (runtimeId) {

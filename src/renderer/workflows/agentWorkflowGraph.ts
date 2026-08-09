@@ -1,9 +1,9 @@
 import type {
   WorkflowDefinition,
   WorkflowNode,
-} from "../../shared/workflowV2Schemas.js";
+} from "../../shared/agentWorkflowSchemas.js";
 
-export interface WorkflowV2GraphRoute {
+export interface AgentWorkflowGraphRoute {
   /** Canonical relationship ID, retained for stable rendering identity. */
   id: string;
   from: string;
@@ -12,17 +12,17 @@ export interface WorkflowV2GraphRoute {
   terminal: boolean;
 }
 
-export interface WorkflowV2GraphNode {
+export interface AgentWorkflowGraphNode {
   id: string;
   name: string;
   role: WorkflowNode["role"];
   detail: string;
-  managedNodes: WorkflowV2GraphNode[];
+  managedNodes: AgentWorkflowGraphNode[];
 }
 
-export interface WorkflowV2GraphModel {
-  topLevelNodes: WorkflowV2GraphNode[];
-  routes: WorkflowV2GraphRoute[];
+export interface AgentWorkflowGraphModel {
+  topLevelNodes: AgentWorkflowGraphNode[];
+  routes: AgentWorkflowGraphRoute[];
   terminalOutcomes: string[];
 }
 
@@ -57,9 +57,9 @@ function nodeDetail(node: WorkflowNode): string {
  * Produces a stable, read-only graph projection. Source document order is used
  * as the tie-breaker after routing outward from the entry node.
  */
-export function deriveWorkflowV2Graph(
+export function deriveAgentWorkflowGraph(
   definition: WorkflowDefinition,
-): WorkflowV2GraphModel {
+): AgentWorkflowGraphModel {
   const nodesById = new Map(definition.nodes.map((node) => [node.id, node]));
   const topLevel = definition.nodes.filter((node) => !node.managedBy);
   const routes = definition.relationships.map((relationship) => ({
@@ -89,7 +89,7 @@ export function deriveWorkflowV2Graph(
   visit(definition.entryNodeId);
   topLevel.forEach((node) => visit(node.id));
 
-  const project = (node: WorkflowNode): WorkflowV2GraphNode => {
+  const project = (node: WorkflowNode): AgentWorkflowGraphNode => {
     const managed =
       node.role === "orchestrator"
         ? definition.nodes

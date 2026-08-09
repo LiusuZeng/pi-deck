@@ -1,6 +1,6 @@
 # Agent Workflows — Product Feedback and Continuation Notes
 
-**Status:** canonical role-based authoring integrated; run wiring and remaining UX feedback tracked<br>
+**Status:** canonical Agent Workflows authoring integrated; run wiring and remaining UX feedback tracked<br>
 **Feedback captured:** 2026-08-07<br>
 **Continuation branch:** `dev/agent-workflows-prompt-first`
 
@@ -24,7 +24,7 @@ another laptop without relying on chat history.
   attention, weaken the primary-action hierarchy, and add redundant keyboard and
   screen-reader stops. A follow-up session should decide which single creation
   action is appropriate in the empty state while preserving an obvious way to
-  create additional workflows after templates exist.
+  create another workflow when workflows exist.
 - **Implementation context:** Both controls are in
   `src/renderer/components/workflows/WorkflowHome.tsx` (the header action near
   lines 245–251 and empty-state action near lines 282–289). Focused coverage
@@ -35,11 +35,11 @@ another laptop without relying on chat history.
 
 ### 2. Replace the field-heavy step model with four execution roles
 
-- **Status:** Canonical role-based authoring, graph, persistence, and core runtime
+- **Status:** Canonical Agent Workflows authoring, graph, persistence, and core runtime
   implemented; end-to-end occurrence-run UI wiring remains tracked.
 - **Reported:** 2026-08-07.
 - **Area:** Workflow concepts, authoring model, and agent-step configuration UX.
-- **Canonical product design:** [Role-Based Agent Workflows](agent-workflows-role-based-design.md).
+- **Canonical product design:** [Agent Workflows](agent-workflows-role-based-design.md).
 - **Screenshot:** [Current field-heavy agent-step editor](assets/agent-workflows-feedback/agent-step-editor-role-model.png).
 - **Problem:** The current editor mixes an agent's instructions with graph wiring,
   start behavior, model overrides, thinking settings, and transition controls in

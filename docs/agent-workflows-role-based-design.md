@@ -1,4 +1,4 @@
-# Agent Workflows — Canonical Role-Based Design
+# Agent Workflows — Canonical Product Design
 
 **Status:** Product direction approved; Build, Graph, persistence, and core role runtime implemented; occurrence-run UI integration remains in progress
 **Date:** 2026-08-07

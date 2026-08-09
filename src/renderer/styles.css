@@ -4593,13 +4593,13 @@ body {
 }
 
 /* Agent workflow builder: compact flow cards plus a focused inspector. */
-.workflow-v2-tabs {
+.agent-workflow-tabs {
   display: flex;
   gap: 4px;
   margin: 0 0 16px;
   border-bottom: 1px solid var(--border, #334155);
 }
-.workflow-v2-tabs button {
+.agent-workflow-tabs button {
   padding: 8px 13px;
   border: 0;
   background: transparent;
@@ -4607,24 +4607,24 @@ body {
   border-bottom: 2px solid transparent;
   cursor: pointer;
 }
-.workflow-v2-tabs button.is-active {
+.agent-workflow-tabs button.is-active {
   border-bottom-color: var(--accent, #60a5fa);
   font-weight: 700;
 }
-.workflow-v2-build {
+.agent-workflow-build {
   display: grid;
   grid-template-columns: minmax(230px, 0.8fr) minmax(320px, 1.2fr);
   gap: 16px;
   align-items: start;
 }
-.workflow-v2-cards {
+.agent-workflow-cards {
   display: grid;
   gap: 10px;
 }
-.workflow-v2-add {
+.agent-workflow-add {
   position: relative;
 }
-.workflow-v2-step-picker {
+.agent-workflow-step-picker {
   position: absolute;
   z-index: 2;
   top: calc(100% + 8px);
@@ -4638,7 +4638,7 @@ body {
   background: var(--color-surface-raised);
   box-shadow: var(--shadow-md);
 }
-.workflow-v2-step-picker button {
+.agent-workflow-step-picker button {
   display: grid;
   gap: 2px;
   padding: 10px;
@@ -4649,14 +4649,14 @@ body {
   text-align: left;
   cursor: pointer;
 }
-.workflow-v2-step-picker button:hover,
-.workflow-v2-step-picker button:focus-visible {
+.agent-workflow-step-picker button:hover,
+.agent-workflow-step-picker button:focus-visible {
   background: var(--color-surface-hover);
 }
-.workflow-v2-step-picker small {
+.agent-workflow-step-picker small {
   color: var(--color-text-muted);
 }
-.workflow-v2-step-card {
+.agent-workflow-step-card {
   text-align: left;
   display: grid;
   gap: 4px;
@@ -4667,24 +4667,24 @@ body {
   color: inherit;
   cursor: pointer;
 }
-.workflow-v2-step-card.is-selected {
+.agent-workflow-step-card.is-selected {
   border-color: var(--accent, #60a5fa);
   box-shadow: 0 0 0 1px var(--accent, #60a5fa);
 }
-.workflow-v2-step-card small {
+.agent-workflow-step-card small {
   opacity: 0.72;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.workflow-v2-card-heading {
+.agent-workflow-card-heading {
   display: flex;
   align-items: center;
   gap: 7px;
   font-size: 12px;
   opacity: 0.8;
 }
-.workflow-v2-card-heading b {
+.agent-workflow-card-heading b {
   display: inline-grid;
   width: 20px;
   height: 20px;
@@ -4692,69 +4692,79 @@ body {
   border-radius: 50%;
   background: color-mix(in srgb, var(--accent, #60a5fa) 16%, transparent);
 }
-.workflow-v2-card-heading i {
+.agent-workflow-card-heading i {
   font-style: normal;
 }
-.workflow-v2-step-card em {
+.agent-workflow-step-card em {
   margin-top: 2px;
   color: var(--accent, #60a5fa);
   font-size: 13px;
   font-style: normal;
 }
-.workflow-v2-inspector,
-.workflow-v2-graph,
-.workflow-v2-json {
+.agent-workflow-inspector,
+.agent-workflow-graph,
+.agent-workflow-json {
   padding: 16px;
   border: 1px solid var(--border, #334155);
   border-radius: 8px;
 }
-.workflow-v2-inspector fieldset {
+.agent-workflow-inspector fieldset {
   margin: 14px 0;
   border: 0;
   padding: 0;
 }
-.workflow-v2-roles {
+.agent-workflow-roles {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
 }
-.workflow-v2-roles button[aria-pressed="true"] {
+.agent-workflow-roles button[aria-pressed="true"] {
   outline: 2px solid var(--accent, #60a5fa);
 }
-.workflow-v2-json textarea {
+.agent-workflow-json textarea {
   width: 100%;
   box-sizing: border-box;
   font-family: ui-monospace, SFMono-Regular, monospace;
 }
 @media (max-width: 720px) {
-  .workflow-v2-build {
+  .agent-workflow-build {
     grid-template-columns: 1fr;
   }
 }
 
-.workflow-v2-inspector-heading {
+.agent-workflow-inspector-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
 }
-.workflow-v2-inspector-close {
+.agent-workflow-inspector-close {
   display: none;
 }
-.workflow-v2-validation {
+.agent-workflow-validation {
   margin: 0 0 12px;
   color: var(--color-danger, #dc2626);
   font-size: 13px;
 }
-.workflow-v2-policy {
+.agent-workflow-policy {
   color: var(--color-text-muted);
   font-size: 13px;
 }
+.agent-workflow-execution-configuration {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 12px 0;
+}
+.agent-workflow-execution-configuration .pi-configuration-menu {
+  flex: 0 0 auto;
+}
 @media (min-width: 721px) and (max-width: 980px) {
-  .workflow-v2-build {
+  .agent-workflow-build {
     grid-template-columns: minmax(210px, 0.8fr) minmax(300px, 1.2fr);
   }
-  .workflow-v2-inspector {
+  .agent-workflow-inspector {
     position: sticky;
     top: 12px;
     max-height: calc(100vh - 24px);
@@ -4762,10 +4772,10 @@ body {
   }
 }
 @media (max-width: 720px) {
-  .workflow-v2-inspector {
+  .agent-workflow-inspector {
     display: none;
   }
-  .workflow-v2-inspector.is-open {
+  .agent-workflow-inspector.is-open {
     position: fixed;
     z-index: 20;
     inset: 0;
@@ -4776,7 +4786,7 @@ body {
     border-radius: 0;
     background: var(--color-surface-raised, #fff);
   }
-  .workflow-v2-inspector-close {
+  .agent-workflow-inspector-close {
     display: inline-block;
   }
 }

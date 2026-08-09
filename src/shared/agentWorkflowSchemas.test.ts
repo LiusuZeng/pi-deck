@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { workflowDefinitionSchema } from "./workflowV2Schemas.js";
+import {
+  canonicalNodeOccurrenceSchema,
+  workflowDefinitionSchema,
+} from "./agentWorkflowSchemas.js";
 
 const base = () => ({
   format: "pi-deck.agent-workflow" as const,
@@ -7,7 +10,7 @@ const base = () => ({
   id: "feature-delivery",
   revision: 1,
   name: "Feature delivery",
-  description: "A role based workflow.",
+  description: "A canonical agent workflow.",
   inputs: [],
   entryNodeId: "plan",
   nodes: [
@@ -68,7 +71,26 @@ const base = () => ({
   ],
 });
 
-describe("v2 workflow contracts", () => {
+describe("canonical node occurrence schema", () => {
+  it("persists a saved Pi session file for reopening after the runtime exits", () => {
+    expect(
+      canonicalNodeOccurrenceSchema.parse({
+        id: "00000000-0000-4000-8000-000000000001",
+        nodeId: "worker",
+        role: "worker",
+        attempt: 1,
+        status: "completed",
+        sessionFile: "/tmp/workflow-session.jsonl",
+        managedChildren: [],
+        aggregation: [],
+        createdAtMs: 1,
+        updatedAtMs: 1,
+      }).sessionFile,
+    ).toBe("/tmp/workflow-session.jsonl");
+  });
+});
+
+describe("agentWorkflow workflow contracts", () => {
   it("accepts exactly the four native roles and canonical fields", () => {
     const parsed = workflowDefinitionSchema.parse(base());
     expect(parsed.nodes.map((node) => node.role)).toEqual([

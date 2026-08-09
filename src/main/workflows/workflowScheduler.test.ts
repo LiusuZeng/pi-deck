@@ -6,6 +6,7 @@ import {
 } from "./workflowEngine.js";
 import {
   renderWorkflowTranscript,
+  workflowExecutionModelSetting,
   WorkflowScheduler,
   WORKFLOW_TRANSCRIPT_MAX_CHARS,
   type WorkflowSessionSnapshot,
@@ -14,6 +15,19 @@ import type {
   WorkflowRun,
   WorkflowTemplate,
 } from "../../shared/workflowSchemas.js";
+
+describe("workflow execution model settings", () => {
+  it("preserves the provider selected in the workflow builder", () => {
+    expect(workflowExecutionModelSetting("anthropic/claude-sonnet-4")).toEqual({
+      provider: "anthropic",
+      modelId: "claude-sonnet-4",
+    });
+    expect(workflowExecutionModelSetting("local-model")).toEqual({
+      modelId: "local-model",
+    });
+    expect(workflowExecutionModelSetting("inherit")).toBeUndefined();
+  });
+});
 
 const template: WorkflowTemplate = {
   id: "00000000-0000-4000-8000-000000000001",

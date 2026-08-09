@@ -1,28 +1,28 @@
 import type {
   WorkflowDefinition,
   WorkflowNode,
-} from "../../shared/workflowV2Schemas.js";
+} from "../../shared/agentWorkflowSchemas.js";
 
-export type WorkflowV2Role = WorkflowNode["role"];
+export type AgentWorkflowRole = WorkflowNode["role"];
 
-export const workflowV2RoleLabel: Record<WorkflowV2Role, string> = {
+export const agentWorkflowRoleLabel: Record<AgentWorkflowRole, string> = {
   worker: "Worker",
   decider: "Decider",
   orchestrator: "Orchestrator",
   human: "Human",
 };
 
-export interface WorkflowV2CardViewModel {
+export interface AgentWorkflowCardViewModel {
   id: string;
   name: string;
   description: string | undefined;
   nodeCount: number;
   relationshipCount: number;
-  roleCounts: Record<WorkflowV2Role, number>;
+  roleCounts: Record<AgentWorkflowRole, number>;
   roleSummary: string;
 }
 
-export function workflowV2RoleSummary(node: WorkflowNode): string {
+export function agentWorkflowRoleSummary(node: WorkflowNode): string {
   switch (node.role) {
     case "worker":
       return node.config.expectedOutput
@@ -40,10 +40,10 @@ export function workflowV2RoleSummary(node: WorkflowNode): string {
   }
 }
 
-export function workflowV2CardViewModel(
+export function agentWorkflowCardViewModel(
   definition: WorkflowDefinition,
-): WorkflowV2CardViewModel {
-  const roleCounts: Record<WorkflowV2Role, number> = {
+): AgentWorkflowCardViewModel {
+  const roleCounts: Record<AgentWorkflowRole, number> = {
     worker: 0,
     decider: 0,
     orchestrator: 0,
@@ -51,7 +51,7 @@ export function workflowV2CardViewModel(
   };
   for (const node of definition.nodes) roleCounts[node.role] += 1;
 
-  const summaries = definition.nodes.map(workflowV2RoleSummary);
+  const summaries = definition.nodes.map(agentWorkflowRoleSummary);
   return {
     id: definition.id,
     name: definition.name,

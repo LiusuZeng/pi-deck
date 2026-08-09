@@ -53,7 +53,7 @@ describe("preload PiDeck API validation", () => {
     expect(electronMock.ipcRenderer.invoke).not.toHaveBeenCalled();
   });
 
-  it("exposes canonical v2 workflow IPC methods with strict workspace scope", async () => {
+  it("exposes canonical agentWorkflow workflow IPC methods with strict workspace scope", async () => {
     const workflow = {
       format: "pi-deck.agent-workflow" as const,
       schemaVersion: 2 as const,

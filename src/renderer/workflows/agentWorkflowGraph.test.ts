@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { WorkflowDefinition } from "../../shared/workflowV2Schemas.js";
-import { deriveWorkflowV2Graph } from "./workflowV2Graph.js";
+import type { WorkflowDefinition } from "../../shared/agentWorkflowSchemas.js";
+import { deriveAgentWorkflowGraph } from "./agentWorkflowGraph.js";
 
 const definition: WorkflowDefinition = {
   format: "pi-deck.agent-workflow",
@@ -111,9 +111,9 @@ const definition: WorkflowDefinition = {
   ],
 };
 
-describe("deriveWorkflowV2Graph", () => {
+describe("deriveAgentWorkflowGraph", () => {
   it("derives loop, fan-out, human, decision, and terminal semantics", () => {
-    const graph = deriveWorkflowV2Graph(definition);
+    const graph = deriveAgentWorkflowGraph(definition);
     const loop = graph.topLevelNodes.find((node) => node.id === "iterate")!;
     const fanout = graph.topLevelNodes.find((node) => node.id === "parallel")!;
     expect(loop.detail).toContain("maximum 3 iterations");
@@ -141,12 +141,12 @@ describe("deriveWorkflowV2Graph", () => {
 
   it("keeps entry routing first and uses document order for disconnected ties", () => {
     expect(
-      deriveWorkflowV2Graph(definition).topLevelNodes.map((node) => node.id),
+      deriveAgentWorkflowGraph(definition).topLevelNodes.map((node) => node.id),
     ).toEqual(["prepare", "iterate", "parallel", "approve", "decide"]);
   });
 
   it("retains relationship IDs for duplicate unconditional same-endpoint routes", () => {
-    const graph = deriveWorkflowV2Graph({
+    const graph = deriveAgentWorkflowGraph({
       ...definition,
       relationships: [
         ...definition.relationships,
@@ -166,7 +166,7 @@ describe("deriveWorkflowV2Graph", () => {
   });
 
   it("labels Human choice routes with their declared options", () => {
-    const graph = deriveWorkflowV2Graph({
+    const graph = deriveAgentWorkflowGraph({
       ...definition,
       nodes: definition.nodes.map((node) =>
         node.id === "approve"

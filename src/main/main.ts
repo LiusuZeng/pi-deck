@@ -90,11 +90,18 @@ import {
   workflowUpdateTemplateRequestSchema,
 } from "../shared/workflowSchemas.js";
 import {
+  canonicalWorkflowGetRunRequestSchema,
+  canonicalWorkflowHumanAnswerRequestSchema,
+  canonicalWorkflowListRunsRequestSchema,
+  canonicalWorkflowOccurrenceRequestSchema,
+  canonicalWorkflowStartRunRequestSchema,
   workflowCreateRequestSchema,
   workflowDefinitionSchema,
   workflowListRequestSchema,
+  workflowRunEnvelopeSchema,
   workflowUpdateRequestSchema,
-} from "../shared/workflowV2Schemas.js";
+  type WorkflowRunEnvelope,
+} from "../shared/agentWorkflowSchemas.js";
 import type {
   AppBootstrapState,
   AppSettings,
@@ -164,14 +171,19 @@ import {
   overrideWorkflowCondition,
   stopWorkflowRun,
 } from "./workflows/workflowEngine.js";
-import { rehydrateWorkflowRuns as rehydratePersistedWorkflowRuns } from "./workflows/workflowRehydration.js";
+import {
+  rehydrateWorkflowRuns as rehydratePersistedWorkflowRuns,
+  rehydrateCanonicalWorkflowRuns,
+} from "./workflows/workflowRehydration.js";
 import { WorkflowStore } from "./workflows/workflowStore.js";
+import { createWorkflowRoleRun } from "./workflows/agentWorkflowRuntime.js";
 import {
   initializeWorkflows,
   requireAgentWorkflows,
   type WorkflowInitialization,
 } from "./workflows/workflowAvailability.js";
 import {
+  WorkflowOccurrenceScheduler,
   WorkflowScheduler,
   type WorkflowRuntimeEvent,
 } from "./workflows/workflowScheduler.js";
@@ -240,6 +252,7 @@ let isQuittingAfterChatWorkerCleanup = false;
 let testProjectPickQueue: string[] | undefined;
 
 let workflowScheduler: WorkflowScheduler | undefined;
+let workflowOccurrenceScheduler: WorkflowOccurrenceScheduler | undefined;
 
 const maxImportedImageBytes = MAX_IMAGE_BYTES;
 const maxPromptImages = 10;
@@ -289,6 +302,10 @@ async function bootstrap(): Promise<void> {
   });
   if (workflowInitialization.status === "available") {
     workflowScheduler = createWorkflowScheduler(settingsStore, diagnostics);
+    workflowOccurrenceScheduler = createWorkflowOccurrenceScheduler(
+      settingsStore,
+      diagnostics,
+    );
   } else {
     diagnostics.recordError(workflowInitialization.diagnostic);
   }
@@ -301,6 +318,10 @@ async function bootstrap(): Promise<void> {
   await workspaceStore.ensureDefaultWorkspace({
     activate: !hadWorkspaceMetadata || resolveChatBackendMode() === "fake",
   });
+  // Rehydrated canonical occurrences may immediately create Pi sessions. An
+  // adapter is safe to initialize here (it creates no worker by itself), while
+  // scheduling before it exists would turn resumable queued work into failure.
+  await ensureChatAdapter(settingsStore, diagnostics);
   await rehydrateWorkflowRuns();
 
   configureCsp();
@@ -1144,6 +1165,87 @@ function registerIpcHandlers(
   });
 
   registerValidatedIpc({
+    channel: ipcChannels.canonicalWorkflowListRuns,
+    requestSchema: canonicalWorkflowListRunsRequestSchema,
+    responseSchema: workflowRunEnvelopeSchema.array(),
+    diagnostics: diagnosticsService,
+    handler: async (request) => {
+      const workspaceId =
+        request?.workspaceId ??
+        (await ensureWorkspaceStore().getActiveWorkspace())?.id;
+      if (!workspaceId)
+        throw new Error("No workspace is selected for workflow runs.");
+      await requireOpenWorkspace(workspaceId);
+      return ensureWorkflowStore().listWorkflowRuns(workspaceId);
+    },
+  });
+  registerValidatedIpc({
+    channel: ipcChannels.canonicalWorkflowGetRun,
+    requestSchema: canonicalWorkflowGetRunRequestSchema,
+    responseSchema: workflowRunEnvelopeSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runId }) => {
+      const run = await ensureWorkflowStore().getWorkflowRun(runId);
+      await requireOpenWorkspace(run.workspaceId);
+      return run;
+    },
+  });
+  registerValidatedIpc({
+    channel: ipcChannels.canonicalWorkflowStartRun,
+    requestSchema: canonicalWorkflowStartRunRequestSchema,
+    responseSchema: workflowRunEnvelopeSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ workflowId, workspaceId, inputs }) => {
+      await requireOpenWorkspace(workspaceId);
+      const definition = await ensureWorkflowStore().getWorkflowForWorkspace(
+        workflowId,
+        workspaceId,
+      );
+      const run = createWorkflowRoleRun(definition, workspaceId, inputs);
+      const persisted = await ensureWorkflowStore().createWorkflowRun(run);
+      emitCanonicalWorkflowRunEvent(persisted);
+      return ensureWorkflowOccurrenceScheduler().schedule(persisted);
+    },
+  });
+  registerValidatedIpc({
+    channel: ipcChannels.canonicalWorkflowStopRun,
+    requestSchema: canonicalWorkflowGetRunRequestSchema,
+    responseSchema: workflowRunEnvelopeSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runId }) => {
+      const run = await ensureWorkflowStore().getWorkflowRun(runId);
+      await requireOpenWorkspace(run.workspaceId);
+      return ensureWorkflowOccurrenceScheduler().stop(runId);
+    },
+  });
+  registerValidatedIpc({
+    channel: ipcChannels.canonicalWorkflowRetryOccurrence,
+    requestSchema: canonicalWorkflowOccurrenceRequestSchema,
+    responseSchema: workflowRunEnvelopeSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runId, occurrenceId }) => {
+      const run = await ensureWorkflowStore().getWorkflowRun(runId);
+      await requireOpenWorkspace(run.workspaceId);
+      return ensureWorkflowOccurrenceScheduler().retry(runId, occurrenceId);
+    },
+  });
+  registerValidatedIpc({
+    channel: ipcChannels.canonicalWorkflowAnswerHuman,
+    requestSchema: canonicalWorkflowHumanAnswerRequestSchema,
+    responseSchema: workflowRunEnvelopeSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runId, occurrenceId, value }) => {
+      const run = await ensureWorkflowStore().getWorkflowRun(runId);
+      await requireOpenWorkspace(run.workspaceId);
+      return ensureWorkflowOccurrenceScheduler().answerHuman(
+        runId,
+        occurrenceId,
+        value,
+      );
+    },
+  });
+
+  registerValidatedIpc({
     channel: ipcChannels.workflowListRuns,
     requestSchema: workflowListRunsRequestSchema,
     responseSchema: workflowRunListResultSchema,
@@ -1420,6 +1522,13 @@ function ensureWorkflowStore(): WorkflowStore {
   return requireAgentWorkflows(workflowInitialization);
 }
 
+function ensureWorkflowOccurrenceScheduler(): WorkflowOccurrenceScheduler {
+  requireAgentWorkflows(workflowInitialization);
+  if (workflowOccurrenceScheduler === undefined)
+    throw new Error("Workflow occurrence scheduler is not initialized");
+  return workflowOccurrenceScheduler;
+}
+
 function ensureWorkflowScheduler(): WorkflowScheduler {
   requireAgentWorkflows(workflowInitialization);
   if (workflowScheduler === undefined) {
@@ -1441,6 +1550,18 @@ async function rehydrateWorkflowRuns(workspaceId?: string): Promise<void> {
       updateRun: (run) => store.updateRun(run),
       schedule: (run) => scheduler.schedule(run),
       emit: (run) => emitWorkflowRunEvent(run),
+      recordError: (message) => diagnostics?.recordError(message),
+    },
+    Date.now(),
+    workspaceId,
+  );
+  await rehydrateCanonicalWorkflowRuns(
+    await store.listWorkflowRuns(),
+    {
+      resolveWorkspace: (id) => resolveWorkspaceProject(id),
+      updateRun: (run) => store.updateWorkflowRun(run),
+      schedule: (run) => ensureWorkflowOccurrenceScheduler().schedule(run),
+      emit: emitCanonicalWorkflowRunEvent,
       recordError: (message) => diagnostics?.recordError(message),
     },
     Date.now(),
@@ -1547,6 +1668,108 @@ function createWorkflowScheduler(
     getRun: (runId) => ensureWorkflowStore().getRun(runId),
     persist: (run) => ensureWorkflowStore().updateRun(run),
     emit: emitWorkflowRunEvent,
+  });
+}
+
+function createWorkflowOccurrenceScheduler(
+  store: SettingsStore,
+  diagnosticsService: DiagnosticsService,
+): WorkflowOccurrenceScheduler {
+  return new WorkflowOccurrenceScheduler({
+    createSession: async (workspaceId) => {
+      const project = await resolveWorkspaceProject(workspaceId);
+      const snapshot = await createChatSessionSnapshot(
+        store,
+        diagnosticsService,
+        project,
+        workspaceId,
+      );
+      return {
+        runtimeId: snapshot.runtimeId,
+        state: snapshot.state,
+        messages: snapshot.messages,
+      };
+    },
+    prompt: async (runtimeId, text) => {
+      const adapter = chatAdapter;
+      if (adapter === undefined || !adapter.hasRuntime(runtimeId)) {
+        throw new Error(
+          `Workflow chat runtime is no longer attached: ${runtimeId}`,
+        );
+      }
+      await adapter.prompt(runtimeId, { text });
+    },
+    getSnapshot: async (runtimeId) => {
+      const adapter = chatAdapter;
+      if (adapter === undefined || !adapter.hasRuntime(runtimeId)) {
+        throw new Error(
+          `Workflow chat runtime is no longer attached: ${runtimeId}`,
+        );
+      }
+      const snapshot = await getChatSnapshotForRuntime(
+        adapter,
+        runtimeId,
+        chatRuntimeModes.get(runtimeId) ?? resolveChatBackendMode(),
+      );
+      return {
+        runtimeId: snapshot.runtimeId,
+        state: snapshot.state,
+        messages: snapshot.messages,
+      };
+    },
+    closeSession: async (runtimeId) => {
+      const adapter = chatAdapter;
+      if (adapter !== undefined && adapter.hasRuntime(runtimeId)) {
+        await closeAttachedChatRuntime(adapter, runtimeId);
+      }
+    },
+    configureSession: async (runtimeId, settings) => {
+      const adapter = chatAdapter;
+      if (adapter === undefined || !adapter.hasRuntime(runtimeId)) {
+        throw new Error(
+          `Workflow chat runtime is no longer attached: ${runtimeId}`,
+        );
+      }
+      if (settings.model !== undefined) {
+        await adapter.request(runtimeId, "set_model", settings.model);
+      }
+      if (settings.thinkingLevel !== undefined) {
+        await adapter.request(runtimeId, "set_thinking_level", {
+          level: settings.thinkingLevel,
+        });
+      }
+      const state = await adapter.getRuntimeStatus(runtimeId);
+      const modelId = typeof state.model === "string" ? state.model : undefined;
+      const provider =
+        typeof state.provider === "string" ? state.provider : undefined;
+      if (
+        settings.model?.modelId !== undefined &&
+        modelId !== settings.model.modelId
+      ) {
+        throw new Error(
+          `Pi did not apply workflow model override: ${settings.model.modelId}`,
+        );
+      }
+      if (
+        settings.model?.provider !== undefined &&
+        provider !== settings.model.provider
+      ) {
+        throw new Error(
+          `Pi did not apply workflow provider override: ${settings.model.provider}`,
+        );
+      }
+      if (
+        settings.thinkingLevel !== undefined &&
+        state.thinkingLevel !== settings.thinkingLevel
+      ) {
+        throw new Error(
+          `Pi did not apply workflow thinking override: ${settings.thinkingLevel}`,
+        );
+      }
+    },
+    getRun: (runId) => ensureWorkflowStore().getWorkflowRun(runId),
+    persist: (run) => ensureWorkflowStore().updateWorkflowRun(run),
+    emit: emitCanonicalWorkflowRunEvent,
   });
 }
 
@@ -2044,6 +2267,9 @@ async function initializeChatAdapter(
     // live worker to read its final transcript; worker_exit itself is handled
     // as a terminal workflow failure before the adapter forgets the worker.
     void workflowScheduler?.handleRuntimeEvent(
+      parsed.data as WorkflowRuntimeEvent,
+    );
+    void workflowOccurrenceScheduler?.handleRuntimeEvent(
       parsed.data as WorkflowRuntimeEvent,
     );
     if (parsed.data.type === "worker_exit") {
@@ -4360,3 +4586,10 @@ bootstrap().catch((error: unknown) => {
   console.error(message);
   app.quit();
 });
+
+function emitCanonicalWorkflowRunEvent(run: WorkflowRunEnvelope): void {
+  mainWindow?.webContents.send(ipcChannels.canonicalWorkflowEvent, {
+    type: "workflow_occurrence_run_updated",
+    run,
+  });
+}

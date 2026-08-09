@@ -5,10 +5,12 @@ import {
   createWorkflowRoleRun,
   failWorkflowOccurrence,
   readyWorkflowOccurrences,
+  retryWorkflowOccurrence,
   startWorkflowOccurrence,
   startWorkflowOrchestrator,
   type WorkflowRoleDefinition,
-} from "./workflowV2Runtime.js";
+} from "./agentWorkflowRuntime.js";
+import { renderWorkflowOccurrencePrompt } from "./workflowPromptRenderer.js";
 
 const base = {
   format: "pi-deck.agent-workflow" as const,
@@ -54,7 +56,128 @@ function fanoutDefinition(completion: "all" | "any"): WorkflowRoleDefinition {
   };
 }
 
-describe("v2 occurrence runtime", () => {
+describe("agentWorkflow occurrence runtime", () => {
+  it("renders the configured first managed context without an Orchestrator output", () => {
+    const definition = fanoutDefinition("all");
+    const orchestrator = definition.nodes.find((node) => node.id === "fan");
+    if (!orchestrator || orchestrator.role !== "orchestrator")
+      throw new Error("fixture");
+    orchestrator.config.input = "shared orchestration input";
+    let run = createWorkflowRoleRun(definition, "workspace", {});
+    run = startWorkflowOrchestrator(run, run.occurrences[0].id);
+    const child = run.occurrences.find((item) => item.nodeId === "a");
+    if (!child) throw new Error("fixture");
+    expect(renderWorkflowOccurrencePrompt(run, child)).toContain(
+      "shared orchestration input",
+    );
+  });
+
+  it("retains the saved Pi session file on a running occurrence", () => {
+    const definition: WorkflowRoleDefinition = {
+      ...base,
+      entryNodeId: "worker",
+      nodes: [
+        {
+          id: "worker",
+          name: "Worker",
+          role: "worker",
+          config: { instructions: "do" },
+        },
+      ],
+      relationships: [{ id: "end", from: "worker", to: { end: "completed" } }],
+    };
+    let run = createWorkflowRoleRun(definition, "workspace");
+    run = startWorkflowOccurrence(
+      run,
+      run.occurrences[0].id,
+      "runtime",
+      "session",
+      2,
+      "/tmp/workflow-session.jsonl",
+    );
+    expect(run.occurrences[0]).toMatchObject({
+      runtimeId: "runtime",
+      sessionId: "session",
+      sessionFile: "/tmp/workflow-session.jsonl",
+    });
+  });
+
+  it("supersedes a failed attempt so a retry can complete the run", () => {
+    const definition: WorkflowRoleDefinition = {
+      ...base,
+      entryNodeId: "worker",
+      nodes: [
+        {
+          id: "worker",
+          name: "Worker",
+          role: "worker",
+          config: { instructions: "do" },
+        },
+      ],
+      relationships: [{ id: "end", from: "worker", to: { end: "completed" } }],
+    };
+    let run = createWorkflowRoleRun(definition, "workspace");
+    run = startWorkflowOccurrence(run, run.occurrences[0].id, "runtime");
+    run = failWorkflowOccurrence(run, run.occurrences[0].id, "failed");
+    run = retryWorkflowOccurrence(run, run.occurrences[0].id);
+    const retry = run.occurrences.at(-1)!;
+    run = startWorkflowOccurrence(run, retry.id, "retry-runtime");
+    run = completeWorkflowOccurrence(run, retry.id, "done");
+    expect(run.status).toBe("completed");
+    expect(run.occurrences[0].status).toBe("skipped");
+  });
+
+  it("records named terminal outcomes without treating rejection as a failure", () => {
+    const definition: WorkflowRoleDefinition = {
+      ...base,
+      entryNodeId: "worker",
+      nodes: [
+        {
+          id: "worker",
+          name: "Worker",
+          role: "worker",
+          config: { instructions: "do" },
+        },
+      ],
+      relationships: [{ id: "end", from: "worker", to: { end: "rejected" } }],
+    };
+    let run = createWorkflowRoleRun(definition, "workspace");
+    const occurrence = run.occurrences[0];
+    run = startWorkflowOccurrence(run, occurrence.id, "runtime", "session");
+    run = completeWorkflowOccurrence(run, occurrence.id, "done");
+    expect(run).toMatchObject({
+      status: "completed",
+      terminalOutcome: "rejected",
+    });
+  });
+
+  it("maps only the stopped terminal outcome to stopped", () => {
+    const definition: WorkflowRoleDefinition = {
+      ...base,
+      entryNodeId: "worker",
+      nodes: [
+        {
+          id: "worker",
+          name: "Worker",
+          role: "worker",
+          config: { instructions: "do" },
+        },
+      ],
+      relationships: [{ id: "end", from: "worker", to: { end: "stopped" } }],
+    };
+    let run = createWorkflowRoleRun(definition, "workspace");
+    run = startWorkflowOccurrence(
+      run,
+      run.occurrences[0].id,
+      "runtime",
+      "session",
+    );
+    run = completeWorkflowOccurrence(run, run.occurrences[0].id, "done");
+    expect(run).toMatchObject({
+      status: "stopped",
+      terminalOutcome: "stopped",
+    });
+  });
   it("uses boolean deciders and records each bounded loop occurrence", () => {
     const definition: WorkflowRoleDefinition = {
       ...base,

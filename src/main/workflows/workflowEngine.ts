@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-// v2 is occurrence-based rather than template-step based. Re-export its pure
+// agentWorkflow is occurrence-based rather than template-step based. Re-export its pure
 // engine here so callers that historically import the workflow engine have a
 // single stable entry point while v1 data remains untouched.
 export {
@@ -11,12 +11,12 @@ export {
   queueWorkflowOccurrence,
   readyWorkflowOccurrences,
   startWorkflowOccurrence,
-} from "./workflowV2Runtime.js";
+} from "./agentWorkflowRuntime.js";
 export type {
   WorkflowOccurrence,
   WorkflowRoleDefinition,
   WorkflowRoleRun,
-} from "./workflowV2Runtime.js";
+} from "./agentWorkflowRuntime.js";
 import {
   workflowRunSchema,
   workflowTemplateSchema,

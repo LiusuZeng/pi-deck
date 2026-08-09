@@ -13,9 +13,11 @@ import {
 import {
   workflowDefinitionSchema,
   workflowOccurrenceSchema,
+  workflowRunEnvelopeSchema,
   type WorkflowDefinition,
   type WorkflowOccurrence,
-} from "../../shared/workflowV2Schemas.js";
+  type WorkflowRunEnvelope,
+} from "../../shared/agentWorkflowSchemas.js";
 import { migrateV1Template, preserveLegacyRun } from "./workflowMigrations.js";
 import type { DiagnosticsRecorder } from "../diagnostics/diagnostics.js";
 
@@ -26,14 +28,17 @@ const v1StoreSchema = z
     runs: z.array(workflowRunSchema),
   })
   .strict();
-const v2StoreSchema = z
+const agentWorkflowStoreSchema = z
   .object({
     version: z.literal(2),
     workflows: z.array(workflowDefinitionSchema),
-    occurrences: z.array(workflowOccurrenceSchema),
+    /** Migration-only pre-canonical occurrence records. */
+    occurrences: z.array(workflowOccurrenceSchema).default([]),
+    /** Canonical occurrence-based runs. */
+    runs: z.array(workflowRunEnvelopeSchema).default([]),
     legacyRuns: z.array(workflowRunSchema),
-    // Scope is store metadata, never part of the canonical v2 document.
-    // Omitted entries are global for compatibility with already-persisted v2 files.
+    // Scope is store metadata, never part of the canonical agentWorkflow document.
+    // Omitted entries are global for compatibility with already-persisted agentWorkflow files.
     workflowScopes: z
       .record(z.string(), z.string().min(1).max(120))
       .default({}),
@@ -47,16 +52,17 @@ const emptyV3StoreSchema = z
   })
   .strict();
 type V1Store = z.infer<typeof v1StoreSchema>;
-type WorkflowStoreFile = z.infer<typeof v2StoreSchema>;
+type WorkflowStoreFile = z.infer<typeof agentWorkflowStoreSchema>;
 const emptyStore = (): WorkflowStoreFile => ({
   version: 2,
   workflows: [],
   occurrences: [],
+  runs: [],
   legacyRuns: [],
   workflowScopes: {},
 });
 
-/** Version-aware store. v1 runs remain in `legacyRuns`; they are never forged into v2 occurrences. */
+/** Version-aware store. v1 runs remain in `legacyRuns`; they are never forged into agentWorkflow occurrences. */
 export class WorkflowStore {
   readonly storeFile: string;
   private state = emptyStore();
@@ -94,6 +100,16 @@ export class WorkflowStore {
     const workflow = this.state.workflows.find((item) => item.id === id);
     if (!workflow) throw new Error(`Unknown workflow: ${id}`);
     return clone(workflow);
+  }
+  async getWorkflowForWorkspace(
+    id: string,
+    workspaceId: string,
+  ): Promise<WorkflowDefinition> {
+    const workflow = await this.getWorkflow(id);
+    const scope = this.state.workflowScopes[id];
+    if (scope !== undefined && scope !== workspaceId)
+      throw new Error(`Workflow ${id} is not available in this workspace`);
+    return workflow;
   }
   async createWorkflow(
     workflow: WorkflowDefinition,
@@ -149,8 +165,47 @@ export class WorkflowStore {
     return clone(parsed);
   }
 
-  // Compatibility boundary for the pre-v2 UI/runtime. It only handles v1
-  // templates that can be normalized to Workers; v2 runtime APIs use methods above.
+  /** Canonical run CRUD. Legacy run history remains in its explicit compatibility list. */
+  async listWorkflowRuns(workspaceId?: string): Promise<WorkflowRunEnvelope[]> {
+    await this.loadIfNeeded();
+    return clone(
+      this.state.runs.filter(
+        (run) => workspaceId === undefined || run.workspaceId === workspaceId,
+      ),
+    );
+  }
+  async getWorkflowRun(id: string): Promise<WorkflowRunEnvelope> {
+    await this.loadIfNeeded();
+    const run = this.state.runs.find((item) => item.id === id);
+    if (!run) throw new Error(`Unknown canonical workflow run: ${id}`);
+    return clone(run);
+  }
+  async createWorkflowRun(
+    run: WorkflowRunEnvelope,
+  ): Promise<WorkflowRunEnvelope> {
+    await this.loadIfNeeded();
+    const parsed = workflowRunEnvelopeSchema.parse(run);
+    if (this.state.runs.some((item) => item.id === parsed.id))
+      throw new Error(`Workflow run already exists: ${parsed.id}`);
+    await this.commit({ ...this.state, runs: [...this.state.runs, parsed] });
+    return clone(parsed);
+  }
+  async updateWorkflowRun(
+    run: WorkflowRunEnvelope,
+  ): Promise<WorkflowRunEnvelope> {
+    await this.loadIfNeeded();
+    const parsed = workflowRunEnvelopeSchema.parse(run);
+    const index = this.state.runs.findIndex((item) => item.id === parsed.id);
+    if (index < 0)
+      throw new Error(`Unknown canonical workflow run: ${parsed.id}`);
+    const runs = [...this.state.runs];
+    runs[index] = parsed;
+    await this.commit({ ...this.state, runs });
+    return clone(parsed);
+  }
+
+  // Compatibility boundary for the pre-agentWorkflow UI/runtime. It only handles v1
+  // templates that can be normalized to Workers; agentWorkflow runtime APIs use methods above.
   async listTemplates(workspaceId?: string): Promise<WorkflowTemplate[]> {
     await this.loadIfNeeded();
     return this.state.workflows
@@ -210,7 +265,7 @@ export class WorkflowStore {
   }
   async archiveTemplate(templateId: string): Promise<WorkflowTemplate> {
     throw new Error(
-      `Archiving v1 workflow templates is not supported after v2 migration: ${templateId}`,
+      `Archiving v1 workflow templates is not supported after agentWorkflow migration: ${templateId}`,
     );
   }
   async duplicateTemplate(templateId: string): Promise<WorkflowTemplate> {
@@ -281,7 +336,8 @@ export class WorkflowStore {
         });
         this.state = migrateV1(v1);
         await this.persist();
-      } else if (version === 2) this.state = v2StoreSchema.parse(parsed);
+      } else if (version === 2)
+        this.state = agentWorkflowStoreSchema.parse(parsed);
       else if (version === 3 && emptyV3StoreSchema.safeParse(parsed).success) {
         await this.migrateEmptyV3(raw);
       } else throw new UnsupportedWorkflowStoreVersionError(version);
@@ -335,7 +391,7 @@ export class WorkflowStore {
     }
   }
   private async commit(next: WorkflowStoreFile): Promise<void> {
-    this.state = v2StoreSchema.parse(next);
+    this.state = agentWorkflowStoreSchema.parse(next);
     await this.persist();
   }
   private async persist(): Promise<void> {
@@ -354,10 +410,11 @@ export class WorkflowStore {
 }
 
 export function migrateV1(file: V1Store): WorkflowStoreFile {
-  return v2StoreSchema.parse({
+  return agentWorkflowStoreSchema.parse({
     version: 2,
     workflows: file.templates.map(migrateV1Template),
     occurrences: [],
+    runs: [],
     legacyRuns: file.runs.map(preserveLegacyRun),
     workflowScopes: Object.fromEntries(
       file.templates.flatMap((template) =>

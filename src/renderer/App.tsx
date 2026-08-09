@@ -31,7 +31,11 @@ import type {
   WorkspaceRef as SharedWorkspaceRef,
   ThemePreference,
 } from "../shared/types.js";
-import type { WorkflowDefinition } from "../shared/workflowV2Schemas.js";
+import type {
+  CanonicalNodeOccurrence,
+  WorkflowDefinition,
+  WorkflowRunEnvelope,
+} from "../shared/agentWorkflowSchemas.js";
 import type {
   WorkflowRun,
   WorkflowStepRun,
@@ -100,6 +104,10 @@ import {
   type ActivitySourceSession,
 } from "./activityInbox.js";
 import { ActivityInbox } from "./components/ActivityInbox.js";
+import {
+  PiModelThinkingMenu,
+  nextMenuItemIndex,
+} from "./components/PiModelThinkingMenu.js";
 
 const WorkflowHome = lazy(() =>
   import("./components/workflows/WorkflowHome.js").then((module) => ({
@@ -116,15 +124,20 @@ const WorkflowBuilder = lazy(() =>
     default: module.WorkflowBuilder,
   })),
 );
-const WorkflowV2Builder = lazy(() =>
-  import("./components/workflows/WorkflowV2Builder.js").then((module) => ({
-    default: module.WorkflowV2Builder,
+const AgentWorkflowBuilder = lazy(() =>
+  import("./components/workflows/AgentWorkflowBuilder.js").then((module) => ({
+    default: module.AgentWorkflowBuilder,
   })),
 );
-const WorkflowV2Home = lazy(() =>
-  import("./components/workflows/v2/WorkflowV2Home.js").then((module) => ({
-    default: module.WorkflowV2Home,
+const AgentWorkflowHome = lazy(() =>
+  import("./components/workflows/AgentWorkflowHome.js").then((module) => ({
+    default: module.AgentWorkflowHome,
   })),
+);
+const WorkflowOccurrenceRunView = lazy(() =>
+  import("./components/workflows/WorkflowOccurrenceRunView.js").then(
+    (module) => ({ default: module.WorkflowOccurrenceRunView }),
+  ),
 );
 
 type LoadState =
@@ -823,7 +836,7 @@ export function App(): ReactElement {
     type: "all",
   });
   const [workflowView, setWorkflowView] = useState<
-    "home" | "builder" | "run" | undefined
+    "home" | "builder" | "run" | "occurrenceRun" | undefined
   >();
   const [workflowTemplates, setWorkflowTemplates] = useState<
     WorkflowTemplate[]
@@ -832,6 +845,9 @@ export function App(): ReactElement {
     WorkflowDefinition[]
   >([]);
   const [workflowRuns, setWorkflowRuns] = useState<WorkflowRun[]>([]);
+  const [workflowOccurrenceRuns, setWorkflowOccurrenceRuns] = useState<
+    WorkflowRunEnvelope[]
+  >([]);
   const [workflowBuilderTemplate, setWorkflowBuilderTemplate] = useState<
     WorkflowTemplate | undefined
   >();
@@ -839,6 +855,9 @@ export function App(): ReactElement {
     WorkflowDefinition | undefined
   >();
   const [workflowRunId, setWorkflowRunId] = useState<string | undefined>();
+  const [workflowOccurrenceRunId, setWorkflowOccurrenceRunId] = useState<
+    string | undefined
+  >();
   const [workflowLoading, setWorkflowLoading] = useState(false);
   const [workflowError, setWorkflowError] = useState<string | undefined>();
   const [usageStatsVisible, setUsageStatsVisible] = useState(() =>
@@ -1135,31 +1154,62 @@ export function App(): ReactElement {
   }, []);
 
   useEffect(() => {
+    return window.piDeck.workflows.onCanonicalEvent((event) => {
+      const run = event.run;
+      setWorkflowOccurrenceRuns((current) => [
+        run,
+        ...current.filter((item) => item.id !== run.id),
+      ]);
+    });
+  }, []);
+
+  useEffect(() => {
     if (workflowView === undefined) return;
     let disposed = false;
     const workspaceId = currentWorkspace.id;
     const refreshRuns = async (): Promise<void> => {
-      const runs = await window.piDeck.workflows.listRuns({ workspaceId });
+      const [runs, canonicalRuns] = await Promise.all([
+        window.piDeck.workflows.listRuns({ workspaceId }),
+        window.piDeck.workflows.canonicalListRuns({ workspaceId }),
+      ]);
       if (!disposed && currentWorkspaceRef.current.id === workspaceId) {
         setWorkflowRuns(
           runs.runs.filter((run) => run.workspaceId === workspaceId),
         );
+        setWorkflowOccurrenceRuns(canonicalRuns);
       }
     };
     const refresh = async (): Promise<void> => {
       setWorkflowLoading(true);
       try {
-        const [templates, definitions, runs] = await Promise.all([
-          window.piDeck.workflows.listTemplates(),
-          window.piDeck.workflows.listWorkflows({ workspaceId }),
-          window.piDeck.workflows.listRuns({ workspaceId }),
-        ]);
+        const [templates, definitions, runs, canonicalRuns] = await Promise.all(
+          [
+            window.piDeck.workflows.listTemplates(),
+            window.piDeck.workflows.listWorkflows({ workspaceId }),
+            window.piDeck.workflows.listRuns({ workspaceId }),
+            window.piDeck.workflows.canonicalListRuns({ workspaceId }),
+          ],
+        );
         if (disposed) return;
         setWorkflowTemplates(templates.templates);
         setWorkflowDefinitions(definitions);
         setWorkflowRuns(
           runs.runs.filter((run) => run.workspaceId === workspaceId),
         );
+        setWorkflowOccurrenceRuns(canonicalRuns);
+        if (workflowOccurrenceRunId !== undefined) {
+          const run = await window.piDeck.workflows.canonicalGetRun({
+            runId: workflowOccurrenceRunId,
+          });
+          if (run.workspaceId !== workspaceId) {
+            setWorkflowOccurrenceRunId(undefined);
+            setWorkflowView("home");
+          } else if (!disposed)
+            setWorkflowOccurrenceRuns((current) => [
+              run,
+              ...current.filter((item) => item.id !== run.id),
+            ]);
+        }
         if (workflowRunId !== undefined) {
           const run = await window.piDeck.workflows.getRun({
             runId: workflowRunId,
@@ -1200,13 +1250,20 @@ export function App(): ReactElement {
       disposed = true;
       unsubscribe();
     };
-  }, [currentWorkspace.id, workflowRunId, workflowView]);
+  }, [
+    currentWorkspace.id,
+    workflowRunId,
+    workflowOccurrenceRunId,
+    workflowView,
+  ]);
 
   useEffect(() => {
     setWorkflowTemplates([]);
     setWorkflowDefinitions([]);
     setWorkflowRuns([]);
+    setWorkflowOccurrenceRuns([]);
     setWorkflowRunId(undefined);
+    setWorkflowOccurrenceRunId(undefined);
     setWorkflowBuilderTemplate(undefined);
     setWorkflowBuilderDefinition(undefined);
     setWorkflowError(undefined);
@@ -1354,8 +1411,11 @@ export function App(): ReactElement {
   const selectedWorkflowRun = workflowRunId
     ? workflowRuns.find((run) => run.id === workflowRunId)
     : undefined;
-  const roleBasedWorkflowDefinitions = useMemo(
-    () => roleBasedWorkflowsForHome(workflowDefinitions, workflowTemplates),
+  const selectedWorkflowOccurrenceRun = workflowOccurrenceRunId
+    ? workflowOccurrenceRuns.find((run) => run.id === workflowOccurrenceRunId)
+    : undefined;
+  const agentWorkflowDefinitions = useMemo(
+    () => agentWorkflowsForHome(workflowDefinitions, workflowTemplates),
     [workflowDefinitions, workflowTemplates],
   );
   useEffect(() => {
@@ -1834,7 +1894,7 @@ export function App(): ReactElement {
     }
   }
 
-  async function handleSaveWorkflowV2(
+  async function handleSaveAgentWorkflow(
     workflow: WorkflowDefinition,
   ): Promise<void> {
     try {
@@ -1950,18 +2010,22 @@ export function App(): ReactElement {
     ]);
   }
 
-  async function handleOpenWorkflowStep(step: WorkflowStepRun): Promise<void> {
-    const runtimeSession = step.runtimeId
-      ? sessionsRef.current.find((session) => session.id === step.runtimeId)
+  async function handleOpenWorkflowSession(
+    sessionReference: Pick<WorkflowStepRun, "runtimeId" | "sessionFile">,
+  ): Promise<void> {
+    const runtimeSession = sessionReference.runtimeId
+      ? sessionsRef.current.find(
+          (session) => session.id === sessionReference.runtimeId,
+        )
       : undefined;
     if (runtimeSession !== undefined) {
       handleSelectSession(runtimeSession.id);
       return;
     }
-    if (step.runtimeId !== undefined) {
+    if (sessionReference.runtimeId !== undefined) {
       try {
         const snapshot = await window.piDeck.chat.getSnapshot({
-          runtimeId: step.runtimeId,
+          runtimeId: sessionReference.runtimeId,
         });
         const session = sessionFromSnapshot(snapshot);
         setSessions((current) => upsertRuntimeSession(current, snapshot));
@@ -1969,55 +2033,74 @@ export function App(): ReactElement {
         setWorkflowView(undefined);
         return;
       } catch (error) {
-        if (step.sessionFile === undefined) {
+        if (sessionReference.sessionFile === undefined) {
           setUiMessage(
-            `Could not open workflow session: ${error instanceof Error ? error.message : String(error)}`,
+            `Could not open the active Pi session: ${error instanceof Error ? error.message : String(error)}. This workflow occurrence has no saved session file to reopen.`,
           );
           return;
         }
       }
     }
-    const savedSession = step.sessionFile
+    const savedSession = sessionReference.sessionFile
       ? sessionsRef.current.find(
-          (session) => session.sessionFile === step.sessionFile,
+          (session) => session.sessionFile === sessionReference.sessionFile,
         )
       : undefined;
     if (savedSession !== undefined) {
       handleSelectSession(savedSession.id);
       return;
     }
-    if (step.sessionFile !== undefined) {
-      try {
-        const snapshot = await window.piDeck.chat.resumeSession({
-          workspaceId: currentWorkspaceRef.current.id,
-          sessionFile: step.sessionFile,
-        });
-        const refreshed = await window.piDeck.chat.listSessions({
-          workspaceId: currentWorkspaceRef.current.id,
-        });
-        const session = refreshed.sessions.find(
-          (candidate) => candidate.sessionFile === snapshot.state.sessionFile,
-        );
-        if (session !== undefined) {
-          setSessions((current) => [
-            ...current.filter(
-              (candidate) => candidate.sessionFile !== session.sessionFile,
-            ),
-            sessionFromSummary(
-              session,
-              currentWorkspaceRef.current.id,
-              projectIdForWorkspace(currentWorkspaceRef.current),
-            ),
-          ]);
-          setSelectedSessionId(session.id);
-          setWorkflowView(undefined);
-        }
-      } catch (error) {
-        setUiMessage(
-          `Could not open workflow session: ${error instanceof Error ? error.message : String(error)}`,
+    if (sessionReference.sessionFile === undefined) {
+      setUiMessage(
+        "This workflow occurrence has no active Pi runtime or saved session file to open.",
+      );
+      return;
+    }
+    try {
+      const snapshot = await window.piDeck.chat.resumeSession({
+        workspaceId: currentWorkspaceRef.current.id,
+        sessionFile: sessionReference.sessionFile,
+      });
+      const refreshed = await window.piDeck.chat.listSessions({
+        workspaceId: currentWorkspaceRef.current.id,
+      });
+      const session = refreshed.sessions.find(
+        (candidate) => candidate.sessionFile === snapshot.state.sessionFile,
+      );
+      if (session === undefined) {
+        throw new Error(
+          "Pi resumed the session but it was not returned by the workspace session list.",
         );
       }
+      setSessions((current) => [
+        ...current.filter(
+          (candidate) => candidate.sessionFile !== session.sessionFile,
+        ),
+        sessionFromSummary(
+          session,
+          currentWorkspaceRef.current.id,
+          projectIdForWorkspace(currentWorkspaceRef.current),
+        ),
+      ]);
+      setSelectedSessionId(session.id);
+      setWorkflowView(undefined);
+    } catch (error) {
+      setUiMessage(
+        `Could not open the saved Pi session: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
+  }
+
+  async function handleOpenWorkflowStep(step: WorkflowStepRun): Promise<void> {
+    await handleOpenWorkflowSession(step);
+  }
+
+  async function handleOpenWorkflowOccurrence(
+    occurrence: CanonicalNodeOccurrence,
+  ): Promise<void> {
+    await handleOpenWorkflowSession(
+      workflowOccurrenceSessionReference(occurrence),
+    );
   }
 
   function handleSelectSession(sessionId: string): void {
@@ -4060,7 +4143,7 @@ export function App(): ReactElement {
           showArchived={showArchived}
           composerDrafts={composerDrafts}
           activityInboxVisible={activityInboxVisible}
-          workflowView={workflowView}
+          workflowView={workflowView === "occurrenceRun" ? "run" : workflowView}
           activityActionableCount={activityInboxModel.actionableCount}
           onSelect={handleSelectSession}
           onOpenActivity={handleToggleActivity}
@@ -4186,12 +4269,14 @@ export function App(): ReactElement {
                     }}
                   />
                 ) : (
-                  <WorkflowV2Builder
-                    key={`${currentWorkspace.id}:${workflowBuilderDefinition?.id ?? "new-v2"}`}
+                  <AgentWorkflowBuilder
+                    key={`${currentWorkspace.id}:${workflowBuilderDefinition?.id ?? "new-agent-workflow"}`}
                     {...(workflowBuilderDefinition === undefined
                       ? {}
                       : { initialDefinition: workflowBuilderDefinition })}
-                    onSave={handleSaveWorkflowV2}
+                    modelChoices={workflowModelChoices}
+                    thinkingChoices={workflowThinkingChoices}
+                    onSave={handleSaveAgentWorkflow}
                     onCancel={() => {
                       setWorkflowBuilderTemplate(undefined);
                       setWorkflowBuilderDefinition(undefined);
@@ -4199,6 +4284,47 @@ export function App(): ReactElement {
                     }}
                   />
                 )
+              ) : workflowView === "occurrenceRun" &&
+                selectedWorkflowOccurrenceRun !== undefined ? (
+                <WorkflowOccurrenceRunView
+                  run={selectedWorkflowOccurrenceRun}
+                  onBack={() => {
+                    setWorkflowOccurrenceRunId(undefined);
+                    setWorkflowView("home");
+                  }}
+                  onStop={async () => {
+                    const run = await window.piDeck.workflows.canonicalStopRun({
+                      runId: selectedWorkflowOccurrenceRun.id,
+                    });
+                    setWorkflowOccurrenceRuns((current) =>
+                      current.map((item) => (item.id === run.id ? run : item)),
+                    );
+                  }}
+                  onRetry={async (occurrenceId) => {
+                    const run =
+                      await window.piDeck.workflows.canonicalRetryOccurrence({
+                        runId: selectedWorkflowOccurrenceRun.id,
+                        occurrenceId,
+                      });
+                    setWorkflowOccurrenceRuns((current) =>
+                      current.map((item) => (item.id === run.id ? run : item)),
+                    );
+                  }}
+                  onAnswer={async (occurrenceId, value) => {
+                    const run =
+                      await window.piDeck.workflows.canonicalAnswerHuman({
+                        runId: selectedWorkflowOccurrenceRun.id,
+                        occurrenceId,
+                        value,
+                      });
+                    setWorkflowOccurrenceRuns((current) =>
+                      current.map((item) => (item.id === run.id ? run : item)),
+                    );
+                  }}
+                  onOpenSession={(occurrence) =>
+                    void handleOpenWorkflowOccurrence(occurrence)
+                  }
+                />
               ) : workflowView === "run" &&
                 selectedWorkflowRun !== undefined ? (
                 <WorkflowRunView
@@ -4215,31 +4341,46 @@ export function App(): ReactElement {
                   onApproveGate={handleApproveWorkflowGate}
                   onOpenSession={(step) => void handleOpenWorkflowStep(step)}
                 />
+              ) : agentWorkflowDefinitions.length > 0 ? (
+                <AgentWorkflowHome
+                  workflows={agentWorkflowDefinitions}
+                  runs={workflowOccurrenceRuns}
+                  onOpenRun={(run) => {
+                    setWorkflowOccurrenceRunId(run.id);
+                    setWorkflowView("occurrenceRun");
+                  }}
+                  onCreate={() => {
+                    setWorkflowBuilderTemplate(undefined);
+                    setWorkflowBuilderDefinition(undefined);
+                    setWorkflowView("builder");
+                  }}
+                  onEdit={(workflow) => {
+                    setWorkflowBuilderTemplate(undefined);
+                    setWorkflowBuilderDefinition(workflow);
+                    setWorkflowView("builder");
+                  }}
+                  onStart={async (workflow, inputs) => {
+                    const run = await window.piDeck.workflows.canonicalStartRun(
+                      {
+                        workflowId: workflow.id,
+                        workspaceId: currentWorkspace.id,
+                        inputs,
+                      },
+                    );
+                    setWorkflowOccurrenceRuns((current) => [
+                      run,
+                      ...current.filter((item) => item.id !== run.id),
+                    ]);
+                    setWorkflowOccurrenceRunId(run.id);
+                    setWorkflowView("occurrenceRun");
+                  }}
+                />
               ) : (
                 <WorkflowHome
                   templates={workflowTemplates}
                   workspaceName={currentWorkspace.name}
                   recentRuns={workflowRuns}
-                  additionalWorkflowCount={roleBasedWorkflowDefinitions.length}
-                  additionalWorkflowSection={
-                    roleBasedWorkflowDefinitions.length > 0 ? (
-                      <WorkflowV2Home
-                        embedded
-                        workflows={roleBasedWorkflowDefinitions}
-                        onCreate={() => {
-                          setWorkflowBuilderTemplate(undefined);
-                          setWorkflowBuilderDefinition(undefined);
-                          setWorkflowView("builder");
-                        }}
-                        onEdit={(workflow) => {
-                          setWorkflowBuilderTemplate(undefined);
-                          setWorkflowBuilderDefinition(workflow);
-                          setWorkflowView("builder");
-                        }}
-                        onStart={async () => undefined}
-                      />
-                    ) : undefined
-                  }
+                  additionalWorkflowCount={0}
                   onCreate={() => {
                     setWorkflowBuilderTemplate(undefined);
                     setWorkflowBuilderDefinition(undefined);
@@ -4968,12 +5109,13 @@ function workflowTemplateIsVisibleInWorkspace(
   );
 }
 
-function roleBasedWorkflowsForHome(
+function agentWorkflowsForHome(
   definitions: readonly WorkflowDefinition[],
-  legacyTemplates: readonly Pick<WorkflowTemplate, "id">[],
+  _legacyTemplates: readonly Pick<WorkflowTemplate, "id">[],
 ): WorkflowDefinition[] {
-  const legacyIds = new Set(legacyTemplates.map((template) => template.id));
-  return definitions.filter((definition) => !legacyIds.has(definition.id));
+  // The canonical definition list is the active product surface. Compatibility
+  // templates remain readable only when no canonical definitions exist.
+  return [...definitions];
 }
 
 function defaultWorkingDirectory(workspace: WorkspaceRef): string | undefined {
@@ -8840,289 +8982,6 @@ function InlineTokens(props: { tokens: InlineToken[] }): ReactElement {
 
 type MenuNavigationKey = "ArrowDown" | "ArrowUp" | "Home" | "End";
 
-function nextMenuItemIndex(
-  key: MenuNavigationKey,
-  currentIndex: number,
-  itemCount: number,
-): number | undefined {
-  if (itemCount === 0) {
-    return undefined;
-  }
-  if (key === "Home") {
-    return 0;
-  }
-  if (key === "End") {
-    return itemCount - 1;
-  }
-  if (key === "ArrowDown") {
-    return currentIndex < 0 ? 0 : (currentIndex + 1) % itemCount;
-  }
-  return currentIndex <= 0 ? itemCount - 1 : currentIndex - 1;
-}
-
-function directMenuItems(menu: HTMLElement | null): HTMLElement[] {
-  if (!menu) {
-    return [];
-  }
-  return Array.from(menu.children).filter(
-    (element): element is HTMLElement =>
-      element instanceof HTMLElement &&
-      element.getAttribute("role")?.startsWith("menuitem") === true &&
-      !element.matches(":disabled, [aria-disabled='true']"),
-  );
-}
-
-function focusMenuItem(
-  menu: HTMLElement | null,
-  currentTarget: EventTarget | null,
-  key: MenuNavigationKey,
-): void {
-  const items = directMenuItems(menu);
-  if (items.length === 0) {
-    return;
-  }
-  const currentIndex = items.indexOf(currentTarget as HTMLElement);
-  const nextIndex = nextMenuItemIndex(key, currentIndex, items.length);
-  if (nextIndex !== undefined) {
-    items[nextIndex]?.focus();
-  }
-}
-
-export function PiModelThinkingMenu(props: {
-  models: ChatModelSummary[];
-  selectedModel: ChatModelSummary | undefined;
-  thinkingLevels: string[];
-  selectedThinking: string | undefined;
-  disabled: boolean;
-  onSelectModel(provider: string, modelId: string): void;
-  onSelectThinking(level: string): void;
-}): ReactElement {
-  const [open, setOpen] = useState(false);
-  const [modelMenuOpen, setModelMenuOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const popoverRef = useRef<HTMLDivElement>(null);
-  const modelTriggerRef = useRef<HTMLButtonElement>(null);
-  const modelMenuRef = useRef<HTMLDivElement>(null);
-  const focusModelMenuOnOpenRef = useRef(false);
-
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-    const closeOnOutsideClick = (event: MouseEvent): void => {
-      if (!rootRef.current?.contains(event.target as Node)) {
-        setOpen(false);
-        setModelMenuOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", closeOnOutsideClick);
-    return () => document.removeEventListener("mousedown", closeOnOutsideClick);
-  }, [open]);
-
-  useEffect(() => {
-    if (open) {
-      directMenuItems(popoverRef.current)[0]?.focus();
-    }
-  }, [open]);
-
-  useEffect(() => {
-    if (!modelMenuOpen || !focusModelMenuOnOpenRef.current) {
-      return;
-    }
-    focusModelMenuOnOpenRef.current = false;
-    directMenuItems(modelMenuRef.current)[0]?.focus();
-  }, [modelMenuOpen]);
-
-  function close(restoreFocus = false): void {
-    setOpen(false);
-    setModelMenuOpen(false);
-    if (restoreFocus) {
-      triggerRef.current?.focus();
-    }
-  }
-
-  function openModelMenu(focusFirstItem: boolean): void {
-    if (focusFirstItem && modelMenuOpen) {
-      directMenuItems(modelMenuRef.current)[0]?.focus();
-      return;
-    }
-    focusModelMenuOnOpenRef.current = focusFirstItem;
-    setModelMenuOpen(true);
-  }
-
-  const modelName =
-    props.selectedModel?.name ?? props.selectedModel?.id ?? "Model";
-  const thinkingName = props.selectedThinking ?? "Thinking";
-
-  return (
-    <div
-      className="pi-configuration-menu"
-      ref={rootRef}
-      onKeyDown={(event) => {
-        if (event.key === "Escape") {
-          event.preventDefault();
-          if (modelMenuOpen) {
-            setModelMenuOpen(false);
-            modelTriggerRef.current?.focus();
-          } else {
-            close(true);
-          }
-          return;
-        }
-        if (
-          event.key === "ArrowRight" &&
-          event.target === modelTriggerRef.current
-        ) {
-          event.preventDefault();
-          openModelMenu(true);
-          return;
-        }
-        if (
-          event.key === "ArrowLeft" &&
-          (event.target as HTMLElement).closest(".pi-model-submenu")
-        ) {
-          event.preventDefault();
-          setModelMenuOpen(false);
-          modelTriggerRef.current?.focus();
-          return;
-        }
-        if (
-          event.key === "ArrowDown" ||
-          event.key === "ArrowUp" ||
-          event.key === "Home" ||
-          event.key === "End"
-        ) {
-          const target = event.target as HTMLElement;
-          const menu = target.closest<HTMLElement>("[role='menu']");
-          if (menu === popoverRef.current || menu === modelMenuRef.current) {
-            event.preventDefault();
-            focusMenuItem(menu, event.target, event.key);
-          }
-        }
-      }}
-    >
-      <Button
-        ref={triggerRef}
-        aria-expanded={open}
-        aria-haspopup="menu"
-        aria-label={`Model and thinking. Current model: ${modelName}. Current thinking: ${thinkingName}.`}
-        className="pi-configuration-trigger"
-        data-model-id={props.selectedModel?.id}
-        data-model-provider={props.selectedModel?.provider}
-        data-thinking-level={props.selectedThinking}
-        disabled={props.disabled}
-        size="sm"
-        onClick={() => {
-          setOpen((value) => !value);
-          setModelMenuOpen(false);
-        }}
-      >
-        <span>{thinkingName}</span>
-        <ChevronDown aria-hidden="true" size={13} strokeWidth={1.75} />
-      </Button>
-      {open ? (
-        <div
-          aria-label="Model and thinking options"
-          className="pi-configuration-popover"
-          ref={popoverRef}
-          role="menu"
-        >
-          <span className="pi-configuration-heading">Thinking</span>
-          {props.thinkingLevels.map((level) => {
-            const selected = level === props.selectedThinking;
-            return (
-              <Button
-                aria-checked={selected}
-                className="pi-configuration-option"
-                data-thinking-level={level}
-                key={level}
-                role="menuitemradio"
-                size="sm"
-                variant="menuItem"
-                onClick={() => {
-                  close(true);
-                  if (!selected) {
-                    props.onSelectThinking(level);
-                  }
-                }}
-              >
-                <span>{level}</span>
-                <Check
-                  aria-hidden="true"
-                  size={14}
-                  strokeWidth={1.75}
-                  visibility={selected ? "visible" : "hidden"}
-                />
-              </Button>
-            );
-          })}
-          {props.models.length > 0 ? (
-            <>
-              <div className="pi-configuration-divider" />
-              <Button
-                ref={modelTriggerRef}
-                aria-expanded={modelMenuOpen}
-                aria-haspopup="menu"
-                className="pi-configuration-option model"
-                role="menuitem"
-                size="sm"
-                variant="menuItem"
-                onClick={() => openModelMenu(true)}
-                onMouseEnter={() => openModelMenu(false)}
-              >
-                <span title={modelName}>{modelName}</span>
-                <ChevronRight aria-hidden="true" size={14} strokeWidth={1.75} />
-              </Button>
-              {modelMenuOpen ? (
-                <div
-                  aria-label="Available Pi models"
-                  className="pi-model-submenu"
-                  ref={modelMenuRef}
-                  role="menu"
-                >
-                  {props.models.map((model) => {
-                    const selected =
-                      model.id === props.selectedModel?.id &&
-                      model.provider === props.selectedModel?.provider;
-                    const name = model.name ?? model.id;
-                    return (
-                      <Button
-                        aria-checked={selected}
-                        className="pi-configuration-option model-choice"
-                        data-model-id={model.id}
-                        data-model-provider={model.provider}
-                        key={`${model.provider ?? ""}/${model.id}`}
-                        role="menuitemradio"
-                        size="sm"
-                        variant="menuItem"
-                        onClick={() => {
-                          close(true);
-                          if (!selected && model.provider) {
-                            props.onSelectModel(model.provider, model.id);
-                          }
-                        }}
-                      >
-                        <span title={name}>{name}</span>
-                        <Check
-                          aria-hidden="true"
-                          size={14}
-                          strokeWidth={1.75}
-                          visibility={selected ? "visible" : "hidden"}
-                        />
-                      </Button>
-                    );
-                  })}
-                </div>
-              ) : null}
-            </>
-          ) : null}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 function Composer(props: {
   value: string;
   isWorking: boolean;
@@ -10252,9 +10111,23 @@ export function findKnownExtensionCommand(
   )?.name;
 }
 
+function workflowOccurrenceSessionReference(
+  occurrence: CanonicalNodeOccurrence,
+): Pick<WorkflowStepRun, "runtimeId" | "sessionFile"> {
+  return {
+    ...(occurrence.runtimeId === undefined
+      ? {}
+      : { runtimeId: occurrence.runtimeId }),
+    ...(occurrence.sessionFile === undefined
+      ? {}
+      : { sessionFile: occurrence.sessionFile }),
+  };
+}
+
 export const __rendererTestHooks = {
   reduceRuntimeEvent,
   sessionFromSnapshot,
+  workflowOccurrenceSessionReference,
   upsertRuntimeSession,
   mergeSessionUsageFromSnapshot,
   composerDraftForSession,
@@ -10309,7 +10182,7 @@ export const __rendererTestHooks = {
   workflowThinkingChoicesFor,
   workflowWorkspaceChoicesFor,
   workflowTemplateIsVisibleInWorkspace,
-  roleBasedWorkflowsForHome,
+  agentWorkflowsForHome,
   thinkingLevelsForModel,
   clampThinkingLevel,
   applyPiDefaultsToDraftSessions,

@@ -2,12 +2,12 @@
 
 **Status:** Build/Graph/home completion integrated; occurrence-run UI wiring remains tracked
 **Date:** 2026-08-08
-**Design source:** [Canonical Role-Based Agent Workflows](agent-workflows-role-based-design.md)
+**Design source:** [Canonical Agent Workflows](agent-workflows-role-based-design.md)
 **Baseline:** `dev/agent-workflows-prompt-first` at merge `c5b41ba`
 
 ## 1. Goal
 
-Finish the role-based authoring experience described by the approved design. The
+Finish the Agent Workflows authoring experience described by the approved design. The
 canonical schema and occurrence runtime already contain substantial role
 support, but the Build and Graph views did not initially let a user author or
 understand that model.
@@ -85,12 +85,12 @@ below are migration details only.
 
 Owns:
 
-- `src/renderer/components/workflows/WorkflowV2Builder.tsx`
-- `src/renderer/components/workflows/WorkflowV2Builder.test.ts`
-- `src/renderer/workflows/workflowV2.ts` and focused tests when needed
-- narrowly scoped `.workflow-v2-*` rules in `src/renderer/styles.css`
+- `src/renderer/components/workflows/AgentWorkflowBuilder.tsx`
+- `src/renderer/components/workflows/AgentWorkflowBuilder.test.ts`
+- `src/renderer/workflows/agentWorkflowDefinition.ts` and focused tests when needed
+- narrowly scoped `.agent-workflow-*` rules in `src/renderer/styles.css`
 - additive role-inspector components under
-  `src/renderer/components/workflows/v2/`, if useful
+  `src/renderer/components/workflows/`, if useful
 
 Delivers:
 
@@ -109,15 +109,15 @@ new Graph component owned by Lane B.
 
 Owns additive files only:
 
-- `src/renderer/components/workflows/v2/WorkflowV2Graph.tsx`
-- `src/renderer/components/workflows/v2/WorkflowV2Graph.test.ts`
-- `src/renderer/workflows/workflowV2Graph.ts`
-- `src/renderer/workflows/workflowV2Graph.test.ts`
+- `src/renderer/components/workflows/AgentWorkflowGraph.tsx`
+- `src/renderer/components/workflows/AgentWorkflowGraph.test.ts`
+- `src/renderer/workflows/agentWorkflowGraph.ts`
+- `src/renderer/workflows/agentWorkflowGraph.test.ts`
 
 Delivers a standalone component with this contract:
 
 ```ts
-interface WorkflowV2GraphProps {
+interface AgentWorkflowGraphProps {
   definition: WorkflowDefinition;
   selectedNodeId?: string;
   onSelectNode(nodeId: string): void;
@@ -130,7 +130,7 @@ concurrency and all/any policy, Human interaction, and terminal outcomes. It is
 read-only and keyboard selectable. Use semantic HTML and deterministic derived
 layout/model; do not add a graph-layout dependency.
 
-Must not edit `WorkflowV2Builder.tsx`, `styles.css`, App, shared schemas, or main
+Must not edit `AgentWorkflowBuilder.tsx`, `styles.css`, App, shared schemas, or main
 files. Return any required integration CSS as a small handoff snippet or use a
 component-local class contract for the primary agent.
 
@@ -138,8 +138,8 @@ component-local class contract for the primary agent.
 
 Owns:
 
-- `src/main/workflows/workflowV2Runtime.ts`
-- `src/main/workflows/workflowV2Runtime.test.ts`
+- `src/main/workflows/agentWorkflowRuntime.ts`
+- `src/main/workflows/agentWorkflowRuntime.test.ts`
 
 Delivers:
 
@@ -155,10 +155,10 @@ Must not alter shared schemas, renderer files, IPC, store, or scheduler wiring.
 
 Owns additive files only:
 
-- `src/renderer/components/workflows/v2/WorkflowV2Home.tsx`
-- `src/renderer/components/workflows/v2/WorkflowV2Home.test.ts`
-- `src/renderer/workflows/workflowV2ViewModels.ts`
-- `src/renderer/workflows/workflowV2ViewModels.test.ts`
+- `src/renderer/components/workflows/AgentWorkflowHome.tsx`
+- `src/renderer/components/workflows/AgentWorkflowHome.test.ts`
+- `src/renderer/workflows/agentWorkflowViewModels.ts`
+- `src/renderer/workflows/agentWorkflowViewModels.test.ts`
 
 Delivers a standalone canonical workflow list/card surface using
 `WorkflowDefinition[]`, with create/edit/start callbacks and summaries for all
@@ -180,7 +180,7 @@ compatibility and canonical home surfaces.
    B through the frozen component contract.
 5. Merge Lane D additive home/view-model surface.
 6. Primary agent wires App to `listWorkflows`, canonical create/update/edit, and the
-   unified home. No role workflow may disappear after save.
+   unified home. No canonical workflow may disappear after save.
 7. Run focused tests, full Vitest, typecheck, format, production build, and a fake
    user-flow check. Add a fresh-context review wave before release.
 
@@ -258,8 +258,7 @@ blockers.
 
 A production-shaped launch on 2026-08-08 exposed a gap not covered by unit/build
 validation: another worktree had written an empty version-3 workflow store into
-the shared `~/.pideck`, while the release worktree supported only versions 1 and
-2. Bootstrap propagated `UnsupportedWorkflowStoreVersionError` before creating
+the shared `~/.pideck`, while the release worktree supported only versions 1 and 2. Bootstrap propagated `UnsupportedWorkflowStoreVersionError` before creating
 the main window, producing a blank Electron window.
 
 Hardening contract:

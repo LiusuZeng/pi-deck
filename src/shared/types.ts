@@ -70,12 +70,35 @@ import type {
   workflowUpdateTemplateRequestSchema,
 } from "./workflowSchemas.js";
 import type {
+  canonicalWorkflowEventSchema,
+  canonicalWorkflowGetRunRequestSchema,
+  canonicalWorkflowHumanAnswerRequestSchema,
+  canonicalWorkflowListRunsRequestSchema,
+  canonicalWorkflowOccurrenceRequestSchema,
+  canonicalWorkflowStartRunRequestSchema,
   workflowCreateRequestSchema,
   workflowDefinitionSchema,
   workflowListRequestSchema,
+  workflowRunEnvelopeSchema,
   workflowUpdateRequestSchema,
-} from "./workflowV2Schemas.js";
+} from "./agentWorkflowSchemas.js";
 
+export type CanonicalWorkflowRun = z.infer<typeof workflowRunEnvelopeSchema>;
+export type CanonicalWorkflowStartRunRequest = z.infer<
+  typeof canonicalWorkflowStartRunRequestSchema
+>;
+export type CanonicalWorkflowGetRunRequest = z.infer<
+  typeof canonicalWorkflowGetRunRequestSchema
+>;
+export type CanonicalWorkflowOccurrenceRequest = z.infer<
+  typeof canonicalWorkflowOccurrenceRequestSchema
+>;
+export type CanonicalWorkflowHumanAnswerRequest = z.infer<
+  typeof canonicalWorkflowHumanAnswerRequestSchema
+>;
+export type CanonicalWorkflowEvent = z.infer<
+  typeof canonicalWorkflowEventSchema
+>;
 export type ThemePreference = z.infer<typeof themePreferenceSchema>;
 export type AppSettings = z.infer<typeof appSettingsSchema>;
 export type AppBootstrapState = z.infer<typeof appBootstrapStateSchema>;
@@ -324,6 +347,27 @@ export interface PiDeckApi {
   };
   workflows: {
     listWorkflows(request: WorkflowListRequest): Promise<WorkflowDefinition[]>;
+    canonicalListRuns(
+      request?: z.infer<typeof canonicalWorkflowListRunsRequestSchema>,
+    ): Promise<CanonicalWorkflowRun[]>;
+    canonicalGetRun(
+      request: CanonicalWorkflowGetRunRequest,
+    ): Promise<CanonicalWorkflowRun>;
+    canonicalStartRun(
+      request: CanonicalWorkflowStartRunRequest,
+    ): Promise<CanonicalWorkflowRun>;
+    canonicalStopRun(
+      request: CanonicalWorkflowGetRunRequest,
+    ): Promise<CanonicalWorkflowRun>;
+    canonicalRetryOccurrence(
+      request: CanonicalWorkflowOccurrenceRequest,
+    ): Promise<CanonicalWorkflowRun>;
+    canonicalAnswerHuman(
+      request: CanonicalWorkflowHumanAnswerRequest,
+    ): Promise<CanonicalWorkflowRun>;
+    onCanonicalEvent(
+      listener: (event: CanonicalWorkflowEvent) => void,
+    ): () => void;
     createWorkflow(request: WorkflowCreateRequest): Promise<WorkflowDefinition>;
     updateWorkflow(request: WorkflowUpdateRequest): Promise<WorkflowDefinition>;
     getTemplate(request: WorkflowGetTemplateRequest): Promise<WorkflowTemplate>;

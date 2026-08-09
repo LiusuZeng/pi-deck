@@ -76,11 +76,18 @@ import {
   workflowUpdateTemplateRequestSchema,
 } from "../shared/workflowSchemas.js";
 import {
+  canonicalWorkflowEventSchema,
+  canonicalWorkflowGetRunRequestSchema,
+  canonicalWorkflowHumanAnswerRequestSchema,
+  canonicalWorkflowListRunsRequestSchema,
+  canonicalWorkflowOccurrenceRequestSchema,
+  canonicalWorkflowStartRunRequestSchema,
   workflowCreateRequestSchema,
   workflowDefinitionSchema,
   workflowListRequestSchema,
+  workflowRunEnvelopeSchema,
   workflowUpdateRequestSchema,
-} from "../shared/workflowV2Schemas.js";
+} from "../shared/agentWorkflowSchemas.js";
 import type {
   AppSettings,
   AttachmentAssignOwnerRequest,
@@ -440,6 +447,65 @@ const api: PiDeckApi = Object.freeze({
         request: workflowUpdateRequestSchema.parse(request),
         responseSchema: workflowDefinitionSchema,
       }),
+    canonicalListRuns: (request?: { workspaceId?: string }) =>
+      invokeValidated({
+        channel: ipcChannels.canonicalWorkflowListRuns,
+        request: canonicalWorkflowListRunsRequestSchema.parse(request),
+        responseSchema: workflowRunEnvelopeSchema.array(),
+      }),
+    canonicalGetRun: (request: { runId: string }) =>
+      invokeValidated({
+        channel: ipcChannels.canonicalWorkflowGetRun,
+        request: canonicalWorkflowGetRunRequestSchema.parse(request),
+        responseSchema: workflowRunEnvelopeSchema,
+      }),
+    canonicalStartRun: (request: {
+      workflowId: string;
+      workspaceId: string;
+      inputs?: Record<string, string>;
+    }) =>
+      invokeValidated({
+        channel: ipcChannels.canonicalWorkflowStartRun,
+        request: canonicalWorkflowStartRunRequestSchema.parse(request),
+        responseSchema: workflowRunEnvelopeSchema,
+      }),
+    canonicalStopRun: (request: { runId: string }) =>
+      invokeValidated({
+        channel: ipcChannels.canonicalWorkflowStopRun,
+        request: canonicalWorkflowGetRunRequestSchema.parse(request),
+        responseSchema: workflowRunEnvelopeSchema,
+      }),
+    canonicalRetryOccurrence: (request: {
+      runId: string;
+      occurrenceId: string;
+    }) =>
+      invokeValidated({
+        channel: ipcChannels.canonicalWorkflowRetryOccurrence,
+        request: canonicalWorkflowOccurrenceRequestSchema.parse(request),
+        responseSchema: workflowRunEnvelopeSchema,
+      }),
+    canonicalAnswerHuman: (request: {
+      runId: string;
+      occurrenceId: string;
+      value: string | boolean;
+    }) =>
+      invokeValidated({
+        channel: ipcChannels.canonicalWorkflowAnswerHuman,
+        request: canonicalWorkflowHumanAnswerRequestSchema.parse(request),
+        responseSchema: workflowRunEnvelopeSchema,
+      }),
+    onCanonicalEvent: (
+      listener: (
+        event: import("../shared/agentWorkflowSchemas.js").CanonicalWorkflowEvent,
+      ) => void,
+    ) => {
+      const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => {
+        const parsed = canonicalWorkflowEventSchema.safeParse(payload);
+        if (parsed.success) listener(parsed.data);
+      };
+      ipcRenderer.on(ipcChannels.canonicalWorkflowEvent, wrapped);
+      return () => ipcRenderer.off(ipcChannels.canonicalWorkflowEvent, wrapped);
+    },
     getTemplate: (request: { templateId: string }) =>
       invokeValidated({
         channel: ipcChannels.workflowGetTemplate,

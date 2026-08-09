@@ -3,7 +3,14 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createWorkflowRun } from "./workflowEngine.js";
-import { rehydrateWorkflowRuns } from "./workflowRehydration.js";
+import {
+  rehydrateCanonicalWorkflowRuns,
+  rehydrateWorkflowRuns,
+} from "./workflowRehydration.js";
+import {
+  createWorkflowRoleRun,
+  startWorkflowOccurrence,
+} from "./agentWorkflowRuntime.js";
 import { WorkspaceStore } from "../workspaces/workspaceStore.js";
 import type { WorkflowTemplate } from "../../shared/workflowSchemas.js";
 
@@ -42,6 +49,91 @@ const template: WorkflowTemplate = {
 };
 
 describe("workflow rehydration", () => {
+  it("keeps queued canonical work resumable and schedules it after runtime readiness", async () => {
+    const definition = {
+      format: "pi-deck.agent-workflow" as const,
+      schemaVersion: 2 as const,
+      id: "queued",
+      revision: 1,
+      name: "Queued",
+      inputs: [],
+      entryNodeId: "work",
+      nodes: [
+        {
+          id: "work",
+          name: "Work",
+          role: "worker" as const,
+          config: { instructions: "work" },
+        },
+      ],
+      relationships: [{ id: "end", from: "work", to: { end: "completed" } }],
+    };
+    const initial = createWorkflowRoleRun(definition, "workspace");
+    const queued = {
+      ...initial,
+      occurrences: initial.occurrences.map((item) => ({
+        ...item,
+        status: "queued" as const,
+      })),
+    };
+    const updated: (typeof initial)[] = [];
+    const scheduled: (typeof initial)[] = [];
+    await rehydrateCanonicalWorkflowRuns([queued], {
+      resolveWorkspace: async () => undefined,
+      updateRun: async (run) => {
+        updated.push(run);
+        return run;
+      },
+      schedule: async (run) => {
+        scheduled.push(run);
+        return run;
+      },
+      emit: () => undefined,
+      recordError: () => undefined,
+    });
+    expect(updated[0].status).toBe("waiting");
+    expect(updated[0].occurrences[0].status).toBe("ready");
+    expect(scheduled).toHaveLength(1);
+  });
+
+  it("marks genuinely lost canonical running ownership as attention without scheduling", async () => {
+    const definition = {
+      format: "pi-deck.agent-workflow" as const,
+      schemaVersion: 2 as const,
+      id: "running",
+      revision: 1,
+      name: "Running",
+      inputs: [],
+      entryNodeId: "work",
+      nodes: [
+        {
+          id: "work",
+          name: "Work",
+          role: "worker" as const,
+          config: { instructions: "work" },
+        },
+      ],
+      relationships: [{ id: "end", from: "work", to: { end: "completed" } }],
+    };
+    const initial = createWorkflowRoleRun(definition, "workspace");
+    const running = startWorkflowOccurrence(
+      initial,
+      initial.occurrences[0].id,
+      "runtime",
+    );
+    const scheduled: (typeof initial)[] = [];
+    await rehydrateCanonicalWorkflowRuns([running], {
+      resolveWorkspace: async () => undefined,
+      updateRun: async (run) => run,
+      schedule: async (run) => {
+        scheduled.push(run);
+        return run;
+      },
+      emit: () => undefined,
+      recordError: () => undefined,
+    });
+    expect(scheduled).toHaveLength(0);
+  });
   it("rehydrates only the workspace released by a restore", async () => {
     const restoredRun = createWorkflowRun({
       template,

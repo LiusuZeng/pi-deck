@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { emptyOverlays } from "./sessionState.js";
-import { defaultV2Definition } from "./workflows/workflowV2.js";
+import { defaultAgentWorkflowDefinition } from "./workflows/agentWorkflowDefinition.js";
 import { __rendererTestHooks } from "./App.js";
 
 function baseSession() {
@@ -58,6 +58,25 @@ function runtimeErrorDiagnostics(session: any): any[] {
     (item: any) => item.kind === "diagnostic" && item.tone === "error",
   );
 }
+
+describe("canonical occurrence Pi-session navigation", () => {
+  it("keeps active runtime and completed saved-session identities distinct", () => {
+    expect(
+      __rendererTestHooks.workflowOccurrenceSessionReference({
+        runtimeId: "runtime-1",
+        sessionFile: "/tmp/session-1.jsonl",
+      } as any),
+    ).toEqual({
+      runtimeId: "runtime-1",
+      sessionFile: "/tmp/session-1.jsonl",
+    });
+    expect(
+      __rendererTestHooks.workflowOccurrenceSessionReference({
+        sessionFile: "/tmp/completed-session.jsonl",
+      } as any),
+    ).toEqual({ sessionFile: "/tmp/completed-session.jsonl" });
+  });
+});
 
 describe("renderer Pi 0.81 terminal and retry events", () => {
   it("keeps a production-shaped provider error visible after agent_end", () => {
@@ -779,15 +798,15 @@ describe("workflow workspace scope choices", () => {
     ]);
   });
 
-  it("deduplicates definitions already represented by legacy templates", () => {
-    const overlapping = { ...defaultV2Definition(), id: "shared" };
-    const roleBased = { ...defaultV2Definition(), id: "role-based" };
+  it("keeps canonical definitions visible even when legacy compatibility records overlap", () => {
+    const overlapping = { ...defaultAgentWorkflowDefinition(), id: "shared" };
+    const canonical = { ...defaultAgentWorkflowDefinition(), id: "canonical" };
     expect(
-      __rendererTestHooks.roleBasedWorkflowsForHome(
-        [overlapping, roleBased],
+      __rendererTestHooks.agentWorkflowsForHome(
+        [overlapping, canonical],
         [{ id: "shared" }],
       ),
-    ).toEqual([roleBased]);
+    ).toEqual([overlapping, canonical]);
   });
 
   it("matches the workflow store's global-or-current visibility rule", () => {

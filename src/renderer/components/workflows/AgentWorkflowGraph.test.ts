@@ -2,8 +2,8 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { WorkflowDefinition } from "../../../../shared/workflowV2Schemas.js";
-import { WorkflowV2Graph } from "./WorkflowV2Graph.js";
+import type { WorkflowDefinition } from "../../../../shared/agentWorkflowSchemas.js";
+import { AgentWorkflowGraph } from "./AgentWorkflowGraph.js";
 
 const semanticGraphDefinition: WorkflowDefinition = {
   format: "pi-deck.agent-workflow",
@@ -114,7 +114,7 @@ const semanticGraphDefinition: WorkflowDefinition = {
   ],
 };
 
-describe("WorkflowV2Graph", () => {
+describe("AgentWorkflowGraph", () => {
   let root: Root | undefined;
   let container: HTMLDivElement | undefined;
   const onSelectNode = vi.fn();
@@ -131,7 +131,7 @@ describe("WorkflowV2Graph", () => {
     root = createRoot(container);
     act(() =>
       root?.render(
-        createElement(WorkflowV2Graph, {
+        createElement(AgentWorkflowGraph, {
           definition,
           selectedNodeId: "prepare",
           onSelectNode,

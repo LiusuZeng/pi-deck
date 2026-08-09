@@ -4,7 +4,7 @@ const workflowIdSchema = z.string().min(1).max(120);
 const nodeIdSchema = z.string().min(1).max(120);
 const relationshipIdSchema = z.string().min(1).max(120);
 
-export const workflowInputV2Schema = z
+export const agentWorkflowInputSchema = z
   .object({
     id: z.string().min(1).max(120),
     label: z.string().trim().min(1).max(120),
@@ -114,7 +114,7 @@ export const humanNodeSchema = nodeBaseSchema
   })
   .strict();
 
-/** The only node roles supported by the v2 canonical document. */
+/** The only node roles supported by the agentWorkflow canonical document. */
 export const workflowNodeSchema = z.discriminatedUnion("role", [
   workerNodeSchema,
   deciderNodeSchema,
@@ -147,7 +147,7 @@ export const workflowDefinitionSchema = z
     revision: z.number().int().min(1),
     name: z.string().trim().min(1).max(160),
     description: z.string().max(4_000).optional(),
-    inputs: z.array(workflowInputV2Schema).max(50),
+    inputs: z.array(agentWorkflowInputSchema).max(50),
     entryNodeId: nodeIdSchema,
     nodes: z.array(workflowNodeSchema).min(1).max(100),
     relationships: z.array(relationshipSchema).max(200),
@@ -167,6 +167,32 @@ export const workflowCreateRequestSchema = z
   })
   .strict();
 export const workflowUpdateRequestSchema = workflowCreateRequestSchema;
+
+/** Canonical occurrence-run IPC contracts. Workspace remains outside snapshots. */
+export const canonicalWorkflowListRunsRequestSchema = z
+  .object({ workspaceId: workspaceIdSchema.optional() })
+  .strict()
+  .optional();
+export const canonicalWorkflowGetRunRequestSchema = z
+  .object({ runId: z.string().uuid() })
+  .strict();
+export const canonicalWorkflowStartRunRequestSchema = z
+  .object({
+    workflowId: workflowIdSchema,
+    workspaceId: workspaceIdSchema,
+    inputs: z.record(z.string(), z.string().max(20_000)).default({}),
+  })
+  .strict();
+export const canonicalWorkflowOccurrenceRequestSchema = z
+  .object({
+    runId: z.string().uuid(),
+    occurrenceId: z.string().uuid(),
+  })
+  .strict();
+export const canonicalWorkflowHumanAnswerRequestSchema =
+  canonicalWorkflowOccurrenceRequestSchema
+    .extend({ value: z.union([z.string().max(32_000), z.boolean()]) })
+    .strict();
 
 /** A static execution of a node. Repetition creates separate occurrences. */
 export const nodeOccurrenceSchema = z.discriminatedUnion("role", [
@@ -279,15 +305,113 @@ export const workflowOccurrenceSchema = z
 export type WorkflowDefinition = z.infer<typeof workflowDefinitionSchema>;
 export type WorkflowNode = z.infer<typeof workflowNodeSchema>;
 export type WorkflowRelationship = z.infer<typeof relationshipSchema>;
+/** @deprecated Migration-only record retained to read pre-canonical occurrence data. */
 export type WorkflowOccurrence = z.infer<typeof workflowOccurrenceSchema>;
 export type NodeOccurrence = z.infer<typeof nodeOccurrenceSchema>;
 
-// Names retained for the runtime implementation while the public v2 contract
+/** The single persisted envelope for new role workflow executions. */
+const boundedRunTextSchema = z.string().max(32_000);
+export const canonicalNodeOccurrenceSchema = z
+  .object({
+    id: z.string().uuid(),
+    nodeId: nodeIdSchema,
+    role: z.enum(["worker", "decider", "orchestrator", "human"]),
+    parentOrchestratorRunId: z.string().uuid().optional(),
+    parentOccurrenceIds: z.array(z.string().uuid()).default([]),
+    /** Explicit creation-time context. This avoids requiring an in-progress parent's output. */
+    context: z.array(boundedRunTextSchema).max(100).default([]),
+    iteration: z.number().int().positive().default(1),
+    attempt: z.number().int().positive(),
+    status: z.enum([
+      "ready",
+      "queued",
+      "running",
+      "waitingHuman",
+      "completed",
+      "failed",
+      "skipped",
+      "cancelled",
+    ]),
+    output: z
+      .union([
+        boundedRunTextSchema,
+        z.boolean(),
+        z.array(boundedRunTextSchema).max(100),
+      ])
+      .optional(),
+    sessionId: z.string().min(1).optional(),
+    /** Saved Pi identity retained after the runtime is closed for transcript reopening. */
+    sessionFile: z.string().min(1).optional(),
+    runtimeId: z.string().min(1).optional(),
+    error: z.string().max(4_000).optional(),
+    managedChildren: z.array(z.string().uuid()).default([]),
+    aggregation: z.array(boundedRunTextSchema).max(100).default([]),
+    createdAtMs: z.number().finite(),
+    startedAtMs: z.number().finite().optional(),
+    completedAtMs: z.number().finite().optional(),
+    updatedAtMs: z.number().finite(),
+  })
+  .strict();
+export const workflowRunEnvelopeSchema = z
+  .object({
+    id: z.string().uuid(),
+    name: z.string().max(160),
+    workspaceId: workspaceIdSchema,
+    status: z.enum([
+      "waiting",
+      "running",
+      "needsAttention",
+      "completed",
+      "failed",
+      "stopped",
+    ]),
+    definition: workflowDefinitionSchema,
+    inputs: z.record(z.string(), z.string().max(20_000)),
+    occurrences: z.array(canonicalNodeOccurrenceSchema).max(10_000),
+    terminalOutcome: z.string().min(1).max(120).optional(),
+    createdAtMs: z.number().finite(),
+    updatedAtMs: z.number().finite(),
+    completedAtMs: z.number().finite().optional(),
+  })
+  .strict()
+  .superRefine((run, ctx) => {
+    if (run.workspaceId.length === 0)
+      ctx.addIssue({
+        code: "custom",
+        path: ["workspaceId"],
+        message: "Workspace is required.",
+      });
+    const nodes = new Map(run.definition.nodes.map((node) => [node.id, node]));
+    for (const [index, occurrence] of run.occurrences.entries()) {
+      const node = nodes.get(occurrence.nodeId);
+      if (!node || node.role !== occurrence.role)
+        ctx.addIssue({
+          code: "custom",
+          path: ["occurrences", index, "nodeId"],
+          message: "Occurrence must match a node in its immutable snapshot.",
+        });
+    }
+  });
+export type CanonicalNodeOccurrence = z.infer<
+  typeof canonicalNodeOccurrenceSchema
+>;
+export type WorkflowRunEnvelope = z.infer<typeof workflowRunEnvelopeSchema>;
+export const canonicalWorkflowEventSchema = z
+  .object({
+    type: z.literal("workflow_occurrence_run_updated"),
+    run: workflowRunEnvelopeSchema,
+  })
+  .strict();
+export type CanonicalWorkflowEvent = z.infer<
+  typeof canonicalWorkflowEventSchema
+>;
+
+// Names retained for the runtime implementation while the public agentWorkflow contract
 // uses the shorter WorkflowDefinition/WorkflowNode names above.
-export const workflowV2DefinitionSchema = workflowDefinitionSchema;
-export type WorkflowV2Definition = WorkflowDefinition;
-export type WorkflowV2Node = WorkflowNode;
-export type WorkflowV2Role = WorkflowNode["role"];
+export const agentWorkflowDefinitionSchema = workflowDefinitionSchema;
+export type AgentWorkflowDefinition = WorkflowDefinition;
+export type AgentWorkflowNode = WorkflowNode;
+export type AgentWorkflowRole = WorkflowNode["role"];
 
 function validateWorkflowGraph(
   value: z.infer<typeof workflowDefinitionSchema>,

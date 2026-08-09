@@ -1,81 +1,42 @@
 import { randomUUID } from "node:crypto";
-import { z } from "zod";
 import {
-  workflowV2DefinitionSchema,
-  type WorkflowV2Definition,
-  type WorkflowV2Node,
-  type WorkflowV2Role,
-} from "../../shared/workflowV2Schemas.js";
+  agentWorkflowDefinitionSchema,
+  workflowRunEnvelopeSchema,
+  canonicalNodeOccurrenceSchema,
+  type AgentWorkflowDefinition,
+  type AgentWorkflowNode,
+  type AgentWorkflowRole,
+  type WorkflowRunEnvelope,
+  type CanonicalNodeOccurrence,
+} from "../../shared/agentWorkflowSchemas.js";
 
-export { workflowV2DefinitionSchema } from "../../shared/workflowV2Schemas.js";
-export type { WorkflowV2Definition } from "../../shared/workflowV2Schemas.js";
-/** Compatibility alias for callers introduced during the v2 branch. */
-export type WorkflowRoleDefinition = WorkflowV2Definition;
-const output = z.string().max(32_000);
-export const workflowOccurrenceStatusSchema = z.enum([
-  "ready",
-  "queued",
-  "running",
-  "waitingHuman",
-  "completed",
-  "failed",
-  "skipped",
-  "cancelled",
-]);
-export const workflowOccurrenceSchema = z
-  .object({
-    id: z.string().uuid(),
-    nodeId: z.string(),
-    role: z.enum(["worker", "decider", "orchestrator", "human"]),
-    parentOrchestratorRunId: z.string().uuid().optional(),
-    parentOccurrenceIds: z.array(z.string().uuid()).default([]),
-    iteration: z.number().int().positive().default(1),
-    attempt: z.number().int().positive(),
-    status: workflowOccurrenceStatusSchema,
-    output: z.union([output, z.boolean(), z.array(output)]).optional(),
-    sessionId: z.string().optional(),
-    runtimeId: z.string().optional(),
-    error: z.string().max(4_000).optional(),
-    managedChildren: z.array(z.string().uuid()).default([]),
-    aggregation: z.array(output).default([]),
-    createdAtMs: z.number().finite(),
-    startedAtMs: z.number().finite().optional(),
-    completedAtMs: z.number().finite().optional(),
-    updatedAtMs: z.number().finite(),
-  })
-  .strict();
-export const workflowRoleRunSchema = z
-  .object({
-    version: z.literal(2),
-    id: z.string().uuid(),
-    name: z.string(),
-    workspaceId: z.string(),
-    status: z.enum([
-      "waiting",
-      "running",
-      "needsAttention",
-      "completed",
-      "failed",
-      "stopped",
-    ]),
-    definition: workflowV2DefinitionSchema,
-    inputs: z.record(z.string(), z.string()),
-    occurrences: z.array(workflowOccurrenceSchema),
-    createdAtMs: z.number(),
-    updatedAtMs: z.number(),
-    completedAtMs: z.number().optional(),
-  })
-  .strict();
-export type WorkflowOccurrence = z.infer<typeof workflowOccurrenceSchema>;
-export type WorkflowRoleRun = z.infer<typeof workflowRoleRunSchema>;
+export { agentWorkflowDefinitionSchema } from "../../shared/agentWorkflowSchemas.js";
+export type { AgentWorkflowDefinition } from "../../shared/agentWorkflowSchemas.js";
+/** Compatibility alias for callers introduced during the agentWorkflow branch. */
+export type WorkflowRoleDefinition = AgentWorkflowDefinition;
+/** Canonical persisted run contract lives in shared schemas; these aliases keep the runtime API stable. */
+export const workflowOccurrenceSchema = canonicalNodeOccurrenceSchema;
+export const workflowRoleRunSchema = workflowRunEnvelopeSchema;
+export type WorkflowOccurrence = CanonicalNodeOccurrence;
+export type WorkflowRoleRun = WorkflowRunEnvelope;
 
 export function createWorkflowRoleRun(
-  definition: WorkflowV2Definition,
+  definition: AgentWorkflowDefinition,
   workspaceId: string,
   inputs: Record<string, string> = {},
   now = Date.now(),
 ): WorkflowRoleRun {
-  const parsed = workflowV2DefinitionSchema.parse(definition);
+  const parsed = agentWorkflowDefinitionSchema.parse(definition);
+  for (const item of parsed.nodes) {
+    if (
+      item.role !== "human" &&
+      (item.execution?.maxAttempts !== undefined ||
+        item.execution?.timeoutSeconds !== undefined)
+    )
+      throw new Error(
+        "maxAttempts and timeoutSeconds are not supported for canonical workflow runs.",
+      );
+  }
   const inputIds = new Set(parsed.inputs.map((input) => input.id));
   for (const key of Object.keys(inputs))
     if (!inputIds.has(key)) throw new Error(`Unknown workflow input: ${key}`);
@@ -89,7 +50,6 @@ export function createWorkflowRoleRun(
       throw new Error(`Workflow input is required: ${input.id}`);
   const entry = node(parsed, parsed.entryNodeId);
   const run = {
-    version: 2 as const,
     id: randomUUID(),
     name: parsed.name,
     workspaceId,
@@ -117,6 +77,7 @@ export function startWorkflowOccurrence(
   runtimeId: string,
   sessionId?: string,
   now = Date.now(),
+  sessionFile?: string,
 ): WorkflowRoleRun {
   const occurrence = occurrenceOf(run, occurrenceId);
   if (
@@ -131,6 +92,7 @@ export function startWorkflowOccurrence(
       status: "running",
       runtimeId,
       ...(sessionId ? { sessionId } : {}),
+      ...(sessionFile ? { sessionFile } : {}),
       startedAtMs: occurrence.startedAtMs ?? now,
       updatedAtMs: now,
     }),
@@ -146,7 +108,7 @@ export function startWorkflowOrchestrator(
   if (occurrence.role !== "orchestrator" || occurrence.status !== "ready")
     throw new Error("Orchestrator occurrence is not ready.");
   const config = node(run.definition, occurrence.nodeId).config as Extract<
-    WorkflowV2Node,
+    AgentWorkflowNode,
     { role: "orchestrator" }
   >["config"];
   let next = patch(run, occurrenceId, {
@@ -161,6 +123,8 @@ export function startWorkflowOrchestrator(
       occurrence.id,
       1,
       now,
+      1,
+      managedContext(next, occurrence),
     ),
   );
   if (config.mode === "fanout")
@@ -285,8 +249,18 @@ export function retryWorkflowOccurrence(
   const prior = occurrenceOf(run, occurrenceId);
   if (!["failed", "cancelled"].includes(prior.status))
     throw new Error("Only failed or cancelled occurrences may retry.");
-  return derive(
-    add(run, [
+  let next = add(
+    {
+      ...run,
+      // A retry supersedes the failed attempt; historical output/error remains
+      // preserved but no longer participates in terminal derivation.
+      occurrences: run.occurrences.map((item) =>
+        item.id === prior.id
+          ? { ...item, status: "skipped" as const, updatedAtMs: now }
+          : item,
+      ),
+    },
+    [
       newOccurrence(
         node(run.definition, prior.nodeId),
         prior.parentOccurrenceIds,
@@ -295,9 +269,17 @@ export function retryWorkflowOccurrence(
         now,
         prior.attempt + 1,
       ),
-    ]),
-    now,
+    ],
   );
+  if (prior.parentOrchestratorRunId) {
+    next = patch(next, prior.parentOrchestratorRunId, {
+      status: "running",
+      error: undefined,
+      completedAtMs: undefined,
+      updatedAtMs: now,
+    });
+  }
+  return derive(next, now);
 }
 export function stopWorkflowRoleRun(
   run: WorkflowRoleRun,
@@ -328,7 +310,7 @@ function advanceOrchestrator(
   // not advance an Orchestrator that was completed by an earlier sibling.
   if (orchestrator.status !== "running") return run;
   const config = node(run.definition, orchestrator.nodeId).config as Extract<
-    WorkflowV2Node,
+    AgentWorkflowNode,
     { role: "orchestrator" }
   >["config"];
   const child = occurrenceOf(run, childId);
@@ -444,6 +426,12 @@ function advanceOrchestrator(
         orchestratorId,
         child.iteration + 1,
         now,
+        1,
+        [
+          ...orchestrator.aggregation,
+          "Decider result: false",
+          ...managedContext(run, orchestrator),
+        ],
       ),
     );
     return add(
@@ -471,8 +459,8 @@ function route(
       (item.when === undefined || item.when.equals === source.output),
   );
   let next = run;
-  for (const relationship of outgoing)
-    if ("nodeId" in relationship.to)
+  for (const relationship of outgoing) {
+    if ("nodeId" in relationship.to) {
       next = add(next, [
         newOccurrence(
           node(next.definition, relationship.to.nodeId),
@@ -482,22 +470,29 @@ function route(
           now,
         ),
       ]);
+    } else {
+      // Terminal labels are workflow business outcomes, not failure classifications.
+      next = { ...next, terminalOutcome: relationship.to.end };
+    }
+  }
   return next;
 }
 function newOccurrence(
-  role: WorkflowV2Node,
+  role: AgentWorkflowNode,
   parents: string[],
   parentOrchestratorRunId: string | undefined,
   iteration: number,
   now: number,
   attempt = 1,
+  context: string[] = [],
 ): WorkflowOccurrence {
   return {
     id: randomUUID(),
     nodeId: role.id,
-    role: role.role as WorkflowV2Role,
+    role: role.role as AgentWorkflowRole,
     ...(parentOrchestratorRunId ? { parentOrchestratorRunId } : {}),
     parentOccurrenceIds: parents,
+    context: context.map((value) => bound(value)),
     iteration,
     attempt,
     status: role.role === "human" ? "waitingHuman" : "ready",
@@ -507,7 +502,24 @@ function newOccurrence(
     updatedAtMs: now,
   };
 }
-function node(definition: WorkflowV2Definition, id: string): WorkflowV2Node {
+function managedContext(
+  run: WorkflowRoleRun,
+  orchestrator: WorkflowOccurrence,
+): string[] {
+  const role = node(run.definition, orchestrator.nodeId);
+  if (role.role !== "orchestrator") return [];
+  const configured = role.config.input ? [role.config.input] : [];
+  const parents = orchestrator.parentOccurrenceIds
+    .map((id) => run.occurrences.find((item) => item.id === id)?.output)
+    .flatMap((value) =>
+      value === undefined ? [] : Array.isArray(value) ? value : [String(value)],
+    );
+  return [...configured, ...parents];
+}
+function node(
+  definition: AgentWorkflowDefinition,
+  id: string,
+): AgentWorkflowNode {
   const result = definition.nodes.find((item) => item.id === id);
   if (!result) throw new Error(`Unknown workflow node: ${id}`);
   return result;
@@ -560,6 +572,13 @@ function isNonFatalFanoutAnyFailure(
 }
 function derive(run: WorkflowRoleRun, now: number): WorkflowRoleRun {
   if (run.status === "stopped") return run;
+  if (run.terminalOutcome === "stopped")
+    return workflowRoleRunSchema.parse({
+      ...run,
+      status: "stopped",
+      updatedAtMs: now,
+      completedAtMs: run.completedAtMs ?? now,
+    });
   const status = run.occurrences.some(
     (item) =>
       item.status === "failed" && !isNonFatalFanoutAnyFailure(run, item),

@@ -2,7 +2,7 @@ import {
   workflowDefinitionSchema,
   type WorkflowDefinition,
   type WorkflowNode,
-} from "../../shared/workflowV2Schemas.js";
+} from "../../shared/agentWorkflowSchemas.js";
 
 export const workflowRoles = [
   "worker",
@@ -20,13 +20,13 @@ export const workflowRoleTemplates: ReadonlyArray<{
   { id: "orchestrator", label: "Orchestrator" },
   { id: "human", label: "Human" },
 ];
-export const workflowV2DefinitionSchema = workflowDefinitionSchema;
-export type WorkflowV2Definition = WorkflowDefinition;
-export type WorkflowV2Node = WorkflowNode;
+export const agentWorkflowDefinitionSchema = workflowDefinitionSchema;
+export type AgentWorkflowDefinition = WorkflowDefinition;
+export type AgentWorkflowNode = WorkflowNode;
 
 /** Produces an unused, stable-looking ID even after imports or deletions. */
 export function uniqueNodeId(
-  definition: WorkflowV2Definition,
+  definition: AgentWorkflowDefinition,
   prefix: string,
 ): string {
   const ids = new Set(definition.nodes.map((node) => node.id));
@@ -34,7 +34,7 @@ export function uniqueNodeId(
   while (ids.has(`${prefix}-${number}`)) number += 1;
   return `${prefix}-${number}`;
 }
-export function defaultV2Definition(): WorkflowV2Definition {
+export function defaultAgentWorkflowDefinition(): AgentWorkflowDefinition {
   return {
     format: "pi-deck.agent-workflow",
     schemaVersion: 2,
@@ -57,11 +57,11 @@ export function defaultV2Definition(): WorkflowV2Definition {
 export function roleTemplate(role: WorkflowRole) {
   return workflowRoleTemplates.find((item) => item.id === role)!;
 }
-export function definitionJson(definition: WorkflowV2Definition): string {
+export function definitionJson(definition: AgentWorkflowDefinition): string {
   return JSON.stringify(definition, null, 2);
 }
 export function validateJsonDraft(value: string): {
-  definition?: WorkflowV2Definition;
+  definition?: AgentWorkflowDefinition;
   error?: string;
 } {
   try {
@@ -79,17 +79,18 @@ export function validateJsonDraft(value: string): {
     };
   }
 }
-export function graphEdges(definition: WorkflowV2Definition) {
+export function graphEdges(definition: AgentWorkflowDefinition) {
   return definition.relationships.map((edge) => ({
     from: edge.from,
     to: "nodeId" in edge.to ? edge.to.nodeId : undefined,
+    end: "end" in edge.to ? edge.to.end : undefined,
     label: edge.when ? String(edge.when.equals) : "then",
   }));
 }
 const nodeFor = (
   role: Exclude<WorkflowRole, "orchestrator">,
   id: string,
-): WorkflowV2Node => {
+): AgentWorkflowNode => {
   if (role === "worker")
     return {
       id,
@@ -113,9 +114,9 @@ const nodeFor = (
 };
 /** Adds roles with valid reciprocal ownership. An Orchestrator starts as a fixed-list Fan-out. */
 export function addRole(
-  definition: WorkflowV2Definition,
+  definition: AgentWorkflowDefinition,
   role: WorkflowRole,
-): { definition: WorkflowV2Definition; selectedId: string } {
+): { definition: AgentWorkflowDefinition; selectedId: string } {
   if (role !== "orchestrator") {
     const node = nodeFor(role, uniqueNodeId(definition, role));
     return {
@@ -125,15 +126,18 @@ export function addRole(
   }
   const id = uniqueNodeId(definition, "orchestrator");
   const workerId = uniqueNodeId(
-    { ...definition, nodes: [...definition.nodes, { id } as WorkflowV2Node] },
+    {
+      ...definition,
+      nodes: [...definition.nodes, { id } as AgentWorkflowNode],
+    },
     "worker",
   );
   const worker = {
     ...nodeFor("worker", workerId),
     name: "Managed worker",
     managedBy: id,
-  } as WorkflowV2Node;
-  const orchestrator: WorkflowV2Node = {
+  } as AgentWorkflowNode;
+  const orchestrator: AgentWorkflowNode = {
     id,
     name: "New orchestration",
     role: "orchestrator",
@@ -153,9 +157,9 @@ export function addRole(
   };
 }
 const withoutNodes = (
-  definition: WorkflowV2Definition,
+  definition: AgentWorkflowDefinition,
   ids: Set<string>,
-): WorkflowV2Definition => ({
+): AgentWorkflowDefinition => ({
   ...definition,
   nodes: definition.nodes.filter((node) => !ids.has(node.id)),
   relationships: definition.relationships.filter(
@@ -169,10 +173,10 @@ const withoutNodes = (
  * top-level node. The UI keeps at least one worker assigned.
  */
 export function setManagedWorkers(
-  definition: WorkflowV2Definition,
+  definition: AgentWorkflowDefinition,
   ownerId: string,
   agentIds: string[],
-): WorkflowV2Definition {
+): AgentWorkflowDefinition {
   const selected = new Set(agentIds);
   const released = new Set(
     definition.nodes
@@ -192,9 +196,9 @@ export function setManagedWorkers(
         return {
           ...node,
           config: { ...node.config, agents: agentIds },
-        } as WorkflowV2Node;
+        } as AgentWorkflowNode;
       if (node.role === "worker" && selected.has(node.id))
-        return { ...node, managedBy: ownerId } as WorkflowV2Node;
+        return { ...node, managedBy: ownerId } as AgentWorkflowNode;
       return node;
     }),
     relationships: base.relationships.filter(
@@ -206,13 +210,13 @@ export function setManagedWorkers(
 }
 /** Assigning a loop decider deletes its old owner decider and incompatible routes. */
 export function setLoopDecider(
-  definition: WorkflowV2Definition,
+  definition: AgentWorkflowDefinition,
   ownerId: string,
   deciderId: string,
-): WorkflowV2Definition {
+): AgentWorkflowDefinition {
   const loopOwner = definition.nodes.find(
     (node) => node.role === "orchestrator" && node.id === ownerId,
-  ) as Extract<WorkflowV2Node, { role: "orchestrator" }> | undefined;
+  ) as Extract<AgentWorkflowNode, { role: "orchestrator" }> | undefined;
   const old =
     loopOwner?.config.mode === "loop" ? loopOwner.config.decider : undefined;
   const base =
@@ -230,9 +234,9 @@ export function setLoopDecider(
         return {
           ...node,
           config: { ...node.config, decider: deciderId },
-        } as WorkflowV2Node;
+        } as AgentWorkflowNode;
       if (node.id === deciderId && node.role === "decider")
-        return { ...node, managedBy: ownerId } as WorkflowV2Node;
+        return { ...node, managedBy: ownerId } as AgentWorkflowNode;
       return node;
     }),
     relationships: base.relationships.filter(
@@ -244,13 +248,13 @@ export function setLoopDecider(
 }
 /** Switches modes while retaining optional input and deleting the loop-only decider. */
 export function setOrchestratorMode(
-  definition: WorkflowV2Definition,
+  definition: AgentWorkflowDefinition,
   ownerId: string,
   mode: "loop" | "fanout",
-): WorkflowV2Definition {
+): AgentWorkflowDefinition {
   const owner = definition.nodes.find(
     (node) => node.id === ownerId && node.role === "orchestrator",
-  ) as Extract<WorkflowV2Node, { role: "orchestrator" }> | undefined;
+  ) as Extract<AgentWorkflowNode, { role: "orchestrator" }> | undefined;
   if (!owner || owner.config.mode === mode) return definition;
   if (mode === "fanout") {
     const base = withoutNodes(
@@ -273,7 +277,7 @@ export function setOrchestratorMode(
                 maxConcurrency: 1,
                 completion: "all",
               },
-            } as WorkflowV2Node)
+            } as AgentWorkflowNode)
           : node,
       ),
     };
@@ -283,7 +287,7 @@ export function setOrchestratorMode(
     ...nodeFor("decider", deciderId),
     name: "Loop completion",
     managedBy: ownerId,
-  } as WorkflowV2Node;
+  } as AgentWorkflowNode;
   return {
     ...definition,
     nodes: [
@@ -298,7 +302,7 @@ export function setOrchestratorMode(
                 decider: deciderId,
                 maxIterations: 1,
               },
-            } as WorkflowV2Node)
+            } as AgentWorkflowNode)
           : node,
       ),
       decider,

@@ -7,6 +7,7 @@ import {
   UnsupportedWorkflowStoreVersionError,
 } from "./workflowStore.js";
 import { createWorkflowRun } from "./workflowEngine.js";
+import { createWorkflowRoleRun } from "./agentWorkflowRuntime.js";
 import type { WorkflowTemplateDefinition } from "../../shared/workflowSchemas.js";
 
 const dirs: string[] = [];
@@ -40,7 +41,7 @@ async function fresh(): Promise<WorkflowStore> {
   dirs.push(dir);
   return new WorkflowStore(dir, undefined, () => 123);
 }
-const v2 = () => ({
+const agentWorkflowDefinition = () => ({
   format: "pi-deck.agent-workflow" as const,
   schemaVersion: 2 as const,
   id: "native",
@@ -60,14 +61,14 @@ const v2 = () => ({
   relationships: [],
 });
 
-describe("WorkflowStore v2 migration foundation", () => {
-  it("persists native v2 workflows without v1 roles or templates", async () => {
+describe("WorkflowStore agentWorkflow migration foundation", () => {
+  it("persists native agentWorkflow workflows without v1 roles or templates", async () => {
     const store = await fresh();
-    await store.createWorkflow(v2());
+    await store.createWorkflow(agentWorkflowDefinition());
     const disk = JSON.parse(await fs.readFile(store.storeFile, "utf8"));
     expect(disk).toMatchObject({
       version: 2,
-      workflows: [v2()],
+      workflows: [agentWorkflowDefinition()],
       occurrences: [],
       legacyRuns: [],
     });
@@ -75,24 +76,31 @@ describe("WorkflowStore v2 migration foundation", () => {
     expect(JSON.stringify(disk)).not.toContain('"templates"');
   });
 
-  it("validates and updates canonical v2 workflows without coercing them to v1", async () => {
+  it("validates and updates canonical agentWorkflow workflows without coercing them to v1", async () => {
     const store = await fresh();
-    await store.createWorkflow(v2());
-    await expect(store.createWorkflow(v2())).rejects.toThrow(
-      "Workflow already exists: native",
-    );
+    await store.createWorkflow(agentWorkflowDefinition());
     await expect(
-      store.updateWorkflow({ ...v2(), name: "Updated native", revision: 2 }),
+      store.createWorkflow(agentWorkflowDefinition()),
+    ).rejects.toThrow("Workflow already exists: native");
+    await expect(
+      store.updateWorkflow({
+        ...agentWorkflowDefinition(),
+        name: "Updated native",
+        revision: 2,
+      }),
     ).resolves.toMatchObject({ name: "Updated native", revision: 2 });
     await expect(
-      store.updateWorkflow({ ...v2(), entryNodeId: "missing" }),
+      store.updateWorkflow({
+        ...agentWorkflowDefinition(),
+        entryNodeId: "missing",
+      }),
     ).rejects.toThrow(/Entry node/);
   });
 
   it("filters scoped workflows while retaining global definitions and rejects cross-workspace updates", async () => {
     const store = await fresh();
-    const global = { ...v2(), id: "global" };
-    const scoped = { ...v2(), id: "scoped" };
+    const global = { ...agentWorkflowDefinition(), id: "global" };
+    const scoped = { ...agentWorkflowDefinition(), id: "scoped" };
     await store.createWorkflow(global);
     await store.createWorkflow(scoped, "workspace-a");
 
@@ -190,7 +198,19 @@ describe("WorkflowStore v2 migration foundation", () => {
     ).toBe("human");
   });
 
-  it("backs up and migrates the exact empty v3 store shape to an empty v2 store", async () => {
+  it("persists canonical run envelopes across reload without fabricating legacy history", async () => {
+    const store = await fresh();
+    const definition = agentWorkflowDefinition();
+    await store.createWorkflow(definition, "workspace");
+    const run = await store.createWorkflowRun(
+      createWorkflowRoleRun(definition, "workspace"),
+    );
+    const reloaded = new WorkflowStore(path.dirname(store.storeFile));
+    expect(await reloaded.getWorkflowRun(run.id)).toEqual(run);
+    expect(await reloaded.listRuns("workspace")).toEqual([]);
+  });
+
+  it("backs up and migrates the exact empty v3 store shape to an empty agentWorkflow store", async () => {
     const store = await fresh();
     const original = '{"version":3,"workflows":[],"runs":[]}';
     await fs.writeFile(store.storeFile, original);
@@ -203,6 +223,7 @@ describe("WorkflowStore v2 migration foundation", () => {
       version: 2,
       workflows: [],
       occurrences: [],
+      runs: [],
       legacyRuns: [],
       workflowScopes: {},
     });
@@ -212,7 +233,9 @@ describe("WorkflowStore v2 migration foundation", () => {
     const store = await fresh();
     const original = JSON.stringify({
       version: 3,
-      workflows: [{ workspaceId: "workspace", definition: v2() }],
+      workflows: [
+        { workspaceId: "workspace", definition: agentWorkflowDefinition() },
+      ],
       runs: [],
     });
     await fs.writeFile(store.storeFile, original);
@@ -245,7 +268,7 @@ describe("WorkflowStore v2 migration foundation", () => {
     expect(await fs.readFile(store.storeFile, "utf8")).toBe(futureStore);
   });
 
-  it("backs up corrupt metadata before initializing an empty v2 store", async () => {
+  it("backs up corrupt metadata before initializing an empty agentWorkflow store", async () => {
     const store = await fresh();
     await fs.writeFile(store.storeFile, "not-json");
     expect(await store.listWorkflows()).toEqual([]);

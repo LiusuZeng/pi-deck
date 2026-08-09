@@ -8,7 +8,7 @@ import {
 } from "react";
 import {
   addRole,
-  defaultV2Definition,
+  defaultAgentWorkflowDefinition,
   definitionJson,
   graphEdges,
   setLoopDecider,
@@ -17,12 +17,30 @@ import {
   validateJsonDraft,
   workflowRoleTemplates,
   type WorkflowRole,
-  type WorkflowV2Definition,
-  type WorkflowV2Node,
-} from "../../workflows/workflowV2.js";
-import { WorkflowV2Graph } from "./v2/WorkflowV2Graph.js";
+  type AgentWorkflowDefinition,
+  type AgentWorkflowNode,
+} from "../../workflows/agentWorkflowDefinition.js";
+import { PiModelThinkingMenu } from "../PiModelThinkingMenu.js";
+import { AgentWorkflowGraph } from "./AgentWorkflowGraph.js";
 
 type View = "build" | "graph" | "json";
+interface WorkflowThinkingChoice {
+  id: string;
+  label: string;
+  disabled?: boolean;
+  note?: string;
+}
+interface WorkflowModelChoice {
+  provider?: string;
+  id: string;
+  label: string;
+  disabled?: boolean;
+  note?: string;
+  thinkingChoices?: WorkflowThinkingChoice[];
+}
+const modelChoiceValue = (
+  choice: Pick<WorkflowModelChoice, "provider" | "id">,
+) => [choice.provider, choice.id].filter(Boolean).join("/");
 const presentation: Record<WorkflowRole, string> = {
   worker: "Agent task",
   decider: "Decision",
@@ -36,22 +54,34 @@ const addAction: Record<WorkflowRole, string> = {
   human: "Add checkpoint",
 };
 const updateNode = (
-  definition: WorkflowV2Definition,
-  node: WorkflowV2Node,
+  definition: AgentWorkflowDefinition,
+  node: AgentWorkflowNode,
 ) => ({
   ...definition,
   nodes: definition.nodes.map((item) => (item.id === node.id ? node : item)),
 });
 const optional = (value: string) => value || undefined;
+const destinationLabel = (
+  definition: AgentWorkflowDefinition,
+  target: AgentWorkflowDefinition["relationships"][number]["to"],
+): string =>
+  "nodeId" in target
+    ? (definition.nodes.find((node) => node.id === target.nodeId)?.name ??
+      "Unavailable step")
+    : `End workflow: ${target.end}`;
+const connectionLabel = (equals: boolean | string | undefined): string =>
+  equals === undefined ? "On completion" : `When ${String(equals)}`;
 
-/** Canonical v2 editor. Build mutations only update the canonical workflow document. */
-export function WorkflowV2Builder(props: {
-  initialDefinition?: WorkflowV2Definition;
-  onSave(definition: WorkflowV2Definition): Promise<void> | void;
+/** Canonical agentWorkflow editor. Build mutations only update the canonical workflow document. */
+export function AgentWorkflowBuilder(props: {
+  initialDefinition?: AgentWorkflowDefinition;
+  modelChoices?: WorkflowModelChoice[];
+  thinkingChoices?: WorkflowThinkingChoice[];
+  onSave(definition: AgentWorkflowDefinition): Promise<void> | void;
   onCancel(): void;
 }): ReactElement {
   const [definition, setDefinition] = useState(
-    () => props.initialDefinition ?? defaultV2Definition(),
+    () => props.initialDefinition ?? defaultAgentWorkflowDefinition(),
   );
   const [view, setView] = useState<View>("build");
   const [selectedId, setSelectedId] = useState(definition.entryNodeId);
@@ -68,17 +98,60 @@ export function WorkflowV2Builder(props: {
   const selected =
     definition.nodes.find((node) => node.id === selectedId) ??
     definition.nodes[0]!;
+  const selectedExecution =
+    selected.role === "human" ? undefined : selected.execution;
+  const selectedModelValue =
+    selectedExecution?.model === "inherit"
+      ? ""
+      : (selectedExecution?.model ?? "");
+  const selectedModelChoice = props.modelChoices?.find(
+    (choice) => modelChoiceValue(choice) === selectedModelValue,
+  );
+  const availableThinkingChoices =
+    selectedModelChoice?.thinkingChoices ?? props.thinkingChoices ?? [];
+  const selectedThinkingValue =
+    selectedExecution?.thinking === "inherit"
+      ? ""
+      : (selectedExecution?.thinking ?? "");
+  const menuModels = (props.modelChoices ?? [])
+    .filter((choice) => !choice.disabled && choice.provider)
+    .map((choice) => ({
+      id: choice.id,
+      name: choice.label,
+      provider: choice.provider,
+    }));
+  const selectedMenuModel =
+    menuModels.find(
+      (model) =>
+        [model.provider, model.id].filter(Boolean).join("/") ===
+        selectedModelValue,
+    ) ??
+    (() => {
+      if (!selectedModelValue) return undefined;
+      const separator = selectedModelValue.indexOf("/");
+      return separator > 0
+        ? {
+            provider: selectedModelValue.slice(0, separator),
+            id: selectedModelValue.slice(separator + 1),
+            name: selectedModelValue,
+          }
+        : { id: selectedModelValue, name: selectedModelValue };
+    })();
+  const menuThinkingLevels = availableThinkingChoices
+    .filter((choice) => !choice.disabled)
+    .map((choice) => choice.id);
   const edges = useMemo(() => graphEdges(definition), [definition]);
   const validationError = useMemo(
     () => validateJsonDraft(definitionJson(definition)).error,
     [definition],
   );
-  const update = (next: WorkflowV2Definition) => {
+  const update = (next: AgentWorkflowDefinition) => {
     setDefinition(next);
     setDraft(definitionJson(next));
     setJsonError(undefined);
   };
-  const patch = (node: WorkflowV2Node) => update(updateNode(definition, node));
+  const patch = (node: AgentWorkflowNode) =>
+    update(updateNode(definition, node));
   useEffect(() => {
     if (!showPicker) return;
     pickerRef.current
@@ -129,19 +202,26 @@ export function WorkflowV2Builder(props: {
     }
   };
   const topLevel = definition.nodes.filter((node) => !node.managedBy);
-  const relationship = (
+  const relationshipDefinition = (
     from: string,
     equals: boolean | string | undefined,
     value: string,
-  ) => {
-    const to = value.startsWith("end:")
-      ? { end: value.slice(4) }
-      : { nodeId: value };
+  ): AgentWorkflowDefinition => {
     const existing = definition.relationships.find(
       (edge) =>
         edge.from === from &&
         (equals === undefined ? !edge.when : edge.when?.equals === equals),
     );
+    if (!value)
+      return {
+        ...definition,
+        relationships: definition.relationships.filter(
+          (item) => item !== existing,
+        ),
+      };
+    const to = value.startsWith("end:")
+      ? { end: value.slice(4) }
+      : { nodeId: value };
     const edge = {
       id:
         existing?.id ??
@@ -158,16 +238,32 @@ export function WorkflowV2Builder(props: {
       ...(equals === undefined ? {} : { when: { equals } }),
       to,
     };
-    update({
+    return {
       ...definition,
       relationships: [
         ...definition.relationships.filter((item) => item !== existing),
         edge,
       ],
-    });
+    } as AgentWorkflowDefinition;
+  };
+  const canSetRelationship = (
+    from: string,
+    equals: boolean | string | undefined,
+    value: string,
+  ): boolean =>
+    validateJsonDraft(
+      definitionJson(relationshipDefinition(from, equals, value)),
+    ).definition !== undefined;
+  const relationship = (
+    from: string,
+    equals: boolean | string | undefined,
+    value: string,
+  ) => {
+    const next = relationshipDefinition(from, equals, value);
+    if (validateJsonDraft(definitionJson(next)).definition) update(next);
   };
   const changeMode = (
-    node: Extract<WorkflowV2Node, { role: "orchestrator" }>,
+    node: Extract<AgentWorkflowNode, { role: "orchestrator" }>,
     mode: "loop" | "fanout",
   ) => update(setOrchestratorMode(definition, node.id, mode));
   const save = async () => {
@@ -183,16 +279,47 @@ export function WorkflowV2Builder(props: {
       setSaveError(error instanceof Error ? error.message : String(error));
     }
   };
-  const destinationOptions = (includeEnd = true) => (
+  const relationshipValue = (equals: boolean | string | undefined): string => {
+    const target = definition.relationships.find(
+      (edge) =>
+        edge.from === selected.id &&
+        (equals === undefined ? !edge.when : edge.when?.equals === equals),
+    )?.to;
+    return target
+      ? "nodeId" in target
+        ? target.nodeId
+        : `end:${target.end}`
+      : "";
+  };
+  const destinationOptions = (
+    equals: boolean | string | undefined,
+    currentValue: string,
+    includeEnd = true,
+  ) => (
     <>
-      {includeEnd && (
-        <>
-          <option value="end:completed">Terminal: completed</option>
-          <option value="end:rejected">Terminal: rejected</option>
-        </>
-      )}
+      {includeEnd &&
+        ["completed", "rejected", "stopped"].map((end) => {
+          const value = `end:${end}`;
+          return canSetRelationship(selected.id, equals, value) ? (
+            <option key={value} value={value}>
+              End workflow: {end}
+            </option>
+          ) : null;
+        })}
+      {currentValue.startsWith("end:") &&
+      !["end:completed", "end:rejected", "end:stopped"].includes(
+        currentValue,
+      ) ? (
+        <option value={currentValue}>
+          End workflow: {currentValue.slice(4)}
+        </option>
+      ) : null}
       {topLevel
-        .filter((node) => node.id !== selected.id)
+        .filter(
+          (node) =>
+            node.id !== selected.id &&
+            canSetRelationship(selected.id, equals, node.id),
+        )
         .map((node) => (
           <option key={node.id} value={node.id}>
             {node.name}
@@ -200,8 +327,11 @@ export function WorkflowV2Builder(props: {
         ))}
     </>
   );
+  const canClearRelationship = (equals: boolean | string | undefined) =>
+    relationshipValue(equals) !== "" &&
+    canSetRelationship(selected.id, equals, "");
   return (
-    <div className="workflow-v2-builder">
+    <div className="agent-workflow-builder">
       <header className="workflow-page-heading">
         <div>
           <button
@@ -236,7 +366,7 @@ export function WorkflowV2Builder(props: {
         </div>
       </header>
       <div
-        className="workflow-v2-tabs"
+        className="agent-workflow-tabs"
         role="tablist"
         aria-label="Workflow views"
       >
@@ -257,9 +387,9 @@ export function WorkflowV2Builder(props: {
         ))}
       </div>
       {view === "build" && (
-        <div className="workflow-v2-build">
+        <div className="agent-workflow-build">
           <section
-            className="workflow-v2-cards"
+            className="agent-workflow-cards"
             aria-label="Workflow role cards"
           >
             <label className="workflow-field">
@@ -271,7 +401,26 @@ export function WorkflowV2Builder(props: {
                 }
               />
             </label>
-            <div ref={pickerRef} className="workflow-v2-add">
+            <label className="workflow-field">
+              <span>Starts with</span>
+              <select
+                aria-label="Workflow starting step"
+                value={definition.entryNodeId}
+                onChange={(event) =>
+                  update({ ...definition, entryNodeId: event.target.value })
+                }
+              >
+                {definition.nodes
+                  .filter((node) => !node.managedBy)
+                  .map((node) => (
+                    <option key={node.id} value={node.id}>
+                      {node.name}
+                    </option>
+                  ))}
+              </select>
+              <small>The first step Pi Deck runs.</small>
+            </label>
+            <div ref={pickerRef} className="agent-workflow-add">
               <button
                 ref={addRef}
                 type="button"
@@ -291,7 +440,7 @@ export function WorkflowV2Builder(props: {
               </button>
               {showPicker && (
                 <div
-                  className="workflow-v2-step-picker"
+                  className="agent-workflow-step-picker"
                   role="menu"
                   aria-label="Choose step type"
                   onKeyDown={pickerKeys}
@@ -320,7 +469,7 @@ export function WorkflowV2Builder(props: {
                 key={node.id}
                 type="button"
                 data-workflow-node-id={node.id}
-                className={`workflow-v2-step-card ${selected.id === node.id ? "is-selected" : ""}`}
+                className={`agent-workflow-step-card ${selected.id === node.id ? "is-selected" : ""}`}
                 aria-pressed={selected.id === node.id}
                 onClick={(event) => {
                   originCardRef.current = event.currentTarget;
@@ -328,11 +477,15 @@ export function WorkflowV2Builder(props: {
                   setInspectorOpen(true);
                 }}
               >
-                <span className="workflow-v2-card-heading">
+                <span className="agent-workflow-card-heading">
                   <b>{index + 1}</b>
                   <i>
                     {presentation[node.role]}
-                    {node.managedBy ? " (managed)" : ""}
+                    {node.managedBy
+                      ? " (managed)"
+                      : node.id === definition.entryNodeId
+                        ? " · Starts workflow"
+                        : ""}
                   </i>
                 </span>
                 <strong>{node.name}</strong>
@@ -349,24 +502,26 @@ export function WorkflowV2Builder(props: {
                   .filter((edge) => edge.from === node.id)
                   .map((edge) => (
                     <em key={`${edge.from}-${edge.to}-${edge.label}`}>
-                      {edge.label} →{" "}
-                      {definition.nodes.find((n) => n.id === edge.to)?.name ??
-                        "End"}
+                      {edge.label === "then" ? "Next" : edge.label} →{" "}
+                      {edge.to
+                        ? (definition.nodes.find((n) => n.id === edge.to)
+                            ?.name ?? "Unavailable step")
+                        : `End workflow: ${edge.end ?? "completed"}`}
                     </em>
                   ))}
               </button>
             ))}
           </section>
           <aside
-            className={`workflow-v2-inspector ${inspectorOpen ? "is-open" : ""}`}
+            className={`agent-workflow-inspector ${inspectorOpen ? "is-open" : ""}`}
             aria-label="Focused role inspector"
           >
-            <div className="workflow-v2-inspector-heading">
+            <div className="agent-workflow-inspector-heading">
               <h3>{presentation[selected.role]}</h3>
               <button
                 ref={inspectorCloseRef}
                 type="button"
-                className="workflow-v2-inspector-close"
+                className="agent-workflow-inspector-close"
                 onClick={() => {
                   setInspectorOpen(false);
                   const origin = originCardRef.current?.isConnected
@@ -385,7 +540,7 @@ export function WorkflowV2Builder(props: {
               </button>
             </div>
             {validationError && (
-              <p className="workflow-v2-validation" role="alert">
+              <p className="agent-workflow-validation" role="alert">
                 {validationError}
               </p>
             )}
@@ -394,7 +549,10 @@ export function WorkflowV2Builder(props: {
               <input
                 value={selected.name}
                 onChange={(e) =>
-                  patch({ ...selected, name: e.target.value } as WorkflowV2Node)
+                  patch({
+                    ...selected,
+                    name: e.target.value,
+                  } as AgentWorkflowNode)
                 }
               />
             </label>
@@ -545,7 +703,7 @@ export function WorkflowV2Builder(props: {
                         ...updateNode(definition, {
                           ...selected,
                           config,
-                        } as WorkflowV2Node),
+                        } as AgentWorkflowNode),
                         relationships: definition.relationships.filter(
                           (edge) => edge.from !== selected.id,
                         ),
@@ -565,7 +723,7 @@ export function WorkflowV2Builder(props: {
                       patch({
                         ...selected,
                         config: { ...selected.config, prompt: e.target.value },
-                      } as WorkflowV2Node)
+                      } as AgentWorkflowNode)
                     }
                   />
                 </label>
@@ -580,7 +738,7 @@ export function WorkflowV2Builder(props: {
                           ...selected.config,
                           input: optional(e.target.value),
                         },
-                      } as WorkflowV2Node)
+                      } as AgentWorkflowNode)
                     }
                   />
                 </label>
@@ -598,7 +756,7 @@ export function WorkflowV2Builder(props: {
                           ...updateNode(definition, {
                             ...selected,
                             config: { ...selected.config, options },
-                          } as WorkflowV2Node),
+                          } as AgentWorkflowNode),
                           relationships: definition.relationships.filter(
                             (edge) =>
                               edge.from !== selected.id ||
@@ -638,7 +796,7 @@ export function WorkflowV2Builder(props: {
                           ...selected.config,
                           input: optional(e.target.value),
                         },
-                      } as WorkflowV2Node)
+                      } as AgentWorkflowNode)
                     }
                   />
                 </label>
@@ -651,7 +809,7 @@ export function WorkflowV2Builder(props: {
                         (!node.managedBy || node.managedBy === selected.id),
                     )
                     .map((node) => (
-                      <label key={node.id} className="workflow-v2-check">
+                      <label key={node.id} className="agent-workflow-check">
                         <input
                           type="checkbox"
                           checked={selected.config.agents.includes(node.id)}
@@ -676,7 +834,7 @@ export function WorkflowV2Builder(props: {
                         {node.name}
                       </label>
                     ))}
-                  <p className="workflow-v2-policy">
+                  <p className="agent-workflow-policy">
                     Workers are owned exclusively. Removing an assigned worker
                     deletes it and its routes; at least one worker is required.
                   </p>
@@ -728,7 +886,7 @@ export function WorkflowV2Builder(props: {
                               ...selected.config,
                               maxIterations: Number(e.target.value),
                             },
-                          } as WorkflowV2Node)
+                          } as AgentWorkflowNode)
                         }
                       />
                     </label>
@@ -748,7 +906,7 @@ export function WorkflowV2Builder(props: {
                               ...selected.config,
                               maxConcurrency: Number(e.target.value),
                             },
-                          } as WorkflowV2Node)
+                          } as AgentWorkflowNode)
                         }
                       />
                     </label>
@@ -763,7 +921,7 @@ export function WorkflowV2Builder(props: {
                               ...selected.config,
                               completion: e.target.value as "all" | "any",
                             },
-                          } as WorkflowV2Node)
+                          } as AgentWorkflowNode)
                         }
                       >
                         <option value="all">All workers</option>
@@ -776,26 +934,25 @@ export function WorkflowV2Builder(props: {
             )}
             {!selected.managedBy && (
               <fieldset>
-                <legend>Relationships</legend>
+                <legend>Workflow connection</legend>
                 {definition.relationships
                   .filter((edge) => edge.from === selected.id)
                   .map((edge) => (
-                    <p key={edge.id}>
-                      {edge.when ? String(edge.when.equals) : "then"} →{" "}
-                      {"nodeId" in edge.to ? edge.to.nodeId : edge.to.end}{" "}
-                      <button
-                        type="button"
-                        onClick={() =>
-                          update({
-                            ...definition,
-                            relationships: definition.relationships.filter(
-                              (item) => item.id !== edge.id,
-                            ),
-                          })
-                        }
-                      >
-                        Remove
-                      </button>
+                    <p key={edge.id} className="agent-workflow-connection">
+                      <span>
+                        {connectionLabel(edge.when?.equals)} →{" "}
+                        <strong>{destinationLabel(definition, edge.to)}</strong>
+                      </span>{" "}
+                      {canSetRelationship(edge.from, edge.when?.equals, "") ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            relationship(edge.from, edge.when?.equals, "")
+                          }
+                        >
+                          Remove
+                        </button>
+                      ) : null}
                     </p>
                   ))}
                 {selected.role === "decider" ||
@@ -811,14 +968,19 @@ export function WorkflowV2Builder(props: {
                       </span>
                       <select
                         aria-label="True destination"
-                        value=""
-                        onChange={(e) => {
-                          if (e.target.value)
-                            relationship(selected.id, true, e.target.value);
-                        }}
+                        value={relationshipValue(true)}
+                        onChange={(e) =>
+                          relationship(selected.id, true, e.target.value)
+                        }
                       >
-                        <option value="">Choose destination…</option>
-                        {destinationOptions()}
+                        {relationshipValue(true) === "" ? (
+                          <option value="">Choose destination…</option>
+                        ) : canClearRelationship(true) ? (
+                          <option value="">
+                            No destination (remove route)
+                          </option>
+                        ) : null}
+                        {destinationOptions(true, relationshipValue(true))}
                       </select>
                     </label>
                     <label className="workflow-field">
@@ -830,14 +992,19 @@ export function WorkflowV2Builder(props: {
                       </span>
                       <select
                         aria-label="False destination"
-                        value=""
-                        onChange={(e) => {
-                          if (e.target.value)
-                            relationship(selected.id, false, e.target.value);
-                        }}
+                        value={relationshipValue(false)}
+                        onChange={(e) =>
+                          relationship(selected.id, false, e.target.value)
+                        }
                       >
-                        <option value="">Choose destination…</option>
-                        {destinationOptions()}
+                        {relationshipValue(false) === "" ? (
+                          <option value="">Choose destination…</option>
+                        ) : canClearRelationship(false) ? (
+                          <option value="">
+                            No destination (remove route)
+                          </option>
+                        ) : null}
+                        {destinationOptions(false, relationshipValue(false))}
                       </select>
                     </label>
                   </>
@@ -849,31 +1016,45 @@ export function WorkflowV2Builder(props: {
                         <span>{option} destination</span>
                         <select
                           aria-label={`${option} destination`}
-                          value=""
-                          onChange={(e) => {
-                            if (e.target.value)
-                              relationship(selected.id, option, e.target.value);
-                          }}
+                          value={relationshipValue(option)}
+                          onChange={(e) =>
+                            relationship(selected.id, option, e.target.value)
+                          }
                         >
-                          <option value="">Choose destination…</option>
-                          {destinationOptions()}
+                          {relationshipValue(option) === "" ? (
+                            <option value="">Choose destination…</option>
+                          ) : canClearRelationship(option) ? (
+                            <option value="">
+                              No destination (remove route)
+                            </option>
+                          ) : null}
+                          {destinationOptions(
+                            option,
+                            relationshipValue(option),
+                          )}
                         </select>
                       </label>
                     ))}
                   </>
                 ) : (
                   <label className="workflow-field">
-                    <span>Connect to</span>
+                    <span>Next step</span>
                     <select
-                      aria-label="Connect selected role to"
-                      value=""
-                      onChange={(e) => {
-                        if (e.target.value)
-                          relationship(selected.id, undefined, e.target.value);
-                      }}
+                      aria-label="Choose the next workflow step"
+                      value={relationshipValue(undefined)}
+                      onChange={(e) =>
+                        relationship(selected.id, undefined, e.target.value)
+                      }
                     >
-                      <option value="">Choose destination…</option>
-                      {destinationOptions()}
+                      {relationshipValue(undefined) === "" ? (
+                        <option value="">Choose next step…</option>
+                      ) : canClearRelationship(undefined) ? (
+                        <option value="">No next step (remove route)</option>
+                      ) : null}
+                      {destinationOptions(
+                        undefined,
+                        relationshipValue(undefined),
+                      )}
                     </select>
                   </label>
                 )}
@@ -882,41 +1063,94 @@ export function WorkflowV2Builder(props: {
             {selected.role !== "human" && (
               <details>
                 <summary>Advanced execution settings</summary>
-                {(
-                  [
-                    "model",
-                    "thinking",
-                    "maxAttempts",
-                    "timeoutSeconds",
-                  ] as const
-                ).map((field) => (
+                <div className="agent-workflow-execution-configuration">
+                  <PiModelThinkingMenu
+                    models={menuModels}
+                    selectedModel={selectedMenuModel}
+                    thinkingLevels={menuThinkingLevels}
+                    selectedThinking={selectedThinkingValue || undefined}
+                    disabled={false}
+                    onSelectModel={(provider, modelId) => {
+                      const model = `${provider}/${modelId}`;
+                      const nextChoice = props.modelChoices?.find(
+                        (choice) => modelChoiceValue(choice) === model,
+                      );
+                      const nextThinkingChoices =
+                        nextChoice?.thinkingChoices ??
+                        props.thinkingChoices ??
+                        [];
+                      const thinkingUnsupported =
+                        selectedThinkingValue !== "" &&
+                        nextThinkingChoices.length > 0 &&
+                        !nextThinkingChoices.some(
+                          (choice) =>
+                            choice.id === selectedThinkingValue &&
+                            !choice.disabled,
+                        );
+                      patch({
+                        ...selected,
+                        execution: {
+                          ...selected.execution,
+                          model,
+                          ...(thinkingUnsupported
+                            ? { thinking: undefined }
+                            : {}),
+                        },
+                      } as AgentWorkflowNode);
+                    }}
+                    onSelectThinking={(thinking) =>
+                      patch({
+                        ...selected,
+                        execution: { ...selected.execution, thinking },
+                      } as AgentWorkflowNode)
+                    }
+                  />
+                  <span className="agent-workflow-policy">
+                    {selectedModelValue || selectedThinkingValue
+                      ? "Overrides Pi Deck defaults for this step."
+                      : "Using Pi Deck defaults for this step."}
+                  </span>
+                  {selectedModelValue || selectedThinkingValue ? (
+                    <button
+                      type="button"
+                      className="workflow-secondary-button"
+                      onClick={() =>
+                        patch({
+                          ...selected,
+                          execution: {
+                            ...selected.execution,
+                            model: undefined,
+                            thinking: undefined,
+                          },
+                        } as AgentWorkflowNode)
+                      }
+                    >
+                      Use Pi Deck defaults
+                    </button>
+                  ) : null}
+                </div>
+                {(["maxAttempts", "timeoutSeconds"] as const).map((field) => (
                   <label className="workflow-field" key={field}>
                     <span>
                       {field === "maxAttempts"
                         ? "Max attempts"
-                        : field === "timeoutSeconds"
-                          ? "Timeout seconds"
-                          : field}
+                        : "Timeout seconds"}
                     </span>
                     <input
-                      type={
-                        field === "maxAttempts" || field === "timeoutSeconds"
-                          ? "number"
-                          : "text"
-                      }
+                      type="number"
+                      min="1"
                       value={selected.execution?.[field] ?? ""}
-                      onChange={(e) => {
-                        const value =
-                          field === "maxAttempts" || field === "timeoutSeconds"
-                            ? e.target.value
-                              ? Number(e.target.value)
-                              : undefined
-                            : optional(e.target.value);
+                      onChange={(event) =>
                         patch({
                           ...selected,
-                          execution: { ...selected.execution, [field]: value },
-                        } as WorkflowV2Node);
-                      }}
+                          execution: {
+                            ...selected.execution,
+                            [field]: event.target.value
+                              ? Number(event.target.value)
+                              : undefined,
+                          },
+                        } as AgentWorkflowNode)
+                      }
                     />
                   </label>
                 ))}
@@ -926,7 +1160,7 @@ export function WorkflowV2Builder(props: {
         </div>
       )}
       {view === "graph" && (
-        <WorkflowV2Graph
+        <AgentWorkflowGraph
           definition={definition}
           selectedNodeId={selected.id}
           onSelectNode={(nodeId) => {
@@ -938,7 +1172,7 @@ export function WorkflowV2Builder(props: {
         />
       )}
       {view === "json" && (
-        <section className="workflow-v2-json">
+        <section className="agent-workflow-json">
           <h3>JSON draft</h3>
           <textarea
             aria-label="Workflow JSON draft"

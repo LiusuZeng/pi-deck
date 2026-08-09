@@ -1,18 +1,18 @@
 import type { ReactElement } from "react";
-import type { WorkflowDefinition } from "../../../../shared/workflowV2Schemas.js";
+import type { WorkflowDefinition } from "../../../shared/agentWorkflowSchemas.js";
 import {
-  deriveWorkflowV2Graph,
-  type WorkflowV2GraphNode,
-} from "../../../workflows/workflowV2Graph.js";
+  deriveAgentWorkflowGraph,
+  type AgentWorkflowGraphNode,
+} from "../../workflows/agentWorkflowGraph.js";
 
-export interface WorkflowV2GraphProps {
+export interface AgentWorkflowGraphProps {
   definition: WorkflowDefinition;
   selectedNodeId?: string;
   onSelectNode(nodeId: string): void;
 }
 
 function RoleNode(props: {
-  node: WorkflowV2GraphNode;
+  node: AgentWorkflowGraphNode;
   selectedNodeId?: string;
   onSelectNode(nodeId: string): void;
   managed?: boolean;
@@ -20,7 +20,7 @@ function RoleNode(props: {
   const { node } = props;
   return (
     <article
-      className={`workflow-v2-graph-node workflow-v2-graph-node--${node.role}`}
+      className={`agent-workflow-graph-node agent-workflow-graph-node--${node.role}`}
       aria-label={`${node.role}: ${node.name}`}
     >
       <h3>
@@ -35,7 +35,7 @@ function RoleNode(props: {
       <p>{node.detail}</p>
       {node.role === "orchestrator" && (
         <section
-          className="workflow-v2-graph-managed"
+          className="agent-workflow-graph-managed"
           aria-label={`Managed roles for ${node.name}`}
         >
           <h4>Managed roles</h4>
@@ -56,21 +56,23 @@ function RoleNode(props: {
         </section>
       )}
       {props.managed && (
-        <span className="workflow-v2-graph-managed-label">Managed</span>
+        <span className="agent-workflow-graph-managed-label">Managed</span>
       )}
     </article>
   );
 }
 
 /** Read-only semantic projection of the canonical workflow definition. */
-export function WorkflowV2Graph(props: WorkflowV2GraphProps): ReactElement {
-  const model = deriveWorkflowV2Graph(props.definition);
+export function AgentWorkflowGraph(
+  props: AgentWorkflowGraphProps,
+): ReactElement {
+  const model = deriveAgentWorkflowGraph(props.definition);
   const names = new Map(
     props.definition.nodes.map((node) => [node.id, node.name]),
   );
   return (
     <section
-      className="workflow-v2-graph"
+      className="agent-workflow-graph"
       aria-label="Read-only workflow graph"
     >
       <header>
@@ -78,7 +80,7 @@ export function WorkflowV2Graph(props: WorkflowV2GraphProps): ReactElement {
         <p>Derived and read-only. Select a role to focus it in Build.</p>
       </header>
       <ol
-        className="workflow-v2-graph-flow"
+        className="agent-workflow-graph-flow"
         aria-label="Top-level workflow flow"
       >
         {model.topLevelNodes.map((node) => (
@@ -96,7 +98,7 @@ export function WorkflowV2Graph(props: WorkflowV2GraphProps): ReactElement {
                 .map((route) => (
                   <li key={route.id}>
                     <span>{route.label}</span> →{" "}
-                    {route.terminal ? "Terminal outcome: " : ""}
+                    {route.terminal ? "End workflow: " : ""}
                     <strong>
                       {route.terminal
                         ? route.to

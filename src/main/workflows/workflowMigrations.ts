@@ -6,7 +6,7 @@ import {
 import {
   workflowDefinitionSchema,
   type WorkflowDefinition,
-} from "../../shared/workflowV2Schemas.js";
+} from "../../shared/agentWorkflowSchemas.js";
 
 /** Converts old prompt-first templates without retaining a second v1 shape. */
 export function migrateV1Template(
@@ -136,8 +136,8 @@ export function migrateV1Template(
           when: { equals: false },
           to: { end: "stopped" },
         });
-      // v1's third value has no v2 equivalent. It is explicitly normalized
-      // to the false route; v2 never fabricates a third decision value.
+      // v1's third value has no agentWorkflow equivalent. It is explicitly normalized
+      // to the false route; agentWorkflow never fabricates a third decision value.
     }
   }
   const targets = new Set(
@@ -195,7 +195,7 @@ export function migrateV1Template(
   });
 }
 
-/** Runs are intentionally not converted: v1's one-step-run model cannot represent v2 occurrences. */
+/** Runs are intentionally not converted: v1's one-step-run model cannot represent agentWorkflow occurrences. */
 export function preserveLegacyRun(run: WorkflowRun): WorkflowRun {
   return structuredClone(run);
 }
