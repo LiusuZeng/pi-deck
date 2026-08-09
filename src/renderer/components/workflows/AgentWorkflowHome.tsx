@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactElement } from "react";
+import { useLayoutEffect, useRef, useState, type ReactElement } from "react";
 import type {
   WorkflowDefinition,
   WorkflowRunEnvelope,
@@ -59,6 +59,14 @@ function plural(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
+function runIdentity(run: WorkflowRunEnvelope): string {
+  return `Updated ${new Date(run.updatedAtMs).toLocaleString()} · ID ${run.id.slice(-8)}`;
+}
+
+function openRunLabel(run: WorkflowRunEnvelope): string {
+  return `Open run ${run.name}: ${runStatusLabel(run.status)}, updated ${new Date(run.updatedAtMs).toISOString()}, ID ${run.id}`;
+}
+
 /** Canonical workflow overview and its focused definitions and runs surfaces. */
 export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
   const view = props.view ?? "overview";
@@ -68,6 +76,7 @@ export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
   const [inputWorkflow, setInputWorkflow] = useState<WorkflowDefinition>();
   const [inputValues, setInputValues] = useState<Record<string, string>>({});
   const starting = useRef(new Set<string>());
+  const inputDialogRef = useRef<HTMLDivElement>(null);
   const startCapability = props.startCapability ?? { enabled: true };
   const unavailableReason =
     startCapability.unavailableReason ?? defaultStartUnavailable;
@@ -110,6 +119,76 @@ export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
     setInputWorkflow(undefined);
     void start(inputWorkflow, inputValues);
   };
+
+  useLayoutEffect(() => {
+    if (!inputWorkflow) return;
+    const opener = document.activeElement as HTMLElement | null;
+    const initialFocus = inputDialogRef.current?.querySelector<HTMLElement>(
+      "[data-dialog-initial-focus], input:not([disabled]), button:not([disabled])",
+    );
+    initialFocus?.focus();
+    return () => {
+      if (opener?.isConnected) opener.focus();
+    };
+  }, [inputWorkflow?.id]);
+
+  const inputDialog = inputWorkflow ? (
+    <div
+      ref={inputDialogRef}
+      className="workflow-input-dialog"
+      role="dialog"
+      aria-labelledby="agent-workflow-inputs-title"
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          setInputWorkflow(undefined);
+        }
+      }}
+    >
+      <h3 id="agent-workflow-inputs-title">Run inputs</h3>
+      {inputWorkflow.inputs.map((input, index) => {
+        const errorId = `agent-workflow-input-${input.id}-error`;
+        const invalid =
+          input.required && startError === `${input.label} is required.`;
+        return (
+          <label key={input.id}>
+            {input.label}
+            <input
+              data-dialog-initial-focus={index === 0 ? true : undefined}
+              type="text"
+              required={input.required}
+              aria-invalid={invalid}
+              aria-describedby={invalid ? errorId : undefined}
+              value={inputValues[input.id] ?? ""}
+              onChange={(event) =>
+                setInputValues({
+                  ...inputValues,
+                  [input.id]: event.target.value,
+                })
+              }
+            />
+            {invalid ? <span id={errorId}>{startError}</span> : null}
+          </label>
+        );
+      })}
+      <div className="workflow-card-actions">
+        <button
+          type="button"
+          className="workflow-secondary-button"
+          onClick={() => setInputWorkflow(undefined)}
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="workflow-primary-button"
+          onClick={submitInputs}
+        >
+          Start run
+        </button>
+      </div>
+    </div>
+  ) : null;
 
   if (view === "overview") {
     const onlyWorkflow =
@@ -205,6 +284,14 @@ export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
                   <button
                     type="button"
                     className="workflow-secondary-button"
+                    onClick={props.onShowWorkflows}
+                    disabled={!props.onShowWorkflows}
+                  >
+                    View workflows
+                  </button>
+                  <button
+                    type="button"
+                    className="workflow-secondary-button"
                     onClick={() => props.onEdit(onlyWorkflow)}
                   >
                     Edit
@@ -218,16 +305,22 @@ export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
                 aria-labelledby={`agent-workflow-${card.id}-flow-title`}
               >
                 <div>
-                  <span className="workflow-kicker">Read-only flow</span>
+                  <span className="workflow-kicker">
+                    Read-only roles and routes
+                  </span>
                   <h4 id={`agent-workflow-${card.id}-flow-title`}>
                     Workflow structure
                   </h4>
                 </div>
-                <ol>
+                <ul
+                  className="agent-workflow-role-preview"
+                  aria-label="Workflow roles"
+                >
                   {graph.topLevelNodes.map((node) => (
                     <li key={node.id}>
                       <strong>{node.name}</strong>
                       <span>{agentWorkflowRoleLabel[node.role]}</span>
+                      <small>{node.detail}</small>
                       {node.managedNodes.length > 0 ? (
                         <small>
                           Manages{" "}
@@ -238,7 +331,34 @@ export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
                       ) : null}
                     </li>
                   ))}
-                </ol>
+                </ul>
+                {graph.routes.length > 0 ? (
+                  <section
+                    className="agent-workflow-route-preview"
+                    aria-label="Configured routes"
+                  >
+                    <h5>Configured routes</h5>
+                    <ul>
+                      {graph.routes.map((route) => {
+                        const from = onlyWorkflow.nodes.find(
+                          (node) => node.id === route.from,
+                        );
+                        const to = onlyWorkflow.nodes.find(
+                          (node) => node.id === route.to,
+                        );
+                        return (
+                          <li key={route.id}>
+                            <strong>{from?.name ?? route.from}</strong>:{" "}
+                            {route.label} →{" "}
+                            {route.terminal
+                              ? `End workflow: ${route.to}`
+                              : (to?.name ?? route.to)}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </section>
+                ) : null}
               </section>
               <section
                 className="agent-workflow-activity"
@@ -274,16 +394,20 @@ export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
                     {workflowRuns.map((run) => (
                       <li key={run.id}>
                         <span>
-                          <strong>{runStatusLabel(run.status)}</strong>
-                          {run.terminalOutcome
-                            ? ` · ${run.terminalOutcome}`
-                            : ` · ${plural(run.occurrences.length, "occurrence")}`}
+                          <strong>{run.name}</strong>
+                          <small>{runIdentity(run)}</small>
+                          <span>
+                            {runStatusLabel(run.status)}
+                            {run.terminalOutcome
+                              ? ` · ${run.terminalOutcome}`
+                              : ` · ${plural(run.occurrences.length, "occurrence")}`}
+                          </span>
                         </span>
                         {props.onOpenRun ? (
                           <button
                             type="button"
                             className="workflow-secondary-button"
-                            aria-label={`Open run ${run.name}: ${runStatusLabel(run.status)}`}
+                            aria-label={openRunLabel(run)}
                             onClick={() => props.onOpenRun?.(run)}
                           >
                             Open run
@@ -327,59 +451,7 @@ export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
             </button>
           </section>
         )}
-        {inputWorkflow ? (
-          <div
-            className="workflow-input-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="agent-workflow-inputs-title"
-            onKeyDown={(event) => {
-              if (event.key === "Escape") setInputWorkflow(undefined);
-            }}
-          >
-            <h3 id="agent-workflow-inputs-title">Run inputs</h3>
-            {inputWorkflow.inputs.map((input) => {
-              const errorId = `agent-workflow-input-${input.id}-error`;
-              const invalid =
-                input.required && startError === `${input.label} is required.`;
-              return (
-                <label key={input.id}>
-                  {input.label}
-                  <input
-                    type="text"
-                    required={input.required}
-                    aria-invalid={invalid}
-                    aria-describedby={invalid ? errorId : undefined}
-                    value={inputValues[input.id] ?? ""}
-                    onChange={(event) =>
-                      setInputValues({
-                        ...inputValues,
-                        [input.id]: event.target.value,
-                      })
-                    }
-                  />
-                  {invalid ? <span id={errorId}>{startError}</span> : null}
-                </label>
-              );
-            })}
-            <div className="workflow-card-actions">
-              <button
-                type="button"
-                className="workflow-secondary-button"
-                onClick={() => setInputWorkflow(undefined)}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="workflow-primary-button"
-                onClick={submitInputs}
-              >
-                Start run
-              </button>
-            </div>
-          </div>
-        ) : null}
+        {inputDialog}
       </div>
     );
   }
@@ -506,10 +578,13 @@ export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
                     : `${run.occurrences.length} occurrence${run.occurrences.length === 1 ? "" : "s"}`}
                 </small>
               </span>
-              <span className="workflow-run-status">{run.status}</span>
+              <span className="workflow-run-status">
+                {runStatusLabel(run.status)}
+              </span>
               <button
                 type="button"
                 className="workflow-secondary-button"
+                aria-label={openRunLabel(run)}
                 onClick={() => props.onOpenRun?.(run)}
               >
                 Open run
@@ -518,59 +593,7 @@ export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
           ))}
         </div>
       )}
-      {inputWorkflow ? (
-        <div
-          className="workflow-input-dialog"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="agent-workflow-inputs-title"
-          onKeyDown={(event) => {
-            if (event.key === "Escape") setInputWorkflow(undefined);
-          }}
-        >
-          <h3 id="agent-workflow-inputs-title">Run inputs</h3>
-          {inputWorkflow.inputs.map((input) => {
-            const errorId = `agent-workflow-input-${input.id}-error`;
-            const invalid =
-              input.required && startError === `${input.label} is required.`;
-            return (
-              <label key={input.id}>
-                {input.label}
-                <input
-                  type="text"
-                  required={input.required}
-                  aria-invalid={invalid}
-                  aria-describedby={invalid ? errorId : undefined}
-                  value={inputValues[input.id] ?? ""}
-                  onChange={(event) =>
-                    setInputValues({
-                      ...inputValues,
-                      [input.id]: event.target.value,
-                    })
-                  }
-                />
-                {invalid ? <span id={errorId}>{startError}</span> : null}
-              </label>
-            );
-          })}
-          <div className="workflow-card-actions">
-            <button
-              type="button"
-              className="workflow-secondary-button"
-              onClick={() => setInputWorkflow(undefined)}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="workflow-primary-button"
-              onClick={submitInputs}
-            >
-              Start run
-            </button>
-          </div>
-        </div>
-      ) : null}
+      {inputDialog}
     </div>
   );
 }

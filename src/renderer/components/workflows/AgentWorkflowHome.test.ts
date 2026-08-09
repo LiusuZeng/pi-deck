@@ -54,6 +54,68 @@ const workflow: WorkflowDefinition = {
   relationships: [],
 };
 
+const semanticWorkflow: WorkflowDefinition = {
+  ...workflow,
+  id: "semantic",
+  name: "Semantic delivery",
+  entryNodeId: "prepare",
+  nodes: [
+    {
+      id: "prepare",
+      name: "Prepare",
+      role: "worker",
+      config: { instructions: "Prepare" },
+    },
+    {
+      id: "iterate",
+      name: "Iterate",
+      role: "orchestrator",
+      config: {
+        mode: "loop",
+        agents: ["implement"],
+        decider: "ready",
+        maxIterations: 3,
+      },
+    },
+    {
+      id: "implement",
+      name: "Implement",
+      role: "worker",
+      managedBy: "iterate",
+      config: { instructions: "Implement" },
+    },
+    {
+      id: "ready",
+      name: "Ready?",
+      role: "decider",
+      managedBy: "iterate",
+      config: { question: "Ready?" },
+    },
+    {
+      id: "ship",
+      name: "Ship?",
+      role: "decider",
+      config: { question: "Ship?", trueLabel: "Ship", falseLabel: "Stop" },
+    },
+  ],
+  relationships: [
+    { id: "prepare-iterate", from: "prepare", to: { nodeId: "iterate" } },
+    { id: "iterate-ship", from: "iterate", to: { nodeId: "ship" } },
+    {
+      id: "ship-complete",
+      from: "ship",
+      when: { equals: true },
+      to: { end: "completed" },
+    },
+    {
+      id: "ship-stop",
+      from: "ship",
+      when: { equals: false },
+      to: { end: "stopped" },
+    },
+  ],
+};
+
 const run = {
   id: "00000000-0000-4000-8000-000000000001",
   name: workflow.name,
@@ -116,10 +178,12 @@ describe("AgentWorkflowHome", () => {
     await act(async () => button("Start run").click());
     act(() => button("Edit").click());
     act(() => button("Open run").click());
+    act(() => button("View workflows").click());
     act(() => button("View all runs").click());
     expect(props.onStart).toHaveBeenCalledWith(workflow, {});
     expect(props.onEdit).toHaveBeenCalledWith(workflow);
     expect(props.onOpenRun).toHaveBeenCalledWith(run);
+    expect(props.onShowWorkflows).toHaveBeenCalledOnce();
     expect(props.onShowRuns).toHaveBeenCalledOnce();
   });
 
@@ -136,9 +200,12 @@ describe("AgentWorkflowHome", () => {
       ],
     };
     const props = render({ workflows: [inputWorkflow] });
+    button("Start run").focus();
     act(() => button("Start run").click());
     const dialog = container!.querySelector('[role="dialog"]');
     expect(dialog?.textContent).toContain("Target");
+    expect(dialog?.getAttribute("aria-modal")).toBeNull();
+    expect(document.activeElement).toBe(dialog?.querySelector("input"));
     const dialogStart = [...dialog!.querySelectorAll("button")].find(
       (item) => item.textContent?.trim() === "Start run",
     )!;
@@ -147,6 +214,13 @@ describe("AgentWorkflowHome", () => {
       "true",
     );
     expect(props.onStart).not.toHaveBeenCalled();
+    act(() =>
+      dialog?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      ),
+    );
+    expect(container?.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.activeElement).toBe(button("Start run"));
     act(() => root?.unmount());
     container?.remove();
 
@@ -156,6 +230,49 @@ describe("AgentWorkflowHome", () => {
     expect(container?.querySelector('[role="alert"]')?.textContent).toContain(
       "Unavailable",
     );
+  });
+
+  it("shows semantic branch and loop routes without implying a linear execution path", () => {
+    render({ workflows: [semanticWorkflow], runs: [] });
+    const preview = container!.querySelector(".agent-workflow-flow-preview");
+    expect(preview?.textContent).toContain("Loop · maximum 3 iterations");
+    expect(preview?.textContent).toContain("Manages Implement, Ready?");
+    expect(preview?.textContent).toContain(
+      "Ship?: true (Ship) → End workflow: completed",
+    );
+    expect(preview?.textContent).toContain(
+      "Ship?: false (Stop) → End workflow: stopped",
+    );
+    expect(
+      preview?.querySelectorAll(".agent-workflow-role-preview > li"),
+    ).toHaveLength(3);
+  });
+
+  it("makes recent runs visibly and accessibly identifiable", () => {
+    const laterRun = {
+      ...run,
+      id: "00000000-0000-4000-8000-000000000002",
+      updatedAtMs: 2_000,
+    };
+    const props = render({ runs: [run, laterRun] });
+    const rows = container!.querySelectorAll(
+      ".agent-workflow-activity-list li",
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows[0].textContent).toContain("ID 00000002");
+    const labels = [
+      ...container!.querySelectorAll<HTMLButtonElement>(
+        ".agent-workflow-activity-list button",
+      ),
+    ].map((item) => item.getAttribute("aria-label"));
+    expect(labels).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(run.id),
+        expect.stringContaining(laterRun.id),
+      ]),
+    );
+    act(() => rows[0].querySelector<HTMLButtonElement>("button")?.click());
+    expect(props.onOpenRun).toHaveBeenCalledWith(laterRun);
   });
 
   it("keeps an intentional empty activity state for one workflow", () => {

@@ -4029,7 +4029,7 @@ body {
   background: var(--color-surface-muted);
 }
 
-.agent-workflow-flow-preview ol,
+.agent-workflow-role-preview,
 .agent-workflow-activity-list {
   display: grid;
   gap: 8px;
@@ -4038,27 +4038,20 @@ body {
   list-style: none;
 }
 
-.agent-workflow-flow-preview li {
-  position: relative;
+.agent-workflow-role-preview {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.agent-workflow-role-preview li {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 3px 12px;
+  gap: 3px;
   padding: 10px 12px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   background: var(--color-surface);
 }
 
-.agent-workflow-flow-preview li:not(:last-child)::after {
-  position: absolute;
-  bottom: -14px;
-  left: 22px;
-  z-index: 1;
-  color: var(--color-text-subtle);
-  content: "↓";
-}
-
-.agent-workflow-flow-preview li strong {
+.agent-workflow-role-preview li strong {
   min-width: 0;
   overflow: hidden;
   color: var(--color-text-strong);
@@ -4066,14 +4059,32 @@ body {
   white-space: nowrap;
 }
 
-.agent-workflow-flow-preview li > span,
-.agent-workflow-flow-preview small {
+.agent-workflow-role-preview li > span,
+.agent-workflow-role-preview small,
+.agent-workflow-route-preview {
   color: var(--color-text-muted);
   font-size: 12px;
 }
 
-.agent-workflow-flow-preview small {
-  grid-column: 1 / -1;
+.agent-workflow-route-preview {
+  margin-top: 14px;
+}
+
+.agent-workflow-route-preview h5 {
+  margin: 0 0 6px;
+  color: var(--color-text-strong);
+  font-size: 12px;
+}
+
+.agent-workflow-route-preview ul {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.agent-workflow-route-preview strong {
+  color: var(--color-text-strong);
 }
 
 .agent-workflow-activity-heading {
@@ -4108,6 +4119,12 @@ body {
 
 .agent-workflow-activity-list strong {
   color: var(--color-text-strong);
+}
+
+.agent-workflow-activity-list li > span > span,
+.agent-workflow-activity-list small {
+  display: block;
+  margin-top: 2px;
 }
 
 .agent-workflow-overview-card {
@@ -5239,18 +5256,27 @@ body {
   stroke: var(--color-text-muted);
   stroke-width: 2;
 }
-.agent-workflow-graph-links marker path { fill: var(--color-text-muted); }
+.agent-workflow-graph-links marker path {
+  fill: var(--color-text-muted);
+}
 .agent-workflow-graph-links text {
   fill: var(--color-text-muted);
   font-size: 12px;
   font-weight: 650;
 }
 .agent-workflow-graph-links .is-active line,
-.agent-workflow-graph-links .is-taken line { stroke: var(--color-accent, #60a5fa); }
+.agent-workflow-graph-links .is-taken line {
+  stroke: var(--color-accent, #60a5fa);
+}
 .agent-workflow-graph-links .is-active marker path,
-.agent-workflow-graph-links .is-taken marker path { fill: var(--color-accent, #60a5fa); }
+.agent-workflow-graph-links .is-taken marker path {
+  fill: var(--color-accent, #60a5fa);
+}
 .agent-workflow-graph-links .is-not_taken line,
-.agent-workflow-graph-links .is-blocked line { stroke-dasharray: 5 4; opacity: .55; }
+.agent-workflow-graph-links .is-blocked line {
+  stroke-dasharray: 5 4;
+  opacity: 0.55;
+}
 .agent-workflow-graph-canvas-node {
   position: absolute;
   top: 18px;
@@ -5265,32 +5291,80 @@ body {
   box-shadow: 0 3px 12px rgb(0 0 0 / 12%);
 }
 .agent-workflow-graph-node h3,
-.agent-workflow-graph-node p { margin: 0 0 8px; }
-.agent-workflow-graph-node h3 button { font-size: 15px; font-weight: 750; }
-.agent-workflow-graph-node--worker { border-left-color: #60a5fa; }
-.agent-workflow-graph-node--decider { border-left-color: #a78bfa; }
-.agent-workflow-graph-node--human { border-left-color: #f59e0b; }
-.agent-workflow-graph-node--orchestrator { border-left-color: #14b8a6; }
-.agent-workflow-graph-node.is-in_progress { border-color: var(--color-accent, #60a5fa); }
-.agent-workflow-graph-node.is-waiting_human { border-color: #f59e0b; }
-.agent-workflow-graph-node.is-failed { border-color: var(--color-danger); }
-.agent-workflow-graph-node.is-completed { border-color: var(--color-success, #22c55e); }
-.agent-workflow-graph-role { text-transform: capitalize; color: var(--color-text-muted); font-size: 12px; }
-.agent-workflow-graph-status strong { font-size: 12px; }
-.agent-workflow-graph-counts { color: var(--color-text-muted); font-size: 12px; }
+.agent-workflow-graph-node p {
+  margin: 0 0 8px;
+}
+.agent-workflow-graph-node h3 button {
+  font-size: 15px;
+  font-weight: 750;
+}
+.agent-workflow-graph-node--worker {
+  border-left-color: #60a5fa;
+}
+.agent-workflow-graph-node--decider {
+  border-left-color: #a78bfa;
+}
+.agent-workflow-graph-node--human {
+  border-left-color: #f59e0b;
+}
+.agent-workflow-graph-node--orchestrator {
+  border-left-color: #14b8a6;
+}
+.agent-workflow-graph-node.is-in_progress {
+  border-color: var(--color-accent, #60a5fa);
+}
+.agent-workflow-graph-node.is-waiting_human {
+  border-color: #f59e0b;
+}
+.agent-workflow-graph-node.is-failed {
+  border-color: var(--color-danger);
+}
+.agent-workflow-graph-node.is-completed {
+  border-color: var(--color-success, #22c55e);
+}
+.agent-workflow-graph-role {
+  text-transform: capitalize;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+.agent-workflow-graph-status strong {
+  font-size: 12px;
+}
+.agent-workflow-graph-counts {
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
 .agent-workflow-graph-node .agent-workflow-graph-managed {
   margin-top: 8px;
   border-top: 1px solid var(--color-border);
   font-size: 12px;
 }
-.agent-workflow-graph-node .agent-workflow-graph-managed ol { padding-left: 0; list-style: none; }
-.agent-workflow-graph-node .agent-workflow-graph-managed .agent-workflow-graph-node {
+.agent-workflow-graph-node .agent-workflow-graph-managed ol {
+  padding-left: 0;
+  list-style: none;
+}
+.agent-workflow-graph-node
+  .agent-workflow-graph-managed
+  .agent-workflow-graph-node {
   min-height: 0;
   margin-top: 6px;
   padding: 8px;
   box-shadow: none;
 }
-.agent-workflow-graph-node .agent-workflow-graph-managed .agent-workflow-graph-node p { display: none; }
-.agent-workflow-graph-text-alternative { margin-top: 12px; }
-.agent-workflow-graph-text-alternative summary { cursor: pointer; color: var(--color-text-muted); }
-.agent-workflow-graph-text-alternative .agent-workflow-graph-flow { display: grid; gap: 8px; }
+.agent-workflow-graph-node
+  .agent-workflow-graph-managed
+  .agent-workflow-graph-node
+  p {
+  display: none;
+}
+.agent-workflow-graph-text-alternative {
+  margin-top: 12px;
+}
+.agent-workflow-graph-text-alternative summary {
+  cursor: pointer;
+  color: var(--color-text-muted);
+}
+.agent-workflow-graph-text-alternative .agent-workflow-graph-flow {
+  display: grid;
+  gap: 8px;
+}
