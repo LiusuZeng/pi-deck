@@ -406,12 +406,6 @@ export function WorkflowOccurrenceRunView(
                   onClick={() =>
                     setSelectedNodeId(selected ? undefined : node.id)
                   }
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
-                      setSelectedNodeId(selected ? undefined : node.id);
-                    }
-                  }}
                 >
                   <span className="workflow-template-mark">{node.role}</span>
                   <strong>{node.name}</strong>

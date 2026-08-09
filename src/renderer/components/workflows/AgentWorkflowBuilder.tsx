@@ -483,7 +483,6 @@ export function AgentWorkflowBuilder(props: {
                 type="button"
                 data-workflow-node-id={node.id}
                 className={`agent-workflow-step-card ${selected.id === node.id ? "is-selected" : ""}`}
-                aria-label={`Edit ${node.name || "workflow step"} details`}
                 aria-current={selected.id === node.id ? "step" : undefined}
                 {...(compactLayout
                   ? {

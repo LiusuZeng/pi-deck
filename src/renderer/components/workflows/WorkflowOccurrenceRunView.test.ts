@@ -121,7 +121,7 @@ describe("WorkflowOccurrenceRunView", () => {
     expect(onAnswer).toHaveBeenCalledWith(run.occurrences[0].id, true);
   });
 
-  it("summarizes logical nodes and reveals raw attempts with keyboard selection", async () => {
+  it("summarizes logical nodes and reveals raw attempts on intentional selection", async () => {
     const definition = {
       format: "pi-deck.agent-workflow" as const,
       schemaVersion: 2 as const,
@@ -181,11 +181,7 @@ describe("WorkflowOccurrenceRunView", () => {
       ".workflow-run-node-toggle",
     )!;
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
-    await act(async () =>
-      toggle.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
-      ),
-    );
+    await act(async () => toggle.click());
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
     expect(container.textContent).toContain("Prompt: Do the raw work.");
     expect(container.textContent).toContain("Raw worker output");

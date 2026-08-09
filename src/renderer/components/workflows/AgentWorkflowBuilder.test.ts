@@ -533,12 +533,14 @@ describe("AgentWorkflowBuilder", () => {
     expect(card.getAttribute("aria-expanded")).toBe("false");
     expect(card.getAttribute("aria-controls")).toBe(inspector.id);
     expect(card.getAttribute("aria-current")).toBe("step");
-    expect(card.getAttribute("aria-label")).toBe("Edit Do the work details");
+    expect(card.getAttribute("aria-label")).toBeNull();
+    expect(card.textContent).toContain("Do the work");
     expect(card.textContent).toContain("Edit⌄");
 
     act(() => card.click());
     expect(card.getAttribute("aria-expanded")).toBe("true");
     expect(inspector.classList.contains("is-open")).toBe(true);
+    expect(document.activeElement?.textContent).toBe("Close inspector");
 
     click("Close inspector");
     expect(card.getAttribute("aria-expanded")).toBe("false");
