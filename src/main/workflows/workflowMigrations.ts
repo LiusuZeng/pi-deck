@@ -222,19 +222,39 @@ export type LegacyV2MigrationFile = {
   workflows: WorkflowDefinition[];
   occurrences: WorkflowOccurrence[];
   runs: WorkflowRunEnvelope[];
+  workflowScopes: Record<string, string>;
 };
 
 export function migrateV2NodeIds(
   file: LegacyV2MigrationFile,
-): Pick<LegacyV2MigrationFile, "workflows" | "occurrences" | "runs"> {
+): Pick<
+  LegacyV2MigrationFile,
+  "workflows" | "occurrences" | "runs" | "workflowScopes"
+> {
+  // v2's UI generated `workflow-${uuid}` IDs. Keep all definitions and
+  // immutable snapshots for one old workflow associated with the same new ID.
+  const workflowIds = new Map<string, string>();
+  const workflowId = (id: string): string => {
+    let result = workflowIds.get(id);
+    if (!result) {
+      result = randomUUID();
+      workflowIds.set(id, result);
+    }
+    return result;
+  };
   return {
     workflows: file.workflows.map(
-      (definition) => migrateDefinition(definition).definition,
+      (definition) =>
+        migrateDefinition(definition, workflowId(definition.id)).definition,
     ),
     occurrences: file.occurrences.map((occurrence) => {
-      const migrated = migrateDefinition(occurrence.workflowSnapshot);
+      const migrated = migrateDefinition(
+        occurrence.workflowSnapshot,
+        workflowId(occurrence.workflowSnapshot.id),
+      );
       return {
         ...occurrence,
+        workflowId: workflowId(occurrence.workflowId),
         workflowSnapshot: migrated.definition,
         nodeOccurrences: occurrence.nodeOccurrences.map((nodeOccurrence) => ({
           ...nodeOccurrence,
@@ -243,7 +263,10 @@ export function migrateV2NodeIds(
       };
     }),
     runs: file.runs.map((run) => {
-      const migrated = migrateDefinition(run.definition);
+      const migrated = migrateDefinition(
+        run.definition,
+        workflowId(run.definition.id),
+      );
       return {
         ...run,
         definition: migrated.definition,
@@ -263,10 +286,19 @@ export function migrateV2NodeIds(
         })),
       };
     }),
+    workflowScopes: Object.fromEntries(
+      Object.entries(file.workflowScopes).map(([id, scope]) => [
+        workflowId(id),
+        scope,
+      ]),
+    ),
   };
 }
 
-function migrateDefinition(definition: WorkflowDefinition): {
+function migrateDefinition(
+  definition: WorkflowDefinition,
+  migratedWorkflowId: string,
+): {
   definition: WorkflowDefinition;
   nodeIds: Map<string, string>;
 } {
@@ -282,6 +314,7 @@ function migrateDefinition(definition: WorkflowDefinition): {
     nodeIds,
     definition: workflowDefinitionSchema.parse({
       ...definition,
+      id: migratedWorkflowId,
       entryNodeId: nodeId(definition.entryNodeId),
       nodes: definition.nodes.map((node) => ({
         ...node,

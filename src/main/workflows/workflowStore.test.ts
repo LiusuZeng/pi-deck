@@ -237,7 +237,7 @@ describe("WorkflowStore agentWorkflow migration foundation", () => {
     const store = await fresh();
     const definition = {
       ...agentWorkflowDefinition(),
-      id: "00000000-0000-4000-8000-000000000005",
+      id: "workflow-00000000-0000-4000-8000-000000000005",
       entryNodeId: "plan",
       nodes: [
         {
@@ -262,6 +262,7 @@ describe("WorkflowStore agentWorkflow migration foundation", () => {
     };
     const canonicalRunDefinition = {
       ...definition,
+      id: "00000000-0000-4000-8000-000000000005",
       entryNodeId: nativeWorkerId,
       nodes: definition.nodes.map((node, index) => ({
         ...node,
@@ -314,7 +315,9 @@ describe("WorkflowStore agentWorkflow migration foundation", () => {
       undefined,
       () => 123,
     );
-    const workflow = await migrated.getWorkflow(definition.id);
+    const workflow = (await migrated.listWorkflows())[0]!;
+    expect(workflow.id).not.toBe(definition.id);
+    expect(workflow.id).toMatch(/^[0-9a-f-]{36}$/i);
     const ids = new Set(workflow.nodes.map((node) => node.id));
     expect([...ids]).toHaveLength(2);
     for (const id of ids) expect(id).toMatch(/^[0-9a-f-]{36}$/i);
@@ -345,7 +348,7 @@ describe("WorkflowStore agentWorkflow migration foundation", () => {
       undefined,
       () => 123,
     );
-    expect(await reloaded.getWorkflow(definition.id)).toEqual(workflow);
+    expect(await reloaded.getWorkflow(workflow.id)).toEqual(workflow);
     expect(await fs.readdir(path.dirname(store.storeFile))).not.toContain(
       "workflows.json.v2-node-id-backup-123-2",
     );
