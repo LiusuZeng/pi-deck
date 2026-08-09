@@ -36,6 +36,11 @@ import type {
   WorkflowDefinition,
   WorkflowRunEnvelope,
 } from "../shared/agentWorkflowSchemas.js";
+import type {
+  WorkflowRun,
+  WorkflowStepRun,
+  WorkflowTransitionRun,
+} from "../shared/workflowSchemas.js";
 import {
   parseSafeMarkdown,
   type InlineToken,
@@ -115,6 +120,11 @@ const AgentWorkflowHome = lazy(() =>
 const WorkflowOccurrenceRunView = lazy(() =>
   import("./components/workflows/WorkflowOccurrenceRunView.js").then(
     (module) => ({ default: module.WorkflowOccurrenceRunView }),
+  ),
+);
+const LegacyWorkflowRunCompatibility = lazy(() =>
+  import("./components/workflows/LegacyWorkflowRunCompatibility.js").then(
+    (module) => ({ default: module.LegacyWorkflowRunCompatibility }),
   ),
 );
 
@@ -814,7 +824,13 @@ export function App(): ReactElement {
     type: "all",
   });
   const [workflowView, setWorkflowView] = useState<
-    "agentHome" | "workflows" | "runs" | "builder" | "occurrenceRun" | undefined
+    | "agentHome"
+    | "workflows"
+    | "runs"
+    | "builder"
+    | "occurrenceRun"
+    | "legacyRun"
+    | undefined
   >();
   const [workflowDefinitions, setWorkflowDefinitions] = useState<
     WorkflowDefinition[]
@@ -822,12 +838,16 @@ export function App(): ReactElement {
   const [workflowOccurrenceRuns, setWorkflowOccurrenceRuns] = useState<
     WorkflowRunEnvelope[]
   >([]);
+  const [legacyWorkflowRuns, setLegacyWorkflowRuns] = useState<WorkflowRun[]>(
+    [],
+  );
   const [workflowBuilderDefinition, setWorkflowBuilderDefinition] = useState<
     WorkflowDefinition | undefined
   >();
   const [workflowOccurrenceRunId, setWorkflowOccurrenceRunId] = useState<
     string | undefined
   >();
+  const [legacyWorkflowRunId, setLegacyWorkflowRunId] = useState<string>();
   const [workflowLoading, setWorkflowLoading] = useState(false);
   const [workflowError, setWorkflowError] = useState<string | undefined>();
   const [usageStatsVisible, setUsageStatsVisible] = useState(() =>
@@ -1140,13 +1160,15 @@ export function App(): ReactElement {
     const refresh = async (): Promise<void> => {
       setWorkflowLoading(true);
       try {
-        const [definitions, canonicalRuns] = await Promise.all([
+        const [definitions, canonicalRuns, legacyRuns] = await Promise.all([
           window.piDeck.workflows.listWorkflows({ workspaceId }),
           window.piDeck.workflows.canonicalListRuns({ workspaceId }),
+          window.piDeck.workflows.listRuns({ workspaceId }),
         ]);
         if (disposed) return;
         setWorkflowDefinitions(definitions);
         setWorkflowOccurrenceRuns(canonicalRuns);
+        setLegacyWorkflowRuns(legacyRuns.runs);
         if (workflowOccurrenceRunId !== undefined) {
           const run = await window.piDeck.workflows.canonicalGetRun({
             runId: workflowOccurrenceRunId,
@@ -1156,6 +1178,20 @@ export function App(): ReactElement {
             setWorkflowView("runs");
           } else if (!disposed) {
             setWorkflowOccurrenceRuns((current) => [
+              run,
+              ...current.filter((item) => item.id !== run.id),
+            ]);
+          }
+        }
+        if (legacyWorkflowRunId !== undefined) {
+          const run = await window.piDeck.workflows.getRun({
+            runId: legacyWorkflowRunId,
+          });
+          if (run.workspaceId !== workspaceId) {
+            setLegacyWorkflowRunId(undefined);
+            setWorkflowView("runs");
+          } else if (!disposed) {
+            setLegacyWorkflowRuns((current) => [
               run,
               ...current.filter((item) => item.id !== run.id),
             ]);
@@ -1173,15 +1209,28 @@ export function App(): ReactElement {
       }
     };
     void refresh();
+    const unsubscribe = window.piDeck.workflows.onEvent(() => {
+      // Legacy scheduler events carry IDs only; reload the compatibility
+      // snapshots so active retries and human gates remain actionable.
+      void refresh();
+    });
     return () => {
       disposed = true;
+      unsubscribe();
     };
-  }, [currentWorkspace.id, workflowOccurrenceRunId, workflowView]);
+  }, [
+    currentWorkspace.id,
+    legacyWorkflowRunId,
+    workflowOccurrenceRunId,
+    workflowView,
+  ]);
 
   useEffect(() => {
     setWorkflowDefinitions([]);
     setWorkflowOccurrenceRuns([]);
+    setLegacyWorkflowRuns([]);
     setWorkflowOccurrenceRunId(undefined);
+    setLegacyWorkflowRunId(undefined);
     setWorkflowBuilderDefinition(undefined);
     setWorkflowError(undefined);
     if (workflowView !== undefined) setWorkflowView("agentHome");
@@ -1318,6 +1367,9 @@ export function App(): ReactElement {
     selectedSession.timeline.length === 0 && selectedSession.status === "idle";
   const selectedWorkflowOccurrenceRun = workflowOccurrenceRunId
     ? workflowOccurrenceRuns.find((run) => run.id === workflowOccurrenceRunId)
+    : undefined;
+  const selectedLegacyWorkflowRun = legacyWorkflowRunId
+    ? legacyWorkflowRuns.find((run) => run.id === legacyWorkflowRunId)
     : undefined;
   const agentWorkflowDefinitions = useMemo(
     () => agentWorkflowsForHome(workflowDefinitions),
@@ -1783,6 +1835,70 @@ export function App(): ReactElement {
       setWorkflowError(error instanceof Error ? error.message : String(error));
       throw error;
     }
+  }
+
+  const updateLegacyWorkflowRun = (run: WorkflowRun): void => {
+    setLegacyWorkflowRuns((current) => [
+      run,
+      ...current.filter((item) => item.id !== run.id),
+    ]);
+  };
+
+  async function handleStopLegacyWorkflow(): Promise<void> {
+    if (!legacyWorkflowRunId) return;
+    updateLegacyWorkflowRun(
+      await window.piDeck.workflows.stopRun({ runId: legacyWorkflowRunId }),
+    );
+  }
+  async function handleRetryLegacyWorkflowStep(
+    step: WorkflowStepRun,
+  ): Promise<void> {
+    if (!legacyWorkflowRunId) return;
+    updateLegacyWorkflowRun(
+      await window.piDeck.workflows.retryStep({
+        runId: legacyWorkflowRunId,
+        stepRunId: step.id,
+      }),
+    );
+  }
+  async function handleRetryLegacyWorkflowCondition(
+    transition: WorkflowTransitionRun,
+  ): Promise<void> {
+    if (!legacyWorkflowRunId) return;
+    updateLegacyWorkflowRun(
+      await window.piDeck.workflows.retryCondition({
+        runId: legacyWorkflowRunId,
+        transitionRunId: transition.id,
+      }),
+    );
+  }
+  async function handleOverrideLegacyWorkflowCondition(
+    transition: WorkflowTransitionRun,
+    decision: "yes" | "no",
+    rationale: string,
+  ): Promise<void> {
+    if (!legacyWorkflowRunId) return;
+    updateLegacyWorkflowRun(
+      await window.piDeck.workflows.overrideCondition({
+        runId: legacyWorkflowRunId,
+        transitionRunId: transition.id,
+        decision,
+        rationale,
+      }),
+    );
+  }
+  async function handleApproveLegacyWorkflowGate(
+    step: WorkflowStepRun,
+    action: "approve" | "skip" | "stop",
+  ): Promise<void> {
+    if (!legacyWorkflowRunId) return;
+    updateLegacyWorkflowRun(
+      await window.piDeck.workflows.approveGate({
+        runId: legacyWorkflowRunId,
+        stepRunId: step.id,
+        action,
+      }),
+    );
   }
 
   async function handleOpenWorkflowSession(sessionReference: {
@@ -3907,7 +4023,9 @@ export function App(): ReactElement {
           composerDrafts={composerDrafts}
           activityInboxVisible={activityInboxVisible}
           workflowView={
-            workflowView === "occurrenceRun" ? "runs" : workflowView
+            workflowView === "occurrenceRun" || workflowView === "legacyRun"
+              ? "runs"
+              : workflowView
           }
           activityActionableCount={activityInboxModel.actionableCount}
           onSelect={handleSelectSession}
@@ -4077,6 +4195,21 @@ export function App(): ReactElement {
                     void handleOpenWorkflowOccurrence(occurrence)
                   }
                 />
+              ) : workflowView === "legacyRun" &&
+                selectedLegacyWorkflowRun !== undefined ? (
+                <LegacyWorkflowRunCompatibility
+                  run={selectedLegacyWorkflowRun}
+                  onBack={() => {
+                    setLegacyWorkflowRunId(undefined);
+                    setWorkflowView("runs");
+                  }}
+                  onStop={handleStopLegacyWorkflow}
+                  onRetryStep={handleRetryLegacyWorkflowStep}
+                  onRetryCondition={handleRetryLegacyWorkflowCondition}
+                  onOverrideCondition={handleOverrideLegacyWorkflowCondition}
+                  onApproveGate={handleApproveLegacyWorkflowGate}
+                  onOpenSession={(step) => void handleOpenWorkflowSession(step)}
+                />
               ) : workflowView === "agentHome" ||
                 workflowView === "workflows" ||
                 workflowView === "runs" ? (
@@ -4090,12 +4223,17 @@ export function App(): ReactElement {
                   }
                   workflows={agentWorkflowDefinitions}
                   runs={workflowOccurrenceRuns}
+                  legacyRuns={legacyWorkflowRuns}
                   onShowWorkflows={() => setWorkflowView("workflows")}
                   onShowRuns={() => setWorkflowView("runs")}
                   onBack={() => setWorkflowView("agentHome")}
                   onOpenRun={(run) => {
                     setWorkflowOccurrenceRunId(run.id);
                     setWorkflowView("occurrenceRun");
+                  }}
+                  onOpenLegacyRun={(run) => {
+                    setLegacyWorkflowRunId(run.id);
+                    setWorkflowView("legacyRun");
                   }}
                   onCreate={() => {
                     setWorkflowBuilderDefinition(undefined);

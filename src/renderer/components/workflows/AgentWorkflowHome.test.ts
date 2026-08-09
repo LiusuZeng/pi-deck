@@ -286,6 +286,26 @@ describe("AgentWorkflowHome", () => {
     expect(props.onOpenRun).toHaveBeenCalledWith(laterRun);
   });
 
+  it("keeps persisted legacy runs visible and openable from the canonical collection", () => {
+    const legacyRun = {
+      id: "00000000-0000-4000-8000-000000000099",
+      name: workflow.name,
+      workspaceId: "workspace",
+      status: "needsAttention",
+      templateSnapshot: { id: workflow.id },
+      updatedAtMs: 3_000,
+    } as any;
+    const props = render({
+      view: "runs",
+      runs: [],
+      legacyRuns: [legacyRun],
+      onOpenLegacyRun: vi.fn(),
+    });
+    expect(container?.textContent).toContain("Legacy run");
+    act(() => button("Open run").click());
+    expect(props.onOpenLegacyRun).toHaveBeenCalledWith(legacyRun);
+  });
+
   it("keeps an intentional empty activity state for one workflow", () => {
     render({ runs: [] });
     expect(container?.textContent).toContain("No activity yet");

@@ -136,7 +136,14 @@ describe("WorkflowStore agentWorkflow migration foundation", () => {
     expect((await migrated.getWorkflow(legacy.id)).nodes).toMatchObject([
       { id: "work", role: "worker", config: { instructions: "Do the work" } },
     ]);
+    // Definitions enter the canonical collection, while v1 run snapshots stay
+    // available through the explicit compatibility boundary rather than being
+    // forged into occurrence envelopes.
+    expect(
+      (await migrated.listWorkflows("workspace")).map(({ id }) => id),
+    ).toEqual([legacy.id]);
     expect(await migrated.getRun(run.id)).toEqual(run);
+    expect(await migrated.listRuns("workspace")).toEqual([run]);
     const files = await fs.readdir(path.dirname(source.storeFile));
     expect(files).toContain("workflows.json.v1-backup-123");
     const disk = JSON.parse(await fs.readFile(source.storeFile, "utf8"));

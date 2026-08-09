@@ -3,6 +3,7 @@ import type {
   WorkflowDefinition,
   WorkflowRunEnvelope,
 } from "../../../shared/agentWorkflowSchemas.js";
+import type { WorkflowRun } from "../../../shared/workflowSchemas.js";
 import {
   agentWorkflowCardViewModel,
   agentWorkflowRoleLabel,
@@ -27,7 +28,10 @@ export interface AgentWorkflowHomeProps {
     inputs: Record<string, string>,
   ): Promise<void> | void;
   runs?: WorkflowRunEnvelope[];
+  /** Runs retained from the pre-occurrence store format. */
+  legacyRuns?: WorkflowRun[];
   onOpenRun?(run: WorkflowRunEnvelope): void;
+  onOpenLegacyRun?(run: WorkflowRun): void;
   onShowWorkflows?(): void;
   onShowRuns?(): void;
   onBack?(): void;
@@ -59,11 +63,15 @@ function plural(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
-function runIdentity(run: WorkflowRunEnvelope): string {
+function runIdentity(
+  run: Pick<WorkflowRunEnvelope, "id" | "updatedAtMs">,
+): string {
   return `Updated ${new Date(run.updatedAtMs).toLocaleString()} · ID ${run.id.slice(-8)}`;
 }
 
-function openRunLabel(run: WorkflowRunEnvelope): string {
+function openRunLabel(
+  run: Pick<WorkflowRunEnvelope, "id" | "name" | "status" | "updatedAtMs">,
+): string {
   return `Open run ${run.name}: ${runStatusLabel(run.status)}, updated ${new Date(run.updatedAtMs).toISOString()}, ID ${run.id}`;
 }
 
@@ -71,6 +79,7 @@ function openRunLabel(run: WorkflowRunEnvelope): string {
 export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
   const view = props.view ?? "overview";
   const runs = props.runs ?? [];
+  const legacyRuns = props.legacyRuns ?? [];
   const [startingId, setStartingId] = useState<string>();
   const [startError, setStartError] = useState<string>();
   const [inputWorkflow, setInputWorkflow] = useState<WorkflowDefinition>();
@@ -194,8 +203,12 @@ export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
     const onlyWorkflow =
       props.workflows.length === 1 ? props.workflows[0] : undefined;
     const workflowRuns = onlyWorkflow
-      ? runs
-          .filter((run) => run.definition.id === onlyWorkflow.id)
+      ? [
+          ...runs.filter((run) => run.definition.id === onlyWorkflow.id),
+          ...legacyRuns.filter(
+            (run) => run.templateSnapshot.id === onlyWorkflow.id,
+          ),
+        ]
           .sort((left, right) => right.updatedAtMs - left.updatedAtMs)
           .slice(0, 3)
       : [];
@@ -390,17 +403,23 @@ export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
                           <small>{runIdentity(run)}</small>
                           <span>
                             {runStatusLabel(run.status)}
-                            {run.terminalOutcome
+                            {"terminalOutcome" in run && run.terminalOutcome
                               ? ` · ${run.terminalOutcome}`
-                              : ` · ${plural(run.occurrences.length, "occurrence")}`}
+                              : "occurrences" in run
+                                ? ` · ${plural(run.occurrences.length, "occurrence")}`
+                                : " · Legacy run"}
                           </span>
                         </span>
-                        {props.onOpenRun ? (
+                        {props.onOpenRun || props.onOpenLegacyRun ? (
                           <button
                             type="button"
                             className="workflow-secondary-button"
                             aria-label={openRunLabel(run)}
-                            onClick={() => props.onOpenRun?.(run)}
+                            onClick={() =>
+                              "occurrences" in run
+                                ? props.onOpenRun?.(run)
+                                : props.onOpenLegacyRun?.(run)
+                            }
                           >
                             Open run
                           </button>
@@ -438,7 +457,7 @@ export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
             >
               <span className="workflow-kicker">Activity</span>
               <strong>Runs</strong>
-              <span>{runs.length} in this workspace</span>
+              <span>{runs.length + legacyRuns.length} in this workspace</span>
               <span className="agent-workflow-overview-link">View runs</span>
             </button>
           </section>
@@ -552,22 +571,24 @@ export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
             })}
           </div>
         )
-      ) : runs.length === 0 ? (
+      ) : runs.length + legacyRuns.length === 0 ? (
         <div className="workflow-empty-state">
           <h3>No runs yet</h3>
           <p>Start a workflow to see its progress here.</p>
         </div>
       ) : (
         <div className="workflow-run-list" aria-label="Workflow runs">
-          {runs.map((run) => (
+          {[...runs, ...legacyRuns].map((run) => (
             <article className="workflow-run-row" key={run.id}>
               <span className="workflow-status-dot" aria-hidden="true" />
               <span className="workflow-run-row-copy">
                 <strong>{run.name}</strong>
                 <small>
-                  {run.terminalOutcome
+                  {"terminalOutcome" in run && run.terminalOutcome
                     ? `Outcome: ${run.terminalOutcome}`
-                    : `${run.occurrences.length} occurrence${run.occurrences.length === 1 ? "" : "s"}`}
+                    : "occurrences" in run
+                      ? `${run.occurrences.length} occurrence${run.occurrences.length === 1 ? "" : "s"}`
+                      : "Legacy run"}
                 </small>
               </span>
               <span className="workflow-run-status">
@@ -577,7 +598,11 @@ export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
                 type="button"
                 className="workflow-secondary-button"
                 aria-label={openRunLabel(run)}
-                onClick={() => props.onOpenRun?.(run)}
+                onClick={() =>
+                  "occurrences" in run
+                    ? props.onOpenRun?.(run)
+                    : props.onOpenLegacyRun?.(run)
+                }
               >
                 Open run
               </button>
