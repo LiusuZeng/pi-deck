@@ -18,7 +18,11 @@ import {
   type WorkflowOccurrence,
   type WorkflowRunEnvelope,
 } from "../../shared/agentWorkflowSchemas.js";
-import { migrateV1Template, preserveLegacyRun } from "./workflowMigrations.js";
+import {
+  migrateV1Template,
+  migrateV2NodeIds,
+  preserveLegacyRun,
+} from "./workflowMigrations.js";
 import type { DiagnosticsRecorder } from "../diagnostics/diagnostics.js";
 
 const v1StoreSchema = z
@@ -28,7 +32,7 @@ const v1StoreSchema = z
     runs: z.array(workflowRunSchema),
   })
   .strict();
-const agentWorkflowStoreSchema = z
+const v2AgentWorkflowStoreSchema = z
   .object({
     version: z.literal(2),
     workflows: z.array(workflowDefinitionSchema),
@@ -44,17 +48,14 @@ const agentWorkflowStoreSchema = z
       .default({}),
   })
   .strict();
-const emptyV3StoreSchema = z
-  .object({
-    version: z.literal(3),
-    workflows: z.tuple([]),
-    runs: z.tuple([]),
-  })
-  .strict();
+const agentWorkflowStoreSchema = v2AgentWorkflowStoreSchema.extend({
+  version: z.literal(3),
+});
 type V1Store = z.infer<typeof v1StoreSchema>;
+type V2WorkflowStoreFile = z.infer<typeof v2AgentWorkflowStoreSchema>;
 type WorkflowStoreFile = z.infer<typeof agentWorkflowStoreSchema>;
 const emptyStore = (): WorkflowStoreFile => ({
-  version: 2,
+  version: 3,
   workflows: [],
   occurrences: [],
   runs: [],
@@ -331,15 +332,19 @@ export class WorkflowStore {
         .parse(parsed).version;
       if (version === 1) {
         const v1 = v1StoreSchema.parse(parsed);
-        await fs.writeFile(`${this.storeFile}.v1-backup-${this.now()}`, raw, {
-          mode: 0o600,
-        });
+        await this.writeRawBackupAtomically(raw, "v1-backup");
         this.state = migrateV1(v1);
         await this.persist();
-      } else if (version === 2)
-        this.state = agentWorkflowStoreSchema.parse(parsed);
-      else if (version === 3 && emptyV3StoreSchema.safeParse(parsed).success) {
-        await this.migrateEmptyV3(raw);
+      } else if (version === 2) {
+        await this.migrateV2NodeIds(
+          raw,
+          v2AgentWorkflowStoreSchema.parse(parsed),
+        );
+      } else if (version === 3) {
+        const v3 = agentWorkflowStoreSchema.safeParse(parsed);
+        if (!v3.success)
+          throw new UnsupportedWorkflowStoreVersionError(version);
+        this.state = v3.data;
       } else throw new UnsupportedWorkflowStoreVersionError(version);
     } catch (error) {
       if (
@@ -365,10 +370,21 @@ export class WorkflowStore {
     }
     this.loaded = true;
   }
-  private async migrateEmptyV3(raw: string): Promise<void> {
+  private async migrateV2NodeIds(
+    raw: string,
+    source: V2WorkflowStoreFile,
+  ): Promise<void> {
     try {
-      await this.writeRawBackupAtomically(raw, "v3-backup");
-      this.state = emptyStore();
+      const migrated = migrateV2NodeIds(source);
+      // Validate the complete candidate before preserving a recovery point or
+      // replacing the source file. Legacy runs deliberately remain untouched.
+      const next = agentWorkflowStoreSchema.parse({
+        ...source,
+        ...migrated,
+        version: 3,
+      });
+      await this.writeRawBackupAtomically(raw, "v2-node-id-backup");
+      this.state = next;
       await this.persist();
     } catch (error) {
       throw new WorkflowStoreMigrationError(error);
@@ -410,8 +426,8 @@ export class WorkflowStore {
 }
 
 export function migrateV1(file: V1Store): WorkflowStoreFile {
-  return agentWorkflowStoreSchema.parse({
-    version: 2,
+  const v2 = {
+    version: 2 as const,
     workflows: file.templates.map(migrateV1Template),
     occurrences: [],
     runs: [],
@@ -423,6 +439,11 @@ export function migrateV1(file: V1Store): WorkflowStoreFile {
           : [[template.id, template.workspaceId]],
       ),
     ),
+  };
+  return agentWorkflowStoreSchema.parse({
+    ...v2,
+    ...migrateV2NodeIds(v2),
+    version: 3,
   });
 }
 export class UnsupportedWorkflowStoreVersionError extends Error {
@@ -434,7 +455,7 @@ export class UnsupportedWorkflowStoreVersionError extends Error {
 class WorkflowStoreMigrationError extends Error {
   constructor(error: unknown) {
     super(
-      `Could not migrate empty v3 workflow metadata: ${errorToMessage(error)}`,
+      `Could not migrate v2 workflow node identities: ${errorToMessage(error)}`,
     );
     this.name = "WorkflowStoreMigrationError";
   }

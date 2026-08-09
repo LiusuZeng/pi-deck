@@ -3,9 +3,12 @@ import {
   type WorkflowTemplate,
   type WorkflowTransition,
 } from "../../shared/workflowSchemas.js";
+import { randomUUID } from "node:crypto";
 import {
   workflowDefinitionSchema,
   type WorkflowDefinition,
+  type WorkflowOccurrence,
+  type WorkflowRunEnvelope,
 } from "../../shared/agentWorkflowSchemas.js";
 
 /** Converts old prompt-first templates without retaining a second v1 shape. */
@@ -198,6 +201,103 @@ export function migrateV1Template(
 /** Runs are intentionally not converted: v1's one-step-run model cannot represent agentWorkflow occurrences. */
 export function preserveLegacyRun(run: WorkflowRun): WorkflowRun {
   return structuredClone(run);
+}
+
+/**
+ * Replaces the human-readable node identities used by persisted v2 canonical
+ * documents. Every snapshot gets its own map: run snapshots are immutable and
+ * may not match the workflow currently being edited.
+ */
+export function migrateV2NodeIds(file: {
+  workflows: WorkflowDefinition[];
+  occurrences: WorkflowOccurrence[];
+  runs: WorkflowRunEnvelope[];
+}): Pick<typeof file, "workflows" | "occurrences" | "runs"> {
+  return {
+    workflows: file.workflows.map(
+      (definition) => migrateDefinition(definition).definition,
+    ),
+    occurrences: file.occurrences.map((occurrence) => {
+      const migrated = migrateDefinition(occurrence.workflowSnapshot);
+      return {
+        ...occurrence,
+        workflowSnapshot: migrated.definition,
+        nodeOccurrences: occurrence.nodeOccurrences.map((nodeOccurrence) => ({
+          ...nodeOccurrence,
+          nodeId: migrated.nodeIds.get(nodeOccurrence.nodeId)!,
+        })),
+      };
+    }),
+    runs: file.runs.map((run) => {
+      const migrated = migrateDefinition(run.definition);
+      return {
+        ...run,
+        definition: migrated.definition,
+        occurrences: run.occurrences.map((occurrence) => ({
+          ...occurrence,
+          nodeId: migrated.nodeIds.get(occurrence.nodeId)!,
+          ...(occurrence.resolvedInputBindings
+            ? {
+                resolvedInputBindings: occurrence.resolvedInputBindings.map(
+                  (binding) => ({
+                    ...binding,
+                    sourceNodeId: migrated.nodeIds.get(binding.sourceNodeId)!,
+                  }),
+                ),
+              }
+            : {}),
+        })),
+      };
+    }),
+  };
+}
+
+function migrateDefinition(definition: WorkflowDefinition): {
+  definition: WorkflowDefinition;
+  nodeIds: Map<string, string>;
+} {
+  const nodeIds = new Map(
+    definition.nodes.map((node) => [node.id, randomUUID()]),
+  );
+  const nodeId = (id: string): string => nodeIds.get(id)!;
+  return {
+    nodeIds,
+    definition: workflowDefinitionSchema.parse({
+      ...definition,
+      entryNodeId: nodeId(definition.entryNodeId),
+      nodes: definition.nodes.map((node) => ({
+        ...node,
+        id: nodeId(node.id),
+        ...(node.managedBy ? { managedBy: nodeId(node.managedBy) } : {}),
+        ...(node.inputBindings
+          ? {
+              inputBindings: node.inputBindings.map((binding) => ({
+                ...binding,
+                sourceNodeId: nodeId(binding.sourceNodeId),
+              })),
+            }
+          : {}),
+        ...(node.role === "orchestrator"
+          ? {
+              config: {
+                ...node.config,
+                agents: node.config.agents.map(nodeId),
+                ...(node.config.mode === "loop"
+                  ? { decider: nodeId(node.config.decider) }
+                  : {}),
+              },
+            }
+          : {}),
+      })),
+      relationships: definition.relationships.map((relationship) => ({
+        ...relationship,
+        from: nodeId(relationship.from),
+        ...("nodeId" in relationship.to
+          ? { to: { nodeId: nodeId(relationship.to.nodeId) } }
+          : {}),
+      })),
+    }),
+  };
 }
 
 function renderLegacyPrompt(

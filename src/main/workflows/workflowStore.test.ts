@@ -67,7 +67,7 @@ describe("WorkflowStore agentWorkflow migration foundation", () => {
     await store.createWorkflow(agentWorkflowDefinition());
     const disk = JSON.parse(await fs.readFile(store.storeFile, "utf8"));
     expect(disk).toMatchObject({
-      version: 2,
+      version: 3,
       workflows: [agentWorkflowDefinition()],
       occurrences: [],
       legacyRuns: [],
@@ -134,7 +134,7 @@ describe("WorkflowStore agentWorkflow migration foundation", () => {
       () => 123,
     );
     expect((await migrated.getWorkflow(legacy.id)).nodes).toMatchObject([
-      { id: "work", role: "worker", config: { instructions: "Do the work" } },
+      { role: "worker", config: { instructions: "Do the work" } },
     ]);
     // Definitions enter the canonical collection, while v1 run snapshots stay
     // available through the explicit compatibility boundary rather than being
@@ -200,9 +200,7 @@ describe("WorkflowStore agentWorkflow migration foundation", () => {
       () => 123,
     );
     const workflow = await migrated.getWorkflow(template.id);
-    expect(
-      workflow.nodes.find((node) => node.id === "to-review-approval")?.role,
-    ).toBe("human");
+    expect(workflow.nodes.some((node) => node.role === "human")).toBe(true);
   });
 
   it("persists canonical run envelopes across reload without fabricating legacy history", async () => {
@@ -217,26 +215,92 @@ describe("WorkflowStore agentWorkflow migration foundation", () => {
     expect(await reloaded.listRuns("workspace")).toEqual([]);
   });
 
-  it("backs up and migrates the exact empty v3 store shape to an empty agentWorkflow store", async () => {
+  it("migrates v2 node identities, preserves snapshots and legacy runs, and backs up raw data", async () => {
     const store = await fresh();
-    const original = '{"version":3,"workflows":[],"runs":[]}';
-    await fs.writeFile(store.storeFile, original);
-
-    expect(await store.listWorkflows()).toEqual([]);
-    expect(await fs.readFile(`${store.storeFile}.v3-backup-123`, "utf8")).toBe(
-      original,
-    );
-    expect(JSON.parse(await fs.readFile(store.storeFile, "utf8"))).toEqual({
-      version: 2,
-      workflows: [],
-      occurrences: [],
-      runs: [],
-      legacyRuns: [],
-      workflowScopes: {},
+    const definition = {
+      ...agentWorkflowDefinition(),
+      id: "v2-native",
+      entryNodeId: "plan",
+      nodes: [
+        {
+          id: "plan",
+          name: "Plan",
+          role: "worker" as const,
+          config: { instructions: "plan" },
+        },
+        {
+          id: "deliver",
+          name: "Deliver",
+          role: "worker" as const,
+          config: { instructions: "deliver" },
+          inputBindings: [
+            { sourceNodeId: "plan", sourceValue: "finalOutput" as const },
+          ],
+        },
+      ],
+      relationships: [
+        { id: "plan-deliver", from: "plan", to: { nodeId: "deliver" } },
+      ],
+    };
+    const run = createWorkflowRoleRun(definition, "workspace");
+    const legacyRun = createWorkflowRun({
+      template: await store.createTemplate(legacyDefinition),
+      workspaceId: "workspace",
+      inputs: {},
     });
+    const source = {
+      version: 2,
+      workflows: [definition],
+      occurrences: [],
+      runs: [run],
+      legacyRuns: [legacyRun],
+      workflowScopes: { [definition.id]: "workspace" },
+    };
+    const raw = JSON.stringify(source);
+    await fs.writeFile(store.storeFile, raw);
+
+    const migrated = new WorkflowStore(
+      path.dirname(store.storeFile),
+      undefined,
+      () => 123,
+    );
+    const workflow = await migrated.getWorkflow(definition.id);
+    const ids = new Set(workflow.nodes.map((node) => node.id));
+    expect([...ids]).toHaveLength(2);
+    for (const id of ids) expect(id).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(workflow.entryNodeId).toBe(workflow.nodes[0]!.id);
+    expect(workflow.relationships[0]).toMatchObject({
+      from: workflow.nodes[0]!.id,
+      to: { nodeId: workflow.nodes[1]!.id },
+    });
+    expect(workflow.nodes[1]!.inputBindings).toEqual([
+      { sourceNodeId: workflow.nodes[0]!.id, sourceValue: "finalOutput" },
+    ]);
+    const migratedRun = await migrated.getWorkflowRun(run.id);
+    expect(migratedRun.id).toBe(run.id);
+    expect(migratedRun.occurrences[0]!.nodeId).toBe(
+      migratedRun.definition.entryNodeId,
+    );
+    expect(await migrated.getRun(legacyRun.id)).toEqual(legacyRun);
+    expect(
+      await fs.readFile(`${store.storeFile}.v2-node-id-backup-123`, "utf8"),
+    ).toBe(raw);
+    expect(JSON.parse(await fs.readFile(store.storeFile, "utf8")).version).toBe(
+      3,
+    );
+
+    const reloaded = new WorkflowStore(
+      path.dirname(store.storeFile),
+      undefined,
+      () => 123,
+    );
+    expect(await reloaded.getWorkflow(definition.id)).toEqual(workflow);
+    expect(await fs.readdir(path.dirname(store.storeFile))).not.toContain(
+      "workflows.json.v2-node-id-backup-123-2",
+    );
   });
 
-  it("preserves a non-empty v3 store byte-for-byte and rejects it", async () => {
+  it("preserves malformed v3 data byte-for-byte and rejects it", async () => {
     const store = await fresh();
     const original = JSON.stringify({
       version: 3,
