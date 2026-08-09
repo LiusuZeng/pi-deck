@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useEffect,
   useId,
   useLayoutEffect,
@@ -98,10 +100,32 @@ import {
   type ActivitySourceSession,
 } from "./activityInbox.js";
 import { ActivityInbox } from "./components/ActivityInbox.js";
-import { WorkflowHome, WorkflowRunView } from "./components/workflows/index.js";
-import { WorkflowBuilder } from "./components/workflows/WorkflowBuilder.js";
-import { WorkflowV2Builder } from "./components/workflows/WorkflowV2Builder.js";
-import { WorkflowV2Home } from "./components/workflows/v2/WorkflowV2Home.js";
+
+const WorkflowHome = lazy(() =>
+  import("./components/workflows/WorkflowHome.js").then((module) => ({
+    default: module.WorkflowHome,
+  })),
+);
+const WorkflowRunView = lazy(() =>
+  import("./components/workflows/WorkflowRunView.js").then((module) => ({
+    default: module.WorkflowRunView,
+  })),
+);
+const WorkflowBuilder = lazy(() =>
+  import("./components/workflows/WorkflowBuilder.js").then((module) => ({
+    default: module.WorkflowBuilder,
+  })),
+);
+const WorkflowV2Builder = lazy(() =>
+  import("./components/workflows/WorkflowV2Builder.js").then((module) => ({
+    default: module.WorkflowV2Builder,
+  })),
+);
+const WorkflowV2Home = lazy(() =>
+  import("./components/workflows/v2/WorkflowV2Home.js").then((module) => ({
+    default: module.WorkflowV2Home,
+  })),
+);
 
 type LoadState =
   | { state: "loading" }
@@ -4131,103 +4155,116 @@ export function App(): ReactElement {
                 {workflowError}
               </p>
             ) : null}
-            {workflowLoading && workflowTemplates.length === 0 ? (
-              <div
-                className="workflow-loading"
-                role="status"
-                aria-live="polite"
-              >
-                Loading Agent Workflows…
-              </div>
-            ) : workflowView === "builder" ? (
-              workflowBuilderTemplate !== undefined ? (
-                <WorkflowBuilder
-                  key={`${currentWorkspace.id}:${workflowBuilderTemplate.id}`}
-                  initialTemplate={workflowBuilderTemplate}
-                  onSave={handleSaveWorkflow}
-                  onCancel={() => {
-                    setWorkflowBuilderTemplate(undefined);
+            <Suspense
+              fallback={
+                <div
+                  className="workflow-loading"
+                  role="status"
+                  aria-live="polite"
+                >
+                  Loading Agent Workflows…
+                </div>
+              }
+            >
+              {workflowLoading && workflowTemplates.length === 0 ? (
+                <div
+                  className="workflow-loading"
+                  role="status"
+                  aria-live="polite"
+                >
+                  Loading Agent Workflows…
+                </div>
+              ) : workflowView === "builder" ? (
+                workflowBuilderTemplate !== undefined ? (
+                  <WorkflowBuilder
+                    key={`${currentWorkspace.id}:${workflowBuilderTemplate.id}`}
+                    initialTemplate={workflowBuilderTemplate}
+                    onSave={handleSaveWorkflow}
+                    onCancel={() => {
+                      setWorkflowBuilderTemplate(undefined);
+                      setWorkflowView("home");
+                    }}
+                  />
+                ) : (
+                  <WorkflowV2Builder
+                    key={`${currentWorkspace.id}:${workflowBuilderDefinition?.id ?? "new-v2"}`}
+                    {...(workflowBuilderDefinition === undefined
+                      ? {}
+                      : { initialDefinition: workflowBuilderDefinition })}
+                    onSave={handleSaveWorkflowV2}
+                    onCancel={() => {
+                      setWorkflowBuilderTemplate(undefined);
+                      setWorkflowBuilderDefinition(undefined);
+                      setWorkflowView("home");
+                    }}
+                  />
+                )
+              ) : workflowView === "run" &&
+                selectedWorkflowRun !== undefined ? (
+                <WorkflowRunView
+                  run={selectedWorkflowRun}
+                  workspaceName={currentWorkspace.name}
+                  onBack={() => {
+                    setWorkflowRunId(undefined);
                     setWorkflowView("home");
                   }}
+                  onStop={handleStopWorkflow}
+                  onRetryStep={handleRetryWorkflowStep}
+                  onRetryCondition={handleRetryWorkflowCondition}
+                  onOverrideCondition={handleOverrideWorkflowCondition}
+                  onApproveGate={handleApproveWorkflowGate}
+                  onOpenSession={(step) => void handleOpenWorkflowStep(step)}
                 />
               ) : (
-                <WorkflowV2Builder
-                  key={`${currentWorkspace.id}:${workflowBuilderDefinition?.id ?? "new-v2"}`}
-                  {...(workflowBuilderDefinition === undefined
-                    ? {}
-                    : { initialDefinition: workflowBuilderDefinition })}
-                  onSave={handleSaveWorkflowV2}
-                  onCancel={() => {
+                <WorkflowHome
+                  templates={workflowTemplates}
+                  workspaceName={currentWorkspace.name}
+                  recentRuns={workflowRuns}
+                  additionalWorkflowCount={roleBasedWorkflowDefinitions.length}
+                  additionalWorkflowSection={
+                    roleBasedWorkflowDefinitions.length > 0 ? (
+                      <WorkflowV2Home
+                        embedded
+                        workflows={roleBasedWorkflowDefinitions}
+                        onCreate={() => {
+                          setWorkflowBuilderTemplate(undefined);
+                          setWorkflowBuilderDefinition(undefined);
+                          setWorkflowView("builder");
+                        }}
+                        onEdit={(workflow) => {
+                          setWorkflowBuilderTemplate(undefined);
+                          setWorkflowBuilderDefinition(workflow);
+                          setWorkflowView("builder");
+                        }}
+                        onStart={async () => undefined}
+                      />
+                    ) : undefined
+                  }
+                  onCreate={() => {
                     setWorkflowBuilderTemplate(undefined);
                     setWorkflowBuilderDefinition(undefined);
-                    setWorkflowView("home");
+                    setWorkflowView("builder");
+                  }}
+                  onEdit={(template) => {
+                    const canonical = workflowDefinitions.find(
+                      (definition) => definition.id === template.id,
+                    );
+                    setWorkflowBuilderDefinition(canonical);
+                    setWorkflowBuilderTemplate(
+                      canonical === undefined ? template : undefined,
+                    );
+                    setWorkflowView("builder");
+                  }}
+                  onStart={(template, inputs) =>
+                    handleStartWorkflow(template, inputs)
+                  }
+                  onOpenRun={(run) => {
+                    setWorkflowRunId(run.id);
+                    setWorkflowView("run");
                   }}
                 />
-              )
-            ) : workflowView === "run" && selectedWorkflowRun !== undefined ? (
-              <WorkflowRunView
-                run={selectedWorkflowRun}
-                workspaceName={currentWorkspace.name}
-                onBack={() => {
-                  setWorkflowRunId(undefined);
-                  setWorkflowView("home");
-                }}
-                onStop={handleStopWorkflow}
-                onRetryStep={handleRetryWorkflowStep}
-                onRetryCondition={handleRetryWorkflowCondition}
-                onOverrideCondition={handleOverrideWorkflowCondition}
-                onApproveGate={handleApproveWorkflowGate}
-                onOpenSession={(step) => void handleOpenWorkflowStep(step)}
-              />
-            ) : (
-              <WorkflowHome
-                templates={workflowTemplates}
-                workspaceName={currentWorkspace.name}
-                recentRuns={workflowRuns}
-                additionalWorkflowCount={roleBasedWorkflowDefinitions.length}
-                additionalWorkflowSection={
-                  roleBasedWorkflowDefinitions.length > 0 ? (
-                    <WorkflowV2Home
-                      embedded
-                      workflows={roleBasedWorkflowDefinitions}
-                      onCreate={() => {
-                        setWorkflowBuilderTemplate(undefined);
-                        setWorkflowBuilderDefinition(undefined);
-                        setWorkflowView("builder");
-                      }}
-                      onEdit={(workflow) => {
-                        setWorkflowBuilderTemplate(undefined);
-                        setWorkflowBuilderDefinition(workflow);
-                        setWorkflowView("builder");
-                      }}
-                      onStart={async () => undefined}
-                    />
-                  ) : undefined
-                }
-                onCreate={() => {
-                  setWorkflowBuilderTemplate(undefined);
-                  setWorkflowBuilderDefinition(undefined);
-                  setWorkflowView("builder");
-                }}
-                onEdit={(template) => {
-                  const canonical = workflowDefinitions.find(
-                    (definition) => definition.id === template.id,
-                  );
-                  setWorkflowBuilderDefinition(canonical);
-                  setWorkflowBuilderTemplate(
-                    canonical === undefined ? template : undefined,
-                  );
-                  setWorkflowView("builder");
-                }}
-                onStart={(template, inputs) =>
-                  handleStartWorkflow(template, inputs)
-                }
-                onOpenRun={(run) => {
-                  setWorkflowRunId(run.id);
-                  setWorkflowView("run");
-                }}
-              />
-            )}
+              )}
+            </Suspense>
           </div>
         ) : activityInboxVisible ? (
           <ActivityInbox
