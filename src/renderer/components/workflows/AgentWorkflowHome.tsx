@@ -199,7 +199,10 @@ export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
     </div>
   ) : null;
 
-  if (view === "overview") {
+  const isFocusedSingleWorkflow =
+    view === "workflows" && props.workflows.length === 1;
+
+  if (view === "overview" || isFocusedSingleWorkflow) {
     const onlyWorkflow =
       props.workflows.length === 1 ? props.workflows[0] : undefined;
     const workflowRuns = onlyWorkflow
@@ -227,9 +230,22 @@ export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
       <div className="workflow-home agent-workflow-home">
         <div className="workflow-page-heading">
           <div>
+            {isFocusedSingleWorkflow ? (
+              <button
+                type="button"
+                className="workflow-back-button"
+                onClick={props.onBack}
+              >
+                Back to overview
+              </button>
+            ) : null}
             <span className="workflow-kicker">Orchestration</span>
-            <h2>Agent Workflows</h2>
-            <p>Coordinate reusable work across people and agents.</p>
+            <h2>{isFocusedSingleWorkflow ? "Workflows" : "Agent Workflows"}</h2>
+            <p>
+              {isFocusedSingleWorkflow
+                ? "1 saved workflow in this collection. Build and start reusable Agent Workflows."
+                : "Coordinate reusable work across people and agents."}
+            </p>
           </div>
           <button
             type="button"

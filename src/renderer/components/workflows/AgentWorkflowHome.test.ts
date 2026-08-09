@@ -343,19 +343,33 @@ describe("AgentWorkflowHome", () => {
     expect(empty.onShowRuns).not.toHaveBeenCalled();
   });
 
-  it("keeps create, start, and edit in the focused Workflows view", async () => {
+  it("uses the compact summary in the focused single-workflow collection", async () => {
     const props = render({ view: "workflows" });
     expect(container?.querySelector("h2")?.textContent).toBe("Workflows");
-    expect(container?.textContent).toContain("Worker: 2");
-    expect(
-      container?.querySelector("article")?.getAttribute("aria-labelledby"),
-    ).toBe("agent-workflow-00000000-0000-4000-8000-000000000701-title");
+    expect(container?.textContent).toContain(
+      "1 saved workflow in this collection.",
+    );
+    expect(container?.querySelector(".agent-workflow-summary")).not.toBeNull();
+    expect(container?.querySelector(".workflow-template-card")).toBeNull();
+    expect(container?.textContent).toContain("Workflow structure");
+    expect(container?.textContent).not.toContain("Worker: 2");
     act(() => button("New workflow").click());
     act(() => button("Edit").click());
     await act(async () => button("Start run").click());
+    act(() => button("Back to overview").click());
     expect(props.onCreate).toHaveBeenCalledOnce();
     expect(props.onEdit).toHaveBeenCalledWith(workflow);
     expect(props.onStart).toHaveBeenCalledWith(workflow, {});
+    expect(props.onBack).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the verbose cards for a focused multi-workflow collection", () => {
+    render({ view: "workflows", workflows: [workflow, semanticWorkflow] });
+    expect(container?.querySelector(".agent-workflow-summary")).toBeNull();
+    expect(container?.querySelectorAll(".workflow-template-card")).toHaveLength(
+      2,
+    );
+    expect(container?.textContent).toContain("Worker: 2");
   });
 
   it("keeps Open run in the focused Runs view and can return to the overview", () => {
