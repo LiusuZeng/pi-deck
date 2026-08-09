@@ -15,6 +15,8 @@ export interface AgentWorkflowStartCapability {
   unavailableReason?: string;
 }
 
+type AgentWorkflowHomeView = "overview" | "workflows" | "runs";
+
 export interface AgentWorkflowHomeProps {
   workflows: WorkflowDefinition[];
   onCreate(): void;
@@ -25,10 +27,12 @@ export interface AgentWorkflowHomeProps {
   ): Promise<void> | void;
   runs?: WorkflowRunEnvelope[];
   onOpenRun?(run: WorkflowRunEnvelope): void;
+  onShowWorkflows?(): void;
+  onShowRuns?(): void;
+  onBack?(): void;
+  view?: AgentWorkflowHomeView;
   /** Execution capability is supplied by the canonical main/preload seam. */
   startCapability?: AgentWorkflowStartCapability;
-  /** Omits the page-level heading when composed into the legacy-compatible home. */
-  embedded?: boolean;
 }
 
 const roles: AgentWorkflowRole[] = [
@@ -39,8 +43,10 @@ const roles: AgentWorkflowRole[] = [
 ];
 const defaultStartUnavailable = "Starting this workflow is unavailable.";
 
-/** Canonical Agent Workflow list; compatibility conversion stays outside this surface. */
+/** Canonical workflow overview and its focused definitions and runs surfaces. */
 export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
+  const view = props.view ?? "overview";
+  const runs = props.runs ?? [];
   const [startingId, setStartingId] = useState<string>();
   const [startError, setStartError] = useState<string>();
   const [inputWorkflow, setInputWorkflow] = useState<WorkflowDefinition>();
@@ -73,6 +79,7 @@ export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
   const requestStart = (workflow: WorkflowDefinition) => {
     if (workflow.inputs.length === 0) void start(workflow, {});
     else {
+      setStartError(undefined);
       setInputWorkflow(workflow);
       setInputValues({});
     }
@@ -87,14 +94,15 @@ export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
     setInputWorkflow(undefined);
     void start(inputWorkflow, inputValues);
   };
-  return (
-    <div className="workflow-home agent-workflow-home">
-      {!props.embedded ? (
+
+  if (view === "overview") {
+    return (
+      <div className="workflow-home agent-workflow-home">
         <div className="workflow-page-heading">
           <div>
             <span className="workflow-kicker">Orchestration</span>
             <h2>Agent Workflows</h2>
-            <p>Build reusable Agent Workflows with explicit handoffs.</p>
+            <p>Coordinate reusable work across people and agents.</p>
           </div>
           <button
             type="button"
@@ -104,55 +112,95 @@ export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
             New workflow
           </button>
         </div>
-      ) : null}
-      <section
-        {...(props.embedded
-          ? { "aria-label": "Agent Workflow definitions" }
-          : { "aria-labelledby": "workflow-role-list-title" })}
-      >
-        {!props.embedded ? (
-          <div className="workflow-section-heading">
-            <div>
-              <span className="workflow-kicker">Workflow definitions</span>
-              <h3 id="workflow-role-list-title">Your agent workflows</h3>
-            </div>
-            <span
-              className="workflow-count"
-              aria-label={`${props.workflows.length} workflows`}
-            >
-              {props.workflows.length}
-            </span>
-          </div>
-        ) : null}
-        {startError ? (
-          <p className="workflow-error" role="alert">
-            {startError}
+        <section
+          className="agent-workflow-overview"
+          aria-label="Agent Workflow overview"
+        >
+          <button
+            type="button"
+            className="agent-workflow-overview-card"
+            onClick={props.onShowWorkflows}
+          >
+            <span className="workflow-kicker">Definitions</span>
+            <strong>Workflows</strong>
+            <span>{props.workflows.length} saved</span>
+            <span className="agent-workflow-overview-link">View workflows</span>
+          </button>
+          <button
+            type="button"
+            className="agent-workflow-overview-card"
+            onClick={props.onShowRuns}
+          >
+            <span className="workflow-kicker">Activity</span>
+            <strong>Runs</strong>
+            <span>{runs.length} in this workspace</span>
+            <span className="agent-workflow-overview-link">View runs</span>
+          </button>
+        </section>
+      </div>
+    );
+  }
+
+  const isWorkflows = view === "workflows";
+  return (
+    <div className="workflow-home agent-workflow-home">
+      <div className="workflow-page-heading">
+        <div>
+          <button
+            type="button"
+            className="workflow-back-button"
+            onClick={props.onBack}
+          >
+            Back to overview
+          </button>
+          <span className="workflow-kicker">Orchestration</span>
+          <h2>{isWorkflows ? "Workflows" : "Runs"}</h2>
+          <p>
+            {isWorkflows
+              ? "Build and start reusable Agent Workflows."
+              : "Review runs in this workspace."}
           </p>
+        </div>
+        {isWorkflows ? (
+          <button
+            type="button"
+            className="workflow-primary-button"
+            onClick={props.onCreate}
+          >
+            New workflow
+          </button>
         ) : null}
-        {props.workflows.length === 0 && !props.embedded ? (
+      </div>
+      {startError ? (
+        <p className="workflow-error" role="alert">
+          {startError}
+        </p>
+      ) : null}
+      {isWorkflows ? (
+        props.workflows.length === 0 ? (
           <div className="workflow-empty-state">
-            <h3>Create an Agent Workflow</h3>
+            <h3>No workflows yet</h3>
             <p>
-              Add Workers, Deciders, Orchestrators, and Human checkpoints to
-              coordinate a reusable workflow.
+              Create a workflow to coordinate work across people and agents.
             </p>
           </div>
         ) : (
-          <div className="workflow-template-grid">
+          <div className="workflow-template-grid" aria-label="Agent Workflows">
             {props.workflows.map((workflow) => {
               const card = agentWorkflowCardViewModel(workflow);
+              const titleId = `agent-workflow-${card.id}-title`;
               const unavailableId = `agent-workflow-start-${workflow.id}`;
               const isStarting = startingId === workflow.id;
               return (
                 <article
                   className="workflow-card workflow-template-card"
                   key={card.id}
-                  aria-label={`${card.name}, Agent Workflow`}
+                  aria-labelledby={titleId}
                 >
                   <div className="workflow-template-card-heading">
                     <div>
                       <span className="workflow-template-mark">Workflow</span>
-                      <h3>{card.name}</h3>
+                      <h3 id={titleId}>{card.name}</h3>
                     </div>
                     <span className="workflow-step-count">
                       {card.nodeCount} role{card.nodeCount === 1 ? "" : "s"}
@@ -167,12 +215,6 @@ export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
                     ))}
                   </ul>
                   <p className="workflow-help">{card.roleSummary}</p>
-                  <div className="workflow-card-facts">
-                    <span>
-                      {card.relationshipCount} relationship
-                      {card.relationshipCount === 1 ? "" : "s"}
-                    </span>
-                  </div>
                   {!startCapability.enabled ? (
                     <p id={unavailableId} className="workflow-help">
                       {unavailableReason}
@@ -202,70 +244,72 @@ export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
               );
             })}
           </div>
-        )}
-      </section>
-      {(props.runs?.length ?? 0) > 0 ? (
-        <section aria-labelledby="workflow-runs-title">
-          <div className="workflow-section-heading">
-            <div>
-              <span className="workflow-kicker">Runs</span>
-              <h3 id="workflow-runs-title">Recent runs</h3>
-            </div>
-          </div>
-          <div className="workflow-template-grid">
-            {props.runs!.map((run) => (
-              <article
-                className="workflow-card workflow-template-card"
-                key={run.id}
-              >
-                <div className="workflow-template-card-heading">
-                  <div>
-                    <span className="workflow-template-mark">Run</span>
-                    <h3>{run.name}</h3>
-                  </div>
-                  <span className="workflow-step-status">{run.status}</span>
-                </div>
-                <p>
+        )
+      ) : runs.length === 0 ? (
+        <div className="workflow-empty-state">
+          <h3>No runs yet</h3>
+          <p>Start a workflow to see its progress here.</p>
+        </div>
+      ) : (
+        <div className="workflow-run-list" aria-label="Workflow runs">
+          {runs.map((run) => (
+            <article className="workflow-run-row" key={run.id}>
+              <span className="workflow-status-dot" aria-hidden="true" />
+              <span className="workflow-run-row-copy">
+                <strong>{run.name}</strong>
+                <small>
                   {run.terminalOutcome
                     ? `Outcome: ${run.terminalOutcome}`
                     : `${run.occurrences.length} occurrence${run.occurrences.length === 1 ? "" : "s"}`}
-                </p>
-                <button
-                  type="button"
-                  className="workflow-secondary-button"
-                  onClick={() => props.onOpenRun?.(run)}
-                >
-                  Open run
-                </button>
-              </article>
-            ))}
-          </div>
-        </section>
-      ) : null}
+                </small>
+              </span>
+              <span className="workflow-run-status">{run.status}</span>
+              <button
+                type="button"
+                className="workflow-secondary-button"
+                onClick={() => props.onOpenRun?.(run)}
+              >
+                Open run
+              </button>
+            </article>
+          ))}
+        </div>
+      )}
       {inputWorkflow ? (
         <div
           className="workflow-input-dialog"
           role="dialog"
           aria-modal="true"
-          aria-label={`Start ${inputWorkflow.name}`}
+          aria-labelledby="agent-workflow-inputs-title"
+          onKeyDown={(event) => {
+            if (event.key === "Escape") setInputWorkflow(undefined);
+          }}
         >
-          <h3>Run inputs</h3>
-          {inputWorkflow.inputs.map((input) => (
-            <label key={input.id}>
-              {input.label}
-              <input
-                type={input.type === "path" ? "text" : "text"}
-                required={input.required}
-                value={inputValues[input.id] ?? ""}
-                onChange={(event) =>
-                  setInputValues({
-                    ...inputValues,
-                    [input.id]: event.target.value,
-                  })
-                }
-              />
-            </label>
-          ))}
+          <h3 id="agent-workflow-inputs-title">Run inputs</h3>
+          {inputWorkflow.inputs.map((input) => {
+            const errorId = `agent-workflow-input-${input.id}-error`;
+            const invalid =
+              input.required && startError === `${input.label} is required.`;
+            return (
+              <label key={input.id}>
+                {input.label}
+                <input
+                  type="text"
+                  required={input.required}
+                  aria-invalid={invalid}
+                  aria-describedby={invalid ? errorId : undefined}
+                  value={inputValues[input.id] ?? ""}
+                  onChange={(event) =>
+                    setInputValues({
+                      ...inputValues,
+                      [input.id]: event.target.value,
+                    })
+                  }
+                />
+                {invalid ? <span id={errorId}>{startError}</span> : null}
+              </label>
+            );
+          })}
           <div className="workflow-card-actions">
             <button
               type="button"

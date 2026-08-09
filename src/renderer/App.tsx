@@ -836,7 +836,14 @@ export function App(): ReactElement {
     type: "all",
   });
   const [workflowView, setWorkflowView] = useState<
-    "home" | "builder" | "run" | "occurrenceRun" | undefined
+    | "home"
+    | "agentHome"
+    | "workflows"
+    | "runs"
+    | "builder"
+    | "run"
+    | "occurrenceRun"
+    | undefined
   >();
   const [workflowTemplates, setWorkflowTemplates] = useState<
     WorkflowTemplate[]
@@ -1845,7 +1852,7 @@ export function App(): ReactElement {
     setWorkflowBuilderTemplate(undefined);
     setWorkflowBuilderDefinition(undefined);
     setWorkflowRunId(undefined);
-    setWorkflowView("home");
+    setWorkflowView("agentHome");
   }
 
   function handleOpenWorkspaceActivity(workspaceId: string): void {
@@ -1914,7 +1921,7 @@ export function App(): ReactElement {
       ]);
       setWorkflowBuilderTemplate(undefined);
       setWorkflowBuilderDefinition(undefined);
-      setWorkflowView("home");
+      setWorkflowView("workflows");
       setWorkflowError(undefined);
       setUiMessage(`Saved ${workflow.name}.`);
     } catch (error) {
@@ -4280,7 +4287,7 @@ export function App(): ReactElement {
                     onCancel={() => {
                       setWorkflowBuilderTemplate(undefined);
                       setWorkflowBuilderDefinition(undefined);
-                      setWorkflowView("home");
+                      setWorkflowView("workflows");
                     }}
                   />
                 )
@@ -4290,7 +4297,7 @@ export function App(): ReactElement {
                   run={selectedWorkflowOccurrenceRun}
                   onBack={() => {
                     setWorkflowOccurrenceRunId(undefined);
-                    setWorkflowView("home");
+                    setWorkflowView("runs");
                   }}
                   onStop={async () => {
                     const run = await window.piDeck.workflows.canonicalStopRun({
@@ -4341,10 +4348,22 @@ export function App(): ReactElement {
                   onApproveGate={handleApproveWorkflowGate}
                   onOpenSession={(step) => void handleOpenWorkflowStep(step)}
                 />
-              ) : agentWorkflowDefinitions.length > 0 ? (
+              ) : workflowView === "agentHome" ||
+                workflowView === "workflows" ||
+                workflowView === "runs" ? (
                 <AgentWorkflowHome
+                  view={
+                    workflowView === "workflows"
+                      ? "workflows"
+                      : workflowView === "runs"
+                        ? "runs"
+                        : "overview"
+                  }
                   workflows={agentWorkflowDefinitions}
                   runs={workflowOccurrenceRuns}
+                  onShowWorkflows={() => setWorkflowView("workflows")}
+                  onShowRuns={() => setWorkflowView("runs")}
+                  onBack={() => setWorkflowView("agentHome")}
                   onOpenRun={(run) => {
                     setWorkflowOccurrenceRunId(run.id);
                     setWorkflowView("occurrenceRun");
@@ -6778,7 +6797,14 @@ function SessionSidebar(props: {
   showArchived: boolean;
   composerDrafts: ComposerDraftsBySession;
   activityInboxVisible: boolean;
-  workflowView: "home" | "builder" | "run" | undefined;
+  workflowView:
+    | "home"
+    | "agentHome"
+    | "workflows"
+    | "runs"
+    | "builder"
+    | "run"
+    | undefined;
   activityActionableCount: number;
   onSelect(sessionId: string): void;
   onOpenActivity(): void;
