@@ -24,28 +24,30 @@ export const agentWorkflowDefinitionSchema = workflowDefinitionSchema;
 export type AgentWorkflowDefinition = WorkflowDefinition;
 export type AgentWorkflowNode = WorkflowNode;
 
-/** Produces an unused, stable-looking ID even after imports or deletions. */
+/** Produces a UUID that is unused by this document. Labels provide display identity. */
 export function uniqueNodeId(
   definition: AgentWorkflowDefinition,
-  prefix: string,
+  _prefix: string,
 ): string {
   const ids = new Set(definition.nodes.map((node) => node.id));
-  let number = 1;
-  while (ids.has(`${prefix}-${number}`)) number += 1;
-  return `${prefix}-${number}`;
+  let id: string;
+  do id = crypto.randomUUID();
+  while (ids.has(id));
+  return id;
 }
 export function defaultAgentWorkflowDefinition(): AgentWorkflowDefinition {
+  const entryNodeId = crypto.randomUUID();
   return {
     format: "pi-deck.agent-workflow",
     schemaVersion: 2,
-    id: `workflow-${crypto.randomUUID()}`,
+    id: crypto.randomUUID(),
     revision: 1,
     name: "New agent workflow",
     inputs: [],
-    entryNodeId: "worker-1",
+    entryNodeId,
     nodes: [
       {
-        id: "worker-1",
+        id: entryNodeId,
         name: "Do the work",
         role: "worker",
         config: { instructions: "Describe the work to perform." },

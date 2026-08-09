@@ -236,17 +236,7 @@ export function AgentWorkflowBuilder(props: {
       ? { end: value.slice(4) }
       : { nodeId: value };
     const edge = {
-      id:
-        existing?.id ??
-        `relationship-${from}-${String(equals ?? "then")}-${(() => {
-          let n = 1;
-          const ids = new Set(definition.relationships.map((item) => item.id));
-          while (
-            ids.has(`relationship-${from}-${String(equals ?? "then")}-${n}`)
-          )
-            n += 1;
-          return n;
-        })()}`,
+      id: existing?.id ?? crypto.randomUUID(),
       from,
       ...(equals === undefined ? {} : { when: { equals } }),
       to,

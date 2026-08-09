@@ -1,8 +1,9 @@
 import { z } from "zod";
 
-const workflowIdSchema = z.string().min(1).max(120);
-const nodeIdSchema = z.string().min(1).max(120);
-const relationshipIdSchema = z.string().min(1).max(120);
+/** Canonical document identities and every reference to them are UUIDs. */
+const workflowIdSchema = z.string().uuid();
+const nodeIdSchema = z.string().uuid();
+const relationshipIdSchema = z.string().uuid();
 
 export const agentWorkflowInputSchema = z
   .object({

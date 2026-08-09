@@ -57,14 +57,14 @@ describe("preload PiDeck API validation", () => {
     const workflow = {
       format: "pi-deck.agent-workflow" as const,
       schemaVersion: 2 as const,
-      id: "workflow-1",
+      id: "00000000-0000-4000-8000-000000000001",
       revision: 1,
       name: "Workflow",
       inputs: [],
-      entryNodeId: "worker-1",
+      entryNodeId: "00000000-0000-4000-8000-000000000002",
       nodes: [
         {
-          id: "worker-1",
+          id: "00000000-0000-4000-8000-000000000002",
           name: "Worker",
           role: "worker" as const,
           config: { instructions: "Do the work" },
