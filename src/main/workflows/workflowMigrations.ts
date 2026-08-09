@@ -15,8 +15,18 @@ import {
 export function migrateV1Template(
   template: WorkflowTemplate,
 ): WorkflowDefinition {
+  // v1 step and transition IDs were user-facing slugs. They are never valid
+  // canonical identities, so allocate opaque IDs before constructing the v2 document.
+  const nodeIds = new Map(
+    template.steps.map((step) => [step.id, randomUUID()]),
+  );
+  const nodeId = (id: string): string => {
+    const result = nodeIds.get(id);
+    if (!result) throw new Error(`Unknown legacy workflow step: ${id}`);
+    return result;
+  };
   const nodes = template.steps.map((step) => ({
-    id: step.id,
+    id: nodeId(step.id),
     name: step.name,
     role: "worker" as const,
     config: { instructions: renderLegacyPrompt(step.promptParts) },
@@ -41,7 +51,6 @@ export function migrateV1Template(
       | { kind: "step"; stepId: string }
       | { kind: "manualGate"; toStepId: string }
       | { kind: "stop" },
-    id: string,
     when?: boolean,
     prompt?: string,
   ): void => {
@@ -54,7 +63,7 @@ export function migrateV1Template(
         ? { kind: "manualGate" as const, toStepId: originalTarget.stepId }
         : originalTarget;
     if (target.kind === "manualGate") {
-      const gateId = `${id}-approval`;
+      const gateId = randomUUID();
       additions.push({
         id: gateId,
         name: "Approval",
@@ -65,51 +74,50 @@ export function migrateV1Template(
         },
       });
       relationships.push({
-        id: `${id}-to-approval`,
-        from,
+        id: randomUUID(),
+        from: nodeId(from),
         ...(when === undefined ? {} : { when: { equals: when } }),
         to: { nodeId: gateId },
       });
       relationships.push({
-        id: `${id}-approved`,
+        id: randomUUID(),
         from: gateId,
         when: { equals: true },
-        to: { nodeId: target.toStepId },
+        to: { nodeId: nodeId(target.toStepId) },
       });
       relationships.push({
-        id: `${id}-rejected`,
+        id: randomUUID(),
         from: gateId,
         when: { equals: false },
         to: { end: "rejected" },
       });
     } else
       relationships.push({
-        id,
-        from,
+        id: randomUUID(),
+        from: nodeId(from),
         ...(when === undefined ? {} : { when: { equals: when } }),
         to:
           target.kind === "step"
-            ? { nodeId: target.stepId }
+            ? { nodeId: nodeId(target.stepId) }
             : { end: "stopped" },
       });
   };
   for (const transition of template.transitions) {
     if (transition.kind === "always")
-      route(
-        transition.fromStepId,
-        { kind: "step", stepId: transition.toStepId },
-        transition.id,
-      );
+      route(transition.fromStepId, {
+        kind: "step",
+        stepId: transition.toStepId,
+      });
     else if (transition.kind === "manualGate")
       route(
         transition.fromStepId,
         { kind: "manualGate", toStepId: transition.toStepId },
-        transition.id,
         undefined,
         transition.prompt,
       );
     else {
-      const deciderId = `${transition.id}-decider`;
+      const deciderId = randomUUID();
+      nodeIds.set(deciderId, deciderId);
       additions.push({
         id: deciderId,
         name: transition.question,
@@ -117,24 +125,22 @@ export function migrateV1Template(
         config: { question: transition.question },
       });
       relationships.push({
-        id: `${transition.id}-evaluate`,
-        from: transition.fromStepId,
+        id: randomUUID(),
+        from: nodeId(transition.fromStepId),
         to: { nodeId: deciderId },
       });
-      if (transition.routes.yes)
-        route(deciderId, transition.routes.yes, `${transition.id}-true`, true);
+      if (transition.routes.yes) route(deciderId, transition.routes.yes, true);
       else
         relationships.push({
-          id: `${transition.id}-true`,
+          id: randomUUID(),
           from: deciderId,
           when: { equals: true },
           to: { end: "completed" },
         });
-      if (transition.routes.no)
-        route(deciderId, transition.routes.no, `${transition.id}-false`, false);
+      if (transition.routes.no) route(deciderId, transition.routes.no, false);
       else
         relationships.push({
-          id: `${transition.id}-false`,
+          id: randomUUID(),
           from: deciderId,
           when: { equals: false },
           to: { end: "stopped" },
@@ -149,13 +155,13 @@ export function migrateV1Template(
     ),
   );
   const first =
-    template.steps.find((step) => !targets.has(step.id))?.id ??
+    template.steps.find((step) => !targets.has(nodeId(step.id)))?.id ??
     template.steps[0]!.id;
   const approval = template.steps.find(
     (step) => step.id === first && step.startPolicy === "manualApproval",
   );
   if (approval) {
-    const gateId = `${approval.id}-start-approval`;
+    const gateId = randomUUID();
     additions.push({
       id: gateId,
       name: `Approve ${approval.name}`,
@@ -166,13 +172,13 @@ export function migrateV1Template(
       },
     });
     relationships.push({
-      id: `${approval.id}-start-approved`,
+      id: randomUUID(),
       from: gateId,
       when: { equals: true },
-      to: { nodeId: approval.id },
+      to: { nodeId: nodeId(approval.id) },
     });
     relationships.push({
-      id: `${approval.id}-start-rejected`,
+      id: randomUUID(),
       from: gateId,
       when: { equals: false },
       to: { end: "rejected" },
@@ -192,7 +198,7 @@ export function migrateV1Template(
       type,
       required,
     })),
-    entryNodeId: approval ? `${approval.id}-start-approval` : first,
+    entryNodeId: approval ? additions[additions.length - 1]!.id : nodeId(first),
     nodes: allNodes,
     relationships,
   });
@@ -208,11 +214,19 @@ export function preserveLegacyRun(run: WorkflowRun): WorkflowRun {
  * documents. Every snapshot gets its own map: run snapshots are immutable and
  * may not match the workflow currently being edited.
  */
-export function migrateV2NodeIds(file: {
+/**
+ * The v2 persistence boundary predates UUID node/relationship identities.
+ * Its non-identity fields are validated by the canonical parse after remapping.
+ */
+export type LegacyV2MigrationFile = {
   workflows: WorkflowDefinition[];
   occurrences: WorkflowOccurrence[];
   runs: WorkflowRunEnvelope[];
-}): Pick<typeof file, "workflows" | "occurrences" | "runs"> {
+};
+
+export function migrateV2NodeIds(
+  file: LegacyV2MigrationFile,
+): Pick<LegacyV2MigrationFile, "workflows" | "occurrences" | "runs"> {
   return {
     workflows: file.workflows.map(
       (definition) => migrateDefinition(definition).definition,
@@ -259,7 +273,11 @@ function migrateDefinition(definition: WorkflowDefinition): {
   const nodeIds = new Map(
     definition.nodes.map((node) => [node.id, randomUUID()]),
   );
-  const nodeId = (id: string): string => nodeIds.get(id)!;
+  const nodeId = (id: string): string => {
+    const result = nodeIds.get(id);
+    if (!result) throw new Error(`Unknown v2 workflow node: ${id}`);
+    return result;
+  };
   return {
     nodeIds,
     definition: workflowDefinitionSchema.parse({
@@ -291,6 +309,7 @@ function migrateDefinition(definition: WorkflowDefinition): {
       })),
       relationships: definition.relationships.map((relationship) => ({
         ...relationship,
+        id: randomUUID(),
         from: nodeId(relationship.from),
         ...("nodeId" in relationship.to
           ? { to: { nodeId: nodeId(relationship.to.nodeId) } }

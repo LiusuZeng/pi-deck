@@ -22,6 +22,7 @@ import {
   migrateV1Template,
   migrateV2NodeIds,
   preserveLegacyRun,
+  type LegacyV2MigrationFile,
 } from "./workflowMigrations.js";
 import type { DiagnosticsRecorder } from "../diagnostics/diagnostics.js";
 
@@ -51,8 +52,30 @@ const v2AgentWorkflowStoreSchema = z
 const agentWorkflowStoreSchema = v2AgentWorkflowStoreSchema.extend({
   version: z.literal(3),
 });
+/**
+ * v2 used the current document shape but allowed human-readable node and edge
+ * identities. Parse that historical boundary separately; every migrated result
+ * is still parsed by `agentWorkflowStoreSchema` before it is persisted.
+ */
+const legacyV2AgentWorkflowStoreSchema = z
+  .object({
+    version: z.literal(2),
+    workflows: z.array(z.unknown()),
+    occurrences: z.array(z.unknown()).default([]),
+    runs: z.array(z.unknown()).default([]),
+    legacyRuns: z.array(workflowRunSchema),
+    workflowScopes: z
+      .record(z.string(), z.string().min(1).max(120))
+      .default({}),
+  })
+  .strict();
 type V1Store = z.infer<typeof v1StoreSchema>;
 type V2WorkflowStoreFile = z.infer<typeof v2AgentWorkflowStoreSchema>;
+type LegacyV2WorkflowStoreFile = Omit<
+  V2WorkflowStoreFile,
+  "workflows" | "occurrences" | "runs"
+> &
+  LegacyV2MigrationFile;
 type WorkflowStoreFile = z.infer<typeof agentWorkflowStoreSchema>;
 const emptyStore = (): WorkflowStoreFile => ({
   version: 3,
@@ -338,7 +361,9 @@ export class WorkflowStore {
       } else if (version === 2) {
         await this.migrateV2NodeIds(
           raw,
-          v2AgentWorkflowStoreSchema.parse(parsed),
+          legacyV2AgentWorkflowStoreSchema.parse(
+            parsed,
+          ) as LegacyV2WorkflowStoreFile,
         );
       } else if (version === 3) {
         const v3 = agentWorkflowStoreSchema.safeParse(parsed);
@@ -372,7 +397,7 @@ export class WorkflowStore {
   }
   private async migrateV2NodeIds(
     raw: string,
-    source: V2WorkflowStoreFile,
+    source: LegacyV2WorkflowStoreFile,
   ): Promise<void> {
     try {
       const migrated = migrateV2NodeIds(source);
@@ -442,7 +467,6 @@ export function migrateV1(file: V1Store): WorkflowStoreFile {
   };
   return agentWorkflowStoreSchema.parse({
     ...v2,
-    ...migrateV2NodeIds(v2),
     version: 3,
   });
 }
