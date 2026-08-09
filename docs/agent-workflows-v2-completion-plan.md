@@ -249,7 +249,30 @@ Validation after integration: 58 Vitest files passed with 436 tests and 2 TODOs;
 main and renderer typechecks, Prettier, production build, and diff checks passed.
 Independent fresh-context release review reported no blockers.
 
-## 8. Required lane handoff
+## 8. Release hardening incident — workflow store version skew
+
+A production-shaped launch on 2026-08-08 exposed a gap not covered by unit/build
+validation: another worktree had written an empty version-3 workflow store into
+the shared `~/.pideck`, while the release worktree supported only versions 1 and
+2. Bootstrap propagated `UnsupportedWorkflowStoreVersionError` before creating
+the main window, producing a blank Electron window.
+
+Hardening contract:
+
+- Unsupported workflow metadata must never prevent the rest of Pi Deck from
+  opening. Preserve the file and expose Agent Workflows as unavailable with a
+  useful error.
+- The known empty v3 store shape may be migrated safely after an atomic backup;
+  non-empty unsupported stores must never be reset or rewritten.
+- Fake/dev launches must use isolated Pi Deck metadata and Electron user-data
+  directories by default unless the caller explicitly opts into shared paths.
+- Release validation must include a real bootstrap launch, not only compilation,
+  and assert that the renderer root becomes visible.
+- Workflow store version changes are a shared integration contract. A worktree
+  may not publish a new version without migration fixtures and release-gate
+  coverage for the immediately previous version.
+
+## 9. Required lane handoff
 
 Each worker reports:
 
