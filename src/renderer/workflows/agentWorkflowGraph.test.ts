@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { WorkflowDefinition } from "../../shared/agentWorkflowSchemas.js";
+import type {
+  CanonicalNodeOccurrence,
+  WorkflowDefinition,
+} from "../../shared/agentWorkflowSchemas.js";
 import { deriveAgentWorkflowGraph } from "./agentWorkflowGraph.js";
 
 const definition: WorkflowDefinition = {
@@ -163,6 +166,34 @@ describe("deriveAgentWorkflowGraph", () => {
         .filter((route) => route.from === "prepare" && route.to === "iterate")
         .map((route) => route.id),
     ).toEqual(["prepare-iterate", "prepare-iterate-again"]);
+  });
+
+  it("projects live occurrence status onto every stable definition node", () => {
+    const occurrence = {
+      id: "00000000-0000-4000-8000-000000000001",
+      nodeId: "prepare",
+      role: "worker",
+      parentOccurrenceIds: [],
+      context: [],
+      iteration: 1,
+      attempt: 2,
+      status: "running",
+      managedChildren: [],
+      aggregation: [],
+      createdAtMs: 1,
+      updatedAtMs: 2,
+    } as CanonicalNodeOccurrence;
+    const graph = deriveAgentWorkflowGraph(definition, [occurrence]);
+    expect(graph.topLevelNodes.find((node) => node.id === "prepare")).toMatchObject({
+      status: "in_progress",
+      retries: 1,
+      counts: { in_progress: 1 },
+    });
+    expect(graph.topLevelNodes.find((node) => node.id === "iterate")).toMatchObject({
+      status: "not_started",
+      occurrenceCount: 0,
+    });
+    expect(graph.routes.find((route) => route.id === "prepare-iterate")?.status).toBe("active");
   });
 
   it("labels Human choice routes with their declared options", () => {
