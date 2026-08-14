@@ -12,6 +12,7 @@ import {
   type ChildLifecycleStatus,
   type ChildResultWireMessage,
   type DelegateWireMessage,
+  type ModeQueryWireMessage,
   type ChildInputResponseWireMessage,
 } from "./delegationBridgeProtocol.js";
 
@@ -25,6 +26,8 @@ export interface DelegationBridgeServerOptions {
   maxFrameBytes?: number;
   authenticationTimeoutMs?: number;
   onDelegate?: (request: DelegateRequest) => void;
+  /** Returns the authoritative current mode for the capability-bound parent. */
+  getParentMode?: (parentId: string) => "sequential" | "parallel" | Promise<"sequential" | "parallel">;
   onConnectionClosed?: (connectionId: string) => void;
   onProtocolError?: (error: DelegationBridgeProtocolError) => void;
 }
@@ -336,6 +339,7 @@ export class DelegationBridgeServer {
     connection: Connection,
     message:
       | DelegateWireMessage
+      | ModeQueryWireMessage
       | ChildInputResponseWireMessage
       | ReturnType<typeof authenticateMessageSchema.parse>,
   ): void {
@@ -355,6 +359,31 @@ export class DelegationBridgeServer {
         version: DELEGATION_BRIDGE_PROTOCOL_VERSION,
         type: "authenticated",
       });
+      return;
+    }
+    if (message.type === "mode-query") {
+      // The parent ID is derived solely from the authenticated capability.
+      // Do not accept a runtime ID from extension-controlled message data.
+      const parentId = connection.parentId;
+      if (!parentId || !this.options.getParentMode) {
+        this.reject(connection.id, connection.socket, "invalid-frame");
+        return;
+      }
+      void Promise.resolve(this.options.getParentMode(parentId)).then(
+        (mode) => {
+          if (mode !== "sequential" && mode !== "parallel") {
+            this.reject(connection.id, connection.socket, "invalid-frame");
+            return;
+          }
+          this.write(connection.socket, {
+            version: DELEGATION_BRIDGE_PROTOCOL_VERSION,
+            type: "mode-state",
+            requestId: message.requestId,
+            mode,
+          });
+        },
+        () => this.reject(connection.id, connection.socket, "invalid-frame"),
+      );
       return;
     }
     if (message.type === "child-input-response") {

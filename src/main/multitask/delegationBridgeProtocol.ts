@@ -32,6 +32,15 @@ export const delegateMessageSchema = z
   })
   .strict();
 
+/** Request the current delegation mode for the authenticated parent capability. */
+export const modeQueryMessageSchema = z
+  .object({
+    ...protocolEnvelope,
+    type: z.literal("mode-query"),
+    requestId: toolCallIdSchema,
+  })
+  .strict();
+
 export const inputResponseMessageSchema = z
   .object({
     ...protocolEnvelope,
@@ -44,6 +53,7 @@ export const inputResponseMessageSchema = z
 export const clientMessageSchema = z.union([
   authenticateMessageSchema,
   delegateMessageSchema,
+  modeQueryMessageSchema,
   inputResponseMessageSchema,
 ]);
 
@@ -99,7 +109,19 @@ export const authenticatedMessageSchema = z
   .object({ ...protocolEnvelope, type: z.literal("authenticated") })
   .strict();
 
+/** Authoritative response to a mode query; never supplied by the extension. */
+export const modeStateMessageSchema = z
+  .object({
+    ...protocolEnvelope,
+    type: z.literal("mode-state"),
+    requestId: toolCallIdSchema,
+    mode: z.enum(["sequential", "parallel"]),
+  })
+  .strict();
+
 export type DelegateWireMessage = z.infer<typeof delegateMessageSchema>;
+export type ModeQueryWireMessage = z.infer<typeof modeQueryMessageSchema>;
+export type ModeStateWireMessage = z.infer<typeof modeStateMessageSchema>;
 export type ChildInputResponseWireMessage = z.infer<
   typeof inputResponseMessageSchema
 >;

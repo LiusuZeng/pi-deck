@@ -40,6 +40,20 @@ export interface DeckDelegateResultMessage {
   details?: unknown;
 }
 
+/** Authenticated extension-to-host query for the current parent mode. */
+export interface DeckDelegateModeQuery {
+  version: typeof DECK_DELEGATE_PROTOCOL_VERSION;
+  type: "mode-query";
+  requestId: string;
+}
+
+export interface DeckDelegateModeState {
+  version: typeof DECK_DELEGATE_PROTOCOL_VERSION;
+  type: "mode-state";
+  requestId: string;
+  mode: "sequential" | "parallel";
+}
+
 /**
  * The JSONL protocol contract for Deck's delegate endpoint.
  *
@@ -111,6 +125,17 @@ export interface DeckDelegateResultMessage {
   text: string;
   details?: JsonValue;
 }
+export interface DeckDelegateModeQuery {
+  version: 1;
+  type: "mode-query";
+  requestId: string;
+}
+export interface DeckDelegateModeState {
+  version: 1;
+  type: "mode-state";
+  requestId: string;
+  mode: "sequential" | "parallel";
+}
 export type DeckDelegateWireMessage = DeckDelegateRequest | DeckDelegateLifecycleMessage | DeckDelegateResultMessage;
 
 type Endpoint = { kind: "tcp"; port: number } | { kind: "unix"; path: string };
@@ -173,6 +198,46 @@ function relay(pi: ExtensionAPI, message: DeckDelegateLifecycleMessage | DeckDel
   } catch {
     // A relay failure must not orphan or change the actual delegate result.
   }
+}
+
+let nextModeQueryId = 1;
+
+/** Fetch mode anew for each turn; the capability determines the parent runtime. */
+function queryMode(endpoint: Endpoint, capability: string): Promise<"sequential" | "parallel"> {
+  return new Promise((resolve, reject) => {
+    const socket = endpoint.kind === "tcp"
+      ? net.createConnection({ host: "127.0.0.1", port: endpoint.port })
+      : net.createConnection({ path: endpoint.path });
+    const requestId = "mode-" + nextModeQueryId++;
+    let buffer = Buffer.alloc(0);
+    let authenticated = false;
+    let settled = false;
+    const timer = setTimeout(() => fail(new Error("Deck mode query timed out")), CONNECT_TIMEOUT_MS);
+    const cleanup = () => { clearTimeout(timer); socket.removeAllListeners(); if (!socket.destroyed) socket.destroy(); };
+    const fail = (error: Error) => { if (!settled) { settled = true; cleanup(); reject(error); } };
+    const succeed = (mode: "sequential" | "parallel") => { if (!settled) { settled = true; cleanup(); resolve(mode); } };
+    socket.once("connect", () => { try { writeJsonLine(socket, { version: 1, type: "authenticate", token: capability }); } catch (error) { fail(error instanceof Error ? error : new Error("Unable to authenticate mode query")); } });
+    socket.on("data", (chunk: Buffer) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      if (buffer.byteLength > MAX_BUFFER_BYTES) return fail(new Error("Deck mode query buffer exceeds size limit"));
+      const newline = buffer.indexOf(10);
+      if (newline < 0) return;
+      const line = buffer.subarray(0, newline);
+      if (line.byteLength > MAX_LINE_BYTES) return fail(new Error("Deck mode query line exceeds size limit"));
+      let value: unknown;
+      try { value = JSON.parse(line.toString("utf8")); } catch { return fail(new Error("Deck mode query sent invalid JSONL")); }
+      if (!authenticated) {
+        if (!isRecord(value) || value.version !== 1 || value.type !== "authenticated") return fail(new Error("Deck mode query authentication failed"));
+        authenticated = true;
+        try { writeJsonLine(socket, { version: 1, type: "mode-query", requestId }); } catch (error) { fail(error instanceof Error ? error : new Error("Unable to query Deck mode")); }
+        return;
+      }
+      if (!isRecord(value) || value.version !== 1 || value.type !== "mode-state" || value.requestId !== requestId || (value.mode !== "sequential" && value.mode !== "parallel")) return fail(new Error("Deck mode query sent an invalid protocol message"));
+      succeed(value.mode);
+    });
+    socket.once("error", (error) => fail(error));
+    socket.once("close", () => { if (!settled) fail(new Error("Deck mode query connection closed")); });
+  });
 }
 
 function delegate(pi: ExtensionAPI, request: DeckDelegateRequest, endpoint: Endpoint, signal: AbortSignal): Promise<DeckDelegateResultMessage> {
@@ -248,6 +313,22 @@ function delegate(pi: ExtensionAPI, request: DeckDelegateRequest, endpoint: Endp
 }
 
 export default function deckDelegateExtension(pi: ExtensionAPI): void {
+  // This hook runs before each agent start. It queries Deck over the
+  // capability-bound bridge rather than inferring mode from conversation text.
+  pi.on("before_agent_start", async (event) => {
+    try {
+      const config = configuration();
+      const mode = await queryMode(config.endpoint, config.capability);
+      const instruction = mode === "parallel"
+        ? "Pi Deck parallel multitasking is enabled. By default, delegate substantive independent work with deck_delegate. Do not delegate only when the user explicitly asks you to handle the work directly; honor that direct-handling override. For trivial work, handle it directly."
+        : "Pi Deck parallel multitasking is disabled. Do not delegate work with deck_delegate; handle the work directly.";
+      return { systemPrompt: event.systemPrompt + "\\n\\n" + instruction };
+    } catch {
+      // A failed mode lookup must not invent delegation permission.
+      return undefined;
+    }
+  });
+
   pi.registerTool({
     name: "deck_delegate",
     label: "Delegate to Deck child",

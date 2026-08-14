@@ -980,7 +980,13 @@ async function ensureChatAdapter(
 }
 
 async function startDelegationBridge(): Promise<void> {
-  const bridge = new DelegationBridgeServer({ stateDir: path.join(app.getPath("userData"), "delegate-bridge") });
+  const bridge = new DelegationBridgeServer({
+    stateDir: path.join(app.getPath("userData"), "delegate-bridge"),
+    // The bridge binds parentId from the capability; this is the only place
+    // extension mode queries obtain their runtime's live manager state.
+    getParentMode: (parentRuntimeId) =>
+      multitaskManagers.get(parentRuntimeId)?.mode ?? "sequential",
+  });
   const credentials = await bridge.start();
   delegationBridge = bridge;
   delegationCredentials = { socketPath: credentials.socketPath };

@@ -42,6 +42,17 @@ describe("Deck delegate extension source generator", () => {
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain("socket.destroy()");
   });
 
+  it("queries capability-bound mode before every agent start and injects only parallel defaults", () => {
+    expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain('pi.on("before_agent_start"');
+    expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain('type: "mode-query"');
+    expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain('type: "mode-state"');
+    expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain("queryMode(config.endpoint, config.capability)");
+    expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain("By default, delegate substantive independent work with deck_delegate");
+    expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain("explicitly asks you to handle the work directly");
+    expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain("parallel multitasking is disabled. Do not delegate work with deck_delegate");
+    expect(DECK_DELEGATE_EXTENSION_SOURCE).not.toContain("assistant-text parsing");
+  });
+
   it("proactively relays child input-needed and results through Pi", () => {
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain("pi.sendMessage");
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain('event.status === "waiting-input"');

@@ -117,6 +117,33 @@ describe("DelegationBridgeServer", () => {
     socket.destroy();
   });
 
+  it("returns the live mode only for the parent bound by its capability", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "pdb-"));
+    directories.push(directory);
+    const modes = new Map([["parent-a", "parallel" as const], ["parent-b", "sequential" as const]]);
+    const server = new DelegationBridgeServer({
+      stateDir: directory,
+      getParentMode: (parentId) => modes.get(parentId) ?? "sequential",
+    });
+    servers.push(server);
+    const credentials = await server.start();
+    const token = server.registerParent("parent-a");
+    const socket = await connect(credentials.socketPath);
+    const authenticated = nextLine(socket);
+    socket.write(`${JSON.stringify({ version: 1, type: "authenticate", token })}\n`);
+    await authenticated;
+
+    const modeState = nextLine(socket);
+    // No extension-controlled runtime ID is accepted by the protocol.
+    socket.write(`${JSON.stringify({ version: 1, type: "mode-query", requestId: "turn-1" })}\n`);
+    expect(await modeState).toEqual({ version: 1, type: "mode-state", requestId: "turn-1", mode: "parallel" });
+    modes.set("parent-a", "sequential");
+    const changedModeState = nextLine(socket);
+    socket.write(`${JSON.stringify({ version: 1, type: "mode-query", requestId: "turn-2" })}\n`);
+    expect(await changedModeState).toEqual({ version: 1, type: "mode-state", requestId: "turn-2", mode: "sequential" });
+    socket.destroy();
+  });
+
   it("bridges waiting input through a stable task number to a retained fake child", async () => {
     const { server, credentials } = await bridge();
     const parentId = "parent";
