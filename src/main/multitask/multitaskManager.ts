@@ -61,12 +61,15 @@ export class MultitaskManager<Request = unknown, Input = unknown> {
     validateOptions(options);
   }
 
-  static rehydrate(
+  static rehydrate<Request = unknown, Input = unknown>(
     state: MultitaskState,
     options: Pick<MultitaskManagerOptions, "maxQueuedTasks">,
-  ): MultitaskManager {
+  ): MultitaskManager<Request, Input> {
     validateState(state);
-    const manager = new MultitaskManager({ mode: state.mode, ...options });
+    const manager = new MultitaskManager<Request, Input>({
+      mode: state.mode,
+      ...options,
+    });
     for (const saved of state.tasks) {
       const status = LIVE_STATUSES.has(saved.status)
         ? "cancelled"
@@ -170,6 +173,15 @@ export class MultitaskManager<Request = unknown, Input = unknown> {
     task.input = input;
     task.status = "queued";
     return snapshot(task);
+  }
+
+  /**
+   * Marks an existing, still-owned child as running after its main-process
+   * supervisor has delivered requested input. Unlike `provideInput`, this
+   * does not requeue or replace the child runtime.
+   */
+  resumeWithInput(number: number): ChildTaskSnapshot {
+    return this.transition(number, "waiting-input", "running");
   }
 
   complete(number: number, handoff?: ChildTaskHandoff): ChildTaskSnapshot {
