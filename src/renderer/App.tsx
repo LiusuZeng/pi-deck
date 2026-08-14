@@ -6387,9 +6387,9 @@ function Composer(props: {
           {props.multitaskMode !== undefined ? (
             <MultitaskControl
               tasks={props.multitaskTasks}
-              aria-label={`Multitasking mode: ${props.multitaskMode}. Toggle mode`}
-              onClick={props.onToggleMultitask}
-              title={`Multitasking: ${props.multitaskMode}`}
+              enabled={false}
+              aria-label="Multitasking is not available yet"
+              title="Multitasking is not available yet"
             />
           ) : props.selectedSession.runtimeBacked ? (
             <MultitaskControl

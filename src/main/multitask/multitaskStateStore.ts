@@ -6,6 +6,7 @@ import type { MultitaskState } from "./types.js";
 export class MultitaskStateStore {
   private states: Record<string, MultitaskState> = {};
   private loaded = false;
+  private writeTail: Promise<void> = Promise.resolve();
 
   constructor(private readonly userDataPath: string) {}
 
@@ -37,11 +38,27 @@ export class MultitaskStateStore {
   }
 
   async set(sessionFile: string, state: MultitaskState): Promise<void> {
-    this.states[sessionFile] = structuredClone(state);
-    await fs.mkdir(path.dirname(this.filePath()), { recursive: true });
-    const temporary = `${this.filePath()}.tmp`;
-    await fs.writeFile(temporary, JSON.stringify(this.states), "utf8");
-    await fs.rename(temporary, this.filePath());
+    await this.mutate(() => {
+      this.states[sessionFile] = structuredClone(state);
+    });
+  }
+
+  async delete(sessionFile: string): Promise<void> {
+    await this.mutate(() => {
+      delete this.states[sessionFile];
+    });
+  }
+
+  private async mutate(change: () => void): Promise<void> {
+    const write = this.writeTail.then(async () => {
+      change();
+      await fs.mkdir(path.dirname(this.filePath()), { recursive: true });
+      const temporary = `${this.filePath()}.${process.pid}.${Date.now()}.tmp`;
+      await fs.writeFile(temporary, JSON.stringify(this.states), "utf8");
+      await fs.rename(temporary, this.filePath());
+    });
+    this.writeTail = write.catch(() => undefined);
+    await write;
   }
 
   private filePath(): string {
@@ -54,6 +71,18 @@ function isState(value: unknown): value is MultitaskState {
   const state = value as MultitaskState;
   return (
     (state.mode === "parallel" || state.mode === "sequential") &&
-    Array.isArray(state.tasks)
+    Array.isArray(state.tasks) &&
+    state.tasks.every(
+      (task) =>
+        task !== null &&
+        typeof task === "object" &&
+        Number.isSafeInteger((task as { number?: unknown }).number) &&
+        (task as { number: number }).number > 0 &&
+        typeof (task as { name?: unknown }).name === "string" &&
+        (task as { name: string }).name.trim().length > 0 &&
+        ["queued", "running", "waiting-input", "completed", "failed", "cancelled"].includes(
+          (task as { status?: unknown }).status as string,
+        ),
+    )
   );
 }

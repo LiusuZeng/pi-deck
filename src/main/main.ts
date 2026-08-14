@@ -1980,6 +1980,13 @@ async function removePersistedPiSessionFile(
   }
 
   chatSessionFileLocks.delete(sessionFile);
+  try {
+    await multitaskStateStore?.delete(sessionFile);
+  } catch (error) {
+    diagnosticsService.recordError(
+      `Failed to remove multitask state for deleted Pi session ${sessionFile}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   // A detached saved-row composer uses the canonical session file as its
   // owner. Revoke it only after removal is confirmed; failed validation and
   // per-file bulk failures leave that owner intact for retry.

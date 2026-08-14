@@ -29,4 +29,26 @@ describe("MultitaskStateStore", () => {
     expect(resumed.get(sessionFile)).toEqual({ mode: "parallel", tasks: [] });
     expect(resumed.get("/sessions/b.jsonl")).toBeUndefined();
   });
+
+  it("serializes concurrent writes and removes deleted parent state", async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-multitask-"),
+    );
+    directories.push(directory);
+    const store = new MultitaskStateStore(directory);
+    await store.loadIfNeeded();
+    await Promise.all([
+      store.set("/sessions/a.jsonl", { mode: "parallel", tasks: [] }),
+      store.set("/sessions/b.jsonl", { mode: "sequential", tasks: [] }),
+    ]);
+    await store.delete("/sessions/a.jsonl");
+
+    const resumed = new MultitaskStateStore(directory);
+    await resumed.loadIfNeeded();
+    expect(resumed.get("/sessions/a.jsonl")).toBeUndefined();
+    expect(resumed.get("/sessions/b.jsonl")).toEqual({
+      mode: "sequential",
+      tasks: [],
+    });
+  });
 });
