@@ -34,6 +34,16 @@ export interface AgentWorkflowGraphRoute {
     | undefined;
 }
 
+export interface AgentWorkflowGraphOccurrence {
+  id: string;
+  status: CanonicalNodeOccurrence["status"];
+  attempt: number;
+  iteration: number;
+  parentOrchestratorRunId?: string;
+  outputSummary?: string;
+  errorSummary?: string;
+}
+
 export interface AgentWorkflowGraphNode {
   id: string;
   name: string;
@@ -44,11 +54,13 @@ export interface AgentWorkflowGraphNode {
   counts?: Partial<Record<WorkflowGraphStatus, number>>;
   occurrenceCount?: number;
   retries?: number;
+  occurrences?: AgentWorkflowGraphOccurrence[];
 }
 
 export interface AgentWorkflowGraphModel {
   topLevelNodes: AgentWorkflowGraphNode[];
   routes: AgentWorkflowGraphRoute[];
+  feedbackRoutes: AgentWorkflowGraphRoute[];
   terminalOutcomes: string[];
 }
 
@@ -247,6 +259,36 @@ export function deriveAgentWorkflowGraph(
             .map(project)
         : [];
     const graphNode = snapshot?.nodes.find((item) => item.nodeId === node.id);
+    const nodeOccurrences = occurrences.filter(
+      (item) => item.nodeId === node.id,
+    );
+    const occurrenceDetails: AgentWorkflowGraphOccurrence[] | undefined =
+      graphNode?.occurrences?.map((item) => ({
+        id: item.occurrenceId,
+        status: item.status,
+        attempt: item.attempt,
+        iteration: item.iteration,
+        ...(item.parentOrchestratorRunId
+          ? { parentOrchestratorRunId: item.parentOrchestratorRunId }
+          : {}),
+        ...(item.outputSummary ? { outputSummary: item.outputSummary } : {}),
+        ...(item.errorSummary ? { errorSummary: item.errorSummary } : {}),
+      })) ??
+      (occurrences.length
+        ? nodeOccurrences.map((item) => ({
+            id: item.id,
+            status: item.status,
+            attempt: item.attempt,
+            iteration: item.iteration,
+            ...(item.parentOrchestratorRunId
+              ? { parentOrchestratorRunId: item.parentOrchestratorRunId }
+              : {}),
+            ...(typeof item.output === "string"
+              ? { outputSummary: item.output }
+              : {}),
+            ...(item.error ? { errorSummary: item.error } : {}),
+          }))
+        : undefined);
     return {
       id: node.id,
       name: node.name,
@@ -264,19 +306,37 @@ export function deriveAgentWorkflowGraph(
                 }
               : {}),
             ...(graphNode.occurrences
-              ? { occurrenceCount: graphNode.occurrences.length }
+              ? {
+                  occurrenceCount: graphNode.occurrences.length,
+                  retries: Math.max(
+                    0,
+                    ...graphNode.occurrences.map((item) => item.attempt - 1),
+                  ),
+                }
               : {}),
           }
         : occurrences.length
-          ? aggregateWorkflowNode(
-              occurrences.filter((item) => item.nodeId === node.id),
-            )
+          ? aggregateWorkflowNode(nodeOccurrences)
           : {}),
+      ...(occurrenceDetails ? { occurrences: occurrenceDetails } : {}),
     };
   };
   return {
     topLevelNodes: orderedIds.map((id) => project(nodesById.get(id)!)),
     routes,
+    feedbackRoutes: definition.nodes.flatMap((node) =>
+      node.role === "orchestrator" && node.config.mode === "loop"
+        ? [
+            {
+              id: `feedback:${node.config.decider}:${node.id}`,
+              from: node.config.decider,
+              to: node.id,
+              label: "next iteration",
+              terminal: false,
+            },
+          ]
+        : [],
+    ),
     terminalOutcomes: [
       ...new Set(
         routes.filter((route) => route.terminal).map((route) => route.to),

@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactElement } from "react";
+import type { CSSProperties, KeyboardEvent, ReactElement } from "react";
 import type {
   CanonicalNodeOccurrence,
   WorkflowDefinition,
@@ -34,6 +34,12 @@ const statusLabel: Record<WorkflowGraphStatus, string> = {
   unknown: "Unavailable",
 };
 
+function flattenNodes(
+  nodes: AgentWorkflowGraphNode[],
+): AgentWorkflowGraphNode[] {
+  return nodes.flatMap((node) => [node, ...flattenNodes(node.managedNodes)]);
+}
+
 function countSummary(node: AgentWorkflowGraphNode): string | undefined {
   if (!node.counts) return undefined;
   const parts = Object.entries(node.counts).map(
@@ -49,7 +55,6 @@ function RoleNode(props: {
   node: AgentWorkflowGraphNode;
   selectedNodeId?: string | undefined;
   onSelectNode(nodeId: string): void;
-  managed?: boolean;
 }): ReactElement {
   const { node } = props;
   const selected = props.selectedNodeId === node.id;
@@ -63,7 +68,7 @@ function RoleNode(props: {
     .join(" · ");
   return (
     <article
-      className={`agent-workflow-graph-node agent-workflow-graph-node--${node.role}${node.status ? ` is-${node.status}` : ""}`}
+      className={`agent-workflow-graph-node agent-workflow-graph-node--${node.role}${node.status ? ` is-${node.status}` : ""}${selected ? " is-selected" : ""}`}
       aria-label={description}
     >
       <h3>
@@ -72,6 +77,7 @@ function RoleNode(props: {
           className="workflow-run-node-toggle"
           aria-pressed={selected}
           aria-expanded={selected}
+          data-workflow-node-id={node.id}
           onClick={() => props.onSelectNode(node.id)}
         >
           {node.name}
@@ -87,29 +93,6 @@ function RoleNode(props: {
         <p className="agent-workflow-graph-counts">{countSummary(node)}</p>
       ) : null}
       <p>{node.detail}</p>
-      {node.role === "orchestrator" && (
-        <section
-          className="agent-workflow-graph-managed"
-          aria-label={`Managed roles for ${node.name}`}
-        >
-          <h4>Managed roles</h4>
-          <ol>
-            {node.managedNodes.map((managedNode) => (
-              <li key={managedNode.id}>
-                <RoleNode
-                  node={managedNode}
-                  selectedNodeId={props.selectedNodeId}
-                  onSelectNode={props.onSelectNode}
-                  managed
-                />
-              </li>
-            ))}
-          </ol>
-        </section>
-      )}
-      {props.managed && (
-        <span className="agent-workflow-graph-managed-label">Managed</span>
-      )}
     </article>
   );
 }
@@ -126,11 +109,43 @@ function GraphCanvas(props: {
     props.occurrences,
     props.snapshot,
   );
+  const navigate = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (
+      !(
+        ["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp"] as string[]
+      ).includes(event.key)
+    )
+      return;
+    const currentId =
+      (event.target as HTMLElement).closest<HTMLButtonElement>(
+        "[data-workflow-node-id]",
+      )?.dataset.workflowNodeId ??
+      props.selectedNodeId ??
+      graph.nodes[0]?.id;
+    if (!currentId) return;
+    const forward = event.key === "ArrowRight" || event.key === "ArrowDown";
+    const connected = graph.edges
+      .filter((edge) =>
+        forward ? edge.from === currentId : edge.to === currentId,
+      )
+      .map((edge) => (forward ? edge.to : edge.from));
+    const nextId = connected.find((id) =>
+      graph.nodes.some((node) => node.id === id),
+    );
+    if (!nextId) return;
+    event.preventDefault();
+    props.onSelectNode(nextId);
+    const next = event.currentTarget.querySelector<HTMLButtonElement>(
+      `[data-workflow-node-id="${nextId}"]`,
+    );
+    next?.focus();
+  };
   return (
     <div
       className="agent-workflow-graph-viewport"
       tabIndex={0}
-      aria-label="Workflow graph canvas. Use the node buttons to inspect a step."
+      aria-label="Workflow graph canvas. Use Right or Down for an outgoing connection and Left or Up for an incoming connection."
+      onKeyDown={navigate}
     >
       <div
         className="agent-workflow-graph-canvas"
@@ -217,7 +232,13 @@ export function AgentWorkflowGraph(
   const names = new Map(
     props.definition.nodes.map((node) => [node.id, node.name]),
   );
-  const live = props.occurrences !== undefined;
+  const ownership = new Map(
+    props.definition.nodes
+      .filter((node) => node.managedBy)
+      .map((node) => [node.id, node.managedBy!] as const),
+  );
+  const allNodes = flattenNodes(model.topLevelNodes);
+  const live = props.occurrences !== undefined || props.snapshot !== undefined;
   return (
     <section
       className={`agent-workflow-graph${live ? " agent-workflow-graph--live" : ""}`}
@@ -241,39 +262,80 @@ export function AgentWorkflowGraph(
         onSelectNode={props.onSelectNode}
       />
       <details className="agent-workflow-graph-text-alternative">
-        <summary>Text alternative: nodes and routes</summary>
-        <ol
-          className="agent-workflow-graph-flow"
-          aria-label="Top-level workflow flow"
-        >
-          {model.topLevelNodes.map((node) => (
-            <li key={node.id}>
-              <strong>{node.name}</strong>
-              {node.status ? ` — ${statusLabel[node.status]}` : ""}
-              <ul aria-label={`Routes from ${node.name}`}>
-                {model.routes
-                  .filter((route) => route.from === node.id)
-                  .map((route) => (
-                    <li
-                      key={route.id}
-                      className={route.status ? `is-${route.status}` : ""}
-                    >
-                      {route.label}
-                      {route.status
-                        ? ` · ${route.status.replace("_", " ")}`
-                        : ""}{" "}
-                      →{" "}
-                      <strong>
-                        {route.terminal
-                          ? `End workflow: ${route.to}`
-                          : (names.get(route.to) ?? route.to)}
-                      </strong>
-                    </li>
-                  ))}
-              </ul>
+        <summary>Text alternative: nodes, ownership, and routes</summary>
+        <ol className="agent-workflow-graph-flow" aria-label="Workflow nodes">
+          {allNodes.map((node) => {
+            const selected = node.id === props.selectedNodeId;
+            const managerId = ownership.get(node.id);
+            return (
+              <li key={node.id} aria-current={selected ? "true" : undefined}>
+                <strong>{node.name}</strong>
+                {selected ? " — Selected node" : ""}
+                {node.status ? ` — Status: ${statusLabel[node.status]}` : ""}
+                {managerId
+                  ? ` — Managed by ${names.get(managerId) ?? managerId}`
+                  : ""}
+                {node.occurrenceCount !== undefined
+                  ? ` — ${node.occurrenceCount} occurrence${node.occurrenceCount === 1 ? "" : "s"}`
+                  : ""}
+                {node.occurrences?.length ? (
+                  <ul aria-label={`Occurrences for ${node.name}`}>
+                    {node.occurrences.map((occurrence) => (
+                      <li key={occurrence.id}>
+                        Occurrence {occurrence.id}: {occurrence.status},
+                        iteration {occurrence.iteration}, attempt{" "}
+                        {occurrence.attempt}
+                        {occurrence.parentOrchestratorRunId
+                          ? `, parent orchestrator occurrence ${occurrence.parentOrchestratorRunId}`
+                          : ""}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </li>
+            );
+          })}
+        </ol>
+        <h3>Routes</h3>
+        <ul aria-label="Workflow routes">
+          {model.routes.map((route) => {
+            const selected =
+              route.from === props.selectedNodeId ||
+              route.to === props.selectedNodeId;
+            return (
+              <li
+                key={route.id}
+                className={route.status ? `is-${route.status}` : ""}
+                aria-current={selected ? "true" : undefined}
+              >
+                {selected ? "Selected route — " : ""}
+                <strong>{names.get(route.from) ?? route.from}</strong> —{" "}
+                {route.label}
+                {route.status
+                  ? ` · State: ${route.status.replace("_", " ")}`
+                  : ""}{" "}
+                →{" "}
+                <strong>
+                  {route.terminal
+                    ? `End workflow: ${route.to}`
+                    : (names.get(route.to) ?? route.to)}
+                </strong>
+              </li>
+            );
+          })}
+          {model.feedbackRoutes.map((route) => (
+            <li key={route.id}>
+              <strong>{names.get(route.from) ?? route.from}</strong> —{" "}
+              {route.label} → <strong>{names.get(route.to) ?? route.to}</strong>
             </li>
           ))}
-        </ol>
+          {Array.from(ownership.entries()).map(([nodeId, managerId]) => (
+            <li key={`ownership:${managerId}:${nodeId}`}>
+              <strong>{names.get(managerId) ?? managerId}</strong> — manages →{" "}
+              <strong>{names.get(nodeId) ?? nodeId}</strong>
+            </li>
+          ))}
+        </ul>
       </details>
       {model.terminalOutcomes.length > 0 && (
         <section aria-label="Terminal outcomes">

@@ -178,9 +178,11 @@ describe("AgentWorkflowGraph", () => {
       container!.querySelector('[aria-label="Terminal outcomes"]')?.textContent,
     ).toContain("completed");
     expect(
-      container!.querySelector('[aria-label="Managed roles for Iterate"]')
-        ?.textContent,
-    ).toContain("Implement");
+      container!.querySelector('[aria-label="Workflow nodes"]')?.textContent,
+    ).toContain("Managed by Iterate");
+    expect(
+      container!.querySelector('[aria-label="Workflow routes"]')?.textContent,
+    ).toContain("next iteration");
     const routes = container!.querySelectorAll(
       ".agent-workflow-graph-links polyline",
     );
@@ -248,7 +250,13 @@ describe("AgentWorkflowGraph", () => {
     });
 
     expect(
-      container!.querySelectorAll('[aria-label="Routes from Prepare"] li'),
+      [
+        ...container!.querySelectorAll('[aria-label="Workflow routes"] li'),
+      ].filter(
+        (route) =>
+          route.textContent?.includes("Prepare") &&
+          route.textContent?.includes("Iterate"),
+      ),
     ).toHaveLength(2);
   });
 
@@ -278,34 +286,79 @@ describe("AgentWorkflowGraph", () => {
       ),
     });
 
-    const routes = container!.querySelector(
-      '[aria-label="Routes from Approve"]',
-    );
+    const routes = container!.querySelector('[aria-label="Workflow routes"]');
     expect(routes?.textContent).toContain("Ship now");
     expect(routes?.textContent).toContain("Request changes");
   });
 
-  it("uses native keyboard-selectable buttons to select top-level and managed nodes", () => {
+  it("moves focus and selection along connected graph nodes with arrow keys", () => {
     render();
-    const managed = [
+    const prepare = [
       ...container!.querySelectorAll<HTMLButtonElement>("button"),
-    ].find((button) => button.textContent === "Implement")!;
-    expect(managed).not.toBeNull();
+    ].find((button) => button.textContent === "Prepare")!;
+    const iterate = [
+      ...container!.querySelectorAll<HTMLButtonElement>("button"),
+    ].find((button) => button.textContent === "Iterate")!;
     act(() => {
-      managed.focus();
-      managed.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      prepare.focus();
+      prepare.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }),
       );
-      managed.click();
     });
-    expect(document.activeElement).toBe(managed);
+    expect(document.activeElement).toBe(iterate);
     expect(onSelectNode).toHaveBeenCalledWith(
-      "00000000-0000-4000-8000-000000000504",
+      "00000000-0000-4000-8000-000000000503",
     );
-    expect(
-      container!
-        .querySelector<HTMLButtonElement>("button")
-        ?.getAttribute("aria-pressed"),
-    ).toBe("true");
+    act(() => {
+      iterate.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }),
+      );
+    });
+    expect(document.activeElement).toBe(prepare);
+  });
+
+  it("provides selected routes, ownership, and occurrence details in the text alternative", () => {
+    render(semanticGraphDefinition, [
+      {
+        id: "00000000-0000-4000-8000-000000000001",
+        nodeId: "00000000-0000-4000-8000-000000000502",
+        role: "worker",
+        parentOccurrenceIds: [],
+        context: [],
+        iteration: 1,
+        attempt: 2,
+        status: "completed",
+        output: true,
+        managedChildren: [],
+        aggregation: [],
+        createdAtMs: 1,
+        updatedAtMs: 2,
+      },
+      {
+        id: "00000000-0000-4000-8000-000000000002",
+        nodeId: "00000000-0000-4000-8000-000000000504",
+        role: "worker",
+        parentOccurrenceIds: [],
+        context: [],
+        iteration: 2,
+        attempt: 1,
+        status: "running",
+        managedChildren: [],
+        aggregation: [],
+        createdAtMs: 1,
+        updatedAtMs: 2,
+      },
+    ]);
+    const alternative = container!.querySelector(
+      ".agent-workflow-graph-text-alternative",
+    )!;
+    expect(alternative.textContent).toContain("Selected node");
+    expect(alternative.textContent).toContain("Managed by Iterate");
+    expect(alternative.textContent).toContain(
+      "Occurrence 00000000-0000-4000-8000-000000000001",
+    );
+    expect(alternative.textContent).toContain("iteration 1, attempt 2");
+    expect(alternative.textContent).toContain("Selected route");
+    expect(alternative.textContent).toContain("State: taken");
   });
 });

@@ -161,6 +161,13 @@ describe("deriveAgentWorkflowGraph", () => {
         )
         .map((route) => route.label),
     ).toEqual(["true (Ship)", "false (Stop)"]);
+    expect(graph.feedbackRoutes).toEqual([
+      expect.objectContaining({
+        from: "00000000-0000-4000-8000-000000000505",
+        to: "00000000-0000-4000-8000-000000000503",
+        label: "next iteration",
+      }),
+    ]);
     expect(graph.terminalOutcomes).toEqual([
       "rejected",
       "completed",
@@ -279,6 +286,18 @@ describe("deriveAgentWorkflowGraph", () => {
         (route) => route.id === "00000000-0000-4000-8000-000000000511",
       )?.status,
     ).toBe("active");
+    expect(
+      graph.topLevelNodes.find(
+        (node) => node.id === "00000000-0000-4000-8000-000000000502",
+      )?.occurrences,
+    ).toEqual([
+      expect.objectContaining({
+        id: "00000000-0000-4000-8000-000000000001",
+        status: "running",
+        iteration: 1,
+        attempt: 2,
+      }),
+    ]);
   });
 
   it("labels Human choice routes with their declared options", () => {

@@ -5220,6 +5220,10 @@ body {
 .agent-workflow-graph-node.is-completed {
   border-color: var(--color-success, #22c55e);
 }
+.agent-workflow-graph-node.is-selected {
+  outline: 3px solid var(--color-focus, #60a5fa);
+  outline-offset: 3px;
+}
 .agent-workflow-graph-role {
   text-transform: capitalize;
   color: var(--color-text-muted);
