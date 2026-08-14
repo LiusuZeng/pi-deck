@@ -473,16 +473,27 @@ function route(
   let next = run;
   for (const relationship of outgoing) {
     if ("nodeId" in relationship.to) {
+      const targetId = relationship.to.nodeId;
+      // Explicit bindings turn converging relationships into a join.  Do not
+      // create a partially-bound child when an earlier branch wins the race:
+      // wait until every declared source has completed, then persist the exact
+      // values on the one child occurrence.
+      if (
+        hasExplicitBindings(next, targetId) &&
+        (!bindingsAreReady(next, targetId) ||
+          next.occurrences.some((item) => item.nodeId === targetId))
+      )
+        continue;
       next = add(next, [
         newOccurrence(
-          node(next.definition, relationship.to.nodeId),
+          node(next.definition, targetId),
           [source.id],
           undefined,
           1,
           now,
           1,
           [],
-          resolveInputBindings(next, relationship.to.nodeId),
+          resolveInputBindings(next, targetId),
         ),
       ]);
     } else {
@@ -549,6 +560,21 @@ function managedContext(
 /** Resolve configured handoffs while the source occurrence output is still
  * available. The resulting immutable values are persisted on the child so a
  * retry/restart never depends on process memory or a later graph revision. */
+function hasExplicitBindings(run: WorkflowRoleRun, nodeId: string): boolean {
+  return node(run.definition, nodeId).inputBindings !== undefined;
+}
+
+function bindingsAreReady(run: WorkflowRoleRun, nodeId: string): boolean {
+  return (node(run.definition, nodeId).inputBindings ?? []).every((binding) =>
+    run.occurrences.some(
+      (occurrence) =>
+        occurrence.nodeId === binding.sourceNodeId &&
+        occurrence.status === "completed" &&
+        occurrence.output !== undefined,
+    ),
+  );
+}
+
 function resolveInputBindings(
   run: WorkflowRoleRun,
   nodeId: string,

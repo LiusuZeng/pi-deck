@@ -245,6 +245,31 @@ describe("WorkflowStore agentWorkflow migration foundation", () => {
     expect(await reloaded.listRuns("workspace")).toEqual([]);
   });
 
+  it("persists resolved explicit handoffs for restart recovery", async () => {
+    const store = await fresh();
+    const definition = agentWorkflowDefinition();
+    const initial = createWorkflowRoleRun(definition, "workspace");
+    const run = {
+      ...initial,
+      occurrences: initial.occurrences.map((occurrence) => ({
+        ...occurrence,
+        resolvedInputBindings: [
+          {
+            sourceNodeId: nativeWorkerId,
+            sourceValue: "finalOutput" as const,
+            label: "Saved source",
+            value: "bounded saved output",
+          },
+        ],
+      })),
+    };
+    await store.createWorkflowRun(run);
+    const restarted = new WorkflowStore(path.dirname(store.storeFile));
+    expect((await restarted.getWorkflowRun(run.id)).occurrences[0]!.resolvedInputBindings).toEqual(
+      run.occurrences[0]!.resolvedInputBindings,
+    );
+  });
+
   it("migrates v2 node identities, preserves snapshots and legacy runs, and backs up raw data", async () => {
     const store = await fresh();
     const definition = {
@@ -254,13 +279,13 @@ describe("WorkflowStore agentWorkflow migration foundation", () => {
       nodes: [
         {
           id: "plan",
-          name: "Plan",
+          name: "Duplicate",
           role: "worker" as const,
           config: { instructions: "plan" },
         },
         {
           id: "deliver",
-          name: "Deliver",
+          name: "Duplicate",
           role: "worker" as const,
           config: { instructions: "deliver" },
           inputBindings: [
@@ -346,6 +371,23 @@ describe("WorkflowStore agentWorkflow migration foundation", () => {
     expect(migratedRun.id).toBe(run.id);
     expect(migratedRun.occurrences[0]!.nodeId).toBe(
       migratedRun.definition.entryNodeId,
+    );
+    // Legacy IDs map once per workflow, including immutable run snapshots;
+    // duplicate display labels are never consulted for this resolution.
+    expect(migratedRun.definition.nodes.map((node) => node.id)).toEqual(
+      workflow.nodes.map((node) => node.id),
+    );
+    const renamed = await migrated.updateWorkflow({
+      ...workflow,
+      revision: 2,
+      nodes: workflow.nodes.map((node, index) => ({
+        ...node,
+        name: index === 0 ? "Renamed duplicate" : node.name,
+      })),
+    });
+    expect(renamed.nodes[0]!.id).toBe(workflow.nodes[0]!.id);
+    expect((await migrated.getWorkflowRun(run.id)).definition.nodes[0]!.name).toBe(
+      "Duplicate",
     );
     expect(await migrated.getRun(legacyRun.id)).toEqual(legacyRun);
     expect(

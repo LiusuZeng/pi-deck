@@ -234,6 +234,21 @@ describe("agentWorkflow workflow contracts", () => {
     );
   });
 
+  it("rejects non-worker explicit binding sources", () => {
+    const definition = base();
+    const plan = definition.nodes.find((node) => node.id === ids.plan);
+    if (!plan) throw new Error("fixture");
+    plan.inputBindings = [
+      { sourceNodeId: ids.approval, sourceValue: "finalOutput" },
+    ];
+    const result = workflowDefinitionSchema.safeParse(definition);
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("fixture");
+    expect(result.error.issues.map((issue) => issue.message)).toContain(
+      "Only Worker finalOutput is supported as an explicit input binding source.",
+    );
+  });
+
   it("accepts exactly the four native roles and canonical fields", () => {
     const parsed = workflowDefinitionSchema.parse(base());
     expect(parsed.nodes.map((node) => node.role)).toEqual([

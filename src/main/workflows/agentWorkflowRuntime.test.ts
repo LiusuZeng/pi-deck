@@ -111,12 +111,20 @@ describe("agentWorkflow occurrence runtime", () => {
               sourceValue: "finalOutput",
               label: "Selected plan",
             },
+            {
+              sourceNodeId: ids.review,
+              sourceValue: "finalOutput",
+              label: "Selected review",
+            },
           ],
           config: { instructions: "deliver" },
         },
       ],
       relationships: [
         { id: ids.planReview, from: ids.plan, to: { nodeId: ids.review } },
+        // The direct edge races the review path; explicit bindings make this a
+        // join rather than creating a partially-bound Deliver occurrence.
+        { id: ids.fanAfter, from: ids.plan, to: { nodeId: ids.deliver } },
         {
           id: ids.reviewDeliver,
           from: ids.review,
@@ -129,6 +137,7 @@ describe("agentWorkflow occurrence runtime", () => {
     run = startWorkflowOccurrence(run, plan.id, "plan-runtime");
     run = completeWorkflowOccurrence(run, plan.id, "chosen plan");
     const review = run.occurrences.find((item) => item.nodeId === ids.review)!;
+    expect(run.occurrences.some((item) => item.nodeId === ids.deliver)).toBe(false);
     run = startWorkflowOccurrence(run, review.id, "review-runtime");
     run = completeWorkflowOccurrence(run, review.id, "incidental review");
     const deliver = run.occurrences.find(
@@ -141,10 +150,16 @@ describe("agentWorkflow occurrence runtime", () => {
         label: "Selected plan",
         value: "chosen plan",
       },
+      {
+        sourceNodeId: ids.review,
+        sourceValue: "finalOutput",
+        label: "Selected review",
+        value: "incidental review",
+      },
     ]);
     const prompt = renderWorkflowOccurrencePrompt(run, deliver);
     expect(prompt).toContain("Selected plan:\nchosen plan");
-    expect(prompt).not.toContain("incidental review");
+    expect(prompt).toContain("Selected review:\nincidental review");
   });
   it("renders the configured first managed context without an Orchestrator output", () => {
     const definition = fanoutDefinition("all");

@@ -689,6 +689,13 @@ function validateWorkflowGraph(
           path: [...bindingPath, "sourceNodeId"],
           message: "A node cannot use its own output as an input binding.",
         });
+      else if (source.role !== "worker")
+        ctx.addIssue({
+          code: "custom",
+          path: [...bindingPath, "sourceNodeId"],
+          message:
+            "Only Worker finalOutput is supported as an explicit input binding source.",
+        });
       else if (source.managedBy || node.managedBy)
         ctx.addIssue({
           code: "custom",

@@ -233,7 +233,10 @@ export function migrateV2NodeIds(
 > {
   // v2's UI generated `workflow-${uuid}` IDs. Keep all definitions and
   // immutable snapshots for one old workflow associated with the same new ID.
+  // Crucially, retain the old-node-id mapping too: a run snapshot is immutable,
+  // but it must still identify the same configured node after a reload/rename.
   const workflowIds = new Map<string, string>();
+  const nodeIdsByWorkflow = new Map<string, Map<string, string>>();
   const workflowId = (id: string): string => {
     let result = workflowIds.get(id);
     if (!result) {
@@ -242,16 +245,21 @@ export function migrateV2NodeIds(
     }
     return result;
   };
+  const migrate = (definition: WorkflowDefinition) =>
+    migrateDefinition(
+      definition,
+      workflowId(definition.id),
+      nodeIdsByWorkflow.get(definition.id) ?? new Map(),
+    );
   return {
-    workflows: file.workflows.map(
-      (definition) =>
-        migrateDefinition(definition, workflowId(definition.id)).definition,
-    ),
+    workflows: file.workflows.map((definition) => {
+      const migrated = migrate(definition);
+      nodeIdsByWorkflow.set(definition.id, migrated.nodeIds);
+      return migrated.definition;
+    }),
     occurrences: file.occurrences.map((occurrence) => {
-      const migrated = migrateDefinition(
-        occurrence.workflowSnapshot,
-        workflowId(occurrence.workflowSnapshot.id),
-      );
+      const migrated = migrate(occurrence.workflowSnapshot);
+      nodeIdsByWorkflow.set(occurrence.workflowSnapshot.id, migrated.nodeIds);
       return {
         ...occurrence,
         workflowId: workflowId(occurrence.workflowId),
@@ -263,10 +271,8 @@ export function migrateV2NodeIds(
       };
     }),
     runs: file.runs.map((run) => {
-      const migrated = migrateDefinition(
-        run.definition,
-        workflowId(run.definition.id),
-      );
+      const migrated = migrate(run.definition);
+      nodeIdsByWorkflow.set(run.definition.id, migrated.nodeIds);
       return {
         ...run,
         definition: migrated.definition,
@@ -298,13 +304,18 @@ export function migrateV2NodeIds(
 function migrateDefinition(
   definition: WorkflowDefinition,
   migratedWorkflowId: string,
+  nodeIds: Map<string, string>,
 ): {
   definition: WorkflowDefinition;
   nodeIds: Map<string, string>;
 } {
-  const nodeIds = new Map(
-    definition.nodes.map((node) => [node.id, randomUUID()]),
-  );
+  // A duplicate legacy ID makes every relationship ambiguous. Refuse the
+  // atomic migration rather than silently assigning a historical occurrence
+  // to an arbitrary node; the store keeps the raw file and backup path.
+  if (new Set(definition.nodes.map((node) => node.id)).size !== definition.nodes.length)
+    throw new Error(`Ambiguous v2 workflow node IDs: ${definition.id}`);
+  for (const legacyId of definition.nodes.map((node) => node.id))
+    if (!nodeIds.has(legacyId)) nodeIds.set(legacyId, randomUUID());
   const nodeId = (id: string): string => {
     const result = nodeIds.get(id);
     if (!result) throw new Error(`Unknown v2 workflow node: ${id}`);
