@@ -27,7 +27,9 @@ export interface DelegationBridgeServerOptions {
   authenticationTimeoutMs?: number;
   onDelegate?: (request: DelegateRequest) => void;
   /** Returns the authoritative current mode for the capability-bound parent. */
-  getParentMode?: (parentId: string) => "sequential" | "parallel" | Promise<"sequential" | "parallel">;
+  getParentMode?: (
+    parentId: string,
+  ) => "sequential" | "parallel" | Promise<"sequential" | "parallel">;
   onConnectionClosed?: (connectionId: string) => void;
   onProtocolError?: (error: DelegationBridgeProtocolError) => void;
 }
@@ -112,6 +114,8 @@ export class DelegationBridgeServer {
   private readonly connections = new Map<string, Connection>();
   private server: net.Server | undefined;
   private socketPath: string | undefined;
+  /** A private short-lived directory used only when userData exceeds Unix limits. */
+  private fallbackSocketDir: string | undefined;
   private token: string | undefined;
   private readonly parentCapabilities = new Map<string, string>();
   private readonly inputs = new Set<(response: ChildInputResponse) => void>();
@@ -137,13 +141,19 @@ export class DelegationBridgeServer {
     await fs.mkdir(this.options.stateDir, { recursive: true, mode: 0o700 });
     // Keep the random Unix-socket leaf short for macOS's 104-byte path limit.
     const name = `.pdb-v${DELEGATION_BRIDGE_PROTOCOL_VERSION}-${randomBytes(6).toString("hex")}.sock`;
-    // `userData` can be deeply nested in e2e and sandbox paths. Unix domain
-    // sockets have a much shorter pathname limit, so keep the socket leaf in
-    // the short macOS `/tmp` namespace; its 0600 mode and random capability
-    // still provide the access boundary.
-    const socketPath = path.join("/tmp", name);
+    let socketDirectory = this.options.stateDir;
+    let socketPath = path.join(socketDirectory, name);
     if (Buffer.byteLength(socketPath) > MAX_UNIX_SOCKET_PATH_BYTES) {
-      throw new Error(`Unix socket path is too long: ${socketPath}`);
+      // macOS permits only 104 bytes for a Unix-domain socket path. User data
+      // is commonly under a long per-test or sandbox path, so use a new,
+      // owner-only short directory rather than making delegation unavailable.
+      socketDirectory = path.join(
+        "/tmp",
+        `.pi-deck-bridge-${randomBytes(8).toString("hex")}`,
+      );
+      await fs.mkdir(socketDirectory, { mode: 0o700 });
+      this.fallbackSocketDir = socketDirectory;
+      socketPath = path.join(socketDirectory, name);
     }
     // The random name makes collision infeasible; remove only this exact stale path.
     await fs.rm(socketPath, { force: true });
@@ -175,7 +185,11 @@ export class DelegationBridgeServer {
       this.server = undefined;
       this.socketPath = undefined;
       this.token = undefined;
+      const fallbackSocketDir = this.fallbackSocketDir;
+      this.fallbackSocketDir = undefined;
       await fs.rm(socketPath, { force: true });
+      if (fallbackSocketDir)
+        await fs.rm(fallbackSocketDir, { recursive: true, force: true });
       throw error;
     }
     return {
@@ -202,7 +216,9 @@ export class DelegationBridgeServer {
     }
   }
 
-  public onInputResponse(listener: (response: ChildInputResponse) => void): () => void {
+  public onInputResponse(
+    listener: (response: ChildInputResponse) => void,
+  ): () => void {
     this.inputs.add(listener);
     return () => this.inputs.delete(listener);
   }
@@ -261,13 +277,17 @@ export class DelegationBridgeServer {
     this.connections.clear();
     const server = this.server;
     const socketPath = this.socketPath;
+    const fallbackSocketDir = this.fallbackSocketDir;
     this.server = undefined;
     this.socketPath = undefined;
+    this.fallbackSocketDir = undefined;
     this.token = undefined;
     this.parentCapabilities.clear();
     if (server)
       await new Promise<void>((resolve) => server.close(() => resolve()));
     if (socketPath) await fs.rm(socketPath, { force: true });
+    if (fallbackSocketDir)
+      await fs.rm(fallbackSocketDir, { recursive: true, force: true });
   }
 
   private accept(socket: net.Socket): void {
@@ -344,9 +364,10 @@ export class DelegationBridgeServer {
       | ReturnType<typeof authenticateMessageSchema.parse>,
   ): void {
     if (!connection.authenticated) {
-      const parentId = message.type === "authenticate"
-        ? this.parentCapabilities.get(message.token)
-        : undefined;
+      const parentId =
+        message.type === "authenticate"
+          ? this.parentCapabilities.get(message.token)
+          : undefined;
       if (!parentId) {
         this.reject(connection.id, connection.socket, "authentication-failed");
         return;
@@ -387,11 +408,20 @@ export class DelegationBridgeServer {
       return;
     }
     if (message.type === "child-input-response") {
-      if (!connection.requestedToolCalls.has(message.toolCallId) || !connection.parentId) {
+      if (
+        !connection.requestedToolCalls.has(message.toolCallId) ||
+        !connection.parentId
+      ) {
         this.reject(connection.id, connection.socket, "invalid-frame");
         return;
       }
-      for (const listener of this.inputs) listener({ parentId: connection.parentId, connectionId: connection.id, toolCallId: message.toolCallId, input: message.input });
+      for (const listener of this.inputs)
+        listener({
+          parentId: connection.parentId,
+          connectionId: connection.id,
+          toolCallId: message.toolCallId,
+          input: message.input,
+        });
       return;
     }
     if (message.type !== "delegate") {
