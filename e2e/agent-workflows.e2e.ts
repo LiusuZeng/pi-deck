@@ -8,11 +8,14 @@ import path from "node:path";
 const repoRoot = path.resolve(__dirname, "..");
 const mainEntry = path.join(repoRoot, "dist/main/main.js");
 
-function fakePiBinary(root: string): string {
+function fakePiBinary(root: string, promptScenario?: "error"): string {
   const binary = path.join(root, "fake-pi.js");
+  const scenarioArgs = promptScenario
+    ? `process.argv.push("--prompt-scenario", ${JSON.stringify(promptScenario)});\n`
+    : "";
   fs.writeFileSync(
     binary,
-    `#!/usr/bin/env node\nif (process.argv.includes("--version")) { console.log("v42.5.0"); process.exit(0); }\nif (process.argv.includes("--list-models")) { console.log("provider  model       context  max-out  thinking  images"); console.log("fake-provider  fake-model  128K     32K      yes       yes"); process.exit(0); }\nrequire(${JSON.stringify(path.join(repoRoot, "dist/main/pi/fakeRpc/fakeRpcServer.js"))});\n`,
+    `#!/usr/bin/env node\nif (process.argv.includes("--version")) { console.log("v42.5.0"); process.exit(0); }\nif (process.argv.includes("--list-models")) { console.log("provider  model       context  max-out  thinking  images"); console.log("fake-provider  fake-model  128K     32K      yes       yes"); process.exit(0); }\n${scenarioArgs}require(${JSON.stringify(path.join(repoRoot, "dist/main/pi/fakeRpc/fakeRpcServer.js"))});\n`,
     { mode: 0o755 },
   );
   return binary;
@@ -55,6 +58,137 @@ async function expectWorkflowStoreUnavailable(page: Page): Promise<void> {
   await expect(page.getByRole("alert")).toContainText(
     /workflow.*(?:unavailable|unsupported)|(?:unavailable|unsupported).*workflow/i,
   );
+}
+
+const graphWorkflowIds = {
+  workflow: "00000000-0000-4000-8000-000000000001",
+  human: "00000000-0000-4000-8000-000000000002",
+  worker: "00000000-0000-4000-8000-000000000003",
+  trueRoute: "00000000-0000-4000-8000-000000000004",
+  falseRoute: "00000000-0000-4000-8000-000000000005",
+  endRoute: "00000000-0000-4000-8000-000000000006",
+};
+
+function graphEnvironment(
+  root: string,
+  promptScenario?: "error",
+): NodeJS.ProcessEnv {
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+  return {
+    PI_DECK_BACKEND: "real",
+    PI_DECK_PI_BINARY: fakePiBinary(root, promptScenario),
+    PI_DECK_PROJECT_CWD: projectCwd,
+    PI_CODING_AGENT_DIR: agentDir,
+    PI_DECK_HOME: path.join(root, "pideck-home"),
+    PI_DECK_USER_DATA_DIR: path.join(root, "user-data"),
+  };
+}
+
+async function createGraphWorkflow(
+  page: Page,
+  kind: "human" | "worker",
+): Promise<void> {
+  await page.evaluate(
+    async ({ ids, kind }) => {
+      const active = await window.piDeck.workspaces.getActive();
+      if (!active.activeWorkspace) throw new Error("No active workspace");
+      const workflow =
+        kind === "human"
+          ? {
+              format: "pi-deck.agent-workflow" as const,
+              schemaVersion: 2 as const,
+              id: ids.workflow,
+              revision: 1,
+              name: "Live graph acceptance",
+              inputs: [],
+              entryNodeId: ids.human,
+              nodes: [
+                {
+                  id: ids.human,
+                  name: "Release approval",
+                  role: "human" as const,
+                  config: {
+                    interaction: "approval" as const,
+                    prompt: "Ship this graph?",
+                  },
+                },
+              ],
+              relationships: [
+                {
+                  id: ids.trueRoute,
+                  from: ids.human,
+                  when: { equals: true },
+                  to: { end: "approved" },
+                },
+                {
+                  id: ids.falseRoute,
+                  from: ids.human,
+                  when: { equals: false },
+                  to: { end: "rejected" },
+                },
+              ],
+            }
+          : {
+              format: "pi-deck.agent-workflow" as const,
+              schemaVersion: 2 as const,
+              id: ids.workflow,
+              revision: 1,
+              name: "Failing live graph",
+              inputs: [],
+              entryNodeId: ids.worker,
+              nodes: [
+                {
+                  id: ids.worker,
+                  name: "Unreliable worker",
+                  role: "worker" as const,
+                  config: { instructions: "Fail for this acceptance test." },
+                  execution: { maxAttempts: 2 },
+                },
+              ],
+              relationships: [
+                { id: ids.endRoute, from: ids.worker, to: { end: "done" } },
+              ],
+            };
+      await window.piDeck.workflows.createWorkflow({
+        workspaceId: active.activeWorkspace.id,
+        scopeWorkspaceId: null,
+        workflow,
+      });
+    },
+    { ids: graphWorkflowIds, kind },
+  );
+}
+
+async function openAndStartOnlyWorkflow(page: Page): Promise<string> {
+  await page.getByRole("button", { name: "Agent Workflows" }).click();
+  await page.getByRole("button", { name: "Start run" }).click();
+  await expect(
+    page.getByRole("region", { name: "Workflow run" }),
+  ).toBeVisible();
+  await expect
+    .poll(async () =>
+      page.evaluate(async () => {
+        const active = await window.piDeck.workspaces.getActive();
+        if (!active.activeWorkspace) return 0;
+        return (
+          await window.piDeck.workflows.canonicalListRuns({
+            workspaceId: active.activeWorkspace.id,
+          })
+        ).length;
+      }),
+    )
+    .toBeGreaterThan(0);
+  return page.evaluate(async () => {
+    const active = await window.piDeck.workspaces.getActive();
+    if (!active.activeWorkspace) throw new Error("No active workspace");
+    const listed = await window.piDeck.workflows.canonicalListRuns({
+      workspaceId: active.activeWorkspace.id,
+    });
+    return listed[0]!.id;
+  });
 }
 
 test("workflow API creates a template, starts a fake run, and persists both across reopen", async () => {
@@ -172,6 +306,192 @@ test("workflow API creates a template, starts a fake run, and persists both acro
     expect(reopened.templateIds).toContain(created.templateId);
     expect(reopened.runIds).toContain(created.runId);
     expect(reopened.run.stepRuns[0]?.status).toBe("completed");
+  } finally {
+    await app?.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("live graph subscribes, renders a human conditional route, and completes after approval", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-live-graph-"),
+  );
+  let app: ElectronApplication | undefined;
+  try {
+    ({ app } = await launch(graphEnvironment(root)));
+    const page = await app.firstWindow();
+    await createGraphWorkflow(page, "human");
+    const runId = await openAndStartOnlyWorkflow(page);
+    const graph = page.locator('[aria-label="Live workflow execution graph"]');
+    await expect(graph).toBeVisible();
+    await expect(graph.locator(".is-waiting_human")).toBeVisible();
+    await expect(
+      graph.locator(`[data-workflow-node-id="${graphWorkflowIds.human}"]`),
+    ).toHaveAttribute("aria-pressed", "false");
+    await expect
+      .poll(() =>
+        page.evaluate(
+          async ({ runId, nodeId }) => {
+            const snapshot = await window.piDeck.workflows.graphGetSnapshot({
+              runId,
+            });
+            return snapshot.nodes.find((node) => node.nodeId === nodeId)
+              ?.aggregateStatus;
+          },
+          { runId, nodeId: graphWorkflowIds.human },
+        ),
+      )
+      .toBe("waiting_human");
+
+    await page.evaluate(() => {
+      const target = window as Window & {
+        graphEvents?: unknown[];
+        stopGraphEvents?: () => void;
+      };
+      target.graphEvents = [];
+      target.stopGraphEvents = window.piDeck.workflows.onGraphEvent((event) =>
+        target.graphEvents?.push(event),
+      );
+    });
+    await page.getByRole("button", { name: "Approve" }).click();
+    await expect(
+      page.getByText("Status: Completed · Outcome: approved"),
+    ).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          ({ runId, routeId }) => {
+            const target = window as Window & {
+              graphEvents?: Array<{
+                runId: string;
+                revision: number;
+                snapshot: {
+                  edges: Array<{ relationshipId: string; status?: string }>;
+                };
+              }>;
+            };
+            return (
+              target.graphEvents?.some(
+                (event) =>
+                  event.runId === runId &&
+                  event.revision > 1 &&
+                  event.snapshot.edges.some(
+                    (edge) =>
+                      edge.relationshipId === routeId &&
+                      edge.status === "taken",
+                  ),
+              ) ?? false
+            );
+          },
+          { runId, routeId: graphWorkflowIds.trueRoute },
+        ),
+      )
+      .toBe(true);
+    await expect
+      .poll(() =>
+        page.evaluate(
+          async ({ runId, routeId }) => {
+            const snapshot = await window.piDeck.workflows.graphGetSnapshot({
+              runId,
+            });
+            return snapshot.edges.find(
+              (edge) => edge.relationshipId === routeId,
+            )?.status;
+          },
+          { runId, routeId: graphWorkflowIds.falseRoute },
+        ),
+      )
+      .toBe("not_taken");
+    await graph
+      .locator(`[data-workflow-node-id="${graphWorkflowIds.human}"]`)
+      .click();
+    await expect(
+      page.getByRole("heading", { name: "Execution details" }),
+    ).toBeVisible();
+    await page.evaluate(() =>
+      (window as Window & { stopGraphEvents?: () => void }).stopGraphEvents?.(),
+    );
+  } finally {
+    await app?.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("live graph shows cancellation from a waiting human gate", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-cancel-graph-"),
+  );
+  let app: ElectronApplication | undefined;
+  try {
+    ({ app } = await launch(graphEnvironment(root)));
+    const page = await app.firstWindow();
+    await createGraphWorkflow(page, "human");
+    const runId = await openAndStartOnlyWorkflow(page);
+    await expect(page.getByText("Waiting for your input")).toBeVisible();
+    await page.getByRole("button", { name: "Stop run" }).click();
+    await expect(page.getByText("Status: Stopped")).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(async (id) => {
+          const snapshot = await window.piDeck.workflows.graphGetSnapshot({
+            runId: id,
+          });
+          return {
+            runStatus: snapshot.runStatus,
+            node: snapshot.nodes[0]?.aggregateStatus,
+          };
+        }, runId),
+      )
+      .toEqual({ runStatus: "stopped", node: "cancelled" });
+  } finally {
+    await app?.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("failed fake worker exposes retry and preserves its graph identity across attempts", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-retry-graph-"),
+  );
+  let app: ElectronApplication | undefined;
+  try {
+    ({ app } = await launch(graphEnvironment(root, "error")));
+    const page = await app.firstWindow();
+    await createGraphWorkflow(page, "worker");
+    const runId = await openAndStartOnlyWorkflow(page);
+    await expect(page.getByText("Status: Needs attention")).toBeVisible({
+      timeout: 20_000,
+    });
+    const graphNode = page.locator(
+      `[data-workflow-node-id="${graphWorkflowIds.worker}"]`,
+    );
+    await graphNode.click();
+    await expect(
+      page.getByRole("button", { name: "Retry attempt 1" }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Retry attempt 1" }).click();
+    await expect(
+      page.getByText("Iteration 1 · Attempt 2", { exact: true }),
+    ).toBeVisible({
+      timeout: 20_000,
+    });
+    await expect
+      .poll(() =>
+        page.evaluate(
+          async ({ runId, nodeId }) => {
+            const snapshot = await window.piDeck.workflows.graphGetSnapshot({
+              runId,
+            });
+            const node = snapshot.nodes.find((item) => item.nodeId === nodeId);
+            return {
+              status: node?.aggregateStatus,
+              attempts: node?.occurrences?.map((item) => item.attempt).sort(),
+            };
+          },
+          { runId, nodeId: graphWorkflowIds.worker },
+        ),
+      )
+      .toEqual({ status: "failed", attempts: [1, 2] });
   } finally {
     await app?.close().catch(() => undefined);
     fs.rmSync(root, { recursive: true, force: true });
