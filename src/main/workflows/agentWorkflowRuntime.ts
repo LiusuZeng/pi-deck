@@ -401,12 +401,24 @@ function advanceOrchestrator(
     workers.length === config.agents.length &&
     workers.every((item) => item.status === "completed")
   ) {
+    const deciderRole = node(run.definition, config.decider);
+    const resolvedInputBindings = resolveInputBindings(
+      run,
+      config.decider,
+      bindingScope(orchestratorId, child.iteration),
+    );
     const decider = newOccurrence(
-      node(run.definition, config.decider),
-      workers.map((item) => item.id),
+      deciderRole,
+      uniqueIds([
+        ...workers.map((item) => item.id),
+        ...bindingSourceOccurrenceIds(resolvedInputBindings),
+      ]),
       orchestratorId,
       child.iteration,
       now,
+      1,
+      [],
+      resolvedInputBindings,
     );
     return add(
       patch(run, orchestratorId, {
@@ -481,22 +493,30 @@ function route(
       // create a partially-bound child when an earlier branch wins the race:
       // wait until every declared source has completed, then persist the exact
       // values on the one child occurrence.
+      const scope = bindingScope(
+        source.parentOrchestratorRunId,
+        source.iteration,
+      );
       if (
         hasExplicitBindings(next, targetId) &&
-        (!bindingsAreReady(next, targetId) ||
+        (!bindingsAreReady(next, targetId, scope) ||
           next.occurrences.some((item) => item.nodeId === targetId))
       )
         continue;
+      const resolvedInputBindings = resolveInputBindings(next, targetId, scope);
       next = add(next, [
         newOccurrence(
           node(next.definition, targetId),
-          [source.id],
+          uniqueIds([
+            source.id,
+            ...bindingSourceOccurrenceIds(resolvedInputBindings),
+          ]),
           undefined,
           1,
           now,
           1,
           [],
-          resolveInputBindings(next, targetId),
+          resolvedInputBindings,
         ),
       ]);
     } else {
@@ -514,7 +534,12 @@ function newOccurrence(
   now: number,
   attempt = 1,
   context: string[] = [],
-  resolvedInputBindings?: Array<WorkflowNodeInputBinding & { value: string }>,
+  resolvedInputBindings?: Array<
+    WorkflowNodeInputBinding & {
+      value: string;
+      sourceOccurrenceId?: string | undefined;
+    }
+  >,
 ): WorkflowOccurrence {
   return {
     id: randomUUID(),
@@ -567,34 +592,71 @@ function hasExplicitBindings(run: WorkflowRoleRun, nodeId: string): boolean {
   return node(run.definition, nodeId).inputBindings !== undefined;
 }
 
-function bindingsAreReady(run: WorkflowRoleRun, nodeId: string): boolean {
-  return (node(run.definition, nodeId).inputBindings ?? []).every((binding) =>
-    run.occurrences.some(
+type BindingScope = Pick<
+  WorkflowOccurrence,
+  "parentOrchestratorRunId" | "iteration"
+>;
+type ResolvedInputBinding = WorkflowNodeInputBinding & {
+  value: string;
+  sourceOccurrenceId?: string | undefined;
+};
+
+function bindingScope(
+  parentOrchestratorRunId: string | undefined,
+  iteration: number,
+): BindingScope {
+  return {
+    ...(parentOrchestratorRunId ? { parentOrchestratorRunId } : {}),
+    iteration,
+  };
+}
+
+function bindingCandidates(
+  run: WorkflowRoleRun,
+  binding: WorkflowNodeInputBinding,
+  scope: BindingScope,
+): WorkflowOccurrence[] {
+  return run.occurrences
+    .filter(
       (occurrence) =>
         occurrence.nodeId === binding.sourceNodeId &&
         occurrence.status === "completed" &&
-        occurrence.output !== undefined,
-    ),
+        occurrence.output !== undefined &&
+        occurrence.parentOrchestratorRunId === scope.parentOrchestratorRunId &&
+        occurrence.iteration === scope.iteration,
+    )
+    .sort(
+      // Never depend on persisted array order: recovery/import can reorder it.
+      (left, right) =>
+        right.attempt - left.attempt ||
+        (right.completedAtMs ?? 0) - (left.completedAtMs ?? 0) ||
+        right.createdAtMs - left.createdAtMs ||
+        right.id.localeCompare(left.id),
+    );
+}
+
+function bindingsAreReady(
+  run: WorkflowRoleRun,
+  nodeId: string,
+  scope: BindingScope,
+): boolean {
+  return (node(run.definition, nodeId).inputBindings ?? []).every(
+    (binding) => bindingCandidates(run, binding, scope).length > 0,
   );
 }
 
 function resolveInputBindings(
   run: WorkflowRoleRun,
   nodeId: string,
-): Array<WorkflowNodeInputBinding & { value: string }> | undefined {
+  scope: BindingScope,
+): ResolvedInputBinding[] | undefined {
   const target = node(run.definition, nodeId);
   if (target.inputBindings === undefined) return undefined;
   return target.inputBindings.map((binding) => {
-    const source = run.occurrences
-      .filter(
-        (occurrence) =>
-          occurrence.nodeId === binding.sourceNodeId &&
-          occurrence.status === "completed",
-      )
-      .at(-1);
+    const source = bindingCandidates(run, binding, scope)[0];
     if (source === undefined || source.output === undefined)
       throw new Error(
-        `Workflow input binding is unavailable: ${binding.sourceNodeId} has not completed.`,
+        `Workflow input binding is unavailable: ${binding.sourceNodeId} has not completed in this execution lineage.`,
       );
     const value = Array.isArray(source.output)
       ? source.output.join("\n")
@@ -603,8 +665,22 @@ function resolveInputBindings(
       throw new Error(
         `Workflow input binding is unavailable: ${binding.sourceNodeId} produced no final output.`,
       );
-    return { ...binding, value: bound(value) };
+    return { ...binding, value: bound(value), sourceOccurrenceId: source.id };
   });
+}
+
+function bindingSourceOccurrenceIds(
+  bindings: ResolvedInputBinding[] | undefined,
+): string[] {
+  return (
+    bindings?.flatMap((binding) =>
+      binding.sourceOccurrenceId ? [binding.sourceOccurrenceId] : [],
+    ) ?? []
+  );
+}
+
+function uniqueIds(ids: string[]): string[] {
+  return [...new Set(ids)];
 }
 function node(
   definition: AgentWorkflowDefinition,

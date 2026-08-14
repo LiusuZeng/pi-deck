@@ -218,6 +218,7 @@ describe("workflow rehydration", () => {
       "persisted output",
       3,
     );
+    const source = persisted.occurrences[0]!;
     const target = persisted.occurrences.at(-1)!;
     persisted = startWorkflowOccurrence(
       persisted,
@@ -244,11 +245,18 @@ describe("workflow rehydration", () => {
     expect(recovered?.occurrences.at(-1)).toMatchObject({
       status: "failed",
       resolvedInputBindings: [
-        { label: "Saved source", value: "persisted output" },
+        {
+          label: "Saved source",
+          value: "persisted output",
+          sourceOccurrenceId: source.id,
+        },
       ],
     });
     const retried = retryWorkflowOccurrence(recovered!, target.id, 6);
     const retry = retried.occurrences.at(-1)!;
+    expect(retry.resolvedInputBindings?.[0]?.sourceOccurrenceId).toBe(
+      source.id,
+    );
     expect(renderWorkflowOccurrencePrompt(retried, retry)).toContain(
       "Saved source:\npersisted output",
     );

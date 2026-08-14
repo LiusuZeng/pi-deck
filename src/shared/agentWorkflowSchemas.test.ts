@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   canonicalNodeOccurrenceSchema,
   workflowDefinitionSchema,
+  workflowRunEnvelopeSchema,
 } from "./agentWorkflowSchemas.js";
 
 const ids = {
@@ -115,6 +116,74 @@ describe("canonical node occurrence schema", () => {
 });
 
 describe("agentWorkflow workflow contracts", () => {
+  it("validates persisted binding occurrence lineage while accepting legacy snapshots", () => {
+    const definition = base();
+    const approval = definition.nodes.find((node) => node.id === ids.approval);
+    if (!approval) throw new Error("fixture");
+    approval.inputBindings = [
+      { sourceNodeId: ids.plan, sourceValue: "finalOutput" },
+    ];
+    const sourceId = "00000000-0000-4000-8000-000000000018";
+    const targetId = "00000000-0000-4000-8000-000000000019";
+    const run = {
+      id: "00000000-0000-4000-8000-000000000020",
+      name: definition.name,
+      workspaceId: "workspace",
+      status: "running" as const,
+      definition,
+      inputs: {},
+      occurrences: [
+        {
+          id: sourceId,
+          nodeId: ids.plan,
+          role: "worker" as const,
+          parentOccurrenceIds: [],
+          context: [],
+          iteration: 1,
+          attempt: 1,
+          status: "completed" as const,
+          output: "plan",
+          managedChildren: [],
+          aggregation: [],
+          createdAtMs: 1,
+          completedAtMs: 2,
+          updatedAtMs: 2,
+        },
+        {
+          id: targetId,
+          nodeId: ids.approval,
+          role: "human" as const,
+          parentOccurrenceIds: [sourceId],
+          context: [],
+          resolvedInputBindings: [
+            {
+              sourceNodeId: ids.plan,
+              sourceValue: "finalOutput" as const,
+              value: "plan",
+              sourceOccurrenceId: sourceId,
+            },
+          ],
+          iteration: 1,
+          attempt: 1,
+          status: "waitingHuman" as const,
+          managedChildren: [],
+          aggregation: [],
+          createdAtMs: 3,
+          updatedAtMs: 3,
+        },
+      ],
+      createdAtMs: 1,
+      updatedAtMs: 3,
+    };
+    expect(workflowRunEnvelopeSchema.safeParse(run).success).toBe(true);
+    const forged = structuredClone(run);
+    forged.occurrences[1]!.resolvedInputBindings![0]!.sourceOccurrenceId =
+      "00000000-0000-4000-8000-000000000017";
+    expect(workflowRunEnvelopeSchema.safeParse(forged).success).toBe(false);
+    delete forged.occurrences[1]!.resolvedInputBindings![0]!.sourceOccurrenceId;
+    expect(workflowRunEnvelopeSchema.safeParse(forged).success).toBe(true);
+  });
+
   it("rejects non-UUID document identities and node references", () => {
     const cases = [
       { ...base(), id: "workflow-slug" },
@@ -210,7 +279,7 @@ describe("agentWorkflow workflow contracts", () => {
     ).toHaveLength(1);
   });
 
-  it("rejects downstream and managed-node input bindings", () => {
+  it("rejects downstream and invalid managed-node input bindings", () => {
     const definition = base();
     const plan = definition.nodes.find((node) => node.id === ids.plan);
     const implement = definition.nodes.find(
@@ -229,9 +298,19 @@ describe("agentWorkflow workflow contracts", () => {
     expect(errors.error.issues.map((issue) => issue.message)).toEqual(
       expect.arrayContaining([
         expect.stringContaining("upstream"),
-        expect.stringContaining("top-level nodes"),
+        expect.stringContaining("Managed input bindings require"),
       ]),
     );
+  });
+
+  it("accepts a loop decider binding from its own managed worker", () => {
+    const definition = base();
+    const ready = definition.nodes.find((node) => node.id === ids.ready);
+    if (!ready) throw new Error("fixture");
+    ready.inputBindings = [
+      { sourceNodeId: ids.implement, sourceValue: "finalOutput" },
+    ];
+    expect(workflowDefinitionSchema.safeParse(definition).success).toBe(true);
   });
 
   it("rejects non-worker explicit binding sources", () => {

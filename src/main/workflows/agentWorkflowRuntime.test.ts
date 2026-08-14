@@ -151,12 +151,14 @@ describe("agentWorkflow occurrence runtime", () => {
         sourceValue: "finalOutput",
         label: "Selected plan",
         value: "chosen plan",
+        sourceOccurrenceId: plan.id,
       },
       {
         sourceNodeId: ids.review,
         sourceValue: "finalOutput",
         label: "Selected review",
         value: "incidental review",
+        sourceOccurrenceId: review.id,
       },
     ]);
     const prompt = renderWorkflowOccurrencePrompt(run, deliver);
@@ -266,6 +268,68 @@ describe("agentWorkflow occurrence runtime", () => {
     };
     exercise("fanout");
     exercise("loop");
+  });
+
+  it("resolves a managed loop-decider binding in its owning iteration", () => {
+    const definition: WorkflowRoleDefinition = {
+      ...base,
+      entryNodeId: ids.loop,
+      nodes: [
+        {
+          id: ids.loop,
+          name: "Loop",
+          role: "orchestrator",
+          config: {
+            mode: "loop",
+            agents: [ids.work],
+            decider: ids.ready,
+            maxIterations: 2,
+          },
+        },
+        {
+          id: ids.work,
+          name: "Work",
+          role: "worker",
+          managedBy: ids.loop,
+          config: { instructions: "work" },
+        },
+        {
+          id: ids.ready,
+          name: "Ready",
+          role: "decider",
+          managedBy: ids.loop,
+          inputBindings: [
+            {
+              sourceNodeId: ids.work,
+              sourceValue: "finalOutput",
+              label: "Work",
+            },
+          ],
+          config: { question: "ready?" },
+        },
+      ],
+      relationships: [],
+    };
+    let run = createWorkflowRoleRun(definition, "workspace", {}, 1);
+    const loop = run.occurrences[0]!;
+    run = startWorkflowOrchestrator(run, loop.id, 2);
+    const work = readyWorkflowOccurrences(run)[0]!;
+    run = startWorkflowOccurrence(run, work.id, "work", undefined, 3);
+    run = completeWorkflowOccurrence(run, work.id, "iteration one", 4);
+    const decider = readyWorkflowOccurrences(run)[0]!;
+    expect(decider.resolvedInputBindings).toEqual([
+      {
+        sourceNodeId: ids.work,
+        sourceValue: "finalOutput",
+        label: "Work",
+        value: "iteration one",
+        sourceOccurrenceId: work.id,
+      },
+    ]);
+    expect(decider.parentOccurrenceIds).toContain(work.id);
+    expect(renderWorkflowOccurrencePrompt(run, decider)).toContain(
+      "Work:\niteration one",
+    );
   });
 
   it("retains the saved Pi session file on a running occurrence", () => {

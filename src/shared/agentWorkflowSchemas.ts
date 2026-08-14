@@ -346,7 +346,11 @@ export type NodeOccurrence = z.infer<typeof nodeOccurrenceSchema>;
 const boundedRunTextSchema = z.string().max(32_000);
 export const resolvedWorkflowNodeInputBindingSchema =
   workflowNodeInputBindingSchema
-    .extend({ value: boundedRunTextSchema })
+    // Optional so runs persisted before binding lineage was recorded rehydrate.
+    .extend({
+      value: boundedRunTextSchema,
+      sourceOccurrenceId: z.string().uuid().optional(),
+    })
     .strict();
 export const canonicalNodeOccurrenceSchema = z
   .object({
@@ -435,6 +439,37 @@ export const workflowRunEnvelopeSchema = z
           path: ["occurrences", index, "nodeId"],
           message: "Occurrence must match a node in its immutable snapshot.",
         });
+      for (const [bindingIndex, binding] of (
+        occurrence.resolvedInputBindings ?? []
+      ).entries()) {
+        // Older runs did not persist source occurrence identity. New snapshots
+        // must be referentially valid so their lineage cannot be forged.
+        if (!binding.sourceOccurrenceId) continue;
+        const source = run.occurrences.find(
+          (item) => item.id === binding.sourceOccurrenceId,
+        );
+        if (
+          !source ||
+          source.nodeId !== binding.sourceNodeId ||
+          source.status !== "completed" ||
+          source.output === undefined ||
+          source.parentOrchestratorRunId !==
+            occurrence.parentOrchestratorRunId ||
+          source.iteration !== occurrence.iteration
+        )
+          ctx.addIssue({
+            code: "custom",
+            path: [
+              "occurrences",
+              index,
+              "resolvedInputBindings",
+              bindingIndex,
+              "sourceOccurrenceId",
+            ],
+            message:
+              "Resolved input binding source must be a completed occurrence in the same execution lineage.",
+          });
+      }
     }
   });
 export type CanonicalNodeOccurrence = z.infer<
@@ -742,13 +777,28 @@ function validateWorkflowGraph(
           message:
             "Only Worker finalOutput is supported as an explicit input binding source.",
         });
-      else if (source.managedBy || node.managedBy)
-        ctx.addIssue({
-          code: "custom",
-          path: [...bindingPath, "sourceNodeId"],
-          message:
-            "Explicit input bindings may only connect top-level nodes; managed nodes use their orchestrator lineage.",
-        });
+      else if (source.managedBy || node.managedBy) {
+        // Managed bindings have a well-defined occurrence correlation only for
+        // a loop decider consuming one of its owning loop's workers. Fan-out
+        // siblings and managed workers have no ordered dependency.
+        const owner = source.managedBy;
+        const ownerNode = owner ? nodes.get(owner) : undefined;
+        const validManagedBinding =
+          owner !== undefined &&
+          owner === node.managedBy &&
+          node.role === "decider" &&
+          ownerNode?.role === "orchestrator" &&
+          ownerNode.config.mode === "loop" &&
+          ownerNode.config.decider === node.id &&
+          ownerNode.config.agents.includes(source.id);
+        if (!validManagedBinding)
+          ctx.addIssue({
+            code: "custom",
+            path: [...bindingPath, "sourceNodeId"],
+            message:
+              "Managed input bindings require a loop decider to bind an agent owned by the same Orchestrator.",
+          });
+      }
     }
   }
 
