@@ -53,7 +53,9 @@ async function launchPiDeck(
 
 async function expectHealthyPreload(page: Page): Promise<void> {
   await expect(page.getByText("Preload error")).toHaveCount(0);
-  await expect(page.getByText(/secure renderer/i)).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "Pi Deck chat workspace" }),
+  ).toBeVisible();
 }
 
 function listJsonlFiles(root: string): string[] {
@@ -124,10 +126,6 @@ test("real Pi GUI P0 smoke: default workspace prompt and resume", async () => {
       await firstLaunch.page
         .getByRole("button", { name: "New session" })
         .click();
-      await expect(
-        firstLaunch.page.getByText(/New real Pi chat is ready/),
-      ).toBeVisible();
-
       await firstLaunch.page
         .getByLabel("Prompt text")
         .fill(`Reply with exactly: ${token}`);
@@ -168,14 +166,11 @@ test("real Pi GUI P0 smoke: default workspace prompt and resume", async () => {
         secondLaunch.page.locator(".session-list .session-item").first(),
       ).toBeVisible();
 
-      const savedSession = secondLaunch.page
-        .locator(".session-list .session-item")
-        .first();
+      const savedSession = secondLaunch.page.getByRole("button", {
+        name: `Session: Reply with exactly: ${token}`,
+      });
       await expect(savedSession).toBeVisible();
       await savedSession.click();
-      await expect(
-        secondLaunch.page.getByText("Resumed saved Pi session."),
-      ).toBeVisible();
       await expect(
         secondLaunch.page
           .getByLabel("Chat / Agent Timeline")

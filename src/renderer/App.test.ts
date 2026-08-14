@@ -2113,6 +2113,27 @@ describe("renderer message_update reduction", () => {
     expect(next.timeline).toEqual([]);
   });
 
+  it("hydrates real Pi content-part messages in resumed snapshots", () => {
+    const token = "real-resume-content-part-token";
+    const session = __rendererTestHooks.sessionFromSnapshot({
+      runtimeId: "runtime-1",
+      backendMode: "real",
+      state: { cwd: "/tmp/project" },
+      messages: [
+        {
+          id: "user-1",
+          role: "user",
+          content: [{ type: "text", text: token }],
+        },
+      ],
+    } as any);
+
+    expect(session.title).toBe(token);
+    expect(session.timeline).toMatchObject([
+      { id: "user-1", kind: "user", content: token },
+    ]);
+  });
+
   it("restores image previews from resumed user messages", () => {
     const session = __rendererTestHooks.sessionFromSnapshot({
       runtimeId: "runtime-1",

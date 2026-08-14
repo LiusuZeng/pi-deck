@@ -5270,9 +5270,10 @@ function titleFromSnapshot(snapshot: ChatSnapshot): string {
     return summarizeTitle(stateTitle, 64);
   }
 
-  const firstUserPrompt = snapshot.messages.find(
-    (message) => message.role === "user" && message.content?.trim(),
-  )?.content;
+  const firstUserPrompt = snapshot.messages
+    .filter((message) => message.role === "user")
+    .map((message) => extractTextContent(message.content))
+    .find((content) => content?.trim());
   if (firstUserPrompt !== undefined) {
     return summarizeTitle(firstUserPrompt, 64);
   }
@@ -5558,7 +5559,10 @@ function timelineAttachmentsFromDrafts(
 
 function timelineFromMessages(messages: ChatMessage[]): TimelineItem[] {
   const timeline = messages.flatMap((message, index): TimelineItem[] => {
-    const content = typeof message.content === "string" ? message.content : "";
+    // Real Pi persists and returns content parts (for example,
+    // [{ type: "text", text: "..." }]) rather than a plain string. Snapshots
+    // can reach the renderer before IPC normalization, so hydrate both forms.
+    const content = extractTextContent(message.content) ?? "";
     const timestamp =
       typeof message.createdAt === "number"
         ? message.createdAt
