@@ -5,6 +5,8 @@ import path from "node:path";
 export const DECK_DELEGATE_ENDPOINT_ENV = "DECK_DELEGATE_ENDPOINT";
 /** Per-Pi-process capability; never put this value in a session message. */
 export const DECK_DELEGATE_CAPABILITY_ENV = "DECK_DELEGATE_CAPABILITY";
+/** Parent-only binding carried in the extension process environment. */
+export const DECK_DELEGATE_PARENT_RUNTIME_ENV = "DECK_DELEGATE_PARENT_RUNTIME";
 export const DECK_DELEGATE_PROTOCOL_VERSION = 1;
 
 export interface DeckDelegateRequest {

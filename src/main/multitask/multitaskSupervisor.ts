@@ -82,6 +82,7 @@ type ParentRecord<
   drain?: Promise<void>;
   parentId: ParentId;
   maxQueuedTasks: number;
+  removed?: boolean;
 };
 
 /**
@@ -122,6 +123,18 @@ export class MultitaskSupervisor<
       workers: new Map(),
       maxQueuedTasks: options.maxQueuedTasks,
     });
+  }
+
+  /** Close all private children and retire this parent permanently. */
+  async removeParent(parentId: ParentId): Promise<void> {
+    const parent = this.parents.get(parentId);
+    if (!parent) return;
+    parent.removed = true;
+    this.parents.delete(parentId);
+    await parent.drain?.catch(() => undefined);
+    await Promise.all([...parent.workers.values()].map(closeQuietly));
+    parent.workers.clear();
+    for (const id of this.parents.keys()) void this.schedule(id);
   }
 
   /** Queue a bounded brief. Starting is scheduled asynchronously. */
@@ -231,7 +244,7 @@ export class MultitaskSupervisor<
   private async drain(
     parent: ParentRecord<ParentId, Input, Worker>,
   ): Promise<void> {
-    while (this.options.hasCapacity()) {
+    while (!parent.removed && this.options.hasCapacity()) {
       const start = parent.manager.startNext(true);
       if (!start) return;
       try {
@@ -270,6 +283,10 @@ export class MultitaskSupervisor<
               afterReady(() => this.waitForInput(parent, start.number)),
           },
         });
+        if (parent.removed || this.parents.get(parent.parentId) !== parent) {
+          await closeQuietly(worker);
+          return;
+        }
         parent.workers.set(start.number, worker);
         ready = true;
         pending.splice(0).forEach((action) => action());
@@ -309,6 +326,7 @@ export class MultitaskSupervisor<
     status: "completed" | "failed",
     handoff?: ChildTaskHandoff,
   ): Promise<void> {
+    if (parent.removed) return;
     const worker = parent.workers.get(number);
     if (!worker) return;
     parent.workers.delete(number);
@@ -326,7 +344,9 @@ export class MultitaskSupervisor<
     this.notifyStatus(parent.parentId, snapshot);
     if (snapshot.terminalHandoff)
       this.notifyHandoff(parent.parentId, snapshot, snapshot.terminalHandoff);
-    void this.schedule(parent.parentId);
+    // Capacity is shared by every parent, so a child finishing for one parent
+    // must wake queues belonging to all other parents too.
+    for (const parentId of this.parents.keys()) void this.schedule(parentId);
   }
 
   private parent(parentId: ParentId): ParentRecord<ParentId, Input, Worker> {

@@ -12,6 +12,7 @@ import {
   type ChildLifecycleStatus,
   type ChildResultWireMessage,
   type DelegateWireMessage,
+  type ChildInputResponseWireMessage,
 } from "./delegationBridgeProtocol.js";
 
 const DEFAULT_MAX_FRAME_BYTES = 64 * 1024;
@@ -37,6 +38,8 @@ export interface DelegationBridgeCredentials {
 
 /** Identity is intentionally scoped to this bridge, not a Pi child/session identity. */
 export interface DelegateRequest {
+  /** Authoritatively bound by the per-parent capability at authentication. */
+  parentId: string;
   connectionId: string;
   toolCallId: string;
   /** Opaque JSON supplied by the extension; the bridge never parses prompts. */
@@ -54,6 +57,13 @@ export interface ChildResultMessage {
   toolCallId: string;
   outcome: ChildResultWireMessage["outcome"];
   handoff?: ChildResultWireMessage["handoff"];
+}
+
+export interface ChildInputResponse {
+  parentId: string;
+  connectionId: string;
+  toolCallId: string;
+  input: string;
 }
 
 export interface ChildInputNeededMessage {
@@ -77,6 +87,7 @@ interface Connection {
   authenticated: boolean;
   buffer: Buffer;
   requestedToolCalls: Set<string>;
+  parentId?: string;
   authenticationTimer: NodeJS.Timeout;
 }
 
@@ -97,6 +108,8 @@ export class DelegationBridgeServer {
   private server: net.Server | undefined;
   private socketPath: string | undefined;
   private token: string | undefined;
+  private readonly parentCapabilities = new Map<string, string>();
+  private readonly inputs = new Set<(response: ChildInputResponse) => void>();
 
   public constructor(options: DelegationBridgeServerOptions) {
     if (!options.stateDir) throw new Error("stateDir is required");
@@ -130,6 +143,9 @@ export class DelegationBridgeServer {
     this.server = server;
     this.socketPath = socketPath;
     this.token = randomBytes(32).toString("hex");
+    // Kept only for direct host/test clients. Production parent extensions
+    // receive a distinct capability from registerParent().
+    this.parentCapabilities.set(this.token, "__bridge_default__");
     server.on("error", () => undefined); // listen errors are surfaced by start().
     try {
       await new Promise<void>((resolve, reject) => {
@@ -158,6 +174,28 @@ export class DelegationBridgeServer {
       token: this.token,
       protocolVersion: DELEGATION_BRIDGE_PROTOCOL_VERSION,
     };
+  }
+
+  /** Issue a unique capability binding an extension connection to one parent. */
+  public registerParent(parentId: string): string {
+    const token = randomBytes(32).toString("hex");
+    this.parentCapabilities.set(token, parentId);
+    return token;
+  }
+
+  /** Revoke a parent capability and its live connections. */
+  public removeParent(parentId: string): void {
+    for (const [token, bound] of this.parentCapabilities) {
+      if (bound === parentId) this.parentCapabilities.delete(token);
+    }
+    for (const connection of this.connections.values()) {
+      if (connection.parentId === parentId) connection.socket.destroy();
+    }
+  }
+
+  public onInputResponse(listener: (response: ChildInputResponse) => void): () => void {
+    this.inputs.add(listener);
+    return () => this.inputs.delete(listener);
   }
 
   /** Subscribe to opaque delegate invocations from authenticated connections. */
@@ -216,6 +254,7 @@ export class DelegationBridgeServer {
     this.server = undefined;
     this.socketPath = undefined;
     this.token = undefined;
+    this.parentCapabilities.clear();
     if (server)
       await new Promise<void>((resolve) => server.close(() => resolve()));
     if (socketPath) await fs.rm(socketPath, { force: true });
@@ -290,23 +329,33 @@ export class DelegationBridgeServer {
     connection: Connection,
     message:
       | DelegateWireMessage
+      | ChildInputResponseWireMessage
       | ReturnType<typeof authenticateMessageSchema.parse>,
   ): void {
     if (!connection.authenticated) {
-      if (
-        message.type !== "authenticate" ||
-        !this.matchesToken(message.token)
-      ) {
+      const parentId = message.type === "authenticate"
+        ? this.parentCapabilities.get(message.token)
+        : undefined;
+      if (!parentId) {
         this.reject(connection.id, connection.socket, "authentication-failed");
         return;
       }
       connection.authenticated = true;
+      connection.parentId = parentId;
       clearTimeout(connection.authenticationTimer);
       this.connections.set(connection.id, connection);
       this.write(connection.socket, {
         version: DELEGATION_BRIDGE_PROTOCOL_VERSION,
         type: "authenticated",
       });
+      return;
+    }
+    if (message.type === "child-input-response") {
+      if (!connection.requestedToolCalls.has(message.toolCallId) || !connection.parentId) {
+        this.reject(connection.id, connection.socket, "invalid-frame");
+        return;
+      }
+      for (const listener of this.inputs) listener({ parentId: connection.parentId, connectionId: connection.id, toolCallId: message.toolCallId, input: message.input });
       return;
     }
     if (message.type !== "delegate") {
@@ -319,6 +368,7 @@ export class DelegationBridgeServer {
     }
     connection.requestedToolCalls.add(message.toolCallId);
     const request: DelegateRequest = {
+      parentId: connection.parentId!,
       connectionId: connection.id,
       toolCallId: message.toolCallId,
       payload: message.payload,

@@ -106,7 +106,7 @@ import { formatCanonicalFileReference } from "./attachments.js";
 import { MultitaskManager } from "./multitask/multitaskManager.js";
 import { MultitaskStateStore } from "./multitask/multitaskStateStore.js";
 import { DelegationBridgeServer, type DelegateRequest } from "./multitask/delegationBridgeServer.js";
-import { writeDeckDelegateExtension, DECK_DELEGATE_CAPABILITY_ENV, DECK_DELEGATE_ENDPOINT_ENV } from "./multitask/deckDelegateExtensionGenerator.js";
+import { writeDeckDelegateExtension, DECK_DELEGATE_CAPABILITY_ENV, DECK_DELEGATE_ENDPOINT_ENV, DECK_DELEGATE_PARENT_RUNTIME_ENV } from "./multitask/deckDelegateExtensionGenerator.js";
 import { MultitaskSupervisor, type ChildWorkerCallbacks, type ParentTaskNotification } from "./multitask/multitaskSupervisor.js";
 import { deliverWithAttachmentConsumption } from "./attachmentDelivery.js";
 import {
@@ -132,7 +132,7 @@ let diagnostics: DiagnosticsService | undefined;
 let multitaskStateStore: MultitaskStateStore | undefined;
 const multitaskManagers = new Map<string, MultitaskManager>();
 let delegationBridge: DelegationBridgeServer | undefined;
-let delegationCredentials: { socketPath: string; token: string } | undefined;
+let delegationCredentials: { socketPath: string } | undefined;
 let multitaskSupervisor: MultitaskSupervisor<string, string, { close(): Promise<void>; provideInput(input: string): Promise<void> }> | undefined;
 const delegateCalls = new Map<string, { connectionId: string; toolCallId: string }>();
 let nextDelegatedTaskNumber = 1;
@@ -979,8 +979,9 @@ async function startDelegationBridge(): Promise<void> {
   const bridge = new DelegationBridgeServer({ stateDir: path.join(app.getPath("userData"), "delegate-bridge") });
   const credentials = await bridge.start();
   delegationBridge = bridge;
-  delegationCredentials = { socketPath: credentials.socketPath, token: credentials.token };
+  delegationCredentials = { socketPath: credentials.socketPath };
   bridge.onDelegate((request) => void handleDelegateRequest(request));
+  bridge.onInputResponse((response) => void handleDelegateInput(response));
 }
 
 async function deckDelegateExtensionPath(): Promise<string> {
@@ -989,24 +990,23 @@ async function deckDelegateExtensionPath(): Promise<string> {
   return output;
 }
 
-function delegateEnvironment(base: NodeJS.ProcessEnv, parentRuntimeId?: string): NodeJS.ProcessEnv {
+function delegateEnvironment(base: NodeJS.ProcessEnv, parentRuntimeId: string): NodeJS.ProcessEnv {
   const credentials = delegationCredentials;
-  if (!credentials) throw new Error("Delegation bridge is not available.");
-  return { ...base, [DECK_DELEGATE_ENDPOINT_ENV]: `unix:${credentials.socketPath}`, [DECK_DELEGATE_CAPABILITY_ENV]: credentials.token, ...(parentRuntimeId ? { DECK_DELEGATE_PARENT_RUNTIME: parentRuntimeId } : {}) }; 
+  const capability = delegationBridge?.registerParent(parentRuntimeId);
+  if (!credentials || !capability) throw new Error("Delegation bridge is not available.");
+  return { ...base, [DECK_DELEGATE_ENDPOINT_ENV]: `unix:${credentials.socketPath}`, [DECK_DELEGATE_CAPABILITY_ENV]: capability, [DECK_DELEGATE_PARENT_RUNTIME_ENV]: parentRuntimeId };
 }
 
 async function handleDelegateRequest(request: DelegateRequest): Promise<void> {
-  // A bridge connection is authenticated, but it is still bound to exactly one
-  // attached parent runtime before any payload is interpreted.
+  // Authentication capability, not untrusted payload, binds this connection.
   const payload = request.payload;
-  const parentId = payload && typeof payload === "object" && !Array.isArray(payload) && typeof (payload as { parentRuntimeId?: unknown }).parentRuntimeId === "string"
-    ? (payload as { parentRuntimeId: string }).parentRuntimeId : undefined;
+  const parentId = request.parentId;
   const supervisor = multitaskSupervisor;
   if (!parentId || !supervisor || !delegationBridge) {
     delegationBridge?.sendChildResult({ connectionId: request.connectionId, toolCallId: request.toolCallId, outcome: "failed", handoff: { summary: "Parallel multitasking is not enabled for this parent." } });
     return;
   }
-  if (!parentId || multitaskManagers.get(parentId)?.mode !== "parallel" || !chatRuntimeIds.has(parentId)) {
+  if (multitaskManagers.get(parentId)?.mode !== "parallel" || !chatRuntimeIds.has(parentId)) {
     delegationBridge?.sendChildResult({ connectionId: request.connectionId, toolCallId: request.toolCallId, outcome: "failed", handoff: { summary: "Parallel multitasking is not enabled for this parent." } });
     return;
   }
@@ -1192,7 +1192,7 @@ async function respondToExtensionUi(
   request: ChatRespondToExtensionUiRequest,
 ): Promise<void> {
   const adapter = await ensureChatAdapter(store, diagnosticsService);
-  if (!adapter.hasRuntime(request.runtimeId)) {
+  if (!chatRuntimeIds.has(request.runtimeId) || !adapter.hasRuntime(request.runtimeId)) {
     throw new Error(
       `Extension UI runtime is no longer attached: ${request.runtimeId}`,
     );
@@ -1294,7 +1294,7 @@ function resolveActiveChatRuntimeId(
 ): string {
   const selection = selectAvailableRuntime({
     requestedRuntimeId,
-    hasRuntime: (runtimeId) => adapter.hasRuntime(runtimeId),
+    hasRuntime: (runtimeId) => chatRuntimeIds.has(runtimeId) && adapter.hasRuntime(runtimeId),
   });
 
   if (selection.reason === "requested" && selection.runtimeId !== undefined) {
@@ -1322,6 +1322,8 @@ async function closeAttachedChatRuntime(
     attachmentPreservingRuntimeClosures.add(runtimeId);
   }
   try {
+    delegationBridge?.removeParent(runtimeId);
+    await multitaskSupervisor?.removeParent(runtimeId);
     if (adapter.hasRuntime(runtimeId)) {
       await adapter.closeSession(runtimeId);
     }
@@ -1356,8 +1358,14 @@ function forgetChatRuntime(
   chatRuntimeSessionFiles.delete(runtimeId);
   chatRuntimeProjectIds.delete(runtimeId);
   multitaskManagers.delete(runtimeId);
-  // Private child handles are never renderer sessions; closing a parent only
-  // drops its scheduling metadata and their processes are cleaned at shutdown.
+  delegationBridge?.removeParent(runtimeId);
+  for (const [key, call] of delegateCalls) {
+    if (key.startsWith(`${runtimeId}:`)) {
+      delegationBridge?.sendChildResult({ ...call, outcome: "cancelled", handoff: { summary: "Parent session closed." } });
+      delegateCalls.delete(key);
+    }
+  }
+  void multitaskSupervisor?.removeParent(runtimeId);
   if (chatRuntimeId === runtimeId) {
     chatRuntimeId = undefined;
   }
@@ -1399,7 +1407,12 @@ async function createDelegatedChild(
       }).catch(() => callbacks.failed({ summary: "Child exited without a result." }));
     }
   });
-  await worker.prompt({ text: task.brief.text });
+  try {
+    await worker.prompt({ text: task.brief.text });
+  } catch (error) {
+    await adapter.closeSession(worker.runtimeId).catch(() => undefined);
+    throw error;
+  }
   return { close: () => adapter.closeSession(worker.runtimeId), provideInput: (input) => worker.steer({ text: input }) };
 }
 
@@ -1419,6 +1432,15 @@ async function createRealDelegatedWorker(
     requestTimeoutMs: Number(process.env.PI_DECK_REAL_RPC_TIMEOUT_MS ?? 30_000),
     commandProtocol: "type-field",
   });
+}
+
+function handleDelegateInput(response: { parentId: string; connectionId: string; toolCallId: string; input: string }): void {
+  const entry = [...delegateCalls.entries()].find(([, call]) =>
+    call.connectionId === response.connectionId && call.toolCallId === response.toolCallId,
+  );
+  if (!entry || !entry[0].startsWith(`${response.parentId}:`)) return;
+  const number = Number(entry[0].slice(response.parentId.length + 1));
+  void multitaskSupervisor?.provideInput(response.parentId, number, response.input).catch(() => undefined);
 }
 
 function handleMultitaskNotification(notification: ParentTaskNotification<string>): void {
@@ -1636,6 +1658,13 @@ async function resolveRealChatProject(
 async function closeChatWorker(): Promise<void> {
   const adapter = chatAdapter;
   const runtimeIds = [...chatRuntimeIds];
+  // Reset/quit has no parent left to mediate child work: retire bridge calls
+  // and await private child shutdown before releasing parent bookkeeping.
+  await Promise.all(runtimeIds.map(async (runtimeId) => {
+    delegationBridge?.removeParent(runtimeId);
+    await multitaskSupervisor?.removeParent(runtimeId);
+  }));
+  delegateCalls.clear();
   chatEventUnsubscribe?.();
   chatEventUnsubscribe = undefined;
   chatAdapter = undefined;
@@ -2345,7 +2374,7 @@ async function getChatSnapshot(
   if (runtimeId === undefined) {
     throw new Error(`${mode} chat runtime failed to initialize`);
   }
-  if (!adapter.hasRuntime(runtimeId)) {
+  if (!chatRuntimeIds.has(runtimeId) || !adapter.hasRuntime(runtimeId)) {
     forgetChatRuntime(runtimeId);
     throw new Error(`Chat runtime is no longer attached: ${runtimeId}`);
   }
@@ -3105,7 +3134,7 @@ async function getMultitaskManager(
   runtimeId: string,
 ): Promise<MultitaskManager> {
   const adapter = chatAdapter;
-  if (adapter === undefined || !adapter.hasRuntime(runtimeId)) {
+  if (adapter === undefined || !chatRuntimeIds.has(runtimeId) || !adapter.hasRuntime(runtimeId)) {
     throw new Error(`Chat runtime is no longer attached: ${runtimeId}`);
   }
   const existing = multitaskManagers.get(runtimeId);
@@ -3132,12 +3161,16 @@ async function reconcileMultitaskRuntime(
     multitaskManagers.set(runtimeId, saved
       ? MultitaskManager.rehydrate(saved, { maxQueuedTasks: 100 })
       : new MultitaskManager({ mode: "sequential", maxQueuedTasks: 100 }));
-  } else if (saved) {
+  }
+  if (multitaskSupervisor) {
+    try { multitaskSupervisor.addParent(runtimeId, { mode: multitaskManagers.get(runtimeId)!.mode, maxQueuedTasks: 100 }); } catch { /* already registered */ }
+  }
+  if (saved) {
     multitaskManagers.get(runtimeId)?.setMode(saved.mode);
   }
   // Resume never revives private child processes; the supervisor converts
   // previously live work into safe interrupted terminal handoffs.
-  if (multitaskSupervisor && saved) await multitaskSupervisor.resume(runtimeId, saved);
+  if (multitaskSupervisor) await multitaskSupervisor.resume(runtimeId, saved);
 }
 
 async function persistMultitaskManager(

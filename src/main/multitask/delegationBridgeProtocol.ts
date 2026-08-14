@@ -32,9 +32,19 @@ export const delegateMessageSchema = z
   })
   .strict();
 
+export const inputResponseMessageSchema = z
+  .object({
+    ...protocolEnvelope,
+    type: z.literal("child-input-response"),
+    toolCallId: toolCallIdSchema,
+    input: z.string().min(1).max(32_768),
+  })
+  .strict();
+
 export const clientMessageSchema = z.union([
   authenticateMessageSchema,
   delegateMessageSchema,
+  inputResponseMessageSchema,
 ]);
 
 const childMessage = {
@@ -87,6 +97,9 @@ export const authenticatedMessageSchema = z
   .strict();
 
 export type DelegateWireMessage = z.infer<typeof delegateMessageSchema>;
+export type ChildInputResponseWireMessage = z.infer<
+  typeof inputResponseMessageSchema
+>;
 export type ChildLifecycleStatus = z.infer<
   typeof childLifecycleMessageSchema
 >["status"];

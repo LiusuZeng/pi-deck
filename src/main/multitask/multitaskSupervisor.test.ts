@@ -167,4 +167,16 @@ describe("MultitaskSupervisor", () => {
       summary: "Child task interrupted during session resume.",
     });
   });
+
+  it("removes a parent by closing all private workers and rejecting future access", async () => {
+    const { supervisor, workers } = setup();
+    supervisor.enqueue("parent", { number: 1, name: "one", brief: { text: "a" } });
+    await supervisor.schedule("parent");
+    let closed = false;
+    workers.get(1)!.close = () => { closed = true; };
+
+    await supervisor.removeParent("parent");
+    expect(closed).toBe(true);
+    expect(() => supervisor.snapshots("parent")).toThrow("not registered");
+  });
 });

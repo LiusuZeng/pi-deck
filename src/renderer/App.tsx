@@ -6387,9 +6387,10 @@ function Composer(props: {
           {props.multitaskMode !== undefined ? (
             <MultitaskControl
               tasks={props.multitaskTasks}
-              enabled={false}
-              aria-label="Multitasking is not available yet"
-              title="Multitasking is not available yet"
+              enabled={!isActionPending}
+              onClick={props.onToggleMultitask}
+              aria-label={`Turn ${props.multitaskMode === "parallel" ? "off" : "on"} multitasking`}
+              title={`Turn ${props.multitaskMode === "parallel" ? "off" : "on"} multitasking`}
             />
           ) : props.selectedSession.runtimeBacked ? (
             <MultitaskControl
