@@ -215,18 +215,21 @@ test("a non-empty unsupported workflow store leaves the shell usable and remains
   }
 });
 
-test("the known empty v3 workflow store boots only through the v3 compatibility migration", async () => {
-  // Depends on Lane A's deliberately narrow v3 compatibility rule and its
-  // atomic backup. This fixture is the known empty shape; the preceding test
-  // covers the non-empty case that must never take this migration path.
+test("the known empty v2 workflow store boots through the node-ID migration", async () => {
+  // This fixture exercises the deliberately narrow, atomic v2 node-ID migration.
+  // The preceding test covers a non-empty unsupported store that must never be
+  // replaced by compatibility handling.
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-e2e-empty-v3-workflow-store-"),
   );
   const piDeckHome = path.join(root, "pideck-home");
   const fixture = seedWorkflowStore(piDeckHome, {
-    version: 3,
+    version: 2,
     workflows: [],
+    occurrences: [],
     runs: [],
+    legacyRuns: [],
+    workflowScopes: {},
   });
   let app: ElectronApplication | undefined;
   try {
@@ -247,7 +250,7 @@ test("the known empty v3 workflow store boots only through the v3 compatibility 
 
     const migrated = JSON.parse(fs.readFileSync(fixture.storeFile, "utf8"));
     expect(migrated).toMatchObject({
-      version: 2,
+      version: 3,
       workflows: [],
       occurrences: [],
       legacyRuns: [],
@@ -255,7 +258,7 @@ test("the known empty v3 workflow store boots only through the v3 compatibility 
     });
     const backup = fs
       .readdirSync(piDeckHome)
-      .find((name) => /^workflows\.json\.v3-backup-/.test(name));
+      .find((name) => /^workflows\.json\.v2-node-id-backup-/.test(name));
     expect(backup).toBeDefined();
     expect(fs.readFileSync(path.join(piDeckHome, backup as string))).toEqual(
       fixture.bytes,
