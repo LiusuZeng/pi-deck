@@ -82,6 +82,10 @@ import {
   canonicalWorkflowListRunsRequestSchema,
   canonicalWorkflowOccurrenceRequestSchema,
   canonicalWorkflowStartRunRequestSchema,
+  workflowGraphEventSchema,
+  workflowGraphSnapshotRequestSchema,
+  workflowGraphSnapshotSchema,
+  workflowGraphSubscriptionRequestSchema,
   workflowCreateRequestSchema,
   workflowListRequestSchema,
   workflowScopedDefinitionSchema,
@@ -459,6 +463,36 @@ const api: PiDeckApi = Object.freeze({
         request: canonicalWorkflowGetRunRequestSchema.parse(request),
         responseSchema: workflowRunEnvelopeSchema,
       }),
+    graphGetSnapshot: (request: { runId: string }) =>
+      invokeValidated({
+        channel: ipcChannels.workflowGraphGetSnapshot,
+        request: workflowGraphSnapshotRequestSchema.parse(request),
+        responseSchema: workflowGraphSnapshotSchema,
+      }),
+    graphSubscribe: (request: { runId: string }) =>
+      invokeValidated({
+        channel: ipcChannels.workflowGraphSubscribe,
+        request: workflowGraphSubscriptionRequestSchema.parse(request),
+        responseSchema: z.void(),
+      }),
+    graphUnsubscribe: (request: { runId: string }) =>
+      invokeValidated({
+        channel: ipcChannels.workflowGraphUnsubscribe,
+        request: workflowGraphSubscriptionRequestSchema.parse(request),
+        responseSchema: z.void(),
+      }),
+    onGraphEvent: (
+      listener: (
+        event: import("../shared/agentWorkflowSchemas.js").WorkflowGraphEvent,
+      ) => void,
+    ) => {
+      const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => {
+        const parsed = workflowGraphEventSchema.safeParse(payload);
+        if (parsed.success) listener(parsed.data);
+      };
+      ipcRenderer.on(ipcChannels.workflowGraphEvent, wrapped);
+      return () => ipcRenderer.off(ipcChannels.workflowGraphEvent, wrapped);
+    },
     canonicalStartRun: (request: {
       workflowId: string;
       workspaceId: string;

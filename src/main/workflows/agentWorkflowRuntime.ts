@@ -57,6 +57,7 @@ export function createWorkflowRoleRun(
     status: "waiting" as const,
     definition: structuredClone(parsed),
     inputs: resolved,
+    revision: 1,
     occurrences: [newOccurrence(entry, [], undefined, 1, now)],
     createdAtMs: now,
     updatedAtMs: now,

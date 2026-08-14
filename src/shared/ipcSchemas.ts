@@ -795,6 +795,10 @@ export const ipcChannels = {
   canonicalWorkflowRetryOccurrence: "workflows:canonicalRetryOccurrence",
   canonicalWorkflowAnswerHuman: "workflows:canonicalAnswerHuman",
   canonicalWorkflowEvent: "workflows:canonicalEvent",
+  workflowGraphGetSnapshot: "workflows:graphGetSnapshot",
+  workflowGraphSubscribe: "workflows:graphSubscribe",
+  workflowGraphUnsubscribe: "workflows:graphUnsubscribe",
+  workflowGraphEvent: "workflows:graphEvent",
 } as const;
 
 export type IpcChannel = (typeof ipcChannels)[keyof typeof ipcChannels];

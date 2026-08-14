@@ -3,6 +3,7 @@ import type {
   CanonicalNodeOccurrence,
   WorkflowDefinition,
   WorkflowNode,
+  WorkflowGraphSnapshot,
 } from "../../shared/agentWorkflowSchemas.js";
 
 export type WorkflowGraphStatus =
@@ -14,7 +15,8 @@ export type WorkflowGraphStatus =
   | "completed"
   | "failed"
   | "skipped"
-  | "cancelled";
+  | "cancelled"
+  | "unknown";
 
 export interface AgentWorkflowGraphRoute {
   id: string;
@@ -22,7 +24,14 @@ export interface AgentWorkflowGraphRoute {
   to: string;
   label: string;
   terminal: boolean;
-  status?: "pending" | "active" | "taken" | "not_taken" | "blocked" | undefined;
+  status?:
+    | "pending"
+    | "active"
+    | "taken"
+    | "not_taken"
+    | "blocked"
+    | "unknown"
+    | undefined;
 }
 
 export interface AgentWorkflowGraphNode {
@@ -96,7 +105,10 @@ function nodeDetail(node: WorkflowNode): string {
   }
 }
 
-const occurrenceStatus: Record<CanonicalNodeOccurrence["status"], WorkflowGraphStatus> = {
+const occurrenceStatus: Record<
+  CanonicalNodeOccurrence["status"],
+  WorkflowGraphStatus
+> = {
   ready: "queued",
   queued: "queued",
   running: "in_progress",
@@ -110,17 +122,31 @@ const occurrenceStatus: Record<CanonicalNodeOccurrence["status"], WorkflowGraphS
 /** Projects many runtime occurrences onto one stable configured node. */
 export function aggregateWorkflowNode(
   occurrences: CanonicalNodeOccurrence[],
-): Pick<AgentWorkflowGraphNode, "status" | "counts" | "occurrenceCount" | "retries"> {
-  if (!occurrences.length) return { status: "not_started", occurrenceCount: 0, retries: 0 };
+): Pick<
+  AgentWorkflowGraphNode,
+  "status" | "counts" | "occurrenceCount" | "retries"
+> {
+  if (!occurrences.length)
+    return { status: "not_started", occurrenceCount: 0, retries: 0 };
   const counts: Partial<Record<WorkflowGraphStatus, number>> = {};
   for (const occurrence of occurrences) {
     const status = occurrenceStatus[occurrence.status];
     counts[status] = (counts[status] ?? 0) + 1;
   }
-  const hasRetry = occurrences.some((item) => item.attempt > 1) &&
-    occurrences.some((item) => ["queued", "running", "failed"].includes(item.status));
+  const hasRetry =
+    occurrences.some((item) => item.attempt > 1) &&
+    occurrences.some((item) =>
+      ["queued", "running", "failed"].includes(item.status),
+    );
   const precedence: WorkflowGraphStatus[] = [
-    "waiting_human", "in_progress", "retrying", "queued", "failed", "cancelled", "completed", "skipped",
+    "waiting_human",
+    "in_progress",
+    "retrying",
+    "queued",
+    "failed",
+    "cancelled",
+    "completed",
+    "skipped",
   ];
   const status = precedence.find((candidate) =>
     candidate === "retrying" ? hasRetry : (counts[candidate] ?? 0) > 0,
@@ -140,10 +166,19 @@ function routeStatus(
 ): AgentWorkflowGraphRoute["status"] {
   const source = occurrences.filter((item) => item.nodeId === route.from);
   if (!source.length) return "pending";
-  if (source.some((item) => ["failed", "cancelled"].includes(item.status))) return "blocked";
-  if (source.some((item) => ["running", "waitingHuman", "queued", "ready"].includes(item.status))) return "active";
+  if (source.some((item) => ["failed", "cancelled"].includes(item.status)))
+    return "blocked";
+  if (
+    source.some((item) =>
+      ["running", "waitingHuman", "queued", "ready"].includes(item.status),
+    )
+  )
+    return "active";
   if (!relationship.when) return "taken";
-  const selected = source.some((item) => item.status === "completed" && item.output === relationship.when?.equals);
+  const selected = source.some(
+    (item) =>
+      item.status === "completed" && item.output === relationship.when?.equals,
+  );
   return selected ? "taken" : "not_taken";
 }
 
@@ -154,6 +189,7 @@ function routeStatus(
 export function deriveAgentWorkflowGraph(
   definition: WorkflowDefinition,
   occurrences: CanonicalNodeOccurrence[] = [],
+  snapshot?: WorkflowGraphSnapshot,
 ): AgentWorkflowGraphModel {
   const nodesById = new Map(definition.nodes.map((node) => [node.id, node]));
   const topLevel = definition.nodes.filter((node) => !node.managedBy);
@@ -161,38 +197,91 @@ export function deriveAgentWorkflowGraph(
     const route = {
       id: relationship.id,
       from: relationship.from,
-      to: "nodeId" in relationship.to ? relationship.to.nodeId : relationship.to.end,
-      label: routeLabel(nodesById.get(relationship.from)!, relationship.when?.equals),
+      to:
+        "nodeId" in relationship.to
+          ? relationship.to.nodeId
+          : relationship.to.end,
+      label: routeLabel(
+        nodesById.get(relationship.from)!,
+        relationship.when?.equals,
+      ),
       terminal: "end" in relationship.to,
     };
-    return occurrences.length ? { ...route, status: routeStatus(route, relationship, occurrences) } : route;
+    const snapshotState = snapshot?.edges.find(
+      (edge) => edge.relationshipId === relationship.id,
+    )?.status;
+    return snapshotState
+      ? { ...route, status: snapshotState }
+      : occurrences.length
+        ? { ...route, status: routeStatus(route, relationship, occurrences) }
+        : route;
   });
   const orderedIds: string[] = [];
   const visited = new Set<string>();
   const visit = (id: string): void => {
-    if (visited.has(id) || !nodesById.get(id) || nodesById.get(id)?.managedBy) return;
+    if (visited.has(id) || !nodesById.get(id) || nodesById.get(id)?.managedBy)
+      return;
     visited.add(id);
     orderedIds.push(id);
-    routes.filter((route) => route.from === id && !route.terminal).forEach((route) => visit(route.to));
+    routes
+      .filter((route) => route.from === id && !route.terminal)
+      .forEach((route) => visit(route.to));
   };
   visit(definition.entryNodeId);
   topLevel.forEach((node) => visit(node.id));
   const project = (node: WorkflowNode): AgentWorkflowGraphNode => {
-    const managed = node.role === "orchestrator"
-      ? definition.nodes.filter((candidate) => candidate.managedBy === node.id).sort((left, right) => {
-          if (node.config.mode === "loop") {
-            if (left.id === node.config.decider) return 1;
-            if (right.id === node.config.decider) return -1;
+    const managed =
+      node.role === "orchestrator"
+        ? definition.nodes
+            .filter((candidate) => candidate.managedBy === node.id)
+            .sort((left, right) => {
+              if (node.config.mode === "loop") {
+                if (left.id === node.config.decider) return 1;
+                if (right.id === node.config.decider) return -1;
+              }
+              return (
+                node.config.agents.indexOf(left.id) -
+                node.config.agents.indexOf(right.id)
+              );
+            })
+            .map(project)
+        : [];
+    const graphNode = snapshot?.nodes.find((item) => item.nodeId === node.id);
+    return {
+      id: node.id,
+      name: node.name,
+      role: node.role,
+      detail: nodeDetail(node),
+      managedNodes: managed,
+      ...(graphNode?.aggregateStatus
+        ? {
+            status: graphNode.aggregateStatus as WorkflowGraphStatus,
+            ...(graphNode.counts
+              ? {
+                  counts: graphNode.counts as Partial<
+                    Record<WorkflowGraphStatus, number>
+                  >,
+                }
+              : {}),
+            ...(graphNode.occurrences
+              ? { occurrenceCount: graphNode.occurrences.length }
+              : {}),
           }
-          return node.config.agents.indexOf(left.id) - node.config.agents.indexOf(right.id);
-        }).map(project)
-      : [];
-    return { id: node.id, name: node.name, role: node.role, detail: nodeDetail(node), managedNodes: managed, ...(occurrences.length ? aggregateWorkflowNode(occurrences.filter((item) => item.nodeId === node.id)) : {}) };
+        : occurrences.length
+          ? aggregateWorkflowNode(
+              occurrences.filter((item) => item.nodeId === node.id),
+            )
+          : {}),
+    };
   };
   return {
     topLevelNodes: orderedIds.map((id) => project(nodesById.get(id)!)),
     routes,
-    terminalOutcomes: [...new Set(routes.filter((route) => route.terminal).map((route) => route.to))],
+    terminalOutcomes: [
+      ...new Set(
+        routes.filter((route) => route.terminal).map((route) => route.to),
+      ),
+    ],
   };
 }
 
@@ -200,8 +289,9 @@ export function deriveAgentWorkflowGraph(
 export function layoutAgentWorkflowGraph(
   definition: WorkflowDefinition,
   occurrences: CanonicalNodeOccurrence[] = [],
+  snapshot?: WorkflowGraphSnapshot,
 ): WorkflowGraphLayout {
-  const model = deriveAgentWorkflowGraph(definition, occurrences);
+  const model = deriveAgentWorkflowGraph(definition, occurrences, snapshot);
   const projected = new Map<string, AgentWorkflowGraphNode>();
   const collect = (node: AgentWorkflowGraphNode): void => {
     projected.set(node.id, node);
@@ -209,38 +299,89 @@ export function layoutAgentWorkflowGraph(
   };
   model.topLevelNodes.forEach(collect);
   const graph = new Graph({ multigraph: true });
-  graph.setGraph({ rankdir: "LR", ranksep: 100, nodesep: 54, marginx: 36, marginy: 36 });
+  graph.setGraph({
+    rankdir: "LR",
+    ranksep: 100,
+    nodesep: 54,
+    marginx: 36,
+    marginy: 36,
+  });
   graph.setDefaultEdgeLabel(() => ({}));
   for (const node of definition.nodes) {
-    graph.setNode(node.id, { width: 240, height: node.role === "orchestrator" ? 280 : 190 });
+    graph.setNode(node.id, {
+      width: 240,
+      height: node.role === "orchestrator" ? 280 : 190,
+    });
   }
   const edges: Omit<WorkflowGraphLayoutEdge, "points">[] = [];
   for (const route of model.routes) {
     if (route.terminal) continue;
     graph.setEdge(route.from, route.to, { weight: 3 }, route.id);
-    edges.push({ id: route.id, from: route.from, to: route.to, label: route.label, status: route.status });
+    edges.push({
+      id: route.id,
+      from: route.from,
+      to: route.to,
+      label: route.label,
+      status: route.status,
+    });
   }
   for (const node of definition.nodes) {
     if (!node.managedBy) continue;
     const ownershipId = `ownership:${node.managedBy}:${node.id}`;
-    graph.setEdge(node.managedBy, node.id, { weight: 1, minlen: 1 }, ownershipId);
-    edges.push({ id: ownershipId, from: node.managedBy, to: node.id, label: "manages", ownership: true });
+    graph.setEdge(
+      node.managedBy,
+      node.id,
+      { weight: 1, minlen: 1 },
+      ownershipId,
+    );
+    edges.push({
+      id: ownershipId,
+      from: node.managedBy,
+      to: node.id,
+      label: "manages",
+      ownership: true,
+    });
   }
   for (const node of definition.nodes) {
     if (node.role !== "orchestrator" || node.config.mode !== "loop") continue;
     const id = `feedback:${node.config.decider}:${node.id}`;
     graph.setEdge(node.config.decider, node.id, { weight: 0, minlen: 2 }, id);
-    edges.push({ id, from: node.config.decider, to: node.id, label: "next iteration", feedback: true });
+    edges.push({
+      id,
+      from: node.config.decider,
+      to: node.id,
+      label: "next iteration",
+      feedback: true,
+    });
   }
   layout(graph);
   const nodes = definition.nodes.map((node) => {
-    const positioned = graph.node(node.id) as { x: number; y: number; width: number; height: number };
-    return { ...projected.get(node.id)!, x: positioned.x, y: positioned.y, width: positioned.width, height: positioned.height, ...(node.managedBy ? { containerId: node.managedBy } : {}) };
+    const positioned = graph.node(node.id) as {
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+    };
+    return {
+      ...projected.get(node.id)!,
+      x: positioned.x,
+      y: positioned.y,
+      width: positioned.width,
+      height: positioned.height,
+      ...(node.managedBy ? { containerId: node.managedBy } : {}),
+    };
   });
   return {
     width: graph.graph().width,
     height: graph.graph().height,
     nodes,
-    edges: edges.map((edge) => ({ ...edge, points: (graph.edge({ v: edge.from, w: edge.to, name: edge.id }) as { points: Array<{ x: number; y: number }> }).points })),
+    edges: edges.map((edge) => ({
+      ...edge,
+      points: (
+        graph.edge({ v: edge.from, w: edge.to, name: edge.id }) as {
+          points: Array<{ x: number; y: number }>;
+        }
+      ).points,
+    })),
   };
 }

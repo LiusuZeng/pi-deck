@@ -3,11 +3,13 @@ import type {
   CanonicalNodeOccurrence,
   WorkflowNode,
   WorkflowRunEnvelope,
+  WorkflowGraphSnapshot,
 } from "../../../shared/agentWorkflowSchemas.js";
 import { AgentWorkflowGraph } from "./AgentWorkflowGraph.js";
 
 export interface WorkflowOccurrenceRunViewProps {
   run: WorkflowRunEnvelope;
+  graphSnapshot?: WorkflowGraphSnapshot | undefined;
   onBack(): void;
   onStop(): Promise<void> | void;
   onRetry(occurrenceId: string): Promise<void> | void;
@@ -356,25 +358,28 @@ export function WorkflowOccurrenceRunView(
         <AgentWorkflowGraph
           definition={props.run.definition}
           occurrences={props.run.occurrences}
+          snapshot={props.graphSnapshot}
           selectedNodeId={selectedNodeId}
           onSelectNode={(nodeId) =>
             setSelectedNodeId(selectedNodeId === nodeId ? undefined : nodeId)
           }
         />
-        {selectedNodeId ? (() => {
-          const node = nodes.find((item) => item.id === selectedNodeId);
-          const occurrences = props.run.occurrences.filter(
-            (item) => item.nodeId === selectedNodeId,
-          );
-          return node ? (
-            <NodeDetails
-              node={node}
-              occurrences={occurrences}
-              onRetry={props.onRetry}
-              onOpenSession={props.onOpenSession}
-            />
-          ) : null;
-        })() : null}
+        {selectedNodeId
+          ? (() => {
+              const node = nodes.find((item) => item.id === selectedNodeId);
+              const occurrences = props.run.occurrences.filter(
+                (item) => item.nodeId === selectedNodeId,
+              );
+              return node ? (
+                <NodeDetails
+                  node={node}
+                  occurrences={occurrences}
+                  onRetry={props.onRetry}
+                  onOpenSession={props.onOpenSession}
+                />
+              ) : null;
+            })()
+          : null}
       </section>
     </section>
   );

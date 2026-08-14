@@ -234,10 +234,13 @@ export class WorkflowStore {
     const index = this.state.runs.findIndex((item) => item.id === parsed.id);
     if (index < 0)
       throw new Error(`Unknown canonical workflow run: ${parsed.id}`);
+    // This is the single persistence boundary for scheduler transitions.  Assign
+    // the sequence here so state is durable before the scheduler publishes it.
+    const saved = { ...parsed, revision: this.state.runs[index]!.revision + 1 };
     const runs = [...this.state.runs];
-    runs[index] = parsed;
+    runs[index] = saved;
     await this.commit({ ...this.state, runs });
-    return clone(parsed);
+    return clone(saved);
   }
 
   // Compatibility boundary for the pre-agentWorkflow UI/runtime. It only handles v1

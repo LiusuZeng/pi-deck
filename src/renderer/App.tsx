@@ -35,6 +35,7 @@ import type {
   CanonicalNodeOccurrence,
   WorkflowDefinition,
   WorkflowRunEnvelope,
+  WorkflowGraphSnapshot,
 } from "../shared/agentWorkflowSchemas.js";
 import type {
   WorkflowRun,
@@ -854,6 +855,9 @@ export function App(): ReactElement {
   const [workflowOccurrenceRuns, setWorkflowOccurrenceRuns] = useState<
     WorkflowRunEnvelope[]
   >([]);
+  const [workflowGraphSnapshot, setWorkflowGraphSnapshot] = useState<
+    WorkflowGraphSnapshot | undefined
+  >();
   const [legacyWorkflowRuns, setLegacyWorkflowRuns] = useState<WorkflowRun[]>(
     [],
   );
@@ -1162,12 +1166,62 @@ export function App(): ReactElement {
   useEffect(() => {
     return window.piDeck.workflows.onCanonicalEvent((event) => {
       const run = event.run;
-      setWorkflowOccurrenceRuns((current) => [
-        run,
-        ...current.filter((item) => item.id !== run.id),
-      ]);
+      setWorkflowOccurrenceRuns((current) => {
+        const existing = current.find((item) => item.id === run.id);
+        // Persisted revisions make a delayed compatibility event harmless.
+        if (existing && existing.revision >= run.revision) return current;
+        return [run, ...current.filter((item) => item.id !== run.id)];
+      });
     });
   }, []);
+
+  useEffect(() => {
+    if (workflowView !== "occurrenceRun" || !workflowOccurrenceRunId) {
+      setWorkflowGraphSnapshot(undefined);
+      return;
+    }
+    let disposed = false;
+    const runId = workflowOccurrenceRunId;
+    const refetch = async () => {
+      const snapshot = await window.piDeck.workflows.graphGetSnapshot({
+        runId,
+      });
+      if (!disposed)
+        setWorkflowGraphSnapshot((current) =>
+          !current || snapshot.revision >= current.revision
+            ? snapshot
+            : current,
+        );
+    };
+    void window.piDeck.workflows
+      .graphSubscribe({ runId })
+      .then(async () => {
+        // An IPC subscribe can resolve after the view was closed; immediately
+        // revoke it rather than leaving an old-workspace stream registered.
+        if (disposed) {
+          await window.piDeck.workflows.graphUnsubscribe({ runId });
+          return;
+        }
+        await refetch();
+      })
+      .catch(() => undefined);
+    const unsubscribe = window.piDeck.workflows.onGraphEvent((event) => {
+      if (event.runId !== runId || disposed) return;
+      setWorkflowGraphSnapshot((current) => {
+        if (!current || event.revision === current.revision + 1)
+          return event.snapshot;
+        if (event.revision <= current.revision) return current;
+        // Never invent missed scheduler states; reconcile an observed gap.
+        void refetch();
+        return current;
+      });
+    });
+    return () => {
+      disposed = true;
+      unsubscribe();
+      void window.piDeck.workflows.graphUnsubscribe({ runId });
+    };
+  }, [workflowOccurrenceRunId, workflowView]);
 
   useEffect(() => {
     if (workflowView === undefined) return;
@@ -4207,6 +4261,12 @@ export function App(): ReactElement {
                 selectedWorkflowOccurrenceRun !== undefined ? (
                 <WorkflowOccurrenceRunView
                   run={selectedWorkflowOccurrenceRun}
+                  graphSnapshot={
+                    workflowGraphSnapshot?.runId ===
+                    selectedWorkflowOccurrenceRun.id
+                      ? workflowGraphSnapshot
+                      : undefined
+                  }
                   onBack={() => {
                     setWorkflowOccurrenceRunId(undefined);
                     setWorkflowView("runs");

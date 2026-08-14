@@ -76,6 +76,9 @@ import type {
   canonicalWorkflowListRunsRequestSchema,
   canonicalWorkflowOccurrenceRequestSchema,
   canonicalWorkflowStartRunRequestSchema,
+  workflowGraphEventSchema,
+  workflowGraphSnapshotRequestSchema,
+  workflowGraphSnapshotSchema,
   workflowCreateRequestSchema,
   workflowDefinitionSchema,
   workflowListRequestSchema,
@@ -100,6 +103,8 @@ export type CanonicalWorkflowHumanAnswerRequest = z.infer<
 export type CanonicalWorkflowEvent = z.infer<
   typeof canonicalWorkflowEventSchema
 >;
+export type WorkflowGraphSnapshot = z.infer<typeof workflowGraphSnapshotSchema>;
+export type WorkflowGraphEvent = z.infer<typeof workflowGraphEventSchema>;
 export type ThemePreference = z.infer<typeof themePreferenceSchema>;
 export type AppSettings = z.infer<typeof appSettingsSchema>;
 export type AppBootstrapState = z.infer<typeof appBootstrapStateSchema>;
@@ -359,6 +364,12 @@ export interface PiDeckApi {
     canonicalGetRun(
       request: CanonicalWorkflowGetRunRequest,
     ): Promise<CanonicalWorkflowRun>;
+    graphGetSnapshot(request: {
+      runId: string;
+    }): Promise<WorkflowGraphSnapshot>;
+    graphSubscribe(request: { runId: string }): Promise<void>;
+    graphUnsubscribe(request: { runId: string }): Promise<void>;
+    onGraphEvent(listener: (event: WorkflowGraphEvent) => void): () => void;
     canonicalStartRun(
       request: CanonicalWorkflowStartRunRequest,
     ): Promise<CanonicalWorkflowRun>;

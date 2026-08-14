@@ -201,6 +201,11 @@ export const canonicalWorkflowListRunsRequestSchema = z
 export const canonicalWorkflowGetRunRequestSchema = z
   .object({ runId: z.string().uuid() })
   .strict();
+/** Renderer-safe, run-scoped graph snapshot/read subscription requests. */
+export const workflowGraphSnapshotRequestSchema =
+  canonicalWorkflowGetRunRequestSchema;
+export const workflowGraphSubscriptionRequestSchema =
+  canonicalWorkflowGetRunRequestSchema;
 export const canonicalWorkflowStartRunRequestSchema = z
   .object({
     workflowId: workflowIdSchema,
@@ -405,6 +410,8 @@ export const workflowRunEnvelopeSchema = z
     ]),
     definition: workflowDefinitionSchema,
     inputs: z.record(z.string(), z.string().max(20_000)),
+    /** Persisted monotonic sequence used by graph clients to reject stale updates. */
+    revision: z.number().int().positive().default(1),
     occurrences: z.array(canonicalNodeOccurrenceSchema).max(10_000),
     terminalOutcome: z.string().min(1).max(120).optional(),
     createdAtMs: z.number().finite(),
@@ -434,6 +441,98 @@ export type CanonicalNodeOccurrence = z.infer<
   typeof canonicalNodeOccurrenceSchema
 >;
 export type WorkflowRunEnvelope = z.infer<typeof workflowRunEnvelopeSchema>;
+
+const workflowGraphAggregateStatusSchema = z.enum([
+  "not_started",
+  "queued",
+  "in_progress",
+  "waiting_human",
+  "retrying",
+  "completed",
+  "failed",
+  "skipped",
+  "cancelled",
+  "unknown",
+]);
+const workflowGraphEdgeStatusSchema = z.enum([
+  "pending",
+  "active",
+  "taken",
+  "not_taken",
+  "blocked",
+  "unknown",
+]);
+export const workflowGraphOccurrenceSummarySchema = z
+  .object({
+    occurrenceId: z.string().uuid(),
+    nodeId: nodeIdSchema,
+    status: canonicalNodeOccurrenceSchema.shape.status,
+    attempt: z.number().int().positive(),
+    iteration: z.number().int().positive(),
+    parentOrchestratorRunId: z.string().uuid().optional(),
+    startedAtMs: z.number().finite().optional(),
+    completedAtMs: z.number().finite().optional(),
+    elapsedMs: z.number().finite().nonnegative().optional(),
+    outputSummary: z.string().max(500).optional(),
+    errorSummary: z.string().max(500).optional(),
+    humanInteraction: z.enum(["approval", "choice", "input"]).optional(),
+    sessionFile: z.string().min(1).optional(),
+  })
+  .strict();
+export const workflowGraphSnapshotSchema = z
+  .object({
+    workflowSnapshot: workflowDefinitionSchema,
+    runId: z.string().uuid().optional(),
+    runStatus: z
+      .enum([
+        "waiting",
+        "running",
+        "needsAttention",
+        "completed",
+        "failed",
+        "stopped",
+      ])
+      .optional(),
+    revision: z.number().int().positive(),
+    updatedAtMs: z.number().finite().optional(),
+    nodes: z.array(
+      z
+        .object({
+          nodeId: nodeIdSchema,
+          aggregateStatus: workflowGraphAggregateStatusSchema.optional(),
+          counts: z
+            .partialRecord(
+              workflowGraphAggregateStatusSchema,
+              z.number().int().nonnegative(),
+            )
+            .optional(),
+          occurrences: z
+            .array(workflowGraphOccurrenceSummarySchema)
+            .max(100)
+            .optional(),
+        })
+        .strict(),
+    ),
+    edges: z.array(
+      z
+        .object({
+          relationshipId: z.string().min(1),
+          status: workflowGraphEdgeStatusSchema.optional(),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
+export type WorkflowGraphSnapshot = z.infer<typeof workflowGraphSnapshotSchema>;
+export const workflowGraphEventSchema = z
+  .object({
+    type: z.literal("workflow_graph_updated"),
+    runId: z.string().uuid(),
+    revision: z.number().int().positive(),
+    snapshot: workflowGraphSnapshotSchema,
+  })
+  .strict();
+export type WorkflowGraphEvent = z.infer<typeof workflowGraphEventSchema>;
 export const canonicalWorkflowEventSchema = z
   .object({
     type: z.literal("workflow_occurrence_run_updated"),
