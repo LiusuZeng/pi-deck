@@ -5236,6 +5236,19 @@ body {
   color: var(--color-text-muted);
   font-size: 12px;
 }
+.agent-workflow-graph-input-sources {
+  margin-top: 8px;
+  border-top: 1px solid var(--color-border);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.agent-workflow-graph-input-sources h4,
+.agent-workflow-graph-input-sources ul {
+  margin: 6px 0;
+}
+.agent-workflow-graph-input-sources ul {
+  padding-left: 18px;
+}
 .agent-workflow-graph-node .agent-workflow-graph-managed {
   margin-top: 8px;
   border-top: 1px solid var(--color-border);

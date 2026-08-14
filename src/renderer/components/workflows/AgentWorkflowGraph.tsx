@@ -51,6 +51,33 @@ function countSummary(node: AgentWorkflowGraphNode): string | undefined {
   return parts.join(" · ");
 }
 
+function managedNodes(node: AgentWorkflowGraphNode): AgentWorkflowGraphNode[] {
+  return node.managedNodes.flatMap((child) => [child, ...managedNodes(child)]);
+}
+
+function InputSources(props: {
+  node: AgentWorkflowGraphNode;
+}): ReactElement | null {
+  if (!props.node.inputSources.length) return null;
+  return (
+    <section
+      className="agent-workflow-graph-input-sources"
+      aria-label={`Configured input sources for ${props.node.name}`}
+    >
+      <h4>Configured input sources</h4>
+      <ul>
+        {props.node.inputSources.map((source) => (
+          <li key={`${source.nodeId}:${source.sourceValue}`}>
+            <strong>{source.label ?? source.name}</strong>
+            {source.label ? ` (${source.name})` : ""} · final output · ID:{" "}
+            {source.nodeId}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 function RoleNode(props: {
   node: AgentWorkflowGraphNode;
   selectedNodeId?: string | undefined;
@@ -93,6 +120,7 @@ function RoleNode(props: {
         <p className="agent-workflow-graph-counts">{countSummary(node)}</p>
       ) : null}
       <p>{node.detail}</p>
+      <InputSources node={node} />
     </article>
   );
 }
@@ -278,6 +306,7 @@ export function AgentWorkflowGraph(
                 {node.occurrenceCount !== undefined
                   ? ` — ${node.occurrenceCount} occurrence${node.occurrenceCount === 1 ? "" : "s"}`
                   : ""}
+                <InputSources node={node} />
                 {node.occurrences?.length ? (
                   <ul aria-label={`Occurrences for ${node.name}`}>
                     {node.occurrences.map((occurrence) => (

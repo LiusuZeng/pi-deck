@@ -44,11 +44,20 @@ export interface AgentWorkflowGraphOccurrence {
   errorSummary?: string;
 }
 
+export interface AgentWorkflowGraphInputSource {
+  /** Stable configured identity; display names may be duplicated or renamed. */
+  nodeId: string;
+  name: string;
+  sourceValue: "finalOutput";
+  label?: string;
+}
+
 export interface AgentWorkflowGraphNode {
   id: string;
   name: string;
   role: WorkflowNode["role"];
   detail: string;
+  inputSources: AgentWorkflowGraphInputSource[];
   managedNodes: AgentWorkflowGraphNode[];
   status?: WorkflowGraphStatus;
   counts?: Partial<Record<WorkflowGraphStatus, number>>;
@@ -98,6 +107,15 @@ function routeLabel(node: WorkflowNode, value: boolean | string | undefined) {
     return `${value ? "true" : "false"} (${display})`;
   }
   return value ? "true" : "false";
+}
+
+function layoutHeight(node: WorkflowNode): number {
+  // Input-source annotations are part of the read-only card, not graph edges.
+  // Reserve a row for each so Dagre does not place the next rank underneath it.
+  return (
+    (node.role === "orchestrator" ? 280 : 190) +
+    (node.inputBindings?.length ?? 0) * 56
+  );
 }
 
 function nodeDetail(node: WorkflowNode): string {
@@ -294,6 +312,14 @@ export function deriveAgentWorkflowGraph(
       name: node.name,
       role: node.role,
       detail: nodeDetail(node),
+      inputSources: (node.inputBindings ?? []).map((binding) => ({
+        nodeId: binding.sourceNodeId,
+        // Keep the opaque ID in the projection even where a historical or
+        // malformed definition cannot resolve its display label.
+        name: nodesById.get(binding.sourceNodeId)?.name ?? binding.sourceNodeId,
+        sourceValue: binding.sourceValue,
+        ...(binding.label ? { label: binding.label } : {}),
+      })),
       managedNodes: managed,
       ...(graphNode?.aggregateStatus
         ? {
@@ -370,7 +396,7 @@ export function layoutAgentWorkflowGraph(
   for (const node of definition.nodes) {
     graph.setNode(node.id, {
       width: 240,
-      height: node.role === "orchestrator" ? 280 : 190,
+      height: layoutHeight(node),
     });
   }
   const edges: Omit<WorkflowGraphLayoutEdge, "points">[] = [];

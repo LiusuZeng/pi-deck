@@ -300,6 +300,61 @@ describe("deriveAgentWorkflowGraph", () => {
     ]);
   });
 
+  it("projects configured sources by stable ID even when display names duplicate", () => {
+    const graph = deriveAgentWorkflowGraph({
+      ...definition,
+      nodes: definition.nodes.map((node) => {
+        if (node.id === "00000000-0000-4000-8000-000000000502")
+          return { ...node, name: "Duplicate" };
+        if (node.id === "00000000-0000-4000-8000-000000000503")
+          return {
+            ...node,
+            inputBindings: [
+              {
+                sourceNodeId: "00000000-0000-4000-8000-000000000502",
+                sourceValue: "finalOutput" as const,
+                label: "Prepared input",
+              },
+            ],
+          };
+        return node;
+      }),
+    });
+
+    expect(
+      graph.topLevelNodes.find(
+        (node) => node.id === "00000000-0000-4000-8000-000000000503",
+      )?.inputSources,
+    ).toEqual([
+      {
+        nodeId: "00000000-0000-4000-8000-000000000502",
+        name: "Duplicate",
+        sourceValue: "finalOutput",
+        label: "Prepared input",
+      },
+    ]);
+    expect(
+      layoutAgentWorkflowGraph({
+        ...definition,
+        nodes: definition.nodes.map((node) =>
+          node.id === "00000000-0000-4000-8000-000000000503"
+            ? {
+                ...node,
+                inputBindings: [
+                  {
+                    sourceNodeId: "00000000-0000-4000-8000-000000000502",
+                    sourceValue: "finalOutput" as const,
+                  },
+                ],
+              }
+            : node,
+        ),
+      }).nodes.find(
+        (node) => node.id === "00000000-0000-4000-8000-000000000503",
+      )?.height,
+    ).toBe(336);
+  });
+
   it("labels Human choice routes with their declared options", () => {
     const graph = deriveAgentWorkflowGraph({
       ...definition,

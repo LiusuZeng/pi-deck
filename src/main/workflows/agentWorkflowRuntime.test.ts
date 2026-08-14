@@ -162,6 +162,16 @@ describe("agentWorkflow occurrence runtime", () => {
     const prompt = renderWorkflowOccurrencePrompt(run, deliver);
     expect(prompt).toContain("Selected plan:\nchosen plan");
     expect(prompt).toContain("Selected review:\nincidental review");
+
+    run = startWorkflowOccurrence(run, deliver.id, "deliver-runtime");
+    run = failWorkflowOccurrence(run, deliver.id, "temporary failure");
+    run = retryWorkflowOccurrence(run, deliver.id);
+    const retry = run.occurrences.at(-1)!;
+    expect(retry.attempt).toBe(2);
+    expect(retry.resolvedInputBindings).toEqual(deliver.resolvedInputBindings);
+    expect(renderWorkflowOccurrencePrompt(run, retry)).toContain(
+      "Selected plan:\nchosen plan",
+    );
   });
   it("renders the configured first managed context without an Orchestrator output", () => {
     const definition = fanoutDefinition("all");
@@ -176,6 +186,86 @@ describe("agentWorkflow occurrence runtime", () => {
     expect(renderWorkflowOccurrencePrompt(run, child)).toContain(
       "shared orchestration input",
     );
+  });
+
+  it("passes an immutable bound source to fan-out and loop managed children", () => {
+    const exercise = (mode: "fanout" | "loop") => {
+      const orchestratorId = mode === "fanout" ? ids.fan : ids.loop;
+      const definition: WorkflowRoleDefinition = {
+        ...base,
+        entryNodeId: ids.plan,
+        nodes: [
+          {
+            id: ids.plan,
+            name: "Plan",
+            role: "worker",
+            config: { instructions: "plan" },
+          },
+          {
+            id: orchestratorId,
+            name: mode,
+            role: "orchestrator",
+            inputBindings: [
+              { sourceNodeId: ids.plan, sourceValue: "finalOutput" },
+            ],
+            config:
+              mode === "fanout"
+                ? {
+                    mode: "fanout",
+                    agents: [ids.work],
+                    maxConcurrency: 1,
+                    completion: "all",
+                  }
+                : {
+                    mode: "loop",
+                    agents: [ids.work],
+                    decider: ids.ready,
+                    maxIterations: 2,
+                  },
+          },
+          {
+            id: ids.work,
+            name: "Work",
+            role: "worker",
+            managedBy: orchestratorId,
+            config: { instructions: "work" },
+          },
+          ...(mode === "loop"
+            ? [
+                {
+                  id: ids.ready,
+                  name: "Ready",
+                  role: "decider" as const,
+                  managedBy: orchestratorId,
+                  config: { question: "ready?" },
+                },
+              ]
+            : []),
+        ],
+        relationships: [
+          {
+            id: ids.planReview,
+            from: ids.plan,
+            to: { nodeId: orchestratorId },
+          },
+        ],
+      };
+      let run = createWorkflowRoleRun(definition, "workspace", {}, 1);
+      const plan = run.occurrences[0]!;
+      run = startWorkflowOccurrence(run, plan.id, "plan", undefined, 2);
+      run = completeWorkflowOccurrence(run, plan.id, `${mode} source`, 3);
+      const orchestrator = readyWorkflowOccurrences(run)[0]!;
+      expect(orchestrator.resolvedInputBindings?.[0]?.value).toBe(
+        `${mode} source`,
+      );
+      run = startWorkflowOrchestrator(run, orchestrator.id, 4);
+      const child = readyWorkflowOccurrences(run)[0]!;
+      expect(renderWorkflowOccurrencePrompt(run, child)).toContain(
+        `${mode} source`,
+      );
+    };
+    exercise("fanout");
+    exercise("loop");
   });
 
   it("retains the saved Pi session file on a running occurrence", () => {

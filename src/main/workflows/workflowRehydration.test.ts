@@ -8,9 +8,12 @@ import {
   rehydrateWorkflowRuns,
 } from "./workflowRehydration.js";
 import {
+  completeWorkflowOccurrence,
   createWorkflowRoleRun,
+  retryWorkflowOccurrence,
   startWorkflowOccurrence,
 } from "./agentWorkflowRuntime.js";
+import { renderWorkflowOccurrencePrompt } from "./workflowPromptRenderer.js";
 import { WorkspaceStore } from "../workspaces/workspaceStore.js";
 import type { WorkflowTemplate } from "../../shared/workflowSchemas.js";
 
@@ -161,6 +164,94 @@ describe("workflow rehydration", () => {
       sessionFile: "/tmp/interrupted.jsonl",
     });
     expect(updated[0]?.occurrences[0]).not.toHaveProperty("runtimeId");
+  });
+
+  it("recovers a bound attempt from persisted state and retries its immutable handoff", async () => {
+    const definition = {
+      format: "pi-deck.agent-workflow" as const,
+      schemaVersion: 2 as const,
+      id: "00000000-0000-4000-8000-000000000120",
+      revision: 1,
+      name: "Bound restart",
+      inputs: [],
+      entryNodeId: "00000000-0000-4000-8000-000000000121",
+      nodes: [
+        {
+          id: "00000000-0000-4000-8000-000000000121",
+          name: "Source",
+          role: "worker" as const,
+          config: { instructions: "source" },
+        },
+        {
+          id: "00000000-0000-4000-8000-000000000122",
+          name: "Target",
+          role: "worker" as const,
+          inputBindings: [
+            {
+              sourceNodeId: "00000000-0000-4000-8000-000000000121",
+              sourceValue: "finalOutput" as const,
+              label: "Saved source",
+            },
+          ],
+          config: { instructions: "target" },
+        },
+      ],
+      relationships: [
+        {
+          id: "00000000-0000-4000-8000-000000000123",
+          from: "00000000-0000-4000-8000-000000000121",
+          to: { nodeId: "00000000-0000-4000-8000-000000000122" },
+        },
+      ],
+    };
+    let persisted = createWorkflowRoleRun(definition, "workspace", {}, 1);
+    persisted = startWorkflowOccurrence(
+      persisted,
+      persisted.occurrences[0]!.id,
+      "source-runtime",
+      undefined,
+      2,
+    );
+    persisted = completeWorkflowOccurrence(
+      persisted,
+      persisted.occurrences[0]!.id,
+      "persisted output",
+      3,
+    );
+    const target = persisted.occurrences.at(-1)!;
+    persisted = startWorkflowOccurrence(
+      persisted,
+      target.id,
+      "target-runtime",
+      undefined,
+      4,
+    );
+    let recovered: typeof persisted | undefined;
+    await rehydrateCanonicalWorkflowRuns(
+      [persisted],
+      {
+        resolveWorkspace: async () => undefined,
+        updateRun: async (run) => {
+          recovered = run;
+          return run;
+        },
+        schedule: async (run) => run,
+        emit: () => undefined,
+        recordError: () => undefined,
+      },
+      5,
+    );
+    expect(recovered?.occurrences.at(-1)).toMatchObject({
+      status: "failed",
+      resolvedInputBindings: [
+        { label: "Saved source", value: "persisted output" },
+      ],
+    });
+    const retried = retryWorkflowOccurrence(recovered!, target.id, 6);
+    const retry = retried.occurrences.at(-1)!;
+    expect(renderWorkflowOccurrencePrompt(retried, retry)).toContain(
+      "Saved source:\npersisted output",
+    );
   });
 
   it("removes stale runtime IDs from completed records but keeps reopen files", async () => {

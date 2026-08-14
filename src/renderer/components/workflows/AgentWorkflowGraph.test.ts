@@ -192,6 +192,39 @@ describe("AgentWorkflowGraph", () => {
     );
   });
 
+  it("renders configured source annotations in the canvas and text alternative", () => {
+    render({
+      ...semanticGraphDefinition,
+      nodes: semanticGraphDefinition.nodes.map((node) =>
+        node.id === "00000000-0000-4000-8000-000000000503"
+          ? {
+              ...node,
+              inputBindings: [
+                {
+                  sourceNodeId: "00000000-0000-4000-8000-000000000502",
+                  sourceValue: "finalOutput" as const,
+                  label: "Prepared input",
+                },
+              ],
+            }
+          : node,
+      ),
+    });
+
+    const annotations = container!.querySelectorAll(
+      '[aria-label="Configured input sources for Iterate"]',
+    );
+    expect(annotations).toHaveLength(2);
+    for (const annotation of annotations) {
+      expect(annotation.textContent).toContain("Prepared input");
+      expect(annotation.textContent).toContain("Prepare");
+      expect(annotation.textContent).toContain("final output");
+      expect(annotation.textContent).toContain(
+        "00000000-0000-4000-8000-000000000502",
+      );
+    }
+  });
+
   it("distinguishes in-progress execution from completed execution", () => {
     render(semanticGraphDefinition, [
       {
