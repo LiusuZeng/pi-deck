@@ -188,6 +188,7 @@ class FakeRpcServer {
   ];
 
   start(): void {
+    this.rehydratePersistedMessages();
     this.ensurePersistedSessionRecord();
     if (this.options.stderrOnStart) {
       process.stderr.write("fake-rpc: deterministic stderr diagnostic\n");
@@ -242,6 +243,49 @@ class FakeRpcServer {
       }
     } catch {
       // Fake persistence is best-effort and should not break RPC tests.
+    }
+  }
+
+  /**
+   * The real Pi RPC process reconstructs get_messages from --session. Mirror
+   * that behavior so a fake real-mode resume exercises the same snapshot path
+   * after the worker (and app) have restarted.
+   */
+  private rehydratePersistedMessages(): void {
+    if (!this.options.sessionFile || !fs.existsSync(this.sessionFile)) {
+      return;
+    }
+    try {
+      const messages: PiMessage[] = [];
+      for (const line of fs
+        .readFileSync(this.sessionFile, "utf8")
+        .split(/\r?\n/)) {
+        if (line.trim().length === 0) {
+          continue;
+        }
+        const record = JSON.parse(line) as unknown;
+        if (!record || typeof record !== "object" || Array.isArray(record)) {
+          continue;
+        }
+        const message = (record as { message?: unknown }).message;
+        if (
+          !message ||
+          typeof message !== "object" ||
+          Array.isArray(message) ||
+          typeof (message as { role?: unknown }).role !== "string"
+        ) {
+          continue;
+        }
+        messages.push(message as PiMessage);
+      }
+      if (messages.length > 0) {
+        this.messages = messages;
+        this.promptCounter = messages.filter(
+          (message) => message.role === "user",
+        ).length;
+      }
+    } catch {
+      // A damaged fixture should retain the deterministic new-session state.
     }
   }
 

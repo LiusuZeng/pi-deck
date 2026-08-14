@@ -2473,6 +2473,7 @@ test("real mode lists a newly prompted session after restart with fake Pi", asyn
   fs.mkdirSync(projectCwd, { recursive: true });
   fs.mkdirSync(agentDir, { recursive: true });
   const env = fakeRealModeEnv({ root, projectCwd, agentDir });
+  const token = `persisted-restart-${Date.now()}`;
 
   const firstLaunch = await launchPiDeck(env);
   try {
@@ -2480,10 +2481,12 @@ test("real mode lists a newly prompted session after restart with fake Pi", asyn
     await selectWorkspaceInUi(firstLaunch.page, path.basename(projectCwd));
     await firstLaunch.page
       .getByLabel("Prompt text")
-      .fill("persisted restart session");
+      .fill(`persisted restart session ${token}`);
     await firstLaunch.page.getByRole("button", { name: "Send" }).click();
     await expect(
-      firstLaunch.page.getByText(/Fake response to: persisted restart session/),
+      firstLaunch.page.getByText(
+        `Fake response to: persisted restart session ${token}`,
+      ),
     ).toBeVisible();
   } finally {
     await firstLaunch.app.close();
@@ -2500,6 +2503,12 @@ test("real mode lists a newly prompted session after restart with fake Pi", asyn
     await persistedSession.click();
     await expect(
       secondLaunch.page.getByText("Resumed saved Pi session."),
+    ).toBeVisible();
+    await expect(
+      secondLaunch.page
+        .getByLabel("Chat / Agent Timeline")
+        .getByText(token)
+        .first(),
     ).toBeVisible();
   } finally {
     await secondLaunch.app.close();

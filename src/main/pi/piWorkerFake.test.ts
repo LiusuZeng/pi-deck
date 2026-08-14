@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -77,6 +77,62 @@ test("PiWorker gets deterministic state and messages from fake RPC", async () =>
     assert.equal(messages[0].content, "Fake RPC ready");
   } finally {
     await worker.closeSession();
+  }
+});
+
+test("PiWorker rehydrates persisted fake real-mode messages for --session", async () => {
+  const sessionDir = mkdtempSync(path.join(tmpdir(), "pi-deck-fake-session-"));
+  const sessionFile = path.join(sessionDir, "rehydrated.jsonl");
+  const token = "persisted-rehydration-token";
+  writeFileSync(
+    sessionFile,
+    [
+      JSON.stringify({
+        type: "session",
+        version: 3,
+        id: "rehydrated",
+        timestamp: "2026-01-01T00:00:00.000Z",
+        cwd: process.cwd(),
+      }),
+      JSON.stringify({
+        type: "message",
+        message: {
+          id: "user-1",
+          role: "user",
+          content: `Remember ${token}`,
+          createdAt: 10,
+        },
+      }),
+      JSON.stringify({
+        type: "message",
+        message: {
+          id: "assistant-1",
+          role: "assistant",
+          content: [{ type: "text", text: `Answered ${token}` }],
+          usage: { input: 3, output: 5, total: 8 },
+          createdAt: 11,
+        },
+      }),
+    ].join("\n") + "\n",
+  );
+  const worker = createWorker(["--session", sessionFile]);
+  try {
+    const messages = await worker.getMessages();
+    assert.deepEqual(
+      messages.map((message) => message.id),
+      ["user-1", "assistant-1"],
+    );
+    assert.equal(
+      JSON.stringify(messages[1]?.content),
+      JSON.stringify([{ type: "text", text: `Answered ${token}` }]),
+    );
+    assert.equal(
+      JSON.stringify(messages[1]?.usage),
+      JSON.stringify({ input: 3, output: 5, total: 8 }),
+    );
+  } finally {
+    await worker.closeSession();
+    rmSync(sessionDir, { recursive: true, force: true });
   }
 });
 
