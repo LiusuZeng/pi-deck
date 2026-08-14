@@ -108,6 +108,7 @@ import { MultitaskStateStore } from "./multitask/multitaskStateStore.js";
 import { DelegationBridgeServer, type DelegateRequest } from "./multitask/delegationBridgeServer.js";
 import { writeDeckDelegateExtension, DECK_DELEGATE_CAPABILITY_ENV, DECK_DELEGATE_ENDPOINT_ENV, DECK_DELEGATE_PARENT_RUNTIME_ENV } from "./multitask/deckDelegateExtensionGenerator.js";
 import { MultitaskSupervisor, type ChildWorkerCallbacks, type ParentTaskNotification } from "./multitask/multitaskSupervisor.js";
+import { PersistedRuntimeResumeGuard } from "./multitask/persistedRuntimeResumeGuard.js";
 import { deliverWithAttachmentConsumption } from "./attachmentDelivery.js";
 import {
   AttachmentSelectionStore,
@@ -131,6 +132,9 @@ const realChatLaunchConfigCache = new RealChatLaunchConfigCache();
 let diagnostics: DiagnosticsService | undefined;
 let multitaskStateStore: MultitaskStateStore | undefined;
 const multitaskManagers = new Map<string, MultitaskManager>();
+// Snapshot reads happen often. A persisted session is rehydrated exactly once
+// when attached; later reads must not close live private children.
+const multitaskRuntimeResumeGuard = new PersistedRuntimeResumeGuard();
 let delegationBridge: DelegationBridgeServer | undefined;
 let delegationCredentials: { socketPath: string } | undefined;
 let multitaskSupervisor: MultitaskSupervisor<string, string, { close(): Promise<void>; provideInput(input: string): Promise<void> }> | undefined;
@@ -1010,7 +1014,25 @@ async function handleDelegateRequest(request: DelegateRequest): Promise<void> {
     delegationBridge?.sendChildResult({ connectionId: request.connectionId, toolCallId: request.toolCallId, outcome: "failed", handoff: { summary: "Parallel multitasking is not enabled for this parent." } });
     return;
   }
-  if (!payload || typeof payload !== "object" || Array.isArray(payload) || typeof (payload as { task?: unknown }).task !== "string") {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    delegationBridge.sendChildResult({ connectionId: request.connectionId, toolCallId: request.toolCallId, outcome: "failed", handoff: { summary: "Invalid delegate action." } });
+    return;
+  }
+  const inputAction = payload as { action?: unknown; taskNumber?: unknown; input?: unknown };
+  if (inputAction.action === "provide_input") {
+    if (!Number.isSafeInteger(inputAction.taskNumber) || (inputAction.taskNumber as number) < 1 || typeof inputAction.input !== "string" || !inputAction.input.trim()) {
+      delegationBridge.sendChildResult({ connectionId: request.connectionId, toolCallId: request.toolCallId, outcome: "failed", handoff: { summary: "A task number and input are required." } });
+      return;
+    }
+    try {
+      await supervisor.provideInput(parentId, inputAction.taskNumber as number, inputAction.input);
+      delegationBridge.sendChildResult({ connectionId: request.connectionId, toolCallId: request.toolCallId, outcome: "completed", handoff: { summary: `Input delivered to task #${inputAction.taskNumber}.` } });
+    } catch (error) {
+      delegationBridge.sendChildResult({ connectionId: request.connectionId, toolCallId: request.toolCallId, outcome: "failed", handoff: { summary: error instanceof Error ? error.message : "Unable to deliver input." } });
+    }
+    return;
+  }
+  if (typeof (payload as { task?: unknown }).task !== "string") {
     delegationBridge.sendChildResult({ connectionId: request.connectionId, toolCallId: request.toolCallId, outcome: "failed", handoff: { summary: "Invalid delegate task." } });
     return;
   }
@@ -1358,6 +1380,7 @@ function forgetChatRuntime(
   chatRuntimeSessionFiles.delete(runtimeId);
   chatRuntimeProjectIds.delete(runtimeId);
   multitaskManagers.delete(runtimeId);
+  multitaskRuntimeResumeGuard.forget(runtimeId);
   delegationBridge?.removeParent(runtimeId);
   for (const [key, call] of delegateCalls) {
     if (key.startsWith(`${runtimeId}:`)) {
@@ -1448,7 +1471,7 @@ function handleMultitaskNotification(notification: ParentTaskNotification<string
   const call = delegateCalls.get(key);
   const bridge = delegationBridge;
   if (notification.type === "task-status") {
-    bridge?.sendChildLifecycle({ connectionId: call?.connectionId ?? "", toolCallId: call?.toolCallId ?? "", status: notification.task.status });
+    bridge?.sendChildLifecycle({ connectionId: call?.connectionId ?? "", toolCallId: call?.toolCallId ?? "", taskNumber: notification.task.number, status: notification.task.status });
   } else {
     const outcome = notification.task.status === "completed" ? "completed" : notification.task.status === "cancelled" ? "cancelled" : "failed";
     bridge?.sendChildResult({ connectionId: call?.connectionId ?? "", toolCallId: call?.toolCallId ?? "", outcome, handoff: notification.handoff });
@@ -3168,9 +3191,11 @@ async function reconcileMultitaskRuntime(
   if (saved) {
     multitaskManagers.get(runtimeId)?.setMode(saved.mode);
   }
-  // Resume never revives private child processes; the supervisor converts
-  // previously live work into safe interrupted terminal handoffs.
-  if (multitaskSupervisor) await multitaskSupervisor.resume(runtimeId, saved);
+  // Resume is destructive to retained private children. It is valid only for
+  // the first attachment of persisted state, never for ordinary snapshots.
+  if (multitaskSupervisor && multitaskRuntimeResumeGuard.claim(runtimeId, saved !== undefined)) {
+    await multitaskSupervisor.resume(runtimeId, saved);
+  }
 }
 
 async function persistMultitaskManager(

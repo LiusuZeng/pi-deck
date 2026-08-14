@@ -57,6 +57,9 @@ export const childLifecycleMessageSchema = z
   .object({
     ...childMessage,
     type: z.literal("child-lifecycle"),
+    // Public task numbers are stable routing keys, never child runtime IDs.
+    // Optional for v1 bridge compatibility; production waiting-input events set it.
+    taskNumber: z.number().int().positive().optional(),
     status: z.enum([
       "queued",
       "running",

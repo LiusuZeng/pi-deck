@@ -16,12 +16,17 @@ export interface DeckDelegateRequest {
   toolCallId: string;
   task: string;
   name?: string;
+  action?: "provide_input";
+  taskNumber?: number;
+  input?: string;
 }
 
 export interface DeckDelegateLifecycleMessage {
   version: typeof DECK_DELEGATE_PROTOCOL_VERSION;
   type: "lifecycle";
   toolCallId: string;
+  /** Stable public task routing key; never a child/session identity. */
+  taskNumber?: number;
   status: "started" | "progress" | "input-needed";
   message?: string;
 }
@@ -86,11 +91,15 @@ export interface DeckDelegateRequest {
   toolCallId: string;
   task: string;
   name?: string;
+  action?: "provide_input";
+  taskNumber?: number;
+  input?: string;
 }
 export interface DeckDelegateLifecycleMessage {
   version: 1;
   type: "lifecycle";
   toolCallId: string;
+  taskNumber?: number;
   status: "started" | "progress" | "input-needed";
   message?: string;
 }
@@ -133,6 +142,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function lifecycle(value: unknown, toolCallId: string): DeckDelegateLifecycleMessage | undefined {
   if (!isRecord(value) || value.version !== 1 || value.type !== "lifecycle" || value.toolCallId !== toolCallId) return undefined;
   if (value.status !== "started" && value.status !== "progress" && value.status !== "input-needed") return undefined;
+  if (value.taskNumber !== undefined && (!Number.isSafeInteger(value.taskNumber) || value.taskNumber < 1)) return undefined;
   if (value.message !== undefined && (typeof value.message !== "string" || value.message.length > MAX_TASK_CHARS)) return undefined;
   return value as DeckDelegateLifecycleMessage;
 }
@@ -152,12 +162,13 @@ function writeJsonLine(socket: Socket, value: unknown): void {
 function relay(pi: ExtensionAPI, message: DeckDelegateLifecycleMessage | DeckDelegateResultMessage): void {
   const inputNeeded = message.type === "lifecycle" && message.status === "input-needed";
   const text = message.type === "result" ? message.text : (message.message || message.status);
+  const taskNumber = message.type === "lifecycle" ? message.taskNumber : undefined;
   try {
     pi.sendMessage({
       customType: "deck_delegate",
-      content: (inputNeeded ? "Deck child needs input: " : "Deck child result: ") + text,
+      content: (inputNeeded ? "Deck child task #" + taskNumber + " needs input: " : "Deck child result: ") + text + (inputNeeded ? ". Ask the user, then call deck_delegate with action provide_input, this taskNumber, and their answer." : ""),
       display: true,
-      details: { version: 1, type: message.type, toolCallId: message.toolCallId, status: message.type === "lifecycle" ? message.status : undefined, ok: message.type === "result" ? message.ok : undefined },
+      details: { version: 1, type: message.type, status: message.type === "lifecycle" ? message.status : undefined, taskNumber, ok: message.type === "result" ? message.ok : undefined },
     }, { deliverAs: "steer", triggerTurn: true });
   } catch {
     // A relay failure must not orphan or change the actual delegate result.
@@ -206,15 +217,15 @@ function delegate(pi: ExtensionAPI, request: DeckDelegateRequest, endpoint: Endp
         if (!authenticated) {
           if (isRecord(parsed) && parsed.version === 1 && parsed.type === "authenticated") {
             authenticated = true;
-            try { writeJsonLine(socket, { version: 1, type: "delegate", toolCallId: request.toolCallId, payload: { task: request.task, parentRuntimeId: process.env[DECK_DELEGATE_PARENT_RUNTIME_ENV], ...(request.name ? { name: request.name } : {}) } }); } catch (error) { return fail(error instanceof Error ? error : new Error("Unable to send Deck delegate")); }
+            try { writeJsonLine(socket, { version: 1, type: "delegate", toolCallId: request.toolCallId, payload: { task: request.task, parentRuntimeId: process.env[DECK_DELEGATE_PARENT_RUNTIME_ENV], ...(request.name ? { name: request.name } : {}), ...(request.action === "provide_input" ? { action: "provide_input", taskNumber: request.taskNumber, input: request.input } : {}) } }); } catch (error) { return fail(error instanceof Error ? error : new Error("Unable to send Deck delegate")); }
             continue;
           }
           return fail(new Error("Deck delegate authentication failed"));
         }
-        const event = isRecord(parsed) && parsed.version === 1 && parsed.type === "child-lifecycle" && parsed.toolCallId === request.toolCallId
-          ? { status: parsed.status } : undefined;
+        const event = isRecord(parsed) && parsed.version === 1 && parsed.type === "child-lifecycle" && parsed.toolCallId === request.toolCallId && Number.isSafeInteger(parsed.taskNumber) && (parsed.taskNumber as number) > 0
+          ? { status: parsed.status, taskNumber: parsed.taskNumber as number } : undefined;
         if (event) {
-          if (event.status === "waiting-input") relay(pi, { version: 1, type: "lifecycle", toolCallId: request.toolCallId, status: "input-needed", message: "Child needs input" });
+          if (event.status === "waiting-input") relay(pi, { version: 1, type: "lifecycle", toolCallId: request.toolCallId, taskNumber: event.taskNumber, status: "input-needed", message: "Child needs input" });
           continue;
         }
         const final = isRecord(parsed) && parsed.version === 1 && parsed.type === "child-result" && parsed.toolCallId === request.toolCallId
@@ -242,13 +253,28 @@ export default function deckDelegateExtension(pi: ExtensionAPI): void {
     label: "Delegate to Deck child",
     description: "Delegate an interactive child task to Pi Deck.",
     parameters: Type.Object({
-      task: Type.String({ minLength: 1, maxLength: MAX_TASK_CHARS, description: "Task for the Deck child" }),
+      action: Type.Optional(Type.Union([Type.Literal("delegate"), Type.Literal("provide_input")])),
+      task: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_TASK_CHARS, description: "Task for a new Deck child" })),
       name: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_NAME_CHARS, description: "Optional child name" })),
+      taskNumber: Type.Optional(Type.Integer({ minimum: 1, description: "Task number from the input-needed notification" })),
+      input: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_TASK_CHARS, description: "User answer for that child" })),
     }),
     async execute(toolCallId, params, signal) {
       try {
         const config = configuration();
-        const request: DeckDelegateRequest = { version: 1, type: "delegate", capability: config.capability, toolCallId, task: params.task, ...(params.name ? { name: params.name } : {}) };
+        const action = params.action || "delegate";
+        const task = action === "provide_input"
+          ? undefined
+          : (typeof params.task === "string" ? params.task : undefined);
+        if (action === "delegate" && !task) throw new Error("task is required when delegating");
+        if (action === "provide_input" && (!params.taskNumber || !params.input)) throw new Error("taskNumber and input are required when providing input");
+        const request: DeckDelegateRequest = { version: 1, type: "delegate", capability: config.capability, toolCallId, task: task || "", ...(params.name ? { name: params.name } : {}) };
+        // The authenticated bridge maps this supported tool action by public task number.
+        if (action === "provide_input") {
+          request.action = "provide_input";
+          request.taskNumber = params.taskNumber!;
+          request.input = params.input!;
+        }
         const final = await delegate(pi, request, config.endpoint, signal);
         return { content: [{ type: "text", text: final.text }], details: { ok: final.ok, serverDetails: final.details } };
       } catch (error) {

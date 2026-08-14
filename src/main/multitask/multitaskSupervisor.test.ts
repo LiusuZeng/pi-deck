@@ -141,6 +141,14 @@ describe("MultitaskSupervisor", () => {
     await supervisor.provideInput("parent", 1, "main-only answer");
     expect(input).toBe("main-only answer");
     expect(supervisor.snapshots("parent")[0].status).toBe("running");
+    // The same retained private worker completes after the main-agent route.
+    workers.get(1)!.callbacks.completed({ summary: "answer applied" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(supervisor.snapshots("parent")[0]).toEqual({
+      number: 1,
+      name: "one",
+      status: "completed",
+    });
   });
 
   it("resume closes live children and turns live saved tasks into safe interruption handoffs", async () => {

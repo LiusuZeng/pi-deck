@@ -46,5 +46,7 @@ describe("Deck delegate extension source generator", () => {
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain("pi.sendMessage");
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain('event.status === "waiting-input"');
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain("relay(pi, message)");
+    expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain('"provide_input"');
+    expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain("taskNumber");
   });
 });

@@ -49,6 +49,8 @@ export interface DelegateRequest {
 export interface ChildLifecycleMessage {
   connectionId: string;
   toolCallId: string;
+  /** Stable public task routing key; never a private child runtime identity. */
+  taskNumber?: number;
   status: ChildLifecycleStatus;
 }
 
@@ -206,11 +208,12 @@ export class DelegationBridgeServer {
 
   /** Send safe child progress to the connection that originated this tool call. */
   public sendChildLifecycle(message: ChildLifecycleMessage): boolean {
-    const { connectionId, toolCallId, status } = message;
+    const { connectionId, toolCallId, taskNumber, status } = message;
     const parsed = childLifecycleMessageSchema.safeParse({
       version: DELEGATION_BRIDGE_PROTOCOL_VERSION,
       type: "child-lifecycle",
       toolCallId,
+      ...(taskNumber === undefined ? {} : { taskNumber }),
       status,
     });
     return parsed.success && this.send(connectionId, toolCallId, parsed.data);
