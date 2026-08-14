@@ -19,6 +19,10 @@ import {
   chatRespondToExtensionUiRequestSchema,
   chatRuntimeStatusRequestSchema,
   chatRuntimeStatusSchema,
+  multitaskModeRequestSchema,
+  multitaskModeUpdateRequestSchema,
+  multitaskStateEventSchema,
+  multitaskTaskSummarySchema,
   pickProjectResultSchema,
   projectRefSchema,
 } from "./ipcSchemas.js";
@@ -204,6 +208,60 @@ describe("IPC schemas", () => {
           isAgentActive: false,
           model: { id: "model-1", unboundedModelPayload: "nope" },
         },
+      }),
+    ).toThrow();
+  });
+
+  it("limits multitask contracts to parent-scoped mode and safe summaries", () => {
+    expect(multitaskModeRequestSchema.parse({ parentTaskNumber: 7 })).toEqual({
+      parentTaskNumber: 7,
+    });
+    expect(
+      multitaskModeUpdateRequestSchema.parse({
+        parentTaskNumber: 7,
+        mode: "parallel",
+      }),
+    ).toEqual({ parentTaskNumber: 7, mode: "parallel" });
+    expect(
+      multitaskStateEventSchema.parse({
+        parentTaskNumber: 7,
+        mode: "sequential",
+        tasks: [
+          { taskNumber: 8, generatedName: "Task 8", status: "waiting-input" },
+        ],
+      }),
+    ).toMatchObject({ parentTaskNumber: 7 });
+
+    expect(() =>
+      multitaskModeRequestSchema.parse({ parentTaskNumber: 0 }),
+    ).toThrow();
+    expect(() =>
+      multitaskModeUpdateRequestSchema.parse({
+        parentTaskNumber: 7,
+        mode: "parallel",
+        childRuntimeId: "not-renderer-safe",
+      }),
+    ).toThrow();
+    expect(() =>
+      multitaskTaskSummarySchema.parse({
+        taskNumber: 8,
+        generatedName: "Task 8",
+        status: "running",
+        sessionFile: "/private/session.jsonl",
+      }),
+    ).toThrow();
+    expect(() =>
+      multitaskStateEventSchema.parse({
+        parentTaskNumber: 7,
+        mode: "parallel",
+        tasks: [
+          {
+            taskNumber: 8,
+            generatedName: "Task 8",
+            status: "queued",
+            prompt: "private child prompt",
+          },
+        ],
       }),
     ).toThrow();
   });

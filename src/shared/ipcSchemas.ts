@@ -596,6 +596,56 @@ export const pickAttachmentsResultSchema = z.discriminatedUnion("selected", [
     .strict(),
 ]);
 
+// Interactive multitasking is scoped exclusively by the parent task's stable
+// renderer-facing number. Runtime/session identifiers must not cross this
+// boundary: child execution remains owned by the main process.
+export const multitaskModeSchema = z.enum(["sequential", "parallel"]);
+
+const multitaskParentTaskNumberSchema = z.number().int().positive();
+
+export const multitaskModeRequestSchema = z
+  .object({
+    parentTaskNumber: multitaskParentTaskNumberSchema,
+  })
+  .strict();
+
+export const multitaskModeUpdateRequestSchema = z
+  .object({
+    parentTaskNumber: multitaskParentTaskNumberSchema,
+    mode: multitaskModeSchema,
+  })
+  .strict();
+
+export const multitaskModeStateSchema = z
+  .object({
+    parentTaskNumber: multitaskParentTaskNumberSchema,
+    mode: multitaskModeSchema,
+  })
+  .strict();
+
+// This intentionally remains a projection, rather than a task DTO. In
+// particular, it cannot disclose runtime IDs, session files, prompts, output,
+// child controls, or transcript data to the renderer.
+export const multitaskTaskSummarySchema = z
+  .object({
+    taskNumber: z.number().int().positive(),
+    generatedName: z.string().min(1),
+    status: z.enum([
+      "queued",
+      "running",
+      "waiting-input",
+      "completed",
+      "failed",
+    ]),
+  })
+  .strict();
+
+export const multitaskStateEventSchema = multitaskModeStateSchema
+  .extend({
+    tasks: z.array(multitaskTaskSummarySchema),
+  })
+  .strict();
+
 export const ipcErrorSchema = z
   .object({
     code: z.string(),
@@ -647,6 +697,9 @@ export const ipcChannels = {
   attachmentsRelease: "attachments:release",
   attachmentsReleaseOwner: "attachments:releaseOwner",
   attachmentsAssignOwner: "attachments:assignOwner",
+  multitaskGetMode: "multitask:getMode",
+  multitaskUpdateMode: "multitask:updateMode",
+  multitaskState: "multitask:state",
 } as const;
 
 export type IpcChannel = (typeof ipcChannels)[keyof typeof ipcChannels];
