@@ -496,6 +496,7 @@ function route(
       const scope = bindingScope(
         source.parentOrchestratorRunId,
         source.iteration,
+        source.role === "orchestrator" ? source.id : undefined,
       );
       if (
         hasExplicitBindings(next, targetId) &&
@@ -595,7 +596,10 @@ function hasExplicitBindings(run: WorkflowRoleRun, nodeId: string): boolean {
 type BindingScope = Pick<
   WorkflowOccurrence,
   "parentOrchestratorRunId" | "iteration"
->;
+> & {
+  /** A fan-out successor resolves managed Workers from this exact completed container. */
+  fanoutOrchestratorRunId?: string;
+};
 type ResolvedInputBinding = WorkflowNodeInputBinding & {
   value: string;
   sourceOccurrenceId?: string | undefined;
@@ -604,9 +608,11 @@ type ResolvedInputBinding = WorkflowNodeInputBinding & {
 function bindingScope(
   parentOrchestratorRunId: string | undefined,
   iteration: number,
+  fanoutOrchestratorRunId?: string,
 ): BindingScope {
   return {
     ...(parentOrchestratorRunId ? { parentOrchestratorRunId } : {}),
+    ...(fanoutOrchestratorRunId ? { fanoutOrchestratorRunId } : {}),
     iteration,
   };
 }
@@ -616,13 +622,27 @@ function bindingCandidates(
   binding: WorkflowNodeInputBinding,
   scope: BindingScope,
 ): WorkflowOccurrence[] {
+  const sourceNode = node(run.definition, binding.sourceNodeId);
+  const sourceOwner = sourceNode.managedBy
+    ? node(run.definition, sourceNode.managedBy)
+    : undefined;
+  const fanoutSource =
+    sourceOwner?.role === "orchestrator" &&
+    sourceOwner.config.mode === "fanout";
+  const sourceParentOrchestratorRunId = fanoutSource
+    ? scope.fanoutOrchestratorRunId
+    : scope.parentOrchestratorRunId;
+  // A fan-out source is valid only when routing from its own completed
+  // Orchestrator occurrence. This prevents a later/retried fan-out or a
+  // reordered persisted occurrence array from changing a bound handoff.
+  if (fanoutSource && !sourceParentOrchestratorRunId) return [];
   return run.occurrences
     .filter(
       (occurrence) =>
         occurrence.nodeId === binding.sourceNodeId &&
         occurrence.status === "completed" &&
         occurrence.output !== undefined &&
-        occurrence.parentOrchestratorRunId === scope.parentOrchestratorRunId &&
+        occurrence.parentOrchestratorRunId === sourceParentOrchestratorRunId &&
         occurrence.iteration === scope.iteration,
     )
     .sort(

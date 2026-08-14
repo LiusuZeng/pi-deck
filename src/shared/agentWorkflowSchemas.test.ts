@@ -313,6 +313,54 @@ describe("agentWorkflow workflow contracts", () => {
     expect(workflowDefinitionSchema.safeParse(definition).success).toBe(true);
   });
 
+  it("accepts a fan-out Worker binding only on its immediate unmanaged successor", () => {
+    const definition = base();
+    definition.nodes = definition.nodes
+      .filter((node) => node.id !== ids.ready)
+      .map((node) =>
+        node.id === ids.delivery
+          ? {
+              ...node,
+              config: {
+                mode: "fanout" as const,
+                agents: [ids.implement],
+                maxConcurrency: 1,
+                completion: "all" as const,
+              },
+            }
+          : node.id === ids.approval
+            ? {
+                ...node,
+                inputBindings: [
+                  {
+                    sourceNodeId: ids.implement,
+                    sourceValue: "finalOutput" as const,
+                  },
+                ],
+              }
+            : node,
+      ) as typeof definition.nodes;
+    expect(workflowDefinitionSchema.safeParse(definition).success).toBe(true);
+
+    const anyCompletion = structuredClone(definition);
+    const fanout = anyCompletion.nodes.find((node) => node.id === ids.delivery);
+    if (!fanout || fanout.role !== "orchestrator") throw new Error("fixture");
+    fanout.config = {
+      ...fanout.config,
+      completion: "any",
+    } as typeof fanout.config;
+    expect(workflowDefinitionSchema.safeParse(anyCompletion).success).toBe(
+      false,
+    );
+
+    const indirect = structuredClone(definition);
+    indirect.relationships[1] = {
+      ...indirect.relationships[1]!,
+      from: ids.plan,
+    };
+    expect(workflowDefinitionSchema.safeParse(indirect).success).toBe(false);
+  });
+
   it("rejects non-worker explicit binding sources", () => {
     const definition = base();
     const plan = definition.nodes.find((node) => node.id === ids.plan);

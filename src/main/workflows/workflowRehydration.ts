@@ -39,8 +39,12 @@ export async function rehydrateCanonicalWorkflowRuns(
   for (const persisted of persistedRuns) {
     if (workspaceId !== undefined && persisted.workspaceId !== workspaceId)
       continue;
+    // Orchestrators have no Pi session and can safely retain their durable
+    // coordination state; only Worker/Decider session owners are lost.
     const lostRunning = persisted.occurrences.some(
-      (item) => item.status === "running",
+      (item) =>
+        item.status === "running" &&
+        (item.role === "worker" || item.role === "decider"),
     );
     const hasQueued = persisted.occurrences.some(
       (item) => item.status === "queued",
@@ -50,19 +54,60 @@ export async function rehydrateCanonicalWorkflowRuns(
     const hasRuntimeId = persisted.occurrences.some(
       (item) => item.runtimeId !== undefined,
     );
+    // Fan-out queues are normally released by a child terminal transition.
+    // After a capacity queue survives restart there may be no active child to
+    // produce that transition, so deterministically refill each running
+    // fan-out's available slots (creation time, then occurrence ID).
+    const resumableFanoutQueued = new Set<string>();
+    for (const owner of persisted.occurrences) {
+      const definitionNode = persisted.definition.nodes.find(
+        (node) => node.id === owner.nodeId,
+      );
+      if (
+        owner.role !== "orchestrator" ||
+        owner.status !== "running" ||
+        definitionNode?.role !== "orchestrator" ||
+        definitionNode.config.mode !== "fanout"
+      )
+        continue;
+      const children = persisted.occurrences.filter(
+        (item) =>
+          item.parentOrchestratorRunId === owner.id &&
+          item.iteration === owner.iteration &&
+          item.role === "worker",
+      );
+      const active = children.filter((item) =>
+        ["ready", "running"].includes(item.status),
+      ).length;
+      const available = definitionNode.config.maxConcurrency - active;
+      if (available <= 0) continue;
+      children
+        .filter((item) => item.status === "queued")
+        .sort(
+          (left, right) =>
+            left.createdAtMs - right.createdAtMs ||
+            left.id.localeCompare(right.id),
+        )
+        .slice(0, available)
+        .forEach((item) => resumableFanoutQueued.add(item.id));
+    }
     const recovered =
       lostRunning || hasQueued || hasRuntimeId
         ? workflowRunEnvelopeSchema.parse({
             ...persisted,
             status: lostRunning
               ? "needsAttention"
-              : hasQueued
+              : hasQueued &&
+                  !persisted.occurrences.some(
+                    (item) => item.status === "running",
+                  )
                 ? "waiting"
                 : persisted.status,
             updatedAtMs: now,
             occurrences: persisted.occurrences.map((item) => {
               const { runtimeId: _runtimeId, ...withoutRuntimeId } = item;
-              return item.status === "running"
+              return item.status === "running" &&
+                (item.role === "worker" || item.role === "decider")
                 ? {
                     ...withoutRuntimeId,
                     status: "failed" as const,
@@ -70,7 +115,9 @@ export async function rehydrateCanonicalWorkflowRuns(
                       "Pi session was interrupted by restart; retry this occurrence.",
                     updatedAtMs: now,
                   }
-                : item.status === "queued"
+                : item.status === "queued" &&
+                    (!item.parentOrchestratorRunId ||
+                      resumableFanoutQueued.has(item.id))
                   ? {
                       ...withoutRuntimeId,
                       status: "ready" as const,

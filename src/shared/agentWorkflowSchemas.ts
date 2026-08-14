@@ -448,14 +448,48 @@ export const workflowRunEnvelopeSchema = z
         const source = run.occurrences.find(
           (item) => item.id === binding.sourceOccurrenceId,
         );
+        // A normal handoff stays in the target's occurrence scope. A fan-out
+        // handoff is the one deliberate exception: the target is created by
+        // its completed fan-out Orchestrator, while the selected Worker belongs
+        // to that Orchestrator's iteration. Keeping both occurrence IDs makes
+        // this durable across retries, reordered persistence, and restart.
+        const sameOccurrenceScope =
+          source &&
+          source.parentOrchestratorRunId ===
+            occurrence.parentOrchestratorRunId &&
+          source.iteration === occurrence.iteration;
+        const fanoutOwner = source?.parentOrchestratorRunId
+          ? run.occurrences.find(
+              (item) => item.id === source.parentOrchestratorRunId,
+            )
+          : undefined;
+        const fanoutHandoff =
+          source &&
+          fanoutOwner &&
+          occurrence.parentOccurrenceIds.includes(fanoutOwner.id) &&
+          fanoutOwner.role === "orchestrator" &&
+          fanoutOwner.status === "completed" &&
+          fanoutOwner.iteration === source.iteration &&
+          nodes.get(fanoutOwner.nodeId)?.role === "orchestrator" &&
+          (
+            nodes.get(fanoutOwner.nodeId) as Extract<
+              WorkflowNode,
+              { role: "orchestrator" }
+            >
+          ).config.mode === "fanout" &&
+          nodes.get(source.nodeId)?.managedBy === fanoutOwner.nodeId &&
+          run.definition.relationships.some(
+            (relationship) =>
+              relationship.from === fanoutOwner.nodeId &&
+              "nodeId" in relationship.to &&
+              relationship.to.nodeId === occurrence.nodeId,
+          );
         if (
           !source ||
           source.nodeId !== binding.sourceNodeId ||
           source.status !== "completed" ||
           source.output === undefined ||
-          source.parentOrchestratorRunId !==
-            occurrence.parentOrchestratorRunId ||
-          source.iteration !== occurrence.iteration
+          (!sameOccurrenceScope && !fanoutHandoff)
         )
           ctx.addIssue({
             code: "custom",
@@ -778,12 +812,14 @@ function validateWorkflowGraph(
             "Only Worker finalOutput is supported as an explicit input binding source.",
         });
       else if (source.managedBy || node.managedBy) {
-        // Managed bindings have a well-defined occurrence correlation only for
-        // a loop decider consuming one of its owning loop's workers. Fan-out
-        // siblings and managed workers have no ordered dependency.
+        // Managed bindings have deterministic correlation in exactly two cases:
+        // a loop Decider reads its own iteration's Workers, or an unmanaged
+        // immediate successor of a fan-out reads its completed fan-out Workers.
+        // The latter is selected by configured Worker/node order and persisted
+        // source occurrence ID, never completion or array order.
         const owner = source.managedBy;
         const ownerNode = owner ? nodes.get(owner) : undefined;
-        const validManagedBinding =
+        const validLoopBinding =
           owner !== undefined &&
           owner === node.managedBy &&
           node.role === "decider" &&
@@ -791,15 +827,45 @@ function validateWorkflowGraph(
           ownerNode.config.mode === "loop" &&
           ownerNode.config.decider === node.id &&
           ownerNode.config.agents.includes(source.id);
-        if (!validManagedBinding)
+        const validFanoutBinding =
+          owner !== undefined &&
+          !node.managedBy &&
+          ownerNode?.role === "orchestrator" &&
+          ownerNode.config.mode === "fanout" &&
+          // `any` can skip the selected Worker; only `all` guarantees every
+          // configured source exists when the successor is routed.
+          ownerNode.config.completion === "all" &&
+          ownerNode.config.agents.includes(source.id) &&
+          value.relationships.some(
+            (relationship) =>
+              relationship.from === owner &&
+              "nodeId" in relationship.to &&
+              relationship.to.nodeId === node.id,
+          );
+        if (!validLoopBinding && !validFanoutBinding)
           ctx.addIssue({
             code: "custom",
             path: [...bindingPath, "sourceNodeId"],
             message:
-              "Managed input bindings require a loop decider to bind an agent owned by the same Orchestrator.",
+              "Managed input bindings require a loop decider in the same Orchestrator or an immediate unmanaged successor of its fan-out Orchestrator.",
           });
       }
     }
+  }
+
+  for (const [index, target] of value.nodes.entries()) {
+    const fanoutOwners = new Set(
+      (target.inputBindings ?? [])
+        .map((binding) => nodes.get(binding.sourceNodeId)?.managedBy)
+        .filter((owner): owner is string => owner !== undefined),
+    );
+    if (fanoutOwners.size > 1)
+      ctx.addIssue({
+        code: "custom",
+        path: ["nodes", index, "inputBindings"],
+        message:
+          "Explicit bindings may select Workers from only one fan-out Orchestrator.",
+      });
   }
 
   const relationshipIds = new Set<string>();

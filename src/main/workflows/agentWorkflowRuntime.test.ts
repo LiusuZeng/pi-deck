@@ -175,6 +175,53 @@ describe("agentWorkflow occurrence runtime", () => {
       "Selected plan:\nchosen plan",
     );
   });
+  it("resolves fan-out Worker bindings from the routed container and persists their lineage", () => {
+    const definition = fanoutDefinition("all");
+    const after = definition.nodes.find((item) => item.id === ids.after);
+    if (!after) throw new Error("fixture");
+    after.inputBindings = [
+      { sourceNodeId: ids.b, sourceValue: "finalOutput", label: "B" },
+      { sourceNodeId: ids.a, sourceValue: "finalOutput", label: "A" },
+    ];
+    let run = createWorkflowRoleRun(definition, "workspace", {}, 1);
+    const fan = run.occurrences[0]!;
+    run = startWorkflowOrchestrator(run, fan.id, 2);
+    const workers = readyWorkflowOccurrences(run);
+    // Complete in the opposite configured order: the target follows its
+    // declared binding order, not timing or persisted occurrence order.
+    run = startWorkflowOccurrence(run, workers[1]!.id, "b", undefined, 3);
+    run = completeWorkflowOccurrence(run, workers[1]!.id, "from B", 4);
+    run = startWorkflowOccurrence(run, workers[0]!.id, "a", undefined, 5);
+    run = completeWorkflowOccurrence(run, workers[0]!.id, "from A", 6);
+    const target = run.occurrences.find((item) => item.nodeId === ids.after)!;
+    expect(target.parentOccurrenceIds).toContain(fan.id);
+    expect(target.resolvedInputBindings).toEqual([
+      expect.objectContaining({
+        sourceNodeId: ids.b,
+        value: "from B",
+        sourceOccurrenceId: workers[1]!.id,
+      }),
+      expect.objectContaining({
+        sourceNodeId: ids.a,
+        value: "from A",
+        sourceOccurrenceId: workers[0]!.id,
+      }),
+    ]);
+    const reordered = { ...run, occurrences: [...run.occurrences].reverse() };
+    const started = startWorkflowOccurrence(
+      reordered,
+      target.id,
+      "target",
+      undefined,
+      7,
+    );
+    const failed = failWorkflowOccurrence(started, target.id, "retry", 8);
+    const retry = retryWorkflowOccurrence(failed, target.id, 9).occurrences.at(
+      -1,
+    )!;
+    expect(retry.resolvedInputBindings).toEqual(target.resolvedInputBindings);
+  });
+
   it("renders the configured first managed context without an Orchestrator output", () => {
     const definition = fanoutDefinition("all");
     const orchestrator = definition.nodes.find((node) => node.id === ids.fan);

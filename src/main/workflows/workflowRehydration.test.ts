@@ -12,6 +12,7 @@ import {
   createWorkflowRoleRun,
   retryWorkflowOccurrence,
   startWorkflowOccurrence,
+  startWorkflowOrchestrator,
 } from "./agentWorkflowRuntime.js";
 import { renderWorkflowOccurrencePrompt } from "./workflowPromptRenderer.js";
 import { WorkspaceStore } from "../workspaces/workspaceStore.js";
@@ -103,6 +104,95 @@ describe("workflow rehydration", () => {
     expect(updated[0].status).toBe("waiting");
     expect(updated[0].occurrences[0].status).toBe("ready");
     expect(scheduled).toHaveLength(1);
+  });
+
+  it("preserves fan-out queue ownership across restart so concurrency remains bounded", async () => {
+    const definition = {
+      format: "pi-deck.agent-workflow" as const,
+      schemaVersion: 2 as const,
+      id: "00000000-0000-4000-8000-000000000106",
+      revision: 1,
+      name: "Fan-out restart",
+      inputs: [],
+      entryNodeId: "00000000-0000-4000-8000-000000000107",
+      nodes: [
+        {
+          id: "00000000-0000-4000-8000-000000000107",
+          name: "Fan",
+          role: "orchestrator" as const,
+          config: {
+            mode: "fanout" as const,
+            agents: [
+              "00000000-0000-4000-8000-000000000108",
+              "00000000-0000-4000-8000-000000000109",
+            ],
+            maxConcurrency: 1,
+            completion: "all" as const,
+          },
+        },
+        ...[
+          "00000000-0000-4000-8000-000000000108",
+          "00000000-0000-4000-8000-000000000109",
+        ].map((id) => ({
+          id,
+          name: id.slice(-1),
+          role: "worker" as const,
+          managedBy: "00000000-0000-4000-8000-000000000107",
+          config: { instructions: "work" },
+        })),
+      ],
+      relationships: [],
+    };
+    const initial = createWorkflowRoleRun(definition, "workspace", {}, 1);
+    const queued = startWorkflowOrchestrator(
+      initial,
+      initial.occurrences[0]!.id,
+      2,
+    );
+    const updated: (typeof initial)[] = [];
+    await rehydrateCanonicalWorkflowRuns([queued], {
+      resolveWorkspace: async () => undefined,
+      updateRun: async (run) => {
+        updated.push(run);
+        return run;
+      },
+      schedule: async (run) => run,
+      emit: () => undefined,
+      recordError: () => undefined,
+    });
+    expect(updated[0]?.occurrences.map((item) => item.status)).toEqual([
+      "running",
+      "ready",
+      "queued",
+    ]);
+
+    // A scheduler-capacity error can leave every managed child queued. Recovery
+    // must refill one slot rather than waiting forever for a child completion.
+    const stalled = {
+      ...queued,
+      occurrences: queued.occurrences.map((item) =>
+        item.parentOrchestratorRunId
+          ? { ...item, status: "queued" as const }
+          : item,
+      ),
+    };
+    const resumed: (typeof initial)[] = [];
+    await rehydrateCanonicalWorkflowRuns([stalled], {
+      resolveWorkspace: async () => undefined,
+      updateRun: async (run) => {
+        resumed.push(run);
+        return run;
+      },
+      schedule: async (run) => run,
+      emit: () => undefined,
+      recordError: () => undefined,
+    });
+    expect(
+      resumed[0]?.occurrences.filter((item) => item.status === "ready"),
+    ).toHaveLength(1);
+    expect(
+      resumed[0]?.occurrences.filter((item) => item.status === "queued"),
+    ).toHaveLength(1);
   });
 
   it("marks genuinely lost canonical running ownership as attention without scheduling", async () => {
