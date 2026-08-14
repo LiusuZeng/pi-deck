@@ -12,6 +12,8 @@ const electronMock = vi.hoisted(() => {
     },
     ipcRenderer: {
       invoke: vi.fn(),
+      on: vi.fn(),
+      off: vi.fn(),
     },
     webUtils: {
       getPathForFile: vi.fn(
@@ -40,6 +42,30 @@ describe("preload PiDeck API validation", () => {
 
   beforeEach(() => {
     electronMock.ipcRenderer.invoke.mockReset();
+  });
+
+  it("invokes graph subscription IPC and cleans up its event listener", async () => {
+    electronMock.ipcRenderer.invoke.mockResolvedValue({
+      ok: true,
+      data: undefined,
+    });
+    const runId = "00000000-0000-4000-8000-000000000001";
+    await api.workflows.graphSubscribe({ runId });
+    await api.workflows.graphUnsubscribe({ runId });
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
+      1,
+      "workflows:graphSubscribe",
+      { runId },
+    );
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
+      2,
+      "workflows:graphUnsubscribe",
+      { runId },
+    );
+    const stop = api.workflows.onGraphEvent(vi.fn());
+    expect(electronMock.ipcRenderer.on).toHaveBeenCalledOnce();
+    stop();
+    expect(electronMock.ipcRenderer.off).toHaveBeenCalledOnce();
   });
 
   it("rejects invalid attachment picker requests before invoking IPC", () => {

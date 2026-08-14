@@ -295,6 +295,33 @@ describe("agentWorkflow occurrence runtime", () => {
     expect(run.occurrences[0].status).toBe("skipped");
   });
 
+  it("enforces persisted maxAttempts while retaining the failed attempt for projection", () => {
+    const definition: WorkflowRoleDefinition = {
+      ...base,
+      entryNodeId: ids.worker,
+      nodes: [
+        {
+          id: ids.worker,
+          name: "Worker",
+          role: "worker",
+          config: { instructions: "do" },
+          execution: { maxAttempts: 2 },
+        },
+      ],
+      relationships: [],
+    };
+    let run = createWorkflowRoleRun(definition, "workspace");
+    run = startWorkflowOccurrence(run, run.occurrences[0]!.id, "runtime");
+    run = failWorkflowOccurrence(run, run.occurrences[0]!.id, "failed");
+    run = retryWorkflowOccurrence(run, run.occurrences[0]!.id);
+    const retry = run.occurrences.at(-1)!;
+    run = startWorkflowOccurrence(run, retry.id, "retry-runtime");
+    run = failWorkflowOccurrence(run, retry.id, "failed again");
+    expect(() => retryWorkflowOccurrence(run, retry.id)).toThrow(
+      "Retry budget exhausted after 2 attempts.",
+    );
+  });
+
   it("records named terminal outcomes without treating rejection as a failure", () => {
     const definition: WorkflowRoleDefinition = {
       ...base,

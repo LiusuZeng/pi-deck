@@ -29,13 +29,9 @@ export function createWorkflowRoleRun(
 ): WorkflowRoleRun {
   const parsed = agentWorkflowDefinitionSchema.parse(definition);
   for (const item of parsed.nodes) {
-    if (
-      item.role !== "human" &&
-      (item.execution?.maxAttempts !== undefined ||
-        item.execution?.timeoutSeconds !== undefined)
-    )
+    if (item.role !== "human" && item.execution?.timeoutSeconds !== undefined)
       throw new Error(
-        "maxAttempts and timeoutSeconds are not supported for canonical workflow runs.",
+        "timeoutSeconds is not supported for canonical workflow runs.",
       );
   }
   const inputIds = new Set(parsed.inputs.map((input) => input.id));
@@ -251,6 +247,13 @@ export function retryWorkflowOccurrence(
   const prior = occurrenceOf(run, occurrenceId);
   if (!["failed", "cancelled"].includes(prior.status))
     throw new Error("Only failed or cancelled occurrences may retry.");
+  const workflowNode = node(run.definition, prior.nodeId);
+  const maxAttempts =
+    workflowNode.role === "human"
+      ? undefined
+      : workflowNode.execution?.maxAttempts;
+  if (maxAttempts !== undefined && prior.attempt >= maxAttempts)
+    throw new Error(`Retry budget exhausted after ${maxAttempts} attempts.`);
   let next = add(
     {
       ...run,

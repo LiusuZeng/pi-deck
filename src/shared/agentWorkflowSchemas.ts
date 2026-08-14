@@ -477,6 +477,14 @@ export const workflowGraphOccurrenceSummarySchema = z
     errorSummary: z.string().max(500).optional(),
     humanInteraction: z.enum(["approval", "choice", "input"]).optional(),
     sessionFile: z.string().min(1).optional(),
+    retry: z
+      .object({
+        maxAttempts: z.number().int().positive().optional(),
+        retriesRemaining: z.number().int().nonnegative().optional(),
+        terminalReason: z.literal("retry_budget_exhausted").optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export const workflowGraphSnapshotSchema = z
@@ -495,6 +503,7 @@ export const workflowGraphSnapshotSchema = z
       .optional(),
     revision: z.number().int().positive(),
     updatedAtMs: z.number().finite().optional(),
+    terminalReason: z.string().max(500).optional(),
     nodes: z.array(
       z
         .object({
@@ -509,6 +518,43 @@ export const workflowGraphSnapshotSchema = z
           occurrences: z
             .array(workflowGraphOccurrenceSummarySchema)
             .max(100)
+            .optional(),
+          progress: z
+            .object({
+              loop: z
+                .object({
+                  currentIteration: z.number().int().nonnegative(),
+                  maxIterations: z.number().int().positive(),
+                  remainingIterations: z.number().int().nonnegative(),
+                  terminalReason: z.string().max(500).optional(),
+                })
+                .strict()
+                .optional(),
+              fanout: z
+                .object({
+                  completion: z.enum(["all", "any"]),
+                  total: z.number().int().nonnegative(),
+                  completed: z.number().int().nonnegative(),
+                  failed: z.number().int().nonnegative(),
+                  cancelled: z.number().int().nonnegative(),
+                  skipped: z.number().int().nonnegative(),
+                  active: z.number().int().nonnegative(),
+                  queued: z.number().int().nonnegative(),
+                  policySatisfied: z.boolean(),
+                })
+                .strict()
+                .optional(),
+            })
+            .strict()
+            .optional(),
+          attention: z
+            .object({
+              interaction: z.enum(["approval", "choice", "input"]),
+              waitingSinceMs: z.number().finite(),
+              waitingMs: z.number().finite().nonnegative(),
+              downstreamBlocked: z.boolean(),
+            })
+            .strict()
             .optional(),
         })
         .strict(),

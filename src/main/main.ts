@@ -6,6 +6,7 @@ import {
   shell,
   session,
   nativeImage,
+  webContents,
   type OpenDialogOptions,
 } from "electron";
 import { randomUUID } from "node:crypto";
@@ -107,6 +108,7 @@ import {
   type WorkflowRunEnvelope,
 } from "../shared/agentWorkflowSchemas.js";
 import { deriveWorkflowGraphSnapshot } from "./workflows/workflowGraphSnapshot.js";
+import { WorkflowGraphSubscriptions } from "./workflows/workflowGraphSubscriptions.js";
 import type {
   AppBootstrapState,
   AppSettings,
@@ -1253,10 +1255,12 @@ function registerIpcHandlers(
     handler: async ({ runId }, event) => {
       const run = await ensureWorkflowStore().getWorkflowRun(runId);
       await requireOpenWorkspace(run.workspaceId);
-      const subscriptions =
-        graphRunSubscriptions.get(event.sender.id) ?? new Map();
-      subscriptions.set(runId, run.workspaceId);
-      graphRunSubscriptions.set(event.sender.id, subscriptions);
+      const senderId = event.sender.id;
+      if (!graphRunSubscriptions.hasSender(senderId))
+        event.sender.once("destroyed", () =>
+          graphRunSubscriptions.removeSender(senderId),
+        );
+      graphRunSubscriptions.subscribe(senderId, runId, run.workspaceId);
     },
   });
   registerValidatedIpc({
@@ -1265,10 +1269,7 @@ function registerIpcHandlers(
     responseSchema: z.void(),
     diagnostics: diagnosticsService,
     handler: async ({ runId }, event) => {
-      const subscriptions = graphRunSubscriptions.get(event.sender.id);
-      subscriptions?.delete(runId);
-      if (subscriptions?.size === 0)
-        graphRunSubscriptions.delete(event.sender.id);
+      graphRunSubscriptions.unsubscribe(event.sender.id, runId);
     },
   });
   registerValidatedIpc({
@@ -4670,24 +4671,17 @@ bootstrap().catch((error: unknown) => {
 
 // Subscriptions belong to a specific renderer webContents and retain the
 // workspace authorized at registration. They are never a global run-ID list.
-const graphRunSubscriptions = new Map<number, Map<string, string>>();
+const graphRunSubscriptions = new WorkflowGraphSubscriptions();
 function emitCanonicalWorkflowRunEvent(run: WorkflowRunEnvelope): void {
   mainWindow?.webContents.send(ipcChannels.canonicalWorkflowEvent, {
     type: "workflow_occurrence_run_updated",
     run,
   });
-  // Full run envelopes remain a compatibility event; the graph stream is
-  // explicitly opt-in and contains only the renderer-safe projection.
-  const senderId = mainWindow?.webContents.id;
-  const subscribedWorkspace =
-    senderId === undefined
-      ? undefined
-      : graphRunSubscriptions.get(senderId)?.get(run.id);
-  if (subscribedWorkspace === run.workspaceId)
-    mainWindow?.webContents.send(ipcChannels.workflowGraphEvent, {
-      type: "workflow_graph_updated",
-      runId: run.id,
-      revision: run.revision,
-      snapshot: deriveWorkflowGraphSnapshot(run.definition, run),
-    });
+  // Full run envelopes remain a compatibility event; graph events are sent to
+  // every authorized subscriber, including auxiliary windows.
+  graphRunSubscriptions.publish(
+    run,
+    deriveWorkflowGraphSnapshot(run.definition, run),
+    (senderId) => webContents.fromId(senderId),
+  );
 }
