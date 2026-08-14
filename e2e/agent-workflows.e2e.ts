@@ -69,6 +69,16 @@ const graphWorkflowIds = {
   endRoute: "00000000-0000-4000-8000-000000000006",
 };
 
+const identityWorkflowIds = {
+  workflow: "10000000-0000-4000-8000-000000000001",
+  source: "10000000-0000-4000-8000-000000000002",
+  fanout: "10000000-0000-4000-8000-000000000003",
+  managedWorker: "10000000-0000-4000-8000-000000000004",
+  target: "10000000-0000-4000-8000-000000000005",
+  sourceRoute: "10000000-0000-4000-8000-000000000006",
+  targetRoute: "10000000-0000-4000-8000-000000000007",
+};
+
 function graphEnvironment(
   root: string,
   promptScenario?: "error",
@@ -492,6 +502,294 @@ test("failed fake worker exposes retry and preserves its graph identity across a
         ),
       )
       .toEqual({ status: "failed", attempts: [1, 2] });
+  } finally {
+    await app?.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("duplicate node names retain ID relationships, fanout ownership, bindings, and historical run routing after rename", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-node-identity-"),
+  );
+  const env = graphEnvironment(root);
+  let app: ElectronApplication | undefined;
+  try {
+    ({ app } = await launch(env));
+    let page = await app.firstWindow();
+    const created = await page.evaluate(async (ids) => {
+      const active = await window.piDeck.workspaces.getActive();
+      if (!active.activeWorkspace) throw new Error("No active workspace");
+      const workflow = {
+        format: "pi-deck.agent-workflow" as const,
+        schemaVersion: 2 as const,
+        id: ids.workflow,
+        revision: 1,
+        name: "Duplicate display name",
+        inputs: [],
+        entryNodeId: ids.source,
+        nodes: [
+          {
+            id: ids.source,
+            name: "Duplicate display name",
+            role: "worker" as const,
+            config: { instructions: "Produce the bound source output." },
+          },
+          {
+            id: ids.fanout,
+            name: "Duplicate display name",
+            role: "orchestrator" as const,
+            config: {
+              mode: "fanout" as const,
+              agents: [ids.managedWorker],
+              maxConcurrency: 1,
+              completion: "all" as const,
+            },
+          },
+          {
+            id: ids.managedWorker,
+            name: "Duplicate display name",
+            role: "worker" as const,
+            managedBy: ids.fanout,
+            config: { instructions: "Participate in the fanout." },
+          },
+          {
+            id: ids.target,
+            name: "Duplicate display name",
+            role: "worker" as const,
+            inputBindings: [
+              {
+                sourceNodeId: ids.source,
+                sourceValue: "finalOutput" as const,
+                label: "Bound duplicate source",
+              },
+            ],
+            config: { instructions: "Consume the explicitly bound output." },
+          },
+        ],
+        relationships: [
+          { id: ids.sourceRoute, from: ids.source, to: { nodeId: ids.fanout } },
+          { id: ids.targetRoute, from: ids.fanout, to: { nodeId: ids.target } },
+          {
+            id: "10000000-0000-4000-8000-000000000008",
+            from: ids.target,
+            to: { end: "done" },
+          },
+        ],
+      };
+      await window.piDeck.workflows.createWorkflow({
+        workspaceId: active.activeWorkspace.id,
+        scopeWorkspaceId: null,
+        workflow,
+      });
+      const run = await window.piDeck.workflows.canonicalStartRun({
+        workflowId: workflow.id,
+        workspaceId: active.activeWorkspace.id,
+        inputs: {},
+      });
+      return { runId: run.id, workspaceId: active.activeWorkspace.id };
+    }, identityWorkflowIds);
+
+    await expect
+      .poll(
+        () =>
+          page.evaluate(async (runId) => {
+            const run = await window.piDeck.workflows.canonicalGetRun({
+              runId,
+            });
+            return run.status;
+          }, created.runId),
+        { timeout: 20_000 },
+      )
+      .toBe("completed");
+
+    const beforeRename = await page.evaluate(
+      async ({ runId, ids }) => {
+        const [run, snapshot] = await Promise.all([
+          window.piDeck.workflows.canonicalGetRun({ runId }),
+          window.piDeck.workflows.graphGetSnapshot({ runId }),
+        ]);
+        const source = run.occurrences.find(
+          (item) => item.nodeId === ids.source,
+        );
+        const target = run.occurrences.find(
+          (item) => item.nodeId === ids.target,
+        );
+        const fanout = run.occurrences.find(
+          (item) => item.nodeId === ids.fanout,
+        );
+        const managed = run.occurrences.find(
+          (item) => item.nodeId === ids.managedWorker,
+        );
+        return {
+          names: run.definition.nodes.map((item) => item.name),
+          relationship: run.definition.relationships.find(
+            (item) => item.id === ids.sourceRoute,
+          ),
+          agents: run.definition.nodes.find((item) => item.id === ids.fanout)
+            ?.config,
+          binding: run.definition.nodes.find((item) => item.id === ids.target)
+            ?.inputBindings?.[0],
+          resolvedBinding: target?.resolvedInputBindings?.[0],
+          sourceOccurrenceId: source?.id,
+          fanoutOccurrenceId: fanout?.id,
+          managedParentId: managed?.parentOrchestratorRunId,
+          fanoutGraphStates: snapshot.nodes
+            .filter(
+              (item) =>
+                item.nodeId === ids.fanout || item.nodeId === ids.managedWorker,
+            )
+            .map((item) => ({
+              nodeId: item.nodeId,
+              status: item.aggregateStatus,
+            })),
+        };
+      },
+      { runId: created.runId, ids: identityWorkflowIds },
+    );
+    expect(beforeRename.names).toEqual([
+      "Duplicate display name",
+      "Duplicate display name",
+      "Duplicate display name",
+      "Duplicate display name",
+    ]);
+    expect(beforeRename.relationship).toMatchObject({
+      from: identityWorkflowIds.source,
+      to: { nodeId: identityWorkflowIds.fanout },
+    });
+    expect(beforeRename.agents).toMatchObject({
+      mode: "fanout",
+      agents: [identityWorkflowIds.managedWorker],
+    });
+    expect(beforeRename.binding).toMatchObject({
+      sourceNodeId: identityWorkflowIds.source,
+      sourceValue: "finalOutput",
+    });
+    expect(beforeRename.resolvedBinding).toMatchObject({
+      sourceNodeId: identityWorkflowIds.source,
+      sourceOccurrenceId: beforeRename.sourceOccurrenceId,
+    });
+    expect(beforeRename.managedParentId).toBe(beforeRename.fanoutOccurrenceId);
+    expect(beforeRename.fanoutGraphStates).toEqual([
+      { nodeId: identityWorkflowIds.fanout, status: "completed" },
+      { nodeId: identityWorkflowIds.managedWorker, status: "completed" },
+    ]);
+
+    await page.evaluate(
+      async ({ workspaceId, ids }) => {
+        const listed = await window.piDeck.workflows.listWorkflows({
+          workspaceId,
+        });
+        const current = listed.find(
+          (item) => item.workflow.id === ids.workflow,
+        );
+        if (!current) throw new Error("Workflow was not created");
+        await window.piDeck.workflows.updateWorkflow({
+          workspaceId,
+          scopeWorkspaceId: current.scopeWorkspaceId,
+          workflow: {
+            ...current.workflow,
+            revision: current.workflow.revision + 1,
+            nodes: current.workflow.nodes.map((node) =>
+              node.id === ids.managedWorker
+                ? { ...node, name: "Renamed duplicate worker" }
+                : node,
+            ),
+          },
+        });
+      },
+      { workspaceId: created.workspaceId, ids: identityWorkflowIds },
+    );
+
+    await page.reload();
+    await expect(
+      page.locator('.workspace[data-load-state="ready"]'),
+    ).toBeVisible();
+    await app.close();
+    app = undefined;
+    ({ app } = await launch(env));
+    page = await app.firstWindow();
+
+    const persisted = await page.evaluate(
+      async ({ runId, workspaceId, ids }) => {
+        const definitions = await window.piDeck.workflows.listWorkflows({
+          workspaceId,
+        });
+        const definition = definitions.find(
+          (item) => item.workflow.id === ids.workflow,
+        )?.workflow;
+        const historical = await window.piDeck.workflows.canonicalGetRun({
+          runId,
+        });
+        return {
+          renamedNode: definition?.nodes.find(
+            (node) => node.id === ids.managedWorker,
+          ),
+          currentRelationship: definition?.relationships.find(
+            (item) => item.id === ids.sourceRoute,
+          ),
+          currentBinding: definition?.nodes.find(
+            (node) => node.id === ids.target,
+          )?.inputBindings?.[0],
+          historicalName: historical.name,
+          historicalManagedName: historical.definition.nodes.find(
+            (node) => node.id === ids.managedWorker,
+          )?.name,
+          historicalRoutes: historical.definition.relationships
+            .filter(
+              (item) =>
+                item.id === ids.sourceRoute || item.id === ids.targetRoute,
+            )
+            .map((item) => ({ id: item.id, from: item.from, to: item.to })),
+        };
+      },
+      {
+        runId: created.runId,
+        workspaceId: created.workspaceId,
+        ids: identityWorkflowIds,
+      },
+    );
+    expect(persisted.renamedNode).toMatchObject({
+      id: identityWorkflowIds.managedWorker,
+      name: "Renamed duplicate worker",
+      managedBy: identityWorkflowIds.fanout,
+    });
+    expect(persisted.currentRelationship).toMatchObject({
+      from: identityWorkflowIds.source,
+      to: { nodeId: identityWorkflowIds.fanout },
+    });
+    expect(persisted.currentBinding).toMatchObject({
+      sourceNodeId: identityWorkflowIds.source,
+    });
+    expect(persisted.historicalName).toBe("Duplicate display name");
+    expect(persisted.historicalManagedName).toBe("Duplicate display name");
+    expect(persisted.historicalRoutes).toEqual([
+      {
+        id: identityWorkflowIds.sourceRoute,
+        from: identityWorkflowIds.source,
+        to: { nodeId: identityWorkflowIds.fanout },
+      },
+      {
+        id: identityWorkflowIds.targetRoute,
+        from: identityWorkflowIds.fanout,
+        to: { nodeId: identityWorkflowIds.target },
+      },
+    ]);
+
+    await page.getByRole("button", { name: "Agent Workflows" }).click();
+    await page.getByRole("button", { name: "View all runs" }).click();
+    await page.locator(`button[aria-label$="ID ${created.runId}"]`).click();
+    const graph = page.locator('[aria-label="Live workflow execution graph"]');
+    await expect(graph).toBeVisible();
+    const historicalManaged = graph.locator(
+      `[data-workflow-node-id="${identityWorkflowIds.managedWorker}"]`,
+    );
+    await expect(historicalManaged).toHaveText("Duplicate display name");
+    await historicalManaged.click();
+    await expect(historicalManaged).toHaveAttribute("aria-pressed", "true");
+    await expect(
+      graph.locator(`[data-workflow-node-id="${identityWorkflowIds.target}"]`),
+    ).toHaveAttribute("aria-pressed", "false");
   } finally {
     await app?.close().catch(() => undefined);
     fs.rmSync(root, { recursive: true, force: true });
