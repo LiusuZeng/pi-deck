@@ -127,11 +127,7 @@ describe("WorkflowStore agentWorkflow migration foundation", () => {
       "workspace-b",
     );
     expect(await store.getWorkflowScope(scoped.id)).toBe("workspace-b");
-    await store.updateWorkflow(
-      { ...scoped, revision: 3 },
-      "workspace-b",
-      null,
-    );
+    await store.updateWorkflow({ ...scoped, revision: 3 }, "workspace-b", null);
     expect(await store.getWorkflowScope(scoped.id)).toBeUndefined();
     expect(
       JSON.stringify(await fs.readFile(store.storeFile, "utf8")),
@@ -265,9 +261,10 @@ describe("WorkflowStore agentWorkflow migration foundation", () => {
     };
     await store.createWorkflowRun(run);
     const restarted = new WorkflowStore(path.dirname(store.storeFile));
-    expect((await restarted.getWorkflowRun(run.id)).occurrences[0]!.resolvedInputBindings).toEqual(
-      run.occurrences[0]!.resolvedInputBindings,
-    );
+    expect(
+      (await restarted.getWorkflowRun(run.id)).occurrences[0]!
+        .resolvedInputBindings,
+    ).toEqual(run.occurrences[0]!.resolvedInputBindings);
   });
 
   it("migrates v2 node identities, preserves snapshots and legacy runs, and backs up raw data", async () => {
@@ -377,18 +374,21 @@ describe("WorkflowStore agentWorkflow migration foundation", () => {
     expect(migratedRun.definition.nodes.map((node) => node.id)).toEqual(
       workflow.nodes.map((node) => node.id),
     );
-    const renamed = await migrated.updateWorkflow({
-      ...workflow,
-      revision: 2,
-      nodes: workflow.nodes.map((node, index) => ({
-        ...node,
-        name: index === 0 ? "Renamed duplicate" : node.name,
-      })),
-    });
-    expect(renamed.nodes[0]!.id).toBe(workflow.nodes[0]!.id);
-    expect((await migrated.getWorkflowRun(run.id)).definition.nodes[0]!.name).toBe(
-      "Duplicate",
+    const renamed = await migrated.updateWorkflow(
+      {
+        ...workflow,
+        revision: 2,
+        nodes: workflow.nodes.map((node, index) => ({
+          ...node,
+          name: index === 0 ? "Renamed duplicate" : node.name,
+        })),
+      },
+      "workspace",
     );
+    expect(renamed.nodes[0]!.id).toBe(workflow.nodes[0]!.id);
+    expect(
+      (await migrated.getWorkflowRun(run.id)).definition.nodes[0]!.name,
+    ).toBe("Duplicate");
     expect(await migrated.getRun(legacyRun.id)).toEqual(legacyRun);
     expect(
       await fs.readFile(`${store.storeFile}.v2-node-id-backup-123`, "utf8"),
@@ -402,7 +402,7 @@ describe("WorkflowStore agentWorkflow migration foundation", () => {
       undefined,
       () => 123,
     );
-    expect(await reloaded.getWorkflow(workflow.id)).toEqual(workflow);
+    expect(await reloaded.getWorkflow(workflow.id)).toEqual(renamed);
     expect(await fs.readdir(path.dirname(store.storeFile))).not.toContain(
       "workflows.json.v2-node-id-backup-123-2",
     );

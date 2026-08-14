@@ -312,7 +312,10 @@ function migrateDefinition(
   // A duplicate legacy ID makes every relationship ambiguous. Refuse the
   // atomic migration rather than silently assigning a historical occurrence
   // to an arbitrary node; the store keeps the raw file and backup path.
-  if (new Set(definition.nodes.map((node) => node.id)).size !== definition.nodes.length)
+  if (
+    new Set(definition.nodes.map((node) => node.id)).size !==
+    definition.nodes.length
+  )
     throw new Error(`Ambiguous v2 workflow node IDs: ${definition.id}`);
   for (const legacyId of definition.nodes.map((node) => node.id))
     if (!nodeIds.has(legacyId)) nodeIds.set(legacyId, randomUUID());

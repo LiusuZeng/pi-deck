@@ -378,7 +378,9 @@ function activeWorkflowScopeChoices(
   workspaces: WorkspaceRef[],
   archivedWorkspaces: WorkspaceRef[],
 ): WorkspaceRef[] {
-  const archivedIds = new Set(archivedWorkspaces.map((workspace) => workspace.id));
+  const archivedIds = new Set(
+    archivedWorkspaces.map((workspace) => workspace.id),
+  );
   return [currentWorkspace, ...workspaces].filter(
     (workspace, index, choices) =>
       !archivedIds.has(workspace.id) &&
@@ -1451,7 +1453,12 @@ export function App(): ReactElement {
     ? legacyWorkflowRuns.find((run) => run.id === legacyWorkflowRunId)
     : undefined;
   const workflowScopeChoices = useMemo(
-    () => activeWorkflowScopeChoices(currentWorkspace, workspaces, archivedWorkspaces),
+    () =>
+      activeWorkflowScopeChoices(
+        currentWorkspace,
+        workspaces,
+        archivedWorkspaces,
+      ),
     [archivedWorkspaces, currentWorkspace, workspaces],
   );
 
@@ -1911,7 +1918,8 @@ export function App(): ReactElement {
             workflow,
           });
       setWorkflowDefinitions((current) =>
-        saved.scopeWorkspaceId === null || saved.scopeWorkspaceId === workspaceId
+        saved.scopeWorkspaceId === null ||
+        saved.scopeWorkspaceId === workspaceId
           ? [
               saved.workflow,
               ...current.filter(

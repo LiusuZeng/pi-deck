@@ -10,15 +10,17 @@ it("offers every active workflow workspace once and excludes archived workspaces
     lastOpenedAt: 1,
   });
   expect(
-    __rendererTestHooks.activeWorkflowScopeChoices(
-      workspace("workspace-a", "Alpha"),
-      [
+    __rendererTestHooks
+      .activeWorkflowScopeChoices(
         workspace("workspace-a", "Alpha"),
-        workspace("workspace-b", "Beta"),
-        workspace("workspace-c", "Archived"),
-      ],
-      [workspace("workspace-c", "Archived")],
-    ).map(({ id, name }) => ({ id, name })),
+        [
+          workspace("workspace-a", "Alpha"),
+          workspace("workspace-b", "Beta"),
+          workspace("workspace-c", "Archived"),
+        ],
+        [workspace("workspace-c", "Archived")],
+      )
+      .map(({ id, name }) => ({ id, name })),
   ).toEqual([
     { id: "workspace-a", name: "Alpha" },
     { id: "workspace-b", name: "Beta" },

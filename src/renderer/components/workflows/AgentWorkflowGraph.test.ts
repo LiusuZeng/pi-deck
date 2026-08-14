@@ -165,7 +165,9 @@ describe("AgentWorkflowGraph", () => {
   it("renders semantic loop, fan-out, human, decision routes, and terminals", () => {
     render();
     expect(container!.textContent).toContain("maximum 3 iterations");
-    expect(container!.textContent).toContain("completion Decider 00000000-0000-4000-8000-000000000505");
+    expect(container!.textContent).toContain(
+      "completion Decider 00000000-0000-4000-8000-000000000505",
+    );
     expect(container!.textContent).toContain("2 Workers");
     expect(container!.textContent).toContain("maximum concurrency 1");
     expect(container!.textContent).toContain("completes when any");

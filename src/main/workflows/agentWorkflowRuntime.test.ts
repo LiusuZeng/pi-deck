@@ -137,7 +137,9 @@ describe("agentWorkflow occurrence runtime", () => {
     run = startWorkflowOccurrence(run, plan.id, "plan-runtime");
     run = completeWorkflowOccurrence(run, plan.id, "chosen plan");
     const review = run.occurrences.find((item) => item.nodeId === ids.review)!;
-    expect(run.occurrences.some((item) => item.nodeId === ids.deliver)).toBe(false);
+    expect(run.occurrences.some((item) => item.nodeId === ids.deliver)).toBe(
+      false,
+    );
     run = startWorkflowOccurrence(run, review.id, "review-runtime");
     run = completeWorkflowOccurrence(run, review.id, "incidental review");
     const deliver = run.occurrences.find(

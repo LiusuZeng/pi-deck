@@ -1064,10 +1064,13 @@ function registerIpcHandlers(
       await requireOpenWorkspace(workspaceId);
       const workflowStore = ensureWorkflowStore();
       return Promise.all(
-        (await workflowStore.listWorkflows(workspaceId)).map(async (workflow) => ({
-          workflow,
-          scopeWorkspaceId: (await workflowStore.getWorkflowScope(workflow.id)) ?? null,
-        })),
+        (await workflowStore.listWorkflows(workspaceId)).map(
+          async (workflow) => ({
+            workflow,
+            scopeWorkspaceId:
+              (await workflowStore.getWorkflowScope(workflow.id)) ?? null,
+          }),
+        ),
       );
     },
   });
@@ -1082,8 +1085,12 @@ function registerIpcHandlers(
       if (scopeWorkspaceId !== undefined && scopeWorkspaceId !== null)
         await requireOpenWorkspace(scopeWorkspaceId);
       // Preserve the old IPC behavior for callers that omit this new field.
-      const scope = scopeWorkspaceId === undefined ? workspaceId : scopeWorkspaceId;
-      const saved = await ensureWorkflowStore().createWorkflow(workflow, scope ?? undefined);
+      const scope =
+        scopeWorkspaceId === undefined ? workspaceId : scopeWorkspaceId;
+      const saved = await ensureWorkflowStore().createWorkflow(
+        workflow,
+        scope ?? undefined,
+      );
       return { workflow: saved, scopeWorkspaceId: scope ?? null };
     },
   });
@@ -1114,7 +1121,7 @@ function registerIpcHandlers(
         workflow: saved,
         scopeWorkspaceId:
           scopeWorkspaceId === undefined
-            ? (await workflowStore.getWorkflowScope(saved.id)) ?? null
+            ? ((await workflowStore.getWorkflowScope(saved.id)) ?? null)
             : scopeWorkspaceId,
       };
     },
