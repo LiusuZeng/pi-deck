@@ -96,8 +96,8 @@ import {
   canonicalWorkflowOccurrenceRequestSchema,
   canonicalWorkflowStartRunRequestSchema,
   workflowCreateRequestSchema,
-  workflowDefinitionSchema,
   workflowListRequestSchema,
+  workflowScopedDefinitionSchema,
   workflowRunEnvelopeSchema,
   workflowUpdateRequestSchema,
   type WorkflowRunEnvelope,
@@ -1053,33 +1053,65 @@ function registerIpcHandlers(
   registerValidatedIpc({
     channel: ipcChannels.workflowListWorkflows,
     requestSchema: workflowListRequestSchema,
-    responseSchema: workflowDefinitionSchema.array(),
+    responseSchema: workflowScopedDefinitionSchema.array(),
     diagnostics: diagnosticsService,
     handler: async ({ workspaceId }) => {
       await requireOpenWorkspace(workspaceId);
-      return ensureWorkflowStore().listWorkflows(workspaceId);
+      const workflowStore = ensureWorkflowStore();
+      return Promise.all(
+        (await workflowStore.listWorkflows(workspaceId)).map(async (workflow) => ({
+          workflow,
+          scopeWorkspaceId: (await workflowStore.getWorkflowScope(workflow.id)) ?? null,
+        })),
+      );
     },
   });
 
   registerValidatedIpc({
     channel: ipcChannels.workflowCreateWorkflow,
     requestSchema: workflowCreateRequestSchema,
-    responseSchema: workflowDefinitionSchema,
+    responseSchema: workflowScopedDefinitionSchema,
     diagnostics: diagnosticsService,
-    handler: async ({ workspaceId, workflow }) => {
+    handler: async ({ workspaceId, scopeWorkspaceId, workflow }) => {
       await requireOpenWorkspace(workspaceId);
-      return ensureWorkflowStore().createWorkflow(workflow, workspaceId);
+      if (scopeWorkspaceId !== undefined && scopeWorkspaceId !== null)
+        await requireOpenWorkspace(scopeWorkspaceId);
+      // Preserve the old IPC behavior for callers that omit this new field.
+      const scope = scopeWorkspaceId === undefined ? workspaceId : scopeWorkspaceId;
+      const saved = await ensureWorkflowStore().createWorkflow(workflow, scope ?? undefined);
+      return { workflow: saved, scopeWorkspaceId: scope ?? null };
     },
   });
 
   registerValidatedIpc({
     channel: ipcChannels.workflowUpdateWorkflow,
     requestSchema: workflowUpdateRequestSchema,
-    responseSchema: workflowDefinitionSchema,
+    responseSchema: workflowScopedDefinitionSchema,
     diagnostics: diagnosticsService,
-    handler: async ({ workspaceId, workflow }) => {
+    handler: async ({ workspaceId, scopeWorkspaceId, workflow }) => {
       await requireOpenWorkspace(workspaceId);
-      return ensureWorkflowStore().updateWorkflow(workflow, workspaceId);
+      const workflowStore = ensureWorkflowStore();
+      const existingScope = await workflowStore.getWorkflowScope(workflow.id);
+      // An archived scope cannot be selected anew, but an existing saved scope
+      // remains editable so archiving never strands its workflow document.
+      if (
+        scopeWorkspaceId !== undefined &&
+        scopeWorkspaceId !== null &&
+        scopeWorkspaceId !== existingScope
+      )
+        await requireOpenWorkspace(scopeWorkspaceId);
+      const saved = await workflowStore.updateWorkflow(
+        workflow,
+        workspaceId,
+        scopeWorkspaceId,
+      );
+      return {
+        workflow: saved,
+        scopeWorkspaceId:
+          scopeWorkspaceId === undefined
+            ? (await workflowStore.getWorkflowScope(saved.id)) ?? null
+            : scopeWorkspaceId,
+      };
     },
   });
 

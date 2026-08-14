@@ -73,6 +73,64 @@ describe("AgentWorkflowBuilder UUID identities", () => {
     expect(decider.managedBy).toBe(orchestrator.id);
   });
 
+  it("lists active workspace scopes, excludes archived choices supplied by App, and saves the selected ID", async () => {
+    const onSave = render();
+    act(() =>
+      root?.render(
+        createElement(AgentWorkflowBuilder, {
+          workspaceChoices: [
+            { id: "workspace-a", name: "Alpha" },
+            { id: "workspace-b", name: "Beta" },
+          ],
+          onSave,
+          onCancel: () => undefined,
+        }),
+      ),
+    );
+    const scope = container!.querySelector<HTMLSelectElement>(
+      '[aria-label="Workflow scope"]',
+    )!;
+    expect([...scope.options].map((option) => option.textContent)).toEqual([
+      "All workspaces (global)",
+      "Alpha",
+      "Beta",
+    ]);
+    expect([...scope.options].map((option) => option.value)).not.toContain(
+      "archived-workspace",
+    );
+    act(() => {
+      scope.value = "workspace-b";
+      scope.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => click("Save workflow"));
+    expect(onSave.mock.calls[0]?.[1]).toBe("workspace-b");
+  });
+
+  it("defaults to global scope and retains an unavailable saved scope when editing", async () => {
+    const globalSave = render();
+    await act(async () => click("Save workflow"));
+    expect(globalSave.mock.calls[0]?.[1]).toBeNull();
+
+    act(() =>
+      root?.render(
+        createElement(AgentWorkflowBuilder, {
+          key: "saved-scope",
+          initialDefinition: defaultAgentWorkflowDefinition(),
+          initialScopeWorkspaceId: "saved-workspace",
+          workspaceChoices: [{ id: "workspace-a", name: "Alpha" }],
+          onSave: vi.fn(),
+          onCancel: () => undefined,
+        }),
+      ),
+    );
+    const scope = container!.querySelector<HTMLSelectElement>(
+      '[aria-label="Workflow scope"]',
+    )!;
+    expect(scope.value).toBe("saved-workspace");
+    expect(scope.selectedOptions[0]?.disabled).toBe(true);
+    expect(scope.selectedOptions[0]?.textContent).toContain("Saved workspace");
+  });
+
   it("generates a UUID relationship ID when a route is added", async () => {
     const onSave = render();
     click("+ Add step");

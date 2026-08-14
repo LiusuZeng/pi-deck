@@ -125,6 +125,12 @@ export class WorkflowStore {
     if (!workflow) throw new Error(`Unknown workflow: ${id}`);
     return clone(workflow);
   }
+  async getWorkflowScope(id: string): Promise<string | undefined> {
+    await this.loadIfNeeded();
+    if (!this.state.workflows.some((item) => item.id === id))
+      throw new Error(`Unknown workflow: ${id}`);
+    return this.state.workflowScopes[id];
+  }
   async getWorkflowForWorkspace(
     id: string,
     workspaceId: string,
@@ -156,6 +162,7 @@ export class WorkflowStore {
   async updateWorkflow(
     workflow: WorkflowDefinition,
     workspaceId?: string,
+    scopeWorkspaceId?: string | null,
   ): Promise<WorkflowDefinition> {
     await this.loadIfNeeded();
     const parsed = workflowDefinitionSchema.parse(workflow);
@@ -170,7 +177,12 @@ export class WorkflowStore {
       );
     const workflows = [...this.state.workflows];
     workflows[index] = parsed;
-    await this.commit({ ...this.state, workflows });
+    const workflowScopes = { ...this.state.workflowScopes };
+    if (scopeWorkspaceId !== undefined) {
+      if (scopeWorkspaceId === null) delete workflowScopes[parsed.id];
+      else workflowScopes[parsed.id] = scopeWorkspaceId;
+    }
+    await this.commit({ ...this.state, workflows, workflowScopes });
     return clone(parsed);
   }
   async listOccurrences(): Promise<WorkflowOccurrence[]> {

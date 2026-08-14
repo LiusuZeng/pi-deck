@@ -372,6 +372,19 @@ function sessionForActivityItem(
 type WorkspaceRef = SharedWorkspaceRef;
 type WorkspaceListResultCompat = WorkspaceListResult;
 
+function activeWorkflowScopeChoices(
+  currentWorkspace: WorkspaceRef,
+  workspaces: WorkspaceRef[],
+  archivedWorkspaces: WorkspaceRef[],
+): WorkspaceRef[] {
+  const archivedIds = new Set(archivedWorkspaces.map((workspace) => workspace.id));
+  return [currentWorkspace, ...workspaces].filter(
+    (workspace, index, choices) =>
+      !archivedIds.has(workspace.id) &&
+      choices.findIndex((candidate) => candidate.id === workspace.id) === index,
+  );
+}
+
 type WorkspaceCapableApi = {
   workspaces?: {
     list?(): Promise<WorkspaceListResultCompat>;
@@ -835,6 +848,9 @@ export function App(): ReactElement {
   const [workflowDefinitions, setWorkflowDefinitions] = useState<
     WorkflowDefinition[]
   >([]);
+  const [workflowScopes, setWorkflowScopes] = useState<
+    Record<string, string | null>
+  >({});
   const [workflowOccurrenceRuns, setWorkflowOccurrenceRuns] = useState<
     WorkflowRunEnvelope[]
   >([]);
@@ -1166,7 +1182,15 @@ export function App(): ReactElement {
           window.piDeck.workflows.listRuns({ workspaceId }),
         ]);
         if (disposed) return;
-        setWorkflowDefinitions(definitions);
+        setWorkflowDefinitions(definitions.map(({ workflow }) => workflow));
+        setWorkflowScopes(
+          Object.fromEntries(
+            definitions.map(({ workflow, scopeWorkspaceId }) => [
+              workflow.id,
+              scopeWorkspaceId,
+            ]),
+          ),
+        );
         setWorkflowOccurrenceRuns(canonicalRuns);
         setLegacyWorkflowRuns(legacyRuns.runs);
         if (workflowOccurrenceRunId !== undefined) {
@@ -1227,6 +1251,7 @@ export function App(): ReactElement {
 
   useEffect(() => {
     setWorkflowDefinitions([]);
+    setWorkflowScopes({});
     setWorkflowOccurrenceRuns([]);
     setLegacyWorkflowRuns([]);
     setWorkflowOccurrenceRunId(undefined);
@@ -1371,6 +1396,11 @@ export function App(): ReactElement {
   const selectedLegacyWorkflowRun = legacyWorkflowRunId
     ? legacyWorkflowRuns.find((run) => run.id === legacyWorkflowRunId)
     : undefined;
+  const workflowScopeChoices = useMemo(
+    () => activeWorkflowScopeChoices(currentWorkspace, workspaces, archivedWorkspaces),
+    [archivedWorkspaces, currentWorkspace, workspaces],
+  );
+
   const agentWorkflowDefinitions = useMemo(
     () => agentWorkflowsForHome(workflowDefinitions),
     [workflowDefinitions],
@@ -1811,22 +1841,35 @@ export function App(): ReactElement {
 
   async function handleSaveAgentWorkflow(
     workflow: WorkflowDefinition,
+    scopeWorkspaceId: string | null,
   ): Promise<void> {
     try {
       const workspaceId = currentWorkspaceRef.current.id;
       const saved = workflowBuilderDefinition
         ? await window.piDeck.workflows.updateWorkflow({
             workspaceId,
+            scopeWorkspaceId,
             workflow,
           })
         : await window.piDeck.workflows.createWorkflow({
             workspaceId,
+            scopeWorkspaceId,
             workflow,
           });
-      setWorkflowDefinitions((current) => [
-        saved,
-        ...current.filter((candidate) => candidate.id !== saved.id),
-      ]);
+      setWorkflowDefinitions((current) =>
+        saved.scopeWorkspaceId === null || saved.scopeWorkspaceId === workspaceId
+          ? [
+              saved.workflow,
+              ...current.filter(
+                (candidate) => candidate.id !== saved.workflow.id,
+              ),
+            ]
+          : current.filter((candidate) => candidate.id !== saved.workflow.id),
+      );
+      setWorkflowScopes((current) => ({
+        ...current,
+        [saved.workflow.id]: saved.scopeWorkspaceId,
+      }));
       setWorkflowBuilderDefinition(undefined);
       setWorkflowView("workflows");
       setWorkflowError(undefined);
@@ -4147,6 +4190,12 @@ export function App(): ReactElement {
                     ? {}
                     : { initialDefinition: workflowBuilderDefinition })}
                   modelChoices={workflowModelChoices}
+                  initialScopeWorkspaceId={
+                    workflowBuilderDefinition === undefined
+                      ? null
+                      : (workflowScopes[workflowBuilderDefinition.id] ?? null)
+                  }
+                  workspaceChoices={workflowScopeChoices}
                   thinkingChoices={workflowThinkingChoices}
                   onSave={handleSaveAgentWorkflow}
                   onCancel={() => {
@@ -10025,6 +10074,7 @@ export const __rendererTestHooks = {
   workflowModelChoicesFor,
   workflowThinkingChoicesFor,
   agentWorkflowsForHome,
+  activeWorkflowScopeChoices,
   thinkingLevelsForModel,
   clampThinkingLevel,
   applyPiDefaultsToDraftSessions,

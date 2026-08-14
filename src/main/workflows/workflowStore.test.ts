@@ -121,6 +121,18 @@ describe("WorkflowStore agentWorkflow migration foundation", () => {
     await expect(
       store.updateWorkflow({ ...scoped, revision: 2 }, "workspace-b"),
     ).rejects.toThrow("not available in this workspace");
+    await store.updateWorkflow(
+      { ...scoped, revision: 2 },
+      "workspace-a",
+      "workspace-b",
+    );
+    expect(await store.getWorkflowScope(scoped.id)).toBe("workspace-b");
+    await store.updateWorkflow(
+      { ...scoped, revision: 3 },
+      "workspace-b",
+      null,
+    );
+    expect(await store.getWorkflowScope(scoped.id)).toBeUndefined();
     expect(
       JSON.stringify(await fs.readFile(store.storeFile, "utf8")),
     ).not.toContain('"workspaceId"');

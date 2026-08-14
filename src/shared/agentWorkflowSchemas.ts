@@ -176,11 +176,22 @@ export const workflowListRequestSchema = z
   .strict();
 export const workflowCreateRequestSchema = z
   .object({
+    // The current workspace authorizes the request; scope remains metadata.
     workspaceId: workspaceIdSchema,
+    // Omitted retains legacy create behavior; null explicitly selects global.
+    scopeWorkspaceId: workspaceIdSchema.nullable().optional(),
     workflow: workflowDefinitionSchema,
   })
   .strict();
 export const workflowUpdateRequestSchema = workflowCreateRequestSchema;
+
+/** A canonical document with its store-owned scope metadata for editor clients. */
+export const workflowScopedDefinitionSchema = z
+  .object({
+    workflow: workflowDefinitionSchema,
+    scopeWorkspaceId: workspaceIdSchema.nullable(),
+  })
+  .strict();
 
 /** Canonical occurrence-run IPC contracts. Workspace remains outside snapshots. */
 export const canonicalWorkflowListRunsRequestSchema = z

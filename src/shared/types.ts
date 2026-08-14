@@ -79,6 +79,7 @@ import type {
   workflowCreateRequestSchema,
   workflowDefinitionSchema,
   workflowListRequestSchema,
+  workflowScopedDefinitionSchema,
   workflowRunEnvelopeSchema,
   workflowUpdateRequestSchema,
 } from "./agentWorkflowSchemas.js";
@@ -197,6 +198,9 @@ export type AttachmentAssignOwnerRequest = z.infer<
 >;
 export type PickAttachmentsResult = z.infer<typeof pickAttachmentsResultSchema>;
 export type WorkflowDefinition = z.infer<typeof workflowDefinitionSchema>;
+export type WorkflowScopedDefinition = z.infer<
+  typeof workflowScopedDefinitionSchema
+>;
 export type WorkflowListRequest = z.infer<typeof workflowListRequestSchema>;
 export type WorkflowCreateRequest = z.infer<typeof workflowCreateRequestSchema>;
 export type WorkflowUpdateRequest = z.infer<typeof workflowUpdateRequestSchema>;
@@ -346,7 +350,9 @@ export interface PiDeckApi {
     listUnassignedSessions(): Promise<ChatListSessionsResult>;
   };
   workflows: {
-    listWorkflows(request: WorkflowListRequest): Promise<WorkflowDefinition[]>;
+    listWorkflows(
+      request: WorkflowListRequest,
+    ): Promise<WorkflowScopedDefinition[]>;
     canonicalListRuns(
       request?: z.infer<typeof canonicalWorkflowListRunsRequestSchema>,
     ): Promise<CanonicalWorkflowRun[]>;
@@ -368,8 +374,12 @@ export interface PiDeckApi {
     onCanonicalEvent(
       listener: (event: CanonicalWorkflowEvent) => void,
     ): () => void;
-    createWorkflow(request: WorkflowCreateRequest): Promise<WorkflowDefinition>;
-    updateWorkflow(request: WorkflowUpdateRequest): Promise<WorkflowDefinition>;
+    createWorkflow(
+      request: WorkflowCreateRequest,
+    ): Promise<WorkflowScopedDefinition>;
+    updateWorkflow(
+      request: WorkflowUpdateRequest,
+    ): Promise<WorkflowScopedDefinition>;
     getTemplate(request: WorkflowGetTemplateRequest): Promise<WorkflowTemplate>;
     listTemplates(): Promise<WorkflowTemplateListResult>;
     createTemplate(

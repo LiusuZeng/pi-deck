@@ -39,6 +39,10 @@ interface WorkflowModelChoice {
   note?: string;
   thinkingChoices?: WorkflowThinkingChoice[];
 }
+export interface WorkflowScopeChoice {
+  id: string;
+  name: string;
+}
 const modelChoiceValue = (
   choice: Pick<WorkflowModelChoice, "provider" | "id">,
 ) => [choice.provider, choice.id].filter(Boolean).join("/");
@@ -79,15 +83,25 @@ const isCompactViewport = () =>
 /** Canonical agentWorkflow editor. Build mutations only update the canonical workflow document. */
 export function AgentWorkflowBuilder(props: {
   initialDefinition?: AgentWorkflowDefinition;
+  /** Active workspaces eligible for new scope selections. */
+  workspaceChoices?: WorkflowScopeChoice[];
+  /** null is global; a saved unavailable ID is retained while editing. */
+  initialScopeWorkspaceId?: string | null;
   modelChoices?: WorkflowModelChoice[];
   thinkingChoices?: WorkflowThinkingChoice[];
-  onSave(definition: AgentWorkflowDefinition): Promise<void> | void;
+  onSave(
+    definition: AgentWorkflowDefinition,
+    scopeWorkspaceId: string | null,
+  ): Promise<void> | void;
   onCancel(): void;
 }): ReactElement {
   const [definition, setDefinition] = useState(
     () => props.initialDefinition ?? defaultAgentWorkflowDefinition(),
   );
   const [view, setView] = useState<View>("build");
+  const [scopeWorkspaceId, setScopeWorkspaceId] = useState<string | null>(
+    () => props.initialScopeWorkspaceId ?? null,
+  );
   const [selectedId, setSelectedId] = useState(definition.entryNodeId);
   const [draft, setDraft] = useState(definitionJson(definition));
   const [jsonError, setJsonError] = useState<string>();
@@ -277,7 +291,7 @@ export function AgentWorkflowBuilder(props: {
     }
     try {
       setSaveError(undefined);
-      await props.onSave(result.definition);
+      await props.onSave(result.definition, scopeWorkspaceId);
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : String(error));
     }
@@ -431,6 +445,32 @@ export function AgentWorkflowBuilder(props: {
                   update({ ...definition, name: e.target.value })
                 }
               />
+            </label>
+            <label className="workflow-field">
+              <span>Workflow scope</span>
+              <select
+                aria-label="Workflow scope"
+                value={scopeWorkspaceId ?? ""}
+                onChange={(event) =>
+                  setScopeWorkspaceId(event.target.value || null)
+                }
+              >
+                <option value="">All workspaces (global)</option>
+                {scopeWorkspaceId !== null &&
+                  !props.workspaceChoices?.some(
+                    (workspace) => workspace.id === scopeWorkspaceId,
+                  ) && (
+                    <option value={scopeWorkspaceId} disabled>
+                      Saved workspace ({scopeWorkspaceId})
+                    </option>
+                  )}
+                {(props.workspaceChoices ?? []).map((workspace) => (
+                  <option key={workspace.id} value={workspace.id}>
+                    {workspace.name}
+                  </option>
+                ))}
+              </select>
+              <small>Where this workflow is available.</small>
             </label>
             <label className="workflow-field">
               <span>Starts with</span>

@@ -72,7 +72,7 @@ another laptop without relying on chat history.
 
 ### 3. Workflow scope selector omits existing workspaces
 
-- **Status:** Open.
+- **Status:** Complete (implemented and tested).
 - **Reported:** 2026-08-07.
 - **Area:** New/edit Agent Workflow, workflow scope selector.
 - **Observed behavior:** The sidebar shows an existing `liusu_pi_gui` workspace
@@ -123,7 +123,7 @@ language.
 - [x] Recheck copy, spacing, and mobile layout after the simplification.
 - [x] Add/update renderer and backend compatibility tests.
 - [x] Push the continuation branch and isolated implementation branches; run final validation.
-- [ ] Populate the workflow scope selector with all active workspaces.
+- [x] Populate the workflow scope selector with all active workspaces.
 
 ## Captured screenshots
 

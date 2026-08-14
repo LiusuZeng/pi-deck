@@ -83,8 +83,8 @@ import {
   canonicalWorkflowOccurrenceRequestSchema,
   canonicalWorkflowStartRunRequestSchema,
   workflowCreateRequestSchema,
-  workflowDefinitionSchema,
   workflowListRequestSchema,
+  workflowScopedDefinitionSchema,
   workflowRunEnvelopeSchema,
   workflowUpdateRequestSchema,
 } from "../shared/agentWorkflowSchemas.js";
@@ -433,19 +433,19 @@ const api: PiDeckApi = Object.freeze({
       invokeValidated({
         channel: ipcChannels.workflowListWorkflows,
         request: workflowListRequestSchema.parse(request),
-        responseSchema: workflowDefinitionSchema.array(),
+        responseSchema: workflowScopedDefinitionSchema.array(),
       }),
     createWorkflow: (request: WorkflowCreateRequest) =>
       invokeValidated({
         channel: ipcChannels.workflowCreateWorkflow,
         request: workflowCreateRequestSchema.parse(request),
-        responseSchema: workflowDefinitionSchema,
+        responseSchema: workflowScopedDefinitionSchema,
       }),
     updateWorkflow: (request: WorkflowUpdateRequest) =>
       invokeValidated({
         channel: ipcChannels.workflowUpdateWorkflow,
         request: workflowUpdateRequestSchema.parse(request),
-        responseSchema: workflowDefinitionSchema,
+        responseSchema: workflowScopedDefinitionSchema,
       }),
     canonicalListRuns: (request?: { workspaceId?: string }) =>
       invokeValidated({

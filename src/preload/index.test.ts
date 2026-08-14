@@ -72,36 +72,43 @@ describe("preload PiDeck API validation", () => {
       ],
       relationships: [],
     };
+    const scoped = { workflow, scopeWorkspaceId: null };
     electronMock.ipcRenderer.invoke.mockResolvedValue({
       ok: true,
-      data: workflow,
+      data: scoped,
     });
 
     await api.workflows.createWorkflow({
       workspaceId: "workspace-1",
+      scopeWorkspaceId: null,
       workflow,
     });
     await api.workflows.updateWorkflow({
       workspaceId: "workspace-1",
+      scopeWorkspaceId: "workspace-2",
       workflow,
     });
     electronMock.ipcRenderer.invoke.mockResolvedValueOnce({
       ok: true,
-      data: [workflow],
+      data: [scoped],
     });
     await expect(
       api.workflows.listWorkflows({ workspaceId: "workspace-1" }),
-    ).resolves.toEqual([workflow]);
+    ).resolves.toEqual([scoped]);
 
     expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
       1,
       "workflows:create",
-      { workspaceId: "workspace-1", workflow },
+      { workspaceId: "workspace-1", scopeWorkspaceId: null, workflow },
     );
     expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
       2,
       "workflows:update",
-      { workspaceId: "workspace-1", workflow },
+      {
+        workspaceId: "workspace-1",
+        scopeWorkspaceId: "workspace-2",
+        workflow,
+      },
     );
     expect(() =>
       api.workflows.createWorkflow({

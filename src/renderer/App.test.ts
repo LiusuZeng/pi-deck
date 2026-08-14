@@ -3,6 +3,28 @@ import { emptyOverlays } from "./sessionState.js";
 import { defaultAgentWorkflowDefinition } from "./workflows/agentWorkflowDefinition.js";
 import { __rendererTestHooks } from "./App.js";
 
+it("offers every active workflow workspace once and excludes archived workspaces", () => {
+  const workspace = (id: string, name: string) => ({
+    id,
+    name,
+    lastOpenedAt: 1,
+  });
+  expect(
+    __rendererTestHooks.activeWorkflowScopeChoices(
+      workspace("workspace-a", "Alpha"),
+      [
+        workspace("workspace-a", "Alpha"),
+        workspace("workspace-b", "Beta"),
+        workspace("workspace-c", "Archived"),
+      ],
+      [workspace("workspace-c", "Archived")],
+    ).map(({ id, name }) => ({ id, name })),
+  ).toEqual([
+    { id: "workspace-a", name: "Alpha" },
+    { id: "workspace-b", name: "Beta" },
+  ]);
+});
+
 function baseSession() {
   return {
     id: "session-1",
