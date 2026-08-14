@@ -1,7 +1,7 @@
 /** A renderer-safe snapshot of a task. Deliberately contains no task payload. */
 export interface MultitaskTaskSummary {
-  name: string;
-  number: number;
+  generatedName: string;
+  taskNumber: number;
   status: string;
 }
 
@@ -24,8 +24,8 @@ export function MultitaskStatusPopover({ tasks }: MultitaskStatusPopoverProps) {
       role="list"
     >
       {tasks.map((task) => (
-        <span key={task.number} role="listitem">
-          {`#${task.number} ${task.name} — ${task.status}`}
+        <span key={task.taskNumber} role="listitem">
+          {`#${task.taskNumber} ${task.generatedName} — ${task.status}`}
         </span>
       ))}
     </span>

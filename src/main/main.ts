@@ -53,6 +53,10 @@ import {
   pickProjectResultSchema,
   projectListResultSchema,
   projectSelectRequestSchema,
+  multitaskModeRequestSchema,
+  multitaskModeStateSchema,
+  multitaskModeUpdateRequestSchema,
+  multitaskStateEventSchema,
 } from "../shared/ipcSchemas.js";
 import type {
   AppBootstrapState,
@@ -99,6 +103,8 @@ import {
 import { ProjectStore, resolvePiDeckHome } from "./projects/projectStore.js";
 import { SettingsStore } from "./settings/settingsStore.js";
 import { formatCanonicalFileReference } from "./attachments.js";
+import { MultitaskManager } from "./multitask/multitaskManager.js";
+import { MultitaskStateStore } from "./multitask/multitaskStateStore.js";
 import { deliverWithAttachmentConsumption } from "./attachmentDelivery.js";
 import {
   AttachmentSelectionStore,
@@ -120,6 +126,8 @@ let settingsStore: SettingsStore | undefined;
 let projectStore: ProjectStore | undefined;
 const realChatLaunchConfigCache = new RealChatLaunchConfigCache();
 let diagnostics: DiagnosticsService | undefined;
+let multitaskStateStore: MultitaskStateStore | undefined;
+const multitaskManagers = new Map<string, MultitaskManager>();
 type ChatBackendMode = "fake" | "real";
 
 let chatAdapter: SinglePiAdapter | undefined;
@@ -182,6 +190,8 @@ async function bootstrap(): Promise<void> {
   settingsStore = new SettingsStore(app.getPath("userData"), diagnostics);
   await settingsStore.loadIfNeeded();
   projectStore = new ProjectStore(resolvePiDeckHome(process.env), diagnostics);
+  multitaskStateStore = new MultitaskStateStore(app.getPath("userData"));
+  await multitaskStateStore.loadIfNeeded();
   await projectStore.loadIfNeeded();
 
   configureCsp();
@@ -590,6 +600,29 @@ function registerIpcHandlers(
       await closeChatWorker();
       // Reset is an explicit new-session action, unlike application bootstrap.
       return createChatSessionSnapshot(store, diagnosticsService);
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.multitaskGetMode,
+    requestSchema: multitaskModeRequestSchema,
+    responseSchema: multitaskModeStateSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runtimeId }) => multitaskModeState(runtimeId),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.multitaskUpdateMode,
+    requestSchema: multitaskModeUpdateRequestSchema,
+    responseSchema: multitaskModeStateSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runtimeId, mode }) => {
+      const manager = await getMultitaskManager(runtimeId);
+      // This changes scheduling metadata only. No child worker is created.
+      manager.setMode(mode);
+      await persistMultitaskManager(runtimeId, manager);
+      emitMultitaskState(runtimeId, manager);
+      return multitaskModeStateFromManager(runtimeId, manager);
     },
   });
 
@@ -1236,6 +1269,7 @@ function forgetChatRuntime(
   }
   chatRuntimeSessionFiles.delete(runtimeId);
   chatRuntimeProjectIds.delete(runtimeId);
+  multitaskManagers.delete(runtimeId);
   if (chatRuntimeId === runtimeId) {
     chatRuntimeId = undefined;
   }
@@ -1448,6 +1482,7 @@ async function closeChatWorker(): Promise<void> {
   chatRuntimeProjectIds.clear();
   chatSessionFileLocks.clear();
   chatSessionResumePromises.clear();
+  multitaskManagers.clear();
   attachmentPreservingRuntimeClosures.clear();
   for (const runtimeId of runtimeIds) {
     attachmentSelections.releaseSession(runtimeId);
@@ -2326,6 +2361,7 @@ async function getChatSnapshotForRuntime(
     }
   }
 
+  await reconcileMultitaskRuntime(runtimeId, state.sessionFile);
   return {
     runtimeId,
     backendMode: mode,
@@ -2890,3 +2926,82 @@ bootstrap().catch((error: unknown) => {
   console.error(message);
   app.quit();
 });
+
+async function getMultitaskManager(
+  runtimeId: string,
+): Promise<MultitaskManager> {
+  const adapter = chatAdapter;
+  if (adapter === undefined || !adapter.hasRuntime(runtimeId)) {
+    throw new Error(`Chat runtime is no longer attached: ${runtimeId}`);
+  }
+  const existing = multitaskManagers.get(runtimeId);
+  if (existing !== undefined) return existing;
+  const sessionFile = chatRuntimeSessionFiles.get(runtimeId);
+  const saved = sessionFile ? multitaskStateStore?.get(sessionFile) : undefined;
+  const manager = saved
+    ? MultitaskManager.rehydrate(saved, { maxQueuedTasks: 100 })
+    : new MultitaskManager({ mode: "sequential", maxQueuedTasks: 100 });
+  multitaskManagers.set(runtimeId, manager);
+  return manager;
+}
+
+async function reconcileMultitaskRuntime(
+  runtimeId: string,
+  sessionFile: unknown,
+): Promise<void> {
+  if (typeof sessionFile !== "string") return;
+  const canonical =
+    (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
+  chatRuntimeSessionFiles.set(runtimeId, canonical);
+  if (multitaskManagers.has(runtimeId)) return;
+  const saved = multitaskStateStore?.get(canonical);
+  multitaskManagers.set(
+    runtimeId,
+    saved
+      ? MultitaskManager.rehydrate(saved, { maxQueuedTasks: 100 })
+      : new MultitaskManager({ mode: "sequential", maxQueuedTasks: 100 }),
+  );
+}
+
+async function persistMultitaskManager(
+  runtimeId: string,
+  manager: MultitaskManager,
+): Promise<void> {
+  const sessionFile = chatRuntimeSessionFiles.get(runtimeId);
+  if (sessionFile !== undefined)
+    await multitaskStateStore?.set(sessionFile, manager.exportState());
+}
+
+function multitaskModeState(
+  runtimeId: string,
+): Promise<{ runtimeId: string; mode: "parallel" | "sequential" }> {
+  return getMultitaskManager(runtimeId).then((manager) =>
+    multitaskModeStateFromManager(runtimeId, manager),
+  );
+}
+
+function multitaskModeStateFromManager(
+  runtimeId: string,
+  manager: MultitaskManager,
+): { runtimeId: string; mode: "parallel" | "sequential" } {
+  return { runtimeId, mode: manager.mode };
+}
+
+function emitMultitaskState(
+  runtimeId: string,
+  manager: MultitaskManager,
+): void {
+  const tasks = manager.snapshots().map((task) => ({
+    taskNumber: task.number,
+    generatedName: task.name,
+    status: task.status === "cancelled" ? "failed" : task.status,
+  }));
+  const payload = {
+    ...multitaskModeStateFromManager(runtimeId, manager),
+    tasks,
+  };
+  const parsed = multitaskStateEventSchema.parse(payload);
+  const window = mainWindow;
+  if (window && !window.isDestroyed() && !window.webContents.isDestroyed())
+    window.webContents.send(ipcChannels.multitaskState, parsed);
+}

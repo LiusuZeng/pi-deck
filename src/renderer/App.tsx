@@ -24,6 +24,7 @@ import type {
   DiagnosticsSummary,
   ProjectListResult,
   ProjectRef,
+  MultitaskTaskSummary,
 } from "../shared/types.js";
 import {
   parseSafeMarkdown,
@@ -38,6 +39,7 @@ import {
 } from "./sessionState.js";
 import { Button } from "./components/ui/Button.js";
 import { IconButton } from "./components/ui/IconButton.js";
+import { MultitaskControl } from "./components/multitask/MultitaskControl.js";
 import {
   ArrowUp,
   Check,
@@ -475,6 +477,12 @@ export function App(): ReactElement {
     {},
   );
   const [composerError, setComposerError] = useState<string | null>(null);
+  const [multitask, setMultitask] = useState<
+    Record<
+      string,
+      { mode: "sequential" | "parallel"; tasks: MultitaskTaskSummary[] }
+    >
+  >({});
   const [currentProject, setCurrentProject] = useState<ProjectRef>(() => ({
     id: "pending-project",
     path: "Resolving project…",
@@ -526,6 +534,7 @@ export function App(): ReactElement {
   useEffect(() => {
     let disposed = false;
     let unsubscribe: (() => void) | undefined;
+    let unsubscribeMultitask: (() => void) | undefined;
     let eventBuffer: RuntimeEventBuffer | undefined;
     let bootstrapRefreshFrame: number | undefined;
     let bootstrapRefreshSecondFrame: number | undefined;
@@ -611,6 +620,13 @@ export function App(): ReactElement {
           },
           isRuntimeVisible: (runtimeId) =>
             selectedSessionIdRef.current === runtimeId,
+        });
+        unsubscribeMultitask = api.multitask.onState((event) => {
+          if (!disposed)
+            setMultitask((current) => ({
+              ...current,
+              [event.runtimeId]: { mode: event.mode, tasks: event.tasks },
+            }));
         });
         unsubscribe = api.chat.onEvent((event) => {
           if (disposed) {
@@ -724,6 +740,7 @@ export function App(): ReactElement {
     return () => {
       disposed = true;
       unsubscribe?.();
+      unsubscribeMultitask?.();
       eventBuffer?.dispose();
       if (bootstrapRefreshFrame !== undefined) {
         window.cancelAnimationFrame(bootstrapRefreshFrame);
@@ -795,6 +812,9 @@ export function App(): ReactElement {
   const draft = composerDraft.text;
   const attachments = composerDraft.attachments;
   const slashOpen = composerDraft.slashOpen;
+  const multitaskState = selectedSession.runtimeBacked
+    ? multitask[selectedSession.id]
+    : undefined;
   const isWorking = selectedSession.status === "working";
   const isBusy = isSessionBusy(selectedSession);
   const isResuming = selectedSession.status === "reconnecting";
@@ -827,6 +847,26 @@ export function App(): ReactElement {
   );
   const showStarterPage =
     selectedSession.timeline.length === 0 && selectedSession.status === "idle";
+
+  useEffect(() => {
+    if (
+      !selectedSession.runtimeBacked ||
+      multitask[selectedSession.id] !== undefined
+    )
+      return;
+    void window.piDeck.multitask
+      .getMode({ runtimeId: selectedSession.id })
+      .then((state) =>
+        setMultitask((current) => ({
+          ...current,
+          [state.runtimeId]: {
+            mode: state.mode,
+            tasks: current[state.runtimeId]?.tasks ?? [],
+          },
+        })),
+      )
+      .catch(() => undefined);
+  }, [multitask, selectedSession.id, selectedSession.runtimeBacked]);
 
   useEffect(() => {
     const compactLayout = window.matchMedia("(max-width: 760px)");
@@ -2601,6 +2641,29 @@ export function App(): ReactElement {
       realThinkingLevels={availableRealThinkingLevels}
       selectedSession={selectedSession}
       allowAttachments={true}
+      multitaskMode={multitaskState?.mode}
+      multitaskTasks={multitaskState?.tasks ?? []}
+      onToggleMultitask={() => {
+        if (!selectedSession.runtimeBacked) return;
+        const mode =
+          multitaskState?.mode === "parallel" ? "sequential" : "parallel";
+        void window.piDeck.multitask
+          .updateMode({ runtimeId: selectedSession.id, mode })
+          .then((state) =>
+            setMultitask((current) => ({
+              ...current,
+              [state.runtimeId]: {
+                mode: state.mode,
+                tasks: current[state.runtimeId]?.tasks ?? [],
+              },
+            })),
+          )
+          .catch((error) =>
+            setComposerError(
+              `Multitasking mode unavailable: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          );
+      }}
       onChange={handleDraftChange}
       onKeyDown={handleComposerKeyDown}
       onSend={handleSend}
@@ -6208,6 +6271,9 @@ function Composer(props: {
   realThinkingLevels: string[];
   selectedSession: SessionViewModel;
   allowAttachments: boolean;
+  multitaskMode: "sequential" | "parallel" | undefined;
+  multitaskTasks: MultitaskTaskSummary[];
+  onToggleMultitask(): void;
   onChange(value: string): void;
   onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void;
   onSend(): void;
@@ -6316,6 +6382,20 @@ function Composer(props: {
               label="Add attachments"
               disabled={isActionPending}
               onClick={props.onPickAttachments}
+            />
+          ) : null}
+          {props.multitaskMode !== undefined ? (
+            <MultitaskControl
+              tasks={props.multitaskTasks}
+              aria-label={`Multitasking mode: ${props.multitaskMode}. Toggle mode`}
+              onClick={props.onToggleMultitask}
+              title={`Multitasking: ${props.multitaskMode}`}
+            />
+          ) : props.selectedSession.runtimeBacked ? (
+            <MultitaskControl
+              tasks={[]}
+              enabled={false}
+              title="Loading multitasking mode"
             />
           ) : null}
           {props.selectedSession.backendMode === "real" ? (

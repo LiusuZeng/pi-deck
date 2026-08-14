@@ -91,6 +91,12 @@ export class MultitaskManager<Request = unknown, Input = unknown> {
     return this.options.mode;
   }
 
+  setMode(mode: MultitaskManagerOptions["mode"]): void {
+    if (mode !== "parallel" && mode !== "sequential")
+      throw new Error("Multitask mode must be parallel or sequential.");
+    this.options.mode = mode;
+  }
+
   enqueue(task: NewChildTask<Request>): ChildTaskSnapshot {
     validateNewTask(task);
     if (this.queuedCount() >= this.options.maxQueuedTasks) {

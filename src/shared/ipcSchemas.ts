@@ -596,36 +596,33 @@ export const pickAttachmentsResultSchema = z.discriminatedUnion("selected", [
     .strict(),
 ]);
 
-// Interactive multitasking is scoped exclusively by the parent task's stable
-// renderer-facing number. Runtime/session identifiers must not cross this
-// boundary: child execution remains owned by the main process.
+// Multitask is scoped by a live parent runtime. The renderer can select only
+// its currently attached parent; it cannot address or operate child sessions.
 export const multitaskModeSchema = z.enum(["sequential", "parallel"]);
-
-const multitaskParentTaskNumberSchema = z.number().int().positive();
+const multitaskRuntimeIdSchema = z.string().min(1);
 
 export const multitaskModeRequestSchema = z
   .object({
-    parentTaskNumber: multitaskParentTaskNumberSchema,
+    runtimeId: multitaskRuntimeIdSchema,
   })
   .strict();
 
 export const multitaskModeUpdateRequestSchema = z
   .object({
-    parentTaskNumber: multitaskParentTaskNumberSchema,
+    runtimeId: multitaskRuntimeIdSchema,
     mode: multitaskModeSchema,
   })
   .strict();
 
 export const multitaskModeStateSchema = z
   .object({
-    parentTaskNumber: multitaskParentTaskNumberSchema,
+    runtimeId: multitaskRuntimeIdSchema,
     mode: multitaskModeSchema,
   })
   .strict();
 
-// This intentionally remains a projection, rather than a task DTO. In
-// particular, it cannot disclose runtime IDs, session files, prompts, output,
-// child controls, or transcript data to the renderer.
+// Safe status-only projection. No child runtime/session, prompt, output, or
+// controls are exposed to the renderer.
 export const multitaskTaskSummarySchema = z
   .object({
     taskNumber: z.number().int().positive(),

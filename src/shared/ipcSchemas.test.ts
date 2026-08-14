@@ -213,31 +213,31 @@ describe("IPC schemas", () => {
   });
 
   it("limits multitask contracts to parent-scoped mode and safe summaries", () => {
-    expect(multitaskModeRequestSchema.parse({ parentTaskNumber: 7 })).toEqual({
-      parentTaskNumber: 7,
+    expect(
+      multitaskModeRequestSchema.parse({ runtimeId: "runtime-7" }),
+    ).toEqual({
+      runtimeId: "runtime-7",
     });
     expect(
       multitaskModeUpdateRequestSchema.parse({
-        parentTaskNumber: 7,
+        runtimeId: "runtime-7",
         mode: "parallel",
       }),
-    ).toEqual({ parentTaskNumber: 7, mode: "parallel" });
+    ).toEqual({ runtimeId: "runtime-7", mode: "parallel" });
     expect(
       multitaskStateEventSchema.parse({
-        parentTaskNumber: 7,
+        runtimeId: "runtime-7",
         mode: "sequential",
         tasks: [
           { taskNumber: 8, generatedName: "Task 8", status: "waiting-input" },
         ],
       }),
-    ).toMatchObject({ parentTaskNumber: 7 });
+    ).toMatchObject({ runtimeId: "runtime-7" });
 
-    expect(() =>
-      multitaskModeRequestSchema.parse({ parentTaskNumber: 0 }),
-    ).toThrow();
+    expect(() => multitaskModeRequestSchema.parse({ runtimeId: "" })).toThrow();
     expect(() =>
       multitaskModeUpdateRequestSchema.parse({
-        parentTaskNumber: 7,
+        runtimeId: "runtime-7",
         mode: "parallel",
         childRuntimeId: "not-renderer-safe",
       }),
@@ -252,7 +252,7 @@ describe("IPC schemas", () => {
     ).toThrow();
     expect(() =>
       multitaskStateEventSchema.parse({
-        parentTaskNumber: 7,
+        runtimeId: "runtime-7",
         mode: "parallel",
         tasks: [
           {

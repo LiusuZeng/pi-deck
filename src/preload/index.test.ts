@@ -150,35 +150,35 @@ describe("preload PiDeck API validation", () => {
   it("exposes only parent-scoped multitask mode APIs", async () => {
     electronMock.ipcRenderer.invoke.mockResolvedValue({
       ok: true,
-      data: { parentTaskNumber: 7, mode: "parallel" },
+      data: { runtimeId: "runtime-7", mode: "parallel" },
     });
 
     await expect(
-      api.multitask.getMode({ parentTaskNumber: 7 }),
+      api.multitask.getMode({ runtimeId: "runtime-7" }),
     ).resolves.toEqual({
-      parentTaskNumber: 7,
+      runtimeId: "runtime-7",
       mode: "parallel",
     });
     await api.multitask.updateMode({
-      parentTaskNumber: 7,
+      runtimeId: "runtime-7",
       mode: "sequential",
     });
 
     expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
       1,
       "multitask:getMode",
-      { parentTaskNumber: 7 },
+      { runtimeId: "runtime-7" },
     );
     expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
       2,
       "multitask:updateMode",
-      { parentTaskNumber: 7, mode: "sequential" },
+      { runtimeId: "runtime-7", mode: "sequential" },
     );
     expect(() =>
       api.multitask.updateMode({
-        parentTaskNumber: 7,
+        runtimeId: "runtime-7",
         mode: "parallel",
-        runtimeId: "must-not-cross-boundary",
+        childRuntimeId: "must-not-cross-boundary",
       } as never),
     ).toThrow();
   });
@@ -194,7 +194,7 @@ describe("preload PiDeck API validation", () => {
     wrapped(
       {},
       {
-        parentTaskNumber: 7,
+        runtimeId: "runtime-7",
         mode: "parallel",
         tasks: [{ taskNumber: 8, generatedName: "Task 8", status: "running" }],
       },
@@ -202,14 +202,14 @@ describe("preload PiDeck API validation", () => {
     wrapped(
       {},
       {
-        parentTaskNumber: 7,
+        runtimeId: "runtime-7",
         mode: "parallel",
         tasks: [
           {
             taskNumber: 8,
             generatedName: "Task 8",
             status: "running",
-            runtimeId: "must-not-cross-boundary",
+            childRuntimeId: "must-not-cross-boundary",
           },
         ],
       },
@@ -217,7 +217,7 @@ describe("preload PiDeck API validation", () => {
 
     expect(listener).toHaveBeenCalledTimes(1);
     expect(listener).toHaveBeenCalledWith({
-      parentTaskNumber: 7,
+      runtimeId: "runtime-7",
       mode: "parallel",
       tasks: [{ taskNumber: 8, generatedName: "Task 8", status: "running" }],
     });

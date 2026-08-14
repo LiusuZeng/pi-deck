@@ -11,8 +11,8 @@ import { MultitaskStatusPopover } from "./MultitaskStatusPopover.js";
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
 const tasks = [
-  { number: 4, name: "Build the renderer", status: "working" },
-  { number: 8, name: "Run focused tests", status: "queued" },
+  { taskNumber: 4, generatedName: "Build the renderer", status: "working" },
+  { taskNumber: 8, generatedName: "Run focused tests", status: "queued" },
 ];
 
 let root: Root | undefined;
