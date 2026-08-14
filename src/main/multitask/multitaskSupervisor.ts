@@ -142,6 +142,29 @@ export class MultitaskSupervisor<
     return this.parent(parentId).manager.snapshots().map(publicSnapshot);
   }
 
+  mode(parentId: ParentId): MultitaskManagerOptions["mode"] {
+    return this.parent(parentId).manager.mode;
+  }
+
+  setMode(parentId: ParentId, mode: MultitaskManagerOptions["mode"]): void {
+    const parent = this.parent(parentId);
+    parent.manager.setMode(mode);
+    // Disabling parallel work is intentionally non-destructive: running
+    // children finish, while work that has not started is cancelled.
+    if (mode === "sequential") {
+      for (const task of parent.manager.snapshots()) {
+        if (task.status === "queued") {
+          const cancelled = parent.manager.cancel(task.number, {
+            summary: "Cancelled because parallel multitasking was disabled.",
+          });
+          this.notifyStatus(parentId, cancelled);
+          if (cancelled.terminalHandoff)
+            this.notifyHandoff(parentId, cancelled, cancelled.terminalHandoff);
+        }
+      }
+    }
+  }
+
   /** Persist only manager state: briefs, input, and all worker handles stay private. */
   exportState(parentId: ParentId): MultitaskState {
     return this.parent(parentId).manager.exportState();

@@ -105,6 +105,9 @@ import { SettingsStore } from "./settings/settingsStore.js";
 import { formatCanonicalFileReference } from "./attachments.js";
 import { MultitaskManager } from "./multitask/multitaskManager.js";
 import { MultitaskStateStore } from "./multitask/multitaskStateStore.js";
+import { DelegationBridgeServer, type DelegateRequest } from "./multitask/delegationBridgeServer.js";
+import { writeDeckDelegateExtension, DECK_DELEGATE_CAPABILITY_ENV, DECK_DELEGATE_ENDPOINT_ENV } from "./multitask/deckDelegateExtensionGenerator.js";
+import { MultitaskSupervisor, type ChildWorkerCallbacks, type ParentTaskNotification } from "./multitask/multitaskSupervisor.js";
 import { deliverWithAttachmentConsumption } from "./attachmentDelivery.js";
 import {
   AttachmentSelectionStore,
@@ -128,11 +131,17 @@ const realChatLaunchConfigCache = new RealChatLaunchConfigCache();
 let diagnostics: DiagnosticsService | undefined;
 let multitaskStateStore: MultitaskStateStore | undefined;
 const multitaskManagers = new Map<string, MultitaskManager>();
+let delegationBridge: DelegationBridgeServer | undefined;
+let delegationCredentials: { socketPath: string; token: string } | undefined;
+let multitaskSupervisor: MultitaskSupervisor<string, string, { close(): Promise<void>; provideInput(input: string): Promise<void> }> | undefined;
+const delegateCalls = new Map<string, { connectionId: string; toolCallId: string }>();
+let nextDelegatedTaskNumber = 1;
 type ChatBackendMode = "fake" | "real";
 
 let chatAdapter: SinglePiAdapter | undefined;
 let chatAdapterPromise: Promise<SinglePiAdapter> | undefined;
 let chatWorkerCapacity: WorkerCapacity | undefined;
+let maxRunningWorkers = 1;
 let chatRuntimeId: string | undefined;
 let chatBackendMode: ChatBackendMode | undefined;
 const chatRuntimeIds = new Set<string>();
@@ -193,6 +202,7 @@ async function bootstrap(): Promise<void> {
   multitaskStateStore = new MultitaskStateStore(app.getPath("userData"));
   await multitaskStateStore.loadIfNeeded();
   await projectStore.loadIfNeeded();
+  await startDelegationBridge();
 
   configureCsp();
   registerIpcHandlers(settingsStore, diagnostics);
@@ -618,9 +628,9 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async ({ runtimeId, mode }) => {
       const manager = await getMultitaskManager(runtimeId);
-      // This changes scheduling metadata only. No child worker is created.
       manager.setMode(mode);
-      await persistMultitaskManager(runtimeId, manager);
+      multitaskSupervisor?.setMode(runtimeId, mode);
+      await persistMultitaskSupervisor(runtimeId);
       emitMultitaskState(runtimeId, manager);
       return multitaskModeStateFromManager(runtimeId, manager);
     },
@@ -965,11 +975,67 @@ async function ensureChatAdapter(
   }
 }
 
+async function startDelegationBridge(): Promise<void> {
+  const bridge = new DelegationBridgeServer({ stateDir: path.join(app.getPath("userData"), "delegate-bridge") });
+  const credentials = await bridge.start();
+  delegationBridge = bridge;
+  delegationCredentials = { socketPath: credentials.socketPath, token: credentials.token };
+  bridge.onDelegate((request) => void handleDelegateRequest(request));
+}
+
+async function deckDelegateExtensionPath(): Promise<string> {
+  const output = path.join(app.getPath("userData"), "extensions", "deck-delegate.ts");
+  await writeDeckDelegateExtension(output);
+  return output;
+}
+
+function delegateEnvironment(base: NodeJS.ProcessEnv, parentRuntimeId?: string): NodeJS.ProcessEnv {
+  const credentials = delegationCredentials;
+  if (!credentials) throw new Error("Delegation bridge is not available.");
+  return { ...base, [DECK_DELEGATE_ENDPOINT_ENV]: `unix:${credentials.socketPath}`, [DECK_DELEGATE_CAPABILITY_ENV]: credentials.token, ...(parentRuntimeId ? { DECK_DELEGATE_PARENT_RUNTIME: parentRuntimeId } : {}) }; 
+}
+
+async function handleDelegateRequest(request: DelegateRequest): Promise<void> {
+  // A bridge connection is authenticated, but it is still bound to exactly one
+  // attached parent runtime before any payload is interpreted.
+  const payload = request.payload;
+  const parentId = payload && typeof payload === "object" && !Array.isArray(payload) && typeof (payload as { parentRuntimeId?: unknown }).parentRuntimeId === "string"
+    ? (payload as { parentRuntimeId: string }).parentRuntimeId : undefined;
+  const supervisor = multitaskSupervisor;
+  if (!parentId || !supervisor || !delegationBridge) {
+    delegationBridge?.sendChildResult({ connectionId: request.connectionId, toolCallId: request.toolCallId, outcome: "failed", handoff: { summary: "Parallel multitasking is not enabled for this parent." } });
+    return;
+  }
+  if (!parentId || multitaskManagers.get(parentId)?.mode !== "parallel" || !chatRuntimeIds.has(parentId)) {
+    delegationBridge?.sendChildResult({ connectionId: request.connectionId, toolCallId: request.toolCallId, outcome: "failed", handoff: { summary: "Parallel multitasking is not enabled for this parent." } });
+    return;
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload) || typeof (payload as { task?: unknown }).task !== "string") {
+    delegationBridge.sendChildResult({ connectionId: request.connectionId, toolCallId: request.toolCallId, outcome: "failed", handoff: { summary: "Invalid delegate task." } });
+    return;
+  }
+  const task = (payload as { task: string; name?: unknown }).task.trim();
+  const name = typeof (payload as { name?: unknown }).name === "string" ? (payload as { name: string }).name.trim() : "Delegated task";
+  if (!task || task.length > 16_000 || name.length > 256) {
+    delegationBridge.sendChildResult({ connectionId: request.connectionId, toolCallId: request.toolCallId, outcome: "failed", handoff: { summary: "Delegate task exceeds Deck limits." } });
+    return;
+  }
+  const number = nextDelegatedTaskNumber++;
+  try {
+    delegateCalls.set(`${parentId}:${number}`, { connectionId: request.connectionId, toolCallId: request.toolCallId });
+    supervisor.enqueue(parentId, { number, name: name || "Delegated task", brief: { text: task } });
+  } catch (error) {
+    delegateCalls.delete(`${parentId}:${number}`);
+    delegationBridge.sendChildResult({ connectionId: request.connectionId, toolCallId: request.toolCallId, outcome: "failed", handoff: { summary: error instanceof Error ? error.message : "Unable to queue child." } });
+  }
+}
+
 async function initializeChatAdapter(
   store: SettingsStore,
   diagnosticsService: DiagnosticsService,
 ): Promise<SinglePiAdapter> {
   const mode = resolveChatBackendMode();
+  maxRunningWorkers = (await store.get()).maxRunningSessions;
   const adapter = new SinglePiAdapter();
   const capacity = new WorkerCapacity(() => adapter.workerCount());
   const unsubscribe = adapter.onEvent((event) => {
@@ -980,8 +1046,12 @@ async function initializeChatAdapter(
       );
       return;
     }
-    trackExtensionUiRuntimeEvent(parsed.data);
-    sendChatEventToRenderer(parsed.data);
+    // Private delegated workers share the adapter only for capacity and RPC;
+    // their events/transcript identities never cross into renderer chat state.
+    if (chatRuntimeIds.has(parsed.data.runtimeId)) {
+      trackExtensionUiRuntimeEvent(parsed.data);
+      sendChatEventToRenderer(parsed.data);
+    }
     if (parsed.data.type === "worker_exit") {
       // A child exit does not go through closeSession(), so remove it from the
       // adapter as well as the UI/runtime maps or it would consume capacity.
@@ -1000,6 +1070,11 @@ async function initializeChatAdapter(
   chatEventUnsubscribe = unsubscribe;
   chatWorkerCapacity = capacity;
   chatAdapter = adapter;
+  multitaskSupervisor = new MultitaskSupervisor({
+    hasCapacity: () => capacityAvailable(),
+    createWorker: (launch) => createDelegatedChild(adapter, store, launch.parentId, launch.task, launch.callbacks),
+    onParentNotification: (notification) => handleMultitaskNotification(notification),
+  });
   return adapter;
 }
 
@@ -1036,6 +1111,14 @@ async function serializeChatWorkerCreation<T>(
   }
 }
 
+function capacityAvailable(): boolean {
+  const capacity = chatWorkerCapacity;
+  const adapter = chatAdapter;
+  // The capacity allocator remains authoritative at spawn time. This cheap
+  // preflight only prevents a queued child from competing with active parent UI.
+  return capacity !== undefined && adapter !== undefined && adapter.workerCount() < maxRunningWorkers;
+}
+
 function registerChatWorker(
   workerSpec: ChatWorkerSpec,
   mode: ChatBackendMode,
@@ -1048,6 +1131,9 @@ function registerChatWorker(
   if (workerSpec.projectId !== undefined) {
     chatRuntimeProjectIds.set(runtimeId, workerSpec.projectId);
   }
+  const manager = new MultitaskManager({ mode: "sequential", maxQueuedTasks: 100 });
+  multitaskManagers.set(runtimeId, manager);
+  multitaskSupervisor?.addParent(runtimeId, { mode: manager.mode, maxQueuedTasks: 100 });
 }
 
 function getChatWorkerCapacity(): WorkerCapacity {
@@ -1270,6 +1356,8 @@ function forgetChatRuntime(
   chatRuntimeSessionFiles.delete(runtimeId);
   chatRuntimeProjectIds.delete(runtimeId);
   multitaskManagers.delete(runtimeId);
+  // Private child handles are never renderer sessions; closing a parent only
+  // drops its scheduling metadata and their processes are cleaned at shutdown.
   if (chatRuntimeId === runtimeId) {
     chatRuntimeId = undefined;
   }
@@ -1281,6 +1369,77 @@ interface ChatWorkerSpec {
   projectId?: string;
 }
 
+async function createDelegatedChild(
+  adapter: SinglePiAdapter,
+  store: SettingsStore,
+  parentId: string,
+  task: { brief: { text: string } },
+  callbacks: ChildWorkerCallbacks,
+): Promise<{ close(): Promise<void>; provideInput(input: string): Promise<void> }> {
+  const capacity = getChatWorkerCapacity();
+  const parentMode = chatRuntimeModes.get(parentId);
+  const cwd = chatWorkerCwds.get(parentId);
+  const projectId = chatRuntimeProjectIds.get(parentId);
+  if (!parentMode || !cwd) throw new Error("Delegating parent is no longer attached.");
+  const worker = await capacity.allocate(async () => (await store.get()).maxRunningSessions, () => {
+    if (parentMode === "fake") {
+      return adapter.createWorker({ command: process.execPath, args: [path.join(__dirname, "pi/fakeRpc/fakeRpcServer.js"), "--stream-delay-ms", "10"], cwd, env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" } });
+    }
+    return createRealDelegatedWorker(adapter, store, cwd, projectId);
+  });
+  let ended = false;
+  worker.onEvent((event) => {
+    if (ended) return;
+    if (event.type === "extension_ui_request") callbacks.inputNeeded();
+    if (event.type === "agent_end" || event.type === "worker_exit") {
+      ended = true;
+      void worker.getMessages().then((messages) => {
+        const last = messages.at(-1);
+        callbacks.completed({ summary: typeof last?.content === "string" ? last.content.slice(0, 32_768) : "Child completed." });
+      }).catch(() => callbacks.failed({ summary: "Child exited without a result." }));
+    }
+  });
+  await worker.prompt({ text: task.brief.text });
+  return { close: () => adapter.closeSession(worker.runtimeId), provideInput: (input) => worker.steer({ text: input }) };
+}
+
+async function createRealDelegatedWorker(
+  adapter: SinglePiAdapter,
+  store: SettingsStore,
+  cwd: string,
+  projectId: string | undefined,
+): Promise<ReturnType<SinglePiAdapter["createWorker"]>> {
+  const project = projectId ? await ensureProjectStore().resolveAuthorizedProject(projectId) : undefined;
+  const launch = await resolveRealChatLaunchConfig(store, project);
+  return adapter.createWorker({
+    command: launch.effective.config.piBinary,
+    args: ["--mode", "rpc", ...launch.effective.workerArgs],
+    cwd: launch.projectCwd,
+    env: launch.effective.config.env,
+    requestTimeoutMs: Number(process.env.PI_DECK_REAL_RPC_TIMEOUT_MS ?? 30_000),
+    commandProtocol: "type-field",
+  });
+}
+
+function handleMultitaskNotification(notification: ParentTaskNotification<string>): void {
+  const key = `${notification.parentId}:${notification.task.number}`;
+  const call = delegateCalls.get(key);
+  const bridge = delegationBridge;
+  if (notification.type === "task-status") {
+    bridge?.sendChildLifecycle({ connectionId: call?.connectionId ?? "", toolCallId: call?.toolCallId ?? "", status: notification.task.status });
+  } else {
+    const outcome = notification.task.status === "completed" ? "completed" : notification.task.status === "cancelled" ? "cancelled" : "failed";
+    bridge?.sendChildResult({ connectionId: call?.connectionId ?? "", toolCallId: call?.toolCallId ?? "", outcome, handoff: notification.handoff });
+    delegateCalls.delete(key);
+  }
+  const supervisor = multitaskSupervisor;
+  if (supervisor) {
+    const manager = multitaskManagers.get(notification.parentId);
+    if (manager) emitMultitaskStateFromSnapshots(notification.parentId, manager.mode, supervisor.snapshots(notification.parentId));
+    void persistMultitaskSupervisor(notification.parentId);
+  }
+}
+
 async function createFakeChatWorker(
   adapter: SinglePiAdapter,
   store: SettingsStore,
@@ -1288,14 +1447,16 @@ async function createFakeChatWorker(
 ): Promise<ChatWorkerSpec> {
   const fakeRpcPath = path.join(__dirname, "pi/fakeRpc/fakeRpcServer.js");
   const cwd = process.cwd();
+  const runtimeId = randomUUID();
   return capacity.allocate(
     async () => (await store.get()).maxRunningSessions,
     () => {
       const worker = adapter.createWorker({
+        runtimeId,
         command: process.execPath,
-        args: [fakeRpcPath, "--stream-delay-ms", "120"],
+        args: [fakeRpcPath, "--stream-delay-ms", "120", ...(process.env.PI_DECK_FAKE_DELEGATE_SCENARIO === "1" ? ["--prompt-scenario", "delegate"] : [])],
         cwd,
-        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+        env: { ...delegateEnvironment(process.env, runtimeId), ELECTRON_RUN_AS_NODE: "1" },
       });
       return { worker, cwd };
     },
@@ -1309,14 +1470,16 @@ async function createRealChatWorker(
   project?: ProjectRef,
 ): Promise<ChatWorkerSpec> {
   const launch = await resolveRealChatLaunchConfig(store, project);
+  const runtimeId = randomUUID();
   return capacity.allocate(
     async () => (await store.get()).maxRunningSessions,
-    () => {
+    async () => {
       const worker = adapter.createWorker({
+        runtimeId,
         command: launch.effective.config.piBinary,
-        args: ["--mode", "rpc", ...launch.effective.workerArgs],
+        args: ["--mode", "rpc", ...launch.effective.workerArgs, "--extension", await deckDelegateExtensionPath()],
         cwd: launch.projectCwd,
-        env: launch.effective.config.env,
+        env: delegateEnvironment(launch.effective.config.env, runtimeId),
         requestTimeoutMs: Number(
           process.env.PI_DECK_REAL_RPC_TIMEOUT_MS ?? 30_000,
         ),
@@ -1350,10 +1513,12 @@ async function createRealResumeWorker(
     );
   }
   const canonicalSessionFile = validation.sessionFile;
+  const runtimeId = randomUUID();
   return capacity.allocate(
     async () => (await store.get()).maxRunningSessions,
-    () => {
+    async () => {
       const worker = adapter.createWorker({
+        runtimeId,
         command: launch.effective.config.piBinary,
         args: [
           "--mode",
@@ -1361,9 +1526,11 @@ async function createRealResumeWorker(
           ...launch.effective.workerArgs,
           "--session",
           canonicalSessionFile,
+          "--extension",
+          await deckDelegateExtensionPath(),
         ],
         cwd: launch.projectCwd,
-        env: launch.effective.config.env,
+        env: delegateEnvironment(launch.effective.config.env, runtimeId),
         requestTimeoutMs: Number(
           process.env.PI_DECK_REAL_RPC_TIMEOUT_MS ?? 30_000,
         ),
@@ -2960,14 +3127,17 @@ async function reconcileMultitaskRuntime(
   const canonical =
     (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
   chatRuntimeSessionFiles.set(runtimeId, canonical);
-  if (multitaskManagers.has(runtimeId)) return;
   const saved = multitaskStateStore?.get(canonical);
-  multitaskManagers.set(
-    runtimeId,
-    saved
+  if (!multitaskManagers.has(runtimeId)) {
+    multitaskManagers.set(runtimeId, saved
       ? MultitaskManager.rehydrate(saved, { maxQueuedTasks: 100 })
-      : new MultitaskManager({ mode: "sequential", maxQueuedTasks: 100 }),
-  );
+      : new MultitaskManager({ mode: "sequential", maxQueuedTasks: 100 }));
+  } else if (saved) {
+    multitaskManagers.get(runtimeId)?.setMode(saved.mode);
+  }
+  // Resume never revives private child processes; the supervisor converts
+  // previously live work into safe interrupted terminal handoffs.
+  if (multitaskSupervisor && saved) await multitaskSupervisor.resume(runtimeId, saved);
 }
 
 async function persistMultitaskManager(
@@ -3011,4 +3181,22 @@ function emitMultitaskState(
   const window = mainWindow;
   if (window && !window.isDestroyed() && !window.webContents.isDestroyed())
     window.webContents.send(ipcChannels.multitaskState, parsed);
+}
+
+function emitMultitaskStateFromSnapshots(
+  runtimeId: string,
+  mode: "parallel" | "sequential",
+  snapshots: Array<{ number: number; name: string; status: string }>,
+): void {
+  const parsed = multitaskStateEventSchema.parse({
+    runtimeId,
+    mode,
+    tasks: snapshots.map((task) => ({ taskNumber: task.number, generatedName: task.name, status: task.status === "cancelled" ? "failed" : task.status })),
+  });
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send(ipcChannels.multitaskState, parsed);
+}
+
+async function persistMultitaskSupervisor(runtimeId: string): Promise<void> {
+  const sessionFile = chatRuntimeSessionFiles.get(runtimeId);
+  if (sessionFile && multitaskSupervisor) await multitaskStateStore?.set(sessionFile, multitaskSupervisor.exportState(runtimeId));
 }

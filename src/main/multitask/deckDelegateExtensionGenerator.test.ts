@@ -44,7 +44,7 @@ describe("Deck delegate extension source generator", () => {
 
   it("proactively relays child input-needed and results through Pi", () => {
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain("pi.sendMessage");
-    expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain('event.status === "input-needed"');
+    expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain('event.status === "waiting-input"');
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain("relay(pi, message)");
   });
 });

@@ -69,6 +69,7 @@ import net, { type Socket } from "node:net";
 export const DECK_DELEGATE_PROTOCOL_VERSION = 1;
 export const DECK_DELEGATE_ENDPOINT_ENV = "DECK_DELEGATE_ENDPOINT";
 export const DECK_DELEGATE_CAPABILITY_ENV = "DECK_DELEGATE_CAPABILITY";
+export const DECK_DELEGATE_PARENT_RUNTIME_ENV = "DECK_DELEGATE_PARENT_RUNTIME";
 const MAX_LINE_BYTES = 64 * 1024;
 const MAX_BUFFER_BYTES = MAX_LINE_BYTES + 1;
 const MAX_TASK_CHARS = 32 * 1024;
@@ -103,10 +104,11 @@ export type DeckDelegateWireMessage = DeckDelegateRequest | DeckDelegateLifecycl
 
 type Endpoint = { kind: "tcp"; port: number } | { kind: "unix"; path: string };
 
-function configuration(): { endpoint: Endpoint; capability: string } {
+function configuration(): { endpoint: Endpoint; capability: string; parentRuntimeId: string } {
   const rawEndpoint = process.env[DECK_DELEGATE_ENDPOINT_ENV];
   const capability = process.env[DECK_DELEGATE_CAPABILITY_ENV];
-  if (!rawEndpoint) throw new Error("Deck delegate endpoint is not configured");
+  const parentRuntimeId = process.env[DECK_DELEGATE_PARENT_RUNTIME_ENV];
+  if (!rawEndpoint || !parentRuntimeId || parentRuntimeId.length > 256) throw new Error("Deck delegate endpoint is not configured");
   // Capabilities are opaque printable tokens; reject whitespace/control characters so they cannot frame JSONL.
   if (!capability || capability.length < 16 || capability.length > 512 || !/^[!-~]+$/.test(capability)) {
     throw new Error("Deck delegate capability is missing or invalid");
@@ -114,10 +116,10 @@ function configuration(): { endpoint: Endpoint; capability: string } {
   const tcp = /^tcp:127\\.0\\.0\\.1:([0-9]{1,5})$/.exec(rawEndpoint);
   if (tcp) {
     const port = Number(tcp[1]);
-    if (port >= 1 && port <= 65535) return { endpoint: { kind: "tcp", port }, capability };
+    if (port >= 1 && port <= 65535) return { endpoint: { kind: "tcp", port }, capability, parentRuntimeId }; 
   }
   if (rawEndpoint.startsWith("unix:/") && rawEndpoint.length <= 4096 && !/[\\r\\n\\0]/.test(rawEndpoint)) {
-    return { endpoint: { kind: "unix", path: rawEndpoint.slice("unix:".length) }, capability };
+    return { endpoint: { kind: "unix", path: rawEndpoint.slice("unix:".length) }, capability, parentRuntimeId };
   }
   throw new Error("Deck delegate endpoint must be tcp:127.0.0.1:<port> or unix:/<path>");
 }
@@ -139,7 +141,7 @@ function result(value: unknown, toolCallId: string): DeckDelegateResultMessage |
   return value as DeckDelegateResultMessage;
 }
 
-function writeJsonLine(socket: Socket, value: DeckDelegateRequest): void {
+function writeJsonLine(socket: Socket, value: unknown): void {
   const encoded = Buffer.from(JSON.stringify(value) + "\\n", "utf8");
   if (encoded.byteLength > MAX_LINE_BYTES) throw new Error("Delegate request exceeds JSONL size limit");
   socket.write(encoded);
@@ -199,15 +201,30 @@ function delegate(pi: ExtensionAPI, request: DeckDelegateRequest, endpoint: Endp
         if (line.byteLength > MAX_LINE_BYTES) return fail(new Error("Deck delegate JSONL line exceeds size limit"));
         let parsed: unknown;
         try { parsed = JSON.parse(line.toString("utf8")); } catch { return fail(new Error("Deck delegate sent invalid JSONL")); }
-        const event = lifecycle(parsed, request.toolCallId);
-        if (event) { if (event.status === "input-needed") relay(pi, event); continue; }
-        const final = result(parsed, request.toolCallId);
+        if (!authenticated) {
+          if (isRecord(parsed) && parsed.version === 1 && parsed.type === "authenticated") {
+            authenticated = true;
+            try { writeJsonLine(socket, { version: 1, type: "delegate", toolCallId: request.toolCallId, payload: { task: request.task, parentRuntimeId: process.env[DECK_DELEGATE_PARENT_RUNTIME_ENV], ...(request.name ? { name: request.name } : {}) } }); } catch (error) { return fail(error instanceof Error ? error : new Error("Unable to send Deck delegate")); }
+            continue;
+          }
+          return fail(new Error("Deck delegate authentication failed"));
+        }
+        const event = isRecord(parsed) && parsed.version === 1 && parsed.type === "child-lifecycle" && parsed.toolCallId === request.toolCallId
+          ? { status: parsed.status } : undefined;
+        if (event) {
+          if (event.status === "waiting-input") relay(pi, { version: 1, type: "lifecycle", toolCallId: request.toolCallId, status: "input-needed", message: "Child needs input" });
+          continue;
+        }
+        const final = isRecord(parsed) && parsed.version === 1 && parsed.type === "child-result" && parsed.toolCallId === request.toolCallId
+          ? { version: 1 as const, type: "result" as const, toolCallId: request.toolCallId, ok: parsed.outcome === "completed", text: isRecord(parsed.handoff) && typeof parsed.handoff.summary === "string" ? parsed.handoff.summary : (parsed.outcome === "completed" ? "Child completed" : "Child failed") }
+          : undefined;
         if (final) return succeed(final);
         return fail(new Error("Deck delegate sent an invalid protocol message"));
       }
     };
+    let authenticated = false;
     socket.once("connect", () => {
-      try { writeJsonLine(socket, request); } catch (error) { fail(error instanceof Error ? error : new Error("Unable to write delegate request")); }
+      try { writeJsonLine(socket, { version: 1, type: "authenticate", token: request.capability }); } catch (error) { fail(error instanceof Error ? error : new Error("Unable to authenticate Deck delegate")); }
     });
     socket.on("data", onData);
     socket.once("error", (error) => fail(error));
