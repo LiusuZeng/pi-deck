@@ -134,7 +134,11 @@ export class DelegationBridgeServer {
     await fs.mkdir(this.options.stateDir, { recursive: true, mode: 0o700 });
     // Keep the random Unix-socket leaf short for macOS's 104-byte path limit.
     const name = `.pdb-v${DELEGATION_BRIDGE_PROTOCOL_VERSION}-${randomBytes(6).toString("hex")}.sock`;
-    const socketPath = path.join(this.options.stateDir, name);
+    // `userData` can be deeply nested in e2e and sandbox paths. Unix domain
+    // sockets have a much shorter pathname limit, so keep the socket leaf in
+    // the short macOS `/tmp` namespace; its 0600 mode and random capability
+    // still provide the access boundary.
+    const socketPath = path.join("/tmp", name);
     if (Buffer.byteLength(socketPath) > MAX_UNIX_SOCKET_PATH_BYTES) {
       throw new Error(`Unix socket path is too long: ${socketPath}`);
     }
