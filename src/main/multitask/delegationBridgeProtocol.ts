@@ -1,0 +1,99 @@
+import { z } from "zod";
+
+/** Version of the local extension-to-host delegation protocol. */
+export const DELEGATION_BRIDGE_PROTOCOL_VERSION = 1 as const;
+
+const protocolEnvelope = {
+  version: z.literal(DELEGATION_BRIDGE_PROTOCOL_VERSION),
+};
+
+/** A caller-provided tool call identity, scoped to one socket connection. */
+export const toolCallIdSchema = z.string().min(1).max(256);
+
+/** The only message accepted before a connection is authenticated. */
+export const authenticateMessageSchema = z
+  .object({
+    ...protocolEnvelope,
+    type: z.literal("authenticate"),
+    token: z.string().length(64),
+  })
+  .strict();
+
+/**
+ * The bridge intentionally treats payload as opaque JSON.  It does not parse
+ * prompts or interpret extension tool arguments.
+ */
+export const delegateMessageSchema = z
+  .object({
+    ...protocolEnvelope,
+    type: z.literal("delegate"),
+    toolCallId: toolCallIdSchema,
+    payload: z.unknown(),
+  })
+  .strict();
+
+export const clientMessageSchema = z.union([
+  authenticateMessageSchema,
+  delegateMessageSchema,
+]);
+
+const childMessage = {
+  ...protocolEnvelope,
+  toolCallId: toolCallIdSchema,
+};
+
+/** Safe progress state only; it deliberately has no child session identifier. */
+export const childLifecycleMessageSchema = z
+  .object({
+    ...childMessage,
+    type: z.literal("child-lifecycle"),
+    status: z.enum([
+      "queued",
+      "running",
+      "waiting-input",
+      "completed",
+      "failed",
+      "cancelled",
+    ]),
+  })
+  .strict();
+
+/** A terminal handoff is the only result data exposed to the parent extension. */
+export const childResultMessageSchema = z
+  .object({
+    ...childMessage,
+    type: z.literal("child-result"),
+    outcome: z.enum(["completed", "failed", "cancelled"]),
+    handoff: z
+      .object({
+        summary: z.string().max(32_768).optional(),
+        details: z.string().max(32_768).optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+export const childInputNeededMessageSchema = z
+  .object({
+    ...childMessage,
+    type: z.literal("child-input-needed"),
+    message: z.string().min(1).max(32_768),
+  })
+  .strict();
+
+export const authenticatedMessageSchema = z
+  .object({ ...protocolEnvelope, type: z.literal("authenticated") })
+  .strict();
+
+export type DelegateWireMessage = z.infer<typeof delegateMessageSchema>;
+export type ChildLifecycleStatus = z.infer<
+  typeof childLifecycleMessageSchema
+>["status"];
+export type ChildLifecycleWireMessage = z.infer<
+  typeof childLifecycleMessageSchema
+>;
+export type ChildResultWireMessage = z.infer<typeof childResultMessageSchema>;
+export type ChildInputNeededWireMessage = z.infer<
+  typeof childInputNeededMessageSchema
+>;
