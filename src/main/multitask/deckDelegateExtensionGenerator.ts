@@ -71,13 +71,36 @@ export type DeckDelegateWireMessage =
  * Write an extension which has no imports from this application. Pi resolves
  * its own bundled `@earendil-works/pi-coding-agent` and `typebox` packages.
  */
-export async function writeDeckDelegateExtension(outputPath: string): Promise<void> {
+export async function writeDeckDelegateExtension(
+  outputPath: string,
+): Promise<void> {
   if (!outputPath.trim()) {
     throw new Error("An extension output path is required");
   }
 
   await fs.mkdir(path.dirname(path.resolve(outputPath)), { recursive: true });
   await fs.writeFile(outputPath, DECK_DELEGATE_EXTENSION_SOURCE, "utf8");
+}
+
+/**
+ * Write a test-only companion extension which invokes the generated tool
+ * definition directly. This exercises Pi's real extension loader and the
+ * generated tool's bridge protocol without asking a model to choose a tool.
+ */
+export async function writeDeckDelegateAcceptanceHarness(
+  outputPath: string,
+  delegateExtensionPath: string,
+): Promise<void> {
+  if (!outputPath.trim() || !delegateExtensionPath.trim()) {
+    throw new Error("Harness and delegate extension paths are required");
+  }
+
+  await fs.mkdir(path.dirname(path.resolve(outputPath)), { recursive: true });
+  await fs.writeFile(
+    outputPath,
+    `// Generated Pi Deck E2E acceptance harness. Never load outside E2E.\nimport type { ExtensionAPI } from "@earendil-works/pi-coding-agent";\nimport { createDeckDelegateTool } from ${JSON.stringify(path.resolve(delegateExtensionPath))};\n\nconst marker = "PI_DECK_E2E_INVOKE_DECK_DELEGATE";\n\nexport default function deckDelegateAcceptanceHarness(pi: ExtensionAPI): void {\n  pi.on("before_agent_start", async (event) => {\n    if (!event.prompt.includes(marker)) return undefined;\n    const result = await createDeckDelegateTool(pi).execute(\n      "pi-deck-e2e-delegate",\n      { action: "delegate", name: "Real delegated acceptance task", task: "Reply with exactly: PI_DECK_REAL_DELEGATE_OK" },\n      new AbortController().signal,\n    );\n    pi.sendMessage({ customType: "deck_delegate_acceptance", content: "Deck delegate acceptance result: " + result.content.map((part) => part.type === "text" ? part.text : "").join(""), display: true });\n    return undefined;\n  });\n}\n`,
+    "utf8",
+  );
 }
 
 /** Self-contained TypeScript source written by {@link writeDeckDelegateExtension}. */
@@ -149,12 +172,12 @@ function configuration(): { endpoint: Endpoint; capability: string; parentRuntim
   if (!capability || capability.length < 16 || capability.length > 512 || !/^[!-~]+$/.test(capability)) {
     throw new Error("Deck delegate capability is missing or invalid");
   }
-  const tcp = /^tcp:127\\.0\\.0\\.1:([0-9]{1,5})$/.exec(rawEndpoint);
+  const tcp = /^tcp:127\.0\.0\.1:([0-9]{1,5})$/.exec(rawEndpoint);
   if (tcp) {
     const port = Number(tcp[1]);
     if (port >= 1 && port <= 65535) return { endpoint: { kind: "tcp", port }, capability, parentRuntimeId }; 
   }
-  if (rawEndpoint.startsWith("unix:/") && rawEndpoint.length <= 4096 && !/[\\r\\n\\0]/.test(rawEndpoint)) {
+  if (rawEndpoint.startsWith("unix:/") && rawEndpoint.length <= 4096 && !/[\r\n\0]/.test(rawEndpoint)) {
     return { endpoint: { kind: "unix", path: rawEndpoint.slice("unix:".length) }, capability, parentRuntimeId };
   }
   throw new Error("Deck delegate endpoint must be tcp:127.0.0.1:<port> or unix:/<path>");
@@ -179,7 +202,7 @@ function result(value: unknown, toolCallId: string): DeckDelegateResultMessage |
 }
 
 function writeJsonLine(socket: Socket, value: unknown): void {
-  const encoded = Buffer.from(JSON.stringify(value) + "\\n", "utf8");
+  const encoded = Buffer.from(JSON.stringify(value) + "\n", "utf8");
   if (encoded.byteLength > MAX_LINE_BYTES) throw new Error("Delegate request exceeds JSONL size limit");
   socket.write(encoded);
 }
@@ -312,24 +335,8 @@ function delegate(pi: ExtensionAPI, request: DeckDelegateRequest, endpoint: Endp
   });
 }
 
-export default function deckDelegateExtension(pi: ExtensionAPI): void {
-  // This hook runs before each agent start. It queries Deck over the
-  // capability-bound bridge rather than inferring mode from conversation text.
-  pi.on("before_agent_start", async (event) => {
-    try {
-      const config = configuration();
-      const mode = await queryMode(config.endpoint, config.capability);
-      const instruction = mode === "parallel"
-        ? "Pi Deck parallel multitasking is enabled. By default, delegate substantive independent work with deck_delegate. Do not delegate only when the user explicitly asks you to handle the work directly; honor that direct-handling override. For trivial work, handle it directly."
-        : "Pi Deck parallel multitasking is disabled. Do not delegate work with deck_delegate; handle the work directly.";
-      return { systemPrompt: event.systemPrompt + "\\n\\n" + instruction };
-    } catch {
-      // A failed mode lookup must not invent delegation permission.
-      return undefined;
-    }
-  });
-
-  pi.registerTool({
+export function createDeckDelegateTool(pi: ExtensionAPI) {
+  return {
     name: "deck_delegate",
     label: "Delegate to Deck child",
     description: "Delegate an interactive child task to Pi Deck.",
@@ -340,7 +347,7 @@ export default function deckDelegateExtension(pi: ExtensionAPI): void {
       taskNumber: Type.Optional(Type.Integer({ minimum: 1, description: "Task number from the input-needed notification" })),
       input: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_TASK_CHARS, description: "User answer for that child" })),
     }),
-    async execute(toolCallId, params, signal) {
+    async execute(toolCallId: string, params: { action?: "delegate" | "provide_input"; task?: string; name?: string; taskNumber?: number; input?: string }, signal: AbortSignal) {
       try {
         const config = configuration();
         const action = params.action || "delegate";
@@ -357,12 +364,32 @@ export default function deckDelegateExtension(pi: ExtensionAPI): void {
           request.input = params.input!;
         }
         const final = await delegate(pi, request, config.endpoint, signal);
-        return { content: [{ type: "text", text: final.text }], details: { ok: final.ok, serverDetails: final.details } };
+        return { content: [{ type: "text" as const, text: final.text }], details: { ok: final.ok, serverDetails: final.details } };
       } catch (error) {
         const message = error instanceof Error ? error.message : "Deck delegate failed";
-        return { content: [{ type: "text", text: "Deck delegation failed: " + message }], details: { ok: false, error: message } };
+        return { content: [{ type: "text" as const, text: "Deck delegation failed: " + message }], details: { ok: false, error: message } };
       }
     },
+  };
+}
+
+export default function deckDelegateExtension(pi: ExtensionAPI): void {
+  // This hook runs before each agent start. It queries Deck over the
+  // capability-bound bridge rather than inferring mode from conversation text.
+  pi.on("before_agent_start", async (event) => {
+    try {
+      const config = configuration();
+      const mode = await queryMode(config.endpoint, config.capability);
+      const instruction = mode === "parallel"
+        ? "Pi Deck parallel multitasking is enabled. By default, delegate substantive independent work with deck_delegate. Do not delegate only when the user explicitly asks you to handle the work directly; honor that direct-handling override. For trivial work, handle it directly."
+        : "Pi Deck parallel multitasking is disabled. Do not delegate work with deck_delegate; handle the work directly.";
+      return { systemPrompt: event.systemPrompt + "\n\n" + instruction };
+    } catch {
+      // A failed mode lookup must not invent delegation permission.
+      return undefined;
+    }
   });
+
+  pi.registerTool(createDeckDelegateTool(pi));
 }
 `;

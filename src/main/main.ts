@@ -106,7 +106,7 @@ import { formatCanonicalFileReference } from "./attachments.js";
 import { MultitaskManager } from "./multitask/multitaskManager.js";
 import { MultitaskStateStore } from "./multitask/multitaskStateStore.js";
 import { DelegationBridgeServer, type DelegateRequest } from "./multitask/delegationBridgeServer.js";
-import { writeDeckDelegateExtension, DECK_DELEGATE_CAPABILITY_ENV, DECK_DELEGATE_ENDPOINT_ENV, DECK_DELEGATE_PARENT_RUNTIME_ENV } from "./multitask/deckDelegateExtensionGenerator.js";
+import { writeDeckDelegateAcceptanceHarness, writeDeckDelegateExtension, DECK_DELEGATE_CAPABILITY_ENV, DECK_DELEGATE_ENDPOINT_ENV, DECK_DELEGATE_PARENT_RUNTIME_ENV } from "./multitask/deckDelegateExtensionGenerator.js";
 import { MultitaskSupervisor, type ChildWorkerCallbacks, type ParentTaskNotification } from "./multitask/multitaskSupervisor.js";
 import { PersistedRuntimeResumeGuard } from "./multitask/persistedRuntimeResumeGuard.js";
 import { deliverWithAttachmentConsumption } from "./attachmentDelivery.js";
@@ -1000,6 +1000,13 @@ async function deckDelegateExtensionPath(): Promise<string> {
   return output;
 }
 
+async function deckDelegateHarnessPath(delegateExtensionPath: string): Promise<string | undefined> {
+  if (process.env.PI_DECK_E2E_DELEGATE_HARNESS !== "1") return undefined;
+  const output = path.join(app.getPath("userData"), "extensions", "deck-delegate-acceptance-harness.ts");
+  await writeDeckDelegateAcceptanceHarness(output, delegateExtensionPath);
+  return output;
+}
+
 function delegateEnvironment(base: NodeJS.ProcessEnv, parentRuntimeId: string): NodeJS.ProcessEnv {
   const credentials = delegationCredentials;
   const capability = delegationBridge?.registerParent(parentRuntimeId);
@@ -1528,7 +1535,7 @@ async function createRealChatWorker(
       const worker = adapter.createWorker({
         runtimeId,
         command: launch.effective.config.piBinary,
-        args: ["--mode", "rpc", ...launch.effective.workerArgs, "--extension", await deckDelegateExtensionPath()],
+        args: await realParentWorkerArgs(launch.effective.workerArgs),
         cwd: launch.projectCwd,
         env: delegateEnvironment(launch.effective.config.env, runtimeId),
         requestTimeoutMs: Number(
@@ -1539,6 +1546,12 @@ async function createRealChatWorker(
       return { worker, cwd: launch.projectCwd, projectId: launch.projectId };
     },
   );
+}
+
+async function realParentWorkerArgs(workerArgs: readonly string[]): Promise<string[]> {
+  const delegateExtension = await deckDelegateExtensionPath();
+  const harnessExtension = await deckDelegateHarnessPath(delegateExtension);
+  return ["--mode", "rpc", ...workerArgs, "--extension", delegateExtension, ...(harnessExtension ? ["--extension", harnessExtension] : [])];
 }
 
 async function createRealResumeWorker(
@@ -1572,13 +1585,9 @@ async function createRealResumeWorker(
         runtimeId,
         command: launch.effective.config.piBinary,
         args: [
-          "--mode",
-          "rpc",
-          ...launch.effective.workerArgs,
+          ...(await realParentWorkerArgs(launch.effective.workerArgs)),
           "--session",
           canonicalSessionFile,
-          "--extension",
-          await deckDelegateExtensionPath(),
         ],
         cwd: launch.projectCwd,
         env: delegateEnvironment(launch.effective.config.env, runtimeId),

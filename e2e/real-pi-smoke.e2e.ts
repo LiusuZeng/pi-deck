@@ -53,9 +53,9 @@ async function launchPiDeck(
 
 async function expectHealthyPreload(page: Page): Promise<void> {
   await expect(page.getByText("Preload error")).toHaveCount(0);
-  await expect(
-    page.getByRole("region", { name: "Pi Deck chat workspace" }),
-  ).toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => Boolean(window.piDeck)))
+    .toBe(true);
 }
 
 function listJsonlFiles(root: string): string[] {
@@ -104,6 +104,9 @@ test("real Pi GUI P0 smoke: prompt, project switch, restart, resume", async () =
     PI_DECK_USER_DATA_DIR: userDataDir,
     PI_DECK_HOME: piDeckHome,
     PI_CODING_AGENT_SESSION_DIR: sessionDir,
+    // The real Pi acceptance harness loads beside the generated extension and
+    // invokes its actual deck_delegate tool definition. It never uses fake RPC.
+    PI_DECK_E2E_DELEGATE_HARNESS: "1",
     PI_DECK_TEST_PICK_PROJECT_CWDS: JSON.stringify([projectB, projectA]),
   };
 
@@ -125,9 +128,6 @@ test("real Pi GUI P0 smoke: prompt, project switch, restart, resume", async () =
         .toBe(0);
 
       await firstLaunch.page
-        .getByRole("button", { name: "New session" })
-        .click();
-      await firstLaunch.page
         .getByLabel("Prompt text")
         .fill(`Reply with exactly: ${token}`);
       await firstLaunch.page.getByRole("button", { name: "Send" }).click();
@@ -139,12 +139,94 @@ test("real Pi GUI P0 smoke: prompt, project switch, restart, resume", async () =
           ),
         },
       );
+
       await expect(
         firstLaunch.page
           .getByLabel("Chat / Agent Timeline")
           .getByText(token)
           .first(),
       ).toBeVisible();
+
+      // The parent exists before enabling its parent-scoped mode. The explicit
+      // instruction is also the deterministic harness trigger; that harness
+      // calls the real generated deck_delegate tool, not a fake RPC endpoint.
+      const multitaskControl = firstLaunch.page.locator(".multitask-control");
+      await expect(multitaskControl).toHaveAttribute(
+        "title",
+        "Turn on multitasking",
+      );
+      const sessionItemCount = await firstLaunch.page
+        .locator(".session-list .session-item")
+        .count();
+      await multitaskControl.click();
+      await expect(multitaskControl).toHaveAttribute(
+        "title",
+        "Turn off multitasking",
+      );
+      await firstLaunch.page.evaluate(() => {
+        const testWindow = window as typeof window & {
+          __piDeckRealDelegateStates?: Array<{
+            tasks: Array<{ generatedName: string; status: string }>;
+          }>;
+          __piDeckRealDelegateUnsubscribe?: () => void;
+        };
+        testWindow.__piDeckRealDelegateUnsubscribe?.();
+        testWindow.__piDeckRealDelegateStates = [];
+        testWindow.__piDeckRealDelegateUnsubscribe =
+          window.piDeck.multitask.onState((state) =>
+            testWindow.__piDeckRealDelegateStates?.push(state),
+          );
+      });
+      await firstLaunch.page
+        .getByLabel("Prompt text")
+        .fill(
+          "PI_DECK_E2E_INVOKE_DECK_DELEGATE: use deck_delegate now for one tiny task.",
+        );
+      await firstLaunch.page.getByRole("button", { name: "Send" }).click();
+      await expect
+        .poll(
+          async () =>
+            firstLaunch.page.evaluate(
+              () =>
+                (
+                  window as typeof window & {
+                    __piDeckRealDelegateStates?: Array<{
+                      tasks: Array<{ status: string }>;
+                    }>;
+                  }
+                ).__piDeckRealDelegateStates?.flatMap((state) =>
+                  state.tasks.map((task) => task.status),
+                ) ?? [],
+            ),
+          {
+            timeout: Number(
+              process.env.PI_DECK_E2E_REAL_DELEGATE_TIMEOUT_MS ?? 180_000,
+            ),
+          },
+        )
+        .toEqual(expect.arrayContaining(["queued", "running", "completed"]));
+      await multitaskControl.focus();
+      const statusList = firstLaunch.page.getByRole("list", {
+        name: "Task statuses",
+      });
+      await expect(statusList).toContainText(
+        "#1 Real delegated acceptance task — completed",
+      );
+      // A completed state is the terminal child result returned to the parent
+      // extension; the renderer intentionally projects only that safe parent
+      // status, not child transcript/session data.
+      // Delegated workers remain private: there are no task controls or child
+      // sessions, only the parent status and parent result.
+      await expect(statusList.getByRole("button")).toHaveCount(0);
+      await expect(
+        firstLaunch.page.locator(".session-list .session-item"),
+      ).toHaveCount(sessionItemCount);
+      await expect(
+        firstLaunch.page.getByLabel("Sessions").locator(".session-item", {
+          hasText: "Real delegated acceptance task",
+        }),
+      ).toHaveCount(0);
+
       await expect
         .poll(() => listJsonlFiles(sessionDir).length, {
           message: "Pi should persist the prompted real session before restart",
@@ -152,6 +234,13 @@ test("real Pi GUI P0 smoke: prompt, project switch, restart, resume", async () =
         })
         .toBeGreaterThan(0);
     } finally {
+      await firstLaunch.page.evaluate(() => {
+        (
+          window as typeof window & {
+            __piDeckRealDelegateUnsubscribe?: () => void;
+          }
+        ).__piDeckRealDelegateUnsubscribe?.();
+      });
       await firstLaunch.app.close();
     }
 

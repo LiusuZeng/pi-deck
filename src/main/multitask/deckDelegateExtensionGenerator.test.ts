@@ -7,6 +7,7 @@ import {
   DECK_DELEGATE_ENDPOINT_ENV,
   DECK_DELEGATE_EXTENSION_SOURCE,
   DECK_DELEGATE_PROTOCOL_VERSION,
+  writeDeckDelegateAcceptanceHarness,
   writeDeckDelegateExtension,
 } from "./deckDelegateExtensionGenerator.js";
 
@@ -30,6 +31,20 @@ describe("Deck delegate extension source generator", () => {
     expect(DECK_DELEGATE_EXTENSION_SOURCE).not.toMatch(/from ["'][^"']*pi-deck/);
   });
 
+  it("writes an opt-in harness that calls the generated tool without fake RPC", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "pi-deck-extension-"));
+    directories.push(directory);
+    const delegate = path.join(directory, "deck-delegate.ts");
+    const harness = path.join(directory, "deck-delegate-harness.ts");
+
+    await writeDeckDelegateAcceptanceHarness(harness, delegate);
+
+    const source = await fs.readFile(harness, "utf8");
+    expect(source).toContain(`from ${JSON.stringify(delegate)}`);
+    expect(source).toContain("createDeckDelegateTool(pi).execute");
+    expect(source).toContain("PI_DECK_E2E_INVOKE_DECK_DELEGATE");
+  });
+
   it("documents and enforces the versioned, capability-gated JSONL contract", () => {
     expect(DECK_DELEGATE_PROTOCOL_VERSION).toBe(1);
     expect(DECK_DELEGATE_ENDPOINT_ENV).toBe("DECK_DELEGATE_ENDPOINT");
@@ -40,6 +55,8 @@ describe("Deck delegate extension source generator", () => {
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain("MAX_LINE_BYTES");
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain('signal.addEventListener("abort"');
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain("socket.destroy()");
+    expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain('JSON.stringify(value) + "\\n"');
+    expect(DECK_DELEGATE_EXTENSION_SOURCE).not.toContain('JSON.stringify(value) + "\\\\n"');
   });
 
   it("queries capability-bound mode before every agent start and injects only parallel defaults", () => {
