@@ -8,11 +8,18 @@ import path from "node:path";
 const repoRoot = path.resolve(__dirname, "..");
 const mainEntry = path.join(repoRoot, "dist/main/main.js");
 
-function fakePiBinary(root: string, promptScenario?: "error"): string {
+function fakePiBinary(
+  root: string,
+  promptScenario?: "error",
+  args: readonly string[] = [],
+): string {
   const binary = path.join(root, "fake-pi.js");
-  const scenarioArgs = promptScenario
-    ? `process.argv.push("--prompt-scenario", ${JSON.stringify(promptScenario)});\n`
-    : "";
+  const scenarioArgs = [
+    ...(promptScenario ? ["--prompt-scenario", promptScenario] : []),
+    ...args,
+  ]
+    .map((arg) => `process.argv.push(${JSON.stringify(arg)});`)
+    .join("\n");
   fs.writeFileSync(
     binary,
     `#!/usr/bin/env node\nif (process.argv.includes("--version")) { console.log("v42.5.0"); process.exit(0); }\nif (process.argv.includes("--list-models")) { console.log("provider  model       context  max-out  thinking  images"); console.log("fake-provider  fake-model  128K     32K      yes       yes"); process.exit(0); }\n${scenarioArgs}require(${JSON.stringify(path.join(repoRoot, "dist/main/pi/fakeRpc/fakeRpcServer.js"))});\n`,
@@ -82,6 +89,7 @@ const identityWorkflowIds = {
 function graphEnvironment(
   root: string,
   promptScenario?: "error",
+  fakeArgs: readonly string[] = [],
 ): NodeJS.ProcessEnv {
   const projectCwd = path.join(root, "project");
   const agentDir = path.join(root, "agent");
@@ -89,7 +97,7 @@ function graphEnvironment(
   fs.mkdirSync(agentDir, { recursive: true });
   return {
     PI_DECK_BACKEND: "real",
-    PI_DECK_PI_BINARY: fakePiBinary(root, promptScenario),
+    PI_DECK_PI_BINARY: fakePiBinary(root, promptScenario, fakeArgs),
     PI_DECK_PROJECT_CWD: projectCwd,
     PI_CODING_AGENT_DIR: agentDir,
     PI_DECK_HOME: path.join(root, "pideck-home"),
@@ -790,6 +798,508 @@ test("duplicate node names retain ID relationships, fanout ownership, bindings, 
     await expect(
       graph.locator(`[data-workflow-node-id="${identityWorkflowIds.target}"]`),
     ).toHaveAttribute("aria-pressed", "false");
+  } finally {
+    await app?.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("fake backend bounds fan-out concurrency and persists its complete graph", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-fanout-stress-"),
+  );
+  const ids = {
+    workflow: "20000000-0000-4000-8000-000000000001",
+    fanout: "20000000-0000-4000-8000-000000000002",
+    a: "20000000-0000-4000-8000-000000000003",
+    b: "20000000-0000-4000-8000-000000000004",
+    c: "20000000-0000-4000-8000-000000000005",
+    d: "20000000-0000-4000-8000-000000000006",
+    target: "20000000-0000-4000-8000-000000000007",
+  };
+  let app: ElectronApplication | undefined;
+  try {
+    ({ app } = await launch(
+      graphEnvironment(root, undefined, ["--stream-delay-ms", "80"]),
+    ));
+    const page = await app.firstWindow();
+    const result = await page.evaluate(async (ids) => {
+      const active = await window.piDeck.workspaces.getActive();
+      if (!active.activeWorkspace) throw new Error("No active workspace");
+      const agents = [ids.a, ids.b, ids.c, ids.d];
+      const workflow = {
+        format: "pi-deck.agent-workflow" as const,
+        schemaVersion: 2 as const,
+        id: ids.workflow,
+        revision: 1,
+        name: "Bound fanout",
+        inputs: [],
+        entryNodeId: ids.fanout,
+        nodes: [
+          {
+            id: ids.fanout,
+            name: "Fan out",
+            role: "orchestrator" as const,
+            config: {
+              mode: "fanout" as const,
+              agents,
+              maxConcurrency: 2,
+              completion: "all" as const,
+            },
+          },
+          ...agents.map((id) => ({
+            id,
+            name: `Worker ${id.slice(-1)}`,
+            role: "worker" as const,
+            managedBy: ids.fanout,
+            config: { instructions: "Return a deterministic fanout result." },
+          })),
+          {
+            id: ids.target,
+            name: "Collector",
+            role: "worker" as const,
+            config: { instructions: "Collect all fanout outputs." },
+          },
+        ],
+        relationships: [
+          {
+            id: "20000000-0000-4000-8000-000000000008",
+            from: ids.fanout,
+            to: { nodeId: ids.target },
+          },
+          {
+            id: "20000000-0000-4000-8000-000000000009",
+            from: ids.target,
+            to: { end: "done" },
+          },
+        ],
+      };
+      await window.piDeck.workflows.createWorkflow({
+        workspaceId: active.activeWorkspace.id,
+        scopeWorkspaceId: null,
+        workflow,
+      });
+      const run = await window.piDeck.workflows.canonicalStartRun({
+        workflowId: workflow.id,
+        workspaceId: active.activeWorkspace.id,
+        inputs: {},
+      });
+      return run.id;
+    }, ids);
+    await expect
+      .poll(
+        async () =>
+          page.evaluate(
+            async ({ runId, agents }) => {
+              const run = await window.piDeck.workflows.canonicalGetRun({
+                runId,
+              });
+              const active = run.occurrences.filter(
+                (item) =>
+                  agents.includes(item.nodeId) &&
+                  ["ready", "running"].includes(item.status),
+              ).length;
+              return {
+                status: run.status,
+                active,
+                queued: run.occurrences.filter(
+                  (item) =>
+                    agents.includes(item.nodeId) && item.status === "queued",
+                ).length,
+              };
+            },
+            { runId: result, agents: [ids.a, ids.b, ids.c, ids.d] },
+          ),
+        { timeout: 20_000 },
+      )
+      .toMatchObject({ status: "running", active: 2, queued: 2 });
+    await expect
+      .poll(
+        () =>
+          page.evaluate(
+            async (runId) =>
+              (await window.piDeck.workflows.canonicalGetRun({ runId })).status,
+            result,
+          ),
+        { timeout: 20_000 },
+      )
+      .toBe("completed");
+    const persisted = await page.evaluate(
+      async ({ runId, ids }) => {
+        const [run, graph] = await Promise.all([
+          window.piDeck.workflows.canonicalGetRun({ runId }),
+          window.piDeck.workflows.graphGetSnapshot({ runId }),
+        ]);
+        const owner = run.occurrences.find(
+          (item) => item.nodeId === ids.fanout,
+        );
+        const children = run.occurrences.filter((item) =>
+          [ids.a, ids.b, ids.c, ids.d].includes(item.nodeId),
+        );
+        const target = run.occurrences.find(
+          (item) => item.nodeId === ids.target,
+        );
+        return {
+          status: run.status,
+          owner,
+          children,
+          target,
+          graph: graph.nodes.find((item) => item.nodeId === ids.fanout),
+        };
+      },
+      { runId: result, ids },
+    );
+    expect(persisted.owner?.aggregation).toHaveLength(4);
+    expect(persisted.children.map((item) => item.nodeId).sort()).toEqual(
+      [ids.a, ids.b, ids.c, ids.d].sort(),
+    );
+    expect(
+      persisted.children.map((item) => ({
+        status: item.status,
+        attempt: item.attempt,
+        parent: item.parentOrchestratorRunId,
+      })),
+    ).toEqual(
+      persisted.children.map(() => ({
+        status: "completed",
+        attempt: 1,
+        parent: persisted.owner?.id,
+      })),
+    );
+    expect(persisted.target?.parentOccurrenceIds).toEqual([
+      persisted.owner?.id,
+    ]);
+    expect(persisted.graph).toMatchObject({ aggregateStatus: "completed" });
+  } finally {
+    await app?.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("fake backend persists loop iterations and strict decider outcomes", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-loop-stress-"),
+  );
+  const state = path.join(root, "decisions.state");
+  fs.writeFileSync(state, "0");
+  const ids = {
+    workflow: "30000000-0000-4000-8000-000000000001",
+    loop: "30000000-0000-4000-8000-000000000002",
+    worker: "30000000-0000-4000-8000-000000000003",
+    decider: "30000000-0000-4000-8000-000000000004",
+  };
+  let app: ElectronApplication | undefined;
+  try {
+    ({ app } = await launch(
+      graphEnvironment(root, undefined, [
+        "--workflow-decisions",
+        "false,true",
+        "--workflow-decision-state-file",
+        state,
+      ]),
+    ));
+    const page = await app.firstWindow();
+    const runId = await page.evaluate(async (ids) => {
+      const active = await window.piDeck.workspaces.getActive();
+      if (!active.activeWorkspace) throw new Error("No active workspace");
+      const workflow = {
+        format: "pi-deck.agent-workflow" as const,
+        schemaVersion: 2 as const,
+        id: ids.workflow,
+        revision: 1,
+        name: "Two pass loop",
+        inputs: [],
+        entryNodeId: ids.loop,
+        nodes: [
+          {
+            id: ids.loop,
+            name: "Loop",
+            role: "orchestrator" as const,
+            config: {
+              mode: "loop" as const,
+              agents: [ids.worker],
+              decider: ids.decider,
+              maxIterations: 2,
+            },
+          },
+          {
+            id: ids.worker,
+            name: "Loop worker",
+            role: "worker" as const,
+            managedBy: ids.loop,
+            config: { instructions: "Produce iteration output." },
+          },
+          {
+            id: ids.decider,
+            name: "Loop decision",
+            role: "decider" as const,
+            managedBy: ids.loop,
+            config: { question: "Should the loop finish?" },
+          },
+        ],
+        relationships: [
+          {
+            id: "30000000-0000-4000-8000-000000000005",
+            from: ids.loop,
+            to: { end: "accepted" },
+          },
+        ],
+      };
+      await window.piDeck.workflows.createWorkflow({
+        workspaceId: active.activeWorkspace.id,
+        scopeWorkspaceId: null,
+        workflow,
+      });
+      return (
+        await window.piDeck.workflows.canonicalStartRun({
+          workflowId: workflow.id,
+          workspaceId: active.activeWorkspace.id,
+          inputs: {},
+        })
+      ).id;
+    }, ids);
+    await expect
+      .poll(
+        () =>
+          page.evaluate(
+            async (runId) =>
+              (await window.piDeck.workflows.canonicalGetRun({ runId })).status,
+            runId,
+          ),
+        { timeout: 20_000 },
+      )
+      .toBe("completed");
+    const persisted = await page.evaluate(
+      async ({ runId, ids }) => {
+        const run = await window.piDeck.workflows.canonicalGetRun({ runId });
+        return {
+          outcome: run.terminalOutcome,
+          workers: run.occurrences.filter((item) => item.nodeId === ids.worker),
+          decisions: run.occurrences.filter(
+            (item) => item.nodeId === ids.decider,
+          ),
+          owner: run.occurrences.find((item) => item.nodeId === ids.loop),
+        };
+      },
+      { runId, ids },
+    );
+    expect(persisted.outcome).toBe("accepted");
+    expect(
+      persisted.workers.map((item) => [
+        item.iteration,
+        item.status,
+        item.attempt,
+      ]),
+    ).toEqual([
+      [1, "completed", 1],
+      [2, "completed", 1],
+    ]);
+    expect(
+      persisted.decisions.map((item) => [
+        item.iteration,
+        item.output,
+        item.parentOrchestratorRunId,
+      ]),
+    ).toEqual([
+      [1, false, persisted.owner?.id],
+      [2, true, persisted.owner?.id],
+    ]);
+  } finally {
+    await app?.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("restart recovery never resurrects a fake in-flight canonical occurrence", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-recovery-stress-"),
+  );
+  const env = graphEnvironment(root, undefined, ["--stream-delay-ms", "500"]);
+  const ids = {
+    workflow: "40000000-0000-4000-8000-000000000001",
+    source: "40000000-0000-4000-8000-000000000002",
+    target: "40000000-0000-4000-8000-000000000003",
+  };
+  let app: ElectronApplication | undefined;
+  try {
+    ({ app } = await launch(env));
+    let page = await app.firstWindow();
+    const runId = await page.evaluate(async (ids) => {
+      const active = await window.piDeck.workspaces.getActive();
+      if (!active.activeWorkspace) throw new Error("No active workspace");
+      const workflow = {
+        format: "pi-deck.agent-workflow" as const,
+        schemaVersion: 2 as const,
+        id: ids.workflow,
+        revision: 1,
+        name: "Restart handoff",
+        inputs: [],
+        entryNodeId: ids.source,
+        nodes: [
+          {
+            id: ids.source,
+            name: "Source",
+            role: "worker" as const,
+            config: { instructions: "Source output." },
+          },
+          {
+            id: ids.target,
+            name: "Target",
+            role: "worker" as const,
+            inputBindings: [
+              { sourceNodeId: ids.source, sourceValue: "finalOutput" as const },
+            ],
+            config: { instructions: "Target output." },
+            execution: { maxAttempts: 2 },
+          },
+        ],
+        relationships: [
+          {
+            id: "40000000-0000-4000-8000-000000000004",
+            from: ids.source,
+            to: { nodeId: ids.target },
+          },
+          {
+            id: "40000000-0000-4000-8000-000000000005",
+            from: ids.target,
+            to: { end: "done" },
+          },
+        ],
+      };
+      await window.piDeck.workflows.createWorkflow({
+        workspaceId: active.activeWorkspace.id,
+        scopeWorkspaceId: null,
+        workflow,
+      });
+      return (
+        await window.piDeck.workflows.canonicalStartRun({
+          workflowId: workflow.id,
+          workspaceId: active.activeWorkspace.id,
+          inputs: {},
+        })
+      ).id;
+    }, ids);
+    await expect
+      .poll(
+        () =>
+          page.evaluate(
+            async ({ runId, target }) =>
+              (
+                await window.piDeck.workflows.canonicalGetRun({ runId })
+              ).occurrences.find((item) => item.nodeId === target)?.status,
+            { runId, target: ids.target },
+          ),
+        { timeout: 20_000 },
+      )
+      .toBe("running");
+    const before = await page.evaluate(
+      async ({ runId, target }) =>
+        (
+          await window.piDeck.workflows.canonicalGetRun({ runId })
+        ).occurrences.find((item) => item.nodeId === target),
+      { runId, target: ids.target },
+    );
+    await app.close();
+    app = undefined;
+    ({ app } = await launch(env));
+    page = await app.firstWindow();
+    const recovered = await page.evaluate(
+      async ({ runId, target }) => {
+        const run = await window.piDeck.workflows.canonicalGetRun({ runId });
+        return {
+          status: run.status,
+          occurrence: run.occurrences.find((item) => item.nodeId === target),
+        };
+      },
+      { runId, target: ids.target },
+    );
+    expect(recovered.status).toBe("needsAttention");
+    expect(recovered.occurrence).toMatchObject({
+      id: before?.id,
+      status: "failed",
+      sessionFile: before?.sessionFile,
+      resolvedInputBindings: before?.resolvedInputBindings,
+    });
+    expect(recovered.occurrence?.runtimeId).toBeUndefined();
+    await page.evaluate(
+      async ({ runId, occurrenceId }) =>
+        window.piDeck.workflows.canonicalRetryOccurrence({
+          runId,
+          occurrenceId,
+        }),
+      { runId, occurrenceId: recovered.occurrence?.id },
+    );
+    await expect
+      .poll(
+        () =>
+          page.evaluate(
+            async (runId) =>
+              (await window.piDeck.workflows.canonicalGetRun({ runId })).status,
+            runId,
+          ),
+        { timeout: 20_000 },
+      )
+      .toBe("completed");
+  } finally {
+    await app?.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a cancellation race leaves no persisted runtime or late completion", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-cancel-race-"),
+  );
+  let app: ElectronApplication | undefined;
+  try {
+    ({ app } = await launch(
+      graphEnvironment(root, undefined, ["--stream-delay-ms", "500"]),
+    ));
+    const page = await app.firstWindow();
+    await createGraphWorkflow(page, "worker");
+    const runId = await openAndStartOnlyWorkflow(page);
+    await expect
+      .poll(() =>
+        page.evaluate(
+          async (runId) =>
+            (await window.piDeck.workflows.canonicalGetRun({ runId }))
+              .occurrences[0]?.status,
+          runId,
+        ),
+      )
+      .toBe("running");
+    const occurrenceId = await page.evaluate(
+      async (runId) =>
+        (await window.piDeck.workflows.canonicalGetRun({ runId }))
+          .occurrences[0]?.id,
+      runId,
+    );
+    // Both IPC requests enter the scheduler while the fake Pi is still
+    // streaming. Regardless of serialization order, stop must win over any
+    // replacement attempt and a late terminal event must have no owner.
+    await page.evaluate(
+      async ({ runId, occurrenceId }) =>
+        Promise.allSettled([
+          window.piDeck.workflows.canonicalStopRun({ runId }),
+          window.piDeck.workflows.canonicalRetryOccurrence({
+            runId,
+            occurrenceId,
+          }),
+        ]),
+      { runId, occurrenceId },
+    );
+    await page.waitForTimeout(2_200);
+    const run = await page.evaluate(
+      async (runId) => window.piDeck.workflows.canonicalGetRun({ runId }),
+      runId,
+    );
+    expect(run.status).toBe("stopped");
+    expect(run.occurrences.some((item) => item.status === "completed")).toBe(
+      false,
+    );
+    expect(run.occurrences.every((item) => item.runtimeId === undefined)).toBe(
+      true,
+    );
   } finally {
     await app?.close().catch(() => undefined);
     fs.rmSync(root, { recursive: true, force: true });

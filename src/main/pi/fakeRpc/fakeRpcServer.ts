@@ -32,6 +32,8 @@ interface FakeOptions {
   extraModel: boolean;
   noSession: boolean;
   sessionFile?: string;
+  workflowDecisions: boolean[];
+  workflowDecisionStateFile?: string;
 }
 
 type FakeCommandRecord = JsonObject & {
@@ -54,6 +56,7 @@ function parseOptions(argv: string[]): FakeOptions {
     extensionUiMethod: "confirm",
     extraModel: false,
     noSession: false,
+    workflowDecisions: [],
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -101,6 +104,22 @@ function parseOptions(argv: string[]): FakeOptions {
       if (sessionFile) {
         options.sessionFile = sessionFile;
       }
+      index += 1;
+    } else if (arg === "--workflow-decisions") {
+      const decisions = (argv[index + 1] ?? "").split(",");
+      if (
+        decisions.every(
+          (decision) => decision === "true" || decision === "false",
+        )
+      ) {
+        options.workflowDecisions = decisions.map(
+          (decision) => decision === "true",
+        );
+      }
+      index += 1;
+    } else if (arg === "--workflow-decision-state-file") {
+      const stateFile = argv[index + 1];
+      if (stateFile) options.workflowDecisionStateFile = stateFile;
       index += 1;
     }
   }
@@ -163,6 +182,7 @@ class FakeRpcServer {
   private buffer = "";
   private firstCommandSeen = false;
   private promptCounter = 0;
+  private workflowDecisionIndex = 0;
   private currentTimers: NodeJS.Timeout[] = [];
   private agentActive = false;
   private currentModel = "fake-model";
@@ -581,7 +601,11 @@ class FakeRpcServer {
   }
 
   private completePrompt(assistantId: string, text: string): void {
-    const chunks = ["Fake response", " to: ", text || "(empty prompt)"];
+    const decision = this.workflowDecision(text);
+    const chunks =
+      decision === undefined
+        ? ["Fake response", " to: ", text || "(empty prompt)"]
+        : [String(decision)];
     let accumulated = "";
     chunks.forEach((chunk, index) => {
       this.currentTimers.push(
@@ -631,6 +655,42 @@ class FakeRpcServer {
         this.options.streamDelayMs * (chunks.length + 1),
       ),
     );
+  }
+
+  private workflowDecision(text: string): boolean | undefined {
+    if (!text.includes("Return exactly true or false, with no other text."))
+      return undefined;
+    const stateFile = this.options.workflowDecisionStateFile;
+    const index = stateFile
+      ? this.allocateWorkflowDecisionIndex(stateFile)
+      : this.workflowDecisionIndex;
+    const decision = this.options.workflowDecisions[index];
+    if (decision === undefined) return undefined;
+    if (!stateFile) this.workflowDecisionIndex += 1;
+    return decision;
+  }
+
+  /** Allocate across independent fake Pi processes without duplicate decisions. */
+  private allocateWorkflowDecisionIndex(stateFile: string): number {
+    const lockFile = `${stateFile}.lock`;
+    let lock: number | undefined;
+    while (lock === undefined) {
+      try {
+        lock = fs.openSync(lockFile, "wx");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+      }
+    }
+    try {
+      const index =
+        Number.parseInt(fs.readFileSync(stateFile, "utf8"), 10) || 0;
+      fs.writeFileSync(stateFile, String(index + 1));
+      return index;
+    } finally {
+      fs.closeSync(lock);
+      fs.unlinkSync(lockFile);
+    }
   }
 
   private emitPromptScenarioEvents(assistantId: string): void {
