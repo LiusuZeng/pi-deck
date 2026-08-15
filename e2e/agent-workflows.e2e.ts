@@ -76,6 +76,19 @@ const graphWorkflowIds = {
   endRoute: "00000000-0000-4000-8000-000000000006",
 };
 
+const navigationWorkflowIds = {
+  workflow: "20000000-0000-4000-8000-000000000001",
+  first: "20000000-0000-4000-8000-000000000002",
+  second: "20000000-0000-4000-8000-000000000003",
+  third: "20000000-0000-4000-8000-000000000004",
+  firstRoute: "20000000-0000-4000-8000-000000000005",
+  firstFalseRoute: "20000000-0000-4000-8000-000000000006",
+  secondRoute: "20000000-0000-4000-8000-000000000007",
+  secondFalseRoute: "20000000-0000-4000-8000-000000000008",
+  endRoute: "20000000-0000-4000-8000-000000000009",
+  endFalseRoute: "20000000-0000-4000-8000-000000000010",
+};
+
 const identityWorkflowIds = {
   workflow: "10000000-0000-4000-8000-000000000001",
   source: "10000000-0000-4000-8000-000000000002",
@@ -178,6 +191,84 @@ async function createGraphWorkflow(
     },
     { ids: graphWorkflowIds, kind },
   );
+}
+
+async function createNavigableGraphWorkflow(page: Page): Promise<void> {
+  await page.evaluate(async (ids) => {
+    const active = await window.piDeck.workspaces.getActive();
+    if (!active.activeWorkspace) throw new Error("No active workspace");
+    await window.piDeck.workflows.createWorkflow({
+      workspaceId: active.activeWorkspace.id,
+      scopeWorkspaceId: null,
+      workflow: {
+        format: "pi-deck.agent-workflow" as const,
+        schemaVersion: 2 as const,
+        id: ids.workflow,
+        revision: 1,
+        name: "Narrow graph navigation acceptance",
+        inputs: [],
+        entryNodeId: ids.first,
+        nodes: [
+          {
+            id: ids.first,
+            name: "First approval",
+            role: "human" as const,
+            config: { interaction: "approval" as const, prompt: "Continue?" },
+          },
+          {
+            id: ids.second,
+            name: "Second approval",
+            role: "human" as const,
+            config: { interaction: "approval" as const, prompt: "Continue?" },
+          },
+          {
+            id: ids.third,
+            name: "Final approval",
+            role: "human" as const,
+            config: { interaction: "approval" as const, prompt: "Finish?" },
+          },
+        ],
+        relationships: [
+          {
+            id: ids.firstRoute,
+            from: ids.first,
+            when: { equals: true },
+            to: { nodeId: ids.second },
+          },
+          {
+            id: ids.firstFalseRoute,
+            from: ids.first,
+            when: { equals: false },
+            to: { end: "rejected" },
+          },
+          {
+            id: ids.secondRoute,
+            from: ids.second,
+            when: { equals: true },
+            to: { nodeId: ids.third },
+          },
+          {
+            id: ids.secondFalseRoute,
+            from: ids.second,
+            when: { equals: false },
+            to: { end: "rejected" },
+          },
+          {
+            id: ids.endRoute,
+            from: ids.third,
+            when: { equals: true },
+            to: { end: "approved" },
+          },
+          {
+            id: ids.endFalseRoute,
+            from: ids.third,
+            when: { equals: false },
+            to: { end: "rejected" },
+          },
+        ],
+      },
+    });
+  }, navigationWorkflowIds);
 }
 
 async function openAndStartOnlyWorkflow(page: Page): Promise<string> {
@@ -372,9 +463,12 @@ test("live graph subscribes, renders a human conditional route, and completes af
       );
     });
     await page.getByRole("button", { name: "Approve" }).click();
-    await expect(
-      page.getByText("Status: Completed · Outcome: approved"),
-    ).toBeVisible();
+    const liveStatus = page
+      .getByRole("region", { name: "Workflow run" })
+      .locator('p[aria-live="polite"]');
+    await expect(liveStatus).toHaveText(
+      "Status: Completed · Outcome: approved",
+    );
     await expect
       .poll(() =>
         page.evaluate(
@@ -420,6 +514,18 @@ test("live graph subscribes, renders a human conditional route, and completes af
         ),
       )
       .toBe("not_taken");
+    await expect(
+      graph.locator(".agent-workflow-graph-node.is-completed"),
+    ).toBeVisible();
+    await graph
+      .locator(".agent-workflow-graph-text-alternative summary")
+      .click();
+    await expect(
+      graph.getByRole("list", { name: "Workflow routes" }),
+    ).toContainText("State: taken");
+    await expect(
+      graph.getByRole("list", { name: "Workflow routes" }),
+    ).toContainText("State: not taken");
     await graph
       .locator(`[data-workflow-node-id="${graphWorkflowIds.human}"]`)
       .click();
@@ -429,6 +535,95 @@ test("live graph subscribes, renders a human conditional route, and completes af
     await page.evaluate(() =>
       (window as Window & { stopGraphEvents?: () => void }).stopGraphEvents?.(),
     );
+  } finally {
+    await app?.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("workflow graph supports keyboard traversal, text parity, and narrow-screen scrolling", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-navigable-graph-"),
+  );
+  let app: ElectronApplication | undefined;
+  try {
+    ({ app } = await launch(graphEnvironment(root)));
+    const page = await app.firstWindow();
+    await createNavigableGraphWorkflow(page);
+    await openAndStartOnlyWorkflow(page);
+    await page.setViewportSize({ width: 480, height: 700 });
+
+    const graph = page.locator('[aria-label="Live workflow execution graph"]');
+    const viewport = graph.locator(".agent-workflow-graph-viewport");
+    const first = graph.locator(
+      `[data-workflow-node-id="${navigationWorkflowIds.first}"]`,
+    );
+    const second = graph.locator(
+      `[data-workflow-node-id="${navigationWorkflowIds.second}"]`,
+    );
+    await expect(viewport).toBeVisible();
+    await viewport.focus();
+    await expect(viewport).toBeFocused();
+    await expect(viewport).toHaveAttribute(
+      "aria-label",
+      /Right or Down.*Left or Up/,
+    );
+    await page.keyboard.press("ArrowRight");
+    await expect(second).toBeFocused();
+    await expect(second).toHaveAttribute("aria-pressed", "true");
+    await page.keyboard.press("ArrowLeft");
+    await expect(first).toBeFocused();
+    await expect(first).toHaveAttribute("aria-pressed", "true");
+
+    await graph
+      .locator(".agent-workflow-graph-text-alternative summary")
+      .click();
+    const nodes = graph.getByRole("list", { name: "Workflow nodes" });
+    const firstTextNode = nodes
+      .getByRole("listitem")
+      .filter({ hasText: "First approval" });
+    await expect(firstTextNode).toContainText("Status: Waiting for input");
+    await expect(firstTextNode).toContainText("1 occurrence");
+    await expect(
+      graph.locator(".agent-workflow-graph-node.is-waiting_human"),
+    ).toHaveAccessibleName(/human.*First approval.*Waiting for input/i);
+    await expect(
+      graph.getByRole("list", { name: "Workflow routes" }),
+    ).toContainText(/First approval.*true.*State: active.*Second approval/);
+
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => document.documentElement.scrollWidth <= window.innerWidth,
+        ),
+      )
+      .toBe(true);
+    await expect
+      .poll(() =>
+        viewport.evaluate(
+          (element) => element.scrollWidth > element.clientWidth,
+        ),
+      )
+      .toBe(true);
+    await viewport.evaluate((element) => {
+      element.scrollLeft = element.scrollWidth;
+    });
+    await expect
+      .poll(() =>
+        viewport.evaluate((container, lastNodeId) => {
+          const node = container.querySelector<HTMLElement>(
+            `[data-workflow-node-id="${lastNodeId}"]`,
+          );
+          if (!node) return false;
+          const viewportBox = container.getBoundingClientRect();
+          const nodeBox = node.getBoundingClientRect();
+          return (
+            nodeBox.left >= viewportBox.left &&
+            nodeBox.right <= viewportBox.right
+          );
+        }, navigationWorkflowIds.third),
+      )
+      .toBe(true);
   } finally {
     await app?.close().catch(() => undefined);
     fs.rmSync(root, { recursive: true, force: true });
