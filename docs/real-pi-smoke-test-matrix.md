@@ -48,6 +48,7 @@ pi --mode rpc --no-session --no-approve --no-extensions --no-skills --no-prompt-
 | SM-016 | Queue/steer/follow-up      | During active run, send steer and follow-up                                                 | Queue counts update; follow-up runs after current work; extension commands not queued as steer/follow-up | M5    |
 | SM-017 | Tool events                | Prompt/fixture triggers tool execution                                                      | Tool start/update/end events produce expandable card data and clear running overlay                      | M5/M7 |
 | SM-018 | Compaction/retry           | Fixture or controlled session triggers compaction/retry if supported                        | Sidebar compacting/retrying indicators set/clear                                                         | M5    |
+| SM-019 | Agent Workflow real worker | Create and start a one-worker workflow through the canonical API, then restart Pi Deck     | Real Pi output, worker session file, completed graph, and run remain visible after restart               | M2    |
 
 ## Fake-RPC Coverage Mapping
 
@@ -64,7 +65,7 @@ The deterministic fake RPC harness covers pre-real-Pi automation for:
 
 ## Current Blockers / Manual Inputs
 
-- P0 real GUI path is covered by `npm run test:e2e:real-smoke` against the installed Pi binary.
+- P0 real GUI prompt/resume and one-worker Agent Workflow persistence paths are covered by `npm run test:e2e:real-smoke` against the installed Pi binary.
 - Broader M7.4 release matrix execution still needs planned pass/fail artifact collection across all rows.
 - G3 requires platform packaging measurements before image support can ship.
 - G4 requires a real or fake extension fixture once extension UI backend IPC is implemented.
