@@ -183,6 +183,7 @@ function HumanControl(props: {
           <button
             disabled={props.busy === occurrence.id}
             type="button"
+            className="workflow-primary-button"
             onClick={() => props.onAnswer(true)}
           >
             Approve
@@ -190,6 +191,7 @@ function HumanControl(props: {
           <button
             disabled={props.busy === occurrence.id}
             type="button"
+            className="workflow-secondary-button"
             onClick={() => props.onAnswer(false)}
           >
             Reject
@@ -200,6 +202,7 @@ function HumanControl(props: {
           <label htmlFor={inputId}>Response</label>
           <select
             id={inputId}
+            className="workflow-human-input"
             value={props.answer ?? ""}
             onChange={(event) => props.onChange(event.target.value)}
           >
@@ -216,6 +219,7 @@ function HumanControl(props: {
           <label htmlFor={inputId}>Response</label>
           <input
             id={inputId}
+            className="workflow-human-input"
             value={props.answer ?? ""}
             onChange={(event) => props.onChange(event.target.value)}
           />
@@ -224,6 +228,7 @@ function HumanControl(props: {
       {node.config.interaction !== "approval" ? (
         <button
           type="button"
+          className="workflow-primary-button"
           disabled={
             props.busy === occurrence.id || !(props.answer ?? "").trim()
           }

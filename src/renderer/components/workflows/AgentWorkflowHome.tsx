@@ -142,59 +142,79 @@ export function AgentWorkflowHome(props: AgentWorkflowHomeProps): ReactElement {
   }, [inputWorkflow?.id]);
 
   const inputDialog = inputWorkflow ? (
-    <div
-      ref={inputDialogRef}
-      className="workflow-input-dialog"
-      role="dialog"
-      aria-labelledby="agent-workflow-inputs-title"
-      onKeyDown={(event) => {
-        if (event.key === "Escape") {
-          event.preventDefault();
-          setInputWorkflow(undefined);
-        }
-      }}
-    >
-      <h3 id="agent-workflow-inputs-title">Run inputs</h3>
-      {inputWorkflow.inputs.map((input, index) => {
-        const errorId = `agent-workflow-input-${input.id}-error`;
-        const invalid =
-          input.required && startError === `${input.label} is required.`;
-        return (
-          <label key={input.id}>
-            {input.label}
-            <input
-              data-dialog-initial-focus={index === 0 ? true : undefined}
-              type="text"
-              required={input.required}
-              aria-invalid={invalid}
-              aria-describedby={invalid ? errorId : undefined}
-              value={inputValues[input.id] ?? ""}
-              onChange={(event) =>
-                setInputValues({
-                  ...inputValues,
-                  [input.id]: event.target.value,
-                })
-              }
-            />
-            {invalid ? <span id={errorId}>{startError}</span> : null}
-          </label>
-        );
-      })}
-      <div className="workflow-card-actions">
-        <button
-          type="button"
-          className="workflow-secondary-button"
-          onClick={() => setInputWorkflow(undefined)}
-        >
-          Cancel
-        </button>
-        <button
-          type="button"
-          className="workflow-primary-button"
-          onClick={submitInputs}
-        >
-          Start run
-        </button>
+    <div className="workflow-input-dialog-backdrop">
+      <div
+        ref={inputDialogRef}
+        className="workflow-input-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="agent-workflow-inputs-title"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            setInputWorkflow(undefined);
+            return;
+          }
+          if (event.key !== "Tab") return;
+          const focusable = Array.from(
+            inputDialogRef.current?.querySelectorAll<HTMLElement>(
+              'button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+            ) ?? [],
+          );
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+          if (!first || !last) return;
+          if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+          }
+        }}
+      >
+        <h3 id="agent-workflow-inputs-title">Run inputs</h3>
+        {inputWorkflow.inputs.map((input, index) => {
+          const errorId = `agent-workflow-input-${input.id}-error`;
+          const invalid =
+            input.required && startError === `${input.label} is required.`;
+          return (
+            <label key={input.id}>
+              {input.label}
+              <input
+                data-dialog-initial-focus={index === 0 ? true : undefined}
+                type="text"
+                required={input.required}
+                aria-invalid={invalid}
+                aria-describedby={invalid ? errorId : undefined}
+                value={inputValues[input.id] ?? ""}
+                onChange={(event) =>
+                  setInputValues({
+                    ...inputValues,
+                    [input.id]: event.target.value,
+                  })
+                }
+              />
+              {invalid ? <span id={errorId}>{startError}</span> : null}
+            </label>
+          );
+        })}
+        <div className="workflow-card-actions">
+          <button
+            type="button"
+            className="workflow-secondary-button"
+            onClick={() => setInputWorkflow(undefined)}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="workflow-primary-button"
+            onClick={submitInputs}
+          >
+            Start run
+          </button>
+        </div>
       </div>
     </div>
   ) : null;

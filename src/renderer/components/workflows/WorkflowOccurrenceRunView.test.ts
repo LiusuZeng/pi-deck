@@ -202,6 +202,11 @@ describe("WorkflowOccurrenceRunView", () => {
     const approve = [...container.querySelectorAll("button")].find(
       (button) => button.textContent === "Approve",
     )!;
+    const reject = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Reject",
+    )!;
+    expect(approve.classList.contains("workflow-primary-button")).toBe(true);
+    expect(reject.classList.contains("workflow-secondary-button")).toBe(true);
     await act(async () => approve.click());
     expect(onAnswer).toHaveBeenCalledWith(run.occurrences[0].id, true);
   });

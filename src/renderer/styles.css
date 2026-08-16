@@ -3903,6 +3903,58 @@ body {
   margin: 0 auto;
 }
 
+.workflow-input-dialog-backdrop {
+  position: fixed;
+  z-index: 30;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: clamp(12px, 4vh, 32px);
+  background: rgb(15 23 42 / 62%);
+}
+
+.workflow-input-dialog {
+  display: grid;
+  width: min(100%, 520px);
+  max-height: calc(100dvh - clamp(24px, 8vh, 64px));
+  gap: 14px;
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: clamp(16px, 3vw, 24px);
+  color: var(--color-text);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.workflow-input-dialog h3 {
+  margin: 0;
+  color: var(--color-text-strong);
+}
+
+.workflow-input-dialog label {
+  display: grid;
+  gap: 6px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.workflow-input-dialog input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  padding: 9px 10px;
+  color: var(--color-text);
+  background: var(--color-surface-raised);
+}
+
+.workflow-input-dialog input:focus {
+  border-color: var(--color-focus);
+  outline: 2px solid color-mix(in srgb, var(--color-focus) 25%, transparent);
+}
+
 .workflow-page-heading,
 .workflow-section-heading,
 .workflow-template-card-heading,
@@ -4386,7 +4438,8 @@ body {
 .workflow-field textarea,
 .workflow-field select,
 .workflow-input-row input,
-.workflow-input-row select {
+.workflow-input-row select,
+.workflow-human-input {
   width: 100%;
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-sm);
@@ -4400,7 +4453,8 @@ body {
 .workflow-field textarea:focus,
 .workflow-field select:focus,
 .workflow-input-row input:focus,
-.workflow-input-row select:focus {
+.workflow-input-row select:focus,
+.workflow-human-input:focus {
   border-color: var(--color-focus);
   outline: 2px solid color-mix(in srgb, var(--color-focus) 25%, transparent);
 }
@@ -4785,6 +4839,13 @@ body {
   padding-bottom: 0;
 }
 
+.workflow-run-output {
+  box-sizing: border-box;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 .workflow-human-control {
   display: grid;
   gap: 10px;
@@ -5131,7 +5192,7 @@ body {
   box-sizing: border-box;
   font-family: ui-monospace, SFMono-Regular, monospace;
 }
-@media (max-width: 720px) {
+@media (max-width: 840px) {
   .agent-workflow-build {
     grid-template-columns: 1fr;
   }
@@ -5186,7 +5247,7 @@ body {
 .agent-workflow-execution-configuration .pi-configuration-menu {
   flex: 0 0 auto;
 }
-@media (min-width: 721px) and (max-width: 980px) {
+@media (min-width: 841px) and (max-width: 980px) {
   .agent-workflow-build {
     grid-template-columns: minmax(210px, 0.8fr) minmax(300px, 1.2fr);
   }

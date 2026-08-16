@@ -223,11 +223,24 @@ describe("AgentWorkflowHome", () => {
     act(() => button("Start run").click());
     const dialog = container!.querySelector('[role="dialog"]');
     expect(dialog?.textContent).toContain("Target");
-    expect(dialog?.getAttribute("aria-modal")).toBeNull();
-    expect(document.activeElement).toBe(dialog?.querySelector("input"));
+    expect(dialog?.getAttribute("aria-modal")).toBe("true");
+    expect(
+      dialog?.parentElement?.classList.contains(
+        "workflow-input-dialog-backdrop",
+      ),
+    ).toBe(true);
+    const dialogInput = dialog?.querySelector("input")!;
+    expect(document.activeElement).toBe(dialogInput);
     const dialogStart = [...dialog!.querySelectorAll("button")].find(
       (item) => item.textContent?.trim() === "Start run",
     )!;
+    dialogStart.focus();
+    act(() =>
+      dialogStart.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Tab", bubbles: true }),
+      ),
+    );
+    expect(document.activeElement).toBe(dialogInput);
     act(() => dialogStart.click());
     expect(dialog?.querySelector("input")?.getAttribute("aria-invalid")).toBe(
       "true",
