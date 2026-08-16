@@ -402,6 +402,58 @@ describe("AgentWorkflowGraph", () => {
     const routes = container!.querySelector('[aria-label="Workflow routes"]');
     expect(routes?.textContent).toContain("Ship now");
     expect(routes?.textContent).toContain("Request changes");
+    const canvasLabels = [
+      ...container!.querySelectorAll(".agent-workflow-graph-edge-label"),
+    ].map((label) => label.textContent);
+    expect(canvasLabels).toContain("Ship now");
+  });
+
+  it("bounds long Human choice route labels while retaining their full text alternative", () => {
+    const longLabel = "A long configured route label ".repeat(20).trim();
+    render({
+      ...semanticGraphDefinition,
+      nodes: semanticGraphDefinition.nodes.map((node) =>
+        node.id === "00000000-0000-4000-8000-000000000509"
+          ? {
+              ...node,
+              config: {
+                interaction: "choice" as const,
+                prompt: "Choose a disposition",
+                options: [longLabel, "Request changes"],
+              },
+            }
+          : node,
+      ),
+      relationships: semanticGraphDefinition.relationships.map(
+        (relationship) =>
+          relationship.id === "00000000-0000-4000-8000-000000000514"
+            ? { ...relationship, when: { equals: longLabel } }
+            : relationship,
+      ),
+    });
+
+    const label = [
+      ...container!.querySelectorAll<HTMLElement>(
+        ".agent-workflow-graph-edge-label",
+      ),
+    ].find((element) => element.getAttribute("title") === longLabel);
+    expect(label).toBeDefined();
+    const labelContainer = label?.parentElement!;
+    const canvas = container!.querySelector(".agent-workflow-graph-links")!;
+    const x = Number(labelContainer.getAttribute("x"));
+    const y = Number(labelContainer.getAttribute("y"));
+    const width = Number(labelContainer.getAttribute("width"));
+    const height = Number(labelContainer.getAttribute("height"));
+    expect(width).toBe(160);
+    expect(x).toBeGreaterThanOrEqual(0);
+    expect(y).toBeGreaterThanOrEqual(0);
+    expect(x + width).toBeLessThanOrEqual(Number(canvas.getAttribute("width")));
+    expect(y + height).toBeLessThanOrEqual(
+      Number(canvas.getAttribute("height")),
+    );
+    expect(
+      container!.querySelector('[aria-label="Workflow routes"]')?.textContent,
+    ).toContain(longLabel);
   });
 
   it("moves focus and selection along connected graph nodes with arrow keys", () => {

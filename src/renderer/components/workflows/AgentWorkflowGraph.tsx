@@ -29,6 +29,9 @@ export interface AgentWorkflowGraphProps {
   onSelectNode(nodeId: string): void;
 }
 
+const EDGE_LABEL_MAX_WIDTH = 160;
+const EDGE_LABEL_HEIGHT = 20;
+
 const statusLabel: Record<WorkflowGraphStatus, string> = {
   not_started: "Not started",
   queued: "Queued",
@@ -276,12 +279,38 @@ function GraphCanvas(props: {
                   points={points}
                   markerEnd="url(#workflow-graph-arrow)"
                 />
-                {midpoint && (
-                  <text x={midpoint.x} y={midpoint.y - 8} textAnchor="middle">
-                    {edge.label}
-                    {edge.status ? ` · ${edge.status.replace("_", " ")}` : ""}
-                  </text>
-                )}
+                {midpoint &&
+                  (() => {
+                    const label = `${edge.label}${edge.status ? ` · ${edge.status.replace("_", " ")}` : ""}`;
+                    const width = Math.min(EDGE_LABEL_MAX_WIDTH, graph.width);
+                    const x = Math.max(
+                      0,
+                      Math.min(midpoint.x - width / 2, graph.width - width),
+                    );
+                    const y = Math.max(
+                      0,
+                      Math.min(
+                        midpoint.y - EDGE_LABEL_HEIGHT - 4,
+                        graph.height - EDGE_LABEL_HEIGHT,
+                      ),
+                    );
+                    return (
+                      <foreignObject
+                        className="agent-workflow-graph-edge-label-container"
+                        x={x}
+                        y={y}
+                        width={width}
+                        height={EDGE_LABEL_HEIGHT}
+                      >
+                        <div
+                          className="agent-workflow-graph-edge-label"
+                          title={label}
+                        >
+                          {label}
+                        </div>
+                      </foreignObject>
+                    );
+                  })()}
               </g>
             );
           })}
