@@ -1,7 +1,9 @@
 import {
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
+  type CSSProperties,
   type KeyboardEvent,
   type ReactElement,
 } from "react";
@@ -55,6 +57,10 @@ export function PiModelThinkingMenu(props: {
 }): ReactElement {
   const [open, setOpen] = useState(false);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [modelMenuPlacement, setModelMenuPlacement] = useState<{
+    direction: "above" | "below";
+    maxHeight: number;
+  }>({ direction: "above", maxHeight: 280 });
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -82,6 +88,39 @@ export function PiModelThinkingMenu(props: {
     if (!modelMenuOpen || !focusModelMenuOnOpenRef.current) return;
     focusModelMenuOnOpenRef.current = false;
     directMenuItems(modelMenuRef.current)[0]?.focus();
+  }, [modelMenuOpen]);
+
+  useLayoutEffect(() => {
+    if (!modelMenuOpen) return;
+    const updateModelMenuPlacement = (): void => {
+      const popover = popoverRef.current;
+      if (popover === null) return;
+      const rect = popover.getBoundingClientRect();
+      const gap = 6;
+      // Narrow layouts place the submenu above the upward-opening popover.
+      // Wider layouts retain the side-by-side menu placement.
+      const aboveBoundary = window.matchMedia("(max-width: 560px)").matches
+        ? rect.top
+        : rect.bottom;
+      const above = Math.max(0, Math.floor(aboveBoundary - gap));
+      const below = Math.max(
+        0,
+        Math.floor(window.innerHeight - rect.bottom - gap),
+      );
+      const maxHeight = Math.min(280, Math.max(above, below));
+      setModelMenuPlacement({
+        direction: above >= below ? "above" : "below",
+        maxHeight,
+      });
+    };
+
+    updateModelMenuPlacement();
+    window.addEventListener("resize", updateModelMenuPlacement);
+    window.addEventListener("scroll", updateModelMenuPlacement, true);
+    return () => {
+      window.removeEventListener("resize", updateModelMenuPlacement);
+      window.removeEventListener("scroll", updateModelMenuPlacement, true);
+    };
   }, [modelMenuOpen]);
 
   function close(restoreFocus = false): void {
@@ -220,8 +259,13 @@ export function PiModelThinkingMenu(props: {
               {modelMenuOpen ? (
                 <div
                   aria-label="Available Pi models"
-                  className="pi-model-submenu"
+                  className={`pi-model-submenu pi-model-submenu--${modelMenuPlacement.direction}`}
                   ref={modelMenuRef}
+                  style={
+                    {
+                      "--pi-model-submenu-max-height": `${modelMenuPlacement.maxHeight}px`,
+                    } as CSSProperties
+                  }
                   role="menu"
                 >
                   {props.models.map((model) => {

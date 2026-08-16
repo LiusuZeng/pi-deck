@@ -1719,7 +1719,7 @@ test("model submenu stays inside a narrow viewport", async () => {
   );
   try {
     await expectHealthyPreload(page);
-    await page.setViewportSize({ width: 320, height: 600 });
+    await page.setViewportSize({ width: 390, height: 600 });
     await page.locator(".pi-configuration-trigger").click();
     await page.getByRole("menuitem", { name: /Fake model/ }).click();
     const modelMenu = page.getByRole("menu", { name: "Available Pi models" });
@@ -1727,7 +1727,9 @@ test("model submenu stays inside a narrow viewport", async () => {
     const box = await modelMenu.boundingBox();
     if (box === null) throw new Error("Model menu has no bounding box");
     expect(box.x).toBeGreaterThanOrEqual(0);
-    expect(box.x + box.width).toBeLessThanOrEqual(320);
+    expect(box.y).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(390);
+    expect(box.y + box.height).toBeLessThanOrEqual(600);
   } finally {
     await app.close();
     fs.rmSync(root, { recursive: true, force: true });
@@ -3354,6 +3356,20 @@ test("Work inbox scopes work by workspace and opens a row with the keyboard", as
     await expect(page.getByLabel("Work inbox workspace")).toHaveValue("all");
     await expect(
       page.getByRole("button", { name: /^In progress \d+$/ }),
+    ).toBeVisible();
+    for (const control of await page
+      .locator(".activity-inbox-close, .activity-inbox-filter")
+      .all()) {
+      const box = await control.boundingBox();
+      if (box === null) throw new Error("Activity inbox control has no bounds");
+      expect(box.width).toBeGreaterThanOrEqual(40);
+      expect(box.height).toBeGreaterThanOrEqual(40);
+    }
+    await page.getByLabel("Close work inbox").click();
+    await expect(page.getByLabel("Prompt text")).toBeVisible();
+    await page.getByRole("button", { name: "Work inbox", exact: true }).click();
+    await expect(
+      page.getByRole("heading", { name: "Work inbox" }),
     ).toBeVisible();
 
     await page
