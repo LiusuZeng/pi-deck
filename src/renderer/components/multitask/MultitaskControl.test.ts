@@ -71,12 +71,16 @@ describe("MultitaskControl", () => {
 
   it("represents unavailable, loading, and error states without enabling activation", () => {
     const unavailable = render(
-      createElement(MultitaskControl, { enabled: false, tasks }),
+      createElement(MultitaskControl, {
+        enabled: false,
+        tasks,
+        unavailableMessage: "Send a message to enable multitasking",
+      }),
     ).querySelector("button");
 
     expect(unavailable?.disabled).toBe(true);
     expect(unavailable?.getAttribute("aria-label")).toBe(
-      "Multitasking unavailable",
+      "Send a message to enable multitasking",
     );
 
     act(() => root?.unmount());

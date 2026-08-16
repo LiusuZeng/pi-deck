@@ -9220,8 +9220,8 @@ function Composer(props: {
               <MultitaskControl
                 tasks={props.multitaskTasks}
                 enabled={!isActionPending}
+                label={`Turn ${props.multitaskMode === "parallel" ? "off" : "on"} parallel multitasking`}
                 onClick={props.onToggleMultitask}
-                aria-label={`Turn ${props.multitaskMode === "parallel" ? "off" : "on"} multitasking`}
                 title={`Turn ${props.multitaskMode === "parallel" ? "off" : "on"} multitasking`}
               />
             ) : props.selectedSession.runtimeBacked ? (
@@ -9229,8 +9229,16 @@ function Composer(props: {
                 tasks={[]}
                 enabled={false}
                 title="Loading multitasking mode"
+                unavailableMessage="Loading multitasking mode"
               />
-            ) : null}
+            ) : (
+              <MultitaskControl
+                tasks={[]}
+                enabled={false}
+                title="Start Pi with a prompt to enable multitasking"
+                unavailableMessage="Start Pi with a prompt to enable multitasking"
+              />
+            )}
             {props.selectedSession.backendMode === "real" ? (
               <PiModelThinkingMenu
                 disabled={isActionPending}

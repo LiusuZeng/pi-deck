@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-08-16
+
+### Fixed
+
+- Kept the parallel multitasking control visible in a new draft session, with a
+  clear explanation that Pi must first be started with a prompt.
+- Improved the control's empty-state tooltip and accessible label so users can
+  discover and enable parallel multitasking without guessing.
+
+### Tests
+
+- Added clean-profile Electron coverage for multitasking control visibility and
+  its pre-runtime guidance.
+
 ## [0.5.2] - 2026-08-16
 
 ### Fixed
@@ -290,7 +304,8 @@ coding-agent sessions.
   crash; persisted sessions can be reopened, but unsaved partial stream text may
   be lost.
 
-[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/LiusuZeng/pi-deck/compare/v0.4.0...v0.5.0

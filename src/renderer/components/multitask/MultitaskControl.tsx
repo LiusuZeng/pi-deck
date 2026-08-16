@@ -14,6 +14,10 @@ export interface MultitaskControlProps extends Omit<
   tasks: readonly MultitaskTaskSummary[];
   /** Whether starting multitasking work is currently available. */
   enabled?: boolean;
+  /** Explains why multitasking is unavailable, when applicable. */
+  unavailableMessage?: string;
+  /** An action-oriented accessible label for the control. */
+  label?: string;
   /** Prevents repeated activation while a task is being started. */
   loading?: boolean;
   /** Indicates that the most recent multitasking action could not be completed. */
@@ -33,29 +37,38 @@ export const MultitaskControl = forwardRef<
     className,
     enabled = true,
     error = false,
+    label,
     loading = false,
     tasks,
     type = "button",
+    unavailableMessage,
     ...props
   },
   ref,
 ) {
-  const label = loading
+  const accessibleLabel = loading
     ? "Loading multitasking status"
     : error
       ? "Multitasking status unavailable"
       : enabled
-        ? `Multitasking: ${tasks.length} task${tasks.length === 1 ? "" : "s"}`
-        : "Multitasking unavailable";
+        ? (label ??
+          `Multitasking: ${tasks.length} task${tasks.length === 1 ? "" : "s"}`)
+        : (unavailableMessage ?? "Multitasking unavailable");
+  const tooltipContent =
+    tasks.length > 0 ? (
+      <MultitaskStatusPopover tasks={tasks} />
+    ) : (
+      <span>{unavailableMessage ?? "No delegated tasks yet."}</span>
+    );
 
   return (
-    <Tooltip content={<MultitaskStatusPopover tasks={tasks} />}>
+    <Tooltip content={tooltipContent}>
       <button
         {...props}
         ref={ref}
         aria-busy={loading || undefined}
         aria-invalid={error || undefined}
-        aria-label={label}
+        aria-label={accessibleLabel}
         className={[
           "ui-control",
           "ui-icon-button",
