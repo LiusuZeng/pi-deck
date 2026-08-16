@@ -158,7 +158,19 @@
         </div>
       </section>
 
-      <section class="section secondary-controls" aria-labelledby="secondary-controls-heading">
+      <section id="use-cases" class="section use-cases" aria-labelledby="use-cases-heading">
+        <div class="section-heading"><p class="eyebrow">What can I run?</p><h2 id="use-cases-heading">Start with the shape of work you already have.</h2><p>Use a normal Pi conversation for ad-hoc work, save an Agent Workflow when the process should be explicit and repeatable, or let one parent conversation delegate independent tasks.</p></div>
+        <div class="use-case-grid">
+          <article><span class="feature-number">01</span><h3>Feature delivery</h3><p>Plan a change, implement it, verify the result, and pause for a Human approval. Use Workers for the work, a Decider to route it, and a checkpoint when a person should choose what happens next.</p></article>
+          <article><span class="feature-number">02</span><h3>Parallel investigation</h3><p>Use an Orchestrator to fan out bounded-concurrency research, review, or validation work. Follow every occurrence in the live graph, then use the resulting handoffs in the next step.</p></article>
+          <article><span class="feature-number">03</span><h3>One-off delegation</h3><p>Keep an exploratory task in one Pi conversation and enable parallel multitasking when it contains substantive independent work. Pi delegates child tasks locally; their status and handoff stay with the parent.</p></article>
+        </div>
+        <ul class="capability-strip" aria-label="Core capabilities">
+          <li>Local Pi sessions</li><li>Reusable workflows</li><li>Four role types</li><li>Loops and fan-out</li><li>Live graph and retries</li><li>Human checkpoints</li><li>Opt-in delegation</li>
+        </ul>
+      </section>
+
+      <section class="section secondary-controls"
         <div class="section-heading"><p class="eyebrow">Secondary controls</p><h2 id="secondary-controls-heading">Tune the session to your style.</h2><p>These supporting preferences sit outside the core workflow: choose Pi’s thinking level or model, and set the interface appearance.</p></div>
         <div class="feature-snapshot-grid">
           <figure>
@@ -193,6 +205,15 @@ cd pi-deck
 npm ci
 npm run build
 npm run deck:real -- /absolute/path/to/your/project</code></pre>
+      </section>
+
+      <section class="section boundaries" aria-labelledby="boundaries-heading">
+        <div><p class="eyebrow">Before you try it</p><h2 id="boundaries-heading">Know the current boundaries.</h2></div>
+        <ul>
+          <li><strong>Bring your Pi setup.</strong> Pi Deck uses your local Pi executable, provider authentication, models, tools, settings, and resources.</li>
+          <li><strong>Local and source-first.</strong> This macOS pre-release runs from source; there is not yet a signed or notarized installer.</li>
+          <li><strong>Delegation is deliberate.</strong> Parallel multitasking is opt-in per parent conversation. Child tasks expose parent-facing status and handoff, not separate child-session controls.</li>
+        </ul>
       </section>
 
       <section class="section privacy" aria-labelledby="privacy-heading">
