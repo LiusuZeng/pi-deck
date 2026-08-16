@@ -147,44 +147,63 @@ test("real Pi Agent Workflow: real worker persists run, session, and graph acros
               ],
             },
           });
-          const run = await window.piDeck.workflows.canonicalStartRun({
-            workflowId,
-            workspaceId: active.activeWorkspace.id,
-            inputs: {},
-          });
-          return { runId: run.id, workspaceId: active.activeWorkspace.id };
+          return { workspaceId: active.activeWorkspace.id };
         },
         { token, workflowId, workerId },
       );
-      runId = started.runId;
+      // Reproduce the user path in the actual real-Pi renderer: starting a
+      // run must leave its live monitor interactive without a restart.
+      await firstLaunch.page
+        .getByRole("button", { name: "Agent Workflows" })
+        .click();
+      await firstLaunch.page.getByRole("button", { name: "Start run" }).click();
+      const liveRun = firstLaunch.page.getByRole("region", {
+        name: "Workflow run",
+      });
+      await expect(liveRun).toBeVisible();
+      const graph = firstLaunch.page.getByLabel(
+        "Live workflow execution graph",
+      );
+      const graphNode = graph.locator(`[data-workflow-node-id="${workerId}"]`);
+      await expect(graph).toBeVisible();
+      await graphNode.click();
+      await expect(
+        firstLaunch.page.getByRole("heading", { name: "Execution details" }),
+      ).toBeVisible();
 
-      await expect
-        .poll(
-          () =>
-            firstLaunch.page.evaluate(async (id) => {
-              const run = await window.piDeck.workflows.canonicalGetRun({
-                runId: id,
-              });
-              return run.status;
-            }, started.runId),
-          {
-            message: "Real Pi workflow run must complete",
-            timeout: Number(
-              process.env.PI_DECK_E2E_REAL_PROMPT_TIMEOUT_MS ?? 180_000,
-            ),
-          },
-        )
-        .toBe("completed");
+      await expect(liveRun.locator('p[aria-live="polite"]')).toHaveText(
+        "Status: Completed · Outcome: done",
+        {
+          timeout: Number(
+            process.env.PI_DECK_E2E_REAL_PROMPT_TIMEOUT_MS ?? 180_000,
+          ),
+        },
+      );
+      await expect(firstLaunch.page.getByText(token).first()).toBeVisible();
+      const openSession = firstLaunch.page.getByRole("button", {
+        name: "Open Pi session",
+      });
+      await expect(openSession).toBeVisible();
+      await openSession.click();
+      await expect(
+        firstLaunch.page
+          .getByLabel("Chat / Agent Timeline")
+          .getByText(token)
+          .first(),
+      ).toBeVisible();
 
-      const completed = await firstLaunch.page.evaluate(async (id) => {
-        const run = await window.piDeck.workflows.canonicalGetRun({
-          runId: id,
+      const completed = await firstLaunch.page.evaluate(async (workspaceId) => {
+        const runs = await window.piDeck.workflows.canonicalListRuns({
+          workspaceId,
         });
+        const run = runs[0];
+        if (!run) throw new Error("Real Pi workflow run was not created");
         const snapshot = await window.piDeck.workflows.graphGetSnapshot({
-          runId: id,
+          runId: run.id,
         });
         return { run, snapshot };
-      }, started.runId);
+      }, started.workspaceId);
+      runId = completed.run.id;
       expect(completed.run.occurrences).toHaveLength(1);
       expect(completed.run.occurrences[0]).toMatchObject({
         nodeId: workerId,

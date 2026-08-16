@@ -1270,6 +1270,10 @@ export function App(): ReactElement {
           const run = await window.piDeck.workflows.canonicalGetRun({
             runId: workflowOccurrenceRunId,
           });
+          // The selected run or workspace may have changed while this request
+          // was in flight. A stale refresh must not navigate away from a newly
+          // opened live monitor.
+          if (disposed) return;
           if (run.workspaceId !== workspaceId) {
             setWorkflowOccurrenceRunId(undefined);
             setWorkflowView("runs");
@@ -1284,6 +1288,9 @@ export function App(): ReactElement {
           const run = await window.piDeck.workflows.getRun({
             runId: legacyWorkflowRunId,
           });
+          // Match the canonical-run guard above: cleanup can occur while the
+          // compatibility lookup is in flight.
+          if (disposed) return;
           if (run.workspaceId !== workspaceId) {
             setLegacyWorkflowRunId(undefined);
             setWorkflowView("runs");
