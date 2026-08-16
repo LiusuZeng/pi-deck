@@ -37,6 +37,9 @@ import {
   chatSnapshotSchema,
   diagnosticsSummarySchema,
   ipcChannels,
+  multitaskModeRequestSchema,
+  multitaskModeUpdateRequestSchema,
+  multitaskStateEventSchema,
   pickAttachmentsResultSchema,
   pickProjectResultSchema,
   projectListResultSchema,
@@ -55,6 +58,43 @@ import {
   workspaceSessionMutationResultSchema,
   workspaceUpdateRequestSchema,
 } from "../shared/ipcSchemas.js";
+import {
+  workflowApproveGateRequestSchema,
+  workflowArchiveTemplateRequestSchema,
+  workflowCreateTemplateRequestSchema,
+  workflowDuplicateTemplateRequestSchema,
+  workflowEventSchema,
+  workflowGetRunRequestSchema,
+  workflowGetTemplateRequestSchema,
+  workflowListRunsRequestSchema,
+  workflowRetryStepRequestSchema,
+  workflowRetryConditionRequestSchema,
+  workflowOverrideConditionRequestSchema,
+  workflowRunListResultSchema,
+  workflowRunSchema,
+  workflowStartRunRequestSchema,
+  workflowStopRunRequestSchema,
+  workflowTemplateListResultSchema,
+  workflowTemplateSchema,
+  workflowUpdateTemplateRequestSchema,
+} from "../shared/workflowSchemas.js";
+import {
+  canonicalWorkflowEventSchema,
+  canonicalWorkflowGetRunRequestSchema,
+  canonicalWorkflowHumanAnswerRequestSchema,
+  canonicalWorkflowListRunsRequestSchema,
+  canonicalWorkflowOccurrenceRequestSchema,
+  canonicalWorkflowStartRunRequestSchema,
+  workflowGraphEventSchema,
+  workflowGraphSnapshotRequestSchema,
+  workflowGraphSnapshotSchema,
+  workflowGraphSubscriptionRequestSchema,
+  workflowCreateRequestSchema,
+  workflowListRequestSchema,
+  workflowScopedDefinitionSchema,
+  workflowRunEnvelopeSchema,
+  workflowUpdateRequestSchema,
+} from "../shared/agentWorkflowSchemas.js";
 import type {
   AppSettings,
   AttachmentAssignOwnerRequest,
@@ -64,6 +104,9 @@ import type {
   ChatInterventionRequest,
   ChatRespondToExtensionUiRequest,
   ChatRuntimeEvent,
+  MultitaskModeRequest,
+  MultitaskModeUpdateRequest,
+  MultitaskStateEvent,
   PiDeckApi,
   WorkspaceAddSessionRequest,
   WorkspaceArchiveSessionRequest,
@@ -73,6 +116,16 @@ import type {
   WorkspaceRemoveSessionRequest,
   WorkspaceRestoreSessionRequest,
   WorkspaceUpdateRequest,
+  WorkflowApproveGateRequest,
+  WorkflowRetryConditionRequest,
+  WorkflowOverrideConditionRequest,
+  WorkflowCreateRequest,
+  WorkflowCreateTemplateRequest,
+  WorkflowListRequest,
+  WorkflowUpdateRequest,
+  WorkflowStartRunRequest,
+  WorkflowUpdateTemplateRequest,
+  WorkflowEvent,
 } from "../shared/types.js";
 
 async function invokeValidated<TRequest, TResponse>(options: {
@@ -273,6 +326,34 @@ const api: PiDeckApi = Object.freeze({
       };
     },
   }),
+  multitask: Object.freeze({
+    getMode: (request: MultitaskModeRequest) =>
+      invokeValidated({
+        channel: ipcChannels.multitaskGetMode,
+        request: multitaskModeRequestSchema.parse(request),
+        responseSchema: multitaskStateEventSchema,
+      }),
+    updateMode: (request: MultitaskModeUpdateRequest) =>
+      invokeValidated({
+        channel: ipcChannels.multitaskUpdateMode,
+        request: multitaskModeUpdateRequestSchema.parse(request),
+        responseSchema: multitaskStateEventSchema,
+      }),
+    onState: (listener: (event: MultitaskStateEvent) => void) => {
+      const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => {
+        const parsed = multitaskStateEventSchema.safeParse(payload);
+        if (!parsed.success) {
+          console.warn("Dropping invalid multitask IPC event", parsed.error);
+          return;
+        }
+        listener(parsed.data);
+      };
+      ipcRenderer.on(ipcChannels.multitaskState, wrapped);
+      return () => {
+        ipcRenderer.off(ipcChannels.multitaskState, wrapped);
+      };
+    },
+  }),
   projects: Object.freeze({
     list: () =>
       invokeValidated({
@@ -384,6 +465,211 @@ const api: PiDeckApi = Object.freeze({
         request: undefined,
         responseSchema: chatListSessionsResultSchema,
       }),
+  }),
+  workflows: Object.freeze({
+    listWorkflows: (request: WorkflowListRequest) =>
+      invokeValidated({
+        channel: ipcChannels.workflowListWorkflows,
+        request: workflowListRequestSchema.parse(request),
+        responseSchema: workflowScopedDefinitionSchema.array(),
+      }),
+    createWorkflow: (request: WorkflowCreateRequest) =>
+      invokeValidated({
+        channel: ipcChannels.workflowCreateWorkflow,
+        request: workflowCreateRequestSchema.parse(request),
+        responseSchema: workflowScopedDefinitionSchema,
+      }),
+    updateWorkflow: (request: WorkflowUpdateRequest) =>
+      invokeValidated({
+        channel: ipcChannels.workflowUpdateWorkflow,
+        request: workflowUpdateRequestSchema.parse(request),
+        responseSchema: workflowScopedDefinitionSchema,
+      }),
+    canonicalListRuns: (request?: { workspaceId?: string }) =>
+      invokeValidated({
+        channel: ipcChannels.canonicalWorkflowListRuns,
+        request: canonicalWorkflowListRunsRequestSchema.parse(request),
+        responseSchema: workflowRunEnvelopeSchema.array(),
+      }),
+    canonicalGetRun: (request: { runId: string }) =>
+      invokeValidated({
+        channel: ipcChannels.canonicalWorkflowGetRun,
+        request: canonicalWorkflowGetRunRequestSchema.parse(request),
+        responseSchema: workflowRunEnvelopeSchema,
+      }),
+    graphGetSnapshot: (request: { runId: string }) =>
+      invokeValidated({
+        channel: ipcChannels.workflowGraphGetSnapshot,
+        request: workflowGraphSnapshotRequestSchema.parse(request),
+        responseSchema: workflowGraphSnapshotSchema,
+      }),
+    graphSubscribe: (request: { runId: string }) =>
+      invokeValidated({
+        channel: ipcChannels.workflowGraphSubscribe,
+        request: workflowGraphSubscriptionRequestSchema.parse(request),
+        responseSchema: z.void(),
+      }),
+    graphUnsubscribe: (request: { runId: string }) =>
+      invokeValidated({
+        channel: ipcChannels.workflowGraphUnsubscribe,
+        request: workflowGraphSubscriptionRequestSchema.parse(request),
+        responseSchema: z.void(),
+      }),
+    onGraphEvent: (
+      listener: (
+        event: import("../shared/agentWorkflowSchemas.js").WorkflowGraphEvent,
+      ) => void,
+    ) => {
+      const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => {
+        const parsed = workflowGraphEventSchema.safeParse(payload);
+        if (parsed.success) listener(parsed.data);
+      };
+      ipcRenderer.on(ipcChannels.workflowGraphEvent, wrapped);
+      return () => ipcRenderer.off(ipcChannels.workflowGraphEvent, wrapped);
+    },
+    canonicalStartRun: (request: {
+      workflowId: string;
+      workspaceId: string;
+      inputs?: Record<string, string>;
+    }) =>
+      invokeValidated({
+        channel: ipcChannels.canonicalWorkflowStartRun,
+        request: canonicalWorkflowStartRunRequestSchema.parse(request),
+        responseSchema: workflowRunEnvelopeSchema,
+      }),
+    canonicalStopRun: (request: { runId: string }) =>
+      invokeValidated({
+        channel: ipcChannels.canonicalWorkflowStopRun,
+        request: canonicalWorkflowGetRunRequestSchema.parse(request),
+        responseSchema: workflowRunEnvelopeSchema,
+      }),
+    canonicalRetryOccurrence: (request: {
+      runId: string;
+      occurrenceId: string;
+    }) =>
+      invokeValidated({
+        channel: ipcChannels.canonicalWorkflowRetryOccurrence,
+        request: canonicalWorkflowOccurrenceRequestSchema.parse(request),
+        responseSchema: workflowRunEnvelopeSchema,
+      }),
+    canonicalAnswerHuman: (request: {
+      runId: string;
+      occurrenceId: string;
+      value: string | boolean;
+    }) =>
+      invokeValidated({
+        channel: ipcChannels.canonicalWorkflowAnswerHuman,
+        request: canonicalWorkflowHumanAnswerRequestSchema.parse(request),
+        responseSchema: workflowRunEnvelopeSchema,
+      }),
+    onCanonicalEvent: (
+      listener: (
+        event: import("../shared/agentWorkflowSchemas.js").CanonicalWorkflowEvent,
+      ) => void,
+    ) => {
+      const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => {
+        const parsed = canonicalWorkflowEventSchema.safeParse(payload);
+        if (parsed.success) listener(parsed.data);
+      };
+      ipcRenderer.on(ipcChannels.canonicalWorkflowEvent, wrapped);
+      return () => ipcRenderer.off(ipcChannels.canonicalWorkflowEvent, wrapped);
+    },
+    getTemplate: (request: { templateId: string }) =>
+      invokeValidated({
+        channel: ipcChannels.workflowGetTemplate,
+        request: workflowGetTemplateRequestSchema.parse(request),
+        responseSchema: workflowTemplateSchema,
+      }),
+    listTemplates: () =>
+      invokeValidated({
+        channel: ipcChannels.workflowListTemplates,
+        request: undefined,
+        responseSchema: workflowTemplateListResultSchema,
+      }),
+    createTemplate: (request: WorkflowCreateTemplateRequest) =>
+      invokeValidated({
+        channel: ipcChannels.workflowCreateTemplate,
+        request: workflowCreateTemplateRequestSchema.parse(request),
+        responseSchema: workflowTemplateSchema,
+      }),
+    updateTemplate: (request: WorkflowUpdateTemplateRequest) =>
+      invokeValidated({
+        channel: ipcChannels.workflowUpdateTemplate,
+        request: workflowUpdateTemplateRequestSchema.parse(request),
+        responseSchema: workflowTemplateSchema,
+      }),
+    archiveTemplate: (request: { templateId: string }) =>
+      invokeValidated({
+        channel: ipcChannels.workflowArchiveTemplate,
+        request: workflowArchiveTemplateRequestSchema.parse(request),
+        responseSchema: workflowTemplateSchema,
+      }),
+    duplicateTemplate: (request: { templateId: string }) =>
+      invokeValidated({
+        channel: ipcChannels.workflowDuplicateTemplate,
+        request: workflowDuplicateTemplateRequestSchema.parse(request),
+        responseSchema: workflowTemplateSchema,
+      }),
+    listRuns: (request?: { workspaceId?: string }) =>
+      invokeValidated({
+        channel: ipcChannels.workflowListRuns,
+        request: workflowListRunsRequestSchema.parse(request),
+        responseSchema: workflowRunListResultSchema,
+      }),
+    getRun: (request: { runId: string }) =>
+      invokeValidated({
+        channel: ipcChannels.workflowGetRun,
+        request: workflowGetRunRequestSchema.parse(request),
+        responseSchema: workflowRunSchema,
+      }),
+    startRun: (request: WorkflowStartRunRequest) =>
+      invokeValidated({
+        channel: ipcChannels.workflowStartRun,
+        request: workflowStartRunRequestSchema.parse(request),
+        responseSchema: workflowRunSchema,
+      }),
+    stopRun: (request: { runId: string }) =>
+      invokeValidated({
+        channel: ipcChannels.workflowStopRun,
+        request: workflowStopRunRequestSchema.parse(request),
+        responseSchema: workflowRunSchema,
+      }),
+    retryStep: (request: { runId: string; stepRunId: string }) =>
+      invokeValidated({
+        channel: ipcChannels.workflowRetryStep,
+        request: workflowRetryStepRequestSchema.parse(request),
+        responseSchema: workflowRunSchema,
+      }),
+    retryCondition: (request: WorkflowRetryConditionRequest) =>
+      invokeValidated({
+        channel: ipcChannels.workflowRetryCondition,
+        request: workflowRetryConditionRequestSchema.parse(request),
+        responseSchema: workflowRunSchema,
+      }),
+    overrideCondition: (request: WorkflowOverrideConditionRequest) =>
+      invokeValidated({
+        channel: ipcChannels.workflowOverrideCondition,
+        request: workflowOverrideConditionRequestSchema.parse(request),
+        responseSchema: workflowRunSchema,
+      }),
+    approveGate: (request: WorkflowApproveGateRequest) =>
+      invokeValidated({
+        channel: ipcChannels.workflowApproveGate,
+        request: workflowApproveGateRequestSchema.parse(request),
+        responseSchema: workflowRunSchema,
+      }),
+    onEvent: (listener: (event: WorkflowEvent) => void) => {
+      const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => {
+        const parsed = workflowEventSchema.safeParse(payload);
+        if (!parsed.success) {
+          console.warn("Dropping invalid workflow IPC event", parsed.error);
+          return;
+        }
+        listener(parsed.data);
+      };
+      ipcRenderer.on(ipcChannels.workflowEvent, wrapped);
+      return () => ipcRenderer.off(ipcChannels.workflowEvent, wrapped);
+    },
   }),
   attachments: Object.freeze({
     pickFiles: (request: {

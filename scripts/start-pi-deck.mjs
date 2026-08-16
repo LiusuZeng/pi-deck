@@ -28,7 +28,7 @@ Options:
   -h, --help          Show this help.
 
 Environment overrides still work:
-  PI_DECK_PI_BINARY, PI_DECK_PROJECT_CWD, PI_CODING_AGENT_DIR, PI_DECK_USER_DATA_DIR
+  PI_DECK_PI_BINARY, PI_DECK_PROJECT_CWD, PI_CODING_AGENT_DIR, PI_DECK_HOME, PI_DECK_USER_DATA_DIR
 `);
 }
 
@@ -157,6 +157,46 @@ function resolvePiBinary(explicitPath) {
   );
 }
 
+export function resolveLaunchEnvironment({ backend, env, root = repoRoot }) {
+  const resolvedEnv = { ...env, PI_DECK_BACKEND: backend };
+
+  if (backend !== "fake") {
+    return { env: resolvedEnv };
+  }
+
+  const localStateRoot = path.join(root, ".pi", "local");
+  const explicitPiDeckHome = resolvedEnv.PI_DECK_HOME?.trim();
+  const explicitUserDataDir = resolvedEnv.PI_DECK_USER_DATA_DIR?.trim();
+  const piDeckHome =
+    explicitPiDeckHome || path.join(localStateRoot, "pi-deck-home");
+  const userDataDir =
+    explicitUserDataDir || path.join(localStateRoot, "electron-user-data");
+  resolvedEnv.PI_DECK_HOME = piDeckHome;
+  resolvedEnv.PI_DECK_USER_DATA_DIR = userDataDir;
+
+  return {
+    env: resolvedEnv,
+    metadataPaths: { piDeckHome, userDataDir },
+  };
+}
+
+export function resolveLaunchPlan({
+  backend,
+  runMode,
+  build,
+  env,
+  root = repoRoot,
+}) {
+  const launchEnvironment = resolveLaunchEnvironment({ backend, env, root });
+  return {
+    backend,
+    runMode,
+    npmScript:
+      runMode === "dev" ? "dev:app" : build ? "launch:build" : "launch",
+    ...launchEnvironment,
+  };
+}
+
 function printPlan(plan) {
   const runLabel = plan.runMode === "dev" ? "dev" : "production-ish";
   console.log(
@@ -169,6 +209,10 @@ function printPlan(plan) {
   if (plan.piBinary) {
     console.log(`  Pi:      ${plan.piBinary}`);
   }
+  if (plan.metadataPaths) {
+    console.log(`  Pi Deck home: ${plan.metadataPaths.piDeckHome}`);
+    console.log(`  User data:    ${plan.metadataPaths.userDataDir}`);
+  }
   console.log(`  Command: npm --prefix ${repoRoot} run ${plan.npmScript}`);
   if (plan.runMode === "dev") {
     console.log(
@@ -178,7 +222,7 @@ function printPlan(plan) {
   console.log();
 }
 
-function main() {
+export function main() {
   let options;
   try {
     options = parseArgs(process.argv.slice(2));
@@ -196,9 +240,15 @@ function main() {
     options.backend ??
     (process.env.PI_DECK_BACKEND === "real" ? "real" : "fake");
   const callerCwd = process.env.INIT_CWD || process.cwd();
-  const env = { ...process.env };
   let projectCwd;
   let piBinary;
+  const plan = resolveLaunchPlan({
+    backend,
+    runMode: options.runMode,
+    build: options.build,
+    env: process.env,
+  });
+  const env = plan.env;
 
   try {
     if (backend === "real") {
@@ -207,30 +257,15 @@ function main() {
         "Project directory",
       );
       piBinary = resolvePiBinary(options.piBinary);
-      env.PI_DECK_BACKEND = "real";
       env.PI_DECK_PI_BINARY = piBinary;
       env.PI_DECK_PROJECT_CWD = projectCwd;
-    } else {
-      env.PI_DECK_BACKEND = "fake";
+      plan.projectCwd = projectCwd;
+      plan.piBinary = piBinary;
     }
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
   }
-
-  const npmScript =
-    options.runMode === "dev"
-      ? "dev"
-      : options.build
-        ? "launch:build"
-        : "launch";
-  const plan = {
-    backend,
-    runMode: options.runMode,
-    npmScript,
-    projectCwd,
-    piBinary,
-  };
   printPlan(plan);
 
   if (options.dryRun) {
@@ -238,11 +273,15 @@ function main() {
   }
 
   const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
-  const child = spawn(npmCommand, ["--prefix", repoRoot, "run", npmScript], {
-    stdio: "inherit",
-    env,
-    cwd: repoRoot,
-  });
+  const child = spawn(
+    npmCommand,
+    ["--prefix", repoRoot, "run", plan.npmScript],
+    {
+      stdio: "inherit",
+      env,
+      cwd: repoRoot,
+    },
+  );
   child.on("exit", (code, signal) => {
     if (signal) {
       process.kill(process.pid, signal);
@@ -252,4 +291,9 @@ function main() {
   });
 }
 
-main();
+if (
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  main();
+}

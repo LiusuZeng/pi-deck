@@ -1,4 +1,4 @@
-import { ipcMain } from "electron";
+import { ipcMain, type IpcMainInvokeEvent } from "electron";
 import type { ZodType } from "zod";
 import { ZodError } from "zod";
 import { apiResponseSchema, type IpcChannel } from "../../shared/ipcSchemas.js";
@@ -10,12 +10,15 @@ export function registerValidatedIpc<TRequest, TResponse>(options: {
   requestSchema: ZodType<TRequest>;
   responseSchema: ZodType<TResponse>;
   diagnostics: DiagnosticsRecorder;
-  handler: (request: TRequest) => Promise<TResponse> | TResponse;
+  handler: (
+    request: TRequest,
+    event: IpcMainInvokeEvent,
+  ) => Promise<TResponse> | TResponse;
 }): void {
   ipcMain.handle(options.channel, async (_event, rawRequest: unknown) => {
     try {
       const request = options.requestSchema.parse(rawRequest);
-      const result = await options.handler(request);
+      const result = await options.handler(request, _event);
       const data = options.responseSchema.parse(result);
       return apiResponseSchema(options.responseSchema).parse({
         ok: true,

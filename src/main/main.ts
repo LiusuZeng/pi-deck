@@ -6,6 +6,7 @@ import {
   shell,
   session,
   nativeImage,
+  webContents,
   type OpenDialogOptions,
 } from "electron";
 import { randomUUID } from "node:crypto";
@@ -67,7 +68,50 @@ import {
   workspaceSelectRequestSchema,
   workspaceSessionMutationResultSchema,
   workspaceUpdateRequestSchema,
+  multitaskModeRequestSchema,
+  multitaskModeUpdateRequestSchema,
+  multitaskStateEventSchema,
 } from "../shared/ipcSchemas.js";
+import {
+  workflowApproveGateRequestSchema,
+  workflowArchiveTemplateRequestSchema,
+  workflowCreateTemplateRequestSchema,
+  workflowDuplicateTemplateRequestSchema,
+  workflowEventSchema,
+  workflowGetRunRequestSchema,
+  workflowGetTemplateRequestSchema,
+  workflowListRunsRequestSchema,
+  workflowRetryStepRequestSchema,
+  workflowRetryConditionRequestSchema,
+  workflowOverrideConditionRequestSchema,
+  workflowRunListResultSchema,
+  workflowRunSchema,
+  workflowStartRunRequestSchema,
+  workflowStopRunRequestSchema,
+  workflowTemplateDefinitionSchema,
+  workflowTemplateListResultSchema,
+  workflowTemplateSchema,
+  workflowUpdateTemplateRequestSchema,
+} from "../shared/workflowSchemas.js";
+import {
+  canonicalWorkflowGetRunRequestSchema,
+  canonicalWorkflowHumanAnswerRequestSchema,
+  canonicalWorkflowListRunsRequestSchema,
+  canonicalWorkflowOccurrenceRequestSchema,
+  canonicalWorkflowStartRunRequestSchema,
+  workflowCreateRequestSchema,
+  workflowDefinitionSchema,
+  workflowGraphSnapshotRequestSchema,
+  workflowGraphSnapshotSchema,
+  workflowGraphSubscriptionRequestSchema,
+  workflowListRequestSchema,
+  workflowScopedDefinitionSchema,
+  workflowRunEnvelopeSchema,
+  workflowUpdateRequestSchema,
+  type WorkflowRunEnvelope,
+} from "../shared/agentWorkflowSchemas.js";
+import { deriveWorkflowGraphSnapshot } from "./workflows/workflowGraphSnapshot.js";
+import { WorkflowGraphSubscriptions } from "./workflows/workflowGraphSubscriptions.js";
 import type {
   AppBootstrapState,
   AppSettings,
@@ -86,6 +130,7 @@ import type {
   PickProjectResult,
   WorkspaceListResult,
   WorkspaceRef,
+  WorkflowRun,
 } from "../shared/types.js";
 import { DiagnosticsService } from "./diagnostics/diagnostics.js";
 import { registerValidatedIpc } from "./ipc/registerIpc.js";
@@ -127,7 +172,49 @@ import {
   updateWindowBackground,
 } from "./theme.js";
 import { formatCanonicalFileReference } from "./attachments.js";
+import { MultitaskStateStore } from "./multitask/multitaskStateStore.js";
+import {
+  DelegationBridgeServer,
+  type DelegateRequest,
+} from "./multitask/delegationBridgeServer.js";
+import {
+  writeDeckDelegateAcceptanceHarness,
+  writeDeckDelegateExtension,
+  DECK_DELEGATE_CAPABILITY_ENV,
+  DECK_DELEGATE_ENDPOINT_ENV,
+  DECK_DELEGATE_PARENT_RUNTIME_ENV,
+} from "./multitask/deckDelegateExtensionGenerator.js";
+import {
+  MultitaskSupervisor,
+  type ChildWorkerCallbacks,
+  type ParentTaskNotification,
+} from "./multitask/multitaskSupervisor.js";
+import { PersistedRuntimeResumeGuard } from "./multitask/persistedRuntimeResumeGuard.js";
 import { deliverWithAttachmentConsumption } from "./attachmentDelivery.js";
+import {
+  approveWorkflowStep,
+  createWorkflowRun,
+  retryWorkflowStep,
+  retryWorkflowCondition,
+  overrideWorkflowCondition,
+  stopWorkflowRun,
+} from "./workflows/workflowEngine.js";
+import {
+  rehydrateWorkflowRuns as rehydratePersistedWorkflowRuns,
+  rehydrateCanonicalWorkflowRuns,
+} from "./workflows/workflowRehydration.js";
+import { WorkflowStore } from "./workflows/workflowStore.js";
+import { createWorkflowRoleRun } from "./workflows/agentWorkflowRuntime.js";
+import {
+  initializeWorkflows,
+  requireAgentWorkflows,
+  type WorkflowInitialization,
+} from "./workflows/workflowAvailability.js";
+import {
+  WorkflowOccurrenceScheduler,
+  WorkflowScheduler,
+  type WorkflowRuntimeEvent,
+} from "./workflows/workflowScheduler.js";
 import {
   AttachmentSelectionStore,
   type AttachmentSelectionEntry,
@@ -154,13 +241,33 @@ let mainWindow: BrowserWindow | undefined;
 let settingsStore: SettingsStore | undefined;
 let projectStore: ProjectStore | undefined;
 let workspaceStore: WorkspaceStore | undefined;
+let workflowInitialization: WorkflowInitialization<WorkflowStore> | undefined;
 const realChatLaunchConfigCache = new RealChatLaunchConfigCache();
 let diagnostics: DiagnosticsService | undefined;
+let multitaskStateStore: MultitaskStateStore | undefined;
+// Snapshot reads happen often. A persisted session is rehydrated exactly once
+// when attached; later reads must not close live private children.
+const multitaskRuntimeResumeGuard = new PersistedRuntimeResumeGuard();
+let delegationBridge: DelegationBridgeServer | undefined;
+let delegationCredentials: { socketPath: string } | undefined;
+let multitaskSupervisor:
+  | MultitaskSupervisor<
+      string,
+      string,
+      { close(): Promise<void>; provideInput(input: string): Promise<void> }
+    >
+  | undefined;
+const delegateCalls = new Map<
+  string,
+  { connectionId: string; toolCallId: string }
+>();
+let nextDelegatedTaskNumber = 1;
 type ChatBackendMode = "fake" | "real";
 
 let chatAdapter: SinglePiAdapter | undefined;
 let chatAdapterPromise: Promise<SinglePiAdapter> | undefined;
 let chatWorkerCapacity: WorkerCapacity | undefined;
+let maxRunningWorkers = 1;
 let chatRuntimeId: string | undefined;
 let chatBackendMode: ChatBackendMode | undefined;
 const chatRuntimeIds = new Set<string>();
@@ -190,6 +297,9 @@ let chatEventUnsubscribe: (() => void) | undefined;
 let selectedRealProjectCwd: string | undefined;
 let isQuittingAfterChatWorkerCleanup = false;
 let testProjectPickQueue: string[] | undefined;
+
+let workflowScheduler: WorkflowScheduler | undefined;
+let workflowOccurrenceScheduler: WorkflowOccurrenceScheduler | undefined;
 
 const maxImportedImageBytes = MAX_IMAGE_BYTES;
 const maxPromptImages = 10;
@@ -223,12 +333,31 @@ async function bootstrap(): Promise<void> {
     updateWindowBackground(mainWindow, nativeTheme);
   });
   projectStore = new ProjectStore(resolvePiDeckHome(process.env), diagnostics);
+  multitaskStateStore = new MultitaskStateStore(app.getPath("userData"));
+  await multitaskStateStore.loadIfNeeded();
   await projectStore.loadIfNeeded();
   workspaceStore = new WorkspaceStore(
     resolvePiDeckHome(process.env),
     diagnostics,
   );
   await workspaceStore.loadIfNeeded();
+  workflowInitialization = await initializeWorkflows(async () => {
+    const store = new WorkflowStore(
+      resolvePiDeckHome(process.env),
+      diagnostics,
+    );
+    await store.loadIfNeeded();
+    return store;
+  });
+  if (workflowInitialization.status === "available") {
+    workflowScheduler = createWorkflowScheduler(settingsStore, diagnostics);
+    workflowOccurrenceScheduler = createWorkflowOccurrenceScheduler(
+      settingsStore,
+      diagnostics,
+    );
+  } else {
+    diagnostics.recordError(workflowInitialization.diagnostic);
+  }
   const hadWorkspaceMetadata =
     (await workspaceStore.list()).workspaces.length > 0;
   await migrateLegacyProjectsToWorkspaces();
@@ -238,6 +367,12 @@ async function bootstrap(): Promise<void> {
   await workspaceStore.ensureDefaultWorkspace({
     activate: !hadWorkspaceMetadata || resolveChatBackendMode() === "fake",
   });
+  // Rehydrated canonical occurrences may immediately create Pi sessions. An
+  // adapter is safe to initialize here (it creates no worker by itself), while
+  // scheduling before it exists would turn resumable queued work into failure.
+  await startDelegationBridge();
+  await ensureChatAdapter(settingsStore, diagnostics);
+  await rehydrateWorkflowRuns();
 
   configureCsp();
   registerIpcHandlers(settingsStore, diagnostics);
@@ -699,6 +834,28 @@ function registerIpcHandlers(
   });
 
   registerValidatedIpc({
+    channel: ipcChannels.multitaskGetMode,
+    requestSchema: multitaskModeRequestSchema,
+    responseSchema: multitaskStateEventSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runtimeId }) => multitaskState(runtimeId),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.multitaskUpdateMode,
+    requestSchema: multitaskModeUpdateRequestSchema,
+    responseSchema: multitaskStateEventSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runtimeId, mode }) => {
+      const supervisor = await getMultitaskSupervisor(runtimeId);
+      supervisor.setMode(runtimeId, mode);
+      await persistMultitaskSupervisor(runtimeId);
+      emitMultitaskState(runtimeId, supervisor);
+      return multitaskState(runtimeId);
+    },
+  });
+
+  registerValidatedIpc({
     channel: ipcChannels.projectList,
     requestSchema: noPayloadSchema,
     responseSchema: projectListResultSchema,
@@ -858,6 +1015,11 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async ({ workspaceId }) => {
       await ensureWorkspaceStore().restore(workspaceId);
+      // Workspace restoration is also a workflow lifecycle boundary. Runs
+      // retained while the workspace was archived may be waiting or queued;
+      // schedule them before returning so the renderer does not need a relaunch
+      // (or a second workflow action) to resume them.
+      await rehydrateWorkflowRuns(workspaceId);
       return projectWorkspaceListResult();
     },
   });
@@ -958,6 +1120,411 @@ function registerIpcHandlers(
     responseSchema: chatListSessionsResultSchema,
     diagnostics: diagnosticsService,
     handler: async () => listUnassignedWorkspaceSessions(store),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowListWorkflows,
+    requestSchema: workflowListRequestSchema,
+    responseSchema: workflowScopedDefinitionSchema.array(),
+    diagnostics: diagnosticsService,
+    handler: async ({ workspaceId }) => {
+      await requireOpenWorkspace(workspaceId);
+      const workflowStore = ensureWorkflowStore();
+      return Promise.all(
+        (await workflowStore.listWorkflows(workspaceId)).map(
+          async (workflow) => ({
+            workflow,
+            scopeWorkspaceId:
+              (await workflowStore.getWorkflowScope(workflow.id)) ?? null,
+          }),
+        ),
+      );
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowCreateWorkflow,
+    requestSchema: workflowCreateRequestSchema,
+    responseSchema: workflowScopedDefinitionSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ workspaceId, scopeWorkspaceId, workflow }) => {
+      await requireOpenWorkspace(workspaceId);
+      if (scopeWorkspaceId !== undefined && scopeWorkspaceId !== null)
+        await requireOpenWorkspace(scopeWorkspaceId);
+      // Preserve the old IPC behavior for callers that omit this new field.
+      const scope =
+        scopeWorkspaceId === undefined ? workspaceId : scopeWorkspaceId;
+      const saved = await ensureWorkflowStore().createWorkflow(
+        workflow,
+        scope ?? undefined,
+      );
+      return { workflow: saved, scopeWorkspaceId: scope ?? null };
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowUpdateWorkflow,
+    requestSchema: workflowUpdateRequestSchema,
+    responseSchema: workflowScopedDefinitionSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ workspaceId, scopeWorkspaceId, workflow }) => {
+      await requireOpenWorkspace(workspaceId);
+      const workflowStore = ensureWorkflowStore();
+      const existingScope = await workflowStore.getWorkflowScope(workflow.id);
+      // An archived scope cannot be selected anew, but an existing saved scope
+      // remains editable so archiving never strands its workflow document.
+      if (
+        scopeWorkspaceId !== undefined &&
+        scopeWorkspaceId !== null &&
+        scopeWorkspaceId !== existingScope
+      )
+        await requireOpenWorkspace(scopeWorkspaceId);
+      const saved = await workflowStore.updateWorkflow(
+        workflow,
+        workspaceId,
+        scopeWorkspaceId,
+      );
+      return {
+        workflow: saved,
+        scopeWorkspaceId:
+          scopeWorkspaceId === undefined
+            ? ((await workflowStore.getWorkflowScope(saved.id)) ?? null)
+            : scopeWorkspaceId,
+      };
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowGetTemplate,
+    requestSchema: workflowGetTemplateRequestSchema,
+    responseSchema: workflowTemplateSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ templateId }) => {
+      const template = await ensureWorkflowStore().getTemplate(templateId);
+      if (template.workspaceId !== undefined)
+        await requireOpenWorkspace(template.workspaceId);
+      return template;
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowListTemplates,
+    requestSchema: noPayloadSchema,
+    responseSchema: workflowTemplateListResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async () => {
+      const workspaceId = (await ensureWorkspaceStore().getActiveWorkspace())
+        ?.id;
+      if (workspaceId !== undefined) await requireOpenWorkspace(workspaceId);
+      return {
+        templates: await ensureWorkflowStore().listTemplates(workspaceId),
+      };
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowCreateTemplate,
+    requestSchema: workflowCreateTemplateRequestSchema,
+    responseSchema: workflowTemplateSchema,
+    diagnostics: diagnosticsService,
+    handler: async (definition) => {
+      if (definition.workspaceId !== undefined)
+        await requireOpenWorkspace(definition.workspaceId);
+      return ensureWorkflowStore().createTemplate(definition);
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowUpdateTemplate,
+    requestSchema: workflowUpdateTemplateRequestSchema,
+    responseSchema: workflowTemplateSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ templateId, ...definition }) => {
+      if (definition.workspaceId !== undefined)
+        await requireOpenWorkspace(definition.workspaceId);
+      const current = await ensureWorkflowStore().getTemplate(templateId);
+      if (current.workspaceId !== undefined)
+        await requireOpenWorkspace(current.workspaceId);
+      return ensureWorkflowStore().updateTemplate(templateId, definition);
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowArchiveTemplate,
+    requestSchema: workflowArchiveTemplateRequestSchema,
+    responseSchema: workflowTemplateSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ templateId }) => {
+      const template = await ensureWorkflowStore().getTemplate(templateId);
+      if (template.workspaceId !== undefined)
+        await requireOpenWorkspace(template.workspaceId);
+      return ensureWorkflowStore().archiveTemplate(templateId);
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowDuplicateTemplate,
+    requestSchema: workflowDuplicateTemplateRequestSchema,
+    responseSchema: workflowTemplateSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ templateId }) => {
+      const template = await ensureWorkflowStore().getTemplate(templateId);
+      if (template.workspaceId !== undefined)
+        await requireOpenWorkspace(template.workspaceId);
+      return ensureWorkflowStore().duplicateTemplate(templateId);
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.canonicalWorkflowListRuns,
+    requestSchema: canonicalWorkflowListRunsRequestSchema,
+    responseSchema: workflowRunEnvelopeSchema.array(),
+    diagnostics: diagnosticsService,
+    handler: async (request) => {
+      const workspaceId =
+        request?.workspaceId ??
+        (await ensureWorkspaceStore().getActiveWorkspace())?.id;
+      if (!workspaceId)
+        throw new Error("No workspace is selected for workflow runs.");
+      await requireOpenWorkspace(workspaceId);
+      return ensureWorkflowStore().listWorkflowRuns(workspaceId);
+    },
+  });
+  registerValidatedIpc({
+    channel: ipcChannels.canonicalWorkflowGetRun,
+    requestSchema: canonicalWorkflowGetRunRequestSchema,
+    responseSchema: workflowRunEnvelopeSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runId }) => {
+      const run = await ensureWorkflowStore().getWorkflowRun(runId);
+      await requireOpenWorkspace(run.workspaceId);
+      return run;
+    },
+  });
+  registerValidatedIpc({
+    channel: ipcChannels.workflowGraphGetSnapshot,
+    requestSchema: workflowGraphSnapshotRequestSchema,
+    responseSchema: workflowGraphSnapshotSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runId }) => {
+      const run = await ensureWorkflowStore().getWorkflowRun(runId);
+      await requireOpenWorkspace(run.workspaceId);
+      return deriveWorkflowGraphSnapshot(run.definition, run);
+    },
+  });
+  registerValidatedIpc({
+    channel: ipcChannels.workflowGraphSubscribe,
+    requestSchema: workflowGraphSubscriptionRequestSchema,
+    responseSchema: z.void(),
+    diagnostics: diagnosticsService,
+    handler: async ({ runId }, event) => {
+      const run = await ensureWorkflowStore().getWorkflowRun(runId);
+      await requireOpenWorkspace(run.workspaceId);
+      const senderId = event.sender.id;
+      if (!graphRunSubscriptions.hasSender(senderId))
+        event.sender.once("destroyed", () =>
+          graphRunSubscriptions.removeSender(senderId),
+        );
+      graphRunSubscriptions.subscribe(senderId, runId, run.workspaceId);
+    },
+  });
+  registerValidatedIpc({
+    channel: ipcChannels.workflowGraphUnsubscribe,
+    requestSchema: workflowGraphSubscriptionRequestSchema,
+    responseSchema: z.void(),
+    diagnostics: diagnosticsService,
+    handler: async ({ runId }, event) => {
+      graphRunSubscriptions.unsubscribe(event.sender.id, runId);
+    },
+  });
+  registerValidatedIpc({
+    channel: ipcChannels.canonicalWorkflowStartRun,
+    requestSchema: canonicalWorkflowStartRunRequestSchema,
+    responseSchema: workflowRunEnvelopeSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ workflowId, workspaceId, inputs }) => {
+      await requireOpenWorkspace(workspaceId);
+      const definition = await ensureWorkflowStore().getWorkflowForWorkspace(
+        workflowId,
+        workspaceId,
+      );
+      const run = createWorkflowRoleRun(definition, workspaceId, inputs);
+      const persisted = await ensureWorkflowStore().createWorkflowRun(run);
+      emitCanonicalWorkflowRunEvent(persisted);
+      return ensureWorkflowOccurrenceScheduler().schedule(persisted);
+    },
+  });
+  registerValidatedIpc({
+    channel: ipcChannels.canonicalWorkflowStopRun,
+    requestSchema: canonicalWorkflowGetRunRequestSchema,
+    responseSchema: workflowRunEnvelopeSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runId }) => {
+      const run = await ensureWorkflowStore().getWorkflowRun(runId);
+      await requireOpenWorkspace(run.workspaceId);
+      return ensureWorkflowOccurrenceScheduler().stop(runId);
+    },
+  });
+  registerValidatedIpc({
+    channel: ipcChannels.canonicalWorkflowRetryOccurrence,
+    requestSchema: canonicalWorkflowOccurrenceRequestSchema,
+    responseSchema: workflowRunEnvelopeSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runId, occurrenceId }) => {
+      const run = await ensureWorkflowStore().getWorkflowRun(runId);
+      await requireOpenWorkspace(run.workspaceId);
+      return ensureWorkflowOccurrenceScheduler().retry(runId, occurrenceId);
+    },
+  });
+  registerValidatedIpc({
+    channel: ipcChannels.canonicalWorkflowAnswerHuman,
+    requestSchema: canonicalWorkflowHumanAnswerRequestSchema,
+    responseSchema: workflowRunEnvelopeSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runId, occurrenceId, value }) => {
+      const run = await ensureWorkflowStore().getWorkflowRun(runId);
+      await requireOpenWorkspace(run.workspaceId);
+      return ensureWorkflowOccurrenceScheduler().answerHuman(
+        runId,
+        occurrenceId,
+        value,
+      );
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowListRuns,
+    requestSchema: workflowListRunsRequestSchema,
+    responseSchema: workflowRunListResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async (request) => {
+      const workspaceId =
+        request?.workspaceId ??
+        (await ensureWorkspaceStore().getActiveWorkspace())?.id;
+      if (workspaceId === undefined)
+        throw new Error("No workspace is selected for workflow runs.");
+      await requireOpenWorkspace(workspaceId);
+      return { runs: await ensureWorkflowStore().listRuns(workspaceId) };
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowGetRun,
+    requestSchema: workflowGetRunRequestSchema,
+    responseSchema: workflowRunSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runId }) => {
+      const run = await ensureWorkflowStore().getRun(runId);
+      await requireOpenWorkspace(run.workspaceId);
+      return run;
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowStartRun,
+    requestSchema: workflowStartRunRequestSchema,
+    responseSchema: workflowRunSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ templateId, workspaceId, inputs }) => {
+      const template = await ensureWorkflowStore().getTemplate(templateId);
+      const resolvedWorkspaceId = await resolveWorkflowWorkspaceId(
+        workspaceId,
+        template.workspaceId,
+      );
+      await validateWorkflowPaths(
+        template,
+        inputs,
+        await resolveWorkspaceProject(resolvedWorkspaceId),
+      );
+      const run = createWorkflowRun({
+        template,
+        workspaceId: resolvedWorkspaceId,
+        inputs,
+      });
+      const persisted = await ensureWorkflowStore().createRun(run);
+      emitWorkflowRunEvent(persisted);
+      return ensureWorkflowScheduler().schedule(persisted);
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowStopRun,
+    requestSchema: workflowStopRunRequestSchema,
+    responseSchema: workflowRunSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runId }) => {
+      const run = await ensureWorkflowStore().getRun(runId);
+      await requireOpenWorkspace(run.workspaceId);
+      const updated = await ensureWorkflowStore().updateRun(
+        stopWorkflowRun(run),
+      );
+      emitWorkflowRunEvent(updated);
+      return ensureWorkflowScheduler().update(updated);
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowRetryStep,
+    requestSchema: workflowRetryStepRequestSchema,
+    responseSchema: workflowRunSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runId, stepRunId }) => {
+      const run = await ensureWorkflowStore().getRun(runId);
+      await requireOpenWorkspace(run.workspaceId);
+      const updated = await ensureWorkflowStore().updateRun(
+        retryWorkflowStep(run, stepRunId),
+      );
+      emitWorkflowRunEvent(updated);
+      return ensureWorkflowScheduler().update(updated);
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowRetryCondition,
+    requestSchema: workflowRetryConditionRequestSchema,
+    responseSchema: workflowRunSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runId, transitionRunId }) => {
+      const run = await ensureWorkflowStore().getRun(runId);
+      await requireOpenWorkspace(run.workspaceId);
+      const updated = await ensureWorkflowStore().updateRun(
+        retryWorkflowCondition(run, transitionRunId),
+      );
+      emitWorkflowRunEvent(updated);
+      return ensureWorkflowScheduler().update(updated);
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowOverrideCondition,
+    requestSchema: workflowOverrideConditionRequestSchema,
+    responseSchema: workflowRunSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runId, transitionRunId, decision, rationale }) => {
+      const run = await ensureWorkflowStore().getRun(runId);
+      await requireOpenWorkspace(run.workspaceId);
+      const updated = await ensureWorkflowStore().updateRun(
+        overrideWorkflowCondition(run, transitionRunId, decision, rationale),
+      );
+      emitWorkflowRunEvent(updated);
+      return ensureWorkflowScheduler().update(updated);
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workflowApproveGate,
+    requestSchema: workflowApproveGateRequestSchema,
+    responseSchema: workflowRunSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runId, stepRunId, action }) => {
+      const run = await ensureWorkflowStore().getRun(runId);
+      await requireOpenWorkspace(run.workspaceId);
+      const updated = await ensureWorkflowStore().updateRun(
+        approveWorkflowStep(run, stepRunId, action),
+      );
+      emitWorkflowRunEvent(updated);
+      return ensureWorkflowScheduler().update(updated);
+    },
   });
 
   registerValidatedIpc({
@@ -1096,6 +1663,313 @@ function ensureWorkspaceStore(): WorkspaceStore {
     throw new Error("Workspace store is not initialized");
   }
   return workspaceStore;
+}
+
+function ensureWorkflowStore(): WorkflowStore {
+  return requireAgentWorkflows(workflowInitialization);
+}
+
+function ensureWorkflowOccurrenceScheduler(): WorkflowOccurrenceScheduler {
+  requireAgentWorkflows(workflowInitialization);
+  if (workflowOccurrenceScheduler === undefined)
+    throw new Error("Workflow occurrence scheduler is not initialized");
+  return workflowOccurrenceScheduler;
+}
+
+function ensureWorkflowScheduler(): WorkflowScheduler {
+  requireAgentWorkflows(workflowInitialization);
+  if (workflowScheduler === undefined) {
+    throw new Error("Workflow scheduler is not initialized");
+  }
+  return workflowScheduler;
+}
+
+async function rehydrateWorkflowRuns(workspaceId?: string): Promise<void> {
+  if (workflowInitialization?.status !== "available") {
+    return;
+  }
+  const store = ensureWorkflowStore();
+  const scheduler = ensureWorkflowScheduler();
+  await rehydratePersistedWorkflowRuns(
+    await store.listRuns(),
+    {
+      resolveWorkspace: (workspaceId) => resolveWorkspaceProject(workspaceId),
+      updateRun: (run) => store.updateRun(run),
+      schedule: (run) => scheduler.schedule(run),
+      emit: (run) => emitWorkflowRunEvent(run),
+      recordError: (message) => diagnostics?.recordError(message),
+    },
+    Date.now(),
+    workspaceId,
+  );
+  await rehydrateCanonicalWorkflowRuns(
+    await store.listWorkflowRuns(),
+    {
+      resolveWorkspace: (id) => resolveWorkspaceProject(id),
+      updateRun: (run) => store.updateWorkflowRun(run),
+      schedule: (run) => ensureWorkflowOccurrenceScheduler().schedule(run),
+      emit: emitCanonicalWorkflowRunEvent,
+      recordError: (message) => diagnostics?.recordError(message),
+    },
+    Date.now(),
+    workspaceId,
+  );
+}
+
+function createWorkflowScheduler(
+  store: SettingsStore,
+  diagnosticsService: DiagnosticsService,
+): WorkflowScheduler {
+  return new WorkflowScheduler({
+    createSession: async (workspaceId) => {
+      const project = await resolveWorkspaceProject(workspaceId);
+      const snapshot = await createChatSessionSnapshot(
+        store,
+        diagnosticsService,
+        project,
+        workspaceId,
+      );
+      return {
+        runtimeId: snapshot.runtimeId,
+        state: snapshot.state,
+        messages: snapshot.messages,
+      };
+    },
+    prompt: async (runtimeId, text) => {
+      const adapter = chatAdapter;
+      if (adapter === undefined || !adapter.hasRuntime(runtimeId)) {
+        throw new Error(
+          `Workflow chat runtime is no longer attached: ${runtimeId}`,
+        );
+      }
+      await adapter.prompt(runtimeId, { text });
+    },
+    getSnapshot: async (runtimeId) => {
+      const adapter = chatAdapter;
+      if (adapter === undefined || !adapter.hasRuntime(runtimeId)) {
+        throw new Error(
+          `Workflow chat runtime is no longer attached: ${runtimeId}`,
+        );
+      }
+      const snapshot = await getChatSnapshotForRuntime(
+        adapter,
+        runtimeId,
+        chatRuntimeModes.get(runtimeId) ?? resolveChatBackendMode(),
+      );
+      return {
+        runtimeId: snapshot.runtimeId,
+        state: snapshot.state,
+        messages: snapshot.messages,
+      };
+    },
+    closeSession: async (runtimeId) => {
+      const adapter = chatAdapter;
+      if (adapter !== undefined && adapter.hasRuntime(runtimeId)) {
+        await closeAttachedChatRuntime(adapter, runtimeId);
+      }
+    },
+    configureSession: async (runtimeId, settings) => {
+      const adapter = chatAdapter;
+      if (adapter === undefined || !adapter.hasRuntime(runtimeId)) {
+        throw new Error(
+          `Workflow chat runtime is no longer attached: ${runtimeId}`,
+        );
+      }
+      if (settings.model !== undefined) {
+        await adapter.request(runtimeId, "set_model", settings.model);
+      }
+      if (settings.thinkingLevel !== undefined) {
+        await adapter.request(runtimeId, "set_thinking_level", {
+          level: settings.thinkingLevel,
+        });
+      }
+      const state = await adapter.getRuntimeStatus(runtimeId);
+      const modelId = typeof state.model === "string" ? state.model : undefined;
+      const provider =
+        typeof state.provider === "string" ? state.provider : undefined;
+      if (
+        settings.model?.modelId !== undefined &&
+        modelId !== settings.model.modelId
+      ) {
+        throw new Error(
+          `Pi did not apply workflow model override: ${settings.model.modelId}`,
+        );
+      }
+      if (
+        settings.model?.provider !== undefined &&
+        provider !== settings.model.provider
+      ) {
+        throw new Error(
+          `Pi did not apply workflow provider override: ${settings.model.provider}`,
+        );
+      }
+      if (
+        settings.thinkingLevel !== undefined &&
+        state.thinkingLevel !== settings.thinkingLevel
+      ) {
+        throw new Error(
+          `Pi did not apply workflow thinking override: ${settings.thinkingLevel}`,
+        );
+      }
+    },
+    getRun: (runId) => ensureWorkflowStore().getRun(runId),
+    persist: (run) => ensureWorkflowStore().updateRun(run),
+    emit: emitWorkflowRunEvent,
+  });
+}
+
+function createWorkflowOccurrenceScheduler(
+  store: SettingsStore,
+  diagnosticsService: DiagnosticsService,
+): WorkflowOccurrenceScheduler {
+  return new WorkflowOccurrenceScheduler({
+    createSession: async (workspaceId) => {
+      const project = await resolveWorkspaceProject(workspaceId);
+      const snapshot = await createChatSessionSnapshot(
+        store,
+        diagnosticsService,
+        project,
+        workspaceId,
+      );
+      return {
+        runtimeId: snapshot.runtimeId,
+        state: snapshot.state,
+        messages: snapshot.messages,
+      };
+    },
+    prompt: async (runtimeId, text) => {
+      const adapter = chatAdapter;
+      if (adapter === undefined || !adapter.hasRuntime(runtimeId)) {
+        throw new Error(
+          `Workflow chat runtime is no longer attached: ${runtimeId}`,
+        );
+      }
+      await adapter.prompt(runtimeId, { text });
+    },
+    getSnapshot: async (runtimeId) => {
+      const adapter = chatAdapter;
+      if (adapter === undefined || !adapter.hasRuntime(runtimeId)) {
+        throw new Error(
+          `Workflow chat runtime is no longer attached: ${runtimeId}`,
+        );
+      }
+      const snapshot = await getChatSnapshotForRuntime(
+        adapter,
+        runtimeId,
+        chatRuntimeModes.get(runtimeId) ?? resolveChatBackendMode(),
+      );
+      return {
+        runtimeId: snapshot.runtimeId,
+        state: snapshot.state,
+        messages: snapshot.messages,
+      };
+    },
+    closeSession: async (runtimeId) => {
+      const adapter = chatAdapter;
+      if (adapter !== undefined && adapter.hasRuntime(runtimeId)) {
+        await closeAttachedChatRuntime(adapter, runtimeId);
+      }
+    },
+    configureSession: async (runtimeId, settings) => {
+      const adapter = chatAdapter;
+      if (adapter === undefined || !adapter.hasRuntime(runtimeId)) {
+        throw new Error(
+          `Workflow chat runtime is no longer attached: ${runtimeId}`,
+        );
+      }
+      if (settings.model !== undefined) {
+        await adapter.request(runtimeId, "set_model", settings.model);
+      }
+      if (settings.thinkingLevel !== undefined) {
+        await adapter.request(runtimeId, "set_thinking_level", {
+          level: settings.thinkingLevel,
+        });
+      }
+      const state = await adapter.getRuntimeStatus(runtimeId);
+      const modelId = typeof state.model === "string" ? state.model : undefined;
+      const provider =
+        typeof state.provider === "string" ? state.provider : undefined;
+      if (
+        settings.model?.modelId !== undefined &&
+        modelId !== settings.model.modelId
+      ) {
+        throw new Error(
+          `Pi did not apply workflow model override: ${settings.model.modelId}`,
+        );
+      }
+      if (
+        settings.model?.provider !== undefined &&
+        provider !== settings.model.provider
+      ) {
+        throw new Error(
+          `Pi did not apply workflow provider override: ${settings.model.provider}`,
+        );
+      }
+      if (
+        settings.thinkingLevel !== undefined &&
+        state.thinkingLevel !== settings.thinkingLevel
+      ) {
+        throw new Error(
+          `Pi did not apply workflow thinking override: ${settings.thinkingLevel}`,
+        );
+      }
+    },
+    getRun: (runId) => ensureWorkflowStore().getWorkflowRun(runId),
+    persist: (run) => ensureWorkflowStore().updateWorkflowRun(run),
+    emit: emitCanonicalWorkflowRunEvent,
+  });
+}
+
+async function validateWorkflowPaths(
+  template: import("../shared/workflowSchemas.js").WorkflowTemplate,
+  inputs: Record<string, string>,
+  project: ProjectRef,
+): Promise<void> {
+  const values = [
+    ...(template.context?.relevantPaths ?? []),
+    ...template.inputs
+      .filter((input) => input.type === "path")
+      .map((input) => inputs[input.id] ?? input.defaultValue)
+      .filter((value): value is string => value !== undefined),
+  ];
+  for (const value of values) {
+    const resolved = path.isAbsolute(value)
+      ? path.resolve(value)
+      : path.resolve(project.canonicalPath, value);
+    const canonical = await safeRealpath(resolved);
+    if (
+      canonical === undefined ||
+      !isPathInside(canonical, project.canonicalPath)
+    ) {
+      throw new Error(
+        `Workflow path is unavailable or outside its authorized workspace project: ${value}`,
+      );
+    }
+  }
+}
+
+async function resolveWorkflowWorkspaceId(
+  requestedWorkspaceId: string | undefined,
+  templateWorkspaceId: string | undefined,
+): Promise<string> {
+  if (
+    requestedWorkspaceId !== undefined &&
+    templateWorkspaceId !== undefined &&
+    requestedWorkspaceId !== templateWorkspaceId
+  ) {
+    throw new Error(
+      "Workflow template is authorized for a different workspace.",
+    );
+  }
+  const workspaceId =
+    templateWorkspaceId ??
+    requestedWorkspaceId ??
+    (await ensureWorkspaceStore().getActiveWorkspace())?.id;
+  if (workspaceId === undefined) {
+    throw new Error("No workspace is selected for this workflow run.");
+  }
+  await requireOpenWorkspace(workspaceId);
+  return workspaceId;
 }
 
 async function migrateLegacyProjectsToWorkspaces(): Promise<void> {
@@ -1519,11 +2393,202 @@ async function ensureChatAdapter(
   }
 }
 
+async function startDelegationBridge(): Promise<void> {
+  const bridge = new DelegationBridgeServer({
+    stateDir: path.join(app.getPath("userData"), "delegate-bridge"),
+    // The bridge binds parentId from the capability; this is the only place
+    // extension mode queries obtain their runtime's live manager state.
+    getParentMode: (parentRuntimeId) => {
+      try {
+        return multitaskSupervisor?.mode(parentRuntimeId) ?? "sequential";
+      } catch {
+        return "sequential";
+      }
+    },
+  });
+  const credentials = await bridge.start();
+  delegationBridge = bridge;
+  delegationCredentials = { socketPath: credentials.socketPath };
+  bridge.onDelegate((request) => void handleDelegateRequest(request));
+  bridge.onInputResponse((response) => void handleDelegateInput(response));
+}
+
+async function deckDelegateExtensionPath(): Promise<string> {
+  const output = path.join(
+    app.getPath("userData"),
+    "extensions",
+    "deck-delegate.ts",
+  );
+  await writeDeckDelegateExtension(output);
+  return output;
+}
+
+async function deckDelegateHarnessPath(
+  delegateExtensionPath: string,
+): Promise<string | undefined> {
+  if (process.env.PI_DECK_E2E_DELEGATE_HARNESS !== "1") return undefined;
+  const output = path.join(
+    app.getPath("userData"),
+    "extensions",
+    "deck-delegate-acceptance-harness.ts",
+  );
+  await writeDeckDelegateAcceptanceHarness(output, delegateExtensionPath);
+  return output;
+}
+
+function delegateEnvironment(
+  base: NodeJS.ProcessEnv,
+  parentRuntimeId: string,
+): NodeJS.ProcessEnv {
+  const credentials = delegationCredentials;
+  const capability = delegationBridge?.registerParent(parentRuntimeId);
+  if (!credentials || !capability)
+    throw new Error("Delegation bridge is not available.");
+  return {
+    ...base,
+    [DECK_DELEGATE_ENDPOINT_ENV]: `unix:${credentials.socketPath}`,
+    [DECK_DELEGATE_CAPABILITY_ENV]: capability,
+    [DECK_DELEGATE_PARENT_RUNTIME_ENV]: parentRuntimeId,
+  };
+}
+
+async function handleDelegateRequest(request: DelegateRequest): Promise<void> {
+  // Authentication capability, not untrusted payload, binds this connection.
+  const payload = request.payload;
+  const parentId = request.parentId;
+  const supervisor = multitaskSupervisor;
+  if (!parentId || !supervisor || !delegationBridge) {
+    delegationBridge?.sendChildResult({
+      connectionId: request.connectionId,
+      toolCallId: request.toolCallId,
+      outcome: "failed",
+      handoff: {
+        summary: "Parallel multitasking is not enabled for this parent.",
+      },
+    });
+    return;
+  }
+  if (!isMultitaskMode(parentId, "parallel") || !chatRuntimeIds.has(parentId)) {
+    delegationBridge?.sendChildResult({
+      connectionId: request.connectionId,
+      toolCallId: request.toolCallId,
+      outcome: "failed",
+      handoff: {
+        summary: "Parallel multitasking is not enabled for this parent.",
+      },
+    });
+    return;
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    delegationBridge.sendChildResult({
+      connectionId: request.connectionId,
+      toolCallId: request.toolCallId,
+      outcome: "failed",
+      handoff: { summary: "Invalid delegate action." },
+    });
+    return;
+  }
+  const inputAction = payload as {
+    action?: unknown;
+    taskNumber?: unknown;
+    input?: unknown;
+  };
+  if (inputAction.action === "provide_input") {
+    if (
+      !Number.isSafeInteger(inputAction.taskNumber) ||
+      (inputAction.taskNumber as number) < 1 ||
+      typeof inputAction.input !== "string" ||
+      !inputAction.input.trim()
+    ) {
+      delegationBridge.sendChildResult({
+        connectionId: request.connectionId,
+        toolCallId: request.toolCallId,
+        outcome: "failed",
+        handoff: { summary: "A task number and input are required." },
+      });
+      return;
+    }
+    try {
+      await supervisor.provideInput(
+        parentId,
+        inputAction.taskNumber as number,
+        inputAction.input,
+      );
+      delegationBridge.sendChildResult({
+        connectionId: request.connectionId,
+        toolCallId: request.toolCallId,
+        outcome: "completed",
+        handoff: {
+          summary: `Input delivered to task #${inputAction.taskNumber}.`,
+        },
+      });
+    } catch (error) {
+      delegationBridge.sendChildResult({
+        connectionId: request.connectionId,
+        toolCallId: request.toolCallId,
+        outcome: "failed",
+        handoff: {
+          summary:
+            error instanceof Error ? error.message : "Unable to deliver input.",
+        },
+      });
+    }
+    return;
+  }
+  if (typeof (payload as { task?: unknown }).task !== "string") {
+    delegationBridge.sendChildResult({
+      connectionId: request.connectionId,
+      toolCallId: request.toolCallId,
+      outcome: "failed",
+      handoff: { summary: "Invalid delegate task." },
+    });
+    return;
+  }
+  const task = (payload as { task: string; name?: unknown }).task.trim();
+  const name =
+    typeof (payload as { name?: unknown }).name === "string"
+      ? (payload as { name: string }).name.trim()
+      : "Delegated task";
+  if (!task || task.length > 16_000 || name.length > 256) {
+    delegationBridge.sendChildResult({
+      connectionId: request.connectionId,
+      toolCallId: request.toolCallId,
+      outcome: "failed",
+      handoff: { summary: "Delegate task exceeds Deck limits." },
+    });
+    return;
+  }
+  const number = nextDelegatedTaskNumber++;
+  try {
+    delegateCalls.set(`${parentId}:${number}`, {
+      connectionId: request.connectionId,
+      toolCallId: request.toolCallId,
+    });
+    supervisor.enqueue(parentId, {
+      number,
+      name: name || "Delegated task",
+      brief: { text: task },
+    });
+  } catch (error) {
+    delegateCalls.delete(`${parentId}:${number}`);
+    delegationBridge.sendChildResult({
+      connectionId: request.connectionId,
+      toolCallId: request.toolCallId,
+      outcome: "failed",
+      handoff: {
+        summary:
+          error instanceof Error ? error.message : "Unable to queue child.",
+      },
+    });
+  }
+}
+
 async function initializeChatAdapter(
   store: SettingsStore,
   diagnosticsService: DiagnosticsService,
 ): Promise<SinglePiAdapter> {
   const mode = resolveChatBackendMode();
+  maxRunningWorkers = (await store.get()).maxRunningSessions;
   const adapter = new SinglePiAdapter();
   const capacity = new WorkerCapacity(() => adapter.workerCount());
   const unsubscribe = adapter.onEvent((event) => {
@@ -1534,8 +2599,21 @@ async function initializeChatAdapter(
       );
       return;
     }
-    trackExtensionUiRuntimeEvent(parsed.data);
-    sendChatEventToRenderer(parsed.data);
+    // Private delegated workers share the adapter only for capacity and RPC;
+    // their events/transcript identities never cross into renderer chat state.
+    if (chatRuntimeIds.has(parsed.data.runtimeId)) {
+      trackExtensionUiRuntimeEvent(parsed.data);
+      sendChatEventToRenderer(parsed.data);
+    }
+    // Workflow handling runs before worker-exit cleanup. agent_end needs the
+    // live worker to read its final transcript; worker_exit itself is handled
+    // as a terminal workflow failure before the adapter forgets the worker.
+    void workflowScheduler?.handleRuntimeEvent(
+      parsed.data as WorkflowRuntimeEvent,
+    );
+    void workflowOccurrenceScheduler?.handleRuntimeEvent(
+      parsed.data as WorkflowRuntimeEvent,
+    );
     if (parsed.data.type === "worker_exit") {
       // A child exit does not go through closeSession(), so remove it from the
       // adapter as well as the UI/runtime maps or it would consume capacity.
@@ -1554,6 +2632,19 @@ async function initializeChatAdapter(
   chatEventUnsubscribe = unsubscribe;
   chatWorkerCapacity = capacity;
   chatAdapter = adapter;
+  multitaskSupervisor = new MultitaskSupervisor({
+    hasCapacity: () => capacityAvailable(),
+    createWorker: (launch) =>
+      createDelegatedChild(
+        adapter,
+        store,
+        launch.parentId,
+        launch.task,
+        launch.callbacks,
+      ),
+    onParentNotification: (notification) =>
+      handleMultitaskNotification(notification),
+  });
   return adapter;
 }
 
@@ -1597,6 +2688,18 @@ async function serializeChatWorkerCreation<T>(
   }
 }
 
+function capacityAvailable(): boolean {
+  const capacity = chatWorkerCapacity;
+  const adapter = chatAdapter;
+  // The capacity allocator remains authoritative at spawn time. This cheap
+  // preflight only prevents a queued child from competing with active parent UI.
+  return (
+    capacity !== undefined &&
+    adapter !== undefined &&
+    adapter.workerCount() < maxRunningWorkers
+  );
+}
+
 function registerChatWorker(
   workerSpec: ChatWorkerSpec,
   mode: ChatBackendMode,
@@ -1612,6 +2715,10 @@ function registerChatWorker(
   if (workerSpec.workspaceId !== undefined) {
     chatRuntimeWorkspaceIds.set(runtimeId, workerSpec.workspaceId);
   }
+  multitaskSupervisor?.addParent(runtimeId, {
+    mode: "sequential",
+    maxQueuedTasks: 100,
+  });
 }
 
 function getChatWorkerCapacity(): WorkerCapacity {
@@ -1670,7 +2777,10 @@ async function respondToExtensionUi(
   request: ChatRespondToExtensionUiRequest,
 ): Promise<void> {
   const adapter = await ensureChatAdapter(store, diagnosticsService);
-  if (!adapter.hasRuntime(request.runtimeId)) {
+  if (
+    !chatRuntimeIds.has(request.runtimeId) ||
+    !adapter.hasRuntime(request.runtimeId)
+  ) {
     throw new Error(
       `Extension UI runtime is no longer attached: ${request.runtimeId}`,
     );
@@ -1762,6 +2872,23 @@ function sendChatEventToRenderer(
   window.webContents.send(ipcChannels.chatEvent, event);
 }
 
+function emitWorkflowRunEvent(run: WorkflowRun): void {
+  const event = workflowEventSchema.parse({
+    type: "workflow_run_updated",
+    runId: run.id,
+    status: run.status,
+  });
+  const window = mainWindow;
+  if (
+    window === undefined ||
+    window.isDestroyed() ||
+    window.webContents.isDestroyed()
+  ) {
+    return;
+  }
+  window.webContents.send(ipcChannels.workflowEvent, event);
+}
+
 function resolveChatBackendMode(): ChatBackendMode {
   return process.env.PI_DECK_BACKEND === "real" ? "real" : "fake";
 }
@@ -1772,7 +2899,8 @@ function resolveActiveChatRuntimeId(
 ): string {
   const selection = selectAvailableRuntime({
     requestedRuntimeId,
-    hasRuntime: (runtimeId) => adapter.hasRuntime(runtimeId),
+    hasRuntime: (runtimeId) =>
+      chatRuntimeIds.has(runtimeId) && adapter.hasRuntime(runtimeId),
   });
 
   if (selection.reason === "requested" && selection.runtimeId !== undefined) {
@@ -1800,6 +2928,8 @@ async function closeAttachedChatRuntime(
     attachmentPreservingRuntimeClosures.add(runtimeId);
   }
   try {
+    delegationBridge?.removeParent(runtimeId);
+    await multitaskSupervisor?.removeParent(runtimeId);
     if (adapter.hasRuntime(runtimeId)) {
       await adapter.closeSession(runtimeId);
     }
@@ -1834,6 +2964,19 @@ function forgetChatRuntime(
   chatRuntimeSessionFiles.delete(runtimeId);
   chatRuntimeProjectIds.delete(runtimeId);
   chatRuntimeWorkspaceIds.delete(runtimeId);
+  multitaskRuntimeResumeGuard.forget(runtimeId);
+  delegationBridge?.removeParent(runtimeId);
+  for (const [key, call] of delegateCalls) {
+    if (key.startsWith(`${runtimeId}:`)) {
+      delegationBridge?.sendChildResult({
+        ...call,
+        outcome: "cancelled",
+        handoff: { summary: "Parent session closed." },
+      });
+      delegateCalls.delete(key);
+    }
+  }
+  void multitaskSupervisor?.removeParent(runtimeId);
   if (chatRuntimeId === runtimeId) {
     chatRuntimeId = undefined;
   }
@@ -1846,6 +2989,159 @@ interface ChatWorkerSpec {
   workspaceId?: string;
 }
 
+async function createDelegatedChild(
+  adapter: SinglePiAdapter,
+  store: SettingsStore,
+  parentId: string,
+  task: { brief: { text: string } },
+  callbacks: ChildWorkerCallbacks,
+): Promise<{
+  close(): Promise<void>;
+  provideInput(input: string): Promise<void>;
+}> {
+  const capacity = getChatWorkerCapacity();
+  const parentMode = chatRuntimeModes.get(parentId);
+  const cwd = chatWorkerCwds.get(parentId);
+  const projectId = chatRuntimeProjectIds.get(parentId);
+  if (!parentMode || !cwd)
+    throw new Error("Delegating parent is no longer attached.");
+  const worker = await capacity.allocate(
+    async () => (await store.get()).maxRunningSessions,
+    () => {
+      if (parentMode === "fake") {
+        return adapter.createWorker({
+          command: process.execPath,
+          args: [
+            path.join(__dirname, "pi/fakeRpc/fakeRpcServer.js"),
+            "--stream-delay-ms",
+            "10",
+          ],
+          cwd,
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+        });
+      }
+      return createRealDelegatedWorker(adapter, store, cwd, projectId);
+    },
+  );
+  let ended = false;
+  worker.onEvent((event) => {
+    if (ended) return;
+    if (event.type === "extension_ui_request") callbacks.inputNeeded();
+    if (event.type === "agent_end" || event.type === "worker_exit") {
+      ended = true;
+      void worker
+        .getMessages()
+        .then((messages) => {
+          const last = messages.at(-1);
+          callbacks.completed({
+            summary:
+              typeof last?.content === "string"
+                ? last.content.slice(0, 32_768)
+                : "Child completed.",
+          });
+        })
+        .catch(() =>
+          callbacks.failed({ summary: "Child exited without a result." }),
+        );
+    }
+  });
+  try {
+    await worker.prompt({ text: task.brief.text });
+  } catch (error) {
+    await adapter.closeSession(worker.runtimeId).catch(() => undefined);
+    throw error;
+  }
+  return {
+    close: () => adapter.closeSession(worker.runtimeId),
+    provideInput: (input) => worker.steer({ text: input }),
+  };
+}
+
+async function createRealDelegatedWorker(
+  adapter: SinglePiAdapter,
+  store: SettingsStore,
+  cwd: string,
+  projectId: string | undefined,
+): Promise<ReturnType<SinglePiAdapter["createWorker"]>> {
+  const project =
+    projectId === managedRuntimeProjectId
+      ? await resolveManagedRuntimeProject()
+      : projectId
+        ? await ensureProjectStore().resolveAuthorizedProject(projectId)
+        : undefined;
+  const launch = await resolveRealChatLaunchConfig(store, project);
+  return adapter.createWorker({
+    command: launch.effective.config.piBinary,
+    args: ["--mode", "rpc", ...launch.effective.workerArgs],
+    cwd: launch.projectCwd,
+    env: launch.effective.config.env,
+    requestTimeoutMs: Number(process.env.PI_DECK_REAL_RPC_TIMEOUT_MS ?? 30_000),
+    commandProtocol: "type-field",
+  });
+}
+
+function handleDelegateInput(response: {
+  parentId: string;
+  connectionId: string;
+  toolCallId: string;
+  input: string;
+}): void {
+  const entry = [...delegateCalls.entries()].find(
+    ([, call]) =>
+      call.connectionId === response.connectionId &&
+      call.toolCallId === response.toolCallId,
+  );
+  if (!entry || !entry[0].startsWith(`${response.parentId}:`)) return;
+  const number = Number(entry[0].slice(response.parentId.length + 1));
+  void multitaskSupervisor
+    ?.provideInput(response.parentId, number, response.input)
+    .catch(() => undefined);
+}
+
+function handleMultitaskNotification(
+  notification: ParentTaskNotification<string>,
+): void {
+  const key = `${notification.parentId}:${notification.task.number}`;
+  const call = delegateCalls.get(key);
+  const bridge = delegationBridge;
+  if (notification.type === "task-status") {
+    bridge?.sendChildLifecycle({
+      connectionId: call?.connectionId ?? "",
+      toolCallId: call?.toolCallId ?? "",
+      taskNumber: notification.task.number,
+      status: notification.task.status,
+    });
+  } else {
+    const outcome =
+      notification.task.status === "completed"
+        ? "completed"
+        : notification.task.status === "cancelled"
+          ? "cancelled"
+          : "failed";
+    bridge?.sendChildResult({
+      connectionId: call?.connectionId ?? "",
+      toolCallId: call?.toolCallId ?? "",
+      outcome,
+      handoff: notification.handoff,
+    });
+    delegateCalls.delete(key);
+  }
+  const supervisor = multitaskSupervisor;
+  if (supervisor) {
+    try {
+      const state = supervisor.state(notification.parentId);
+      emitMultitaskStateFromSnapshots(
+        notification.parentId,
+        state.mode,
+        state.tasks,
+      );
+    } catch {
+      // The parent may have been removed while a child notification was queued.
+    }
+    void persistMultitaskSupervisor(notification.parentId);
+  }
+}
+
 async function createFakeChatWorker(
   adapter: SinglePiAdapter,
   store: SettingsStore,
@@ -1854,14 +3150,26 @@ async function createFakeChatWorker(
 ): Promise<ChatWorkerSpec> {
   const fakeRpcPath = path.join(__dirname, "pi/fakeRpc/fakeRpcServer.js");
   const cwd = process.cwd();
+  const runtimeId = randomUUID();
   return capacity.allocate(
     async () => (await store.get()).maxRunningSessions,
     () => {
       const worker = adapter.createWorker({
+        runtimeId,
         command: process.execPath,
-        args: [fakeRpcPath, "--stream-delay-ms", "120"],
+        args: [
+          fakeRpcPath,
+          "--stream-delay-ms",
+          "120",
+          ...(process.env.PI_DECK_FAKE_DELEGATE_SCENARIO === "1"
+            ? ["--prompt-scenario", "delegate"]
+            : []),
+        ],
         cwd,
-        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+        env: {
+          ...delegateEnvironment(process.env, runtimeId),
+          ELECTRON_RUN_AS_NODE: "1",
+        },
       });
       return { worker, cwd, ...(workspaceId ? { workspaceId } : {}) };
     },
@@ -1876,14 +3184,16 @@ async function createRealChatWorker(
   workspaceId?: string,
 ): Promise<ChatWorkerSpec> {
   const launch = await resolveRealChatLaunchConfig(store, project);
+  const runtimeId = randomUUID();
   return capacity.allocate(
     async () => (await store.get()).maxRunningSessions,
-    () => {
+    async () => {
       const worker = adapter.createWorker({
+        runtimeId,
         command: launch.effective.config.piBinary,
-        args: ["--mode", "rpc", ...launch.effective.workerArgs],
+        args: await realParentWorkerArgs(launch.effective.workerArgs),
         cwd: launch.projectCwd,
-        env: launch.effective.config.env,
+        env: delegateEnvironment(launch.effective.config.env, runtimeId),
         requestTimeoutMs: Number(
           process.env.PI_DECK_REAL_RPC_TIMEOUT_MS ?? 30_000,
         ),
@@ -1897,6 +3207,21 @@ async function createRealChatWorker(
       };
     },
   );
+}
+
+async function realParentWorkerArgs(
+  workerArgs: readonly string[],
+): Promise<string[]> {
+  const delegateExtension = await deckDelegateExtensionPath();
+  const harnessExtension = await deckDelegateHarnessPath(delegateExtension);
+  return [
+    "--mode",
+    "rpc",
+    ...workerArgs,
+    "--extension",
+    delegateExtension,
+    ...(harnessExtension ? ["--extension", harnessExtension] : []),
+  ];
 }
 
 async function createRealResumeWorker(
@@ -1925,20 +3250,20 @@ async function createRealResumeWorker(
     );
   }
   const canonicalSessionFile = validation.sessionFile;
+  const runtimeId = randomUUID();
   return capacity.allocate(
     async () => (await store.get()).maxRunningSessions,
-    () => {
+    async () => {
       const worker = adapter.createWorker({
+        runtimeId,
         command: launch.effective.config.piBinary,
         args: [
-          "--mode",
-          "rpc",
-          ...launch.effective.workerArgs,
+          ...(await realParentWorkerArgs(launch.effective.workerArgs)),
           "--session",
           canonicalSessionFile,
         ],
         cwd: launch.projectCwd,
-        env: launch.effective.config.env,
+        env: delegateEnvironment(launch.effective.config.env, runtimeId),
         requestTimeoutMs: Number(
           process.env.PI_DECK_REAL_RPC_TIMEOUT_MS ?? 30_000,
         ),
@@ -2051,6 +3376,15 @@ async function resolveRealChatProject(
 async function closeChatWorker(): Promise<void> {
   const adapter = chatAdapter;
   const runtimeIds = [...chatRuntimeIds];
+  // Reset/quit has no parent left to mediate child work: retire bridge calls
+  // and await private child shutdown before releasing parent bookkeeping.
+  await Promise.all(
+    runtimeIds.map(async (runtimeId) => {
+      delegationBridge?.removeParent(runtimeId);
+      await multitaskSupervisor?.removeParent(runtimeId);
+    }),
+  );
+  delegateCalls.clear();
   chatEventUnsubscribe?.();
   chatEventUnsubscribe = undefined;
   chatAdapter = undefined;
@@ -2842,6 +4176,13 @@ async function removePersistedPiSessionFile(
   }
 
   chatSessionFileLocks.delete(sessionFile);
+  try {
+    await multitaskStateStore?.delete(sessionFile);
+  } catch (error) {
+    diagnosticsService.recordError(
+      `Failed to remove multitask state for deleted Pi session ${sessionFile}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   // A detached saved-row composer uses the canonical session file as its
   // owner. Revoke it only after removal is confirmed; failed validation and
   // per-file bulk failures leave that owner intact for retry.
@@ -3055,7 +4396,7 @@ async function getChatSnapshot(
   if (runtimeId === undefined) {
     throw new Error(`${mode} chat runtime failed to initialize`);
   }
-  if (!adapter.hasRuntime(runtimeId)) {
+  if (!chatRuntimeIds.has(runtimeId) || !adapter.hasRuntime(runtimeId)) {
     forgetChatRuntime(runtimeId);
     throw new Error(`Chat runtime is no longer attached: ${runtimeId}`);
   }
@@ -3266,6 +4607,7 @@ async function getChatSnapshotForRuntime(
     }
   }
 
+  await reconcileMultitaskRuntime(runtimeId, state.sessionFile);
   return {
     runtimeId,
     backendMode: mode,
@@ -3833,3 +5175,142 @@ bootstrap().catch((error: unknown) => {
   console.error(message);
   app.quit();
 });
+
+// Subscriptions belong to a specific renderer webContents and retain the
+// workspace authorized at registration. They are never a global run-ID list.
+const graphRunSubscriptions = new WorkflowGraphSubscriptions();
+function emitCanonicalWorkflowRunEvent(run: WorkflowRunEnvelope): void {
+  mainWindow?.webContents.send(ipcChannels.canonicalWorkflowEvent, {
+    type: "workflow_occurrence_run_updated",
+    run,
+  });
+  // Full run envelopes remain a compatibility event; graph events are sent to
+  // every authorized subscriber, including auxiliary windows.
+  graphRunSubscriptions.publish(
+    run,
+    deriveWorkflowGraphSnapshot(run.definition, run),
+    (senderId) => webContents.fromId(senderId),
+  );
+}
+
+async function getMultitaskSupervisor(
+  runtimeId: string,
+): Promise<NonNullable<typeof multitaskSupervisor>> {
+  const adapter = chatAdapter;
+  const supervisor = multitaskSupervisor;
+  if (
+    adapter === undefined ||
+    supervisor === undefined ||
+    !chatRuntimeIds.has(runtimeId) ||
+    !adapter.hasRuntime(runtimeId)
+  ) {
+    throw new Error(`Chat runtime is no longer attached: ${runtimeId}`);
+  }
+  // state() also verifies that this is an attached parent, rather than a child.
+  supervisor.state(runtimeId);
+  return supervisor;
+}
+
+function isMultitaskMode(
+  runtimeId: string,
+  mode: "parallel" | "sequential",
+): boolean {
+  try {
+    return multitaskSupervisor?.mode(runtimeId) === mode;
+  } catch {
+    return false;
+  }
+}
+
+async function reconcileMultitaskRuntime(
+  runtimeId: string,
+  sessionFile: unknown,
+): Promise<void> {
+  if (typeof sessionFile !== "string") return;
+  const canonical =
+    (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
+  chatRuntimeSessionFiles.set(runtimeId, canonical);
+  const saved = multitaskStateStore?.get(canonical);
+  const supervisor = multitaskSupervisor;
+  if (!supervisor) return;
+  try {
+    supervisor.addParent(runtimeId, {
+      mode: saved?.mode ?? "sequential",
+      maxQueuedTasks: 100,
+    });
+  } catch {
+    /* already registered */
+  }
+  // Resume is destructive to retained private children. It is valid only for
+  // the first attachment of persisted state, never for ordinary snapshots.
+  if (multitaskRuntimeResumeGuard.claim(runtimeId, saved !== undefined)) {
+    await supervisor.resume(runtimeId, saved);
+  }
+}
+
+async function multitaskState(runtimeId: string): Promise<{
+  runtimeId: string;
+  mode: "parallel" | "sequential";
+  tasks: Array<{ taskNumber: number; generatedName: string; status: string }>;
+}> {
+  const state = (await getMultitaskSupervisor(runtimeId)).state(runtimeId);
+  return {
+    runtimeId,
+    mode: state.mode,
+    tasks: state.tasks.map((task) => ({
+      taskNumber: task.number,
+      generatedName: task.name,
+      status: task.status === "cancelled" ? "failed" : task.status,
+    })),
+  };
+}
+
+function emitMultitaskState(
+  runtimeId: string,
+  supervisor: NonNullable<typeof multitaskSupervisor>,
+): void {
+  const state = supervisor.state(runtimeId);
+  const parsed = multitaskStateEventSchema.parse({
+    runtimeId,
+    mode: state.mode,
+    tasks: state.tasks.map((task) => ({
+      taskNumber: task.number,
+      generatedName: task.name,
+      status: task.status === "cancelled" ? "failed" : task.status,
+    })),
+  });
+  const window = mainWindow;
+  if (window && !window.isDestroyed() && !window.webContents.isDestroyed())
+    window.webContents.send(ipcChannels.multitaskState, parsed);
+}
+
+function emitMultitaskStateFromSnapshots(
+  runtimeId: string,
+  mode: "parallel" | "sequential",
+  snapshots: Array<{ number: number; name: string; status: string }>,
+): void {
+  const parsed = multitaskStateEventSchema.parse({
+    runtimeId,
+    mode,
+    tasks: snapshots.map((task) => ({
+      taskNumber: task.number,
+      generatedName: task.name,
+      status: task.status === "cancelled" ? "failed" : task.status,
+    })),
+  });
+  if (
+    mainWindow &&
+    !mainWindow.isDestroyed() &&
+    !mainWindow.webContents.isDestroyed()
+  )
+    mainWindow.webContents.send(ipcChannels.multitaskState, parsed);
+}
+
+async function persistMultitaskSupervisor(runtimeId: string): Promise<void> {
+  const sessionFile = chatRuntimeSessionFiles.get(runtimeId);
+  if (sessionFile && multitaskSupervisor)
+    await multitaskStateStore?.set(
+      sessionFile,
+      multitaskSupervisor.exportState(runtimeId),
+    );
+}

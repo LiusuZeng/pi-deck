@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-08-16
+
+### Fixed
+
+- Restored workflow-builder interactivity after editing workflow and step names.
+- Prevented stale workflow refreshes from blocking newly started live-run monitoring.
+- Restored visible delegated-task status snapshots when live multitask events are missed.
+- Serialized concurrent fan-out occurrence completions so no child completion is lost.
+
+### Tests
+
+- Added real-Pi UI coverage for workflow editing, live monitoring, and delegated task status.
+- Added a deterministic regression for concurrent fan-out completion.
+
+## [0.5.0] - 2026-08-15
+
+Major feature release adding Agent Workflows and interactive multitasking.
+
+### Added
+
+- Added persistent, role-based Agent Workflows with Workers, Deciders,
+  Orchestrators, Human checkpoints, graph authoring, canonical JSON, scoped
+  templates, live run monitoring, retries, and restart recovery.
+- Added accessible static and live execution graphs with deterministic layout,
+  keyboard traversal, text alternatives, workflow-state updates, input-source
+  annotations, fan-out and loop progress, and Pi-session drill-in.
+- Added explicit, persisted workflow input-source bindings with deterministic
+  retry, loop, and fan-out lineage resolution.
+- Added interactive multitasking: a parent Pi session can delegate isolated
+  child tasks through an authenticated local bridge, monitor their status, and
+  safely resume persisted delegated work.
+- Added real-Pi, workflow, multitask, recovery, concurrency, graph
+  accessibility, and restart end-to-end coverage.
+
+### Changed
+
+- Workflow nodes now use stable opaque UUIDs rather than mutable display names;
+  existing persisted workflow data is migrated with recovery backups.
+- Agent Workflow scope selection now supports every active workspace while
+  preserving global and previously saved scopes.
+
+### Fixed
+
+- Restored persisted real-Pi message content correctly after session restart.
+- Resolved managed-runtime project lookup for delegated real-Pi child workers.
+- Prevented cancelled or stale workflow occurrences from being resurrected
+  during restart/retry races.
+
 ## [0.4.0] - 2026-08-03
 
 Feature release adding a unified Work inbox for parallel session management.
@@ -223,7 +271,9 @@ coding-agent sessions.
   crash; persisted sessions can be reopened, but unsaved partial stream text may
   be lost.
 
-[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/LiusuZeng/pi-deck/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/LiusuZeng/pi-deck/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/LiusuZeng/pi-deck/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/LiusuZeng/pi-deck/compare/v0.1.1...v0.2.0

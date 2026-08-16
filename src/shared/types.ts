@@ -30,6 +30,11 @@ import type {
   chatSnapshotSchema,
   diagnosticsSummarySchema,
   ipcErrorSchema,
+  multitaskModeRequestSchema,
+  multitaskModeStateSchema,
+  multitaskModeUpdateRequestSchema,
+  multitaskStateEventSchema,
+  multitaskTaskSummarySchema,
   pickAttachmentsResultSchema,
   pickProjectResultSchema,
   projectListResultSchema,
@@ -48,12 +53,75 @@ import type {
   workspaceRestoreRequestSchema,
   workspaceUpdateRequestSchema,
 } from "./ipcSchemas.js";
+import type {
+  workflowApproveGateRequestSchema,
+  workflowArchiveTemplateRequestSchema,
+  workflowCreateTemplateRequestSchema,
+  workflowDuplicateTemplateRequestSchema,
+  workflowEventSchema,
+  workflowGetRunRequestSchema,
+  workflowGetTemplateRequestSchema,
+  workflowListRunsRequestSchema,
+  workflowRetryStepRequestSchema,
+  workflowRetryConditionRequestSchema,
+  workflowOverrideConditionRequestSchema,
+  workflowRunListResultSchema,
+  workflowRunSchema,
+  workflowStartRunRequestSchema,
+  workflowStopRunRequestSchema,
+  workflowTemplateDefinitionSchema,
+  workflowTemplateListResultSchema,
+  workflowTemplateSchema,
+  workflowUpdateTemplateRequestSchema,
+} from "./workflowSchemas.js";
+import type {
+  canonicalWorkflowEventSchema,
+  canonicalWorkflowGetRunRequestSchema,
+  canonicalWorkflowHumanAnswerRequestSchema,
+  canonicalWorkflowListRunsRequestSchema,
+  canonicalWorkflowOccurrenceRequestSchema,
+  canonicalWorkflowStartRunRequestSchema,
+  workflowGraphEventSchema,
+  workflowGraphSnapshotRequestSchema,
+  workflowGraphSnapshotSchema,
+  workflowCreateRequestSchema,
+  workflowDefinitionSchema,
+  workflowListRequestSchema,
+  workflowScopedDefinitionSchema,
+  workflowRunEnvelopeSchema,
+  workflowUpdateRequestSchema,
+} from "./agentWorkflowSchemas.js";
 
+export type CanonicalWorkflowRun = z.infer<typeof workflowRunEnvelopeSchema>;
+export type CanonicalWorkflowStartRunRequest = z.infer<
+  typeof canonicalWorkflowStartRunRequestSchema
+>;
+export type CanonicalWorkflowGetRunRequest = z.infer<
+  typeof canonicalWorkflowGetRunRequestSchema
+>;
+export type CanonicalWorkflowOccurrenceRequest = z.infer<
+  typeof canonicalWorkflowOccurrenceRequestSchema
+>;
+export type CanonicalWorkflowHumanAnswerRequest = z.infer<
+  typeof canonicalWorkflowHumanAnswerRequestSchema
+>;
+export type CanonicalWorkflowEvent = z.infer<
+  typeof canonicalWorkflowEventSchema
+>;
+export type WorkflowGraphSnapshot = z.infer<typeof workflowGraphSnapshotSchema>;
+export type WorkflowGraphEvent = z.infer<typeof workflowGraphEventSchema>;
 export type ThemePreference = z.infer<typeof themePreferenceSchema>;
 export type AppSettings = z.infer<typeof appSettingsSchema>;
 export type AppBootstrapState = z.infer<typeof appBootstrapStateSchema>;
 export type DiagnosticsSummary = z.infer<typeof diagnosticsSummarySchema>;
 export type IpcErrorPayload = z.infer<typeof ipcErrorSchema>;
+export type MultitaskModeRequest = z.infer<typeof multitaskModeRequestSchema>;
+export type MultitaskModeUpdateRequest = z.infer<
+  typeof multitaskModeUpdateRequestSchema
+>;
+export type MultitaskModeState = z.infer<typeof multitaskModeStateSchema>;
+export type MultitaskTaskSummary = z.infer<typeof multitaskTaskSummarySchema>;
+export type MultitaskStateEvent = z.infer<typeof multitaskStateEventSchema>;
 export type ChatMessage = z.infer<typeof chatMessageSchema>;
 export type ChatInterventionRequest = z.infer<
   typeof chatInterventionRequestSchema
@@ -146,6 +214,60 @@ export type AttachmentAssignOwnerRequest = z.infer<
   typeof attachmentAssignOwnerRequestSchema
 >;
 export type PickAttachmentsResult = z.infer<typeof pickAttachmentsResultSchema>;
+export type WorkflowDefinition = z.infer<typeof workflowDefinitionSchema>;
+export type WorkflowScopedDefinition = z.infer<
+  typeof workflowScopedDefinitionSchema
+>;
+export type WorkflowListRequest = z.infer<typeof workflowListRequestSchema>;
+export type WorkflowCreateRequest = z.infer<typeof workflowCreateRequestSchema>;
+export type WorkflowUpdateRequest = z.infer<typeof workflowUpdateRequestSchema>;
+export type WorkflowTemplate = z.infer<typeof workflowTemplateSchema>;
+export type WorkflowTemplateDefinition = z.infer<
+  typeof workflowTemplateDefinitionSchema
+>;
+export type WorkflowRun = z.infer<typeof workflowRunSchema>;
+export type WorkflowEvent = z.infer<typeof workflowEventSchema>;
+export type WorkflowTemplateListResult = z.infer<
+  typeof workflowTemplateListResultSchema
+>;
+export type WorkflowRunListResult = z.infer<typeof workflowRunListResultSchema>;
+export type WorkflowGetTemplateRequest = z.infer<
+  typeof workflowGetTemplateRequestSchema
+>;
+export type WorkflowCreateTemplateRequest = z.infer<
+  typeof workflowCreateTemplateRequestSchema
+>;
+export type WorkflowUpdateTemplateRequest = z.infer<
+  typeof workflowUpdateTemplateRequestSchema
+>;
+export type WorkflowArchiveTemplateRequest = z.infer<
+  typeof workflowArchiveTemplateRequestSchema
+>;
+export type WorkflowDuplicateTemplateRequest = z.infer<
+  typeof workflowDuplicateTemplateRequestSchema
+>;
+export type WorkflowListRunsRequest = z.infer<
+  typeof workflowListRunsRequestSchema
+>;
+export type WorkflowGetRunRequest = z.infer<typeof workflowGetRunRequestSchema>;
+export type WorkflowStartRunRequest = z.infer<
+  typeof workflowStartRunRequestSchema
+>;
+export type WorkflowStopRunRequest = z.infer<
+  typeof workflowStopRunRequestSchema
+>;
+export type WorkflowRetryStepRequest = z.infer<
+  typeof workflowRetryStepRequestSchema
+>;
+export type WorkflowRetryConditionRequest = z.infer<
+  typeof workflowRetryConditionRequestSchema
+>;
+export type WorkflowOverrideConditionRequest = z.infer<
+  typeof workflowOverrideConditionRequestSchema
+>;
+export type WorkflowApproveGateRequest = z.infer<
+  typeof workflowApproveGateRequestSchema
+>;
 
 export interface PiDeckApi {
   app: {
@@ -243,6 +365,78 @@ export interface PiDeckApi {
       request: WorkspaceListSessionsRequest,
     ): Promise<ChatListSessionsResult>;
     listUnassignedSessions(): Promise<ChatListSessionsResult>;
+  };
+  workflows: {
+    listWorkflows(
+      request: WorkflowListRequest,
+    ): Promise<WorkflowScopedDefinition[]>;
+    canonicalListRuns(
+      request?: z.infer<typeof canonicalWorkflowListRunsRequestSchema>,
+    ): Promise<CanonicalWorkflowRun[]>;
+    canonicalGetRun(
+      request: CanonicalWorkflowGetRunRequest,
+    ): Promise<CanonicalWorkflowRun>;
+    graphGetSnapshot(request: {
+      runId: string;
+    }): Promise<WorkflowGraphSnapshot>;
+    graphSubscribe(request: { runId: string }): Promise<void>;
+    graphUnsubscribe(request: { runId: string }): Promise<void>;
+    onGraphEvent(listener: (event: WorkflowGraphEvent) => void): () => void;
+    canonicalStartRun(
+      request: CanonicalWorkflowStartRunRequest,
+    ): Promise<CanonicalWorkflowRun>;
+    canonicalStopRun(
+      request: CanonicalWorkflowGetRunRequest,
+    ): Promise<CanonicalWorkflowRun>;
+    canonicalRetryOccurrence(
+      request: CanonicalWorkflowOccurrenceRequest,
+    ): Promise<CanonicalWorkflowRun>;
+    canonicalAnswerHuman(
+      request: CanonicalWorkflowHumanAnswerRequest,
+    ): Promise<CanonicalWorkflowRun>;
+    onCanonicalEvent(
+      listener: (event: CanonicalWorkflowEvent) => void,
+    ): () => void;
+    createWorkflow(
+      request: WorkflowCreateRequest,
+    ): Promise<WorkflowScopedDefinition>;
+    updateWorkflow(
+      request: WorkflowUpdateRequest,
+    ): Promise<WorkflowScopedDefinition>;
+    getTemplate(request: WorkflowGetTemplateRequest): Promise<WorkflowTemplate>;
+    listTemplates(): Promise<WorkflowTemplateListResult>;
+    createTemplate(
+      request: WorkflowCreateTemplateRequest,
+    ): Promise<WorkflowTemplate>;
+    updateTemplate(
+      request: WorkflowUpdateTemplateRequest,
+    ): Promise<WorkflowTemplate>;
+    archiveTemplate(
+      request: WorkflowArchiveTemplateRequest,
+    ): Promise<WorkflowTemplate>;
+    duplicateTemplate(
+      request: WorkflowDuplicateTemplateRequest,
+    ): Promise<WorkflowTemplate>;
+    listRuns(request?: WorkflowListRunsRequest): Promise<WorkflowRunListResult>;
+    getRun(request: WorkflowGetRunRequest): Promise<WorkflowRun>;
+    startRun(request: WorkflowStartRunRequest): Promise<WorkflowRun>;
+    stopRun(request: WorkflowStopRunRequest): Promise<WorkflowRun>;
+    retryStep(request: WorkflowRetryStepRequest): Promise<WorkflowRun>;
+    retryCondition(
+      request: WorkflowRetryConditionRequest,
+    ): Promise<WorkflowRun>;
+    overrideCondition(
+      request: WorkflowOverrideConditionRequest,
+    ): Promise<WorkflowRun>;
+    approveGate(request: WorkflowApproveGateRequest): Promise<WorkflowRun>;
+    onEvent(listener: (event: WorkflowEvent) => void): () => void;
+  };
+  multitask: {
+    getMode(request: MultitaskModeRequest): Promise<MultitaskStateEvent>;
+    updateMode(
+      request: MultitaskModeUpdateRequest,
+    ): Promise<MultitaskStateEvent>;
+    onState(listener: (event: MultitaskStateEvent) => void): () => void;
   };
   attachments: {
     pickFiles(request: {

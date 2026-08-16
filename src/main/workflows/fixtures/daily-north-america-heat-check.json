@@ -1,0 +1,78 @@
+{
+  "format": "pi-deck.agent-workflow",
+  "schemaVersion": 2,
+  "id": "00000000-0000-4000-8000-000000000401",
+  "revision": 1,
+  "name": "Daily North America Heat Check",
+  "description": "Sequentially researches today's forecast high in Canada, the United States, and Mexico, then identifies the hottest country.",
+  "inputs": [],
+  "entryNodeId": "00000000-0000-4000-8000-000000000402",
+  "nodes": [
+    {
+      "id": "00000000-0000-4000-8000-000000000402",
+      "name": "Find Canada's highest temperature",
+      "role": "worker",
+      "config": {
+        "instructions": "Determine today's calendar date at workflow start and write it as an ISO date. Find the highest forecast daily maximum temperature you can verify for that date in Canada. Use Celsius and a credible weather source. Prefer a provider that also covers the United States and Mexico so later agents can use the same provider. Do not compare countries yet. Clearly distinguish forecast data from observed data and state any coverage limitation.",
+        "expectedOutput": "A Canada result containing the ISO date, country, highest temperature in \u00b0C, location, forecast or observed status, source name and URL, and coverage caveat."
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000403",
+      "name": "Find the United States' highest temperature",
+      "role": "worker",
+      "config": {
+        "instructions": "Read the Canada result supplied by the previous step. Use exactly the ISO date established there; do not independently choose a new date. Find the highest forecast daily maximum temperature you can verify for that date in the United States. Use Celsius and the same weather provider as the Canada result when possible. Preserve the complete Canada result, then append the United States result in the same format. Do not compare countries yet. Clearly state any source or coverage limitation.",
+        "expectedOutput": "An accumulated report containing the unchanged Canada result followed by the United States result, with date, \u00b0C temperature, location, data status, source URL, and caveat for each."
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000404",
+      "name": "Find Mexico's highest temperature",
+      "role": "worker",
+      "config": {
+        "instructions": "Read the accumulated Canada and United States results supplied by the previous step. Use exactly their shared ISO date; do not independently choose a new date. Find the highest forecast daily maximum temperature you can verify for that date in Mexico. Use Celsius and the same weather provider as the earlier results when possible. Preserve both earlier results, then append the Mexico result in the same format. Do not select a winner yet. Clearly state any source or coverage limitation.",
+        "expectedOutput": "An accumulated report containing Canada, United States, and Mexico results for one ISO date, each with \u00b0C temperature, location, data status, source URL, and caveat."
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000405",
+      "name": "Choose today's hottest country",
+      "role": "worker",
+      "config": {
+        "instructions": "Use only the accumulated Canada, United States, and Mexico results supplied by the previous step. Verify that all three results use the same ISO date and compare their numeric Celsius temperatures. Identify the hottest country, or report a tie. Do not perform new weather research or silently repair missing data. If a result is missing, dates differ, or temperatures are not comparable, state that a reliable winner cannot be determined and explain why.",
+        "expectedOutput": "A concise comparison table followed by the date, winning country or tie, winning temperature in \u00b0C, location, source citations, and any reliability caveat."
+      }
+    }
+  ],
+  "relationships": [
+    {
+      "id": "00000000-0000-4000-8000-000000000406",
+      "from": "00000000-0000-4000-8000-000000000402",
+      "to": {
+        "nodeId": "00000000-0000-4000-8000-000000000403"
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000407",
+      "from": "00000000-0000-4000-8000-000000000403",
+      "to": {
+        "nodeId": "00000000-0000-4000-8000-000000000404"
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000408",
+      "from": "00000000-0000-4000-8000-000000000404",
+      "to": {
+        "nodeId": "00000000-0000-4000-8000-000000000405"
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000409",
+      "from": "00000000-0000-4000-8000-000000000405",
+      "to": {
+        "end": "completed"
+      }
+    }
+  ]
+}

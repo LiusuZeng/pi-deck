@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useEffect,
   useId,
   useLayoutEffect,
@@ -28,7 +30,19 @@ import type {
   WorkspaceListResult,
   WorkspaceRef as SharedWorkspaceRef,
   ThemePreference,
+  MultitaskTaskSummary,
 } from "../shared/types.js";
+import type {
+  CanonicalNodeOccurrence,
+  WorkflowDefinition,
+  WorkflowRunEnvelope,
+  WorkflowGraphSnapshot,
+} from "../shared/agentWorkflowSchemas.js";
+import type {
+  WorkflowRun,
+  WorkflowStepRun,
+  WorkflowTransitionRun,
+} from "../shared/workflowSchemas.js";
 import {
   parseSafeMarkdown,
   type InlineToken,
@@ -42,6 +56,7 @@ import {
 } from "./sessionState.js";
 import { Button } from "./components/ui/Button.js";
 import { IconButton } from "./components/ui/IconButton.js";
+import { MultitaskControl } from "./components/multitask/MultitaskControl.js";
 import {
   Archive,
   ArrowUp,
@@ -90,6 +105,31 @@ import {
   type ActivitySourceSession,
 } from "./activityInbox.js";
 import { ActivityInbox } from "./components/ActivityInbox.js";
+import {
+  PiModelThinkingMenu,
+  nextMenuItemIndex,
+} from "./components/PiModelThinkingMenu.js";
+
+const AgentWorkflowBuilder = lazy(() =>
+  import("./components/workflows/AgentWorkflowBuilder.js").then((module) => ({
+    default: module.AgentWorkflowBuilder,
+  })),
+);
+const AgentWorkflowHome = lazy(() =>
+  import("./components/workflows/AgentWorkflowHome.js").then((module) => ({
+    default: module.AgentWorkflowHome,
+  })),
+);
+const WorkflowOccurrenceRunView = lazy(() =>
+  import("./components/workflows/WorkflowOccurrenceRunView.js").then(
+    (module) => ({ default: module.WorkflowOccurrenceRunView }),
+  ),
+);
+const LegacyWorkflowRunCompatibility = lazy(() =>
+  import("./components/workflows/LegacyWorkflowRunCompatibility.js").then(
+    (module) => ({ default: module.LegacyWorkflowRunCompatibility }),
+  ),
+);
 
 type LoadState =
   | { state: "loading" }
@@ -335,6 +375,21 @@ function sessionForActivityItem(
 type WorkspaceRef = SharedWorkspaceRef;
 type WorkspaceListResultCompat = WorkspaceListResult;
 
+function activeWorkflowScopeChoices(
+  currentWorkspace: WorkspaceRef,
+  workspaces: WorkspaceRef[],
+  archivedWorkspaces: WorkspaceRef[],
+): WorkspaceRef[] {
+  const archivedIds = new Set(
+    archivedWorkspaces.map((workspace) => workspace.id),
+  );
+  return [currentWorkspace, ...workspaces].filter(
+    (workspace, index, choices) =>
+      !archivedIds.has(workspace.id) &&
+      choices.findIndex((candidate) => candidate.id === workspace.id) === index,
+  );
+}
+
 type WorkspaceCapableApi = {
   workspaces?: {
     list?(): Promise<WorkspaceListResultCompat>;
@@ -384,6 +439,7 @@ type WorkspaceCapableApi = {
     listUnassignedSessions?(): Promise<{ sessions: ChatSessionSummary[] }>;
   };
   chat: {
+    getSnapshot?(request?: { runtimeId?: string }): Promise<ChatSnapshot>;
     listSessions?(request?: {
       workspaceId?: string;
       projectId?: string;
@@ -444,6 +500,22 @@ interface ThinkingOption {
   id: string;
   label: string;
   supported: boolean;
+  note?: string;
+}
+
+interface WorkflowModelChoice {
+  provider: string;
+  id: string;
+  label: string;
+  disabled?: boolean;
+  note?: string;
+  thinkingChoices?: WorkflowThinkingChoice[];
+}
+
+interface WorkflowThinkingChoice {
+  id: string;
+  label: string;
+  disabled?: boolean;
   note?: string;
 }
 
@@ -720,6 +792,12 @@ export function App(): ReactElement {
     {},
   );
   const [composerError, setComposerError] = useState<string | null>(null);
+  const [multitask, setMultitask] = useState<
+    Record<
+      string,
+      { mode: "sequential" | "parallel"; tasks: MultitaskTaskSummary[] }
+    >
+  >({});
   const [currentProject, setCurrentProject] = useState<ProjectRef>(() => ({
     id: "pending-project",
     path: "Resolving project…",
@@ -769,6 +847,39 @@ export function App(): ReactElement {
   const [activityScope, setActivityScope] = useState<ActivityScope>({
     type: "all",
   });
+  const [workflowView, setWorkflowView] = useState<
+    | "agentHome"
+    | "workflows"
+    | "runs"
+    | "builder"
+    | "occurrenceRun"
+    | "legacyRun"
+    | undefined
+  >();
+  const [workflowDefinitions, setWorkflowDefinitions] = useState<
+    WorkflowDefinition[]
+  >([]);
+  const [workflowScopes, setWorkflowScopes] = useState<
+    Record<string, string | null>
+  >({});
+  const [workflowOccurrenceRuns, setWorkflowOccurrenceRuns] = useState<
+    WorkflowRunEnvelope[]
+  >([]);
+  const [workflowGraphSnapshot, setWorkflowGraphSnapshot] = useState<
+    WorkflowGraphSnapshot | undefined
+  >();
+  const [legacyWorkflowRuns, setLegacyWorkflowRuns] = useState<WorkflowRun[]>(
+    [],
+  );
+  const [workflowBuilderDefinition, setWorkflowBuilderDefinition] = useState<
+    WorkflowDefinition | undefined
+  >();
+  const [workflowOccurrenceRunId, setWorkflowOccurrenceRunId] = useState<
+    string | undefined
+  >();
+  const [legacyWorkflowRunId, setLegacyWorkflowRunId] = useState<string>();
+  const [workflowLoading, setWorkflowLoading] = useState(false);
+  const [workflowError, setWorkflowError] = useState<string | undefined>();
   const [usageStatsVisible, setUsageStatsVisible] = useState(() =>
     loadUsageStatsVisiblePreference(),
   );
@@ -827,6 +938,7 @@ export function App(): ReactElement {
   useEffect(() => {
     let disposed = false;
     let unsubscribe: (() => void) | undefined;
+    let unsubscribeMultitask: (() => void) | undefined;
     let eventBuffer: RuntimeEventBuffer | undefined;
     let bootstrapRefreshFrame: number | undefined;
     let bootstrapRefreshSecondFrame: number | undefined;
@@ -913,6 +1025,13 @@ export function App(): ReactElement {
           },
           isRuntimeVisible: (runtimeId) =>
             selectedSessionIdRef.current === runtimeId,
+        });
+        unsubscribeMultitask = api.multitask.onState((event) => {
+          if (!disposed)
+            setMultitask((current) => ({
+              ...current,
+              [event.runtimeId]: { mode: event.mode, tasks: event.tasks },
+            }));
         });
         unsubscribe = api.chat.onEvent((event) => {
           if (disposed) {
@@ -1047,6 +1166,7 @@ export function App(): ReactElement {
     return () => {
       disposed = true;
       unsubscribe?.();
+      unsubscribeMultitask?.();
       eventBuffer?.dispose();
       if (bootstrapRefreshFrame !== undefined) {
         window.cancelAnimationFrame(bootstrapRefreshFrame);
@@ -1061,6 +1181,165 @@ export function App(): ReactElement {
       reconciliationRetryAttempts.current.clear();
     };
   }, []);
+
+  useEffect(() => {
+    return window.piDeck.workflows.onCanonicalEvent((event) => {
+      const run = event.run;
+      setWorkflowOccurrenceRuns((current) => {
+        const existing = current.find((item) => item.id === run.id);
+        // Persisted revisions make a delayed compatibility event harmless.
+        if (existing && existing.revision >= run.revision) return current;
+        return [run, ...current.filter((item) => item.id !== run.id)];
+      });
+    });
+  }, []);
+
+  useEffect(() => {
+    if (workflowView !== "occurrenceRun" || !workflowOccurrenceRunId) {
+      setWorkflowGraphSnapshot(undefined);
+      return;
+    }
+    let disposed = false;
+    const runId = workflowOccurrenceRunId;
+    const refetch = async () => {
+      const snapshot = await window.piDeck.workflows.graphGetSnapshot({
+        runId,
+      });
+      if (!disposed)
+        setWorkflowGraphSnapshot((current) =>
+          !current || snapshot.revision >= current.revision
+            ? snapshot
+            : current,
+        );
+    };
+    void window.piDeck.workflows
+      .graphSubscribe({ runId })
+      .then(async () => {
+        // An IPC subscribe can resolve after the view was closed; immediately
+        // revoke it rather than leaving an old-workspace stream registered.
+        if (disposed) {
+          await window.piDeck.workflows.graphUnsubscribe({ runId });
+          return;
+        }
+        await refetch();
+      })
+      .catch(() => undefined);
+    const unsubscribe = window.piDeck.workflows.onGraphEvent((event) => {
+      if (event.runId !== runId || disposed) return;
+      setWorkflowGraphSnapshot((current) => {
+        if (!current || event.revision === current.revision + 1)
+          return event.snapshot;
+        if (event.revision <= current.revision) return current;
+        // Never invent missed scheduler states; reconcile an observed gap.
+        void refetch();
+        return current;
+      });
+    });
+    return () => {
+      disposed = true;
+      unsubscribe();
+      void window.piDeck.workflows.graphUnsubscribe({ runId });
+    };
+  }, [workflowOccurrenceRunId, workflowView]);
+
+  useEffect(() => {
+    if (workflowView === undefined) return;
+    let disposed = false;
+    const workspaceId = currentWorkspace.id;
+    const refresh = async (): Promise<void> => {
+      setWorkflowLoading(true);
+      try {
+        const [definitions, canonicalRuns, legacyRuns] = await Promise.all([
+          window.piDeck.workflows.listWorkflows({ workspaceId }),
+          window.piDeck.workflows.canonicalListRuns({ workspaceId }),
+          window.piDeck.workflows.listRuns({ workspaceId }),
+        ]);
+        if (disposed) return;
+        setWorkflowDefinitions(definitions.map(({ workflow }) => workflow));
+        setWorkflowScopes(
+          Object.fromEntries(
+            definitions.map(({ workflow, scopeWorkspaceId }) => [
+              workflow.id,
+              scopeWorkspaceId,
+            ]),
+          ),
+        );
+        setWorkflowOccurrenceRuns(canonicalRuns);
+        setLegacyWorkflowRuns(legacyRuns.runs);
+        if (workflowOccurrenceRunId !== undefined) {
+          const run = await window.piDeck.workflows.canonicalGetRun({
+            runId: workflowOccurrenceRunId,
+          });
+          // The selected run or workspace may have changed while this request
+          // was in flight. A stale refresh must not navigate away from a newly
+          // opened live monitor.
+          if (disposed) return;
+          if (run.workspaceId !== workspaceId) {
+            setWorkflowOccurrenceRunId(undefined);
+            setWorkflowView("runs");
+          } else if (!disposed) {
+            setWorkflowOccurrenceRuns((current) => [
+              run,
+              ...current.filter((item) => item.id !== run.id),
+            ]);
+          }
+        }
+        if (legacyWorkflowRunId !== undefined) {
+          const run = await window.piDeck.workflows.getRun({
+            runId: legacyWorkflowRunId,
+          });
+          // Match the canonical-run guard above: cleanup can occur while the
+          // compatibility lookup is in flight.
+          if (disposed) return;
+          if (run.workspaceId !== workspaceId) {
+            setLegacyWorkflowRunId(undefined);
+            setWorkflowView("runs");
+          } else if (!disposed) {
+            setLegacyWorkflowRuns((current) => [
+              run,
+              ...current.filter((item) => item.id !== run.id),
+            ]);
+          }
+        }
+        setWorkflowError(undefined);
+      } catch (error) {
+        if (!disposed) {
+          setWorkflowError(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      } finally {
+        if (!disposed) setWorkflowLoading(false);
+      }
+    };
+    void refresh();
+    const unsubscribe = window.piDeck.workflows.onEvent(() => {
+      // Legacy scheduler events carry IDs only; reload the compatibility
+      // snapshots so active retries and human gates remain actionable.
+      void refresh();
+    });
+    return () => {
+      disposed = true;
+      unsubscribe();
+    };
+  }, [
+    currentWorkspace.id,
+    legacyWorkflowRunId,
+    workflowOccurrenceRunId,
+    workflowView,
+  ]);
+
+  useEffect(() => {
+    setWorkflowDefinitions([]);
+    setWorkflowScopes({});
+    setWorkflowOccurrenceRuns([]);
+    setLegacyWorkflowRuns([]);
+    setWorkflowOccurrenceRunId(undefined);
+    setLegacyWorkflowRunId(undefined);
+    setWorkflowBuilderDefinition(undefined);
+    setWorkflowError(undefined);
+    if (workflowView !== undefined) setWorkflowView("agentHome");
+  }, [currentWorkspace.id]);
 
   // A renderer reload/disposal loses all composer and retry references. Main
   // retains each selection only by its owner, so revoke every owner we created
@@ -1138,6 +1417,19 @@ export function App(): ReactElement {
           activeRealModel,
           projectModelConfiguration.thinkingLevels,
         );
+  const workflowAvailableThinkingLevels =
+    selectedSession.backendMode === "real" &&
+    (runtimeThinkingLevels.length > 0 ||
+      projectModelConfiguration.thinkingLevels.length > 0)
+      ? availableRealThinkingLevels
+      : [];
+  const workflowThinkingChoices = workflowThinkingChoicesFor(
+    workflowAvailableThinkingLevels,
+  );
+  const workflowModelChoices = workflowModelChoicesFor(
+    realModels,
+    workflowAvailableThinkingLevels,
+  );
   const realCommands = selectedRealCapabilities?.commands ?? [];
   const composerDraft = composerDraftForSession(
     composerDrafts,
@@ -1146,6 +1438,9 @@ export function App(): ReactElement {
   const draft = composerDraft.text;
   const attachments = composerDraft.attachments;
   const slashOpen = composerDraft.slashOpen;
+  const multitaskState = selectedSession.runtimeBacked
+    ? multitask[selectedSession.id]
+    : undefined;
   const isWorking = selectedSession.status === "working";
   const isBusy = isSessionBusy(selectedSession);
   const isResuming = selectedSession.status === "reconnecting";
@@ -1178,6 +1473,47 @@ export function App(): ReactElement {
   );
   const showStarterPage =
     selectedSession.timeline.length === 0 && selectedSession.status === "idle";
+  const selectedWorkflowOccurrenceRun = workflowOccurrenceRunId
+    ? workflowOccurrenceRuns.find((run) => run.id === workflowOccurrenceRunId)
+    : undefined;
+  const selectedLegacyWorkflowRun = legacyWorkflowRunId
+    ? legacyWorkflowRuns.find((run) => run.id === legacyWorkflowRunId)
+    : undefined;
+  const workflowScopeChoices = useMemo(
+    () =>
+      activeWorkflowScopeChoices(
+        currentWorkspace,
+        workspaces,
+        archivedWorkspaces,
+      ),
+    [archivedWorkspaces, currentWorkspace, workspaces],
+  );
+
+  const agentWorkflowDefinitions = useMemo(
+    () => agentWorkflowsForHome(workflowDefinitions),
+    [workflowDefinitions],
+  );
+  useEffect(() => {
+    if (
+      !selectedSession.runtimeBacked ||
+      multitask[selectedSession.id] !== undefined
+    )
+      return;
+    void window.piDeck.multitask
+      .getMode({ runtimeId: selectedSession.id })
+      .then((state) =>
+        setMultitask((current) => ({
+          ...current,
+          // A status event received while the request was in flight is newer
+          // than this snapshot; otherwise hydrate a missed event from it.
+          [state.runtimeId]: current[state.runtimeId] ?? {
+            mode: state.mode,
+            tasks: state.tasks,
+          },
+        })),
+      )
+      .catch(() => undefined);
+  }, [multitask, selectedSession.id, selectedSession.runtimeBacked]);
 
   useEffect(() => {
     const compactLayout = window.matchMedia("(max-width: 760px)");
@@ -1595,16 +1931,213 @@ export function App(): ReactElement {
       setActivityInboxVisible(false);
       return;
     }
+    setWorkflowView(undefined);
     setActivityScope({ type: "all" });
     setActivityInboxVisible(true);
   }
 
+  function handleOpenWorkflows(): void {
+    setActivityInboxVisible(false);
+    setWorkflowError(undefined);
+    setWorkflowBuilderDefinition(undefined);
+    setWorkflowView("agentHome");
+  }
+
   function handleOpenWorkspaceActivity(workspaceId: string): void {
+    setWorkflowView(undefined);
     setActivityScope({ type: "workspace", workspaceId });
     setActivityInboxVisible(true);
   }
 
+  async function handleSaveAgentWorkflow(
+    workflow: WorkflowDefinition,
+    scopeWorkspaceId: string | null,
+  ): Promise<void> {
+    try {
+      const workspaceId = currentWorkspaceRef.current.id;
+      const saved = workflowBuilderDefinition
+        ? await window.piDeck.workflows.updateWorkflow({
+            workspaceId,
+            scopeWorkspaceId,
+            workflow,
+          })
+        : await window.piDeck.workflows.createWorkflow({
+            workspaceId,
+            scopeWorkspaceId,
+            workflow,
+          });
+      setWorkflowDefinitions((current) =>
+        saved.scopeWorkspaceId === null ||
+        saved.scopeWorkspaceId === workspaceId
+          ? [
+              saved.workflow,
+              ...current.filter(
+                (candidate) => candidate.id !== saved.workflow.id,
+              ),
+            ]
+          : current.filter((candidate) => candidate.id !== saved.workflow.id),
+      );
+      setWorkflowScopes((current) => ({
+        ...current,
+        [saved.workflow.id]: saved.scopeWorkspaceId,
+      }));
+      setWorkflowBuilderDefinition(undefined);
+      setWorkflowView("workflows");
+      setWorkflowError(undefined);
+      setUiMessage(`Saved ${workflow.name}.`);
+    } catch (error) {
+      setWorkflowError(error instanceof Error ? error.message : String(error));
+      throw error;
+    }
+  }
+
+  const updateLegacyWorkflowRun = (run: WorkflowRun): void => {
+    setLegacyWorkflowRuns((current) => [
+      run,
+      ...current.filter((item) => item.id !== run.id),
+    ]);
+  };
+
+  async function handleStopLegacyWorkflow(): Promise<void> {
+    if (!legacyWorkflowRunId) return;
+    updateLegacyWorkflowRun(
+      await window.piDeck.workflows.stopRun({ runId: legacyWorkflowRunId }),
+    );
+  }
+  async function handleRetryLegacyWorkflowStep(
+    step: WorkflowStepRun,
+  ): Promise<void> {
+    if (!legacyWorkflowRunId) return;
+    updateLegacyWorkflowRun(
+      await window.piDeck.workflows.retryStep({
+        runId: legacyWorkflowRunId,
+        stepRunId: step.id,
+      }),
+    );
+  }
+  async function handleRetryLegacyWorkflowCondition(
+    transition: WorkflowTransitionRun,
+  ): Promise<void> {
+    if (!legacyWorkflowRunId) return;
+    updateLegacyWorkflowRun(
+      await window.piDeck.workflows.retryCondition({
+        runId: legacyWorkflowRunId,
+        transitionRunId: transition.id,
+      }),
+    );
+  }
+  async function handleOverrideLegacyWorkflowCondition(
+    transition: WorkflowTransitionRun,
+    decision: "yes" | "no",
+    rationale: string,
+  ): Promise<void> {
+    if (!legacyWorkflowRunId) return;
+    updateLegacyWorkflowRun(
+      await window.piDeck.workflows.overrideCondition({
+        runId: legacyWorkflowRunId,
+        transitionRunId: transition.id,
+        decision,
+        rationale,
+      }),
+    );
+  }
+  async function handleApproveLegacyWorkflowGate(
+    step: WorkflowStepRun,
+    action: "approve" | "skip" | "stop",
+  ): Promise<void> {
+    if (!legacyWorkflowRunId) return;
+    updateLegacyWorkflowRun(
+      await window.piDeck.workflows.approveGate({
+        runId: legacyWorkflowRunId,
+        stepRunId: step.id,
+        action,
+      }),
+    );
+  }
+
+  async function handleOpenWorkflowSession(sessionReference: {
+    runtimeId?: string | undefined;
+    sessionFile?: string | undefined;
+  }): Promise<void> {
+    const runtimeSession = sessionReference.runtimeId
+      ? sessionsRef.current.find(
+          (session) => session.id === sessionReference.runtimeId,
+        )
+      : undefined;
+    if (runtimeSession !== undefined) {
+      handleSelectSession(runtimeSession.id);
+      return;
+    }
+    if (sessionReference.runtimeId !== undefined) {
+      try {
+        const snapshot = await window.piDeck.chat.getSnapshot({
+          runtimeId: sessionReference.runtimeId,
+        });
+        const session = sessionFromSnapshot(snapshot);
+        setSessions((current) => upsertRuntimeSession(current, snapshot));
+        setSelectedSessionId(session.id);
+        setWorkflowView(undefined);
+        return;
+      } catch (error) {
+        if (sessionReference.sessionFile === undefined) {
+          setUiMessage(
+            `Could not open the active Pi session: ${error instanceof Error ? error.message : String(error)}. This workflow occurrence has no saved session file to reopen.`,
+          );
+          return;
+        }
+      }
+    }
+    const savedSession = sessionReference.sessionFile
+      ? sessionsRef.current.find(
+          (session) => session.sessionFile === sessionReference.sessionFile,
+        )
+      : undefined;
+    if (savedSession !== undefined) {
+      handleSelectSession(savedSession.id);
+      return;
+    }
+    if (sessionReference.sessionFile === undefined) {
+      setUiMessage(
+        "This workflow occurrence has no active Pi runtime or saved session file to open.",
+      );
+      return;
+    }
+    try {
+      const snapshot = await window.piDeck.chat.resumeSession({
+        workspaceId: currentWorkspaceRef.current.id,
+        sessionFile: sessionReference.sessionFile,
+      });
+      // Keep the runtime returned by resume attached to this row. Replacing it
+      // with a saved-session summary loses that runtime id, so its expected
+      // SIGTERM/143 close is later applied as an unrelated backend error.
+      const session = sessionFromSnapshot(snapshot);
+      setSessions((current) => [
+        ...current.filter(
+          (candidate) =>
+            candidate.id !== session.id &&
+            candidate.sessionFile !== session.sessionFile,
+        ),
+        session,
+      ]);
+      setSelectedSessionId(session.id);
+      setWorkflowView(undefined);
+    } catch (error) {
+      setUiMessage(
+        `Could not open the saved Pi session: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  async function handleOpenWorkflowOccurrence(
+    occurrence: CanonicalNodeOccurrence,
+  ): Promise<void> {
+    await handleOpenWorkflowSession(
+      workflowOccurrenceSessionReference(occurrence),
+    );
+  }
+
   function handleSelectSession(sessionId: string): void {
+    setWorkflowView(undefined);
     setActivityInboxVisible(false);
     const session = sessions.find((item) => item.id === sessionId);
     if (session?.isResuming === true) {
@@ -3605,6 +4138,29 @@ export function App(): ReactElement {
       realThinkingLevels={availableRealThinkingLevels}
       selectedSession={selectedSession}
       allowAttachments={true}
+      multitaskMode={multitaskState?.mode}
+      multitaskTasks={multitaskState?.tasks ?? []}
+      onToggleMultitask={() => {
+        if (!selectedSession.runtimeBacked) return;
+        const mode =
+          multitaskState?.mode === "parallel" ? "sequential" : "parallel";
+        void window.piDeck.multitask
+          .updateMode({ runtimeId: selectedSession.id, mode })
+          .then((state) =>
+            setMultitask((current) => ({
+              ...current,
+              [state.runtimeId]: current[state.runtimeId] ?? {
+                mode: state.mode,
+                tasks: state.tasks,
+              },
+            })),
+          )
+          .catch((error) =>
+            setComposerError(
+              `Multitasking mode unavailable: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          );
+      }}
       onChange={handleDraftChange}
       onKeyDown={handleComposerKeyDown}
       onDismissSlashPicker={handleDismissSlashPicker}
@@ -3643,9 +4199,15 @@ export function App(): ReactElement {
           showArchived={showArchived}
           composerDrafts={composerDrafts}
           activityInboxVisible={activityInboxVisible}
+          workflowView={
+            workflowView === "occurrenceRun" || workflowView === "legacyRun"
+              ? "runs"
+              : workflowView
+          }
           activityActionableCount={activityInboxModel.actionableCount}
           onSelect={handleSelectSession}
           onOpenActivity={handleToggleActivity}
+          onOpenWorkflows={handleOpenWorkflows}
           onOpenWorkspaceActivity={handleOpenWorkspaceActivity}
           onSelectWorkspace={(workspace) =>
             void handleSelectWorkspace(workspace)
@@ -3684,7 +4246,11 @@ export function App(): ReactElement {
 
       <section
         className="workspace"
-        aria-label="Pi Deck chat workspace"
+        aria-label={
+          workflowView !== undefined
+            ? "Agent Workflows"
+            : "Pi Deck chat workspace"
+        }
         data-load-state={loadState.state}
       >
         <AppHeader
@@ -3725,7 +4291,167 @@ export function App(): ReactElement {
           {uiMessage}
         </div>
 
-        {activityInboxVisible ? (
+        {workflowView !== undefined ? (
+          <div className="workflow-surface">
+            {workflowError ? (
+              <p className="workflow-error" role="alert">
+                {workflowError}
+              </p>
+            ) : null}
+            <Suspense
+              fallback={
+                <div
+                  className="workflow-loading"
+                  role="status"
+                  aria-live="polite"
+                >
+                  Loading Agent Workflows…
+                </div>
+              }
+            >
+              {workflowLoading && workflowDefinitions.length === 0 ? (
+                <div
+                  className="workflow-loading"
+                  role="status"
+                  aria-live="polite"
+                >
+                  Loading Agent Workflows…
+                </div>
+              ) : workflowView === "builder" ? (
+                <AgentWorkflowBuilder
+                  key={`${currentWorkspace.id}:${workflowBuilderDefinition?.id ?? "new-agent-workflow"}`}
+                  {...(workflowBuilderDefinition === undefined
+                    ? {}
+                    : { initialDefinition: workflowBuilderDefinition })}
+                  modelChoices={workflowModelChoices}
+                  initialScopeWorkspaceId={
+                    workflowBuilderDefinition === undefined
+                      ? null
+                      : (workflowScopes[workflowBuilderDefinition.id] ?? null)
+                  }
+                  workspaceChoices={workflowScopeChoices}
+                  thinkingChoices={workflowThinkingChoices}
+                  onSave={handleSaveAgentWorkflow}
+                  onCancel={() => {
+                    setWorkflowBuilderDefinition(undefined);
+                    setWorkflowView("workflows");
+                  }}
+                />
+              ) : workflowView === "occurrenceRun" &&
+                selectedWorkflowOccurrenceRun !== undefined ? (
+                <WorkflowOccurrenceRunView
+                  run={selectedWorkflowOccurrenceRun}
+                  graphSnapshot={
+                    workflowGraphSnapshot?.runId ===
+                    selectedWorkflowOccurrenceRun.id
+                      ? workflowGraphSnapshot
+                      : undefined
+                  }
+                  onBack={() => {
+                    setWorkflowOccurrenceRunId(undefined);
+                    setWorkflowView("runs");
+                  }}
+                  onStop={async () => {
+                    const run = await window.piDeck.workflows.canonicalStopRun({
+                      runId: selectedWorkflowOccurrenceRun.id,
+                    });
+                    setWorkflowOccurrenceRuns((current) =>
+                      current.map((item) => (item.id === run.id ? run : item)),
+                    );
+                  }}
+                  onRetry={async (occurrenceId) => {
+                    const run =
+                      await window.piDeck.workflows.canonicalRetryOccurrence({
+                        runId: selectedWorkflowOccurrenceRun.id,
+                        occurrenceId,
+                      });
+                    setWorkflowOccurrenceRuns((current) =>
+                      current.map((item) => (item.id === run.id ? run : item)),
+                    );
+                  }}
+                  onAnswer={async (occurrenceId, value) => {
+                    const run =
+                      await window.piDeck.workflows.canonicalAnswerHuman({
+                        runId: selectedWorkflowOccurrenceRun.id,
+                        occurrenceId,
+                        value,
+                      });
+                    setWorkflowOccurrenceRuns((current) =>
+                      current.map((item) => (item.id === run.id ? run : item)),
+                    );
+                  }}
+                  onOpenSession={(occurrence) =>
+                    void handleOpenWorkflowOccurrence(occurrence)
+                  }
+                />
+              ) : workflowView === "legacyRun" &&
+                selectedLegacyWorkflowRun !== undefined ? (
+                <LegacyWorkflowRunCompatibility
+                  run={selectedLegacyWorkflowRun}
+                  onBack={() => {
+                    setLegacyWorkflowRunId(undefined);
+                    setWorkflowView("runs");
+                  }}
+                  onStop={handleStopLegacyWorkflow}
+                  onRetryStep={handleRetryLegacyWorkflowStep}
+                  onRetryCondition={handleRetryLegacyWorkflowCondition}
+                  onOverrideCondition={handleOverrideLegacyWorkflowCondition}
+                  onApproveGate={handleApproveLegacyWorkflowGate}
+                  onOpenSession={(step) => void handleOpenWorkflowSession(step)}
+                />
+              ) : workflowView === "agentHome" ||
+                workflowView === "workflows" ||
+                workflowView === "runs" ? (
+                <AgentWorkflowHome
+                  view={
+                    workflowView === "workflows"
+                      ? "workflows"
+                      : workflowView === "runs"
+                        ? "runs"
+                        : "overview"
+                  }
+                  workflows={agentWorkflowDefinitions}
+                  runs={workflowOccurrenceRuns}
+                  legacyRuns={legacyWorkflowRuns}
+                  onShowWorkflows={() => setWorkflowView("workflows")}
+                  onShowRuns={() => setWorkflowView("runs")}
+                  onBack={() => setWorkflowView("agentHome")}
+                  onOpenRun={(run) => {
+                    setWorkflowOccurrenceRunId(run.id);
+                    setWorkflowView("occurrenceRun");
+                  }}
+                  onOpenLegacyRun={(run) => {
+                    setLegacyWorkflowRunId(run.id);
+                    setWorkflowView("legacyRun");
+                  }}
+                  onCreate={() => {
+                    setWorkflowBuilderDefinition(undefined);
+                    setWorkflowView("builder");
+                  }}
+                  onEdit={(workflow) => {
+                    setWorkflowBuilderDefinition(workflow);
+                    setWorkflowView("builder");
+                  }}
+                  onStart={async (workflow, inputs) => {
+                    const run = await window.piDeck.workflows.canonicalStartRun(
+                      {
+                        workflowId: workflow.id,
+                        workspaceId: currentWorkspace.id,
+                        inputs,
+                      },
+                    );
+                    setWorkflowOccurrenceRuns((current) => [
+                      run,
+                      ...current.filter((item) => item.id !== run.id),
+                    ]);
+                    setWorkflowOccurrenceRunId(run.id);
+                    setWorkflowView("occurrenceRun");
+                  }}
+                />
+              ) : null}
+            </Suspense>
+          </div>
+        ) : activityInboxVisible ? (
           <ActivityInbox
             model={activityInboxModel}
             scope={activityScope}
@@ -4343,6 +5069,49 @@ function modelLabelForChatModel(model: ChatModelSummary): string {
   return model.provider ? `${model.provider} / ${model.id}` : model.id;
 }
 
+function workflowModelChoicesFor(
+  models: readonly ChatModelSummary[],
+  fallbackThinkingLevels: readonly string[] = [],
+): WorkflowModelChoice[] {
+  if (models.length === 0) {
+    return modelOptions.map((model) => ({
+      provider: model.provider,
+      id: model.id,
+      label: model.displayName,
+      ...(model.unavailableReason !== undefined
+        ? { disabled: true, note: model.unavailableReason }
+        : {}),
+    }));
+  }
+  return models.map((model) => ({
+    provider: model.provider ?? "",
+    id: model.id,
+    label: model.name ?? modelLabelForChatModel(model),
+    thinkingChoices: workflowThinkingChoicesFor(
+      thinkingLevelsForModel(model, [...fallbackThinkingLevels]),
+    ),
+  }));
+}
+
+function workflowThinkingChoicesFor(
+  levels: readonly string[],
+): WorkflowThinkingChoice[] {
+  if (levels.length === 0) {
+    return thinkingOptions.map((option) => ({
+      id: option.id,
+      label: option.label,
+      ...(option.supported ? {} : { disabled: true }),
+      ...(option.note !== undefined ? { note: option.note } : {}),
+    }));
+  }
+  return levels.map((level) => ({
+    id: level,
+    label:
+      thinkingOptions.find((option) => option.id === level)?.label ??
+      level.slice(0, 1).toUpperCase() + level.slice(1),
+  }));
+}
+
 function workspaceFromLegacyProject(project: ProjectRef): WorkspaceRef {
   return {
     id: project.id,
@@ -4351,6 +5120,12 @@ function workspaceFromLegacyProject(project: ProjectRef): WorkspaceRef {
     defaultProject: project,
     lastOpenedAt: project.lastOpenedAt,
   };
+}
+
+function agentWorkflowsForHome(
+  definitions: readonly WorkflowDefinition[],
+): WorkflowDefinition[] {
+  return [...definitions];
 }
 
 function defaultWorkingDirectory(workspace: WorkspaceRef): string | undefined {
@@ -4463,6 +5238,17 @@ function workspaceIdFromSnapshot(snapshot: ChatSnapshot): string {
   return snapshot.projectId ?? "unassigned-workspace";
 }
 
+function upsertRuntimeSession(
+  sessions: readonly SessionViewModel[],
+  snapshot: ChatSnapshot,
+): SessionViewModel[] {
+  const session = sessionFromSnapshot(snapshot);
+  return [
+    ...sessions.filter((candidate) => candidate.id !== session.id),
+    session,
+  ];
+}
+
 function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
   const modelLabel = modelLabelFromState(snapshot.state);
   const { usageStats, usageByMessageId } = usageFromMessages(
@@ -4556,9 +5342,10 @@ function titleFromSnapshot(snapshot: ChatSnapshot): string {
     return summarizeTitle(stateTitle, 64);
   }
 
-  const firstUserPrompt = snapshot.messages.find(
-    (message) => message.role === "user" && message.content?.trim(),
-  )?.content;
+  const firstUserPrompt = snapshot.messages
+    .filter((message) => message.role === "user")
+    .map((message) => extractTextContent(message.content))
+    .find((content) => content?.trim());
   if (firstUserPrompt !== undefined) {
     return summarizeTitle(firstUserPrompt, 64);
   }
@@ -4844,7 +5631,10 @@ function timelineAttachmentsFromDrafts(
 
 function timelineFromMessages(messages: ChatMessage[]): TimelineItem[] {
   const timeline = messages.flatMap((message, index): TimelineItem[] => {
-    const content = typeof message.content === "string" ? message.content : "";
+    // Real Pi persists and returns content parts (for example,
+    // [{ type: "text", text: "..." }]) rather than a plain string. Snapshots
+    // can reach the renderer before IPC normalization, so hydrate both forms.
+    const content = extractTextContent(message.content) ?? "";
     const timestamp =
       typeof message.createdAt === "number"
         ? message.createdAt
@@ -5208,7 +5998,22 @@ function reduceRuntimeEvent(
         tone: getString(event, "level") === "error" ? "error" : "info",
         content: getString(event, "message") ?? "Backend diagnostic event",
       });
-    case "worker_exit":
+    case "worker_exit": {
+      const intentional = getUnknown(event, "intentional") === true;
+      // SIGTERM is expected when Pi Deck detaches a completed session. Shell
+      // launchers may expose it as code 143; preserve its durable file as a
+      // resumable row rather than presenting a backend failure.
+      if (intentional && session.sessionFile !== undefined) {
+        return {
+          ...session,
+          status: "idle",
+          baseState: "idle",
+          awaitingAgentEnd: false,
+          runtimeBacked: false,
+          resumeBacked: true,
+          subtitle: "Saved · click to resume",
+        };
+      }
       // An intentional close already detached this runtime and preserved the
       // saved-session row. Its late process-exit event must not turn that row
       // into an error.
@@ -5232,6 +6037,7 @@ function reduceRuntimeEvent(
           content: `${backendLabel(session)} worker exited (code=${String(getUnknown(event, "code") ?? "null")}).`,
         },
       );
+    }
     default:
       return session;
   }
@@ -6002,9 +6808,18 @@ function SessionSidebar(props: {
   showArchived: boolean;
   composerDrafts: ComposerDraftsBySession;
   activityInboxVisible: boolean;
+  workflowView:
+    | "home"
+    | "agentHome"
+    | "workflows"
+    | "runs"
+    | "builder"
+    | "run"
+    | undefined;
   activityActionableCount: number;
   onSelect(sessionId: string): void;
   onOpenActivity(): void;
+  onOpenWorkflows(): void;
   onOpenWorkspaceActivity(workspaceId: string): void;
   onSelectWorkspace(workspace: WorkspaceRef): void;
   onRenameWorkspace(workspace: WorkspaceRef): void;
@@ -6300,6 +7115,16 @@ function SessionSidebar(props: {
             {props.activityActionableCount}
           </span>
         ) : null}
+      </Button>
+      <Button
+        className={`sidebar-new-chat workflow-inbox-button ${
+          props.workflowView !== undefined ? "active" : ""
+        }`}
+        aria-pressed={props.workflowView !== undefined}
+        onClick={props.onOpenWorkflows}
+      >
+        <ListPlus aria-hidden="true" size={16} strokeWidth={1.75} />
+        Agent Workflows
       </Button>
 
       {activeWork.length > 0 ? (
@@ -8194,289 +9019,6 @@ function InlineTokens(props: { tokens: InlineToken[] }): ReactElement {
 
 type MenuNavigationKey = "ArrowDown" | "ArrowUp" | "Home" | "End";
 
-function nextMenuItemIndex(
-  key: MenuNavigationKey,
-  currentIndex: number,
-  itemCount: number,
-): number | undefined {
-  if (itemCount === 0) {
-    return undefined;
-  }
-  if (key === "Home") {
-    return 0;
-  }
-  if (key === "End") {
-    return itemCount - 1;
-  }
-  if (key === "ArrowDown") {
-    return currentIndex < 0 ? 0 : (currentIndex + 1) % itemCount;
-  }
-  return currentIndex <= 0 ? itemCount - 1 : currentIndex - 1;
-}
-
-function directMenuItems(menu: HTMLElement | null): HTMLElement[] {
-  if (!menu) {
-    return [];
-  }
-  return Array.from(menu.children).filter(
-    (element): element is HTMLElement =>
-      element instanceof HTMLElement &&
-      element.getAttribute("role")?.startsWith("menuitem") === true &&
-      !element.matches(":disabled, [aria-disabled='true']"),
-  );
-}
-
-function focusMenuItem(
-  menu: HTMLElement | null,
-  currentTarget: EventTarget | null,
-  key: MenuNavigationKey,
-): void {
-  const items = directMenuItems(menu);
-  if (items.length === 0) {
-    return;
-  }
-  const currentIndex = items.indexOf(currentTarget as HTMLElement);
-  const nextIndex = nextMenuItemIndex(key, currentIndex, items.length);
-  if (nextIndex !== undefined) {
-    items[nextIndex]?.focus();
-  }
-}
-
-export function PiModelThinkingMenu(props: {
-  models: ChatModelSummary[];
-  selectedModel: ChatModelSummary | undefined;
-  thinkingLevels: string[];
-  selectedThinking: string | undefined;
-  disabled: boolean;
-  onSelectModel(provider: string, modelId: string): void;
-  onSelectThinking(level: string): void;
-}): ReactElement {
-  const [open, setOpen] = useState(false);
-  const [modelMenuOpen, setModelMenuOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const popoverRef = useRef<HTMLDivElement>(null);
-  const modelTriggerRef = useRef<HTMLButtonElement>(null);
-  const modelMenuRef = useRef<HTMLDivElement>(null);
-  const focusModelMenuOnOpenRef = useRef(false);
-
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-    const closeOnOutsideClick = (event: MouseEvent): void => {
-      if (!rootRef.current?.contains(event.target as Node)) {
-        setOpen(false);
-        setModelMenuOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", closeOnOutsideClick);
-    return () => document.removeEventListener("mousedown", closeOnOutsideClick);
-  }, [open]);
-
-  useEffect(() => {
-    if (open) {
-      directMenuItems(popoverRef.current)[0]?.focus();
-    }
-  }, [open]);
-
-  useEffect(() => {
-    if (!modelMenuOpen || !focusModelMenuOnOpenRef.current) {
-      return;
-    }
-    focusModelMenuOnOpenRef.current = false;
-    directMenuItems(modelMenuRef.current)[0]?.focus();
-  }, [modelMenuOpen]);
-
-  function close(restoreFocus = false): void {
-    setOpen(false);
-    setModelMenuOpen(false);
-    if (restoreFocus) {
-      triggerRef.current?.focus();
-    }
-  }
-
-  function openModelMenu(focusFirstItem: boolean): void {
-    if (focusFirstItem && modelMenuOpen) {
-      directMenuItems(modelMenuRef.current)[0]?.focus();
-      return;
-    }
-    focusModelMenuOnOpenRef.current = focusFirstItem;
-    setModelMenuOpen(true);
-  }
-
-  const modelName =
-    props.selectedModel?.name ?? props.selectedModel?.id ?? "Model";
-  const thinkingName = props.selectedThinking ?? "Thinking";
-
-  return (
-    <div
-      className="pi-configuration-menu"
-      ref={rootRef}
-      onKeyDown={(event) => {
-        if (event.key === "Escape") {
-          event.preventDefault();
-          if (modelMenuOpen) {
-            setModelMenuOpen(false);
-            modelTriggerRef.current?.focus();
-          } else {
-            close(true);
-          }
-          return;
-        }
-        if (
-          event.key === "ArrowRight" &&
-          event.target === modelTriggerRef.current
-        ) {
-          event.preventDefault();
-          openModelMenu(true);
-          return;
-        }
-        if (
-          event.key === "ArrowLeft" &&
-          (event.target as HTMLElement).closest(".pi-model-submenu")
-        ) {
-          event.preventDefault();
-          setModelMenuOpen(false);
-          modelTriggerRef.current?.focus();
-          return;
-        }
-        if (
-          event.key === "ArrowDown" ||
-          event.key === "ArrowUp" ||
-          event.key === "Home" ||
-          event.key === "End"
-        ) {
-          const target = event.target as HTMLElement;
-          const menu = target.closest<HTMLElement>("[role='menu']");
-          if (menu === popoverRef.current || menu === modelMenuRef.current) {
-            event.preventDefault();
-            focusMenuItem(menu, event.target, event.key);
-          }
-        }
-      }}
-    >
-      <Button
-        ref={triggerRef}
-        aria-expanded={open}
-        aria-haspopup="menu"
-        aria-label={`Model and thinking. Current model: ${modelName}. Current thinking: ${thinkingName}.`}
-        className="pi-configuration-trigger"
-        data-model-id={props.selectedModel?.id}
-        data-model-provider={props.selectedModel?.provider}
-        data-thinking-level={props.selectedThinking}
-        disabled={props.disabled}
-        size="sm"
-        onClick={() => {
-          setOpen((value) => !value);
-          setModelMenuOpen(false);
-        }}
-      >
-        <span>{thinkingName}</span>
-        <ChevronDown aria-hidden="true" size={13} strokeWidth={1.75} />
-      </Button>
-      {open ? (
-        <div
-          aria-label="Model and thinking options"
-          className="pi-configuration-popover"
-          ref={popoverRef}
-          role="menu"
-        >
-          <span className="pi-configuration-heading">Thinking</span>
-          {props.thinkingLevels.map((level) => {
-            const selected = level === props.selectedThinking;
-            return (
-              <Button
-                aria-checked={selected}
-                className="pi-configuration-option"
-                data-thinking-level={level}
-                key={level}
-                role="menuitemradio"
-                size="sm"
-                variant="menuItem"
-                onClick={() => {
-                  close(true);
-                  if (!selected) {
-                    props.onSelectThinking(level);
-                  }
-                }}
-              >
-                <span>{level}</span>
-                <Check
-                  aria-hidden="true"
-                  size={14}
-                  strokeWidth={1.75}
-                  visibility={selected ? "visible" : "hidden"}
-                />
-              </Button>
-            );
-          })}
-          {props.models.length > 0 ? (
-            <>
-              <div className="pi-configuration-divider" />
-              <Button
-                ref={modelTriggerRef}
-                aria-expanded={modelMenuOpen}
-                aria-haspopup="menu"
-                className="pi-configuration-option model"
-                role="menuitem"
-                size="sm"
-                variant="menuItem"
-                onClick={() => openModelMenu(true)}
-                onMouseEnter={() => openModelMenu(false)}
-              >
-                <span title={modelName}>{modelName}</span>
-                <ChevronRight aria-hidden="true" size={14} strokeWidth={1.75} />
-              </Button>
-              {modelMenuOpen ? (
-                <div
-                  aria-label="Available Pi models"
-                  className="pi-model-submenu"
-                  ref={modelMenuRef}
-                  role="menu"
-                >
-                  {props.models.map((model) => {
-                    const selected =
-                      model.id === props.selectedModel?.id &&
-                      model.provider === props.selectedModel?.provider;
-                    const name = model.name ?? model.id;
-                    return (
-                      <Button
-                        aria-checked={selected}
-                        className="pi-configuration-option model-choice"
-                        data-model-id={model.id}
-                        data-model-provider={model.provider}
-                        key={`${model.provider ?? ""}/${model.id}`}
-                        role="menuitemradio"
-                        size="sm"
-                        variant="menuItem"
-                        onClick={() => {
-                          close(true);
-                          if (!selected && model.provider) {
-                            props.onSelectModel(model.provider, model.id);
-                          }
-                        }}
-                      >
-                        <span title={name}>{name}</span>
-                        <Check
-                          aria-hidden="true"
-                          size={14}
-                          strokeWidth={1.75}
-                          visibility={selected ? "visible" : "hidden"}
-                        />
-                      </Button>
-                    );
-                  })}
-                </div>
-              ) : null}
-            </>
-          ) : null}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 function Composer(props: {
   value: string;
   isWorking: boolean;
@@ -8494,6 +9036,9 @@ function Composer(props: {
   realThinkingLevels: string[];
   selectedSession: SessionViewModel;
   allowAttachments: boolean;
+  multitaskMode: "sequential" | "parallel" | undefined;
+  multitaskTasks: MultitaskTaskSummary[];
+  onToggleMultitask(): void;
   onChange(value: string): void;
   onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void;
   onDismissSlashPicker(): void;
@@ -8669,6 +9214,21 @@ function Composer(props: {
               label="Add attachments"
               disabled={isActionPending}
               onClick={props.onPickAttachments}
+            />
+          ) : null}
+          {props.multitaskMode !== undefined ? (
+            <MultitaskControl
+              tasks={props.multitaskTasks}
+              enabled={!isActionPending}
+              onClick={props.onToggleMultitask}
+              aria-label={`Turn ${props.multitaskMode === "parallel" ? "off" : "on"} multitasking`}
+              title={`Turn ${props.multitaskMode === "parallel" ? "off" : "on"} multitasking`}
+            />
+          ) : props.selectedSession.runtimeBacked ? (
+            <MultitaskControl
+              tasks={[]}
+              enabled={false}
+              title="Loading multitasking mode"
             />
           ) : null}
           {props.selectedSession.backendMode === "real" ? (
@@ -9606,9 +10166,24 @@ export function findKnownExtensionCommand(
   )?.name;
 }
 
+function workflowOccurrenceSessionReference(
+  occurrence: CanonicalNodeOccurrence,
+): { runtimeId?: string | undefined; sessionFile?: string | undefined } {
+  return {
+    ...(occurrence.runtimeId === undefined
+      ? {}
+      : { runtimeId: occurrence.runtimeId }),
+    ...(occurrence.sessionFile === undefined
+      ? {}
+      : { sessionFile: occurrence.sessionFile }),
+  };
+}
+
 export const __rendererTestHooks = {
   reduceRuntimeEvent,
   sessionFromSnapshot,
+  workflowOccurrenceSessionReference,
+  upsertRuntimeSession,
   mergeSessionUsageFromSnapshot,
   composerDraftForSession,
   updateComposerDraft,
@@ -9658,6 +10233,10 @@ export const __rendererTestHooks = {
   workingDirectoryForSession,
   runtimeCapabilitiesFor,
   updateRuntimeCapabilities,
+  workflowModelChoicesFor,
+  workflowThinkingChoicesFor,
+  agentWorkflowsForHome,
+  activeWorkflowScopeChoices,
   thinkingLevelsForModel,
   clampThinkingLevel,
   applyPiDefaultsToDraftSessions,

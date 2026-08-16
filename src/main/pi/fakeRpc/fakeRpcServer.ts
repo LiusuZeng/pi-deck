@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type {
@@ -17,6 +18,7 @@ type PromptScenario =
   | "retry"
   | "extension-ui"
   | "error"
+  | "delegate"
   | "all";
 
 interface FakeOptions {
@@ -33,6 +35,8 @@ interface FakeOptions {
   productionShaped: boolean;
   noSession: boolean;
   sessionFile?: string;
+  workflowDecisions: boolean[];
+  workflowDecisionStateFile?: string;
 }
 
 type FakeCommandRecord = JsonObject & {
@@ -56,6 +60,7 @@ function parseOptions(argv: string[]): FakeOptions {
     extraModel: false,
     productionShaped: false,
     noSession: false,
+    workflowDecisions: [],
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -106,6 +111,22 @@ function parseOptions(argv: string[]): FakeOptions {
         options.sessionFile = sessionFile;
       }
       index += 1;
+    } else if (arg === "--workflow-decisions") {
+      const decisions = (argv[index + 1] ?? "").split(",");
+      if (
+        decisions.every(
+          (decision) => decision === "true" || decision === "false",
+        )
+      ) {
+        options.workflowDecisions = decisions.map(
+          (decision) => decision === "true",
+        );
+      }
+      index += 1;
+    } else if (arg === "--workflow-decision-state-file") {
+      const stateFile = argv[index + 1];
+      if (stateFile) options.workflowDecisionStateFile = stateFile;
+      index += 1;
     }
   }
 
@@ -121,6 +142,7 @@ function isPromptScenario(value: string): value is PromptScenario {
     "retry",
     "extension-ui",
     "error",
+    "delegate",
     "all",
   ].includes(value);
 }
@@ -167,6 +189,7 @@ class FakeRpcServer {
   private buffer = "";
   private firstCommandSeen = false;
   private promptCounter = 0;
+  private workflowDecisionIndex = 0;
   private currentTimers: NodeJS.Timeout[] = [];
   private agentActive = false;
   private currentModel = "fake-model";
@@ -184,6 +207,55 @@ class FakeRpcServer {
     | undefined;
   private readonly steering: string[] = [];
   private readonly followUp: string[] = [];
+
+  /** Deterministic test-only parent-extension stand-in for bridge E2E tests. */
+  private exerciseDelegationBridge(task: string): void {
+    const endpoint = process.env.DECK_DELEGATE_ENDPOINT;
+    const token = process.env.DECK_DELEGATE_CAPABILITY;
+    if (!endpoint?.startsWith("unix:") || !token) return;
+    const socket = net.createConnection({ path: endpoint.slice(5) });
+    const callId = `fake-delegate-${this.promptCounter}`;
+    let authenticated = false;
+    let buffer = "";
+    socket.on("connect", () =>
+      socket.write(
+        `${JSON.stringify({ version: 1, type: "authenticate", token })}\n`,
+      ),
+    );
+    socket.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+      for (;;) {
+        const newline = buffer.indexOf("\n");
+        if (newline < 0) return;
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        try {
+          const message = JSON.parse(line) as {
+            type?: string;
+            outcome?: string;
+            handoff?: { summary?: string };
+          };
+          if (!authenticated && message.type === "authenticated") {
+            authenticated = true;
+            socket.write(
+              `${JSON.stringify({ version: 1, type: "delegate", toolCallId: callId, payload: { task, name: "Fake delegated task", parentRuntimeId: process.env.DECK_DELEGATE_PARENT_RUNTIME } })}\n`,
+            );
+          } else if (message.type === "child-result") {
+            this.write({
+              type: "custom",
+              customType: "deck_delegate",
+              content:
+                message.handoff?.summary ?? message.outcome ?? "Child finished",
+            });
+            socket.destroy();
+          }
+        } catch {
+          socket.destroy();
+        }
+      }
+    });
+    socket.on("error", () => undefined);
+  }
   private messages: PiMessage[] = [
     {
       id: "msg_system_1",
@@ -208,6 +280,7 @@ class FakeRpcServer {
   }
 
   start(): void {
+    this.rehydratePersistedMessages();
     this.ensurePersistedSessionRecord();
     if (this.options.stderrOnStart) {
       process.stderr.write("fake-rpc: deterministic stderr diagnostic\n");
@@ -262,6 +335,49 @@ class FakeRpcServer {
       }
     } catch {
       // Fake persistence is best-effort and should not break RPC tests.
+    }
+  }
+
+  /**
+   * The real Pi RPC process reconstructs get_messages from --session. Mirror
+   * that behavior so a fake real-mode resume exercises the same snapshot path
+   * after the worker (and app) have restarted.
+   */
+  private rehydratePersistedMessages(): void {
+    if (!this.options.sessionFile || !fs.existsSync(this.sessionFile)) {
+      return;
+    }
+    try {
+      const messages: PiMessage[] = [];
+      for (const line of fs
+        .readFileSync(this.sessionFile, "utf8")
+        .split(/\r?\n/)) {
+        if (line.trim().length === 0) {
+          continue;
+        }
+        const record = JSON.parse(line) as unknown;
+        if (!record || typeof record !== "object" || Array.isArray(record)) {
+          continue;
+        }
+        const message = (record as { message?: unknown }).message;
+        if (
+          !message ||
+          typeof message !== "object" ||
+          Array.isArray(message) ||
+          typeof (message as { role?: unknown }).role !== "string"
+        ) {
+          continue;
+        }
+        messages.push(message as PiMessage);
+      }
+      if (messages.length > 0) {
+        this.messages = messages;
+        this.promptCounter = messages.filter(
+          (message) => message.role === "user",
+        ).length;
+      }
+    } catch {
+      // A damaged fixture should retain the deterministic new-session state.
     }
   }
 
@@ -488,6 +604,13 @@ class FakeRpcServer {
       messageId: assistantId,
     });
 
+    if (
+      this.options.promptScenario === "delegate" &&
+      !this.isDirectHandlingOverride(text)
+    ) {
+      this.exerciseDelegationBridge(text);
+    }
+
     if (this.options.promptScenario === "error") {
       const errorMessage = "Usage limit reached for fake provider.";
       const failedAssistant = {
@@ -553,10 +676,23 @@ class FakeRpcServer {
     this.completePrompt(assistantId, text);
   }
 
+  /**
+   * The fake delegate scenario models the explicit user override in Deck's
+   * delegate instruction. Keeping it here makes the GUI acceptance path
+   * deterministic without asking a model to interpret the prompt.
+   */
+  private isDirectHandlingOverride(text: string): boolean {
+    return /\bhandle(?:\s+this)?\s+directly\b/i.test(text);
+  }
+
   private completePrompt(assistantId: string, text: string): void {
-    const chunks = this.options.productionShaped
-      ? ["I’ll review the workspace", " and summarize the next steps."]
-      : ["Fake response", " to: ", text || "(empty prompt)"];
+    const decision = this.workflowDecision(text);
+    const chunks =
+      decision !== undefined
+        ? [String(decision)]
+        : this.options.productionShaped
+          ? ["I’ll review the workspace", " and summarize the next steps."]
+          : ["Fake response", " to: ", text || "(empty prompt)"];
     let accumulated = "";
     chunks.forEach((chunk, index) => {
       this.currentTimers.push(
@@ -606,6 +742,42 @@ class FakeRpcServer {
         this.options.streamDelayMs * (chunks.length + 1),
       ),
     );
+  }
+
+  private workflowDecision(text: string): boolean | undefined {
+    if (!text.includes("Return exactly true or false, with no other text."))
+      return undefined;
+    const stateFile = this.options.workflowDecisionStateFile;
+    const index = stateFile
+      ? this.allocateWorkflowDecisionIndex(stateFile)
+      : this.workflowDecisionIndex;
+    const decision = this.options.workflowDecisions[index];
+    if (decision === undefined) return undefined;
+    if (!stateFile) this.workflowDecisionIndex += 1;
+    return decision;
+  }
+
+  /** Allocate across independent fake Pi processes without duplicate decisions. */
+  private allocateWorkflowDecisionIndex(stateFile: string): number {
+    const lockFile = `${stateFile}.lock`;
+    let lock: number | undefined;
+    while (lock === undefined) {
+      try {
+        lock = fs.openSync(lockFile, "wx");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+      }
+    }
+    try {
+      const index =
+        Number.parseInt(fs.readFileSync(stateFile, "utf8"), 10) || 0;
+      fs.writeFileSync(stateFile, String(index + 1));
+      return index;
+    } finally {
+      fs.closeSync(lock);
+      fs.unlinkSync(lockFile);
+    }
   }
 
   private emitPromptScenarioEvents(assistantId: string): void {

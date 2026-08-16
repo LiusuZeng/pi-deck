@@ -705,6 +705,53 @@ export const pickAttachmentsResultSchema = z.discriminatedUnion("selected", [
     .strict(),
 ]);
 
+// Multitask is scoped by a live parent runtime. The renderer can select only
+// its currently attached parent; it cannot address or operate child sessions.
+export const multitaskModeSchema = z.enum(["sequential", "parallel"]);
+const multitaskRuntimeIdSchema = z.string().min(1);
+
+export const multitaskModeRequestSchema = z
+  .object({
+    runtimeId: multitaskRuntimeIdSchema,
+  })
+  .strict();
+
+export const multitaskModeUpdateRequestSchema = z
+  .object({
+    runtimeId: multitaskRuntimeIdSchema,
+    mode: multitaskModeSchema,
+  })
+  .strict();
+
+export const multitaskModeStateSchema = z
+  .object({
+    runtimeId: multitaskRuntimeIdSchema,
+    mode: multitaskModeSchema,
+  })
+  .strict();
+
+// Safe status-only projection. No child runtime/session, prompt, output, or
+// controls are exposed to the renderer.
+export const multitaskTaskSummarySchema = z
+  .object({
+    taskNumber: z.number().int().positive(),
+    generatedName: z.string().min(1),
+    status: z.enum([
+      "queued",
+      "running",
+      "waiting-input",
+      "completed",
+      "failed",
+    ]),
+  })
+  .strict();
+
+export const multitaskStateEventSchema = multitaskModeStateSchema
+  .extend({
+    tasks: z.array(multitaskTaskSummarySchema),
+  })
+  .strict();
+
 export const ipcErrorSchema = z
   .object({
     code: z.string(),
@@ -770,6 +817,38 @@ export const ipcChannels = {
   attachmentsRelease: "attachments:release",
   attachmentsReleaseOwner: "attachments:releaseOwner",
   attachmentsAssignOwner: "attachments:assignOwner",
+  workflowGetTemplate: "workflows:getTemplate",
+  workflowListWorkflows: "workflows:list",
+  workflowCreateWorkflow: "workflows:create",
+  workflowUpdateWorkflow: "workflows:update",
+  workflowListTemplates: "workflows:listTemplates",
+  workflowCreateTemplate: "workflows:createTemplate",
+  workflowUpdateTemplate: "workflows:updateTemplate",
+  workflowArchiveTemplate: "workflows:archiveTemplate",
+  workflowDuplicateTemplate: "workflows:duplicateTemplate",
+  workflowListRuns: "workflows:listRuns",
+  workflowGetRun: "workflows:getRun",
+  workflowStartRun: "workflows:startRun",
+  workflowStopRun: "workflows:stopRun",
+  workflowRetryStep: "workflows:retryStep",
+  workflowRetryCondition: "workflows:retryCondition",
+  workflowOverrideCondition: "workflows:overrideCondition",
+  workflowApproveGate: "workflows:approveGate",
+  workflowEvent: "workflows:event",
+  canonicalWorkflowListRuns: "workflows:canonicalListRuns",
+  canonicalWorkflowGetRun: "workflows:canonicalGetRun",
+  canonicalWorkflowStartRun: "workflows:canonicalStartRun",
+  canonicalWorkflowStopRun: "workflows:canonicalStopRun",
+  canonicalWorkflowRetryOccurrence: "workflows:canonicalRetryOccurrence",
+  canonicalWorkflowAnswerHuman: "workflows:canonicalAnswerHuman",
+  canonicalWorkflowEvent: "workflows:canonicalEvent",
+  workflowGraphGetSnapshot: "workflows:graphGetSnapshot",
+  workflowGraphSubscribe: "workflows:graphSubscribe",
+  workflowGraphUnsubscribe: "workflows:graphUnsubscribe",
+  workflowGraphEvent: "workflows:graphEvent",
+  multitaskGetMode: "multitask:getMode",
+  multitaskUpdateMode: "multitask:updateMode",
+  multitaskState: "multitask:state",
 } as const;
 
 export type IpcChannel = (typeof ipcChannels)[keyof typeof ipcChannels];

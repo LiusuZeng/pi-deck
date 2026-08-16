@@ -1,6 +1,31 @@
 import { describe, expect, it } from "vitest";
 import { emptyOverlays } from "./sessionState.js";
+import { defaultAgentWorkflowDefinition } from "./workflows/agentWorkflowDefinition.js";
 import { __rendererTestHooks } from "./App.js";
+
+it("offers every active workflow workspace once and excludes archived workspaces", () => {
+  const workspace = (id: string, name: string) => ({
+    id,
+    name,
+    lastOpenedAt: 1,
+  });
+  expect(
+    __rendererTestHooks
+      .activeWorkflowScopeChoices(
+        workspace("workspace-a", "Alpha"),
+        [
+          workspace("workspace-a", "Alpha"),
+          workspace("workspace-b", "Beta"),
+          workspace("workspace-c", "Archived"),
+        ],
+        [workspace("workspace-c", "Archived")],
+      )
+      .map(({ id, name }) => ({ id, name })),
+  ).toEqual([
+    { id: "workspace-a", name: "Alpha" },
+    { id: "workspace-b", name: "Beta" },
+  ]);
+});
 
 function baseSession() {
   return {
@@ -57,6 +82,61 @@ function runtimeErrorDiagnostics(session: any): any[] {
     (item: any) => item.kind === "diagnostic" && item.tone === "error",
   );
 }
+
+describe("worker exit lifecycle", () => {
+  it("keeps a deliberately closed durable session resumable when SIGTERM is reported as 143", () => {
+    const next = __rendererTestHooks.reduceRuntimeEvent(
+      { ...baseSession(), sessionFile: "/tmp/workflow-step.jsonl" } as any,
+      {
+        type: "worker_exit",
+        runtimeId: "session-1",
+        code: 143,
+        signal: null,
+        intentional: true,
+      } as any,
+    );
+
+    expect(next).toMatchObject({
+      status: "idle",
+      baseState: "idle",
+      runtimeBacked: false,
+      resumeBacked: true,
+      subtitle: "Saved · click to resume",
+    });
+    expect(runtimeErrorDiagnostics(next)).toEqual([]);
+  });
+
+  it("continues to report an unplanned worker exit as an error", () => {
+    const next = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {
+      type: "worker_exit",
+      runtimeId: "session-1",
+      code: 143,
+      signal: null,
+    } as any);
+
+    expect(next.baseState).toBe("error");
+    expect(runtimeErrorDiagnostics(next)).toHaveLength(1);
+  });
+});
+
+describe("canonical occurrence Pi-session navigation", () => {
+  it("keeps active runtime and completed saved-session identities distinct", () => {
+    expect(
+      __rendererTestHooks.workflowOccurrenceSessionReference({
+        runtimeId: "runtime-1",
+        sessionFile: "/tmp/session-1.jsonl",
+      } as any),
+    ).toEqual({
+      runtimeId: "runtime-1",
+      sessionFile: "/tmp/session-1.jsonl",
+    });
+    expect(
+      __rendererTestHooks.workflowOccurrenceSessionReference({
+        sessionFile: "/tmp/completed-session.jsonl",
+      } as any),
+    ).toEqual({ sessionFile: "/tmp/completed-session.jsonl" });
+  });
+});
 
 describe("renderer Pi 0.81 terminal and retry events", () => {
   it("keeps a production-shaped provider error visible after agent_end", () => {
@@ -750,6 +830,23 @@ describe("renderer project API compatibility", () => {
   });
 });
 
+describe("canonical workflow collection", () => {
+  it("keeps canonical definitions visible without legacy compatibility records", () => {
+    const first = {
+      ...defaultAgentWorkflowDefinition(),
+      id: "00000000-0000-4000-8000-000000000801",
+    };
+    const second = {
+      ...defaultAgentWorkflowDefinition(),
+      id: "00000000-0000-4000-8000-000000000802",
+    };
+    expect(__rendererTestHooks.agentWorkflowsForHome([first, second])).toEqual([
+      first,
+      second,
+    ]);
+  });
+});
+
 describe("Pi draft defaults and thinking capabilities", () => {
   it("uses Pi's model-specific levels, including max and unsupported holes", () => {
     expect(
@@ -767,6 +864,49 @@ describe("Pi draft defaults and thinking capabilities", () => {
         [],
       ),
     ).toEqual(["off", "low", "medium", "high", "max"]);
+  });
+
+  it("derives workflow choices from discovered models without losing provider ids", () => {
+    expect(
+      __rendererTestHooks.workflowModelChoicesFor([
+        {
+          id: "model-1",
+          name: "Discovered model",
+          provider: "provider-1",
+        },
+      ]),
+    ).toEqual([
+      {
+        provider: "provider-1",
+        id: "model-1",
+        label: "Discovered model",
+        thinkingChoices: [{ id: "off", label: "Off" }],
+      },
+    ]);
+
+    const fallback = __rendererTestHooks.workflowModelChoicesFor([]);
+    expect(fallback).toContainEqual({
+      provider: "local",
+      id: "offline-placeholder",
+      label: "Offline placeholder",
+      disabled: true,
+      note: "Unavailable until provider/auth setup is complete",
+    });
+  });
+
+  it("derives workflow thinking choices from runtime levels with static fallback", () => {
+    expect(
+      __rendererTestHooks.workflowThinkingChoicesFor(["minimal", "xhigh"]),
+    ).toEqual([
+      { id: "minimal", label: "Minimal" },
+      { id: "xhigh", label: "Xhigh" },
+    ]);
+    expect(__rendererTestHooks.workflowThinkingChoicesFor([])).toContainEqual({
+      id: "max",
+      label: "Max",
+      disabled: true,
+      note: "Unsupported by current model",
+    });
   });
 
   it("initializes a draft with Pi's effective model and thinking defaults", () => {
@@ -1793,6 +1933,30 @@ describe("renderer message_update reduction", () => {
     expect(session.title).toBe("Named by Pi");
   });
 
+  it("upserts a runtime snapshot so workflow runtime sessions can be selected", () => {
+    const existing = {
+      ...baseSession(),
+      id: "runtime-1",
+      title: "Stale title",
+    };
+    const sessions = __rendererTestHooks.upsertRuntimeSession(
+      [existing] as any,
+      {
+        runtimeId: "runtime-1",
+        backendMode: "real",
+        state: { cwd: "/tmp/project", sessionName: "Live workflow step" },
+        messages: [],
+      } as any,
+    );
+
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]).toMatchObject({
+      id: "runtime-1",
+      title: "Live workflow step",
+      runtimeBacked: true,
+    });
+  });
+
   it("does not render persisted empty assistant messages as waiting forever", () => {
     const session = __rendererTestHooks.sessionFromSnapshot({
       runtimeId: "runtime-1",
@@ -1947,6 +2111,27 @@ describe("renderer message_update reduction", () => {
     );
 
     expect(next.timeline).toEqual([]);
+  });
+
+  it("hydrates real Pi content-part messages in resumed snapshots", () => {
+    const token = "real-resume-content-part-token";
+    const session = __rendererTestHooks.sessionFromSnapshot({
+      runtimeId: "runtime-1",
+      backendMode: "real",
+      state: { cwd: "/tmp/project" },
+      messages: [
+        {
+          id: "user-1",
+          role: "user",
+          content: [{ type: "text", text: token }],
+        },
+      ],
+    } as any);
+
+    expect(session.title).toBe(token);
+    expect(session.timeline).toMatchObject([
+      { id: "user-1", kind: "user", content: token },
+    ]);
   });
 
   it("restores image previews from resumed user messages", () => {

@@ -12,6 +12,8 @@ const electronMock = vi.hoisted(() => {
     },
     ipcRenderer: {
       invoke: vi.fn(),
+      on: vi.fn(),
+      off: vi.fn(),
     },
     webUtils: {
       getPathForFile: vi.fn(
@@ -40,6 +42,32 @@ describe("preload PiDeck API validation", () => {
 
   beforeEach(() => {
     electronMock.ipcRenderer.invoke.mockReset();
+    electronMock.ipcRenderer.on.mockReset();
+    electronMock.ipcRenderer.off.mockReset();
+  });
+
+  it("invokes graph subscription IPC and cleans up its event listener", async () => {
+    electronMock.ipcRenderer.invoke.mockResolvedValue({
+      ok: true,
+      data: undefined,
+    });
+    const runId = "00000000-0000-4000-8000-000000000001";
+    await api.workflows.graphSubscribe({ runId });
+    await api.workflows.graphUnsubscribe({ runId });
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
+      1,
+      "workflows:graphSubscribe",
+      { runId },
+    );
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
+      2,
+      "workflows:graphUnsubscribe",
+      { runId },
+    );
+    const stop = api.workflows.onGraphEvent(vi.fn());
+    expect(electronMock.ipcRenderer.on).toHaveBeenCalledOnce();
+    stop();
+    expect(electronMock.ipcRenderer.off).toHaveBeenCalledOnce();
   });
 
   it("rejects invalid attachment picker requests before invoking IPC", () => {
@@ -51,6 +79,71 @@ describe("preload PiDeck API validation", () => {
     ).toThrow();
 
     expect(electronMock.ipcRenderer.invoke).not.toHaveBeenCalled();
+  });
+
+  it("exposes canonical agentWorkflow workflow IPC methods with strict workspace scope", async () => {
+    const workflow = {
+      format: "pi-deck.agent-workflow" as const,
+      schemaVersion: 2 as const,
+      id: "00000000-0000-4000-8000-000000000001",
+      revision: 1,
+      name: "Workflow",
+      inputs: [],
+      entryNodeId: "00000000-0000-4000-8000-000000000002",
+      nodes: [
+        {
+          id: "00000000-0000-4000-8000-000000000002",
+          name: "Worker",
+          role: "worker" as const,
+          config: { instructions: "Do the work" },
+        },
+      ],
+      relationships: [],
+    };
+    const scoped = { workflow, scopeWorkspaceId: null };
+    electronMock.ipcRenderer.invoke.mockResolvedValue({
+      ok: true,
+      data: scoped,
+    });
+
+    await api.workflows.createWorkflow({
+      workspaceId: "workspace-1",
+      scopeWorkspaceId: null,
+      workflow,
+    });
+    await api.workflows.updateWorkflow({
+      workspaceId: "workspace-1",
+      scopeWorkspaceId: "workspace-2",
+      workflow,
+    });
+    electronMock.ipcRenderer.invoke.mockResolvedValueOnce({
+      ok: true,
+      data: [scoped],
+    });
+    await expect(
+      api.workflows.listWorkflows({ workspaceId: "workspace-1" }),
+    ).resolves.toEqual([scoped]);
+
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
+      1,
+      "workflows:create",
+      { workspaceId: "workspace-1", scopeWorkspaceId: null, workflow },
+    );
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
+      2,
+      "workflows:update",
+      {
+        workspaceId: "workspace-1",
+        scopeWorkspaceId: "workspace-2",
+        workflow,
+      },
+    );
+    expect(() =>
+      api.workflows.createWorkflow({
+        workspaceId: "workspace-1",
+        workflow: { ...workflow, extra: true },
+      } as never),
+    ).toThrow();
   });
 
   it("exposes strict steer and follow-up IPC methods", async () => {
@@ -141,6 +234,104 @@ describe("preload PiDeck API validation", () => {
         messages: [],
       } as unknown as { runtimeId: string }),
     ).toThrow();
+  });
+
+  it("exposes only parent-scoped multitask mode APIs", async () => {
+    electronMock.ipcRenderer.invoke.mockResolvedValue({
+      ok: true,
+      data: {
+        runtimeId: "runtime-7",
+        mode: "parallel",
+        tasks: [
+          {
+            taskNumber: 1,
+            generatedName: "Delegated task",
+            status: "completed",
+          },
+        ],
+      },
+    });
+
+    await expect(
+      api.multitask.getMode({ runtimeId: "runtime-7" }),
+    ).resolves.toEqual({
+      runtimeId: "runtime-7",
+      mode: "parallel",
+      tasks: [
+        {
+          taskNumber: 1,
+          generatedName: "Delegated task",
+          status: "completed",
+        },
+      ],
+    });
+    await api.multitask.updateMode({
+      runtimeId: "runtime-7",
+      mode: "sequential",
+    });
+
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
+      1,
+      "multitask:getMode",
+      { runtimeId: "runtime-7" },
+    );
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
+      2,
+      "multitask:updateMode",
+      { runtimeId: "runtime-7", mode: "sequential" },
+    );
+    expect(() =>
+      api.multitask.updateMode({
+        runtimeId: "runtime-7",
+        mode: "parallel",
+        childRuntimeId: "must-not-cross-boundary",
+      } as never),
+    ).toThrow();
+  });
+
+  it("drops unsafe multitask state events and supports unsubscribe", () => {
+    const listener = vi.fn();
+    const unsubscribe = api.multitask.onState(listener);
+    const wrapped = electronMock.ipcRenderer.on.mock.calls[0]?.[1] as (
+      event: unknown,
+      payload: unknown,
+    ) => void;
+
+    wrapped(
+      {},
+      {
+        runtimeId: "runtime-7",
+        mode: "parallel",
+        tasks: [{ taskNumber: 8, generatedName: "Task 8", status: "running" }],
+      },
+    );
+    wrapped(
+      {},
+      {
+        runtimeId: "runtime-7",
+        mode: "parallel",
+        tasks: [
+          {
+            taskNumber: 8,
+            generatedName: "Task 8",
+            status: "running",
+            childRuntimeId: "must-not-cross-boundary",
+          },
+        ],
+      },
+    );
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(listener).toHaveBeenCalledWith({
+      runtimeId: "runtime-7",
+      mode: "parallel",
+      tasks: [{ taskNumber: 8, generatedName: "Task 8", status: "running" }],
+    });
+    unsubscribe();
+    expect(electronMock.ipcRenderer.off).toHaveBeenCalledWith(
+      "multitask:state",
+      wrapped,
+    );
   });
 
   it("validates project picker responses from IPC", async () => {

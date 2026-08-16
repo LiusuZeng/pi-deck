@@ -134,6 +134,42 @@ test("ProjectStore resolves opaque stored IDs to canonical roots without treatin
   });
 });
 
+test("ProjectStore rejects symlinked roots when canonical authorization changes", async () => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "pi-deck-project-store-symlink-authorize-"),
+  );
+  const home = path.join(root, "home");
+  const target = path.join(root, "target");
+  const link = path.join(root, "project-link");
+  await fs.mkdir(target, { recursive: true });
+  await fs.symlink(target, link, "dir");
+  await fs.mkdir(home, { recursive: true });
+  const now = Date.now();
+  await fs.writeFile(
+    path.join(home, "projects.json"),
+    `${JSON.stringify({
+      version: 1,
+      activeProjectId: "opaque-symlink-project",
+      projects: [
+        {
+          id: "opaque-symlink-project",
+          rootPath: link,
+          displayName: "linked project",
+          createdAtMs: now,
+          updatedAtMs: now,
+          lastOpenedAtMs: now,
+        },
+      ],
+      sessionRefs: [],
+    })}\n`,
+  );
+
+  const store = new ProjectStore(home);
+  await expect(
+    store.resolveAuthorizedProject("opaque-symlink-project"),
+  ).rejects.toThrow(/canonical path changed|moved or is unavailable/i);
+});
+
 test("ProjectStore marks deleted recent project folders as invalid", async () => {
   const root = await fs.mkdtemp(
     path.join(os.tmpdir(), "pi-deck-project-store-"),
