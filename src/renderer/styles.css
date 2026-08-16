@@ -2783,6 +2783,9 @@ h3 {
   right: 0;
   display: grid;
   min-width: 190px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
   gap: 2px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
@@ -2802,7 +2805,8 @@ h3 {
   text-align: left;
 }
 
-.appearance-menu .ui-menu-popover .ui-button > :last-child {
+.appearance-menu .ui-menu-popover .ui-button > :last-child,
+.ui-menu-popover.appearance-menu .ui-button > :last-child {
   margin-left: auto;
 }
 
@@ -3849,13 +3853,15 @@ body {
   background: var(--color-surface-hover);
 }
 
-.workspace-actions-menu .ui-menu-popover {
+.workspace-actions-menu .ui-menu-popover,
+.ui-menu-popover.workspace-actions-menu {
   width: 220px;
   min-width: 220px;
   padding: 5px;
 }
 
-.workspace-actions-menu .ui-menu-popover .ui-button {
+.workspace-actions-menu .ui-menu-popover .ui-button,
+.ui-menu-popover.workspace-actions-menu .ui-button {
   box-sizing: border-box;
   min-width: 0;
   justify-content: flex-start;

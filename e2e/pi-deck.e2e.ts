@@ -259,6 +259,24 @@ test("workspace management UI keeps Pi JSONL membership reversible and deletion 
 
     await createWorkspaceInUi(page, "UI source");
     await openWorkspaceActions(page, "UI source");
+    const workspaceActionsMenu = page.getByRole("menu", {
+      name: "Workspace actions for UI source",
+    });
+    await expect(workspaceActionsMenu).toBeVisible();
+    const menuBounds = await workspaceActionsMenu.boundingBox();
+    if (!menuBounds) {
+      throw new Error("Workspace actions menu has no bounding box");
+    }
+    const viewport = await page.evaluate(() => ({
+      height: window.innerHeight,
+      width: window.innerWidth,
+    }));
+    expect(menuBounds.x).toBeGreaterThanOrEqual(0);
+    expect(menuBounds.y).toBeGreaterThanOrEqual(0);
+    expect(menuBounds.x + menuBounds.width).toBeLessThanOrEqual(viewport.width);
+    expect(menuBounds.y + menuBounds.height).toBeLessThanOrEqual(
+      viewport.height,
+    );
     await page.getByRole("menuitem", { name: "Rename workspace" }).click();
     const renameDialog = page.getByTestId("workspace-rename-dialog");
     await expect(renameDialog).toBeVisible();

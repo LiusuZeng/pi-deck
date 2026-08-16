@@ -39,9 +39,12 @@ describe("Menu", () => {
     expect(trigger?.hasAttribute("aria-controls")).toBe(false);
 
     act(() => trigger?.click());
-    const menu = container.querySelector('[role="menu"]');
+    const menu = document.body.querySelector('[role="menu"]');
     const item =
-      container.querySelector<HTMLButtonElement>('[role="menuitem"]');
+      document.body.querySelector<HTMLButtonElement>('[role="menuitem"]');
+    expect(menu?.parentElement).toBe(document.body);
+    expect(menu?.getAttribute("style")).toContain("position: fixed");
+    expect(menu?.getAttribute("style")).toContain("right: auto");
     expect(trigger?.getAttribute("aria-expanded")).toBe("true");
     expect(trigger?.getAttribute("aria-controls")).toBe(menu?.id);
     expect(menu).not.toBeNull();
@@ -73,12 +76,40 @@ describe("Menu", () => {
     const trigger = container.querySelector<HTMLButtonElement>("button");
     act(() => trigger?.click());
     act(() =>
-      container?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.click(),
+      document.body
+        .querySelector<HTMLButtonElement>('[role="menuitem"]')
+        ?.click(),
     );
 
     expect(trigger?.getAttribute("aria-expanded")).toBe("false");
-    expect(container.querySelector('[role="menu"]')).toBeNull();
+    expect(document.body.querySelector('[role="menu"]')).toBeNull();
     expect(document.activeElement).toBe(trigger);
+  });
+
+  it("dismisses when a pointer goes outside the portalled popover", () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    act(() => {
+      root?.render(
+        createElement(
+          Menu,
+          { label: "Session actions" },
+          createElement(Button, { role: "menuitem" }, "Delete saved sessions…"),
+        ),
+      );
+    });
+
+    const trigger = container.querySelector<HTMLButtonElement>("button");
+    act(() => trigger?.click());
+    act(() =>
+      document.body.dispatchEvent(
+        new MouseEvent("mousedown", { bubbles: true }),
+      ),
+    );
+
+    expect(trigger?.getAttribute("aria-expanded")).toBe("false");
+    expect(document.body.querySelector('[role="menu"]')).toBeNull();
   });
 
   it("moves between enabled menu items with arrow, Home, and End keys", () => {
@@ -99,9 +130,11 @@ describe("Menu", () => {
 
     const trigger = container.querySelector<HTMLButtonElement>("button");
     act(() => trigger?.click());
-    const menu = container.querySelector('[role="menu"]');
+    const menu = document.body.querySelector('[role="menu"]');
     const items = Array.from(
-      container.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]'),
+      document.body.querySelectorAll<HTMLButtonElement>(
+        '[role="menuitemradio"]',
+      ),
     );
     expect(document.activeElement).toBe(items[0]);
 

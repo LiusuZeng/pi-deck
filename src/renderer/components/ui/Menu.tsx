@@ -1,11 +1,14 @@
 import {
+  type CSSProperties,
   type KeyboardEvent,
   type ReactNode,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import { Ellipsis } from "./icons.js";
 import { IconButton } from "./IconButton.js";
 import type { LucideIcon } from "./icons.js";
@@ -24,7 +27,9 @@ export function Menu(props: {
   const [isOpen, setIsOpen] = useState(false);
   const menuId = useId();
   const menuRef = useRef<HTMLDivElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const [popoverStyle, setPopoverStyle] = useState<CSSProperties>();
   const isMenu = props.menu !== false;
 
   useEffect(() => {
@@ -32,7 +37,11 @@ export function Menu(props: {
       return;
     }
     const closeOnPointerDown = (event: MouseEvent): void => {
-      if (!menuRef.current?.contains(event.target as Node)) {
+      const target = event.target as Node;
+      if (
+        !menuRef.current?.contains(target) &&
+        !popoverRef.current?.contains(target)
+      ) {
         setIsOpen(false);
       }
     };
@@ -44,8 +53,62 @@ export function Menu(props: {
     if (!isOpen || !isMenu) {
       return;
     }
-    menuRef.current?.querySelector<HTMLElement>('[role^="menuitem"]')?.focus();
+    popoverRef.current
+      ?.querySelector<HTMLElement>('[role^="menuitem"]')
+      ?.focus();
   }, [isMenu, isOpen]);
+
+  useLayoutEffect(() => {
+    if (!isOpen) {
+      setPopoverStyle(undefined);
+      return;
+    }
+
+    const positionPopover = (): void => {
+      const trigger = triggerRef.current;
+      const popover = popoverRef.current;
+      if (!trigger || !popover) {
+        return;
+      }
+
+      const margin = 8;
+      const gap = 6;
+      const triggerBounds = trigger.getBoundingClientRect();
+      const popoverBounds = popover.getBoundingClientRect();
+      const maxLeft = Math.max(
+        margin,
+        window.innerWidth - margin - popoverBounds.width,
+      );
+      const maxTop = Math.max(
+        margin,
+        window.innerHeight - margin - popoverBounds.height,
+      );
+      const below = triggerBounds.bottom + gap;
+      const above = triggerBounds.top - gap - popoverBounds.height;
+      const top =
+        below + popoverBounds.height <= window.innerHeight - margin
+          ? below
+          : Math.min(maxTop, Math.max(margin, above));
+
+      setPopoverStyle({
+        position: "fixed",
+        right: "auto",
+        left: Math.min(
+          maxLeft,
+          Math.max(margin, triggerBounds.right - popoverBounds.width),
+        ),
+        top,
+      });
+    };
+
+    positionPopover();
+    window.addEventListener("resize", positionPopover);
+    document.addEventListener("scroll", positionPopover, true);
+    return () => {
+      window.removeEventListener("resize", positionPopover);
+      document.removeEventListener("scroll", positionPopover, true);
+    };
+  }, [isOpen]);
 
   function closeAndRestoreFocus(): void {
     setIsOpen(false);
@@ -63,7 +126,7 @@ export function Menu(props: {
     }
 
     const items = Array.from(
-      menuRef.current?.querySelectorAll<HTMLElement>(
+      popoverRef.current?.querySelectorAll<HTMLElement>(
         '[role^="menuitem"]:not([disabled]):not([aria-disabled="true"])',
       ) ?? [],
     );
@@ -110,17 +173,24 @@ export function Menu(props: {
         size="sm"
         onClick={() => setIsOpen((value) => !value)}
       />
-      {isOpen ? (
-        <div
-          className="ui-menu-popover"
-          id={menuId}
-          aria-label={props.menuLabel}
-          role={isMenu ? "menu" : undefined}
-          onClick={isMenu ? closeAndRestoreFocus : undefined}
-        >
-          {props.children}
-        </div>
-      ) : null}
+      {isOpen
+        ? createPortal(
+            <div
+              className={`ui-menu-popover ${props.className ?? ""}`}
+              id={menuId}
+              aria-label={props.menuLabel}
+              ref={popoverRef}
+              role={isMenu ? "menu" : undefined}
+              style={
+                popoverStyle ?? { position: "fixed", visibility: "hidden" }
+              }
+              onClick={isMenu ? closeAndRestoreFocus : undefined}
+            >
+              {props.children}
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }
