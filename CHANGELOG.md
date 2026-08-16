@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-08-16
+
+### Fixed
+
+- Prevented sidebar and archived-session lists, action menus, attachment rows,
+  chat messages, composer controls, and model choices from clipping, overlapping,
+  or overflowing at supported window sizes.
+- Made workflow input and compact inspector overlays keyboard-safe, and kept
+  workflow builder, graph cards, route labels, run output, and human controls
+  within their intended bounds.
+- Restored initial keyboard focus for portalled menus, including Appearance.
+- Enlarged Work Inbox close and filter hit targets without changing visual density.
+
+### Tests
+
+- Added renderer and Electron regressions for long content, responsive layout,
+  menu placement and focus, workflow graph geometry, modal focus handling, and
+  control hit areas.
+
 ## [0.5.1] - 2026-08-16
 
 ### Fixed
@@ -271,7 +290,8 @@ coding-agent sessions.
   crash; persisted sessions can be reopened, but unsaved partial stream text may
   be lost.
 
-[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/LiusuZeng/pi-deck/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/LiusuZeng/pi-deck/compare/v0.3.0...v0.4.0
