@@ -17,7 +17,6 @@
 .evidence-copy .feature-number { margin-bottom: 1.5rem; }
 .evidence-copy p { color: var(--muted); margin-bottom: 0; }
 .evidence-card > figure { border: 0; border-top: 1px solid var(--line); margin-top: auto; }
-.evidence-card--text { justify-content: center; min-height: 19rem; background: linear-gradient(145deg, var(--panel), #191a3d); }
 .evidence-media-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; padding: 1rem; border-top: 1px solid var(--line); margin-top: auto; }
 .evidence-media-pair figure { min-width: 0; }
 .evidence-media-pair figcaption { padding: .75rem .85rem; font-size: .8rem; }

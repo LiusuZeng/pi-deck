@@ -2851,6 +2851,10 @@ summary::marker {
   font: inherit;
 }
 
+.ui-tooltip:has(.multitask-status-popover) {
+  max-width: 340px;
+}
+
 .multitask-status-popover {
   display: grid;
   gap: 3px;
@@ -2858,9 +2862,7 @@ summary::marker {
 }
 
 .multitask-status-popover [role="listitem"] {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .multitask-control[data-error="true"] {

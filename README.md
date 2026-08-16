@@ -68,6 +68,12 @@ The workspace inbox keeps saved work grouped and easy to reopen.
 
 ### Agent Workflows
 
+<p align="center">
+  <a href="docs/assets/pi-deck-workflow-builder.png" title="Open the Agent Workflow builder screenshot full size">
+    <img src="docs/assets/pi-deck-workflow-builder.png" alt="Pi Deck showing the Agent Workflow builder with a Pi worker and Human approval checkpoint" width="78%">
+  </a>
+</p>
+
 Create persistent global or workspace-scoped workflows for repeatable multi-agent work. Build a workflow visually or edit its canonical JSON, then start a run and follow its live, keyboard-accessible execution graph.
 
 - Combine **Worker**, **Decider**, **Orchestrator**, and **Human** roles.
@@ -76,6 +82,17 @@ Create persistent global or workspace-scoped workflows for repeatable multi-agen
 - Monitor queued, running, waiting, completed, failed, and skipped occurrences; inspect outputs and open the associated Pi session when one exists.
 - Answer Human input, approval, or choice checkpoints without creating a model-backed Pi session.
 - Retry failed or cancelled occurrences, stop a run, and recover persisted definitions and runs after restart.
+
+<p align="center">
+  <a href="docs/assets/pi-deck-workflow-run.png" title="Open the live workflow screenshot full size">
+    <img src="docs/assets/pi-deck-workflow-run.png" alt="Pi Deck showing a real Pi workflow worker completed and a Human approval checkpoint waiting for input" width="49%">
+  </a>
+  <a href="docs/assets/pi-deck-workflow-run.gif" title="Open the real Pi workflow walkthrough full size">
+    <img src="docs/assets/pi-deck-workflow-run.gif" alt="Animated Pi Deck workflow run showing a real Pi worker complete before a Human approval checkpoint" width="49%">
+  </a>
+</p>
+
+_These captures use a real local Pi worker and a persisted Pi session; the workflow then pauses at the Human checkpoint._
 
 ### Multi-session control and multitasking
 
@@ -95,6 +112,14 @@ For a parent session that needs independent parallel work, enable **parallel mul
 - Parallel multitasking is opt-in per parent session; sequential mode does not permit delegation.
 - Child tasks can be queued, running, waiting for input, completed, failed, or cancelled.
 - Child task status stays with the parent conversation. Child sessions are deliberately not exposed as independent user controls.
+
+<p align="center">
+  <a href="docs/assets/pi-deck-multitasking.png" title="Open the parallel multitasking screenshot full size">
+    <img src="docs/assets/pi-deck-multitasking.png" alt="Pi Deck showing a parent conversation with a completed delegated child task status" width="78%">
+  </a>
+</p>
+
+_The delegated-task capture uses Pi Deck's real local delegation bridge and a real Pi child worker; child details remain intentionally parent-facing._
 
 ### Chat and intervention controls
 
@@ -276,6 +301,14 @@ credentials. The command refreshes both `docs/assets` and `site/assets`:
 
 ```bash
 npm run docs:capture
+```
+
+To refresh the Agent Workflow and multitasking assets with real local Pi workers,
+use a configured provider account. This contacts the configured model provider and
+keeps the temporary project, sessions, and Pi Deck metadata isolated:
+
+```bash
+PI_DECK_CAPTURE_REAL_PI=1 npm run docs:capture:real-workflows
 ```
 
 ## Typical workflow
