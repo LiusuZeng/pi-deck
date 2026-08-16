@@ -1587,32 +1587,14 @@ test("fake delegation is status-only, parent-scoped, and honors direct handling"
   try {
     await expectHealthyPreload(page);
 
-    // Fresh drafts still expose the control and explain that a parent runtime
-    // must be started before its parent-scoped mode can be enabled.
+    // A fresh draft can opt in before its first prompt. The initial mode is
+    // passed to worker creation so that first prompt can be delegated.
     const multitaskControl = page.locator(".multitask-control");
-    await expect(multitaskControl).toHaveAttribute(
-      "title",
-      "Start Pi with a prompt to enable multitasking",
-    );
-    await expect(multitaskControl).toBeDisabled();
-    await expect(multitaskControl).toHaveAttribute(
-      "aria-label",
-      "Start Pi with a prompt to enable multitasking",
-    );
-
-    // Materialize and open the parent before enabling its parent-scoped mode.
-    await page.getByLabel("Prompt text").fill("open multitasking parent");
-    await page.getByRole("button", { name: "Send" }).click();
-    await expect(
-      page.getByText("Fake response to: open multitasking parent", {
-        exact: true,
-      }),
-    ).toBeVisible();
-
     await expect(multitaskControl).toHaveAttribute(
       "title",
       "Turn on multitasking",
     );
+    await expect(multitaskControl).toBeEnabled();
     await multitaskControl.click();
     await expect(multitaskControl).toHaveAttribute(
       "title",

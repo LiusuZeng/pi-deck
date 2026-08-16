@@ -817,6 +817,7 @@ function registerIpcHandlers(
         diagnosticsService,
         project,
         request?.workspaceId,
+        request?.multitaskMode,
       );
     },
   });
@@ -2655,6 +2656,7 @@ async function createChatWorker(
   capacity: WorkerCapacity,
   project?: ProjectRef,
   workspaceId?: string,
+  initialMultitaskMode: "sequential" | "parallel" = "sequential",
 ): Promise<ChatWorkerSpec> {
   return serializeChatWorkerCreation(async () => {
     const workerSpec =
@@ -2667,7 +2669,7 @@ async function createChatWorker(
             workspaceId,
           )
         : await createFakeChatWorker(adapter, store, capacity, workspaceId);
-    registerChatWorker(workerSpec, mode);
+    registerChatWorker(workerSpec, mode, initialMultitaskMode);
     return workerSpec;
   });
 }
@@ -2703,6 +2705,7 @@ function capacityAvailable(): boolean {
 function registerChatWorker(
   workerSpec: ChatWorkerSpec,
   mode: ChatBackendMode,
+  initialMultitaskMode: "sequential" | "parallel" = "sequential",
 ): void {
   const runtimeId = workerSpec.worker.runtimeId;
   chatRuntimeId = runtimeId;
@@ -2716,7 +2719,7 @@ function registerChatWorker(
     chatRuntimeWorkspaceIds.set(runtimeId, workerSpec.workspaceId);
   }
   multitaskSupervisor?.addParent(runtimeId, {
-    mode: "sequential",
+    mode: initialMultitaskMode,
     maxQueuedTasks: 100,
   });
 }
@@ -4357,6 +4360,7 @@ async function createChatSessionSnapshot(
   diagnosticsService: DiagnosticsService,
   project?: ProjectRef,
   workspaceId?: string,
+  initialMultitaskMode: "sequential" | "parallel" = "sequential",
 ): Promise<ChatSnapshot> {
   const adapter = await ensureChatAdapter(store, diagnosticsService);
   const mode = chatBackendMode ?? resolveChatBackendMode();
@@ -4367,12 +4371,15 @@ async function createChatSessionSnapshot(
     getChatWorkerCapacity(),
     project,
     workspaceId,
+    initialMultitaskMode,
   );
   const runtimeId = workerSpec.worker.runtimeId;
   try {
-    return await getChatSnapshotForRuntime(adapter, runtimeId, mode, {
+    const snapshot = await getChatSnapshotForRuntime(adapter, runtimeId, mode, {
       skipMessages: true,
     });
+    await persistMultitaskSupervisor(runtimeId);
+    return snapshot;
   } catch (error) {
     try {
       await closeAttachedChatRuntime(adapter, runtimeId);

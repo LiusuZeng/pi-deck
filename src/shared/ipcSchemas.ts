@@ -458,10 +458,15 @@ export const chatCloseSessionRequestSchema = z
   })
   .strict();
 
+export const multitaskModeSchema = z.enum(["sequential", "parallel"]);
+
 export const chatCreateSessionRequestSchema = z
   .object({
     workspaceId: z.string().min(1).optional(),
     projectId: z.string().min(1).optional(),
+    // A new parent may begin in parallel mode so its first prompt can
+    // delegate; subsequent changes remain scoped to a live parent runtime.
+    multitaskMode: multitaskModeSchema.optional(),
   })
   .strict()
   .optional();
@@ -707,7 +712,6 @@ export const pickAttachmentsResultSchema = z.discriminatedUnion("selected", [
 
 // Multitask is scoped by a live parent runtime. The renderer can select only
 // its currently attached parent; it cannot address or operate child sessions.
-export const multitaskModeSchema = z.enum(["sequential", "parallel"]);
 const multitaskRuntimeIdSchema = z.string().min(1);
 
 export const multitaskModeRequestSchema = z

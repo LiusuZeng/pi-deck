@@ -9,6 +9,7 @@ import type {
   attachmentReleaseOwnerRequestSchema,
   attachmentReleaseRequestSchema,
   chatCommandSummarySchema,
+  chatCreateSessionRequestSchema,
   chatDeleteAllSessionsRequestSchema,
   chatDeleteAllSessionsResultSchema,
   chatDeleteSessionResultSchema,
@@ -125,6 +126,9 @@ export type MultitaskStateEvent = z.infer<typeof multitaskStateEventSchema>;
 export type ChatMessage = z.infer<typeof chatMessageSchema>;
 export type ChatInterventionRequest = z.infer<
   typeof chatInterventionRequestSchema
+>;
+export type ChatCreateSessionRequest = z.infer<
+  typeof chatCreateSessionRequestSchema
 >;
 export type ChatRespondToExtensionUiRequest = z.infer<
   typeof chatRespondToExtensionUiRequestSchema
@@ -325,10 +329,7 @@ export interface PiDeckApi {
       request: ChatRespondToExtensionUiRequest,
     ): Promise<void>;
     closeSession(request: { runtimeId: string }): Promise<void>;
-    createSession(request?: {
-      workspaceId?: string;
-      projectId?: string;
-    }): Promise<ChatSnapshot>;
+    createSession(request?: ChatCreateSessionRequest): Promise<ChatSnapshot>;
     reset(): Promise<ChatSnapshot>;
     onEvent(listener: (event: ChatRuntimeEvent) => void): () => void;
   };

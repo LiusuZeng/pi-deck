@@ -449,6 +449,7 @@ type WorkspaceCapableApi = {
     createSession?(request?: {
       workspaceId?: string;
       projectId?: string;
+      multitaskMode?: "sequential" | "parallel";
     }): Promise<ChatSnapshot>;
     resumeSession?(request: {
       workspaceId?: string;
@@ -1440,7 +1441,9 @@ export function App(): ReactElement {
   const slashOpen = composerDraft.slashOpen;
   const multitaskState = selectedSession.runtimeBacked
     ? multitask[selectedSession.id]
-    : undefined;
+    : selectedSession.draftSession
+      ? (multitask[selectedSession.id] ?? { mode: "sequential", tasks: [] })
+      : undefined;
   const isWorking = selectedSession.status === "working";
   const isBusy = isSessionBusy(selectedSession);
   const isResuming = selectedSession.status === "reconnecting";
@@ -2455,10 +2458,13 @@ export function App(): ReactElement {
     try {
       const draftProjectId =
         draftSession.projectId ?? projectIdForWorkspace(currentWorkspace);
+      const initialMultitaskMode =
+        multitask[draftSession.id]?.mode ?? "sequential";
       let snapshot = await createSessionForWorkspace(
         window.piDeck,
         currentWorkspace,
         draftProjectId,
+        initialMultitaskMode,
       );
       // Configuration RPCs can fail after main has successfully spawned and
       // registered this worker. Retain the original id so this setup attempt
@@ -2514,6 +2520,19 @@ export function App(): ReactElement {
         ),
       );
       setSelectedSessionId(initializedSession.id);
+      setMultitask((current) => {
+        const draftState = current[draftSession.id] ?? {
+          mode: initialMultitaskMode,
+          tasks: [],
+        };
+        const { [draftSession.id]: _draftState, ...remaining } = current;
+        return {
+          ...remaining,
+          // A state event can arrive while the session is being materialized;
+          // preserve it instead of replacing it with the draft selection.
+          [initializedSession.id]: current[initializedSession.id] ?? draftState,
+        };
+      });
       setComposerDrafts((items) =>
         moveComposerDraft(items, draftSession.id, initializedSession.id),
       );
@@ -4141,9 +4160,19 @@ export function App(): ReactElement {
       multitaskMode={multitaskState?.mode}
       multitaskTasks={multitaskState?.tasks ?? []}
       onToggleMultitask={() => {
-        if (!selectedSession.runtimeBacked) return;
         const mode =
           multitaskState?.mode === "parallel" ? "sequential" : "parallel";
+        if (selectedSession.draftSession) {
+          setMultitask((current) => ({
+            ...current,
+            [selectedSession.id]: {
+              mode,
+              tasks: current[selectedSession.id]?.tasks ?? [],
+            },
+          }));
+          return;
+        }
+        if (!selectedSession.runtimeBacked) return;
         void window.piDeck.multitask
           .updateMode({ runtimeId: selectedSession.id, mode })
           .then((state) =>
@@ -4640,15 +4669,20 @@ async function createSessionForWorkspace(
   api: typeof window.piDeck,
   workspace: WorkspaceRef,
   projectId?: string,
+  multitaskMode: "sequential" | "parallel" = "sequential",
 ): Promise<ChatSnapshot> {
   const chat = workspaceApi(api).chat;
   if (hasWorkspaceApi(api) && chat.createSession !== undefined) {
     return chat.createSession({
       workspaceId: workspace.id,
       ...(projectId !== undefined ? { projectId } : {}),
+      multitaskMode,
     });
   }
-  return api.chat.createSession(projectId === undefined ? {} : { projectId });
+  return api.chat.createSession({
+    ...(projectId !== undefined ? { projectId } : {}),
+    multitaskMode,
+  });
 }
 
 async function selectProjectIfAvailable(

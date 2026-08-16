@@ -101,6 +101,7 @@ import type {
   AttachmentImportImageRequest,
   AttachmentReleaseOwnerRequest,
   AttachmentReleaseRequest,
+  ChatCreateSessionRequest,
   ChatInterventionRequest,
   ChatRespondToExtensionUiRequest,
   ChatRuntimeEvent,
@@ -299,7 +300,7 @@ const api: PiDeckApi = Object.freeze({
         request: chatCloseSessionRequestSchema.parse(request),
         responseSchema: z.void(),
       }),
-    createSession: (request?: { workspaceId?: string; projectId?: string }) =>
+    createSession: (request?: ChatCreateSessionRequest) =>
       invokeValidated({
         channel: ipcChannels.chatCreateSession,
         request: chatCreateSessionRequestSchema.parse(request),

@@ -11,6 +11,7 @@ import {
   attachmentReleaseOwnerRequestSchema,
   attachmentReleaseRequestSchema,
   attachmentAssignOwnerRequestSchema,
+  chatCreateSessionRequestSchema,
   chatDeleteAllSessionsResultSchema,
   chatDeleteSessionRequestSchema,
   chatInterventionRequestSchema,
@@ -438,6 +439,26 @@ describe("IPC schemas", () => {
         deleted: true,
         deletedCount: 1,
         skippedCount: 0,
+      }),
+    ).toThrow();
+  });
+
+  it("accepts an initial multitask mode only when creating a session", () => {
+    expect(
+      chatCreateSessionRequestSchema.parse({
+        workspaceId: "workspace-1",
+        multitaskMode: "parallel",
+      }),
+    ).toEqual({ workspaceId: "workspace-1", multitaskMode: "parallel" });
+    expect(() =>
+      chatCreateSessionRequestSchema.parse({
+        multitaskMode: "invalid",
+      }),
+    ).toThrow();
+    expect(() =>
+      chatCreateSessionRequestSchema.parse({
+        multitaskMode: "parallel",
+        childRuntimeId: "must-not-cross-boundary",
       }),
     ).toThrow();
   });
