@@ -3071,9 +3071,12 @@ async function createRealDelegatedWorker(
   cwd: string,
   projectId: string | undefined,
 ): Promise<ReturnType<SinglePiAdapter["createWorker"]>> {
-  const project = projectId
-    ? await ensureProjectStore().resolveAuthorizedProject(projectId)
-    : undefined;
+  const project =
+    projectId === managedRuntimeProjectId
+      ? await resolveManagedRuntimeProject()
+      : projectId
+        ? await ensureProjectStore().resolveAuthorizedProject(projectId)
+        : undefined;
   const launch = await resolveRealChatLaunchConfig(store, project);
   return adapter.createWorker({
     command: launch.effective.config.piBinary,
