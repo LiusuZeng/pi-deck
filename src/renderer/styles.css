@@ -455,6 +455,7 @@ textarea:disabled {
 
 .workspace {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto auto minmax(0, 1fr) auto;
   height: 100vh;
   min-width: 0;
@@ -1363,7 +1364,11 @@ h1 {
 }
 
 .markdown-body pre {
+  min-width: 0;
+  max-width: 100%;
   overflow: auto;
+  overflow-wrap: normal;
+  white-space: pre;
   margin: 0;
   border-radius: 10px;
   padding: 9px;
@@ -3351,6 +3356,12 @@ body {
   background: var(--color-surface-muted);
 }
 
+.user-bubble,
+.assistant-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .user-bubble time,
 .assistant-message time {
   display: none;
@@ -3524,6 +3535,10 @@ body {
 @media (max-width: 560px) {
   .composer {
     width: calc(100% - 20px);
+    min-width: 0;
+    max-width: calc(100% - 20px);
+    margin-right: 10px;
+    margin-left: 10px;
   }
 
   .composer-meta {

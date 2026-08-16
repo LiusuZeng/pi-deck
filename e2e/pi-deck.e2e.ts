@@ -1189,6 +1189,99 @@ test("icon controls retain names, neutral styles, and fit a 900×600 viewport", 
   }
 });
 
+test("long unbroken chat text does not overflow at 900×600", async () => {
+  const { app, page } = await launchPiDeck({ PI_DECK_BACKEND: "fake" });
+  try {
+    await page.setViewportSize({ width: 900, height: 600 });
+    await expectHealthyPreload(page);
+
+    const token = "unbroken-chat-token-".repeat(180);
+    const prompt = page.getByLabel("Prompt text");
+    await prompt.fill(token);
+    await page.getByRole("button", { name: "Send" }).click();
+
+    const userBubble = page.locator(".user-bubble").last();
+    const assistantMessage = page.locator(".assistant-message").last();
+    await expect(userBubble).toContainText(token);
+    await expect(assistantMessage).toContainText(token);
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const timeline = document.querySelector(".timeline-scroll");
+          return (
+            timeline !== null &&
+            timeline.scrollWidth <= timeline.clientWidth + 1 &&
+            document.documentElement.scrollWidth <= window.innerWidth
+          );
+        }),
+      )
+      .toBe(true);
+  } finally {
+    await app.close();
+  }
+});
+
+test("composer has symmetric gutters at and below 560px", async () => {
+  const { app, page } = await launchPiDeck({ PI_DECK_BACKEND: "fake" });
+  try {
+    await expectHealthyPreload(page);
+    for (const width of [560, 320]) {
+      await page.setViewportSize({ width, height: 600 });
+      const composer = page.locator(".composer");
+      const prompt = page.getByLabel("Prompt text");
+      const send = page.getByRole("button", { name: "Send" });
+      await expect(composer).toBeVisible();
+      await expect(prompt).toBeVisible();
+      await expect(send).toBeVisible();
+      await prompt.fill("composer viewport check");
+      await expect(send).toBeEnabled();
+
+      const layout = await page.evaluate(() => {
+        const composer = document.querySelector(".composer");
+        const workspace = document.querySelector(".workspace");
+        const input = document.querySelector(".composer-input-wrap");
+        const send = document.querySelector(
+          '.composer button[aria-label="Send"]',
+        );
+        if (
+          composer === null ||
+          workspace === null ||
+          input === null ||
+          send === null
+        ) {
+          throw new Error("Composer controls are missing.");
+        }
+        const composerBox = composer.getBoundingClientRect();
+        const workspaceBox = workspace.getBoundingClientRect();
+        const inputBox = input.getBoundingClientRect();
+        const sendBox = send.getBoundingClientRect();
+        return {
+          leftGutter: composerBox.left - workspaceBox.left,
+          rightGutter: workspaceBox.right - composerBox.right,
+          inputWithinComposer:
+            inputBox.left >= composerBox.left &&
+            inputBox.right <= composerBox.right,
+          sendWithinComposer:
+            sendBox.left >= composerBox.left &&
+            sendBox.right <= composerBox.right,
+          sendWithinViewport:
+            sendBox.left >= 0 && sendBox.right <= window.innerWidth,
+          pageFits: document.documentElement.scrollWidth <= window.innerWidth,
+        };
+      });
+      expect(
+        Math.abs(layout.leftGutter - layout.rightGutter),
+      ).toBeLessThanOrEqual(1);
+      expect(layout.inputWithinComposer).toBe(true);
+      expect(layout.sendWithinComposer).toBe(true);
+      expect(layout.sendWithinViewport).toBe(true);
+      expect(layout.pageFits).toBe(true);
+    }
+  } finally {
+    await app.close();
+  }
+});
+
 test("appearance preference switches themes and persists across relaunch", async () => {
   const userDataDir = createThemeUserData("dark");
   const env = {
