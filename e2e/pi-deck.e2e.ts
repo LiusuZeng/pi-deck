@@ -212,6 +212,15 @@ test("workspace management UI keeps Pi JSONL membership reversible and deletion 
   );
   try {
     await expectHealthyPreload(page);
+    const workspaceTree = page.getByTestId("workspace-tree");
+    await expect
+      .poll(() =>
+        workspaceTree.evaluate((element) => ({
+          overflowX: getComputedStyle(element).overflowX,
+          overflowY: getComputedStyle(element).overflowY,
+        })),
+      )
+      .toEqual({ overflowX: "hidden", overflowY: "auto" });
 
     // A busy runtime is a workspace-level archival guard. Runtime shutdown is
     // otherwise internal, so users do not need a separate close affordance.
@@ -329,9 +338,11 @@ test("workspace management UI keeps Pi JSONL membership reversible and deletion 
     await expect(sessionRow).toHaveCount(0);
     expect(fs.existsSync(canonicalSessionFile)).toBe(true);
     await page.getByRole("button", { name: /Archived/ }).click();
-    await expect(page.getByTestId("archived-tree")).toContainText(
-      "ui-membership",
-    );
+    const archivedTree = page.getByTestId("archived-tree");
+    await expect(archivedTree).toContainText("ui-membership");
+    await expect(
+      workspaceTree.locator('[data-testid="archived-tree"]'),
+    ).toHaveCount(1);
     await page.getByRole("button", { name: "Restore session" }).click();
     await expect(sessionRow).toBeVisible();
 

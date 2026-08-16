@@ -3623,8 +3623,10 @@ body {
 }
 
 .workspace-tree {
-  overflow: auto;
+  flex: 1 1 auto;
   min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding-top: 2px;
 }
 

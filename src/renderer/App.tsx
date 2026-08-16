@@ -7295,17 +7295,16 @@ function SessionSidebar(props: {
         {visibleWorkspaces.length === 0 ? (
           <p className="empty-session-list">No workspaces yet.</p>
         ) : null}
+        {props.realMode && props.showArchived ? (
+          <ArchivedSidebarTree
+            activeWorkspaces={props.workspaces}
+            archivedWorkspaces={props.archivedWorkspaces}
+            archivedSessions={props.archivedSessions}
+            onRestoreWorkspace={props.onRestoreWorkspace}
+            onRestoreSession={props.onRestoreSession}
+          />
+        ) : null}
       </section>
-
-      {props.realMode && props.showArchived ? (
-        <ArchivedSidebarTree
-          activeWorkspaces={props.workspaces}
-          archivedWorkspaces={props.archivedWorkspaces}
-          archivedSessions={props.archivedSessions}
-          onRestoreWorkspace={props.onRestoreWorkspace}
-          onRestoreSession={props.onRestoreSession}
-        />
-      ) : null}
 
       {!props.realMode ? (
         <div className="sidebar-note">
