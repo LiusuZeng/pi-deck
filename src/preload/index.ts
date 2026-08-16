@@ -37,6 +37,10 @@ import {
   chatSnapshotSchema,
   diagnosticsSummarySchema,
   ipcChannels,
+  multitaskModeRequestSchema,
+  multitaskModeStateSchema,
+  multitaskModeUpdateRequestSchema,
+  multitaskStateEventSchema,
   pickAttachmentsResultSchema,
   pickProjectResultSchema,
   projectListResultSchema,
@@ -101,6 +105,9 @@ import type {
   ChatInterventionRequest,
   ChatRespondToExtensionUiRequest,
   ChatRuntimeEvent,
+  MultitaskModeRequest,
+  MultitaskModeUpdateRequest,
+  MultitaskStateEvent,
   PiDeckApi,
   WorkspaceAddSessionRequest,
   WorkspaceArchiveSessionRequest,
@@ -317,6 +324,34 @@ const api: PiDeckApi = Object.freeze({
       ipcRenderer.on(ipcChannels.chatEvent, wrapped);
       return () => {
         ipcRenderer.off(ipcChannels.chatEvent, wrapped);
+      };
+    },
+  }),
+  multitask: Object.freeze({
+    getMode: (request: MultitaskModeRequest) =>
+      invokeValidated({
+        channel: ipcChannels.multitaskGetMode,
+        request: multitaskModeRequestSchema.parse(request),
+        responseSchema: multitaskModeStateSchema,
+      }),
+    updateMode: (request: MultitaskModeUpdateRequest) =>
+      invokeValidated({
+        channel: ipcChannels.multitaskUpdateMode,
+        request: multitaskModeUpdateRequestSchema.parse(request),
+        responseSchema: multitaskModeStateSchema,
+      }),
+    onState: (listener: (event: MultitaskStateEvent) => void) => {
+      const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => {
+        const parsed = multitaskStateEventSchema.safeParse(payload);
+        if (!parsed.success) {
+          console.warn("Dropping invalid multitask IPC event", parsed.error);
+          return;
+        }
+        listener(parsed.data);
+      };
+      ipcRenderer.on(ipcChannels.multitaskState, wrapped);
+      return () => {
+        ipcRenderer.off(ipcChannels.multitaskState, wrapped);
       };
     },
   }),

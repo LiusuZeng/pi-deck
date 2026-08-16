@@ -2851,6 +2851,22 @@ summary::marker {
   font: inherit;
 }
 
+.multitask-status-popover {
+  display: grid;
+  gap: 3px;
+  max-width: 300px;
+}
+
+.multitask-status-popover [role="listitem"] {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.multitask-control[data-error="true"] {
+  color: var(--danger-fg);
+}
+
 .ui-icon-button[data-loading="true"] svg {
   animation: ui-control-spin 800ms linear infinite;
 }

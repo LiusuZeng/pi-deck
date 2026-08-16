@@ -30,6 +30,11 @@ import type {
   chatSnapshotSchema,
   diagnosticsSummarySchema,
   ipcErrorSchema,
+  multitaskModeRequestSchema,
+  multitaskModeStateSchema,
+  multitaskModeUpdateRequestSchema,
+  multitaskStateEventSchema,
+  multitaskTaskSummarySchema,
   pickAttachmentsResultSchema,
   pickProjectResultSchema,
   projectListResultSchema,
@@ -110,6 +115,13 @@ export type AppSettings = z.infer<typeof appSettingsSchema>;
 export type AppBootstrapState = z.infer<typeof appBootstrapStateSchema>;
 export type DiagnosticsSummary = z.infer<typeof diagnosticsSummarySchema>;
 export type IpcErrorPayload = z.infer<typeof ipcErrorSchema>;
+export type MultitaskModeRequest = z.infer<typeof multitaskModeRequestSchema>;
+export type MultitaskModeUpdateRequest = z.infer<
+  typeof multitaskModeUpdateRequestSchema
+>;
+export type MultitaskModeState = z.infer<typeof multitaskModeStateSchema>;
+export type MultitaskTaskSummary = z.infer<typeof multitaskTaskSummarySchema>;
+export type MultitaskStateEvent = z.infer<typeof multitaskStateEventSchema>;
 export type ChatMessage = z.infer<typeof chatMessageSchema>;
 export type ChatInterventionRequest = z.infer<
   typeof chatInterventionRequestSchema
@@ -418,6 +430,13 @@ export interface PiDeckApi {
     ): Promise<WorkflowRun>;
     approveGate(request: WorkflowApproveGateRequest): Promise<WorkflowRun>;
     onEvent(listener: (event: WorkflowEvent) => void): () => void;
+  };
+  multitask: {
+    getMode(request: MultitaskModeRequest): Promise<MultitaskModeState>;
+    updateMode(
+      request: MultitaskModeUpdateRequest,
+    ): Promise<MultitaskModeState>;
+    onState(listener: (event: MultitaskStateEvent) => void): () => void;
   };
   attachments: {
     pickFiles(request: {

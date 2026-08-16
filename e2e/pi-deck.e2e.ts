@@ -1455,6 +1455,134 @@ test("real mode renders a draft shell before an unavailable backend is touched",
   }
 });
 
+test("fake delegation is status-only, parent-scoped, and honors direct handling", async () => {
+  const root = fs.mkdtempSync("/tmp/pd-");
+  const { app, page } = await launchPiDeck({
+    PI_DECK_FAKE_DELEGATE_SCENARIO: "1",
+    PI_DECK_HOME: path.join(root, "pideck-home"),
+    PI_DECK_USER_DATA_DIR: path.join(root, "user-data"),
+  });
+  try {
+    await expectHealthyPreload(page);
+
+    // Materialize and open the parent before enabling its parent-scoped mode.
+    await page.getByLabel("Prompt text").fill("open multitasking parent");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Fake response to: open multitasking parent", {
+        exact: true,
+      }),
+    ).toBeVisible();
+
+    const multitaskControl = page.locator(".multitask-control");
+    await expect(multitaskControl).toHaveAttribute(
+      "title",
+      "Turn on multitasking",
+    );
+    await multitaskControl.click();
+    await expect(multitaskControl).toHaveAttribute(
+      "title",
+      "Turn off multitasking",
+    );
+
+    await page.evaluate(() => {
+      const testWindow = window as typeof window & {
+        __piDeckMultitaskStates?: Array<{
+          tasks: Array<{
+            generatedName: string;
+            status: string;
+            taskNumber: number;
+          }>;
+        }>;
+        __piDeckMultitaskUnsubscribe?: () => void;
+      };
+      testWindow.__piDeckMultitaskUnsubscribe?.();
+      testWindow.__piDeckMultitaskStates = [];
+      testWindow.__piDeckMultitaskUnsubscribe = window.piDeck.multitask.onState(
+        (state) => testWindow.__piDeckMultitaskStates?.push(state),
+      );
+    });
+
+    await page.getByLabel("Prompt text").fill("delegated acceptance task");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect
+      .poll(async () =>
+        page.evaluate(
+          () =>
+            (
+              window as typeof window & {
+                __piDeckMultitaskStates?: Array<{
+                  tasks: Array<{ status: string }>;
+                }>;
+              }
+            ).__piDeckMultitaskStates?.flatMap((state) =>
+              state.tasks.map((task) => task.status),
+            ) ?? [],
+        ),
+      )
+      .toEqual(expect.arrayContaining(["queued", "running", "completed"]));
+
+    // The only GUI projection is the numbered, named terminal status. It has
+    // no task navigation or direct child controls, and no child enters the
+    // session sidebar; the child handoff is rendered in the parent timeline.
+    await multitaskControl.focus();
+    const statusList = page.getByRole("list", { name: "Task statuses" });
+    await expect(statusList).toHaveText("#1 Fake delegated task — completed");
+    await expect(statusList.getByRole("button")).toHaveCount(0);
+    await expect(
+      page.getByLabel("Sessions").locator(".session-item", {
+        hasText: "Fake delegated task",
+      }),
+    ).toHaveCount(0);
+    await expect(
+      page
+        .getByText("Fake response to: delegated acceptance task", {
+          exact: true,
+        })
+        .first(),
+    ).toBeVisible();
+
+    const stateCountBeforeDirectOverride = await page.evaluate(
+      () =>
+        (
+          window as typeof window & {
+            __piDeckMultitaskStates?: unknown[];
+          }
+        ).__piDeckMultitaskStates?.length ?? 0,
+    );
+    await page.getByLabel("Prompt text").fill("Handle this directly.");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Fake response to: Handle this directly.", {
+        exact: true,
+      }),
+    ).toBeVisible();
+    expect(
+      await page.evaluate(
+        () =>
+          (
+            window as typeof window & {
+              __piDeckMultitaskStates?: unknown[];
+            }
+          ).__piDeckMultitaskStates?.length ?? 0,
+      ),
+    ).toBe(stateCountBeforeDirectOverride);
+    await multitaskControl.focus();
+    await expect(statusList).toHaveText("#1 Fake delegated task — completed");
+  } finally {
+    await page.evaluate(() => {
+      const testWindow = window as typeof window & {
+        __piDeckMultitaskUnsubscribe?: () => void;
+      };
+      testWindow.__piDeckMultitaskUnsubscribe?.();
+      delete testWindow.__piDeckMultitaskUnsubscribe;
+      delete testWindow.__piDeckMultitaskStates;
+    });
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("bootstrap creates no saved session and the first draft send creates one", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-lazy-new-"));
   const projectCwd = path.join(root, "project");

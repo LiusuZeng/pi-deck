@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type {
@@ -17,6 +18,7 @@ type PromptScenario =
   | "retry"
   | "extension-ui"
   | "error"
+  | "delegate"
   | "all";
 
 interface FakeOptions {
@@ -136,6 +138,7 @@ function isPromptScenario(value: string): value is PromptScenario {
     "retry",
     "extension-ui",
     "error",
+    "delegate",
     "all",
   ].includes(value);
 }
@@ -198,6 +201,55 @@ class FakeRpcServer {
     | undefined;
   private readonly steering: string[] = [];
   private readonly followUp: string[] = [];
+
+  /** Deterministic test-only parent-extension stand-in for bridge E2E tests. */
+  private exerciseDelegationBridge(task: string): void {
+    const endpoint = process.env.DECK_DELEGATE_ENDPOINT;
+    const token = process.env.DECK_DELEGATE_CAPABILITY;
+    if (!endpoint?.startsWith("unix:") || !token) return;
+    const socket = net.createConnection({ path: endpoint.slice(5) });
+    const callId = `fake-delegate-${this.promptCounter}`;
+    let authenticated = false;
+    let buffer = "";
+    socket.on("connect", () =>
+      socket.write(
+        `${JSON.stringify({ version: 1, type: "authenticate", token })}\n`,
+      ),
+    );
+    socket.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+      for (;;) {
+        const newline = buffer.indexOf("\n");
+        if (newline < 0) return;
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        try {
+          const message = JSON.parse(line) as {
+            type?: string;
+            outcome?: string;
+            handoff?: { summary?: string };
+          };
+          if (!authenticated && message.type === "authenticated") {
+            authenticated = true;
+            socket.write(
+              `${JSON.stringify({ version: 1, type: "delegate", toolCallId: callId, payload: { task, name: "Fake delegated task", parentRuntimeId: process.env.DECK_DELEGATE_PARENT_RUNTIME } })}\n`,
+            );
+          } else if (message.type === "child-result") {
+            this.write({
+              type: "custom",
+              customType: "deck_delegate",
+              content:
+                message.handoff?.summary ?? message.outcome ?? "Child finished",
+            });
+            socket.destroy();
+          }
+        } catch {
+          socket.destroy();
+        }
+      }
+    });
+    socket.on("error", () => undefined);
+  }
   private messages: PiMessage[] = [
     {
       id: "msg_system_1",
@@ -535,6 +587,13 @@ class FakeRpcServer {
       messageId: assistantId,
     });
 
+    if (
+      this.options.promptScenario === "delegate" &&
+      !this.isDirectHandlingOverride(text)
+    ) {
+      this.exerciseDelegationBridge(text);
+    }
+
     if (this.options.promptScenario === "error") {
       const errorMessage = "Usage limit reached for fake provider.";
       const failedAssistant = {
@@ -598,6 +657,15 @@ class FakeRpcServer {
       return;
     }
     this.completePrompt(assistantId, text);
+  }
+
+  /**
+   * The fake delegate scenario models the explicit user override in Deck's
+   * delegate instruction. Keeping it here makes the GUI acceptance path
+   * deterministic without asking a model to interpret the prompt.
+   */
+  private isDirectHandlingOverride(text: string): boolean {
+    return /\bhandle(?:\s+this)?\s+directly\b/i.test(text);
   }
 
   private completePrompt(assistantId: string, text: string): void {
