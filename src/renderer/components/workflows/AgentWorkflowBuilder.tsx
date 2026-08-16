@@ -110,10 +110,13 @@ export function AgentWorkflowBuilder(props: {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [compactLayout, setCompactLayout] = useState(isCompactViewport);
   const inspectorId = useId();
+  const inspectorTitleId = useId();
   const pickerRef = useRef<HTMLDivElement>(null);
   const addRef = useRef<HTMLButtonElement>(null);
+  const inspectorRef = useRef<HTMLElement>(null);
   const inspectorCloseRef = useRef<HTMLButtonElement>(null);
   const originCardRef = useRef<HTMLButtonElement>(null);
+  const previousCompactLayout = useRef(compactLayout);
   const initialFocus = useRef(0);
   const selected =
     definition.nodes.find((node) => node.id === selectedId) ??
@@ -212,10 +215,54 @@ export function AgentWorkflowBuilder(props: {
       document.removeEventListener("keydown", escape);
     };
   }, [showPicker]);
+  const restoreInspectorFocus = () => {
+    const origin = originCardRef.current?.isConnected
+      ? originCardRef.current
+      : Array.from(
+          document.querySelectorAll<HTMLButtonElement>(
+            "[data-workflow-node-id]",
+          ),
+        ).find((card) => card.dataset.workflowNodeId === selected.id);
+    (origin ?? addRef.current)?.focus();
+  };
   useEffect(() => {
-    if (inspectorOpen && window.matchMedia?.("(max-width: 720px)").matches)
-      inspectorCloseRef.current?.focus();
-  }, [inspectorOpen, selectedId, view]);
+    if (inspectorOpen && compactLayout) inspectorCloseRef.current?.focus();
+    else if (inspectorOpen && previousCompactLayout.current)
+      restoreInspectorFocus();
+    previousCompactLayout.current = compactLayout;
+  }, [compactLayout, inspectorOpen, selectedId, view]);
+  const closeInspector = () => {
+    setInspectorOpen(false);
+    restoreInspectorFocus();
+  };
+  const inspectorKeys = (event: ReactKeyboardEvent<HTMLElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeInspector();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = Array.from(
+      inspectorRef.current?.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])',
+      ) ?? [],
+    ).filter((element) => {
+      const closedDetails = element.closest("details:not([open])");
+      return (
+        !closedDetails || element === closedDetails.querySelector("summary")
+      );
+    });
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (!first || !last) return;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
   const pickerKeys = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     const items = Array.from(
       pickerRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ??
@@ -611,29 +658,25 @@ export function AgentWorkflowBuilder(props: {
             ))}
           </section>
           <aside
+            ref={inspectorRef}
             id={inspectorId}
             className={`agent-workflow-inspector ${inspectorOpen ? "is-open" : ""}`}
-            aria-label="Focused role inspector"
+            {...(compactLayout && inspectorOpen
+              ? {
+                  role: "dialog",
+                  "aria-modal": true,
+                  "aria-labelledby": inspectorTitleId,
+                  onKeyDown: inspectorKeys,
+                }
+              : { "aria-label": "Focused role inspector" })}
           >
             <div className="agent-workflow-inspector-heading">
-              <h3>{presentation[selected.role]}</h3>
+              <h3 id={inspectorTitleId}>{presentation[selected.role]}</h3>
               <button
                 ref={inspectorCloseRef}
                 type="button"
                 className="agent-workflow-inspector-close"
-                onClick={() => {
-                  setInspectorOpen(false);
-                  const origin = originCardRef.current?.isConnected
-                    ? originCardRef.current
-                    : Array.from(
-                        document.querySelectorAll<HTMLButtonElement>(
-                          "[data-workflow-node-id]",
-                        ),
-                      ).find(
-                        (card) => card.dataset.workflowNodeId === selected.id,
-                      );
-                  (origin ?? addRef.current)?.focus();
-                }}
+                onClick={closeInspector}
               >
                 Close inspector
               </button>

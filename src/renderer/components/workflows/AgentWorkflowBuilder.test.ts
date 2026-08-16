@@ -160,6 +160,142 @@ describe("AgentWorkflowBuilder UUID identities", () => {
     expect(scope.selectedOptions[0]?.textContent).toContain("Saved workspace");
   });
 
+  it("traps and restores focus for the compact inspector dialog", () => {
+    const originalMatchMedia = window.matchMedia;
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: () => ({
+        matches: true,
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+      }),
+    });
+    try {
+      render();
+      const card = container!.querySelector<HTMLButtonElement>(
+        ".agent-workflow-step-card",
+      )!;
+      act(() => card.click());
+
+      const dialog = container!.querySelector<HTMLElement>('[role="dialog"]')!;
+      const close = dialog.querySelector<HTMLButtonElement>(
+        ".agent-workflow-inspector-close",
+      )!;
+      const focusable = Array.from(
+        dialog.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((element) => {
+        const closedDetails = element.closest("details:not([open])");
+        return (
+          !closedDetails || element === closedDetails.querySelector("summary")
+        );
+      });
+      const last = focusable.at(-1)!;
+
+      expect(dialog.getAttribute("aria-modal")).toBe("true");
+      expect(dialog.getAttribute("aria-labelledby")).toBeTruthy();
+      expect(document.activeElement).toBe(close);
+
+      act(() =>
+        close.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "Tab",
+            shiftKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        ),
+      );
+      expect(document.activeElement).toBe(last);
+
+      act(() =>
+        last.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "Tab",
+            bubbles: true,
+            cancelable: true,
+          }),
+        ),
+      );
+      expect(document.activeElement).toBe(close);
+
+      act(() =>
+        close.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "Escape",
+            bubbles: true,
+            cancelable: true,
+          }),
+        ),
+      );
+      expect(container!.querySelector('[role="dialog"]')).toBeNull();
+      expect(document.activeElement).toBe(card);
+    } finally {
+      Object.defineProperty(window, "matchMedia", {
+        configurable: true,
+        value: originalMatchMedia,
+      });
+    }
+  });
+
+  it("restores focus when a compact inspector becomes desktop layout", () => {
+    const originalMatchMedia = window.matchMedia;
+    let listener: (() => void) | undefined;
+    const media = {
+      matches: true,
+      addEventListener: (_event: string, next: () => void) => {
+        listener = next;
+      },
+      removeEventListener: () => undefined,
+    };
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: () => media,
+    });
+    try {
+      render();
+      const card = container!.querySelector<HTMLButtonElement>(
+        ".agent-workflow-step-card",
+      )!;
+      const close = container!.querySelector<HTMLButtonElement>(
+        ".agent-workflow-inspector-close",
+      )!;
+      act(() => card.click());
+      expect(document.activeElement).toBe(close);
+
+      media.matches = false;
+      act(() => listener?.());
+
+      expect(document.activeElement).toBe(card);
+      expect(
+        container!
+          .querySelector(".agent-workflow-inspector")
+          ?.getAttribute("role"),
+      ).not.toBe("dialog");
+    } finally {
+      Object.defineProperty(window, "matchMedia", {
+        configurable: true,
+        value: originalMatchMedia,
+      });
+    }
+  });
+
+  it("keeps the desktop inspector non-modal", () => {
+    render();
+    const inspector = container!.querySelector<HTMLElement>(
+      ".agent-workflow-inspector",
+    )!;
+    const close = inspector.querySelector<HTMLButtonElement>(
+      ".agent-workflow-inspector-close",
+    )!;
+
+    expect(inspector.getAttribute("role")).toBeNull();
+    expect(inspector.getAttribute("aria-modal")).toBeNull();
+    expect(inspector.getAttribute("aria-label")).toBe("Focused role inspector");
+    expect(document.activeElement).not.toBe(close);
+  });
+
   it("generates a UUID relationship ID when a route is added", async () => {
     const onSave = render();
     click("+ Add step");
