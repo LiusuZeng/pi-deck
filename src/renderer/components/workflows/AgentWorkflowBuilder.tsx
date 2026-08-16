@@ -165,13 +165,22 @@ export function AgentWorkflowBuilder(props: {
     () => validateJsonDraft(definitionJson(definition)).error,
     [definition],
   );
-  const update = (next: AgentWorkflowDefinition) => {
-    setDefinition(next);
-    setDraft(definitionJson(next));
+  const update = (
+    next:
+      | AgentWorkflowDefinition
+      | ((current: AgentWorkflowDefinition) => AgentWorkflowDefinition),
+  ) => {
+    setDefinition((current) =>
+      typeof next === "function" ? next(current) : next,
+    );
     setJsonError(undefined);
   };
   const patch = (node: AgentWorkflowNode) =>
-    update(updateNode(definition, node));
+    update((current) => updateNode(current, node));
+  // Keep the JSON view in lockstep with the committed canonical document. This
+  // cannot be done from a render-time snapshot: consecutive controls may be
+  // batched before a new render provides a fresh `definition`.
+  useEffect(() => setDraft(definitionJson(definition)), [definition]);
   useEffect(() => {
     const media = window.matchMedia?.("(max-width: 720px)");
     const updateLayout = () => setCompactLayout(media?.matches === true);
@@ -441,9 +450,10 @@ export function AgentWorkflowBuilder(props: {
               <span>Workflow name</span>
               <input
                 value={definition.name}
-                onChange={(e) =>
-                  update({ ...definition, name: e.target.value })
-                }
+                onChange={(e) => {
+                  const name = e.target.value;
+                  update((current) => ({ ...current, name }));
+                }}
               />
             </label>
             <label className="workflow-field">
@@ -637,12 +647,18 @@ export function AgentWorkflowBuilder(props: {
               <span>Name</span>
               <input
                 value={selected.name}
-                onChange={(e) =>
-                  patch({
-                    ...selected,
-                    name: e.target.value,
-                  } as AgentWorkflowNode)
-                }
+                onChange={(e) => {
+                  const name = e.target.value;
+                  const nodeId = selected.id;
+                  update((current) => {
+                    const node = current.nodes.find(
+                      (item) => item.id === nodeId,
+                    );
+                    return node
+                      ? updateNode(current, { ...node, name })
+                      : current;
+                  });
+                }}
               />
             </label>
             {selected.role === "worker" && (

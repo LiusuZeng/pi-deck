@@ -41,6 +41,35 @@ describe("AgentWorkflowBuilder UUID identities", () => {
         ?.dispatchEvent(new MouseEvent("click", { bubbles: true })),
     );
 
+  it("keeps workflow and selected-step edits made in one React batch", async () => {
+    const onSave = render();
+    const inputs = container!.querySelectorAll<HTMLInputElement>("input");
+    const workflowName = inputs[0]!;
+    const stepName = inputs[1]!;
+    const setValue = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )!.set!;
+
+    act(() => {
+      setValue.call(workflowName, "Release checklist");
+      workflowName.dispatchEvent(new Event("input", { bubbles: true }));
+      setValue.call(stepName, "Implement fix");
+      stepName.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    expect(workflowName.value).toBe("Release checklist");
+    expect(stepName.value).toBe("Implement fix");
+    await act(async () => click("Save workflow"));
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "Release checklist",
+        nodes: [expect.objectContaining({ name: "Implement fix" })],
+      }),
+      null,
+    );
+  });
+
   it("creates a schema-valid default document with UUID workflow and node IDs", () => {
     const definition = defaultAgentWorkflowDefinition();
     expect(definition.id).toMatch(uuid);
