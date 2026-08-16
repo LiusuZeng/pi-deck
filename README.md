@@ -2,15 +2,15 @@
 
 **A local macOS desktop app for Pi coding agents.**
 
-Pi Deck is a Pi coding-agent GUI that gives Pi a dedicated desktop workspace for running, watching, and steering coding-agent sessions without opening Pi's terminal UI. It organizes sessions into named workspaces while Pi continues to use its native models, settings, tools, resources, and session files. Visit [the Pi Deck website](https://liusuzeng.github.io/pi-deck/) for an overview.
+Pi Deck is a Pi coding-agent GUI that gives Pi a dedicated desktop workspace for running, watching, and steering coding-agent sessions without opening Pi's terminal UI. It organizes sessions and reusable Agent Workflows into named workspaces while Pi continues to use its native models, settings, tools, resources, and session files. Visit [the Pi Deck website](https://liusuzeng.github.io/pi-deck/) for an overview.
 
 > **Status:** Pi Deck is an active, pre-release personal MVP. It currently runs from source and targets macOS.
 
 ## At a glance
 
-| Organize the work | Triage what matters | Run in parallel | Direct the next step |
+| Organize the work | Automate repeatable work | Triage what matters | Direct the next step |
 | --- | --- | --- | --- |
-| Named workspaces keep related sessions organized independently of folders. [Explore workspaces](#workspaces-projects-and-pi-native-sessions) | Work inbox surfaces attention, failures, progress, and idle history. [Explore Work inbox](#work-inbox) | Independent Pi workers let several conversations run at once. [Explore multi-session control](#multi-session-control) | Chat, tools, model controls, files, and images stay in one composer. [Explore chat controls](#chat-and-intervention-controls) |
+| Named workspaces keep related sessions organized independently of folders. [Explore workspaces](#workspaces-projects-and-pi-native-sessions) | Agent Workflows compose Workers, Deciders, Orchestrators, and Human checkpoints. [Explore workflows](#agent-workflows) | Work inbox surfaces attention, failures, progress, and idle history across sessions. [Explore Work inbox](#work-inbox) | Chat, tools, model controls, files, images, and optional parallel delegation stay in one control plane. [Explore session control](#multi-session-control-and-multitasking) |
 
 ## What Pi Deck is
 
@@ -19,6 +19,8 @@ Pi Deck is a **local agent harness** for developers who already use Pi and want 
 - Organize related Pi sessions into named workspaces independent of their folders.
 - Open a project and continue its previous Pi sessions from the appropriate workspace.
 - Run multiple independent Pi workers without managing terminal windows.
+- Create reusable Agent Workflows with explicit roles, routing, and Human checkpoints.
+- Enable a parent conversation to delegate substantive independent work to isolated local child tasks.
 - Switch workspaces and projects while active work remains attached in the background.
 - Send prompts, files, and images from a graphical composer.
 - Change models and thinking levels from the session workspace.
@@ -64,7 +66,18 @@ The Work inbox gives parallel work a single place to review. Open it globally ac
 
 The workspace inbox keeps saved work grouped and easy to reopen.
 
-### Multi-session control
+### Agent Workflows
+
+Create persistent global or workspace-scoped workflows for repeatable multi-agent work. Build a workflow visually or edit its canonical JSON, then start a run and follow its live, keyboard-accessible execution graph.
+
+- Combine **Worker**, **Decider**, **Orchestrator**, and **Human** roles.
+- Route between steps based on decisions; use bounded loops or bounded-concurrency fan-out where appropriate.
+- Configure workflow inputs, model/thinking overrides, and retry attempts for model-backed roles.
+- Monitor queued, running, waiting, completed, failed, and skipped occurrences; inspect outputs and open the associated Pi session when one exists.
+- Answer Human input, approval, or choice checkpoints without creating a model-backed Pi session.
+- Retry failed or cancelled occurrences, stop a run, and recover persisted definitions and runs after restart.
+
+### Multi-session control and multitasking
 
 Each attached conversation has its own `pi --mode rpc` subprocess and event stream. Pi Deck routes actions by runtime ID so a stale prompt, abort, or close request cannot be redirected to the wrong conversation.
 
@@ -74,6 +87,14 @@ Each attached conversation has its own `pi --mode rpc` subprocess and event stre
 - Visible state for starting, working, tool execution, waiting for input, retrying, compacting, queued messages, idle, and errors.
 - Attention-first ordering keeps sessions that need input or recovery visible.
 - Runtime reconciliation recovers the UI when a terminal completion event is missed.
+
+#### Interactive multitasking
+
+For a parent session that needs independent parallel work, enable **parallel multitasking**. Pi then uses Pi Deck's authenticated local bridge to delegate substantive child tasks; it keeps trivial or explicitly direct work in the parent conversation. Pi Deck queues and schedules child tasks subject to worker capacity, and shows parent-facing status and completion handoffs only.
+
+- Parallel multitasking is opt-in per parent session; sequential mode does not permit delegation.
+- Child tasks can be queued, running, waiting for input, completed, failed, or cancelled.
+- Child task status stays with the parent conversation. Child sessions are deliberately not exposed as independent user controls.
 
 ### Chat and intervention controls
 
@@ -166,17 +187,18 @@ A background request marks its session as needing input without stealing focus. 
 ┌──────────────────────── Electron app ────────────────────────┐
 │                                                              │
 │  React renderer                                              │
-│  Work inbox · Workspaces · Sessions · Timeline · Composer    │
+│  Work inbox · Workspaces · Sessions · Workflows · Composer   │
 │              │                                               │
 │              │ validated, typed IPC                          │
 │              ▼                                               │
 │  Electron main process                                      │
-│  Workspace/project stores · Session index · Attachments      │
-│  Runtime state                                               │
+│  Workspace/project/workflow stores · Session index           │
+│  Workflow runtime · Attachments · Multitask scheduler        │
 │              │                                               │
 │              │ PiAdapter + strict JSONL transport            │
 │              ▼                                               │
 │  One local `pi --mode rpc` subprocess per attached session   │
+│  Authenticated local delegation bridge for child tasks        │
 │                                                              │
 └──────────────────────────────────────────────────────────────┘
                          │
@@ -184,7 +206,7 @@ A background request marks its session as needing input without stealing focus. 
        Pi settings, provider auth, resources, and sessions
 ```
 
-The renderer has no direct filesystem or process access. Electron main owns Pi subprocesses, selected-file tokens, workspace and project metadata, and session validation. Pi's session files remain the source of truth for conversation history; Pi Deck stores only the metadata needed to organize, filter, and reopen them. Workspace membership is Pi Deck metadata and does not require moving Pi's JSONL files or changing working folders.
+The renderer has no direct filesystem or process access. Electron main owns Pi subprocesses, selected-file tokens, workspace/project/workflow metadata, runtime scheduling, and session validation. Pi's session files remain the source of truth for conversation history; Pi Deck stores the metadata needed to organize, filter, reopen, and orchestrate it. Workflow definitions and occurrence runs are Pi Deck metadata, while model-backed workflow roles use Pi sessions. Workspace membership does not require moving Pi's JSONL files or changing working folders. Parallel delegation uses an authenticated local bridge between the parent Pi worker and Pi Deck's child-task scheduler.
 
 ## Requirements
 
@@ -259,13 +281,14 @@ npm run docs:capture
 ## Typical workflow
 
 1. Launch Pi Deck and choose or create a workspace.
-2. Open a project with **Open project**, or select an existing session in the workspace.
-3. Use **Work inbox** to review activity across all workspaces or filter the current workspace by status.
-4. Choose a saved session, or create a **New session** draft.
-5. Select the model and thinking level, add referenced files or image inputs, and send a prompt.
-6. Pi starts lazily and streams into the timeline while other workers remain attached in the background.
-7. Use **Steer**, **Follow-up**, or **Abort** while a turn is active; return to the Work inbox to triage the next session.
-8. Close an idle runtime to free capacity while keeping its saved session resumable.
+2. Open a project with **Open project**, select an existing session, or use **Work inbox** to review activity across all workspaces.
+3. For an ad-hoc task, create a **New session** draft, choose the model and thinking level, add referenced files or image inputs, and send a prompt.
+4. Pi starts lazily and streams into the timeline while other workers remain attached in the background.
+5. For repeatable multi-agent work, open **Agent Workflows**, create or select a workflow, provide its run inputs, and start it.
+6. Follow the live graph, answer Human checkpoints, retry or stop occurrences, and open a worker's Pi session when you need to intervene.
+7. For one conversation that should delegate independent work, enable parallel multitasking on the parent session and let Pi create and monitor child tasks.
+8. Use **Steer**, **Follow-up**, or **Abort** while a turn is active; return to the Work inbox to triage the next session.
+9. Close an idle runtime to free capacity while keeping its saved session resumable.
 
 Press **Enter** to send or steer. Use **Shift+Enter** for a newline.
 
@@ -302,6 +325,8 @@ Pi Deck has no hosted backend and does not sync app data.
 - **Conversation history:** Pi-owned JSONL session files in Pi's resolved session directory.
 - **Workspace metadata:** `~/.pideck/workspaces.json` by default.
 - **Project metadata:** `~/.pideck/projects.json` by default.
+- **Workflow definitions and occurrence runs:** `~/.pideck/workflows.json` by default.
+- **Delegated-task state:** `multitask-state.json` in Electron's local user-data directory. It retains only the scheduling mode, task number/name, status, and terminal handoff—not child runtime/session IDs or child task input.
 - **App settings and diagnostics:** Electron's local user-data directory.
 - **Provider authentication and Pi resources:** Pi's normal agent directory, `~/.pi/agent` by default.
 
@@ -321,7 +346,7 @@ Security boundaries include:
 
 - Pi Deck currently runs from source; there is no signed/notarized installer or packaged release yet.
 - macOS is the supported MVP target.
-- Worker capacity is enforced, but there is no queued-start scheduler. New workers are blocked when capacity is reached.
+- Ad-hoc session starts are blocked when attached-worker capacity is reached. Workflow occurrences and delegated child tasks use bounded queues and share that capacity.
 - There is not yet a full settings or diagnostics screen; some advanced configuration remains environment/file driven.
 - Project resources follow Pi's own trust and settings behavior; Pi Deck does not yet provide a project trust or resource-inspection panel.
 - Custom extension interfaces beyond `select`, `confirm`, `input`, and `editor` are not rendered as bespoke GUI components.
@@ -359,13 +384,15 @@ The prompt and GUI smoke commands require working provider authentication and ma
 ## Repository layout
 
 ```text
-src/main/       Electron backend, Pi workers, workspaces, projects, sessions, attachments
-src/preload/    Sandboxed, validated renderer API
-src/renderer/   React chat workspace and runtime-state reduction
-src/shared/     IPC schemas and shared TypeScript types
-scripts/        Launch, build-validation, and real Pi smoke tooling
-e2e/            Playwright Electron end-to-end coverage
-docs/           Requirements, architecture, plans, and validation records
+src/main/             Electron backend, Pi workers, workspaces, projects, sessions, attachments
+src/main/workflows/   Workflow persistence, occurrence runtime, scheduling, rehydration, and graph snapshots
+src/main/multitask/   Delegation bridge, Pi extension generation, parent/child scheduling, and task state
+src/preload/          Sandboxed, validated renderer API
+src/renderer/         React session workspace, workflow UI, multitask controls, and runtime-state reduction
+src/shared/           IPC schemas and shared TypeScript types, including canonical workflow contracts
+scripts/              Launch, build-validation, and real Pi smoke tooling
+e2e/                  Playwright Electron end-to-end coverage, including workflows and live runs
+docs/                 Requirements, architecture, plans, and validation records
 ```
 
 ## Further documentation
@@ -373,6 +400,8 @@ docs/           Requirements, architecture, plans, and validation records
 - [How to run and test Pi Deck](docs/how-to-run-and-test.md)
 - [Product requirements](docs/requirements.md)
 - [Technical architecture](docs/technical-architecture.md)
+- [Agent Workflows design](docs/agent-workflows-role-based-design.md)
+- [Agent Workflows UX feedback](docs/agent-workflows-feedback.md)
 - [Project-grouped sessions design](docs/project-grouped-sessions-p0-design.md)
 - [Real Pi validation record](docs/real-pi-gui-chat-validation.md)
 - [Implementation tracker](docs/project-tracker.md)
