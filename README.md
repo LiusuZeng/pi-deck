@@ -425,6 +425,7 @@ npm test
 npm run typecheck
 npm run format
 npm run build
+npm run check:site
 npm run test:e2e
 ```
 
@@ -441,7 +442,7 @@ npm run smoke:real:prompt
 npm run test:e2e:real-smoke
 ```
 
-The prompt and GUI smoke commands require working provider authentication and may contact the configured model provider.
+The prompt and GUI smoke commands require working provider authentication and may contact the configured model provider. The GitHub Pages deployment also runs `npm run check:site` before uploading the site artifact.
 
 ## Repository layout
 

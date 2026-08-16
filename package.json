@@ -33,9 +33,10 @@
     "docs:capture": "npm run build && node scripts/capture-doc-screenshots.mjs",
     "docs:capture:real-workflows": "npm run build && node scripts/capture-real-workflow-screenshots.mjs",
     "docs:render-social-preview": "node scripts/render-social-preview.mjs",
+    "check:site": "node scripts/check-site.mjs",
     "smoke:real": "node scripts/smoke-real-pi.mjs",
     "smoke:real:prompt": "node scripts/smoke-real-pi.mjs --prompt \"Reply with exactly: PI_DECK_REAL_SMOKE_OK\"",
-    "lint": "npm run typecheck",
+    "lint": "npm run typecheck && npm run check:site",
     "format": "prettier --check \"index.html\" \"package*.json\" \"*.config.ts\" \"tsconfig*.json\" \"scripts/**/*.mjs\" \"src/**/*.{ts,tsx,css}\" \"e2e/**/*.ts\""
   },
   "dependencies": {
