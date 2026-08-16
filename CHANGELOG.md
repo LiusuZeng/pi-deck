@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-08-16
+
+### Fixed
+
+- Restored workflow-builder interactivity after editing workflow and step names.
+- Prevented stale workflow refreshes from blocking newly started live-run monitoring.
+- Restored visible delegated-task status snapshots when live multitask events are missed.
+- Serialized concurrent fan-out occurrence completions so no child completion is lost.
+
+### Tests
+
+- Added real-Pi UI coverage for workflow editing, live monitoring, and delegated task status.
+- Added a deterministic regression for concurrent fan-out completion.
+
 ## [0.5.0] - 2026-08-15
 
 Major feature release adding Agent Workflows and interactive multitasking.
@@ -257,7 +271,8 @@ coding-agent sessions.
   crash; persisted sessions can be reopened, but unsaved partial stream text may
   be lost.
 
-[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/LiusuZeng/pi-deck/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/LiusuZeng/pi-deck/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/LiusuZeng/pi-deck/compare/v0.2.0...v0.3.0
