@@ -793,6 +793,8 @@ export class WorkflowOccurrenceScheduler {
     { runId: string; occurrenceId: string }
   >();
   private readonly now: () => number;
+  /** Serialize read-modify-write transitions for each canonical run. */
+  private readonly mutationTails = new Map<string, Promise<unknown>>();
   constructor(
     private readonly dependencies: Omit<
       WorkflowSchedulerDependencies,
@@ -806,53 +808,61 @@ export class WorkflowOccurrenceScheduler {
     this.now = dependencies.now ?? (() => Date.now());
   }
   async schedule(run: WorkflowRoleRun): Promise<WorkflowRoleRun> {
-    const now = this.now();
-    // Only scheduler-capacity queues are revived here. Fan-out queues remain
-    // owned by their Orchestrator, which releases them as concurrency slots open.
-    const resumable = {
-      ...run,
-      occurrences: run.occurrences.map((item) =>
-        item.status === "queued" && !item.parentOrchestratorRunId
-          ? { ...item, status: "ready" as const, updatedAtMs: now }
-          : item,
-      ),
-      updatedAtMs: now,
-    };
-    this.runs.set(resumable.id, resumable);
-    return this.pump(resumable.id);
+    return this.serialize(run.id, async () => {
+      const now = this.now();
+      // Only scheduler-capacity queues are revived here. Fan-out queues remain
+      // owned by their Orchestrator, which releases them as concurrency slots open.
+      const resumable = {
+        ...run,
+        occurrences: run.occurrences.map((item) =>
+          item.status === "queued" && !item.parentOrchestratorRunId
+            ? { ...item, status: "ready" as const, updatedAtMs: now }
+            : item,
+        ),
+        updatedAtMs: now,
+      };
+      this.runs.set(resumable.id, resumable);
+      return this.pump(resumable.id);
+    });
   }
   /** Stops owned sessions before persisting cancellation, so late completions lose ownership. */
   async stop(runId: string): Promise<WorkflowRoleRun> {
-    const run = await this.current(runId);
-    if (!run) throw new Error(`Unknown workflow run: ${runId}`);
-    const owned = [...this.active.entries()].filter(
-      ([, owner]) => owner.runId === runId,
-    );
-    for (const [runtimeId] of owned) {
-      this.active.delete(runtimeId);
-      await this.closeQuietly(runtimeId);
-    }
-    return this.save(stopWorkflowRoleRun(run, this.now()));
+    return this.serialize(runId, async () => {
+      const run = await this.current(runId);
+      if (!run) throw new Error(`Unknown workflow run: ${runId}`);
+      const owned = [...this.active.entries()].filter(
+        ([, owner]) => owner.runId === runId,
+      );
+      for (const [runtimeId] of owned) {
+        this.active.delete(runtimeId);
+        await this.closeQuietly(runtimeId);
+      }
+      return this.save(stopWorkflowRoleRun(run, this.now()));
+    });
   }
   async retry(runId: string, occurrenceId: string): Promise<WorkflowRoleRun> {
-    const run = await this.current(runId);
-    if (!run) throw new Error(`Unknown workflow run: ${runId}`);
-    const next = await this.save(
-      retryWorkflowOccurrence(run, occurrenceId, this.now()),
-    );
-    return this.pump(next.id);
+    return this.serialize(runId, async () => {
+      const run = await this.current(runId);
+      if (!run) throw new Error(`Unknown workflow run: ${runId}`);
+      const next = await this.save(
+        retryWorkflowOccurrence(run, occurrenceId, this.now()),
+      );
+      return this.pump(next.id);
+    });
   }
   async answerHuman(
     runId: string,
     occurrenceId: string,
     value: string | boolean,
   ): Promise<WorkflowRoleRun> {
-    const run = await this.current(runId);
-    if (!run) throw new Error(`Unknown workflow run: ${runId}`);
-    const next = await this.save(
-      answerWorkflowHumanOccurrence(run, occurrenceId, value, this.now()),
-    );
-    return this.pump(next.id);
+    return this.serialize(runId, async () => {
+      const run = await this.current(runId);
+      if (!run) throw new Error(`Unknown workflow run: ${runId}`);
+      const next = await this.save(
+        answerWorkflowHumanOccurrence(run, occurrenceId, value, this.now()),
+      );
+      return this.pump(next.id);
+    });
   }
   async handleRuntimeEvent(event: WorkflowRuntimeEvent): Promise<void> {
     // A worker process exit has the same ownership and failure semantics as an
@@ -864,80 +874,94 @@ export class WorkflowOccurrenceScheduler {
     // automatic retry. Keep ownership so its eventual completion is accepted.
     if (event.type === "agent_end" && event.willRetry === true) return;
     this.active.delete(event.runtimeId);
-    try {
-      const run = await this.current(owner.runId);
-      if (!run) return;
-      const occurrence = run.occurrences.find(
-        (item) => item.id === owner.occurrenceId,
-      );
-      if (
-        !occurrence ||
-        occurrence.runtimeId !== event.runtimeId ||
-        occurrence.status !== "running"
-      )
-        return;
-      if (
-        event.type === "worker_exit" ||
-        event.status === "error" ||
-        event.status === "aborted"
-      ) {
-        await this.save(
-          failWorkflowOccurrence(
-            run,
-            occurrence.id,
-            String(event.error ?? "Pi worker failed."),
-            this.now(),
-          ),
+    await this.serialize(owner.runId, async () => {
+      try {
+        const run = await this.current(owner.runId);
+        if (!run) return;
+        const occurrence = run.occurrences.find(
+          (item) => item.id === owner.occurrenceId,
         );
-        return;
-      }
-      const answer = findFinalAssistant(
-        (await this.dependencies.getSnapshot(event.runtimeId)).messages,
-      );
-      if (!answer?.content || answer.error) {
-        await this.save(
-          failWorkflowOccurrence(
-            run,
-            occurrence.id,
-            answer?.errorMessage ?? "Pi returned no assistant result.",
-            this.now(),
-          ),
-        );
-        return;
-      }
-      if (occurrence.role === "decider") {
-        const parsed = answer.content.trim();
-        if (parsed !== "true" && parsed !== "false")
+        if (
+          !occurrence ||
+          occurrence.runtimeId !== event.runtimeId ||
+          occurrence.status !== "running"
+        )
+          return;
+        if (
+          event.type === "worker_exit" ||
+          event.status === "error" ||
+          event.status === "aborted"
+        ) {
           await this.save(
             failWorkflowOccurrence(
               run,
               occurrence.id,
-              "Decider returned malformed output; expected strict boolean.",
+              String(event.error ?? "Pi worker failed."),
               this.now(),
             ),
           );
-        else
+          return;
+        }
+        const answer = findFinalAssistant(
+          (await this.dependencies.getSnapshot(event.runtimeId)).messages,
+        );
+        if (!answer?.content || answer.error) {
+          await this.save(
+            failWorkflowOccurrence(
+              run,
+              occurrence.id,
+              answer?.errorMessage ?? "Pi returned no assistant result.",
+              this.now(),
+            ),
+          );
+          return;
+        }
+        if (occurrence.role === "decider") {
+          const parsed = answer.content.trim();
+          if (parsed !== "true" && parsed !== "false")
+            await this.save(
+              failWorkflowOccurrence(
+                run,
+                occurrence.id,
+                "Decider returned malformed output; expected strict boolean.",
+                this.now(),
+              ),
+            );
+          else
+            await this.save(
+              completeWorkflowOccurrence(
+                run,
+                occurrence.id,
+                parsed === "true",
+                this.now(),
+              ),
+            );
+        } else
           await this.save(
             completeWorkflowOccurrence(
               run,
               occurrence.id,
-              parsed === "true",
+              answer.content,
               this.now(),
             ),
           );
-      } else
-        await this.save(
-          completeWorkflowOccurrence(
-            run,
-            occurrence.id,
-            answer.content,
-            this.now(),
-          ),
-        );
-    } finally {
-      await this.closeQuietly(event.runtimeId);
-      await this.pump(owner.runId);
-    }
+      } finally {
+        await this.closeQuietly(event.runtimeId);
+        await this.pump(owner.runId);
+      }
+    });
+  }
+  private serialize<T>(runId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.mutationTails.get(runId) ?? Promise.resolve();
+    const result = previous.catch(() => undefined).then(operation);
+    this.mutationTails.set(runId, result);
+    void result
+      .finally(() => {
+        if (this.mutationTails.get(runId) === result)
+          this.mutationTails.delete(runId);
+      })
+      .catch(() => undefined);
+    return result;
   }
   private async pump(runId: string): Promise<WorkflowRoleRun> {
     let run = await this.current(runId);

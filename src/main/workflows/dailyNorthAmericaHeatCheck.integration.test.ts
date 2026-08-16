@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   workflowDefinitionSchema,
   type WorkflowDefinition,
+  type WorkflowRoleDefinition,
 } from "../../shared/agentWorkflowSchemas.js";
 import { createWorkflowRoleRun } from "./agentWorkflowRuntime.js";
 import { WorkflowOccurrenceScheduler } from "./workflowScheduler.js";
@@ -104,6 +105,129 @@ describe("Daily North America Heat Check canonical execution", () => {
       expect(occurrence).not.toHaveProperty("runtimeId");
       expect(occurrence.sessionFile).toMatch(/^\/tmp\/session-\d+\.jsonl$/);
     }
+  });
+
+  it("serializes simultaneous bounded fan-out completions without losing a child", async () => {
+    const ids = {
+      workflow: "00000000-0000-4000-8000-000000000301",
+      fanout: "00000000-0000-4000-8000-000000000302",
+      a: "00000000-0000-4000-8000-000000000303",
+      b: "00000000-0000-4000-8000-000000000304",
+      c: "00000000-0000-4000-8000-000000000305",
+      d: "00000000-0000-4000-8000-000000000306",
+      end: "00000000-0000-4000-8000-000000000307",
+    };
+    const definition: WorkflowRoleDefinition = {
+      format: "pi-deck.agent-workflow",
+      schemaVersion: 2,
+      id: ids.workflow,
+      revision: 1,
+      name: "Concurrent fan-out",
+      inputs: [],
+      entryNodeId: ids.fanout,
+      nodes: [
+        {
+          id: ids.fanout,
+          name: "Fan out",
+          role: "orchestrator",
+          config: {
+            mode: "fanout",
+            agents: [ids.a, ids.b, ids.c, ids.d],
+            maxConcurrency: 2,
+            completion: "all",
+          },
+        },
+        ...[ids.a, ids.b, ids.c, ids.d].map((id) => ({
+          id,
+          name: `Worker ${id.slice(-1)}`,
+          role: "worker" as const,
+          managedBy: ids.fanout,
+          config: { instructions: "Return an answer." },
+        })),
+      ],
+      relationships: [{ id: ids.end, from: ids.fanout, to: { end: "done" } }],
+    };
+    let persisted = createWorkflowRoleRun(definition, "workspace", {}, 1);
+    let created = 0;
+    let synchronizeCompletionReads = false;
+    let completionReads = 0;
+    let releaseCompletionReads!: () => void;
+    const completionReadBarrier = new Promise<void>((resolve) => {
+      releaseCompletionReads = resolve;
+    });
+    const scheduler = new WorkflowOccurrenceScheduler({
+      createSession: async () => ({
+        runtimeId: `runtime-${++created}`,
+        state: {
+          sessionId: `session-${created}`,
+          sessionFile: `/tmp/session-${created}.jsonl`,
+        },
+        messages: [],
+      }),
+      prompt: async () => undefined,
+      getSnapshot: async (runtimeId) => ({
+        runtimeId,
+        state: {},
+        messages: [{ role: "assistant", content: `answer ${runtimeId}` }],
+      }),
+      closeSession: async () => undefined,
+      getRun: async () => {
+        // The old unsynchronized scheduler lets both handlers load this same
+        // snapshot. A serialized handler instead times out the first read,
+        // persists it, then gives the second handler the current snapshot.
+        if (synchronizeCompletionReads && ++completionReads <= 2) {
+          if (completionReads === 2) releaseCompletionReads();
+          await Promise.race([
+            completionReadBarrier,
+            new Promise<void>((resolve) => setTimeout(resolve, 25)),
+          ]);
+        }
+        return persisted;
+      },
+      persist: async (run) => {
+        persisted = run;
+        return run;
+      },
+      emit: () => undefined,
+    });
+
+    await scheduler.schedule(persisted);
+    synchronizeCompletionReads = true;
+    await Promise.all(
+      ["runtime-1", "runtime-2"].map((runtimeId) =>
+        scheduler.handleRuntimeEvent({
+          type: "agent_end",
+          runtimeId,
+          status: "completed",
+        }),
+      ),
+    );
+    await Promise.all(
+      ["runtime-3", "runtime-4"].map((runtimeId) =>
+        scheduler.handleRuntimeEvent({
+          type: "agent_end",
+          runtimeId,
+          status: "completed",
+        }),
+      ),
+    );
+
+    expect(persisted.status).toBe("completed");
+    expect(persisted.occurrences).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ nodeId: ids.fanout, status: "completed" }),
+      ]),
+    );
+    expect(
+      persisted.occurrences.filter((item) => item.role === "worker"),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ nodeId: ids.a, status: "completed" }),
+        expect.objectContaining({ nodeId: ids.b, status: "completed" }),
+        expect.objectContaining({ nodeId: ids.c, status: "completed" }),
+        expect.objectContaining({ nodeId: ids.d, status: "completed" }),
+      ]),
+    );
   });
 
   it("fails a workflow-created session without a durable reopen file", async () => {
