@@ -1504,9 +1504,11 @@ export function App(): ReactElement {
       .then((state) =>
         setMultitask((current) => ({
           ...current,
-          [state.runtimeId]: {
+          // A status event received while the request was in flight is newer
+          // than this snapshot; otherwise hydrate a missed event from it.
+          [state.runtimeId]: current[state.runtimeId] ?? {
             mode: state.mode,
-            tasks: current[state.runtimeId]?.tasks ?? [],
+            tasks: state.tasks,
           },
         })),
       )
@@ -4147,9 +4149,9 @@ export function App(): ReactElement {
           .then((state) =>
             setMultitask((current) => ({
               ...current,
-              [state.runtimeId]: {
+              [state.runtimeId]: current[state.runtimeId] ?? {
                 mode: state.mode,
-                tasks: current[state.runtimeId]?.tasks ?? [],
+                tasks: state.tasks,
               },
             })),
           )

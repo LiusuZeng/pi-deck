@@ -239,7 +239,17 @@ describe("preload PiDeck API validation", () => {
   it("exposes only parent-scoped multitask mode APIs", async () => {
     electronMock.ipcRenderer.invoke.mockResolvedValue({
       ok: true,
-      data: { runtimeId: "runtime-7", mode: "parallel" },
+      data: {
+        runtimeId: "runtime-7",
+        mode: "parallel",
+        tasks: [
+          {
+            taskNumber: 1,
+            generatedName: "Delegated task",
+            status: "completed",
+          },
+        ],
+      },
     });
 
     await expect(
@@ -247,6 +257,13 @@ describe("preload PiDeck API validation", () => {
     ).resolves.toEqual({
       runtimeId: "runtime-7",
       mode: "parallel",
+      tasks: [
+        {
+          taskNumber: 1,
+          generatedName: "Delegated task",
+          status: "completed",
+        },
+      ],
     });
     await api.multitask.updateMode({
       runtimeId: "runtime-7",

@@ -159,6 +159,18 @@ export class MultitaskSupervisor<
     return this.parent(parentId).manager.mode;
   }
 
+  /** Returns the atomic, renderer-safe parent task projection. */
+  state(parentId: ParentId): {
+    mode: MultitaskManagerOptions["mode"];
+    tasks: SupervisedTaskSnapshot[];
+  } {
+    const parent = this.parent(parentId);
+    return {
+      mode: parent.manager.mode,
+      tasks: parent.manager.snapshots().map(publicSnapshot),
+    };
+  }
+
   setMode(parentId: ParentId, mode: MultitaskManagerOptions["mode"]): void {
     const parent = this.parent(parentId);
     parent.manager.setMode(mode);

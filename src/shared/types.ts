@@ -432,10 +432,10 @@ export interface PiDeckApi {
     onEvent(listener: (event: WorkflowEvent) => void): () => void;
   };
   multitask: {
-    getMode(request: MultitaskModeRequest): Promise<MultitaskModeState>;
+    getMode(request: MultitaskModeRequest): Promise<MultitaskStateEvent>;
     updateMode(
       request: MultitaskModeUpdateRequest,
-    ): Promise<MultitaskModeState>;
+    ): Promise<MultitaskStateEvent>;
     onState(listener: (event: MultitaskStateEvent) => void): () => void;
   };
   attachments: {

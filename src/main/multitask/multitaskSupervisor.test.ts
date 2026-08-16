@@ -66,6 +66,24 @@ describe("MultitaskSupervisor", () => {
     ).toThrow(/exceeds/);
   });
 
+  it("returns an atomic status-only state projection", async () => {
+    const { supervisor, workers } = setup();
+    supervisor.enqueue("parent", {
+      number: 1,
+      name: "visible name",
+      brief: { text: "secret" },
+    });
+    await supervisor.schedule("parent");
+    workers.get(1)!.callbacks.completed({ summary: "secret result" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(supervisor.state("parent")).toEqual({
+      mode: "parallel",
+      tasks: [{ number: 1, name: "visible name", status: "completed" }],
+    });
+    expect(JSON.stringify(supervisor.state("parent"))).not.toContain("secret");
+  });
+
   it("captures terminal handoffs, closes workers, and starts the next queued child", async () => {
     const { supervisor, workers, notifications } = setup(1);
     supervisor.enqueue("parent", {

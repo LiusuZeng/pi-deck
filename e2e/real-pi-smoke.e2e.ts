@@ -381,6 +381,7 @@ test("real Pi GUI P0 smoke: default workspace prompt and resume", async () => {
       await firstLaunch.page.evaluate(() => {
         const testWindow = window as typeof window & {
           __piDeckRealDelegateStates?: Array<{
+            runtimeId: string;
             tasks: Array<{ generatedName: string; status: string }>;
           }>;
           __piDeckRealDelegateUnsubscribe?: () => void;
@@ -427,6 +428,32 @@ test("real Pi GUI P0 smoke: default workspace prompt and resume", async () => {
       await expect(statusList).toContainText(
         "#1 Real delegated acceptance task — completed",
       );
+      // getMode is the authoritative recovery snapshot if status events
+      // precede a renderer subscription; it must retain the visible task.
+      await expect
+        .poll(() =>
+          firstLaunch.page.evaluate(async () => {
+            const states = (
+              window as typeof window & {
+                __piDeckRealDelegateStates?: Array<{ runtimeId: string }>;
+              }
+            ).__piDeckRealDelegateStates;
+            const runtimeId = states?.at(-1)?.runtimeId;
+            return runtimeId
+              ? window.piDeck.multitask.getMode({ runtimeId })
+              : undefined;
+          }),
+        )
+        .toMatchObject({
+          mode: "parallel",
+          tasks: [
+            {
+              taskNumber: 1,
+              generatedName: "Real delegated acceptance task",
+              status: "completed",
+            },
+          ],
+        });
       // A completed state is the terminal child result returned to the parent
       // extension; the renderer intentionally projects only that safe parent
       // status, not child transcript/session data.

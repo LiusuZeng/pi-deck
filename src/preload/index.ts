@@ -38,7 +38,6 @@ import {
   diagnosticsSummarySchema,
   ipcChannels,
   multitaskModeRequestSchema,
-  multitaskModeStateSchema,
   multitaskModeUpdateRequestSchema,
   multitaskStateEventSchema,
   pickAttachmentsResultSchema,
@@ -332,13 +331,13 @@ const api: PiDeckApi = Object.freeze({
       invokeValidated({
         channel: ipcChannels.multitaskGetMode,
         request: multitaskModeRequestSchema.parse(request),
-        responseSchema: multitaskModeStateSchema,
+        responseSchema: multitaskStateEventSchema,
       }),
     updateMode: (request: MultitaskModeUpdateRequest) =>
       invokeValidated({
         channel: ipcChannels.multitaskUpdateMode,
         request: multitaskModeUpdateRequestSchema.parse(request),
-        responseSchema: multitaskModeStateSchema,
+        responseSchema: multitaskStateEventSchema,
       }),
     onState: (listener: (event: MultitaskStateEvent) => void) => {
       const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => {

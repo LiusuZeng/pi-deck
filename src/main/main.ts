@@ -69,7 +69,6 @@ import {
   workspaceSessionMutationResultSchema,
   workspaceUpdateRequestSchema,
   multitaskModeRequestSchema,
-  multitaskModeStateSchema,
   multitaskModeUpdateRequestSchema,
   multitaskStateEventSchema,
 } from "../shared/ipcSchemas.js";
@@ -173,7 +172,6 @@ import {
   updateWindowBackground,
 } from "./theme.js";
 import { formatCanonicalFileReference } from "./attachments.js";
-import { MultitaskManager } from "./multitask/multitaskManager.js";
 import { MultitaskStateStore } from "./multitask/multitaskStateStore.js";
 import {
   DelegationBridgeServer,
@@ -247,7 +245,6 @@ let workflowInitialization: WorkflowInitialization<WorkflowStore> | undefined;
 const realChatLaunchConfigCache = new RealChatLaunchConfigCache();
 let diagnostics: DiagnosticsService | undefined;
 let multitaskStateStore: MultitaskStateStore | undefined;
-const multitaskManagers = new Map<string, MultitaskManager>();
 // Snapshot reads happen often. A persisted session is rehydrated exactly once
 // when attached; later reads must not close live private children.
 const multitaskRuntimeResumeGuard = new PersistedRuntimeResumeGuard();
@@ -839,23 +836,22 @@ function registerIpcHandlers(
   registerValidatedIpc({
     channel: ipcChannels.multitaskGetMode,
     requestSchema: multitaskModeRequestSchema,
-    responseSchema: multitaskModeStateSchema,
+    responseSchema: multitaskStateEventSchema,
     diagnostics: diagnosticsService,
-    handler: async ({ runtimeId }) => multitaskModeState(runtimeId),
+    handler: async ({ runtimeId }) => multitaskState(runtimeId),
   });
 
   registerValidatedIpc({
     channel: ipcChannels.multitaskUpdateMode,
     requestSchema: multitaskModeUpdateRequestSchema,
-    responseSchema: multitaskModeStateSchema,
+    responseSchema: multitaskStateEventSchema,
     diagnostics: diagnosticsService,
     handler: async ({ runtimeId, mode }) => {
-      const manager = await getMultitaskManager(runtimeId);
-      manager.setMode(mode);
-      multitaskSupervisor?.setMode(runtimeId, mode);
+      const supervisor = await getMultitaskSupervisor(runtimeId);
+      supervisor.setMode(runtimeId, mode);
       await persistMultitaskSupervisor(runtimeId);
-      emitMultitaskState(runtimeId, manager);
-      return multitaskModeStateFromManager(runtimeId, manager);
+      emitMultitaskState(runtimeId, supervisor);
+      return multitaskState(runtimeId);
     },
   });
 
@@ -2402,8 +2398,13 @@ async function startDelegationBridge(): Promise<void> {
     stateDir: path.join(app.getPath("userData"), "delegate-bridge"),
     // The bridge binds parentId from the capability; this is the only place
     // extension mode queries obtain their runtime's live manager state.
-    getParentMode: (parentRuntimeId) =>
-      multitaskManagers.get(parentRuntimeId)?.mode ?? "sequential",
+    getParentMode: (parentRuntimeId) => {
+      try {
+        return multitaskSupervisor?.mode(parentRuntimeId) ?? "sequential";
+      } catch {
+        return "sequential";
+      }
+    },
   });
   const credentials = await bridge.start();
   delegationBridge = bridge;
@@ -2467,10 +2468,7 @@ async function handleDelegateRequest(request: DelegateRequest): Promise<void> {
     });
     return;
   }
-  if (
-    multitaskManagers.get(parentId)?.mode !== "parallel" ||
-    !chatRuntimeIds.has(parentId)
-  ) {
+  if (!isMultitaskMode(parentId, "parallel") || !chatRuntimeIds.has(parentId)) {
     delegationBridge?.sendChildResult({
       connectionId: request.connectionId,
       toolCallId: request.toolCallId,
@@ -2717,13 +2715,8 @@ function registerChatWorker(
   if (workerSpec.workspaceId !== undefined) {
     chatRuntimeWorkspaceIds.set(runtimeId, workerSpec.workspaceId);
   }
-  const manager = new MultitaskManager({
-    mode: "sequential",
-    maxQueuedTasks: 100,
-  });
-  multitaskManagers.set(runtimeId, manager);
   multitaskSupervisor?.addParent(runtimeId, {
-    mode: manager.mode,
+    mode: "sequential",
     maxQueuedTasks: 100,
   });
 }
@@ -2971,7 +2964,6 @@ function forgetChatRuntime(
   chatRuntimeSessionFiles.delete(runtimeId);
   chatRuntimeProjectIds.delete(runtimeId);
   chatRuntimeWorkspaceIds.delete(runtimeId);
-  multitaskManagers.delete(runtimeId);
   multitaskRuntimeResumeGuard.forget(runtimeId);
   delegationBridge?.removeParent(runtimeId);
   for (const [key, call] of delegateCalls) {
@@ -3136,13 +3128,16 @@ function handleMultitaskNotification(
   }
   const supervisor = multitaskSupervisor;
   if (supervisor) {
-    const manager = multitaskManagers.get(notification.parentId);
-    if (manager)
+    try {
+      const state = supervisor.state(notification.parentId);
       emitMultitaskStateFromSnapshots(
         notification.parentId,
-        manager.mode,
-        supervisor.snapshots(notification.parentId),
+        state.mode,
+        state.tasks,
       );
+    } catch {
+      // The parent may have been removed while a child notification was queued.
+    }
     void persistMultitaskSupervisor(notification.parentId);
   }
 }
@@ -3404,7 +3399,6 @@ async function closeChatWorker(): Promise<void> {
   chatRuntimeWorkspaceIds.clear();
   chatSessionFileLocks.clear();
   chatSessionResumePromises.clear();
-  multitaskManagers.clear();
   attachmentPreservingRuntimeClosures.clear();
   for (const runtimeId of runtimeIds) {
     attachmentSelections.releaseSession(runtimeId);
@@ -5199,26 +5193,33 @@ function emitCanonicalWorkflowRunEvent(run: WorkflowRunEnvelope): void {
   );
 }
 
-async function getMultitaskManager(
+async function getMultitaskSupervisor(
   runtimeId: string,
-): Promise<MultitaskManager> {
+): Promise<NonNullable<typeof multitaskSupervisor>> {
   const adapter = chatAdapter;
+  const supervisor = multitaskSupervisor;
   if (
     adapter === undefined ||
+    supervisor === undefined ||
     !chatRuntimeIds.has(runtimeId) ||
     !adapter.hasRuntime(runtimeId)
   ) {
     throw new Error(`Chat runtime is no longer attached: ${runtimeId}`);
   }
-  const existing = multitaskManagers.get(runtimeId);
-  if (existing !== undefined) return existing;
-  const sessionFile = chatRuntimeSessionFiles.get(runtimeId);
-  const saved = sessionFile ? multitaskStateStore?.get(sessionFile) : undefined;
-  const manager = saved
-    ? MultitaskManager.rehydrate(saved, { maxQueuedTasks: 100 })
-    : new MultitaskManager({ mode: "sequential", maxQueuedTasks: 100 });
-  multitaskManagers.set(runtimeId, manager);
-  return manager;
+  // state() also verifies that this is an attached parent, rather than a child.
+  supervisor.state(runtimeId);
+  return supervisor;
+}
+
+function isMultitaskMode(
+  runtimeId: string,
+  mode: "parallel" | "sequential",
+): boolean {
+  try {
+    return multitaskSupervisor?.mode(runtimeId) === mode;
+  } catch {
+    return false;
+  }
 }
 
 async function reconcileMultitaskRuntime(
@@ -5230,75 +5231,54 @@ async function reconcileMultitaskRuntime(
     (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
   chatRuntimeSessionFiles.set(runtimeId, canonical);
   const saved = multitaskStateStore?.get(canonical);
-  if (!multitaskManagers.has(runtimeId)) {
-    multitaskManagers.set(
-      runtimeId,
-      saved
-        ? MultitaskManager.rehydrate(saved, { maxQueuedTasks: 100 })
-        : new MultitaskManager({ mode: "sequential", maxQueuedTasks: 100 }),
-    );
-  }
-  if (multitaskSupervisor) {
-    try {
-      multitaskSupervisor.addParent(runtimeId, {
-        mode: multitaskManagers.get(runtimeId)!.mode,
-        maxQueuedTasks: 100,
-      });
-    } catch {
-      /* already registered */
-    }
-  }
-  if (saved) {
-    multitaskManagers.get(runtimeId)?.setMode(saved.mode);
+  const supervisor = multitaskSupervisor;
+  if (!supervisor) return;
+  try {
+    supervisor.addParent(runtimeId, {
+      mode: saved?.mode ?? "sequential",
+      maxQueuedTasks: 100,
+    });
+  } catch {
+    /* already registered */
   }
   // Resume is destructive to retained private children. It is valid only for
   // the first attachment of persisted state, never for ordinary snapshots.
-  if (
-    multitaskSupervisor &&
-    multitaskRuntimeResumeGuard.claim(runtimeId, saved !== undefined)
-  ) {
-    await multitaskSupervisor.resume(runtimeId, saved);
+  if (multitaskRuntimeResumeGuard.claim(runtimeId, saved !== undefined)) {
+    await supervisor.resume(runtimeId, saved);
   }
 }
 
-async function persistMultitaskManager(
-  runtimeId: string,
-  manager: MultitaskManager,
-): Promise<void> {
-  const sessionFile = chatRuntimeSessionFiles.get(runtimeId);
-  if (sessionFile !== undefined)
-    await multitaskStateStore?.set(sessionFile, manager.exportState());
-}
-
-function multitaskModeState(
-  runtimeId: string,
-): Promise<{ runtimeId: string; mode: "parallel" | "sequential" }> {
-  return getMultitaskManager(runtimeId).then((manager) =>
-    multitaskModeStateFromManager(runtimeId, manager),
-  );
-}
-
-function multitaskModeStateFromManager(
-  runtimeId: string,
-  manager: MultitaskManager,
-): { runtimeId: string; mode: "parallel" | "sequential" } {
-  return { runtimeId, mode: manager.mode };
+async function multitaskState(runtimeId: string): Promise<{
+  runtimeId: string;
+  mode: "parallel" | "sequential";
+  tasks: Array<{ taskNumber: number; generatedName: string; status: string }>;
+}> {
+  const state = (await getMultitaskSupervisor(runtimeId)).state(runtimeId);
+  return {
+    runtimeId,
+    mode: state.mode,
+    tasks: state.tasks.map((task) => ({
+      taskNumber: task.number,
+      generatedName: task.name,
+      status: task.status === "cancelled" ? "failed" : task.status,
+    })),
+  };
 }
 
 function emitMultitaskState(
   runtimeId: string,
-  manager: MultitaskManager,
+  supervisor: NonNullable<typeof multitaskSupervisor>,
 ): void {
-  const tasks = manager.snapshots().map((task) => ({
-    taskNumber: task.number,
-    generatedName: task.name,
-    status: task.status === "cancelled" ? "failed" : task.status,
-  }));
-  const payload = {
-    ...multitaskModeStateFromManager(runtimeId, manager),
-    tasks,
-  };
-  const parsed = multitaskStateEventSchema.parse(payload);
+  const state = supervisor.state(runtimeId);
+  const parsed = multitaskStateEventSchema.parse({
+    runtimeId,
+    mode: state.mode,
+    tasks: state.tasks.map((task) => ({
+      taskNumber: task.number,
+      generatedName: task.name,
+      status: task.status === "cancelled" ? "failed" : task.status,
+    })),
+  });
   const window = mainWindow;
   if (window && !window.isDestroyed() && !window.webContents.isDestroyed())
     window.webContents.send(ipcChannels.multitaskState, parsed);
