@@ -45,6 +45,7 @@ describe("Menu", () => {
     expect(menu?.parentElement).toBe(document.body);
     expect(menu?.getAttribute("style")).toContain("position: fixed");
     expect(menu?.getAttribute("style")).toContain("right: auto");
+    expect(menu?.style.visibility).not.toBe("hidden");
     expect(trigger?.getAttribute("aria-expanded")).toBe("true");
     expect(trigger?.getAttribute("aria-controls")).toBe(menu?.id);
     expect(menu).not.toBeNull();

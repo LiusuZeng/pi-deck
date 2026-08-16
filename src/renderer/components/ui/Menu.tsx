@@ -181,9 +181,7 @@ export function Menu(props: {
               aria-label={props.menuLabel}
               ref={popoverRef}
               role={isMenu ? "menu" : undefined}
-              style={
-                popoverStyle ?? { position: "fixed", visibility: "hidden" }
-              }
+              style={popoverStyle ?? { position: "fixed" }}
               onClick={isMenu ? closeAndRestoreFocus : undefined}
             >
               {props.children}
