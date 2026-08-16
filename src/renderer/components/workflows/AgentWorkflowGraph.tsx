@@ -1,4 +1,11 @@
-import type { CSSProperties, KeyboardEvent, ReactElement } from "react";
+import {
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent,
+  type ReactElement,
+} from "react";
 import type {
   CanonicalNodeOccurrence,
   WorkflowDefinition,
@@ -8,6 +15,7 @@ import {
   deriveAgentWorkflowGraph,
   layoutAgentWorkflowGraph,
   type AgentWorkflowGraphNode,
+  type WorkflowGraphNodeHeights,
   type WorkflowGraphStatus,
 } from "../../workflows/agentWorkflowGraph.js";
 
@@ -80,6 +88,7 @@ function InputSources(props: {
 
 function RoleNode(props: {
   node: AgentWorkflowGraphNode;
+  layoutHeight?: number | undefined;
   selectedNodeId?: string | undefined;
   onSelectNode(nodeId: string): void;
 }): ReactElement {
@@ -97,6 +106,11 @@ function RoleNode(props: {
     <article
       className={`agent-workflow-graph-node agent-workflow-graph-node--${node.role}${node.status ? ` is-${node.status}` : ""}${selected ? " is-selected" : ""}`}
       aria-label={description}
+      style={
+        props.layoutHeight === undefined
+          ? undefined
+          : { minHeight: props.layoutHeight }
+      }
     >
       <h3>
         <button
@@ -132,11 +146,57 @@ function GraphCanvas(props: {
   selectedNodeId?: string | undefined;
   onSelectNode(nodeId: string): void;
 }): ReactElement {
+  const cardRefs = useRef(new Map<string, HTMLElement>());
+  const cardRefCallbacks = useRef(
+    new Map<string, (element: HTMLDivElement | null) => void>(),
+  );
+  const [nodeHeights, setNodeHeights] = useState<WorkflowGraphNodeHeights>(
+    () => new Map(),
+  );
   const graph = layoutAgentWorkflowGraph(
     props.definition,
     props.occurrences,
     props.snapshot,
+    nodeHeights,
   );
+
+  useLayoutEffect(() => {
+    const nodeIds = new Set(props.definition.nodes.map((node) => node.id));
+    const measure = () => {
+      const next = new Map<string, number>();
+      for (const [nodeId, card] of cardRefs.current) {
+        if (!nodeIds.has(nodeId)) continue;
+        const height = Math.ceil(card.getBoundingClientRect().height);
+        if (height > 0) next.set(nodeId, height);
+      }
+      setNodeHeights((previous) => {
+        if (
+          previous.size === next.size &&
+          [...next].every(([nodeId, height]) => previous.get(nodeId) === height)
+        )
+          return previous;
+        return next;
+      });
+    };
+
+    measure();
+    if (typeof ResizeObserver === "undefined") return undefined;
+    const observer = new ResizeObserver(measure);
+    cardRefs.current.forEach((card) => observer.observe(card));
+    return () => observer.disconnect();
+  }, [props.definition, props.occurrences, props.snapshot]);
+
+  const cardRef = (nodeId: string) => {
+    let callback = cardRefCallbacks.current.get(nodeId);
+    if (!callback) {
+      callback = (element) => {
+        if (element) cardRefs.current.set(nodeId, element);
+        else cardRefs.current.delete(nodeId);
+      };
+      cardRefCallbacks.current.set(nodeId, callback);
+    }
+    return callback;
+  };
   const navigate = (event: KeyboardEvent<HTMLDivElement>) => {
     if (
       !(
@@ -229,6 +289,7 @@ function GraphCanvas(props: {
         {graph.nodes.map((node) => (
           <div
             key={node.id}
+            ref={cardRef(node.id)}
             className="agent-workflow-graph-canvas-node"
             style={{
               left: node.x - node.width / 2,
@@ -238,6 +299,7 @@ function GraphCanvas(props: {
           >
             <RoleNode
               node={node}
+              layoutHeight={node.height}
               selectedNodeId={props.selectedNodeId}
               onSelectNode={props.onSelectNode}
             />

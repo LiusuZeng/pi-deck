@@ -97,6 +97,9 @@ export interface WorkflowGraphLayout {
   edges: WorkflowGraphLayoutEdge[];
 }
 
+/** Measured canvas-card heights keyed by stable configured node ID. */
+export type WorkflowGraphNodeHeights = ReadonlyMap<string, number>;
+
 function routeLabel(node: WorkflowNode, value: boolean | string | undefined) {
   if (value === undefined) return "then";
   if (typeof value === "string") return value;
@@ -376,6 +379,7 @@ export function layoutAgentWorkflowGraph(
   definition: WorkflowDefinition,
   occurrences: CanonicalNodeOccurrence[] = [],
   snapshot?: WorkflowGraphSnapshot,
+  nodeHeights?: WorkflowGraphNodeHeights,
 ): WorkflowGraphLayout {
   const model = deriveAgentWorkflowGraph(definition, occurrences, snapshot);
   const projected = new Map<string, AgentWorkflowGraphNode>();
@@ -394,10 +398,18 @@ export function layoutAgentWorkflowGraph(
   });
   graph.setDefaultEdgeLabel(() => ({}));
   for (const node of definition.nodes) {
-    graph.setNode(node.id, {
-      width: 240,
-      height: layoutHeight(node),
-    });
+    const measuredHeight = nodeHeights?.get(node.id);
+    // A card may grow as text wraps at its fixed canvas width. Keep the
+    // conservative fallback for the first pass, then let its measured DOM
+    // height become Dagre's node box so routes and neighbouring ranks agree
+    // with the card that is actually rendered.
+    const height = Math.max(
+      layoutHeight(node),
+      typeof measuredHeight === "number" && Number.isFinite(measuredHeight)
+        ? Math.ceil(measuredHeight)
+        : 0,
+    );
+    graph.setNode(node.id, { width: 240, height });
   }
   const edges: Omit<WorkflowGraphLayoutEdge, "points">[] = [];
   for (const route of model.routes) {

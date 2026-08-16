@@ -5342,6 +5342,7 @@ body {
 .agent-workflow-graph-node {
   min-height: 175px;
   box-sizing: border-box;
+  overflow-wrap: anywhere;
   border: 2px solid var(--color-border-strong, var(--color-border));
   border-radius: var(--radius-lg);
   padding: 12px;
@@ -5353,6 +5354,9 @@ body {
   margin: 0 0 8px;
 }
 .agent-workflow-graph-node h3 button {
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-size: 15px;
   font-weight: 750;
 }

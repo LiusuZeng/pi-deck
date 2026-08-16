@@ -141,6 +141,7 @@ describe("AgentWorkflowGraph", () => {
     act(() => root?.unmount());
     container?.remove();
     onSelectNode.mockReset();
+    vi.restoreAllMocks();
   });
 
   const render = (
@@ -222,6 +223,85 @@ describe("AgentWorkflowGraph", () => {
       expect(annotation.textContent).toContain(
         "00000000-0000-4000-8000-000000000502",
       );
+    }
+  });
+
+  it("relayouts measured long card content without canvas card intersections", () => {
+    const long = "long configured card content ".repeat(80);
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
+      function (this: HTMLElement) {
+        const height =
+          this.classList.contains("agent-workflow-graph-canvas-node") &&
+          this.textContent?.includes(long)
+            ? 900
+            : 200;
+        return {
+          bottom: height,
+          height,
+          left: 0,
+          right: 240,
+          top: 0,
+          width: 240,
+          x: 0,
+          y: 0,
+          toJSON: () => ({}),
+        } as DOMRect;
+      },
+    );
+    render({
+      ...semanticGraphDefinition,
+      nodes: semanticGraphDefinition.nodes.map((node) => {
+        if (node.id === "00000000-0000-4000-8000-000000000502")
+          return {
+            ...node,
+            name: long,
+            config: { instructions: long },
+          };
+        if (node.id === "00000000-0000-4000-8000-000000000503")
+          return {
+            ...node,
+            inputBindings: [
+              {
+                sourceNodeId: "00000000-0000-4000-8000-000000000502",
+                sourceValue: "finalOutput" as const,
+                label: long,
+              },
+            ],
+          };
+        if (node.id === "00000000-0000-4000-8000-000000000505")
+          return { ...node, name: long, config: { question: long } };
+        return node;
+      }),
+    });
+
+    const cards = [
+      ...container!.querySelectorAll<HTMLElement>(
+        ".agent-workflow-graph-canvas-node",
+      ),
+    ].map((card) => {
+      const article = card.querySelector<HTMLElement>(
+        ".agent-workflow-graph-node",
+      )!;
+      return {
+        id: card
+          .querySelector("[data-workflow-node-id]")
+          ?.getAttribute("data-workflow-node-id"),
+        height: Number.parseFloat(article.style.minHeight),
+        left: Number.parseFloat(card.style.left),
+        top: Number.parseFloat(card.style.top),
+        width: Number.parseFloat(card.style.width),
+      };
+    });
+    expect(cards.some((card) => card.height === 900)).toBe(true);
+    for (const [index, left] of cards.entries()) {
+      for (const right of cards.slice(index + 1)) {
+        const intersects =
+          left.left < right.left + right.width &&
+          left.left + left.width > right.left &&
+          left.top < right.top + right.height &&
+          left.top + left.height > right.top;
+        expect(intersects, `${left.id} intersects ${right.id}`).toBe(false);
+      }
     }
   });
 

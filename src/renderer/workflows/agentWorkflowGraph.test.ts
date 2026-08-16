@@ -355,6 +355,59 @@ describe("deriveAgentWorkflowGraph", () => {
     ).toBe(336);
   });
 
+  it("reserves measured card heights for long configured content without card intersections", () => {
+    const long = "long configured content ".repeat(80);
+    const longContentDefinition: WorkflowDefinition = {
+      ...definition,
+      nodes: definition.nodes.map((node) => {
+        if (node.id === "00000000-0000-4000-8000-000000000502")
+          return {
+            ...node,
+            name: long,
+            config: { instructions: long },
+          };
+        if (node.id === "00000000-0000-4000-8000-000000000503")
+          return {
+            ...node,
+            inputBindings: [
+              {
+                sourceNodeId: "00000000-0000-4000-8000-000000000502",
+                sourceValue: "finalOutput" as const,
+                label: long,
+              },
+            ],
+          };
+        if (node.id === "00000000-0000-4000-8000-000000000505")
+          return { ...node, name: long, config: { question: long } };
+        return node;
+      }),
+    };
+    const graph = layoutAgentWorkflowGraph(
+      longContentDefinition,
+      [],
+      undefined,
+      new Map([
+        ["00000000-0000-4000-8000-000000000502", 760],
+        ["00000000-0000-4000-8000-000000000503", 920],
+        ["00000000-0000-4000-8000-000000000505", 840],
+      ]),
+    );
+
+    expect(
+      graph.nodes.find(
+        (node) => node.id === "00000000-0000-4000-8000-000000000503",
+      )?.height,
+    ).toBe(920);
+    for (const [index, left] of graph.nodes.entries()) {
+      for (const right of graph.nodes.slice(index + 1)) {
+        const intersects =
+          Math.abs(left.x - right.x) < (left.width + right.width) / 2 &&
+          Math.abs(left.y - right.y) < (left.height + right.height) / 2;
+        expect(intersects, `${left.id} intersects ${right.id}`).toBe(false);
+      }
+    }
+  });
+
   it("labels Human choice routes with their declared options", () => {
     const graph = deriveAgentWorkflowGraph({
       ...definition,
