@@ -29,6 +29,16 @@ Pi Deck is a **local agent harness** for developers who already use Pi and want 
 
 Pi Deck is **not** an IDE, source editor, terminal wrapper, or hosted agent service. Keep using your preferred editor for code navigation and editing; Pi Deck coordinates the agents working alongside it.
 
+## Choose the right mode
+
+Pi remains the agent runtime: it owns models, provider authentication, tools, resources, settings, and JSONL conversation history. Pi Deck is the local desktop layer that organizes and directs that work.
+
+| If you need to… | Start with | Why |
+| --- | --- | --- |
+| Explore, implement, or steer one task directly | A **Pi session** | Work in a normal conversation with the composer, timeline, and intervention controls. |
+| Repeat a multi-step process | An **Agent Workflow** | Save explicit roles, routes, bounded loops or fan-out, and Human checkpoints; then monitor each run in a graph. |
+| Split independent work from one active conversation | **Parallel multitasking** | Opt in on the parent session and let Pi delegate isolated local child tasks whose status and handoff remain parent-facing. |
+
 ## Features
 
 ### Workspaces, projects, and Pi-native sessions
@@ -82,6 +92,10 @@ Create persistent global or workspace-scoped workflows for repeatable multi-agen
 - Monitor queued, running, waiting, completed, failed, and skipped occurrences; inspect outputs and open the associated Pi session when one exists.
 - Answer Human input, approval, or choice checkpoints without creating a model-backed Pi session.
 - Retry failed or cancelled occurrences, stop a run, and recover persisted definitions and runs after restart.
+
+#### Start from a feature-delivery template
+
+Use [`docs/examples/feature-delivery-workflow.json`](docs/examples/feature-delivery-workflow.json) as a small canonical starting point: a Pi worker plans the change, a Human approves it, then a second Pi worker implements it. Open **Agent Workflows**, create a workflow, and use the **JSON** view to adapt the template to your project.
 
 <p align="center">
   <a href="docs/assets/pi-deck-workflow-run.png" title="Open the live workflow screenshot full size">
@@ -259,6 +273,13 @@ npm run build
 npm run deck:real -- /absolute/path/to/your/project
 ```
 
+### First run
+
+1. Confirm `pi --version` succeeds and its provider authentication is configured.
+2. Launch Pi Deck with your project path, then choose or create a workspace.
+3. Start a **New session** for ad-hoc work, or open **Agent Workflows** and create a workflow from the visual builder or JSON template.
+4. Start the session or workflow run, then use the timeline, Work inbox, or live graph to follow and direct the work.
+
 The production-style launcher uses the existing `dist` output and deliberately does **not** rebuild it. Rebuild after pulling or changing source:
 
 ```bash
@@ -310,6 +331,14 @@ keeps the temporary project, sessions, and Pi Deck metadata isolated:
 ```bash
 PI_DECK_CAPTURE_REAL_PI=1 npm run docs:capture:real-workflows
 ```
+
+Refresh the GitHub Pages social-preview PNG after changing its SVG source:
+
+```bash
+npm run docs:render-social-preview
+```
+
+Set `CHROME_PATH` when Google Chrome is installed somewhere other than the script's default macOS location.
 
 ## Typical workflow
 

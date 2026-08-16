@@ -16,12 +16,12 @@
     <meta property="og:image" content="https://liusuzeng.github.io/pi-deck/assets/social-preview.png" />
     <meta property="og:image:width" content="1280" />
     <meta property="og:image:height" content="640" />
-    <meta property="og:image:alt" content="Pi Deck desktop interface for monitoring Pi coding-agent sessions" />
+    <meta property="og:image:alt" content="Pi Deck showing a local Pi workflow with a completed worker and Human checkpoint" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="Pi Deck — Local workflows for Pi coding agents" />
     <meta name="twitter:description" content="Organize local Pi sessions, run reusable Agent Workflows, and delegate parallel work from one macOS desktop app." />
     <meta name="twitter:image" content="https://liusuzeng.github.io/pi-deck/assets/social-preview.png" />
-    <meta name="twitter:image:alt" content="Pi Deck desktop interface for monitoring Pi coding-agent sessions" />
+    <meta name="twitter:image:alt" content="Pi Deck showing a local Pi workflow with a completed worker and Human checkpoint" />
     <link rel="stylesheet" href="styles.css" />
     <script type="application/ld+json">
       {
@@ -43,6 +43,7 @@
       <nav aria-label="Primary navigation">
         <a href="#features">Features</a>
         <a href="#workflows">Workflows</a>
+        <a href="#use-cases">Use cases</a>
         <a href="#how-it-works">How it works</a>
         <a href="#faq">FAQ</a>
         <a class="nav-github" href="https://github.com/LiusuZeng/pi-deck">GitHub <span aria-hidden="true">↗</span></a>
@@ -72,6 +73,14 @@
         <div><strong>Agent Workflows</strong><span>Build reusable multi-agent execution graphs.</span></div>
         <div><strong>Work inbox</strong><span>See all work—or narrow it by workspace and status.</span></div>
         <div><strong>Pi-native by design</strong><span>Uses Pi’s models, settings, tools, and session files.</span></div>
+      </section>
+
+      <section class="section pi-and-deck" aria-labelledby="pi-and-deck-heading">
+        <div class="section-heading"><p class="eyebrow">Pi stays in charge</p><h2 id="pi-and-deck-heading">Pi runs the agent. Pi Deck runs the desk.</h2><p>Pi Deck adds a local desktop control plane without replacing the Pi CLI, its providers, tools, settings, resources, or session files.</p></div>
+        <div class="pi-and-deck-grid">
+          <article><h3>Pi</h3><p>Owns model access, provider authentication, tools, resources, settings, and JSONL conversation history.</p></article>
+          <article><h3>Pi Deck</h3><p>Organizes sessions, keeps active work visible, runs explicit workflows, and gives you local controls for intervention and delegation.</p></article>
+        </div>
       </section>
 
       <section id="features" class="section feature-evidence" aria-labelledby="features-heading">
@@ -170,7 +179,7 @@
         </ul>
       </section>
 
-      <section class="section secondary-controls"
+      <section class="section secondary-controls">
         <div class="section-heading"><p class="eyebrow">Secondary controls</p><h2 id="secondary-controls-heading">Tune the session to your style.</h2><p>These supporting preferences sit outside the core workflow: choose Pi’s thinking level or model, and set the interface appearance.</p></div>
         <div class="feature-snapshot-grid">
           <figure>
@@ -199,7 +208,7 @@
       </section>
 
       <section id="run-from-source" class="section install" aria-labelledby="install-heading">
-        <div class="install-copy"><p class="eyebrow">Get started</p><h2 id="install-heading">Run Pi Deck from source.</h2><p>Pi Deck is currently a macOS Electron pre-release. You will need Node.js 22.12+, npm, and a working Pi executable with its normal provider authentication configured.</p><a class="button button-primary" href="https://github.com/LiusuZeng/pi-deck#quick-start">Read the setup guide <span aria-hidden="true">↗</span></a></div>
+        <div class="install-copy"><p class="eyebrow">Get started</p><h2 id="install-heading">Run Pi Deck from source.</h2><p>Pi Deck is currently a macOS Electron pre-release. You will need Node.js 22.12+, npm, and a working Pi executable with its normal provider authentication configured.</p><ol class="quickstart-list"><li><strong>Check Pi.</strong> Run <code>pi --version</code> in your terminal.</li><li><strong>Launch a project.</strong> Use the command beside this list with an absolute project path.</li><li><strong>Choose the work mode.</strong> Start a session, create a workflow, or enable delegation on a parent conversation.</li></ol><a class="button button-primary" href="https://github.com/LiusuZeng/pi-deck#quick-start">Read the setup guide <span aria-hidden="true">↗</span></a></div>
         <pre aria-label="Installation commands"><code>git clone https://github.com/LiusuZeng/pi-deck.git
 cd pi-deck
 npm ci
@@ -214,6 +223,11 @@ npm run deck:real -- /absolute/path/to/your/project</code></pre>
           <li><strong>Local and source-first.</strong> This macOS pre-release runs from source; there is not yet a signed or notarized installer.</li>
           <li><strong>Delegation is deliberate.</strong> Parallel multitasking is opt-in per parent conversation. Child tasks expose parent-facing status and handoff, not separate child-session controls.</li>
         </ul>
+      </section>
+
+      <section class="section release-confidence" aria-labelledby="release-confidence-heading">
+        <div><p class="eyebrow">Release confidence</p><h2 id="release-confidence-heading">See the current state before you commit.</h2></div>
+        <div><p><strong>v0.5.1</strong> is the current pre-release source version, with Agent Workflows and interactive multitasking introduced in v0.5.0.</p><p>Read the release notes, review the documented validation paths, or inspect the source before trying it with your own Pi setup.</p><p class="release-links"><a href="https://github.com/LiusuZeng/pi-deck/blob/main/CHANGELOG.md">Changelog <span aria-hidden="true">↗</span></a><a href="https://github.com/LiusuZeng/pi-deck/blob/main/docs/real-pi-gui-chat-validation.md">Validation record <span aria-hidden="true">↗</span></a><a href="https://github.com/LiusuZeng/pi-deck/releases">Releases <span aria-hidden="true">↗</span></a></p></div>
       </section>
 
       <section class="section privacy" aria-labelledby="privacy-heading">

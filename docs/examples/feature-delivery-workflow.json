@@ -1,0 +1,70 @@
+{
+  "format": "pi-deck.agent-workflow",
+  "schemaVersion": 2,
+  "id": "f1000000-0000-4000-8000-000000000001",
+  "revision": 1,
+  "name": "Feature delivery",
+  "description": "Plan a change, pause for approval, then implement the approved plan.",
+  "inputs": [],
+  "entryNodeId": "f1000000-0000-4000-8000-000000000002",
+  "nodes": [
+    {
+      "id": "f1000000-0000-4000-8000-000000000002",
+      "name": "Plan the change",
+      "role": "worker",
+      "config": {
+        "instructions": "Inspect the project and produce a concise implementation plan with validation steps. Do not edit files.",
+        "expectedOutput": "An ordered implementation plan and validation checklist."
+      }
+    },
+    {
+      "id": "f1000000-0000-4000-8000-000000000003",
+      "name": "Approve the plan",
+      "role": "human",
+      "config": {
+        "interaction": "approval",
+        "prompt": "Is this plan ready to implement?"
+      }
+    },
+    {
+      "id": "f1000000-0000-4000-8000-000000000004",
+      "name": "Implement the change",
+      "inputBindings": [
+        {
+          "sourceNodeId": "f1000000-0000-4000-8000-000000000002",
+          "sourceValue": "finalOutput",
+          "label": "Approved implementation plan"
+        }
+      ],
+      "role": "worker",
+      "config": {
+        "instructions": "Implement the approved plan. Run the focused validation that the plan calls for and summarize the changed files and results.",
+        "expectedOutput": "Changed files, validation results, and any remaining concerns."
+      }
+    }
+  ],
+  "relationships": [
+    {
+      "id": "f1000000-0000-4000-8000-000000000005",
+      "from": "f1000000-0000-4000-8000-000000000002",
+      "to": { "nodeId": "f1000000-0000-4000-8000-000000000003" }
+    },
+    {
+      "id": "f1000000-0000-4000-8000-000000000006",
+      "from": "f1000000-0000-4000-8000-000000000003",
+      "when": { "equals": true },
+      "to": { "nodeId": "f1000000-0000-4000-8000-000000000004" }
+    },
+    {
+      "id": "f1000000-0000-4000-8000-000000000007",
+      "from": "f1000000-0000-4000-8000-000000000003",
+      "when": { "equals": false },
+      "to": { "end": "not approved" }
+    },
+    {
+      "id": "f1000000-0000-4000-8000-000000000008",
+      "from": "f1000000-0000-4000-8000-000000000004",
+      "to": { "end": "delivered" }
+    }
+  ]
+}

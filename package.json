@@ -32,6 +32,7 @@
     "test:e2e:real-smoke": "npm run build && PI_DECK_E2E_REAL_SMOKE=1 playwright test -c e2e/playwright.config.ts e2e/real-pi-smoke.e2e.ts",
     "docs:capture": "npm run build && node scripts/capture-doc-screenshots.mjs",
     "docs:capture:real-workflows": "npm run build && node scripts/capture-real-workflow-screenshots.mjs",
+    "docs:render-social-preview": "node scripts/render-social-preview.mjs",
     "smoke:real": "node scripts/smoke-real-pi.mjs",
     "smoke:real:prompt": "node scripts/smoke-real-pi.mjs --prompt \"Reply with exactly: PI_DECK_REAL_SMOKE_OK\"",
     "lint": "npm run typecheck",
