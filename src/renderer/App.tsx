@@ -9206,114 +9206,124 @@ function Composer(props: {
           />
         ) : null}
         <div className="composer-meta">
-          {props.allowAttachments ? (
-            <IconButton
-              className="attachment-button"
-              icon={Paperclip}
-              label="Add attachments"
-              disabled={isActionPending}
-              onClick={props.onPickAttachments}
-            />
-          ) : null}
-          {props.multitaskMode !== undefined ? (
-            <MultitaskControl
-              tasks={props.multitaskTasks}
-              enabled={!isActionPending}
-              onClick={props.onToggleMultitask}
-              aria-label={`Turn ${props.multitaskMode === "parallel" ? "off" : "on"} multitasking`}
-              title={`Turn ${props.multitaskMode === "parallel" ? "off" : "on"} multitasking`}
-            />
-          ) : props.selectedSession.runtimeBacked ? (
-            <MultitaskControl
-              tasks={[]}
-              enabled={false}
-              title="Loading multitasking mode"
-            />
-          ) : null}
-          {props.selectedSession.backendMode === "real" ? (
-            <PiModelThinkingMenu
-              disabled={isActionPending}
-              models={props.realModels}
-              selectedModel={selectedRealModel}
-              selectedThinking={props.selectedSession.thinkingLevel}
-              thinkingLevels={props.realThinkingLevels}
-              onSelectModel={props.onSetModel}
-              onSelectThinking={props.onSetThinking}
-            />
-          ) : null}
+          <div className="composer-meta-controls">
+            {props.allowAttachments ? (
+              <IconButton
+                className="attachment-button"
+                icon={Paperclip}
+                label="Add attachments"
+                disabled={isActionPending}
+                onClick={props.onPickAttachments}
+              />
+            ) : null}
+            {props.multitaskMode !== undefined ? (
+              <MultitaskControl
+                tasks={props.multitaskTasks}
+                enabled={!isActionPending}
+                onClick={props.onToggleMultitask}
+                aria-label={`Turn ${props.multitaskMode === "parallel" ? "off" : "on"} multitasking`}
+                title={`Turn ${props.multitaskMode === "parallel" ? "off" : "on"} multitasking`}
+              />
+            ) : props.selectedSession.runtimeBacked ? (
+              <MultitaskControl
+                tasks={[]}
+                enabled={false}
+                title="Loading multitasking mode"
+              />
+            ) : null}
+            {props.selectedSession.backendMode === "real" ? (
+              <PiModelThinkingMenu
+                disabled={isActionPending}
+                models={props.realModels}
+                selectedModel={selectedRealModel}
+                selectedThinking={props.selectedSession.thinkingLevel}
+                thinkingLevels={props.realThinkingLevels}
+                onSelectModel={props.onSetModel}
+                onSelectThinking={props.onSetThinking}
+              />
+            ) : null}
+          </div>
           {props.error !== null ? (
-            <span className="composer-error" id={composerErrorId} role="alert">
+            <span
+              className="composer-status composer-error"
+              id={composerErrorId}
+              role="alert"
+            >
               {props.error}
             </span>
           ) : isActionPending ? (
-            <span>
+            <span className="composer-status">
               {statusLabel(props.status)} · waiting for Pi confirmation…
             </span>
           ) : props.knownExtensionCommand !== undefined ? (
-            <span className="composer-error" role="alert">
+            <span className="composer-status composer-error" role="alert">
               {props.knownExtensionCommand} is an extension command. It runs
               immediately and cannot be queued.
             </span>
           ) : props.isWorking ? (
-            <span>Working in {props.backendLabel}…</span>
+            <span className="composer-status">
+              Working in {props.backendLabel}…
+            </span>
           ) : hasImageWarning ? (
-            <span className="composer-error" role="alert">
+            <span className="composer-status composer-error" role="alert">
               Selected model does not support image input.
             </span>
           ) : null}
           <span className="composer-spacer" />
-          {props.isWorking ? (
-            <>
+          <div className="composer-meta-actions">
+            {props.isWorking ? (
+              <>
+                <IconButton
+                  icon={CornerUpLeft}
+                  label="Steer"
+                  size="lg"
+                  variant="solid"
+                  disabled={
+                    !props.canIntervene ||
+                    props.knownExtensionCommand !== undefined
+                  }
+                  onClick={props.onSteer}
+                />
+                <IconButton
+                  icon={ListPlus}
+                  label="Follow-up"
+                  variant="outline"
+                  disabled={
+                    !props.canIntervene ||
+                    props.knownExtensionCommand !== undefined
+                  }
+                  onClick={props.onFollowUp}
+                />
+                {props.knownExtensionCommand !== undefined ? (
+                  <IconButton
+                    icon={Play}
+                    label="Run command now"
+                    variant="outline"
+                    disabled={!props.canIntervene}
+                    onClick={props.onRunExtensionCommand}
+                  />
+                ) : null}
+                <IconButton
+                  icon={Square}
+                  label="Abort"
+                  variant="danger"
+                  onClick={props.onAbort}
+                />
+              </>
+            ) : (
               <IconButton
-                icon={CornerUpLeft}
-                label="Steer"
+                className="send-button"
+                icon={ArrowUp}
+                label="Send"
+                aria-keyshortcuts="Enter"
+                shortcut="Enter"
                 size="lg"
                 variant="solid"
-                disabled={
-                  !props.canIntervene ||
-                  props.knownExtensionCommand !== undefined
-                }
-                onClick={props.onSteer}
+                disabled={!props.canSend}
+                onClick={props.onSend}
               />
-              <IconButton
-                icon={ListPlus}
-                label="Follow-up"
-                variant="outline"
-                disabled={
-                  !props.canIntervene ||
-                  props.knownExtensionCommand !== undefined
-                }
-                onClick={props.onFollowUp}
-              />
-              {props.knownExtensionCommand !== undefined ? (
-                <IconButton
-                  icon={Play}
-                  label="Run command now"
-                  variant="outline"
-                  disabled={!props.canIntervene}
-                  onClick={props.onRunExtensionCommand}
-                />
-              ) : null}
-              <IconButton
-                icon={Square}
-                label="Abort"
-                variant="danger"
-                onClick={props.onAbort}
-              />
-            </>
-          ) : (
-            <IconButton
-              className="send-button"
-              icon={ArrowUp}
-              label="Send"
-              aria-keyshortcuts="Enter"
-              shortcut="Enter"
-              size="lg"
-              variant="solid"
-              disabled={!props.canSend}
-              onClick={props.onSend}
-            />
-          )}
+            )}
+          </div>
         </div>
       </div>
     </footer>

@@ -1594,6 +1594,35 @@ test("fake delegation is status-only, parent-scoped, and honors direct handling"
   }
 });
 
+test("model submenu stays inside a narrow viewport", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-model-menu-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({ root, projectCwd, agentDir }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await page.setViewportSize({ width: 320, height: 600 });
+    await page.locator(".pi-configuration-trigger").click();
+    await page.getByRole("menuitem", { name: /Fake model/ }).click();
+    const modelMenu = page.getByRole("menu", { name: "Available Pi models" });
+    await expect(modelMenu).toBeVisible();
+    const box = await modelMenu.boundingBox();
+    if (box === null) throw new Error("Model menu has no bounding box");
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(320);
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("bootstrap creates no saved session and the first draft send creates one", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-lazy-new-"));
   const projectCwd = path.join(root, "project");

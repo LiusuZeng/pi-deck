@@ -1572,6 +1572,22 @@ h1 {
   pointer-events: auto;
 }
 
+.composer-meta-controls,
+.composer-meta-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.composer-status {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .composer-meta .attachment-button {
   flex: 0 0 auto;
 }
@@ -1615,13 +1631,21 @@ h1 {
 
 .attachment-row {
   display: flex;
+  max-height: 132px;
+  min-width: 0;
+  max-width: 100%;
   flex-wrap: wrap;
+  align-content: start;
   gap: 8px;
+  overflow-y: auto;
 }
 
 .attachment-chip {
   display: inline-grid;
-  grid-template-columns: auto 1fr auto;
+  box-sizing: border-box;
+  width: min(280px, 100%);
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 2px 6px;
   align-items: center;
   max-width: 280px;
@@ -1648,6 +1672,7 @@ h1 {
 .attachment-chip strong,
 .attachment-chip em,
 .attachment-chip small {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3381,7 +3406,10 @@ body {
 }
 
 .composer-meta > .ui-control,
-.composer-meta > .ui-menu > .ui-control {
+.composer-meta > .ui-menu > .ui-control,
+.composer-meta-controls > .ui-control,
+.composer-meta-controls > .ui-menu > .ui-control,
+.composer-meta-actions > .ui-control {
   height: 30px;
 }
 
@@ -3492,6 +3520,52 @@ body {
 @media (max-width: 560px) {
   .composer {
     width: calc(100% - 20px);
+  }
+
+  .composer-meta {
+    flex-wrap: wrap;
+    align-content: flex-end;
+  }
+
+  .composer-meta-controls,
+  .composer-meta-actions {
+    flex-wrap: wrap;
+  }
+
+  .composer-input-wrap:has(.composer-status) {
+    min-height: 120px;
+  }
+
+  .composer-input-wrap:has(.composer-status) textarea {
+    padding-bottom: 72px;
+  }
+
+  .composer-input-wrap:has(.composer-meta-actions > :nth-child(2)) {
+    min-height: 156px;
+  }
+
+  .composer-input-wrap:has(.composer-meta-actions > :nth-child(2)) textarea {
+    padding-bottom: 108px;
+  }
+
+  .composer-status {
+    flex: 1 0 100%;
+    order: 3;
+    max-height: 36px;
+    overflow-y: auto;
+    text-overflow: clip;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .composer-spacer {
+    display: none;
+  }
+
+  .pi-model-submenu {
+    bottom: calc(100% + 6px);
+    left: 0;
+    width: min(196px, calc(100vw - 20px));
   }
 
   .starter-page {
