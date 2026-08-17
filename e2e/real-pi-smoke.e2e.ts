@@ -342,6 +342,23 @@ test("real Pi GUI P0 smoke: default workspace prompt and resume", async () => {
       await firstLaunch.page
         .getByRole("button", { name: "New session" })
         .click();
+
+      // Drafts explicitly start in sequential mode, but must let the user opt
+      // into parallel work before the first worker/prompt exists.
+      const multitaskControl = firstLaunch.page.getByRole("button", {
+        name: "Parallel: Off",
+        exact: true,
+      });
+      await expect(multitaskControl).toBeVisible();
+      await expect(multitaskControl).toBeEnabled();
+      await multitaskControl.click();
+      await expect(
+        firstLaunch.page.getByRole("button", {
+          name: "Parallel: On",
+          exact: true,
+        }),
+      ).toBeVisible();
+
       await firstLaunch.page
         .getByLabel("Prompt text")
         .fill(`Reply with exactly: ${token}`);
@@ -362,22 +379,13 @@ test("real Pi GUI P0 smoke: default workspace prompt and resume", async () => {
           .first(),
       ).toBeVisible();
 
-      // The parent exists before enabling its parent-scoped mode. The explicit
-      // instruction is also the deterministic harness trigger; that harness
-      // calls the real generated deck_delegate tool, not a fake RPC endpoint.
-      const multitaskControl = firstLaunch.page.locator(".multitask-control");
-      await expect(multitaskControl).toHaveAttribute(
-        "title",
-        "Turn on multitasking",
-      );
+      // The explicit instruction is the deterministic harness trigger; that
+      // harness calls the real generated deck_delegate tool, not a fake RPC
+      // endpoint. It therefore verifies observable child status from a real
+      // parallel-mode prompt without depending on provider tool selection.
       const sessionItemCount = await firstLaunch.page
         .locator(".session-list .session-item")
         .count();
-      await multitaskControl.click();
-      await expect(multitaskControl).toHaveAttribute(
-        "title",
-        "Turn off multitasking",
-      );
       await firstLaunch.page.evaluate(() => {
         const testWindow = window as typeof window & {
           __piDeckRealDelegateStates?: Array<{
