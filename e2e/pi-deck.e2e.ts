@@ -1590,16 +1590,29 @@ test("fake delegation is status-only, parent-scoped, and honors direct handling"
     // A fresh draft can opt in before its first prompt. The initial mode is
     // passed to worker creation so that first prompt can be delegated.
     const multitaskControl = page.locator(".multitask-control");
-    await expect(multitaskControl).toHaveAttribute(
-      "title",
-      "Turn on multitasking",
-    );
+    await expect(multitaskControl).toHaveText("Parallel: Off");
+    await expect(multitaskControl).toHaveAttribute("aria-pressed", "false");
     await expect(multitaskControl).toBeEnabled();
-    await multitaskControl.click();
-    await expect(multitaskControl).toHaveAttribute(
-      "title",
-      "Turn off multitasking",
+    await multitaskControl.hover();
+    const modeTooltip = page.getByRole("tooltip");
+    await expect(modeTooltip).toHaveText(
+      "Parallel multitasking is off. Enable it to let Pi delegate independent work.",
     );
+    const controlBox = await multitaskControl.boundingBox();
+    const tooltipBox = await modeTooltip.boundingBox();
+    expect(controlBox).not.toBeNull();
+    expect(tooltipBox).not.toBeNull();
+    expect(
+      Math.abs(
+        tooltipBox!.x +
+          tooltipBox!.width / 2 -
+          (controlBox!.x + controlBox!.width / 2),
+      ),
+    ).toBeLessThan(2);
+    expect(Math.abs(tooltipBox!.y - controlBox!.y)).toBeLessThan(100);
+    await multitaskControl.click();
+    await expect(multitaskControl).toHaveText("Parallel: On");
+    await expect(multitaskControl).toHaveAttribute("aria-pressed", "true");
 
     await page.evaluate(() => {
       const testWindow = window as typeof window & {

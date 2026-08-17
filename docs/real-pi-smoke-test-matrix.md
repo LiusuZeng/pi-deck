@@ -49,7 +49,7 @@ pi --mode rpc --no-session --no-approve --no-extensions --no-skills --no-prompt-
 | SM-017 | Tool events                | Prompt/fixture triggers tool execution                                                      | Tool start/update/end events produce expandable card data and clear running overlay                      | M5/M7 |
 | SM-018 | Compaction/retry           | Fixture or controlled session triggers compaction/retry if supported                        | Sidebar compacting/retrying indicators set/clear                                                         | M5    |
 | SM-019 | Agent Workflow real worker | Create and start a one-worker workflow through the canonical API, then restart Pi Deck     | Real Pi output, worker session file, completed graph, and run remain visible after restart               | M2    |
-| SM-020 | Delegated parent handoff   | `npm run test:e2e:real-smoke` enables multitasking after a real parent exists, then sends the explicit `deck_delegate` instruction | Parent-only task status reaches `completed`; no child session or controls are rendered                  | M5    |
+| SM-020 | Delegated parent handoff   | `npm run test:e2e:real-smoke` enables **Parallel: On** in a new draft, then sends the first explicit `deck_delegate` instruction | The first parent prompt reaches child `completed`; parent-only status is visible, with no child session or controls rendered | M5    |
 
 ## Fake-RPC Coverage Mapping
 

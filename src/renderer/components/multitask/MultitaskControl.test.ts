@@ -72,8 +72,25 @@ describe("MultitaskControl", () => {
     act(() => button?.focus());
 
     expect(button?.getAttribute("aria-describedby")).toBeTruthy();
-    expect(view.querySelector('[role="tooltip"]')?.textContent).toBe(
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toBe(
       "Task status#4 Build the renderer — working#8 Run focused tests — queued",
+    );
+  });
+
+  it("explains the current mode when no tasks have been delegated", () => {
+    const view = render(
+      createElement(MultitaskControl, {
+        mode: "sequential",
+        onClick: () => {},
+        tasks: [],
+      }),
+    );
+    const button = view.querySelector("button");
+
+    act(() => button?.focus());
+
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toBe(
+      "Parallel multitasking is off. Enable it to let Pi delegate independent work.",
     );
   });
 

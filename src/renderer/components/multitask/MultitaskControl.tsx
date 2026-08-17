@@ -31,8 +31,8 @@ export interface MultitaskControlProps extends Omit<
 }
 
 /**
- * An explicit parallel-mode toggle. Its hover/focus tooltip is intentionally
- * task-status-only, so task progress is never presented as the mode state.
+ * An explicit parallel-mode toggle. Its hover/focus tooltip explains the mode
+ * when no work has been delegated and presents task progress separately.
  */
 export const MultitaskControl = forwardRef<
   HTMLButtonElement,
@@ -63,7 +63,13 @@ export const MultitaskControl = forwardRef<
     tasks.length > 0 ? (
       <MultitaskStatusPopover tasks={tasks} />
     ) : (
-      <span>{unavailableMessage ?? "No delegated tasks yet."}</span>
+      <span>
+        {enabled
+          ? parallel
+            ? "Parallel multitasking is on. Pi can delegate independent work from your next prompt."
+            : "Parallel multitasking is off. Enable it to let Pi delegate independent work."
+          : (unavailableMessage ?? "Multitasking is unavailable.")}
+      </span>
     );
 
   return (

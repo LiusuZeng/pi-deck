@@ -9254,7 +9254,7 @@ function Composer(props: {
               <MultitaskControl
                 tasks={props.multitaskTasks}
                 enabled={!isActionPending}
-                label={`Turn ${props.multitaskMode === "parallel" ? "off" : "on"} parallel multitasking`}
+                mode={props.multitaskMode}
                 onClick={props.onToggleMultitask}
                 title={`Turn ${props.multitaskMode === "parallel" ? "off" : "on"} multitasking`}
               />

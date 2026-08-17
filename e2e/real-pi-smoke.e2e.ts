@@ -342,23 +342,6 @@ test("real Pi GUI P0 smoke: default workspace prompt and resume", async () => {
       await firstLaunch.page
         .getByRole("button", { name: "New session" })
         .click();
-
-      // Drafts explicitly start in sequential mode, but must let the user opt
-      // into parallel work before the first worker/prompt exists.
-      const multitaskControl = firstLaunch.page.getByRole("button", {
-        name: "Parallel: Off",
-        exact: true,
-      });
-      await expect(multitaskControl).toBeVisible();
-      await expect(multitaskControl).toBeEnabled();
-      await multitaskControl.click();
-      await expect(
-        firstLaunch.page.getByRole("button", {
-          name: "Parallel: On",
-          exact: true,
-        }),
-      ).toBeVisible();
-
       await firstLaunch.page
         .getByLabel("Prompt text")
         .fill(`Reply with exactly: ${token}`);
@@ -379,13 +362,18 @@ test("real Pi GUI P0 smoke: default workspace prompt and resume", async () => {
           .first(),
       ).toBeVisible();
 
-      // The explicit instruction is the deterministic harness trigger; that
-      // harness calls the real generated deck_delegate tool, not a fake RPC
-      // endpoint. It therefore verifies observable child status from a real
-      // parallel-mode prompt without depending on provider tool selection.
+      // The parent exists before enabling its parent-scoped mode. The explicit
+      // instruction is also the deterministic harness trigger; that harness
+      // calls the real generated deck_delegate tool, not a fake RPC endpoint.
+      const multitaskControl = firstLaunch.page.locator(".multitask-control");
+      await expect(multitaskControl).toHaveText("Parallel: Off");
+      await expect(multitaskControl).toHaveAttribute("aria-pressed", "false");
       const sessionItemCount = await firstLaunch.page
         .locator(".session-list .session-item")
         .count();
+      await multitaskControl.click();
+      await expect(multitaskControl).toHaveText("Parallel: On");
+      await expect(multitaskControl).toHaveAttribute("aria-pressed", "true");
       await firstLaunch.page.evaluate(() => {
         const testWindow = window as typeof window & {
           __piDeckRealDelegateStates?: Array<{
@@ -519,6 +507,129 @@ test("real Pi GUI P0 smoke: default workspace prompt and resume", async () => {
       ).toBeVisible();
     } finally {
       await secondLaunch.app.close();
+    }
+  } finally {
+    if (process.env.PI_DECK_E2E_KEEP_REAL_SMOKE_ARTIFACTS !== "1") {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("real Pi: draft parallel opt-in delegates from its first prompt", async () => {
+  test.setTimeout(
+    Number(process.env.PI_DECK_E2E_REAL_SMOKE_TIMEOUT_MS ?? 240_000),
+  );
+  const piBinary = resolvePiBinary();
+  test.skip(!piBinary, "Pi binary not found");
+
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-real-draft-multitask-"),
+  );
+  const baseEnv: NodeJS.ProcessEnv = {
+    PI_DECK_BACKEND: "real",
+    PI_DECK_PI_BINARY: piBinary,
+    PI_DECK_USER_DATA_DIR: path.join(root, "user-data"),
+    PI_DECK_HOME: path.join(root, "pideck-home"),
+    PI_CODING_AGENT_SESSION_DIR: path.join(root, "sessions"),
+    PI_DECK_PROJECT_CWD: path.join(root, "project"),
+    // This invokes the generated deck_delegate tool through real Pi and the
+    // authenticated local bridge, without relying on model tool choice.
+    PI_DECK_E2E_DELEGATE_HARNESS: "1",
+  };
+  for (const directory of [
+    baseEnv.PI_DECK_USER_DATA_DIR,
+    baseEnv.PI_DECK_HOME,
+    baseEnv.PI_CODING_AGENT_SESSION_DIR,
+    baseEnv.PI_DECK_PROJECT_CWD,
+  ]) {
+    fs.mkdirSync(directory!, { recursive: true });
+  }
+
+  try {
+    const { app, page } = await launchPiDeck(baseEnv);
+    try {
+      await expectHealthyPreload(page);
+      const parallelOff = page.getByRole("button", {
+        name: "Parallel multitasking: Off",
+        exact: true,
+      });
+      await expect(parallelOff).toHaveText("Parallel: Off");
+      await expect(parallelOff).toHaveAttribute("aria-pressed", "false");
+      await expect(parallelOff).toBeEnabled();
+      await parallelOff.click();
+      const parallelOn = page.getByRole("button", {
+        name: "Parallel multitasking: On",
+        exact: true,
+      });
+      await expect(parallelOn).toHaveText("Parallel: On");
+      await expect(parallelOn).toHaveAttribute("aria-pressed", "true");
+
+      await page.evaluate(() => {
+        const testWindow = window as typeof window & {
+          __piDeckRealDraftDelegateStates?: Array<{
+            tasks: Array<{ status: string }>;
+          }>;
+          __piDeckRealDraftDelegateUnsubscribe?: () => void;
+        };
+        testWindow.__piDeckRealDraftDelegateUnsubscribe?.();
+        testWindow.__piDeckRealDraftDelegateStates = [];
+        testWindow.__piDeckRealDraftDelegateUnsubscribe =
+          window.piDeck.multitask.onState((state) =>
+            testWindow.__piDeckRealDraftDelegateStates?.push(state),
+          );
+      });
+      const parentSessionCount = await page
+        .locator(".session-list .session-item")
+        .count();
+      await page
+        .getByLabel("Prompt text")
+        .fill(
+          "PI_DECK_E2E_INVOKE_DECK_DELEGATE: use deck_delegate now for one tiny task.",
+        );
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect
+        .poll(
+          () =>
+            page.evaluate(
+              () =>
+                (
+                  window as typeof window & {
+                    __piDeckRealDraftDelegateStates?: Array<{
+                      tasks: Array<{ status: string }>;
+                    }>;
+                  }
+                ).__piDeckRealDraftDelegateStates?.flatMap((state) =>
+                  state.tasks.map((task) => task.status),
+                ) ?? [],
+            ),
+          {
+            timeout: Number(
+              process.env.PI_DECK_E2E_REAL_DELEGATE_TIMEOUT_MS ?? 180_000,
+            ),
+          },
+        )
+        .toEqual(expect.arrayContaining(["queued", "running", "completed"]));
+
+      await parallelOn.focus();
+      const statusList = page.getByRole("list", { name: "Task statuses" });
+      await expect(statusList).toContainText(
+        "#1 Real delegated acceptance task — completed",
+      );
+      await expect(statusList.getByRole("button")).toHaveCount(0);
+      // First send adds the parent session to the sidebar; the completed
+      // child must not add a second, user-navigable session.
+      await expect(page.locator(".session-list .session-item")).toHaveCount(
+        parentSessionCount + 1,
+      );
+    } finally {
+      await page.evaluate(() => {
+        (
+          window as typeof window & {
+            __piDeckRealDraftDelegateUnsubscribe?: () => void;
+          }
+        ).__piDeckRealDraftDelegateUnsubscribe?.();
+      });
+      await app.close();
     }
   } finally {
     if (process.env.PI_DECK_E2E_KEEP_REAL_SMOKE_ARTIFACTS !== "1") {
