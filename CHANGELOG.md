@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-08-16
+
+### Fixed
+
+- Allowed parallel multitasking to be enabled in a new draft session before its
+  first prompt, then applied that mode during parent-worker creation so the
+  first prompt can delegate work.
+- Preserved the selected draft mode as its session becomes runtime-backed and
+  persisted it with the newly created Pi session.
+
+### Tests
+
+- Updated clean-profile Electron coverage to prove that a first prompt can
+  delegate after parallel multitasking is enabled in a draft.
+
 ## [0.5.3] - 2026-08-16
 
 ### Fixed
@@ -304,7 +319,8 @@ coding-agent sessions.
   crash; persisted sessions can be reopened, but unsaved partial stream text may
   be lost.
 
-[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.4...HEAD
+[0.5.4]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.0...v0.5.1
