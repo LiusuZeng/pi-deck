@@ -18,16 +18,15 @@ export interface MultitaskStatusPopoverProps {
  */
 export function MultitaskStatusPopover({ tasks }: MultitaskStatusPopoverProps) {
   return (
-    <span
-      className="multitask-status-popover"
-      aria-label="Task statuses"
-      role="list"
-    >
-      {tasks.map((task) => (
-        <span key={task.taskNumber} role="listitem">
-          {`#${task.taskNumber} ${task.generatedName} — ${task.status}`}
-        </span>
-      ))}
+    <span className="multitask-status-popover">
+      <span className="multitask-status-popover__heading">Task status</span>
+      <span aria-label="Task statuses" role="list">
+        {tasks.map((task) => (
+          <span key={task.taskNumber} role="listitem">
+            {`#${task.taskNumber} ${task.generatedName} — ${task.status}`}
+          </span>
+        ))}
+      </span>
     </span>
   );
 }

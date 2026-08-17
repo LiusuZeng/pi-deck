@@ -2934,8 +2934,30 @@ summary::marker {
   max-width: 300px;
 }
 
+.multitask-status-popover__heading {
+  color: #d1d5db;
+  font-weight: 600;
+}
+
+.multitask-status-popover [role="list"] {
+  display: grid;
+  gap: 3px;
+}
+
 .multitask-status-popover [role="listitem"] {
   white-space: normal;
+}
+
+.multitask-mode-control {
+  gap: 5px;
+  padding: 0 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.multitask-mode-control svg {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
 }
 
 .multitask-control[data-error="true"] {
