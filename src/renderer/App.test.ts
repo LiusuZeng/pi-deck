@@ -613,6 +613,19 @@ describe("renderer per-session composer drafts", () => {
     );
   });
 
+  it("synthesizes an enabled sequential multitask state for a fresh draft", () => {
+    expect(
+      __rendererTestHooks.initialDraftMultitaskState("new-session"),
+    ).toEqual({
+      runtimeId: "new-session",
+      mode: "sequential",
+      settings: {},
+      activeCount: 0,
+      activeLimit: 10,
+      tasks: [],
+    });
+  });
+
   it("keeps the hidden new-session landing draft until its worker gets an id", () => {
     const drafts = __rendererTestHooks.updateComposerDraft(
       {},

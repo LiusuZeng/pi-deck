@@ -18,6 +18,7 @@ export function TaskSessionPanel({
   activeLimit,
   tasks,
 }: TaskSessionPanelProps) {
+  if (tasks.length === 0) return null;
   return (
     <section className="task-session-panel" aria-label="Parallel task sessions">
       <header>

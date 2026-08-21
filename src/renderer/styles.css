@@ -2967,7 +2967,7 @@ summary::marker {
 .parallel-prompt-settings {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   min-width: 0;
   color: var(--color-text-muted);
   font-size: 12px;
@@ -2978,18 +2978,8 @@ summary::marker {
   font-weight: 600;
 }
 
-.parallel-prompt-settings label,
-.parallel-prompt-settings details {
-  min-width: 0;
-}
-
-.parallel-prompt-settings label > small {
-  display: none;
-}
-
-.parallel-prompt-settings select,
-.parallel-prompt-settings button {
-  max-width: 130px;
+.parallel-prompt-settings select {
+  max-width: 160px;
   border: 1px solid var(--color-border);
   border-radius: 7px;
   padding: 3px 5px;
@@ -2998,14 +2988,26 @@ summary::marker {
   font: inherit;
 }
 
-.parallel-prompt-settings details {
-  position: relative;
+.parallel-prompt-settings__popover {
+  display: grid;
+  gap: 8px;
+  padding: 4px;
 }
 
-.parallel-prompt-settings details[open] > label {
+.parallel-prompt-settings__popover > label,
+.parallel-prompt-settings__popover details[open] > label {
   display: grid;
   gap: 3px;
-  margin-top: 6px;
+}
+
+.parallel-prompt-settings__popover details {
+  display: grid;
+  gap: 6px;
+}
+
+.parallel-prompt-settings__popover summary {
+  cursor: pointer;
+  font-weight: 600;
 }
 
 .task-session-panel {

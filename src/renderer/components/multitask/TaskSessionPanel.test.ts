@@ -18,6 +18,23 @@ afterEach(() => {
 });
 
 describe("TaskSessionPanel", () => {
+  it("is absent when the backend has no tasks", () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    act(() =>
+      root?.render(
+        createElement(TaskSessionPanel, {
+          activeCount: 0,
+          activeLimit: 10,
+          tasks: [],
+        }),
+      ),
+    );
+
+    expect(container.querySelector(".task-session-panel")).toBeNull();
+  });
+
   it("shows the safe task projection and remains inert", () => {
     container = document.createElement("div");
     document.body.append(container);

@@ -1449,7 +1449,8 @@ export function App(): ReactElement {
   const multitaskState = selectedSession.runtimeBacked
     ? multitask[selectedSession.id]
     : selectedSession.draftSession
-      ? multitask[selectedSession.id]
+      ? (multitask[selectedSession.id] ??
+        initialDraftMultitaskState(selectedSession.id))
       : undefined;
   const promptDestination =
     multitaskState?.mode === "parallel" && !workInParentOnce[selectedSession.id]
@@ -2422,7 +2423,13 @@ export function App(): ReactElement {
       return;
     }
     if (selectedSession.draftSession === true) {
-      void startDraftSessionAndSend(selectedSession, prompt, promptAttachments);
+      void startDraftSessionAndSend(
+        selectedSession,
+        prompt,
+        promptAttachments,
+        promptDestination,
+        promptWorkerOverrides,
+      );
       return;
     }
     if (!selectedSession.runtimeBacked) {
@@ -2445,6 +2452,8 @@ export function App(): ReactElement {
     draftSession: SessionViewModel,
     prompt: string,
     promptAttachments: AttachmentDraft[],
+    destination: "parent" | "newTaskSession",
+    overrides: ParallelWorkerSettings,
   ): Promise<void> {
     const validationError = validateComposerInput({
       attachments: promptAttachments,
@@ -2505,6 +2514,14 @@ export function App(): ReactElement {
           level: draftSession.thinkingLevel,
         });
       }
+      // Draft defaults are local until a runtime exists. Persist them before
+      // routing the first prompt so its worker sees the selected defaults.
+      const draftWorkerDefaults = multitask[draftSession.id]?.settings ?? {};
+      const persistedWorkerDefaults =
+        await window.piDeck.multitask.updateSettings({
+          runtimeId: snapshot.runtimeId,
+          settings: draftWorkerDefaults,
+        });
       const transferred = await transferComposerAttachmentOwnership(
         draftSession.id,
         snapshot.runtimeId,
@@ -2547,7 +2564,7 @@ export function App(): ReactElement {
           mode: initialMultitaskMode,
           settings: {},
           activeCount: 0,
-          activeLimit: 1,
+          activeLimit: 10,
           tasks: [],
         };
         const { [draftSession.id]: _draftState, ...remaining } = current;
@@ -2555,8 +2572,20 @@ export function App(): ReactElement {
           ...remaining,
           // A state event can arrive while the session is being materialized;
           // preserve it instead of replacing it with the draft selection.
-          [initializedSession.id]: current[initializedSession.id] ?? draftState,
+          [initializedSession.id]: current[initializedSession.id] ?? {
+            ...draftState,
+            runtimeId: initializedSession.id,
+            settings: persistedWorkerDefaults,
+          },
         };
+      });
+      setWorkInParentOnce((current) => {
+        const { [draftSession.id]: draftChoice, ...remaining } = current;
+        return { ...remaining, [initializedSession.id]: draftChoice ?? false };
+      });
+      setWorkerOverrides((current) => {
+        const { [draftSession.id]: draftOverrides, ...remaining } = current;
+        return { ...remaining, [initializedSession.id]: draftOverrides ?? {} };
       });
       setComposerDrafts((items) =>
         moveComposerDraft(items, draftSession.id, initializedSession.id),
@@ -2632,7 +2661,13 @@ export function App(): ReactElement {
     // sendPrompt has its own failure/retry path. Keep it outside the setup
     // transaction so a worker is never closed after Pi accepted a prompt.
     if (backendSession !== undefined) {
-      await sendPrompt(backendSession.id, prompt, promptAttachments);
+      await sendPrompt(
+        backendSession.id,
+        prompt,
+        promptAttachments,
+        destination,
+        overrides,
+      );
     }
   }
 
@@ -2759,7 +2794,13 @@ export function App(): ReactElement {
       return;
     }
     if (selectedSession.draftSession === true) {
-      void startDraftSessionAndSend(selectedSession, prompt, promptAttachments);
+      void startDraftSessionAndSend(
+        selectedSession,
+        prompt,
+        promptAttachments,
+        "parent",
+        {},
+      );
       return;
     }
     if (!selectedSession.runtimeBacked) {
@@ -4199,10 +4240,10 @@ export function App(): ReactElement {
       multitaskSettings={multitaskState?.settings ?? {}}
       multitaskDestination={promptDestination}
       workerOverrides={promptWorkerOverrides}
-      onSetWorkInParentOnce={() =>
+      onSetPromptDestination={(destination) =>
         setWorkInParentOnce((current) => ({
           ...current,
-          [selectedSession.id]: true,
+          [selectedSession.id]: destination === "parent",
         }))
       }
       onSetWorkerOverrides={(overrides) =>
@@ -4212,6 +4253,19 @@ export function App(): ReactElement {
         }))
       }
       onUpdateWorkerDefaults={(settings) => {
+        setMultitask((current) => ({
+          ...current,
+          [selectedSession.id]: {
+            ...(current[selectedSession.id] ?? {
+              runtimeId: selectedSession.id,
+              mode: "sequential" as const,
+              activeCount: 0,
+              activeLimit: 10,
+              tasks: [],
+            }),
+            settings,
+          },
+        }));
         if (!selectedSession.runtimeBacked) return;
         void window.piDeck.multitask
           .updateSettings({ runtimeId: selectedSession.id, settings })
@@ -4223,7 +4277,7 @@ export function App(): ReactElement {
                   runtimeId: selectedSession.id,
                   mode: "parallel" as const,
                   activeCount: 0,
-                  activeLimit: 1,
+                  activeLimit: 10,
                   tasks: [],
                 }),
                 settings: updated,
@@ -4247,7 +4301,7 @@ export function App(): ReactElement {
               mode,
               settings: current[selectedSession.id]?.settings ?? {},
               activeCount: current[selectedSession.id]?.activeCount ?? 0,
-              activeLimit: current[selectedSession.id]?.activeLimit ?? 1,
+              activeLimit: current[selectedSession.id]?.activeLimit ?? 10,
               tasks: current[selectedSession.id]?.tasks ?? [],
             },
           }));
@@ -9161,7 +9215,7 @@ function Composer(props: {
   multitaskSettings: ParallelWorkerSettings;
   multitaskDestination: "parent" | "newTaskSession";
   workerOverrides: ParallelWorkerSettings;
-  onSetWorkInParentOnce(): void;
+  onSetPromptDestination(destination: "parent" | "newTaskSession"): void;
   onSetWorkerOverrides(overrides: ParallelWorkerSettings): void;
   onUpdateWorkerDefaults(settings: ParallelWorkerSettings): void;
   onToggleMultitask(): void;
@@ -9373,7 +9427,7 @@ function Composer(props: {
                 models={props.realModels}
                 thinkingLevels={props.realThinkingLevels}
                 overrides={props.workerOverrides}
-                onWorkInParent={props.onSetWorkInParentOnce}
+                onSetDestination={props.onSetPromptDestination}
                 onOverrideModel={(model) =>
                   props.onSetWorkerOverrides({
                     ...props.workerOverrides,
@@ -10339,6 +10393,17 @@ export function findKnownExtensionCommand(
   )?.name;
 }
 
+function initialDraftMultitaskState(runtimeId: string): MultitaskStateEvent {
+  return {
+    runtimeId,
+    mode: "sequential",
+    settings: {},
+    activeCount: 0,
+    activeLimit: 10,
+    tasks: [],
+  };
+}
+
 function workflowOccurrenceSessionReference(
   occurrence: CanonicalNodeOccurrence,
 ): { runtimeId?: string | undefined; sessionFile?: string | undefined } {
@@ -10354,6 +10419,7 @@ function workflowOccurrenceSessionReference(
 
 export const __rendererTestHooks = {
   reduceRuntimeEvent,
+  initialDraftMultitaskState,
   sessionFromSnapshot,
   workflowOccurrenceSessionReference,
   upsertRuntimeSession,
