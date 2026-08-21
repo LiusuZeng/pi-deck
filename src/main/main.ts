@@ -143,7 +143,7 @@ import {
   parsePiRuntimeModelDiscovery,
 } from "./pi/modelDiscovery.js";
 import { SinglePiAdapter } from "./pi/piAdapter.js";
-import { WorkerCapacity } from "./pi/workerCapacity.js";
+import { WorkerCapacity, WorkerCapacityError } from "./pi/workerCapacity.js";
 import { selectAvailableRuntime } from "./runtimeSelection.js";
 import {
   readPiSessionSummary,
@@ -2729,6 +2729,7 @@ async function initializeChatAdapter(
     }),
     createWorker: (launch) => createTaskSessionWorker(adapter, store, launch),
     hasGlobalCapacity: () => capacityAvailable(),
+    isCapacityUnavailable: (error) => error instanceof WorkerCapacityError,
     synthesize: (input) => synthesizeTaskSession(adapter, input),
     onState: (parentId) => {
       emitTaskSessionState(parentId);
