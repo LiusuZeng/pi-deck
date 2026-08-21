@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added deterministic Parallel mode routing: prompts default to one or more
+  private, model-planned task sessions while a one-prompt **Work in parent**
+  override keeps direct conversation available.
+- Added a flat, parent-only task panel with safe brief, lifecycle, elapsed,
+  attempt, progress, capacity, and queue information.
+- Added persistent parallel-worker defaults and per-prompt model/thinking
+  overrides, with secure task attachment materialization.
+
+### Changed
+
+- Replaced model-elected `deck_delegate` routing with a private structured
+  planner and parent-owned task-session orchestrator.
+- Limited each parent to 10 active task sessions, queued excess work in order,
+  retried failed tasks three times, and automatically synthesized terminal
+  results through the parent.
+- Kept private planner/task workers ephemeral with `--no-session`; unfinished
+  work is restored only as interrupted parent trace and never resumed.
+
+### Fixed
+
+- Kept task status visible when Parallel mode is switched off, preserved failed
+  task prompts and settings state, anchored/focused task UI popovers correctly,
+  and prevented private session files or attachment payloads from leaking into
+  session navigation or durable task state.
+
+### Tests
+
+- Added deterministic 12-task fan-out, active-limit queueing, retry, synthesis,
+  attachment privacy, parent-override, and restart regressions.
+- Added authenticated real-Pi coverage proving ordinary Parallel prompts use
+  the production planner to create multiple private task sessions without the
+  bridge harness or a routing fixture.
+
 ## [0.5.4] - 2026-08-16
 
 ### Fixed

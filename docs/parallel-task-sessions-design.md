@@ -1,6 +1,6 @@
 # Parallel Task Sessions Design
 
-Status: **Approved product behavior; implementation incomplete**
+Status: **Implemented on the dedicated feature branch; pending merge and release**
 
 This document is the canonical product and engineering contract for ad-hoc
 parallel work in Pi Deck. It is separate from Agent Workflows, which are saved,
@@ -276,15 +276,26 @@ These criteria require fake deterministic E2E coverage and authenticated real-Pi
 coverage. A test-only harness that directly invokes `deck_delegate` verifies the
 bridge, but by itself does not verify deterministic product routing.
 
-## 11. Current implementation gap
+## 11. Integration status
 
-The current implementation exposes a parallel-mode toggle and a parent-facing
-status projection, but production delegation still depends on the parent model
-choosing the `deck_delegate` tool. It does not yet provide the per-prompt
-destination and worker-setting UI, mandatory multi-task planning, deterministic
-task-session creation for every default parallel prompt, automatic synthesis
-and retry, the 10-active-session queue policy, or the transient in-conversation
-task panel.
+The dedicated feature branch implements the contract above:
 
-No release should claim this design is complete until the acceptance criteria
-above pass against the production routing path.
+- production sends carry an explicit parent/task-session destination;
+- a private real-Pi planner produces one or more validated task briefs without
+  `deck_delegate` tool election;
+- private planner/task workers use `--no-session` and never enter session
+  navigation;
+- the parent-scoped orchestrator enforces 10 active tasks, ordered queueing,
+  three retries, synthesis, transient-row clearing, and interrupted restart;
+- worker settings resolve per prompt, persistent parallel default, then parent;
+- referenced paths and validated images are materialized once in main, cloned
+  only into ephemeral private prompts, and excluded from durable task state;
+- the in-conversation task panel is flat, informative, accessible, and inert.
+
+The compatibility `deck_delegate` bridge remains only as a separately tested
+transport. Generated parent instructions explicitly prohibit model-elected use
+for ordinary prompts.
+
+Release remains blocked until this branch is reviewed, merged deliberately into
+the dedicated integration branch, and all CI plus authenticated real-Pi gates
+are recorded. No changes have been pushed or published.

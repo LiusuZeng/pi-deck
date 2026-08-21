@@ -3511,7 +3511,14 @@ async function createTaskSessionWorker(
     if (ended) return;
     if (event.type === "extension_ui_request")
       launch.callbacks.waitingForParent();
-    if (event.type === "agent_end" || event.type === "worker_exit") {
+    if (event.type === "worker_exit") {
+      ended = true;
+      launch.callbacks.failed(
+        new Error("Private task worker exited before completing."),
+      );
+      return;
+    }
+    if (event.type === "agent_end") {
       ended = true;
       if (testBehavior?.lifecycle === "interrupted") {
         // Test-only crash fixture: retain a running trace until app teardown so
@@ -3533,6 +3540,11 @@ async function createTaskSessionWorker(
             return;
           }
           const last = messages.at(-1);
+          const failure = piMessageFailure(last);
+          if (failure) {
+            launch.callbacks.failed(new Error(failure));
+            return;
+          }
           launch.callbacks.completed({
             summary: conciseTaskHandoff(piMessageText(last)),
           });
@@ -3636,6 +3648,25 @@ function queueTaskSessionParentTurn(
   return queued;
 }
 
+function agentEndFailure(event: unknown): string | undefined {
+  if (!event || typeof event !== "object") return undefined;
+  const messages = (event as { messages?: unknown }).messages;
+  return Array.isArray(messages)
+    ? piMessageFailure(messages.at(-1))
+    : undefined;
+}
+
+function piMessageFailure(message: unknown): string | undefined {
+  if (!message || typeof message !== "object") return undefined;
+  const errorMessage = (message as { errorMessage?: unknown }).errorMessage;
+  if (typeof errorMessage === "string" && errorMessage.trim())
+    return conciseTaskHandoff(errorMessage);
+  const stopReason = (message as { stopReason?: unknown }).stopReason;
+  return stopReason === "error" || stopReason === "aborted"
+    ? `Task ended with ${stopReason}.`
+    : undefined;
+}
+
 function piMessageText(message: unknown): string {
   if (!message || typeof message !== "object") return "";
   const content = (message as { content?: unknown }).content;
@@ -3705,12 +3736,12 @@ async function synthesizeTaskSession(
       };
       cancelSettledWait = () => finish(resolve);
       unsubscribe = worker.onEvent((event) => {
-        if (
-          event.type === "agent_settled" ||
-          (!active && event.type === "agent_end")
-        )
-          finish(resolve);
-        else if (event.type === "worker_exit")
+        if (event.type === "agent_settled") finish(resolve);
+        else if (!active && event.type === "agent_end") {
+          const failure = agentEndFailure(event);
+          if (failure) finish(() => reject(new Error(failure)));
+          else finish(resolve);
+        } else if (event.type === "worker_exit")
           finish(() =>
             reject(new Error("Parent closed before synthesis completed.")),
           );
@@ -3767,15 +3798,23 @@ async function createDelegatedChild(
   worker.onEvent((event) => {
     if (ended) return;
     if (event.type === "extension_ui_request") callbacks.inputNeeded();
-    if (event.type === "agent_end" || event.type === "worker_exit") {
+    if (event.type === "worker_exit") {
+      ended = true;
+      callbacks.failed({ summary: "Child exited without a result." });
+      return;
+    }
+    if (event.type === "agent_end") {
       ended = true;
       void worker
         .getMessages()
         .then((messages) => {
           const last = messages.at(-1);
-          callbacks.completed({
-            summary: conciseTaskHandoff(piMessageText(last)),
-          });
+          const failure = piMessageFailure(last);
+          if (failure) callbacks.failed({ summary: failure });
+          else
+            callbacks.completed({
+              summary: conciseTaskHandoff(piMessageText(last)),
+            });
         })
         .catch(() =>
           callbacks.failed({ summary: "Child exited without a result." }),

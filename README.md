@@ -130,7 +130,7 @@ Pi Deck's approved multitasking model is based on parent-owned **task sessions**
 - Failed tasks retry up to three times. Once every task for that prompt is terminal, the parent reports successful results and terminal failures, then clears those task rows.
 - Unfinished private sessions do not resume after restart; the parent restores their context and trace and reports them as interrupted.
 
-The canonical behavior and security contract is [Parallel Task Sessions Design](docs/parallel-task-sessions-design.md). **Implementation status:** the mode toggle and parent-facing status bridge exist, but deterministic per-prompt routing, the destination selector, and the complete parent/task-session hierarchy are not yet implemented.
+The canonical behavior and security contract is [Parallel Task Sessions Design](docs/parallel-task-sessions-design.md). The dedicated feature branch implements deterministic routing, private model-backed planning, the prompt destination/settings UI, task panel, retries, synthesis, attachment handling, and interrupted restart behavior; it is pending merge and release.
 
 <p align="center">
   <a href="docs/assets/pi-deck-multitasking.png" title="Open the parallel multitasking screenshot full size">
@@ -353,7 +353,7 @@ Set `CHROME_PATH` when Google Chrome is installed somewhere other than the scrip
 4. Pi starts lazily and streams into the timeline while other workers remain attached in the background.
 5. For repeatable multi-agent work, open **Agent Workflows**, create or select a workflow, provide its run inputs, and start it.
 6. Follow the live graph, answer Human checkpoints, retry or stop occurrences, and open a worker's Pi session when you need to intervene.
-7. When the task-session design is complete, enable parallel mode on a parent to make each prompt default to an automatically planned set of private task sessions, or choose **Work in parent** for a one-prompt override.
+7. Enable parallel mode on a parent to make each prompt default to an automatically planned set of private task sessions, or choose **Work in parent** for a one-prompt override.
 8. Use **Steer**, **Follow-up**, or **Abort** while a turn is active; return to the Work inbox to triage the next session.
 9. Close an idle runtime to free capacity while keeping its saved session resumable.
 
@@ -393,7 +393,7 @@ Pi Deck has no hosted backend and does not sync app data.
 - **Workspace metadata:** `~/.pideck/workspaces.json` by default.
 - **Project metadata:** `~/.pideck/projects.json` by default.
 - **Workflow definitions and occurrence runs:** `~/.pideck/workflows.json` by default.
-- **Task-session state:** `multitask-state.json` in Electron's local user-data directory. It retains only the scheduling mode, task number/name, status, and terminal handoff—not private runtime/session IDs, prompts, transcripts, or raw output.
+- **Task-session state:** `task-session-state.json` in Electron's local user-data directory. It retains bounded parent planning/trace metadata, attempts, status transitions, and terminal handoffs—not private runtime/session IDs, session paths, transcripts, raw tool output, attachment tokens, or image payloads. `multitask-state.json` remains compatibility state for the legacy bridge.
 - **App settings and diagnostics:** Electron's local user-data directory.
 - **Provider authentication and Pi resources:** Pi's normal agent directory, `~/.pi/agent` by default.
 
@@ -414,7 +414,6 @@ Security boundaries include:
 - Pi Deck currently runs from source; there is no signed/notarized installer or packaged release yet.
 - macOS is the supported MVP target.
 - Ad-hoc session starts are blocked when attached-worker capacity is reached. Workflow occurrences and private task sessions use bounded queues and share that capacity.
-- Parallel task sessions are not yet complete: current production routing still relies on model-elected `deck_delegate` calls rather than the deterministic per-prompt destination contract.
 - There is not yet a full settings or diagnostics screen; some advanced configuration remains environment/file driven.
 - Project resources follow Pi's own trust and settings behavior; Pi Deck does not yet provide a project trust or resource-inspection panel.
 - Custom extension interfaces beyond `select`, `confirm`, `input`, and `editor` are not rendered as bespoke GUI components.
