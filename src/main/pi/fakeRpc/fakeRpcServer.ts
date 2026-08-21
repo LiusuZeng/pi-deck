@@ -627,6 +627,9 @@ class FakeRpcServer {
     }
     if (this.options.promptScenario === "routing") {
       this.traceFixture("ordinary_prompt");
+      const images = params.images;
+      if (Array.isArray(images) && images.length > 0)
+        this.traceFixture(`prompt_images:${images.length}`);
     }
     this.promptCounter += 1;
     const assistantId = `msg_assistant_${this.promptCounter}`;

@@ -31,6 +31,16 @@ export function ParallelPromptSettings({
   const modelValue = overrides.model
     ? `${overrides.model.provider}\u0000${overrides.model.modelId}`
     : "";
+  const promptThinkingLevels = thinkingLevelsForModel(
+    overrides.model ?? defaults.model,
+    models,
+    thinkingLevels,
+  );
+  const defaultThinkingLevels = thinkingLevelsForModel(
+    defaults.model,
+    models,
+    thinkingLevels,
+  );
   return (
     <div className="parallel-prompt-settings">
       <label className="parallel-prompt-settings__destination">
@@ -50,6 +60,7 @@ export function ParallelPromptSettings({
         className="parallel-prompt-settings__menu"
         label="Parallel worker settings"
         menu={false}
+        menuLabel="Parallel worker settings"
       >
         <div
           aria-label="Parallel worker settings"
@@ -65,6 +76,7 @@ export function ParallelPromptSettings({
                 onOverrideModel(
                   provider && modelId ? { provider, modelId } : undefined,
                 );
+                onOverrideThinking(undefined);
               }}
             >
               <option value="">Use persistent default</option>
@@ -92,7 +104,7 @@ export function ParallelPromptSettings({
               }
             >
               <option value="">Use persistent default</option>
-              {thinkingLevels.map((level) => (
+              {promptThinkingLevels.map((level) => (
                 <option key={level} value={level}>
                   {level}
                 </option>
@@ -118,6 +130,7 @@ export function ParallelPromptSettings({
                     ...(provider && modelId
                       ? { model: { provider, modelId } }
                       : { model: undefined }),
+                    thinkingLevel: undefined,
                   });
                 }}
               >
@@ -151,7 +164,7 @@ export function ParallelPromptSettings({
                 }
               >
                 <option value="">Inherit parent thinking</option>
-                {thinkingLevels.map((level) => (
+                {defaultThinkingLevels.map((level) => (
                   <option key={level} value={level}>
                     {level}
                   </option>
@@ -163,4 +176,23 @@ export function ParallelPromptSettings({
       </Menu>
     </div>
   );
+}
+
+function thinkingLevelsForModel(
+  selected: ParallelWorkerSettings["model"],
+  models: readonly ChatModelSummary[],
+  fallback: readonly string[],
+): readonly string[] {
+  if (!selected) return fallback;
+  const model = models.find(
+    (candidate) =>
+      candidate.provider === selected.provider &&
+      candidate.id === selected.modelId,
+  );
+  if (!model) return fallback;
+  if (model.reasoning === false) return ["off"];
+  const mapped = Object.entries(model.thinkingLevelMap ?? {})
+    .filter(([, providerLevel]) => providerLevel !== null)
+    .map(([level]) => level);
+  return mapped.length > 0 ? mapped : fallback;
 }

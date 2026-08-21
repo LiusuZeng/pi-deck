@@ -1,8 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import type {
-  PersistedTaskSessionState,
-  TaskSessionWorkerSettings,
+import {
+  isPersistedTaskSessionState,
+  type PersistedTaskSessionState,
+  type TaskSessionWorkerSettings,
 } from "./taskSessionOrchestrator.js";
 
 /** Durable private task-session state, deliberately separate from legacy bridge state. */
@@ -108,13 +109,5 @@ function isSettings(value: unknown): value is TaskSessionWorkerSettings {
   );
 }
 function isState(value: unknown): value is PersistedTaskSessionState {
-  if (!isRecord(value)) return false;
-  const state = value as unknown as PersistedTaskSessionState;
-  return (
-    state.version === 1 &&
-    (state.mode === "parallel" || state.mode === "sequential") &&
-    Number.isSafeInteger(state.nextTaskNumber) &&
-    state.nextTaskNumber > 0 &&
-    Array.isArray(state.plans)
-  );
+  return isPersistedTaskSessionState(value);
 }

@@ -25,14 +25,21 @@ export function TaskSessionPanel({
         <strong>Parallel tasks</strong>
         <span aria-live="polite">{`${activeCount} active of ${activeLimit}`}</span>
       </header>
-      <div aria-label="Task session status" role="list">
+      <div
+        aria-label="Task session status"
+        aria-live="polite"
+        aria-relevant="all"
+        role="list"
+      >
         {tasks.map((task) => (
           <article key={task.taskNumber} role="listitem">
             <div className="task-session-panel__title">
               <strong>{`#${task.taskNumber} ${task.generatedName}`}</strong>
               <span data-lifecycle={task.lifecycle}>{task.lifecycle}</span>
             </div>
-            <p>{task.brief}</p>
+            <p className="task-session-panel__brief" title={task.brief}>
+              {task.brief}
+            </p>
             <small>{`Attempt ${task.attempt} · ${elapsedLabel(task.elapsedMs)}`}</small>
             {task.progress ? <small>{task.progress}</small> : null}
             {task.queueReason ? <small>{task.queueReason}</small> : null}

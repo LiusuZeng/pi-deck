@@ -3046,6 +3046,12 @@ summary::marker {
   overflow-wrap: anywhere;
 }
 
+.task-session-panel__brief {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .task-session-panel small,
 .task-session-panel__title > span {
   color: var(--color-text-muted);

@@ -111,11 +111,13 @@ export function boundedParentContext(
 
 export function fallbackTaskSessionPlan(
   originalPrompt: string,
-  parentContext: string,
+  _parentContext: string,
 ): TaskSessionPlannerPlan {
   return {
+    // A planner failure must not copy raw parent messages into a private worker
+    // or durable task trace. The original request remains the only user input.
     contextSummary:
-      boundedText(parentContext, 2_000).trim() || "No prior parent context.",
+      "Planning was unavailable; use only the original request and assigned task brief.",
     tasks: [
       {
         generatedName:

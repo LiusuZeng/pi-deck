@@ -146,10 +146,21 @@ describe("TaskSessionOrchestrator", () => {
 
   it("retains a durable terminal trace after successful synthesis but clears it from state", async () => {
     const { orchestrator, launches } = setup();
-    await orchestrator.submit("parent", "private original prompt", {
-      project: "p",
-    });
+    await orchestrator.submit(
+      "parent",
+      "private original prompt",
+      { project: "p" },
+      {
+        input: {
+          text: "ephemeral attachment path /private/secret.txt",
+          images: [{ data: "SECRET_BASE64", mimeType: "image/png" }],
+        },
+      },
+    );
     await tick();
+    expect(launches[0].request.runtimeContext).toMatchObject({
+      input: { text: expect.stringContaining("/private/secret.txt") },
+    });
     launches[0].callbacks.completed({ summary: "done\nraw" });
     launches[1].callbacks.completed({ summary: "done" });
     await tick();
@@ -172,6 +183,8 @@ describe("TaskSessionOrchestrator", () => {
     );
     expect(saved.workerSettings).toEqual({ model: "parent" });
     expect(JSON.stringify(saved)).not.toContain("runtimeConfiguration");
+    expect(JSON.stringify(saved)).not.toContain("/private/secret.txt");
+    expect(JSON.stringify(saved)).not.toContain("SECRET_BASE64");
   });
 
   it("marks restored unfinished work interrupted but does not synthesize or relaunch it", async () => {

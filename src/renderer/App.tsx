@@ -2681,49 +2681,47 @@ export function App(): ReactElement {
     const now = formatTime();
     const sentAttachments = timelineAttachmentsFromDrafts(promptAttachments);
     setComposerError(null);
-    blockAttachmentOwner(runtimeId);
-    setComposerDrafts((items) => clearComposerDraft(items, runtimeId));
-    setSessions((current) =>
-      current.map((session) =>
-        session.id === runtimeId
-          ? {
-              ...session,
-              title: isPlaceholderSessionTitle(session.title)
-                ? summarizeTitle(prompt, 64)
-                : session.title,
-              ...(destination === "parent"
-                ? {
-                    status: "sending" as const,
-                    baseState: "attaching" as const,
-                    completedAtMs: undefined,
-                    overlays: { ...session.overlays, streaming: false },
-                    subtitle: `Sending · waiting for ${backendLabel(session)} confirmation`,
-                    workingStartedAtMs:
-                      session.workingStartedAtMs ?? Date.now(),
-                    lastRuntimeEventLabel:
-                      "Prompt sent; awaiting Pi confirmation",
-                    retryPrompt: {
-                      text: prompt,
-                      attachments: promptAttachments,
-                    },
-                  }
-                : {}),
-              updatedAt: "Now",
-              updatedAtMs: Date.now(),
-              timeline: [
-                ...session.timeline,
-                {
-                  id: createId("user"),
-                  kind: "user",
-                  content: prompt,
-                  createdAt: now,
-                  ...(sentAttachments ? { attachments: sentAttachments } : {}),
+    if (destination === "parent") {
+      blockAttachmentOwner(runtimeId);
+      setComposerDrafts((items) => clearComposerDraft(items, runtimeId));
+      setSessions((current) =>
+        current.map((session) =>
+          session.id === runtimeId
+            ? {
+                ...session,
+                title: isPlaceholderSessionTitle(session.title)
+                  ? summarizeTitle(prompt, 64)
+                  : session.title,
+                status: "sending",
+                baseState: "attaching",
+                completedAtMs: undefined,
+                overlays: { ...session.overlays, streaming: false },
+                subtitle: `Sending · waiting for ${backendLabel(session)} confirmation`,
+                workingStartedAtMs: session.workingStartedAtMs ?? Date.now(),
+                lastRuntimeEventLabel: "Prompt sent; awaiting Pi confirmation",
+                retryPrompt: {
+                  text: prompt,
+                  attachments: promptAttachments,
                 },
-              ],
-            }
-          : session,
-      ),
-    );
+                updatedAt: "Now",
+                updatedAtMs: Date.now(),
+                timeline: [
+                  ...session.timeline,
+                  {
+                    id: createId("user"),
+                    kind: "user",
+                    content: prompt,
+                    createdAt: now,
+                    ...(sentAttachments
+                      ? { attachments: sentAttachments }
+                      : {}),
+                  },
+                ],
+              }
+            : session,
+        ),
+      );
+    }
 
     try {
       const attachmentOwnerId =
@@ -2749,10 +2747,43 @@ export function App(): ReactElement {
           ? { workerOverrides: overrides }
           : {}),
       });
+      if (destination === "newTaskSession") {
+        setComposerDrafts((items) =>
+          composerDraftForSession(items, runtimeId).text.trimEnd() === prompt
+            ? clearComposerDraft(items, runtimeId)
+            : items,
+        );
+        setSessions((current) =>
+          current.map((session) =>
+            session.id === runtimeId
+              ? {
+                  ...session,
+                  title: isPlaceholderSessionTitle(session.title)
+                    ? summarizeTitle(prompt, 64)
+                    : session.title,
+                  updatedAt: "Now",
+                  updatedAtMs: Date.now(),
+                  timeline: [
+                    ...session.timeline,
+                    {
+                      id: createId("user"),
+                      kind: "user",
+                      content: prompt,
+                      createdAt: now,
+                      ...(sentAttachments
+                        ? { attachments: sentAttachments }
+                        : {}),
+                    },
+                  ],
+                }
+              : session,
+          ),
+        );
+      }
       setWorkInParentOnce((current) => ({ ...current, [runtimeId]: false }));
       setWorkerOverrides((current) => ({ ...current, [runtimeId]: {} }));
     } catch (error) {
-      unblockAttachmentOwner(runtimeId);
+      if (destination === "parent") unblockAttachmentOwner(runtimeId);
       setComposerError(error instanceof Error ? error.message : String(error));
       setComposerDrafts((items) =>
         updateComposerDraft(items, runtimeId, (current) => ({
@@ -4259,6 +4290,7 @@ export function App(): ReactElement {
         }))
       }
       onUpdateWorkerDefaults={(settings) => {
+        const previousSettings = multitaskState?.settings ?? {};
         setMultitask((current) => ({
           ...current,
           [selectedSession.id]: {
@@ -4290,11 +4322,19 @@ export function App(): ReactElement {
               },
             })),
           )
-          .catch((error) =>
+          .catch((error) => {
+            setMultitask((current) => ({
+              ...current,
+              [selectedSession.id]: {
+                ...(current[selectedSession.id] ??
+                  initialDraftMultitaskState(selectedSession.id)),
+                settings: previousSettings,
+              },
+            }));
             setComposerError(
               `Worker defaults unavailable: ${error instanceof Error ? error.message : String(error)}`,
-            ),
-          );
+            );
+          });
       }}
       onToggleMultitask={() => {
         const mode =
@@ -8718,7 +8758,7 @@ function ChatTimeline(props: {
         ref={timelineScrollRef}
         onScroll={handleTimelineScroll}
       >
-        {props.multitaskState?.mode === "parallel" ? (
+        {props.multitaskState && props.multitaskState.tasks.length > 0 ? (
           <TaskSessionPanel
             activeCount={props.multitaskState.activeCount}
             activeLimit={props.multitaskState.activeLimit}

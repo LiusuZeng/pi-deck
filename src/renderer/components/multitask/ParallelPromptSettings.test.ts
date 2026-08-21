@@ -52,6 +52,18 @@ describe("ParallelPromptSettings", () => {
     expect(destination?.textContent).toContain("Work in parent");
   });
 
+  it("moves keyboard focus into the worker-settings dialog", () => {
+    render("newTaskSession");
+    const trigger = container?.querySelector<HTMLButtonElement>(
+      '[aria-label="Parallel worker settings"]',
+    );
+    act(() => trigger?.click());
+    const dialog = document.querySelector('[role="dialog"]');
+    const firstSelect = dialog?.querySelector<HTMLSelectElement>("select");
+    expect(dialog?.getAttribute("aria-label")).toBe("Parallel worker settings");
+    expect(document.activeElement).toBe(firstSelect);
+  });
+
   it("offers both destinations and reports a destination switch", () => {
     const onSetDestination = render("newTaskSession");
     const destination = container?.querySelector<HTMLSelectElement>(

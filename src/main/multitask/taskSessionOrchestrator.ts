@@ -40,6 +40,8 @@ export interface TaskSessionLaunch<ParentId> {
     originalPrompt: string;
     brief: string;
     workerSettings: TaskSessionWorkerSettings;
+    /** Ephemeral main-owned material; never included in durable state. */
+    runtimeContext?: unknown;
   };
   callbacks: {
     completed(handoff?: { summary?: string }): void;
@@ -91,6 +93,7 @@ export interface TaskSessionOrchestratorOptions<
   plan(
     parentId: ParentId,
     originalPrompt: string,
+    runtimeContext?: unknown,
   ): Promise<TaskSessionPlan> | TaskSessionPlan;
   resolveWorkerSettings(input: {
     parentId: ParentId;
@@ -98,7 +101,7 @@ export interface TaskSessionOrchestratorOptions<
     promptSettings?: TaskSessionWorkerSettings;
   }): TaskSessionWorkerSettings;
   createWorker(launch: TaskSessionLaunch<ParentId>): Promise<Worker> | Worker;
-  hasGlobalCapacity(): boolean;
+  hasGlobalCapacity(parentId: ParentId): boolean;
   /** Identifies a createWorker rejection caused by worker capacity, rather than task failure. */
   isCapacityUnavailable?(error: unknown): boolean;
   /** Atomic claim. Supplying this requires `releaseGlobalCapacity`; the orchestrator releases every claim it owns. */
@@ -134,6 +137,7 @@ type Task = PersistedTaskSessionTask & {
 };
 type Plan = Omit<PersistedTaskSessionPlan, "tasks"> & {
   tasks: Task[];
+  runtimeContext?: unknown;
   synthesizing?: boolean;
   synthesized?: boolean;
   synthesisEligible?: boolean;
@@ -223,13 +227,18 @@ export class TaskSessionOrchestrator<
     parentId: ParentId,
     originalPrompt: string,
     promptSettings?: TaskSessionWorkerSettings,
+    runtimeContext?: unknown,
   ): Promise<readonly TaskSessionSummary[]> {
     const parent = this.parent(parentId);
     const cleanPrompt = safeText(originalPrompt, this.maxContextSummaryLength);
     const cleanPromptSettings = promptSettings
       ? safeSettings(promptSettings)
       : undefined;
-    const planned = await this.options.plan(parentId, cleanPrompt);
+    const planned = await this.options.plan(
+      parentId,
+      cleanPrompt,
+      runtimeContext,
+    );
     validatePlan(planned, this.maxPlanTasks, this.maxContextSummaryLength);
     if (parent.removed || this.parents.get(parentId) !== parent)
       throw new Error("Parent is not registered.");
@@ -248,6 +257,7 @@ export class TaskSessionOrchestrator<
         task(parent.nextTaskNumber++, item, this.now()),
       ),
       ...(cleanPromptSettings ? { promptSettings: cleanPromptSettings } : {}),
+      ...(runtimeContext !== undefined ? { runtimeContext } : {}),
     };
     parent.plans.push(record);
     this.publish(parent);
@@ -380,7 +390,7 @@ export class TaskSessionOrchestrator<
     while (
       !parent.removed &&
       !parent.capacityBlocked &&
-      this.options.hasGlobalCapacity()
+      this.options.hasGlobalCapacity(parent.parentId)
     ) {
       const activeCount = allTasks(parent).filter(isActive).length;
       // Retrying is active in UI but has released its worker slot. Reserve it first;
@@ -438,6 +448,9 @@ export class TaskSessionOrchestrator<
             originalPrompt: plan.originalPrompt,
             brief: entry.brief,
             workerSettings: settings,
+            ...(plan.runtimeContext !== undefined
+              ? { runtimeContext: plan.runtimeContext }
+              : {}),
           },
           callbacks: {
             completed: (handoff) =>
@@ -603,6 +616,7 @@ export class TaskSessionOrchestrator<
         });
         plan.synthesized = true;
         plan.synthesisReported = true;
+        delete plan.runtimeContext;
         delete plan.synthesisFailureTrace;
         this.publish(parent);
       } catch (error) {
@@ -787,6 +801,23 @@ function workerSettingsInput<ParentId>(
     ? { parentId, parentSettings, promptSettings }
     : { parentId, parentSettings };
 }
+export function isPersistedTaskSessionState(
+  value: unknown,
+  maxPlanTasks = 100,
+  maxContextSummaryLength = 16_000,
+): value is PersistedTaskSessionState {
+  try {
+    validatePersisted(
+      value as PersistedTaskSessionState,
+      maxPlanTasks,
+      maxContextSummaryLength,
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function validatePersisted(
   state: PersistedTaskSessionState,
   maxPlanTasks: number,

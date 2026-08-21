@@ -79,8 +79,11 @@ describe("task-session planner", () => {
         parentContext: "",
       }),
     ).toContain("three country tasks");
-    expect(fallbackTaskSessionPlan("Do the thing", "context")).toEqual({
-      contextSummary: "context",
+    expect(
+      fallbackTaskSessionPlan("Do the thing", "SECRET parent transcript"),
+    ).toEqual({
+      contextSummary:
+        "Planning was unavailable; use only the original request and assigned task brief.",
       tasks: [
         {
           generatedName: "Do the thing",

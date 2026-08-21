@@ -553,6 +553,8 @@ function registerIpcHandlers(
       applyAppTheme(updated);
       // App settings are an explicit configuration generation boundary.
       realChatLaunchConfigCache.clear();
+      maxRunningWorkers = updated.maxRunningSessions;
+      taskSessionOrchestrator?.scheduleAll();
       return updated;
     },
   });
@@ -706,23 +708,37 @@ function registerIpcHandlers(
       const adapter = await ensureChatAdapter(store, diagnosticsService);
       const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
       if (destination === "newTaskSession") {
-        if ((attachments?.length ?? 0) > 0) {
-          throw new Error(
-            "Attachments are not supported for private task sessions.",
-          );
-        }
         const orchestrator = getTaskSessionOrchestrator(activeRuntimeId);
         if (orchestrator.state(activeRuntimeId).mode !== "parallel") {
           throw new Error(
             "New task sessions are available only in Parallel mode.",
           );
         }
-        await recordTaskSessionPrompt(adapter, activeRuntimeId, text);
-        await orchestrator.submit(
-          activeRuntimeId,
-          text,
-          toTaskSessionSettings(workerOverrides),
-        );
+        const taskAttachments = attachments ?? [];
+        await deliverWithAttachmentConsumption({
+          store: attachmentSelections,
+          ownerId: attachmentOwnerId,
+          selectedPathTokens: taskAttachments.map(
+            (attachment) => attachment.selectedPathToken,
+          ),
+          deliver: async () => {
+            const taskInput = await buildPromptInputWithImagePolicy(
+              store,
+              adapter,
+              activeRuntimeId,
+              text,
+              taskAttachments,
+              attachmentOwnerId,
+            );
+            await recordTaskSessionPrompt(adapter, activeRuntimeId, text);
+            await orchestrator.submit(
+              activeRuntimeId,
+              text,
+              toTaskSessionSettings(workerOverrides),
+              { input: taskInput } satisfies TaskSessionPromptRuntimeContext,
+            );
+          },
+        });
         return undefined;
       }
       const promptAttachments = attachments ?? [];
@@ -2642,6 +2658,22 @@ async function handleDelegateRequest(request: DelegateRequest): Promise<void> {
     }
     return;
   }
+  const productTaskState = taskSessionOrchestrator?.state(parentId);
+  if (
+    (productTaskState?.tasks.length ?? 0) > 0 ||
+    legacyNonterminalTaskCount(parentId) >= 10
+  ) {
+    delegationBridge.sendChildResult({
+      connectionId: request.connectionId,
+      toolCallId: request.toolCallId,
+      outcome: "failed",
+      handoff: {
+        summary:
+          "The compatibility bridge cannot bypass this parent's 10-task limit or run beside product task sessions.",
+      },
+    });
+    return;
+  }
   if (typeof (payload as { task?: unknown }).task !== "string") {
     delegationBridge.sendChildResult({
       connectionId: request.connectionId,
@@ -2741,15 +2773,16 @@ async function initializeChatAdapter(
   chatWorkerCapacity = capacity;
   chatAdapter = adapter;
   taskSessionOrchestrator = new TaskSessionOrchestrator({
-    plan: (parentId, prompt) =>
-      planTaskSession(adapter, store, parentId, prompt),
+    plan: (parentId, prompt, runtimeContext) =>
+      planTaskSession(adapter, store, parentId, prompt, runtimeContext),
     resolveWorkerSettings: ({ parentId, parentSettings, promptSettings }) => ({
       ...parentSettings,
       ...taskSessionSettings.get(parentId),
       ...promptSettings,
     }),
     createWorker: (launch) => createTaskSessionWorker(adapter, store, launch),
-    hasGlobalCapacity: () => capacityAvailable(),
+    hasGlobalCapacity: (parentId) =>
+      capacityAvailable() && legacyNonterminalTaskCount(parentId) === 0,
     isCapacityUnavailable: (error) => error instanceof WorkerCapacityError,
     synthesize: (input) => synthesizeTaskSession(adapter, input),
     onState: (parentId) => {
@@ -2811,6 +2844,19 @@ async function serializeChatWorkerCreation<T>(
     return await create();
   } finally {
     release?.();
+  }
+}
+
+function legacyNonterminalTaskCount(parentId: string): number {
+  try {
+    return (multitaskSupervisor?.state(parentId).tasks ?? []).filter(
+      (task) =>
+        task.status === "queued" ||
+        task.status === "running" ||
+        task.status === "waiting-input",
+    ).length;
+  } catch {
+    return 0;
   }
 }
 
@@ -3121,6 +3167,10 @@ function forgetChatRuntime(
   }
 }
 
+interface TaskSessionPromptRuntimeContext {
+  input: PromptInput;
+}
+
 interface ChatWorkerSpec {
   worker: ReturnType<SinglePiAdapter["createWorker"]>;
   cwd: string;
@@ -3138,9 +3188,7 @@ function toTaskSessionSettings(
 ): TaskSessionWorkerSettings {
   if (!settings) return {};
   return {
-    ...(settings.model
-      ? { model: `${settings.model.provider}:${settings.model.modelId}` }
-      : {}),
+    ...(settings.model ? { model: JSON.stringify(settings.model) } : {}),
     ...(settings.thinkingLevel
       ? { thinkingLevel: settings.thinkingLevel }
       : {}),
@@ -3169,6 +3217,7 @@ async function planTaskSession(
   store: SettingsStore,
   parentId: string,
   prompt: string,
+  runtimeContext?: unknown,
 ): Promise<{
   contextSummary: string;
   tasks: { generatedName: string; brief: string }[];
@@ -3222,6 +3271,7 @@ async function planTaskSession(
       store,
       parentId,
       buildTaskSessionPlannerPrompt({ originalPrompt: prompt, parentContext }),
+      taskSessionPromptContext(runtimeContext)?.input.images,
     );
     const plan = parseTaskSessionPlannerResponse(response);
     ensureTaskSessionStillParallel(parentId);
@@ -3261,6 +3311,17 @@ async function recordTaskSessionPrompt(
   });
 }
 
+function taskSessionPromptContext(
+  value: unknown,
+): TaskSessionPromptRuntimeContext | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const input = (value as { input?: unknown }).input;
+  if (!input || typeof input !== "object") return undefined;
+  return typeof (input as { text?: unknown }).text === "string"
+    ? (value as TaskSessionPromptRuntimeContext)
+    : undefined;
+}
+
 function ensureTaskSessionStillParallel(parentId: string): void {
   if (
     getTaskSessionOrchestrator(parentId).state(parentId).mode !== "parallel"
@@ -3278,6 +3339,7 @@ async function runTaskSessionPlanner(
   store: SettingsStore,
   parentId: string,
   plannerPrompt: string,
+  images?: PromptInput["images"],
 ): Promise<string> {
   const capacity = getChatWorkerCapacity();
   const parentMode = chatRuntimeModes.get(parentId);
@@ -3309,36 +3371,44 @@ async function runTaskSessionPlanner(
     try {
       // The deadline starts before allocation and remains in force through
       // inherited configuration, prompt delivery, and terminal-event waiting.
-      worker = await capacity.allocate(
-        async () => (await store.get()).maxRunningSessions,
-        () =>
-          parentMode === "fake"
-            ? adapter.createWorker({
-                command: process.execPath,
-                args: [
-                  path.join(__dirname, "pi/fakeRpc/fakeRpcServer.js"),
-                  "--stream-delay-ms",
-                  "10",
-                  "--no-session",
-                ],
-                cwd,
-                env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
-              })
-            : createRealDelegatedWorker(adapter, store, cwd, projectId),
-      );
+      while (!worker) {
+        if (
+          run.cancelled ||
+          !chatRuntimeIds.has(parentId) ||
+          !adapter.hasRuntime(parentId)
+        )
+          throw new Error("Task-session planner was cancelled.");
+        try {
+          worker = await capacity.allocate(
+            async () => (await store.get()).maxRunningSessions,
+            () =>
+              parentMode === "fake"
+                ? adapter.createWorker({
+                    command: process.execPath,
+                    args: [
+                      path.join(__dirname, "pi/fakeRpc/fakeRpcServer.js"),
+                      "--stream-delay-ms",
+                      "10",
+                      "--no-session",
+                    ],
+                    cwd,
+                    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+                  })
+                : createRealDelegatedWorker(adapter, store, cwd, projectId),
+          );
+        } catch (error) {
+          if (!(error instanceof WorkerCapacityError)) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+      }
       const plannerWorker = worker;
       run.closeWorker = () => adapter.closeSession(plannerWorker.runtimeId);
       if (run.cancelled) throw new Error("Task-session planner was cancelled.");
       const parentState = await adapter.getRuntimeStatus(parentId);
       try {
-        if (
-          typeof parentState.provider === "string" &&
-          typeof parentState.model === "string"
-        ) {
-          await plannerWorker.request("set_model", {
-            provider: parentState.provider,
-            modelId: parentState.model,
-          });
+        const parentModel = runtimeModelSelection(parentState);
+        if (parentModel) {
+          await plannerWorker.request("set_model", parentModel);
         }
         if (typeof parentState.thinkingLevel === "string") {
           await plannerWorker.request("set_thinking_level", {
@@ -3380,7 +3450,12 @@ async function runTaskSessionPlanner(
           }
         });
         void plannerWorker
-          .prompt({ text: plannerPrompt })
+          .prompt({
+            text: plannerPrompt,
+            ...(images && images.length > 0
+              ? { images: structuredClone(images) }
+              : {}),
+          })
           .catch((error) => finish(() => reject(error)));
       });
     } finally {
@@ -3467,16 +3542,14 @@ async function createTaskSessionWorker(
   });
   try {
     const parentState = await adapter.getRuntimeStatus(launch.parentId);
-    const [provider, modelId] =
-      launch.request.workerSettings.model?.split(":", 2) ?? [];
-    const selectedProvider =
-      provider ??
-      (typeof parentState.provider === "string"
-        ? parentState.provider
-        : undefined);
-    const selectedModelId =
-      modelId ??
-      (typeof parentState.model === "string" ? parentState.model : undefined);
+    const configuredModel = decodeTaskSessionModel(
+      launch.request.workerSettings.model,
+    );
+    const provider = configuredModel?.provider;
+    const modelId = configuredModel?.modelId;
+    const parentModel = runtimeModelSelection(parentState);
+    const selectedProvider = provider ?? parentModel?.provider;
+    const selectedModelId = modelId ?? parentModel?.modelId;
     if (selectedProvider && selectedModelId)
       await worker.request("set_model", {
         provider: selectedProvider,
@@ -3489,8 +3562,19 @@ async function createTaskSessionWorker(
         : undefined);
     if (thinkingLevel)
       await worker.request("set_thinking_level", { level: thinkingLevel });
+    const taskInput = taskSessionPromptContext(
+      launch.request.runtimeContext,
+    )?.input;
+    const attachmentContext = taskInput
+      ? taskInput.text.startsWith(launch.request.originalPrompt)
+        ? taskInput.text.slice(launch.request.originalPrompt.length).trim()
+        : taskInput.text
+      : "";
     await worker.prompt({
-      text: `Parent context:\n${launch.request.contextSummary}\n\nOriginal request:\n${launch.request.originalPrompt}\n\nAssigned task:\n${launch.request.brief}`,
+      text: `Parent context:\n${launch.request.contextSummary}\n\nOriginal request:\n${launch.request.originalPrompt}\n\nAssigned task:\n${launch.request.brief}${attachmentContext ? `\n\nAttachment context:\n${attachmentContext}` : ""}`,
+      ...(taskInput?.images && taskInput.images.length > 0
+        ? { images: structuredClone(taskInput.images) }
+        : {}),
     });
   } catch (error) {
     await adapter.closeSession(worker.runtimeId).catch(() => undefined);
@@ -5980,12 +6064,55 @@ function taskSessionState(
   });
 }
 
+function runtimeModelSelection(
+  state: PiState,
+): { provider: string; modelId: string } | undefined {
+  if (
+    state.model &&
+    typeof state.model === "object" &&
+    !Array.isArray(state.model)
+  ) {
+    const provider = (state.model as { provider?: unknown }).provider;
+    const modelId = (state.model as { id?: unknown }).id;
+    if (typeof provider === "string" && typeof modelId === "string")
+      return { provider, modelId };
+  }
+  return typeof state.provider === "string" && typeof state.model === "string"
+    ? { provider: state.provider, modelId: state.model }
+    : undefined;
+}
+
+function decodeTaskSessionModel(
+  value: string | undefined,
+): { provider: string; modelId: string } | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      typeof (parsed as { provider?: unknown }).provider === "string" &&
+      typeof (parsed as { modelId?: unknown }).modelId === "string"
+    )
+      return parsed as { provider: string; modelId: string };
+  } catch {
+    // Migrate the initial provider:model persisted representation.
+  }
+  const separator = value.indexOf(":");
+  return separator > 0
+    ? {
+        provider: value.slice(0, separator),
+        modelId: value.slice(separator + 1),
+      }
+    : undefined;
+}
+
 function fromTaskSessionSettings(
   settings: TaskSessionWorkerSettings | undefined,
 ): { model?: { provider: string; modelId: string }; thinkingLevel?: string } {
-  const [provider, modelId] = settings?.model?.split(":", 2) ?? [];
+  const model = decodeTaskSessionModel(settings?.model);
   return {
-    ...(provider && modelId ? { model: { provider, modelId } } : {}),
+    ...(model ? { model } : {}),
     ...(settings?.thinkingLevel
       ? { thinkingLevel: settings.thinkingLevel }
       : {}),

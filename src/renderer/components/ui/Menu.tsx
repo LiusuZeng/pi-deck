@@ -50,12 +50,11 @@ export function Menu(props: {
   }, [isOpen]);
 
   useEffect(() => {
-    if (!isOpen || !isMenu) {
-      return;
-    }
-    popoverRef.current
-      ?.querySelector<HTMLElement>('[role^="menuitem"]')
-      ?.focus();
+    if (!isOpen) return;
+    const selector = isMenu
+      ? '[role^="menuitem"]'
+      : 'select, input, button, textarea, [tabindex]:not([tabindex="-1"])';
+    popoverRef.current?.querySelector<HTMLElement>(selector)?.focus();
   }, [isMenu, isOpen]);
 
   useLayoutEffect(() => {
@@ -164,7 +163,7 @@ export function Menu(props: {
         ref={triggerRef}
         aria-controls={isOpen ? menuId : undefined}
         aria-expanded={isOpen}
-        aria-haspopup={isMenu ? "menu" : undefined}
+        aria-haspopup={isMenu ? "menu" : "dialog"}
         disabled={props.disabled}
         icon={props.icon ?? Ellipsis}
         label={props.label}
@@ -180,7 +179,7 @@ export function Menu(props: {
               id={menuId}
               aria-label={props.menuLabel}
               ref={popoverRef}
-              role={isMenu ? "menu" : undefined}
+              role={isMenu ? "menu" : "dialog"}
               style={popoverStyle ?? { position: "fixed" }}
               onClick={isMenu ? closeAndRestoreFocus : undefined}
             >

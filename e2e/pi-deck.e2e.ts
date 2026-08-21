@@ -3510,6 +3510,15 @@ test.describe("task-session routing acceptance", () => {
         /^(queued|starting|running|completed)$/,
       );
       await expect(rows.nth(0)).toContainText(/Attempt 1 · \d+s/);
+      // Mode changes affect future routing only; active task visibility remains.
+      await page
+        .getByRole("button", { name: "Parallel multitasking: On" })
+        .click();
+      await expect(panel).toBeVisible();
+      await page
+        .getByRole("button", { name: "Parallel multitasking: Off" })
+        .click();
+      await expect(destination).toHaveValue("newTaskSession");
 
       await expect
         .poll(() =>
@@ -3612,6 +3621,122 @@ test.describe("task-session routing acceptance", () => {
         const w = window as typeof window & { __stopTaskStates?: () => void };
         w.__stopTaskStates?.();
       });
+      await app.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("materializes task attachments once without persisting private payloads", async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "pi-deck-task-attachment-"),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    const userDataDir = path.join(root, "user-data");
+    const traceFile = path.join(root, "fixture-trace.log");
+    const fixture = path.join(root, "attachment-plan.json");
+    for (const directory of [projectCwd, agentDir, userDataDir])
+      fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(
+      fixture,
+      JSON.stringify({
+        tasks: [{ name: "Inspect supplied image", lifecycle: "completed" }],
+      }),
+    );
+    const { app, page } = await launchPiDeck({
+      ...fakeRealModeEnv({
+        root,
+        projectCwd,
+        agentDir,
+        userDataDir,
+        fakePiArgs: [
+          "--prompt-scenario",
+          "routing",
+          "--fixture-trace-file",
+          traceFile,
+          "--stream-delay-ms",
+          "50",
+        ],
+      }),
+      PI_DECK_TEST_TASK_ROUTING_FIXTURE: fixture,
+    });
+    try {
+      await expectHealthyPreload(page);
+      await page.getByLabel("Prompt text").fill("Create the parent runtime.");
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect(
+        page.getByText(/Ordinary routing fixture accepted/),
+      ).toBeVisible();
+      const result = await page.evaluate(async (dataBase64) => {
+        const snapshot = await window.piDeck.chat.getSnapshot();
+        const runtimeId = snapshot.runtimeId;
+        await window.piDeck.multitask.updateMode({
+          runtimeId,
+          mode: "parallel",
+        });
+        const ownerId = "task-attachment-owner";
+        const imported = await window.piDeck.attachments.importImages({
+          ownerId,
+          sessionId: runtimeId,
+          images: [
+            {
+              fileName: "task.png",
+              mimeType: "image/png",
+              size: 24,
+              dataBase64,
+            },
+          ],
+        });
+        if (!imported.selected) throw new Error("Image import was cancelled.");
+        const token = imported.attachments[0]!.selectedPathToken;
+        const states: Array<{ tasks: Array<{ lifecycle: string }> }> = [];
+        const stop = window.piDeck.multitask.onState((state) =>
+          states.push(state),
+        );
+        await window.piDeck.chat.prompt({
+          runtimeId,
+          text: "Inspect the supplied image privately.",
+          destination: "newTaskSession",
+          attachmentOwnerId: ownerId,
+          attachments: [{ selectedPathToken: token, sendMode: "imageInput" }],
+        });
+        let reusedError = "";
+        try {
+          await window.piDeck.chat.prompt({
+            runtimeId,
+            text: "Try to reuse the consumed image.",
+            destination: "newTaskSession",
+            attachmentOwnerId: ownerId,
+            attachments: [{ selectedPathToken: token, sendMode: "imageInput" }],
+          });
+        } catch (error) {
+          reusedError = error instanceof Error ? error.message : String(error);
+        }
+        return { runtimeId, states, reusedError, token };
+      }, tinyPngBase64());
+      expect(result.reusedError).toMatch(/no longer available|reselect/i);
+      await expect
+        .poll(async () =>
+          page.evaluate(
+            async (runtimeId) =>
+              (await window.piDeck.multitask.getMode({ runtimeId })).tasks
+                .length,
+            result.runtimeId,
+          ),
+        )
+        .toBe(0);
+      await expect
+        .poll(() =>
+          fs.existsSync(traceFile) ? fs.readFileSync(traceFile, "utf8") : "",
+        )
+        .toContain("prompt_images:1");
+      const persisted = fs.readFileSync(
+        path.join(userDataDir, "task-session-state.json"),
+        "utf8",
+      );
+      expect(persisted).not.toContain(result.token);
+      expect(persisted).not.toContain(tinyPngBase64());
+    } finally {
       await app.close();
       fs.rmSync(root, { recursive: true, force: true });
     }
