@@ -66,6 +66,9 @@ export interface PersistedTaskSessionPlan {
   /** Per-prompt safe settings, retained so resolution precedence is reproducible. */
   promptSettings?: TaskSessionWorkerSettings;
   synthesisReported?: boolean;
+  /** Number of attempted synthesis deliveries, including the initial attempt. */
+  synthesisAttempts?: number;
+  synthesisFailureTrace?: string;
   tasks: readonly PersistedTaskSessionTask[];
 }
 export interface PersistedTaskSessionTask {
@@ -96,6 +99,8 @@ export interface TaskSessionOrchestratorOptions<
   }): TaskSessionWorkerSettings;
   createWorker(launch: TaskSessionLaunch<ParentId>): Promise<Worker> | Worker;
   hasGlobalCapacity(): boolean;
+  /** Identifies a createWorker rejection caused by worker capacity, rather than task failure. */
+  isCapacityUnavailable?(error: unknown): boolean;
   /** Atomic claim. Supplying this requires `releaseGlobalCapacity`; the orchestrator releases every claim it owns. */
   claimGlobalCapacity?(): boolean;
   releaseGlobalCapacity?(): void;
@@ -105,6 +110,9 @@ export interface TaskSessionOrchestratorOptions<
     contextSummary: string;
     tasks: readonly PersistedTaskSessionTask[];
   }): Promise<void> | void;
+  /** Injectable timer hook for bounded terminal synthesis retries. */
+  scheduleSynthesisRetry?(callback: () => void, delayMs: number): void;
+  synthesisRetryDelayMs?: number;
   onState(parentId: ParentId, state: TaskSessionState): void;
   now?(): number;
   activeLimit?: number;
@@ -121,12 +129,15 @@ type Task = PersistedTaskSessionTask & {
   startedAt?: number;
   worker?: TaskSessionWorker;
   progress?: string;
+  queueReason?: string;
   capacityClaimed?: boolean;
 };
 type Plan = Omit<PersistedTaskSessionPlan, "tasks"> & {
   tasks: Task[];
   synthesizing?: boolean;
   synthesized?: boolean;
+  synthesisEligible?: boolean;
+  synthesisRetryScheduled?: boolean;
 };
 type Parent<ParentId> = {
   parentId: ParentId;
@@ -136,6 +147,7 @@ type Parent<ParentId> = {
   nextPlanId: number;
   plans: Plan[];
   removed?: boolean;
+  capacityBlocked?: boolean;
   drain?: Promise<void>;
 };
 
@@ -155,6 +167,14 @@ export class TaskSessionOrchestrator<
     this.now = options.now ?? Date.now;
     this.maxPlanTasks = options.maxPlanTasks ?? 100;
     this.maxContextSummaryLength = options.maxContextSummaryLength ?? 16_000;
+    if (
+      options.synthesisRetryDelayMs !== undefined &&
+      (!Number.isSafeInteger(options.synthesisRetryDelayMs) ||
+        options.synthesisRetryDelayMs < 0)
+    )
+      throw new Error(
+        "Synthesis retry delay must be a non-negative safe integer.",
+      );
     if (
       !Number.isSafeInteger(this.activeLimit) ||
       this.activeLimit < 1 ||
@@ -259,7 +279,11 @@ export class TaskSessionOrchestrator<
     void this.schedule(parent);
   }
   scheduleAll(): void {
-    for (const parent of this.parents.values()) void this.schedule(parent);
+    for (const parent of this.parents.values()) {
+      parent.capacityBlocked = false;
+      void this.schedule(parent);
+      void this.synthesizeTerminalPlans(parent);
+    }
   }
   exportState(parentId: ParentId): PersistedTaskSessionState {
     const parent = this.parent(parentId);
@@ -282,6 +306,12 @@ export class TaskSessionOrchestrator<
           ? { promptSettings: safeSettings(plan.promptSettings) }
           : {}),
         ...(plan.synthesisReported ? { synthesisReported: true } : {}),
+        ...(plan.synthesisAttempts
+          ? { synthesisAttempts: plan.synthesisAttempts }
+          : {}),
+        ...(plan.synthesisFailureTrace
+          ? { synthesisFailureTrace: safeLine(plan.synthesisFailureTrace) }
+          : {}),
         tasks: plan.tasks.map(persistTask),
       })),
     };
@@ -297,34 +327,38 @@ export class TaskSessionOrchestrator<
       1,
       ...state.plans.map((plan) => plan.planId + 1),
     );
-    parent.plans = state.plans.map((plan) => ({
-      ...plan,
-      originalPrompt: safeText(
-        plan.originalPrompt,
-        this.maxContextSummaryLength,
-      ),
-      contextSummary: safeText(
-        plan.contextSummary,
-        this.maxContextSummaryLength,
-      ),
-      ...(plan.promptSettings
-        ? { promptSettings: safeSettings(plan.promptSettings) }
-        : {}),
-      ...(plan.synthesisReported ? { synthesized: true } : {}),
-      tasks: plan.tasks.map((saved) =>
-        !isTerminal(saved)
-          ? {
-              ...saved,
-              lifecycle: "interrupted",
-              transitions: [
-                ...saved.transitions,
-                transition("interrupted", saved.attempt, this.now()),
-              ],
-              handoffSummary: "Task session interrupted after restart.",
-            }
-          : { ...saved },
-      ),
-    }));
+    parent.plans = state.plans.map((plan) => {
+      const hadInterruptedWork = plan.tasks.some((saved) => !isTerminal(saved));
+      return {
+        ...plan,
+        originalPrompt: safeText(
+          plan.originalPrompt,
+          this.maxContextSummaryLength,
+        ),
+        contextSummary: safeText(
+          plan.contextSummary,
+          this.maxContextSummaryLength,
+        ),
+        ...(plan.promptSettings
+          ? { promptSettings: safeSettings(plan.promptSettings) }
+          : {}),
+        ...(plan.synthesisReported ? { synthesized: true } : {}),
+        synthesisEligible: !hadInterruptedWork,
+        tasks: plan.tasks.map((saved) =>
+          !isTerminal(saved)
+            ? {
+                ...saved,
+                lifecycle: "interrupted",
+                transitions: [
+                  ...saved.transitions,
+                  transition("interrupted", saved.attempt, this.now()),
+                ],
+                handoffSummary: "Task session interrupted after restart.",
+              }
+            : { ...saved },
+        ),
+      };
+    });
     this.publish(parent);
   }
   async removeParent(parentId: ParentId): Promise<void> {
@@ -343,7 +377,11 @@ export class TaskSessionOrchestrator<
     return next;
   }
   private async drain(parent: Parent<ParentId>): Promise<void> {
-    while (!parent.removed && this.options.hasGlobalCapacity()) {
+    while (
+      !parent.removed &&
+      !parent.capacityBlocked &&
+      this.options.hasGlobalCapacity()
+    ) {
       const activeCount = allTasks(parent).filter(isActive).length;
       // Retrying is active in UI but has released its worker slot. Reserve it first;
       // it may refill that slot at the limit, while queued work may not exceed it.
@@ -363,8 +401,11 @@ export class TaskSessionOrchestrator<
         !this.options.claimGlobalCapacity()
       )
         break;
+      const priorLifecycle: "queued" | "retrying" =
+        entry.lifecycle === "retrying" ? "retrying" : "queued";
       entry.capacityClaimed = Boolean(this.options.claimGlobalCapacity);
       entry.lifecycle = "starting";
+      delete entry.queueReason;
       entry.attempt += 1;
       entry.startedAt = this.now();
       entry.transitions = [
@@ -449,9 +490,27 @@ export class TaskSessionOrchestrator<
         pending.splice(0).forEach((fn) => fn());
         this.publish(parent);
       } catch (error) {
+        if (this.options.isCapacityUnavailable?.(error)) {
+          await this.returnCapacityDeniedTask(parent, entry, priorLifecycle);
+          return;
+        }
         await this.fail(parent, plan, entry, entry.attempt, error);
       }
     }
+  }
+  private async returnCapacityDeniedTask(
+    parent: Parent<ParentId>,
+    entry: Task,
+    priorLifecycle: "queued" | "retrying",
+  ): Promise<void> {
+    await this.closeEntry(entry);
+    entry.lifecycle = priorLifecycle;
+    entry.attempt -= 1;
+    delete entry.startedAt;
+    entry.queueReason =
+      "Queued: worker capacity was unavailable. Waiting for the next global scheduling pass.";
+    parent.capacityBlocked = true;
+    this.publish(parent);
   }
   private async closeEntry(entry: Task): Promise<void> {
     await closeQuietly(entry.worker);
@@ -479,6 +538,7 @@ export class TaskSessionOrchestrator<
     )
       return;
     await this.closeEntry(entry);
+    delete entry.queueReason;
     entry.handoffSummary = safeLine(
       error instanceof Error ? error.message : "Task session failed.",
     );
@@ -506,6 +566,7 @@ export class TaskSessionOrchestrator<
     )
       return;
     await this.closeEntry(entry);
+    delete entry.queueReason;
     entry.lifecycle = "completed";
     entry.handoffSummary = handoff ? safeLine(handoff) : undefined;
     entry.transitions = [
@@ -524,10 +585,13 @@ export class TaskSessionOrchestrator<
       if (
         plan.synthesizing ||
         plan.synthesized ||
+        plan.synthesisEligible === false ||
         !plan.tasks.every(isTerminal)
       )
         continue;
       plan.synthesizing = true;
+      plan.synthesisAttempts = (plan.synthesisAttempts ?? 0) + 1;
+      let retrySynthesis = false;
       try {
         if (parent.removed || this.parents.get(parent.parentId) !== parent)
           return;
@@ -539,13 +603,36 @@ export class TaskSessionOrchestrator<
         });
         plan.synthesized = true;
         plan.synthesisReported = true;
+        delete plan.synthesisFailureTrace;
         this.publish(parent);
-      } catch {
-        /* Retain terminal trace; caller may explicitly retry after restart or submit work. */
+      } catch (error) {
+        plan.synthesisFailureTrace = safeLine(
+          error instanceof Error
+            ? error.message
+            : "Task-session synthesis delivery failed.",
+        );
+        this.publish(parent);
+        // Three retries after the initial delivery attempt. A timer, rather than a
+        // drain loop, prevents a failing synthesizer from spinning the event loop.
+        retrySynthesis = plan.synthesisAttempts <= 3 && !parent.removed;
       } finally {
         plan.synthesizing = false;
       }
+      if (retrySynthesis) this.scheduleSynthesisRetry(parent, plan);
     }
+  }
+  private scheduleSynthesisRetry(parent: Parent<ParentId>, plan: Plan): void {
+    if (plan.synthesisRetryScheduled) return;
+    plan.synthesisRetryScheduled = true;
+    const retry = () => {
+      plan.synthesisRetryScheduled = false;
+      if (!parent.removed && this.parents.get(parent.parentId) === parent)
+        void this.synthesizeTerminalPlans(parent, plan);
+    };
+    const delayMs = this.options.synthesisRetryDelayMs ?? 1_000;
+    if (this.options.scheduleSynthesisRetry)
+      this.options.scheduleSynthesisRetry(retry, delayMs);
+    else setTimeout(retry, delayMs);
   }
   private publish(parent: Parent<ParentId>): void {
     if (!parent.removed)
@@ -601,11 +688,12 @@ function summary(
   activeLimit: number,
 ): TaskSessionSummary {
   const queueReason =
-    entry.lifecycle === "queued"
+    entry.queueReason ??
+    (entry.lifecycle === "queued"
       ? limited
         ? `Queued: this parent has reached its ${activeLimit} active task-session limit.`
         : "Queued: waiting for worker capacity."
-      : undefined;
+      : undefined);
   return {
     taskNumber: entry.taskNumber,
     generatedName: entry.generatedName,
@@ -622,6 +710,7 @@ function persistTask(task: Task): PersistedTaskSessionTask {
     startedAt: _startedAt,
     worker: _worker,
     progress: _progress,
+    queueReason: _queueReason,
     capacityClaimed: _capacityClaimed,
     ...safe
   } = task;
@@ -719,7 +808,12 @@ function validatePersisted(
       !Number.isSafeInteger(plan.planId) ||
       plan.planId < 1 ||
       planIds.has(plan.planId) ||
-      typeof plan.originalPrompt !== "string"
+      typeof plan.originalPrompt !== "string" ||
+      (plan.synthesisAttempts !== undefined &&
+        (!Number.isSafeInteger(plan.synthesisAttempts) ||
+          plan.synthesisAttempts < 0)) ||
+      (plan.synthesisFailureTrace !== undefined &&
+        typeof plan.synthesisFailureTrace !== "string")
     )
       throw new Error("Invalid persisted task-session state.");
     planIds.add(plan.planId);

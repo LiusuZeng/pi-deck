@@ -211,6 +211,127 @@ describe("TaskSessionOrchestrator", () => {
     });
   });
 
+  it("returns capacity-denied worker creation to its prior queue state without consuming an attempt", async () => {
+    const launches: TaskSessionLaunch<string>[] = [];
+    const states: ReturnType<
+      TaskSessionOrchestrator<string, Worker>["state"]
+    >[] = [];
+    let denied = true;
+    const orchestrator = new TaskSessionOrchestrator<string, Worker>({
+      plan: () => ({
+        contextSummary: "context",
+        tasks: [{ generatedName: "one", brief: "brief" }],
+      }),
+      resolveWorkerSettings: () => ({}),
+      createWorker: (launch) => {
+        if (denied) throw new Error("worker pool full");
+        launches.push(launch);
+        return { close: () => undefined };
+      },
+      hasGlobalCapacity: () => true,
+      isCapacityUnavailable: (error) =>
+        error instanceof Error && error.message === "worker pool full",
+      synthesize: () => undefined,
+      onState: (_parent, state) => states.push(state),
+    });
+    orchestrator.addParent("parent", { mode: "parallel" });
+    await orchestrator.submit("parent", "prompt");
+    await tick();
+    expect(orchestrator.state("parent").tasks[0]).toMatchObject({
+      lifecycle: "queued",
+      attempt: 1,
+      queueReason: expect.stringContaining("unavailable"),
+    });
+    expect(launches).toHaveLength(0);
+    denied = false;
+    await tick();
+    expect(launches).toHaveLength(0); // Capacity denial pauses draining until scheduleAll.
+    orchestrator.scheduleAll();
+    await tick();
+    expect(launches.map((launch) => launch.attempt)).toEqual([1]);
+    expect(states.at(-1)?.tasks[0].queueReason).toBeUndefined();
+  });
+
+  it("retries failed synthesis delivery three times on an injected scheduler and persists its trace", async () => {
+    const launches: TaskSessionLaunch<string>[] = [];
+    const retries: (() => void)[] = [];
+    let reports = 0;
+    const orchestrator = new TaskSessionOrchestrator<string, Worker>({
+      plan: () => ({
+        contextSummary: "context",
+        tasks: [{ generatedName: "one", brief: "brief" }],
+      }),
+      resolveWorkerSettings: () => ({}),
+      createWorker: (launch) => {
+        launches.push(launch);
+        return { close: () => undefined };
+      },
+      hasGlobalCapacity: () => true,
+      synthesize: () => {
+        reports++;
+        throw new Error("delivery unavailable");
+      },
+      scheduleSynthesisRetry: (callback, delay) => {
+        expect(delay).toBe(0);
+        retries.push(callback);
+      },
+      synthesisRetryDelayMs: 0,
+      onState: () => undefined,
+    });
+    orchestrator.addParent("parent", { mode: "parallel" });
+    await orchestrator.submit("parent", "prompt");
+    await tick();
+    launches[0].callbacks.completed();
+    for (let index = 0; index < 3; index++) {
+      await tick();
+      expect(retries).toHaveLength(1);
+      retries.shift()!();
+    }
+    await tick();
+    expect(reports).toBe(4);
+    expect(retries).toHaveLength(0);
+    expect(orchestrator.state("parent").tasks).toHaveLength(1);
+    expect(orchestrator.exportState("parent").plans[0]).toMatchObject({
+      synthesisAttempts: 4,
+      synthesisFailureTrace: "delivery unavailable",
+    });
+  });
+
+  it("retries a pending terminal synthesis when scheduleAll is requested", async () => {
+    const launches: TaskSessionLaunch<string>[] = [];
+    let failDelivery = true;
+    let reports = 0;
+    const orchestrator = new TaskSessionOrchestrator<string, Worker>({
+      plan: () => ({
+        contextSummary: "context",
+        tasks: [{ generatedName: "one", brief: "brief" }],
+      }),
+      resolveWorkerSettings: () => ({}),
+      createWorker: (launch) => {
+        launches.push(launch);
+        return { close: () => undefined };
+      },
+      hasGlobalCapacity: () => true,
+      synthesize: () => {
+        reports++;
+        if (failDelivery) throw new Error("offline");
+      },
+      scheduleSynthesisRetry: () => undefined,
+      onState: () => undefined,
+    });
+    orchestrator.addParent("parent", { mode: "parallel" });
+    await orchestrator.submit("parent", "prompt");
+    await tick();
+    launches[0].callbacks.completed();
+    await tick();
+    expect(orchestrator.state("parent").tasks).toHaveLength(1);
+    failDelivery = false;
+    orchestrator.scheduleAll();
+    await tick();
+    expect(reports).toBe(2);
+    expect(orchestrator.state("parent").tasks).toEqual([]);
+  });
+
   it("requires releasable capacity claims and releases a failed worker creation", async () => {
     expect(
       () =>
