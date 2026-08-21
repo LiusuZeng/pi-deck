@@ -3264,7 +3264,7 @@ async function runTaskSessionPlanner(
     }
     const result = new Promise<string>((resolve, reject) => {
       let settled = false;
-      let unsubscribe = () => undefined;
+      let unsubscribe: () => void = () => undefined;
       const finish = (fn: () => void) => {
         if (settled) return;
         settled = true;

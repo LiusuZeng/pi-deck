@@ -76,7 +76,7 @@ export function parseTaskSessionPlannerResponse(
 }
 
 export function boundedParentContext(
-  messages: readonly { role: string; content: unknown }[],
+  messages: readonly { role: string; content?: unknown }[],
 ): string {
   const context = messages
     .slice(-8)
