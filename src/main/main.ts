@@ -71,6 +71,7 @@ import {
   multitaskModeRequestSchema,
   multitaskModeUpdateRequestSchema,
   multitaskSettingsRequestSchema,
+  multitaskSettingsSchema,
   multitaskSettingsUpdateRequestSchema,
   multitaskStateEventSchema,
 } from "../shared/ipcSchemas.js";
@@ -273,7 +274,8 @@ const delegateCalls = new Map<
 >();
 let nextDelegatedTaskNumber = 1;
 let taskSessionOrchestrator:
-  TaskSessionOrchestrator<string, { close(): Promise<void> }> | undefined;
+  | TaskSessionOrchestrator<string, { close(): Promise<void> }>
+  | undefined;
 const taskSessionSettings = new Map<string, TaskSessionWorkerSettings>();
 type ChatBackendMode = "fake" | "real";
 
@@ -897,28 +899,30 @@ function registerIpcHandlers(
   registerValidatedIpc({
     channel: ipcChannels.multitaskGetSettings,
     requestSchema: multitaskSettingsRequestSchema,
-    responseSchema: multitaskStateEventSchema,
+    responseSchema: multitaskSettingsSchema,
     diagnostics: diagnosticsService,
-    handler: async ({ runtimeId }) => taskSessionState(runtimeId),
+    handler: async ({ runtimeId }) => {
+      getTaskSessionOrchestrator(runtimeId);
+      return fromTaskSessionSettings(taskSessionSettings.get(runtimeId));
+    },
   });
 
   registerValidatedIpc({
     channel: ipcChannels.multitaskUpdateSettings,
     requestSchema: multitaskSettingsUpdateRequestSchema,
-    responseSchema: multitaskStateEventSchema,
+    responseSchema: multitaskSettingsSchema,
     diagnostics: diagnosticsService,
     handler: async ({ runtimeId, settings }) => {
-      getTaskSessionOrchestrator(runtimeId);
-      taskSessionSettings.set(runtimeId, toTaskSessionSettings(settings));
+      const orchestrator = getTaskSessionOrchestrator(runtimeId);
+      const storedSettings = toTaskSessionSettings(settings);
+      taskSessionSettings.set(runtimeId, storedSettings);
+      orchestrator.updateWorkerSettings(runtimeId, storedSettings);
       const sessionFile = chatRuntimeSessionFiles.get(runtimeId);
       if (sessionFile)
-        await taskSessionStateStore?.setSettings(
-          sessionFile,
-          taskSessionSettings.get(runtimeId)!,
-        );
+        await taskSessionStateStore?.setSettings(sessionFile, storedSettings);
       emitTaskSessionState(runtimeId);
       await persistTaskSession(runtimeId);
-      return taskSessionState(runtimeId);
+      return fromTaskSessionSettings(storedSettings);
     },
   });
 
