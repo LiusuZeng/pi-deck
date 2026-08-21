@@ -70,6 +70,8 @@ import {
   workspaceUpdateRequestSchema,
   multitaskModeRequestSchema,
   multitaskModeUpdateRequestSchema,
+  multitaskSettingsRequestSchema,
+  multitaskSettingsUpdateRequestSchema,
   multitaskStateEventSchema,
 } from "../shared/ipcSchemas.js";
 import {
@@ -190,6 +192,13 @@ import {
   type ParentTaskNotification,
 } from "./multitask/multitaskSupervisor.js";
 import { PersistedRuntimeResumeGuard } from "./multitask/persistedRuntimeResumeGuard.js";
+import {
+  TaskSessionOrchestrator,
+  type PersistedTaskSessionTask,
+  type TaskSessionLaunch,
+  type TaskSessionWorkerSettings,
+} from "./multitask/taskSessionOrchestrator.js";
+import { TaskSessionMainStateStore } from "./multitask/taskSessionMainStateStore.js";
 import { deliverWithAttachmentConsumption } from "./attachmentDelivery.js";
 import {
   approveWorkflowStep,
@@ -245,6 +254,7 @@ let workflowInitialization: WorkflowInitialization<WorkflowStore> | undefined;
 const realChatLaunchConfigCache = new RealChatLaunchConfigCache();
 let diagnostics: DiagnosticsService | undefined;
 let multitaskStateStore: MultitaskStateStore | undefined;
+let taskSessionStateStore: TaskSessionMainStateStore | undefined;
 // Snapshot reads happen often. A persisted session is rehydrated exactly once
 // when attached; later reads must not close live private children.
 const multitaskRuntimeResumeGuard = new PersistedRuntimeResumeGuard();
@@ -262,6 +272,9 @@ const delegateCalls = new Map<
   { connectionId: string; toolCallId: string }
 >();
 let nextDelegatedTaskNumber = 1;
+let taskSessionOrchestrator:
+  TaskSessionOrchestrator<string, { close(): Promise<void> }> | undefined;
+const taskSessionSettings = new Map<string, TaskSessionWorkerSettings>();
 type ChatBackendMode = "fake" | "real";
 
 let chatAdapter: SinglePiAdapter | undefined;
@@ -334,7 +347,13 @@ async function bootstrap(): Promise<void> {
   });
   projectStore = new ProjectStore(resolvePiDeckHome(process.env), diagnostics);
   multitaskStateStore = new MultitaskStateStore(app.getPath("userData"));
-  await multitaskStateStore.loadIfNeeded();
+  taskSessionStateStore = new TaskSessionMainStateStore(
+    app.getPath("userData"),
+  );
+  await Promise.all([
+    multitaskStateStore.loadIfNeeded(),
+    taskSessionStateStore.loadIfNeeded(),
+  ]);
   await projectStore.loadIfNeeded();
   workspaceStore = new WorkspaceStore(
     resolvePiDeckHome(process.env),
@@ -657,9 +676,29 @@ function registerIpcHandlers(
     requestSchema: chatPromptRequestSchema,
     responseSchema: z.void(),
     diagnostics: diagnosticsService,
-    handler: async ({ runtimeId, text, attachments, attachmentOwnerId }) => {
+    handler: async ({
+      runtimeId,
+      text,
+      attachments,
+      attachmentOwnerId,
+      destination,
+      workerOverrides,
+    }) => {
       const adapter = await ensureChatAdapter(store, diagnosticsService);
       const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
+      if (destination === "newTaskSession") {
+        if ((attachments?.length ?? 0) > 0) {
+          throw new Error(
+            "Attachments are not supported for private task sessions.",
+          );
+        }
+        await getTaskSessionOrchestrator(activeRuntimeId).submit(
+          activeRuntimeId,
+          text,
+          toTaskSessionSettings(workerOverrides),
+        );
+        return undefined;
+      }
       const promptAttachments = attachments ?? [];
       await deliverWithAttachmentConsumption({
         store: attachmentSelections,
@@ -839,7 +878,7 @@ function registerIpcHandlers(
     requestSchema: multitaskModeRequestSchema,
     responseSchema: multitaskStateEventSchema,
     diagnostics: diagnosticsService,
-    handler: async ({ runtimeId }) => multitaskState(runtimeId),
+    handler: async ({ runtimeId }) => taskSessionState(runtimeId),
   });
 
   registerValidatedIpc({
@@ -848,11 +887,38 @@ function registerIpcHandlers(
     responseSchema: multitaskStateEventSchema,
     diagnostics: diagnosticsService,
     handler: async ({ runtimeId, mode }) => {
-      const supervisor = await getMultitaskSupervisor(runtimeId);
-      supervisor.setMode(runtimeId, mode);
-      await persistMultitaskSupervisor(runtimeId);
-      emitMultitaskState(runtimeId, supervisor);
-      return multitaskState(runtimeId);
+      const orchestrator = getTaskSessionOrchestrator(runtimeId);
+      orchestrator.setMode(runtimeId, mode);
+      await persistTaskSession(runtimeId);
+      return taskSessionState(runtimeId);
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.multitaskGetSettings,
+    requestSchema: multitaskSettingsRequestSchema,
+    responseSchema: multitaskStateEventSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runtimeId }) => taskSessionState(runtimeId),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.multitaskUpdateSettings,
+    requestSchema: multitaskSettingsUpdateRequestSchema,
+    responseSchema: multitaskStateEventSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runtimeId, settings }) => {
+      getTaskSessionOrchestrator(runtimeId);
+      taskSessionSettings.set(runtimeId, toTaskSessionSettings(settings));
+      const sessionFile = chatRuntimeSessionFiles.get(runtimeId);
+      if (sessionFile)
+        await taskSessionStateStore?.setSettings(
+          sessionFile,
+          taskSessionSettings.get(runtimeId)!,
+        );
+      emitTaskSessionState(runtimeId);
+      await persistTaskSession(runtimeId);
+      return taskSessionState(runtimeId);
     },
   });
 
@@ -2623,6 +2689,7 @@ async function initializeChatAdapter(
         parsed.data.runtimeId,
       );
       forgetChatRuntime(parsed.data.runtimeId, { preserveAttachments });
+      taskSessionOrchestrator?.scheduleAll();
     }
   });
 
@@ -2633,6 +2700,21 @@ async function initializeChatAdapter(
   chatEventUnsubscribe = unsubscribe;
   chatWorkerCapacity = capacity;
   chatAdapter = adapter;
+  taskSessionOrchestrator = new TaskSessionOrchestrator({
+    plan: (parentId, prompt) => planTaskSession(adapter, parentId, prompt),
+    resolveWorkerSettings: ({ parentId, parentSettings, promptSettings }) => ({
+      ...parentSettings,
+      ...taskSessionSettings.get(parentId),
+      ...promptSettings,
+    }),
+    createWorker: (launch) => createTaskSessionWorker(adapter, store, launch),
+    hasGlobalCapacity: () => capacityAvailable(),
+    synthesize: (input) => synthesizeTaskSession(adapter, input),
+    onState: (parentId) => {
+      emitTaskSessionState(parentId);
+      void persistTaskSession(parentId);
+    },
+  });
   multitaskSupervisor = new MultitaskSupervisor({
     hasCapacity: () => capacityAvailable(),
     createWorker: (launch) =>
@@ -2718,6 +2800,12 @@ function registerChatWorker(
   if (workerSpec.workspaceId !== undefined) {
     chatRuntimeWorkspaceIds.set(runtimeId, workerSpec.workspaceId);
   }
+  taskSessionOrchestrator?.addParent(runtimeId, {
+    mode: initialMultitaskMode,
+    ...(taskSessionSettings.has(runtimeId)
+      ? { workerSettings: taskSessionSettings.get(runtimeId)! }
+      : {}),
+  });
   multitaskSupervisor?.addParent(runtimeId, {
     mode: initialMultitaskMode,
     maxQueuedTasks: 100,
@@ -2932,6 +3020,7 @@ async function closeAttachedChatRuntime(
   }
   try {
     delegationBridge?.removeParent(runtimeId);
+    await taskSessionOrchestrator?.removeParent(runtimeId);
     await multitaskSupervisor?.removeParent(runtimeId);
     if (adapter.hasRuntime(runtimeId)) {
       await adapter.closeSession(runtimeId);
@@ -2979,6 +3068,8 @@ function forgetChatRuntime(
       delegateCalls.delete(key);
     }
   }
+  void taskSessionOrchestrator?.removeParent(runtimeId);
+  taskSessionSettings.delete(runtimeId);
   void multitaskSupervisor?.removeParent(runtimeId);
   if (chatRuntimeId === runtimeId) {
     chatRuntimeId = undefined;
@@ -2990,6 +3081,206 @@ interface ChatWorkerSpec {
   cwd: string;
   projectId?: string;
   workspaceId?: string;
+}
+
+function toTaskSessionSettings(
+  settings:
+    | {
+        model?: { provider: string; modelId: string } | undefined;
+        thinkingLevel?: string | undefined;
+      }
+    | undefined,
+): TaskSessionWorkerSettings {
+  if (!settings) return {};
+  return {
+    ...(settings.model
+      ? { model: `${settings.model.provider}:${settings.model.modelId}` }
+      : {}),
+    ...(settings.thinkingLevel
+      ? { thinkingLevel: settings.thinkingLevel }
+      : {}),
+  };
+}
+
+function getTaskSessionOrchestrator(
+  runtimeId: string,
+): NonNullable<typeof taskSessionOrchestrator> {
+  const orchestrator = taskSessionOrchestrator;
+  const adapter = chatAdapter;
+  if (
+    !orchestrator ||
+    !adapter ||
+    !chatRuntimeIds.has(runtimeId) ||
+    !adapter.hasRuntime(runtimeId)
+  ) {
+    throw new Error(`Chat runtime is no longer attached: ${runtimeId}`);
+  }
+  orchestrator.state(runtimeId);
+  return orchestrator;
+}
+
+async function planTaskSession(
+  adapter: SinglePiAdapter,
+  parentId: string,
+  prompt: string,
+): Promise<{
+  contextSummary: string;
+  tasks: { generatedName: string; brief: string }[];
+}> {
+  const fixturePath = process.env.PI_DECK_TEST_TASK_ROUTING_FIXTURE;
+  if (fixturePath) {
+    const fixture: unknown = JSON.parse(await fs.readFile(fixturePath, "utf8"));
+    const tasks = (fixture as { tasks?: unknown }).tasks;
+    if (Array.isArray(tasks) && tasks.length > 0) {
+      return {
+        contextSummary: "Test fixture task-session context.",
+        tasks: tasks.map((task, index) => {
+          const name = (task as { name?: unknown }).name;
+          return {
+            generatedName:
+              typeof name === "string"
+                ? name.slice(0, 1024)
+                : `Task ${index + 1}`,
+            brief: `Complete ${typeof name === "string" ? name : `task ${index + 1}`} for the requested work.`,
+          };
+        }),
+      };
+    }
+    throw new Error("Task-session fixture must contain one or more tasks.");
+  }
+  // This is a main-owned planner, not a model tool election. Keep the parent
+  // context bounded and launch a private worker for the resulting concrete task.
+  const messages = await adapter.getMessages(parentId);
+  const contextSummary =
+    messages
+      .slice(-8)
+      .map(
+        (message) =>
+          `${message.role}: ${typeof message.content === "string" ? message.content : ""}`,
+      )
+      .join("\n")
+      .slice(-16_000) || "No prior parent context.";
+  return {
+    contextSummary,
+    tasks: [
+      {
+        generatedName:
+          prompt
+            .replace(/[\r\n]+/g, " ")
+            .trim()
+            .slice(0, 96) || "Complete requested work",
+        brief:
+          "Independently complete the requested work, verify it, and report a concise result.",
+      },
+    ],
+  };
+}
+
+async function createTaskSessionWorker(
+  adapter: SinglePiAdapter,
+  store: SettingsStore,
+  launch: TaskSessionLaunch<string>,
+): Promise<{ close(): Promise<void> }> {
+  const capacity = getChatWorkerCapacity();
+  const parentMode = chatRuntimeModes.get(launch.parentId);
+  const cwd = chatWorkerCwds.get(launch.parentId);
+  const projectId = chatRuntimeProjectIds.get(launch.parentId);
+  if (!parentMode || !cwd)
+    throw new Error("Task-session parent is no longer attached.");
+  const worker = await capacity.allocate(
+    async () => (await store.get()).maxRunningSessions,
+    () =>
+      parentMode === "fake"
+        ? adapter.createWorker({
+            command: process.execPath,
+            args: [
+              path.join(__dirname, "pi/fakeRpc/fakeRpcServer.js"),
+              "--stream-delay-ms",
+              "10",
+            ],
+            cwd,
+            env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+          })
+        : createRealDelegatedWorker(adapter, store, cwd, projectId),
+  );
+  let ended = false;
+  worker.onEvent((event) => {
+    if (ended) return;
+    if (event.type === "extension_ui_request")
+      launch.callbacks.waitingForParent();
+    if (event.type === "agent_end" || event.type === "worker_exit") {
+      ended = true;
+      void worker
+        .getMessages()
+        .then((messages) => {
+          const last = messages.at(-1);
+          launch.callbacks.completed({
+            summary:
+              typeof last?.content === "string"
+                ? last.content.slice(0, 32_768)
+                : "Task completed.",
+          });
+        })
+        .catch((error) => launch.callbacks.failed(error));
+    }
+  });
+  try {
+    const parentState = await adapter.getRuntimeStatus(launch.parentId);
+    const [provider, modelId] =
+      launch.request.workerSettings.model?.split(":", 2) ?? [];
+    const selectedProvider =
+      provider ??
+      (typeof parentState.provider === "string"
+        ? parentState.provider
+        : undefined);
+    const selectedModelId =
+      modelId ??
+      (typeof parentState.model === "string" ? parentState.model : undefined);
+    if (selectedProvider && selectedModelId)
+      await worker.request("set_model", {
+        provider: selectedProvider,
+        modelId: selectedModelId,
+      });
+    const thinkingLevel =
+      launch.request.workerSettings.thinkingLevel ??
+      (typeof parentState.thinkingLevel === "string"
+        ? parentState.thinkingLevel
+        : undefined);
+    if (thinkingLevel)
+      await worker.request("set_thinking_level", { level: thinkingLevel });
+    await worker.prompt({
+      text: `Parent context:\n${launch.request.contextSummary}\n\nOriginal request:\n${launch.request.originalPrompt}\n\nAssigned task:\n${launch.request.brief}`,
+    });
+  } catch (error) {
+    await adapter.closeSession(worker.runtimeId).catch(() => undefined);
+    throw error;
+  }
+  return { close: () => adapter.closeSession(worker.runtimeId) };
+}
+
+async function synthesizeTaskSession(
+  adapter: SinglePiAdapter,
+  input: {
+    parentId: string;
+    originalPrompt: string;
+    contextSummary: string;
+    tasks: readonly PersistedTaskSessionTask[];
+  },
+): Promise<void> {
+  if (
+    !chatRuntimeIds.has(input.parentId) ||
+    !adapter.hasRuntime(input.parentId)
+  )
+    return;
+  const report = input.tasks
+    .map(
+      (task) =>
+        `#${task.taskNumber} ${task.generatedName}: ${task.handoffSummary ?? task.lifecycle}`,
+    )
+    .join("\n");
+  await adapter.prompt(input.parentId, {
+    text: `Task-session synthesis for: ${input.originalPrompt}\n\n${report}`,
+  });
 }
 
 async function createDelegatedChild(
@@ -3133,11 +3424,9 @@ function handleMultitaskNotification(
   if (supervisor) {
     try {
       const state = supervisor.state(notification.parentId);
-      emitMultitaskStateFromSnapshots(
-        notification.parentId,
-        state.mode,
-        state.tasks,
-      );
+      // Legacy bridge tasks are deliberately transport-only; task-session
+      // renderer state is published exclusively by TaskSessionOrchestrator.
+      void state;
     } catch {
       // The parent may have been removed while a child notification was queued.
     }
@@ -3384,6 +3673,7 @@ async function closeChatWorker(): Promise<void> {
   await Promise.all(
     runtimeIds.map(async (runtimeId) => {
       delegationBridge?.removeParent(runtimeId);
+      await taskSessionOrchestrator?.removeParent(runtimeId);
       await multitaskSupervisor?.removeParent(runtimeId);
     }),
   );
@@ -4180,7 +4470,10 @@ async function removePersistedPiSessionFile(
 
   chatSessionFileLocks.delete(sessionFile);
   try {
-    await multitaskStateStore?.delete(sessionFile);
+    await Promise.all([
+      multitaskStateStore?.delete(sessionFile),
+      taskSessionStateStore?.delete(sessionFile),
+    ]);
   } catch (error) {
     diagnosticsService.recordError(
       `Failed to remove multitask state for deleted Pi session ${sessionFile}: ${error instanceof Error ? error.message : String(error)}`,
@@ -5237,80 +5530,99 @@ async function reconcileMultitaskRuntime(
   const canonical =
     (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
   chatRuntimeSessionFiles.set(runtimeId, canonical);
-  const saved = multitaskStateStore?.get(canonical);
-  const supervisor = multitaskSupervisor;
-  if (!supervisor) return;
-  try {
-    supervisor.addParent(runtimeId, {
-      mode: saved?.mode ?? "sequential",
-      maxQueuedTasks: 100,
-    });
-  } catch {
-    /* already registered */
+  const saved = taskSessionStateStore?.get(canonical);
+  const savedSettings = taskSessionStateStore?.getSettings(canonical);
+  if (savedSettings) taskSessionSettings.set(runtimeId, savedSettings);
+  const orchestrator = taskSessionOrchestrator;
+  if (orchestrator) {
+    try {
+      orchestrator.addParent(runtimeId, {
+        mode: saved?.mode ?? "sequential",
+        ...(taskSessionSettings.has(runtimeId)
+          ? { workerSettings: taskSessionSettings.get(runtimeId)! }
+          : {}),
+      });
+    } catch {
+      /* registered at worker creation */
+    }
+    // Recovery only marks retained private work interrupted; it never starts it.
+    if (
+      multitaskRuntimeResumeGuard.claim(runtimeId, saved !== undefined) &&
+      saved
+    ) {
+      orchestrator.restore(runtimeId, saved);
+    }
   }
-  // Resume is destructive to retained private children. It is valid only for
-  // the first attachment of persisted state, never for ordinary snapshots.
-  if (multitaskRuntimeResumeGuard.claim(runtimeId, saved !== undefined)) {
-    await supervisor.resume(runtimeId, saved);
+  // The authenticated bridge remains independent transport coverage.
+  const legacySaved = multitaskStateStore?.get(canonical);
+  const supervisor = multitaskSupervisor;
+  if (supervisor) {
+    try {
+      supervisor.addParent(runtimeId, {
+        mode: legacySaved?.mode ?? "sequential",
+        maxQueuedTasks: 100,
+      });
+    } catch {
+      /* registered */
+    }
+    if (
+      legacySaved &&
+      multitaskRuntimeResumeGuard.claim(`${runtimeId}:legacy`, true)
+    ) {
+      await supervisor.resume(runtimeId, legacySaved);
+    }
   }
 }
 
-async function multitaskState(runtimeId: string): Promise<{
-  runtimeId: string;
-  mode: "parallel" | "sequential";
-  tasks: Array<{ taskNumber: number; generatedName: string; status: string }>;
-}> {
-  const state = (await getMultitaskSupervisor(runtimeId)).state(runtimeId);
-  return {
+function taskSessionState(
+  runtimeId: string,
+): z.infer<typeof multitaskStateEventSchema> {
+  const state = getTaskSessionOrchestrator(runtimeId).state(runtimeId);
+  return multitaskStateEventSchema.parse({
     runtimeId,
     mode: state.mode,
-    tasks: state.tasks.map((task) => ({
-      taskNumber: task.number,
-      generatedName: task.name,
-      status: task.status === "cancelled" ? "failed" : task.status,
-    })),
+    settings: fromTaskSessionSettings(taskSessionSettings.get(runtimeId)),
+    activeCount: state.activeCount,
+    activeLimit: state.activeLimit,
+    tasks: state.tasks,
+  });
+}
+
+function fromTaskSessionSettings(
+  settings: TaskSessionWorkerSettings | undefined,
+): { model?: { provider: string; modelId: string }; thinkingLevel?: string } {
+  const [provider, modelId] = settings?.model?.split(":", 2) ?? [];
+  return {
+    ...(provider && modelId ? { model: { provider, modelId } } : {}),
+    ...(settings?.thinkingLevel
+      ? { thinkingLevel: settings.thinkingLevel }
+      : {}),
   };
 }
 
-function emitMultitaskState(
-  runtimeId: string,
-  supervisor: NonNullable<typeof multitaskSupervisor>,
-): void {
-  const state = supervisor.state(runtimeId);
-  const parsed = multitaskStateEventSchema.parse({
-    runtimeId,
-    mode: state.mode,
-    tasks: state.tasks.map((task) => ({
-      taskNumber: task.number,
-      generatedName: task.name,
-      status: task.status === "cancelled" ? "failed" : task.status,
-    })),
-  });
-  const window = mainWindow;
-  if (window && !window.isDestroyed() && !window.webContents.isDestroyed())
-    window.webContents.send(ipcChannels.multitaskState, parsed);
-}
-
-function emitMultitaskStateFromSnapshots(
-  runtimeId: string,
-  mode: "parallel" | "sequential",
-  snapshots: Array<{ number: number; name: string; status: string }>,
-): void {
-  const parsed = multitaskStateEventSchema.parse({
-    runtimeId,
-    mode,
-    tasks: snapshots.map((task) => ({
-      taskNumber: task.number,
-      generatedName: task.name,
-      status: task.status === "cancelled" ? "failed" : task.status,
-    })),
-  });
+function emitTaskSessionState(runtimeId: string): void {
+  let state: z.infer<typeof multitaskStateEventSchema>;
+  try {
+    state = taskSessionState(runtimeId);
+  } catch {
+    return;
+  }
   if (
     mainWindow &&
     !mainWindow.isDestroyed() &&
     !mainWindow.webContents.isDestroyed()
   )
-    mainWindow.webContents.send(ipcChannels.multitaskState, parsed);
+    mainWindow.webContents.send(ipcChannels.multitaskState, state);
+}
+
+async function persistTaskSession(runtimeId: string): Promise<void> {
+  const sessionFile = chatRuntimeSessionFiles.get(runtimeId);
+  const orchestrator = taskSessionOrchestrator;
+  if (sessionFile && orchestrator)
+    await taskSessionStateStore?.set(
+      sessionFile,
+      orchestrator.exportState(runtimeId),
+    );
 }
 
 async function persistMultitaskSupervisor(runtimeId: string): Promise<void> {
