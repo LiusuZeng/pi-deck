@@ -8,7 +8,7 @@ export interface TaskSessionPlannerPlan {
   tasks: TaskSessionPlannerTask[];
 }
 
-export const TASK_SESSION_PLANNER_MAX_TASKS = 10;
+export const TASK_SESSION_PLANNER_MAX_TASKS = 20;
 const MAX_CONTEXT = 12_000;
 const MAX_NAME = 96;
 const MAX_BRIEF = 512;

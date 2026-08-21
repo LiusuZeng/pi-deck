@@ -3711,7 +3711,13 @@ body {
 
   .composer-meta-controls,
   .composer-meta-actions {
+    min-width: 0;
+    max-width: 100%;
     flex-wrap: wrap;
+  }
+
+  .composer-meta-controls > .parallel-prompt-settings__destination {
+    flex: 1 0 100%;
   }
 
   .parallel-prompt-settings {

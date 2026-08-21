@@ -89,13 +89,13 @@ describe("Deck delegate extension source generator", () => {
       "queryMode(config.endpoint, config.capability)",
     );
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain(
-      "By default, delegate substantive independent work with deck_delegate",
+      "manages Parallel mode task-session planning and routing outside this parent turn",
     );
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain(
-      "explicitly asks you to handle the work directly",
+      "Do not call deck_delegate for ordinary user prompts",
     );
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain(
-      "parallel multitasking is disabled. Do not delegate work with deck_delegate",
+      "Parallel mode is off. Do not call deck_delegate",
     );
     expect(DECK_DELEGATE_EXTENSION_SOURCE).not.toContain(
       "assistant-text parsing",

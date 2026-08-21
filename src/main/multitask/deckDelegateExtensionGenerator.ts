@@ -381,8 +381,8 @@ export default function deckDelegateExtension(pi: ExtensionAPI): void {
       const config = configuration();
       const mode = await queryMode(config.endpoint, config.capability);
       const instruction = mode === "parallel"
-        ? "Pi Deck parallel multitasking is enabled. By default, delegate substantive independent work with deck_delegate. Do not delegate only when the user explicitly asks you to handle the work directly; honor that direct-handling override. For trivial work, handle it directly."
-        : "Pi Deck parallel multitasking is disabled. Do not delegate work with deck_delegate; handle the work directly.";
+        ? "Pi Deck manages Parallel mode task-session planning and routing outside this parent turn. Do not call deck_delegate for ordinary user prompts; the tool remains available only for an explicit compatibility-bridge invocation."
+        : "Pi Deck Parallel mode is off. Do not call deck_delegate; handle the work in this parent session.";
       return { systemPrompt: event.systemPrompt + "\n\n" + instruction };
     } catch {
       // A failed mode lookup must not invent delegation permission.

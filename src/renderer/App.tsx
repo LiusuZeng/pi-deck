@@ -2683,41 +2683,47 @@ export function App(): ReactElement {
     setComposerError(null);
     blockAttachmentOwner(runtimeId);
     setComposerDrafts((items) => clearComposerDraft(items, runtimeId));
-    if (destination === "parent")
-      setSessions((current) =>
-        current.map((session) =>
-          session.id === runtimeId
-            ? {
-                ...session,
-                title: isPlaceholderSessionTitle(session.title)
-                  ? summarizeTitle(prompt, 64)
-                  : session.title,
-                status: "sending",
-                baseState: "attaching",
-                completedAtMs: undefined,
-                overlays: { ...session.overlays, streaming: false },
-                subtitle: `Sending · waiting for ${backendLabel(session)} confirmation`,
-                workingStartedAtMs: session.workingStartedAtMs ?? Date.now(),
-                lastRuntimeEventLabel: "Prompt sent; awaiting Pi confirmation",
-                retryPrompt: { text: prompt, attachments: promptAttachments },
-                updatedAt: "Now",
-                updatedAtMs: Date.now(),
-                timeline: [
-                  ...session.timeline,
-                  {
-                    id: createId("user"),
-                    kind: "user",
-                    content: prompt,
-                    createdAt: now,
-                    ...(sentAttachments
-                      ? { attachments: sentAttachments }
-                      : {}),
-                  },
-                ],
-              }
-            : session,
-        ),
-      );
+    setSessions((current) =>
+      current.map((session) =>
+        session.id === runtimeId
+          ? {
+              ...session,
+              title: isPlaceholderSessionTitle(session.title)
+                ? summarizeTitle(prompt, 64)
+                : session.title,
+              ...(destination === "parent"
+                ? {
+                    status: "sending" as const,
+                    baseState: "attaching" as const,
+                    completedAtMs: undefined,
+                    overlays: { ...session.overlays, streaming: false },
+                    subtitle: `Sending · waiting for ${backendLabel(session)} confirmation`,
+                    workingStartedAtMs:
+                      session.workingStartedAtMs ?? Date.now(),
+                    lastRuntimeEventLabel:
+                      "Prompt sent; awaiting Pi confirmation",
+                    retryPrompt: {
+                      text: prompt,
+                      attachments: promptAttachments,
+                    },
+                  }
+                : {}),
+              updatedAt: "Now",
+              updatedAtMs: Date.now(),
+              timeline: [
+                ...session.timeline,
+                {
+                  id: createId("user"),
+                  kind: "user",
+                  content: prompt,
+                  createdAt: now,
+                  ...(sentAttachments ? { attachments: sentAttachments } : {}),
+                },
+              ],
+            }
+          : session,
+      ),
+    );
 
     try {
       const attachmentOwnerId =

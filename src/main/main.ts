@@ -206,6 +206,7 @@ import {
   fallbackTaskSessionPlan,
   parseTaskSessionPlannerResponse,
   resolveTaskSessionPlannerTimeoutMs,
+  TASK_SESSION_PLANNER_MAX_TASKS,
 } from "./multitask/taskSessionPlanner.js";
 import { deliverWithAttachmentConsumption } from "./attachmentDelivery.js";
 import {
@@ -918,8 +919,14 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async ({ runtimeId, mode }) => {
       const orchestrator = getTaskSessionOrchestrator(runtimeId);
+      const legacySupervisor = await getMultitaskSupervisor(runtimeId);
       orchestrator.setMode(runtimeId, mode);
-      await persistTaskSession(runtimeId);
+      legacySupervisor.setMode(runtimeId, mode);
+      await Promise.all([
+        persistTaskSession(runtimeId),
+        persistMultitaskSupervisor(runtimeId),
+      ]);
+      emitTaskSessionState(runtimeId);
       return taskSessionState(runtimeId);
     },
   });
@@ -3171,7 +3178,11 @@ async function planTaskSession(
   if (fixturePath) {
     const fixture: unknown = JSON.parse(await fs.readFile(fixturePath, "utf8"));
     const tasks = (fixture as { tasks?: unknown }).tasks;
-    if (Array.isArray(tasks) && tasks.length > 0 && tasks.length <= 10) {
+    if (
+      Array.isArray(tasks) &&
+      tasks.length > 0 &&
+      tasks.length <= TASK_SESSION_PLANNER_MAX_TASKS
+    ) {
       const plan = {
         contextSummary: "Test fixture task-session context.",
         tasks: tasks.map((task, index) => {
@@ -3196,7 +3207,9 @@ async function planTaskSession(
       ensureTaskSessionStillParallel(parentId);
       return plan;
     }
-    throw new Error("Task-session fixture must contain one to ten tasks.");
+    throw new Error(
+      `Task-session fixture must contain one to ${TASK_SESSION_PLANNER_MAX_TASKS} tasks.`,
+    );
   }
 
   const parentContext = boundedParentContext(
@@ -3656,10 +3669,8 @@ function handleMultitaskNotification(
   const supervisor = multitaskSupervisor;
   if (supervisor) {
     try {
-      const state = supervisor.state(notification.parentId);
-      // Legacy bridge tasks are deliberately transport-only; task-session
-      // renderer state is published exclusively by TaskSessionOrchestrator.
-      void state;
+      supervisor.state(notification.parentId);
+      emitTaskSessionState(notification.parentId);
     } catch {
       // The parent may have been removed while a child notification was queued.
     }
@@ -5812,13 +5823,47 @@ function taskSessionState(
   runtimeId: string,
 ): z.infer<typeof multitaskStateEventSchema> {
   const state = getTaskSessionOrchestrator(runtimeId).state(runtimeId);
+  const usedTaskNumbers = new Set(state.tasks.map((task) => task.taskNumber));
+  let legacyTasks: Array<
+    z.infer<typeof multitaskStateEventSchema>["tasks"][number]
+  > = [];
+  try {
+    legacyTasks = (multitaskSupervisor?.state(runtimeId).tasks ?? []).map(
+      (task) => {
+        let taskNumber = task.number;
+        while (usedTaskNumbers.has(taskNumber)) taskNumber += 1_000_000;
+        usedTaskNumbers.add(taskNumber);
+        const lifecycle =
+          task.status === "waiting-input"
+            ? "waiting-parent"
+            : task.status === "cancelled"
+              ? "interrupted"
+              : task.status;
+        return {
+          taskNumber,
+          generatedName: task.name,
+          brief: task.name,
+          lifecycle,
+          attempt: 1,
+          elapsedMs: 0,
+        };
+      },
+    );
+  } catch {
+    // The compatibility bridge may already be detached from this parent.
+  }
+  const legacyActiveCount = legacyTasks.filter((task) =>
+    ["starting", "running", "retrying", "waiting-parent"].includes(
+      task.lifecycle,
+    ),
+  ).length;
   return multitaskStateEventSchema.parse({
     runtimeId,
     mode: state.mode,
     settings: fromTaskSessionSettings(taskSessionSettings.get(runtimeId)),
-    activeCount: state.activeCount,
+    activeCount: state.activeCount + legacyActiveCount,
     activeLimit: state.activeLimit,
-    tasks: state.tasks,
+    tasks: [...state.tasks, ...legacyTasks],
   });
 }
 
