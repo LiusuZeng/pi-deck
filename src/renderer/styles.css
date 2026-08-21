@@ -2964,6 +2964,100 @@ summary::marker {
   color: var(--danger-fg);
 }
 
+.parallel-prompt-settings {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.parallel-prompt-settings__destination {
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.parallel-prompt-settings label,
+.parallel-prompt-settings details {
+  min-width: 0;
+}
+
+.parallel-prompt-settings label > small {
+  display: none;
+}
+
+.parallel-prompt-settings select,
+.parallel-prompt-settings button {
+  max-width: 130px;
+  border: 1px solid var(--color-border);
+  border-radius: 7px;
+  padding: 3px 5px;
+  color: inherit;
+  background: var(--color-surface);
+  font: inherit;
+}
+
+.parallel-prompt-settings details {
+  position: relative;
+}
+
+.parallel-prompt-settings details[open] > label {
+  display: grid;
+  gap: 3px;
+  margin-top: 6px;
+}
+
+.task-session-panel {
+  width: min(776px, calc(100% - 28px));
+  margin: 12px auto;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 10px;
+  background: var(--color-surface-muted);
+}
+
+.task-session-panel header,
+.task-session-panel__title {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.task-session-panel [role="list"] {
+  display: grid;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.task-session-panel article {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding-top: 7px;
+  border-top: 1px solid var(--color-border);
+}
+
+.task-session-panel p,
+.task-session-panel small {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.task-session-panel small,
+.task-session-panel__title > span {
+  color: var(--color-text-muted);
+}
+
+.task-session-panel__title > span {
+  text-transform: capitalize;
+}
+
+.task-session-panel__title > span[data-lifecycle="failed"],
+.task-session-panel__title > span[data-lifecycle="interrupted"] {
+  color: var(--danger-fg);
+}
+
 .ui-icon-button[data-loading="true"] svg {
   animation: ui-control-spin 800ms linear infinite;
 }
@@ -3616,6 +3710,15 @@ body {
   .composer-meta-controls,
   .composer-meta-actions {
     flex-wrap: wrap;
+  }
+
+  .parallel-prompt-settings {
+    flex: 1 0 100%;
+    flex-wrap: wrap;
+  }
+
+  .task-session-panel {
+    width: calc(100% - 20px);
   }
 
   .composer-input-wrap:has(.composer-status) {

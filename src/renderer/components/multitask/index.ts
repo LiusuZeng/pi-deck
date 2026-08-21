@@ -7,3 +7,11 @@ export {
   type MultitaskStatusPopoverProps,
   type MultitaskTaskSummary,
 } from "./MultitaskStatusPopover.js";
+export {
+  ParallelPromptSettings,
+  type ParallelPromptSettingsProps,
+} from "./ParallelPromptSettings.js";
+export {
+  TaskSessionPanel,
+  type TaskSessionPanelProps,
+} from "./TaskSessionPanel.js";

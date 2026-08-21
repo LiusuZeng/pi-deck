@@ -11,8 +11,22 @@ import { MultitaskStatusPopover } from "./MultitaskStatusPopover.js";
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
 const tasks = [
-  { taskNumber: 4, generatedName: "Build the renderer", status: "working" },
-  { taskNumber: 8, generatedName: "Run focused tests", status: "queued" },
+  {
+    taskNumber: 4,
+    generatedName: "Build the renderer",
+    brief: "Render the task panel",
+    lifecycle: "running" as const,
+    attempt: 1,
+    elapsedMs: 1_000,
+  },
+  {
+    taskNumber: 8,
+    generatedName: "Run focused tests",
+    brief: "Verify the renderer",
+    lifecycle: "queued" as const,
+    attempt: 1,
+    elapsedMs: 0,
+  },
 ];
 
 let root: Root | undefined;
@@ -39,7 +53,7 @@ describe("MultitaskStatusPopover", () => {
     const list = view.querySelector('[role="list"]');
 
     expect(list?.textContent).toBe(
-      "#4 Build the renderer — working#8 Run focused tests — queued",
+      "#4 Build the renderer — running#8 Run focused tests — queued",
     );
     expect(list?.querySelectorAll('[role="listitem"]')).toHaveLength(2);
     expect(
@@ -73,7 +87,7 @@ describe("MultitaskControl", () => {
 
     expect(button?.getAttribute("aria-describedby")).toBeTruthy();
     expect(document.querySelector('[role="tooltip"]')?.textContent).toBe(
-      "Task status#4 Build the renderer — working#8 Run focused tests — queued",
+      "Task status#4 Build the renderer — running#8 Run focused tests — queued",
     );
   });
 

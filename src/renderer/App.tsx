@@ -30,7 +30,9 @@ import type {
   WorkspaceListResult,
   WorkspaceRef as SharedWorkspaceRef,
   ThemePreference,
+  MultitaskStateEvent,
   MultitaskTaskSummary,
+  ParallelWorkerSettings,
 } from "../shared/types.js";
 import type {
   CanonicalNodeOccurrence,
@@ -57,6 +59,8 @@ import {
 import { Button } from "./components/ui/Button.js";
 import { IconButton } from "./components/ui/IconButton.js";
 import { MultitaskControl } from "./components/multitask/MultitaskControl.js";
+import { ParallelPromptSettings } from "./components/multitask/ParallelPromptSettings.js";
+import { TaskSessionPanel } from "./components/multitask/TaskSessionPanel.js";
 import {
   Archive,
   ArrowUp,
@@ -794,10 +798,13 @@ export function App(): ReactElement {
   );
   const [composerError, setComposerError] = useState<string | null>(null);
   const [multitask, setMultitask] = useState<
-    Record<
-      string,
-      { mode: "sequential" | "parallel"; tasks: MultitaskTaskSummary[] }
-    >
+    Record<string, MultitaskStateEvent>
+  >({});
+  const [workInParentOnce, setWorkInParentOnce] = useState<
+    Record<string, boolean>
+  >({});
+  const [workerOverrides, setWorkerOverrides] = useState<
+    Record<string, ParallelWorkerSettings>
   >({});
   const [currentProject, setCurrentProject] = useState<ProjectRef>(() => ({
     id: "pending-project",
@@ -1031,7 +1038,7 @@ export function App(): ReactElement {
           if (!disposed)
             setMultitask((current) => ({
               ...current,
-              [event.runtimeId]: { mode: event.mode, tasks: event.tasks },
+              [event.runtimeId]: event,
             }));
         });
         unsubscribe = api.chat.onEvent((event) => {
@@ -1442,8 +1449,13 @@ export function App(): ReactElement {
   const multitaskState = selectedSession.runtimeBacked
     ? multitask[selectedSession.id]
     : selectedSession.draftSession
-      ? (multitask[selectedSession.id] ?? { mode: "sequential", tasks: [] })
+      ? multitask[selectedSession.id]
       : undefined;
+  const promptDestination =
+    multitaskState?.mode === "parallel" && !workInParentOnce[selectedSession.id]
+      ? "newTaskSession"
+      : "parent";
+  const promptWorkerOverrides = workerOverrides[selectedSession.id] ?? {};
   const isWorking = selectedSession.status === "working";
   const isBusy = isSessionBusy(selectedSession);
   const isResuming = selectedSession.status === "reconnecting";
@@ -1463,6 +1475,12 @@ export function App(): ReactElement {
     draft.trim().length > 0 &&
     isWorking &&
     !isResuming &&
+    loadState.state === "ready";
+  const canSendTask =
+    promptDestination === "newTaskSession" &&
+    draft.trim().length > 0 &&
+    !isLifecycleTransition(selectedSession.status) &&
+    !selectedSession.overlays.retrying &&
     loadState.state === "ready";
   const availableSlashCommands = isRealBackendMode
     ? realCommands
@@ -1509,10 +1527,7 @@ export function App(): ReactElement {
           ...current,
           // A status event received while the request was in flight is newer
           // than this snapshot; otherwise hydrate a missed event from it.
-          [state.runtimeId]: current[state.runtimeId] ?? {
-            mode: state.mode,
-            tasks: state.tasks,
-          },
+          [state.runtimeId]: current[state.runtimeId] ?? state,
         })),
       )
       .catch(() => undefined);
@@ -2382,7 +2397,7 @@ export function App(): ReactElement {
   }
 
   function handleSend(): void {
-    if (!canSend) {
+    if (!canSend && !canSendTask) {
       return;
     }
     const prompt = draft.trimEnd();
@@ -2417,7 +2432,13 @@ export function App(): ReactElement {
       return;
     }
 
-    void sendPrompt(selectedSession.id, prompt, promptAttachments);
+    void sendPrompt(
+      selectedSession.id,
+      prompt,
+      promptAttachments,
+      promptDestination,
+      promptWorkerOverrides,
+    );
   }
 
   async function startDraftSessionAndSend(
@@ -2522,7 +2543,11 @@ export function App(): ReactElement {
       setSelectedSessionId(initializedSession.id);
       setMultitask((current) => {
         const draftState = current[draftSession.id] ?? {
+          runtimeId: initializedSession.id,
           mode: initialMultitaskMode,
+          settings: {},
+          activeCount: 0,
+          activeLimit: 1,
           tasks: [],
         };
         const { [draftSession.id]: _draftState, ...remaining } = current;
@@ -2615,44 +2640,49 @@ export function App(): ReactElement {
     runtimeId: string,
     prompt: string,
     promptAttachments: AttachmentDraft[],
+    destination: "parent" | "newTaskSession" = "parent",
+    overrides: ParallelWorkerSettings = {},
   ): Promise<void> {
     const now = formatTime();
     const sentAttachments = timelineAttachmentsFromDrafts(promptAttachments);
     setComposerError(null);
     blockAttachmentOwner(runtimeId);
     setComposerDrafts((items) => clearComposerDraft(items, runtimeId));
-    setSessions((current) =>
-      current.map((session) =>
-        session.id === runtimeId
-          ? {
-              ...session,
-              title: isPlaceholderSessionTitle(session.title)
-                ? summarizeTitle(prompt, 64)
-                : session.title,
-              status: "sending",
-              baseState: "attaching",
-              completedAtMs: undefined,
-              overlays: { ...session.overlays, streaming: false },
-              subtitle: `Sending · waiting for ${backendLabel(session)} confirmation`,
-              workingStartedAtMs: session.workingStartedAtMs ?? Date.now(),
-              lastRuntimeEventLabel: "Prompt sent; awaiting Pi confirmation",
-              retryPrompt: { text: prompt, attachments: promptAttachments },
-              updatedAt: "Now",
-              updatedAtMs: Date.now(),
-              timeline: [
-                ...session.timeline,
-                {
-                  id: createId("user"),
-                  kind: "user",
-                  content: prompt,
-                  createdAt: now,
-                  ...(sentAttachments ? { attachments: sentAttachments } : {}),
-                },
-              ],
-            }
-          : session,
-      ),
-    );
+    if (destination === "parent")
+      setSessions((current) =>
+        current.map((session) =>
+          session.id === runtimeId
+            ? {
+                ...session,
+                title: isPlaceholderSessionTitle(session.title)
+                  ? summarizeTitle(prompt, 64)
+                  : session.title,
+                status: "sending",
+                baseState: "attaching",
+                completedAtMs: undefined,
+                overlays: { ...session.overlays, streaming: false },
+                subtitle: `Sending · waiting for ${backendLabel(session)} confirmation`,
+                workingStartedAtMs: session.workingStartedAtMs ?? Date.now(),
+                lastRuntimeEventLabel: "Prompt sent; awaiting Pi confirmation",
+                retryPrompt: { text: prompt, attachments: promptAttachments },
+                updatedAt: "Now",
+                updatedAtMs: Date.now(),
+                timeline: [
+                  ...session.timeline,
+                  {
+                    id: createId("user"),
+                    kind: "user",
+                    content: prompt,
+                    createdAt: now,
+                    ...(sentAttachments
+                      ? { attachments: sentAttachments }
+                      : {}),
+                  },
+                ],
+              }
+            : session,
+        ),
+      );
 
     try {
       const attachmentOwnerId =
@@ -2672,7 +2702,14 @@ export function App(): ReactElement {
           sendMode: attachment.sendMode,
         })),
         ...(attachmentOwnerId !== undefined ? { attachmentOwnerId } : {}),
+        destination,
+        ...(destination === "newTaskSession" &&
+        Object.keys(overrides).length > 0
+          ? { workerOverrides: overrides }
+          : {}),
       });
+      setWorkInParentOnce((current) => ({ ...current, [runtimeId]: false }));
+      setWorkerOverrides((current) => ({ ...current, [runtimeId]: {} }));
     } catch (error) {
       unblockAttachmentOwner(runtimeId);
       setComposerError(error instanceof Error ? error.message : String(error));
@@ -4144,7 +4181,7 @@ export function App(): ReactElement {
       value={draft}
       isWorking={isWorking}
       status={selectedSession.status}
-      canSend={canSend}
+      canSend={canSend || canSendTask}
       canIntervene={canIntervene}
       knownExtensionCommand={knownExtensionCommand}
       error={composerError}
@@ -4159,6 +4196,46 @@ export function App(): ReactElement {
       allowAttachments={true}
       multitaskMode={multitaskState?.mode}
       multitaskTasks={multitaskState?.tasks ?? []}
+      multitaskSettings={multitaskState?.settings ?? {}}
+      multitaskDestination={promptDestination}
+      workerOverrides={promptWorkerOverrides}
+      onSetWorkInParentOnce={() =>
+        setWorkInParentOnce((current) => ({
+          ...current,
+          [selectedSession.id]: true,
+        }))
+      }
+      onSetWorkerOverrides={(overrides) =>
+        setWorkerOverrides((current) => ({
+          ...current,
+          [selectedSession.id]: overrides,
+        }))
+      }
+      onUpdateWorkerDefaults={(settings) => {
+        if (!selectedSession.runtimeBacked) return;
+        void window.piDeck.multitask
+          .updateSettings({ runtimeId: selectedSession.id, settings })
+          .then((updated) =>
+            setMultitask((current) => ({
+              ...current,
+              [selectedSession.id]: {
+                ...(current[selectedSession.id] ?? {
+                  runtimeId: selectedSession.id,
+                  mode: "parallel" as const,
+                  activeCount: 0,
+                  activeLimit: 1,
+                  tasks: [],
+                }),
+                settings: updated,
+              },
+            })),
+          )
+          .catch((error) =>
+            setComposerError(
+              `Worker defaults unavailable: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          );
+      }}
       onToggleMultitask={() => {
         const mode =
           multitaskState?.mode === "parallel" ? "sequential" : "parallel";
@@ -4166,7 +4243,11 @@ export function App(): ReactElement {
           setMultitask((current) => ({
             ...current,
             [selectedSession.id]: {
+              runtimeId: selectedSession.id,
               mode,
+              settings: current[selectedSession.id]?.settings ?? {},
+              activeCount: current[selectedSession.id]?.activeCount ?? 0,
+              activeLimit: current[selectedSession.id]?.activeLimit ?? 1,
               tasks: current[selectedSession.id]?.tasks ?? [],
             },
           }));
@@ -4178,10 +4259,7 @@ export function App(): ReactElement {
           .then((state) =>
             setMultitask((current) => ({
               ...current,
-              [state.runtimeId]: current[state.runtimeId] ?? {
-                mode: state.mode,
-                tasks: state.tasks,
-              },
+              [state.runtimeId]: state,
             })),
           )
           .catch((error) =>
@@ -4500,6 +4578,7 @@ export function App(): ReactElement {
               uiMessage={uiMessage}
               showAttachmentExamples={!isRealBackendMode}
               nowMs={nowMs}
+              multitaskState={multitaskState}
               onRecoverSession={handleRecoverSelectedSession}
               onRespondToExtensionUi={handleExtensionUiResponse}
               onRetrySession={handleRetrySelectedSession}
@@ -8524,6 +8603,7 @@ function ChatTimeline(props: {
   uiMessage: string;
   showAttachmentExamples: boolean;
   nowMs: number;
+  multitaskState: MultitaskStateEvent | undefined;
   onRecoverSession(): void;
   onRespondToExtensionUi(
     requestId: string,
@@ -8578,6 +8658,13 @@ function ChatTimeline(props: {
         ref={timelineScrollRef}
         onScroll={handleTimelineScroll}
       >
+        {props.multitaskState?.mode === "parallel" ? (
+          <TaskSessionPanel
+            activeCount={props.multitaskState.activeCount}
+            activeLimit={props.multitaskState.activeLimit}
+            tasks={props.multitaskState.tasks}
+          />
+        ) : null}
         {!hasItems ? (
           <EmptyTimelineState
             status={props.session.status}
@@ -9071,6 +9158,12 @@ function Composer(props: {
   allowAttachments: boolean;
   multitaskMode: "sequential" | "parallel" | undefined;
   multitaskTasks: MultitaskTaskSummary[];
+  multitaskSettings: ParallelWorkerSettings;
+  multitaskDestination: "parent" | "newTaskSession";
+  workerOverrides: ParallelWorkerSettings;
+  onSetWorkInParentOnce(): void;
+  onSetWorkerOverrides(overrides: ParallelWorkerSettings): void;
+  onUpdateWorkerDefaults(settings: ParallelWorkerSettings): void;
   onToggleMultitask(): void;
   onChange(value: string): void;
   onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void;
@@ -9273,6 +9366,35 @@ function Composer(props: {
                 unavailableMessage="Start Pi with a prompt to enable multitasking"
               />
             )}
+            {props.multitaskMode === "parallel" ? (
+              <ParallelPromptSettings
+                destination={props.multitaskDestination}
+                defaults={props.multitaskSettings}
+                models={props.realModels}
+                thinkingLevels={props.realThinkingLevels}
+                overrides={props.workerOverrides}
+                onWorkInParent={props.onSetWorkInParentOnce}
+                onOverrideModel={(model) =>
+                  props.onSetWorkerOverrides({
+                    ...props.workerOverrides,
+                    ...(model ? { model } : { model: undefined }),
+                  })
+                }
+                onOverrideThinking={(thinkingLevel) =>
+                  props.onSetWorkerOverrides({
+                    ...props.workerOverrides,
+                    ...(thinkingLevel
+                      ? { thinkingLevel }
+                      : { thinkingLevel: undefined }),
+                  })
+                }
+                onUpdateDefaults={props.onUpdateWorkerDefaults}
+              />
+            ) : props.multitaskMode === "sequential" ? (
+              <span className="parallel-prompt-settings__destination">
+                Work in parent
+              </span>
+            ) : null}
             {props.selectedSession.backendMode === "real" ? (
               <PiModelThinkingMenu
                 disabled={isActionPending}
