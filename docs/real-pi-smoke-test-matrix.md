@@ -49,7 +49,8 @@ pi --mode rpc --no-session --no-approve --no-extensions --no-skills --no-prompt-
 | SM-017 | Tool events                | Prompt/fixture triggers tool execution                                                      | Tool start/update/end events produce expandable card data and clear running overlay                      | M5/M7 |
 | SM-018 | Compaction/retry           | Fixture or controlled session triggers compaction/retry if supported                        | Sidebar compacting/retrying indicators set/clear                                                         | M5    |
 | SM-019 | Agent Workflow real worker | Create and start a one-worker workflow through the canonical API, then restart Pi Deck     | Real Pi output, worker session file, completed graph, and run remain visible after restart               | M2    |
-| SM-020 | Delegated parent handoff   | `npm run test:e2e:real-smoke` enables **Parallel: On** in a new draft, then sends the first explicit `deck_delegate` instruction | The first parent prompt reaches child `completed`; parent-only status is visible, with no child session or controls rendered | M5    |
+| SM-020 | Task-session bridge handoff | `npm run test:e2e:real-smoke` enables **Parallel: On**, then uses the acceptance harness to invoke `deck_delegate` | The real bridge and child worker reach `completed`; parent-only status is visible, with no private session or controls rendered | M5 |
+| SM-021 | Deterministic task-session routing | In a fresh real-Pi parent, enable **Parallel: On** and send an ordinary decomposable first prompt with destination **New task session** | Production routing automatically plans multiple private task sessions without model tool election; **Work in parent** overrides one prompt; task states remain visible together and the parent reports a synthesis | M5 |
 
 ## Fake-RPC Coverage Mapping
 
@@ -67,7 +68,7 @@ The deterministic fake RPC harness covers pre-real-Pi automation for:
 ## Current Blockers / Manual Inputs
 
 - P0 real GUI prompt/resume and one-worker Agent Workflow persistence paths are covered by `npm run test:e2e:real-smoke` against the installed Pi binary.
-- The opt-in `PI_DECK_E2E_DELEGATE_HARNESS=1` companion extension invokes the generated `deck_delegate` tool definition directly after the explicit test instruction. This avoids relying on a model to elect a tool while retaining the real Pi extension loader, generated tool, authenticated bridge, and real child Pi worker; it does not use fake RPC.
+- The opt-in `PI_DECK_E2E_DELEGATE_HARNESS=1` companion extension invokes the generated `deck_delegate` tool definition directly after the explicit test instruction. This validates the real Pi extension loader, generated tool, authenticated bridge, and real private worker without fake RPC, but it does **not** validate the deterministic production prompt-routing contract in SM-021.
 - Broader M7.4 release matrix execution still needs planned pass/fail artifact collection across all rows.
 - G3 requires platform packaging measurements before image support can ship.
 - G4 requires a real or fake extension fixture once extension UI backend IPC is implemented.

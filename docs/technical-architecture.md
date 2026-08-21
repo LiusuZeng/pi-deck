@@ -229,6 +229,60 @@ Failure handling:
 - `RunScheduler` counts workers whose base state is `working` or `waitingForInput`, or which have active compaction/retry work.
 - Steering/follow-up for an already running session is sent to that session's worker and does not consume a new slot.
 
+### Parent-Owned Task-Session Routing
+
+The target contract is defined in
+[`parallel-task-sessions-design.md`](parallel-task-sessions-design.md).
+Electron main, rather than the parent model, owns prompt destination routing.
+
+A parent-scoped send request must carry an explicit destination resolved by the
+renderer from the visible composer state:
+
+```ts
+type ParentPromptDestination = "parent" | "newTaskSession";
+
+interface ParentPromptRequest {
+  parentRuntimeId: string;
+  destination: ParentPromptDestination;
+  text: string;
+  attachments: AttachmentDraft[];
+  workerModel?: { provider: string; modelId: string };
+  workerThinkingLevel?: string;
+}
+```
+
+For `parent`, main uses the existing parent prompt/steer/follow-up path. For
+`newTaskSession`, main invokes a mandatory structured planning turn. The parent
+may return one or more independent task briefs. Main validates the bounded plan,
+allocates stable parent-owned task numbers, records queued summaries, and starts
+or queues each private Pi session. Planning launches automatically because
+parallel mode is already explicit user consent. It may occupy one short parent
+turn but must not wait for task execution or synthesis; after plan acceptance,
+the parent can receive additional prompts. The renderer never receives a
+private runtime ID or session path.
+
+Each task receives a parent-generated context summary, original prompt, and task
+brief rather than the full parent transcript. Worker model/thinking settings
+resolve in this order: per-prompt override, persistent parallel-worker default,
+then parent setting.
+
+Each parent admits at most 10 active task sessions. Excess planned tasks stay
+visibly queued in plan order; they are never routed to the parent as fallback.
+The global worker scheduler remains authoritative for actual process starts, so
+a parent may have fewer than 10 workers running even when its active set is
+full.
+
+The parent-facing task registry is authoritative for status, attempts, terminal
+handoffs, and synthesis. A failed task receives up to three retries after its
+initial attempt. When every task for a prompt is terminal, the parent reports a
+synthesized result and its transient task rows are cleared. On restart,
+unfinished private sessions are marked interrupted and are never resumed
+automatically; their plan and trace remain available to the parent.
+
+Existing model-elected `deck_delegate` transport may be reused internally, but
+it cannot be the gate that decides whether ordinary parallel-mode prompts enter
+task planning.
+
 ### Local Queued Starts
 
 MVP avoids implicit local queueing. If the cap is reached when the user tries to send a prompt to an idle/unattached session:
