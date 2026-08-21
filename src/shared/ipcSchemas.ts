@@ -410,12 +410,34 @@ const chatPromptAttachmentsSchema = z
     }
   });
 
+export const chatPromptDestinationSchema = z.enum(["parent", "newTaskSession"]);
+
+// These settings select a worker configuration without exposing a runtime,
+// session, or provider-specific object to the renderer.
+export const parallelWorkerModelSchema = z
+  .object({
+    provider: z.string().trim().min(1).max(256),
+    modelId: z.string().trim().min(1).max(1_024),
+  })
+  .strict();
+
+export const parallelWorkerSettingsSchema = z
+  .object({
+    model: parallelWorkerModelSchema.optional(),
+    thinkingLevel: z.string().trim().min(1).max(256).optional(),
+  })
+  .strict();
+
 export const chatPromptRequestSchema = z
   .object({
     runtimeId: z.string(),
     text: z.string().trim().min(1),
     attachments: chatPromptAttachmentsSchema.optional(),
     attachmentOwnerId: attachmentOwnerIdSchema.optional(),
+    // Old renderers did not send a destination. Keep those prompts on the
+    // parent rather than changing their routing when main is upgraded.
+    destination: chatPromptDestinationSchema.default("parent"),
+    workerOverrides: parallelWorkerSettingsSchema.optional(),
   })
   .strict();
 
@@ -734,24 +756,57 @@ export const multitaskModeStateSchema = z
   })
   .strict();
 
-// Safe status-only projection. No child runtime/session, prompt, output, or
-// controls are exposed to the renderer.
+// Persisted defaults are parent-scoped. Omitting either value means workers
+// inherit that setting from their parent; an update replaces the full object.
+export const multitaskSettingsSchema = parallelWorkerSettingsSchema;
+
+export const multitaskSettingsRequestSchema = z
+  .object({ runtimeId: multitaskRuntimeIdSchema })
+  .strict();
+
+export const multitaskSettingsUpdateRequestSchema = z
+  .object({
+    runtimeId: multitaskRuntimeIdSchema,
+    settings: multitaskSettingsSchema,
+  })
+  .strict();
+
+const oneLineTaskTextSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(1_024)
+  .refine((value) => !/[\r\n]/.test(value), "Must be a single line.");
+
+// Safe status-only projection. It intentionally has no child runtime/session,
+// prompt, transcript, raw output, or controls.
 export const multitaskTaskSummarySchema = z
   .object({
     taskNumber: z.number().int().positive(),
-    generatedName: z.string().min(1),
-    status: z.enum([
+    generatedName: oneLineTaskTextSchema,
+    brief: oneLineTaskTextSchema,
+    lifecycle: z.enum([
       "queued",
+      "starting",
       "running",
-      "waiting-input",
+      "retrying",
+      "waiting-parent",
       "completed",
       "failed",
+      "interrupted",
     ]),
+    attempt: z.number().int().positive(),
+    elapsedMs: z.number().finite().nonnegative(),
+    progress: oneLineTaskTextSchema.optional(),
+    queueReason: oneLineTaskTextSchema.optional(),
   })
   .strict();
 
 export const multitaskStateEventSchema = multitaskModeStateSchema
   .extend({
+    settings: multitaskSettingsSchema,
+    activeCount: z.number().int().nonnegative(),
+    activeLimit: z.number().int().positive(),
     tasks: z.array(multitaskTaskSummarySchema),
   })
   .strict();
@@ -852,6 +907,8 @@ export const ipcChannels = {
   workflowGraphEvent: "workflows:graphEvent",
   multitaskGetMode: "multitask:getMode",
   multitaskUpdateMode: "multitask:updateMode",
+  multitaskGetSettings: "multitask:getSettings",
+  multitaskUpdateSettings: "multitask:updateSettings",
   multitaskState: "multitask:state",
 } as const;
 

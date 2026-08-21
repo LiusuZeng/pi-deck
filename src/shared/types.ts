@@ -20,6 +20,8 @@ import type {
   chatListSessionsResultSchema,
   chatInterventionRequestSchema,
   chatMessageSchema,
+  chatPromptDestinationSchema,
+  chatPromptRequestSchema,
   chatModelSummarySchema,
   chatRuntimeEventSchema,
   chatRuntimeStatusRequestSchema,
@@ -34,8 +36,13 @@ import type {
   multitaskModeRequestSchema,
   multitaskModeStateSchema,
   multitaskModeUpdateRequestSchema,
+  multitaskSettingsRequestSchema,
+  multitaskSettingsSchema,
+  multitaskSettingsUpdateRequestSchema,
   multitaskStateEventSchema,
   multitaskTaskSummarySchema,
+  parallelWorkerModelSchema,
+  parallelWorkerSettingsSchema,
   pickAttachmentsResultSchema,
   pickProjectResultSchema,
   projectListResultSchema,
@@ -121,9 +128,24 @@ export type MultitaskModeUpdateRequest = z.infer<
   typeof multitaskModeUpdateRequestSchema
 >;
 export type MultitaskModeState = z.infer<typeof multitaskModeStateSchema>;
+export type MultitaskSettings = z.infer<typeof multitaskSettingsSchema>;
+export type MultitaskSettingsRequest = z.infer<
+  typeof multitaskSettingsRequestSchema
+>;
+export type MultitaskSettingsUpdateRequest = z.infer<
+  typeof multitaskSettingsUpdateRequestSchema
+>;
 export type MultitaskTaskSummary = z.infer<typeof multitaskTaskSummarySchema>;
 export type MultitaskStateEvent = z.infer<typeof multitaskStateEventSchema>;
 export type ChatMessage = z.infer<typeof chatMessageSchema>;
+export type ChatPromptDestination = z.infer<typeof chatPromptDestinationSchema>;
+export type ParallelWorkerModel = z.infer<typeof parallelWorkerModelSchema>;
+export type ParallelWorkerSettings = z.infer<
+  typeof parallelWorkerSettingsSchema
+>;
+// Input keeps destination optional for callers upgrading from the legacy
+// parent-only prompt contract; schema parsing supplies the parent default.
+export type ChatPromptRequest = z.input<typeof chatPromptRequestSchema>;
 export type ChatInterventionRequest = z.infer<
   typeof chatInterventionRequestSchema
 >;
@@ -321,7 +343,7 @@ export interface PiDeckApi {
       runtimeId: string;
       level: string;
     }): Promise<ChatSnapshot>;
-    prompt(request: ChatInterventionRequest): Promise<void>;
+    prompt(request: ChatPromptRequest): Promise<void>;
     steer(request: ChatInterventionRequest): Promise<void>;
     followUp(request: ChatInterventionRequest): Promise<void>;
     abort(request: { runtimeId: string }): Promise<void>;
@@ -437,6 +459,10 @@ export interface PiDeckApi {
     updateMode(
       request: MultitaskModeUpdateRequest,
     ): Promise<MultitaskStateEvent>;
+    getSettings(request: MultitaskSettingsRequest): Promise<MultitaskSettings>;
+    updateSettings(
+      request: MultitaskSettingsUpdateRequest,
+    ): Promise<MultitaskSettings>;
     onState(listener: (event: MultitaskStateEvent) => void): () => void;
   };
   attachments: {
