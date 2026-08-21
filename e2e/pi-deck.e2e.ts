@@ -3408,3 +3408,224 @@ test("Work inbox scopes work by workspace and opens a row with the keyboard", as
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+/**
+ * Opt-in until task-session routing lands. It exercises the production `real`
+ * main route with a deterministic, provider-independent Pi RPC executable;
+ * it must never be replaced by the deck_delegate bridge harness.
+ */
+const runTaskSessionAcceptance =
+  process.env.PI_DECK_E2E_TASK_SESSION_ACCEPTANCE === "1";
+
+test.describe("clarified task-session routing acceptance", () => {
+  test.skip(
+    !runTaskSessionAcceptance,
+    "Set PI_DECK_E2E_TASK_SESSION_ACCEPTANCE=1 after task-session routing is integrated.",
+  );
+
+  test("routes ordinary prompts, limits active work, reports retries, and keeps the parent flat", async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "pi-deck-task-routing-"),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    const traceFile = path.join(root, "fixture-trace.log");
+    const routingFixture = path.join(
+      repoRoot,
+      "e2e/fixtures/task-routing-contract.json",
+    );
+    fs.mkdirSync(projectCwd, { recursive: true });
+    fs.mkdirSync(agentDir, { recursive: true });
+    const { app, page } = await launchPiDeck({
+      ...fakeRealModeEnv({
+        root,
+        projectCwd,
+        agentDir,
+        fakePiArgs: [
+          "--prompt-scenario",
+          "routing",
+          "--task-routing-fixture",
+          routingFixture,
+          "--fixture-trace-file",
+          traceFile,
+          "--stream-delay-ms",
+          "25",
+        ],
+      }),
+      // Expected production test-only hook: main reads this plan after the
+      // normal prompt has entered its real Pi route.
+      PI_DECK_TEST_TASK_ROUTING_FIXTURE: routingFixture,
+    });
+    try {
+      await expectHealthyPreload(page);
+      const destination = page.getByRole("button", {
+        name: "Task destination: Work in parent",
+        exact: true,
+      });
+      await expect(destination).toBeVisible();
+      // Parent defaults are observable before planning. A task-specific fixture
+      // override below must take precedence over these values, rather than
+      // leaking the parent thinking/model choice into every child.
+      const configuration = page.locator(".pi-configuration-trigger");
+      await configuration.click();
+      await page
+        .getByRole("menuitemradio", { name: "max", exact: true })
+        .click();
+      await expect(configuration).toHaveAttribute("data-thinking-level", "max");
+
+      // Off is an ordinary parent prompt: it must not create task rows.
+      await page.getByLabel("Prompt text").fill("Summarize the repository.");
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect(
+        page.getByText(/Ordinary routing fixture accepted/),
+      ).toBeVisible();
+      await expect(
+        page.getByRole("region", { name: "Task sessions" }),
+      ).toHaveCount(0);
+
+      // On selects new task sessions. The per-prompt parent override is
+      // consumed by this send, then visibly resets to the task default.
+      await destination.click();
+      const taskDestination = page.getByRole("button", {
+        name: "Task destination: New task session",
+        exact: true,
+      });
+      await expect(taskDestination).toBeVisible();
+      await page
+        .getByRole("button", { name: "Work in parent for next prompt" })
+        .click();
+      await page.getByLabel("Prompt text").fill("Only this stays in parent.");
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect(taskDestination).toBeVisible();
+
+      await page
+        .getByLabel("Prompt text")
+        .fill(
+          "Prepare the release: inspect, implement, test, and document it.",
+        );
+      await page.getByRole("button", { name: "Send" }).click();
+      const taskPanel = page.getByRole("region", { name: "Task sessions" });
+      const taskRows = taskPanel.getByRole("listitem");
+      await expect(taskRows).toHaveCount(12);
+      await expect(taskRows.nth(0)).toContainText(
+        "#1 Inventory affected files",
+      );
+      await expect(taskRows.nth(10)).toContainText("#11 Queued eleventh task");
+      await expect(taskRows.nth(11)).toContainText("#12 Queued twelfth task");
+      await expect(taskPanel.getByText("10 active · 2 queued")).toBeVisible();
+      await expect(taskRows.nth(0)).toHaveAttribute(
+        "data-model-id",
+        "fake-model",
+      );
+      await expect(taskRows.nth(0)).toHaveAttribute(
+        "data-thinking-level",
+        "max",
+      );
+      await expect(taskRows.nth(1)).toHaveAttribute(
+        "data-model-id",
+        "fake-model-2",
+      );
+      await expect(taskRows.nth(1)).toHaveAttribute(
+        "data-thinking-level",
+        "high",
+      );
+
+      // Parent input remains usable. Flat rows never expose controls, sidebar,
+      // or inbox entries for a private task session.
+      await expect(page.getByLabel("Prompt text")).toBeEnabled();
+      await page.getByLabel("Prompt text").fill("Add rollback guidance.");
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect(taskPanel.getByRole("button")).toHaveCount(0);
+      await expect(
+        page.getByLabel("Sessions").locator(".session-item"),
+      ).not.toContainText("Inventory affected files");
+      await expect(
+        page.getByRole("heading", { name: "Work inbox" }),
+      ).toHaveCount(0);
+
+      await expect(taskRows.nth(2)).toContainText("attempt 4");
+      await expect(taskRows.nth(2)).toContainText("failed");
+      await expect(
+        page.getByText(
+          "Synthesis: 10 completed, 1 failed after attempt 4, and 1 interrupted.",
+          { exact: true },
+        ),
+      ).toBeVisible();
+      await expect(taskPanel).toHaveCount(0);
+
+      // Ordinary routing has no harness marker and no deck_delegate election.
+      expect(fs.readFileSync(traceFile, "utf8")).toContain("ordinary_prompt");
+      expect(fs.readFileSync(traceFile, "utf8")).not.toContain("deck_delegate");
+    } finally {
+      await app.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("restart never resumes children and exposes interrupted trace to the parent", async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "pi-deck-task-restart-"),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    fs.mkdirSync(projectCwd, { recursive: true });
+    fs.mkdirSync(agentDir, { recursive: true });
+    const routingFixture = path.join(
+      repoRoot,
+      "e2e/fixtures/task-routing-contract.json",
+    );
+    const env = {
+      ...fakeRealModeEnv({
+        root,
+        projectCwd,
+        agentDir,
+        fakePiArgs: [
+          "--prompt-scenario",
+          "routing",
+          "--task-routing-fixture",
+          routingFixture,
+          "--stream-delay-ms",
+          "250",
+        ],
+      }),
+      PI_DECK_TEST_TASK_ROUTING_FIXTURE: routingFixture,
+    };
+    const first = await launchPiDeck(env);
+    try {
+      await expectHealthyPreload(first.page);
+      await first.page
+        .getByRole("button", {
+          name: "Task destination: Work in parent",
+        })
+        .click();
+      await first.page
+        .getByLabel("Prompt text")
+        .fill("Decompose this release.");
+      await first.page.getByRole("button", { name: "Send" }).click();
+      await expect(
+        first.page.getByRole("region", { name: "Task sessions" }),
+      ).toBeVisible();
+    } finally {
+      await first.app.close();
+    }
+    try {
+      const second = await launchPiDeck(env);
+      try {
+        await expectHealthyPreload(second.page);
+        await expect(
+          second.page.getByText("Interrupted by restart", { exact: true }),
+        ).toBeVisible();
+        await expect(
+          second.page.getByText("No child task was resumed", { exact: true }),
+        ).toBeVisible();
+        await expect(
+          second.page.getByRole("region", { name: "Task sessions" }),
+        ).toHaveCount(0);
+      } finally {
+        await second.app.close();
+      }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

@@ -19,6 +19,7 @@ type PromptScenario =
   | "extension-ui"
   | "error"
   | "delegate"
+  | "routing"
   | "all";
 
 interface FakeOptions {
@@ -37,6 +38,13 @@ interface FakeOptions {
   sessionFile?: string;
   workflowDecisions: boolean[];
   workflowDecisionStateFile?: string;
+  /**
+   * Provider-independent ordinary-prompt routing fixture. This deliberately
+   * does not call the deck_delegate bridge: production routing owns task
+   * planning, while this process remains a real Pi RPC transport.
+   */
+  taskRoutingFixture?: string;
+  fixtureTraceFile?: string;
 }
 
 type FakeCommandRecord = JsonObject & {
@@ -127,6 +135,14 @@ function parseOptions(argv: string[]): FakeOptions {
       const stateFile = argv[index + 1];
       if (stateFile) options.workflowDecisionStateFile = stateFile;
       index += 1;
+    } else if (arg === "--task-routing-fixture") {
+      const fixture = argv[index + 1];
+      if (fixture) options.taskRoutingFixture = fixture;
+      index += 1;
+    } else if (arg === "--fixture-trace-file") {
+      const traceFile = argv[index + 1];
+      if (traceFile) options.fixtureTraceFile = traceFile;
+      index += 1;
     }
   }
 
@@ -143,6 +159,7 @@ function isPromptScenario(value: string): value is PromptScenario {
     "extension-ui",
     "error",
     "delegate",
+    "routing",
     "all",
   ].includes(value);
 }
@@ -208,8 +225,16 @@ class FakeRpcServer {
   private readonly steering: string[] = [];
   private readonly followUp: string[] = [];
 
+  private traceFixture(event: string): void {
+    const traceFile = this.options.fixtureTraceFile;
+    if (!traceFile) return;
+    fs.mkdirSync(path.dirname(traceFile), { recursive: true });
+    fs.appendFileSync(traceFile, `${event}\n`);
+  }
+
   /** Deterministic test-only parent-extension stand-in for bridge E2E tests. */
   private exerciseDelegationBridge(task: string): void {
+    this.traceFixture("deck_delegate");
     const endpoint = process.env.DECK_DELEGATE_ENDPOINT;
     const token = process.env.DECK_DELEGATE_CAPABILITY;
     if (!endpoint?.startsWith("unix:") || !token) return;
@@ -593,6 +618,9 @@ class FakeRpcServer {
     };
     this.messages.push(userMessage);
     this.appendPersistedMessage(userMessage);
+    if (this.options.promptScenario === "routing") {
+      this.traceFixture("ordinary_prompt");
+    }
     this.promptCounter += 1;
     const assistantId = `msg_assistant_${this.promptCounter}`;
     this.agentActive = true;
@@ -690,9 +718,14 @@ class FakeRpcServer {
     const chunks =
       decision !== undefined
         ? [String(decision)]
-        : this.options.productionShaped
-          ? ["I’ll review the workspace", " and summarize the next steps."]
-          : ["Fake response", " to: ", text || "(empty prompt)"];
+        : this.options.promptScenario === "routing"
+          ? [
+              "Ordinary routing fixture accepted ",
+              `(${this.options.taskRoutingFixture ?? "default"}).`,
+            ]
+          : this.options.productionShaped
+            ? ["I’ll review the workspace", " and summarize the next steps."]
+            : ["Fake response", " to: ", text || "(empty prompt)"];
     let accumulated = "";
     chunks.forEach((chunk, index) => {
       this.currentTimers.push(
