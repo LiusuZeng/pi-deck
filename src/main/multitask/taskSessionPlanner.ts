@@ -13,6 +13,19 @@ const MAX_CONTEXT = 12_000;
 const MAX_NAME = 96;
 const MAX_BRIEF = 512;
 const MAX_RESPONSE = 64_000;
+export const TASK_SESSION_PLANNER_TIMEOUT_MS = 120_000;
+
+/** Uses a bounded positive integer so a bad environment value cannot disable cleanup. */
+export function resolveTaskSessionPlannerTimeoutMs(
+  value = process.env.PI_DECK_TASK_SESSION_PLANNER_TIMEOUT_MS,
+): number {
+  if (value === undefined || value.trim() === "")
+    return TASK_SESSION_PLANNER_TIMEOUT_MS;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0
+    ? parsed
+    : TASK_SESSION_PLANNER_TIMEOUT_MS;
+}
 
 export function buildTaskSessionPlannerPrompt(input: {
   originalPrompt: string;
@@ -41,7 +54,15 @@ export function parseTaskSessionPlannerResponse(
   if (typeof response !== "string" || response.length > MAX_RESPONSE) {
     throw new Error("Planner response is too large.");
   }
-  const parsed = JSON.parse(extractJsonObject(response)) as unknown;
+  const text = response.trim();
+  let parsed: unknown;
+  try {
+    // Prefer an exact response, including a top-level object with trailing braces
+    // inside quoted strings, before looking for an object in model prose.
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = JSON.parse(extractJsonObject(text));
+  }
   if (
     !isRecord(parsed) ||
     typeof parsed.contextSummary !== "string" ||
@@ -110,7 +131,6 @@ function extractJsonObject(value: string): string {
   const text = typeof value === "string" ? value.trim() : "";
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)?.[1];
   const candidate = fenced?.trim() || text;
-  if (candidate.startsWith("{") && candidate.endsWith("}")) return candidate;
   const start = candidate.indexOf("{");
   if (start < 0) throw new Error("Planner response contains no JSON object.");
   let depth = 0;

@@ -205,6 +205,7 @@ import {
   buildTaskSessionPlannerPrompt,
   fallbackTaskSessionPlan,
   parseTaskSessionPlannerResponse,
+  resolveTaskSessionPlannerTimeoutMs,
 } from "./multitask/taskSessionPlanner.js";
 import { deliverWithAttachmentConsumption } from "./attachmentDelivery.js";
 import {
@@ -284,6 +285,14 @@ let taskSessionOrchestrator:
   | undefined;
 const taskSessionSettings = new Map<string, TaskSessionWorkerSettings>();
 const taskSessionSynthesisTails = new Map<string, Promise<void>>();
+type TaskSessionPlannerRun = {
+  cancelled: boolean;
+  cancel(): void;
+  closeWorker?: () => Promise<void>;
+};
+// Planner workers are not task-session workers, so they need their own parent
+// ownership registry for close/delete races and allocation timeouts.
+const taskSessionPlannerRuns = new Map<string, Set<TaskSessionPlannerRun>>();
 type ChatBackendMode = "fake" | "real";
 
 let chatAdapter: SinglePiAdapter | undefined;
@@ -788,15 +797,19 @@ function registerIpcHandlers(
           (attachment) => attachment.selectedPathToken,
         ),
         deliver: async () =>
-          adapter.followUp(
-            activeRuntimeId,
-            await buildPromptInputWithImagePolicy(
-              store,
-              adapter,
+          // Follow-ups share the parent turn queue with synthesis. Steer is
+          // intentionally not queued: it is an intervention in the live turn.
+          queueTaskSessionParentTurn(activeRuntimeId, async () =>
+            adapter.followUp(
               activeRuntimeId,
-              text,
-              promptAttachments,
-              attachmentOwnerId,
+              await buildPromptInputWithImagePolicy(
+                store,
+                adapter,
+                activeRuntimeId,
+                text,
+                promptAttachments,
+                attachmentOwnerId,
+              ),
             ),
           ),
       });
@@ -3041,6 +3054,7 @@ async function closeAttachedChatRuntime(
   }
   try {
     delegationBridge?.removeParent(runtimeId);
+    cancelTaskSessionPlanners(runtimeId);
     await taskSessionOrchestrator?.removeParent(runtimeId);
     await multitaskSupervisor?.removeParent(runtimeId);
     if (adapter.hasRuntime(runtimeId)) {
@@ -3089,6 +3103,7 @@ function forgetChatRuntime(
       delegateCalls.delete(key);
     }
   }
+  cancelTaskSessionPlanners(runtimeId);
   void taskSessionOrchestrator?.removeParent(runtimeId);
   taskSessionSettings.delete(runtimeId);
   taskSessionSynthesisTails.delete(runtimeId);
@@ -3204,6 +3219,14 @@ async function planTaskSession(
     ) {
       throw error;
     }
+    if (
+      error instanceof Error &&
+      error.message === "Planner inherited model/thinking setup failed."
+    ) {
+      diagnostics?.recordError(
+        "Task-session planner could not inherit the parent model/thinking configuration.",
+      );
+    }
     // Planning must never turn a new-task submission into parent execution.
     const plan = fallbackTaskSessionPlan(prompt, parentContext);
     ensureTaskSessionStillParallel(parentId);
@@ -3219,6 +3242,10 @@ function ensureTaskSessionStillParallel(parentId: string): void {
   }
 }
 
+function cancelTaskSessionPlanners(parentId: string): void {
+  for (const run of taskSessionPlannerRuns.get(parentId) ?? []) run.cancel();
+}
+
 async function runTaskSessionPlanner(
   adapter: SinglePiAdapter,
   store: SettingsStore,
@@ -3231,71 +3258,123 @@ async function runTaskSessionPlanner(
   const projectId = chatRuntimeProjectIds.get(parentId);
   if (!parentMode || !cwd)
     throw new Error("Task-session parent is no longer attached.");
-  const worker = await capacity.allocate(
-    async () => (await store.get()).maxRunningSessions,
-    () =>
-      parentMode === "fake"
-        ? adapter.createWorker({
-            command: process.execPath,
-            args: [
-              path.join(__dirname, "pi/fakeRpc/fakeRpcServer.js"),
-              "--stream-delay-ms",
-              "10",
-            ],
-            cwd,
-            env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
-          })
-        : createRealDelegatedWorker(adapter, store, cwd, projectId),
-  );
-  try {
-    const parentState = await adapter.getRuntimeStatus(parentId);
-    if (
-      typeof parentState.provider === "string" &&
-      typeof parentState.model === "string"
-    ) {
-      await worker.request("set_model", {
-        provider: parentState.provider,
-        modelId: parentState.model,
-      });
-    }
-    if (typeof parentState.thinkingLevel === "string") {
-      await worker.request("set_thinking_level", {
-        level: parentState.thinkingLevel,
-      });
-    }
-    const result = new Promise<string>((resolve, reject) => {
-      let settled = false;
-      let unsubscribe: () => void = () => undefined;
-      const finish = (fn: () => void) => {
-        if (settled) return;
-        settled = true;
-        unsubscribe();
-        fn();
-      };
-      unsubscribe = worker.onEvent((event) => {
-        if (event.type === "agent_end") {
-          void worker.getMessages().then(
-            (messages) => {
-              const last = messages.at(-1);
-              finish(() =>
-                resolve(typeof last?.content === "string" ? last.content : ""),
-              );
-            },
-            (error) => finish(() => reject(error)),
-          );
-        } else if (event.type === "worker_exit") {
-          finish(() =>
-            reject(new Error("Planner worker exited before returning a plan.")),
-          );
+
+  const runs = taskSessionPlannerRuns.get(parentId) ?? new Set();
+  taskSessionPlannerRuns.set(parentId, runs);
+  const run: TaskSessionPlannerRun = {
+    cancelled: false,
+    cancel: () => {
+      run.cancelled = true;
+      void run.closeWorker?.().catch(() => undefined);
+    },
+  };
+  runs.add(run);
+  const timeoutMs = resolveTaskSessionPlannerTimeoutMs();
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      run.cancel();
+      reject(new Error(`Task-session planner timed out after ${timeoutMs}ms.`));
+    }, timeoutMs);
+  });
+  const operation = (async (): Promise<string> => {
+    let worker: ReturnType<SinglePiAdapter["createWorker"]> | undefined;
+    try {
+      // The deadline starts before allocation and remains in force through
+      // inherited configuration, prompt delivery, and terminal-event waiting.
+      worker = await capacity.allocate(
+        async () => (await store.get()).maxRunningSessions,
+        () =>
+          parentMode === "fake"
+            ? adapter.createWorker({
+                command: process.execPath,
+                args: [
+                  path.join(__dirname, "pi/fakeRpc/fakeRpcServer.js"),
+                  "--stream-delay-ms",
+                  "10",
+                ],
+                cwd,
+                env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+              })
+            : createRealDelegatedWorker(adapter, store, cwd, projectId),
+      );
+      const plannerWorker = worker;
+      run.closeWorker = () => adapter.closeSession(plannerWorker.runtimeId);
+      if (run.cancelled) throw new Error("Task-session planner was cancelled.");
+      const parentState = await adapter.getRuntimeStatus(parentId);
+      try {
+        if (
+          typeof parentState.provider === "string" &&
+          typeof parentState.model === "string"
+        ) {
+          await plannerWorker.request("set_model", {
+            provider: parentState.provider,
+            modelId: parentState.model,
+          });
         }
+        if (typeof parentState.thinkingLevel === "string") {
+          await plannerWorker.request("set_thinking_level", {
+            level: parentState.thinkingLevel,
+          });
+        }
+      } catch (error) {
+        // This label is safe for diagnostics and distinguishes inherited setup
+        // from an invalid planner response or an ordinary prompt failure.
+        throw new Error("Planner inherited model/thinking setup failed.", {
+          cause: error,
+        });
+      }
+      if (run.cancelled) throw new Error("Task-session planner was cancelled.");
+      return await new Promise<string>((resolve, reject) => {
+        let settled = false;
+        let unsubscribe: () => void = () => undefined;
+        const finish = (fn: () => void) => {
+          if (settled) return;
+          settled = true;
+          unsubscribe();
+          fn();
+        };
+        unsubscribe = plannerWorker.onEvent((event) => {
+          if (event.type === "agent_end") {
+            void plannerWorker.getMessages().then(
+              (messages) => {
+                const last = messages.at(-1);
+                finish(() =>
+                  resolve(
+                    typeof last?.content === "string" ? last.content : "",
+                  ),
+                );
+              },
+              (error) => finish(() => reject(error)),
+            );
+          } else if (event.type === "worker_exit") {
+            finish(() =>
+              reject(
+                new Error("Planner worker exited before returning a plan."),
+              ),
+            );
+          }
+        });
+        void plannerWorker
+          .prompt({ text: plannerPrompt })
+          .catch((error) => finish(() => reject(error)));
       });
-      void worker
-        .prompt({ text: plannerPrompt })
-        .catch((error) => finish(() => reject(error)));
-    });
-    return await result;
+    } finally {
+      await run.closeWorker?.().catch(() => undefined);
+    }
+  })();
+  // Keep a timed-out allocation registered until it resolves, so a late worker
+  // is immediately closed rather than escaping parent cleanup.
+  void operation
+    .finally(() => {
+      runs.delete(run);
+      if (runs.size === 0) taskSessionPlannerRuns.delete(parentId);
+    })
+    .catch(() => undefined);
+  try {
+    return await Promise.race([operation, timeout]);
   } finally {
-    await adapter.closeSession(worker.runtimeId).catch(() => undefined);
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -3430,11 +3509,9 @@ async function synthesizeTaskSession(
   const synthesis = async (): Promise<void> => {
     if (!adapter.hasRuntime(input.parentId)) return;
     const text = `Task-session synthesis for: ${input.originalPrompt}\n\n${report}`;
-    const status = await adapter.getRuntimeStatus(input.parentId);
-    // Do not race a live parent turn. Pi serializes follow-ups behind it;
-    // otherwise a normal prompt starts the synthesis turn.
-    if (status.isAgentActive) await adapter.followUp(input.parentId, { text });
-    else await adapter.prompt(input.parentId, { text });
+    // Always follow up. The parent turn queue puts this behind an active or
+    // queued normal turn; steer remains the sole immediate intervention path.
+    await adapter.followUp(input.parentId, { text });
   };
   await queueTaskSessionParentTurn(input.parentId, synthesis);
 }
@@ -3829,6 +3906,7 @@ async function closeChatWorker(): Promise<void> {
   await Promise.all(
     runtimeIds.map(async (runtimeId) => {
       delegationBridge?.removeParent(runtimeId);
+      cancelTaskSessionPlanners(runtimeId);
       await taskSessionOrchestrator?.removeParent(runtimeId);
       await multitaskSupervisor?.removeParent(runtimeId);
     }),

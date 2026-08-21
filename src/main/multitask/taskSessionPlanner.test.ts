@@ -4,6 +4,8 @@ import {
   buildTaskSessionPlannerPrompt,
   fallbackTaskSessionPlan,
   parseTaskSessionPlannerResponse,
+  resolveTaskSessionPlannerTimeoutMs,
+  TASK_SESSION_PLANNER_TIMEOUT_MS,
 } from "./taskSessionPlanner.js";
 
 describe("task-session planner", () => {
@@ -31,6 +33,30 @@ describe("task-session planner", () => {
       contextSummary: "x",
       tasks: [{ generatedName: "A" }],
     });
+  });
+
+  test("extracts the first balanced object despite quoted and trailing braces", () => {
+    expect(
+      parseTaskSessionPlannerResponse(
+        'Model note: {"contextSummary":"brace } in a quoted string","tasks":[{"generatedName":"A","brief":"Do { A }"}]} trailing } prose',
+      ),
+    ).toMatchObject({
+      contextSummary: "brace } in a quoted string",
+      tasks: [{ generatedName: "A", brief: "Do { A }" }],
+    });
+  });
+
+  test("uses a bounded planner timeout default", () => {
+    expect(resolveTaskSessionPlannerTimeoutMs(undefined)).toBe(
+      TASK_SESSION_PLANNER_TIMEOUT_MS,
+    );
+    expect(resolveTaskSessionPlannerTimeoutMs("25")).toBe(25);
+    expect(resolveTaskSessionPlannerTimeoutMs("0")).toBe(
+      TASK_SESSION_PLANNER_TIMEOUT_MS,
+    );
+    expect(resolveTaskSessionPlannerTimeoutMs("not-a-number")).toBe(
+      TASK_SESSION_PLANNER_TIMEOUT_MS,
+    );
   });
 
   test("rejects malformed and oversized plans", () => {
