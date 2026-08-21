@@ -34,7 +34,9 @@ export function TaskSessionPanel({
         {tasks.map((task) => (
           <article key={task.taskNumber} role="listitem">
             <div className="task-session-panel__title">
-              <strong>{`#${task.taskNumber} ${task.generatedName}`}</strong>
+              <strong title={`#${task.taskNumber} ${task.generatedName}`}>
+                {`#${task.taskNumber} ${task.generatedName}`}
+              </strong>
               <span data-lifecycle={task.lifecycle}>{task.lifecycle}</span>
             </div>
             <p className="task-session-panel__brief" title={task.brief}>

@@ -3606,14 +3606,20 @@ test.describe("task-session routing acceptance", () => {
         )
         .toEqual({ retried: true, failedAtFour: true });
 
-      // Rows are transient: synthesis removes them only after its parent response.
+      // The parent receives every successful handoff and the attempt-4 failure.
+      const synthesizedReport = page
+        .getByLabel("Chat / Agent Timeline")
+        .locator(".assistant-message")
+        .last();
+      await expect(synthesizedReport).toContainText(
+        "#1 Inventory affected files: Ordinary routing fixture accepted",
+        { timeout: 30_000 },
+      );
+      await expect(synthesizedReport).toContainText(
+        "#3 Verify regression coverage: Configured task failure on attempt 4.",
+      );
+      // Rows are transient and clear only after that parent report completes.
       await expect(panel).toHaveCount(0, { timeout: 30_000 });
-      await expect(
-        page
-          .getByLabel("Chat / Agent Timeline")
-          .getByText(/Ordinary routing fixture accepted/)
-          .last(),
-      ).toBeVisible();
       expect(fs.readFileSync(traceFile, "utf8")).toContain("ordinary_prompt");
       expect(fs.readFileSync(traceFile, "utf8")).not.toContain("deck_delegate");
     } finally {
@@ -3640,7 +3646,7 @@ test.describe("task-session routing acceptance", () => {
     fs.writeFileSync(
       fixture,
       JSON.stringify({
-        tasks: [{ name: "Inspect supplied image", lifecycle: "completed" }],
+        tasks: [{ name: "Inspect supplied image", lifecycle: "interrupted" }],
       }),
     );
     const { app, page } = await launchPiDeck({
@@ -3689,10 +3695,6 @@ test.describe("task-session routing acceptance", () => {
         });
         if (!imported.selected) throw new Error("Image import was cancelled.");
         const token = imported.attachments[0]!.selectedPathToken;
-        const states: Array<{ tasks: Array<{ lifecycle: string }> }> = [];
-        const stop = window.piDeck.multitask.onState((state) =>
-          states.push(state),
-        );
         await window.piDeck.chat.prompt({
           runtimeId,
           text: "Inspect the supplied image privately.",
@@ -3712,28 +3714,31 @@ test.describe("task-session routing acceptance", () => {
         } catch (error) {
           reusedError = error instanceof Error ? error.message : String(error);
         }
-        return { runtimeId, states, reusedError, token };
+        return { runtimeId, reusedError, token };
       }, tinyPngBase64());
       expect(result.reusedError).toMatch(/no longer available|reselect/i);
       await expect
-        .poll(async () =>
+        .poll(() =>
           page.evaluate(
             async (runtimeId) =>
-              (await window.piDeck.multitask.getMode({ runtimeId })).tasks
-                .length,
+              (await window.piDeck.multitask.getMode({ runtimeId })).tasks[0]
+                ?.lifecycle,
             result.runtimeId,
           ),
         )
-        .toBe(0);
+        .toBe("running");
       await expect
         .poll(() =>
           fs.existsSync(traceFile) ? fs.readFileSync(traceFile, "utf8") : "",
         )
         .toContain("prompt_images:1");
-      const persisted = fs.readFileSync(
-        path.join(userDataDir, "task-session-state.json"),
-        "utf8",
-      );
+      const statePath = path.join(userDataDir, "task-session-state.json");
+      await expect
+        .poll(() =>
+          fs.existsSync(statePath) ? fs.readFileSync(statePath, "utf8") : "",
+        )
+        .toContain('"lifecycle":"running"');
+      const persisted = fs.readFileSync(statePath, "utf8");
       expect(persisted).not.toContain(result.token);
       expect(persisted).not.toContain(tinyPngBase64());
     } finally {
@@ -3748,6 +3753,7 @@ test.describe("task-session routing acceptance", () => {
     );
     const projectCwd = path.join(root, "project");
     const agentDir = path.join(root, "agent");
+    const traceFile = path.join(root, "restart-trace.log");
     const fixture = path.join(root, "interrupted-plan.json");
     for (const directory of [projectCwd, agentDir])
       fs.mkdirSync(directory, { recursive: true });
@@ -3767,11 +3773,19 @@ test.describe("task-session routing acceptance", () => {
         root,
         projectCwd,
         agentDir,
-        fakePiArgs: ["--stream-delay-ms", "250"],
+        fakePiArgs: [
+          "--prompt-scenario",
+          "routing",
+          "--fixture-trace-file",
+          traceFile,
+          "--stream-delay-ms",
+          "250",
+        ],
       }),
       PI_DECK_TEST_TASK_ROUTING_FIXTURE: fixture,
     };
 
+    let privatePromptCountBeforeRestart = 0;
     const first = await launchPiDeck(env);
     try {
       await expectHealthyPreload(first.page);
@@ -3787,6 +3801,13 @@ test.describe("task-session routing acceptance", () => {
         .getByRole("listitem");
       await expect(row).toContainText("#1 Long private task");
       await expect(row.locator('[data-lifecycle="running"]')).toBeVisible();
+      await expect
+        .poll(() =>
+          fs.existsSync(traceFile) ? fs.readFileSync(traceFile, "utf8") : "",
+        )
+        .toContain("ordinary_prompt");
+      privatePromptCountBeforeRestart =
+        fs.readFileSync(traceFile, "utf8").split("ordinary_prompt").length - 1;
     } finally {
       await first.app.close();
     }
@@ -3827,6 +3848,13 @@ test.describe("task-session routing acceptance", () => {
         }),
       ]);
       expect(runtimeState.activeCount).toBe(0);
+      await second.page.waitForTimeout(500);
+      const privatePromptCountAfterRestart = fs.existsSync(traceFile)
+        ? fs.readFileSync(traceFile, "utf8").split("ordinary_prompt").length - 1
+        : 0;
+      expect(privatePromptCountAfterRestart).toBe(
+        privatePromptCountBeforeRestart,
+      );
     } finally {
       await second.app.close();
       if (process.env.PI_DECK_E2E_KEEP_REAL_SMOKE_ARTIFACTS !== "1")

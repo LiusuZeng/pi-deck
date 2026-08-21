@@ -747,14 +747,16 @@ class FakeRpcServer {
     const chunks =
       decision !== undefined
         ? [String(decision)]
-        : this.options.promptScenario === "routing"
-          ? [
-              "Ordinary routing fixture accepted ",
-              `(${this.options.taskRoutingFixture ?? "default"}).`,
-            ]
-          : this.options.productionShaped
-            ? ["I’ll review the workspace", " and summarize the next steps."]
-            : ["Fake response", " to: ", text || "(empty prompt)"];
+        : text.startsWith("Task-session synthesis for:")
+          ? ["Synthesis observed:\n", text]
+          : this.options.promptScenario === "routing"
+            ? [
+                "Ordinary routing fixture accepted ",
+                `(${this.options.taskRoutingFixture ?? "default"}).`,
+              ]
+            : this.options.productionShaped
+              ? ["I’ll review the workspace", " and summarize the next steps."]
+              : ["Fake response", " to: ", text || "(empty prompt)"];
     let accumulated = "";
     chunks.forEach((chunk, index) => {
       this.currentTimers.push(

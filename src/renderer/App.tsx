@@ -806,6 +806,7 @@ export function App(): ReactElement {
   const [workerOverrides, setWorkerOverrides] = useState<
     Record<string, ParallelWorkerSettings>
   >({});
+  const workerSettingsGenerationRef = useRef<Record<string, number>>({});
   const [currentProject, setCurrentProject] = useState<ProjectRef>(() => ({
     id: "pending-project",
     path: "Resolving project…",
@@ -4291,6 +4292,9 @@ export function App(): ReactElement {
       }
       onUpdateWorkerDefaults={(settings) => {
         const previousSettings = multitaskState?.settings ?? {};
+        const generation =
+          (workerSettingsGenerationRef.current[selectedSession.id] ?? 0) + 1;
+        workerSettingsGenerationRef.current[selectedSession.id] = generation;
         setMultitask((current) => ({
           ...current,
           [selectedSession.id]: {
@@ -4307,7 +4311,12 @@ export function App(): ReactElement {
         if (!selectedSession.runtimeBacked) return;
         void window.piDeck.multitask
           .updateSettings({ runtimeId: selectedSession.id, settings })
-          .then((updated) =>
+          .then((updated) => {
+            if (
+              workerSettingsGenerationRef.current[selectedSession.id] !==
+              generation
+            )
+              return;
             setMultitask((current) => ({
               ...current,
               [selectedSession.id]: {
@@ -4320,9 +4329,14 @@ export function App(): ReactElement {
                 }),
                 settings: updated,
               },
-            })),
-          )
+            }));
+          })
           .catch((error) => {
+            if (
+              workerSettingsGenerationRef.current[selectedSession.id] !==
+              generation
+            )
+              return;
             setMultitask((current) => ({
               ...current,
               [selectedSession.id]: {

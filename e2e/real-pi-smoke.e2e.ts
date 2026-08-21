@@ -33,6 +33,15 @@ function resolvePiBinary(): string | undefined {
   return undefined;
 }
 
+function requirePiBinary(): string {
+  const piBinary = resolvePiBinary();
+  if (!piBinary)
+    throw new Error(
+      "Real-Pi release validation requires an installed Pi binary; a skipped smoke test is not release evidence.",
+    );
+  return piBinary;
+}
+
 async function launchPiDeck(
   env: NodeJS.ProcessEnv,
 ): Promise<{ app: ElectronApplication; page: Page }> {
@@ -85,8 +94,7 @@ test("real Pi Agent Workflow: real worker persists run, session, and graph acros
   test.setTimeout(
     Number(process.env.PI_DECK_E2E_REAL_SMOKE_TIMEOUT_MS ?? 240_000),
   );
-  const piBinary = resolvePiBinary();
-  test.skip(!piBinary, "Pi binary not found");
+  const piBinary = requirePiBinary();
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-real-workflow-"));
   const userDataDir = path.join(root, "user-data");
@@ -295,8 +303,7 @@ test("real Pi bridge transport: default workspace prompt, resume, and explicit d
   test.setTimeout(
     Number(process.env.PI_DECK_E2E_REAL_SMOKE_TIMEOUT_MS ?? 240_000),
   );
-  const piBinary = resolvePiBinary();
-  test.skip(!piBinary, "Pi binary not found");
+  const piBinary = requirePiBinary();
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-real-p0-"));
   const userDataDir = path.join(root, "user-data");
@@ -523,8 +530,7 @@ test("real Pi: draft parallel opt-in delegates from its first prompt", async () 
   test.setTimeout(
     Number(process.env.PI_DECK_E2E_REAL_SMOKE_TIMEOUT_MS ?? 240_000),
   );
-  const piBinary = resolvePiBinary();
-  test.skip(!piBinary, "Pi binary not found");
+  const piBinary = requirePiBinary();
 
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-real-draft-multitask-"),
@@ -648,8 +654,7 @@ test("real Pi production routing plans multiple private task sessions without br
   test.setTimeout(
     Number(process.env.PI_DECK_E2E_REAL_SMOKE_TIMEOUT_MS ?? 300_000),
   );
-  const piBinary = resolvePiBinary();
-  test.skip(!piBinary, "Pi binary not found");
+  const piBinary = requirePiBinary();
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-real-planner-"));
   const userDataDir = path.join(root, "user-data");

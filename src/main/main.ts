@@ -3720,6 +3720,8 @@ async function synthesizeTaskSession(
     let cancelSettledWait: () => void = () => undefined;
     const settled = new Promise<void>((resolve, reject) => {
       let finished = false;
+      let sawAgentEnd = false;
+      let latestAgentFailure: string | undefined;
       let unsubscribe: () => void = () => undefined;
       const timeout = setTimeout(
         () => {
@@ -3736,10 +3738,21 @@ async function synthesizeTaskSession(
       };
       cancelSettledWait = () => finish(resolve);
       unsubscribe = worker.onEvent((event) => {
-        if (event.type === "agent_settled") finish(resolve);
-        else if (!active && event.type === "agent_end") {
-          const failure = agentEndFailure(event);
-          if (failure) finish(() => reject(new Error(failure)));
+        if (event.type === "agent_end") {
+          sawAgentEnd = true;
+          latestAgentFailure = agentEndFailure(event);
+          if (!active) {
+            if (latestAgentFailure)
+              finish(() => reject(new Error(latestAgentFailure)));
+            else finish(resolve);
+          }
+        } else if (event.type === "agent_settled") {
+          if (!sawAgentEnd)
+            finish(() =>
+              reject(new Error("Parent synthesis settled without a report.")),
+            );
+          else if (latestAgentFailure)
+            finish(() => reject(new Error(latestAgentFailure)));
           else finish(resolve);
         } else if (event.type === "worker_exit")
           finish(() =>

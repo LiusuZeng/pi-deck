@@ -3057,7 +3057,19 @@ summary::marker {
   color: var(--color-text-muted);
 }
 
+.task-session-panel__title {
+  min-width: 0;
+}
+
+.task-session-panel__title > strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .task-session-panel__title > span {
+  flex: 0 0 auto;
   text-transform: capitalize;
 }
 
