@@ -2,7 +2,7 @@
 
 Date: 2026-08-21  
 Branch: `feature/parallel-task-sessions`  
-Validated commit: `b5bad18f39c4647dbb0aadbac8a791af46faf4ad`
+Validated code commit: `f8fd3835407112f3f7f3fd52f3635ad89b2d2cdd`
 
 This is integration evidence only. The branch has not been pushed, merged to
 `main`, tagged, or released.
