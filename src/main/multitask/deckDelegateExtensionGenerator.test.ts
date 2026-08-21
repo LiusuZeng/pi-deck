@@ -86,6 +86,12 @@ describe("Deck delegate extension source generator", () => {
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain('type: "mode-query"');
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain('type: "mode-state"');
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain(
+      'registerCommand("deck-task-prompt"',
+    );
+    expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain(
+      'appendEntry("deck_task_prompt"',
+    );
+    expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain(
       "queryMode(config.endpoint, config.capability)",
     );
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain(

@@ -610,14 +610,21 @@ class FakeRpcServer {
         : typeof params.text === "string"
           ? params.text
           : "";
+    const recordedTaskPrompt = this.decodeTaskSessionPrompt(text);
     const userMessage: PiMessage = {
       id: `msg_user_${this.promptCounter + 1}`,
       role: "user",
-      content: text,
+      content: recordedTaskPrompt ?? text,
       createdAt: Date.now(),
     };
     this.messages.push(userMessage);
     this.appendPersistedMessage(userMessage);
+    if (recordedTaskPrompt !== undefined) {
+      this.promptCounter += 1;
+      this.respond(command.id, "prompt");
+      this.traceFixture("task_session_prompt_recorded");
+      return;
+    }
     if (this.options.promptScenario === "routing") {
       this.traceFixture("ordinary_prompt");
     }
@@ -683,6 +690,7 @@ class FakeRpcServer {
         messages: [failedAssistant],
         willRetry: false,
       });
+      this.write({ type: "agent_settled" });
       return;
     }
 
@@ -702,6 +710,24 @@ class FakeRpcServer {
       return;
     }
     this.completePrompt(assistantId, text);
+  }
+
+  private decodeTaskSessionPrompt(text: string): string | undefined {
+    const prefix = "/deck-task-prompt ";
+    if (!text.startsWith(prefix)) return undefined;
+    try {
+      const payload: unknown = JSON.parse(
+        Buffer.from(text.slice(prefix.length).trim(), "base64url").toString(
+          "utf8",
+        ),
+      );
+      const prompt = (payload as { prompt?: unknown }).prompt;
+      return typeof prompt === "string" && prompt.trim()
+        ? prompt.trim()
+        : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -770,6 +796,7 @@ class FakeRpcServer {
               runId: `run_${this.promptCounter}`,
               status: "completed",
             });
+            this.write({ type: "agent_settled" });
           }
         },
         this.options.streamDelayMs * (chunks.length + 1),
@@ -929,6 +956,7 @@ class FakeRpcServer {
       runId: `run_${this.promptCounter}`,
       status: "aborted",
     });
+    this.write({ type: "agent_settled" });
   }
 
   private emitQueueUpdate(): void {

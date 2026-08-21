@@ -374,6 +374,24 @@ export function createDeckDelegateTool(pi: ExtensionAPI) {
 }
 
 export default function deckDelegateExtension(pi: ExtensionAPI): void {
+  pi.registerCommand("deck-task-prompt", {
+    description: "Record a Pi Deck task-session prompt without starting a parent turn.",
+    handler: async (args) => {
+      try {
+        const decoded = Buffer.from(args.trim(), "base64url").toString("utf8");
+        const payload = JSON.parse(decoded) as { prompt?: unknown };
+        if (typeof payload.prompt !== "string" || !payload.prompt.trim() || payload.prompt.length > MAX_TASK_CHARS) {
+          throw new Error("invalid task-session prompt");
+        }
+        const prompt = payload.prompt.trim();
+        pi.appendEntry("deck_task_prompt", { prompt });
+        if (!pi.getSessionName()) pi.setSessionName(prompt.slice(0, MAX_NAME_CHARS));
+      } catch {
+        throw new Error("Pi Deck task-session prompt could not be recorded");
+      }
+    },
+  });
+
   // This hook runs before each agent start. It queries Deck over the
   // capability-bound bridge rather than inferring mode from conversation text.
   pi.on("before_agent_start", async (event) => {

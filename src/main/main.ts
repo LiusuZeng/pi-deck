@@ -717,6 +717,7 @@ function registerIpcHandlers(
             "New task sessions are available only in Parallel mode.",
           );
         }
+        await recordTaskSessionPrompt(adapter, activeRuntimeId, text);
         await orchestrator.submit(
           activeRuntimeId,
           text,
@@ -3247,6 +3248,19 @@ async function planTaskSession(
   }
 }
 
+async function recordTaskSessionPrompt(
+  adapter: SinglePiAdapter,
+  parentId: string,
+  prompt: string,
+): Promise<void> {
+  const encoded = Buffer.from(JSON.stringify({ prompt }), "utf8").toString(
+    "base64url",
+  );
+  await adapter.prompt(parentId, {
+    text: `/deck-task-prompt ${encoded}`,
+  });
+}
+
 function ensureTaskSessionStillParallel(parentId: string): void {
   if (
     getTaskSessionOrchestrator(parentId).state(parentId).mode !== "parallel"
@@ -3305,6 +3319,7 @@ async function runTaskSessionPlanner(
                   path.join(__dirname, "pi/fakeRpc/fakeRpcServer.js"),
                   "--stream-delay-ms",
                   "10",
+                  "--no-session",
                 ],
                 cwd,
                 env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
@@ -3352,11 +3367,7 @@ async function runTaskSessionPlanner(
             void plannerWorker.getMessages().then(
               (messages) => {
                 const last = messages.at(-1);
-                finish(() =>
-                  resolve(
-                    typeof last?.content === "string" ? last.content : "",
-                  ),
-                );
+                finish(() => resolve(piMessageText(last)));
               },
               (error) => finish(() => reject(error)),
             );
@@ -3396,6 +3407,7 @@ async function createTaskSessionWorker(
   store: SettingsStore,
   launch: TaskSessionLaunch<string>,
 ): Promise<{ close(): Promise<void> }> {
+  const testBehavior = await taskSessionFixtureBehavior(launch.taskNumber);
   const capacity = getChatWorkerCapacity();
   const parentMode = chatRuntimeModes.get(launch.parentId);
   const cwd = chatWorkerCwds.get(launch.parentId);
@@ -3412,6 +3424,7 @@ async function createTaskSessionWorker(
               path.join(__dirname, "pi/fakeRpc/fakeRpcServer.js"),
               "--stream-delay-ms",
               "10",
+              "--no-session",
             ],
             cwd,
             env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
@@ -3425,15 +3438,28 @@ async function createTaskSessionWorker(
       launch.callbacks.waitingForParent();
     if (event.type === "agent_end" || event.type === "worker_exit") {
       ended = true;
+      if (testBehavior?.lifecycle === "interrupted") {
+        // Test-only crash fixture: retain a running trace until app teardown so
+        // restart recovery can prove that no private worker is resumed.
+        return;
+      }
       void worker
         .getMessages()
         .then((messages) => {
+          if (
+            testBehavior?.lifecycle === "failed" &&
+            launch.attempt <= testBehavior.attempts
+          ) {
+            launch.callbacks.failed(
+              new Error(
+                `Configured task failure on attempt ${launch.attempt}.`,
+              ),
+            );
+            return;
+          }
           const last = messages.at(-1);
           launch.callbacks.completed({
-            summary:
-              typeof last?.content === "string"
-                ? conciseTaskHandoff(last.content)
-                : "Task completed.",
+            summary: conciseTaskHandoff(piMessageText(last)),
           });
         })
         .catch((error) => launch.callbacks.failed(error));
@@ -3473,6 +3499,42 @@ async function createTaskSessionWorker(
   return { close: () => adapter.closeSession(worker.runtimeId) };
 }
 
+async function taskSessionFixtureBehavior(
+  taskNumber: number,
+): Promise<
+  | { lifecycle: "completed" | "failed" | "interrupted"; attempts: number }
+  | undefined
+> {
+  const fixturePath = process.env.PI_DECK_TEST_TASK_ROUTING_FIXTURE;
+  if (!fixturePath) return undefined;
+  try {
+    const fixture: unknown = JSON.parse(await fs.readFile(fixturePath, "utf8"));
+    const task = (fixture as { tasks?: unknown[] }).tasks?.[taskNumber - 1];
+    if (!task || typeof task !== "object") return undefined;
+    const lifecycle = (task as { lifecycle?: unknown }).lifecycle;
+    if (
+      lifecycle !== "completed" &&
+      lifecycle !== "failed" &&
+      lifecycle !== "interrupted"
+    )
+      return undefined;
+    const configuredAttempts = (task as { attempts?: unknown }).attempts;
+    return {
+      lifecycle,
+      attempts:
+        typeof configuredAttempts === "number" &&
+        Number.isSafeInteger(configuredAttempts) &&
+        configuredAttempts > 0
+          ? Math.min(configuredAttempts, 4)
+          : lifecycle === "failed"
+            ? 4
+            : 1,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 function queueTaskSessionParentTurn(
   parentId: string,
   turn: () => Promise<void>,
@@ -3488,6 +3550,21 @@ function queueTaskSessionParentTurn(
     })
     .catch(() => undefined);
   return queued;
+}
+
+function piMessageText(message: unknown): string {
+  if (!message || typeof message !== "object") return "";
+  const content = (message as { content?: unknown }).content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => {
+      if (typeof part === "string") return part;
+      if (!part || typeof part !== "object") return "";
+      const text = (part as { text?: unknown }).text;
+      return typeof text === "string" ? text : "";
+    })
+    .join("");
 }
 
 function conciseTaskHandoff(value: string) {
@@ -3521,10 +3598,48 @@ async function synthesizeTaskSession(
     .join("\n");
   const synthesis = async (): Promise<void> => {
     if (!adapter.hasRuntime(input.parentId)) return;
+    const worker = adapter.getWorker(input.parentId);
     const text = `Task-session synthesis for: ${input.originalPrompt}\n\n${report}`;
-    // Always follow up. The parent turn queue puts this behind an active or
-    // queued normal turn; steer remains the sole immediate intervention path.
-    await adapter.followUp(input.parentId, { text });
+    const status = await adapter.getRuntimeStatus(input.parentId);
+    const active = status.isAgentActive === true || status.isStreaming === true;
+    let cancelSettledWait: () => void = () => undefined;
+    const settled = new Promise<void>((resolve, reject) => {
+      let finished = false;
+      let unsubscribe: () => void = () => undefined;
+      const timeout = setTimeout(
+        () => {
+          finish(() => reject(new Error("Parent synthesis timed out.")));
+        },
+        Number(process.env.PI_DECK_TASK_SYNTHESIS_TIMEOUT_MS ?? 180_000),
+      );
+      const finish = (complete: () => void) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timeout);
+        unsubscribe();
+        complete();
+      };
+      cancelSettledWait = () => finish(resolve);
+      unsubscribe = worker.onEvent((event) => {
+        if (
+          event.type === "agent_settled" ||
+          (!active && event.type === "agent_end")
+        )
+          finish(resolve);
+        else if (event.type === "worker_exit")
+          finish(() =>
+            reject(new Error("Parent closed before synthesis completed.")),
+          );
+      });
+    });
+    try {
+      if (active) await adapter.followUp(input.parentId, { text });
+      else await adapter.prompt(input.parentId, { text });
+      await settled;
+    } catch (error) {
+      cancelSettledWait();
+      throw error;
+    }
   };
   await queueTaskSessionParentTurn(input.parentId, synthesis);
 }
@@ -3555,6 +3670,7 @@ async function createDelegatedChild(
             path.join(__dirname, "pi/fakeRpc/fakeRpcServer.js"),
             "--stream-delay-ms",
             "10",
+            "--no-session",
           ],
           cwd,
           env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
@@ -3574,10 +3690,7 @@ async function createDelegatedChild(
         .then((messages) => {
           const last = messages.at(-1);
           callbacks.completed({
-            summary:
-              typeof last?.content === "string"
-                ? last.content.slice(0, 32_768)
-                : "Child completed.",
+            summary: conciseTaskHandoff(piMessageText(last)),
           });
         })
         .catch(() =>
@@ -3612,7 +3725,7 @@ async function createRealDelegatedWorker(
   const launch = await resolveRealChatLaunchConfig(store, project);
   return adapter.createWorker({
     command: launch.effective.config.piBinary,
-    args: ["--mode", "rpc", ...launch.effective.workerArgs],
+    args: ["--mode", "rpc", ...launch.effective.workerArgs, "--no-session"],
     cwd: launch.projectCwd,
     env: launch.effective.config.env,
     requestTimeoutMs: Number(process.env.PI_DECK_REAL_RPC_TIMEOUT_MS ?? 30_000),

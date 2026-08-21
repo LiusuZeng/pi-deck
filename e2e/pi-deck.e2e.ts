@@ -3449,7 +3449,7 @@ test.describe("task-session routing acceptance", () => {
           "--fixture-trace-file",
           traceFile,
           "--stream-delay-ms",
-          "100",
+          "500",
         ],
       }),
       PI_DECK_TEST_TASK_ROUTING_FIXTURE: routingFixture,
@@ -3525,10 +3525,9 @@ test.describe("task-session routing acceptance", () => {
               ).__taskStates ?? [];
             return states.some(
               (state) =>
-                state.tasks.some((task) => task.lifecycle === "queued") &&
-                state.tasks.some((task) =>
-                  ["starting", "running", "completed"].includes(task.lifecycle),
-                ),
+                state.activeCount === 10 &&
+                state.tasks.filter((task) => task.lifecycle === "queued")
+                  .length >= 2,
             );
           }),
         )
@@ -3565,6 +3564,39 @@ test.describe("task-session routing acceptance", () => {
         page.getByRole("button", { name: "Work inbox" }),
       ).toBeVisible();
 
+      // The configured failure retries three times after its initial attempt.
+      await expect
+        .poll(
+          () =>
+            page.evaluate(() => {
+              const states =
+                (
+                  window as typeof window & {
+                    __taskStates?: Array<{
+                      tasks: Array<{
+                        taskNumber: number;
+                        lifecycle: string;
+                        attempt: number;
+                      }>;
+                    }>;
+                  }
+                ).__taskStates ?? [];
+              const seen = states.flatMap((state) =>
+                state.tasks
+                  .filter((task) => task.taskNumber === 3)
+                  .map((task) => `${task.lifecycle}:${task.attempt}`),
+              );
+              return {
+                retried: [1, 2, 3].every((attempt) =>
+                  seen.includes(`retrying:${attempt}`),
+                ),
+                failedAtFour: seen.includes("failed:4"),
+              };
+            }),
+          { timeout: 30_000 },
+        )
+        .toEqual({ retried: true, failedAtFour: true });
+
       // Rows are transient: synthesis removes them only after its parent response.
       await expect(panel).toHaveCount(0, { timeout: 30_000 });
       await expect(
@@ -3585,110 +3617,95 @@ test.describe("task-session routing acceptance", () => {
     }
   });
 
-  test.skip("observes 10 active and two queued tasks in state history", async () => {
-    // BLOCKER: fake child workers have a fixed 10ms completion delay, so
-    // startup is serialized enough that this route never reaches ten live
-    // children. A configurable child delay is needed for this timing check.
-  });
-
-  test.skip("reports retry lifecycle through parent state history", async () => {
-    // BLOCKER: task-session fake workers are intentionally launched without
-    // the parent fake-RPC scenario, so no deterministic child failure exists
-    // to exercise retrying without adding a production test hook.
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-task-retry-"));
+  test("restart preserves interrupted trace without resuming private work", async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "pi-deck-task-restart-"),
+    );
     const projectCwd = path.join(root, "project");
     const agentDir = path.join(root, "agent");
-    fs.mkdirSync(projectCwd, { recursive: true });
-    fs.mkdirSync(agentDir, { recursive: true });
-    const fixture = path.join(root, "one-task.json");
+    const fixture = path.join(root, "interrupted-plan.json");
+    for (const directory of [projectCwd, agentDir])
+      fs.mkdirSync(directory, { recursive: true });
     fs.writeFileSync(
       fixture,
       JSON.stringify({
-        tasks: [{ name: "Retryable task", lifecycle: "failed" }],
+        tasks: [
+          {
+            name: "Long private task",
+            lifecycle: "interrupted",
+          },
+        ],
       }),
     );
-    const { app, page } = await launchPiDeck({
+    const env = {
       ...fakeRealModeEnv({
         root,
         projectCwd,
         agentDir,
-        fakePiArgs: [
-          "--prompt-scenario",
-          "error",
-          "--task-routing-fixture",
-          fixture,
-        ],
+        fakePiArgs: ["--stream-delay-ms", "250"],
       }),
       PI_DECK_TEST_TASK_ROUTING_FIXTURE: fixture,
-    });
+    };
+
+    const first = await launchPiDeck(env);
     try {
-      await expectHealthyPreload(page);
-      await page
+      await expectHealthyPreload(first.page);
+      await first.page
         .getByRole("button", { name: "Parallel multitasking: Off" })
         .click();
-      await page.evaluate(() => {
-        const w = window as typeof window & {
-          __retryStates?: unknown[];
-          __stopRetryStates?: () => void;
-        };
-        w.__retryStates = [];
-        w.__stopRetryStates = window.piDeck.multitask.onState((state) =>
-          w.__retryStates?.push(state),
-        );
-      });
-      await page.getByLabel("Prompt text").fill("Make this retry.");
-      await page.getByRole("button", { name: "Send" }).click();
-      await expect
-        .poll(() =>
-          page.evaluate(() => {
-            const states =
-              (
-                window as typeof window & {
-                  __retryStates?: Array<{
-                    tasks: Array<{ lifecycle: string; attempt: number }>;
-                  }>;
-                }
-              ).__retryStates ?? [];
-            return states.some((state) =>
-              state.tasks.some(
-                (task) => task.lifecycle === "retrying" && task.attempt === 1,
-              ),
-            );
-          }),
-        )
-        .toBe(true);
-      await expect
-        .poll(() =>
-          page.evaluate(() => {
-            const states =
-              (
-                window as typeof window & {
-                  __retryStates?: Array<{
-                    tasks: Array<{ lifecycle: string; attempt: number }>;
-                  }>;
-                }
-              ).__retryStates ?? [];
-            return states.some((state) =>
-              state.tasks.some(
-                (task) => task.lifecycle === "failed" && task.attempt === 4,
-              ),
-            );
-          }),
-        )
-        .toBe(true);
+      await first.page
+        .getByLabel("Prompt text")
+        .fill("Start work that will be interrupted by restart.");
+      await first.page.getByRole("button", { name: "Send" }).click();
+      const row = first.page
+        .getByRole("region", { name: "Parallel task sessions" })
+        .getByRole("listitem");
+      await expect(row).toContainText("#1 Long private task");
+      await expect(row.locator('[data-lifecycle="running"]')).toBeVisible();
     } finally {
-      await page.evaluate(() => {
-        const w = window as typeof window & { __stopRetryStates?: () => void };
-        w.__stopRetryStates?.();
-      });
-      await app.close();
-      fs.rmSync(root, { recursive: true, force: true });
+      await first.app.close();
     }
-  });
 
-  test.skip("restart parent timeline interruption trace", async () => {
-    // BLOCKER: restored interrupted handoff data is intentionally omitted from
-    // MultitaskStateEvent and is not projected into the parent timeline.
-    // Keep this targeted specification gated until that safe projection exists.
+    const second = await launchPiDeck(env);
+    try {
+      await expectHealthyPreload(second.page);
+      await selectWorkspaceInUi(second.page, "Default workspace");
+      const savedSession = second.page
+        .getByRole("button", { name: /^Session:/ })
+        .first();
+      await expect(savedSession).toBeVisible();
+      await savedSession.click();
+      await expect(second.page.locator(".multitask-control")).toBeEnabled({
+        timeout: 30_000,
+      });
+      const panel = second.page.getByRole("region", {
+        name: "Parallel task sessions",
+      });
+      const interrupted = panel.getByRole("listitem");
+      await expect(interrupted).toContainText("#1 Long private task");
+      await expect(
+        interrupted.locator('[data-lifecycle="interrupted"]'),
+      ).toBeVisible();
+      await expect(interrupted).toContainText("Attempt 1");
+      await expect(panel.getByText("0 active of 10")).toBeVisible();
+      const runtimeState = await second.page.evaluate(async () => {
+        const snapshot = await window.piDeck.chat.getSnapshot();
+        return window.piDeck.multitask.getMode({
+          runtimeId: snapshot.runtimeId,
+        });
+      });
+      expect(runtimeState.tasks).toEqual([
+        expect.objectContaining({
+          taskNumber: 1,
+          lifecycle: "interrupted",
+          attempt: 1,
+        }),
+      ]);
+      expect(runtimeState.activeCount).toBe(0);
+    } finally {
+      await second.app.close();
+      if (process.env.PI_DECK_E2E_KEEP_REAL_SMOKE_ARTIFACTS !== "1")
+        fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
