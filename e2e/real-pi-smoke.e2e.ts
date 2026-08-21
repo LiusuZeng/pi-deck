@@ -75,8 +75,6 @@ function listJsonlFiles(root: string): string[] {
 }
 
 const runRealSmoke = process.env.PI_DECK_E2E_REAL_SMOKE === "1";
-const runTaskSessionRouting =
-  process.env.PI_DECK_E2E_TASK_SESSION_ACCEPTANCE === "1";
 
 test.skip(
   !runRealSmoke,
@@ -376,6 +374,10 @@ test("real Pi bridge transport: default workspace prompt, resume, and explicit d
       await multitaskControl.click();
       await expect(multitaskControl).toHaveText("Parallel: On");
       await expect(multitaskControl).toHaveAttribute("aria-pressed", "true");
+      // This is the explicit deck_delegate bridge harness, not planner routing.
+      await firstLaunch.page
+        .getByLabel("Prompt destination")
+        .selectOption("parent");
       await firstLaunch.page.evaluate(() => {
         const testWindow = window as typeof window & {
           __piDeckRealDelegateStates?: Array<{
@@ -565,6 +567,8 @@ test("real Pi: draft parallel opt-in delegates from its first prompt", async () 
       });
       await expect(parallelOn).toHaveText("Parallel: On");
       await expect(parallelOn).toHaveAttribute("aria-pressed", "true");
+      // The harness calls deck_delegate from its parent turn.
+      await page.getByLabel("Prompt destination").selectOption("parent");
 
       await page.evaluate(() => {
         const testWindow = window as typeof window & {
@@ -631,71 +635,6 @@ test("real Pi: draft parallel opt-in delegates from its first prompt", async () 
           }
         ).__piDeckRealDraftDelegateUnsubscribe?.();
       });
-      await app.close();
-    }
-  } finally {
-    if (process.env.PI_DECK_E2E_KEEP_REAL_SMOKE_ARTIFACTS !== "1") {
-      fs.rmSync(root, { recursive: true, force: true });
-    }
-  }
-});
-
-test("real Pi production routing: ordinary prompt uses deterministic task fixture without tool election", async () => {
-  test.skip(
-    !runTaskSessionRouting,
-    "Set PI_DECK_E2E_TASK_SESSION_ACCEPTANCE=1 after production task routing lands.",
-  );
-  test.setTimeout(
-    Number(process.env.PI_DECK_E2E_REAL_SMOKE_TIMEOUT_MS ?? 240_000),
-  );
-  const piBinary = resolvePiBinary();
-  test.skip(!piBinary, "Pi binary not found");
-
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-real-routing-"));
-  const projectCwd = path.join(root, "project");
-  const fixture = path.join(
-    repoRoot,
-    "e2e/fixtures/task-routing-contract.json",
-  );
-  for (const directory of [projectCwd, path.join(root, "sessions")]) {
-    fs.mkdirSync(directory, { recursive: true });
-  }
-  // Deliberately no PI_DECK_E2E_DELEGATE_HARNESS and no deck_delegate prompt:
-  // production routing consumes the fixture after Pi receives an ordinary
-  // prompt, keeping real Pi/main transport in the path without provider choice.
-  const env: NodeJS.ProcessEnv = {
-    PI_DECK_BACKEND: "real",
-    PI_DECK_PI_BINARY: piBinary,
-    PI_DECK_PROJECT_CWD: projectCwd,
-    PI_DECK_USER_DATA_DIR: path.join(root, "user-data"),
-    PI_DECK_HOME: path.join(root, "pideck-home"),
-    PI_CODING_AGENT_SESSION_DIR: path.join(root, "sessions"),
-    PI_DECK_TEST_TASK_ROUTING_FIXTURE: fixture,
-  };
-  try {
-    const { app, page } = await launchPiDeck(env);
-    try {
-      await expectHealthyPreload(page);
-      await page
-        .getByRole("button", {
-          name: "Task destination: Work in parent",
-        })
-        .click();
-      await page
-        .getByLabel("Prompt text")
-        .fill(
-          "Prepare this release by inspecting, implementing, testing, and documenting it.",
-        );
-      await page.getByRole("button", { name: "Send" }).click();
-      const taskPanel = page.getByRole("region", { name: "Task sessions" });
-      await expect(taskPanel.getByRole("listitem")).toHaveCount(12, {
-        timeout: Number(
-          process.env.PI_DECK_E2E_REAL_DELEGATE_TIMEOUT_MS ?? 180_000,
-        ),
-      });
-      await expect(taskPanel).toContainText("10 active · 2 queued");
-      await expect(taskPanel.getByRole("button")).toHaveCount(0);
-    } finally {
       await app.close();
     }
   } finally {

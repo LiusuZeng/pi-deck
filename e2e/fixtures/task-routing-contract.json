@@ -1,28 +1,61 @@
 {
   "version": 1,
-  "parentDefaults": { "model": "fake-model", "thinkingLevel": "max" },
+  "parentDefaults": {
+    "model": "fake-model",
+    "thinkingLevel": "max"
+  },
   "tasks": [
-    { "name": "Inventory affected files", "outcome": "completed" },
+    {
+      "name": "Inventory affected files",
+      "lifecycle": "completed"
+    },
     {
       "name": "Update implementation",
-      "outcome": "completed",
       "model": "fake-model-2",
-      "thinkingLevel": "high"
+      "thinkingLevel": "high",
+      "lifecycle": "completed"
     },
     {
       "name": "Verify regression coverage",
-      "outcome": "failed",
-      "attempts": 4
+      "attempts": 4,
+      "lifecycle": "failed"
     },
-    { "name": "Prepare release notes", "outcome": "completed" },
-    { "name": "Check migration", "outcome": "completed" },
-    { "name": "Check compatibility", "outcome": "completed" },
-    { "name": "Check documentation", "outcome": "completed" },
-    { "name": "Check packaging", "outcome": "completed" },
-    { "name": "Check accessibility", "outcome": "completed" },
-    { "name": "Check telemetry", "outcome": "completed" },
-    { "name": "Queued eleventh task", "outcome": "completed" },
-    { "name": "Queued twelfth task", "outcome": "interrupted" }
+    {
+      "name": "Prepare release notes",
+      "lifecycle": "completed"
+    },
+    {
+      "name": "Check migration",
+      "lifecycle": "completed"
+    },
+    {
+      "name": "Check compatibility",
+      "lifecycle": "completed"
+    },
+    {
+      "name": "Check documentation",
+      "lifecycle": "completed"
+    },
+    {
+      "name": "Check packaging",
+      "lifecycle": "completed"
+    },
+    {
+      "name": "Check accessibility",
+      "lifecycle": "completed"
+    },
+    {
+      "name": "Check telemetry",
+      "lifecycle": "completed"
+    },
+    {
+      "name": "Queued eleventh task",
+      "lifecycle": "completed"
+    },
+    {
+      "name": "Queued twelfth task",
+      "lifecycle": "interrupted"
+    }
   ],
   "holdUntilParentFollowUp": true,
   "synthesis": "Synthesis: 10 completed, 1 failed after attempt 4, and 1 interrupted."
