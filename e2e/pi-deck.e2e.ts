@@ -3452,6 +3452,8 @@ test.describe("task-session routing acceptance", () => {
           "500",
         ],
       }),
+      NODE_ENV: "test",
+      PI_DECK_E2E_TASK_SESSION_ACCEPTANCE: "1",
       PI_DECK_TEST_TASK_ROUTING_FIXTURE: routingFixture,
     });
     try {
@@ -3664,6 +3666,8 @@ test.describe("task-session routing acceptance", () => {
           "50",
         ],
       }),
+      NODE_ENV: "test",
+      PI_DECK_E2E_TASK_SESSION_ACCEPTANCE: "1",
       PI_DECK_TEST_TASK_ROUTING_FIXTURE: fixture,
     });
     try {
@@ -3782,6 +3786,8 @@ test.describe("task-session routing acceptance", () => {
           "250",
         ],
       }),
+      NODE_ENV: "test",
+      PI_DECK_E2E_TASK_SESSION_ACCEPTANCE: "1",
       PI_DECK_TEST_TASK_ROUTING_FIXTURE: fixture,
     };
 

@@ -3224,7 +3224,7 @@ async function planTaskSession(
 }> {
   // Deliberately isolated: deterministic routing tests never create or consult
   // a planner worker.
-  const fixturePath = process.env.PI_DECK_TEST_TASK_ROUTING_FIXTURE;
+  const fixturePath = taskRoutingFixturePath();
   if (fixturePath) {
     const fixture: unknown = JSON.parse(await fs.readFile(fixturePath, "utf8"));
     const tasks = (fixture as { tasks?: unknown }).tasks;
@@ -3319,6 +3319,13 @@ function taskSessionPromptContext(
   if (!input || typeof input !== "object") return undefined;
   return typeof (input as { text?: unknown }).text === "string"
     ? (value as TaskSessionPromptRuntimeContext)
+    : undefined;
+}
+
+function taskRoutingFixturePath(): string | undefined {
+  return process.env.NODE_ENV === "test" &&
+    process.env.PI_DECK_E2E_TASK_SESSION_ACCEPTANCE === "1"
+    ? process.env.PI_DECK_TEST_TASK_ROUTING_FIXTURE
     : undefined;
 }
 
@@ -3601,7 +3608,7 @@ async function taskSessionFixtureBehavior(
   | { lifecycle: "completed" | "failed" | "interrupted"; attempts: number }
   | undefined
 > {
-  const fixturePath = process.env.PI_DECK_TEST_TASK_ROUTING_FIXTURE;
+  const fixturePath = taskRoutingFixturePath();
   if (!fixturePath) return undefined;
   try {
     const fixture: unknown = JSON.parse(await fs.readFile(fixturePath, "utf8"));
