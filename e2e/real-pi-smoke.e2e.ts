@@ -606,9 +606,10 @@ test("real Pi: draft parallel opt-in delegates from its first prompt", async () 
     PI_DECK_HOME: path.join(root, "pideck-home"),
     PI_CODING_AGENT_SESSION_DIR: path.join(root, "sessions"),
     PI_DECK_PROJECT_CWD: path.join(root, "project"),
-    // This invokes the generated deck_delegate tool through real Pi and the
-    // authenticated local bridge, without relying on model tool choice.
+    // This invokes the explicitly enabled generated deck_delegate tool through
+    // real Pi and the authenticated bridge, without model tool choice.
     PI_DECK_E2E_DELEGATE_HARNESS: "1",
+    PI_DECK_ENABLE_LEGACY_DELEGATE_BRIDGE: "1",
   };
   for (const directory of [
     baseEnv.PI_DECK_USER_DATA_DIR,
