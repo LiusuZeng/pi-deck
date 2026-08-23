@@ -7,6 +7,9 @@ export const DECK_DELEGATE_ENDPOINT_ENV = "DECK_DELEGATE_ENDPOINT";
 export const DECK_DELEGATE_CAPABILITY_ENV = "DECK_DELEGATE_CAPABILITY";
 /** Parent-only binding carried in the extension process environment. */
 export const DECK_DELEGATE_PARENT_RUNTIME_ENV = "DECK_DELEGATE_PARENT_RUNTIME";
+/** Explicit opt-in for the model-visible legacy tool; product routing does not need it. */
+export const DECK_DELEGATE_LEGACY_TOOL_ENV =
+  "PI_DECK_ENABLE_LEGACY_DELEGATE_BRIDGE";
 export const DECK_DELEGATE_PROTOCOL_VERSION = 1;
 
 export interface DeckDelegateRequest {
@@ -114,6 +117,7 @@ export const DECK_DELEGATE_PROTOCOL_VERSION = 1;
 export const DECK_DELEGATE_ENDPOINT_ENV = "DECK_DELEGATE_ENDPOINT";
 export const DECK_DELEGATE_CAPABILITY_ENV = "DECK_DELEGATE_CAPABILITY";
 export const DECK_DELEGATE_PARENT_RUNTIME_ENV = "DECK_DELEGATE_PARENT_RUNTIME";
+const DECK_DELEGATE_LEGACY_TOOL_ENV = "PI_DECK_ENABLE_LEGACY_DELEGATE_BRIDGE";
 const MAX_LINE_BYTES = 64 * 1024;
 const MAX_BUFFER_BYTES = MAX_LINE_BYTES + 1;
 const MAX_TASK_CHARS = 32 * 1024;
@@ -408,6 +412,11 @@ export default function deckDelegateExtension(pi: ExtensionAPI): void {
     }
   });
 
-  pi.registerTool(createDeckDelegateTool(pi));
+  // Product Parallel routing is deterministic and never needs model tool
+  // election. Keep the compatibility transport available only to an explicit
+  // opt-in; the E2E harness imports createDeckDelegateTool directly.
+  if (process.env[DECK_DELEGATE_LEGACY_TOOL_ENV] === "1") {
+    pi.registerTool(createDeckDelegateTool(pi));
+  }
 }
 `;

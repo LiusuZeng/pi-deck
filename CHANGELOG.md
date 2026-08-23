@@ -37,6 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   labels so long-running private work no longer appears hung.
 - Rendered safe GitHub-style Markdown tables semantically with horizontal
   scrolling on narrow conversation layouts.
+- Acknowledged Parallel submissions immediately while planning, prevented
+  duplicate in-flight planning, and fixed DOM-safe worker-model selection.
+- Disabled the model-visible legacy `deck_delegate` tool by default so ordinary
+  prompts cannot bypass deterministic planning or become stranded on legacy
+  task limits; compatibility use now requires explicit opt-in.
 
 ### Tests
 

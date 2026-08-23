@@ -292,9 +292,10 @@ The dedicated feature branch implements the contract above:
   only into ephemeral private prompts, and excluded from durable task state;
 - the in-conversation task panel is flat, informative, accessible, and inert.
 
-The compatibility `deck_delegate` bridge remains only as a separately tested
-transport. Generated parent instructions explicitly prohibit model-elected use
-for ordinary prompts.
+The compatibility `deck_delegate` bridge remains only as a separately tested,
+explicitly opt-in transport. Its model-visible tool is disabled during ordinary
+product sessions; generated parent instructions additionally prohibit
+model-elected use when compatibility mode is enabled.
 
 Release remains blocked until this branch is reviewed, merged deliberately into
 the dedicated integration branch, and all CI plus authenticated real-Pi gates

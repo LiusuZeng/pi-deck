@@ -6,6 +6,7 @@ import {
   DECK_DELEGATE_CAPABILITY_ENV,
   DECK_DELEGATE_ENDPOINT_ENV,
   DECK_DELEGATE_EXTENSION_SOURCE,
+  DECK_DELEGATE_LEGACY_TOOL_ENV,
   DECK_DELEGATE_PROTOCOL_VERSION,
   writeDeckDelegateAcceptanceHarness,
   writeDeckDelegateExtension,
@@ -21,7 +22,7 @@ afterEach(async () => {
 });
 
 describe("Deck delegate extension source generator", () => {
-  it("writes a self-contained Pi extension with the supported custom tool", async () => {
+  it("writes a self-contained Pi extension with an opt-in compatibility tool", async () => {
     const directory = await fs.mkdtemp(
       path.join(os.tmpdir(), "pi-deck-extension-"),
     );
@@ -38,6 +39,15 @@ describe("Deck delegate extension source generator", () => {
     );
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain('from "typebox"');
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain('name: "deck_delegate"');
+    expect(DECK_DELEGATE_LEGACY_TOOL_ENV).toBe(
+      "PI_DECK_ENABLE_LEGACY_DELEGATE_BRIDGE",
+    );
+    expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain(
+      'process.env[DECK_DELEGATE_LEGACY_TOOL_ENV] === "1"',
+    );
+    expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain(
+      "pi.registerTool(createDeckDelegateTool(pi))",
+    );
     expect(DECK_DELEGATE_EXTENSION_SOURCE).not.toMatch(
       /from ["'][^"']*pi-deck/,
     );
