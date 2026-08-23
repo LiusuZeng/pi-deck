@@ -67,6 +67,9 @@ describe("Deck delegate extension source generator", () => {
     expect(source).toContain(`from ${JSON.stringify(delegate)}`);
     expect(source).toContain("createDeckDelegateTool(pi).execute");
     expect(source).toContain("PI_DECK_E2E_INVOKE_DECK_DELEGATE");
+    expect(source).toContain("PI_DECK_E2E_ASSERT_DECK_DELEGATE_ABSENT");
+    expect(source).toContain("pi.getAllTools()");
+    expect(source).toContain("PI_DECK_E2E_DECK_DELEGATE_NOT_REGISTERED");
   });
 
   it("documents and enforces the versioned, capability-gated JSONL contract", () => {

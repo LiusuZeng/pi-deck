@@ -331,6 +331,8 @@ test("real Pi bridge transport: default workspace prompt, resume, and explicit d
     const firstLaunch = await launchPiDeck({
       ...baseEnv,
       PI_DECK_PROJECT_CWD: projectCwd,
+      // The compatibility tool must be model-visible only under explicit opt-in.
+      PI_DECK_ENABLE_LEGACY_DELEGATE_BRIDGE: "1",
     });
     try {
       await expectHealthyPreload(firstLaunch.page);
@@ -510,12 +512,10 @@ test("real Pi bridge transport: default workspace prompt, resume, and explicit d
       });
       await expect(savedSession).toBeVisible();
       await savedSession.click();
-      await expect(
-        secondLaunch.page
-          .getByLabel("Chat / Agent Timeline")
-          .getByText(token)
-          .first(),
-      ).toBeVisible();
+      const resumedTimeline = secondLaunch.page.getByLabel(
+        "Chat / Agent Timeline",
+      );
+      await expect(resumedTimeline.getByText(token).first()).toBeVisible();
     } finally {
       await secondLaunch.app.close();
     }
@@ -523,6 +523,70 @@ test("real Pi bridge transport: default workspace prompt, resume, and explicit d
     if (process.env.PI_DECK_E2E_KEEP_REAL_SMOKE_ARTIFACTS !== "1") {
       fs.rmSync(root, { recursive: true, force: true });
     }
+  }
+});
+
+test("real Pi ordinary parent omits the legacy deck_delegate tool", async () => {
+  test.setTimeout(
+    Number(process.env.PI_DECK_E2E_REAL_SMOKE_TIMEOUT_MS ?? 240_000),
+  );
+  const piBinary = requirePiBinary();
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-no-legacy-tool-"),
+  );
+  const userDataDir = path.join(root, "user-data");
+  const piDeckHome = path.join(root, "pideck-home");
+  const sessionDir = path.join(root, "sessions");
+  const projectCwd = path.join(root, "project");
+  for (const directory of [userDataDir, piDeckHome, sessionDir, projectCwd])
+    fs.mkdirSync(directory, { recursive: true });
+
+  try {
+    const { app, page } = await launchPiDeck({
+      PI_DECK_BACKEND: "real",
+      PI_DECK_PI_BINARY: piBinary,
+      PI_DECK_USER_DATA_DIR: userDataDir,
+      PI_DECK_HOME: piDeckHome,
+      PI_CODING_AGENT_SESSION_DIR: sessionDir,
+      PI_DECK_PROJECT_CWD: projectCwd,
+      // Load only the test inspector; deliberately omit the compatibility opt-in.
+      PI_DECK_E2E_DELEGATE_HARNESS: "1",
+    });
+    try {
+      await expectHealthyPreload(page);
+      await page.getByRole("button", { name: "New session" }).click();
+      await page
+        .getByLabel("Prompt text")
+        .fill("PI_DECK_E2E_ASSERT_DECK_DELEGATE_ABSENT");
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect
+        .poll(
+          () =>
+            listJsonlFiles(sessionDir).some((file) =>
+              fs
+                .readFileSync(file, "utf8")
+                .includes("PI_DECK_E2E_DECK_DELEGATE_ABSENT"),
+            ),
+          {
+            message:
+              "The real Pi harness must observe that deck_delegate is not registered by default.",
+            timeout: 30_000,
+          },
+        )
+        .toBe(true);
+      expect(
+        listJsonlFiles(sessionDir).some((file) =>
+          fs
+            .readFileSync(file, "utf8")
+            .includes("PI_DECK_E2E_DECK_DELEGATE_UNEXPECTEDLY_PRESENT"),
+        ),
+      ).toBe(false);
+    } finally {
+      await app.close();
+    }
+  } finally {
+    if (process.env.PI_DECK_E2E_KEEP_REAL_SMOKE_ARTIFACTS !== "1")
+      fs.rmSync(root, { recursive: true, force: true });
   }
 });
 

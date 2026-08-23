@@ -69,7 +69,7 @@ The deterministic fake RPC harness covers pre-real-Pi automation for:
 ## Current Blockers / Manual Inputs
 
 - P0 real GUI prompt/resume and one-worker Agent Workflow persistence paths are covered by `npm run test:e2e:real-smoke` against the installed Pi binary.
-- The opt-in `PI_DECK_E2E_DELEGATE_HARNESS=1` companion extension remains a **separate bridge transport** test: it invokes `deck_delegate` after an explicit instruction and validates the real extension loader, generated tool, authenticated bridge, and real private worker.
+- The `PI_DECK_E2E_DELEGATE_HARNESS=1` companion extension remains a **separate bridge transport** test: with `PI_DECK_ENABLE_LEGACY_DELEGATE_BRIDGE=1` it confirms the tool is registered before invoking it, validates the real extension loader/authenticated bridge/private worker, then relaunches without the compatibility opt-in and confirms the model-visible tool is absent.
 - SM-021 is ungated fake-RPC production-route coverage and deliberately does not use the bridge harness. Its test-only fixture controls bounded planning and child outcomes so capacity, retries, synthesis, attachment consumption/privacy, and restart interruption remain deterministic.
 - SM-022 is authenticated real-Pi coverage of the production model-backed planner. It supplies no fixture and no `deck_delegate` marker, so a one-task fallback fails the test instead of masquerading as planner success.
 - Broader M7.4 release matrix execution still needs planned pass/fail artifact collection across all rows.
