@@ -1,8 +1,8 @@
 # Parallel Task Sessions Release Validation
 
-Date: 2026-08-21  
+Date: 2026-08-22  
 Branch: `feature/parallel-task-sessions`  
-Validated code commit: `f8fd3835407112f3f7f3fd52f3635ad89b2d2cdd`
+Validated code commit: `d8c981b7c4b049bc0ea0050fc977f0d8191dd8ca`
 
 This is integration evidence only. The branch has not been pushed, merged to
 `main`, tagged, or released.
@@ -19,10 +19,10 @@ Result: **passed**
 
 - Formatting: passed.
 - Main/preload/shared and renderer typechecks: passed.
-- Unit/integration: 68 files passed; 529 tests passed; 2 todo.
+- Unit/integration: 68 files passed; 540 tests passed; 2 todo.
 - Production build: passed.
 - Site/version validation: passed for source version 0.5.4.
-- Standard Electron E2E: 56 passed; 4 authenticated real-Pi tests skipped by
+- Standard Electron E2E: 56 passed; 5 authenticated real-Pi tests skipped by
   the standard suite as intended.
 
 The standard E2E includes deterministic production-route coverage for:
@@ -48,12 +48,13 @@ Command:
 npm run test:e2e:real-smoke
 ```
 
-Result: **passed — 4 of 4**
+Result: **passed — 5 of 5**
 
 1. Real Pi Agent Workflow persistence across restart.
-2. Explicit compatibility `deck_delegate` bridge transport.
-3. Draft Parallel opt-in through the real bridge harness.
-4. Production model-backed Parallel routing without a harness marker or test
+2. Explicitly opted-in compatibility `deck_delegate` bridge transport.
+3. Ordinary real-Pi parent confirms the legacy tool is absent by default.
+4. Draft Parallel opt-in through the explicitly enabled real bridge harness.
+5. Production model-backed Parallel routing without a harness marker or test
    routing fixture.
 
 The production planner test required an ordinary prompt to become exactly three
@@ -79,7 +80,14 @@ Final review fixes included:
 - active-parent synthesis failure propagation before task-row clearing;
 - bounded planner cancellation/capacity waiting and private `--no-session`
   cleanup;
-- long task-name/brief containment at narrow widths.
+- long task-name/brief containment at narrow widths;
+- continuously ticking task clocks and payload-free major-step progress;
+- semantic, safe, narrow-layout Markdown tables;
+- immediate planner acknowledgement, duplicate-submit protection, and safe
+  failed-planning draft restoration;
+- DOM-safe per-prompt and persistent worker-model selection;
+- model-visible legacy `deck_delegate` disabled by default, with authenticated
+  real-Pi coverage of both opt-in registration and ordinary-session absence.
 
 ## Remaining release actions
 
