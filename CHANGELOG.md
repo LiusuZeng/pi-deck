@@ -5,10 +5,21 @@ All notable changes to Pi Deck will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0] - 2026-08-23
+
+Unified Work brings workspace navigation, cross-workspace supervision, and
+per-session interaction into one Work-oriented experience. All Work and
+workspace Work are renderer-derived projections of runtime and Pi session
+state; Work is not a persisted entity. Sessions created from All Work still
+receive the persisted default workspace internally, while workspace
+organization remains optional in the user experience.
 
 ### Added
 
+- Added **All Work**, a global overview of active and saved work across active
+  workspaces, with the same surface available as workspace-scoped Work.
+- Added direct workspace-to-Work navigation and exact Work-origin return paths
+  from session detail.
 - Added deterministic Parallel mode routing: prompts default to one or more
   private, model-planned task sessions while a one-prompt **Work in parent**
   override keeps direct conversation available.
@@ -19,6 +30,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Replaced the former Work inbox destination with **All Work** and scoped
+  **Work**, keeping one navigation path from global overview to session detail.
+- Changed workspace selection to open that workspace's Work overview instead of
+  treating workspace browsing and work supervision as unrelated modes.
+- Kept the persisted default workspace as an internal fallback for global
+  session creation; it remains part of workspace persistence and migration.
+- Kept **Agent Workflows** as a separate, explicit advanced orchestration
+  surface rather than folding workflow runs into normal Work.
 - Replaced model-elected `deck_delegate` routing with a private structured
   planner and parent-owned task-session orchestrator.
 - Limited each parent to 10 active task sessions, queued excess work in order,
@@ -29,6 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserved canonical saved-session identity and workspace ownership while
+  opening Work rows, resuming sessions, and switching workspace scope.
+- Kept active runtimes attached while navigating between All Work, scoped Work,
+  session detail, and Agent Workflows.
 - Kept task status visible when Parallel mode is switched off, preserved failed
   task prompts and settings state, anchored/focused task UI popovers correctly,
   and prevented private session files or attachment payloads from leaking into
@@ -48,6 +71,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- Added integrated fake Electron coverage for launch at All Work, global and
+  workspace-scoped navigation, Work-row session drill-in and Back origins,
+  default-workspace global creation, runtime retention, ownership, and private
+  task exclusion.
 - Added deterministic 12-task fan-out, active-limit queueing, retry, synthesis,
   attachment privacy, parent-override, and restart regressions.
 - Added authenticated real-Pi coverage proving ordinary Parallel prompts use
@@ -366,7 +393,8 @@ coding-agent sessions.
   crash; persisted sessions can be reopened, but unsaved partial stream text may
   be lost.
 
-[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.4...HEAD
+[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.4...v0.6.0
 [0.5.4]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.1...v0.5.2

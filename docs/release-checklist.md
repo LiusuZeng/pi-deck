@@ -16,7 +16,10 @@ tag.
    retried test. Do not treat a DOM-only assertion as visual acceptance.
 5. Update `CHANGELOG.md`, `package.json`, `package-lock.json`, and the release
    version in `site/index.html`; run `npm run check:site` after the update.
-6. Commit the release preparation, create an annotated SemVer tag, push `main`
+6. Confirm the v0.6 narrative describes All Work → scoped Work → session detail,
+   keeps Work renderer-derived, and treats the persisted default workspace as an
+   internal fallback rather than a removed entity.
+7. Commit the release preparation, create an annotated SemVer tag, push `main`
    and the tag, publish the GitHub Release, and confirm the Pages deployment.
 
 ## Parallel task-session acceptance criteria
