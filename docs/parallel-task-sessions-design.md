@@ -2,6 +2,10 @@
 
 Status: **Implemented in the v0.6 source candidate; final candidate validation pending**
 
+Interactive multitasking predates v0.5.5. The deterministic private Parallel
+task-session routing described in this contract shipped in v0.5.5; v0.6 carries
+that routing forward and integrates it with Unified Work.
+
 This document is the canonical product and engineering contract for ad-hoc
 parallel work in Pi Deck. It is separate from Agent Workflows, which are saved,
 explicit execution graphs.
@@ -285,7 +289,8 @@ bridge, but by itself does not verify deterministic product routing.
 
 ## 11. Integration status
 
-The v0.6 source candidate implements the contract above:
+The v0.6 source candidate carries forward the deterministic private Parallel
+task-session routing shipped in v0.5.5 and integrates it with Unified Work:
 
 - production sends carry an explicit parent/task-session destination;
 - a private real-Pi planner produces one or more validated task briefs without
