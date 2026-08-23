@@ -229,6 +229,22 @@ import {
 } from "./imagePolicy.js";
 
 const isDev = process.env.VITE_DEV_SERVER_URL !== undefined;
+
+/**
+ * Chat creation is allowed to omit a workspace for legacy renderer callers,
+ * but the main-process runtime registry is never allowed to do so.
+ */
+export function resolveChatCreationWorkspaceId(
+  requestedWorkspaceId: string | undefined,
+  defaultWorkspaceId: string | undefined,
+): string {
+  const workspaceId = requestedWorkspaceId ?? defaultWorkspaceId;
+  if (workspaceId === undefined) {
+    throw new Error("Chat session creation requires a workspace.");
+  }
+  return workspaceId;
+}
+
 const managedRuntimeProjectId = "pi-deck:managed-runtime-context";
 const managedRuntimeDirectoryName = "runtime-context";
 const managedRuntimeProjectBrand = Symbol("managedRuntimeProject");
@@ -809,14 +825,15 @@ function registerIpcHandlers(
     responseSchema: chatSnapshotSchema,
     diagnostics: diagnosticsService,
     handler: async (request) => {
-      const project = request?.workspaceId
-        ? await resolveWorkspaceProject(request.workspaceId, request.projectId)
-        : await authorizeRendererChatProject(request?.projectId);
+      const { project, workspaceId } = await resolveChatCreationContext(
+        request?.workspaceId,
+        request?.projectId,
+      );
       return createChatSessionSnapshot(
         store,
         diagnosticsService,
         project,
-        request?.workspaceId,
+        workspaceId,
         request?.multitaskMode,
       );
     },
@@ -830,7 +847,16 @@ function registerIpcHandlers(
     handler: async () => {
       await closeChatWorker();
       // Reset is an explicit new-session action, unlike application bootstrap.
-      return createChatSessionSnapshot(store, diagnosticsService);
+      const { project, workspaceId } = await resolveChatCreationContext(
+        undefined,
+        undefined,
+      );
+      return createChatSessionSnapshot(
+        store,
+        diagnosticsService,
+        project,
+        workspaceId,
+      );
     },
   });
 
@@ -2058,6 +2084,42 @@ async function requireOpenWorkspace(
   return workspace;
 }
 
+async function resolveChatCreationContext(
+  requestedWorkspaceId: string | undefined,
+  requestedProjectId: string | undefined,
+): Promise<{ workspaceId: string; project?: ProjectRef }> {
+  if (requestedWorkspaceId !== undefined) {
+    const workspaceId = resolveChatCreationWorkspaceId(
+      requestedWorkspaceId,
+      undefined,
+    );
+    return {
+      workspaceId,
+      project: await resolveWorkspaceProject(workspaceId, requestedProjectId),
+    };
+  }
+
+  // Compatibility callers without a workspace must use the persisted default,
+  // not whichever named workspace happens to be active. Do not activate it:
+  // fallback ownership must not change migration/relaunch selection state.
+  const requestedProject =
+    await authorizeRendererChatProject(requestedProjectId);
+  const defaultWorkspace =
+    await ensureWorkspaceStore().ensureDefaultWorkspace();
+  const workspaceId = resolveChatCreationWorkspaceId(
+    undefined,
+    defaultWorkspace.id,
+  );
+  return {
+    workspaceId,
+    ...(requestedProject !== undefined
+      ? { project: requestedProject }
+      : resolveChatBackendMode() === "real"
+        ? { project: await resolveWorkspaceProject(workspaceId) }
+        : {}),
+  };
+}
+
 async function resolveWorkspaceProject(
   workspaceId: string,
   requestedProjectId?: string,
@@ -2654,8 +2716,8 @@ async function createChatWorker(
   store: SettingsStore,
   mode: ChatBackendMode,
   capacity: WorkerCapacity,
-  project?: ProjectRef,
-  workspaceId?: string,
+  project: ProjectRef | undefined,
+  workspaceId: string,
   initialMultitaskMode: "sequential" | "parallel" = "sequential",
 ): Promise<ChatWorkerSpec> {
   return serializeChatWorkerCreation(async () => {
@@ -2715,9 +2777,7 @@ function registerChatWorker(
   if (workerSpec.projectId !== undefined) {
     chatRuntimeProjectIds.set(runtimeId, workerSpec.projectId);
   }
-  if (workerSpec.workspaceId !== undefined) {
-    chatRuntimeWorkspaceIds.set(runtimeId, workerSpec.workspaceId);
-  }
+  chatRuntimeWorkspaceIds.set(runtimeId, workerSpec.workspaceId);
   multitaskSupervisor?.addParent(runtimeId, {
     mode: initialMultitaskMode,
     maxQueuedTasks: 100,
@@ -2989,7 +3049,7 @@ interface ChatWorkerSpec {
   worker: ReturnType<SinglePiAdapter["createWorker"]>;
   cwd: string;
   projectId?: string;
-  workspaceId?: string;
+  workspaceId: string;
 }
 
 async function createDelegatedChild(
@@ -3149,7 +3209,7 @@ async function createFakeChatWorker(
   adapter: SinglePiAdapter,
   store: SettingsStore,
   capacity: WorkerCapacity,
-  workspaceId?: string,
+  workspaceId: string,
 ): Promise<ChatWorkerSpec> {
   const fakeRpcPath = path.join(__dirname, "pi/fakeRpc/fakeRpcServer.js");
   const cwd = process.cwd();
@@ -3174,7 +3234,7 @@ async function createFakeChatWorker(
           ELECTRON_RUN_AS_NODE: "1",
         },
       });
-      return { worker, cwd, ...(workspaceId ? { workspaceId } : {}) };
+      return { worker, cwd, workspaceId };
     },
   );
 }
@@ -3183,8 +3243,8 @@ async function createRealChatWorker(
   adapter: SinglePiAdapter,
   store: SettingsStore,
   capacity: WorkerCapacity,
-  project?: ProjectRef,
-  workspaceId?: string,
+  project: ProjectRef | undefined,
+  workspaceId: string,
 ): Promise<ChatWorkerSpec> {
   const launch = await resolveRealChatLaunchConfig(store, project);
   const runtimeId = randomUUID();
@@ -3206,7 +3266,7 @@ async function createRealChatWorker(
         worker,
         cwd: launch.projectCwd,
         projectId: launch.projectId,
-        ...(workspaceId ? { workspaceId } : {}),
+        workspaceId,
       };
     },
   );
@@ -3234,7 +3294,7 @@ async function createRealResumeWorker(
   sessionFile: string,
   project?: ProjectRef,
   workspaceId?: string,
-): Promise<ChatWorkerSpec> {
+): Promise<ChatResumeWorkerSpec> {
   const launch = await resolveRealChatLaunchConfig(store, project);
   const sessionDir = launch.effective.config.sessionDir;
   if (sessionDir === undefined) {
@@ -4358,8 +4418,8 @@ async function attachRealResumeWorker(
 async function createChatSessionSnapshot(
   store: SettingsStore,
   diagnosticsService: DiagnosticsService,
-  project?: ProjectRef,
-  workspaceId?: string,
+  project: ProjectRef | undefined,
+  workspaceId: string,
   initialMultitaskMode: "sequential" | "parallel" = "sequential",
 ): Promise<ChatSnapshot> {
   const adapter = await ensureChatAdapter(store, diagnosticsService);
