@@ -28,9 +28,7 @@ export function ParallelPromptSettings({
   onOverrideThinking,
   onUpdateDefaults,
 }: ParallelPromptSettingsProps) {
-  const modelValue = overrides.model
-    ? `${overrides.model.provider}\u0000${overrides.model.modelId}`
-    : "";
+  const modelValue = overrides.model ? encodeModelOption(overrides.model) : "";
   const promptThinkingLevels = thinkingLevelsForModel(
     overrides.model ?? defaults.model,
     models,
@@ -72,10 +70,7 @@ export function ParallelPromptSettings({
               aria-label="Worker model override"
               value={modelValue}
               onChange={(event) => {
-                const [provider, modelId] = event.target.value.split("\u0000");
-                onOverrideModel(
-                  provider && modelId ? { provider, modelId } : undefined,
-                );
+                onOverrideModel(decodeModelOption(event.target.value));
                 onOverrideThinking(undefined);
               }}
             >
@@ -84,8 +79,14 @@ export function ParallelPromptSettings({
                 model.provider
                   ? [
                       <option
-                        key={`${model.provider}\u0000${model.id}`}
-                        value={`${model.provider}\u0000${model.id}`}
+                        key={encodeModelOption({
+                          provider: model.provider,
+                          modelId: model.id,
+                        })}
+                        value={encodeModelOption({
+                          provider: model.provider,
+                          modelId: model.id,
+                        })}
                       >
                         {model.name ?? model.id}
                       </option>,
@@ -117,19 +118,11 @@ export function ParallelPromptSettings({
               Default model
               <select
                 aria-label="Persistent worker model"
-                value={
-                  defaults.model
-                    ? `${defaults.model.provider}\u0000${defaults.model.modelId}`
-                    : ""
-                }
+                value={defaults.model ? encodeModelOption(defaults.model) : ""}
                 onChange={(event) => {
-                  const [provider, modelId] =
-                    event.target.value.split("\u0000");
                   onUpdateDefaults({
                     ...defaults,
-                    ...(provider && modelId
-                      ? { model: { provider, modelId } }
-                      : { model: undefined }),
+                    model: decodeModelOption(event.target.value),
                     thinkingLevel: undefined,
                   });
                 }}
@@ -139,8 +132,14 @@ export function ParallelPromptSettings({
                   model.provider
                     ? [
                         <option
-                          key={`${model.provider}\u0000${model.id}`}
-                          value={`${model.provider}\u0000${model.id}`}
+                          key={encodeModelOption({
+                            provider: model.provider,
+                            modelId: model.id,
+                          })}
+                          value={encodeModelOption({
+                            provider: model.provider,
+                            modelId: model.id,
+                          })}
                         >
                           {model.name ?? model.id}
                         </option>,
@@ -176,6 +175,34 @@ export function ParallelPromptSettings({
       </Menu>
     </div>
   );
+}
+
+type ModelSelection = NonNullable<ParallelWorkerSettings["model"]>;
+
+/** JSON keeps arbitrary provider/model IDs reversible without DOM control bytes. */
+function encodeModelOption(model: ModelSelection): string {
+  return JSON.stringify([model.provider, model.modelId]);
+}
+
+function decodeModelOption(value: string): ModelSelection | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (
+      !Array.isArray(parsed) ||
+      parsed.length !== 2 ||
+      typeof parsed[0] !== "string" ||
+      !parsed[0] ||
+      typeof parsed[1] !== "string" ||
+      !parsed[1]
+    ) {
+      return undefined;
+    }
+    const model = { provider: parsed[0], modelId: parsed[1] };
+    return encodeModelOption(model) === value ? model : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function thinkingLevelsForModel(

@@ -3,7 +3,14 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ParallelPromptSettings } from "./ParallelPromptSettings.js";
+import type {
+  ChatModelSummary,
+  ParallelWorkerSettings,
+} from "../../../shared/types.js";
+import {
+  ParallelPromptSettings,
+  type ParallelPromptSettingsProps,
+} from "./ParallelPromptSettings.js";
 
 (
   globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -12,39 +19,78 @@ import { ParallelPromptSettings } from "./ParallelPromptSettings.js";
 let root: Root | undefined;
 let container: HTMLDivElement | undefined;
 
+const model: ChatModelSummary = {
+  provider: "anthropic",
+  id: "claude-sonnet-4-5",
+  name: "Claude Sonnet 4.5",
+};
+const selectedModel = { provider: model.provider!, modelId: model.id };
+const modelWithControlCharacters: ChatModelSummary = {
+  provider: 'provider\u0000with"quotes',
+  id: "model\u0000with\\slashes",
+  name: "Control character model",
+};
+const selectedModelWithControlCharacters = {
+  provider: modelWithControlCharacters.provider!,
+  modelId: modelWithControlCharacters.id,
+};
+
 afterEach(() => {
   act(() => root?.unmount());
   container?.remove();
+  root = undefined;
+  container = undefined;
 });
 
-function render(
-  destination: "parent" | "newTaskSession",
-  onSetDestination = vi.fn(),
-) {
+function renderSettings(initial: Partial<ParallelPromptSettingsProps> = {}) {
+  const props: ParallelPromptSettingsProps = {
+    destination: "newTaskSession",
+    defaults: {},
+    models: [],
+    thinkingLevels: [],
+    overrides: {},
+    onSetDestination: vi.fn(),
+    onOverrideModel: vi.fn(),
+    onOverrideThinking: vi.fn(),
+    onUpdateDefaults: vi.fn(),
+    ...initial,
+  };
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
-  act(() =>
-    root?.render(
-      createElement(ParallelPromptSettings, {
-        destination,
-        defaults: {},
-        models: [],
-        thinkingLevels: [],
-        overrides: {},
-        onSetDestination,
-        onOverrideModel: vi.fn(),
-        onOverrideThinking: vi.fn(),
-        onUpdateDefaults: vi.fn(),
-      }),
-    ),
+  const rerender = (next: Partial<ParallelPromptSettingsProps>) => {
+    Object.assign(props, next);
+    act(() => root?.render(createElement(ParallelPromptSettings, props)));
+  };
+  rerender({});
+  return { props, rerender };
+}
+
+function openWorkerSettings() {
+  const trigger = container?.querySelector<HTMLButtonElement>(
+    '[aria-label="Parallel worker settings"]',
   );
-  return onSetDestination;
+  act(() => trigger?.click());
+}
+
+function workerSelect(label: string) {
+  const select = document.querySelector<HTMLSelectElement>(
+    `[aria-label="${label}"]`,
+  );
+  if (!select) throw new Error(`${label} missing`);
+  return select;
+}
+
+function selectValue(select: HTMLSelectElement, value: string) {
+  act(() => {
+    select.value = value;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
 }
 
 describe("ParallelPromptSettings", () => {
   it("keeps the parent destination visibly selected", () => {
-    render("parent");
+    renderSettings({ destination: "parent" });
     const destination = container?.querySelector<HTMLSelectElement>(
       '[aria-label="Prompt destination"]',
     );
@@ -53,11 +99,8 @@ describe("ParallelPromptSettings", () => {
   });
 
   it("moves keyboard focus into the worker-settings dialog", () => {
-    render("newTaskSession");
-    const trigger = container?.querySelector<HTMLButtonElement>(
-      '[aria-label="Parallel worker settings"]',
-    );
-    act(() => trigger?.click());
+    renderSettings();
+    openWorkerSettings();
     const dialog = document.querySelector('[role="dialog"]');
     const firstSelect = dialog?.querySelector<HTMLSelectElement>("select");
     expect(dialog?.getAttribute("aria-label")).toBe("Parallel worker settings");
@@ -65,16 +108,68 @@ describe("ParallelPromptSettings", () => {
   });
 
   it("offers both destinations and reports a destination switch", () => {
-    const onSetDestination = render("newTaskSession");
+    const { props } = renderSettings();
     const destination = container?.querySelector<HTMLSelectElement>(
       '[aria-label="Prompt destination"]',
     );
-    expect(destination?.options).toHaveLength(2);
-    act(() => {
-      if (destination === undefined) throw new Error("destination missing");
-      destination.value = "parent";
-      destination.dispatchEvent(new Event("change", { bubbles: true }));
+    if (!destination) throw new Error("destination missing");
+    selectValue(destination, "parent");
+    expect(props.onSetDestination).toHaveBeenCalledWith("parent");
+  });
+
+  it("round-trips a worker model override through DOM-safe option values", () => {
+    const { props, rerender } = renderSettings({
+      models: [modelWithControlCharacters],
     });
-    expect(onSetDestination).toHaveBeenCalledWith("parent");
+    openWorkerSettings();
+    const select = workerSelect("Worker model override");
+    const option = select.options[1];
+    expect(option.value).not.toContain("\u0000");
+
+    selectValue(select, option.value);
+    expect(props.onOverrideModel).toHaveBeenCalledWith(
+      selectedModelWithControlCharacters,
+    );
+    expect(props.onOverrideThinking).toHaveBeenCalledWith(undefined);
+
+    rerender({ overrides: { model: selectedModelWithControlCharacters } });
+    expect(workerSelect("Worker model override").value).toBe(option.value);
+  });
+
+  it("updates and clears the persistent worker model default", () => {
+    const defaults: ParallelWorkerSettings = { thinkingLevel: "high" };
+    const { props, rerender } = renderSettings({ defaults, models: [model] });
+    openWorkerSettings();
+    const select = workerSelect("Persistent worker model");
+    const option = select.options[1];
+
+    selectValue(select, option.value);
+    const updatedDefaults = { model: selectedModel, thinkingLevel: undefined };
+    expect(props.onUpdateDefaults).toHaveBeenCalledWith(updatedDefaults);
+
+    rerender({ defaults: updatedDefaults });
+    expect(workerSelect("Persistent worker model").value).toBe(option.value);
+
+    selectValue(workerSelect("Persistent worker model"), "");
+    expect(props.onUpdateDefaults).toHaveBeenLastCalledWith({
+      model: undefined,
+      thinkingLevel: undefined,
+    });
+  });
+
+  it("treats malformed worker model values as no selection", () => {
+    const { props } = renderSettings({ models: [model] });
+    openWorkerSettings();
+    const select = workerSelect("Worker model override");
+    const malformed = document.createElement("option");
+    malformed.value = "not a model";
+    select.append(malformed);
+
+    selectValue(select, malformed.value);
+    expect(props.onOverrideModel).toHaveBeenCalledWith(undefined);
+    expect(props.onOverrideThinking).toHaveBeenCalledWith(undefined);
+
+    selectValue(select, "");
+    expect(props.onOverrideModel).toHaveBeenLastCalledWith(undefined);
   });
 });
