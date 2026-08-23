@@ -18,6 +18,8 @@ const outputs = [
 ];
 
 function resolvePiBinary() {
+  // This separate opt-in capture intentionally resolves an actual Pi binary;
+  // the standard docs:capture command uses production-shaped fake RPC fixtures.
   const candidate = process.env.PI_DECK_PI_BINARY || "/usr/local/bin/pi";
   if (!fs.existsSync(candidate)) {
     throw new Error(`Pi executable not found: ${candidate}`);

@@ -159,7 +159,7 @@ The conversation view shows the composer, image attachment preview, Pi tool exec
   </a>
 </p>
 
-_A short real-mode walkthrough: attach an image, send the prompt, watch Pi execute a tool, and follow the response as it streams._
+_A deterministic real-mode UI walkthrough driven by production-shaped fake Pi RPC fixtures (not an actual Pi worker): attach an image, send the prompt, watch the fixture emit a tool event, and follow the response as it streams._
 
 - Streaming assistant responses rendered as safe Markdown.
 - Collapsible thinking sections.
@@ -323,18 +323,23 @@ npm run deck:real -- --dry-run /absolute/path/to/your/project
 
 ### Refreshing documentation screenshots
 
-The checked-in PNG and GIF assets are generated from the Electron renderer in
-real Pi mode with deterministic, production-shaped local session fixtures, so they stay aligned
-with workspace navigation, All Work, scoped Work, and session detail without requiring provider
-credentials. The command refreshes both `docs/assets` and `site/assets`:
+The standard documentation capture uses Electron's real-mode UI and production
+backend wiring with a generated `pi --mode rpc` shim backed by deterministic,
+production-shaped fake Pi RPC fixtures. It does not invoke an actual Pi
+executable or contact a model provider, so these captures are deterministic
+fake-Pi evidence of the real-mode UI—not captures from actual Pi. The command
+refreshes the workspace, All Work, scoped Work, session detail, model,
+appearance, extension, and conversation assets in both `docs/assets` and
+`site/assets`:
 
 ```bash
 npm run docs:capture
 ```
 
-To refresh the Agent Workflow and multitasking assets with real local Pi workers,
-use a configured provider account. This contacts the configured model provider and
-keeps the temporary project, sessions, and Pi Deck metadata isolated:
+The Agent Workflow and multitasking assets use a separate authenticated capture
+with actual local Pi workers. Use a configured provider account for that command;
+it contacts the configured model provider and keeps the temporary project,
+sessions, and Pi Deck metadata isolated:
 
 ```bash
 PI_DECK_CAPTURE_REAL_PI=1 npm run docs:capture:real-workflows

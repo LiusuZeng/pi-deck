@@ -1,6 +1,6 @@
 # Parallel Task Sessions Design
 
-Status: **Implemented on the dedicated feature branch; pending merge and release**
+Status: **Implemented in the v0.6 source candidate; final candidate validation pending**
 
 This document is the canonical product and engineering contract for ad-hoc
 parallel work in Pi Deck. It is separate from Agent Workflows, which are saved,
@@ -119,8 +119,8 @@ Task-session rows are informational only:
 - users cannot address a private runtime or session directly;
 - task prompts, transcripts, tool details, credentials, and raw outputs are not
   exposed as independent UI;
-- task sessions do not appear as ordinary top-level sessions in the sidebar or
-  Work inbox.
+- task sessions do not appear as ordinary top-level sessions in the sidebar,
+  All Work, or scoped Work.
 
 The UI must show simultaneous task-session states together. A serial list of
 parent tool calls is not evidence that parallel task sessions are running.
@@ -197,6 +197,12 @@ workers can run simultaneously; excess task sessions remain visibly queued.
   Section 5.
 - Parent close/delete behavior must explicitly account for active and queued
   task sessions and must not orphan private workers.
+- Workspace archive is denied when the workspace contains a parent with a
+  pending Parallel planning submission or a nonterminal private task in
+  `queued`, `starting`, `running`, `retrying`, or `waiting-parent`. The parent
+  itself may be idle; closing it cancels its children silently. The archive
+  dialog names the blocking reason, and the archive action rechecks eligibility
+  before mutating workspace state.
 
 ## 8. Architecture boundary
 
@@ -260,7 +266,8 @@ the following:
 7. The parent remains usable while task sessions run.
 8. At 10 active task sessions, excess tasks queue automatically and never fall
    back silently to parent execution.
-9. Task sessions do not appear as top-level sidebar or Work inbox sessions.
+9. Task sessions do not appear as top-level sidebar, All Work, or scoped Work
+   sessions.
 10. Task sessions inherit parent model/thinking settings unless persistent or
     per-prompt worker overrides are specified; per-prompt settings win.
 11. Each task receives summarized parent context rather than the full
@@ -278,7 +285,7 @@ bridge, but by itself does not verify deterministic product routing.
 
 ## 11. Integration status
 
-The dedicated feature branch implements the contract above:
+The v0.6 source candidate implements the contract above:
 
 - production sends carry an explicit parent/task-session destination;
 - a private real-Pi planner produces one or more validated task briefs without
@@ -290,13 +297,16 @@ The dedicated feature branch implements the contract above:
 - worker settings resolve per prompt, persistent parallel default, then parent;
 - referenced paths and validated images are materialized once in main, cloned
   only into ephemeral private prompts, and excluded from durable task state;
-- the in-conversation task panel is flat, informative, accessible, and inert.
+- the in-conversation task panel is flat, informative, accessible, and inert;
+- workspace archive eligibility is checked before the dialog and rechecked by
+  the archive action when pending planning or nonterminal private tasks exist.
 
 The compatibility `deck_delegate` bridge remains only as a separately tested,
 explicitly opt-in transport. Its model-visible tool is disabled during ordinary
 product sessions; generated parent instructions additionally prohibit
 model-elected use when compatibility mode is enabled.
 
-Release remains blocked until this branch is reviewed, merged deliberately into
-the dedicated integration branch, and all CI plus authenticated real-Pi gates
-are recorded. No changes have been pushed or published.
+Final release validation remains gated by the exact CI-equivalent and
+authenticated real-Pi commands in [the release checklist](release-checklist.md)
+run on the final candidate HEAD. This design document is a product contract,
+not validation evidence.

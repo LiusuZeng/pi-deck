@@ -91,6 +91,9 @@ function encodeGif(frames, width, height) {
 }
 
 function createFakePiBinary(root, extraArgs = []) {
+  // Keep the production real-mode UI/backend wiring while substituting a
+  // deterministic, production-shaped fake Pi RPC process. This capture never
+  // invokes an installed Pi executable or contacts a model provider.
   const fakePiPath = path.join(root, "fake-pi.js");
   fs.writeFileSync(
     fakePiPath,

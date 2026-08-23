@@ -2,7 +2,8 @@
 
 A version tag is a release assertion, not merely a successful build. The release
 owner records the command output and links the relevant CI run before creating a
-tag.
+tag. The final-candidate evidence template at the end of this document is only a
+template; it becomes evidence only after its commands are run on the final HEAD.
 
 ## Required before every release
 
@@ -19,7 +20,10 @@ tag.
 6. Confirm the v0.6 narrative describes All Work → scoped Work → session detail,
    keeps Work renderer-derived, and treats the persisted default workspace as an
    internal fallback rather than a removed entity.
-7. Commit the release preparation, create an annotated SemVer tag, push `main`
+7. Create a final-candidate validation record from the template below only after
+   `npm run verify:ci` and `npm run test:e2e:real-smoke` have both run on the
+   final candidate HEAD. Do not reuse historical integration or real-Pi records.
+8. Commit the release preparation, create an annotated SemVer tag, push `main`
    and the tag, publish the GitHub Release, and confirm the Pages deployment.
 
 ## Parallel task-session acceptance criteria
@@ -52,6 +56,11 @@ the fake E2E run and authenticated real-Pi smoke run:
 - Reopening a saved parent never resumes unfinished task sessions; it preserves
   enough plan/context trace to mark them interrupted and let the user decide
   what to do next.
+- Workspace archive is denied when a workspace contains a parent with a pending
+  Parallel planning submission or a nonterminal private task in `queued`,
+  `starting`, `running`, `retrying`, or `waiting-parent`. The parent may be
+  idle; closing it cancels children silently. The archive dialog explains the
+  blocking reason, and the archive action rechecks eligibility.
 
 A harness that invokes `deck_delegate` directly validates the bridge only. It
 is not sufficient release evidence for deterministic prompt routing.
@@ -61,5 +70,54 @@ is not sufficient release evidence for deterministic prompt routing.
 The `Verify desktop app` GitHub Actions check from `.github/workflows/ci.yml`
 must be required by branch protection for `main`. The authenticated real-Pi
 smoke remains a release-only gate because it needs local provider credentials;
-its command output is mandatory release evidence. The current integration
-record is [`reviews/parallel-task-sessions-release-validation.md`](reviews/parallel-task-sessions-release-validation.md); it does not authorize a push or release by itself.
+its command output is mandatory release evidence. The historical integration
+record is [`reviews/parallel-task-sessions-release-validation.md`](reviews/parallel-task-sessions-release-validation.md); it is context only, is not v0.6 final-candidate evidence, and does not authorize a push or release by itself.
+
+## Final-candidate evidence template
+
+> Template only. Do not treat this section as a validation record or fill in
+> results until the commands have run on the final candidate HEAD.
+
+````md
+# v0.6 RC Final-Candidate Validation
+
+Date:
+Candidate commit SHA (paste the output of `git rev-parse HEAD`):
+Branch:
+Working tree before validation (paste `git status --short` output):
+Node/npm:
+macOS:
+Pi version and authenticated configuration: record with secrets redacted
+
+## CI-equivalent gate
+
+Command actually run:
+
+```bash
+npm run verify:ci
+```
+
+Result:
+Verbatim stdout/stderr or immutable log artifact URL/hash:
+
+## Authenticated real-Pi gate
+
+Command actually run:
+
+```bash
+npm run test:e2e:real-smoke
+```
+
+Result:
+Verbatim stdout/stderr or immutable log artifact URL/hash:
+Artifacts, screenshots, traces, or report:
+Exceptions approved: none / describe explicitly
+
+## Candidate-specific task-session checks
+
+- Production routing used instead of direct `deck_delegate`:
+- Private task sessions absent from the sidebar, All Work, and scoped Work:
+- Workspace archive blocked for pending planning and each nonterminal state
+  (`queued`, `starting`, `running`, `retrying`, `waiting-parent`):
+- Archive dialog named the blocker and archive action rechecked eligibility:
+````
