@@ -131,5 +131,5 @@ export function workScopeLabel(
   workspaceNameById: Readonly<Record<string, string>> = {},
 ): string {
   if (scope.type === "all") return "All Work";
-  return `Work · ${workspaceNameById[scope.workspaceId] ?? scope.workspaceId}`;
+  return `${workspaceNameById[scope.workspaceId] ?? scope.workspaceId} Work`;
 }

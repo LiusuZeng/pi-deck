@@ -142,6 +142,8 @@ async function expectAllWorkLaunch(page: Page): Promise<void> {
   await expect(
     route.getByRole("heading", { name: "All Work", exact: true }),
   ).toBeVisible();
+  await expect(route.locator(".surface-title")).toHaveText("All Work");
+  await expect(route.locator(".usage-toggle")).toHaveCount(0);
 }
 
 function sidebarNewSessionButton(page: Page) {
@@ -3449,6 +3451,7 @@ test.describe("Unified Work", () => {
       await expect(
         page.getByRole("heading", { name: "Unified A Work", exact: true }),
       ).toBeVisible();
+      await expect(page.locator(".surface-title")).toHaveText("Unified A Work");
 
       await createWorkspaceInUi(page, "Unified B");
       const unifiedBId = await workspaceId("Unified B");
@@ -3456,6 +3459,7 @@ test.describe("Unified Work", () => {
       await expect(
         page.getByRole("heading", { name: "Unified B Work", exact: true }),
       ).toBeVisible();
+      await expect(page.locator(".surface-title")).toHaveText("Unified B Work");
 
       await selectWorkspaceInUi(page, "Unified A");
       await expectWorkRoute(page, unifiedAId);
@@ -3557,7 +3561,7 @@ test.describe("Unified Work", () => {
       await scopedA.click();
       await expect(page.getByTestId("session-origin-back")).toHaveAttribute(
         "aria-label",
-        "Back to Work · Unified A",
+        "Back to Unified A Work",
       );
       await page.getByTestId("session-origin-back").click();
       await expectWorkRoute(page, unifiedAId);

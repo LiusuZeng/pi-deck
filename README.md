@@ -458,9 +458,9 @@ The prompt and GUI smoke commands require working provider authentication and ma
 ```text
 src/main/             Electron backend, Pi workers, workspaces, projects, sessions, attachments
 src/main/workflows/   Workflow persistence, occurrence runtime, scheduling, rehydration, and graph snapshots
-src/main/multitask/   Delegation bridge, Pi extension generation, parent/child scheduling, and task state
+src/main/multitask/   Parallel planning, private task scheduling, compatibility bridge, and task state
 src/preload/          Sandboxed, validated renderer API
-src/renderer/         React session workspace, workflow UI, multitask controls, and runtime-state reduction
+src/renderer/         React All Work, session detail, workflow UI, Parallel controls, and runtime-state reduction
 src/shared/           IPC schemas and shared TypeScript types, including canonical workflow contracts
 scripts/              Launch, build-validation, and real Pi smoke tooling
 e2e/                  Playwright Electron end-to-end coverage, including workflows and live runs

@@ -4012,7 +4012,8 @@ body {
   min-width: 0;
 }
 
-.session-header-title h1 {
+.session-header-title h1,
+.session-header-title .surface-title {
   overflow: hidden;
   max-width: min(34vw, 460px);
   margin: 0;
@@ -4239,7 +4240,8 @@ body {
     display: none;
   }
 
-  .session-header-title h1 {
+  .session-header-title h1,
+  .session-header-title .surface-title {
     max-width: 44vw;
   }
 }

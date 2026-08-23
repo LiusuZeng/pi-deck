@@ -5052,6 +5052,14 @@ export function App(): ReactElement {
       >
         <AppHeader
           loadState={loadState}
+          surfaceTitle={
+            primaryView.kind === "work"
+              ? workScopeLabel(primaryView.scope, activityWorkspaceNameById)
+              : primaryView.kind === "workflow"
+                ? "Agent Workflows"
+                : selectedSession.title
+          }
+          showSessionControls={primaryView.kind === "session"}
           selectedSession={selectedSession}
           selectedModelId={selectedModelId}
           selectedThinking={selectedThinking}
@@ -8532,6 +8540,8 @@ function StatusMark(props: { status: SessionStatus }): ReactElement {
 
 function AppHeader(props: {
   loadState: LoadState;
+  surfaceTitle: string;
+  showSessionControls: boolean;
   selectedSession: SessionViewModel;
   selectedModelId: string;
   selectedThinking: string;
@@ -8558,8 +8568,14 @@ function AppHeader(props: {
         />
         <div className="title-block session-header-title">
           <div className="session-heading-line">
-            <h1>{props.selectedSession.title}</h1>
-            <StatusMark status={props.selectedSession.status} />
+            {props.showSessionControls ? (
+              <>
+                <h1>{props.surfaceTitle}</h1>
+                <StatusMark status={props.selectedSession.status} />
+              </>
+            ) : (
+              <span className="surface-title">{props.surfaceTitle}</span>
+            )}
           </div>
         </div>
       </div>
@@ -8570,24 +8586,28 @@ function AppHeader(props: {
           pending={props.appearanceThemePending}
           onChange={props.onAppearanceThemeChange}
         />
-        <UsageStatsToggle
-          session={props.selectedSession}
-          visible={props.usageStatsVisible}
-          onToggle={props.onToggleUsageStats}
-        />
-        {props.usageStatsVisible ? (
-          <UsageStatsPanel session={props.selectedSession} />
+        {props.showSessionControls ? (
+          <>
+            <UsageStatsToggle
+              session={props.selectedSession}
+              visible={props.usageStatsVisible}
+              onToggle={props.onToggleUsageStats}
+            />
+            {props.usageStatsVisible ? (
+              <UsageStatsPanel session={props.selectedSession} />
+            ) : null}
+            {props.loadState.state === "error" || props.realMode ? null : (
+              <ModelThinkingControls
+                selectedModelId={props.selectedModelId}
+                selectedThinking={props.selectedThinking}
+                realMode={props.realMode}
+                selectedSession={props.selectedSession}
+                onModelChange={props.onModelChange}
+                onThinkingChange={props.onThinkingChange}
+              />
+            )}
+          </>
         ) : null}
-        {props.loadState.state === "error" || props.realMode ? null : (
-          <ModelThinkingControls
-            selectedModelId={props.selectedModelId}
-            selectedThinking={props.selectedThinking}
-            realMode={props.realMode}
-            selectedSession={props.selectedSession}
-            onModelChange={props.onModelChange}
-            onThinkingChange={props.onThinkingChange}
-          />
-        )}
         <LoadStateBadge loadState={props.loadState} />
       </div>
     </header>
