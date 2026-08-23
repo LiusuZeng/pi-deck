@@ -66,7 +66,17 @@ async function expectHealthyPreload(page: Page): Promise<void> {
     .poll(() => page.evaluate(() => Boolean(window.piDeck)))
     .toBe(true);
   await expect(
-    page.getByRole("region", { name: "Pi Deck chat workspace" }),
+    page.locator('.workspace[data-load-state="ready"]'),
+  ).toBeVisible();
+}
+
+async function expectAllWorkLaunch(page: Page): Promise<void> {
+  const route = page.locator(
+    '.workspace[data-primary-view="work"][data-work-scope="all"]',
+  );
+  await expect(route).toBeVisible();
+  await expect(
+    route.getByRole("heading", { name: "All Work", exact: true }),
   ).toBeVisible();
 }
 
@@ -391,11 +401,7 @@ test("real Pi bridge transport: default workspace prompt, resume, and explicit d
     });
     try {
       await expectHealthyPreload(firstLaunch.page);
-      await expect(
-        firstLaunch.page.getByRole("button", {
-          name: "Workspace: Default workspace",
-        }),
-      ).toHaveAttribute("aria-current", "page");
+      await expectAllWorkLaunch(firstLaunch.page);
       await expect
         .poll(() => listJsonlFiles(sessionDir).length, {
           message: "Startup must not leave a hidden empty warm-worker session",
@@ -553,11 +559,7 @@ test("real Pi bridge transport: default workspace prompt, resume, and explicit d
     const secondLaunch = await launchPiDeck(baseEnv);
     try {
       await expectHealthyPreload(secondLaunch.page);
-      await expect(
-        secondLaunch.page.getByRole("button", {
-          name: "Workspace: Default workspace",
-        }),
-      ).toHaveAttribute("aria-current", "page");
+      await expectAllWorkLaunch(secondLaunch.page);
       await expect(
         secondLaunch.page.locator(".session-list .session-item").first(),
       ).toBeVisible();
@@ -679,6 +681,10 @@ test("real Pi: draft parallel opt-in delegates from its first prompt", async () 
     const { app, page } = await launchPiDeck(baseEnv);
     try {
       await expectHealthyPreload(page);
+      await page
+        .getByRole("button", { name: "New session", exact: true })
+        .click();
+      await expect(page.getByLabel("Prompt text")).toBeVisible();
       const parallelOff = page.getByRole("button", {
         name: "Parallel multitasking: Off",
         exact: true,
@@ -799,6 +805,10 @@ test("real Pi production routing plans multiple private task sessions without br
     const { app, page } = await launchPiDeck(env);
     try {
       await expectHealthyPreload(page);
+      await page
+        .getByRole("button", { name: "New session", exact: true })
+        .click();
+      await expect(page.getByLabel("Prompt text")).toBeVisible();
       await page
         .getByRole("button", { name: "Parallel multitasking: Off" })
         .click();
