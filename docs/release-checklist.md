@@ -70,8 +70,10 @@ is not sufficient release evidence for deterministic prompt routing.
 The `Verify desktop app` GitHub Actions check from `.github/workflows/ci.yml`
 must be required by branch protection for `main`. The authenticated real-Pi
 smoke remains a release-only gate because it needs local provider credentials;
-its command output is mandatory release evidence. The historical integration
-record is [`reviews/parallel-task-sessions-release-validation.md`](reviews/parallel-task-sessions-release-validation.md); it is context only, is not v0.6 final-candidate evidence, and does not authorize a push or release by itself.
+its command output is mandatory release evidence. The v0.6 candidate evidence is recorded in
+[`reviews/v0.6-unified-work-release-validation.md`](reviews/v0.6-unified-work-release-validation.md).
+The older [`reviews/parallel-task-sessions-release-validation.md`](reviews/parallel-task-sessions-release-validation.md)
+is historical context only and does not authorize a release by itself.
 
 ## Final-candidate evidence template
 

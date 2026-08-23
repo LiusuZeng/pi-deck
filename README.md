@@ -480,5 +480,6 @@ docs/                 Requirements, architecture, plans, and validation records
 - [Agent Workflows design](docs/agent-workflows-role-based-design.md)
 - [Agent Workflows UX feedback](docs/agent-workflows-feedback.md)
 - [Project-grouped sessions design](docs/project-grouped-sessions-p0-design.md)
-- [Real Pi validation record](docs/real-pi-gui-chat-validation.md)
+- [v0.6 Unified Work release validation](docs/reviews/v0.6-unified-work-release-validation.md)
+- [Real Pi validation history](docs/real-pi-gui-chat-validation.md)
 - [Implementation tracker](docs/project-tracker.md)
