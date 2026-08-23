@@ -130,7 +130,7 @@ describe("ParallelPromptSettings", () => {
     expect(props.onOverrideModel).toHaveBeenCalledWith(
       selectedModelWithControlCharacters,
     );
-    expect(props.onOverrideThinking).toHaveBeenCalledWith(undefined);
+    expect(props.onOverrideThinking).not.toHaveBeenCalled();
 
     rerender({ overrides: { model: selectedModelWithControlCharacters } });
     expect(workerSelect("Worker model override").value).toBe(option.value);
@@ -167,7 +167,7 @@ describe("ParallelPromptSettings", () => {
 
     selectValue(select, malformed.value);
     expect(props.onOverrideModel).toHaveBeenCalledWith(undefined);
-    expect(props.onOverrideThinking).toHaveBeenCalledWith(undefined);
+    expect(props.onOverrideThinking).not.toHaveBeenCalled();
 
     selectValue(select, "");
     expect(props.onOverrideModel).toHaveBeenLastCalledWith(undefined);

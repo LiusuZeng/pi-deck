@@ -90,6 +90,61 @@ test.skip(
   "Set PI_DECK_E2E_REAL_SMOKE=1 or run npm run test:e2e:real-smoke to exercise real Pi GUI P0 flows.",
 );
 
+test("real Pi Parallel worker model selection remains selected", async () => {
+  test.setTimeout(120_000);
+  const piBinary = requirePiBinary();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-real-models-"));
+  const userDataDir = path.join(root, "user-data");
+  const piDeckHome = path.join(root, "pideck-home");
+  const sessionDir = path.join(root, "sessions");
+  const projectCwd = path.join(root, "project");
+  for (const directory of [userDataDir, piDeckHome, sessionDir, projectCwd])
+    fs.mkdirSync(directory, { recursive: true });
+
+  try {
+    const { app, page } = await launchPiDeck({
+      PI_DECK_BACKEND: "real",
+      PI_DECK_PI_BINARY: piBinary,
+      PI_DECK_USER_DATA_DIR: userDataDir,
+      PI_DECK_HOME: piDeckHome,
+      PI_CODING_AGENT_SESSION_DIR: sessionDir,
+      PI_DECK_PROJECT_CWD: projectCwd,
+    });
+    try {
+      await expectHealthyPreload(page);
+      await page.getByRole("button", { name: "New session" }).click();
+      await page
+        .getByRole("button", { name: "Parallel multitasking: Off" })
+        .click();
+      await page
+        .getByRole("button", { name: "Parallel worker settings" })
+        .click();
+      const workerModel = page.getByLabel("Worker model override");
+      await expect
+        .poll(() => workerModel.locator("option").count(), {
+          message: "Real Pi models must populate the worker selector.",
+          timeout: 30_000,
+        })
+        .toBeGreaterThan(1);
+      const selectedValue = await workerModel
+        .locator("option")
+        .nth(1)
+        .getAttribute("value");
+      expect(selectedValue).toBeTruthy();
+      await workerModel.selectOption(selectedValue!);
+      await expect(workerModel).toHaveValue(selectedValue!);
+      await page.waitForTimeout(500);
+      await expect(workerModel).toHaveValue(selectedValue!);
+      await expect(page.getByLabel("Worker thinking override")).toHaveValue("");
+    } finally {
+      await app.close();
+    }
+  } finally {
+    if (process.env.PI_DECK_E2E_KEEP_REAL_SMOKE_ARTIFACTS !== "1")
+      fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("real Pi Agent Workflow: real worker persists run, session, and graph across restart", async () => {
   test.setTimeout(
     Number(process.env.PI_DECK_E2E_REAL_SMOKE_TIMEOUT_MS ?? 240_000),

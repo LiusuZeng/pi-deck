@@ -9672,6 +9672,10 @@ function Composer(props: {
                   props.onSetWorkerOverrides({
                     ...props.workerOverrides,
                     ...(model ? { model } : { model: undefined }),
+                    // A model change must reset incompatible thinking in the
+                    // same state update. A second callback would use stale
+                    // props and erase the newly selected model.
+                    thinkingLevel: undefined,
                   })
                 }
                 onOverrideThinking={(thinkingLevel) =>

@@ -71,7 +71,6 @@ export function ParallelPromptSettings({
               value={modelValue}
               onChange={(event) => {
                 onOverrideModel(decodeModelOption(event.target.value));
-                onOverrideThinking(undefined);
               }}
             >
               <option value="">Use persistent default</option>
