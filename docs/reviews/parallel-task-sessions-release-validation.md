@@ -100,8 +100,9 @@ Final review fixes included:
 
 - Review draft PR [#9](https://github.com/LiusuZeng/pi-deck/pull/9) and obtain a
   green hosted **Verify desktop app** check.
-- GitHub currently reports `main` as unprotected; configure the required check
-  before merging, as required by `docs/release-checklist.md`.
+- `main` now requires the strict **Verify desktop app** status check, blocks
+  force-push/deletion, and requires conversation resolution. Keep the final PR
+  head green before merging.
 - Merge without content changes and confirm the resulting `main` SHA and Pages
   workflow are green.
 - Create and push annotated tag `v0.5.5`, then publish the source-only GitHub
