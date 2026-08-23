@@ -669,17 +669,52 @@ export class WorkspaceStore {
     const sessionFile = await canonicalOrResolved(
       z.string().min(1).parse(options.sessionFile),
     );
-    const summary = chatSessionSummarySchema.parse({
-      id: sessionFile,
-      sessionFile,
-      title: options.title ?? path.basename(sessionFile, ".jsonl"),
-      updatedAtMs: options.updatedAtMs ?? Date.now(),
-      messageCount: options.messageCount ?? 0,
-      ...(options.sessionId ? { sessionId: options.sessionId } : {}),
-      ...(options.cwd ? { cwd: options.cwd } : {}),
-      ...(options.preview ? { preview: options.preview } : {}),
-    });
+    const summary = sessionSummaryFromSnapshot(sessionFile, options);
     return this.upsertSessionRef(workspaceId, summary);
+  }
+
+  /**
+   * Claim a session only while it is unassigned. Unlike upsertSessionRef, this
+   * never moves an existing membership, so resume fallback cannot overwrite a
+   * concurrent explicit move. The owner check and in-memory state update are
+   * synchronous within this mutation seam.
+   */
+  async claimUnassignedSessionRefFromSnapshot(options: {
+    workspaceId: string;
+    sessionFile: string;
+    sessionId?: string;
+    cwd?: string;
+    title?: string;
+    updatedAtMs?: number;
+    messageCount?: number;
+    preview?: string;
+  }): Promise<WorkspaceSessionMutationResult> {
+    const workspaceId = z.string().uuid().parse(options.workspaceId);
+    const sessionFile = await canonicalOrResolved(
+      z.string().min(1).parse(options.sessionFile),
+    );
+    const summary = sessionSummaryFromSnapshot(sessionFile, options);
+    await this.loadIfNeeded();
+    this.requireOpenWorkspaceIndex(workspaceId);
+    const existing = this.state.sessionRefs.find(
+      (ref) => ref.sessionFile === sessionFile,
+    );
+    if (existing !== undefined) {
+      return {
+        workspaceId: existing.workspaceId,
+        sessionFile,
+        ...(existing.workspaceId !== workspaceId
+          ? { previousWorkspaceId: existing.workspaceId }
+          : {}),
+      };
+    }
+    const now = Date.now();
+    const refs = [
+      ...this.state.sessionRefs,
+      sessionRefFromSummary(workspaceId, sessionFile, summary, undefined, now),
+    ];
+    await this.commit({ ...this.state, sessionRefs: refs });
+    return { workspaceId, sessionFile };
   }
 
   async moveSession(
@@ -1236,6 +1271,29 @@ function removeLegacySessionExclusions(
       : {}),
     updatedAtMs: now,
   };
+}
+
+function sessionSummaryFromSnapshot(
+  sessionFile: string,
+  options: {
+    sessionId?: string;
+    cwd?: string;
+    title?: string;
+    updatedAtMs?: number;
+    messageCount?: number;
+    preview?: string;
+  },
+): ChatSessionSummary {
+  return chatSessionSummarySchema.parse({
+    id: sessionFile,
+    sessionFile,
+    title: options.title ?? path.basename(sessionFile, ".jsonl"),
+    updatedAtMs: options.updatedAtMs ?? Date.now(),
+    messageCount: options.messageCount ?? 0,
+    ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+    ...(options.cwd ? { cwd: options.cwd } : {}),
+    ...(options.preview ? { preview: options.preview } : {}),
+  });
 }
 
 function sessionRefFromSummary(
