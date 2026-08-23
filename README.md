@@ -54,7 +54,7 @@ Pi remains the agent runtime: it owns models, provider authentication, tools, re
 - Keep workspace membership independent from Pi JSONL files and working folders.
 - Open local project folders with the macOS directory picker and associate them with sessions.
 - Persist recent projects and discover existing Pi JSONL sessions for their active project.
-- Keep a default workspace persisted as an internal fallback for sessions created from All Work; workspace management is optional in the user experience.
+- Keep a default workspace persisted as an internal fallback for sessions created from All Work; its sidebar row and scope stay hidden until a named workspace exists, so workspace management is optional.
 - Create a lightweight draft without starting Pi; the worker starts on first send.
 - Resume saved sessions with their transcript and persisted image inputs.
 - Search, refresh, close, resume, move, remove, archive, restore, and delete sessions.
@@ -66,7 +66,7 @@ Pi remains the agent runtime: it owns models, provider authentication, tools, re
 
 **All Work** is the global Work overview for supervising active and saved work across active workspaces. Selecting a workspace opens the same Work surface scoped to that workspace; it is a context choice, not a separate mode. Filter by **Needs attention**, **Failed**, **Pending**, **In progress**, **Completed**, or **Idle**. Idle saved sessions remain discoverable without increasing actionable counts.
 
-Work is a renderer-derived projection of runtime state and Pi session metadata, not a persisted Work entity. Selecting a Work row opens the existing Pi session detail, and Back returns to the exact All Work or workspace Work origin. Users can choose **New session** from either surface without managing workspace membership first: global creation uses the persisted default workspace internally, while scoped creation uses the selected workspace.
+Work is a stable primary surface, not a closable inbox or persisted Work entity. It is a renderer-derived projection of runtime state and Pi session metadata. Selecting a Work row opens the existing Pi session detail, and Back returns to the exact All Work or workspace Work origin. Users can choose **New session** from either surface without managing workspace membership first: global creation uses the persisted default workspace internally, while scoped creation uses the selected workspace.
 
 <p align="center">
   <a href="docs/assets/pi-deck-dark.png" title="Open the All Work overview screenshot full size">

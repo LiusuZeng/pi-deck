@@ -28,7 +28,11 @@ organization remains optional in the user experience.
 - Changed workspace selection to open that workspace's Work overview instead of
   treating workspace browsing and work supervision as unrelated modes.
 - Kept the persisted default workspace as an internal fallback for global
-  session creation; it remains part of workspace persistence and migration.
+  session creation while hiding its sidebar row, scope option, and Work-row
+  provenance until a named workspace exists.
+- Made Work a stable primary surface rather than a closable inbox; session
+  detail now requires an explicit Work row, New Session, saved-session, or
+  workflow drill-in action.
 - Kept **Agent Workflows** as a separate, explicit advanced orchestration
   surface rather than folding workflow runs into normal Work.
 
@@ -43,8 +47,9 @@ organization remains optional in the user experience.
 
 - Added integrated fake Electron coverage for launch at All Work, global and
   workspace-scoped navigation, Work-row session drill-in and Back origins,
-  default-workspace global creation, runtime retention, ownership, and private
-  task exclusion.
+  default-workspace global creation and progressive disclosure, removal of the
+  legacy Work close action, runtime retention, ownership, and private task
+  exclusion.
 
 ## [0.5.5] - 2026-08-22
 
