@@ -15,6 +15,8 @@ import { Check, CircleAlert, CircleDot, LoaderCircle, X } from "./ui/icons.js";
 
 type ActivityFilter = "all" | ActivityStatus;
 
+const ALL_WORK_LABEL = "All Work";
+
 export interface ActivityWorkspace {
   id: string;
   name: string;
@@ -59,6 +61,28 @@ function formatTimestamp(timestamp: number): string {
   }).format(new Date(timestamp));
 }
 
+function workScopeLabel(
+  scope: ActivityScope,
+  workspaceName: string | undefined,
+): string {
+  if (scope.type === "all") {
+    return ALL_WORK_LABEL;
+  }
+  return workspaceName === undefined
+    ? "Workspace Work"
+    : `${workspaceName} Work`;
+}
+
+function availableActivityCount(model: ActivityInboxModel): number {
+  // The workspace map is intentionally computed before scope/status filters;
+  // use it instead of model.items.length when App supplies a scoped model.
+  const availableCount = Object.values(model.availableWorkspaceCounts).reduce(
+    (total, count) => total + count,
+    0,
+  );
+  return availableCount;
+}
+
 export interface ActivityInboxProps {
   model: ActivityInboxModel;
   scope: ActivityScope;
@@ -68,7 +92,7 @@ export interface ActivityInboxProps {
   onClose: () => void;
 }
 
-/** A scoped, presentational work inbox. Classification and tags remain domain-owned. */
+/** A scoped, presentational Work overview. Classification and tags remain domain-owned. */
 export function ActivityInbox({
   model,
   scope,
@@ -82,6 +106,9 @@ export function ActivityInbox({
     scope.type === "workspace"
       ? workspaces.find((workspace) => workspace.id === scope.workspaceId)?.name
       : undefined;
+  // Keep this boundary compatible with both global and pre-scoped models:
+  // applying the same tag twice is idempotent while App transitions to a
+  // single unscoped source model.
   const scopedItems = useMemo(
     () => filterActivityItems(model.items, tagsForScope(scope)),
     [model.items, scope],
@@ -100,6 +127,12 @@ export function ActivityInbox({
       ),
     [scopedItems],
   );
+  const availableCount = availableActivityCount(model);
+  const scopeLabel = workScopeLabel(scope, workspaceName);
+  const description =
+    scope.type === "all"
+      ? "Monitor work across active workspaces and jump to sessions that need you."
+      : "Monitor work in this workspace and jump to sessions that need you.";
   const groups = useMemo(
     () =>
       ACTIVITY_STATUSES.reduce(
@@ -116,24 +149,28 @@ export function ActivityInbox({
   const visibleKinds =
     selectedFilter === "all" ? ACTIVITY_STATUSES : [selectedFilter];
   const visibleItems = visibleKinds.flatMap((kind) => groups[kind]);
-  const scopeLabel = workspaceName ?? "All workspaces";
 
   return (
-    <main className="activity-inbox" aria-labelledby="activity-inbox-title">
+    <main
+      aria-describedby="activity-inbox-description"
+      aria-labelledby="activity-inbox-title"
+      className="activity-inbox"
+    >
       <header className="activity-inbox-header">
         <div>
           <p className="activity-inbox-eyebrow">
-            {scope.type === "all" ? "All workspaces" : "Workspace work inbox"}
+            {scope.type === "all" ? ALL_WORK_LABEL : "Workspace Work"}
           </p>
-          <h1 id="activity-inbox-title">
-            {workspaceName ? `Work inbox · ${workspaceName}` : "Work inbox"}
-          </h1>
-          <p className="activity-inbox-description">
-            Monitor parallel work and jump to sessions that need you.
+          <h1 id="activity-inbox-title">{scopeLabel}</h1>
+          <p
+            className="activity-inbox-description"
+            id="activity-inbox-description"
+          >
+            {description}
           </p>
         </div>
         <button
-          aria-label="Close work inbox"
+          aria-label={`Close ${scopeLabel}`}
           className="activity-inbox-close"
           onClick={onClose}
           type="button"
@@ -142,10 +179,17 @@ export function ActivityInbox({
         </button>
       </header>
 
-      <label className="activity-inbox-workspace-filter">
-        <span>Workspace scope</span>
+      <label
+        className="activity-inbox-workspace-filter"
+        htmlFor="activity-inbox-workspace-scope"
+      >
+        <span id="activity-inbox-workspace-scope-label">
+          Current Work scope
+        </span>
         <select
-          aria-label="Work inbox workspace"
+          aria-describedby="activity-inbox-scope-status"
+          aria-label="Current Work scope"
+          id="activity-inbox-workspace-scope"
           onChange={(event) =>
             onScopeChange(
               event.target.value === "all"
@@ -155,7 +199,9 @@ export function ActivityInbox({
           }
           value={scope.type === "workspace" ? scope.workspaceId : "all"}
         >
-          <option value="all">All workspaces ({model.items.length})</option>
+          <option value="all">
+            {ALL_WORK_LABEL} ({availableCount})
+          </option>
           {workspaces.map((workspace) => {
             const count = model.availableWorkspaceCounts[workspace.id] ?? 0;
             return (
@@ -165,11 +211,21 @@ export function ActivityInbox({
             );
           })}
         </select>
+        <span
+          aria-live="polite"
+          className="activity-inbox-scope-status sr-only"
+          id="activity-inbox-scope-status"
+        >
+          Current scope: {scopeLabel}.
+        </span>
       </label>
 
       <div
+        aria-controls="activity-inbox-content"
+        aria-describedby="activity-inbox-scope-status"
+        aria-label="Filter Work by status"
         className="activity-inbox-filters"
-        aria-label="Filter work inbox status"
+        role="group"
       >
         <button
           aria-pressed={selectedFilter === "all"}
@@ -201,7 +257,7 @@ export function ActivityInbox({
         })}
       </div>
 
-      <div className="activity-inbox-content">
+      <div className="activity-inbox-content" id="activity-inbox-content">
         {visibleItems.length === 0 ? (
           <EmptyState filter={selectedFilter} scopeLabel={scopeLabel} />
         ) : (
@@ -232,12 +288,12 @@ function EmptyState({
 }) {
   const message =
     filter === "all"
-      ? `No work in ${scopeLabel}. Start work in a session to see it here.`
+      ? `No work in ${scopeLabel}. Start a session to see it here.`
       : `No ${ACTIVITY_META[filter].emptyLabel.toLowerCase()} work in ${scopeLabel}.`;
 
   return (
     <div className="activity-inbox-empty" role="status">
-      <h2>{filter === "all" ? "No work yet" : "Nothing here"}</h2>
+      <h2>{filter === "all" ? "No work yet" : "No matching work"}</h2>
       <p>{message}</p>
     </div>
   );

@@ -2162,7 +2162,7 @@ h3 {
   box-shadow: var(--shadow-sm);
 }
 
-/* Activity inbox: a main-pane operational view, independent of the sidebar. */
+/* Work overview: a main-pane operational view, independent of the sidebar. */
 .activity-inbox {
   display: flex;
   flex-direction: column;
@@ -2275,8 +2275,13 @@ h3 {
   background: var(--color-surface);
 }
 
+.activity-inbox-workspace-filter > span:first-child {
+  color: var(--color-text-strong);
+}
+
 .activity-inbox-workspace-filter select:focus-visible {
-  outline: none;
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
   box-shadow: var(--focus-ring);
 }
 
@@ -2327,6 +2332,7 @@ h3 {
 
 .activity-inbox-filter[aria-pressed="true"] {
   color: var(--color-on-accent);
+  font-weight: 750;
 }
 
 .activity-inbox-filter[aria-pressed="true"]::before {
@@ -2517,6 +2523,25 @@ h3 {
   margin-bottom: 0;
   color: var(--color-text-muted);
   font-size: 13px;
+}
+
+@media (max-height: 680px) and (min-width: 641px) {
+  .activity-inbox {
+    padding: 18px clamp(20px, 4vw, 32px);
+  }
+
+  .activity-inbox-workspace-filter {
+    margin-top: 14px;
+  }
+
+  .activity-inbox-filters {
+    margin-bottom: 14px;
+  }
+
+  .activity-inbox-row {
+    padding-top: 10px;
+    padding-bottom: 10px;
+  }
 }
 
 @media (max-width: 640px) {

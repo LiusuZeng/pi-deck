@@ -3,10 +3,14 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type {
-  ActivityInboxModel,
-  ActivityItem,
-  ActivityScope,
+import { emptyOverlays } from "../sessionState.js";
+import {
+  buildActivityInbox,
+  tagsForScope,
+  type ActivityInboxModel,
+  type ActivityItem,
+  type ActivityScope,
+  type ActivitySourceSession,
 } from "../activityInbox.js";
 import { ActivityInbox, type ActivityWorkspace } from "./ActivityInbox.js";
 
@@ -17,6 +21,22 @@ const workspaces: ActivityWorkspace[] = [
   { id: "workspace-atlas", name: "Project Atlas" },
   { id: "workspace-borealis", name: "Project Borealis" },
 ];
+
+function sourceSession(
+  id: string,
+  patch: Partial<ActivitySourceSession> = {},
+): ActivitySourceSession {
+  return {
+    id,
+    workspaceId: workspaces[0]!.id,
+    title: `Session ${id}`,
+    workspaceName: workspaces[0]!.name,
+    updatedAtMs: Date.now() - 60_000,
+    baseState: "idle",
+    overlays: { ...emptyOverlays },
+    ...patch,
+  };
+}
 
 function activity(
   status: ActivityItem["status"],
@@ -77,6 +97,7 @@ function renderInbox(
   scope: ActivityScope = { type: "all" },
   onOpenActivityItem = vi.fn(),
   onScopeChange = vi.fn(),
+  workspaceOptions: readonly ActivityWorkspace[] = workspaces,
 ) {
   container = document.createElement("div");
   document.body.append(container);
@@ -89,7 +110,7 @@ function renderInbox(
         onOpenActivityItem={onOpenActivityItem}
         onScopeChange={onScopeChange}
         scope={scope}
-        workspaces={workspaces}
+        workspaces={workspaceOptions}
       />,
     );
   });
@@ -107,12 +128,18 @@ describe("ActivityInbox", () => {
   it("shows global rows, workspace context, selector counts, and status chips", () => {
     const { view } = renderInbox(modelWithEveryKind());
 
-    expect(view.querySelector("h1")?.textContent).toBe("Work inbox");
-    expect(view.textContent).toContain("All workspaces");
+    expect(view.querySelector("h1")?.textContent).toBe("All Work");
+    expect(view.textContent).toContain("All Work");
     expect(view.textContent).toContain("Project Atlas");
     expect(view.textContent).toContain("Project Borealis");
+    expect(view.querySelector("select")?.getAttribute("aria-label")).toBe(
+      "Current Work scope",
+    );
     expect(view.querySelector("select")?.textContent).toContain(
       "Project Borealis (1)",
+    );
+    expect(view.querySelector('option[value="all"]')?.textContent).toBe(
+      "All Work (6)",
     );
     expect(view.querySelector('[aria-pressed="true"]')?.textContent).toContain(
       "All",
@@ -120,6 +147,40 @@ describe("ActivityInbox", () => {
     expect(view.textContent).toContain("Respond");
     expect(view.textContent).toContain("Review failure");
     expect(view.textContent).toContain("Idle");
+  });
+
+  it("keeps All Work availability counts global when App passes a scoped model", () => {
+    const sources = [
+      sourceSession("atlas-working", { baseState: "working" }),
+      sourceSession("borealis-failed", {
+        workspaceId: workspaces[1]!.id,
+        workspaceName: workspaces[1]!.name,
+        baseState: "error",
+      }),
+    ];
+    const scopedModel = buildActivityInbox(
+      sources,
+      tagsForScope({ type: "workspace", workspaceId: workspaces[0]!.id }),
+    );
+    const { view } = renderInbox(scopedModel, {
+      type: "workspace",
+      workspaceId: workspaces[0]!.id,
+    });
+
+    expect(view.querySelector('option[value="all"]')?.textContent).toBe(
+      "All Work (2)",
+    );
+    const allFilter = view.querySelector(".activity-inbox-filter");
+    expect(allFilter?.textContent).toContain("All");
+    expect(
+      allFilter?.querySelector(".activity-inbox-filter-count")?.textContent,
+    ).toBe("1");
+    expect(
+      view.querySelector(".activity-inbox-content")?.textContent,
+    ).toContain("atlas-working");
+    expect(
+      view.querySelector(".activity-inbox-content")?.textContent,
+    ).not.toContain("borealis-failed");
   });
 
   it("changes workspace scope through the selector and uses scoped status counts", () => {
@@ -132,12 +193,19 @@ describe("ActivityInbox", () => {
     );
     const selector = view.querySelector<HTMLSelectElement>("select");
 
-    expect(view.querySelector("h1")?.textContent).toBe(
-      "Work inbox · Project Atlas",
-    );
-    expect(view.textContent).not.toContain("failed session failure");
-    expect(view.textContent).not.toContain("Project Borealis");
+    expect(view.querySelector("h1")?.textContent).toBe("Project Atlas Work");
+    expect(selector?.value).toBe("workspace-atlas");
+    expect(
+      view.querySelector("#activity-inbox-scope-status")?.textContent,
+    ).toBe("Current scope: Project Atlas Work.");
+    expect(
+      view.querySelector(".activity-inbox-content")?.textContent,
+    ).not.toContain("failed session failure");
+    expect(view.textContent).toContain("Project Borealis");
     expect(view.textContent).toContain("Failed0");
+    expect(
+      view.querySelector(".activity-inbox-filters")?.getAttribute("role"),
+    ).toBe("group");
 
     act(() => {
       selector!.value = "workspace-borealis";
@@ -147,6 +215,24 @@ describe("ActivityInbox", () => {
       type: "workspace",
       workspaceId: "workspace-borealis",
     });
+  });
+
+  it("names an empty workspace scope without falling back to global copy", () => {
+    const { view } = renderInbox(
+      modelWithEveryKind(),
+      { type: "workspace", workspaceId: "workspace-cygnus" },
+      vi.fn(),
+      vi.fn(),
+      [...workspaces, { id: "workspace-cygnus", name: "Project Cygnus" }],
+    );
+
+    expect(view.querySelector("h1")?.textContent).toBe("Project Cygnus Work");
+    expect(view.querySelector('[role="status"]')?.textContent).toContain(
+      "No work in Project Cygnus Work.",
+    );
+    expect(view.querySelector('option[value="all"]')?.textContent).toBe(
+      "All Work (6)",
+    );
   });
 
   it("filters by status and provides scoped empty state copy", () => {
@@ -162,7 +248,7 @@ describe("ActivityInbox", () => {
 
     expect(failedFilter?.getAttribute("aria-pressed")).toBe("true");
     expect(view.querySelector('[role="status"]')?.textContent).toContain(
-      "No failed work in Project Atlas.",
+      "No failed work in Project Atlas Work.",
     );
   });
 
