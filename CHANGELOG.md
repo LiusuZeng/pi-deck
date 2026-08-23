@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-08-22
+
 ### Added
 
 - Added deterministic Parallel mode routing: prompts default to one or more
@@ -45,6 +47,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Disabled the model-visible legacy `deck_delegate` tool by default so ordinary
   prompts cannot bypass deterministic planning or become stranded on legacy
   task limits; compatibility use now requires explicit opt-in.
+- Assigned legacy or omitted-workspace chat creation to the stable default
+  workspace without changing the user's active named workspace, preventing
+  unowned runtimes and misplaced session references.
 
 ### Tests
 
@@ -52,7 +57,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attachment privacy, parent-override, and restart regressions.
 - Added authenticated real-Pi coverage proving ordinary Parallel prompts use
   the production planner to create multiple private task sessions without the
-  bridge harness or a routing fixture.
+  bridge harness or a routing fixture, the legacy bridge is absent by default,
+  and selected worker models remain selected.
 
 ## [0.5.4] - 2026-08-16
 
@@ -366,7 +372,8 @@ coding-agent sessions.
   crash; persisted sessions can be reopened, but unsaved partial stream text may
   be lost.
 
-[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.4...HEAD
+[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.5...HEAD
+[0.5.5]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.1...v0.5.2

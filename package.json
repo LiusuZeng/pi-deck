@@ -1,6 +1,6 @@
 {
   "name": "pi-deck",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "private": true,
   "description": "Local macOS Electron GUI control plane for Pi agents.",
   "main": "dist/main/main.js",
