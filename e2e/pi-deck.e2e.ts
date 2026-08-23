@@ -1317,6 +1317,7 @@ test("icon controls retain names, neutral styles, and fit a 900×600 viewport", 
     );
 
     const sidebarToggle = page.locator(".topbar .sidebar-toggle");
+    await page.getByLabel("Prompt text").hover();
     await expect(sidebarToggle).not.toHaveAttribute("aria-describedby");
     await sidebarToggle.hover();
     await expect(page.getByRole("tooltip")).toHaveText(/sessions/);

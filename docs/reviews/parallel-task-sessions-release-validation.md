@@ -1,10 +1,13 @@
-# Parallel Task Sessions Release Validation
+# v0.5.5 Release-Candidate Validation
 
 Date: 2026-08-22  
-Branch: `feature/parallel-task-sessions`  
-Validated code commit: `d8c981b7c4b049bc0ea0050fc977f0d8191dd8ca`
+Branch: `release/v0.5.5`
+Validated code commit: `ebbf37558ffa3b7d361cc4376139a85a59557921`
 
-This is integration evidence only. The branch has not been pushed, merged to
+This is release-candidate evidence. The branch contains all integrated Parallel
+task-session fixes, the stable-default-workspace ownership fix, and v0.5.5
+metadata. It is pushed as draft PR
+[#9](https://github.com/LiusuZeng/pi-deck/pull/9), but has not been merged to
 `main`, tagged, or released.
 
 ## CI-equivalent gate
@@ -19,10 +22,10 @@ Result: **passed**
 
 - Formatting: passed.
 - Main/preload/shared and renderer typechecks: passed.
-- Unit/integration: 68 files passed; 540 tests passed; 2 todo.
+- Unit/integration: 69 files passed; 542 tests passed; 2 todo.
 - Production build: passed.
-- Site/version validation: passed for source version 0.5.4.
-- Standard Electron E2E: 56 passed; 5 authenticated real-Pi tests skipped by
+- Site/version validation: passed for source version 0.5.5.
+- Standard Electron E2E: 56 passed; 6 authenticated real-Pi tests skipped by
   the standard suite as intended.
 
 The standard E2E includes deterministic production-route coverage for:
@@ -48,13 +51,14 @@ Command:
 npm run test:e2e:real-smoke
 ```
 
-Result: **passed — 5 of 5**
+Result: **passed — 6 of 6**
 
-1. Real Pi Agent Workflow persistence across restart.
-2. Explicitly opted-in compatibility `deck_delegate` bridge transport.
-3. Ordinary real-Pi parent confirms the legacy tool is absent by default.
-4. Draft Parallel opt-in through the explicitly enabled real bridge harness.
-5. Production model-backed Parallel routing without a harness marker or test
+1. Real-Pi worker model discovery and retained per-prompt model selection.
+2. Real Pi Agent Workflow persistence across restart.
+3. Explicitly opted-in compatibility `deck_delegate` bridge transport.
+4. Ordinary real-Pi parent confirms the legacy tool is absent by default.
+5. Draft Parallel opt-in through the explicitly enabled real bridge harness.
+6. Production model-backed Parallel routing without a harness marker or test
    routing fixture.
 
 The production planner test required an ordinary prompt to become exactly three
@@ -85,14 +89,22 @@ Final review fixes included:
 - semantic, safe, narrow-layout Markdown tables;
 - immediate planner acknowledgement, duplicate-submit protection, and safe
   failed-planning draft restoration;
-- DOM-safe per-prompt and persistent worker-model selection;
+- DOM-safe per-prompt and persistent worker-model selection with an atomic
+  model/thinking update that cannot restore stale defaults;
 - model-visible legacy `deck_delegate` disabled by default, with authenticated
-  real-Pi coverage of both opt-in registration and ordinary-session absence.
+  real-Pi coverage of both opt-in registration and ordinary-session absence;
+- omitted-workspace compatibility creation assigned to the stable default
+  workspace without changing the active named workspace.
 
 ## Remaining release actions
 
-- Review the complete integration diff against `main`.
-- Configure/confirm the GitHub `Verify desktop app` required branch check after
-  the eventual push.
-- Decide the patch version and prepare release metadata only after approval.
+- Review draft PR [#9](https://github.com/LiusuZeng/pi-deck/pull/9) and obtain a
+  green hosted **Verify desktop app** check.
+- `main` now requires the strict **Verify desktop app** status check, blocks
+  force-push/deletion, and requires conversation resolution. Keep the final PR
+  head green before merging.
+- Merge without content changes and confirm the resulting `main` SHA and Pages
+  workflow are green.
+- Create and push annotated tag `v0.5.5`, then publish the source-only GitHub
+  Release. The package is private and no installer/npm publication is prepared.
 - Do not push, tag, or publish from this validation document alone.

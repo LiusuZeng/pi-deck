@@ -20,13 +20,6 @@ organization remains optional in the user experience.
   workspaces, with the same surface available as workspace-scoped Work.
 - Added direct workspace-to-Work navigation and exact Work-origin return paths
   from session detail.
-- Added deterministic Parallel mode routing: prompts default to one or more
-  private, model-planned task sessions while a one-prompt **Work in parent**
-  override keeps direct conversation available.
-- Added a flat, parent-only task panel with safe brief, lifecycle, elapsed,
-  attempt, progress, capacity, and queue information.
-- Added persistent parallel-worker defaults and per-prompt model/thinking
-  overrides, with secure task attachment materialization.
 
 ### Changed
 
@@ -38,6 +31,35 @@ organization remains optional in the user experience.
   session creation; it remains part of workspace persistence and migration.
 - Kept **Agent Workflows** as a separate, explicit advanced orchestration
   surface rather than folding workflow runs into normal Work.
+
+### Fixed
+
+- Preserved canonical saved-session identity and workspace ownership while
+  opening Work rows, resuming sessions, and switching workspace scope.
+- Kept active runtimes attached while navigating between All Work, scoped Work,
+  session detail, and Agent Workflows.
+
+### Tests
+
+- Added integrated fake Electron coverage for launch at All Work, global and
+  workspace-scoped navigation, Work-row session drill-in and Back origins,
+  default-workspace global creation, runtime retention, ownership, and private
+  task exclusion.
+
+## [0.5.5] - 2026-08-22
+
+### Added
+
+- Added deterministic Parallel mode routing: prompts default to one or more
+  private, model-planned task sessions while a one-prompt **Work in parent**
+  override keeps direct conversation available.
+- Added a flat, parent-only task panel with safe brief, lifecycle, elapsed,
+  attempt, progress, capacity, and queue information.
+- Added persistent parallel-worker defaults and per-prompt model/thinking
+  overrides, with secure task attachment materialization.
+
+### Changed
+
 - Replaced model-elected `deck_delegate` routing with a private structured
   planner and parent-owned task-session orchestrator.
 - Limited each parent to 10 active task sessions, queued excess work in order,
@@ -48,10 +70,6 @@ organization remains optional in the user experience.
 
 ### Fixed
 
-- Preserved canonical saved-session identity and workspace ownership while
-  opening Work rows, resuming sessions, and switching workspace scope.
-- Kept active runtimes attached while navigating between All Work, scoped Work,
-  session detail, and Agent Workflows.
 - Kept task status visible when Parallel mode is switched off, preserved failed
   task prompts and settings state, anchored/focused task UI popovers correctly,
   and prevented private session files or attachment payloads from leaking into
@@ -68,18 +86,18 @@ organization remains optional in the user experience.
 - Disabled the model-visible legacy `deck_delegate` tool by default so ordinary
   prompts cannot bypass deterministic planning or become stranded on legacy
   task limits; compatibility use now requires explicit opt-in.
+- Assigned legacy or omitted-workspace chat creation to the stable default
+  workspace without changing the user's active named workspace, preventing
+  unowned runtimes and misplaced session references.
 
 ### Tests
 
-- Added integrated fake Electron coverage for launch at All Work, global and
-  workspace-scoped navigation, Work-row session drill-in and Back origins,
-  default-workspace global creation, runtime retention, ownership, and private
-  task exclusion.
 - Added deterministic 12-task fan-out, active-limit queueing, retry, synthesis,
   attachment privacy, parent-override, and restart regressions.
 - Added authenticated real-Pi coverage proving ordinary Parallel prompts use
   the production planner to create multiple private task sessions without the
-  bridge harness or a routing fixture.
+  bridge harness or a routing fixture, the legacy bridge is absent by default,
+  and selected worker models remain selected.
 
 ## [0.5.4] - 2026-08-16
 
@@ -394,7 +412,8 @@ coding-agent sessions.
   be lost.
 
 [Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.0...HEAD
-[0.6.0]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.4...v0.6.0
+[0.6.0]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.5...v0.6.0
+[0.5.5]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.1...v0.5.2
