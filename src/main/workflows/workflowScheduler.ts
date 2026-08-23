@@ -28,6 +28,7 @@ import type {
   WorkflowStepDefinition,
   WorkflowTransition,
 } from "../../shared/workflowSchemas.js";
+import { isWorkspaceRuntimeLifecycleConflictError } from "../workspaceRuntimeLifecycleGate.js";
 import { z } from "zod";
 interface WorkflowMessage {
   role: string;
@@ -354,6 +355,16 @@ export class WorkflowScheduler {
       try {
         session = await this.dependencies.createSession(run.workspaceId);
       } catch (error) {
+        // A workspace lifecycle conflict is a transient archive boundary, not
+        // a workflow failure. Preserve ready work until the workspace can be
+        // scheduled again (for example after restore).
+        if (isWorkspaceRuntimeLifecycleConflictError(error)) {
+          if (step !== undefined) {
+            const queued = markWorkflowStepQueued(run, step.id, this.now());
+            return this.persistAndEmit(this.runsSet(queued));
+          }
+          return run;
+        }
         // Capacity is intentionally not inferred from an arbitrary error. A
         // failed allocation is safe to leave queued; startup/configuration
         // errors are actionable and must not masquerade as queued work.
@@ -1026,7 +1037,8 @@ export class WorkflowOccurrenceScheduler {
           await this.closeQuietly(runtimeId);
         }
         run = await this.save(
-          isCapacityError(error)
+          isCapacityError(error) ||
+            isWorkspaceRuntimeLifecycleConflictError(error)
             ? queueWorkflowOccurrence(run, occurrence.id, this.now())
             : failWorkflowOccurrence(
                 run,

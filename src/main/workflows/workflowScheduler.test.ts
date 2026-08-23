@@ -11,6 +11,7 @@ import {
   WORKFLOW_TRANSCRIPT_MAX_CHARS,
   type WorkflowSessionSnapshot,
 } from "./workflowScheduler.js";
+import { WorkspaceRuntimeLifecycleConflictError } from "../workspaceRuntimeLifecycleGate.js";
 import type {
   WorkflowRun,
   WorkflowTemplate,
@@ -200,6 +201,36 @@ function setup(
 }
 
 describe("WorkflowScheduler", () => {
+  it("keeps a step queued when workspace lifecycle ownership is busy", async () => {
+    const persisted: WorkflowRun[] = [];
+    const scheduler = new WorkflowScheduler({
+      createSession: async () => {
+        throw new WorkspaceRuntimeLifecycleConflictError();
+      },
+      prompt: async () => undefined,
+      getSnapshot: async () => snapshot("unused", ""),
+      closeSession: async () => undefined,
+      persist: async (run) => {
+        persisted.push(run);
+        return run;
+      },
+      emit: () => undefined,
+      now: () => 10,
+    });
+    const run = createWorkflowRun({
+      template,
+      workspaceId: "workspace",
+      inputs: {},
+      now: 1,
+    });
+
+    const result = await scheduler.schedule(run);
+
+    expect(result.stepRuns[0]?.status).toBe("queued");
+    expect(result.status).not.toBe("needsAttention");
+    expect(persisted.at(-1)?.stepRuns[0]?.status).toBe("queued");
+  });
+
   it("executes one linear step, captures output, and starts the always-after step", async () => {
     const fixture = setup();
     const run = createWorkflowRun({

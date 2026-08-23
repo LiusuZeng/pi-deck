@@ -168,6 +168,7 @@ import {
   WorkspaceStore,
   type WorkspaceRecord,
 } from "./workspaces/workspaceStore.js";
+import { WorkspaceRuntimeLifecycleGate } from "./workspaceRuntimeLifecycleGate.js";
 import { SettingsStore } from "./settings/settingsStore.js";
 import {
   applyThemePreference,
@@ -318,11 +319,15 @@ const chatWorkerCwds = new Map<string, string>();
 const chatRuntimeSessionFiles = new Map<string, string>();
 const chatRuntimeProjectIds = new Map<string, string>();
 const chatRuntimeWorkspaceIds = new Map<string, string>();
+// A failed close must remain archive-blocking even if a stale renderer read
+// drops the ordinary runtime maps before Pi emits its eventual exit event.
+const chatRuntimeShutdownFailures = new Map<string, string>();
 const chatSessionFileLocks = new Map<string, string>();
 const chatSessionResumePromises = new Map<string, Promise<ChatSnapshot>>();
 const chatSessionResumeWorkspaceIds = new Map<string, string>();
 const chatSessionMutationReservations = new Set<string>();
 const chatWorkspaceMutationReservations = new Set<string>();
+const workspaceRuntimeLifecycle = new WorkspaceRuntimeLifecycleGate();
 // A single-delete transaction may detach Pi before filesystem removal commits.
 // Its worker-exit event must not revoke retryable composer selections.
 const attachmentPreservingRuntimeClosures = new Set<string>();
@@ -1176,6 +1181,9 @@ function registerIpcHandlers(
             ([runtimeId, ownerWorkspaceId]) =>
               ownerWorkspaceId === workspaceId && chatRuntimeIds.has(runtimeId),
           ) ||
+          [...chatRuntimeShutdownFailures.values()].some(
+            (ownerWorkspaceId) => ownerWorkspaceId === workspaceId,
+          ) ||
           [...chatSessionResumeWorkspaceIds.values()].some(
             (ownerWorkspaceId) => ownerWorkspaceId === workspaceId,
           )
@@ -1528,17 +1536,17 @@ function registerIpcHandlers(
     requestSchema: canonicalWorkflowStartRunRequestSchema,
     responseSchema: workflowRunEnvelopeSchema,
     diagnostics: diagnosticsService,
-    handler: async ({ workflowId, workspaceId, inputs }) => {
-      await requireOpenWorkspace(workspaceId);
-      const definition = await ensureWorkflowStore().getWorkflowForWorkspace(
-        workflowId,
-        workspaceId,
-      );
-      const run = createWorkflowRoleRun(definition, workspaceId, inputs);
-      const persisted = await ensureWorkflowStore().createWorkflowRun(run);
-      emitCanonicalWorkflowRunEvent(persisted);
-      return ensureWorkflowOccurrenceScheduler().schedule(persisted);
-    },
+    handler: async ({ workflowId, workspaceId, inputs }) =>
+      withChatWorkspaceCreation(workspaceId, async () => {
+        const definition = await ensureWorkflowStore().getWorkflowForWorkspace(
+          workflowId,
+          workspaceId,
+        );
+        const run = createWorkflowRoleRun(definition, workspaceId, inputs);
+        const persisted = await ensureWorkflowStore().createWorkflowRun(run);
+        emitCanonicalWorkflowRunEvent(persisted);
+        return ensureWorkflowOccurrenceScheduler().schedule(persisted);
+      }),
   });
   registerValidatedIpc({
     channel: ipcChannels.canonicalWorkflowStopRun,
@@ -1617,19 +1625,21 @@ function registerIpcHandlers(
         workspaceId,
         template.workspaceId,
       );
-      await validateWorkflowPaths(
-        template,
-        inputs,
-        await resolveWorkspaceProject(resolvedWorkspaceId),
-      );
-      const run = createWorkflowRun({
-        template,
-        workspaceId: resolvedWorkspaceId,
-        inputs,
+      return withChatWorkspaceCreation(resolvedWorkspaceId, async () => {
+        await validateWorkflowPaths(
+          template,
+          inputs,
+          await resolveWorkspaceProject(resolvedWorkspaceId),
+        );
+        const run = createWorkflowRun({
+          template,
+          workspaceId: resolvedWorkspaceId,
+          inputs,
+        });
+        const persisted = await ensureWorkflowStore().createRun(run);
+        emitWorkflowRunEvent(persisted);
+        return ensureWorkflowScheduler().schedule(persisted);
       });
-      const persisted = await ensureWorkflowStore().createRun(run);
-      emitWorkflowRunEvent(persisted);
-      return ensureWorkflowScheduler().schedule(persisted);
     },
   });
 
@@ -1908,11 +1918,10 @@ function createWorkflowScheduler(
 ): WorkflowScheduler {
   return new WorkflowScheduler({
     createSession: async (workspaceId) => {
-      const project = await resolveWorkspaceProject(workspaceId);
       const snapshot = await createChatSessionSnapshot(
         store,
         diagnosticsService,
-        project,
+        undefined,
         workspaceId,
       );
       return {
@@ -2010,11 +2019,10 @@ function createWorkflowOccurrenceScheduler(
 ): WorkflowOccurrenceScheduler {
   return new WorkflowOccurrenceScheduler({
     createSession: async (workspaceId) => {
-      const project = await resolveWorkspaceProject(workspaceId);
       const snapshot = await createChatSessionSnapshot(
         store,
         diagnosticsService,
-        project,
+        undefined,
         workspaceId,
       );
       return {
@@ -2873,7 +2881,10 @@ async function initializeChatAdapter(
       const preserveAttachments = attachmentPreservingRuntimeClosures.has(
         parsed.data.runtimeId,
       );
-      forgetChatRuntime(parsed.data.runtimeId, { preserveAttachments });
+      forgetChatRuntime(parsed.data.runtimeId, {
+        preserveAttachments,
+        shutdownConfirmed: true,
+      });
       taskSessionOrchestrator?.scheduleAll();
     }
   });
@@ -2929,18 +2940,32 @@ async function createChatWorker(
   initialMultitaskMode: "sequential" | "parallel" = "sequential",
 ): Promise<ChatWorkerSpec> {
   return serializeChatWorkerCreation(async () => {
-    const workerSpec =
-      mode === "real"
-        ? await createRealChatWorker(
-            adapter,
-            store,
-            capacity,
-            project,
-            workspaceId,
-          )
-        : await createFakeChatWorker(adapter, store, capacity, workspaceId);
-    registerChatWorker(workerSpec, mode, initialMultitaskMode);
-    return workerSpec;
+    let workerSpec: ChatWorkerSpec | undefined;
+    try {
+      workerSpec =
+        mode === "real"
+          ? await createRealChatWorker(
+              adapter,
+              store,
+              capacity,
+              project,
+              workspaceId,
+            )
+          : await createFakeChatWorker(adapter, store, capacity, workspaceId);
+      registerChatWorker(workerSpec, mode, initialMultitaskMode);
+      return workerSpec;
+    } catch (error) {
+      if (workerSpec !== undefined) {
+        try {
+          await closeAttachedChatRuntime(adapter, workerSpec.worker.runtimeId);
+        } catch (cleanupError) {
+          diagnostics?.recordError(
+            `Failed to clean up chat worker ${workerSpec.worker.runtimeId} after registration failure: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+          );
+        }
+      }
+      throw error;
+    }
   });
 }
 
@@ -3222,10 +3247,25 @@ async function withChatWorkspaceMutation<T>(
   }
   chatWorkspaceMutationReservations.add(workspaceId);
   try {
-    return await operation();
+    return await workspaceRuntimeLifecycle.withArchive(workspaceId, operation);
   } finally {
     chatWorkspaceMutationReservations.delete(workspaceId);
   }
+}
+
+/**
+ * Hold the workspace runtime claim through open-workspace validation, worker
+ * spawn/registration, and the initial durable snapshot/task persistence.
+ * Workflow schedulers and direct chat creation share this seam.
+ */
+async function withChatWorkspaceCreation<T>(
+  workspaceId: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return workspaceRuntimeLifecycle.withCreation(workspaceId, async () => {
+    await requireOpenWorkspace(workspaceId);
+    return operation();
+  });
 }
 
 function resolveActiveChatRuntimeId(
@@ -3262,6 +3302,7 @@ async function closeAttachedChatRuntime(
   if (options.preserveAttachments === true) {
     attachmentPreservingRuntimeClosures.add(runtimeId);
   }
+  let closed = false;
   try {
     delegationBridge?.removeParent(runtimeId);
     cancelTaskSessionPlanners(runtimeId);
@@ -3270,20 +3311,39 @@ async function closeAttachedChatRuntime(
     if (adapter.hasRuntime(runtimeId)) {
       await adapter.closeSession(runtimeId);
     }
+    closed = true;
   } finally {
-    // Map cleanup must not depend on a cooperative child process. A delete
-    // transaction may keep attachment authority until file removal commits.
-    forgetChatRuntime(runtimeId, options);
+    // Map cleanup must not depend on a cooperative child process. If shutdown
+    // itself fails, retain workspace ownership so archive remains blocked until
+    // the worker's eventual worker_exit event proves it is gone.
+    if (closed) {
+      chatRuntimeShutdownFailures.delete(runtimeId);
+      forgetChatRuntime(runtimeId, {
+        ...options,
+        shutdownConfirmed: true,
+      });
+    } else {
+      const workspaceId = chatRuntimeWorkspaceIds.get(runtimeId);
+      if (workspaceId !== undefined) {
+        chatRuntimeShutdownFailures.set(runtimeId, workspaceId);
+      }
+    }
   }
 }
 
 function forgetChatRuntime(
   runtimeId: string,
-  options: { preserveAttachments?: boolean } = {},
+  options: {
+    preserveAttachments?: boolean;
+    shutdownConfirmed?: boolean;
+  } = {},
 ): void {
   const preserveAttachments =
     options.preserveAttachments === true ||
     attachmentPreservingRuntimeClosures.has(runtimeId);
+  if (options.shutdownConfirmed === true) {
+    chatRuntimeShutdownFailures.delete(runtimeId);
+  }
   if (!preserveAttachments) {
     attachmentSelections.releaseSession(runtimeId);
   }
@@ -4328,6 +4388,7 @@ async function resolveRealChatProject(
 async function closeChatWorker(): Promise<void> {
   const adapter = chatAdapter;
   const runtimeIds = [...chatRuntimeIds];
+  const runtimeWorkspaceIds = new Map(chatRuntimeWorkspaceIds);
   // Reset/quit has no parent left to mediate child work: retire bridge calls
   // and await private child shutdown before releasing parent bookkeeping.
   await Promise.all(
@@ -4351,6 +4412,8 @@ async function closeChatWorker(): Promise<void> {
   chatRuntimeSessionFiles.clear();
   chatRuntimeProjectIds.clear();
   chatRuntimeWorkspaceIds.clear();
+  // Failed shutdown tombstones intentionally survive reset/adapter teardown so
+  // an unconfirmed worker can never make its workspace appear archivable.
   chatSessionFileLocks.clear();
   chatSessionResumePromises.clear();
   chatSessionResumeWorkspaceIds.clear();
@@ -4367,9 +4430,16 @@ async function closeChatWorker(): Promise<void> {
     clearPendingExtensionUiRequests(runtimeId);
   }
 
-  if (adapter === undefined || runtimeIds.length === 0) {
+  if (adapter === undefined) {
+    for (const runtimeId of runtimeIds) {
+      const workspaceId = runtimeWorkspaceIds.get(runtimeId);
+      if (workspaceId !== undefined) {
+        chatRuntimeShutdownFailures.set(runtimeId, workspaceId);
+      }
+    }
     return;
   }
+  if (runtimeIds.length === 0) return;
 
   await Promise.all(
     runtimeIds.map(async (runtimeId) => {
@@ -4380,6 +4450,10 @@ async function closeChatWorker(): Promise<void> {
         diagnostics?.recordError(
           `Failed to close chat worker ${runtimeId}: ${message}`,
         );
+        const workspaceId = runtimeWorkspaceIds.get(runtimeId);
+        if (workspaceId !== undefined) {
+          chatRuntimeShutdownFailures.set(runtimeId, workspaceId);
+        }
       }
     }),
   );
@@ -5001,7 +5075,10 @@ async function closeRuntimeForDeletedSession(
 ): Promise<void> {
   const adapter = chatAdapter;
   if (adapter === undefined) {
-    forgetChatRuntime(runtimeId, { preserveAttachments });
+    forgetChatRuntime(runtimeId, {
+      preserveAttachments,
+      shutdownConfirmed: true,
+    });
     return;
   }
   await closeAttachedChatRuntime(adapter, runtimeId, { preserveAttachments });
@@ -5248,47 +5325,48 @@ async function resumeChatSession(
   chatSessionResumeWorkspaceIds.set(canonicalSessionFile, workspaceId);
 
   try {
-    if (chatSessionMutationReservations.has(canonicalSessionFile)) {
-      throw new Error("Session is already being changed.");
-    }
-    if (chatWorkspaceMutationReservations.has(workspaceId)) {
-      throw new Error("Workspace is already being changed.");
-    }
-    // The handler validates membership before this async path begins. Recheck
-    // the workspace after launch/file validation so an archive that completed
-    // in the meantime cannot receive a new runtime.
-    await requireOpenWorkspace(workspaceId);
-    if (options.claimUnassignedWorkspace === true) {
-      await claimUnassignedChatResumeWorkspace(
-        ensureWorkspaceStore(),
-        workspaceId,
-        canonicalSessionFile,
-      );
-    } else {
-      await assertChatResumeWorkspaceOwnership(
-        ensureWorkspaceStore(),
-        workspaceId,
-        canonicalSessionFile,
-      );
-    }
+    await withChatWorkspaceCreation(workspaceId, async () => {
+      if (chatSessionMutationReservations.has(canonicalSessionFile)) {
+        throw new Error("Session is already being changed.");
+      }
+      if (chatWorkspaceMutationReservations.has(workspaceId)) {
+        throw new Error("Workspace is already being changed.");
+      }
+      // The handler validates membership before this async path begins. The
+      // lifecycle claim rechecks it before ownership persistence or spawn so
+      // an archive that completed in the meantime cannot receive a runtime.
+      if (options.claimUnassignedWorkspace === true) {
+        await claimUnassignedChatResumeWorkspace(
+          ensureWorkspaceStore(),
+          workspaceId,
+          canonicalSessionFile,
+        );
+      } else {
+        await assertChatResumeWorkspaceOwnership(
+          ensureWorkspaceStore(),
+          workspaceId,
+          canonicalSessionFile,
+        );
+      }
 
-    const adapter = await ensureChatAdapter(store, diagnosticsService);
-    const attachedRuntimeId = chatSessionFileLocks.get(canonicalSessionFile);
-    const snapshot =
-      attachedRuntimeId !== undefined
-        ? await getChatSnapshotForRuntime(adapter, attachedRuntimeId, mode)
-        : await attachRealResumeWorker(
-            adapter,
-            store,
-            getChatWorkerCapacity(),
-            canonicalSessionFile,
-            project,
-            workspaceId,
-          );
-    if (attachedRuntimeId !== undefined) {
-      chatRuntimeId = attachedRuntimeId;
-    }
-    resolvePending(snapshot);
+      const adapter = await ensureChatAdapter(store, diagnosticsService);
+      const attachedRuntimeId = chatSessionFileLocks.get(canonicalSessionFile);
+      const snapshot =
+        attachedRuntimeId !== undefined
+          ? await getChatSnapshotForRuntime(adapter, attachedRuntimeId, mode)
+          : await attachRealResumeWorker(
+              adapter,
+              store,
+              getChatWorkerCapacity(),
+              canonicalSessionFile,
+              project,
+              workspaceId,
+            );
+      if (attachedRuntimeId !== undefined) {
+        chatRuntimeId = attachedRuntimeId;
+      }
+      resolvePending(snapshot);
+    });
   } catch (error) {
     rejectPending(error);
   } finally {
@@ -5312,48 +5390,51 @@ async function attachRealResumeWorker(
   project: ProjectRef | undefined,
   workspaceId: string,
 ): Promise<ChatSnapshot> {
-  const workerSpec = await serializeChatWorkerCreation(() =>
-    createRealResumeWorker(
-      adapter,
-      store,
-      capacity,
-      canonicalSessionFile,
-      project,
-      workspaceId,
-    ),
-  );
-  const runtimeId = workerSpec.worker.runtimeId;
-  registerChatWorker(workerSpec, "real");
-  chatRuntimeSessionFiles.set(runtimeId, canonicalSessionFile);
-  chatSessionFileLocks.set(canonicalSessionFile, runtimeId);
-
-  try {
-    const snapshot = await getChatSnapshotForRuntime(
-      adapter,
-      runtimeId,
-      "real",
+  return withChatWorkspaceCreation(workspaceId, async () => {
+    const workerSpec = await serializeChatWorkerCreation(() =>
+      createRealResumeWorker(
+        adapter,
+        store,
+        capacity,
+        canonicalSessionFile,
+        project,
+        workspaceId,
+      ),
     );
-    const returnedSessionFile = snapshot.state.sessionFile;
-    if (typeof returnedSessionFile !== "string") {
-      throw new Error(
-        "This Pi version did not report the resumed session file. Update Pi and try again, or resume this session from the Pi CLI.",
+    const runtimeId = workerSpec.worker.runtimeId;
+
+    try {
+      registerChatWorker(workerSpec, "real");
+      chatRuntimeSessionFiles.set(runtimeId, canonicalSessionFile);
+      chatSessionFileLocks.set(canonicalSessionFile, runtimeId);
+
+      const snapshot = await getChatSnapshotForRuntime(
+        adapter,
+        runtimeId,
+        "real",
       );
+      const returnedSessionFile = snapshot.state.sessionFile;
+      if (typeof returnedSessionFile !== "string") {
+        throw new Error(
+          "This Pi version did not report the resumed session file. Update Pi and try again, or resume this session from the Pi CLI.",
+        );
+      }
+      const returnedCanonical =
+        (await safeRealpath(returnedSessionFile)) ??
+        path.resolve(returnedSessionFile);
+      if (returnedCanonical !== canonicalSessionFile) {
+        throw new Error(
+          `Pi resume opened a different session. Requested ${canonicalSessionFile}, got ${returnedCanonical}.`,
+        );
+      }
+      chatRuntimeSessionFiles.set(runtimeId, canonicalSessionFile);
+      chatSessionFileLocks.set(canonicalSessionFile, runtimeId);
+      return snapshot;
+    } catch (error) {
+      await closeRuntimeForDeletedSession(runtimeId);
+      throw error;
     }
-    const returnedCanonical =
-      (await safeRealpath(returnedSessionFile)) ??
-      path.resolve(returnedSessionFile);
-    if (returnedCanonical !== canonicalSessionFile) {
-      throw new Error(
-        `Pi resume opened a different session. Requested ${canonicalSessionFile}, got ${returnedCanonical}.`,
-      );
-    }
-    chatRuntimeSessionFiles.set(runtimeId, canonicalSessionFile);
-    chatSessionFileLocks.set(canonicalSessionFile, runtimeId);
-    return snapshot;
-  } catch (error) {
-    await closeRuntimeForDeletedSession(runtimeId);
-    throw error;
-  }
+  });
 }
 
 async function createChatSessionSnapshot(
@@ -5363,34 +5444,46 @@ async function createChatSessionSnapshot(
   workspaceId: string,
   initialMultitaskMode: "sequential" | "parallel" = "sequential",
 ): Promise<ChatSnapshot> {
-  const adapter = await ensureChatAdapter(store, diagnosticsService);
-  const mode = chatBackendMode ?? resolveChatBackendMode();
-  const workerSpec = await createChatWorker(
-    adapter,
-    store,
-    mode,
-    getChatWorkerCapacity(),
-    project,
-    workspaceId,
-    initialMultitaskMode,
-  );
-  const runtimeId = workerSpec.worker.runtimeId;
-  try {
-    const snapshot = await getChatSnapshotForRuntime(adapter, runtimeId, mode, {
-      skipMessages: true,
-    });
-    await persistMultitaskSupervisor(runtimeId);
-    return snapshot;
-  } catch (error) {
+  return withChatWorkspaceCreation(workspaceId, async () => {
+    const adapter = await ensureChatAdapter(store, diagnosticsService);
+    const mode = chatBackendMode ?? resolveChatBackendMode();
+    const resolvedProject =
+      project ??
+      (mode === "real"
+        ? await resolveWorkspaceProject(workspaceId)
+        : undefined);
+    const workerSpec = await createChatWorker(
+      adapter,
+      store,
+      mode,
+      getChatWorkerCapacity(),
+      resolvedProject,
+      workspaceId,
+      initialMultitaskMode,
+    );
+    const runtimeId = workerSpec.worker.runtimeId;
     try {
-      await closeAttachedChatRuntime(adapter, runtimeId);
-    } catch (cleanupError) {
-      diagnosticsService.recordError(
-        `Failed to clean up newly created chat worker ${runtimeId}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+      const snapshot = await getChatSnapshotForRuntime(
+        adapter,
+        runtimeId,
+        mode,
+        {
+          skipMessages: true,
+        },
       );
+      await persistMultitaskSupervisor(runtimeId);
+      return snapshot;
+    } catch (error) {
+      try {
+        await closeAttachedChatRuntime(adapter, runtimeId);
+      } catch (cleanupError) {
+        diagnosticsService.recordError(
+          `Failed to clean up newly created chat worker ${runtimeId}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+        );
+      }
+      throw error;
     }
-    throw error;
-  }
+  });
 }
 
 async function getChatSnapshot(
