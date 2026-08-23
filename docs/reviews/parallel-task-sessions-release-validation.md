@@ -2,7 +2,7 @@
 
 Date: 2026-08-22  
 Branch: `feature/parallel-task-sessions`  
-Validated code commit: `d8c981b7c4b049bc0ea0050fc977f0d8191dd8ca`
+Validated code commit: `59441171fae9ee425923bca3ee78882ee58fe79f`
 
 This is integration evidence only. The branch has not been pushed, merged to
 `main`, tagged, or released.
@@ -22,7 +22,7 @@ Result: **passed**
 - Unit/integration: 68 files passed; 540 tests passed; 2 todo.
 - Production build: passed.
 - Site/version validation: passed for source version 0.5.4.
-- Standard Electron E2E: 56 passed; 5 authenticated real-Pi tests skipped by
+- Standard Electron E2E: 56 passed; 6 authenticated real-Pi tests skipped by
   the standard suite as intended.
 
 The standard E2E includes deterministic production-route coverage for:
@@ -48,13 +48,14 @@ Command:
 npm run test:e2e:real-smoke
 ```
 
-Result: **passed — 5 of 5**
+Result: **passed — 6 of 6**
 
-1. Real Pi Agent Workflow persistence across restart.
-2. Explicitly opted-in compatibility `deck_delegate` bridge transport.
-3. Ordinary real-Pi parent confirms the legacy tool is absent by default.
-4. Draft Parallel opt-in through the explicitly enabled real bridge harness.
-5. Production model-backed Parallel routing without a harness marker or test
+1. Real-Pi worker model discovery and retained per-prompt model selection.
+2. Real Pi Agent Workflow persistence across restart.
+3. Explicitly opted-in compatibility `deck_delegate` bridge transport.
+4. Ordinary real-Pi parent confirms the legacy tool is absent by default.
+5. Draft Parallel opt-in through the explicitly enabled real bridge harness.
+6. Production model-backed Parallel routing without a harness marker or test
    routing fixture.
 
 The production planner test required an ordinary prompt to become exactly three
@@ -85,7 +86,8 @@ Final review fixes included:
 - semantic, safe, narrow-layout Markdown tables;
 - immediate planner acknowledgement, duplicate-submit protection, and safe
   failed-planning draft restoration;
-- DOM-safe per-prompt and persistent worker-model selection;
+- DOM-safe per-prompt and persistent worker-model selection with an atomic
+  model/thinking update that cannot restore stale defaults;
 - model-visible legacy `deck_delegate` disabled by default, with authenticated
   real-Pi coverage of both opt-in registration and ordinary-session absence.
 
