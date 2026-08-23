@@ -6,7 +6,9 @@ Validated code commit: `ebbf37558ffa3b7d361cc4376139a85a59557921`
 
 This is release-candidate evidence. The branch contains all integrated Parallel
 task-session fixes, the stable-default-workspace ownership fix, and v0.5.5
-metadata. It has not been pushed, merged to `main`, tagged, or released.
+metadata. It is pushed as draft PR
+[#9](https://github.com/LiusuZeng/pi-deck/pull/9), but has not been merged to
+`main`, tagged, or released.
 
 ## CI-equivalent gate
 
@@ -96,8 +98,8 @@ Final review fixes included:
 
 ## Remaining release actions
 
-- Push `release/v0.5.5`, open a pull request to `main`, and obtain a green
-  hosted **Verify desktop app** check.
+- Review draft PR [#9](https://github.com/LiusuZeng/pi-deck/pull/9) and obtain a
+  green hosted **Verify desktop app** check.
 - GitHub currently reports `main` as unprotected; configure the required check
   before merging, as required by `docs/release-checklist.md`.
 - Merge without content changes and confirm the resulting `main` SHA and Pages
