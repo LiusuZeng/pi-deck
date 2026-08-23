@@ -9155,7 +9155,7 @@ function TimelineAttachmentGrid(props: {
   );
 }
 
-function MarkdownView(props: { markdown: string }): ReactElement {
+export function MarkdownView(props: { markdown: string }): ReactElement {
   const blocks = useMemo(
     () => parseSafeMarkdown(props.markdown),
     [props.markdown],

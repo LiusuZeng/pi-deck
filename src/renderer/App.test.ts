@@ -1,7 +1,28 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { emptyOverlays } from "./sessionState.js";
 import { defaultAgentWorkflowDefinition } from "./workflows/agentWorkflowDefinition.js";
-import { __rendererTestHooks } from "./App.js";
+import { __rendererTestHooks, MarkdownView } from "./App.js";
+
+it("renders pipe tables as safe semantic table markup", () => {
+  const markup = renderToStaticMarkup(
+    createElement(MarkdownView, {
+      markdown: [
+        "| Country | Temperature | Source |",
+        "|---|---:|---|",
+        "| Canada | **35.2°C** | [ECCC](https://example.com) |",
+      ].join("\n"),
+    }),
+  );
+
+  expect(markup).toContain('<div class="markdown-table-scroll"><table>');
+  expect(markup).toContain("<thead>");
+  expect(markup).toContain("<tbody>");
+  expect(markup).toContain("<strong><span>35.2°C</span></strong>");
+  expect(markup).toContain('href="https://example.com"');
+  expect(markup).not.toContain("|---|---:|---|");
+});
 
 it("offers every active workflow workspace once and excludes archived workspaces", () => {
   const workspace = (id: string, name: string) => ({
