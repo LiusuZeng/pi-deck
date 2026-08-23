@@ -80,6 +80,12 @@ async function expectAllWorkLaunch(page: Page): Promise<void> {
   ).toBeVisible();
 }
 
+function sidebarNewSessionButton(page: Page) {
+  return page
+    .getByLabel("Sessions", { exact: true })
+    .getByRole("button", { name: "New session", exact: true });
+}
+
 function listJsonlFiles(root: string): string[] {
   if (!fs.existsSync(root)) {
     return [];
@@ -122,7 +128,7 @@ test("real Pi Parallel worker model selection remains selected", async () => {
     });
     try {
       await expectHealthyPreload(page);
-      await page.getByRole("button", { name: "New session" }).click();
+      await sidebarNewSessionButton(page).click();
       await page
         .getByRole("button", { name: "Parallel multitasking: Off" })
         .click();
@@ -409,9 +415,7 @@ test("real Pi bridge transport: default workspace prompt, resume, and explicit d
         })
         .toBe(0);
 
-      await firstLaunch.page
-        .getByRole("button", { name: "New session" })
-        .click();
+      await sidebarNewSessionButton(firstLaunch.page).click();
       await firstLaunch.page
         .getByLabel("Prompt text")
         .fill(`Reply with exactly: ${token}`);
@@ -611,7 +615,7 @@ test("real Pi ordinary parent omits the legacy deck_delegate tool", async () => 
     });
     try {
       await expectHealthyPreload(page);
-      await page.getByRole("button", { name: "New session" }).click();
+      await sidebarNewSessionButton(page).click();
       await page
         .getByLabel("Prompt text")
         .fill("PI_DECK_E2E_ASSERT_DECK_DELEGATE_ABSENT");
@@ -681,9 +685,7 @@ test("real Pi: draft parallel opt-in delegates from its first prompt", async () 
     const { app, page } = await launchPiDeck(baseEnv);
     try {
       await expectHealthyPreload(page);
-      await page
-        .getByRole("button", { name: "New session", exact: true })
-        .click();
+      await sidebarNewSessionButton(page).click();
       await expect(page.getByLabel("Prompt text")).toBeVisible();
       const parallelOff = page.getByRole("button", {
         name: "Parallel multitasking: Off",
@@ -805,9 +807,7 @@ test("real Pi production routing plans multiple private task sessions without br
     const { app, page } = await launchPiDeck(env);
     try {
       await expectHealthyPreload(page);
-      await page
-        .getByRole("button", { name: "New session", exact: true })
-        .click();
+      await sidebarNewSessionButton(page).click();
       await expect(page.getByLabel("Prompt text")).toBeVisible();
       await page
         .getByRole("button", { name: "Parallel multitasking: Off" })

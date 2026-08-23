@@ -3565,10 +3565,11 @@ export function App(): ReactElement {
       void window.piDeck.chat
         .listModels(modelDiscoveryRequestForWorkspace(workspace))
         .then((result) => {
-          if (
-            sessionListRequest === sessionListGeneration.current &&
-            isNavigationCurrent(generation)
-          ) {
+          // Model discovery belongs to the activated workspace, not to the
+          // transient route that initiated activation. A user can enter a
+          // session before discovery completes; the latest session-list token
+          // still prevents an older workspace result from winning.
+          if (sessionListRequest === sessionListGeneration.current) {
             setProjectModelConfiguration(result);
             setSessions((items) =>
               applyPiDefaultsToDraftSessions(items, workspace.id, result),

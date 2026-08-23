@@ -144,11 +144,14 @@ async function expectAllWorkLaunch(page: Page): Promise<void> {
   ).toBeVisible();
 }
 
+function sidebarNewSessionButton(page: Page) {
+  return page
+    .getByLabel("Sessions", { exact: true })
+    .getByRole("button", { name: "New session", exact: true });
+}
+
 async function enterSessionDetail(page: Page): Promise<void> {
-  const newSession = page.getByRole("button", {
-    name: "New session",
-    exact: true,
-  });
+  const newSession = sidebarNewSessionButton(page);
   await expect(newSession).toBeVisible();
   await newSession.click();
   await expect(
@@ -1571,9 +1574,7 @@ test("extension UI confirm request completes through renderer, IPC, and fake Pi"
 
     // A waiting worker remains in the sidebar after the user moves elsewhere;
     // receiving extension input never steals foreground selection.
-    await page
-      .getByRole("button", { name: "New session", exact: true })
-      .click();
+    await sidebarNewSessionButton(page).click();
     await expect(
       page.getByRole("heading", { name: /Untitled new session/ }),
     ).toBeVisible();
@@ -3301,7 +3302,7 @@ test("real mode routes background session events to the right session with fake 
       page.locator(".session-item", { hasText: "background route one" }),
     ).toBeVisible();
 
-    await page.getByRole("button", { name: "New session" }).click();
+    await sidebarNewSessionButton(page).click();
     await page.getByLabel("Prompt text").fill("foreground route two");
     await page.getByRole("button", { name: "Send" }).click();
     await expect(
@@ -3335,7 +3336,7 @@ test("real mode compact plus creates another attached session with fake Pi", asy
   );
   try {
     await expectHealthyPreload(page);
-    await page.getByRole("button", { name: "New session" }).click();
+    await sidebarNewSessionButton(page).click();
     await page.getByLabel("Prompt text").fill("start draft session");
     await page.getByRole("button", { name: "Send" }).click();
     await expect(
