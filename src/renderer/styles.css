@@ -1337,6 +1337,50 @@ h1 {
   padding-left: 20px;
 }
 
+.markdown-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.markdown-table-scroll table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+}
+
+.markdown-table-scroll th,
+.markdown-table-scroll td {
+  min-width: 96px;
+  border: 1px solid var(--color-border);
+  padding: 6px 8px;
+  vertical-align: top;
+}
+
+.markdown-table-scroll th {
+  color: var(--color-text-strong);
+  background: var(--color-surface-muted);
+  font-weight: 700;
+}
+
+.markdown-table-scroll tr > :first-child {
+  border-left: 0;
+}
+
+.markdown-table-scroll tr > :last-child {
+  border-right: 0;
+}
+
+.markdown-table-scroll thead tr:first-child > * {
+  border-top: 0;
+}
+
+.markdown-table-scroll tbody tr:last-child > * {
+  border-bottom: 0;
+}
+
 .markdown-body blockquote {
   margin: 0;
   border-left: 3px solid #c7d2fe;
@@ -1834,6 +1878,12 @@ h1 {
   .starter-page,
   .transcript-loading {
     padding: 20px 14px;
+  }
+
+  .markdown-table-scroll th,
+  .markdown-table-scroll td {
+    min-width: 80px;
+    padding: 5px 7px;
   }
 }
 
@@ -2934,11 +2984,147 @@ summary::marker {
   max-width: 300px;
 }
 
+.multitask-status-popover__heading {
+  color: #d1d5db;
+  font-weight: 600;
+}
+
+.multitask-status-popover [role="list"] {
+  display: grid;
+  gap: 3px;
+}
+
 .multitask-status-popover [role="listitem"] {
   white-space: normal;
 }
 
+.multitask-mode-control {
+  gap: 5px;
+  padding: 0 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.multitask-mode-control svg {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+}
+
 .multitask-control[data-error="true"] {
+  color: var(--danger-fg);
+}
+
+.parallel-prompt-settings {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.parallel-prompt-settings__destination {
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.parallel-prompt-settings select {
+  max-width: 160px;
+  border: 1px solid var(--color-border);
+  border-radius: 7px;
+  padding: 3px 5px;
+  color: inherit;
+  background: var(--color-surface);
+  font: inherit;
+}
+
+.parallel-prompt-settings__popover {
+  display: grid;
+  gap: 8px;
+  padding: 4px;
+}
+
+.parallel-prompt-settings__popover > label,
+.parallel-prompt-settings__popover details[open] > label {
+  display: grid;
+  gap: 3px;
+}
+
+.parallel-prompt-settings__popover details {
+  display: grid;
+  gap: 6px;
+}
+
+.parallel-prompt-settings__popover summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.task-session-panel {
+  width: min(776px, calc(100% - 28px));
+  margin: 12px auto;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 10px;
+  background: var(--color-surface-muted);
+}
+
+.task-session-panel header,
+.task-session-panel__title {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.task-session-panel [role="list"] {
+  display: grid;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.task-session-panel article {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding-top: 7px;
+  border-top: 1px solid var(--color-border);
+}
+
+.task-session-panel p,
+.task-session-panel small {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.task-session-panel__brief {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-session-panel small,
+.task-session-panel__title > span {
+  color: var(--color-text-muted);
+}
+
+.task-session-panel__title {
+  min-width: 0;
+}
+
+.task-session-panel__title > strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-session-panel__title > span {
+  flex: 0 0 auto;
+  text-transform: capitalize;
+}
+
+.task-session-panel__title > span[data-lifecycle="failed"],
+.task-session-panel__title > span[data-lifecycle="interrupted"] {
   color: var(--danger-fg);
 }
 
@@ -3593,7 +3779,22 @@ body {
 
   .composer-meta-controls,
   .composer-meta-actions {
+    min-width: 0;
+    max-width: 100%;
     flex-wrap: wrap;
+  }
+
+  .composer-meta-controls > .parallel-prompt-settings__destination {
+    flex: 1 0 100%;
+  }
+
+  .parallel-prompt-settings {
+    flex: 1 0 100%;
+    flex-wrap: wrap;
+  }
+
+  .task-session-panel {
+    width: calc(100% - 20px);
   }
 
   .composer-input-wrap:has(.composer-status) {

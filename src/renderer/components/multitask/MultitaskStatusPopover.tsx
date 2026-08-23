@@ -1,9 +1,6 @@
-/** A renderer-safe snapshot of a task. Deliberately contains no task payload. */
-export interface MultitaskTaskSummary {
-  generatedName: string;
-  taskNumber: number;
-  status: string;
-}
+import type { MultitaskTaskSummary } from "../../../shared/types.js";
+
+export type { MultitaskTaskSummary } from "../../../shared/types.js";
 
 export interface MultitaskStatusPopoverProps {
   /** Tasks to show, including tasks whose status is `queued`. */
@@ -18,16 +15,15 @@ export interface MultitaskStatusPopoverProps {
  */
 export function MultitaskStatusPopover({ tasks }: MultitaskStatusPopoverProps) {
   return (
-    <span
-      className="multitask-status-popover"
-      aria-label="Task statuses"
-      role="list"
-    >
-      {tasks.map((task) => (
-        <span key={task.taskNumber} role="listitem">
-          {`#${task.taskNumber} ${task.generatedName} — ${task.status}`}
-        </span>
-      ))}
+    <span className="multitask-status-popover">
+      <span className="multitask-status-popover__heading">Task status</span>
+      <span aria-label="Task statuses" role="list">
+        {tasks.map((task) => (
+          <span key={task.taskNumber} role="listitem">
+            {`#${task.taskNumber} ${task.generatedName} — ${task.lifecycle}`}
+          </span>
+        ))}
+      </span>
     </span>
   );
 }

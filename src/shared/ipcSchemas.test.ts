@@ -22,6 +22,7 @@ import {
   chatRuntimeStatusSchema,
   multitaskModeRequestSchema,
   multitaskModeUpdateRequestSchema,
+  multitaskSettingsUpdateRequestSchema,
   multitaskStateEventSchema,
   multitaskTaskSummarySchema,
   pickProjectResultSchema,
@@ -362,12 +363,10 @@ describe("IPC schemas", () => {
     ).toThrow();
   });
 
-  it("limits multitask contracts to parent-scoped mode and safe summaries", () => {
+  it("limits multitask contracts to parent-scoped settings and safe task rows", () => {
     expect(
       multitaskModeRequestSchema.parse({ runtimeId: "runtime-7" }),
-    ).toEqual({
-      runtimeId: "runtime-7",
-    });
+    ).toEqual({ runtimeId: "runtime-7" });
     expect(
       multitaskModeUpdateRequestSchema.parse({
         runtimeId: "runtime-7",
@@ -375,15 +374,47 @@ describe("IPC schemas", () => {
       }),
     ).toEqual({ runtimeId: "runtime-7", mode: "parallel" });
     expect(
+      multitaskSettingsUpdateRequestSchema.parse({
+        runtimeId: "runtime-7",
+        settings: {
+          model: { provider: "anthropic", modelId: "claude" },
+          thinkingLevel: "high",
+        },
+      }),
+    ).toMatchObject({ runtimeId: "runtime-7" });
+    expect(
       multitaskStateEventSchema.parse({
         runtimeId: "runtime-7",
         mode: "sequential",
+        settings: {},
+        activeCount: 1,
+        activeLimit: 10,
         tasks: [
-          { taskNumber: 8, generatedName: "Task 8", status: "waiting-input" },
+          {
+            taskNumber: 8,
+            generatedName: "Task 8",
+            brief: "Investigate the issue",
+            lifecycle: "waiting-parent",
+            attempt: 2,
+            elapsedMs: 500,
+            startedAtMs: 1_700_000_000_000,
+            progress: "Waiting for plan context",
+          },
         ],
       }),
-    ).toMatchObject({ runtimeId: "runtime-7" });
+    ).toMatchObject({ runtimeId: "runtime-7", activeLimit: 10 });
 
+    expect(() =>
+      multitaskTaskSummarySchema.parse({
+        taskNumber: 8,
+        generatedName: "Task 8",
+        brief: "Private work",
+        lifecycle: "completed",
+        attempt: 1,
+        elapsedMs: 500,
+        startedAtMs: 1_700_000_000_000,
+      }),
+    ).toThrow();
     expect(() => multitaskModeRequestSchema.parse({ runtimeId: "" })).toThrow();
     expect(() =>
       multitaskModeUpdateRequestSchema.parse({
@@ -396,7 +427,10 @@ describe("IPC schemas", () => {
       multitaskTaskSummarySchema.parse({
         taskNumber: 8,
         generatedName: "Task 8",
-        status: "running",
+        brief: "Private work",
+        lifecycle: "running",
+        attempt: 1,
+        elapsedMs: 0,
         sessionFile: "/private/session.jsonl",
       }),
     ).toThrow();
@@ -404,11 +438,17 @@ describe("IPC schemas", () => {
       multitaskStateEventSchema.parse({
         runtimeId: "runtime-7",
         mode: "parallel",
+        settings: {},
+        activeCount: 0,
+        activeLimit: 10,
         tasks: [
           {
             taskNumber: 8,
             generatedName: "Task 8",
-            status: "queued",
+            brief: "Private work",
+            lifecycle: "queued",
+            attempt: 1,
+            elapsedMs: 0,
             prompt: "private child prompt",
           },
         ],
@@ -500,6 +540,32 @@ describe("IPC schemas", () => {
         requestId: "uuid-1",
         response: { value: "x" },
         arbitraryFileWrite: true,
+      }),
+    ).toThrow();
+  });
+
+  it("defaults legacy prompts to the parent and validates task-worker overrides", () => {
+    expect(
+      chatPromptRequestSchema.parse({
+        runtimeId: "runtime-1",
+        text: "Summarize these",
+        destination: "newTaskSession",
+        workerOverrides: {
+          model: { provider: "anthropic", modelId: "claude" },
+          thinkingLevel: "high",
+        },
+      }),
+    ).toMatchObject({ destination: "newTaskSession" });
+    expect(
+      chatPromptRequestSchema.parse({ runtimeId: "runtime-1", text: "Legacy" }),
+    ).toMatchObject({ destination: "parent" });
+    expect(() =>
+      chatPromptRequestSchema.parse({
+        runtimeId: "runtime-1",
+        text: "Bad worker",
+        workerOverrides: {
+          model: { provider: "x", modelId: "y", runtimeId: "private" },
+        },
       }),
     ).toThrow();
   });

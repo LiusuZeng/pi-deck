@@ -299,7 +299,7 @@ Historical note: this gate began as a narrow real-Pi vertical slice. P0 session 
 | M7.1 | Tool execution cards                | Frontend/Backend | Done for P1 | M5.1 tool events | Tool cards show running/success/error status and truncate large detail payloads; broader real stdout/stderr shapes remain. |
 | M7.2 | Session stats and diagnostics panel | Backend/Frontend | In Progress | M3/M4 workers    | Usage stats popover refreshes after turns; full diagnostics panel for binary/config/workers/stderr/session files remains.  |
 | M7.3 | Error recovery flows                | Backend/Frontend | In Progress | M5/M6            | Worker-exit locks are released and saved errored sessions can be reopened; richer provider-failure retry flows remain.     |
-| M7.4 | End-to-end release validation       | QA/All           | In Progress | M1-M7            | P0 real smoke has run; broader matrix in `docs/real-pi-smoke-test-matrix.md` waits for feature readiness                   |
+| M7.4 | End-to-end release validation       | QA/All           | In Progress | M1-M7            | `verify:ci`, the authenticated real-Pi smoke, and `docs/release-checklist.md` are mandatory tag evidence; broader matrix remains required per feature |
 
 ## 4. Parallel Work Lanes and Worktrees
 

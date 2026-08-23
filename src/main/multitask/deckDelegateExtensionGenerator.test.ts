@@ -6,6 +6,7 @@ import {
   DECK_DELEGATE_CAPABILITY_ENV,
   DECK_DELEGATE_ENDPOINT_ENV,
   DECK_DELEGATE_EXTENSION_SOURCE,
+  DECK_DELEGATE_LEGACY_TOOL_ENV,
   DECK_DELEGATE_PROTOCOL_VERSION,
   writeDeckDelegateAcceptanceHarness,
   writeDeckDelegateExtension,
@@ -21,7 +22,7 @@ afterEach(async () => {
 });
 
 describe("Deck delegate extension source generator", () => {
-  it("writes a self-contained Pi extension with the supported custom tool", async () => {
+  it("writes a self-contained Pi extension with an opt-in compatibility tool", async () => {
     const directory = await fs.mkdtemp(
       path.join(os.tmpdir(), "pi-deck-extension-"),
     );
@@ -38,6 +39,15 @@ describe("Deck delegate extension source generator", () => {
     );
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain('from "typebox"');
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain('name: "deck_delegate"');
+    expect(DECK_DELEGATE_LEGACY_TOOL_ENV).toBe(
+      "PI_DECK_ENABLE_LEGACY_DELEGATE_BRIDGE",
+    );
+    expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain(
+      'process.env[DECK_DELEGATE_LEGACY_TOOL_ENV] === "1"',
+    );
+    expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain(
+      "pi.registerTool(createDeckDelegateTool(pi))",
+    );
     expect(DECK_DELEGATE_EXTENSION_SOURCE).not.toMatch(
       /from ["'][^"']*pi-deck/,
     );
@@ -57,6 +67,9 @@ describe("Deck delegate extension source generator", () => {
     expect(source).toContain(`from ${JSON.stringify(delegate)}`);
     expect(source).toContain("createDeckDelegateTool(pi).execute");
     expect(source).toContain("PI_DECK_E2E_INVOKE_DECK_DELEGATE");
+    expect(source).toContain("PI_DECK_E2E_ASSERT_DECK_DELEGATE_ABSENT");
+    expect(source).toContain("pi.getAllTools()");
+    expect(source).toContain("PI_DECK_E2E_DECK_DELEGATE_NOT_REGISTERED");
   });
 
   it("documents and enforces the versioned, capability-gated JSONL contract", () => {
@@ -86,16 +99,22 @@ describe("Deck delegate extension source generator", () => {
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain('type: "mode-query"');
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain('type: "mode-state"');
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain(
+      'registerCommand("deck-task-prompt"',
+    );
+    expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain(
+      'appendEntry("deck_task_prompt"',
+    );
+    expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain(
       "queryMode(config.endpoint, config.capability)",
     );
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain(
-      "By default, delegate substantive independent work with deck_delegate",
+      "manages Parallel mode task-session planning and routing outside this parent turn",
     );
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain(
-      "explicitly asks you to handle the work directly",
+      "Do not call deck_delegate for ordinary user prompts",
     );
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain(
-      "parallel multitasking is disabled. Do not delegate work with deck_delegate",
+      "Parallel mode is off. Do not call deck_delegate",
     );
     expect(DECK_DELEGATE_EXTENSION_SOURCE).not.toContain(
       "assistant-text parsing",

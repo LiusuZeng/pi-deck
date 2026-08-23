@@ -19,6 +19,7 @@ type PromptScenario =
   | "extension-ui"
   | "error"
   | "delegate"
+  | "routing"
   | "all";
 
 interface FakeOptions {
@@ -37,6 +38,13 @@ interface FakeOptions {
   sessionFile?: string;
   workflowDecisions: boolean[];
   workflowDecisionStateFile?: string;
+  /**
+   * Provider-independent ordinary-prompt routing fixture. This deliberately
+   * does not call the deck_delegate bridge: production routing owns task
+   * planning, while this process remains a real Pi RPC transport.
+   */
+  taskRoutingFixture?: string;
+  fixtureTraceFile?: string;
 }
 
 type FakeCommandRecord = JsonObject & {
@@ -127,6 +135,14 @@ function parseOptions(argv: string[]): FakeOptions {
       const stateFile = argv[index + 1];
       if (stateFile) options.workflowDecisionStateFile = stateFile;
       index += 1;
+    } else if (arg === "--task-routing-fixture") {
+      const fixture = argv[index + 1];
+      if (fixture) options.taskRoutingFixture = fixture;
+      index += 1;
+    } else if (arg === "--fixture-trace-file") {
+      const traceFile = argv[index + 1];
+      if (traceFile) options.fixtureTraceFile = traceFile;
+      index += 1;
     }
   }
 
@@ -143,6 +159,7 @@ function isPromptScenario(value: string): value is PromptScenario {
     "extension-ui",
     "error",
     "delegate",
+    "routing",
     "all",
   ].includes(value);
 }
@@ -208,8 +225,16 @@ class FakeRpcServer {
   private readonly steering: string[] = [];
   private readonly followUp: string[] = [];
 
+  private traceFixture(event: string): void {
+    const traceFile = this.options.fixtureTraceFile;
+    if (!traceFile) return;
+    fs.mkdirSync(path.dirname(traceFile), { recursive: true });
+    fs.appendFileSync(traceFile, `${event}\n`);
+  }
+
   /** Deterministic test-only parent-extension stand-in for bridge E2E tests. */
   private exerciseDelegationBridge(task: string): void {
+    this.traceFixture("deck_delegate");
     const endpoint = process.env.DECK_DELEGATE_ENDPOINT;
     const token = process.env.DECK_DELEGATE_CAPABILITY;
     if (!endpoint?.startsWith("unix:") || !token) return;
@@ -585,14 +610,27 @@ class FakeRpcServer {
         : typeof params.text === "string"
           ? params.text
           : "";
+    const recordedTaskPrompt = this.decodeTaskSessionPrompt(text);
     const userMessage: PiMessage = {
       id: `msg_user_${this.promptCounter + 1}`,
       role: "user",
-      content: text,
+      content: recordedTaskPrompt ?? text,
       createdAt: Date.now(),
     };
     this.messages.push(userMessage);
     this.appendPersistedMessage(userMessage);
+    if (recordedTaskPrompt !== undefined) {
+      this.promptCounter += 1;
+      this.respond(command.id, "prompt");
+      this.traceFixture("task_session_prompt_recorded");
+      return;
+    }
+    if (this.options.promptScenario === "routing") {
+      this.traceFixture("ordinary_prompt");
+      const images = params.images;
+      if (Array.isArray(images) && images.length > 0)
+        this.traceFixture(`prompt_images:${images.length}`);
+    }
     this.promptCounter += 1;
     const assistantId = `msg_assistant_${this.promptCounter}`;
     this.agentActive = true;
@@ -655,6 +693,7 @@ class FakeRpcServer {
         messages: [failedAssistant],
         willRetry: false,
       });
+      this.write({ type: "agent_settled" });
       return;
     }
 
@@ -676,6 +715,24 @@ class FakeRpcServer {
     this.completePrompt(assistantId, text);
   }
 
+  private decodeTaskSessionPrompt(text: string): string | undefined {
+    const prefix = "/deck-task-prompt ";
+    if (!text.startsWith(prefix)) return undefined;
+    try {
+      const payload: unknown = JSON.parse(
+        Buffer.from(text.slice(prefix.length).trim(), "base64url").toString(
+          "utf8",
+        ),
+      );
+      const prompt = (payload as { prompt?: unknown }).prompt;
+      return typeof prompt === "string" && prompt.trim()
+        ? prompt.trim()
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   /**
    * The fake delegate scenario models the explicit user override in Deck's
    * delegate instruction. Keeping it here makes the GUI acceptance path
@@ -690,9 +747,16 @@ class FakeRpcServer {
     const chunks =
       decision !== undefined
         ? [String(decision)]
-        : this.options.productionShaped
-          ? ["I’ll review the workspace", " and summarize the next steps."]
-          : ["Fake response", " to: ", text || "(empty prompt)"];
+        : text.startsWith("Task-session synthesis for:")
+          ? ["Synthesis observed:\n", text]
+          : this.options.promptScenario === "routing"
+            ? [
+                "Ordinary routing fixture accepted ",
+                `(${this.options.taskRoutingFixture ?? "default"}).`,
+              ]
+            : this.options.productionShaped
+              ? ["I’ll review the workspace", " and summarize the next steps."]
+              : ["Fake response", " to: ", text || "(empty prompt)"];
     let accumulated = "";
     chunks.forEach((chunk, index) => {
       this.currentTimers.push(
@@ -737,6 +801,7 @@ class FakeRpcServer {
               runId: `run_${this.promptCounter}`,
               status: "completed",
             });
+            this.write({ type: "agent_settled" });
           }
         },
         this.options.streamDelayMs * (chunks.length + 1),
@@ -896,6 +961,7 @@ class FakeRpcServer {
       runId: `run_${this.promptCounter}`,
       status: "aborted",
     });
+    this.write({ type: "agent_settled" });
   }
 
   private emitQueueUpdate(): void {

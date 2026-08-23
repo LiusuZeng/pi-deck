@@ -33,6 +33,15 @@ function resolvePiBinary(): string | undefined {
   return undefined;
 }
 
+function requirePiBinary(): string {
+  const piBinary = resolvePiBinary();
+  if (!piBinary)
+    throw new Error(
+      "Real-Pi release validation requires an installed Pi binary; a skipped smoke test is not release evidence.",
+    );
+  return piBinary;
+}
+
 async function launchPiDeck(
   env: NodeJS.ProcessEnv,
 ): Promise<{ app: ElectronApplication; page: Page }> {
@@ -81,12 +90,66 @@ test.skip(
   "Set PI_DECK_E2E_REAL_SMOKE=1 or run npm run test:e2e:real-smoke to exercise real Pi GUI P0 flows.",
 );
 
+test("real Pi Parallel worker model selection remains selected", async () => {
+  test.setTimeout(120_000);
+  const piBinary = requirePiBinary();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-real-models-"));
+  const userDataDir = path.join(root, "user-data");
+  const piDeckHome = path.join(root, "pideck-home");
+  const sessionDir = path.join(root, "sessions");
+  const projectCwd = path.join(root, "project");
+  for (const directory of [userDataDir, piDeckHome, sessionDir, projectCwd])
+    fs.mkdirSync(directory, { recursive: true });
+
+  try {
+    const { app, page } = await launchPiDeck({
+      PI_DECK_BACKEND: "real",
+      PI_DECK_PI_BINARY: piBinary,
+      PI_DECK_USER_DATA_DIR: userDataDir,
+      PI_DECK_HOME: piDeckHome,
+      PI_CODING_AGENT_SESSION_DIR: sessionDir,
+      PI_DECK_PROJECT_CWD: projectCwd,
+    });
+    try {
+      await expectHealthyPreload(page);
+      await page.getByRole("button", { name: "New session" }).click();
+      await page
+        .getByRole("button", { name: "Parallel multitasking: Off" })
+        .click();
+      await page
+        .getByRole("button", { name: "Parallel worker settings" })
+        .click();
+      const workerModel = page.getByLabel("Worker model override");
+      await expect
+        .poll(() => workerModel.locator("option").count(), {
+          message: "Real Pi models must populate the worker selector.",
+          timeout: 30_000,
+        })
+        .toBeGreaterThan(1);
+      const selectedValue = await workerModel
+        .locator("option")
+        .nth(1)
+        .getAttribute("value");
+      expect(selectedValue).toBeTruthy();
+      await workerModel.selectOption(selectedValue!);
+      await expect(workerModel).toHaveValue(selectedValue!);
+      await page.waitForTimeout(500);
+      await expect(workerModel).toHaveValue(selectedValue!);
+      await expect(page.getByLabel("Worker thinking override")).toHaveValue("");
+    } finally {
+      await app.close();
+    }
+  } finally {
+    if (process.env.PI_DECK_E2E_KEEP_REAL_SMOKE_ARTIFACTS !== "1")
+      fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("real Pi Agent Workflow: real worker persists run, session, and graph across restart", async () => {
   test.setTimeout(
     Number(process.env.PI_DECK_E2E_REAL_SMOKE_TIMEOUT_MS ?? 240_000),
   );
-  const piBinary = resolvePiBinary();
-  test.skip(!piBinary, "Pi binary not found");
+  const piBinary = requirePiBinary();
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-real-workflow-"));
   const userDataDir = path.join(root, "user-data");
@@ -291,12 +354,11 @@ test("real Pi Agent Workflow: real worker persists run, session, and graph acros
   }
 });
 
-test("real Pi GUI P0 smoke: default workspace prompt and resume", async () => {
+test("real Pi bridge transport: default workspace prompt, resume, and explicit deck_delegate harness", async () => {
   test.setTimeout(
     Number(process.env.PI_DECK_E2E_REAL_SMOKE_TIMEOUT_MS ?? 240_000),
   );
-  const piBinary = resolvePiBinary();
-  test.skip(!piBinary, "Pi binary not found");
+  const piBinary = requirePiBinary();
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-real-p0-"));
   const userDataDir = path.join(root, "user-data");
@@ -324,6 +386,8 @@ test("real Pi GUI P0 smoke: default workspace prompt and resume", async () => {
     const firstLaunch = await launchPiDeck({
       ...baseEnv,
       PI_DECK_PROJECT_CWD: projectCwd,
+      // The compatibility tool must be model-visible only under explicit opt-in.
+      PI_DECK_ENABLE_LEGACY_DELEGATE_BRIDGE: "1",
     });
     try {
       await expectHealthyPreload(firstLaunch.page);
@@ -366,23 +430,23 @@ test("real Pi GUI P0 smoke: default workspace prompt and resume", async () => {
       // instruction is also the deterministic harness trigger; that harness
       // calls the real generated deck_delegate tool, not a fake RPC endpoint.
       const multitaskControl = firstLaunch.page.locator(".multitask-control");
-      await expect(multitaskControl).toHaveAttribute(
-        "title",
-        "Turn on multitasking",
-      );
+      await expect(multitaskControl).toHaveText("Parallel: Off");
+      await expect(multitaskControl).toHaveAttribute("aria-pressed", "false");
       const sessionItemCount = await firstLaunch.page
         .locator(".session-list .session-item")
         .count();
       await multitaskControl.click();
-      await expect(multitaskControl).toHaveAttribute(
-        "title",
-        "Turn off multitasking",
-      );
+      await expect(multitaskControl).toHaveText("Parallel: On");
+      await expect(multitaskControl).toHaveAttribute("aria-pressed", "true");
+      // This is the explicit deck_delegate bridge harness, not planner routing.
+      await firstLaunch.page
+        .getByLabel("Prompt destination")
+        .selectOption("parent");
       await firstLaunch.page.evaluate(() => {
         const testWindow = window as typeof window & {
           __piDeckRealDelegateStates?: Array<{
             runtimeId: string;
-            tasks: Array<{ generatedName: string; status: string }>;
+            tasks: Array<{ generatedName: string; lifecycle: string }>;
           }>;
           __piDeckRealDelegateUnsubscribe?: () => void;
         };
@@ -407,11 +471,11 @@ test("real Pi GUI P0 smoke: default workspace prompt and resume", async () => {
                 (
                   window as typeof window & {
                     __piDeckRealDelegateStates?: Array<{
-                      tasks: Array<{ status: string }>;
+                      tasks: Array<{ lifecycle: string }>;
                     }>;
                   }
                 ).__piDeckRealDelegateStates?.flatMap((state) =>
-                  state.tasks.map((task) => task.status),
+                  state.tasks.map((task) => task.lifecycle),
                 ) ?? [],
             ),
           {
@@ -450,7 +514,7 @@ test("real Pi GUI P0 smoke: default workspace prompt and resume", async () => {
             {
               taskNumber: 1,
               generatedName: "Real delegated acceptance task",
-              status: "completed",
+              lifecycle: "completed",
             },
           ],
         });
@@ -503,12 +567,10 @@ test("real Pi GUI P0 smoke: default workspace prompt and resume", async () => {
       });
       await expect(savedSession).toBeVisible();
       await savedSession.click();
-      await expect(
-        secondLaunch.page
-          .getByLabel("Chat / Agent Timeline")
-          .getByText(token)
-          .first(),
-      ).toBeVisible();
+      const resumedTimeline = secondLaunch.page.getByLabel(
+        "Chat / Agent Timeline",
+      );
+      await expect(resumedTimeline.getByText(token).first()).toBeVisible();
     } finally {
       await secondLaunch.app.close();
     }
@@ -516,5 +578,335 @@ test("real Pi GUI P0 smoke: default workspace prompt and resume", async () => {
     if (process.env.PI_DECK_E2E_KEEP_REAL_SMOKE_ARTIFACTS !== "1") {
       fs.rmSync(root, { recursive: true, force: true });
     }
+  }
+});
+
+test("real Pi ordinary parent omits the legacy deck_delegate tool", async () => {
+  test.setTimeout(
+    Number(process.env.PI_DECK_E2E_REAL_SMOKE_TIMEOUT_MS ?? 240_000),
+  );
+  const piBinary = requirePiBinary();
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-no-legacy-tool-"),
+  );
+  const userDataDir = path.join(root, "user-data");
+  const piDeckHome = path.join(root, "pideck-home");
+  const sessionDir = path.join(root, "sessions");
+  const projectCwd = path.join(root, "project");
+  for (const directory of [userDataDir, piDeckHome, sessionDir, projectCwd])
+    fs.mkdirSync(directory, { recursive: true });
+
+  try {
+    const { app, page } = await launchPiDeck({
+      PI_DECK_BACKEND: "real",
+      PI_DECK_PI_BINARY: piBinary,
+      PI_DECK_USER_DATA_DIR: userDataDir,
+      PI_DECK_HOME: piDeckHome,
+      PI_CODING_AGENT_SESSION_DIR: sessionDir,
+      PI_DECK_PROJECT_CWD: projectCwd,
+      // Load only the test inspector; deliberately omit the compatibility opt-in.
+      PI_DECK_E2E_DELEGATE_HARNESS: "1",
+    });
+    try {
+      await expectHealthyPreload(page);
+      await page.getByRole("button", { name: "New session" }).click();
+      await page
+        .getByLabel("Prompt text")
+        .fill("PI_DECK_E2E_ASSERT_DECK_DELEGATE_ABSENT");
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect
+        .poll(
+          () =>
+            listJsonlFiles(sessionDir).some((file) =>
+              fs
+                .readFileSync(file, "utf8")
+                .includes("PI_DECK_E2E_DECK_DELEGATE_ABSENT"),
+            ),
+          {
+            message:
+              "The real Pi harness must observe that deck_delegate is not registered by default.",
+            timeout: 30_000,
+          },
+        )
+        .toBe(true);
+      expect(
+        listJsonlFiles(sessionDir).some((file) =>
+          fs
+            .readFileSync(file, "utf8")
+            .includes("PI_DECK_E2E_DECK_DELEGATE_UNEXPECTEDLY_PRESENT"),
+        ),
+      ).toBe(false);
+    } finally {
+      await app.close();
+    }
+  } finally {
+    if (process.env.PI_DECK_E2E_KEEP_REAL_SMOKE_ARTIFACTS !== "1")
+      fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("real Pi: draft parallel opt-in delegates from its first prompt", async () => {
+  test.setTimeout(
+    Number(process.env.PI_DECK_E2E_REAL_SMOKE_TIMEOUT_MS ?? 240_000),
+  );
+  const piBinary = requirePiBinary();
+
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-real-draft-multitask-"),
+  );
+  const baseEnv: NodeJS.ProcessEnv = {
+    PI_DECK_BACKEND: "real",
+    PI_DECK_PI_BINARY: piBinary,
+    PI_DECK_USER_DATA_DIR: path.join(root, "user-data"),
+    PI_DECK_HOME: path.join(root, "pideck-home"),
+    PI_CODING_AGENT_SESSION_DIR: path.join(root, "sessions"),
+    PI_DECK_PROJECT_CWD: path.join(root, "project"),
+    // This invokes the explicitly enabled generated deck_delegate tool through
+    // real Pi and the authenticated bridge, without model tool choice.
+    PI_DECK_E2E_DELEGATE_HARNESS: "1",
+    PI_DECK_ENABLE_LEGACY_DELEGATE_BRIDGE: "1",
+  };
+  for (const directory of [
+    baseEnv.PI_DECK_USER_DATA_DIR,
+    baseEnv.PI_DECK_HOME,
+    baseEnv.PI_CODING_AGENT_SESSION_DIR,
+    baseEnv.PI_DECK_PROJECT_CWD,
+  ]) {
+    fs.mkdirSync(directory!, { recursive: true });
+  }
+
+  try {
+    const { app, page } = await launchPiDeck(baseEnv);
+    try {
+      await expectHealthyPreload(page);
+      const parallelOff = page.getByRole("button", {
+        name: "Parallel multitasking: Off",
+        exact: true,
+      });
+      await expect(parallelOff).toHaveText("Parallel: Off");
+      await expect(parallelOff).toHaveAttribute("aria-pressed", "false");
+      await expect(parallelOff).toBeEnabled();
+      await parallelOff.click();
+      const parallelOn = page.getByRole("button", {
+        name: "Parallel multitasking: On",
+        exact: true,
+      });
+      await expect(parallelOn).toHaveText("Parallel: On");
+      await expect(parallelOn).toHaveAttribute("aria-pressed", "true");
+      // The harness calls deck_delegate from its parent turn.
+      await page.getByLabel("Prompt destination").selectOption("parent");
+
+      await page.evaluate(() => {
+        const testWindow = window as typeof window & {
+          __piDeckRealDraftDelegateStates?: Array<{
+            tasks: Array<{ lifecycle: string }>;
+          }>;
+          __piDeckRealDraftDelegateUnsubscribe?: () => void;
+        };
+        testWindow.__piDeckRealDraftDelegateUnsubscribe?.();
+        testWindow.__piDeckRealDraftDelegateStates = [];
+        testWindow.__piDeckRealDraftDelegateUnsubscribe =
+          window.piDeck.multitask.onState((state) =>
+            testWindow.__piDeckRealDraftDelegateStates?.push(state),
+          );
+      });
+      const parentSessionCount = await page
+        .locator(".session-list .session-item")
+        .count();
+      await page
+        .getByLabel("Prompt text")
+        .fill(
+          "PI_DECK_E2E_INVOKE_DECK_DELEGATE: use deck_delegate now for one tiny task.",
+        );
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect
+        .poll(
+          () =>
+            page.evaluate(
+              () =>
+                (
+                  window as typeof window & {
+                    __piDeckRealDraftDelegateStates?: Array<{
+                      tasks: Array<{ lifecycle: string }>;
+                    }>;
+                  }
+                ).__piDeckRealDraftDelegateStates?.flatMap((state) =>
+                  state.tasks.map((task) => task.lifecycle),
+                ) ?? [],
+            ),
+          {
+            timeout: Number(
+              process.env.PI_DECK_E2E_REAL_DELEGATE_TIMEOUT_MS ?? 180_000,
+            ),
+          },
+        )
+        .toEqual(expect.arrayContaining(["queued", "running", "completed"]));
+
+      await parallelOn.focus();
+      const statusList = page.getByRole("list", { name: "Task statuses" });
+      await expect(statusList).toContainText(
+        "#1 Real delegated acceptance task — completed",
+      );
+      await expect(statusList.getByRole("button")).toHaveCount(0);
+      // First send adds the parent session to the sidebar; the completed
+      // child must not add a second, user-navigable session.
+      await expect(page.locator(".session-list .session-item")).toHaveCount(
+        parentSessionCount + 1,
+      );
+    } finally {
+      await page.evaluate(() => {
+        (
+          window as typeof window & {
+            __piDeckRealDraftDelegateUnsubscribe?: () => void;
+          }
+        ).__piDeckRealDraftDelegateUnsubscribe?.();
+      });
+      await app.close();
+    }
+  } finally {
+    if (process.env.PI_DECK_E2E_KEEP_REAL_SMOKE_ARTIFACTS !== "1") {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("real Pi production routing plans multiple private task sessions without bridge election", async () => {
+  test.setTimeout(
+    Number(process.env.PI_DECK_E2E_REAL_SMOKE_TIMEOUT_MS ?? 300_000),
+  );
+  const piBinary = requirePiBinary();
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-real-planner-"));
+  const userDataDir = path.join(root, "user-data");
+  const piDeckHome = path.join(root, "pideck-home");
+  const sessionDir = path.join(root, "sessions");
+  const projectCwd = path.join(root, "project");
+  for (const directory of [userDataDir, piDeckHome, sessionDir, projectCwd])
+    fs.mkdirSync(directory, { recursive: true });
+
+  const env: NodeJS.ProcessEnv = {
+    PI_DECK_BACKEND: "real",
+    PI_DECK_PI_BINARY: piBinary,
+    PI_DECK_USER_DATA_DIR: userDataDir,
+    PI_DECK_HOME: piDeckHome,
+    PI_CODING_AGENT_SESSION_DIR: sessionDir,
+    PI_DECK_PROJECT_CWD: projectCwd,
+    // Deliberately omit the deck_delegate harness and routing fixture. This
+    // test must exercise the production model-backed planner.
+  };
+
+  try {
+    const { app, page } = await launchPiDeck(env);
+    try {
+      await expectHealthyPreload(page);
+      await page
+        .getByRole("button", { name: "Parallel multitasking: Off" })
+        .click();
+      await expect(page.getByLabel("Prompt destination")).toHaveValue(
+        "newTaskSession",
+      );
+      await page.evaluate(() => {
+        const testWindow = window as typeof window & {
+          __realPlannerStates?: Array<{
+            tasks: Array<{
+              taskNumber: number;
+              lifecycle: string;
+            }>;
+          }>;
+          __stopRealPlannerStates?: () => void;
+        };
+        testWindow.__stopRealPlannerStates?.();
+        testWindow.__realPlannerStates = [];
+        testWindow.__stopRealPlannerStates = window.piDeck.multitask.onState(
+          (state) => testWindow.__realPlannerStates?.push(state),
+        );
+      });
+
+      const prompt =
+        "Run exactly three independent tasks in parallel: task one replies with exactly ALPHA, task two replies with exactly BETA, and task three replies with exactly GAMMA. Then report their combined result.";
+      await page.getByLabel("Prompt text").fill(prompt);
+      await page.getByRole("button", { name: "Send" }).click();
+
+      await expect
+        .poll(
+          () =>
+            page.evaluate(() => {
+              const states =
+                (
+                  window as typeof window & {
+                    __realPlannerStates?: Array<{
+                      tasks: Array<{
+                        taskNumber: number;
+                        lifecycle: string;
+                      }>;
+                    }>;
+                  }
+                ).__realPlannerStates ?? [];
+              return Math.max(0, ...states.map((state) => state.tasks.length));
+            }),
+          {
+            timeout: Number(
+              process.env.PI_DECK_E2E_REAL_DELEGATE_TIMEOUT_MS ?? 180_000,
+            ),
+          },
+        )
+        .toBe(3);
+      await expect
+        .poll(
+          () =>
+            page.evaluate(() => {
+              const states =
+                (
+                  window as typeof window & {
+                    __realPlannerStates?: Array<{
+                      tasks: Array<{ lifecycle: string }>;
+                    }>;
+                  }
+                ).__realPlannerStates ?? [];
+              return states.some(
+                (state) =>
+                  state.tasks.length === 3 &&
+                  state.tasks.every((task) => task.lifecycle === "completed"),
+              );
+            }),
+          {
+            timeout: Number(
+              process.env.PI_DECK_E2E_REAL_DELEGATE_TIMEOUT_MS ?? 180_000,
+            ),
+          },
+        )
+        .toBe(true);
+
+      const timeline = page.getByLabel("Chat / Agent Timeline");
+      await expect(timeline.getByText(prompt, { exact: true })).toBeVisible();
+      const synthesizedAnswer = timeline.locator(".assistant-message").last();
+      await expect(synthesizedAnswer).toContainText(/ALPHA/i, {
+        timeout: 180_000,
+      });
+      await expect(synthesizedAnswer).toContainText(/BETA/i);
+      await expect(synthesizedAnswer).toContainText(/GAMMA/i);
+      await expect(
+        page.getByRole("region", { name: "Parallel task sessions" }),
+      ).toHaveCount(0, { timeout: 180_000 });
+      await expect(page.locator(".session-list .session-item")).toHaveCount(1);
+      await expect
+        .poll(() => listJsonlFiles(sessionDir).length, {
+          message: "Private planner/task workers must not persist sessions",
+          timeout: 30_000,
+        })
+        .toBe(1);
+    } finally {
+      await page.evaluate(() => {
+        (
+          window as typeof window & {
+            __stopRealPlannerStates?: () => void;
+          }
+        ).__stopRealPlannerStates?.();
+      });
+      await app.close();
+    }
+  } finally {
+    if (process.env.PI_DECK_E2E_KEEP_REAL_SMOKE_ARTIFACTS !== "1")
+      fs.rmSync(root, { recursive: true, force: true });
   }
 });

@@ -16,7 +16,12 @@ export interface MultitaskControlProps extends Omit<
   enabled?: boolean;
   /** Explains why multitasking is unavailable, when applicable. */
   unavailableMessage?: string;
-  /** An action-oriented accessible label for the control. */
+  /**
+   * The current multitasking mode. Supplying this is preferred; `label` is
+   * retained temporarily so existing callers can continue to convey the mode.
+   */
+  mode?: "parallel" | "sequential";
+  /** @deprecated Pass `mode` instead. */
   label?: string;
   /** Prevents repeated activation while a task is being started. */
   loading?: boolean;
@@ -26,8 +31,8 @@ export interface MultitaskControlProps extends Omit<
 }
 
 /**
- * An accessible, icon-only entry point for multitasking work.
- * Its hover/focus tooltip is intentionally status-only.
+ * An explicit parallel-mode toggle. Its hover/focus tooltip explains the mode
+ * when no work has been delegated and presents task progress separately.
  */
 export const MultitaskControl = forwardRef<
   HTMLButtonElement,
@@ -39,6 +44,7 @@ export const MultitaskControl = forwardRef<
     error = false,
     label,
     loading = false,
+    mode,
     tasks,
     type = "button",
     unavailableMessage,
@@ -46,19 +52,24 @@ export const MultitaskControl = forwardRef<
   },
   ref,
 ) {
-  const accessibleLabel = loading
-    ? "Loading multitasking status"
-    : error
-      ? "Multitasking status unavailable"
-      : enabled
-        ? (label ??
-          `Multitasking: ${tasks.length} task${tasks.length === 1 ? "" : "s"}`)
-        : (unavailableMessage ?? "Multitasking unavailable");
+  // `label` was the original action label ("Turn off…" / "Turn on…").
+  // Read it only as a compatibility fallback while callers migrate to `mode`.
+  const parallel =
+    mode === "parallel" ||
+    (mode === undefined && label?.toLowerCase().includes("turn off") === true);
+  const modeState = parallel ? "On" : "Off";
+  const accessibleLabel = `Parallel multitasking: ${modeState}`;
   const tooltipContent =
     tasks.length > 0 ? (
       <MultitaskStatusPopover tasks={tasks} />
     ) : (
-      <span>{unavailableMessage ?? "No delegated tasks yet."}</span>
+      <span>
+        {enabled
+          ? parallel
+            ? "Parallel multitasking is on. Pi can delegate independent work from your next prompt."
+            : "Parallel multitasking is off. Enable it to let Pi delegate independent work."
+          : (unavailableMessage ?? "Multitasking is unavailable.")}
+      </span>
     );
 
   return (
@@ -69,11 +80,11 @@ export const MultitaskControl = forwardRef<
         aria-busy={loading || undefined}
         aria-invalid={error || undefined}
         aria-label={accessibleLabel}
+        aria-pressed={parallel}
         className={[
           "ui-control",
-          "ui-icon-button",
           "ui-control--md",
-          "ui-icon-button--ghost",
+          "multitask-mode-control",
           "multitask-control",
           className,
         ]
@@ -85,6 +96,7 @@ export const MultitaskControl = forwardRef<
         type={type}
       >
         <Multitask aria-hidden="true" focusable="false" strokeWidth={1.75} />
+        <span>Parallel: {modeState}</span>
       </button>
     </Tooltip>
   );

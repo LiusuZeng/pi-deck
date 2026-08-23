@@ -160,6 +160,38 @@ Important behavior:
 - A background session that needs extension UI input should show a red dot in the sidebar and should not silently block unnoticed.
 - The app should not automatically switch to a session that needs input; the user can click the red-dot session when ready.
 
+### R6.1 Parent-Owned Parallel Task Sessions
+
+Ad-hoc parallel work uses the parent/task-session contract in
+[`parallel-task-sessions-design.md`](parallel-task-sessions-design.md).
+
+Required:
+
+- With parallel mode off, prompts run in the parent session.
+- With parallel mode on, every prompt enters automatic planning and defaults to
+  one or more new private task sessions according to its independent work.
+- The user can choose **Work in parent** as a one-prompt override; the next
+  prompt returns to the parallel-mode default.
+- Routing into planning is enforced by Pi Deck before model execution and does
+  not depend on a model choosing a delegation tool. The parent may intelligently
+  decompose one prompt into multiple task briefs without further approval.
+- The parent remains usable while multiple task sessions are queued or running.
+- A flat task panel inside the parent shows task brief, status, elapsed time,
+  attempt count, and concise progress. Rows cannot be opened, expanded,
+  navigated to, or controlled directly.
+- Task sessions receive summarized parent context. Model/thinking settings
+  resolve in this order: per-prompt override, persistent parallel-worker
+  default, then parent setting.
+- Failed tasks retry up to three times after the initial attempt. The parent
+  automatically synthesizes and reports results, then clears terminal rows.
+- A parent has a soft limit of 10 active task sessions. Excess planned tasks
+  always queue automatically. The user may separately send another prompt with
+  **Work in parent**, but that does not reroute tasks already planned.
+- The per-parent task-session limit is distinct from the global worker cap of
+  20; both constraints must be represented honestly in the UI.
+- The renderer receives only safe parent-facing task summaries, never private
+  task runtime IDs, session paths, prompts, transcripts, or raw outputs.
+
 ### R7. Session State Indicators
 
 The app should surface state changes in the session sidebar without requiring the user to watch every chat constantly.

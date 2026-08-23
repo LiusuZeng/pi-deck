@@ -242,11 +242,17 @@ describe("preload PiDeck API validation", () => {
       data: {
         runtimeId: "runtime-7",
         mode: "parallel",
+        settings: {},
+        activeCount: 0,
+        activeLimit: 10,
         tasks: [
           {
             taskNumber: 1,
             generatedName: "Delegated task",
-            status: "completed",
+            brief: "Complete the delegated work",
+            lifecycle: "completed",
+            attempt: 1,
+            elapsedMs: 100,
           },
         ],
       },
@@ -257,17 +263,31 @@ describe("preload PiDeck API validation", () => {
     ).resolves.toEqual({
       runtimeId: "runtime-7",
       mode: "parallel",
+      settings: {},
+      activeCount: 0,
+      activeLimit: 10,
       tasks: [
         {
           taskNumber: 1,
           generatedName: "Delegated task",
-          status: "completed",
+          brief: "Complete the delegated work",
+          lifecycle: "completed",
+          attempt: 1,
+          elapsedMs: 100,
         },
       ],
     });
     await api.multitask.updateMode({
       runtimeId: "runtime-7",
       mode: "sequential",
+    });
+    electronMock.ipcRenderer.invoke.mockResolvedValueOnce({
+      ok: true,
+      data: { model: { provider: "anthropic", modelId: "claude" } },
+    });
+    await api.multitask.updateSettings({
+      runtimeId: "runtime-7",
+      settings: { model: { provider: "anthropic", modelId: "claude" } },
     });
 
     expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
@@ -279,6 +299,14 @@ describe("preload PiDeck API validation", () => {
       2,
       "multitask:updateMode",
       { runtimeId: "runtime-7", mode: "sequential" },
+    );
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
+      3,
+      "multitask:updateSettings",
+      {
+        runtimeId: "runtime-7",
+        settings: { model: { provider: "anthropic", modelId: "claude" } },
+      },
     );
     expect(() =>
       api.multitask.updateMode({
@@ -302,7 +330,19 @@ describe("preload PiDeck API validation", () => {
       {
         runtimeId: "runtime-7",
         mode: "parallel",
-        tasks: [{ taskNumber: 8, generatedName: "Task 8", status: "running" }],
+        settings: {},
+        activeCount: 1,
+        activeLimit: 10,
+        tasks: [
+          {
+            taskNumber: 8,
+            generatedName: "Task 8",
+            brief: "Work",
+            lifecycle: "running",
+            attempt: 1,
+            elapsedMs: 0,
+          },
+        ],
       },
     );
     wrapped(
@@ -310,11 +350,17 @@ describe("preload PiDeck API validation", () => {
       {
         runtimeId: "runtime-7",
         mode: "parallel",
+        settings: {},
+        activeCount: 1,
+        activeLimit: 10,
         tasks: [
           {
             taskNumber: 8,
             generatedName: "Task 8",
-            status: "running",
+            brief: "Work",
+            lifecycle: "running",
+            attempt: 1,
+            elapsedMs: 0,
             childRuntimeId: "must-not-cross-boundary",
           },
         ],
@@ -325,7 +371,19 @@ describe("preload PiDeck API validation", () => {
     expect(listener).toHaveBeenCalledWith({
       runtimeId: "runtime-7",
       mode: "parallel",
-      tasks: [{ taskNumber: 8, generatedName: "Task 8", status: "running" }],
+      settings: {},
+      activeCount: 1,
+      activeLimit: 10,
+      tasks: [
+        {
+          taskNumber: 8,
+          generatedName: "Task 8",
+          brief: "Work",
+          lifecycle: "running",
+          attempt: 1,
+          elapsedMs: 0,
+        },
+      ],
     });
     unsubscribe();
     expect(electronMock.ipcRenderer.off).toHaveBeenCalledWith(

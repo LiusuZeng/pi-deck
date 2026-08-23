@@ -1590,23 +1590,38 @@ test("fake delegation is status-only, parent-scoped, and honors direct handling"
     // A fresh draft can opt in before its first prompt. The initial mode is
     // passed to worker creation so that first prompt can be delegated.
     const multitaskControl = page.locator(".multitask-control");
-    await expect(multitaskControl).toHaveAttribute(
-      "title",
-      "Turn on multitasking",
-    );
+    await expect(multitaskControl).toHaveText("Parallel: Off");
+    await expect(multitaskControl).toHaveAttribute("aria-pressed", "false");
     await expect(multitaskControl).toBeEnabled();
-    await multitaskControl.click();
-    await expect(multitaskControl).toHaveAttribute(
-      "title",
-      "Turn off multitasking",
+    await multitaskControl.hover();
+    const modeTooltip = page.getByRole("tooltip");
+    await expect(modeTooltip).toHaveText(
+      "Parallel multitasking is off. Enable it to let Pi delegate independent work.",
     );
+    const controlBox = await multitaskControl.boundingBox();
+    const tooltipBox = await modeTooltip.boundingBox();
+    expect(controlBox).not.toBeNull();
+    expect(tooltipBox).not.toBeNull();
+    expect(
+      Math.abs(
+        tooltipBox!.x +
+          tooltipBox!.width / 2 -
+          (controlBox!.x + controlBox!.width / 2),
+      ),
+    ).toBeLessThan(2);
+    expect(Math.abs(tooltipBox!.y - controlBox!.y)).toBeLessThan(100);
+    await multitaskControl.click();
+    await expect(multitaskControl).toHaveText("Parallel: On");
+    await expect(multitaskControl).toHaveAttribute("aria-pressed", "true");
+    // deck_delegate is a parent extension bridge, not production task routing.
+    await page.getByLabel("Prompt destination").selectOption("parent");
 
     await page.evaluate(() => {
       const testWindow = window as typeof window & {
         __piDeckMultitaskStates?: Array<{
           tasks: Array<{
             generatedName: string;
-            status: string;
+            lifecycle: string;
             taskNumber: number;
           }>;
         }>;
@@ -1628,11 +1643,11 @@ test("fake delegation is status-only, parent-scoped, and honors direct handling"
             (
               window as typeof window & {
                 __piDeckMultitaskStates?: Array<{
-                  tasks: Array<{ status: string }>;
+                  tasks: Array<{ lifecycle: string }>;
                 }>;
               }
             ).__piDeckMultitaskStates?.flatMap((state) =>
-              state.tasks.map((task) => task.status),
+              state.tasks.map((task) => task.lifecycle),
             ) ?? [],
         ),
       )
@@ -1666,6 +1681,7 @@ test("fake delegation is status-only, parent-scoped, and honors direct handling"
           }
         ).__piDeckMultitaskStates?.length ?? 0,
     );
+    await page.getByLabel("Prompt destination").selectOption("parent");
     await page.getByLabel("Prompt text").fill("Handle this directly.");
     await page.getByRole("button", { name: "Send" }).click();
     await expect(
@@ -3394,4 +3410,461 @@ test("Work inbox scopes work by workspace and opens a row with the keyboard", as
     await app.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+/** Deterministic fake-RPC coverage of the production task-session route. */
+test.describe("task-session routing acceptance", () => {
+  test("routes a 12-task plan through the flat parent projection", async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "pi-deck-task-routing-"),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    const traceFile = path.join(root, "fixture-trace.log");
+    const routingFixture = path.join(
+      repoRoot,
+      "e2e/fixtures/task-routing-contract.json",
+    );
+    const userDataDir = path.join(root, "user-data");
+    fs.mkdirSync(projectCwd, { recursive: true });
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.mkdirSync(userDataDir, { recursive: true });
+    // The adapter snapshots this setting during startup, so persist it before
+    // launch as well as exercising the settings IPC before submitting a plan.
+    fs.writeFileSync(
+      path.join(userDataDir, "settings.json"),
+      JSON.stringify({ maxRunningSessions: 20 }),
+    );
+    const { app, page } = await launchPiDeck({
+      ...fakeRealModeEnv({
+        root,
+        projectCwd,
+        agentDir,
+        userDataDir,
+        fakePiArgs: [
+          "--prompt-scenario",
+          "routing",
+          "--task-routing-fixture",
+          routingFixture,
+          "--fixture-trace-file",
+          traceFile,
+          "--stream-delay-ms",
+          "500",
+        ],
+      }),
+      NODE_ENV: "test",
+      PI_DECK_E2E_TASK_SESSION_ACCEPTANCE: "1",
+      PI_DECK_TEST_TASK_ROUTING_FIXTURE: routingFixture,
+    });
+    try {
+      await expectHealthyPreload(page);
+      // Leave room for the parent plus all ten active child workers.
+      await page.evaluate(() =>
+        window.piDeck.settings.update({ maxRunningSessions: 20 }),
+      );
+      const parallel = page.getByRole("button", {
+        name: "Parallel multitasking: Off",
+      });
+      await parallel.click();
+      const destination = page.getByLabel("Prompt destination");
+      await expect(destination).toHaveValue("newTaskSession");
+
+      await page.evaluate(() => {
+        const w = window as typeof window & {
+          __taskStates?: unknown[];
+          __stopTaskStates?: () => void;
+        };
+        w.__stopTaskStates?.();
+        w.__taskStates = [];
+        w.__stopTaskStates = window.piDeck.multitask.onState((state) =>
+          w.__taskStates?.push(state),
+        );
+      });
+      // The parent override is deliberately one prompt only.
+      await destination.selectOption("parent");
+      await page.getByLabel("Prompt text").fill("Only this stays in parent.");
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect(
+        page.getByText(/Ordinary routing fixture accepted/),
+      ).toBeVisible();
+      await expect(destination).toHaveValue("newTaskSession");
+
+      await page
+        .getByLabel("Prompt text")
+        .fill(
+          "Prepare the release: inspect, implement, test, and document it.",
+        );
+      await page.getByRole("button", { name: "Send" }).click();
+      const panel = page.getByRole("region", {
+        name: "Parallel task sessions",
+      });
+      const rows = panel.getByRole("listitem");
+      await expect(rows).toHaveCount(12);
+      await expect(rows.nth(0)).toContainText("#1 Inventory affected files");
+      await expect(rows.nth(0)).toContainText("Attempt 1");
+      await expect(rows.nth(10)).toContainText("#11 Queued eleventh task");
+      await expect(rows.nth(11)).toContainText("#12 Queued twelfth task");
+      await expect(rows.nth(0)).toContainText(
+        "Complete Inventory affected files",
+      );
+      await expect(rows.nth(0).getByRole("button")).toHaveCount(0);
+      await expect(rows.nth(0).locator("[data-lifecycle]")).toHaveText(
+        /^(queued|starting|running|completed)$/,
+      );
+      await expect(rows.nth(0)).toContainText(/Attempt 1 · \d+s/);
+      // Mode changes affect future routing only; active task visibility remains.
+      await page
+        .getByRole("button", { name: "Parallel multitasking: On" })
+        .click();
+      await expect(panel).toBeVisible();
+      await page
+        .getByRole("button", { name: "Parallel multitasking: Off" })
+        .click();
+      await expect(destination).toHaveValue("newTaskSession");
+
+      await expect
+        .poll(() =>
+          page.evaluate(() => {
+            const states =
+              (
+                window as typeof window & {
+                  __taskStates?: Array<{
+                    activeCount: number;
+                    tasks: Array<{ lifecycle: string }>;
+                  }>;
+                }
+              ).__taskStates ?? [];
+            return states.some(
+              (state) =>
+                state.activeCount === 10 &&
+                state.tasks.filter((task) => task.lifecycle === "queued")
+                  .length >= 2,
+            );
+          }),
+        )
+        .toBe(true);
+      // The task-origin request is recorded on the parent, whose composer
+      // remains usable while private work is active.
+      await expect(
+        page
+          .getByLabel("Chat / Agent Timeline")
+          .getByText(
+            "Prepare the release: inspect, implement, test, and document it.",
+            { exact: true },
+          ),
+      ).toBeVisible();
+      await expect(page.getByLabel("Prompt text")).toBeEnabled();
+      await destination.selectOption("parent");
+      await page.getByLabel("Prompt text").fill("Add rollback guidance.");
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect(
+        page
+          .getByLabel("Chat / Agent Timeline")
+          .getByText("Add rollback guidance.", { exact: true }),
+      ).toBeVisible();
+      await expect(destination).toHaveValue("newTaskSession");
+      await expect(
+        page
+          .getByLabel("Sessions")
+          .locator(".session-item", { hasText: "Inventory affected files" }),
+      ).toHaveCount(0);
+      await expect(
+        page.getByRole("heading", { name: "Work inbox" }),
+      ).toHaveCount(0);
+      await expect(
+        page.getByRole("button", { name: "Work inbox" }),
+      ).toBeVisible();
+
+      // The configured failure retries three times after its initial attempt.
+      await expect
+        .poll(
+          () =>
+            page.evaluate(() => {
+              const states =
+                (
+                  window as typeof window & {
+                    __taskStates?: Array<{
+                      tasks: Array<{
+                        taskNumber: number;
+                        lifecycle: string;
+                        attempt: number;
+                      }>;
+                    }>;
+                  }
+                ).__taskStates ?? [];
+              const seen = states.flatMap((state) =>
+                state.tasks
+                  .filter((task) => task.taskNumber === 3)
+                  .map((task) => `${task.lifecycle}:${task.attempt}`),
+              );
+              return {
+                retried: [1, 2, 3].every((attempt) =>
+                  seen.includes(`retrying:${attempt}`),
+                ),
+                failedAtFour: seen.includes("failed:4"),
+              };
+            }),
+          { timeout: 30_000 },
+        )
+        .toEqual({ retried: true, failedAtFour: true });
+
+      // The parent receives every successful handoff and the attempt-4 failure.
+      const synthesizedReport = page
+        .getByLabel("Chat / Agent Timeline")
+        .locator(".assistant-message")
+        .last();
+      await expect(synthesizedReport).toContainText(
+        "#1 Inventory affected files: Ordinary routing fixture accepted",
+        { timeout: 30_000 },
+      );
+      await expect(synthesizedReport).toContainText(
+        "#3 Verify regression coverage: Configured task failure on attempt 4.",
+      );
+      // Rows are transient and clear only after that parent report completes.
+      await expect(panel).toHaveCount(0, { timeout: 30_000 });
+      expect(fs.readFileSync(traceFile, "utf8")).toContain("ordinary_prompt");
+      expect(fs.readFileSync(traceFile, "utf8")).not.toContain("deck_delegate");
+    } finally {
+      await page.evaluate(() => {
+        const w = window as typeof window & { __stopTaskStates?: () => void };
+        w.__stopTaskStates?.();
+      });
+      await app.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("materializes task attachments once without persisting private payloads", async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "pi-deck-task-attachment-"),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    const userDataDir = path.join(root, "user-data");
+    const traceFile = path.join(root, "fixture-trace.log");
+    const fixture = path.join(root, "attachment-plan.json");
+    for (const directory of [projectCwd, agentDir, userDataDir])
+      fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(
+      fixture,
+      JSON.stringify({
+        tasks: [{ name: "Inspect supplied image", lifecycle: "interrupted" }],
+      }),
+    );
+    const { app, page } = await launchPiDeck({
+      ...fakeRealModeEnv({
+        root,
+        projectCwd,
+        agentDir,
+        userDataDir,
+        fakePiArgs: [
+          "--prompt-scenario",
+          "routing",
+          "--fixture-trace-file",
+          traceFile,
+          "--stream-delay-ms",
+          "50",
+        ],
+      }),
+      NODE_ENV: "test",
+      PI_DECK_E2E_TASK_SESSION_ACCEPTANCE: "1",
+      PI_DECK_TEST_TASK_ROUTING_FIXTURE: fixture,
+    });
+    try {
+      await expectHealthyPreload(page);
+      await page.getByLabel("Prompt text").fill("Create the parent runtime.");
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect(
+        page.getByText(/Ordinary routing fixture accepted/),
+      ).toBeVisible();
+      const result = await page.evaluate(async (dataBase64) => {
+        const snapshot = await window.piDeck.chat.getSnapshot();
+        const runtimeId = snapshot.runtimeId;
+        await window.piDeck.multitask.updateMode({
+          runtimeId,
+          mode: "parallel",
+        });
+        const ownerId = "task-attachment-owner";
+        const imported = await window.piDeck.attachments.importImages({
+          ownerId,
+          sessionId: runtimeId,
+          images: [
+            {
+              fileName: "task.png",
+              mimeType: "image/png",
+              size: 24,
+              dataBase64,
+            },
+          ],
+        });
+        if (!imported.selected) throw new Error("Image import was cancelled.");
+        const token = imported.attachments[0]!.selectedPathToken;
+        await window.piDeck.chat.prompt({
+          runtimeId,
+          text: "Inspect the supplied image privately.",
+          destination: "newTaskSession",
+          attachmentOwnerId: ownerId,
+          attachments: [{ selectedPathToken: token, sendMode: "imageInput" }],
+        });
+        let reusedError = "";
+        try {
+          await window.piDeck.chat.prompt({
+            runtimeId,
+            text: "Try to reuse the consumed image.",
+            destination: "newTaskSession",
+            attachmentOwnerId: ownerId,
+            attachments: [{ selectedPathToken: token, sendMode: "imageInput" }],
+          });
+        } catch (error) {
+          reusedError = error instanceof Error ? error.message : String(error);
+        }
+        return { runtimeId, reusedError, token };
+      }, tinyPngBase64());
+      expect(result.reusedError).toMatch(/no longer available|reselect/i);
+      await expect
+        .poll(() =>
+          page.evaluate(
+            async (runtimeId) =>
+              (await window.piDeck.multitask.getMode({ runtimeId })).tasks[0]
+                ?.lifecycle,
+            result.runtimeId,
+          ),
+        )
+        .toBe("running");
+      await expect
+        .poll(() =>
+          fs.existsSync(traceFile) ? fs.readFileSync(traceFile, "utf8") : "",
+        )
+        .toContain("prompt_images:1");
+      const statePath = path.join(userDataDir, "task-session-state.json");
+      await expect
+        .poll(() =>
+          fs.existsSync(statePath) ? fs.readFileSync(statePath, "utf8") : "",
+        )
+        .toContain('"lifecycle":"running"');
+      const persisted = fs.readFileSync(statePath, "utf8");
+      expect(persisted).not.toContain(result.token);
+      expect(persisted).not.toContain(tinyPngBase64());
+    } finally {
+      await app.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("restart preserves interrupted trace without resuming private work", async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "pi-deck-task-restart-"),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    const traceFile = path.join(root, "restart-trace.log");
+    const fixture = path.join(root, "interrupted-plan.json");
+    for (const directory of [projectCwd, agentDir])
+      fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(
+      fixture,
+      JSON.stringify({
+        tasks: [
+          {
+            name: "Long private task",
+            lifecycle: "interrupted",
+          },
+        ],
+      }),
+    );
+    const env = {
+      ...fakeRealModeEnv({
+        root,
+        projectCwd,
+        agentDir,
+        fakePiArgs: [
+          "--prompt-scenario",
+          "routing",
+          "--fixture-trace-file",
+          traceFile,
+          "--stream-delay-ms",
+          "250",
+        ],
+      }),
+      NODE_ENV: "test",
+      PI_DECK_E2E_TASK_SESSION_ACCEPTANCE: "1",
+      PI_DECK_TEST_TASK_ROUTING_FIXTURE: fixture,
+    };
+
+    let privatePromptCountBeforeRestart = 0;
+    const first = await launchPiDeck(env);
+    try {
+      await expectHealthyPreload(first.page);
+      await first.page
+        .getByRole("button", { name: "Parallel multitasking: Off" })
+        .click();
+      await first.page
+        .getByLabel("Prompt text")
+        .fill("Start work that will be interrupted by restart.");
+      await first.page.getByRole("button", { name: "Send" }).click();
+      const row = first.page
+        .getByRole("region", { name: "Parallel task sessions" })
+        .getByRole("listitem");
+      await expect(row).toContainText("#1 Long private task");
+      await expect(row.locator('[data-lifecycle="running"]')).toBeVisible();
+      await expect
+        .poll(() =>
+          fs.existsSync(traceFile) ? fs.readFileSync(traceFile, "utf8") : "",
+        )
+        .toContain("ordinary_prompt");
+      privatePromptCountBeforeRestart =
+        fs.readFileSync(traceFile, "utf8").split("ordinary_prompt").length - 1;
+    } finally {
+      await first.app.close();
+    }
+
+    const second = await launchPiDeck(env);
+    try {
+      await expectHealthyPreload(second.page);
+      await selectWorkspaceInUi(second.page, "Default workspace");
+      const savedSession = second.page
+        .getByRole("button", { name: /^Session:/ })
+        .first();
+      await expect(savedSession).toBeVisible();
+      await savedSession.click();
+      await expect(second.page.locator(".multitask-control")).toBeEnabled({
+        timeout: 30_000,
+      });
+      const panel = second.page.getByRole("region", {
+        name: "Parallel task sessions",
+      });
+      const interrupted = panel.getByRole("listitem");
+      await expect(interrupted).toContainText("#1 Long private task");
+      await expect(
+        interrupted.locator('[data-lifecycle="interrupted"]'),
+      ).toBeVisible();
+      await expect(interrupted).toContainText("Attempt 1");
+      await expect(panel.getByText("0 active of 10")).toBeVisible();
+      const runtimeState = await second.page.evaluate(async () => {
+        const snapshot = await window.piDeck.chat.getSnapshot();
+        return window.piDeck.multitask.getMode({
+          runtimeId: snapshot.runtimeId,
+        });
+      });
+      expect(runtimeState.tasks).toEqual([
+        expect.objectContaining({
+          taskNumber: 1,
+          lifecycle: "interrupted",
+          attempt: 1,
+        }),
+      ]);
+      expect(runtimeState.activeCount).toBe(0);
+      await second.page.waitForTimeout(500);
+      const privatePromptCountAfterRestart = fs.existsSync(traceFile)
+        ? fs.readFileSync(traceFile, "utf8").split("ordinary_prompt").length - 1
+        : 0;
+      expect(privatePromptCountAfterRestart).toBe(
+        privatePromptCountBeforeRestart,
+      );
+    } finally {
+      await second.app.close();
+      if (process.env.PI_DECK_E2E_KEEP_REAL_SMOKE_ARTIFACTS !== "1")
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

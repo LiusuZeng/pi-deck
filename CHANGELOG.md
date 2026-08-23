@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-08-22
+
+### Added
+
+- Added deterministic Parallel mode routing: prompts default to one or more
+  private, model-planned task sessions while a one-prompt **Work in parent**
+  override keeps direct conversation available.
+- Added a flat, parent-only task panel with safe brief, lifecycle, elapsed,
+  attempt, progress, capacity, and queue information.
+- Added persistent parallel-worker defaults and per-prompt model/thinking
+  overrides, with secure task attachment materialization.
+
+### Changed
+
+- Replaced model-elected `deck_delegate` routing with a private structured
+  planner and parent-owned task-session orchestrator.
+- Limited each parent to 10 active task sessions, queued excess work in order,
+  retried failed tasks three times, and automatically synthesized terminal
+  results through the parent.
+- Kept private planner/task workers ephemeral with `--no-session`; unfinished
+  work is restored only as interrupted parent trace and never resumed.
+
+### Fixed
+
+- Kept task status visible when Parallel mode is switched off, preserved failed
+  task prompts and settings state, anchored/focused task UI popovers correctly,
+  and prevented private session files or attachment payloads from leaking into
+  session navigation or durable task state.
+- Made active task clocks tick continuously and surfaced payload-free major-step
+  labels so long-running private work no longer appears hung.
+- Rendered safe GitHub-style Markdown tables semantically with horizontal
+  scrolling on narrow conversation layouts.
+- Acknowledged Parallel submissions immediately while planning and prevented
+  duplicate in-flight planning.
+- Made worker-model option values DOM-safe and reset model-specific thinking in
+  the same state update, preventing a stale callback from reverting the chosen
+  worker model to **Use persistent default**.
+- Disabled the model-visible legacy `deck_delegate` tool by default so ordinary
+  prompts cannot bypass deterministic planning or become stranded on legacy
+  task limits; compatibility use now requires explicit opt-in.
+- Assigned legacy or omitted-workspace chat creation to the stable default
+  workspace without changing the user's active named workspace, preventing
+  unowned runtimes and misplaced session references.
+
+### Tests
+
+- Added deterministic 12-task fan-out, active-limit queueing, retry, synthesis,
+  attachment privacy, parent-override, and restart regressions.
+- Added authenticated real-Pi coverage proving ordinary Parallel prompts use
+  the production planner to create multiple private task sessions without the
+  bridge harness or a routing fixture, the legacy bridge is absent by default,
+  and selected worker models remain selected.
+
 ## [0.5.4] - 2026-08-16
 
 ### Fixed
@@ -319,7 +372,8 @@ coding-agent sessions.
   crash; persisted sessions can be reopened, but unsaved partial stream text may
   be lost.
 
-[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.4...HEAD
+[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.5...HEAD
+[0.5.5]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.1...v0.5.2

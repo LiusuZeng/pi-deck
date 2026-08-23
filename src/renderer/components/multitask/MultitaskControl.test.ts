@@ -11,8 +11,22 @@ import { MultitaskStatusPopover } from "./MultitaskStatusPopover.js";
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
 const tasks = [
-  { taskNumber: 4, generatedName: "Build the renderer", status: "working" },
-  { taskNumber: 8, generatedName: "Run focused tests", status: "queued" },
+  {
+    taskNumber: 4,
+    generatedName: "Build the renderer",
+    brief: "Render the task panel",
+    lifecycle: "running" as const,
+    attempt: 1,
+    elapsedMs: 1_000,
+  },
+  {
+    taskNumber: 8,
+    generatedName: "Run focused tests",
+    brief: "Verify the renderer",
+    lifecycle: "queued" as const,
+    attempt: 1,
+    elapsedMs: 0,
+  },
 ];
 
 let root: Root | undefined;
@@ -39,7 +53,7 @@ describe("MultitaskStatusPopover", () => {
     const list = view.querySelector('[role="list"]');
 
     expect(list?.textContent).toBe(
-      "#4 Build the renderer — working#8 Run focused tests — queued",
+      "#4 Build the renderer — running#8 Run focused tests — queued",
     );
     expect(list?.querySelectorAll('[role="listitem"]')).toHaveLength(2);
     expect(
@@ -49,13 +63,21 @@ describe("MultitaskStatusPopover", () => {
 });
 
 describe("MultitaskControl", () => {
-  it("is an accessible icon control and exposes task status on keyboard focus", () => {
+  it("states the parallel mode explicitly and exposes separate task status on focus", () => {
     const view = render(
-      createElement(MultitaskControl, { onClick: () => {}, tasks }),
+      createElement(MultitaskControl, {
+        mode: "parallel",
+        onClick: () => {},
+        tasks,
+      }),
     );
     const button = view.querySelector("button");
 
-    expect(button?.getAttribute("aria-label")).toBe("Multitasking: 2 tasks");
+    expect(button?.textContent).toBe("Parallel: On");
+    expect(button?.getAttribute("aria-label")).toBe(
+      "Parallel multitasking: On",
+    );
+    expect(button?.getAttribute("aria-pressed")).toBe("true");
     expect(button?.querySelector("svg")?.getAttribute("aria-hidden")).toBe(
       "true",
     );
@@ -64,9 +86,41 @@ describe("MultitaskControl", () => {
     act(() => button?.focus());
 
     expect(button?.getAttribute("aria-describedby")).toBeTruthy();
-    expect(view.querySelector('[role="tooltip"]')?.textContent).toBe(
-      "#4 Build the renderer — working#8 Run focused tests — queued",
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toBe(
+      "Task status#4 Build the renderer — running#8 Run focused tests — queued",
     );
+  });
+
+  it("explains the current mode when no tasks have been delegated", () => {
+    const view = render(
+      createElement(MultitaskControl, {
+        mode: "sequential",
+        onClick: () => {},
+        tasks: [],
+      }),
+    );
+    const button = view.querySelector("button");
+
+    act(() => button?.focus());
+
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toBe(
+      "Parallel multitasking is off. Enable it to let Pi delegate independent work.",
+    );
+  });
+
+  it("keeps existing action labels compatible while callers migrate to mode", () => {
+    const button = render(
+      createElement(MultitaskControl, {
+        label: "Turn off parallel multitasking",
+        tasks,
+      }),
+    ).querySelector("button");
+
+    expect(button?.textContent).toBe("Parallel: On");
+    expect(button?.getAttribute("aria-label")).toBe(
+      "Parallel multitasking: On",
+    );
+    expect(button?.getAttribute("aria-pressed")).toBe("true");
   });
 
   it("represents unavailable, loading, and error states without enabling activation", () => {
@@ -79,9 +133,11 @@ describe("MultitaskControl", () => {
     ).querySelector("button");
 
     expect(unavailable?.disabled).toBe(true);
+    expect(unavailable?.textContent).toBe("Parallel: Off");
     expect(unavailable?.getAttribute("aria-label")).toBe(
-      "Send a message to enable multitasking",
+      "Parallel multitasking: Off",
     );
+    expect(unavailable?.getAttribute("aria-pressed")).toBe("false");
 
     act(() => root?.unmount());
     container?.remove();
@@ -96,7 +152,7 @@ describe("MultitaskControl", () => {
     expect(loading?.getAttribute("aria-busy")).toBe("true");
     expect(loading?.getAttribute("aria-invalid")).toBe("true");
     expect(loading?.getAttribute("aria-label")).toBe(
-      "Loading multitasking status",
+      "Parallel multitasking: Off",
     );
   });
 });

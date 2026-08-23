@@ -4,12 +4,20 @@ export type InlineToken =
   | { type: "strong"; children: InlineToken[] }
   | { type: "link"; text: string; href: string };
 
+export type TableAlignment = "left" | "center" | "right" | undefined;
+
 export type MarkdownBlock =
   | { type: "paragraph"; children: InlineToken[] }
   | { type: "heading"; level: 1 | 2 | 3; children: InlineToken[] }
   | { type: "list"; items: InlineToken[][] }
   | { type: "quote"; children: InlineToken[] }
-  | { type: "code"; code: string; language?: string };
+  | { type: "code"; code: string; language?: string }
+  | {
+      type: "table";
+      header: InlineToken[][];
+      alignments: TableAlignment[];
+      rows: InlineToken[][][];
+    };
 
 export function parseSafeMarkdown(markdown: string): MarkdownBlock[] {
   const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
@@ -71,6 +79,14 @@ export function parseSafeMarkdown(markdown: string): MarkdownBlock[] {
 
     if (line.trim().length === 0) {
       flushTextBlocks();
+      continue;
+    }
+
+    const table = parseTable(lines, index);
+    if (table !== undefined) {
+      flushTextBlocks();
+      blocks.push(table.block);
+      index = table.endIndex;
       continue;
     }
 
@@ -143,14 +159,18 @@ export function parseInlineMarkdown(text: string): InlineToken[] {
     }
 
     if (next === nextCode) {
-      const close = text.indexOf("`", cursor + 1);
+      const delimiter = backtickRunAt(text, cursor);
+      const close = text.indexOf(delimiter, cursor + delimiter.length);
       if (close === -1) {
-        pushText(text[cursor] ?? "");
-        cursor += 1;
+        pushText(delimiter);
+        cursor += delimiter.length;
         continue;
       }
-      tokens.push({ type: "code", text: text.slice(cursor + 1, close) });
-      cursor = close + 1;
+      tokens.push({
+        type: "code",
+        text: text.slice(cursor + delimiter.length, close),
+      });
+      cursor = close + delimiter.length;
       continue;
     }
 
@@ -202,6 +222,124 @@ export function isAllowedExternalHref(href: string): boolean {
   } catch {
     return false;
   }
+}
+
+function parseTable(
+  lines: string[],
+  startIndex: number,
+):
+  | { block: Extract<MarkdownBlock, { type: "table" }>; endIndex: number }
+  | undefined {
+  const headerRow = splitTableRow(lines[startIndex] ?? "");
+  const delimiterRow = splitTableRow(lines[startIndex + 1] ?? "");
+  if (
+    headerRow === undefined ||
+    delimiterRow === undefined ||
+    headerRow.length !== delimiterRow.length
+  ) {
+    return undefined;
+  }
+
+  const alignments = delimiterRow.map(parseTableDelimiter);
+  if (alignments.some((alignment) => alignment === null)) {
+    return undefined;
+  }
+
+  const columnCount = headerRow.length;
+  const rows: InlineToken[][][] = [];
+  let endIndex = startIndex + 1;
+  for (let index = startIndex + 2; index < lines.length; index += 1) {
+    const row = splitTableRow(lines[index] ?? "");
+    if (row === undefined) break;
+    rows.push(
+      Array.from({ length: columnCount }, (_, cellIndex) =>
+        parseInlineMarkdown(row[cellIndex] ?? ""),
+      ),
+    );
+    endIndex = index;
+  }
+
+  return {
+    block: {
+      type: "table",
+      header: headerRow.map(parseInlineMarkdown),
+      alignments: alignments as TableAlignment[],
+      rows,
+    },
+    endIndex,
+  };
+}
+
+/** Splits a GFM table row without treating escaped or code-span pipes as cells. */
+function splitTableRow(line: string): string[] | undefined {
+  const cells: string[] = [];
+  let cell = "";
+  let pipeCount = 0;
+  let codeDelimiter: string | undefined;
+
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index] ?? "";
+    if (char === "`") {
+      const delimiter = backtickRunAt(line, index);
+      if (codeDelimiter === undefined) {
+        const close = line.indexOf(delimiter, index + delimiter.length);
+        if (close !== -1) codeDelimiter = delimiter;
+      } else if (delimiter === codeDelimiter) {
+        codeDelimiter = undefined;
+      }
+      cell += delimiter;
+      index += delimiter.length - 1;
+      continue;
+    }
+    if (
+      char === "|" &&
+      codeDelimiter === undefined &&
+      !isEscaped(line, index)
+    ) {
+      cells.push(cell.trim().replace(/\\\|/g, "|"));
+      cell = "";
+      pipeCount += 1;
+      continue;
+    }
+    cell += char;
+  }
+
+  if (pipeCount === 0) return undefined;
+  cells.push(cell.trim().replace(/\\\|/g, "|"));
+  if (cells[0] === "") cells.shift();
+  if (cells[cells.length - 1] === "") cells.pop();
+  return cells.length > 0 ? cells : undefined;
+}
+
+function parseTableDelimiter(cell: string): TableAlignment | null {
+  const match = cell.match(/^(?<left>:)?-+(?<right>:)?$/);
+  if (match === null) return null;
+  if (match.groups?.left !== undefined && match.groups.right !== undefined) {
+    return "center";
+  }
+  return match.groups?.left !== undefined
+    ? "left"
+    : match.groups?.right !== undefined
+      ? "right"
+      : undefined;
+}
+
+function isEscaped(text: string, index: number): boolean {
+  let slashCount = 0;
+  for (
+    let cursor = index - 1;
+    cursor >= 0 && text[cursor] === "\\";
+    cursor -= 1
+  ) {
+    slashCount += 1;
+  }
+  return slashCount % 2 === 1;
+}
+
+function backtickRunAt(text: string, index: number): string {
+  let end = index;
+  while (text[end] === "`") end += 1;
+  return text.slice(index, end);
 }
 
 function smallestNonNegative(...values: number[]): number {
