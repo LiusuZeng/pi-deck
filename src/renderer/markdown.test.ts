@@ -59,6 +59,56 @@ describe("safe markdown parser", () => {
     });
   });
 
+  it("parses GFM pipe tables with alignment and safe inline tokens", () => {
+    const blocks = parseSafeMarkdown(
+      [
+        "Name | Details | Link",
+        ":--- | :---: | ---:",
+        "Ada | **bold** and `a|b` | [docs](https://example.com)",
+        "Grace | escaped \\| pipe | plain",
+      ].join("\n"),
+    );
+
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toMatchObject({
+      type: "table",
+      alignments: ["left", "center", "right"],
+    });
+    const table = blocks[0];
+    if (table?.type !== "table") throw new Error("Expected a table");
+    expect(table.rows[0]?.[1]).toEqual([
+      { type: "strong", children: [{ type: "text", text: "bold" }] },
+      { type: "text", text: " and " },
+      { type: "code", text: "a|b" },
+    ]);
+    expect(table.rows[1]?.[1]).toEqual([
+      { type: "text", text: "escaped | pipe" },
+    ]);
+    expect(table.rows[0]?.[2]).toContainEqual({
+      type: "link",
+      text: "docs",
+      href: "https://example.com",
+    });
+  });
+
+  it("leaves malformed tables as ordinary text", () => {
+    const blocks = parseSafeMarkdown(
+      ["One | Two", "--- | not-a-delimiter", "still ordinary"].join("\n"),
+    );
+
+    expect(blocks).toEqual([
+      {
+        type: "paragraph",
+        children: [
+          {
+            type: "text",
+            text: "One | Two --- | not-a-delimiter still ordinary",
+          },
+        ],
+      },
+    ]);
+  });
+
   it("allows only http, https, and mailto external hrefs", () => {
     expect(isAllowedExternalHref("https://example.com")).toBe(true);
     expect(isAllowedExternalHref("http://example.com")).toBe(true);

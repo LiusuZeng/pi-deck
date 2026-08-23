@@ -9206,6 +9206,43 @@ function MarkdownBlockView(props: { block: MarkdownBlock }): ReactElement {
           <code>{props.block.code}</code>
         </pre>
       );
+    case "table": {
+      const table = props.block;
+      return (
+        <div className="markdown-table-scroll">
+          <table>
+            <thead>
+              <tr>
+                {table.header.map((cell, index) => (
+                  <th
+                    key={index}
+                    style={{ textAlign: table.alignments[index] }}
+                  >
+                    <InlineTokens tokens={cell} />
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {table.rows.map((row, rowIndex) => (
+                <tr key={rowIndex}>
+                  {row.map((cell, cellIndex) => (
+                    <td
+                      key={cellIndex}
+                      style={{
+                        textAlign: table.alignments[cellIndex],
+                      }}
+                    >
+                      <InlineTokens tokens={cell} />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+    }
     case "paragraph":
       return (
         <p>
