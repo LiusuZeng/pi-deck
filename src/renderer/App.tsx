@@ -841,6 +841,7 @@ export function App(): ReactElement {
   const [pendingTaskSubmissions, setPendingTaskSubmissions] =
     useState<PendingTaskSubmissionsBySession>({});
   const pendingTaskSubmissionsRef = useRef<PendingTaskSubmissionsBySession>({});
+  const multitaskRef = useRef<Record<string, MultitaskStateEvent>>({});
   const workerSettingsGenerationRef = useRef<Record<string, number>>({});
   const [currentProject, setCurrentProject] = useState<ProjectRef>(() => ({
     id: "pending-project",
@@ -957,6 +958,7 @@ export function App(): ReactElement {
   sessionsRef.current = sessions;
   composerDraftsRef.current = composerDrafts;
   pendingTaskSubmissionsRef.current = pendingTaskSubmissions;
+  multitaskRef.current = multitask;
   selectedSessionIdRef.current = selectedSessionId;
   currentProjectRef.current = currentProject;
   currentWorkspaceRef.current = currentWorkspace;
@@ -1181,11 +1183,18 @@ export function App(): ReactElement {
             selectedSessionIdRef.current === runtimeId,
         });
         unsubscribeMultitask = api.multitask.onState((event) => {
-          if (!disposed)
-            setMultitask((current) => ({
-              ...current,
-              [event.runtimeId]: event,
-            }));
+          if (disposed) return;
+          // Archive rechecks can run before React commits the state update
+          // while an idle runtime is being closed. Keep the synchronous ref in
+          // lockstep with the event so private children cannot slip through.
+          multitaskRef.current = {
+            ...multitaskRef.current,
+            [event.runtimeId]: event,
+          };
+          setMultitask((current) => ({
+            ...current,
+            [event.runtimeId]: event,
+          }));
         });
         unsubscribe = api.chat.onEvent((event) => {
           if (disposed) {
@@ -2370,9 +2379,12 @@ export function App(): ReactElement {
     showWorkflowSurface("occurrenceRun", generation);
   }
 
-  function handleSelectSession(sessionId: string): void {
+  async function handleSelectSession(sessionId: string): Promise<void> {
     const generation = beginNavigation();
     lastOpenedActivityItemId.current = undefined;
+    // Capture the route before workspace activation. A cross-workspace sidebar
+    // click changes execution context, but it must not rewrite the Work surface
+    // the user came from.
     const origin = workOriginForPrimaryView(
       primaryView,
       currentWorkspaceRef.current.id,
@@ -2389,13 +2401,73 @@ export function App(): ReactElement {
         (workspace) => workspace.id === session.workspaceId,
       );
       if (owner !== undefined) {
-        // Opening cross-workspace active work changes the grouping view and
-        // the selected row together; the worker itself is never restarted.
+        // This is one route transaction: main owns the active workspace, then
+        // the renderer refreshes the workspace tree, and only then commits the
+        // runtime or canonical saved-session route. switchWorkspaceView keeps
+        // every attached runtime row, including the one being opened.
+        try {
+          if (hasWorkspaceApi(window.piDeck)) {
+            const result = await selectWorkspaceOnMain(owner.id);
+            if (!isNavigationCurrent(generation)) {
+              void reconcileStaleWorkspaceSelection(owner.id, generation);
+              return;
+            }
+            setArchivedWorkspaces(result.archivedWorkspaces ?? []);
+            const switched = await switchWorkspaceView(
+              result.activeWorkspace ?? owner,
+              result.workspaces,
+              session.id,
+              generation,
+            );
+            if (!switched || !isNavigationCurrent(generation)) {
+              if (!isNavigationCurrent(generation)) {
+                void reconcileStaleWorkspaceSelection(owner.id, generation);
+              }
+              return;
+            }
+          } else {
+            // Keep old project-only preloads usable while the workspace-capable
+            // path above remains the authoritative v0.6 transaction.
+            const switched = await switchWorkspaceView(
+              owner,
+              workspaces,
+              session.id,
+              generation,
+            );
+            if (!switched || !isNavigationCurrent(generation)) return;
+          }
+        } catch (error) {
+          if (isNavigationCurrent(generation)) {
+            setUiMessage(
+              `Failed to open session workspace: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+          return;
+        }
+
+        if (!isNavigationCurrent(generation)) return;
+        if (session.runtimeBacked) {
+          showSessionDetail(session.id, origin, generation);
+          if (session.backendMode === "real") {
+            loadRealCapabilities(session.id);
+          }
+          return;
+        }
+        if (
+          session.backendMode === "real" &&
+          session.resumeBacked === true &&
+          session.sessionFile !== undefined
+        ) {
+          await resumeSession(session, generation, origin);
+          return;
+        }
         showSessionDetail(session.id, origin, generation);
-        void switchWorkspaceView(owner, workspaces, session.id, generation);
         return;
       }
     }
+
+    // Same-workspace selection intentionally keeps its existing eager route
+    // behavior; only the cross-workspace branch needs the awaited transaction.
     showSessionDetail(sessionId, origin, generation);
     if (
       session?.backendMode === "real" &&
@@ -3757,6 +3829,8 @@ export function App(): ReactElement {
       composerDraftsRef.current,
       workspaceId,
       workspaces.length,
+      pendingTaskSubmissionsRef.current,
+      multitaskRef.current,
     );
     if (blockedReason !== undefined) {
       setComposerError(blockedReason);
@@ -3776,6 +3850,21 @@ export function App(): ReactElement {
       );
       for (const session of attachedSessions) {
         if (!(await closeIdleRuntimeForMembershipMutation(session))) return;
+      }
+      // Recheck after closing idle runtimes: planner/task state can change
+      // while those IPC calls are in flight, and private children are not
+      // represented by the parent's normal busy status.
+      const lateBlockedReason = archiveWorkspaceBlockReason(
+        sessionsRef.current,
+        composerDraftsRef.current,
+        workspaceId,
+        workspaces.length,
+        pendingTaskSubmissionsRef.current,
+        multitaskRef.current,
+      );
+      if (lateBlockedReason !== undefined) {
+        setComposerError(lateBlockedReason);
+        return;
       }
       const result = await window.piDeck.workspaces.archive({
         workspaceId,
@@ -5301,6 +5390,8 @@ export function App(): ReactElement {
             busy={workspaceDialogBusy}
             composerDrafts={composerDrafts}
             currentWorkspace={currentWorkspace}
+            multitask={multitask}
+            pendingTaskSubmissions={pendingTaskSubmissions}
             dialog={workspaceDialog}
             unassignedLoading={unassignedSessionsLoading}
             sessions={sessions}
@@ -5835,12 +5926,40 @@ function updateWorkspaceSessionLabels(
   );
 }
 
+const NONTERMINAL_PRIVATE_TASK_LIFECYCLES = new Set<
+  MultitaskTaskSummary["lifecycle"]
+>(["queued", "starting", "running", "retrying", "waiting-parent"]);
+
 function archiveWorkspaceBlockReason(
   sessions: SessionViewModel[],
   composerDrafts: ComposerDraftsBySession,
   workspaceId: string,
   openWorkspaceCount: number,
+  pendingTaskSubmissions: PendingTaskSubmissionsBySession = {},
+  multitask: Readonly<Record<string, MultitaskStateEvent>> = {},
 ): string | undefined {
+  const parentSessionIds = new Set(
+    sessions
+      .filter((session) => session.workspaceId === workspaceId)
+      .map((session) => session.id),
+  );
+  if (
+    Object.entries(pendingTaskSubmissions).some(
+      ([sessionId, submission]) =>
+        submission !== undefined && parentSessionIds.has(sessionId),
+    )
+  ) {
+    return "Wait for parallel task planning to finish before archiving this workspace.";
+  }
+  if (
+    [...parentSessionIds].some((sessionId) =>
+      multitask[sessionId]?.tasks.some((task) =>
+        NONTERMINAL_PRIVATE_TASK_LIFECYCLES.has(task.lifecycle),
+      ),
+    )
+  ) {
+    return "Finish private parallel tasks before archiving this workspace.";
+  }
   if (
     sessions.some(
       (session) =>
@@ -8724,6 +8843,8 @@ function WorkspaceManagementDialog(props: {
   busy: boolean;
   composerDrafts: ComposerDraftsBySession;
   currentWorkspace: WorkspaceRef;
+  multitask: Readonly<Record<string, MultitaskStateEvent>>;
+  pendingTaskSubmissions: PendingTaskSubmissionsBySession;
   dialog: Exclude<WorkspaceDialogState, undefined>;
   sessions: SessionViewModel[];
   unassignedSessions: ChatSessionSummary[];
@@ -8772,6 +8893,8 @@ function WorkspaceManagementDialog(props: {
     props.composerDrafts,
     targetWorkspace.id,
     props.workspaces.length,
+    props.pendingTaskSubmissions,
+    props.multitask,
   );
   const testId =
     props.dialog.kind === "create"

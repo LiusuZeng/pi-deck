@@ -1608,6 +1608,97 @@ describe("renderer session actions", () => {
     ).toMatch(/attachments/i);
   });
 
+  it("blocks archive for pending planning and every nonterminal private task lifecycle", () => {
+    const parent = {
+      ...baseSession(),
+      id: "parent-runtime",
+      status: "idle",
+    } as any;
+    const pendingPlanning = {
+      "parent-runtime": {
+        text: "delegate this",
+        attachments: [],
+        timelineItemId: "planning-item",
+      },
+    } as any;
+    expect(
+      __rendererTestHooks.archiveWorkspaceBlockReason(
+        [parent],
+        {},
+        "workspace-a",
+        2,
+        pendingPlanning,
+        {},
+      ),
+    ).toMatch(/parallel task planning/i);
+
+    for (const lifecycle of [
+      "queued",
+      "starting",
+      "running",
+      "retrying",
+      "waiting-parent",
+    ]) {
+      expect(
+        __rendererTestHooks.archiveWorkspaceBlockReason(
+          [parent],
+          {},
+          "workspace-a",
+          2,
+          {},
+          {
+            "parent-runtime": {
+              runtimeId: "parent-runtime",
+              mode: "parallel",
+              settings: {},
+              activeCount: 1,
+              activeLimit: 2,
+              tasks: [
+                {
+                  taskNumber: 1,
+                  generatedName: "private task",
+                  brief: "Keep working",
+                  lifecycle,
+                  attempt: 1,
+                  elapsedMs: 0,
+                },
+              ],
+            },
+          } as any,
+        ),
+      ).toMatch(/private parallel tasks/i);
+    }
+
+    expect(
+      __rendererTestHooks.archiveWorkspaceBlockReason(
+        [parent],
+        {},
+        "workspace-a",
+        2,
+        {},
+        {
+          "parent-runtime": {
+            runtimeId: "parent-runtime",
+            mode: "parallel",
+            settings: {},
+            activeCount: 0,
+            activeLimit: 2,
+            tasks: [
+              {
+                taskNumber: 1,
+                generatedName: "private task",
+                brief: "Done",
+                lifecycle: "completed",
+                attempt: 1,
+                elapsedMs: 10,
+              },
+            ],
+          },
+        } as any,
+      ),
+    ).toBeUndefined();
+  });
+
   it("keeps a destructive dialog busy and rejects duplicate transactions", async () => {
     const gate = { current: false };
     const busy: boolean[] = [];

@@ -496,6 +496,101 @@ test("workspace management UI keeps Pi JSONL membership reversible and deletion 
   }
 });
 
+test("Unified Work opens a saved sidebar row across workspaces through canonical resume", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-cross-workspace-row-"),
+  );
+  const sourceCwd = path.join(root, "source-project");
+  const agentDir = path.join(root, "agent");
+  const sessionFile = path.join(
+    agentDir,
+    "sessions",
+    "--cross-workspace--",
+    "saved-cross-workspace.jsonl",
+  );
+  fs.mkdirSync(sourceCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+  writePiSessionFixture({
+    sessionFile,
+    sessionId: "saved-cross-workspace",
+    projectCwd: sourceCwd,
+  });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({ root, projectCwd: sourceCwd, agentDir }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    const sourceName = path.basename(sourceCwd);
+    await createWorkspaceInUi(page, "Cross destination");
+    const destinationId = await page.evaluate(async () => {
+      const active = await window.piDeck.workspaces.getActive();
+      if (active.activeWorkspace === undefined) {
+        throw new Error("Destination workspace was not selected.");
+      }
+      return active.activeWorkspace.id;
+    });
+    await page.evaluate(
+      ({ destinationId, sessionFile }) =>
+        window.piDeck.workspaces.addSession({
+          workspaceId: destinationId,
+          sessionFile,
+        }),
+      { destinationId, sessionFile: fs.realpathSync(sessionFile) },
+    );
+    await page.getByLabel("Refresh sessions").click();
+    const savedRow = page.getByRole("button", {
+      name: "Session: saved-cross-workspace",
+    });
+    await expect(savedRow).toBeVisible();
+
+    // Leave the source workspace active so this is a direct cross-workspace
+    // sidebar selection rather than a prior workspace navigation. Keep a
+    // source runtime attached as well; the transaction must not evict it.
+    await selectWorkspaceInUi(page, sourceName);
+    await enterSessionDetail(page);
+    const sourcePrompt = "Keep source runtime attached";
+    await page.getByLabel("Prompt text").fill(sourcePrompt);
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText(`Fake response to: ${sourcePrompt}`, { exact: true }),
+    ).toBeVisible();
+    const sourceRuntimeId = await page.evaluate(
+      async () => (await window.piDeck.chat.getSnapshot()).runtimeId,
+    );
+    await expectRuntimeIds(page, [sourceRuntimeId]);
+
+    await savedRow.click();
+    await expect(
+      page.locator('.workspace[data-primary-view="session"]'),
+    ).toBeVisible();
+    await expect(page.locator(".ui-status-message")).toContainText(
+      "Resumed saved Pi session.",
+    );
+    const resumedRuntimeId = await page.evaluate(
+      async () => (await window.piDeck.chat.getSnapshot()).runtimeId,
+    );
+    expect(resumedRuntimeId).not.toBe(sourceRuntimeId);
+    await expectRuntimeIds(page, [sourceRuntimeId, resumedRuntimeId]);
+    await expect(page.getByTestId("session-origin-back")).toHaveAttribute(
+      "aria-label",
+      `Back to ${sourceName} Work`,
+    );
+    await expect
+      .poll(async () =>
+        page.evaluate(
+          async () =>
+            (await window.piDeck.workspaces.getActive()).activeWorkspace
+              ?.name ?? null,
+        ),
+      )
+      .toBe("Cross destination");
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("new workspaces send with managed context and model defaults without a folder picker", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-e2e-managed-workspace-"),
