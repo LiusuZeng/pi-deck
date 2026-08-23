@@ -150,6 +150,9 @@ export function ActivityInbox({
   const visibleKinds =
     selectedFilter === "all" ? ACTIVITY_STATUSES : [selectedFilter];
   const visibleItems = visibleKinds.flatMap((kind) => groups[kind]);
+  const showWorkspaceControls =
+    workspaces.length > 0 || scope.type === "workspace";
+  const showWorkspaceContext = scope.type === "all" && workspaces.length > 0;
 
   return (
     <main
@@ -174,46 +177,48 @@ export function ActivityInbox({
         </div>
       </header>
 
-      <label
-        className="activity-inbox-workspace-filter"
-        htmlFor="activity-inbox-workspace-scope"
+      {showWorkspaceControls ? (
+        <label
+          className="activity-inbox-workspace-filter"
+          htmlFor="activity-inbox-workspace-scope"
+        >
+          <span id="activity-inbox-workspace-scope-label">
+            Current Work scope
+          </span>
+          <select
+            aria-describedby="activity-inbox-scope-status"
+            aria-label="Current Work scope"
+            id="activity-inbox-workspace-scope"
+            onChange={(event) =>
+              onScopeChange(
+                event.target.value === "all"
+                  ? { type: "all" }
+                  : { type: "workspace", workspaceId: event.target.value },
+              )
+            }
+            value={scope.type === "workspace" ? scope.workspaceId : "all"}
+          >
+            <option value="all">
+              {ALL_WORK_LABEL} ({availableCount})
+            </option>
+            {workspaces.map((workspace) => {
+              const count = model.availableWorkspaceCounts[workspace.id] ?? 0;
+              return (
+                <option key={workspace.id} value={workspace.id}>
+                  {workspace.name} ({count})
+                </option>
+              );
+            })}
+          </select>
+        </label>
+      ) : null}
+      <span
+        aria-live="polite"
+        className="activity-inbox-scope-status sr-only"
+        id="activity-inbox-scope-status"
       >
-        <span id="activity-inbox-workspace-scope-label">
-          Current Work scope
-        </span>
-        <select
-          aria-describedby="activity-inbox-scope-status"
-          aria-label="Current Work scope"
-          id="activity-inbox-workspace-scope"
-          onChange={(event) =>
-            onScopeChange(
-              event.target.value === "all"
-                ? { type: "all" }
-                : { type: "workspace", workspaceId: event.target.value },
-            )
-          }
-          value={scope.type === "workspace" ? scope.workspaceId : "all"}
-        >
-          <option value="all">
-            {ALL_WORK_LABEL} ({availableCount})
-          </option>
-          {workspaces.map((workspace) => {
-            const count = model.availableWorkspaceCounts[workspace.id] ?? 0;
-            return (
-              <option key={workspace.id} value={workspace.id}>
-                {workspace.name} ({count})
-              </option>
-            );
-          })}
-        </select>
-        <span
-          aria-live="polite"
-          className="activity-inbox-scope-status sr-only"
-          id="activity-inbox-scope-status"
-        >
-          Current scope: {scopeLabel}.
-        </span>
-      </label>
+        Current scope: {scopeLabel}.
+      </span>
 
       <div
         aria-controls="activity-inbox-content"
@@ -264,8 +269,8 @@ export function ActivityInbox({
             const items = groups[kind];
             return items.length > 0 ? (
               <ActivitySection
-                isGlobalScope={scope.type === "all"}
                 items={items}
+                showWorkspaceContext={showWorkspaceContext}
                 key={kind}
                 kind={kind}
                 onOpenActivityItem={onOpenActivityItem}
@@ -310,15 +315,15 @@ function EmptyState({
 }
 
 function ActivitySection({
-  isGlobalScope,
   items,
   kind,
   onOpenActivityItem,
+  showWorkspaceContext,
 }: {
-  isGlobalScope: boolean;
   items: ActivityItem[];
   kind: ActivityStatus;
   onOpenActivityItem: (item: ActivityItem) => void;
+  showWorkspaceContext: boolean;
 }) {
   const { Icon, label } = ACTIVITY_META[kind];
   const headingId = `activity-inbox-${kind}`;
@@ -333,8 +338,8 @@ function ActivitySection({
       <div className="activity-inbox-list">
         {items.map((item) => (
           <ActivityRow
-            isGlobalScope={isGlobalScope}
             item={item}
+            showWorkspaceContext={showWorkspaceContext}
             key={item.id}
             onOpenActivityItem={onOpenActivityItem}
           />
@@ -345,17 +350,20 @@ function ActivitySection({
 }
 
 function ActivityRow({
-  isGlobalScope,
   item,
   onOpenActivityItem,
+  showWorkspaceContext,
 }: {
-  isGlobalScope: boolean;
   item: ActivityItem;
   onOpenActivityItem: (item: ActivityItem) => void;
+  showWorkspaceContext: boolean;
 }) {
   const kind = item.status;
   const { Icon, label } = ACTIVITY_META[kind];
   const relativeTime = formatRelativeTime(item.updatedAtMs);
+  const workspaceContext = showWorkspaceContext
+    ? `, ${item.workspaceName}`
+    : "";
   const activate = () => onOpenActivityItem(item);
   const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (event.key === "Enter" || event.key === " ") {
@@ -366,7 +374,7 @@ function ActivityRow({
 
   return (
     <button
-      aria-label={`${label}: ${item.title}, ${item.workspaceName}. ${item.detail}. Updated ${relativeTime}. ${item.actionLabel}.`}
+      aria-label={`${label}: ${item.title}${workspaceContext}. ${item.detail}. Updated ${relativeTime}. ${item.actionLabel}.`}
       className={`activity-inbox-row activity-inbox-row--${kind}`}
       data-activity-item-id={item.id}
       onClick={activate}
@@ -379,7 +387,7 @@ function ActivityRow({
       </span>
       <span className="activity-inbox-row-copy">
         <span className="activity-inbox-row-title">{item.title}</span>
-        {isGlobalScope ? (
+        {showWorkspaceContext ? (
           <span className="activity-inbox-row-context">
             {item.workspaceName}
           </span>

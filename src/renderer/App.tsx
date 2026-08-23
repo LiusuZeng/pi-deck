@@ -1592,10 +1592,10 @@ export function App(): ReactElement {
       return;
     }
     const scopedWorkspaceId = primaryView.scope.workspaceId;
-    if (
-      currentWorkspace.id !== scopedWorkspaceId ||
-      currentWorkspace.isDefault !== true
-    ) {
+    const scopedWorkspace = activityWorkspaces.find(
+      (workspace) => workspace.id === scopedWorkspaceId,
+    );
+    if (scopedWorkspace?.isDefault !== true) {
       return;
     }
     if (
@@ -1609,7 +1609,12 @@ export function App(): ReactElement {
     // default. Once the default becomes the only active workspace, its
     // presentation-only scope is no longer disclosed; return to All Work.
     showAllWork();
-  }, [currentWorkspace, primaryView, workScopeWorkspaces, workspaceDialogBusy]);
+  }, [
+    activityWorkspaces,
+    primaryView,
+    workScopeWorkspaces,
+    workspaceDialogBusy,
+  ]);
 
   useLayoutEffect(() => {
     if (primaryView.kind !== "work") return;
@@ -2183,14 +2188,6 @@ export function App(): ReactElement {
 
   function handleActivityScopeChange(scope: WorkScope): void {
     showWork(scope);
-  }
-
-  function handleCloseWork(): void {
-    if (primaryView.kind === "work") {
-      showSessionDetail(selectedSession.id, primaryView);
-      return;
-    }
-    showSessionDetail(selectedSession.id);
   }
 
   function handleBackToWork(): void {
@@ -5390,7 +5387,6 @@ export function App(): ReactElement {
             workspaces={workScopeWorkspaces}
             onScopeChange={handleActivityScopeChange}
             onOpenActivityItem={handleOpenActivityItem}
-            onClose={handleCloseWork}
             onNewSession={() => void handleNewSession()}
           />
         ) : (

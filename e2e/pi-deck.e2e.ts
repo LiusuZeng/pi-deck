@@ -144,6 +144,10 @@ async function expectAllWorkLaunch(page: Page): Promise<void> {
   ).toBeVisible();
   await expect(route.locator(".surface-title")).toHaveText("All Work");
   await expect(route.locator(".usage-toggle")).toHaveCount(0);
+  await expect(route.locator(".activity-inbox-close")).toHaveCount(0);
+  await expect(
+    route.getByRole("button", { name: /^Close .*Work$/ }),
+  ).toHaveCount(0);
 }
 
 function sidebarNewSessionButton(page: Page) {
@@ -1301,11 +1305,15 @@ test("default workspace stays implicit until a named workspace exists", async ()
     await expect(
       page.getByRole("button", { name: "New workspace…", exact: true }),
     ).toBeVisible();
-    await expect(
-      page
-        .locator(".activity-inbox-row")
-        .filter({ hasText: "Extension approval request" }),
-    ).toBeVisible();
+    const defaultOwnedWork = page
+      .locator(".activity-inbox-row")
+      .filter({ hasText: "Extension approval request" });
+    await expect(defaultOwnedWork).toBeVisible();
+    await expect(defaultOwnedWork).not.toContainText(defaultWorkspace.name);
+    await expect(defaultOwnedWork).not.toHaveAttribute(
+      "aria-label",
+      new RegExp(defaultWorkspace.name),
+    );
 
     await createWorkspaceInUi(page, "Named disclosure workspace");
     await expect(defaultRow).toBeVisible();
@@ -1320,6 +1328,15 @@ test("default workspace stays implicit until a named workspace exists", async ()
         .locator("option")
         .filter({ hasText: defaultWorkspace.name }),
     ).toHaveCount(1);
+
+    const firstSessionRow = page.locator(".session-item").first();
+    const sessionList = firstSessionRow.locator("..");
+    await expect(firstSessionRow).toHaveCSS("display", "grid");
+    const sessionListBox = await sessionList.boundingBox();
+    const firstSessionRowBox = await firstSessionRow.boundingBox();
+    expect(firstSessionRowBox?.width).toBeGreaterThanOrEqual(
+      (sessionListBox?.width ?? 0) - 1,
+    );
   } finally {
     await app.close();
     fs.rmSync(root, { recursive: true, force: true });

@@ -134,6 +134,23 @@ describe("ActivityInbox", () => {
     expect(view.querySelector("h1")?.getAttribute("tabindex")).toBe("-1");
   });
 
+  it("keeps default-only Work free of workspace presentation mechanics", () => {
+    const { view } = renderInbox(
+      modelWithEveryKind(),
+      { type: "all" },
+      vi.fn(),
+      vi.fn(),
+      [],
+    );
+
+    expect(view.querySelector("select")).toBeNull();
+    expect(view.querySelector(".activity-inbox-row-context")).toBeNull();
+    expect(
+      view.querySelector(".activity-inbox-row")?.getAttribute("aria-label"),
+    ).not.toContain("Project Atlas");
+    expect(view.textContent).not.toContain("Project Atlas");
+  });
+
   it("shows global rows, workspace context, selector counts, and status chips", () => {
     const { view } = renderInbox(modelWithEveryKind());
 
