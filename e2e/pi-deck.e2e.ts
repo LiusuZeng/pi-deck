@@ -1315,6 +1315,25 @@ test("default workspace stays implicit until a named workspace exists", async ()
       new RegExp(defaultWorkspace.name),
     );
 
+    const globalPrompt = "Default-only global session";
+    await enterSessionDetail(page);
+    await page.getByLabel("Prompt text").fill(globalPrompt);
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText(`Fake response to: ${globalPrompt}`, { exact: true }),
+    ).toBeVisible();
+    const globalSnapshot = await page.evaluate(() =>
+      window.piDeck.chat.getSnapshot(),
+    );
+    expect(globalSnapshot.workspaceId).toBe(defaultWorkspace.id);
+    await page.getByRole("button", { name: /^All Work/ }).click();
+    await expectAllWorkLaunch(page);
+    const persistedDefaultRow = page
+      .locator(".activity-inbox-row")
+      .filter({ hasText: globalPrompt });
+    await expect(persistedDefaultRow).toBeVisible();
+    await expect(persistedDefaultRow).not.toContainText(defaultWorkspace.name);
+
     await createWorkspaceInUi(page, "Named disclosure workspace");
     await expect(defaultRow).toBeVisible();
     await expect(

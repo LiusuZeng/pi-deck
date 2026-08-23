@@ -2373,8 +2373,10 @@ export function App(): ReactElement {
       return;
     }
     try {
+      // The workflow reference does not carry workspace ownership. Omitting
+      // workspaceId lets main resolve the saved file's canonical membership
+      // instead of guessing from whichever workspace is currently visible.
       const snapshot = await window.piDeck.chat.resumeSession({
-        workspaceId: currentWorkspaceRef.current.id,
         sessionFile: sessionReference.sessionFile,
       });
       // Keep the runtime returned by resume attached to this row. Replacing it

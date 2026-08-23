@@ -150,8 +150,7 @@ export function ActivityInbox({
   const visibleKinds =
     selectedFilter === "all" ? ACTIVITY_STATUSES : [selectedFilter];
   const visibleItems = visibleKinds.flatMap((kind) => groups[kind]);
-  const showWorkspaceControls =
-    workspaces.length > 0 || scope.type === "workspace";
+  const showWorkspaceControls = workspaces.length > 0;
   const showWorkspaceContext = scope.type === "all" && workspaces.length > 0;
 
   return (
