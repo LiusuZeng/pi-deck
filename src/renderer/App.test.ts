@@ -1,7 +1,28 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { emptyOverlays } from "./sessionState.js";
 import { defaultAgentWorkflowDefinition } from "./workflows/agentWorkflowDefinition.js";
-import { __rendererTestHooks } from "./App.js";
+import { __rendererTestHooks, MarkdownView } from "./App.js";
+
+it("renders pipe tables as safe semantic table markup", () => {
+  const markup = renderToStaticMarkup(
+    createElement(MarkdownView, {
+      markdown: [
+        "| Country | Temperature | Source |",
+        "|---|---:|---|",
+        "| Canada | **35.2°C** | [ECCC](https://example.com) |",
+      ].join("\n"),
+    }),
+  );
+
+  expect(markup).toContain('<div class="markdown-table-scroll"><table>');
+  expect(markup).toContain("<thead>");
+  expect(markup).toContain("<tbody>");
+  expect(markup).toContain("<strong><span>35.2°C</span></strong>");
+  expect(markup).toContain('href="https://example.com"');
+  expect(markup).not.toContain("|---|---:|---|");
+});
 
 it("offers every active workflow workspace once and excludes archived workspaces", () => {
   const workspace = (id: string, name: string) => ({
@@ -613,6 +634,19 @@ describe("renderer per-session composer drafts", () => {
     );
   });
 
+  it("synthesizes an enabled sequential multitask state for a fresh draft", () => {
+    expect(
+      __rendererTestHooks.initialDraftMultitaskState("new-session"),
+    ).toEqual({
+      runtimeId: "new-session",
+      mode: "sequential",
+      settings: {},
+      activeCount: 0,
+      activeLimit: 10,
+      tasks: [],
+    });
+  });
+
   it("keeps the hidden new-session landing draft until its worker gets an id", () => {
     const drafts = __rendererTestHooks.updateComposerDraft(
       {},
@@ -631,6 +665,107 @@ describe("renderer per-session composer drafts", () => {
     expect(__rendererTestHooks.hasComposerDraft(moved, "new-session")).toBe(
       false,
     );
+  });
+
+  it("acknowledges one pending task submission and rejects a duplicate", () => {
+    const attachment = {
+      id: "attachment-1",
+      selectedPathToken: "token-1",
+      fileName: "notes.txt",
+      displayPath: "/project/notes.txt",
+      kind: "textFile",
+      sendMode: "pathReference",
+      outsideProject: false,
+      status: "ready",
+    } as const;
+    const pending = __rendererTestHooks.beginTaskSubmission(
+      {},
+      "session-a",
+      "Plan this",
+      [attachment],
+      "user-1",
+    );
+
+    expect(pending).toEqual({
+      "session-a": {
+        text: "Plan this",
+        attachments: [attachment],
+        timelineItemId: "user-1",
+      },
+    });
+    expect(
+      __rendererTestHooks.beginTaskSubmission(
+        pending!,
+        "session-a",
+        "Plan this",
+        [attachment],
+        "user-2",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("clears only the submitted task draft and restores a rejected task only into an empty composer", () => {
+    const attachment = {
+      id: "attachment-1",
+      selectedPathToken: "token-1",
+      fileName: "notes.txt",
+      displayPath: "/project/notes.txt",
+      kind: "textFile",
+      sendMode: "pathReference",
+      outsideProject: false,
+      status: "ready",
+    } as const;
+    const submitted = {
+      "session-a": {
+        text: "Plan this  ",
+        attachments: [attachment],
+        slashOpen: false,
+      },
+    };
+    const cleared = __rendererTestHooks.clearSubmittedTaskDraft(
+      submitted,
+      "session-a",
+      "Plan this",
+      [attachment],
+    );
+    expect(cleared).toEqual({});
+    expect(
+      __rendererTestHooks.clearSubmittedTaskDraft(
+        {
+          ...submitted,
+          "session-a": { ...submitted["session-a"], text: "New draft" },
+        },
+        "session-a",
+        "Plan this",
+        [attachment],
+      ),
+    ).toEqual({
+      ...submitted,
+      "session-a": { ...submitted["session-a"], text: "New draft" },
+    });
+    expect(
+      __rendererTestHooks.restoreFailedTaskDraft({}, "session-a", "Plan this", [
+        attachment,
+      ]),
+    ).toEqual({
+      "session-a": {
+        text: "Plan this",
+        attachments: [attachment],
+        slashOpen: false,
+      },
+    });
+    expect(
+      __rendererTestHooks.restoreFailedTaskDraft(
+        {
+          "session-a": { text: "New draft", attachments: [], slashOpen: false },
+        },
+        "session-a",
+        "Plan this",
+        [attachment],
+      ),
+    ).toEqual({
+      "session-a": { text: "New draft", attachments: [], slashOpen: false },
+    });
   });
 
   it("reports invalid attachments or image models before work is started", () => {

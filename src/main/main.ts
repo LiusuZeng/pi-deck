@@ -70,6 +70,9 @@ import {
   workspaceUpdateRequestSchema,
   multitaskModeRequestSchema,
   multitaskModeUpdateRequestSchema,
+  multitaskSettingsRequestSchema,
+  multitaskSettingsSchema,
+  multitaskSettingsUpdateRequestSchema,
   multitaskStateEventSchema,
 } from "../shared/ipcSchemas.js";
 import {
@@ -140,7 +143,7 @@ import {
   parsePiRuntimeModelDiscovery,
 } from "./pi/modelDiscovery.js";
 import { SinglePiAdapter } from "./pi/piAdapter.js";
-import { WorkerCapacity } from "./pi/workerCapacity.js";
+import { WorkerCapacity, WorkerCapacityError } from "./pi/workerCapacity.js";
 import { selectAvailableRuntime } from "./runtimeSelection.js";
 import {
   readPiSessionSummary,
@@ -190,6 +193,22 @@ import {
   type ParentTaskNotification,
 } from "./multitask/multitaskSupervisor.js";
 import { PersistedRuntimeResumeGuard } from "./multitask/persistedRuntimeResumeGuard.js";
+import {
+  TaskSessionOrchestrator,
+  taskSessionProgressForWorkerEventType,
+  type PersistedTaskSessionTask,
+  type TaskSessionLaunch,
+  type TaskSessionWorkerSettings,
+} from "./multitask/taskSessionOrchestrator.js";
+import { TaskSessionMainStateStore } from "./multitask/taskSessionMainStateStore.js";
+import {
+  boundedParentContext,
+  buildTaskSessionPlannerPrompt,
+  fallbackTaskSessionPlan,
+  parseTaskSessionPlannerResponse,
+  resolveTaskSessionPlannerTimeoutMs,
+  TASK_SESSION_PLANNER_MAX_TASKS,
+} from "./multitask/taskSessionPlanner.js";
 import { deliverWithAttachmentConsumption } from "./attachmentDelivery.js";
 import {
   approveWorkflowStep,
@@ -261,6 +280,7 @@ let workflowInitialization: WorkflowInitialization<WorkflowStore> | undefined;
 const realChatLaunchConfigCache = new RealChatLaunchConfigCache();
 let diagnostics: DiagnosticsService | undefined;
 let multitaskStateStore: MultitaskStateStore | undefined;
+let taskSessionStateStore: TaskSessionMainStateStore | undefined;
 // Snapshot reads happen often. A persisted session is rehydrated exactly once
 // when attached; later reads must not close live private children.
 const multitaskRuntimeResumeGuard = new PersistedRuntimeResumeGuard();
@@ -278,6 +298,19 @@ const delegateCalls = new Map<
   { connectionId: string; toolCallId: string }
 >();
 let nextDelegatedTaskNumber = 1;
+let taskSessionOrchestrator:
+  | TaskSessionOrchestrator<string, { close(): Promise<void> }>
+  | undefined;
+const taskSessionSettings = new Map<string, TaskSessionWorkerSettings>();
+const taskSessionSynthesisTails = new Map<string, Promise<void>>();
+type TaskSessionPlannerRun = {
+  cancelled: boolean;
+  cancel(): void;
+  closeWorker?: () => Promise<void>;
+};
+// Planner workers are not task-session workers, so they need their own parent
+// ownership registry for close/delete races and allocation timeouts.
+const taskSessionPlannerRuns = new Map<string, Set<TaskSessionPlannerRun>>();
 type ChatBackendMode = "fake" | "real";
 
 let chatAdapter: SinglePiAdapter | undefined;
@@ -350,7 +383,13 @@ async function bootstrap(): Promise<void> {
   });
   projectStore = new ProjectStore(resolvePiDeckHome(process.env), diagnostics);
   multitaskStateStore = new MultitaskStateStore(app.getPath("userData"));
-  await multitaskStateStore.loadIfNeeded();
+  taskSessionStateStore = new TaskSessionMainStateStore(
+    app.getPath("userData"),
+  );
+  await Promise.all([
+    multitaskStateStore.loadIfNeeded(),
+    taskSessionStateStore.loadIfNeeded(),
+  ]);
   await projectStore.loadIfNeeded();
   workspaceStore = new WorkspaceStore(
     resolvePiDeckHome(process.env),
@@ -531,6 +570,8 @@ function registerIpcHandlers(
       applyAppTheme(updated);
       // App settings are an explicit configuration generation boundary.
       realChatLaunchConfigCache.clear();
+      maxRunningWorkers = updated.maxRunningSessions;
+      taskSessionOrchestrator?.scheduleAll();
       return updated;
     },
   });
@@ -673,9 +714,50 @@ function registerIpcHandlers(
     requestSchema: chatPromptRequestSchema,
     responseSchema: z.void(),
     diagnostics: diagnosticsService,
-    handler: async ({ runtimeId, text, attachments, attachmentOwnerId }) => {
+    handler: async ({
+      runtimeId,
+      text,
+      attachments,
+      attachmentOwnerId,
+      destination,
+      workerOverrides,
+    }) => {
       const adapter = await ensureChatAdapter(store, diagnosticsService);
       const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
+      if (destination === "newTaskSession") {
+        const orchestrator = getTaskSessionOrchestrator(activeRuntimeId);
+        if (orchestrator.state(activeRuntimeId).mode !== "parallel") {
+          throw new Error(
+            "New task sessions are available only in Parallel mode.",
+          );
+        }
+        const taskAttachments = attachments ?? [];
+        await deliverWithAttachmentConsumption({
+          store: attachmentSelections,
+          ownerId: attachmentOwnerId,
+          selectedPathTokens: taskAttachments.map(
+            (attachment) => attachment.selectedPathToken,
+          ),
+          deliver: async () => {
+            const taskInput = await buildPromptInputWithImagePolicy(
+              store,
+              adapter,
+              activeRuntimeId,
+              text,
+              taskAttachments,
+              attachmentOwnerId,
+            );
+            await recordTaskSessionPrompt(adapter, activeRuntimeId, text);
+            await orchestrator.submit(
+              activeRuntimeId,
+              text,
+              toTaskSessionSettings(workerOverrides),
+              { input: taskInput } satisfies TaskSessionPromptRuntimeContext,
+            );
+          },
+        });
+        return undefined;
+      }
       const promptAttachments = attachments ?? [];
       await deliverWithAttachmentConsumption({
         store: attachmentSelections,
@@ -684,15 +766,17 @@ function registerIpcHandlers(
           (attachment) => attachment.selectedPathToken,
         ),
         deliver: async () =>
-          adapter.prompt(
-            activeRuntimeId,
-            await buildPromptInputWithImagePolicy(
-              store,
-              adapter,
+          queueTaskSessionParentTurn(activeRuntimeId, async () =>
+            adapter.prompt(
               activeRuntimeId,
-              text,
-              promptAttachments,
-              attachmentOwnerId,
+              await buildPromptInputWithImagePolicy(
+                store,
+                adapter,
+                activeRuntimeId,
+                text,
+                promptAttachments,
+                attachmentOwnerId,
+              ),
             ),
           ),
       });
@@ -748,15 +832,19 @@ function registerIpcHandlers(
           (attachment) => attachment.selectedPathToken,
         ),
         deliver: async () =>
-          adapter.followUp(
-            activeRuntimeId,
-            await buildPromptInputWithImagePolicy(
-              store,
-              adapter,
+          // Follow-ups share the parent turn queue with synthesis. Steer is
+          // intentionally not queued: it is an intervention in the live turn.
+          queueTaskSessionParentTurn(activeRuntimeId, async () =>
+            adapter.followUp(
               activeRuntimeId,
-              text,
-              promptAttachments,
-              attachmentOwnerId,
+              await buildPromptInputWithImagePolicy(
+                store,
+                adapter,
+                activeRuntimeId,
+                text,
+                promptAttachments,
+                attachmentOwnerId,
+              ),
             ),
           ),
       });
@@ -865,7 +953,7 @@ function registerIpcHandlers(
     requestSchema: multitaskModeRequestSchema,
     responseSchema: multitaskStateEventSchema,
     diagnostics: diagnosticsService,
-    handler: async ({ runtimeId }) => multitaskState(runtimeId),
+    handler: async ({ runtimeId }) => taskSessionState(runtimeId),
   });
 
   registerValidatedIpc({
@@ -874,11 +962,46 @@ function registerIpcHandlers(
     responseSchema: multitaskStateEventSchema,
     diagnostics: diagnosticsService,
     handler: async ({ runtimeId, mode }) => {
-      const supervisor = await getMultitaskSupervisor(runtimeId);
-      supervisor.setMode(runtimeId, mode);
-      await persistMultitaskSupervisor(runtimeId);
-      emitMultitaskState(runtimeId, supervisor);
-      return multitaskState(runtimeId);
+      const orchestrator = getTaskSessionOrchestrator(runtimeId);
+      const legacySupervisor = await getMultitaskSupervisor(runtimeId);
+      orchestrator.setMode(runtimeId, mode);
+      legacySupervisor.setMode(runtimeId, mode);
+      await Promise.all([
+        persistTaskSession(runtimeId),
+        persistMultitaskSupervisor(runtimeId),
+      ]);
+      emitTaskSessionState(runtimeId);
+      return taskSessionState(runtimeId);
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.multitaskGetSettings,
+    requestSchema: multitaskSettingsRequestSchema,
+    responseSchema: multitaskSettingsSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runtimeId }) => {
+      getTaskSessionOrchestrator(runtimeId);
+      return fromTaskSessionSettings(taskSessionSettings.get(runtimeId));
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.multitaskUpdateSettings,
+    requestSchema: multitaskSettingsUpdateRequestSchema,
+    responseSchema: multitaskSettingsSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ runtimeId, settings }) => {
+      const orchestrator = getTaskSessionOrchestrator(runtimeId);
+      const storedSettings = toTaskSessionSettings(settings);
+      taskSessionSettings.set(runtimeId, storedSettings);
+      orchestrator.updateWorkerSettings(runtimeId, storedSettings);
+      const sessionFile = chatRuntimeSessionFiles.get(runtimeId);
+      if (sessionFile)
+        await taskSessionStateStore?.setSettings(sessionFile, storedSettings);
+      emitTaskSessionState(runtimeId);
+      await persistTaskSession(runtimeId);
+      return fromTaskSessionSettings(storedSettings);
     },
   });
 
@@ -2598,6 +2721,22 @@ async function handleDelegateRequest(request: DelegateRequest): Promise<void> {
     }
     return;
   }
+  const productTaskState = taskSessionOrchestrator?.state(parentId);
+  if (
+    (productTaskState?.tasks.length ?? 0) > 0 ||
+    legacyNonterminalTaskCount(parentId) >= 10
+  ) {
+    delegationBridge.sendChildResult({
+      connectionId: request.connectionId,
+      toolCallId: request.toolCallId,
+      outcome: "failed",
+      handoff: {
+        summary:
+          "The compatibility bridge cannot bypass this parent's 10-task limit or run beside product task sessions.",
+      },
+    });
+    return;
+  }
   if (typeof (payload as { task?: unknown }).task !== "string") {
     delegationBridge.sendChildResult({
       connectionId: request.connectionId,
@@ -2685,6 +2824,7 @@ async function initializeChatAdapter(
         parsed.data.runtimeId,
       );
       forgetChatRuntime(parsed.data.runtimeId, { preserveAttachments });
+      taskSessionOrchestrator?.scheduleAll();
     }
   });
 
@@ -2695,6 +2835,24 @@ async function initializeChatAdapter(
   chatEventUnsubscribe = unsubscribe;
   chatWorkerCapacity = capacity;
   chatAdapter = adapter;
+  taskSessionOrchestrator = new TaskSessionOrchestrator({
+    plan: (parentId, prompt, runtimeContext) =>
+      planTaskSession(adapter, store, parentId, prompt, runtimeContext),
+    resolveWorkerSettings: ({ parentId, parentSettings, promptSettings }) => ({
+      ...parentSettings,
+      ...taskSessionSettings.get(parentId),
+      ...promptSettings,
+    }),
+    createWorker: (launch) => createTaskSessionWorker(adapter, store, launch),
+    hasGlobalCapacity: (parentId) =>
+      capacityAvailable() && legacyNonterminalTaskCount(parentId) === 0,
+    isCapacityUnavailable: (error) => error instanceof WorkerCapacityError,
+    synthesize: (input) => synthesizeTaskSession(adapter, input),
+    onState: (parentId) => {
+      emitTaskSessionState(parentId);
+      void persistTaskSession(parentId);
+    },
+  });
   multitaskSupervisor = new MultitaskSupervisor({
     hasCapacity: () => capacityAvailable(),
     createWorker: (launch) =>
@@ -2752,6 +2910,19 @@ async function serializeChatWorkerCreation<T>(
   }
 }
 
+function legacyNonterminalTaskCount(parentId: string): number {
+  try {
+    return (multitaskSupervisor?.state(parentId).tasks ?? []).filter(
+      (task) =>
+        task.status === "queued" ||
+        task.status === "running" ||
+        task.status === "waiting-input",
+    ).length;
+  } catch {
+    return 0;
+  }
+}
+
 function capacityAvailable(): boolean {
   const capacity = chatWorkerCapacity;
   const adapter = chatAdapter;
@@ -2778,6 +2949,12 @@ function registerChatWorker(
     chatRuntimeProjectIds.set(runtimeId, workerSpec.projectId);
   }
   chatRuntimeWorkspaceIds.set(runtimeId, workerSpec.workspaceId);
+  taskSessionOrchestrator?.addParent(runtimeId, {
+    mode: initialMultitaskMode,
+    ...(taskSessionSettings.has(runtimeId)
+      ? { workerSettings: taskSessionSettings.get(runtimeId)! }
+      : {}),
+  });
   multitaskSupervisor?.addParent(runtimeId, {
     mode: initialMultitaskMode,
     maxQueuedTasks: 100,
@@ -2992,6 +3169,8 @@ async function closeAttachedChatRuntime(
   }
   try {
     delegationBridge?.removeParent(runtimeId);
+    cancelTaskSessionPlanners(runtimeId);
+    await taskSessionOrchestrator?.removeParent(runtimeId);
     await multitaskSupervisor?.removeParent(runtimeId);
     if (adapter.hasRuntime(runtimeId)) {
       await adapter.closeSession(runtimeId);
@@ -3039,10 +3218,18 @@ function forgetChatRuntime(
       delegateCalls.delete(key);
     }
   }
+  cancelTaskSessionPlanners(runtimeId);
+  void taskSessionOrchestrator?.removeParent(runtimeId);
+  taskSessionSettings.delete(runtimeId);
+  taskSessionSynthesisTails.delete(runtimeId);
   void multitaskSupervisor?.removeParent(runtimeId);
   if (chatRuntimeId === runtimeId) {
     chatRuntimeId = undefined;
   }
+}
+
+interface TaskSessionPromptRuntimeContext {
+  input: PromptInput;
 }
 
 interface ChatWorkerSpec {
@@ -3050,6 +3237,615 @@ interface ChatWorkerSpec {
   cwd: string;
   projectId?: string;
   workspaceId: string;
+}
+
+type ChatResumeWorkerSpec = Omit<ChatWorkerSpec, "workspaceId"> & {
+  workspaceId?: string;
+};
+
+function toTaskSessionSettings(
+  settings:
+    | {
+        model?: { provider: string; modelId: string } | undefined;
+        thinkingLevel?: string | undefined;
+      }
+    | undefined,
+): TaskSessionWorkerSettings {
+  if (!settings) return {};
+  return {
+    ...(settings.model ? { model: JSON.stringify(settings.model) } : {}),
+    ...(settings.thinkingLevel
+      ? { thinkingLevel: settings.thinkingLevel }
+      : {}),
+  };
+}
+
+function getTaskSessionOrchestrator(
+  runtimeId: string,
+): NonNullable<typeof taskSessionOrchestrator> {
+  const orchestrator = taskSessionOrchestrator;
+  const adapter = chatAdapter;
+  if (
+    !orchestrator ||
+    !adapter ||
+    !chatRuntimeIds.has(runtimeId) ||
+    !adapter.hasRuntime(runtimeId)
+  ) {
+    throw new Error(`Chat runtime is no longer attached: ${runtimeId}`);
+  }
+  orchestrator.state(runtimeId);
+  return orchestrator;
+}
+
+async function planTaskSession(
+  adapter: SinglePiAdapter,
+  store: SettingsStore,
+  parentId: string,
+  prompt: string,
+  runtimeContext?: unknown,
+): Promise<{
+  contextSummary: string;
+  tasks: { generatedName: string; brief: string }[];
+}> {
+  // Deliberately isolated: deterministic routing tests never create or consult
+  // a planner worker.
+  const fixturePath = taskRoutingFixturePath();
+  if (fixturePath) {
+    const fixture: unknown = JSON.parse(await fs.readFile(fixturePath, "utf8"));
+    const tasks = (fixture as { tasks?: unknown }).tasks;
+    if (
+      Array.isArray(tasks) &&
+      tasks.length > 0 &&
+      tasks.length <= TASK_SESSION_PLANNER_MAX_TASKS
+    ) {
+      const plan = {
+        contextSummary: "Test fixture task-session context.",
+        tasks: tasks.map((task, index) => {
+          const name = (task as { name?: unknown }).name;
+          const cleanName =
+            typeof name === "string"
+              ? name
+                  .replace(/[\r\n]+/g, " ")
+                  .trim()
+                  .slice(0, 96)
+              : `Task ${index + 1}`;
+          return {
+            generatedName: cleanName || `Task ${index + 1}`,
+            brief:
+              `Complete ${cleanName || `task ${index + 1}`} for the requested work.`.slice(
+                0,
+                512,
+              ),
+          };
+        }),
+      };
+      ensureTaskSessionStillParallel(parentId);
+      return plan;
+    }
+    throw new Error(
+      `Task-session fixture must contain one to ${TASK_SESSION_PLANNER_MAX_TASKS} tasks.`,
+    );
+  }
+
+  const parentContext = boundedParentContext(
+    await adapter.getMessages(parentId),
+  );
+  try {
+    const response = await runTaskSessionPlanner(
+      adapter,
+      store,
+      parentId,
+      buildTaskSessionPlannerPrompt({ originalPrompt: prompt, parentContext }),
+      taskSessionPromptContext(runtimeContext)?.input.images,
+    );
+    const plan = parseTaskSessionPlannerResponse(response);
+    ensureTaskSessionStillParallel(parentId);
+    return plan;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === "New task sessions are available only in Parallel mode."
+    ) {
+      throw error;
+    }
+    if (
+      error instanceof Error &&
+      error.message === "Planner inherited model/thinking setup failed."
+    ) {
+      diagnostics?.recordError(
+        "Task-session planner could not inherit the parent model/thinking configuration.",
+      );
+    }
+    // Planning must never turn a new-task submission into parent execution.
+    const plan = fallbackTaskSessionPlan(prompt, parentContext);
+    ensureTaskSessionStillParallel(parentId);
+    return plan;
+  }
+}
+
+async function recordTaskSessionPrompt(
+  adapter: SinglePiAdapter,
+  parentId: string,
+  prompt: string,
+): Promise<void> {
+  const encoded = Buffer.from(JSON.stringify({ prompt }), "utf8").toString(
+    "base64url",
+  );
+  await adapter.prompt(parentId, {
+    text: `/deck-task-prompt ${encoded}`,
+  });
+}
+
+function taskSessionPromptContext(
+  value: unknown,
+): TaskSessionPromptRuntimeContext | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const input = (value as { input?: unknown }).input;
+  if (!input || typeof input !== "object") return undefined;
+  return typeof (input as { text?: unknown }).text === "string"
+    ? (value as TaskSessionPromptRuntimeContext)
+    : undefined;
+}
+
+function taskRoutingFixturePath(): string | undefined {
+  return process.env.NODE_ENV === "test" &&
+    process.env.PI_DECK_E2E_TASK_SESSION_ACCEPTANCE === "1"
+    ? process.env.PI_DECK_TEST_TASK_ROUTING_FIXTURE
+    : undefined;
+}
+
+function ensureTaskSessionStillParallel(parentId: string): void {
+  if (
+    getTaskSessionOrchestrator(parentId).state(parentId).mode !== "parallel"
+  ) {
+    throw new Error("New task sessions are available only in Parallel mode.");
+  }
+}
+
+function cancelTaskSessionPlanners(parentId: string): void {
+  for (const run of taskSessionPlannerRuns.get(parentId) ?? []) run.cancel();
+}
+
+async function runTaskSessionPlanner(
+  adapter: SinglePiAdapter,
+  store: SettingsStore,
+  parentId: string,
+  plannerPrompt: string,
+  images?: PromptInput["images"],
+): Promise<string> {
+  const capacity = getChatWorkerCapacity();
+  const parentMode = chatRuntimeModes.get(parentId);
+  const cwd = chatWorkerCwds.get(parentId);
+  const projectId = chatRuntimeProjectIds.get(parentId);
+  if (!parentMode || !cwd)
+    throw new Error("Task-session parent is no longer attached.");
+
+  const runs = taskSessionPlannerRuns.get(parentId) ?? new Set();
+  taskSessionPlannerRuns.set(parentId, runs);
+  const run: TaskSessionPlannerRun = {
+    cancelled: false,
+    cancel: () => {
+      run.cancelled = true;
+      void run.closeWorker?.().catch(() => undefined);
+    },
+  };
+  runs.add(run);
+  const timeoutMs = resolveTaskSessionPlannerTimeoutMs();
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      run.cancel();
+      reject(new Error(`Task-session planner timed out after ${timeoutMs}ms.`));
+    }, timeoutMs);
+  });
+  const operation = (async (): Promise<string> => {
+    let worker: ReturnType<SinglePiAdapter["createWorker"]> | undefined;
+    try {
+      // The deadline starts before allocation and remains in force through
+      // inherited configuration, prompt delivery, and terminal-event waiting.
+      while (!worker) {
+        if (
+          run.cancelled ||
+          !chatRuntimeIds.has(parentId) ||
+          !adapter.hasRuntime(parentId)
+        )
+          throw new Error("Task-session planner was cancelled.");
+        try {
+          worker = await capacity.allocate(
+            async () => (await store.get()).maxRunningSessions,
+            () =>
+              parentMode === "fake"
+                ? adapter.createWorker({
+                    command: process.execPath,
+                    args: [
+                      path.join(__dirname, "pi/fakeRpc/fakeRpcServer.js"),
+                      "--stream-delay-ms",
+                      "10",
+                      "--no-session",
+                    ],
+                    cwd,
+                    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+                  })
+                : createRealDelegatedWorker(adapter, store, cwd, projectId),
+          );
+        } catch (error) {
+          if (!(error instanceof WorkerCapacityError)) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+      }
+      const plannerWorker = worker;
+      run.closeWorker = () => adapter.closeSession(plannerWorker.runtimeId);
+      if (run.cancelled) throw new Error("Task-session planner was cancelled.");
+      const parentState = await adapter.getRuntimeStatus(parentId);
+      try {
+        const parentModel = runtimeModelSelection(parentState);
+        if (parentModel) {
+          await plannerWorker.request("set_model", parentModel);
+        }
+        if (typeof parentState.thinkingLevel === "string") {
+          await plannerWorker.request("set_thinking_level", {
+            level: parentState.thinkingLevel,
+          });
+        }
+      } catch (error) {
+        // This label is safe for diagnostics and distinguishes inherited setup
+        // from an invalid planner response or an ordinary prompt failure.
+        throw new Error("Planner inherited model/thinking setup failed.", {
+          cause: error,
+        });
+      }
+      if (run.cancelled) throw new Error("Task-session planner was cancelled.");
+      return await new Promise<string>((resolve, reject) => {
+        let settled = false;
+        let unsubscribe: () => void = () => undefined;
+        const finish = (fn: () => void) => {
+          if (settled) return;
+          settled = true;
+          unsubscribe();
+          fn();
+        };
+        unsubscribe = plannerWorker.onEvent((event) => {
+          if (event.type === "agent_end") {
+            void plannerWorker.getMessages().then(
+              (messages) => {
+                const last = messages.at(-1);
+                finish(() => resolve(piMessageText(last)));
+              },
+              (error) => finish(() => reject(error)),
+            );
+          } else if (event.type === "worker_exit") {
+            finish(() =>
+              reject(
+                new Error("Planner worker exited before returning a plan."),
+              ),
+            );
+          }
+        });
+        void plannerWorker
+          .prompt({
+            text: plannerPrompt,
+            ...(images && images.length > 0
+              ? { images: structuredClone(images) }
+              : {}),
+          })
+          .catch((error) => finish(() => reject(error)));
+      });
+    } finally {
+      await run.closeWorker?.().catch(() => undefined);
+    }
+  })();
+  // Keep a timed-out allocation registered until it resolves, so a late worker
+  // is immediately closed rather than escaping parent cleanup.
+  void operation
+    .finally(() => {
+      runs.delete(run);
+      if (runs.size === 0) taskSessionPlannerRuns.delete(parentId);
+    })
+    .catch(() => undefined);
+  try {
+    return await Promise.race([operation, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function createTaskSessionWorker(
+  adapter: SinglePiAdapter,
+  store: SettingsStore,
+  launch: TaskSessionLaunch<string>,
+): Promise<{ close(): Promise<void> }> {
+  const testBehavior = await taskSessionFixtureBehavior(launch.taskNumber);
+  const capacity = getChatWorkerCapacity();
+  const parentMode = chatRuntimeModes.get(launch.parentId);
+  const cwd = chatWorkerCwds.get(launch.parentId);
+  const projectId = chatRuntimeProjectIds.get(launch.parentId);
+  if (!parentMode || !cwd)
+    throw new Error("Task-session parent is no longer attached.");
+  const worker = await capacity.allocate(
+    async () => (await store.get()).maxRunningSessions,
+    () =>
+      parentMode === "fake"
+        ? adapter.createWorker({
+            command: process.execPath,
+            args: [
+              path.join(__dirname, "pi/fakeRpc/fakeRpcServer.js"),
+              "--stream-delay-ms",
+              "10",
+              "--no-session",
+            ],
+            cwd,
+            env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+          })
+        : createRealDelegatedWorker(adapter, store, cwd, projectId),
+  );
+  let ended = false;
+  worker.onEvent((event) => {
+    if (ended) return;
+    // The event payload is private child-worker data. Only the allowlisted
+    // event type reaches the task-session status projection.
+    const progress = taskSessionProgressForWorkerEventType(event.type);
+    if (progress) launch.callbacks.progress(progress);
+    if (event.type === "extension_ui_request")
+      launch.callbacks.waitingForParent();
+    if (event.type === "worker_exit") {
+      ended = true;
+      launch.callbacks.failed(
+        new Error("Private task worker exited before completing."),
+      );
+      return;
+    }
+    if (event.type === "agent_end") {
+      ended = true;
+      if (testBehavior?.lifecycle === "interrupted") {
+        // Test-only crash fixture: retain a running trace until app teardown so
+        // restart recovery can prove that no private worker is resumed.
+        return;
+      }
+      void worker
+        .getMessages()
+        .then((messages) => {
+          if (
+            testBehavior?.lifecycle === "failed" &&
+            launch.attempt <= testBehavior.attempts
+          ) {
+            launch.callbacks.failed(
+              new Error(
+                `Configured task failure on attempt ${launch.attempt}.`,
+              ),
+            );
+            return;
+          }
+          const last = messages.at(-1);
+          const failure = piMessageFailure(last);
+          if (failure) {
+            launch.callbacks.failed(new Error(failure));
+            return;
+          }
+          launch.callbacks.completed({
+            summary: conciseTaskHandoff(piMessageText(last)),
+          });
+        })
+        .catch((error) => launch.callbacks.failed(error));
+    }
+  });
+  try {
+    const parentState = await adapter.getRuntimeStatus(launch.parentId);
+    const configuredModel = decodeTaskSessionModel(
+      launch.request.workerSettings.model,
+    );
+    const provider = configuredModel?.provider;
+    const modelId = configuredModel?.modelId;
+    const parentModel = runtimeModelSelection(parentState);
+    const selectedProvider = provider ?? parentModel?.provider;
+    const selectedModelId = modelId ?? parentModel?.modelId;
+    if (selectedProvider && selectedModelId)
+      await worker.request("set_model", {
+        provider: selectedProvider,
+        modelId: selectedModelId,
+      });
+    const thinkingLevel =
+      launch.request.workerSettings.thinkingLevel ??
+      (typeof parentState.thinkingLevel === "string"
+        ? parentState.thinkingLevel
+        : undefined);
+    if (thinkingLevel)
+      await worker.request("set_thinking_level", { level: thinkingLevel });
+    const taskInput = taskSessionPromptContext(
+      launch.request.runtimeContext,
+    )?.input;
+    const attachmentContext = taskInput
+      ? taskInput.text.startsWith(launch.request.originalPrompt)
+        ? taskInput.text.slice(launch.request.originalPrompt.length).trim()
+        : taskInput.text
+      : "";
+    await worker.prompt({
+      text: `Parent context:\n${launch.request.contextSummary}\n\nOriginal request:\n${launch.request.originalPrompt}\n\nAssigned task:\n${launch.request.brief}${attachmentContext ? `\n\nAttachment context:\n${attachmentContext}` : ""}`,
+      ...(taskInput?.images && taskInput.images.length > 0
+        ? { images: structuredClone(taskInput.images) }
+        : {}),
+    });
+  } catch (error) {
+    await adapter.closeSession(worker.runtimeId).catch(() => undefined);
+    throw error;
+  }
+  return { close: () => adapter.closeSession(worker.runtimeId) };
+}
+
+async function taskSessionFixtureBehavior(
+  taskNumber: number,
+): Promise<
+  | { lifecycle: "completed" | "failed" | "interrupted"; attempts: number }
+  | undefined
+> {
+  const fixturePath = taskRoutingFixturePath();
+  if (!fixturePath) return undefined;
+  try {
+    const fixture: unknown = JSON.parse(await fs.readFile(fixturePath, "utf8"));
+    const task = (fixture as { tasks?: unknown[] }).tasks?.[taskNumber - 1];
+    if (!task || typeof task !== "object") return undefined;
+    const lifecycle = (task as { lifecycle?: unknown }).lifecycle;
+    if (
+      lifecycle !== "completed" &&
+      lifecycle !== "failed" &&
+      lifecycle !== "interrupted"
+    )
+      return undefined;
+    const configuredAttempts = (task as { attempts?: unknown }).attempts;
+    return {
+      lifecycle,
+      attempts:
+        typeof configuredAttempts === "number" &&
+        Number.isSafeInteger(configuredAttempts) &&
+        configuredAttempts > 0
+          ? Math.min(configuredAttempts, 4)
+          : lifecycle === "failed"
+            ? 4
+            : 1,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function queueTaskSessionParentTurn(
+  parentId: string,
+  turn: () => Promise<void>,
+): Promise<void> {
+  const previous = taskSessionSynthesisTails.get(parentId) ?? Promise.resolve();
+  const queued = previous.catch(() => undefined).then(turn);
+  taskSessionSynthesisTails.set(parentId, queued);
+  void queued
+    .finally(() => {
+      if (taskSessionSynthesisTails.get(parentId) === queued) {
+        taskSessionSynthesisTails.delete(parentId);
+      }
+    })
+    .catch(() => undefined);
+  return queued;
+}
+
+function agentEndFailure(event: unknown): string | undefined {
+  if (!event || typeof event !== "object") return undefined;
+  const messages = (event as { messages?: unknown }).messages;
+  return Array.isArray(messages)
+    ? piMessageFailure(messages.at(-1))
+    : undefined;
+}
+
+function piMessageFailure(message: unknown): string | undefined {
+  if (!message || typeof message !== "object") return undefined;
+  const errorMessage = (message as { errorMessage?: unknown }).errorMessage;
+  if (typeof errorMessage === "string" && errorMessage.trim())
+    return conciseTaskHandoff(errorMessage);
+  const stopReason = (message as { stopReason?: unknown }).stopReason;
+  return stopReason === "error" || stopReason === "aborted"
+    ? `Task ended with ${stopReason}.`
+    : undefined;
+}
+
+function piMessageText(message: unknown): string {
+  if (!message || typeof message !== "object") return "";
+  const content = (message as { content?: unknown }).content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => {
+      if (typeof part === "string") return part;
+      if (!part || typeof part !== "object") return "";
+      const text = (part as { text?: unknown }).text;
+      return typeof text === "string" ? text : "";
+    })
+    .join("");
+}
+
+function conciseTaskHandoff(value: string) {
+  const singleLine = value
+    .replace(/\u0000/g, "")
+    .replace(/[\r\n]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return singleLine.slice(0, 1_024) || "Task completed.";
+}
+
+async function synthesizeTaskSession(
+  adapter: SinglePiAdapter,
+  input: {
+    parentId: string;
+    originalPrompt: string;
+    contextSummary: string;
+    tasks: readonly PersistedTaskSessionTask[];
+  },
+): Promise<void> {
+  if (
+    !chatRuntimeIds.has(input.parentId) ||
+    !adapter.hasRuntime(input.parentId)
+  )
+    return;
+  const report = input.tasks
+    .map(
+      (task) =>
+        `#${task.taskNumber} ${task.generatedName}: ${task.handoffSummary ?? task.lifecycle}`,
+    )
+    .join("\n");
+  const synthesis = async (): Promise<void> => {
+    if (!adapter.hasRuntime(input.parentId)) return;
+    const worker = adapter.getWorker(input.parentId);
+    const text = `Task-session synthesis for: ${input.originalPrompt}\n\n${report}`;
+    const status = await adapter.getRuntimeStatus(input.parentId);
+    const active = status.isAgentActive === true || status.isStreaming === true;
+    let cancelSettledWait: () => void = () => undefined;
+    const settled = new Promise<void>((resolve, reject) => {
+      let finished = false;
+      let sawAgentEnd = false;
+      let latestAgentFailure: string | undefined;
+      let unsubscribe: () => void = () => undefined;
+      const timeout = setTimeout(
+        () => {
+          finish(() => reject(new Error("Parent synthesis timed out.")));
+        },
+        Number(process.env.PI_DECK_TASK_SYNTHESIS_TIMEOUT_MS ?? 180_000),
+      );
+      const finish = (complete: () => void) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timeout);
+        unsubscribe();
+        complete();
+      };
+      cancelSettledWait = () => finish(resolve);
+      unsubscribe = worker.onEvent((event) => {
+        if (event.type === "agent_end") {
+          sawAgentEnd = true;
+          latestAgentFailure = agentEndFailure(event);
+          if (!active) {
+            if (latestAgentFailure)
+              finish(() => reject(new Error(latestAgentFailure)));
+            else finish(resolve);
+          }
+        } else if (event.type === "agent_settled") {
+          if (!sawAgentEnd)
+            finish(() =>
+              reject(new Error("Parent synthesis settled without a report.")),
+            );
+          else if (latestAgentFailure)
+            finish(() => reject(new Error(latestAgentFailure)));
+          else finish(resolve);
+        } else if (event.type === "worker_exit")
+          finish(() =>
+            reject(new Error("Parent closed before synthesis completed.")),
+          );
+      });
+    });
+    try {
+      if (active) await adapter.followUp(input.parentId, { text });
+      else await adapter.prompt(input.parentId, { text });
+      await settled;
+    } catch (error) {
+      cancelSettledWait();
+      throw error;
+    }
+  };
+  await queueTaskSessionParentTurn(input.parentId, synthesis);
 }
 
 async function createDelegatedChild(
@@ -3078,6 +3874,7 @@ async function createDelegatedChild(
             path.join(__dirname, "pi/fakeRpc/fakeRpcServer.js"),
             "--stream-delay-ms",
             "10",
+            "--no-session",
           ],
           cwd,
           env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
@@ -3090,18 +3887,23 @@ async function createDelegatedChild(
   worker.onEvent((event) => {
     if (ended) return;
     if (event.type === "extension_ui_request") callbacks.inputNeeded();
-    if (event.type === "agent_end" || event.type === "worker_exit") {
+    if (event.type === "worker_exit") {
+      ended = true;
+      callbacks.failed({ summary: "Child exited without a result." });
+      return;
+    }
+    if (event.type === "agent_end") {
       ended = true;
       void worker
         .getMessages()
         .then((messages) => {
           const last = messages.at(-1);
-          callbacks.completed({
-            summary:
-              typeof last?.content === "string"
-                ? last.content.slice(0, 32_768)
-                : "Child completed.",
-          });
+          const failure = piMessageFailure(last);
+          if (failure) callbacks.failed({ summary: failure });
+          else
+            callbacks.completed({
+              summary: conciseTaskHandoff(piMessageText(last)),
+            });
         })
         .catch(() =>
           callbacks.failed({ summary: "Child exited without a result." }),
@@ -3135,7 +3937,7 @@ async function createRealDelegatedWorker(
   const launch = await resolveRealChatLaunchConfig(store, project);
   return adapter.createWorker({
     command: launch.effective.config.piBinary,
-    args: ["--mode", "rpc", ...launch.effective.workerArgs],
+    args: ["--mode", "rpc", ...launch.effective.workerArgs, "--no-session"],
     cwd: launch.projectCwd,
     env: launch.effective.config.env,
     requestTimeoutMs: Number(process.env.PI_DECK_REAL_RPC_TIMEOUT_MS ?? 30_000),
@@ -3192,12 +3994,8 @@ function handleMultitaskNotification(
   const supervisor = multitaskSupervisor;
   if (supervisor) {
     try {
-      const state = supervisor.state(notification.parentId);
-      emitMultitaskStateFromSnapshots(
-        notification.parentId,
-        state.mode,
-        state.tasks,
-      );
+      supervisor.state(notification.parentId);
+      emitTaskSessionState(notification.parentId);
     } catch {
       // The parent may have been removed while a child notification was queued.
     }
@@ -3444,6 +4242,8 @@ async function closeChatWorker(): Promise<void> {
   await Promise.all(
     runtimeIds.map(async (runtimeId) => {
       delegationBridge?.removeParent(runtimeId);
+      cancelTaskSessionPlanners(runtimeId);
+      await taskSessionOrchestrator?.removeParent(runtimeId);
       await multitaskSupervisor?.removeParent(runtimeId);
     }),
   );
@@ -4240,7 +5040,10 @@ async function removePersistedPiSessionFile(
 
   chatSessionFileLocks.delete(sessionFile);
   try {
-    await multitaskStateStore?.delete(sessionFile);
+    await Promise.all([
+      multitaskStateStore?.delete(sessionFile),
+      taskSessionStateStore?.delete(sessionFile),
+    ]);
   } catch (error) {
     diagnosticsService.recordError(
       `Failed to remove multitask state for deleted Pi session ${sessionFile}: ${error instanceof Error ? error.message : String(error)}`,
@@ -5297,80 +6100,176 @@ async function reconcileMultitaskRuntime(
   const canonical =
     (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
   chatRuntimeSessionFiles.set(runtimeId, canonical);
-  const saved = multitaskStateStore?.get(canonical);
-  const supervisor = multitaskSupervisor;
-  if (!supervisor) return;
-  try {
-    supervisor.addParent(runtimeId, {
-      mode: saved?.mode ?? "sequential",
-      maxQueuedTasks: 100,
-    });
-  } catch {
-    /* already registered */
+  const saved = taskSessionStateStore?.get(canonical);
+  const savedSettings = taskSessionStateStore?.getSettings(canonical);
+  if (savedSettings) taskSessionSettings.set(runtimeId, savedSettings);
+  const orchestrator = taskSessionOrchestrator;
+  if (orchestrator) {
+    try {
+      orchestrator.addParent(runtimeId, {
+        mode: saved?.mode ?? "sequential",
+        ...(taskSessionSettings.has(runtimeId)
+          ? { workerSettings: taskSessionSettings.get(runtimeId)! }
+          : {}),
+      });
+    } catch {
+      /* registered at worker creation */
+    }
+    // Recovery only marks retained private work interrupted; it never starts it.
+    if (
+      multitaskRuntimeResumeGuard.claim(runtimeId, saved !== undefined) &&
+      saved
+    ) {
+      orchestrator.restore(runtimeId, saved);
+    }
   }
-  // Resume is destructive to retained private children. It is valid only for
-  // the first attachment of persisted state, never for ordinary snapshots.
-  if (multitaskRuntimeResumeGuard.claim(runtimeId, saved !== undefined)) {
-    await supervisor.resume(runtimeId, saved);
+  // The authenticated bridge remains independent transport coverage.
+  const legacySaved = multitaskStateStore?.get(canonical);
+  const supervisor = multitaskSupervisor;
+  if (supervisor) {
+    try {
+      supervisor.addParent(runtimeId, {
+        mode: legacySaved?.mode ?? "sequential",
+        maxQueuedTasks: 100,
+      });
+    } catch {
+      /* registered */
+    }
+    if (
+      legacySaved &&
+      multitaskRuntimeResumeGuard.claim(`${runtimeId}:legacy`, true)
+    ) {
+      await supervisor.resume(runtimeId, legacySaved);
+    }
   }
 }
 
-async function multitaskState(runtimeId: string): Promise<{
-  runtimeId: string;
-  mode: "parallel" | "sequential";
-  tasks: Array<{ taskNumber: number; generatedName: string; status: string }>;
-}> {
-  const state = (await getMultitaskSupervisor(runtimeId)).state(runtimeId);
-  return {
+function taskSessionState(
+  runtimeId: string,
+): z.infer<typeof multitaskStateEventSchema> {
+  const state = getTaskSessionOrchestrator(runtimeId).state(runtimeId);
+  const usedTaskNumbers = new Set(state.tasks.map((task) => task.taskNumber));
+  let legacyTasks: Array<
+    z.infer<typeof multitaskStateEventSchema>["tasks"][number]
+  > = [];
+  try {
+    legacyTasks = (multitaskSupervisor?.state(runtimeId).tasks ?? []).map(
+      (task) => {
+        let taskNumber = task.number;
+        while (usedTaskNumbers.has(taskNumber)) taskNumber += 1_000_000;
+        usedTaskNumbers.add(taskNumber);
+        const lifecycle =
+          task.status === "waiting-input"
+            ? "waiting-parent"
+            : task.status === "cancelled"
+              ? "interrupted"
+              : task.status;
+        return {
+          taskNumber,
+          generatedName: task.name,
+          brief: task.name,
+          lifecycle,
+          attempt: 1,
+          elapsedMs: 0,
+        };
+      },
+    );
+  } catch {
+    // The compatibility bridge may already be detached from this parent.
+  }
+  const legacyActiveCount = legacyTasks.filter((task) =>
+    ["starting", "running", "retrying", "waiting-parent"].includes(
+      task.lifecycle,
+    ),
+  ).length;
+  return multitaskStateEventSchema.parse({
     runtimeId,
     mode: state.mode,
-    tasks: state.tasks.map((task) => ({
-      taskNumber: task.number,
-      generatedName: task.name,
-      status: task.status === "cancelled" ? "failed" : task.status,
-    })),
+    settings: fromTaskSessionSettings(taskSessionSettings.get(runtimeId)),
+    activeCount: state.activeCount + legacyActiveCount,
+    activeLimit: state.activeLimit,
+    tasks: [...state.tasks, ...legacyTasks],
+  });
+}
+
+function runtimeModelSelection(
+  state: PiState,
+): { provider: string; modelId: string } | undefined {
+  if (
+    state.model &&
+    typeof state.model === "object" &&
+    !Array.isArray(state.model)
+  ) {
+    const provider = (state.model as { provider?: unknown }).provider;
+    const modelId = (state.model as { id?: unknown }).id;
+    if (typeof provider === "string" && typeof modelId === "string")
+      return { provider, modelId };
+  }
+  return typeof state.provider === "string" && typeof state.model === "string"
+    ? { provider: state.provider, modelId: state.model }
+    : undefined;
+}
+
+function decodeTaskSessionModel(
+  value: string | undefined,
+): { provider: string; modelId: string } | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      typeof (parsed as { provider?: unknown }).provider === "string" &&
+      typeof (parsed as { modelId?: unknown }).modelId === "string"
+    )
+      return parsed as { provider: string; modelId: string };
+  } catch {
+    // Migrate the initial provider:model persisted representation.
+  }
+  const separator = value.indexOf(":");
+  return separator > 0
+    ? {
+        provider: value.slice(0, separator),
+        modelId: value.slice(separator + 1),
+      }
+    : undefined;
+}
+
+function fromTaskSessionSettings(
+  settings: TaskSessionWorkerSettings | undefined,
+): { model?: { provider: string; modelId: string }; thinkingLevel?: string } {
+  const model = decodeTaskSessionModel(settings?.model);
+  return {
+    ...(model ? { model } : {}),
+    ...(settings?.thinkingLevel
+      ? { thinkingLevel: settings.thinkingLevel }
+      : {}),
   };
 }
 
-function emitMultitaskState(
-  runtimeId: string,
-  supervisor: NonNullable<typeof multitaskSupervisor>,
-): void {
-  const state = supervisor.state(runtimeId);
-  const parsed = multitaskStateEventSchema.parse({
-    runtimeId,
-    mode: state.mode,
-    tasks: state.tasks.map((task) => ({
-      taskNumber: task.number,
-      generatedName: task.name,
-      status: task.status === "cancelled" ? "failed" : task.status,
-    })),
-  });
-  const window = mainWindow;
-  if (window && !window.isDestroyed() && !window.webContents.isDestroyed())
-    window.webContents.send(ipcChannels.multitaskState, parsed);
-}
-
-function emitMultitaskStateFromSnapshots(
-  runtimeId: string,
-  mode: "parallel" | "sequential",
-  snapshots: Array<{ number: number; name: string; status: string }>,
-): void {
-  const parsed = multitaskStateEventSchema.parse({
-    runtimeId,
-    mode,
-    tasks: snapshots.map((task) => ({
-      taskNumber: task.number,
-      generatedName: task.name,
-      status: task.status === "cancelled" ? "failed" : task.status,
-    })),
-  });
+function emitTaskSessionState(runtimeId: string): void {
+  let state: z.infer<typeof multitaskStateEventSchema>;
+  try {
+    state = taskSessionState(runtimeId);
+  } catch {
+    return;
+  }
   if (
     mainWindow &&
     !mainWindow.isDestroyed() &&
     !mainWindow.webContents.isDestroyed()
   )
-    mainWindow.webContents.send(ipcChannels.multitaskState, parsed);
+    mainWindow.webContents.send(ipcChannels.multitaskState, state);
+}
+
+async function persistTaskSession(runtimeId: string): Promise<void> {
+  const sessionFile = chatRuntimeSessionFiles.get(runtimeId);
+  const orchestrator = taskSessionOrchestrator;
+  if (sessionFile && orchestrator)
+    await taskSessionStateStore?.set(
+      sessionFile,
+      orchestrator.exportState(runtimeId),
+    );
 }
 
 async function persistMultitaskSupervisor(runtimeId: string): Promise<void> {

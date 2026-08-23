@@ -113,17 +113,19 @@ npm run build && npm run launch
 
 ## 5. Automated Validation Commands
 
-Run these before demo/release-readiness handoff:
+Run this required CI-equivalent validation before demo/release-readiness handoff:
 
 ```bash
-npm test
-npm run typecheck
-npm run build
-npm run format
-npm run test:e2e
+npm run verify:ci
 ```
 
-Real Pi smoke checks are separate because prompt smoke requires local Pi/model-provider auth. The non-prompt smoke uses an isolated temp agent dir; prompt smoke uses Pi's default/user agent dir so auth is available:
+Real Pi smoke checks are separate because prompt smoke requires local Pi/model-provider auth. Before tagging a release, run the authenticated real-Pi GUI smoke too:
+
+```bash
+npm run test:e2e:real-smoke
+```
+
+See [the release checklist](release-checklist.md) for the mandatory user-journey and evidence requirements. The non-prompt smoke uses an isolated temp agent dir; prompt smoke uses Pi's default/user agent dir so auth is available:
 
 ```bash
 # Starts a real temp pi --mode rpc session and checks get_state/get_messages.

@@ -8,8 +8,8 @@ Pi Deck is a Pi coding-agent GUI that gives Pi a dedicated desktop workspace for
 
 ## At a glance
 
-| Organize the work | Automate repeatable work | Triage what matters | Direct the next step |
-| --- | --- | --- | --- |
+| Organize the work                                                                                                                            | Automate repeatable work                                                                                               | Triage what matters                                                                                                    | Direct the next step                                                                                                                                                       |
+| -------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Named workspaces keep related sessions organized independently of folders. [Explore workspaces](#workspaces-projects-and-pi-native-sessions) | Agent Workflows compose Workers, Deciders, Orchestrators, and Human checkpoints. [Explore workflows](#agent-workflows) | Work inbox surfaces attention, failures, progress, and idle history across sessions. [Explore Work inbox](#work-inbox) | Chat, tools, model controls, files, images, and optional parallel delegation stay in one control plane. [Explore session control](#multi-session-control-and-multitasking) |
 
 ## What Pi Deck is
@@ -20,7 +20,7 @@ Pi Deck is a **local agent harness** for developers who already use Pi and want 
 - Open a project and continue its previous Pi sessions from the appropriate workspace.
 - Run multiple independent Pi workers without managing terminal windows.
 - Create reusable Agent Workflows with explicit roles, routing, and Human checkpoints.
-- Enable a parent conversation to delegate substantive independent work to isolated local child tasks.
+- Enable parallel mode so a parent automatically plans independent work into private task sessions and reports a synthesized result.
 - Switch workspaces and projects while active work remains attached in the background.
 - Send prompts, files, and images from a graphical composer.
 - Change models and thinking levels from the session workspace.
@@ -33,11 +33,11 @@ Pi Deck is **not** an IDE, source editor, terminal wrapper, or hosted agent serv
 
 Pi remains the agent runtime: it owns models, provider authentication, tools, resources, settings, and JSONL conversation history. Pi Deck is the local desktop layer that organizes and directs that work.
 
-| If you need to… | Start with | Why |
-| --- | --- | --- |
-| Explore, implement, or steer one task directly | A **Pi session** | Work in a normal conversation with the composer, timeline, and intervention controls. |
-| Repeat a multi-step process | An **Agent Workflow** | Save explicit roles, routes, bounded loops or fan-out, and Human checkpoints; then monitor each run in a graph. |
-| Split independent work from one active conversation | **Parallel multitasking** | Opt in on the parent session and let Pi delegate isolated local child tasks whose status and handoff remain parent-facing. |
+| If you need to…                                     | Start with            | Why                                                                                                                            |
+| --------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Explore, implement, or steer one task directly      | A **Pi session**      | Work in a normal conversation with the composer, timeline, and intervention controls.                                          |
+| Repeat a multi-step process                         | An **Agent Workflow** | Save explicit roles, routes, bounded loops or fan-out, and Human checkpoints; then monitor each run in a graph.                |
+| Split independent work from one active conversation | **Parallel mode**     | Make prompts default to automatically planned private task sessions while the parent remains available and reports the result. |
 
 ## Features
 
@@ -121,19 +121,24 @@ Each attached conversation has its own `pi --mode rpc` subprocess and event stre
 
 #### Interactive multitasking
 
-For a parent session that needs independent parallel work, enable **parallel multitasking**. Pi then uses Pi Deck's authenticated local bridge to delegate substantive child tasks; it keeps trivial or explicitly direct work in the parent conversation. Pi Deck queues and schedules child tasks subject to worker capacity, and shows parent-facing status and completion handoffs only.
+Pi Deck's approved multitasking model is based on parent-owned **task sessions**. With **Parallel: Off**, prompts run in the parent. With **Parallel: On**, every prompt enters automatic planning and defaults to one or more private task sessions; the user can choose **Work in parent** for an individual prompt. Routing into planning is deterministic Pi Deck behavior, while the parent intelligently decomposes independent work.
 
-- Parallel multitasking is opt-in per parent session; sequential mode does not permit delegation.
-- Child tasks can be queued, running, waiting for input, completed, failed, or cancelled.
-- Child task status stays with the parent conversation. Child sessions are deliberately not exposed as independent user controls.
+- A parent can own many task sessions while remaining available for conversation.
+- A flat task panel inside the parent shows task briefs, queued/running/retrying status, elapsed time, and attempt count. Rows are informational and cannot be opened or controlled.
+- Task sessions receive summarized parent context and inherit its model/thinking settings unless persistent or per-prompt worker overrides are specified.
+- Each parent has a soft limit of 10 active task sessions; excess tasks queue automatically and never fall back silently to the parent.
+- Failed tasks retry up to three times. Once every task for that prompt is terminal, the parent reports successful results and terminal failures, then clears those task rows.
+- Unfinished private sessions do not resume after restart; the parent restores their context and trace and reports them as interrupted.
+
+The canonical behavior and security contract is [Parallel Task Sessions Design](docs/parallel-task-sessions-design.md). The dedicated feature branch implements deterministic routing, private model-backed planning, the prompt destination/settings UI, task panel, retries, synthesis, attachment handling, and interrupted restart behavior; it is pending merge and release.
 
 <p align="center">
   <a href="docs/assets/pi-deck-multitasking.png" title="Open the parallel multitasking screenshot full size">
-    <img src="docs/assets/pi-deck-multitasking.png" alt="Pi Deck showing a parent conversation with a completed delegated child task status" width="78%">
+    <img src="docs/assets/pi-deck-multitasking.png" alt="Pi Deck showing a parent conversation with completed task-session status" width="78%">
   </a>
 </p>
 
-_The delegated-task capture uses Pi Deck's real local delegation bridge and a real Pi child worker; child details remain intentionally parent-facing._
+_This task-session capture uses Pi Deck's real local bridge and a real private Pi worker; private details remain intentionally parent-facing._
 
 ### Chat and intervention controls
 
@@ -237,7 +242,7 @@ A background request marks its session as needing input without stealing focus. 
 │              │ PiAdapter + strict JSONL transport            │
 │              ▼                                               │
 │  One local `pi --mode rpc` subprocess per attached session   │
-│  Authenticated local delegation bridge for child tasks        │
+│  Authenticated local bridge for private task sessions         │
 │                                                              │
 └──────────────────────────────────────────────────────────────┘
                          │
@@ -245,7 +250,7 @@ A background request marks its session as needing input without stealing focus. 
        Pi settings, provider auth, resources, and sessions
 ```
 
-The renderer has no direct filesystem or process access. Electron main owns Pi subprocesses, selected-file tokens, workspace/project/workflow metadata, runtime scheduling, and session validation. Pi's session files remain the source of truth for conversation history; Pi Deck stores the metadata needed to organize, filter, reopen, and orchestrate it. Workflow definitions and occurrence runs are Pi Deck metadata, while model-backed workflow roles use Pi sessions. Workspace membership does not require moving Pi's JSONL files or changing working folders. Parallel delegation uses an authenticated local bridge between the parent Pi worker and Pi Deck's child-task scheduler.
+The renderer has no direct filesystem or process access. Electron main owns Pi subprocesses, selected-file tokens, workspace/project/workflow metadata, runtime scheduling, and session validation. Pi's session files remain the source of truth for conversation history; Pi Deck stores the metadata needed to organize, filter, reopen, and orchestrate it. Workflow definitions and occurrence runs are Pi Deck metadata, while model-backed workflow roles use Pi sessions. Workspace membership does not require moving Pi's JSONL files or changing working folders. The target parallel-mode design uses deterministic prompt routing plus an authenticated local bridge between the parent and Pi Deck's private task-session scheduler; the current bridge-only implementation is incomplete.
 
 ## Requirements
 
@@ -348,7 +353,7 @@ Set `CHROME_PATH` when Google Chrome is installed somewhere other than the scrip
 4. Pi starts lazily and streams into the timeline while other workers remain attached in the background.
 5. For repeatable multi-agent work, open **Agent Workflows**, create or select a workflow, provide its run inputs, and start it.
 6. Follow the live graph, answer Human checkpoints, retry or stop occurrences, and open a worker's Pi session when you need to intervene.
-7. For one conversation that should delegate independent work, enable parallel multitasking on the parent session and let Pi create and monitor child tasks.
+7. Enable parallel mode on a parent to make each prompt default to an automatically planned set of private task sessions, or choose **Work in parent** for a one-prompt override.
 8. Use **Steer**, **Follow-up**, or **Abort** while a turn is active; return to the Work inbox to triage the next session.
 9. Close an idle runtime to free capacity while keeping its saved session resumable.
 
@@ -364,15 +369,16 @@ npm run deck:real -- --pi /absolute/path/to/pi /absolute/path/to/project
 
 Useful environment overrides:
 
-| Variable                                       | Purpose                                                                                 |
-| ---------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `PI_DECK_PI_BINARY`                            | Absolute path to the Pi executable                                                      |
-| `PI_DECK_PROJECT_CWD`                          | Initial project directory                                                               |
-| `PI_CODING_AGENT_DIR`                          | Override Pi's agent/configuration directory                                             |
-| `PI_CODING_AGENT_SESSION_DIR`                  | Override Pi's session directory                                                         |
-| `PI_DECK_HOME`                                 | Override Pi Deck's local metadata directory                                             |
-| `PI_DECK_REAL_RPC_TIMEOUT_MS`                  | Override the RPC command-response timeout                                               |
-| `PI_DECK_SCAN_PROJECT_SESSION_DIR_CANDIDATE=1` | Explicitly include a trust-dependent project `sessionDir` candidate in bounded scanning |
+| Variable                                       | Purpose                                                                                                          |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `PI_DECK_PI_BINARY`                            | Absolute path to the Pi executable                                                                               |
+| `PI_DECK_PROJECT_CWD`                          | Initial project directory                                                                                        |
+| `PI_CODING_AGENT_DIR`                          | Override Pi's agent/configuration directory                                                                      |
+| `PI_CODING_AGENT_SESSION_DIR`                  | Override Pi's session directory                                                                                  |
+| `PI_DECK_HOME`                                 | Override Pi Deck's local metadata directory                                                                      |
+| `PI_DECK_REAL_RPC_TIMEOUT_MS`                  | Override the RPC command-response timeout                                                                        |
+| `PI_DECK_SCAN_PROJECT_SESSION_DIR_CANDIDATE=1` | Explicitly include a trust-dependent project `sessionDir` candidate in bounded scanning                          |
+| `PI_DECK_ENABLE_LEGACY_DELEGATE_BRIDGE=1`      | Opt in to the model-visible legacy `deck_delegate` compatibility tool; ordinary Parallel routing does not use it |
 
 Pi Deck narrowly reads effective `sessionDir`, `images.blockImages`, and `images.autoResize` values needed before worker launch. Other Pi settings and resource behavior remain owned by Pi.
 
@@ -388,7 +394,7 @@ Pi Deck has no hosted backend and does not sync app data.
 - **Workspace metadata:** `~/.pideck/workspaces.json` by default.
 - **Project metadata:** `~/.pideck/projects.json` by default.
 - **Workflow definitions and occurrence runs:** `~/.pideck/workflows.json` by default.
-- **Delegated-task state:** `multitask-state.json` in Electron's local user-data directory. It retains only the scheduling mode, task number/name, status, and terminal handoff—not child runtime/session IDs or child task input.
+- **Task-session state:** `task-session-state.json` in Electron's local user-data directory. It retains bounded parent planning/trace metadata, attempts, status transitions, and terminal handoffs—not private runtime/session IDs, session paths, transcripts, raw tool output, attachment tokens, or image payloads. `multitask-state.json` remains compatibility state for the legacy bridge.
 - **App settings and diagnostics:** Electron's local user-data directory.
 - **Provider authentication and Pi resources:** Pi's normal agent directory, `~/.pi/agent` by default.
 
@@ -408,7 +414,7 @@ Security boundaries include:
 
 - Pi Deck currently runs from source; there is no signed/notarized installer or packaged release yet.
 - macOS is the supported MVP target.
-- Ad-hoc session starts are blocked when attached-worker capacity is reached. Workflow occurrences and delegated child tasks use bounded queues and share that capacity.
+- Ad-hoc session starts are blocked when attached-worker capacity is reached. Workflow occurrences and private task sessions use bounded queues and share that capacity.
 - There is not yet a full settings or diagnostics screen; some advanced configuration remains environment/file driven.
 - Project resources follow Pi's own trust and settings behavior; Pi Deck does not yet provide a project trust or resource-inspection panel.
 - Custom extension interfaces beyond `select`, `confirm`, `input`, and `editor` are not rendered as bespoke GUI components.

@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "parentDefaults": {
+    "model": "fake-model",
+    "thinkingLevel": "max"
+  },
+  "tasks": [
+    {
+      "name": "Inventory affected files",
+      "lifecycle": "completed"
+    },
+    {
+      "name": "Update implementation",
+      "model": "fake-model-2",
+      "thinkingLevel": "high",
+      "lifecycle": "completed"
+    },
+    {
+      "name": "Verify regression coverage",
+      "attempts": 4,
+      "lifecycle": "failed"
+    },
+    {
+      "name": "Prepare release notes",
+      "lifecycle": "completed"
+    },
+    {
+      "name": "Check migration",
+      "lifecycle": "completed"
+    },
+    {
+      "name": "Check compatibility",
+      "lifecycle": "completed"
+    },
+    {
+      "name": "Check documentation",
+      "lifecycle": "completed"
+    },
+    {
+      "name": "Check packaging",
+      "lifecycle": "completed"
+    },
+    {
+      "name": "Check accessibility",
+      "lifecycle": "completed"
+    },
+    {
+      "name": "Check telemetry",
+      "lifecycle": "completed"
+    },
+    {
+      "name": "Queued eleventh task",
+      "lifecycle": "completed"
+    },
+    {
+      "name": "Queued twelfth task",
+      "lifecycle": "completed"
+    }
+  ],
+  "synthesis": "Synthesis: 11 completed and 1 failed after attempt 4."
+}

@@ -7,6 +7,9 @@ export const DECK_DELEGATE_ENDPOINT_ENV = "DECK_DELEGATE_ENDPOINT";
 export const DECK_DELEGATE_CAPABILITY_ENV = "DECK_DELEGATE_CAPABILITY";
 /** Parent-only binding carried in the extension process environment. */
 export const DECK_DELEGATE_PARENT_RUNTIME_ENV = "DECK_DELEGATE_PARENT_RUNTIME";
+/** Explicit opt-in for the model-visible legacy tool; product routing does not need it. */
+export const DECK_DELEGATE_LEGACY_TOOL_ENV =
+  "PI_DECK_ENABLE_LEGACY_DELEGATE_BRIDGE";
 export const DECK_DELEGATE_PROTOCOL_VERSION = 1;
 
 export interface DeckDelegateRequest {
@@ -98,7 +101,7 @@ export async function writeDeckDelegateAcceptanceHarness(
   await fs.mkdir(path.dirname(path.resolve(outputPath)), { recursive: true });
   await fs.writeFile(
     outputPath,
-    `// Generated Pi Deck E2E acceptance harness. Never load outside E2E.\nimport type { ExtensionAPI } from "@earendil-works/pi-coding-agent";\nimport { createDeckDelegateTool } from ${JSON.stringify(path.resolve(delegateExtensionPath))};\n\nconst marker = "PI_DECK_E2E_INVOKE_DECK_DELEGATE";\n\nexport default function deckDelegateAcceptanceHarness(pi: ExtensionAPI): void {\n  pi.on("before_agent_start", async (event) => {\n    if (!event.prompt.includes(marker)) return undefined;\n    const result = await createDeckDelegateTool(pi).execute(\n      "pi-deck-e2e-delegate",\n      { action: "delegate", name: "Real delegated acceptance task", task: "Reply with exactly: PI_DECK_REAL_DELEGATE_OK" },\n      new AbortController().signal,\n    );\n    pi.sendMessage({ customType: "deck_delegate_acceptance", content: "Deck delegate acceptance result: " + result.content.map((part) => part.type === "text" ? part.text : "").join(""), display: true });\n    return undefined;\n  });\n}\n`,
+    `// Generated Pi Deck E2E acceptance harness. Never load outside E2E.\nimport type { ExtensionAPI } from "@earendil-works/pi-coding-agent";\nimport { createDeckDelegateTool } from ${JSON.stringify(path.resolve(delegateExtensionPath))};\n\nconst invokeMarker = "PI_DECK_E2E_INVOKE_DECK_DELEGATE";\nconst absentMarker = "PI_DECK_E2E_ASSERT_DECK_DELEGATE_ABSENT";\n\nexport default function deckDelegateAcceptanceHarness(pi: ExtensionAPI): void {\n  pi.on("before_agent_start", async (event) => {\n    const registered = pi.getAllTools().some((tool) => tool.name === "deck_delegate");\n    if (event.prompt.includes(absentMarker)) {\n      pi.sendMessage({ customType: "deck_delegate_registration", content: registered ? "PI_DECK_E2E_DECK_DELEGATE_UNEXPECTEDLY_PRESENT" : "PI_DECK_E2E_DECK_DELEGATE_ABSENT", display: true });\n      return undefined;\n    }\n    if (!event.prompt.includes(invokeMarker)) return undefined;\n    if (!registered) {\n      pi.sendMessage({ customType: "deck_delegate_acceptance", content: "PI_DECK_E2E_DECK_DELEGATE_NOT_REGISTERED", display: true });\n      return undefined;\n    }\n    const result = await createDeckDelegateTool(pi).execute(\n      "pi-deck-e2e-delegate",\n      { action: "delegate", name: "Real delegated acceptance task", task: "Reply with exactly: PI_DECK_REAL_DELEGATE_OK" },\n      new AbortController().signal,\n    );\n    pi.sendMessage({ customType: "deck_delegate_acceptance", content: "Deck delegate acceptance result: " + result.content.map((part) => part.type === "text" ? part.text : "").join(""), display: true });\n    return undefined;\n  });\n}\n`,
     "utf8",
   );
 }
@@ -114,6 +117,7 @@ export const DECK_DELEGATE_PROTOCOL_VERSION = 1;
 export const DECK_DELEGATE_ENDPOINT_ENV = "DECK_DELEGATE_ENDPOINT";
 export const DECK_DELEGATE_CAPABILITY_ENV = "DECK_DELEGATE_CAPABILITY";
 export const DECK_DELEGATE_PARENT_RUNTIME_ENV = "DECK_DELEGATE_PARENT_RUNTIME";
+const DECK_DELEGATE_LEGACY_TOOL_ENV = "PI_DECK_ENABLE_LEGACY_DELEGATE_BRIDGE";
 const MAX_LINE_BYTES = 64 * 1024;
 const MAX_BUFFER_BYTES = MAX_LINE_BYTES + 1;
 const MAX_TASK_CHARS = 32 * 1024;
@@ -374,6 +378,24 @@ export function createDeckDelegateTool(pi: ExtensionAPI) {
 }
 
 export default function deckDelegateExtension(pi: ExtensionAPI): void {
+  pi.registerCommand("deck-task-prompt", {
+    description: "Record a Pi Deck task-session prompt without starting a parent turn.",
+    handler: async (args) => {
+      try {
+        const decoded = Buffer.from(args.trim(), "base64url").toString("utf8");
+        const payload = JSON.parse(decoded) as { prompt?: unknown };
+        if (typeof payload.prompt !== "string" || !payload.prompt.trim() || payload.prompt.length > MAX_TASK_CHARS) {
+          throw new Error("invalid task-session prompt");
+        }
+        const prompt = payload.prompt.trim();
+        pi.appendEntry("deck_task_prompt", { prompt });
+        if (!pi.getSessionName()) pi.setSessionName(prompt.slice(0, MAX_NAME_CHARS));
+      } catch {
+        throw new Error("Pi Deck task-session prompt could not be recorded");
+      }
+    },
+  });
+
   // This hook runs before each agent start. It queries Deck over the
   // capability-bound bridge rather than inferring mode from conversation text.
   pi.on("before_agent_start", async (event) => {
@@ -381,8 +403,8 @@ export default function deckDelegateExtension(pi: ExtensionAPI): void {
       const config = configuration();
       const mode = await queryMode(config.endpoint, config.capability);
       const instruction = mode === "parallel"
-        ? "Pi Deck parallel multitasking is enabled. By default, delegate substantive independent work with deck_delegate. Do not delegate only when the user explicitly asks you to handle the work directly; honor that direct-handling override. For trivial work, handle it directly."
-        : "Pi Deck parallel multitasking is disabled. Do not delegate work with deck_delegate; handle the work directly.";
+        ? "Pi Deck manages Parallel mode task-session planning and routing outside this parent turn. Do not call deck_delegate for ordinary user prompts; the tool remains available only for an explicit compatibility-bridge invocation."
+        : "Pi Deck Parallel mode is off. Do not call deck_delegate; handle the work in this parent session.";
       return { systemPrompt: event.systemPrompt + "\n\n" + instruction };
     } catch {
       // A failed mode lookup must not invent delegation permission.
@@ -390,6 +412,11 @@ export default function deckDelegateExtension(pi: ExtensionAPI): void {
     }
   });
 
-  pi.registerTool(createDeckDelegateTool(pi));
+  // Product Parallel routing is deterministic and never needs model tool
+  // election. Keep the compatibility transport available only to an explicit
+  // opt-in; the E2E harness imports createDeckDelegateTool directly.
+  if (process.env[DECK_DELEGATE_LEGACY_TOOL_ENV] === "1") {
+    pi.registerTool(createDeckDelegateTool(pi));
+  }
 }
 `;

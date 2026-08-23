@@ -39,6 +39,9 @@ import {
   ipcChannels,
   multitaskModeRequestSchema,
   multitaskModeUpdateRequestSchema,
+  multitaskSettingsRequestSchema,
+  multitaskSettingsSchema,
+  multitaskSettingsUpdateRequestSchema,
   multitaskStateEventSchema,
   pickAttachmentsResultSchema,
   pickProjectResultSchema,
@@ -103,10 +106,13 @@ import type {
   AttachmentReleaseRequest,
   ChatCreateSessionRequest,
   ChatInterventionRequest,
+  ChatPromptRequest,
   ChatRespondToExtensionUiRequest,
   ChatRuntimeEvent,
   MultitaskModeRequest,
   MultitaskModeUpdateRequest,
+  MultitaskSettingsRequest,
+  MultitaskSettingsUpdateRequest,
   MultitaskStateEvent,
   PiDeckApi,
   WorkspaceAddSessionRequest,
@@ -264,7 +270,7 @@ const api: PiDeckApi = Object.freeze({
         request: chatSetThinkingRequestSchema.parse(request),
         responseSchema: chatSnapshotSchema,
       }),
-    prompt: (request: ChatInterventionRequest) =>
+    prompt: (request: ChatPromptRequest) =>
       invokeValidated({
         channel: ipcChannels.chatPrompt,
         request: chatPromptRequestSchema.parse(request),
@@ -339,6 +345,18 @@ const api: PiDeckApi = Object.freeze({
         channel: ipcChannels.multitaskUpdateMode,
         request: multitaskModeUpdateRequestSchema.parse(request),
         responseSchema: multitaskStateEventSchema,
+      }),
+    getSettings: (request: MultitaskSettingsRequest) =>
+      invokeValidated({
+        channel: ipcChannels.multitaskGetSettings,
+        request: multitaskSettingsRequestSchema.parse(request),
+        responseSchema: multitaskSettingsSchema,
+      }),
+    updateSettings: (request: MultitaskSettingsUpdateRequest) =>
+      invokeValidated({
+        channel: ipcChannels.multitaskUpdateSettings,
+        request: multitaskSettingsUpdateRequestSchema.parse(request),
+        responseSchema: multitaskSettingsSchema,
       }),
     onState: (listener: (event: MultitaskStateEvent) => void) => {
       const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => {

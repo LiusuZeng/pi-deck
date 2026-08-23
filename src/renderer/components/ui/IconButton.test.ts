@@ -83,14 +83,14 @@ describe("IconButton", () => {
 
     expect(view.firstElementChild).toBe(button);
     expect(button?.hasAttribute("aria-describedby")).toBe(false);
-    expect(view.querySelector('[role="tooltip"]')).toBeNull();
+    expect(document.querySelector('[role="tooltip"]')).toBeNull();
     act(() => button?.focus());
 
     expect(button?.getAttribute("aria-describedby")).toBeTruthy();
-    expect(view.querySelector('[role="tooltip"]')?.textContent).toContain(
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toContain(
       "Refresh sessions",
     );
-    expect(view.querySelector('[role="tooltip"]')?.classList).toContain(
+    expect(document.querySelector('[role="tooltip"]')?.classList).toContain(
       "below",
     );
 

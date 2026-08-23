@@ -9,6 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 
 type TooltipTargetProps = {
   "aria-describedby"?: string;
@@ -127,17 +128,20 @@ export function Tooltip({
   return (
     <>
       {cloneElement(children, tooltipTargetProps)}
-      {isOpen && position !== undefined ? (
-        <span
-          className={`ui-tooltip ${position.placement}`}
-          id={tooltipId}
-          role="tooltip"
-          style={{ left: position.left, top: position.top }}
-        >
-          <span>{content}</span>
-          {shortcut ? <kbd>{shortcut}</kbd> : null}
-        </span>
-      ) : null}
+      {isOpen && position !== undefined
+        ? createPortal(
+            <span
+              className={`ui-tooltip ${position.placement}`}
+              id={tooltipId}
+              role="tooltip"
+              style={{ left: position.left, top: position.top }}
+            >
+              <span>{content}</span>
+              {shortcut ? <kbd>{shortcut}</kbd> : null}
+            </span>,
+            document.body,
+          )
+        : null}
     </>
   );
 }
