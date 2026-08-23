@@ -2525,6 +2525,27 @@ h3 {
   font-size: 13px;
 }
 
+.activity-inbox-empty-action {
+  min-height: 36px;
+  margin-top: 18px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  padding: 7px 14px;
+  color: var(--action-solid-fg);
+  background: var(--action-solid-bg);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.activity-inbox-empty-action:hover {
+  background: var(--color-text-strong);
+}
+
+.activity-inbox-empty-action:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
 @media (max-height: 680px) and (min-width: 641px) {
   .activity-inbox {
     padding: 18px clamp(20px, 4vw, 32px);
@@ -3387,6 +3408,53 @@ body {
 
 .workspace > .composer {
   grid-row: 3;
+}
+
+.session-surface {
+  display: grid;
+  grid-row: 2;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+}
+
+.session-origin-back {
+  justify-self: start;
+  min-height: 34px;
+  margin: 4px 16px 0;
+  border: 0;
+  border-radius: 9px;
+  padding: 0 10px;
+  color: var(--color-text-muted);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.session-origin-back:hover {
+  color: var(--color-text);
+  background: var(--color-surface-hover);
+}
+
+.session-origin-back:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.session-content {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  min-height: 0;
+}
+
+.session-content > .starter-page,
+.session-content > .transcript-loading,
+.session-content > .timeline-shell {
+  grid-row: 1;
+  min-height: 0;
+}
+
+.session-content > .composer {
+  grid-row: 2;
 }
 
 .topbar {

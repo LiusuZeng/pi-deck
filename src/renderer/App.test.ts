@@ -48,6 +48,44 @@ it("offers every active workflow workspace once and excludes archived workspaces
   ]);
 });
 
+it("uses Pi durable sessionId instead of a canonical file path", () => {
+  const session = __rendererTestHooks.sessionFromSummary(
+    {
+      id: "/sessions/canonical.jsonl",
+      sessionFile: "/sessions/canonical.jsonl",
+      sessionId: "pi-durable-id",
+      title: "Saved session",
+      updatedAtMs: 1,
+      messageCount: 2,
+    } as any,
+    "workspace-a",
+    "project-a",
+  );
+
+  expect(session).toMatchObject({
+    id: "pi-durable-id",
+    sessionId: "pi-durable-id",
+    sessionFile: "/sessions/canonical.jsonl",
+  });
+});
+
+it("re-homes fake fixtures to the bootstrapped workspace", () => {
+  const sessions = __rendererTestHooks.fakeSessionsForWorkspace({
+    id: "fixture-bootstrap",
+    name: "Fixture workspace",
+    defaultProjectId: "fixture-project",
+    lastOpenedAt: 1,
+  });
+
+  expect(sessions.length).toBeGreaterThan(0);
+  expect(new Set(sessions.map((session: any) => session.workspaceId))).toEqual(
+    new Set(["fixture-bootstrap"]),
+  );
+  expect(new Set(sessions.map((session: any) => session.project))).toEqual(
+    new Set(["Fixture workspace"]),
+  );
+});
+
 it("resolves global creation to the default workspace and first-send owner", () => {
   const current = {
     id: "workspace-current",

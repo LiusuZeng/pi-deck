@@ -32,6 +32,39 @@ export function allWorkView(): WorkOrigin {
   return { kind: "work", scope: { type: "all" } };
 }
 
+export function isAllWorkPrimaryView(view: PrimaryView): boolean {
+  return view.kind === "work" && view.scope.type === "all";
+}
+
+export function isWorkspaceWorkPrimaryView(
+  view: PrimaryView,
+  workspaceId: string,
+): boolean {
+  return (
+    view.kind === "work" &&
+    view.scope.type === "workspace" &&
+    view.scope.workspaceId === workspaceId
+  );
+}
+
+export function shouldFallbackToAllWorkAfterArchive(
+  view: PrimaryView,
+  archivedWorkspaceId: string,
+  currentWorkspaceId: string,
+): boolean {
+  const origin =
+    view.kind === "work"
+      ? view
+      : view.kind === "session" || view.kind === "workflow"
+        ? view.origin
+        : undefined;
+  return (
+    (origin !== undefined &&
+      isWorkspaceWorkPrimaryView(origin, archivedWorkspaceId)) ||
+    archivedWorkspaceId === currentWorkspaceId
+  );
+}
+
 export function workspaceWorkView(workspaceId: string): WorkOrigin {
   return { kind: "work", scope: { type: "workspace", workspaceId } };
 }

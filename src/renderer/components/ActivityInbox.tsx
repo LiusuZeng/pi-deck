@@ -90,6 +90,8 @@ export interface ActivityInboxProps {
   onOpenActivityItem: (item: ActivityItem) => void;
   onScopeChange: (scope: ActivityScope) => void;
   onClose: () => void;
+  /** Optional for compatibility with pre-CTA embedders. */
+  onNewSession?: () => void;
 }
 
 /** A scoped, presentational Work overview. Classification and tags remain domain-owned. */
@@ -100,6 +102,7 @@ export function ActivityInbox({
   onOpenActivityItem,
   onScopeChange,
   onClose,
+  onNewSession,
 }: ActivityInboxProps) {
   const [selectedFilter, setSelectedFilter] = useState<ActivityFilter>("all");
   const workspaceName =
@@ -161,7 +164,9 @@ export function ActivityInbox({
           <p className="activity-inbox-eyebrow">
             {scope.type === "all" ? ALL_WORK_LABEL : "Workspace Work"}
           </p>
-          <h1 id="activity-inbox-title">{scopeLabel}</h1>
+          <h1 id="activity-inbox-title" tabIndex={-1}>
+            {scopeLabel}
+          </h1>
           <p
             className="activity-inbox-description"
             id="activity-inbox-description"
@@ -259,7 +264,11 @@ export function ActivityInbox({
 
       <div className="activity-inbox-content" id="activity-inbox-content">
         {visibleItems.length === 0 ? (
-          <EmptyState filter={selectedFilter} scopeLabel={scopeLabel} />
+          <EmptyState
+            filter={selectedFilter}
+            {...(onNewSession === undefined ? {} : { onNewSession })}
+            scopeLabel={scopeLabel}
+          />
         ) : (
           visibleKinds.map((kind) => {
             const items = groups[kind];
@@ -281,9 +290,11 @@ export function ActivityInbox({
 
 function EmptyState({
   filter,
+  onNewSession,
   scopeLabel,
 }: {
   filter: ActivityFilter;
+  onNewSession?: () => void;
   scopeLabel: string;
 }) {
   const message =
@@ -295,6 +306,15 @@ function EmptyState({
     <div className="activity-inbox-empty" role="status">
       <h2>{filter === "all" ? "No work yet" : "No matching work"}</h2>
       <p>{message}</p>
+      {filter === "all" && onNewSession !== undefined ? (
+        <button
+          className="activity-inbox-empty-action"
+          onClick={onNewSession}
+          type="button"
+        >
+          New session
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -356,8 +376,9 @@ function ActivityRow({
 
   return (
     <button
-      aria-label={`${label}: ${item.title}, ${item.workspaceName}. ${item.actionLabel}.`}
+      aria-label={`${label}: ${item.title}, ${item.workspaceName}. ${item.detail}. Updated ${relativeTime}. ${item.actionLabel}.`}
       className={`activity-inbox-row activity-inbox-row--${kind}`}
+      data-activity-item-id={item.id}
       onClick={activate}
       onKeyDown={onKeyDown}
       type="button"

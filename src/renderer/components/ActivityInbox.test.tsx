@@ -98,6 +98,7 @@ function renderInbox(
   onOpenActivityItem = vi.fn(),
   onScopeChange = vi.fn(),
   workspaceOptions: readonly ActivityWorkspace[] = workspaces,
+  onNewSession = vi.fn(),
 ) {
   container = document.createElement("div");
   document.body.append(container);
@@ -109,6 +110,7 @@ function renderInbox(
         onClose={vi.fn()}
         onOpenActivityItem={onOpenActivityItem}
         onScopeChange={onScopeChange}
+        onNewSession={onNewSession}
         scope={scope}
         workspaces={workspaceOptions}
       />,
@@ -129,6 +131,7 @@ describe("ActivityInbox", () => {
     const { view } = renderInbox(modelWithEveryKind());
 
     expect(view.querySelector("h1")?.textContent).toBe("All Work");
+    expect(view.querySelector("h1")?.getAttribute("tabindex")).toBe("-1");
     expect(view.textContent).toContain("All Work");
     expect(view.textContent).toContain("Project Atlas");
     expect(view.textContent).toContain("Project Borealis");
@@ -250,6 +253,40 @@ describe("ActivityInbox", () => {
     expect(view.querySelector('[role="status"]')?.textContent).toContain(
       "No failed work in Project Atlas Work.",
     );
+  });
+
+  it("offers New session from an empty Work surface", () => {
+    const onNewSession = vi.fn();
+    const { view } = renderInbox(
+      buildActivityInbox([]),
+      { type: "workspace", workspaceId: "workspace-atlas" },
+      vi.fn(),
+      vi.fn(),
+      workspaces,
+      onNewSession,
+    );
+    const cta = view.querySelector<HTMLButtonElement>(
+      ".activity-inbox-empty-action",
+    );
+
+    expect(cta?.textContent).toBe("New session");
+    act(() => cta?.click());
+    expect(onNewSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("names rows with visible detail and relative update time", () => {
+    const { view } = renderInbox(modelWithEveryKind());
+    const row = Array.from(
+      view.querySelectorAll<HTMLButtonElement>(".activity-inbox-row"),
+    ).find((button) =>
+      button.getAttribute("aria-label")?.includes("Needs attention"),
+    );
+
+    expect(row?.getAttribute("aria-label")).toContain(
+      "Detail for needsAttention",
+    );
+    expect(row?.getAttribute("aria-label")).toContain("Updated");
+    expect(row?.dataset.activityItemId).toBe("needsAttention-attention");
   });
 
   it("activates a full row by click or keyboard with its canonical item", () => {

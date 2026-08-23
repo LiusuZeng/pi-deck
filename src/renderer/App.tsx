@@ -108,8 +108,13 @@ import {
 } from "./activityInbox.js";
 import { ActivityInbox } from "./components/ActivityInbox.js";
 import {
+  isNavigationGenerationCurrent,
+  nextNavigationGeneration,
+} from "./navigationGeneration.js";
+import {
   allWorkView,
   backToWorkView,
+  isAllWorkPrimaryView,
   replaceSessionRouteId,
   sessionView,
   workflowView as workflowPrimaryView,
@@ -117,6 +122,7 @@ import {
   workScopeForNewSession,
   workScopeLabel,
   workspaceWorkView,
+  shouldFallbackToAllWorkAfterArchive,
   type PrimaryView,
   type WorkOrigin,
   type WorkScope,
@@ -934,6 +940,17 @@ export function App(): ReactElement {
   const selectedSessionIdRef = useRef(selectedSessionId);
   const currentProjectRef = useRef(currentProject);
   const currentWorkspaceRef = useRef(currentWorkspace);
+  // Route commits from workspace activation, resume, and draft materialization
+  // may resolve after a newer user navigation. Keep this token separate from
+  // session-list freshness so stale completions cannot steal the visible
+  // route, while their runtime/session state can still be retained.
+  const navigationGeneration = useRef(0);
+  const latestWorkspaceSelectionTarget = useRef(currentWorkspace.id);
+  const workspaceSelectionQueue = useRef<Promise<void>>(Promise.resolve());
+  const pendingActivityFocusItemId = useRef<string | null | undefined>(
+    undefined,
+  );
+  const lastOpenedActivityItemId = useRef<string | undefined>(undefined);
   const sessionListGeneration = useRef(0);
   const reconciliationRetryTimers = useRef(new Map<string, number>());
   const reconciliationRetryAttempts = useRef(new Map<string, number>());
@@ -944,15 +961,72 @@ export function App(): ReactElement {
   currentProjectRef.current = currentProject;
   currentWorkspaceRef.current = currentWorkspace;
 
-  function showWork(scope: WorkScope): void {
+  function beginNavigation(): number {
+    latestWorkspaceSelectionTarget.current = currentWorkspaceRef.current.id;
+    navigationGeneration.current = nextNavigationGeneration(
+      navigationGeneration.current,
+    );
+    return navigationGeneration.current;
+  }
+
+  function selectWorkspaceOnMain(
+    workspaceId: string,
+  ): Promise<WorkspaceListResultCompat> {
+    const select = workspaceApi(window.piDeck).workspaces?.select;
+    if (typeof select !== "function") {
+      return Promise.reject(new Error("Workspace selection is unavailable."));
+    }
+    latestWorkspaceSelectionTarget.current = workspaceId;
+    const request = workspaceSelectionQueue.current.then(() =>
+      select({ workspaceId }),
+    );
+    workspaceSelectionQueue.current = request.then(
+      () => undefined,
+      () => undefined,
+    );
+    return request;
+  }
+
+  async function reconcileStaleWorkspaceSelection(
+    requestedWorkspaceId: string,
+    generation: number,
+  ): Promise<void> {
+    if (isNavigationCurrent(generation)) return;
+    const targetWorkspaceId = latestWorkspaceSelectionTarget.current;
+    if (targetWorkspaceId === requestedWorkspaceId) return;
+    try {
+      await selectWorkspaceOnMain(targetWorkspaceId);
+    } catch {
+      // The newer route owns renderer state; a failed best-effort compensation
+      // must not replace its user-facing error or runtime state.
+    }
+  }
+
+  function isNavigationCurrent(generation: number): boolean {
+    return isNavigationGenerationCurrent(
+      navigationGeneration.current,
+      generation,
+    );
+  }
+
+  function showWork(scope: WorkScope, generation?: number): void {
+    const routeGeneration = generation ?? beginNavigation();
+    if (!isNavigationCurrent(routeGeneration)) return;
     setPrimaryView({ kind: "work", scope });
   }
 
-  function showAllWork(): void {
+  function showAllWork(generation?: number): void {
+    const routeGeneration = generation ?? beginNavigation();
+    if (!isNavigationCurrent(routeGeneration)) return;
     setPrimaryView(allWorkView());
   }
 
-  function showWorkflowSurface(surface: WorkflowSurface): void {
+  function showWorkflowSurface(
+    surface: WorkflowSurface,
+    generation?: number,
+  ): void {
+    const routeGeneration = generation ?? beginNavigation();
+    if (!isNavigationCurrent(routeGeneration)) return;
     setPrimaryView((current) =>
       workflowPrimaryView(
         surface,
@@ -961,7 +1035,13 @@ export function App(): ReactElement {
     );
   }
 
-  function showSessionDetail(sessionId: string, origin?: WorkOrigin): void {
+  function showSessionDetail(
+    sessionId: string,
+    origin?: WorkOrigin,
+    generation?: number,
+  ): void {
+    const routeGeneration = generation ?? beginNavigation();
+    if (!isNavigationCurrent(routeGeneration)) return;
     setSelectedSessionId(sessionId);
     setPrimaryView((current) =>
       sessionView(
@@ -975,7 +1055,10 @@ export function App(): ReactElement {
   function replaceSessionDetailId(
     previousSessionId: string,
     nextSessionId: string,
+    generation?: number,
   ): void {
+    const routeGeneration = generation ?? beginNavigation();
+    if (!isNavigationCurrent(routeGeneration)) return;
     setPrimaryView((current) =>
       replaceSessionRouteId(current, previousSessionId, nextSessionId),
     );
@@ -1144,12 +1227,7 @@ export function App(): ReactElement {
         setSessions(
           bootstrap.backendMode === "real"
             ? mergeSessions([draft], cachedRows)
-            : [
-                draft,
-                ...initialSessions.filter(
-                  (session) => session.id !== "session-active",
-                ),
-              ],
+            : [draft, ...fakeSessionsForWorkspace(bootstrapWorkspace)],
         );
         setSelectedSessionId(draft.id);
         setCurrentProject(bootstrap.project);
@@ -1471,6 +1549,23 @@ export function App(): ReactElement {
     () => buildActivityInbox(activitySources),
     [activitySources],
   );
+
+  useLayoutEffect(() => {
+    if (primaryView.kind !== "work") return;
+    const itemId = pendingActivityFocusItemId.current;
+    if (itemId === undefined) return;
+    const row =
+      itemId === null
+        ? undefined
+        : Array.from(
+            document.querySelectorAll<HTMLElement>("[data-activity-item-id]"),
+          ).find((candidate) => candidate.dataset.activityItemId === itemId);
+    const target = row ?? document.getElementById("activity-inbox-title");
+    if (target === null) return;
+    pendingActivityFocusItemId.current = undefined;
+    target.focus();
+  }, [activityInboxModel, primaryView]);
+
   const selectedModel =
     modelOptions.find((model) => model.id === selectedModelId) ??
     modelOptions[0];
@@ -2038,15 +2133,19 @@ export function App(): ReactElement {
   }
 
   function handleBackToWork(): void {
-    if (primaryView.kind === "session") {
-      setPrimaryView(backToWorkView(primaryView));
-    }
+    if (primaryView.kind !== "session") return;
+    const generation = beginNavigation();
+    pendingActivityFocusItemId.current =
+      lastOpenedActivityItemId.current ?? null;
+    if (!isNavigationCurrent(generation)) return;
+    setPrimaryView(backToWorkView(primaryView));
   }
 
   async function handleSaveAgentWorkflow(
     workflow: WorkflowDefinition,
     scopeWorkspaceId: string | null,
   ): Promise<void> {
+    const generation = beginNavigation();
     try {
       const workspaceId = currentWorkspaceRef.current.id;
       const saved = workflowBuilderDefinition
@@ -2075,12 +2174,18 @@ export function App(): ReactElement {
         ...current,
         [saved.workflow.id]: saved.scopeWorkspaceId,
       }));
-      setWorkflowBuilderDefinition(undefined);
-      showWorkflowSurface("workflows");
-      setWorkflowError(undefined);
-      setUiMessage(`Saved ${workflow.name}.`);
+      if (isNavigationCurrent(generation)) {
+        setWorkflowBuilderDefinition(undefined);
+        showWorkflowSurface("workflows", generation);
+        setWorkflowError(undefined);
+        setUiMessage(`Saved ${workflow.name}.`);
+      }
     } catch (error) {
-      setWorkflowError(error instanceof Error ? error.message : String(error));
+      if (isNavigationCurrent(generation)) {
+        setWorkflowError(
+          error instanceof Error ? error.message : String(error),
+        );
+      }
       throw error;
     }
   }
@@ -2153,6 +2258,8 @@ export function App(): ReactElement {
     runtimeId?: string | undefined;
     sessionFile?: string | undefined;
   }): Promise<void> {
+    const generation = beginNavigation();
+    lastOpenedActivityItemId.current = undefined;
     const origin = workOriginForPrimaryView(
       primaryView,
       currentWorkspaceRef.current.id,
@@ -2173,13 +2280,17 @@ export function App(): ReactElement {
         });
         const session = sessionFromSnapshot(snapshot);
         setSessions((current) => upsertRuntimeSession(current, snapshot));
-        showSessionDetail(session.id, origin);
+        if (isNavigationCurrent(generation)) {
+          showSessionDetail(session.id, origin, generation);
+        }
         return;
       } catch (error) {
         if (sessionReference.sessionFile === undefined) {
-          setUiMessage(
-            `Could not open the active Pi session: ${error instanceof Error ? error.message : String(error)}. This workflow occurrence has no saved session file to reopen.`,
-          );
+          if (isNavigationCurrent(generation)) {
+            setUiMessage(
+              `Could not open the active Pi session: ${error instanceof Error ? error.message : String(error)}. This workflow occurrence has no saved session file to reopen.`,
+            );
+          }
           return;
         }
       }
@@ -2190,13 +2301,17 @@ export function App(): ReactElement {
         )
       : undefined;
     if (savedSession !== undefined) {
+      // This is a new route intent for the existing saved row; its own resume
+      // completion will use the current generation and preserve this origin.
       handleSelectSession(savedSession.id);
       return;
     }
     if (sessionReference.sessionFile === undefined) {
-      setUiMessage(
-        "This workflow occurrence has no active Pi runtime or saved session file to open.",
-      );
+      if (isNavigationCurrent(generation)) {
+        setUiMessage(
+          "This workflow occurrence has no active Pi runtime or saved session file to open.",
+        );
+      }
       return;
     }
     try {
@@ -2216,11 +2331,15 @@ export function App(): ReactElement {
         ),
         session,
       ]);
-      showSessionDetail(session.id, origin);
+      if (isNavigationCurrent(generation)) {
+        showSessionDetail(session.id, origin, generation);
+      }
     } catch (error) {
-      setUiMessage(
-        `Could not open the saved Pi session: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      if (isNavigationCurrent(generation)) {
+        setUiMessage(
+          `Could not open the saved Pi session: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
   }
 
@@ -2232,34 +2351,58 @@ export function App(): ReactElement {
     );
   }
 
+  async function handleStartAgentWorkflow(
+    workflow: WorkflowDefinition,
+    inputs: Record<string, string>,
+  ): Promise<void> {
+    const generation = beginNavigation();
+    const run = await window.piDeck.workflows.canonicalStartRun({
+      workflowId: workflow.id,
+      workspaceId: currentWorkspaceRef.current.id,
+      inputs,
+    });
+    setWorkflowOccurrenceRuns((current) => [
+      run,
+      ...current.filter((item) => item.id !== run.id),
+    ]);
+    if (!isNavigationCurrent(generation)) return;
+    setWorkflowOccurrenceRunId(run.id);
+    showWorkflowSurface("occurrenceRun", generation);
+  }
+
   function handleSelectSession(sessionId: string): void {
+    const generation = beginNavigation();
+    lastOpenedActivityItemId.current = undefined;
     const origin = workOriginForPrimaryView(
       primaryView,
       currentWorkspaceRef.current.id,
     );
-    const session = sessions.find((item) => item.id === sessionId);
+    const session = sessionsRef.current.find((item) => item.id === sessionId);
     if (session?.isResuming === true) {
       return;
     }
-    if (session !== undefined && session.workspaceId !== currentWorkspace.id) {
-      const owner = [currentWorkspace, ...workspaces].find(
+    if (
+      session !== undefined &&
+      session.workspaceId !== currentWorkspaceRef.current.id
+    ) {
+      const owner = [currentWorkspaceRef.current, ...workspaces].find(
         (workspace) => workspace.id === session.workspaceId,
       );
       if (owner !== undefined) {
         // Opening cross-workspace active work changes the grouping view and
         // the selected row together; the worker itself is never restarted.
-        showSessionDetail(session.id, origin);
-        void switchWorkspaceView(owner, workspaces, session.id);
+        showSessionDetail(session.id, origin, generation);
+        void switchWorkspaceView(owner, workspaces, session.id, generation);
         return;
       }
     }
-    showSessionDetail(sessionId, origin);
+    showSessionDetail(sessionId, origin, generation);
     if (
       session?.backendMode === "real" &&
       session.resumeBacked === true &&
       session.sessionFile !== undefined
     ) {
-      void resumeSession(session);
+      void resumeSession(session, generation, origin);
       return;
     }
     if (session?.backendMode === "real" && session.runtimeBacked) {
@@ -2272,8 +2415,8 @@ export function App(): ReactElement {
   }
 
   async function openActivityItem(item: ActivityItem): Promise<void> {
-    const previousView = primaryView;
-    const previousSelectedSessionId = selectedSessionIdRef.current;
+    const generation = beginNavigation();
+    lastOpenedActivityItemId.current = item.id;
     const origin = workOriginForPrimaryView(
       primaryView,
       currentWorkspaceRef.current.id,
@@ -2290,55 +2433,48 @@ export function App(): ReactElement {
     const session =
       activitySessionForItem(sessionsRef.current, item) ??
       sessionForActivityItem(item, targetWorkspace);
-    const restoreActivityNavigation = (): void => {
-      setPrimaryView((current) =>
-        current.kind === "session" && current.sessionId === session.id
-          ? previousView
-          : current,
-      );
-      if (selectedSessionIdRef.current === session.id) {
-        setSelectedSessionId(previousSelectedSessionId);
-      }
-    };
-    showSessionDetail(session.id, origin);
 
+    // Activate the owner before committing a session route. In particular, an
+    // idle saved row must resume from its canonical file rather than briefly
+    // rendering a synthetic starter session while the workspace changes.
     if (currentWorkspaceRef.current.id !== item.workspaceId) {
       try {
         if (hasWorkspaceApi(window.piDeck)) {
-          const result = await window.piDeck.workspaces.select({
-            workspaceId: item.workspaceId,
-          });
+          const result = await selectWorkspaceOnMain(item.workspaceId);
+          if (!isNavigationCurrent(generation)) {
+            void reconcileStaleWorkspaceSelection(item.workspaceId, generation);
+            return;
+          }
           setArchivedWorkspaces(result.archivedWorkspaces ?? []);
           const switched = await switchWorkspaceView(
             result.activeWorkspace ?? targetWorkspace,
             result.workspaces,
-            session.id,
+            undefined,
+            generation,
           );
-          if (!switched) {
-            restoreActivityNavigation();
-            return;
-          }
+          if (!switched || !isNavigationCurrent(generation)) return;
         } else {
           const switched = await switchWorkspaceView(
             targetWorkspace,
             activityWorkspaces,
-            session.id,
+            undefined,
+            generation,
           );
-          if (!switched) {
-            restoreActivityNavigation();
-            return;
-          }
+          if (!switched || !isNavigationCurrent(generation)) return;
         }
       } catch (error) {
-        restoreActivityNavigation();
-        setUiMessage(
-          `Failed to open activity workspace: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        if (isNavigationCurrent(generation)) {
+          setUiMessage(
+            `Failed to open activity workspace: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
         return;
       }
     }
 
+    if (!isNavigationCurrent(generation)) return;
     if (session.runtimeBacked) {
+      showSessionDetail(session.id, origin, generation);
       loadRealCapabilities(session.id);
       return;
     }
@@ -2346,19 +2482,25 @@ export function App(): ReactElement {
       // Resume only from the canonical saved-session identity. This is kept
       // separate from new-session creation, so Activity never opens a folder
       // picker when navigating an existing row.
-      await resumeSession(session);
+      await resumeSession(session, generation, origin);
       return;
     }
+    showSessionDetail(session.id, origin, generation);
   }
 
   async function resumeSession(
     session: SessionViewModel,
+    generation = navigationGeneration.current,
+    origin?: WorkOrigin,
   ): Promise<SessionViewModel | undefined> {
     if (session.sessionFile === undefined) {
       return undefined;
     }
-    setComposerError(null);
-    setSelectedSessionId(session.id);
+    if (isNavigationCurrent(generation)) {
+      setComposerError(null);
+      setSelectedSessionId(session.id);
+      setUiMessage(`Loading previous context for ${session.title}…`);
+    }
     blockAttachmentOwner(session.id);
     setSessions((items) =>
       items.map((item) =>
@@ -2373,7 +2515,6 @@ export function App(): ReactElement {
           : item,
       ),
     );
-    setUiMessage(`Loading previous context for ${session.title}…`);
     try {
       const snapshot = await window.piDeck.chat.resumeSession({
         workspaceId: session.workspaceId,
@@ -2415,24 +2556,35 @@ export function App(): ReactElement {
             attachments: [],
           })),
         );
-        setComposerError(
-          "One or more attachments expired; reselect them before sending.",
-        );
+        if (isNavigationCurrent(generation)) {
+          setComposerError(
+            "One or more attachments expired; reselect them before sending.",
+          );
+        }
       }
       // Use the state at completion time: another runtime can stream while
-      // this saved session is being resumed.
+      // this saved session is being resumed. This merge is intentionally not
+      // guarded by navigation: the worker must remain retained in background.
       setSessions((items) => replaceResumedSession(items, session.id, resumed));
-      setSelectedSessionId(resumed.id);
-      replaceSessionDetailId(session.id, resumed.id);
       setComposerDrafts((items) =>
         moveComposerDraft(items, session.id, resumed.id),
       );
+      if (isNavigationCurrent(generation)) {
+        setSelectedSessionId(resumed.id);
+        if (origin !== undefined) {
+          showSessionDetail(resumed.id, origin, generation);
+        } else {
+          replaceSessionDetailId(session.id, resumed.id, generation);
+        }
+      }
       loadRealCapabilities(resumed.id);
-      setUiMessage(
-        transferred
-          ? "Resumed saved Pi session."
-          : "Resumed saved Pi session; reselect expired attachments before sending.",
-      );
+      if (isNavigationCurrent(generation)) {
+        setUiMessage(
+          transferred
+            ? "Resumed saved Pi session."
+            : "Resumed saved Pi session; reselect expired attachments before sending.",
+        );
+      }
       return transferred ? resumed : undefined;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -2445,7 +2597,10 @@ export function App(): ReactElement {
         );
         setSessions((items) => removeSessionById(items, session.id));
         discardComposerAttachmentOwner(session.id);
-        if (selectedSessionIdRef.current === session.id) {
+        if (
+          isNavigationCurrent(generation) &&
+          selectedSessionIdRef.current === session.id
+        ) {
           const nextSession =
             remainingSessions.find((item) => item.runtimeBacked) ??
             remainingSessions[0];
@@ -2453,18 +2608,22 @@ export function App(): ReactElement {
             setSelectedSessionId(nextSession.id);
           }
         }
-        setPrimaryView((current) =>
-          current.kind === "session" && current.sessionId === session.id
-            ? current.origin
-            : current,
-        );
-        setUiMessage(
-          "Saved session file is missing or unreadable. Removed it from the list.",
-        );
+        if (isNavigationCurrent(generation)) {
+          setPrimaryView((current) =>
+            current.kind === "session" && current.sessionId === session.id
+              ? current.origin
+              : current,
+          );
+          setUiMessage(
+            "Saved session file is missing or unreadable. Removed it from the list.",
+          );
+        }
         return undefined;
       }
       unblockAttachmentOwner(session.id);
-      setUiMessage(`Failed to resume session: ${message}`);
+      if (isNavigationCurrent(generation)) {
+        setUiMessage(`Failed to resume session: ${message}`);
+      }
       setSessions((items) =>
         items.map((item) =>
           item.id === session.id
@@ -2502,7 +2661,12 @@ export function App(): ReactElement {
       setComposerError(validationError);
       return;
     }
-    const resumed = await resumeSession(session);
+    const generation = navigationGeneration.current;
+    const origin = workOriginForPrimaryView(
+      primaryView,
+      currentWorkspaceRef.current.id,
+    );
+    const resumed = await resumeSession(session, generation, origin);
     if (resumed !== undefined) {
       await sendPrompt(resumed.id, prompt, promptAttachments);
     }
@@ -2566,6 +2730,7 @@ export function App(): ReactElement {
     destination: "parent" | "newTaskSession",
     overrides: ParallelWorkerSettings,
   ): Promise<void> {
+    const generation = navigationGeneration.current;
     const validationError = validateComposerInput({
       attachments: promptAttachments,
       supportsImages: selectedSessionSupportsImages(
@@ -2675,8 +2840,14 @@ export function App(): ReactElement {
           items.filter((item) => item.id !== draftSession.id),
         ),
       );
-      setSelectedSessionId(initializedSession.id);
-      replaceSessionDetailId(draftSession.id, initializedSession.id);
+      if (isNavigationCurrent(generation)) {
+        setSelectedSessionId(initializedSession.id);
+        replaceSessionDetailId(
+          draftSession.id,
+          initializedSession.id,
+          generation,
+        );
+      }
       setMultitask((current) => {
         const draftState = current[draftSession.id] ?? {
           runtimeId: initializedSession.id,
@@ -2713,7 +2884,7 @@ export function App(): ReactElement {
         rememberPiDefaults(initializedSession);
         loadRealCapabilities(initializedSession.id);
       }
-      if (snapshot.projectId !== undefined) {
+      if (isNavigationCurrent(generation) && snapshot.projectId !== undefined) {
         // Project IDs are app-owned references, not cwd strings. Preserve the
         // selected record when an ID is path-independent in a future/migrated
         // ProjectStore, rather than reconstructing one from Pi's cwd.
@@ -2723,16 +2894,18 @@ export function App(): ReactElement {
         if (snapshotProject !== undefined) {
           setCurrentProject(snapshotProject);
         }
-      } else if (snapshot.state.cwd) {
+      } else if (isNavigationCurrent(generation) && snapshot.state.cwd) {
         setCurrentProject(projectFromCwd(snapshot.state.cwd));
       }
       if (!transferred) {
-        setComposerError(
-          "One or more attachments expired; reselect them before sending.",
-        );
-        setUiMessage(
-          "Pi is ready, but expired attachments were removed. Reselect them before sending.",
-        );
+        if (isNavigationCurrent(generation)) {
+          setComposerError(
+            "One or more attachments expired; reselect them before sending.",
+          );
+          setUiMessage(
+            "Pi is ready, but expired attachments were removed. Reselect them before sending.",
+          );
+        }
         return;
       }
     } catch (error) {
@@ -2751,7 +2924,9 @@ export function App(): ReactElement {
           );
         }
       }
-      setComposerError(message);
+      if (isNavigationCurrent(generation)) {
+        setComposerError(message);
+      }
       setComposerDrafts((items) =>
         updateComposerDraft(items, draftSession.id, (current) => ({
           ...current,
@@ -2773,7 +2948,9 @@ export function App(): ReactElement {
             : session,
         ),
       );
-      setUiMessage(`Failed to start a new Pi session: ${message}`);
+      if (isNavigationCurrent(generation)) {
+        setUiMessage(`Failed to start a new Pi session: ${message}`);
+      }
       return;
     }
 
@@ -3149,7 +3326,16 @@ export function App(): ReactElement {
       );
       return;
     }
-    void resumeSession({ ...selectedSession, resumeBacked: true });
+    const generation = beginNavigation();
+    const origin = workOriginForPrimaryView(
+      primaryView,
+      currentWorkspaceRef.current.id,
+    );
+    void resumeSession(
+      { ...selectedSession, resumeBacked: true },
+      generation,
+      origin,
+    );
   }
 
   function handleRetrySelectedSession(): void {
@@ -3260,6 +3446,7 @@ export function App(): ReactElement {
   }
 
   async function handlePickProject(): Promise<void> {
+    const generation = beginNavigation();
     try {
       const result = await window.piDeck.projects.pickProject();
       if (!result.selected) {
@@ -3270,26 +3457,43 @@ export function App(): ReactElement {
         window.piDeck,
         result.project,
       );
-      await switchProjectView(result.project, refreshedProjects.projects);
-    } catch (error) {
-      setUiMessage(
-        `Project picker failed; no project was selected (${error instanceof Error ? error.message : String(error)}).`,
+      if (!isNavigationCurrent(generation)) return;
+      await switchProjectView(
+        result.project,
+        refreshedProjects.projects,
+        generation,
       );
+    } catch (error) {
+      if (isNavigationCurrent(generation)) {
+        setUiMessage(
+          `Project picker failed; no project was selected (${error instanceof Error ? error.message : String(error)}).`,
+        );
+      }
     }
   }
 
-  async function handleSelectProject(project: ProjectRef): Promise<void> {
+  async function handleSelectProject(
+    project: ProjectRef,
+    generation = beginNavigation(),
+  ): Promise<void> {
     if (project.invalidReason) {
       setUiMessage(project.invalidReason);
       return;
     }
     try {
       const result = await selectProjectIfAvailable(window.piDeck, project);
-      await switchProjectView(result.activeProject ?? project, result.projects);
-    } catch (error) {
-      setUiMessage(
-        `Failed to select project: ${error instanceof Error ? error.message : String(error)}`,
+      if (!isNavigationCurrent(generation)) return;
+      await switchProjectView(
+        result.activeProject ?? project,
+        result.projects,
+        generation,
       );
+    } catch (error) {
+      if (isNavigationCurrent(generation)) {
+        setUiMessage(
+          `Failed to select project: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
   }
 
@@ -3302,11 +3506,14 @@ export function App(): ReactElement {
     workspace: WorkspaceRef,
     nextWorkspaces: WorkspaceRef[],
     preferredSessionId?: string,
+    generation = navigationGeneration.current,
   ): Promise<boolean> {
     const sessionListRequest = ++sessionListGeneration.current;
-    setComposerError(null);
-    setProjectModelConfiguration({ models: [], thinkingLevels: [] });
-    setUiMessage(`Opening ${workspace.name}; active Pi work stays attached…`);
+    if (isNavigationCurrent(generation)) {
+      setComposerError(null);
+      setProjectModelConfiguration({ models: [], thinkingLevels: [] });
+      setUiMessage(`Opening ${workspace.name}; active Pi work stays attached…`);
+    }
     try {
       const listedSessions = await listSessionsForWorkspaces(
         window.piDeck,
@@ -3333,14 +3540,22 @@ export function App(): ReactElement {
         existingRuntime === undefined && existingDraft === undefined
           ? draftSessionForWorkspace(workspace, selectedId)
           : undefined;
+      // Fake mode's fixture rows are renderer-owned, not saved-session rows.
+      // Never let a compatibility list call evict them during workspace
+      // activation; real mode continues to replace only canonical saved rows.
       setSessions((items) =>
-        replaceWorkspaceTreeSavedRows(
-          items,
-          nextWorkspaces.map((candidate) => candidate.id),
-          draft ? [...savedRows, draft] : savedRows,
-          composerDraftsRef.current,
-        ),
+        isRealBackendMode
+          ? replaceWorkspaceTreeSavedRows(
+              items,
+              nextWorkspaces.map((candidate) => candidate.id),
+              draft ? [...savedRows, draft] : savedRows,
+              composerDraftsRef.current,
+            )
+          : mergeSessions(draft ? [draft] : [], items),
       );
+      if (!isNavigationCurrent(generation)) {
+        return false;
+      }
       setCurrentWorkspace(workspace);
       setWorkspaces(nextWorkspaces);
       if (workspace.defaultProject !== undefined) {
@@ -3350,7 +3565,10 @@ export function App(): ReactElement {
       void window.piDeck.chat
         .listModels(modelDiscoveryRequestForWorkspace(workspace))
         .then((result) => {
-          if (sessionListRequest === sessionListGeneration.current) {
+          if (
+            sessionListRequest === sessionListGeneration.current &&
+            isNavigationCurrent(generation)
+          ) {
             setProjectModelConfiguration(result);
             setSessions((items) =>
               applyPiDefaultsToDraftSessions(items, workspace.id, result),
@@ -3363,9 +3581,11 @@ export function App(): ReactElement {
       );
       return true;
     } catch (error) {
-      setUiMessage(
-        `Failed to open workspace: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      if (isNavigationCurrent(generation)) {
+        setUiMessage(
+          `Failed to open workspace: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
       return false;
     }
   }
@@ -3374,8 +3594,10 @@ export function App(): ReactElement {
     // Workspace selection always enters scoped Work, including selecting the
     // already-current workspace. currentWorkspace remains execution context;
     // the primary route is the source of truth for the selected surface.
+    const generation = beginNavigation();
     const previousView = primaryView;
     const restorePreviousView = (): void => {
+      if (!isNavigationCurrent(generation)) return;
       setPrimaryView((current) =>
         current.kind === "work" &&
         current.scope.type === "workspace" &&
@@ -3384,16 +3606,20 @@ export function App(): ReactElement {
           : current,
       );
     };
-    showWork(workspaceWorkView(workspace.id).scope);
+    showWork(workspaceWorkView(workspace.id).scope, generation);
     try {
       if (hasWorkspaceApi(window.piDeck)) {
-        const result = await window.piDeck.workspaces.select({
-          workspaceId: workspace.id,
-        });
+        const result = await selectWorkspaceOnMain(workspace.id);
+        if (!isNavigationCurrent(generation)) {
+          void reconcileStaleWorkspaceSelection(workspace.id, generation);
+          return;
+        }
         setArchivedWorkspaces(result.archivedWorkspaces ?? []);
         const switched = await switchWorkspaceView(
           result.activeWorkspace ?? workspace,
           result.workspaces,
+          undefined,
+          generation,
         );
         if (!switched) {
           restorePreviousView();
@@ -3402,14 +3628,18 @@ export function App(): ReactElement {
       }
       // Legacy preload: a migrated workspace maps one-to-one to its project.
       if (workspace.defaultProject !== undefined) {
-        await handleSelectProject(workspace.defaultProject);
-        setCurrentWorkspace(workspace);
+        await handleSelectProject(workspace.defaultProject, generation);
+        if (isNavigationCurrent(generation)) {
+          setCurrentWorkspace(workspace);
+        }
       }
     } catch (error) {
       restorePreviousView();
-      setUiMessage(
-        `Failed to select workspace: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      if (isNavigationCurrent(generation)) {
+        setUiMessage(
+          `Failed to select workspace: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
   }
 
@@ -3428,19 +3658,27 @@ export function App(): ReactElement {
       setComposerError("A workspace name is required.");
       return;
     }
+    const generation = beginNavigation();
     setWorkspaceDialogBusy(true);
     try {
       if (hasWorkspaceApi(window.piDeck)) {
         const result = await window.piDeck.workspaces.create({
           name: normalizedName,
         });
-        applyWorkspaceListResult(result);
-        const workspace = result.activeWorkspace ?? result.workspaces.at(-1);
-        if (workspace !== undefined) {
-          showWork(workspaceWorkView(workspace.id).scope);
-          await switchWorkspaceView(workspace, result.workspaces);
+        if (isNavigationCurrent(generation)) {
+          applyWorkspaceListResult(result);
         }
-        setWorkspaceDialog(undefined);
+        const workspace = result.activeWorkspace ?? result.workspaces.at(-1);
+        if (workspace !== undefined && isNavigationCurrent(generation)) {
+          showWork(workspaceWorkView(workspace.id).scope, generation);
+          await switchWorkspaceView(
+            workspace,
+            result.workspaces,
+            undefined,
+            generation,
+          );
+        }
+        if (isNavigationCurrent(generation)) setWorkspaceDialog(undefined);
         return;
       }
       const workspace: WorkspaceRef = {
@@ -3448,13 +3686,22 @@ export function App(): ReactElement {
         name: normalizedName,
         lastOpenedAt: Date.now(),
       };
-      showWork(workspaceWorkView(workspace.id).scope);
-      await switchWorkspaceView(workspace, [...workspaces, workspace]);
-      setWorkspaceDialog(undefined);
+      if (isNavigationCurrent(generation)) {
+        showWork(workspaceWorkView(workspace.id).scope, generation);
+        await switchWorkspaceView(
+          workspace,
+          [...workspaces, workspace],
+          undefined,
+          generation,
+        );
+        setWorkspaceDialog(undefined);
+      }
     } catch (error) {
-      setUiMessage(
-        `Failed to create workspace: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      if (isNavigationCurrent(generation)) {
+        setUiMessage(
+          `Failed to create workspace: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     } finally {
       setWorkspaceDialogBusy(false);
     }
@@ -3469,6 +3716,7 @@ export function App(): ReactElement {
       setComposerError("A workspace name is required.");
       return;
     }
+    const generation = beginNavigation();
     setWorkspaceDialogBusy(true);
     try {
       const result = await window.piDeck.workspaces.update({
@@ -3476,19 +3724,27 @@ export function App(): ReactElement {
         name: normalizedName,
       });
       const updated = result.workspaces.find((item) => item.id === workspaceId);
-      if (updated !== undefined && workspaceId === currentWorkspace.id) {
+      if (
+        updated !== undefined &&
+        workspaceId === currentWorkspaceRef.current.id &&
+        isNavigationCurrent(generation)
+      ) {
         setCurrentWorkspace(updated);
       }
-      applyWorkspaceListResult(result);
+      if (isNavigationCurrent(generation)) applyWorkspaceListResult(result);
       setSessions((items) =>
         updateWorkspaceSessionLabels(items, workspaceId, normalizedName),
       );
-      setWorkspaceDialog(undefined);
-      setUiMessage(`Renamed workspace to ${normalizedName}.`);
+      if (isNavigationCurrent(generation)) {
+        setWorkspaceDialog(undefined);
+        setUiMessage(`Renamed workspace to ${normalizedName}.`);
+      }
     } catch (error) {
-      setUiMessage(
-        `Failed to rename workspace: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      if (isNavigationCurrent(generation)) {
+        setUiMessage(
+          `Failed to rename workspace: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     } finally {
       setWorkspaceDialogBusy(false);
     }
@@ -3505,6 +3761,12 @@ export function App(): ReactElement {
       setComposerError(blockedReason);
       return;
     }
+    const generation = beginNavigation();
+    const shouldFallbackToAllWork = shouldFallbackToAllWorkAfterArchive(
+      primaryView,
+      workspaceId,
+      currentWorkspaceRef.current.id,
+    );
     setWorkspaceDialogBusy(true);
     try {
       const attachedSessions = sessionsRef.current.filter(
@@ -3517,7 +3779,9 @@ export function App(): ReactElement {
       const result = await window.piDeck.workspaces.archive({
         workspaceId,
       });
-      applyWorkspaceListResult(result);
+      if (isNavigationCurrent(generation)) {
+        applyWorkspaceListResult(result);
+      }
       // Archived membership is no longer an active Work source. Attached
       // runtimes were closed above, so dropping these renderer rows does not
       // terminate live work and prevents stale archived rows in global Work.
@@ -3525,29 +3789,34 @@ export function App(): ReactElement {
         items.filter((session) => session.workspaceId !== workspaceId),
       );
       if (showArchived) await refreshArchivedSessions();
-      if (workspaceId !== currentWorkspace.id) {
+      if (!isNavigationCurrent(generation)) return;
+      if (!shouldFallbackToAllWork) {
         setWorkspaceDialog(undefined);
         setUiMessage(
           "Workspace archived with its sessions. Pi session files were left untouched.",
         );
         return;
       }
-      // A scoped Work route cannot point at an archived workspace. Return to
-      // the durable global overview before replacing the execution context.
-      showAllWork();
+      // A scoped Work route cannot point at an archived workspace. This also
+      // handles archiving the execution workspace while viewing global Work.
+      showAllWork(generation);
       const next = result.activeWorkspace ?? result.workspaces[0];
       if (next === undefined) {
         throw new Error("Cannot archive the last open workspace.");
       }
       setWorkspaceDialog(undefined);
-      await switchWorkspaceView(next, result.workspaces);
-      setUiMessage(
-        "Workspace archived with its sessions. Pi session files were left untouched.",
-      );
+      await switchWorkspaceView(next, result.workspaces, undefined, generation);
+      if (isNavigationCurrent(generation)) {
+        setUiMessage(
+          "Workspace archived with its sessions. Pi session files were left untouched.",
+        );
+      }
     } catch (error) {
-      setUiMessage(
-        `Failed to archive workspace: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      if (isNavigationCurrent(generation)) {
+        setUiMessage(
+          `Failed to archive workspace: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     } finally {
       setWorkspaceDialogBusy(false);
     }
@@ -3775,23 +4044,33 @@ export function App(): ReactElement {
   }
 
   async function restoreWorkspace(workspaceId: string): Promise<void> {
+    const generation = beginNavigation();
     setWorkspaceDialogBusy(true);
     try {
       const result = await window.piDeck.workspaces.restore({ workspaceId });
-      applyWorkspaceListResult(result);
+      if (isNavigationCurrent(generation)) applyWorkspaceListResult(result);
       const restored = result.workspaces.find(
         (workspace) => workspace.id === workspaceId,
       );
-      if (restored !== undefined) {
-        showWork(workspaceWorkView(restored.id).scope);
-        await switchWorkspaceView(restored, result.workspaces);
+      if (restored !== undefined && isNavigationCurrent(generation)) {
+        showWork(workspaceWorkView(restored.id).scope, generation);
+        await switchWorkspaceView(
+          restored,
+          result.workspaces,
+          undefined,
+          generation,
+        );
       }
       await refreshArchivedSessions();
-      setUiMessage("Restored workspace and its cascaded sessions.");
+      if (isNavigationCurrent(generation)) {
+        setUiMessage("Restored workspace and its cascaded sessions.");
+      }
     } catch (error) {
-      setUiMessage(
-        `Failed to restore workspace: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      if (isNavigationCurrent(generation)) {
+        setUiMessage(
+          `Failed to restore workspace: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     } finally {
       setWorkspaceDialogBusy(false);
     }
@@ -3807,12 +4086,15 @@ export function App(): ReactElement {
   async function switchProjectView(
     project: ProjectRef,
     projects: ProjectRef[],
+    generation = navigationGeneration.current,
   ): Promise<void> {
     const sessionListRequest = ++sessionListGeneration.current;
     if (!isRealBackendMode) {
-      setCurrentProject(project);
-      setRecentProjects(projects);
-      setUiMessage(`Selected project ${project.displayName}.`);
+      if (isNavigationCurrent(generation)) {
+        setCurrentProject(project);
+        setRecentProjects(projects);
+        setUiMessage(`Selected project ${project.displayName}.`);
+      }
       return;
     }
     setComposerError(null);
@@ -3869,11 +4151,15 @@ export function App(): ReactElement {
       );
       return mergeSessions(retained, draft ? [...savedRows, draft] : savedRows);
     });
+    if (!isNavigationCurrent(generation)) return;
     setCurrentProject(project);
     setRecentProjects(projects);
     setSelectedSessionId(selectedId);
     void modelConfigurationPromise.then((result) => {
-      if (sessionListRequest !== sessionListGeneration.current) {
+      if (
+        sessionListRequest !== sessionListGeneration.current ||
+        !isNavigationCurrent(generation)
+      ) {
         return;
       }
       if (result === undefined) {
@@ -3888,13 +4174,15 @@ export function App(): ReactElement {
     if (existingProjectRuntime?.runtimeBacked) {
       loadRealCapabilities(existingProjectRuntime.id);
     }
-    const backgroundCount = sessions.filter(
+    const backgroundCount = sessionsRef.current.filter(
       (session) =>
         session.projectId !== project.id && isBackgroundActiveWork(session),
     ).length;
-    setUiMessage(
-      `Project view switched to ${project.displayName}. No Pi worker was closed; ${backgroundCount} background active work item${backgroundCount === 1 ? "" : "s"} ${backgroundCount === 1 ? "remains" : "remain"} in Active work.`,
-    );
+    if (isNavigationCurrent(generation)) {
+      setUiMessage(
+        `Project view switched to ${project.displayName}. No Pi worker was closed; ${backgroundCount} background active work item${backgroundCount === 1 ? "" : "s"} ${backgroundCount === 1 ? "remains" : "remain"} in Active work.`,
+      );
+    }
   }
 
   function loadRealCapabilities(runtimeId: string): void {
@@ -4387,19 +4675,24 @@ export function App(): ReactElement {
 
   async function activateWorkspaceForSessionCreation(
     workspace: WorkspaceRef,
+    generation = navigationGeneration.current,
   ): Promise<WorkspaceRef> {
     if (currentWorkspaceRef.current.id === workspace.id) {
       return workspace;
     }
     if (hasWorkspaceApi(window.piDeck)) {
-      const result = await window.piDeck.workspaces.select({
-        workspaceId: workspace.id,
-      });
+      const result = await selectWorkspaceOnMain(workspace.id);
+      if (!isNavigationCurrent(generation)) {
+        void reconcileStaleWorkspaceSelection(workspace.id, generation);
+        return workspace;
+      }
       setArchivedWorkspaces(result.archivedWorkspaces ?? []);
       const activeWorkspace = result.activeWorkspace ?? workspace;
       const switched = await switchWorkspaceView(
         activeWorkspace,
         result.workspaces,
+        undefined,
+        generation,
       );
       if (!switched) {
         throw new Error(`Could not open workspace ${activeWorkspace.name}.`);
@@ -4410,7 +4703,12 @@ export function App(): ReactElement {
       workspace,
       ...workspaces.filter((item) => item.id !== workspace.id),
     ];
-    const switched = await switchWorkspaceView(workspace, nextWorkspaces);
+    const switched = await switchWorkspaceView(
+      workspace,
+      nextWorkspaces,
+      undefined,
+      generation,
+    );
     if (!switched) {
       throw new Error(`Could not open workspace ${workspace.name}.`);
     }
@@ -4418,6 +4716,8 @@ export function App(): ReactElement {
   }
 
   async function handleNewSession(): Promise<void> {
+    const generation = beginNavigation();
+    lastOpenedActivityItemId.current = undefined;
     const origin = workOriginForPrimaryView(
       primaryView,
       currentWorkspaceRef.current.id,
@@ -4437,13 +4737,19 @@ export function App(): ReactElement {
     const workspace = requestedWorkspace ?? currentWorkspaceRef.current;
     let creationWorkspace = workspace;
     try {
-      creationWorkspace = await activateWorkspaceForSessionCreation(workspace);
-    } catch (error) {
-      setUiMessage(
-        `Failed to select the session workspace: ${error instanceof Error ? error.message : String(error)}`,
+      creationWorkspace = await activateWorkspaceForSessionCreation(
+        workspace,
+        generation,
       );
+    } catch (error) {
+      if (isNavigationCurrent(generation)) {
+        setUiMessage(
+          `Failed to select the session workspace: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
       return;
     }
+    if (!isNavigationCurrent(generation)) return;
 
     const next = draftSessionForWorkspace(
       creationWorkspace,
@@ -4463,7 +4769,7 @@ export function App(): ReactElement {
         ),
       ),
     );
-    showSessionDetail(next.id, origin);
+    showSessionDetail(next.id, origin, generation);
     setUiMessage(
       "Created a new session. Pi will start when you send the first prompt.",
     );
@@ -4922,21 +5228,7 @@ export function App(): ReactElement {
                     setWorkflowBuilderDefinition(workflow);
                     showWorkflowSurface("builder");
                   }}
-                  onStart={async (workflow, inputs) => {
-                    const run = await window.piDeck.workflows.canonicalStartRun(
-                      {
-                        workflowId: workflow.id,
-                        workspaceId: currentWorkspace.id,
-                        inputs,
-                      },
-                    );
-                    setWorkflowOccurrenceRuns((current) => [
-                      run,
-                      ...current.filter((item) => item.id !== run.id),
-                    ]);
-                    setWorkflowOccurrenceRunId(run.id);
-                    showWorkflowSurface("occurrenceRun");
-                  }}
+                  onStart={handleStartAgentWorkflow}
                 />
               ) : null}
             </Suspense>
@@ -4949,48 +5241,51 @@ export function App(): ReactElement {
             onScopeChange={handleActivityScopeChange}
             onOpenActivityItem={handleOpenActivityItem}
             onClose={handleCloseWork}
+            onNewSession={() => void handleNewSession()}
           />
         ) : (
-          <>
-            {primaryView.kind === "session" ? (
-              <Button
-                aria-label={`Back to ${workScopeLabel(primaryView.origin.scope, activityWorkspaceNameById)}`}
-                className="session-origin-back"
-                data-testid="session-origin-back"
-                onClick={handleBackToWork}
-              >
-                <CornerUpLeft aria-hidden="true" size={15} strokeWidth={1.75} />
-                Back to{" "}
-                {workScopeLabel(
-                  primaryView.origin.scope,
-                  activityWorkspaceNameById,
-                )}
-              </Button>
-            ) : null}
-            {isResuming ? (
-              <TranscriptLoading sessionTitle={selectedSession.title} />
-            ) : showStarterPage ? (
-              <StarterPage composer={composer} />
-            ) : (
-              <>
-                <ChatTimeline
-                  session={selectedSession}
-                  uiMessage={uiMessage}
-                  showAttachmentExamples={!isRealBackendMode}
-                  nowMs={nowMs}
-                  multitaskState={multitaskState}
-                  taskPlanning={
-                    pendingTaskSubmissions[selectedSession.id] !== undefined
-                  }
-                  onRecoverSession={handleRecoverSelectedSession}
-                  onRespondToExtensionUi={handleExtensionUiResponse}
-                  onRetrySession={handleRetrySelectedSession}
-                  onCopyDiagnostics={() => void handleCopySelectedDiagnostics()}
-                />
-                {composer}
-              </>
-            )}
-          </>
+          <div className="session-surface">
+            <Button
+              aria-label={`Back to ${workScopeLabel(primaryView.origin.scope, activityWorkspaceNameById)}`}
+              className="session-origin-back"
+              data-testid="session-origin-back"
+              onClick={handleBackToWork}
+            >
+              <CornerUpLeft aria-hidden="true" size={15} strokeWidth={1.75} />
+              Back to{" "}
+              {workScopeLabel(
+                primaryView.origin.scope,
+                activityWorkspaceNameById,
+              )}
+            </Button>
+            <div className="session-content">
+              {isResuming ? (
+                <TranscriptLoading sessionTitle={selectedSession.title} />
+              ) : showStarterPage ? (
+                <StarterPage composer={composer} />
+              ) : (
+                <>
+                  <ChatTimeline
+                    session={selectedSession}
+                    uiMessage={uiMessage}
+                    showAttachmentExamples={!isRealBackendMode}
+                    nowMs={nowMs}
+                    multitaskState={multitaskState}
+                    taskPlanning={
+                      pendingTaskSubmissions[selectedSession.id] !== undefined
+                    }
+                    onRecoverSession={handleRecoverSelectedSession}
+                    onRespondToExtensionUi={handleExtensionUiResponse}
+                    onRetrySession={handleRetrySelectedSession}
+                    onCopyDiagnostics={() =>
+                      void handleCopySelectedDiagnostics()
+                    }
+                  />
+                  {composer}
+                </>
+              )}
+            </div>
+          </div>
         )}
         {workspaceDialog !== undefined ? (
           <WorkspaceManagementDialog
@@ -5795,10 +6090,14 @@ function sessionFromSummary(
   workspaceId: string,
   projectId?: string,
 ): SessionViewModel {
+  // `id` is often the canonical JSONL path. Pi's durable conversation id is
+  // carried separately when available and must remain distinct from the file
+  // identity used to resume the session.
+  const durableSessionId = summary.sessionId ?? summary.id;
   return {
-    id: summary.attachedRuntimeId ?? summary.id,
+    id: summary.attachedRuntimeId ?? durableSessionId,
     workspaceId,
-    sessionId: summary.id,
+    sessionId: durableSessionId,
     ...(summary.cwd !== undefined ? { workingDirectory: summary.cwd } : {}),
     title: summary.title,
     project: summary.cwd?.split(/[\\/]/).pop() ?? "Pi project",
@@ -7702,11 +8001,11 @@ function SessionSidebar(props: {
       ) : null}
 
       <Button
-        className={`sidebar-new-chat activity-inbox-button ${
-          props.primaryView.kind === "work" ? "active" : ""
-        }`}
-        aria-current={props.primaryView.kind === "work" ? "page" : undefined}
-        aria-pressed={props.primaryView.kind === "work"}
+        className={`sidebar-new-chat activity-inbox-button ${isAllWorkPrimaryView(props.primaryView) ? "active" : ""}`}
+        aria-current={
+          isAllWorkPrimaryView(props.primaryView) ? "page" : undefined
+        }
+        aria-pressed={isAllWorkPrimaryView(props.primaryView)}
         onClick={props.onOpenActivity}
       >
         <History aria-hidden="true" size={16} strokeWidth={1.75} />
@@ -10157,6 +10456,22 @@ function SlashPicker(props: {
   );
 }
 
+function fakeSessionsForWorkspace(workspace: WorkspaceRef): SessionViewModel[] {
+  const workingDirectory = defaultWorkingDirectory(workspace);
+  return initialSessions
+    .filter((session) => session.id !== "session-active")
+    .map((session) => ({
+      ...session,
+      workspaceId: workspace.id,
+      project: workspace.name,
+      projectPath: workingDirectory ?? session.projectPath,
+      ...(workingDirectory === undefined ? {} : { workingDirectory }),
+      ...(workspace.defaultProjectId === undefined
+        ? {}
+        : { projectId: workspace.defaultProjectId }),
+    }));
+}
+
 function fixtureSession(
   id: string,
   title: string,
@@ -10924,6 +11239,8 @@ export const __rendererTestHooks = {
   reduceRuntimeEvent,
   initialDraftMultitaskState,
   sessionFromSnapshot,
+  sessionFromSummary,
+  fakeSessionsForWorkspace,
   workflowOccurrenceSessionReference,
   upsertRuntimeSession,
   mergeSessionUsageFromSnapshot,

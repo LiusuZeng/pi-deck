@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   allWorkView,
   backToWorkView,
+  isAllWorkPrimaryView,
+  isWorkspaceWorkPrimaryView,
   replaceSessionRouteId,
   sessionView,
   workflowSidebarView,
@@ -9,6 +11,7 @@ import {
   workOriginForPrimaryView,
   workScopeForNewSession,
   workspaceWorkView,
+  shouldFallbackToAllWorkAfterArchive,
 } from "./primaryView.js";
 
 describe("primary renderer view transitions", () => {
@@ -18,6 +21,40 @@ describe("primary renderer view transitions", () => {
       kind: "work",
       scope: { type: "workspace", workspaceId: "workspace-a" },
     });
+  });
+
+  it("marks only the global Work route as All Work current", () => {
+    const global = allWorkView();
+    const scoped = workspaceWorkView("workspace-a");
+
+    expect(isAllWorkPrimaryView(global)).toBe(true);
+    expect(isAllWorkPrimaryView(scoped)).toBe(false);
+    expect(isWorkspaceWorkPrimaryView(scoped, "workspace-a")).toBe(true);
+    expect(isWorkspaceWorkPrimaryView(global, "workspace-a")).toBe(false);
+  });
+
+  it("falls back from archived scoped Work even when execution is elsewhere", () => {
+    expect(
+      shouldFallbackToAllWorkAfterArchive(
+        workspaceWorkView("workspace-a"),
+        "workspace-a",
+        "workspace-b",
+      ),
+    ).toBe(true);
+    expect(
+      shouldFallbackToAllWorkAfterArchive(
+        allWorkView(),
+        "workspace-a",
+        "workspace-b",
+      ),
+    ).toBe(false);
+    expect(
+      shouldFallbackToAllWorkAfterArchive(
+        sessionView("runtime-a", workspaceWorkView("workspace-a")),
+        "workspace-a",
+        "workspace-b",
+      ),
+    ).toBe(true);
   });
 
   it("supports All Work -> A -> B -> All Work without using active workspace state", () => {
