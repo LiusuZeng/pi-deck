@@ -480,6 +480,17 @@ interface ComposerDraftState {
 
 type ComposerDraftsBySession = Record<string, ComposerDraftState | undefined>;
 
+interface PendingTaskSubmission {
+  text: string;
+  attachments: AttachmentDraft[];
+  timelineItemId: string;
+}
+
+type PendingTaskSubmissionsBySession = Record<
+  string,
+  PendingTaskSubmission | undefined
+>;
+
 type WorkspaceDialogState =
   | { kind: "create" }
   | { kind: "rename"; workspaceId: string }
@@ -806,6 +817,11 @@ export function App(): ReactElement {
   const [workerOverrides, setWorkerOverrides] = useState<
     Record<string, ParallelWorkerSettings>
   >({});
+  // A task submission waits for main's planner. Keep that separate from the
+  // parent runtime state: planning a child must not make the parent look busy.
+  const [pendingTaskSubmissions, setPendingTaskSubmissions] =
+    useState<PendingTaskSubmissionsBySession>({});
+  const pendingTaskSubmissionsRef = useRef<PendingTaskSubmissionsBySession>({});
   const workerSettingsGenerationRef = useRef<Record<string, number>>({});
   const [currentProject, setCurrentProject] = useState<ProjectRef>(() => ({
     id: "pending-project",
@@ -920,6 +936,7 @@ export function App(): ReactElement {
   const reconciliationRetryAttempts = useRef(new Map<string, number>());
   sessionsRef.current = sessions;
   composerDraftsRef.current = composerDrafts;
+  pendingTaskSubmissionsRef.current = pendingTaskSubmissions;
   selectedSessionIdRef.current = selectedSessionId;
   currentProjectRef.current = currentProject;
   currentWorkspaceRef.current = currentWorkspace;
@@ -1350,12 +1367,13 @@ export function App(): ReactElement {
     if (workflowView !== undefined) setWorkflowView("agentHome");
   }, [currentWorkspace.id]);
 
-  // A renderer reload/disposal loses all composer and retry references. Main
-  // retains each selection only by its owner, so revoke every owner we created
-  // rather than relying solely on the ten-minute expiry fallback.
+  // An in-flight prompt may still be reading selections in main. Let blocked
+  // owners expire rather than revoking them during renderer disposal; ordinary
+  // editable drafts are still released immediately.
   useEffect(() => {
     return () => {
-      for (const ownerId of attachmentOwnersBySession.current.values()) {
+      for (const [sessionId, ownerId] of attachmentOwnersBySession.current) {
+        if (blockedAttachmentOwnerIds.current.has(sessionId)) continue;
         void releaseAttachmentOwner(window.piDeck.attachments, ownerId).catch(
           () => undefined,
         );
@@ -1480,6 +1498,7 @@ export function App(): ReactElement {
     loadState.state === "ready";
   const canSendTask =
     promptDestination === "newTaskSession" &&
+    pendingTaskSubmissions[selectedSession.id] === undefined &&
     draft.trim().length > 0 &&
     !isLifecycleTransition(selectedSession.status) &&
     !selectedSession.overlays.retrying &&
@@ -1910,7 +1929,7 @@ export function App(): ReactElement {
       return;
     }
     event.preventDefault();
-    if (isWorking) {
+    if (isWorking && !canSendTask) {
       handleSteer();
     } else {
       handleSend();
@@ -2722,6 +2741,51 @@ export function App(): ReactElement {
             : session,
         ),
       );
+    } else {
+      // The planner can take a while. Acknowledge this accepted click before
+      // crossing IPC, while a synchronous ref guard makes double-click/Enter
+      // unable to submit the same draft twice.
+      const timelineItemId = createId("user");
+      const nextPending = beginTaskSubmission(
+        pendingTaskSubmissionsRef.current,
+        runtimeId,
+        prompt,
+        promptAttachments,
+        timelineItemId,
+      );
+      if (nextPending === undefined) return;
+      pendingTaskSubmissionsRef.current = nextPending;
+      setPendingTaskSubmissions(nextPending);
+      blockAttachmentOwner(runtimeId);
+      setComposerDrafts((items) =>
+        clearSubmittedTaskDraft(items, runtimeId, prompt, promptAttachments),
+      );
+      setSessions((current) =>
+        current.map((session) =>
+          session.id === runtimeId
+            ? {
+                ...session,
+                title: isPlaceholderSessionTitle(session.title)
+                  ? summarizeTitle(prompt, 64)
+                  : session.title,
+                updatedAt: "Now",
+                updatedAtMs: Date.now(),
+                timeline: [
+                  ...session.timeline,
+                  {
+                    id: timelineItemId,
+                    kind: "user",
+                    content: prompt,
+                    createdAt: now,
+                    ...(sentAttachments
+                      ? { attachments: sentAttachments }
+                      : {}),
+                  },
+                ],
+              }
+            : session,
+        ),
+      );
     }
 
     try {
@@ -2749,49 +2813,66 @@ export function App(): ReactElement {
           : {}),
       });
       if (destination === "newTaskSession") {
-        setComposerDrafts((items) =>
-          composerDraftForSession(items, runtimeId).text.trimEnd() === prompt
-            ? clearComposerDraft(items, runtimeId)
-            : items,
-        );
-        setSessions((current) =>
-          current.map((session) =>
-            session.id === runtimeId
-              ? {
-                  ...session,
-                  title: isPlaceholderSessionTitle(session.title)
-                    ? summarizeTitle(prompt, 64)
-                    : session.title,
-                  updatedAt: "Now",
-                  updatedAtMs: Date.now(),
-                  timeline: [
-                    ...session.timeline,
-                    {
-                      id: createId("user"),
-                      kind: "user",
-                      content: prompt,
-                      createdAt: now,
-                      ...(sentAttachments
-                        ? { attachments: sentAttachments }
-                        : {}),
-                    },
-                  ],
-                }
-              : session,
-          ),
-        );
+        // Main has consumed the attachment selections before this resolves.
+        // The parent remains idle; only the child-task panel reports work.
+        unblockAttachmentOwner(runtimeId);
+        const { [runtimeId]: _completed, ...remaining } =
+          pendingTaskSubmissionsRef.current;
+        pendingTaskSubmissionsRef.current = remaining;
+        setPendingTaskSubmissions(remaining);
       }
       setWorkInParentOnce((current) => ({ ...current, [runtimeId]: false }));
       setWorkerOverrides((current) => ({ ...current, [runtimeId]: {} }));
     } catch (error) {
-      if (destination === "parent") unblockAttachmentOwner(runtimeId);
+      if (destination === "parent") {
+        unblockAttachmentOwner(runtimeId);
+      } else {
+        // Main rejected the submission, so it has not consumed these tokens.
+        // Restore it only when the user has not begun a newer draft; otherwise
+        // release the now-invisible submitted selections.
+        const shouldRestore = isEmptyComposerDraft(
+          composerDraftForSession(composerDraftsRef.current, runtimeId),
+        );
+        unblockAttachmentOwner(runtimeId);
+        const failedSubmission = pendingTaskSubmissionsRef.current[runtimeId];
+        const { [runtimeId]: _failed, ...remaining } =
+          pendingTaskSubmissionsRef.current;
+        pendingTaskSubmissionsRef.current = remaining;
+        setPendingTaskSubmissions(remaining);
+        setComposerDrafts((items) =>
+          restoreFailedTaskDraft(items, runtimeId, prompt, promptAttachments),
+        );
+        setSessions((current) =>
+          current.map((session) =>
+            session.id === runtimeId && failedSubmission !== undefined
+              ? {
+                  ...session,
+                  timeline: session.timeline.filter(
+                    (item) => item.id !== failedSubmission.timelineItemId,
+                  ),
+                }
+              : session,
+          ),
+        );
+        if (!shouldRestore) {
+          const ownerId = attachmentOwnersBySession.current.get(runtimeId);
+          if (ownerId !== undefined) {
+            releaseSelectedAttachmentTokens(
+              ownerId,
+              attachmentTokens(promptAttachments),
+            );
+          }
+        }
+      }
       setComposerError(error instanceof Error ? error.message : String(error));
-      setComposerDrafts((items) =>
-        updateComposerDraft(items, runtimeId, (current) => ({
-          ...current,
-          attachments: promptAttachments,
-        })),
-      );
+      if (destination === "parent") {
+        setComposerDrafts((items) =>
+          updateComposerDraft(items, runtimeId, (current) => ({
+            ...current,
+            attachments: promptAttachments,
+          })),
+        );
+      }
       setSessions((current) =>
         current.map((session) =>
           session.id === runtimeId
@@ -4261,7 +4342,9 @@ export function App(): ReactElement {
       isWorking={isWorking}
       status={selectedSession.status}
       canSend={canSend || canSendTask}
+      canSendTask={canSendTask}
       canIntervene={canIntervene}
+      isPlanningTask={pendingTaskSubmissions[selectedSession.id] !== undefined}
       knownExtensionCommand={knownExtensionCommand}
       error={composerError}
       attachments={attachments}
@@ -4693,6 +4776,9 @@ export function App(): ReactElement {
               showAttachmentExamples={!isRealBackendMode}
               nowMs={nowMs}
               multitaskState={multitaskState}
+              taskPlanning={
+                pendingTaskSubmissions[selectedSession.id] !== undefined
+              }
               onRecoverSession={handleRecoverSelectedSession}
               onRespondToExtensionUi={handleExtensionUiResponse}
               onRetrySession={handleRetrySelectedSession}
@@ -4970,6 +5056,55 @@ function clearComposerDraft(
   sessionId: string,
 ): ComposerDraftsBySession {
   return clearComposerDraftsForSessions(drafts, [sessionId]);
+}
+
+function beginTaskSubmission(
+  pending: PendingTaskSubmissionsBySession,
+  sessionId: string,
+  text: string,
+  attachments: AttachmentDraft[],
+  timelineItemId: string,
+): PendingTaskSubmissionsBySession | undefined {
+  if (pending[sessionId] !== undefined) return undefined;
+  return { ...pending, [sessionId]: { text, attachments, timelineItemId } };
+}
+
+function clearSubmittedTaskDraft(
+  drafts: ComposerDraftsBySession,
+  sessionId: string,
+  submittedText: string,
+  submittedAttachments: readonly AttachmentDraft[],
+): ComposerDraftsBySession {
+  const current = composerDraftForSession(drafts, sessionId);
+  const isSubmittedDraft =
+    current.text.trimEnd() === submittedText &&
+    current.attachments.length === submittedAttachments.length &&
+    current.attachments.every(
+      (attachment, index) =>
+        attachment.selectedPathToken ===
+        submittedAttachments[index]?.selectedPathToken,
+    );
+  return isSubmittedDraft ? clearComposerDraft(drafts, sessionId) : drafts;
+}
+
+function isEmptyComposerDraft(draft: ComposerDraftState): boolean {
+  return draft.text.length === 0 && draft.attachments.length === 0;
+}
+
+/** Restore a rejected task only if the user has not started a newer draft. */
+function restoreFailedTaskDraft(
+  drafts: ComposerDraftsBySession,
+  sessionId: string,
+  text: string,
+  attachments: AttachmentDraft[],
+): ComposerDraftsBySession {
+  const current = composerDraftForSession(drafts, sessionId);
+  if (!isEmptyComposerDraft(current)) return drafts;
+  return updateComposerDraft(drafts, sessionId, () => ({
+    text,
+    attachments,
+    slashOpen: text.trimStart().startsWith("/"),
+  }));
 }
 
 function clearComposerDraftsForSessions(
@@ -8718,6 +8853,7 @@ function ChatTimeline(props: {
   showAttachmentExamples: boolean;
   nowMs: number;
   multitaskState: MultitaskStateEvent | undefined;
+  taskPlanning: boolean;
   onRecoverSession(): void;
   onRespondToExtensionUi(
     requestId: string,
@@ -8772,6 +8908,11 @@ function ChatTimeline(props: {
         ref={timelineScrollRef}
         onScroll={handleTimelineScroll}
       >
+        {props.taskPlanning ? (
+          <div className="state-banner waiting" role="status">
+            Planning parallel tasks…
+          </div>
+        ) : null}
         {props.multitaskState && props.multitaskState.tasks.length > 0 ? (
           <TaskSessionPanel
             activeCount={props.multitaskState.activeCount}
@@ -9295,7 +9436,9 @@ function Composer(props: {
   isWorking: boolean;
   status: SessionStatus;
   canSend: boolean;
+  canSendTask: boolean;
   canIntervene: boolean;
+  isPlanningTask: boolean;
   knownExtensionCommand: string | undefined;
   error: string | null;
   attachments: AttachmentDraft[];
@@ -9575,6 +9718,10 @@ function Composer(props: {
               {props.knownExtensionCommand} is an extension command. It runs
               immediately and cannot be queued.
             </span>
+          ) : props.isPlanningTask ? (
+            <span className="composer-status" role="status">
+              Planning parallel tasks…
+            </span>
           ) : props.isWorking ? (
             <span className="composer-status">
               Working in {props.backendLabel}…
@@ -9588,6 +9735,19 @@ function Composer(props: {
           <div className="composer-meta-actions">
             {props.isWorking ? (
               <>
+                {props.canSendTask ? (
+                  <IconButton
+                    className="send-button"
+                    icon={ArrowUp}
+                    label="Plan task"
+                    aria-keyshortcuts="Enter"
+                    shortcut="Enter"
+                    size="lg"
+                    variant="solid"
+                    disabled={props.knownExtensionCommand !== undefined}
+                    onClick={props.onSend}
+                  />
+                ) : null}
                 <IconButton
                   icon={CornerUpLeft}
                   label="Steer"
@@ -10524,6 +10684,10 @@ export const __rendererTestHooks = {
   composerDraftForSession,
   updateComposerDraft,
   clearComposerDraft,
+  beginTaskSubmission,
+  clearSubmittedTaskDraft,
+  restoreFailedTaskDraft,
+  isEmptyComposerDraft,
   clearComposerDraftsForSessions,
   moveComposerDraft,
   hasComposerDraft,

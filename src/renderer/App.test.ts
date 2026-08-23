@@ -667,6 +667,107 @@ describe("renderer per-session composer drafts", () => {
     );
   });
 
+  it("acknowledges one pending task submission and rejects a duplicate", () => {
+    const attachment = {
+      id: "attachment-1",
+      selectedPathToken: "token-1",
+      fileName: "notes.txt",
+      displayPath: "/project/notes.txt",
+      kind: "textFile",
+      sendMode: "pathReference",
+      outsideProject: false,
+      status: "ready",
+    } as const;
+    const pending = __rendererTestHooks.beginTaskSubmission(
+      {},
+      "session-a",
+      "Plan this",
+      [attachment],
+      "user-1",
+    );
+
+    expect(pending).toEqual({
+      "session-a": {
+        text: "Plan this",
+        attachments: [attachment],
+        timelineItemId: "user-1",
+      },
+    });
+    expect(
+      __rendererTestHooks.beginTaskSubmission(
+        pending!,
+        "session-a",
+        "Plan this",
+        [attachment],
+        "user-2",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("clears only the submitted task draft and restores a rejected task only into an empty composer", () => {
+    const attachment = {
+      id: "attachment-1",
+      selectedPathToken: "token-1",
+      fileName: "notes.txt",
+      displayPath: "/project/notes.txt",
+      kind: "textFile",
+      sendMode: "pathReference",
+      outsideProject: false,
+      status: "ready",
+    } as const;
+    const submitted = {
+      "session-a": {
+        text: "Plan this  ",
+        attachments: [attachment],
+        slashOpen: false,
+      },
+    };
+    const cleared = __rendererTestHooks.clearSubmittedTaskDraft(
+      submitted,
+      "session-a",
+      "Plan this",
+      [attachment],
+    );
+    expect(cleared).toEqual({});
+    expect(
+      __rendererTestHooks.clearSubmittedTaskDraft(
+        {
+          ...submitted,
+          "session-a": { ...submitted["session-a"], text: "New draft" },
+        },
+        "session-a",
+        "Plan this",
+        [attachment],
+      ),
+    ).toEqual({
+      ...submitted,
+      "session-a": { ...submitted["session-a"], text: "New draft" },
+    });
+    expect(
+      __rendererTestHooks.restoreFailedTaskDraft({}, "session-a", "Plan this", [
+        attachment,
+      ]),
+    ).toEqual({
+      "session-a": {
+        text: "Plan this",
+        attachments: [attachment],
+        slashOpen: false,
+      },
+    });
+    expect(
+      __rendererTestHooks.restoreFailedTaskDraft(
+        {
+          "session-a": { text: "New draft", attachments: [], slashOpen: false },
+        },
+        "session-a",
+        "Plan this",
+        [attachment],
+      ),
+    ).toEqual({
+      "session-a": { text: "New draft", attachments: [], slashOpen: false },
+    });
+  });
+
   it("reports invalid attachments or image models before work is started", () => {
     const missingAttachment = {
       id: "missing",
