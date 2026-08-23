@@ -169,6 +169,7 @@ import {
   type WorkspaceRecord,
 } from "./workspaces/workspaceStore.js";
 import { WorkspaceRuntimeLifecycleGate } from "./workspaceRuntimeLifecycleGate.js";
+import { WorkspaceRuntimeShutdownTombstones } from "./workspaceRuntimeShutdownTombstones.js";
 import { SettingsStore } from "./settings/settingsStore.js";
 import {
   applyThemePreference,
@@ -319,9 +320,9 @@ const chatWorkerCwds = new Map<string, string>();
 const chatRuntimeSessionFiles = new Map<string, string>();
 const chatRuntimeProjectIds = new Map<string, string>();
 const chatRuntimeWorkspaceIds = new Map<string, string>();
-// A failed close must remain archive-blocking even if a stale renderer read
-// drops the ordinary runtime maps before Pi emits its eventual exit event.
-const chatRuntimeShutdownFailures = new Map<string, string>();
+// A failed close remains archive-blocking until the old adapter confirms exit;
+// the tracker also keeps that proof race-safe across reset teardown.
+const chatRuntimeShutdownFailures = new WorkspaceRuntimeShutdownTombstones();
 const chatSessionFileLocks = new Map<string, string>();
 const chatSessionResumePromises = new Map<string, Promise<ChatSnapshot>>();
 const chatSessionResumeWorkspaceIds = new Map<string, string>();
@@ -1181,9 +1182,7 @@ function registerIpcHandlers(
             ([runtimeId, ownerWorkspaceId]) =>
               ownerWorkspaceId === workspaceId && chatRuntimeIds.has(runtimeId),
           ) ||
-          [...chatRuntimeShutdownFailures.values()].some(
-            (ownerWorkspaceId) => ownerWorkspaceId === workspaceId,
-          ) ||
+          chatRuntimeShutdownFailures.isWorkspaceBlocked(workspaceId) ||
           [...chatSessionResumeWorkspaceIds.values()].some(
             (ownerWorkspaceId) => ownerWorkspaceId === workspaceId,
           )
@@ -2111,6 +2110,16 @@ function createWorkflowOccurrenceScheduler(
     getRun: (runId) => ensureWorkflowStore().getWorkflowRun(runId),
     persist: (run) => ensureWorkflowStore().updateWorkflowRun(run),
     emit: emitCanonicalWorkflowRunEvent,
+    onWorkspaceRuntimeLifecycleAvailable: (workspaceId, listener) =>
+      workspaceRuntimeLifecycle.onCreationAvailable(workspaceId, listener),
+    isWorkspaceAvailable: async (workspaceId) => {
+      try {
+        await requireOpenWorkspace(workspaceId);
+        return true;
+      } catch {
+        return false;
+      }
+    },
   });
 }
 
@@ -2875,6 +2884,7 @@ async function initializeChatAdapter(
       parsed.data as WorkflowRuntimeEvent,
     );
     if (parsed.data.type === "worker_exit") {
+      chatRuntimeShutdownFailures.confirmExit(parsed.data.runtimeId);
       // A child exit does not go through closeSession(), so remove it from the
       // adapter as well as the UI/runtime maps or it would consume capacity.
       adapter.forgetExitedWorker(parsed.data.runtimeId);
@@ -3302,6 +3312,10 @@ async function closeAttachedChatRuntime(
   if (options.preserveAttachments === true) {
     attachmentPreservingRuntimeClosures.add(runtimeId);
   }
+  const workspaceId = chatRuntimeWorkspaceIds.get(runtimeId);
+  if (workspaceId !== undefined) {
+    chatRuntimeShutdownFailures.beginClose(runtimeId, workspaceId);
+  }
   let closed = false;
   try {
     delegationBridge?.removeParent(runtimeId);
@@ -3316,17 +3330,15 @@ async function closeAttachedChatRuntime(
     // Map cleanup must not depend on a cooperative child process. If shutdown
     // itself fails, retain workspace ownership so archive remains blocked until
     // the worker's eventual worker_exit event proves it is gone.
+    if (!closed && workspaceId !== undefined) {
+      chatRuntimeShutdownFailures.markCloseFailed(runtimeId, workspaceId);
+    }
+    chatRuntimeShutdownFailures.finishClose(runtimeId, closed);
     if (closed) {
-      chatRuntimeShutdownFailures.delete(runtimeId);
       forgetChatRuntime(runtimeId, {
         ...options,
         shutdownConfirmed: true,
       });
-    } else {
-      const workspaceId = chatRuntimeWorkspaceIds.get(runtimeId);
-      if (workspaceId !== undefined) {
-        chatRuntimeShutdownFailures.set(runtimeId, workspaceId);
-      }
     }
   }
 }
@@ -3342,7 +3354,7 @@ function forgetChatRuntime(
     options.preserveAttachments === true ||
     attachmentPreservingRuntimeClosures.has(runtimeId);
   if (options.shutdownConfirmed === true) {
-    chatRuntimeShutdownFailures.delete(runtimeId);
+    chatRuntimeShutdownFailures.confirmExit(runtimeId);
   }
   if (!preserveAttachments) {
     attachmentSelections.releaseSession(runtimeId);
@@ -4389,6 +4401,41 @@ async function closeChatWorker(): Promise<void> {
   const adapter = chatAdapter;
   const runtimeIds = [...chatRuntimeIds];
   const runtimeWorkspaceIds = new Map(chatRuntimeWorkspaceIds);
+  const trackedRuntimeIds = new Set(
+    [...runtimeWorkspaceIds.keys()].filter((runtimeId) =>
+      runtimeIds.includes(runtimeId),
+    ),
+  );
+  for (const runtimeId of trackedRuntimeIds) {
+    const workspaceId = runtimeWorkspaceIds.get(runtimeId);
+    if (workspaceId !== undefined) {
+      // Provision the tombstone before the normal listener and runtime maps are
+      // detached. A late exit can then be proven by a watcher on this adapter.
+      chatRuntimeShutdownFailures.beginClose(runtimeId, workspaceId);
+    }
+  }
+
+  let shutdownWatcher: (() => void) | undefined;
+  const disposeShutdownWatcherIfSettled = (): void => {
+    if (
+      shutdownWatcher !== undefined &&
+      [...trackedRuntimeIds].every(
+        (runtimeId) => !chatRuntimeShutdownFailures.has(runtimeId),
+      )
+    ) {
+      const dispose = shutdownWatcher;
+      shutdownWatcher = undefined;
+      dispose();
+    }
+  };
+  if (adapter !== undefined && trackedRuntimeIds.size > 0) {
+    shutdownWatcher = chatRuntimeShutdownFailures.watchAdapter(
+      (listener) => adapter.onEvent(listener),
+      trackedRuntimeIds,
+      disposeShutdownWatcherIfSettled,
+    );
+  }
+
   // Reset/quit has no parent left to mediate child work: retire bridge calls
   // and await private child shutdown before releasing parent bookkeeping.
   await Promise.all(
@@ -4431,11 +4478,8 @@ async function closeChatWorker(): Promise<void> {
   }
 
   if (adapter === undefined) {
-    for (const runtimeId of runtimeIds) {
-      const workspaceId = runtimeWorkspaceIds.get(runtimeId);
-      if (workspaceId !== undefined) {
-        chatRuntimeShutdownFailures.set(runtimeId, workspaceId);
-      }
+    for (const runtimeId of trackedRuntimeIds) {
+      chatRuntimeShutdownFailures.finishClose(runtimeId, false);
     }
     return;
   }
@@ -4443,8 +4487,10 @@ async function closeChatWorker(): Promise<void> {
 
   await Promise.all(
     runtimeIds.map(async (runtimeId) => {
+      let closed = false;
       try {
         await adapter.closeSession(runtimeId);
+        closed = true;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         diagnostics?.recordError(
@@ -4452,11 +4498,15 @@ async function closeChatWorker(): Promise<void> {
         );
         const workspaceId = runtimeWorkspaceIds.get(runtimeId);
         if (workspaceId !== undefined) {
-          chatRuntimeShutdownFailures.set(runtimeId, workspaceId);
+          chatRuntimeShutdownFailures.markCloseFailed(runtimeId, workspaceId);
         }
+      } finally {
+        chatRuntimeShutdownFailures.finishClose(runtimeId, closed);
+        disposeShutdownWatcherIfSettled();
       }
     }),
   );
+  disposeShutdownWatcherIfSettled();
 }
 
 async function listChatModels(

@@ -117,3 +117,28 @@ test("a failed creation releases its workspace claim", async () => {
   });
   assert.equal(archiveRan, true);
 });
+
+test("notifies lifecycle listeners after an archive claim releases", async () => {
+  const gate = new WorkspaceRuntimeLifecycleGate();
+  const started = deferred();
+  const finish = deferred();
+  let notifications = 0;
+  const unsubscribe = gate.onCreationAvailable("workspace-a", () => {
+    notifications += 1;
+  });
+
+  const archive = gate.withArchive("workspace-a", async () => {
+    started.resolve();
+    await finish.promise;
+  });
+  await started.promise;
+  assert.equal(notifications, 0);
+
+  finish.resolve();
+  await archive;
+  assert.equal(notifications, 1);
+
+  unsubscribe();
+  await gate.withArchive("workspace-a", () => undefined);
+  assert.equal(notifications, 1);
+});

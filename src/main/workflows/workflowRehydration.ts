@@ -91,6 +91,28 @@ export async function rehydrateCanonicalWorkflowRuns(
         .slice(0, available)
         .forEach((item) => resumableFanoutQueued.add(item.id));
     }
+    // A queued occurrence may have been retained because allocation raced an
+    // archive claim. Do not promote it to ready until the workspace resolves;
+    // an actually archived workspace must keep the durable queue until restore
+    // provides the next scheduling boundary. Lost runtime ownership is still
+    // recovered even when the workspace is archived, so it cannot remain stale.
+    let workspaceResolved = false;
+    let workspaceResolutionAttempted = false;
+    if (hasQueued) {
+      workspaceResolutionAttempted = true;
+      try {
+        await dependencies.resolveWorkspace(persisted.workspaceId);
+        workspaceResolved = true;
+      } catch (error) {
+        dependencies.recordError(
+          `Canonical workflow run ${persisted.id} could not be rehydrated: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        // Leave a queued-only archived run byte-for-byte durable. Workspace
+        // restore will provide the next scheduling boundary. A run with lost
+        // runtime metadata still needs the recovery mutation below.
+        if (!lostRunning && !hasRuntimeId) continue;
+      }
+    }
     const recovered =
       lostRunning || hasQueued || hasRuntimeId
         ? workflowRunEnvelopeSchema.parse({
@@ -116,6 +138,7 @@ export async function rehydrateCanonicalWorkflowRuns(
                     updatedAtMs: now,
                   }
                 : item.status === "queued" &&
+                    workspaceResolved &&
                     (!item.parentOrchestratorRunId ||
                       resumableFanoutQueued.has(item.id))
                   ? {
@@ -136,8 +159,18 @@ export async function rehydrateCanonicalWorkflowRuns(
       ["needsAttention", "stopped", "completed", "failed"].includes(run.status)
     )
       continue;
+    if (!workspaceResolved) {
+      if (workspaceResolutionAttempted) continue;
+      try {
+        await dependencies.resolveWorkspace(run.workspaceId);
+      } catch (error) {
+        dependencies.recordError(
+          `Canonical workflow run ${run.id} could not be rehydrated: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        continue;
+      }
+    }
     try {
-      await dependencies.resolveWorkspace(run.workspaceId);
       await dependencies.schedule(run);
     } catch (error) {
       dependencies.recordError(

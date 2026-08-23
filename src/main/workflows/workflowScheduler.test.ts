@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  createWorkflowRoleRun,
+  type WorkflowRoleRun,
+} from "./agentWorkflowRuntime.js";
+import {
   createWorkflowRun,
   markWorkflowStepQueued,
   stopWorkflowRun,
@@ -7,11 +11,13 @@ import {
 import {
   renderWorkflowTranscript,
   workflowExecutionModelSetting,
+  WorkflowOccurrenceScheduler,
   WorkflowScheduler,
   WORKFLOW_TRANSCRIPT_MAX_CHARS,
   type WorkflowSessionSnapshot,
 } from "./workflowScheduler.js";
 import { WorkspaceRuntimeLifecycleConflictError } from "../workspaceRuntimeLifecycleGate.js";
+import type { AgentWorkflowDefinition } from "../../shared/agentWorkflowSchemas.js";
 import type {
   WorkflowRun,
   WorkflowTemplate,
@@ -198,6 +204,96 @@ function setup(
     now: () => 10,
   });
   return { scheduler, prompts, persisted, closed, sessions, releaseSnapshot };
+}
+
+const lifecycleDefinition: AgentWorkflowDefinition = {
+  format: "pi-deck.agent-workflow",
+  schemaVersion: 2,
+  id: "00000000-0000-4000-8000-000000000201",
+  revision: 1,
+  name: "Lifecycle queue",
+  inputs: [],
+  entryNodeId: "00000000-0000-4000-8000-000000000202",
+  nodes: [
+    {
+      id: "00000000-0000-4000-8000-000000000202",
+      name: "Work",
+      role: "worker",
+      config: { instructions: "work" },
+    },
+  ],
+  relationships: [
+    {
+      id: "00000000-0000-4000-8000-000000000203",
+      from: "00000000-0000-4000-8000-000000000202",
+      to: { end: "completed" },
+    },
+  ],
+};
+
+function setupOccurrenceLifecycle() {
+  let available = true;
+  let created = 0;
+  let persisted: WorkflowRoleRun | undefined;
+  let wake: (() => void) | undefined;
+  let unsubscribed = 0;
+  const prompts: string[] = [];
+  const scheduler = new WorkflowOccurrenceScheduler({
+    createSession: async () => {
+      created += 1;
+      if (created === 1) throw new WorkspaceRuntimeLifecycleConflictError();
+      return {
+        runtimeId: `runtime-${created}`,
+        state: {
+          sessionId: `session-${created}`,
+          sessionFile: `/tmp/runtime-${created}.jsonl`,
+        },
+        messages: [],
+      };
+    },
+    prompt: async (_runtimeId, text) => {
+      prompts.push(text);
+    },
+    getSnapshot: async (runtimeId) => ({
+      runtimeId,
+      state: {},
+      messages: [{ role: "assistant", content: "answer" }],
+    }),
+    closeSession: async () => undefined,
+    persist: async (run) => {
+      persisted = run;
+      return run;
+    },
+    emit: () => undefined,
+    now: () => 10,
+    onWorkspaceRuntimeLifecycleAvailable: (_workspaceId, listener) => {
+      wake = listener;
+      return () => {
+        unsubscribed += 1;
+      };
+    },
+    isWorkspaceAvailable: async () => available,
+  });
+  return {
+    scheduler,
+    run: createWorkflowRoleRun(lifecycleDefinition, "workspace", {}, 1),
+    setAvailable(value: boolean) {
+      available = value;
+    },
+    get created() {
+      return created;
+    },
+    get persisted() {
+      return persisted;
+    },
+    get wake() {
+      return wake;
+    },
+    prompts,
+    get unsubscribed() {
+      return unsubscribed;
+    },
+  };
 }
 
 describe("WorkflowScheduler", () => {
@@ -532,5 +628,61 @@ describe("WorkflowScheduler", () => {
     expect(
       latest.stepRuns.find((step) => step.templateStepId === "yes")?.status,
     ).toBe("waiting");
+  });
+});
+
+describe("WorkflowOccurrenceScheduler lifecycle conflicts", () => {
+  it("reschedules a lifecycle-conflict occurrence when the workspace is released", async () => {
+    const fixture = setupOccurrenceLifecycle();
+
+    const queued = await fixture.scheduler.schedule(fixture.run);
+
+    expect(queued.occurrences[0]?.status).toBe("queued");
+    expect(fixture.created).toBe(1);
+    expect(fixture.wake).toBeDefined();
+
+    fixture.wake!();
+    // The public release path waits behind the callback's serialized mutation,
+    // making the test deterministic while still exercising the wake listener.
+    await fixture.scheduler.releaseQueued("workspace");
+
+    expect(fixture.created).toBe(2);
+    expect(fixture.prompts).toHaveLength(1);
+    expect(fixture.persisted?.occurrences[0]).toMatchObject({
+      status: "running",
+      runtimeId: "runtime-2",
+    });
+    expect(fixture.unsubscribed).toBe(1);
+  });
+
+  it("leaves an archived lifecycle-conflict occurrence queued until restore", async () => {
+    const fixture = setupOccurrenceLifecycle();
+    fixture.setAvailable(false);
+
+    const queued = await fixture.scheduler.schedule(fixture.run);
+    expect(queued.occurrences[0]?.status).toBe("queued");
+
+    const archived = await fixture.scheduler.schedule(queued);
+    expect(archived.occurrences[0]?.status).toBe("queued");
+    expect(fixture.created).toBe(1);
+
+    fixture.wake!();
+    await fixture.scheduler.releaseQueued("workspace");
+
+    expect(fixture.created).toBe(1);
+    expect(fixture.prompts).toEqual([]);
+    expect(fixture.persisted?.occurrences[0]?.status).toBe("queued");
+    expect(fixture.unsubscribed).toBe(0);
+
+    fixture.setAvailable(true);
+    const restored = await fixture.scheduler.schedule(fixture.persisted!);
+
+    expect(fixture.created).toBe(2);
+    expect(restored.occurrences[0]).toMatchObject({
+      status: "running",
+      runtimeId: "runtime-2",
+    });
+    expect(fixture.prompts).toHaveLength(1);
+    expect(fixture.unsubscribed).toBe(1);
   });
 });

@@ -19,6 +19,8 @@ type WorkspaceLifecycleState = {
   archiving: boolean;
 };
 
+type CreationAvailableListener = () => void;
+
 /**
  * Coordinates workspace archive transactions with runtime creation.
  *
@@ -30,6 +32,32 @@ type WorkspaceLifecycleState = {
  */
 export class WorkspaceRuntimeLifecycleGate {
   private readonly states = new Map<string, WorkspaceLifecycleState>();
+  private readonly creationAvailableListeners = new Map<
+    string,
+    Set<CreationAvailableListener>
+  >();
+
+  /**
+   * Subscribe to the end of an archive claim for one workspace. This is a
+   * release boundary, not a retry loop: listeners run once when the archive
+   * claim ends, and callers decide whether the workspace is actually open
+   * before attempting creation again.
+   */
+  onCreationAvailable(
+    workspaceId: string,
+    listener: CreationAvailableListener,
+  ): () => void {
+    const listeners =
+      this.creationAvailableListeners.get(workspaceId) ??
+      new Set<CreationAvailableListener>();
+    listeners.add(listener);
+    this.creationAvailableListeners.set(workspaceId, listeners);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0)
+        this.creationAvailableListeners.delete(workspaceId);
+    };
+  }
 
   withArchive<T>(
     workspaceId: string,
@@ -43,6 +71,7 @@ export class WorkspaceRuntimeLifecycleGate {
     return this.run(operation, () => {
       state.archiving = false;
       this.removeIfIdle(workspaceId, state);
+      this.notifyCreationAvailable(workspaceId);
     });
   }
 
@@ -78,6 +107,19 @@ export class WorkspaceRuntimeLifecycleGate {
   ): void {
     if (!state.archiving && state.creationCount === 0) {
       this.states.delete(workspaceId);
+    }
+  }
+
+  private notifyCreationAvailable(workspaceId: string): void {
+    for (const listener of [
+      ...(this.creationAvailableListeners.get(workspaceId) ?? []),
+    ]) {
+      try {
+        listener();
+      } catch {
+        // A release notification must never change the archive operation's
+        // result. Scheduling listeners own their asynchronous error handling.
+      }
     }
   }
 
