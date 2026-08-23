@@ -397,12 +397,24 @@ describe("IPC schemas", () => {
             lifecycle: "waiting-parent",
             attempt: 2,
             elapsedMs: 500,
+            startedAtMs: 1_700_000_000_000,
             progress: "Waiting for plan context",
           },
         ],
       }),
     ).toMatchObject({ runtimeId: "runtime-7", activeLimit: 10 });
 
+    expect(() =>
+      multitaskTaskSummarySchema.parse({
+        taskNumber: 8,
+        generatedName: "Task 8",
+        brief: "Private work",
+        lifecycle: "completed",
+        attempt: 1,
+        elapsedMs: 500,
+        startedAtMs: 1_700_000_000_000,
+      }),
+    ).toThrow();
     expect(() => multitaskModeRequestSchema.parse({ runtimeId: "" })).toThrow();
     expect(() =>
       multitaskModeUpdateRequestSchema.parse({

@@ -195,6 +195,7 @@ import {
 import { PersistedRuntimeResumeGuard } from "./multitask/persistedRuntimeResumeGuard.js";
 import {
   TaskSessionOrchestrator,
+  taskSessionProgressForWorkerEventType,
   type PersistedTaskSessionTask,
   type TaskSessionLaunch,
   type TaskSessionWorkerSettings,
@@ -3516,6 +3517,10 @@ async function createTaskSessionWorker(
   let ended = false;
   worker.onEvent((event) => {
     if (ended) return;
+    // The event payload is private child-worker data. Only the allowlisted
+    // event type reaches the task-session status projection.
+    const progress = taskSessionProgressForWorkerEventType(event.type);
+    if (progress) launch.callbacks.progress(progress);
     if (event.type === "extension_ui_request")
       launch.callbacks.waitingForParent();
     if (event.type === "worker_exit") {

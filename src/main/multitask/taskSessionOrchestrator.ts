@@ -17,9 +17,19 @@ export interface TaskSessionSummary {
   lifecycle: TaskSessionLifecycle;
   attempt: number;
   elapsedMs: number;
+  /** Epoch timestamp for renderer-side live elapsed-time calculation. */
+  startedAtMs?: number;
   progress?: string;
   queueReason?: string;
 }
+export const taskSessionProgressLabels = [
+  "Started",
+  "Using a tool",
+  "Preparing result",
+  "Waiting for parent",
+] as const;
+export type TaskSessionProgress = (typeof taskSessionProgressLabels)[number];
+
 export interface TaskSessionPlan {
   contextSummary: string;
   tasks: readonly { generatedName: string; brief: string }[];
@@ -46,7 +56,7 @@ export interface TaskSessionLaunch<ParentId> {
   callbacks: {
     completed(handoff?: { summary?: string }): void;
     failed(error?: unknown): void;
-    progress(message: string): void;
+    progress(message: TaskSessionProgress): void;
     waitingForParent(): void;
   };
 }
@@ -85,6 +95,8 @@ export interface PersistedTaskSessionTask {
     at?: number;
   }[];
   handoffSummary?: string | undefined;
+  /** Safe frozen duration retained for terminal rows across app restart. */
+  terminalElapsedMs?: number;
 }
 export interface TaskSessionOrchestratorOptions<
   ParentId,
@@ -130,6 +142,8 @@ export interface TaskSessionState {
 }
 type Task = PersistedTaskSessionTask & {
   startedAt?: number;
+  /** Captured at terminal transition so terminal elapsed time never advances. */
+  terminalElapsedMs?: number;
   worker?: TaskSessionWorker;
   progress?: string;
   queueReason?: string;
@@ -470,8 +484,12 @@ export class TaskSessionOrchestrator<
               ),
             progress: (message) =>
               afterReady(() => {
-                if (entry.attempt === attempt && !isTerminal(entry)) {
-                  entry.progress = safeLine(message);
+                if (
+                  entry.attempt === attempt &&
+                  !isTerminal(entry) &&
+                  isTaskSessionProgress(message)
+                ) {
+                  entry.progress = message;
                   this.publish(parent);
                 }
               }),
@@ -556,6 +574,8 @@ export class TaskSessionOrchestrator<
       error instanceof Error ? error.message : "Task session failed.",
     );
     entry.lifecycle = attempt <= 3 ? "retrying" : "failed";
+    if (isTerminal(entry))
+      entry.terminalElapsedMs = elapsedSinceStart(entry, this.now());
     entry.transitions = [
       ...entry.transitions,
       transition(entry.lifecycle, attempt, this.now()),
@@ -581,6 +601,7 @@ export class TaskSessionOrchestrator<
     await this.closeEntry(entry);
     delete entry.queueReason;
     entry.lifecycle = "completed";
+    entry.terminalElapsedMs = elapsedSinceStart(entry, this.now());
     entry.handoffSummary = handoff ? safeLine(handoff) : undefined;
     entry.transitions = [
       ...entry.transitions,
@@ -714,7 +735,10 @@ function summary(
     brief: entry.brief,
     lifecycle: entry.lifecycle,
     attempt: Math.max(1, entry.attempt),
-    elapsedMs: entry.startedAt ? Math.max(0, now - entry.startedAt) : 0,
+    elapsedMs: entry.terminalElapsedMs ?? elapsedSinceStart(entry, now),
+    ...(!isTerminal(entry) && entry.startedAt !== undefined
+      ? { startedAtMs: entry.startedAt }
+      : {}),
     ...(entry.progress ? { progress: entry.progress } : {}),
     ...(queueReason ? { queueReason } : {}),
   };
@@ -737,6 +761,43 @@ function persistTask(task: Task): PersistedTaskSessionTask {
       : {}),
   });
 }
+function elapsedSinceStart(
+  entry: Pick<Task, "startedAt">,
+  now: number,
+): number {
+  return entry.startedAt === undefined ? 0 : Math.max(0, now - entry.startedAt);
+}
+
+/**
+ * Allowlisted, payload-free status labels for private child-worker events.
+ * Never pass event data through this boundary: it can include transcript,
+ * tool arguments/output, runtime IDs, or session details.
+ */
+export function taskSessionProgressForWorkerEventType(
+  eventType: string,
+): TaskSessionProgress | undefined {
+  switch (eventType) {
+    case "agent_start":
+      return "Started";
+    case "tool_execution_start":
+    case "tool_execution_update":
+    case "tool_execution_end":
+      return "Using a tool";
+    case "message_update":
+    case "agent_settled":
+    case "agent_end":
+      return "Preparing result";
+    case "extension_ui_request":
+      return "Waiting for parent";
+    default:
+      return undefined;
+  }
+}
+
+function isTaskSessionProgress(value: unknown): value is TaskSessionProgress {
+  return taskSessionProgressLabels.includes(value as TaskSessionProgress);
+}
+
 function safeText(value: string, max: number): string {
   return typeof value === "string"
     ? value.replace(/\u0000/g, "").slice(0, max)
@@ -866,6 +927,9 @@ function validatePersisted(
         !Number.isSafeInteger(entry.attempt) ||
         entry.attempt < 0 ||
         !isLifecycle(entry.lifecycle) ||
+        (entry.terminalElapsedMs !== undefined &&
+          (!Number.isSafeInteger(entry.terminalElapsedMs) ||
+            entry.terminalElapsedMs < 0)) ||
         !Array.isArray(entry.transitions) ||
         entry.transitions.some(
           (item: {

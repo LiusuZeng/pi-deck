@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import type { MultitaskTaskSummary } from "../../../shared/types.js";
 
 export interface TaskSessionPanelProps {
@@ -12,12 +13,35 @@ function elapsedLabel(elapsedMs: number): string {
   return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
 
+function hasLiveElapsedClock(task: MultitaskTaskSummary): boolean {
+  return (
+    task.startedAtMs !== undefined &&
+    !["completed", "failed", "interrupted"].includes(task.lifecycle)
+  );
+}
+
+function displayedElapsedMs(task: MultitaskTaskSummary, nowMs: number): number {
+  return hasLiveElapsedClock(task)
+    ? Math.max(0, nowMs - task.startedAtMs!)
+    : task.elapsedMs;
+}
+
 /** Safe, flat status projection for child task sessions; deliberately inert. */
 export function TaskSessionPanel({
   activeCount,
   activeLimit,
   tasks,
 }: TaskSessionPanelProps) {
+  const [nowMs, setNowMs] = useState(Date.now);
+  const hasLiveClock = tasks.some(hasLiveElapsedClock);
+
+  useEffect(() => {
+    if (!hasLiveClock) return;
+    setNowMs(Date.now());
+    const interval = window.setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => window.clearInterval(interval);
+  }, [hasLiveClock]);
+
   if (tasks.length === 0) return null;
   return (
     <section className="task-session-panel" aria-label="Parallel task sessions">
@@ -42,7 +66,7 @@ export function TaskSessionPanel({
             <p className="task-session-panel__brief" title={task.brief}>
               {task.brief}
             </p>
-            <small>{`Attempt ${task.attempt} · ${elapsedLabel(task.elapsedMs)}`}</small>
+            <small>{`Attempt ${task.attempt} · ${elapsedLabel(displayedElapsedMs(task, nowMs))}`}</small>
             {task.progress ? <small>{task.progress}</small> : null}
             {task.queueReason ? <small>{task.queueReason}</small> : null}
           </article>

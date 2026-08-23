@@ -797,10 +797,19 @@ export const multitaskTaskSummarySchema = z
     ]),
     attempt: z.number().int().positive(),
     elapsedMs: z.number().finite().nonnegative(),
+    // A safe epoch timestamp lets the renderer advance active clocks locally.
+    // It is absent for terminal rows, whose elapsedMs is frozen by main.
+    startedAtMs: z.number().finite().nonnegative().optional(),
     progress: oneLineTaskTextSchema.optional(),
     queueReason: oneLineTaskTextSchema.optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (task) =>
+      task.startedAtMs === undefined ||
+      !["completed", "failed", "interrupted"].includes(task.lifecycle),
+    "Terminal tasks must provide frozen elapsedMs without startedAtMs.",
+  );
 
 export const multitaskStateEventSchema = multitaskModeStateSchema
   .extend({

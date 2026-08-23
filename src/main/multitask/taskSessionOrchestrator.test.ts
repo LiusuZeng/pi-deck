@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   TaskSessionOrchestrator,
+  taskSessionProgressForWorkerEventType,
   type TaskSessionLaunch,
 } from "./taskSessionOrchestrator.js";
 
@@ -205,6 +206,94 @@ describe("TaskSessionOrchestrator", () => {
         .tasks.every((task) => task.lifecycle === "interrupted"),
     ).toBe(true);
     expect(reports).toBe(0);
+  });
+
+  it("projects generic live progress, ticks from a stable start timestamp, and freezes terminal elapsed time", async () => {
+    const launches: TaskSessionLaunch<string>[] = [];
+    let now = 1_000;
+    const orchestrator = new TaskSessionOrchestrator<string, Worker>({
+      plan: () => ({
+        contextSummary: "context",
+        tasks: [{ generatedName: "one", brief: "brief" }],
+      }),
+      resolveWorkerSettings: () => ({}),
+      createWorker: (launch) => {
+        launches.push(launch);
+        return { close: () => undefined };
+      },
+      hasGlobalCapacity: () => true,
+      synthesize: () => {
+        throw new Error("retain terminal row");
+      },
+      scheduleSynthesisRetry: () => undefined,
+      onState: () => undefined,
+      now: () => now,
+    });
+    orchestrator.addParent("parent", { mode: "parallel" });
+    await orchestrator.submit("parent", "private prompt");
+    await tick();
+    launches[0].callbacks.progress("Using a tool");
+    now = 6_500;
+    expect(orchestrator.state("parent").tasks[0]).toMatchObject({
+      startedAtMs: 1_000,
+      elapsedMs: 5_500,
+      progress: "Using a tool",
+    });
+    expect(JSON.stringify(orchestrator.exportState("parent"))).not.toContain(
+      "Using a tool",
+    );
+    launches[0].callbacks.failed(new Error("private failure"));
+    await tick();
+    await tick();
+    now = 7_500;
+    expect(orchestrator.state("parent").tasks[0]).toMatchObject({
+      lifecycle: "running",
+      startedAtMs: 6_500,
+      elapsedMs: 1_000,
+    });
+    // Exhaust retries to retain a terminal row while synthesis fails.
+    launches.at(-1)!.callbacks.failed(new Error("private failure"));
+    await tick();
+    await tick();
+    now = 9_500;
+    launches.at(-1)!.callbacks.failed(new Error("private failure"));
+    await tick();
+    await tick();
+    now = 12_500;
+    launches.at(-1)!.callbacks.failed(new Error("private failure"));
+    await tick();
+    await tick();
+    const terminalElapsed = orchestrator.state("parent").tasks[0].elapsedMs;
+    now = 30_000;
+    expect(orchestrator.state("parent").tasks[0]).toMatchObject({
+      lifecycle: "failed",
+      elapsedMs: terminalElapsed,
+    });
+    expect(orchestrator.state("parent").tasks[0].startedAtMs).toBeUndefined();
+    const restored = setup();
+    restored.orchestrator.restore("parent", orchestrator.exportState("parent"));
+    expect(restored.orchestrator.state("parent").tasks[0]).toMatchObject({
+      lifecycle: "failed",
+      elapsedMs: terminalElapsed,
+    });
+  });
+
+  it("maps child event types to allowlisted generic progress without event payloads", () => {
+    expect(taskSessionProgressForWorkerEventType("agent_start")).toBe(
+      "Started",
+    );
+    expect(taskSessionProgressForWorkerEventType("tool_execution_update")).toBe(
+      "Using a tool",
+    );
+    expect(taskSessionProgressForWorkerEventType("message_update")).toBe(
+      "Preparing result",
+    );
+    expect(taskSessionProgressForWorkerEventType("extension_ui_request")).toBe(
+      "Waiting for parent",
+    );
+    expect(
+      taskSessionProgressForWorkerEventType("worker_exit"),
+    ).toBeUndefined();
   });
 
   it("persists safe parent defaults and exposes replacement worker-settings APIs", () => {
