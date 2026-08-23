@@ -983,7 +983,18 @@ test("workspace and session archive state persists across relaunch", async () =>
           workspaceId: workspace.id,
           sessionFile: independentlyArchivedFile,
         });
-        await api.workspaces.archive({ workspaceId: workspace.id });
+        const archived = await api.workspaces.archive({
+          workspaceId: workspace.id,
+        });
+        // Leave only the stable default active so relaunch exercises the
+        // default-only disclosure path while keeping both named archives
+        // discoverable.
+        const remainingNamed = archived.workspaces.find(
+          (candidate) => candidate.isDefault !== true,
+        );
+        if (remainingNamed !== undefined) {
+          await api.workspaces.archive({ workspaceId: remainingNamed.id });
+        }
         return workspace.id;
       },
       { independentlyArchivedFile, cascadeArchivedFile },
@@ -995,6 +1006,38 @@ test("workspace and session archive state persists across relaunch", async () =>
   const secondLaunch = await launchPiDeck(env);
   try {
     await expectHealthyPreload(secondLaunch.page);
+    await expectAllWorkLaunch(secondLaunch.page);
+    const defaultWorkspace = await secondLaunch.page.evaluate(async () => {
+      const result = await window.piDeck.workspaces.getActive();
+      const workspace = result.workspaces.find(
+        (candidate) => candidate.isDefault === true,
+      );
+      if (workspace === undefined) {
+        throw new Error(
+          "Expected the stable default workspace after relaunch.",
+        );
+      }
+      return workspace;
+    });
+    await expect(
+      secondLaunch.page.getByRole("button", {
+        name: `Workspace: ${defaultWorkspace.name}`,
+      }),
+    ).toHaveCount(0);
+    await expect(
+      secondLaunch.page
+        .getByLabel("Current Work scope", { exact: true })
+        .locator("option")
+        .filter({ hasText: defaultWorkspace.name }),
+    ).toHaveCount(0);
+    await expect(
+      secondLaunch.page.getByRole("button", { name: /^Archived/ }).first(),
+    ).toBeVisible();
+    await secondLaunch.page.getByRole("button", { name: /^Archived/ }).click();
+    await expect(secondLaunch.page.getByTestId("archived-tree")).toContainText(
+      "Persistent archive topic",
+    );
+
     const persisted = await secondLaunch.page.evaluate(async (workspaceId) => {
       const api = window.piDeck;
       const listed = await api.workspaces.getActive();
@@ -1216,6 +1259,73 @@ test("fake mode launches with backend runtime and send enabled", async () => {
   }
 });
 
+test("default workspace stays implicit until a named workspace exists", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-default-disclosure-"),
+  );
+  const { app, page } = await launchPiDeck({
+    PI_DECK_BACKEND: "fake",
+    PI_DECK_HOME: path.join(root, "pideck-home"),
+    PI_DECK_USER_DATA_DIR: path.join(root, "user-data"),
+  });
+  try {
+    await expectHealthyPreload(page);
+    await expectAllWorkLaunch(page);
+
+    const defaultWorkspace = await page.evaluate(async () => {
+      const result = await window.piDeck.workspaces.getActive();
+      const workspace = result.workspaces.find(
+        (candidate) => candidate.isDefault === true,
+      );
+      if (workspace === undefined) {
+        throw new Error("Expected a stable default workspace.");
+      }
+      return workspace;
+    });
+    const defaultRow = page.getByRole("button", {
+      name: `Workspace: ${defaultWorkspace.name}`,
+    });
+    await expect(defaultRow).toHaveCount(0);
+    await expect(
+      page
+        .getByLabel("Current Work scope", { exact: true })
+        .locator("option")
+        .filter({ hasText: defaultWorkspace.name }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByTestId("workspace-tree").getByText("No workspaces yet.", {
+        exact: true,
+      }),
+    ).toHaveCount(0);
+    await expect(sidebarNewSessionButton(page)).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "New workspace…", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page
+        .locator(".activity-inbox-row")
+        .filter({ hasText: "Extension approval request" }),
+    ).toBeVisible();
+
+    await createWorkspaceInUi(page, "Named disclosure workspace");
+    await expect(defaultRow).toBeVisible();
+    await expect(
+      page.getByRole("button", {
+        name: "Workspace: Named disclosure workspace",
+      }),
+    ).toBeVisible();
+    await expect(
+      page
+        .getByLabel("Current Work scope", { exact: true })
+        .locator("option")
+        .filter({ hasText: defaultWorkspace.name }),
+    ).toHaveCount(1);
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("attachment selections release and revoke through preload/main IPC", async () => {
   const { app, page } = await launchPiDeck({ PI_DECK_BACKEND: "fake" });
   try {
@@ -1306,15 +1416,6 @@ test("icon controls retain names, neutral styles, and fit a 900×600 viewport", 
     );
     await expect(userBubble).toHaveCSS("color", "rgb(47, 47, 47)");
     await expect(userBubble).toHaveCSS("box-shadow", "none");
-
-    const sessionList = page.locator(".session-list");
-    const firstSessionRow = sessionList.locator(".session-item").first();
-    await expect(firstSessionRow).toHaveCSS("display", "grid");
-    const sessionListBox = await sessionList.boundingBox();
-    const firstSessionRowBox = await firstSessionRow.boundingBox();
-    expect(firstSessionRowBox?.width).toBeGreaterThanOrEqual(
-      (sessionListBox?.width ?? 0) - 1,
-    );
 
     const sidebarToggle = page.locator(".topbar .sidebar-toggle");
     await page.getByLabel("Prompt text").hover();
@@ -4173,10 +4274,10 @@ test.describe("task-session routing acceptance", () => {
     const second = await launchPiDeck(env);
     try {
       await expectHealthyPreload(second.page);
-      await selectWorkspaceInUi(second.page, "Default workspace");
-      const savedSession = second.page
-        .getByRole("button", { name: /^Session:/ })
-        .first();
+      await expectAllWorkLaunch(second.page);
+      const savedSession = second.page.locator(".activity-inbox-row").filter({
+        hasText: "Start work that will be interrupted by restart.",
+      });
       await expect(savedSession).toBeVisible();
       await savedSession.click();
       await expect(second.page.locator(".multitask-control")).toBeEnabled({

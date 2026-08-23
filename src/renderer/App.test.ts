@@ -48,6 +48,36 @@ it("offers every active workflow workspace once and excludes archived workspaces
   ]);
 });
 
+it("progressively discloses the stable default workspace", () => {
+  const workspace = (id: string, name: string, isDefault = false) => ({
+    id,
+    name,
+    ...(isDefault ? { isDefault: true } : {}),
+    lastOpenedAt: 1,
+  });
+  const defaultWorkspace = workspace(
+    "workspace-default",
+    "Default workspace",
+    true,
+  );
+  const namedWorkspace = workspace("workspace-named", "Named workspace");
+
+  expect(
+    __rendererTestHooks.workspaceRowsForProgressiveDisclosure([
+      defaultWorkspace,
+    ]),
+  ).toEqual([]);
+  expect(
+    __rendererTestHooks.workspaceRowsForProgressiveDisclosure([
+      defaultWorkspace,
+      namedWorkspace,
+    ]),
+  ).toEqual([defaultWorkspace, namedWorkspace]);
+  expect(
+    __rendererTestHooks.workspaceRowsForProgressiveDisclosure([namedWorkspace]),
+  ).toEqual([namedWorkspace]);
+});
+
 it("uses Pi durable sessionId instead of a canonical file path", () => {
   const session = __rendererTestHooks.sessionFromSummary(
     {

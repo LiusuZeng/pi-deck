@@ -413,6 +413,23 @@ function activeWorkflowScopeChoices(
   );
 }
 
+/**
+ * Keep the durable default workspace in renderer state, activity projections,
+ * and creation ownership, but disclose it in workspace navigation only after
+ * a user-named active workspace exists. The invalid fake fixture is not an
+ * active workspace and must not defeat the default-only rule.
+ */
+function workspaceRowsForProgressiveDisclosure(
+  workspaces: readonly WorkspaceRef[],
+): WorkspaceRef[] {
+  const activeWorkspaces = workspaces.filter(
+    (workspace) => workspace.id !== invalidDemoWorkspace.id,
+  );
+  return activeWorkspaces.some((workspace) => workspace.isDefault !== true)
+    ? activeWorkspaces
+    : [];
+}
+
 type WorkspaceCapableApi = {
   workspaces?: {
     list?(): Promise<WorkspaceListResultCompat>;
@@ -1536,6 +1553,13 @@ export function App(): ReactElement {
     ],
     [currentWorkspace, workspaces],
   );
+  // This is presentation-only. Keep activityWorkspaces complete so default-
+  // owned sessions remain addressable from All Work and global creation keeps
+  // using the persisted default workspace.
+  const workScopeWorkspaces = useMemo(
+    () => workspaceRowsForProgressiveDisclosure(activityWorkspaces),
+    [activityWorkspaces],
+  );
   const activityWorkspaceNameById = useMemo(
     () =>
       Object.fromEntries(
@@ -1558,6 +1582,34 @@ export function App(): ReactElement {
     () => buildActivityInbox(activitySources),
     [activitySources],
   );
+
+  useEffect(() => {
+    if (
+      workspaceDialogBusy ||
+      primaryView.kind !== "work" ||
+      primaryView.scope.type !== "workspace"
+    ) {
+      return;
+    }
+    const scopedWorkspaceId = primaryView.scope.workspaceId;
+    if (
+      currentWorkspace.id !== scopedWorkspaceId ||
+      currentWorkspace.isDefault !== true
+    ) {
+      return;
+    }
+    if (
+      workScopeWorkspaces.some(
+        (workspace) => workspace.id === scopedWorkspaceId,
+      )
+    ) {
+      return;
+    }
+    // A named workspace can be archived while the user is scoped to the
+    // default. Once the default becomes the only active workspace, its
+    // presentation-only scope is no longer disclosed; return to All Work.
+    showAllWork();
+  }, [currentWorkspace, primaryView, workScopeWorkspaces, workspaceDialogBusy]);
 
   useLayoutEffect(() => {
     if (primaryView.kind !== "work") return;
@@ -5335,7 +5387,7 @@ export function App(): ReactElement {
           <ActivityInbox
             model={activityInboxModel}
             scope={activityScope}
-            workspaces={activityWorkspaces}
+            workspaces={workScopeWorkspaces}
             onScopeChange={handleActivityScopeChange}
             onOpenActivityItem={handleOpenActivityItem}
             onClose={handleCloseWork}
@@ -7870,12 +7922,14 @@ function SessionSidebar(props: {
   const availableWorkspaces = props.workspaces.filter(
     (workspace) => workspace.id !== invalidDemoWorkspace.id,
   );
-  const visibleWorkspaces =
+  const activeWorkspaces =
     availableWorkspaces.length > 0
       ? availableWorkspaces
       : [props.currentWorkspace];
+  const visibleWorkspaces =
+    workspaceRowsForProgressiveDisclosure(activeWorkspaces);
   const workspaceIds = new Set(
-    visibleWorkspaces.map((workspace) => workspace.id),
+    activeWorkspaces.map((workspace) => workspace.id),
   );
   const selectedWorkspaceId =
     props.primaryView.kind === "work" &&
@@ -7921,7 +7975,7 @@ function SessionSidebar(props: {
           isBackgroundActiveWork(session),
       )
     : [];
-  const allRealSessions = visibleWorkspaces.flatMap(sessionsForWorkspace);
+  const allRealSessions = activeWorkspaces.flatMap(sessionsForWorkspace);
   const allRealInbox = props.realMode
     ? buildRealSessionInbox(allRealSessions, "")
     : undefined;
@@ -8323,9 +8377,6 @@ function SessionSidebar(props: {
             </div>
           );
         })}
-        {visibleWorkspaces.length === 0 ? (
-          <p className="empty-session-list">No workspaces yet.</p>
-        ) : null}
         {props.realMode && props.showArchived ? (
           <ArchivedSidebarTree
             activeWorkspaces={props.workspaces}
@@ -11444,6 +11495,7 @@ export const __rendererTestHooks = {
   workflowThinkingChoicesFor,
   agentWorkflowsForHome,
   activeWorkflowScopeChoices,
+  workspaceRowsForProgressiveDisclosure,
   allWorkView,
   backToWorkView,
   defaultWorkspaceFor,
