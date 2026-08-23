@@ -103,12 +103,25 @@ import {
 import { RuntimeEventBuffer } from "./runtimeEventBuffer.js";
 import {
   buildActivityInbox,
-  tagsForScope,
   type ActivityItem,
-  type ActivityScope,
   type ActivitySourceSession,
 } from "./activityInbox.js";
 import { ActivityInbox } from "./components/ActivityInbox.js";
+import {
+  allWorkView,
+  backToWorkView,
+  replaceSessionRouteId,
+  sessionView,
+  workflowView as workflowPrimaryView,
+  workOriginForPrimaryView,
+  workScopeForNewSession,
+  workScopeLabel,
+  workspaceWorkView,
+  type PrimaryView,
+  type WorkOrigin,
+  type WorkScope,
+  type WorkflowSurface,
+} from "./primaryView.js";
 import {
   PiModelThinkingMenu,
   nextMenuItemIndex,
@@ -868,19 +881,9 @@ export function App(): ReactElement {
   const [sidebarVisible, setSidebarVisible] = useState(() =>
     loadSidebarVisiblePreference(),
   );
-  const [activityInboxVisible, setActivityInboxVisible] = useState(false);
-  const [activityScope, setActivityScope] = useState<ActivityScope>({
-    type: "all",
-  });
-  const [workflowView, setWorkflowView] = useState<
-    | "agentHome"
-    | "workflows"
-    | "runs"
-    | "builder"
-    | "occurrenceRun"
-    | "legacyRun"
-    | undefined
-  >();
+  const [primaryView, setPrimaryView] = useState<PrimaryView>(() =>
+    allWorkView(),
+  );
   const [workflowDefinitions, setWorkflowDefinitions] = useState<
     WorkflowDefinition[]
   >([]);
@@ -940,6 +943,48 @@ export function App(): ReactElement {
   selectedSessionIdRef.current = selectedSessionId;
   currentProjectRef.current = currentProject;
   currentWorkspaceRef.current = currentWorkspace;
+
+  function showWork(scope: WorkScope): void {
+    setPrimaryView({ kind: "work", scope });
+  }
+
+  function showAllWork(): void {
+    setPrimaryView(allWorkView());
+  }
+
+  function showWorkflowSurface(surface: WorkflowSurface): void {
+    setPrimaryView((current) =>
+      workflowPrimaryView(
+        surface,
+        workOriginForPrimaryView(current, currentWorkspaceRef.current.id),
+      ),
+    );
+  }
+
+  function showSessionDetail(sessionId: string, origin?: WorkOrigin): void {
+    setSelectedSessionId(sessionId);
+    setPrimaryView((current) =>
+      sessionView(
+        sessionId,
+        origin ??
+          workOriginForPrimaryView(current, currentWorkspaceRef.current.id),
+      ),
+    );
+  }
+
+  function replaceSessionDetailId(
+    previousSessionId: string,
+    nextSessionId: string,
+  ): void {
+    setPrimaryView((current) =>
+      replaceSessionRouteId(current, previousSessionId, nextSessionId),
+    );
+  }
+
+  const workflowView: WorkflowSurface | undefined =
+    primaryView.kind === "workflow" ? primaryView.view : undefined;
+  const activityScope: WorkScope =
+    primaryView.kind === "work" ? primaryView.scope : { type: "all" };
 
   useEffect(() => {
     const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
@@ -1302,7 +1347,7 @@ export function App(): ReactElement {
           if (disposed) return;
           if (run.workspaceId !== workspaceId) {
             setWorkflowOccurrenceRunId(undefined);
-            setWorkflowView("runs");
+            showWorkflowSurface("runs");
           } else if (!disposed) {
             setWorkflowOccurrenceRuns((current) => [
               run,
@@ -1319,7 +1364,7 @@ export function App(): ReactElement {
           if (disposed) return;
           if (run.workspaceId !== workspaceId) {
             setLegacyWorkflowRunId(undefined);
-            setWorkflowView("runs");
+            showWorkflowSurface("runs");
           } else if (!disposed) {
             setLegacyWorkflowRuns((current) => [
               run,
@@ -1364,7 +1409,7 @@ export function App(): ReactElement {
     setLegacyWorkflowRunId(undefined);
     setWorkflowBuilderDefinition(undefined);
     setWorkflowError(undefined);
-    if (workflowView !== undefined) setWorkflowView("agentHome");
+    if (workflowView !== undefined) showWorkflowSurface("agentHome");
   }, [currentWorkspace.id]);
 
   // An in-flight prompt may still be reading selections in main. Let blocked
@@ -1422,9 +1467,10 @@ export function App(): ReactElement {
       ),
     [activityWorkspaceNameById, archivedSessions, sessions],
   );
-  const activityInboxModel = useMemo(() => {
-    return buildActivityInbox(activitySources, tagsForScope(activityScope));
-  }, [activityScope, activitySources]);
+  const activityInboxModel = useMemo(
+    () => buildActivityInbox(activitySources),
+    [activitySources],
+  );
   const selectedModel =
     modelOptions.find((model) => model.id === selectedModelId) ??
     modelOptions[0];
@@ -1966,26 +2012,35 @@ export function App(): ReactElement {
   }
 
   function handleToggleActivity(): void {
-    if (activityInboxVisible) {
-      setActivityInboxVisible(false);
-      return;
-    }
-    setWorkflowView(undefined);
-    setActivityScope({ type: "all" });
-    setActivityInboxVisible(true);
+    showAllWork();
   }
 
   function handleOpenWorkflows(): void {
-    setActivityInboxVisible(false);
     setWorkflowError(undefined);
     setWorkflowBuilderDefinition(undefined);
-    setWorkflowView("agentHome");
+    showWorkflowSurface("agentHome");
   }
 
   function handleOpenWorkspaceActivity(workspaceId: string): void {
-    setWorkflowView(undefined);
-    setActivityScope({ type: "workspace", workspaceId });
-    setActivityInboxVisible(true);
+    showWork(workspaceWorkView(workspaceId).scope);
+  }
+
+  function handleActivityScopeChange(scope: WorkScope): void {
+    showWork(scope);
+  }
+
+  function handleCloseWork(): void {
+    if (primaryView.kind === "work") {
+      showSessionDetail(selectedSession.id, primaryView);
+      return;
+    }
+    showSessionDetail(selectedSession.id);
+  }
+
+  function handleBackToWork(): void {
+    if (primaryView.kind === "session") {
+      setPrimaryView(backToWorkView(primaryView));
+    }
   }
 
   async function handleSaveAgentWorkflow(
@@ -2021,7 +2076,7 @@ export function App(): ReactElement {
         [saved.workflow.id]: saved.scopeWorkspaceId,
       }));
       setWorkflowBuilderDefinition(undefined);
-      setWorkflowView("workflows");
+      showWorkflowSurface("workflows");
       setWorkflowError(undefined);
       setUiMessage(`Saved ${workflow.name}.`);
     } catch (error) {
@@ -2098,6 +2153,10 @@ export function App(): ReactElement {
     runtimeId?: string | undefined;
     sessionFile?: string | undefined;
   }): Promise<void> {
+    const origin = workOriginForPrimaryView(
+      primaryView,
+      currentWorkspaceRef.current.id,
+    );
     const runtimeSession = sessionReference.runtimeId
       ? sessionsRef.current.find(
           (session) => session.id === sessionReference.runtimeId,
@@ -2114,8 +2173,7 @@ export function App(): ReactElement {
         });
         const session = sessionFromSnapshot(snapshot);
         setSessions((current) => upsertRuntimeSession(current, snapshot));
-        setSelectedSessionId(session.id);
-        setWorkflowView(undefined);
+        showSessionDetail(session.id, origin);
         return;
       } catch (error) {
         if (sessionReference.sessionFile === undefined) {
@@ -2158,8 +2216,7 @@ export function App(): ReactElement {
         ),
         session,
       ]);
-      setSelectedSessionId(session.id);
-      setWorkflowView(undefined);
+      showSessionDetail(session.id, origin);
     } catch (error) {
       setUiMessage(
         `Could not open the saved Pi session: ${error instanceof Error ? error.message : String(error)}`,
@@ -2176,21 +2233,27 @@ export function App(): ReactElement {
   }
 
   function handleSelectSession(sessionId: string): void {
-    setWorkflowView(undefined);
-    setActivityInboxVisible(false);
+    const origin = workOriginForPrimaryView(
+      primaryView,
+      currentWorkspaceRef.current.id,
+    );
     const session = sessions.find((item) => item.id === sessionId);
     if (session?.isResuming === true) {
       return;
     }
     if (session !== undefined && session.workspaceId !== currentWorkspace.id) {
-      const owner = workspaces.find((item) => item.id === session.workspaceId);
+      const owner = [currentWorkspace, ...workspaces].find(
+        (workspace) => workspace.id === session.workspaceId,
+      );
       if (owner !== undefined) {
         // Opening cross-workspace active work changes the grouping view and
         // the selected row together; the worker itself is never restarted.
+        showSessionDetail(session.id, origin);
         void switchWorkspaceView(owner, workspaces, session.id);
         return;
       }
     }
+    showSessionDetail(sessionId, origin);
     if (
       session?.backendMode === "real" &&
       session.resumeBacked === true &&
@@ -2199,7 +2262,6 @@ export function App(): ReactElement {
       void resumeSession(session);
       return;
     }
-    setSelectedSessionId(sessionId);
     if (session?.backendMode === "real" && session.runtimeBacked) {
       loadRealCapabilities(session.id);
     }
@@ -2210,7 +2272,12 @@ export function App(): ReactElement {
   }
 
   async function openActivityItem(item: ActivityItem): Promise<void> {
-    setActivityInboxVisible(false);
+    const previousView = primaryView;
+    const previousSelectedSessionId = selectedSessionIdRef.current;
+    const origin = workOriginForPrimaryView(
+      primaryView,
+      currentWorkspaceRef.current.id,
+    );
     const targetWorkspace = activityWorkspaces.find(
       (workspace) => workspace.id === item.workspaceId,
     );
@@ -2220,6 +2287,20 @@ export function App(): ReactElement {
       );
       return;
     }
+    const session =
+      activitySessionForItem(sessionsRef.current, item) ??
+      sessionForActivityItem(item, targetWorkspace);
+    const restoreActivityNavigation = (): void => {
+      setPrimaryView((current) =>
+        current.kind === "session" && current.sessionId === session.id
+          ? previousView
+          : current,
+      );
+      if (selectedSessionIdRef.current === session.id) {
+        setSelectedSessionId(previousSelectedSessionId);
+      }
+    };
+    showSessionDetail(session.id, origin);
 
     if (currentWorkspaceRef.current.id !== item.workspaceId) {
       try {
@@ -2228,19 +2309,28 @@ export function App(): ReactElement {
             workspaceId: item.workspaceId,
           });
           setArchivedWorkspaces(result.archivedWorkspaces ?? []);
-          await switchWorkspaceView(
+          const switched = await switchWorkspaceView(
             result.activeWorkspace ?? targetWorkspace,
             result.workspaces,
-            item.runtimeId ?? item.sessionId,
+            session.id,
           );
+          if (!switched) {
+            restoreActivityNavigation();
+            return;
+          }
         } else {
-          await switchWorkspaceView(
+          const switched = await switchWorkspaceView(
             targetWorkspace,
             activityWorkspaces,
-            item.runtimeId ?? item.sessionId,
+            session.id,
           );
+          if (!switched) {
+            restoreActivityNavigation();
+            return;
+          }
         }
       } catch (error) {
+        restoreActivityNavigation();
         setUiMessage(
           `Failed to open activity workspace: ${error instanceof Error ? error.message : String(error)}`,
         );
@@ -2248,11 +2338,7 @@ export function App(): ReactElement {
       }
     }
 
-    const session =
-      activitySessionForItem(sessionsRef.current, item) ??
-      sessionForActivityItem(item, targetWorkspace);
     if (session.runtimeBacked) {
-      setSelectedSessionId(session.id);
       loadRealCapabilities(session.id);
       return;
     }
@@ -2263,7 +2349,6 @@ export function App(): ReactElement {
       await resumeSession(session);
       return;
     }
-    setSelectedSessionId(session.id);
   }
 
   async function resumeSession(
@@ -2338,6 +2423,7 @@ export function App(): ReactElement {
       // this saved session is being resumed.
       setSessions((items) => replaceResumedSession(items, session.id, resumed));
       setSelectedSessionId(resumed.id);
+      replaceSessionDetailId(session.id, resumed.id);
       setComposerDrafts((items) =>
         moveComposerDraft(items, session.id, resumed.id),
       );
@@ -2367,6 +2453,11 @@ export function App(): ReactElement {
             setSelectedSessionId(nextSession.id);
           }
         }
+        setPrimaryView((current) =>
+          current.kind === "session" && current.sessionId === session.id
+            ? current.origin
+            : current,
+        );
         setUiMessage(
           "Saved session file is missing or unreadable. Removed it from the list.",
         );
@@ -2506,13 +2597,20 @@ export function App(): ReactElement {
     let createdRuntimeId: string | undefined;
     let backendSession: SessionViewModel | undefined;
     try {
+      // The draft owns durable workspace membership. Do not let a later
+      // workspace selection redirect first-send materialization elsewhere.
+      const draftWorkspace = workspaceForSessionOwner(
+        draftSession,
+        currentWorkspace,
+        workspaces,
+      );
       const draftProjectId =
-        draftSession.projectId ?? projectIdForWorkspace(currentWorkspace);
+        draftSession.projectId ?? projectIdForWorkspace(draftWorkspace);
       const initialMultitaskMode =
         multitask[draftSession.id]?.mode ?? "sequential";
       let snapshot = await createSessionForWorkspace(
         window.piDeck,
-        currentWorkspace,
+        draftWorkspace,
         draftProjectId,
         initialMultitaskMode,
       );
@@ -2578,6 +2676,7 @@ export function App(): ReactElement {
         ),
       );
       setSelectedSessionId(initializedSession.id);
+      replaceSessionDetailId(draftSession.id, initializedSession.id);
       setMultitask((current) => {
         const draftState = current[draftSession.id] ?? {
           runtimeId: initializedSession.id,
@@ -3203,7 +3302,7 @@ export function App(): ReactElement {
     workspace: WorkspaceRef,
     nextWorkspaces: WorkspaceRef[],
     preferredSessionId?: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const sessionListRequest = ++sessionListGeneration.current;
     setComposerError(null);
     setProjectModelConfiguration({ models: [], thinkingLevels: [] });
@@ -3214,7 +3313,7 @@ export function App(): ReactElement {
         nextWorkspaces.length > 0 ? nextWorkspaces : [workspace],
       );
       if (sessionListRequest !== sessionListGeneration.current) {
-        return;
+        return false;
       }
       const savedRows = listedSessions;
       const existingRuntime = sessionsRef.current.find(
@@ -3262,38 +3361,52 @@ export function App(): ReactElement {
       setUiMessage(
         `Workspace switched to ${workspace.name}. Sessions remain grouped by workspace.`,
       );
+      return true;
     } catch (error) {
       setUiMessage(
         `Failed to open workspace: ${error instanceof Error ? error.message : String(error)}`,
       );
+      return false;
     }
   }
 
   async function handleSelectWorkspace(workspace: WorkspaceRef): Promise<void> {
-    if (activityInboxVisible) {
-      setActivityScope((scope) =>
-        scope.type === "workspace"
-          ? { type: "workspace", workspaceId: workspace.id }
-          : scope,
+    // Workspace selection always enters scoped Work, including selecting the
+    // already-current workspace. currentWorkspace remains execution context;
+    // the primary route is the source of truth for the selected surface.
+    const previousView = primaryView;
+    const restorePreviousView = (): void => {
+      setPrimaryView((current) =>
+        current.kind === "work" &&
+        current.scope.type === "workspace" &&
+        current.scope.workspaceId === workspace.id
+          ? previousView
+          : current,
       );
-    }
+    };
+    showWork(workspaceWorkView(workspace.id).scope);
     try {
       if (hasWorkspaceApi(window.piDeck)) {
         const result = await window.piDeck.workspaces.select({
           workspaceId: workspace.id,
         });
         setArchivedWorkspaces(result.archivedWorkspaces ?? []);
-        await switchWorkspaceView(
+        const switched = await switchWorkspaceView(
           result.activeWorkspace ?? workspace,
           result.workspaces,
         );
+        if (!switched) {
+          restorePreviousView();
+        }
         return;
       }
       // Legacy preload: a migrated workspace maps one-to-one to its project.
       if (workspace.defaultProject !== undefined) {
         await handleSelectProject(workspace.defaultProject);
+        setCurrentWorkspace(workspace);
       }
     } catch (error) {
+      restorePreviousView();
       setUiMessage(
         `Failed to select workspace: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -3324,6 +3437,7 @@ export function App(): ReactElement {
         applyWorkspaceListResult(result);
         const workspace = result.activeWorkspace ?? result.workspaces.at(-1);
         if (workspace !== undefined) {
+          showWork(workspaceWorkView(workspace.id).scope);
           await switchWorkspaceView(workspace, result.workspaces);
         }
         setWorkspaceDialog(undefined);
@@ -3334,6 +3448,7 @@ export function App(): ReactElement {
         name: normalizedName,
         lastOpenedAt: Date.now(),
       };
+      showWork(workspaceWorkView(workspace.id).scope);
       await switchWorkspaceView(workspace, [...workspaces, workspace]);
       setWorkspaceDialog(undefined);
     } catch (error) {
@@ -3403,6 +3518,12 @@ export function App(): ReactElement {
         workspaceId,
       });
       applyWorkspaceListResult(result);
+      // Archived membership is no longer an active Work source. Attached
+      // runtimes were closed above, so dropping these renderer rows does not
+      // terminate live work and prevents stale archived rows in global Work.
+      setSessions((items) =>
+        items.filter((session) => session.workspaceId !== workspaceId),
+      );
       if (showArchived) await refreshArchivedSessions();
       if (workspaceId !== currentWorkspace.id) {
         setWorkspaceDialog(undefined);
@@ -3411,6 +3532,9 @@ export function App(): ReactElement {
         );
         return;
       }
+      // A scoped Work route cannot point at an archived workspace. Return to
+      // the durable global overview before replacing the execution context.
+      showAllWork();
       const next = result.activeWorkspace ?? result.workspaces[0];
       if (next === undefined) {
         throw new Error("Cannot archive the last open workspace.");
@@ -3659,6 +3783,7 @@ export function App(): ReactElement {
         (workspace) => workspace.id === workspaceId,
       );
       if (restored !== undefined) {
+        showWork(workspaceWorkView(restored.id).scope);
         await switchWorkspaceView(restored, result.workspaces);
       }
       await refreshArchivedSessions();
@@ -4260,12 +4385,68 @@ export function App(): ReactElement {
     }
   }
 
+  async function activateWorkspaceForSessionCreation(
+    workspace: WorkspaceRef,
+  ): Promise<WorkspaceRef> {
+    if (currentWorkspaceRef.current.id === workspace.id) {
+      return workspace;
+    }
+    if (hasWorkspaceApi(window.piDeck)) {
+      const result = await window.piDeck.workspaces.select({
+        workspaceId: workspace.id,
+      });
+      setArchivedWorkspaces(result.archivedWorkspaces ?? []);
+      const activeWorkspace = result.activeWorkspace ?? workspace;
+      const switched = await switchWorkspaceView(
+        activeWorkspace,
+        result.workspaces,
+      );
+      if (!switched) {
+        throw new Error(`Could not open workspace ${activeWorkspace.name}.`);
+      }
+      return activeWorkspace;
+    }
+    const nextWorkspaces = [
+      workspace,
+      ...workspaces.filter((item) => item.id !== workspace.id),
+    ];
+    const switched = await switchWorkspaceView(workspace, nextWorkspaces);
+    if (!switched) {
+      throw new Error(`Could not open workspace ${workspace.name}.`);
+    }
+    return workspace;
+  }
+
   async function handleNewSession(): Promise<void> {
-    // Starting a session is a navigation action. Leave the work inbox so the
-    // newly selected session and its composer are visible immediately.
-    setActivityInboxVisible(false);
+    const origin = workOriginForPrimaryView(
+      primaryView,
+      currentWorkspaceRef.current.id,
+    );
+    const creationScope = workScopeForNewSession(
+      primaryView,
+      currentWorkspaceRef.current.id,
+    );
+    const requestedWorkspace =
+      creationScope.type === "all"
+        ? defaultWorkspaceFor(workspaces, currentWorkspaceRef.current)
+        : workspaceForId(
+            creationScope.workspaceId,
+            currentWorkspaceRef.current,
+            workspaces,
+          );
+    const workspace = requestedWorkspace ?? currentWorkspaceRef.current;
+    let creationWorkspace = workspace;
+    try {
+      creationWorkspace = await activateWorkspaceForSessionCreation(workspace);
+    } catch (error) {
+      setUiMessage(
+        `Failed to select the session workspace: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
+
     const next = draftSessionForWorkspace(
-      currentWorkspace,
+      creationWorkspace,
       createId("draft-session"),
       isRealBackendMode ? "real" : "fake",
       isRealBackendMode ? projectModelConfiguration : undefined,
@@ -4278,13 +4459,13 @@ export function App(): ReactElement {
           (item) =>
             item.draftSession !== true ||
             hasComposerDraft(composerDrafts, item.id) ||
-            item.workspaceId !== currentWorkspace.id,
+            item.workspaceId !== creationWorkspace.id,
         ),
       ),
     );
-    setSelectedSessionId(next.id);
+    showSessionDetail(next.id, origin);
     setUiMessage(
-      "Created a new session. Pi will start when you send a prompt.",
+      "Created a new session. Pi will start when you send the first prompt.",
     );
   }
 
@@ -4502,12 +4683,7 @@ export function App(): ReactElement {
           archivedSessions={archivedSessions}
           showArchived={showArchived}
           composerDrafts={composerDrafts}
-          activityInboxVisible={activityInboxVisible}
-          workflowView={
-            workflowView === "occurrenceRun" || workflowView === "legacyRun"
-              ? "runs"
-              : workflowView
-          }
+          primaryView={primaryView}
           activityActionableCount={activityInboxModel.actionableCount}
           onSelect={handleSelectSession}
           onOpenActivity={handleToggleActivity}
@@ -4551,11 +4727,21 @@ export function App(): ReactElement {
       <section
         className="workspace"
         aria-label={
-          workflowView !== undefined
+          primaryView.kind === "workflow"
             ? "Agent Workflows"
-            : "Pi Deck chat workspace"
+            : primaryView.kind === "work"
+              ? workScopeLabel(primaryView.scope, activityWorkspaceNameById)
+              : "Pi Deck chat workspace"
         }
         data-load-state={loadState.state}
+        data-primary-view={primaryView.kind}
+        data-work-scope={
+          primaryView.kind === "work"
+            ? primaryView.scope.type === "all"
+              ? "all"
+              : primaryView.scope.workspaceId
+            : undefined
+        }
       >
         <AppHeader
           loadState={loadState}
@@ -4595,7 +4781,7 @@ export function App(): ReactElement {
           {uiMessage}
         </div>
 
-        {workflowView !== undefined ? (
+        {primaryView.kind === "workflow" ? (
           <div className="workflow-surface">
             {workflowError ? (
               <p className="workflow-error" role="alert">
@@ -4638,7 +4824,7 @@ export function App(): ReactElement {
                   onSave={handleSaveAgentWorkflow}
                   onCancel={() => {
                     setWorkflowBuilderDefinition(undefined);
-                    setWorkflowView("workflows");
+                    showWorkflowSurface("workflows");
                   }}
                 />
               ) : workflowView === "occurrenceRun" &&
@@ -4653,7 +4839,7 @@ export function App(): ReactElement {
                   }
                   onBack={() => {
                     setWorkflowOccurrenceRunId(undefined);
-                    setWorkflowView("runs");
+                    showWorkflowSurface("runs");
                   }}
                   onStop={async () => {
                     const run = await window.piDeck.workflows.canonicalStopRun({
@@ -4694,7 +4880,7 @@ export function App(): ReactElement {
                   run={selectedLegacyWorkflowRun}
                   onBack={() => {
                     setLegacyWorkflowRunId(undefined);
-                    setWorkflowView("runs");
+                    showWorkflowSurface("runs");
                   }}
                   onStop={handleStopLegacyWorkflow}
                   onRetryStep={handleRetryLegacyWorkflowStep}
@@ -4717,24 +4903,24 @@ export function App(): ReactElement {
                   workflows={agentWorkflowDefinitions}
                   runs={workflowOccurrenceRuns}
                   legacyRuns={legacyWorkflowRuns}
-                  onShowWorkflows={() => setWorkflowView("workflows")}
-                  onShowRuns={() => setWorkflowView("runs")}
-                  onBack={() => setWorkflowView("agentHome")}
+                  onShowWorkflows={() => showWorkflowSurface("workflows")}
+                  onShowRuns={() => showWorkflowSurface("runs")}
+                  onBack={() => showWorkflowSurface("agentHome")}
                   onOpenRun={(run) => {
                     setWorkflowOccurrenceRunId(run.id);
-                    setWorkflowView("occurrenceRun");
+                    showWorkflowSurface("occurrenceRun");
                   }}
                   onOpenLegacyRun={(run) => {
                     setLegacyWorkflowRunId(run.id);
-                    setWorkflowView("legacyRun");
+                    showWorkflowSurface("legacyRun");
                   }}
                   onCreate={() => {
                     setWorkflowBuilderDefinition(undefined);
-                    setWorkflowView("builder");
+                    showWorkflowSurface("builder");
                   }}
                   onEdit={(workflow) => {
                     setWorkflowBuilderDefinition(workflow);
-                    setWorkflowView("builder");
+                    showWorkflowSurface("builder");
                   }}
                   onStart={async (workflow, inputs) => {
                     const run = await window.piDeck.workflows.canonicalStartRun(
@@ -4749,42 +4935,61 @@ export function App(): ReactElement {
                       ...current.filter((item) => item.id !== run.id),
                     ]);
                     setWorkflowOccurrenceRunId(run.id);
-                    setWorkflowView("occurrenceRun");
+                    showWorkflowSurface("occurrenceRun");
                   }}
                 />
               ) : null}
             </Suspense>
           </div>
-        ) : activityInboxVisible ? (
+        ) : primaryView.kind === "work" ? (
           <ActivityInbox
             model={activityInboxModel}
             scope={activityScope}
             workspaces={activityWorkspaces}
-            onScopeChange={setActivityScope}
+            onScopeChange={handleActivityScopeChange}
             onOpenActivityItem={handleOpenActivityItem}
-            onClose={() => setActivityInboxVisible(false)}
+            onClose={handleCloseWork}
           />
-        ) : isResuming ? (
-          <TranscriptLoading sessionTitle={selectedSession.title} />
-        ) : showStarterPage ? (
-          <StarterPage composer={composer} />
         ) : (
           <>
-            <ChatTimeline
-              session={selectedSession}
-              uiMessage={uiMessage}
-              showAttachmentExamples={!isRealBackendMode}
-              nowMs={nowMs}
-              multitaskState={multitaskState}
-              taskPlanning={
-                pendingTaskSubmissions[selectedSession.id] !== undefined
-              }
-              onRecoverSession={handleRecoverSelectedSession}
-              onRespondToExtensionUi={handleExtensionUiResponse}
-              onRetrySession={handleRetrySelectedSession}
-              onCopyDiagnostics={() => void handleCopySelectedDiagnostics()}
-            />
-            {composer}
+            {primaryView.kind === "session" ? (
+              <Button
+                aria-label={`Back to ${workScopeLabel(primaryView.origin.scope, activityWorkspaceNameById)}`}
+                className="session-origin-back"
+                data-testid="session-origin-back"
+                onClick={handleBackToWork}
+              >
+                <CornerUpLeft aria-hidden="true" size={15} strokeWidth={1.75} />
+                Back to{" "}
+                {workScopeLabel(
+                  primaryView.origin.scope,
+                  activityWorkspaceNameById,
+                )}
+              </Button>
+            ) : null}
+            {isResuming ? (
+              <TranscriptLoading sessionTitle={selectedSession.title} />
+            ) : showStarterPage ? (
+              <StarterPage composer={composer} />
+            ) : (
+              <>
+                <ChatTimeline
+                  session={selectedSession}
+                  uiMessage={uiMessage}
+                  showAttachmentExamples={!isRealBackendMode}
+                  nowMs={nowMs}
+                  multitaskState={multitaskState}
+                  taskPlanning={
+                    pendingTaskSubmissions[selectedSession.id] !== undefined
+                  }
+                  onRecoverSession={handleRecoverSelectedSession}
+                  onRespondToExtensionUi={handleExtensionUiResponse}
+                  onRetrySession={handleRetrySelectedSession}
+                  onCopyDiagnostics={() => void handleCopySelectedDiagnostics()}
+                />
+                {composer}
+              </>
+            )}
           </>
         )}
         {workspaceDialog !== undefined ? (
@@ -5482,6 +5687,44 @@ function workspaceFromLegacyProject(project: ProjectRef): WorkspaceRef {
     defaultProject: project,
     lastOpenedAt: project.lastOpenedAt,
   };
+}
+
+function workspaceForId(
+  workspaceId: string,
+  currentWorkspace: WorkspaceRef,
+  workspaces: readonly WorkspaceRef[],
+): WorkspaceRef | undefined {
+  return [currentWorkspace, ...workspaces].find(
+    (workspace) => workspace.id === workspaceId,
+  );
+}
+
+function defaultWorkspaceFor(
+  workspaces: readonly WorkspaceRef[],
+  currentWorkspace: WorkspaceRef,
+): WorkspaceRef {
+  return (
+    [currentWorkspace, ...workspaces].find(
+      (workspace) => workspace.isDefault === true,
+    ) ?? currentWorkspace
+  );
+}
+
+function workspaceForSessionOwner(
+  session: Pick<SessionViewModel, "workspaceId" | "project" | "projectId">,
+  currentWorkspace: WorkspaceRef,
+  workspaces: readonly WorkspaceRef[],
+): WorkspaceRef {
+  return (
+    workspaceForId(session.workspaceId, currentWorkspace, workspaces) ?? {
+      id: session.workspaceId,
+      name: session.project,
+      lastOpenedAt: Date.now(),
+      ...(session.projectId !== undefined
+        ? { defaultProjectId: session.projectId }
+        : {}),
+    }
+  );
 }
 
 function agentWorkflowsForHome(
@@ -7169,15 +7412,7 @@ function SessionSidebar(props: {
   archivedSessions: SessionViewModel[];
   showArchived: boolean;
   composerDrafts: ComposerDraftsBySession;
-  activityInboxVisible: boolean;
-  workflowView:
-    | "home"
-    | "agentHome"
-    | "workflows"
-    | "runs"
-    | "builder"
-    | "run"
-    | undefined;
+  primaryView: PrimaryView;
   activityActionableCount: number;
   onSelect(sessionId: string): void;
   onOpenActivity(): void;
@@ -7215,6 +7450,11 @@ function SessionSidebar(props: {
   const workspaceIds = new Set(
     visibleWorkspaces.map((workspace) => workspace.id),
   );
+  const selectedWorkspaceId =
+    props.primaryView.kind === "work" &&
+    props.primaryView.scope.type === "workspace"
+      ? props.primaryView.scope.workspaceId
+      : undefined;
 
   useEffect(() => {
     setExpandedWorkspaceIds((current) => {
@@ -7283,9 +7523,7 @@ function SessionSidebar(props: {
       next.add(workspace.id);
       return next;
     });
-    if (workspace.id !== props.currentWorkspace.id) {
-      props.onSelectWorkspace(workspace);
-    }
+    props.onSelectWorkspace(workspace);
   }
 
   function renderSession(session: SessionViewModel): ReactElement {
@@ -7465,13 +7703,14 @@ function SessionSidebar(props: {
 
       <Button
         className={`sidebar-new-chat activity-inbox-button ${
-          props.activityInboxVisible ? "active" : ""
+          props.primaryView.kind === "work" ? "active" : ""
         }`}
-        aria-pressed={props.activityInboxVisible}
+        aria-current={props.primaryView.kind === "work" ? "page" : undefined}
+        aria-pressed={props.primaryView.kind === "work"}
         onClick={props.onOpenActivity}
       >
         <History aria-hidden="true" size={16} strokeWidth={1.75} />
-        Work inbox
+        All Work
         {props.activityActionableCount > 0 ? (
           <span className="activity-inbox-badge" aria-live="polite">
             {props.activityActionableCount}
@@ -7480,9 +7719,12 @@ function SessionSidebar(props: {
       </Button>
       <Button
         className={`sidebar-new-chat workflow-inbox-button ${
-          props.workflowView !== undefined ? "active" : ""
+          props.primaryView.kind === "workflow" ? "active" : ""
         }`}
-        aria-pressed={props.workflowView !== undefined}
+        aria-current={
+          props.primaryView.kind === "workflow" ? "page" : undefined
+        }
+        aria-pressed={props.primaryView.kind === "workflow"}
         onClick={props.onOpenWorkflows}
       >
         <ListPlus aria-hidden="true" size={16} strokeWidth={1.75} />
@@ -7559,7 +7801,7 @@ function SessionSidebar(props: {
         {visibleWorkspaces.map((workspace) => {
           const workspaceSessions = sessionsForWorkspace(workspace);
           const expanded = expandedWorkspaceIds.has(workspace.id);
-          const active = workspace.id === props.currentWorkspace.id;
+          const active = selectedWorkspaceId === workspace.id;
           return (
             <div
               className={`workspace-tree-item ${active ? "active" : ""}`}
@@ -7614,7 +7856,7 @@ function SessionSidebar(props: {
                     variant="menuItem"
                     onClick={() => props.onOpenWorkspaceActivity(workspace.id)}
                   >
-                    View work inbox
+                    View Work
                   </Button>
                   {props.realMode && !workspace.isDefault ? (
                     <>
@@ -10741,6 +10983,17 @@ export const __rendererTestHooks = {
   workflowThinkingChoicesFor,
   agentWorkflowsForHome,
   activeWorkflowScopeChoices,
+  allWorkView,
+  backToWorkView,
+  defaultWorkspaceFor,
+  replaceSessionRouteId,
+  sessionView,
+  workflowPrimaryView,
+  workOriginForPrimaryView,
+  workScopeForNewSession,
+  workspaceWorkView,
+  workspaceForId,
+  workspaceForSessionOwner,
   thinkingLevelsForModel,
   clampThinkingLevel,
   applyPiDefaultsToDraftSessions,

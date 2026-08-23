@@ -48,6 +48,37 @@ it("offers every active workflow workspace once and excludes archived workspaces
   ]);
 });
 
+it("resolves global creation to the default workspace and first-send owner", () => {
+  const current = {
+    id: "workspace-current",
+    name: "Current",
+    lastOpenedAt: 1,
+  };
+  const defaultWorkspace = {
+    id: "workspace-default",
+    name: "Default",
+    isDefault: true,
+    lastOpenedAt: 2,
+  };
+
+  expect(
+    __rendererTestHooks.defaultWorkspaceFor(
+      [current, defaultWorkspace],
+      current,
+    ),
+  ).toBe(defaultWorkspace);
+  expect(
+    __rendererTestHooks.workspaceForSessionOwner(
+      {
+        workspaceId: defaultWorkspace.id,
+        project: defaultWorkspace.name,
+      },
+      current,
+      [current, defaultWorkspace],
+    ),
+  ).toBe(defaultWorkspace);
+});
+
 function baseSession() {
   return {
     id: "session-1",
