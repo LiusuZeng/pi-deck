@@ -285,6 +285,9 @@ describe("TaskSessionOrchestrator", () => {
     expect(taskSessionProgressForWorkerEventType("tool_execution_update")).toBe(
       "Using a tool",
     );
+    expect(taskSessionProgressForWorkerEventType("tool_execution_end")).toBe(
+      "Tool step completed",
+    );
     expect(taskSessionProgressForWorkerEventType("message_update")).toBe(
       "Preparing result",
     );

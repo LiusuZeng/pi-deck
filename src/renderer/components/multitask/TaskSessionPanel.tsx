@@ -66,7 +66,12 @@ export function TaskSessionPanel({
             <p className="task-session-panel__brief" title={task.brief}>
               {task.brief}
             </p>
-            <small>{`Attempt ${task.attempt} · ${elapsedLabel(displayedElapsedMs(task, nowMs))}`}</small>
+            <small>
+              {`Attempt ${task.attempt}`}
+              <span aria-hidden="true">
+                {` · ${elapsedLabel(displayedElapsedMs(task, nowMs))}`}
+              </span>
+            </small>
             {task.progress ? <small>{task.progress}</small> : null}
             {task.queueReason ? <small>{task.queueReason}</small> : null}
           </article>

@@ -33,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   task prompts and settings state, anchored/focused task UI popovers correctly,
   and prevented private session files or attachment payloads from leaking into
   session navigation or durable task state.
+- Made active task clocks tick continuously and surfaced payload-free major-step
+  labels so long-running private work no longer appears hung.
+- Rendered safe GitHub-style Markdown tables semantically with horizontal
+  scrolling on narrow conversation layouts.
 
 ### Tests
 

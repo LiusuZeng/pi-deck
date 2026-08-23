@@ -25,6 +25,7 @@ export interface TaskSessionSummary {
 export const taskSessionProgressLabels = [
   "Started",
   "Using a tool",
+  "Tool step completed",
   "Preparing result",
   "Waiting for parent",
 ] as const;
@@ -430,6 +431,8 @@ export class TaskSessionOrchestrator<
       entry.capacityClaimed = Boolean(this.options.claimGlobalCapacity);
       entry.lifecycle = "starting";
       delete entry.queueReason;
+      delete entry.progress;
+      delete entry.terminalElapsedMs;
       entry.attempt += 1;
       entry.startedAt = this.now();
       entry.transitions = [
@@ -781,8 +784,9 @@ export function taskSessionProgressForWorkerEventType(
       return "Started";
     case "tool_execution_start":
     case "tool_execution_update":
-    case "tool_execution_end":
       return "Using a tool";
+    case "tool_execution_end":
+      return "Tool step completed";
     case "message_update":
     case "agent_settled":
     case "agent_end":
