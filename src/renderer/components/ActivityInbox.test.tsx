@@ -107,7 +107,6 @@ function renderInbox(
     root?.render(
       <ActivityInbox
         model={model}
-        onClose={vi.fn()}
         onOpenActivityItem={onOpenActivityItem}
         onScopeChange={onScopeChange}
         onNewSession={onNewSession}
@@ -127,6 +126,14 @@ afterEach(() => {
 });
 
 describe("ActivityInbox", () => {
+  it("removes the legacy close action while preserving heading focus", () => {
+    const { view } = renderInbox(modelWithEveryKind());
+
+    expect(view.querySelector('button[aria-label^="Close "]')).toBeNull();
+    expect(view.querySelector(".activity-inbox-close")).toBeNull();
+    expect(view.querySelector("h1")?.getAttribute("tabindex")).toBe("-1");
+  });
+
   it("shows global rows, workspace context, selector counts, and status chips", () => {
     const { view } = renderInbox(modelWithEveryKind());
 

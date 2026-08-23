@@ -254,12 +254,10 @@ async function main() {
       .getByRole("heading", { name: "All Work", exact: true })
       .waitFor();
     await page
-      .getByRole("button", { name: "Close All Work", exact: true })
-      .click();
-    await page.getByLabel("Prompt text").waitFor();
-    await page
+      .getByRole("complementary", { name: "Sessions" })
       .getByRole("button", { name: "New session", exact: true })
       .click();
+    await page.getByLabel("Prompt text").waitFor();
     await page
       .getByLabel("Prompt text")
       .fill("Reply with exactly: Parent session ready.");

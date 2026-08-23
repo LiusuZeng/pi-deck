@@ -200,7 +200,8 @@ async function captureExtensionScreenshot(root, output) {
     await page.waitForLoadState("domcontentloaded");
     await waitForReady(page);
     await page
-      .getByRole("button", { name: "Close All Work", exact: true })
+      .getByRole("complementary", { name: "Sessions" })
+      .getByRole("button", { name: "New session", exact: true })
       .click();
     await page.locator('.workspace[data-primary-view="session"]').waitFor();
     await page
@@ -396,7 +397,10 @@ async function main() {
     // Fresh launches open at All Work. Capture the workspace shell from the
     // existing session surface before returning to the global Work overview.
     await page
-      .getByRole("button", { name: "Close All Work", exact: true })
+      .locator(".activity-inbox-row")
+      .filter({
+        hasText: "read this repo and come up with 3 next roadmap items.",
+      })
       .click();
     await page.locator('.workspace[data-primary-view="session"]').waitFor();
     await page.getByLabel(/Model and thinking\. Current model:/).click();
@@ -472,7 +476,10 @@ async function main() {
     await page.getByLabel("Show sessions").click();
     await page.getByRole("complementary", { name: "Sessions" }).waitFor();
     await page
-      .getByRole("button", { name: "Close All Work", exact: true })
+      .locator(".activity-inbox-row")
+      .filter({
+        hasText: "read this repo and come up with 3 next roadmap items.",
+      })
       .click();
     await page.locator('.workspace[data-primary-view="session"]').waitFor();
     await page.getByRole("button", { name: "Workspace: pi-deck" }).click();
@@ -490,9 +497,7 @@ async function main() {
     capturedScreenshots.set(workspaceWorkOutput.name, workspaceWorkScreenshot);
 
     await page
-      .getByRole("button", { name: "Close pi-deck Work", exact: true })
-      .click();
-    await page
+      .getByRole("complementary", { name: "Sessions" })
       .getByRole("button", { name: "New session", exact: true })
       .click();
     await page.getByLabel("Prompt text").waitFor();

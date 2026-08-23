@@ -11,7 +11,7 @@ import {
   tagsForScope,
   tagsForStatus,
 } from "../activityInbox.js";
-import { Check, CircleAlert, CircleDot, LoaderCircle, X } from "./ui/icons.js";
+import { Check, CircleAlert, CircleDot, LoaderCircle } from "./ui/icons.js";
 
 type ActivityFilter = "all" | ActivityStatus;
 
@@ -89,7 +89,6 @@ export interface ActivityInboxProps {
   workspaces: readonly ActivityWorkspace[];
   onOpenActivityItem: (item: ActivityItem) => void;
   onScopeChange: (scope: ActivityScope) => void;
-  onClose: () => void;
   /** Optional for compatibility with pre-CTA embedders. */
   onNewSession?: () => void;
 }
@@ -101,7 +100,6 @@ export function ActivityInbox({
   workspaces,
   onOpenActivityItem,
   onScopeChange,
-  onClose,
   onNewSession,
 }: ActivityInboxProps) {
   const [selectedFilter, setSelectedFilter] = useState<ActivityFilter>("all");
@@ -174,14 +172,6 @@ export function ActivityInbox({
             {description}
           </p>
         </div>
-        <button
-          aria-label={`Close ${scopeLabel}`}
-          className="activity-inbox-close"
-          onClick={onClose}
-          type="button"
-        >
-          <X aria-hidden="true" focusable="false" />
-        </button>
       </header>
 
       <label
