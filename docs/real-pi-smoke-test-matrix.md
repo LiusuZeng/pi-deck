@@ -74,5 +74,5 @@ The deterministic fake RPC harness covers pre-real-Pi automation for:
 - SM-021 is ungated fake-RPC production-route coverage and deliberately does not use the bridge harness. Its test-only fixture controls bounded planning and child outcomes so capacity, retries, synthesis, attachment consumption/privacy, and restart interruption remain deterministic.
 - SM-022 is authenticated real-Pi coverage of the production model-backed planner. It supplies no fixture and no `deck_delegate` marker, so a one-task fallback fails the test instead of masquerading as planner success.
 - Broader M7.4 release matrix execution still needs planned pass/fail artifact collection across all rows.
-- G3 requires platform packaging measurements before image support can ship.
-- G4 requires a real or fake extension fixture once extension UI backend IPC is implemented.
+- G3 release evidence must include platform packaging measurements for the implemented image UI.
+- G4 release evidence must include a real or fake extension fixture covering the implemented extension UI backend IPC.

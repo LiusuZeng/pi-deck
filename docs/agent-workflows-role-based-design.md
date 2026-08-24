@@ -1,6 +1,6 @@
 # Agent Workflows — Canonical Product Design
 
-**Status:** Product direction approved; Build, Graph, persistence, and core role runtime implemented; occurrence-run UI integration remains in progress
+**Status:** Canonical Agent Workflows product design. For current shipped behavior, see the [README](../README.md); for release requirements, see the [Release Checklist](release-checklist.md).
 **Date:** 2026-08-07
 **Tracking item:** [Agent Workflows feedback item 2](agent-workflows-feedback.md#2-replace-the-field-heavy-step-model-with-four-execution-roles)
 
@@ -546,7 +546,7 @@ Required behavior:
 The same shared validator serves import, JSON Apply, GUI editing, Save, IPC, and
 run creation.
 
-## 14. Implementation sequence
+## 14. Historical implementation sequence
 
 ### Phase 1 — Contracts and migration foundation
 

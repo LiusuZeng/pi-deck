@@ -476,10 +476,10 @@ docs/                 Requirements, architecture, plans, and validation records
 
 - [How to run and test Pi Deck](docs/how-to-run-and-test.md)
 - [Product requirements](docs/requirements.md)
-- [Technical architecture](docs/technical-architecture.md)
+- [Historical MVP technical architecture (draft)](docs/technical-architecture.md)
 - [Agent Workflows design](docs/agent-workflows-role-based-design.md)
-- [Agent Workflows UX feedback](docs/agent-workflows-feedback.md)
+- [Agent Workflows UX feedback/history](docs/agent-workflows-feedback.md)
 - [Project-grouped sessions design](docs/project-grouped-sessions-p0-design.md)
 - [v0.6.0 Unified Work release validation](docs/reviews/v0.6-unified-work-release-validation.md)
 - [Real Pi validation history](docs/real-pi-gui-chat-validation.md)
-- [Implementation tracker](docs/project-tracker.md)
+- [Historical MVP implementation tracker](docs/project-tracker.md)

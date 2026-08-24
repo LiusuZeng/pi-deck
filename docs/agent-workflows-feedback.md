@@ -1,14 +1,14 @@
 # Agent Workflows — Product Feedback and Continuation Notes
 
-**Status:** canonical Agent Workflows authoring integrated; run wiring and remaining UX feedback tracked<br>
+**Status:** Historical Agent Workflows UX feedback and continuation record. For current behavior, see the [canonical product design](agent-workflows-role-based-design.md) and [README](../README.md).<br>
 **Feedback captured:** 2026-08-07<br>
-**Continuation branch:** `dev/agent-workflows-prompt-first`
+**Historical continuation branch:** `dev/agent-workflows-prompt-first`
 
-This is the working product-feedback log for Agent Workflows. Keep new UX findings,
-implementation decisions, and validation notes here so the work can continue from
-another laptop without relying on chat history.
+This is a historical product-feedback log retained for implementation context.
+Current users should use the canonical design and README rather than its
+continuation or branch instructions.
 
-## Open numbered feedback and bugs
+## Historical numbered feedback and bugs
 
 ### 1. Empty workflow screen has two creation actions
 
@@ -101,9 +101,9 @@ language.
 - Shared context is **one shared prompt plus “Don’t do”**.
 - Do not expose separate Objective, Constraints, Relevant paths, Standards, or
   explicit file/link/path inputs in the first version.
-- Handoffs should be implicit. Agents work in the same local workspace and should
-  discover/read local files as needed; do not make users compose structured
-  previous-result handoff chips.
+- In Build UX, handoffs should be implicit. Agents work in the same local
+  workspace and should discover/read local files as needed; do not make users
+  compose structured previous-result handoff chips.
 - Keep the workflow/skills distinction: workflows coordinate; skills remain
   Pi-native agent capabilities.
 - Model override and thinking level should use dropdown choices matching the
@@ -171,7 +171,10 @@ manual gates, retries/overrides, capacity handling, transcript/runtime recovery,
 workspace/path guards, and stop-race protection. This feedback pass is a UX
 simplification, not a request to remove those runtime safety guarantees.
 
-## Resume on another laptop
+## Historical continuation instructions (another laptop)
+
+These instructions are retained for historical context. For current setup and
+usage, follow the [README](../README.md).
 
 ```bash
 git clone https://github.com/LiusuZeng/pi-deck.git
@@ -212,7 +215,7 @@ Prompt-first implementation commits currently include:
 - `19299a8` — Prompt-first renderer editor and run-flow UX.
 - `ac05e11` — Parent integration fixes for choice types and compatibility fields.
 
-The continuation branch is pushed at:
+Historical continuation-branch record:
 `origin/dev/agent-workflows-prompt-first`
 
 The isolated implementation lanes were consolidated into the continuation

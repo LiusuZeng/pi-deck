@@ -1,6 +1,6 @@
 # Pi Deck MVP Technical Architecture
 
-Status: draft v2 after engineering review  
+Status: historical MVP draft baseline after engineering review; not a statement of current shipped behavior. See the [README](../README.md) for current shipped behavior.<br>
 Target: macOS Electron + TypeScript personal MVP  
 Source requirements: `docs/requirements.md`  
 Review notes: `docs/engineering-design-review-notes.md`
