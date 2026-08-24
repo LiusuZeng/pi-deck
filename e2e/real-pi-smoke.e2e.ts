@@ -297,10 +297,13 @@ test("real Pi Agent Workflow: real worker persists run, session, and graph acros
         }),
       ]);
       await expect
-        .poll(() => listJsonlFiles(sessionDir), {
-          message: "Real Pi workflow worker must persist its session",
-          timeout: 30_000,
-        })
+        .poll(
+          () => listJsonlFiles(sessionDir).map((file) => fs.realpathSync(file)),
+          {
+            message: "Real Pi workflow worker must persist its session",
+            timeout: 30_000,
+          },
+        )
         .toContain(completed.run.occurrences[0]!.sessionFile);
     } finally {
       await firstLaunch.app.close();
@@ -332,9 +335,9 @@ test("real Pi Agent Workflow: real worker persists run, session, and graph acros
           aggregateStatus: "completed",
         }),
       ]);
-      expect(listJsonlFiles(sessionDir)).toContain(
-        persisted.run.occurrences[0]!.sessionFile,
-      );
+      expect(
+        listJsonlFiles(sessionDir).map((file) => fs.realpathSync(file)),
+      ).toContain(persisted.run.occurrences[0]!.sessionFile);
 
       await secondLaunch.page
         .getByRole("button", { name: "Agent Workflows" })
@@ -789,6 +792,9 @@ test("real Pi production routing plans multiple private task sessions without br
   const piDeckHome = path.join(root, "pideck-home");
   const sessionDir = path.join(root, "sessions");
   const projectCwd = path.join(root, "project");
+  const scopeName = "Parallel production smoke";
+  const prompt =
+    "Run exactly three independent tasks in parallel: task one replies with exactly ALPHA, task two replies with exactly BETA, and task three replies with exactly GAMMA. Then report their combined result.";
   for (const directory of [userDataDir, piDeckHome, sessionDir, projectCwd])
     fs.mkdirSync(directory, { recursive: true });
 
@@ -803,10 +809,38 @@ test("real Pi production routing plans multiple private task sessions without br
     // test must exercise the production model-backed planner.
   };
 
+  let durableParent:
+    | {
+        sessionFile: string;
+        sessionId: string | undefined;
+        title: string;
+        messageCount: number;
+      }
+    | undefined;
+  let workspaceId: string | undefined;
+  let parentActivityItemId: string | undefined;
   try {
     const { app, page } = await launchPiDeck(env);
     try {
       await expectHealthyPreload(page);
+      // A named workspace exposes the scoped Work assertion without an extra
+      // model prompt.
+      await page.getByRole("button", { name: "New workspace…" }).click();
+      const workspaceDialog = page.getByTestId("workspace-create-dialog");
+      await expect(workspaceDialog).toBeVisible();
+      await workspaceDialog.getByLabel("Workspace name").fill(scopeName);
+      await workspaceDialog
+        .getByRole("button", { name: "Create workspace" })
+        .click();
+      const scopeWorkspace = page.getByRole("button", {
+        name: `Workspace: ${scopeName}`,
+      });
+      await expect(scopeWorkspace).toHaveAttribute("aria-current", "page");
+      workspaceId = await page.evaluate(async () => {
+        const active = await window.piDeck.workspaces.getActive();
+        if (!active.activeWorkspace) throw new Error("No active workspace");
+        return active.activeWorkspace.id;
+      });
       await sidebarNewSessionButton(page).click();
       await expect(page.getByLabel("Prompt text")).toBeVisible();
       await page
@@ -832,8 +866,6 @@ test("real Pi production routing plans multiple private task sessions without br
         );
       });
 
-      const prompt =
-        "Run exactly three independent tasks in parallel: task one replies with exactly ALPHA, task two replies with exactly BETA, and task three replies with exactly GAMMA. Then report their combined result.";
       await page.getByLabel("Prompt text").fill(prompt);
       await page.getByRole("button", { name: "Send" }).click();
 
@@ -905,6 +937,108 @@ test("real Pi production routing plans multiple private task sessions without br
           timeout: 30_000,
         })
         .toBe(1);
+
+      const activeParentSnapshot = await page.evaluate(async () => {
+        const snapshot = await window.piDeck.chat.getSnapshot();
+        return {
+          sessionFile: snapshot.state.sessionFile,
+          sessionId: snapshot.state.sessionId,
+        };
+      });
+      expect(activeParentSnapshot).toMatchObject({
+        sessionFile: expect.any(String),
+        sessionId: expect.any(String),
+      });
+      expect(fs.realpathSync(activeParentSnapshot.sessionFile!)).toBe(
+        activeParentSnapshot.sessionFile,
+      );
+
+      await page.getByRole("button", { name: "Refresh sessions" }).click();
+      await expect
+        .poll(
+          () =>
+            page.evaluate(async (id) => {
+              const listed = await window.piDeck.chat.listSessions({
+                workspaceId: id,
+              });
+              return listed.sessions.length;
+            }, workspaceId!),
+          { timeout: 30_000 },
+        )
+        .toBe(1);
+      durableParent = await page.evaluate(async (id) => {
+        const listed = await window.piDeck.chat.listSessions({
+          workspaceId: id,
+        });
+        if (listed.sessions.length !== 1) {
+          throw new Error("Expected exactly one backend parent session");
+        }
+        const [parent] = listed.sessions;
+        if (parent === undefined) {
+          throw new Error("Expected the sole backend session to be the parent");
+        }
+        return {
+          sessionFile: parent.sessionFile,
+          sessionId: parent.sessionId,
+          title: parent.title,
+          messageCount: parent.messageCount,
+        };
+      }, workspaceId);
+      expect(durableParent).toMatchObject({
+        sessionFile: expect.any(String),
+        sessionId: expect.any(String),
+      });
+      expect(durableParent!.messageCount).toBeGreaterThan(0);
+      expect(durableParent!.sessionFile).toBe(activeParentSnapshot.sessionFile);
+      expect(durableParent!.sessionId).toBe(activeParentSnapshot.sessionId);
+      expect(fs.realpathSync(durableParent!.sessionFile)).toBe(
+        fs.realpathSync(listJsonlFiles(sessionDir)[0]!),
+      );
+      const sidebar = page.getByLabel("Sessions", { exact: true });
+      await expect(
+        sidebar.getByRole("button", {
+          name: `Session: ${durableParent!.title}`,
+          exact: true,
+        }),
+      ).toHaveCount(1);
+      await page.getByRole("button", { name: /^All Work/ }).click();
+      await expectAllWorkLaunch(page);
+      const allWorkRows = page.locator(".activity-inbox-row");
+      await expect(allWorkRows).toHaveCount(1);
+      await expect(allWorkRows.locator(".activity-inbox-row-title")).toHaveText(
+        durableParent!.title,
+      );
+      parentActivityItemId = await allWorkRows
+        .first()
+        .getAttribute("data-activity-item-id");
+      expect(parentActivityItemId).toEqual(expect.any(String));
+      await scopeWorkspace.click();
+      await expect(
+        page.locator(
+          `.workspace[data-primary-view="work"][data-work-scope="${workspaceId}"]`,
+        ),
+      ).toBeVisible();
+      const scopedWorkRows = page.locator(".activity-inbox-row");
+      await expect(scopedWorkRows).toHaveCount(1);
+      await expect(
+        scopedWorkRows.locator(".activity-inbox-row-title"),
+      ).toHaveText(durableParent!.title);
+      await expect(scopedWorkRows.first()).toHaveAttribute(
+        "data-activity-item-id",
+        parentActivityItemId!,
+      );
+      await page.getByRole("button", { name: /^All Work/ }).click();
+      await expectAllWorkLaunch(page);
+      const refreshedAllWorkRows = page.locator(".activity-inbox-row");
+      await expect(refreshedAllWorkRows).toHaveCount(1);
+      await expect(refreshedAllWorkRows.first()).toHaveAttribute(
+        "data-activity-item-id",
+        parentActivityItemId!,
+      );
+      await expect(
+        refreshedAllWorkRows.locator(".activity-inbox-row-title"),
+      ).toHaveText(durableParent!.title);
+      await expect(sidebar.locator(".session-item")).toHaveCount(1);
     } finally {
       await page.evaluate(() => {
         (
@@ -914,6 +1048,89 @@ test("real Pi production routing plans multiple private task sessions without br
         ).__stopRealPlannerStates?.();
       });
       await app.close();
+    }
+
+    const restarted = await launchPiDeck(env);
+    try {
+      await expectHealthyPreload(restarted.page);
+      await expectAllWorkLaunch(restarted.page);
+      const rediscovered = await restarted.page.evaluate(async (id) => {
+        const listed = await window.piDeck.chat.listSessions({
+          workspaceId: id,
+        });
+        if (listed.sessions.length !== 1) {
+          throw new Error("Expected exactly one rediscovered backend parent");
+        }
+        const [parent] = listed.sessions;
+        if (parent === undefined) {
+          throw new Error(
+            "Expected the sole rediscovered session to be the parent",
+          );
+        }
+        return {
+          sessionFile: parent.sessionFile,
+          sessionId: parent.sessionId,
+          title: parent.title,
+          messageCount: parent.messageCount,
+        };
+      }, workspaceId!);
+      expect(rediscovered).toEqual(durableParent);
+      const restartedSidebar = restarted.page.getByLabel("Sessions", {
+        exact: true,
+      });
+      await expect(restartedSidebar.locator(".session-item")).toHaveCount(1);
+      await expect(
+        restartedSidebar.getByRole("button", {
+          name: `Session: ${durableParent!.title}`,
+          exact: true,
+        }),
+      ).toHaveCount(1);
+      const restartedAllWorkRows = restarted.page.locator(
+        ".activity-inbox-row",
+      );
+      await expect(restartedAllWorkRows).toHaveCount(1);
+      await expect(restartedAllWorkRows.first()).toHaveAttribute(
+        "data-activity-item-id",
+        parentActivityItemId!,
+      );
+      await expect(
+        restartedAllWorkRows.locator(".activity-inbox-row-title"),
+      ).toHaveText(durableParent!.title);
+      await restarted.page
+        .getByRole("button", { name: `Workspace: ${scopeName}` })
+        .click();
+      await expect(
+        restarted.page.locator(
+          `.workspace[data-primary-view="work"][data-work-scope="${workspaceId}"]`,
+        ),
+      ).toBeVisible();
+      const restartedScopedWorkRows = restarted.page.locator(
+        ".activity-inbox-row",
+      );
+      await expect(restartedScopedWorkRows).toHaveCount(1);
+      await expect(restartedScopedWorkRows.first()).toHaveAttribute(
+        "data-activity-item-id",
+        parentActivityItemId!,
+      );
+      await expect(
+        restartedScopedWorkRows.locator(".activity-inbox-row-title"),
+      ).toHaveText(durableParent!.title);
+      await expect
+        .poll(() => listJsonlFiles(sessionDir).length, {
+          message: "Restart must preserve exactly one parent JSONL session",
+          timeout: 30_000,
+        })
+        .toBe(1);
+      await restartedSidebar.locator(".session-item").first().click();
+      const restartedAssistantMessage = restarted.page
+        .getByLabel("Chat / Agent Timeline")
+        .locator(".assistant-message")
+        .last();
+      await expect(restartedAssistantMessage).toContainText(/ALPHA/i);
+      await expect(restartedAssistantMessage).toContainText(/BETA/i);
+      await expect(restartedAssistantMessage).toContainText(/GAMMA/i);
+    } finally {
+      await restarted.app.close();
     }
   } finally {
     if (process.env.PI_DECK_E2E_KEEP_REAL_SMOKE_ARTIFACTS !== "1")

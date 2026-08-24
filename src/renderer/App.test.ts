@@ -1542,6 +1542,34 @@ describe("renderer session actions", () => {
     ]);
   });
 
+  it("uses the refreshed durable title for an attached saved session", () => {
+    const runtime = {
+      ...baseSession(),
+      id: "runtime-a",
+      workspaceId: "workspace-a",
+      runtimeBacked: true,
+      sessionFile: "/sessions/parent.jsonl",
+      title: "Snapshot title",
+    };
+    const saved = {
+      ...runtime,
+      id: "/sessions/parent.jsonl",
+      runtimeBacked: false,
+      resumeBacked: true,
+      title: "Durable title",
+    };
+
+    const result = __rendererTestHooks.replaceWorkspaceSavedRows(
+      [runtime] as any,
+      "workspace-a",
+      [saved] as any,
+      {},
+    );
+
+    expect(result).toHaveLength(1);
+    expect((result[0] as any).title).toBe("Durable title");
+  });
+
   it("uses the session working folder for attachments over the workspace default", () => {
     const workspace = {
       id: "workspace-a",
@@ -2326,11 +2354,16 @@ describe("renderer message_update reduction", () => {
     expect(afterThinking.timeline).toEqual(current.timeline);
   });
 
-  it("uses Pi's production sessionName as the snapshot title", () => {
+  it("uses Pi's production sessionName and session identity from the snapshot", () => {
     const session = __rendererTestHooks.sessionFromSnapshot({
       runtimeId: "runtime-1",
       backendMode: "real",
-      state: { cwd: "/tmp/project", sessionName: "  Named by Pi  " },
+      state: {
+        cwd: "/tmp/project",
+        sessionName: "  Named by Pi  ",
+        sessionFile: "/canonical/sessions/parent.jsonl",
+        sessionId: "parent-session-id",
+      },
       messages: [
         {
           id: "user-1",
@@ -2341,6 +2374,8 @@ describe("renderer message_update reduction", () => {
     } as any);
 
     expect(session.title).toBe("Named by Pi");
+    expect(session.sessionFile).toBe("/canonical/sessions/parent.jsonl");
+    expect(session.sessionId).toBe("parent-session-id");
   });
 
   it("upserts a runtime snapshot so workflow runtime sessions can be selected", () => {

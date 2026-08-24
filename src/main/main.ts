@@ -5710,10 +5710,12 @@ async function getChatSnapshotForRuntime(
   const messages = options.skipMessages
     ? []
     : await adapter.getMessages(runtimeId);
+  let canonicalSessionFile: string | undefined;
   if (typeof state.sessionFile === "string") {
-    const canonicalSessionFile =
-      (await safeRealpath(state.sessionFile)) ??
-      path.resolve(state.sessionFile);
+    const resolvedSessionFile = await safeRealpath(state.sessionFile);
+    canonicalSessionFile =
+      resolvedSessionFile ??
+      (await canonicalSessionPathForMissingFile(state.sessionFile));
     chatRuntimeSessionFiles.set(runtimeId, canonicalSessionFile);
     chatSessionFileLocks.set(canonicalSessionFile, runtimeId);
     // Model/thinking updates intentionally omit get_messages. Merge their
@@ -5767,7 +5769,13 @@ async function getChatSnapshotForRuntime(
     backendMode: mode,
     workspaceId,
     ...(projectId !== undefined ? { projectId } : {}),
-    state: { ...state, cwd: state.cwd ?? chatWorkerCwds.get(runtimeId) },
+    state: {
+      ...state,
+      ...(canonicalSessionFile !== undefined
+        ? { sessionFile: canonicalSessionFile }
+        : {}),
+      cwd: state.cwd ?? chatWorkerCwds.get(runtimeId),
+    },
     messages,
   };
 }
@@ -5808,6 +5816,17 @@ async function safeRealpath(filePath: string): Promise<string | undefined> {
   } catch {
     return undefined;
   }
+}
+
+/** Canonicalize a Pi destination even while Pi has not created its JSONL yet. */
+async function canonicalSessionPathForMissingFile(
+  filePath: string,
+): Promise<string> {
+  const resolved = path.resolve(filePath);
+  const canonicalDirectory = await safeRealpath(path.dirname(resolved));
+  return canonicalDirectory === undefined
+    ? resolved
+    : path.join(canonicalDirectory, path.basename(resolved));
 }
 
 async function resolvePromptImageSettings(

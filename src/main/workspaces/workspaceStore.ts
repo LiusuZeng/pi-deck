@@ -1287,7 +1287,9 @@ function sessionSummaryFromSnapshot(
   return chatSessionSummarySchema.parse({
     id: sessionFile,
     sessionFile,
-    title: options.title ?? path.basename(sessionFile, ".jsonl"),
+    // State-only model/thinking snapshots omit title. Preserve a prior durable
+    // title through sessionRefFromSummary; only a new reference uses basename.
+    title: options.title ?? "",
     updatedAtMs: options.updatedAtMs ?? Date.now(),
     messageCount: options.messageCount ?? 0,
     ...(options.sessionId ? { sessionId: options.sessionId } : {}),

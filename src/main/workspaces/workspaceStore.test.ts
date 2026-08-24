@@ -198,6 +198,41 @@ test("WorkspaceStore persists membership once by canonical file and projects cac
   assert.equal((await store.getSessionRefs(right.id)).length, 0);
 });
 
+test("WorkspaceStore preserves a durable title across title-less model and thinking snapshots", async () => {
+  const { root, home } = await temporaryHome();
+  const store = new WorkspaceStore(home);
+  const workspace = await store.create({ name: "Snapshots" });
+  const sessionFile = path.join(root, "parent.jsonl");
+
+  await store.upsertSessionRefFromSnapshot({
+    workspaceId: workspace.id,
+    sessionFile,
+    sessionId: "parent-id",
+    title: "Durable parent title",
+    messageCount: 3,
+  });
+  // Model and thinking updates are state-only snapshots and have no title.
+  await store.upsertSessionRefFromSnapshot({
+    workspaceId: workspace.id,
+    sessionFile,
+    sessionId: "parent-id",
+  });
+  const preserved = await store.getSessionRefs(workspace.id);
+  assert.equal(preserved[0]?.title, "Durable parent title");
+
+  const newFile = path.join(root, "new-parent.jsonl");
+  await store.upsertSessionRefFromSnapshot({
+    workspaceId: workspace.id,
+    sessionFile: newFile,
+  });
+  assert.equal(
+    (await store.getSessionRefs(workspace.id)).find(
+      (ref) => ref.sessionFile === path.resolve(newFile),
+    )?.title,
+    "new-parent",
+  );
+});
+
 test("WorkspaceStore validates an entire refresh batch before changing membership", async () => {
   const { root, home } = await temporaryHome();
   const store = new WorkspaceStore(home);

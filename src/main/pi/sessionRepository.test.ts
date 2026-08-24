@@ -105,6 +105,241 @@ test("refreshes one explicit session summary without scanning the repository", a
   assert.equal(result.summary?.title, "Use the prompt as the title");
   assert.equal(result.summary?.messageCount, 1);
   assert.equal(result.summary?.sessionFile, await fs.realpath(sessionFile));
+
+  // This is Pi's observed metadata record shape. Name selection is JSONL
+  // append order, rather than timestamp order, because Pi may write updates
+  // with timestamps that do not sort monotonically.
+  await fs.appendFile(
+    sessionFile,
+    `\n${JSON.stringify({
+      type: "session_info",
+      timestamp: "2026-08-03T03:48:34.000Z",
+      name: "  First\nname  ",
+    })}`,
+  );
+  const named = await readPiSessionSummary({ sessionFile, sessionDir });
+  assert.equal(named.summary?.title, "First name");
+
+  await fs.appendFile(
+    sessionFile,
+    `\n${JSON.stringify({
+      type: "session_info",
+      timestamp: "2026-08-03T03:48:33.000Z",
+      name: "Second name",
+    })}`,
+  );
+  const latestByRecordOrder = await scanSessionRepository({ sessionDir });
+  assert.equal(latestByRecordOrder.sessions[0]?.title, "Second name");
+
+  await fs.appendFile(
+    sessionFile,
+    `\n${JSON.stringify({
+      type: "session_info",
+      timestamp: "2026-08-03T03:48:35.000Z",
+      name: 42,
+    })}`,
+  );
+  const malformedIgnored = await readPiSessionSummary({
+    sessionFile,
+    sessionDir,
+  });
+  assert.equal(malformedIgnored.summary?.title, "Second name");
+
+  await fs.appendFile(
+    sessionFile,
+    `\n${JSON.stringify({
+      type: "session_info",
+      timestamp: "2026-08-03T03:48:36.000Z",
+      name: " \t ",
+    })}`,
+  );
+  const clearedName = await scanSessionRepository({ sessionDir });
+  assert.equal(clearedName.sessions[0]?.title, "Use the prompt as the title");
+  assert.equal(clearedName.sessions[0]?.messageCount, 1);
+});
+
+test("bounds explicit summary metadata bytes and wall time", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-deck-metadata-"));
+  const project = path.join(root, "project");
+  const sessionDir = path.join(root, "sessions");
+  const sessionFile = path.join(sessionDir, "bounded.jsonl");
+  await fs.mkdir(project, { recursive: true });
+  await fs.mkdir(sessionDir, { recursive: true });
+  await fs.writeFile(
+    sessionFile,
+    [
+      JSON.stringify({ type: "session", id: "bounded", cwd: project }),
+      JSON.stringify({
+        type: "message",
+        message: { role: "user", content: "Prompt" },
+      }),
+      "not-json".repeat(1_000),
+      JSON.stringify({ type: "session_info", name: "Durable name" }),
+    ].join("\n"),
+  );
+
+  const byteCapped = await readPiSessionSummary({
+    sessionFile,
+    sessionDir,
+    maxBytesPerFile: 256,
+    maxTotalBytes: 256,
+  });
+  assert.ok(
+    byteCapped.diagnostics.some((diagnostic) =>
+      diagnostic.includes(
+        "Stopped session metadata scan after reading 0 bytes",
+      ),
+    ),
+  );
+
+  const deadlineCapped = await readPiSessionSummary({
+    sessionFile,
+    sessionDir,
+    maxBytesPerFile: 256,
+    maxTotalBytes: 512,
+    maxWallTimeMs: 0,
+  });
+  assert.ok(
+    deadlineCapped.diagnostics.some((diagnostic) =>
+      diagnostic.includes("wall-time limit"),
+    ),
+  );
+});
+
+test("discovers the latest valid session name beyond capped head and tail windows", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-deck-metadata-"));
+  const project = path.join(root, "project");
+  const sessionDir = path.join(root, "sessions");
+  const sessionFile = path.join(sessionDir, "long.jsonl");
+  const authoritativeName = "Authoritative name outside bounded windows";
+  // Keep the metadata more than 256 KiB from both EOF and the header. The
+  // trailing malformed value must not erase the earlier valid update.
+  const padding = "not-json\n".repeat(40_000);
+  await fs.mkdir(project, { recursive: true });
+  await fs.mkdir(sessionDir, { recursive: true });
+  await fs.writeFile(
+    sessionFile,
+    [
+      JSON.stringify({
+        type: "session",
+        id: "long-session",
+        timestamp: "2026-08-03T03:48:31.582Z",
+        cwd: project,
+      }),
+      JSON.stringify({
+        type: "message",
+        message: { role: "user", content: "Capped prompt title" },
+      }),
+      padding,
+      JSON.stringify({ type: "session_info", name: authoritativeName }),
+      padding,
+      JSON.stringify({ type: "session_info", name: null }),
+    ].join("\n"),
+  );
+
+  const scanned = await scanSessionRepository({ sessionDir });
+  const explicit = await readPiSessionSummary({ sessionFile, sessionDir });
+  for (const summary of [scanned.sessions[0], explicit.summary]) {
+    assert.equal(summary?.title, authoritativeName);
+    assert.equal(summary?.messageCount, 1);
+    assert.equal(summary?.sessionFile, await fs.realpath(sessionFile));
+  }
+});
+
+test("uses a latest empty session name to clear an older name in a long file", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-deck-metadata-"));
+  const project = path.join(root, "project");
+  const sessionDir = path.join(root, "sessions");
+  const sessionFile = path.join(sessionDir, "cleared-long.jsonl");
+  // Keep the older name outside normal bounded head/tail parsing windows.
+  const padding = "not-json\n".repeat(40_000);
+  await fs.mkdir(project, { recursive: true });
+  await fs.mkdir(sessionDir, { recursive: true });
+  await fs.writeFile(
+    sessionFile,
+    [
+      JSON.stringify({ type: "session", id: "cleared-long", cwd: project }),
+      JSON.stringify({
+        type: "message",
+        message: { role: "user", content: "Fallback prompt title" },
+      }),
+      padding,
+      JSON.stringify({ type: "session_info", name: "Older durable name" }),
+      padding,
+      JSON.stringify({ type: "session_info", name: " \t " }),
+    ].join("\n"),
+  );
+
+  const scanned = await scanSessionRepository({ sessionDir });
+  const explicit = await readPiSessionSummary({ sessionFile, sessionDir });
+  for (const summary of [scanned.sessions[0], explicit.summary]) {
+    assert.equal(summary?.title, "Fallback prompt title");
+    assert.equal(summary?.messageCount, 1);
+  }
+});
+
+test("scans CRLF metadata across chunks and skips an oversized newline-free tail", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-deck-metadata-"));
+  const project = path.join(root, "project");
+  const sessionDir = path.join(root, "sessions");
+  const sessionFile = path.join(sessionDir, "boundary.jsonl");
+  const latestName = "Name split across reverse scan chunks";
+  const metadata = JSON.stringify({ type: "session_info", name: latestName });
+  await fs.mkdir(project, { recursive: true });
+  await fs.mkdir(sessionDir, { recursive: true });
+  // Align the final reverse chunk boundary through the CRLF metadata record.
+  const oversizedTailBytes =
+    1024 * 1024 + 64 * 1024 - Math.floor(metadata.length / 2) - 2;
+  await fs.writeFile(
+    sessionFile,
+    [
+      JSON.stringify({ type: "session", id: "boundary", cwd: project }),
+      JSON.stringify({
+        type: "message",
+        message: { role: "user", content: "Prompt title" },
+      }),
+      metadata,
+      "z".repeat(oversizedTailBytes),
+    ].join("\r\n"),
+  );
+
+  const result = await readPiSessionSummary({ sessionFile, sessionDir });
+  assert.equal(result.summary?.title, latestName);
+  assert.ok(
+    result.diagnostics.some((diagnostic) =>
+      diagnostic.includes("Skipped oversized session metadata record"),
+    ),
+  );
+});
+
+test("counts reverse metadata reads against the repository byte budget", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-deck-metadata-"));
+  const project = path.join(root, "project");
+  const sessionDir = path.join(root, "sessions");
+  await fs.mkdir(project, { recursive: true });
+  await fs.mkdir(sessionDir, { recursive: true });
+  await fs.writeFile(
+    path.join(sessionDir, "metadata.jsonl"),
+    [
+      JSON.stringify({ type: "session", id: "metadata", cwd: project }),
+      JSON.stringify({ type: "session_info", name: "Stored name" }),
+    ].join("\n"),
+  );
+
+  const bytes = (await fs.stat(path.join(sessionDir, "metadata.jsonl"))).size;
+  const result = await scanSessionRepository({
+    sessionDir,
+    maxBytesPerFile: 1024,
+    maxTotalBytes: bytes * 2,
+  });
+  assert.equal(result.sessions[0]?.title, "Stored name");
+  assert.ok(
+    result.diagnostics.some((diagnostic) =>
+      diagnostic.includes(
+        `Stopped session scan after reading ${bytes * 2} bytes`,
+      ),
+    ),
+  );
 });
 
 describe("Pi session eligibility validation", () => {

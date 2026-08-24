@@ -5947,12 +5947,15 @@ function replaceWorkspaceSavedRows(
   composerDrafts: ComposerDraftsBySession,
 ): SessionViewModel[] {
   return mergeSessions(
-    sessions.filter(
-      (session) =>
-        session.runtimeBacked ||
-        session.draftSession === true ||
-        hasComposerDraft(composerDrafts, session.id) ||
-        session.workspaceId !== workspaceId,
+    retainRuntimeTitlesFromSavedRows(
+      sessions.filter(
+        (session) =>
+          session.runtimeBacked ||
+          session.draftSession === true ||
+          hasComposerDraft(composerDrafts, session.id) ||
+          session.workspaceId !== workspaceId,
+      ),
+      savedRows,
     ),
     savedRows,
   );
@@ -5967,15 +5970,39 @@ function replaceWorkspaceTreeSavedRows(
 ): SessionViewModel[] {
   const ids = new Set(workspaceIds);
   return mergeSessions(
-    sessions.filter(
-      (session) =>
-        session.runtimeBacked ||
-        session.draftSession === true ||
-        hasComposerDraft(composerDrafts, session.id) ||
-        !ids.has(session.workspaceId),
+    retainRuntimeTitlesFromSavedRows(
+      sessions.filter(
+        (session) =>
+          session.runtimeBacked ||
+          session.draftSession === true ||
+          hasComposerDraft(composerDrafts, session.id) ||
+          !ids.has(session.workspaceId),
+      ),
+      savedRows,
     ),
     savedRows,
   );
+}
+
+/** Saved Pi metadata is authoritative when an attached runtime shares its file. */
+function retainRuntimeTitlesFromSavedRows(
+  sessions: SessionViewModel[],
+  savedRows: SessionViewModel[],
+): SessionViewModel[] {
+  const savedTitles = new Map(
+    savedRows
+      .filter((session) => session.sessionFile !== undefined)
+      .map((session) => [session.sessionFile!, session.title]),
+  );
+  return sessions.map((session) => {
+    const title =
+      session.runtimeBacked && session.sessionFile !== undefined
+        ? savedTitles.get(session.sessionFile)
+        : undefined;
+    return title === undefined || title === session.title
+      ? session
+      : { ...session, title };
+  });
 }
 
 function initialWorkspaceDialogName(
@@ -6411,6 +6438,9 @@ function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
   }
   if (typeof snapshot.state.sessionFile === "string") {
     session.sessionFile = snapshot.state.sessionFile;
+  }
+  if (typeof snapshot.state.sessionId === "string") {
+    session.sessionId = snapshot.state.sessionId;
   }
   if (modelLabel.length > 0) {
     session.modelLabel = modelLabel;
