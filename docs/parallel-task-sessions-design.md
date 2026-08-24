@@ -1,10 +1,10 @@
 # Parallel Task Sessions Design
 
-Status: **Implemented in the v0.6 source candidate; final candidate validation pending**
+Status: **Implemented for v0.6.0.** Exact product candidate `29cb814` passed CI-equivalent and authenticated validation per the [v0.6.0 validation record](reviews/v0.6-unified-work-release-validation.md); final merged-main validation remains required before the tag.
 
 Interactive multitasking predates v0.5.5. The deterministic private Parallel
-task-session routing described in this contract shipped in v0.5.5; v0.6 carries
-that routing forward and integrates it with Unified Work.
+task-session routing described in this contract shipped in v0.5.5; the v0.6.0
+implementation carries that routing forward and integrates it with Unified Work.
 
 This document is the canonical product and engineering contract for ad-hoc
 parallel work in Pi Deck. It is separate from Agent Workflows, which are saved,
@@ -289,7 +289,7 @@ bridge, but by itself does not verify deterministic product routing.
 
 ## 11. Integration status
 
-The v0.6 source candidate carries forward the deterministic private Parallel
+The v0.6.0 implementation carries forward the deterministic private Parallel
 task-session routing shipped in v0.5.5 and integrates it with Unified Work:
 
 - production sends carry an explicit parent/task-session destination;
@@ -311,7 +311,8 @@ explicitly opt-in transport. Its model-visible tool is disabled during ordinary
 product sessions; generated parent instructions additionally prohibit
 model-elected use when compatibility mode is enabled.
 
-Final release validation remains gated by the exact CI-equivalent and
-authenticated real-Pi commands in [the release checklist](release-checklist.md)
-run on the final candidate HEAD. This design document is a product contract,
-not validation evidence.
+The exact product candidate `29cb814` passed CI-equivalent and authenticated
+validation as recorded in the [v0.6.0 validation record](reviews/v0.6-unified-work-release-validation.md).
+Final merged-main release validation remains required before the tag under [the
+release checklist](release-checklist.md). This design document is a product
+contract, not validation evidence.
