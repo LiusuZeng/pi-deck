@@ -37,6 +37,10 @@ function waitForEvents(
   });
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function tempDir(name: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), name));
 }
@@ -103,6 +107,64 @@ test("fake RPC production-shaped profile uses realistic documentation labels", a
   }
 });
 
+test("fake RPC configures the extension UI auto-complete timeout", async () => {
+  const client = spawnFakeRpc([
+    "--prompt-scenario",
+    "extension-ui",
+    "--extension-ui-auto-complete-timeout-ms",
+    "25",
+    "--stream-delay-ms",
+    "1",
+  ]);
+  try {
+    const extensionRequest = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "extension_ui_request"),
+    );
+    const completed = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "agent_end"),
+    );
+    await client.request("prompt", { message: "timeout fixture" });
+    const request = (await extensionRequest).find(
+      (event) => event.type === "extension_ui_request",
+    ) as JsonObject;
+    assert.equal(request.timeout, 25);
+
+    const events = await completed;
+    assert.equal((events.at(-1) as JsonObject).status, "completed");
+  } finally {
+    client.close();
+  }
+});
+
+test("fake RPC retains the default extension UI timeout for invalid values", async () => {
+  for (const timeout of [
+    "-1",
+    "2147483648",
+    "9007199254740992",
+    "not-a-number",
+  ]) {
+    const client = spawnFakeRpc([
+      "--prompt-scenario",
+      "extension-ui",
+      "--extension-ui-auto-complete-timeout-ms",
+      timeout,
+    ]);
+    try {
+      const extensionRequest = waitForEvents(client, (events) =>
+        events.some((event) => event.type === "extension_ui_request"),
+      );
+      await client.request("prompt", { message: `invalid timeout ${timeout}` });
+      const request = (await extensionRequest).find(
+        (event) => event.type === "extension_ui_request",
+      ) as JsonObject;
+      assert.equal(request.timeout, 5_000);
+      await client.send({ type: "extension_ui_response", id: request.id });
+    } finally {
+      client.close();
+    }
+  }
+});
+
 test("fake RPC can reject a configured command while retaining the worker", async () => {
   const client = spawnFakeRpc(["--fail-command", "set_model"]);
   try {
@@ -158,6 +220,39 @@ test("fake RPC abort fixture stops work and emits an aborted agent_end", async (
     assert.equal(abortResult, null);
     await aborted;
   } finally {
+    client.close();
+  }
+});
+
+test("fake RPC abort clears a pending extension UI request and timer", async () => {
+  const client = spawnFakeRpc([
+    "--prompt-scenario",
+    "extension-ui",
+    "--extension-ui-auto-complete-timeout-ms",
+    "25",
+  ]);
+  const events: RpcEventRecord[] = [];
+  const onEvent = (event: RpcEventRecord): void => {
+    events.push(event);
+  };
+  client.on("event", onEvent);
+  try {
+    const extensionRequest = waitForEvents(client, (received) =>
+      received.some((event) => event.type === "extension_ui_request"),
+    );
+    await client.request("prompt", { message: "abort extension UI fixture" });
+    const request = (await extensionRequest).find(
+      (event) => event.type === "extension_ui_request",
+    ) as JsonObject;
+    await client.request("abort");
+    await client.send({ type: "extension_ui_response", id: request.id });
+    await delay(50);
+
+    const agentEnds = events.filter((event) => event.type === "agent_end");
+    assert.equal(agentEnds.length, 1);
+    assert.equal((agentEnds[0] as JsonObject).status, "aborted");
+  } finally {
+    client.off("event", onEvent);
     client.close();
   }
 });
@@ -254,6 +349,7 @@ test("fake RPC prompt scenario exposes reducer extension event fixtures", async 
     assert.equal(extensionRequest.method, "confirm");
     assert.equal(extensionRequest.id, "ext_fake_dialog_1");
     assert.equal(extensionRequest.title, "Fake confirm");
+    assert.equal(extensionRequest.timeout, 5_000);
     assert.equal(
       (
         (events.find((event) => event.type === "queue_update") as JsonObject)

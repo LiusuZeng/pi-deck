@@ -28,6 +28,7 @@ import type {
   WorkflowStepDefinition,
   WorkflowTransition,
 } from "../../shared/workflowSchemas.js";
+import { isWorkspaceRuntimeLifecycleConflictError } from "../workspaceRuntimeLifecycleGate.js";
 import { z } from "zod";
 interface WorkflowMessage {
   role: string;
@@ -354,6 +355,16 @@ export class WorkflowScheduler {
       try {
         session = await this.dependencies.createSession(run.workspaceId);
       } catch (error) {
+        // A workspace lifecycle conflict is a transient archive boundary, not
+        // a workflow failure. Preserve ready work until the workspace can be
+        // scheduled again (for example after restore).
+        if (isWorkspaceRuntimeLifecycleConflictError(error)) {
+          if (step !== undefined) {
+            const queued = markWorkflowStepQueued(run, step.id, this.now());
+            return this.persistAndEmit(this.runsSet(queued));
+          }
+          return run;
+        }
         // Capacity is intentionally not inferred from an arbitrary error. A
         // failed allocation is safe to leave queued; startup/configuration
         // errors are actionable and must not masquerade as queued work.
@@ -721,6 +732,10 @@ function isCapacityError(error: unknown): boolean {
   );
 }
 
+function isArchivedWorkspaceError(error: unknown): boolean {
+  return error instanceof Error && /workspace is archived/i.test(error.message);
+}
+
 interface FinalAssistant {
   content?: string;
   error?: boolean;
@@ -785,6 +800,22 @@ function findFinalAssistant(
  * Unlike WorkflowScheduler it intentionally claims every ready occurrence;
  * worker capacity is the only concurrency limiter.
  */
+export interface WorkflowOccurrenceSchedulerDependencies extends Omit<
+  WorkflowSchedulerDependencies,
+  "getRun" | "persist" | "emit"
+> {
+  getRun?(runId: string): Promise<WorkflowRoleRun>;
+  persist(run: WorkflowRoleRun): Promise<WorkflowRoleRun>;
+  emit(run: WorkflowRoleRun): void;
+  /** A single archive-release wake-up; callers must not turn this into a timer. */
+  onWorkspaceRuntimeLifecycleAvailable?(
+    workspaceId: string,
+    listener: () => void,
+  ): () => void;
+  /** Used to leave queued work untouched while its workspace is archived. */
+  isWorkspaceAvailable?(workspaceId: string): Promise<boolean>;
+}
+
 export class WorkflowOccurrenceScheduler {
   private readonly runs = new Map<string, WorkflowRoleRun>();
   /** A runtime is owned by one occurrence; deleting it before mutation makes late events harmless. */
@@ -795,35 +826,98 @@ export class WorkflowOccurrenceScheduler {
   private readonly now: () => number;
   /** Serialize read-modify-write transitions for each canonical run. */
   private readonly mutationTails = new Map<string, Promise<unknown>>();
+  /** Lifecycle-conflict queues are distinct from fan-out capacity queues in memory. */
+  private readonly lifecycleQueued = new Map<string, Set<string>>();
+  /** One bounded wake listener per workspace with queued allocation work. */
+  private readonly lifecycleWakeUnsubscribers = new Map<string, () => void>();
+  /** A release can race queue persistence; retry that missed boundary once. */
+  private readonly lifecycleWakePending = new Set<string>();
   constructor(
-    private readonly dependencies: Omit<
-      WorkflowSchedulerDependencies,
-      "getRun" | "persist" | "emit"
-    > & {
-      getRun?(runId: string): Promise<WorkflowRoleRun>;
-      persist(run: WorkflowRoleRun): Promise<WorkflowRoleRun>;
-      emit(run: WorkflowRoleRun): void;
-    },
+    private readonly dependencies: WorkflowOccurrenceSchedulerDependencies,
   ) {
     this.now = dependencies.now ?? (() => Date.now());
   }
   async schedule(run: WorkflowRoleRun): Promise<WorkflowRoleRun> {
+    this.ensureLifecycleWake(run.workspaceId);
     return this.serialize(run.id, async () => {
-      const now = this.now();
-      // Only scheduler-capacity queues are revived here. Fan-out queues remain
-      // owned by their Orchestrator, which releases them as concurrency slots open.
-      const resumable = {
-        ...run,
-        occurrences: run.occurrences.map((item) =>
-          item.status === "queued" && !item.parentOrchestratorRunId
-            ? { ...item, status: "ready" as const, updatedAtMs: now }
-            : item,
-        ),
-        updatedAtMs: now,
-      };
-      this.runs.set(resumable.id, resumable);
-      return this.pump(resumable.id);
+      if (
+        run.occurrences.some((item) => item.status === "queued") &&
+        !(await this.workspaceAvailable(run.workspaceId))
+      ) {
+        this.runs.set(run.id, run);
+        this.cleanupLifecycleWake(run.id, run);
+        return run;
+      }
+      const result = await this.scheduleCurrent(run);
+      this.cleanupLifecycleWake(run.id);
+      return result;
     });
+  }
+
+  /**
+   * Release one bounded batch of queued runs after an archive claim ends. The
+   * mutation is serialized behind any in-flight allocation, so a release
+   * cannot race the queue persistence that caused it. If the workspace is now
+   * archived, no allocation is attempted and the listener remains for a later
+   * restore/re-hydration boundary.
+   */
+  async releaseQueued(workspaceId: string): Promise<void> {
+    const runIds = [...this.runs.values()]
+      .filter(
+        (run) =>
+          run.workspaceId === workspaceId && this.hasLifecycleWakeQueue(run),
+      )
+      .map((run) => run.id);
+    for (const runId of runIds) {
+      await this.serialize(runId, async () => {
+        const current = await this.current(runId);
+        if (
+          current === undefined ||
+          current.workspaceId !== workspaceId ||
+          !this.hasLifecycleWakeQueue(current)
+        )
+          return;
+        if (!(await this.workspaceAvailable(workspaceId))) return;
+        const result = await this.scheduleCurrent(current, {
+          lifecycleOnly: true,
+        });
+        this.cleanupLifecycleWake(runId, result);
+      });
+    }
+    // The archive may release before the allocation failure has been persisted.
+    // Leave the listener in place and remember the boundary; the in-flight
+    // schedule mutation will retry once it has persisted the lifecycle queue.
+    if (runIds.length === 0) {
+      if (this.lifecycleWakeUnsubscribers.has(workspaceId))
+        this.lifecycleWakePending.add(workspaceId);
+      return;
+    }
+    this.cleanupWorkspaceLifecycleWake(workspaceId);
+  }
+
+  private async scheduleCurrent(
+    run: WorkflowRoleRun,
+    options: { lifecycleOnly?: boolean } = {},
+  ): Promise<WorkflowRoleRun> {
+    const now = this.now();
+    // Only scheduler-capacity queues are revived by a normal schedule. An
+    // archive-release wake-up revives only occurrences explicitly remembered
+    // as lifecycle-conflict queues; fan-out capacity remains orchestrator-owned.
+    const lifecycleIds = this.lifecycleQueued.get(run.id);
+    const resumable = {
+      ...run,
+      occurrences: run.occurrences.map((item) =>
+        item.status === "queued" &&
+        (options.lifecycleOnly === true
+          ? lifecycleIds?.has(item.id) === true
+          : !item.parentOrchestratorRunId || lifecycleIds?.has(item.id))
+          ? { ...item, status: "ready" as const, updatedAtMs: now }
+          : item,
+      ),
+      updatedAtMs: now,
+    };
+    this.runs.set(resumable.id, resumable);
+    return this.pump(resumable.id);
   }
   /** Stops owned sessions before persisting cancellation, so late completions lose ownership. */
   async stop(runId: string): Promise<WorkflowRoleRun> {
@@ -837,7 +931,9 @@ export class WorkflowOccurrenceScheduler {
         this.active.delete(runtimeId);
         await this.closeQuietly(runtimeId);
       }
-      return this.save(stopWorkflowRoleRun(run, this.now()));
+      const stopped = await this.save(stopWorkflowRoleRun(run, this.now()));
+      this.cleanupLifecycleWake(runId, stopped);
+      return stopped;
     });
   }
   async retry(runId: string, occurrenceId: string): Promise<WorkflowRoleRun> {
@@ -950,6 +1046,7 @@ export class WorkflowOccurrenceScheduler {
         await this.pump(owner.runId);
       }
     });
+    this.cleanupLifecycleWake(owner.runId);
   }
   private serialize<T>(runId: string, operation: () => Promise<T>): Promise<T> {
     const previous = this.mutationTails.get(runId) ?? Promise.resolve();
@@ -967,6 +1064,7 @@ export class WorkflowOccurrenceScheduler {
     let run = await this.current(runId);
     if (!run || ["stopped", "completed", "failed"].includes(run.status))
       return run!;
+    this.ensureLifecycleWake(run.workspaceId);
     let advanced = false;
     for (const occurrence of readyWorkflowOccurrences(run)) {
       if (occurrence.role === "orchestrator") {
@@ -1025,8 +1123,18 @@ export class WorkflowOccurrenceScheduler {
           this.active.delete(runtimeId);
           await this.closeQuietly(runtimeId);
         }
+        const lifecycleConflict =
+          isWorkspaceRuntimeLifecycleConflictError(error) ||
+          isArchivedWorkspaceError(error) ||
+          (this.dependencies.isWorkspaceAvailable !== undefined &&
+            !(await this.workspaceAvailable(run.workspaceId)));
+        if (lifecycleConflict) {
+          this.rememberLifecycleQueue(run.id, occurrence.id);
+        } else {
+          this.forgetLifecycleQueue(run.id, occurrence.id);
+        }
         run = await this.save(
-          isCapacityError(error)
+          isCapacityError(error) || lifecycleConflict
             ? queueWorkflowOccurrence(run, occurrence.id, this.now())
             : failWorkflowOccurrence(
                 run,
@@ -1037,10 +1145,101 @@ export class WorkflowOccurrenceScheduler {
         );
       }
     }
-    return advanced && readyWorkflowOccurrences(run).length > 0
-      ? this.pump(runId)
-      : run;
+    const result =
+      advanced && readyWorkflowOccurrences(run).length > 0
+        ? await this.pump(runId)
+        : run;
+    this.cleanupLifecycleWake(runId, result);
+    return result;
   }
+
+  private ensureLifecycleWake(workspaceId: string): void {
+    if (
+      this.lifecycleWakeUnsubscribers.has(workspaceId) ||
+      this.dependencies.onWorkspaceRuntimeLifecycleAvailable === undefined
+    )
+      return;
+    const unsubscribe = this.dependencies.onWorkspaceRuntimeLifecycleAvailable(
+      workspaceId,
+      () => {
+        void this.releaseQueued(workspaceId).catch(() => undefined);
+      },
+    );
+    this.lifecycleWakeUnsubscribers.set(workspaceId, unsubscribe);
+  }
+
+  private hasLifecycleWakeQueue(run: WorkflowRoleRun): boolean {
+    const lifecycleIds = this.lifecycleQueued.get(run.id);
+    return (
+      lifecycleIds !== undefined &&
+      run.occurrences.some(
+        (item) => item.status === "queued" && lifecycleIds.has(item.id),
+      )
+    );
+  }
+
+  private rememberLifecycleQueue(runId: string, occurrenceId: string): void {
+    const ids = this.lifecycleQueued.get(runId) ?? new Set<string>();
+    ids.add(occurrenceId);
+    this.lifecycleQueued.set(runId, ids);
+    const run = this.runs.get(runId);
+    if (run !== undefined) this.ensureLifecycleWake(run.workspaceId);
+  }
+
+  private forgetLifecycleQueue(runId: string, occurrenceId: string): void {
+    const ids = this.lifecycleQueued.get(runId);
+    if (ids === undefined) return;
+    ids.delete(occurrenceId);
+    if (ids.size === 0) this.lifecycleQueued.delete(runId);
+  }
+
+  private cleanupLifecycleWake(
+    runId: string,
+    run = this.runs.get(runId),
+  ): void {
+    if (run === undefined) return;
+    const lifecycleIds = this.lifecycleQueued.get(runId);
+    if (lifecycleIds !== undefined) {
+      for (const occurrenceId of lifecycleIds) {
+        const occurrence = run.occurrences.find(
+          (item) => item.id === occurrenceId,
+        );
+        if (occurrence?.status !== "queued") lifecycleIds.delete(occurrenceId);
+      }
+      if (lifecycleIds.size === 0) this.lifecycleQueued.delete(runId);
+    }
+    if (!this.hasLifecycleWakeQueue(run)) {
+      this.cleanupWorkspaceLifecycleWake(run.workspaceId);
+      return;
+    }
+    if (this.lifecycleWakePending.delete(run.workspaceId)) {
+      void this.releaseQueued(run.workspaceId).catch(() => undefined);
+    }
+  }
+
+  private cleanupWorkspaceLifecycleWake(workspaceId: string): void {
+    if (
+      [...this.runs.values()].some(
+        (run) =>
+          run.workspaceId === workspaceId && this.hasLifecycleWakeQueue(run),
+      )
+    )
+      return;
+    this.lifecycleWakePending.delete(workspaceId);
+    const unsubscribe = this.lifecycleWakeUnsubscribers.get(workspaceId);
+    if (unsubscribe !== undefined) unsubscribe();
+    this.lifecycleWakeUnsubscribers.delete(workspaceId);
+  }
+
+  private async workspaceAvailable(workspaceId: string): Promise<boolean> {
+    if (this.dependencies.isWorkspaceAvailable === undefined) return true;
+    try {
+      return await this.dependencies.isWorkspaceAvailable(workspaceId);
+    } catch {
+      return false;
+    }
+  }
+
   private async current(id: string): Promise<WorkflowRoleRun | undefined> {
     const run = this.dependencies.getRun
       ? await this.dependencies.getRun(id)

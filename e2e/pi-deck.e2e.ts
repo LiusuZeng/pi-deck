@@ -134,6 +134,62 @@ async function expectHealthyPreload(page: Page): Promise<void> {
   ).toBeVisible();
 }
 
+async function expectAllWorkLaunch(page: Page): Promise<void> {
+  const route = page.locator(
+    '.workspace[data-primary-view="work"][data-work-scope="all"]',
+  );
+  await expect(route).toBeVisible();
+  await expect(
+    route.getByRole("heading", { name: "All Work", exact: true }),
+  ).toBeVisible();
+  await expect(route.locator(".surface-title")).toHaveText("All Work");
+  await expect(route.locator(".usage-toggle")).toHaveCount(0);
+  await expect(route.locator(".activity-inbox-close")).toHaveCount(0);
+  await expect(
+    route.getByRole("button", { name: /^Close .*Work$/ }),
+  ).toHaveCount(0);
+}
+
+function sidebarNewSessionButton(page: Page) {
+  return page
+    .getByLabel("Sessions", { exact: true })
+    .getByRole("button", { name: "New session", exact: true });
+}
+
+async function enterSessionDetail(page: Page): Promise<void> {
+  const newSession = sidebarNewSessionButton(page);
+  await expect(newSession).toBeVisible();
+  await newSession.click();
+  await expect(
+    page.locator('.workspace[data-primary-view="session"]'),
+  ).toBeVisible();
+  await expect(page.getByLabel("Prompt text")).toBeVisible();
+}
+
+async function expectWorkRoute(page: Page, scope: string): Promise<void> {
+  const route = page.locator('.workspace[data-primary-view="work"]');
+  await expect(route).toBeVisible();
+  await expect(route).toHaveAttribute("data-work-scope", scope);
+}
+
+async function expectRuntimeIds(
+  page: Page,
+  runtimeIds: readonly string[],
+): Promise<void> {
+  const attachedIds = await page.evaluate(
+    async (ids) => {
+      const statuses = await Promise.all(
+        ids.map((runtimeId) =>
+          window.piDeck.chat.getRuntimeStatus({ runtimeId }),
+        ),
+      );
+      return statuses.map((status) => status.runtimeId);
+    },
+    [...runtimeIds],
+  );
+  expect(attachedIds).toEqual([...runtimeIds]);
+}
+
 function writePiSessionFixture(options: {
   sessionFile: string;
   sessionId: string;
@@ -225,6 +281,7 @@ test("workspace management UI keeps Pi JSONL membership reversible and deletion 
     // A busy runtime is a workspace-level archival guard. Runtime shutdown is
     // otherwise internal, so users do not need a separate close affordance.
     await selectWorkspaceInUi(page, path.basename(projectCwd));
+    await enterSessionDetail(page);
     await page.getByLabel("Prompt text").fill("keep archive disabled");
     await page.getByRole("button", { name: "Send" }).click();
     await expect(page.getByRole("button", { name: "Abort" })).toBeVisible();
@@ -443,6 +500,101 @@ test("workspace management UI keeps Pi JSONL membership reversible and deletion 
   }
 });
 
+test("Unified Work opens a saved sidebar row across workspaces through canonical resume", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-cross-workspace-row-"),
+  );
+  const sourceCwd = path.join(root, "source-project");
+  const agentDir = path.join(root, "agent");
+  const sessionFile = path.join(
+    agentDir,
+    "sessions",
+    "--cross-workspace--",
+    "saved-cross-workspace.jsonl",
+  );
+  fs.mkdirSync(sourceCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+  writePiSessionFixture({
+    sessionFile,
+    sessionId: "saved-cross-workspace",
+    projectCwd: sourceCwd,
+  });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({ root, projectCwd: sourceCwd, agentDir }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    const sourceName = path.basename(sourceCwd);
+    await createWorkspaceInUi(page, "Cross destination");
+    const destinationId = await page.evaluate(async () => {
+      const active = await window.piDeck.workspaces.getActive();
+      if (active.activeWorkspace === undefined) {
+        throw new Error("Destination workspace was not selected.");
+      }
+      return active.activeWorkspace.id;
+    });
+    await page.evaluate(
+      ({ destinationId, sessionFile }) =>
+        window.piDeck.workspaces.addSession({
+          workspaceId: destinationId,
+          sessionFile,
+        }),
+      { destinationId, sessionFile: fs.realpathSync(sessionFile) },
+    );
+    await page.getByLabel("Refresh sessions").click();
+    const savedRow = page.getByRole("button", {
+      name: "Session: saved-cross-workspace",
+    });
+    await expect(savedRow).toBeVisible();
+
+    // Leave the source workspace active so this is a direct cross-workspace
+    // sidebar selection rather than a prior workspace navigation. Keep a
+    // source runtime attached as well; the transaction must not evict it.
+    await selectWorkspaceInUi(page, sourceName);
+    await enterSessionDetail(page);
+    const sourcePrompt = "Keep source runtime attached";
+    await page.getByLabel("Prompt text").fill(sourcePrompt);
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText(`Fake response to: ${sourcePrompt}`, { exact: true }),
+    ).toBeVisible();
+    const sourceRuntimeId = await page.evaluate(
+      async () => (await window.piDeck.chat.getSnapshot()).runtimeId,
+    );
+    await expectRuntimeIds(page, [sourceRuntimeId]);
+
+    await savedRow.click();
+    await expect(
+      page.locator('.workspace[data-primary-view="session"]'),
+    ).toBeVisible();
+    await expect(page.locator(".ui-status-message")).toContainText(
+      "Resumed saved Pi session.",
+    );
+    const resumedRuntimeId = await page.evaluate(
+      async () => (await window.piDeck.chat.getSnapshot()).runtimeId,
+    );
+    expect(resumedRuntimeId).not.toBe(sourceRuntimeId);
+    await expectRuntimeIds(page, [sourceRuntimeId, resumedRuntimeId]);
+    await expect(page.getByTestId("session-origin-back")).toHaveAttribute(
+      "aria-label",
+      `Back to ${sourceName} Work`,
+    );
+    await expect
+      .poll(async () =>
+        page.evaluate(
+          async () =>
+            (await window.piDeck.workspaces.getActive()).activeWorkspace
+              ?.name ?? null,
+        ),
+      )
+      .toBe("Cross destination");
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("new workspaces send with managed context and model defaults without a folder picker", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-e2e-managed-workspace-"),
@@ -469,6 +621,7 @@ test("new workspaces send with managed context and model defaults without a fold
   try {
     await expectHealthyPreload(page);
     await createWorkspaceInUi(page, "Managed topic");
+    await enterSessionDetail(page);
 
     await expect(
       page.getByRole("button", { name: /working folder/i }),
@@ -834,7 +987,18 @@ test("workspace and session archive state persists across relaunch", async () =>
           workspaceId: workspace.id,
           sessionFile: independentlyArchivedFile,
         });
-        await api.workspaces.archive({ workspaceId: workspace.id });
+        const archived = await api.workspaces.archive({
+          workspaceId: workspace.id,
+        });
+        // Leave only the stable default active so relaunch exercises the
+        // default-only disclosure path while keeping both named archives
+        // discoverable.
+        const remainingNamed = archived.workspaces.find(
+          (candidate) => candidate.isDefault !== true,
+        );
+        if (remainingNamed !== undefined) {
+          await api.workspaces.archive({ workspaceId: remainingNamed.id });
+        }
         return workspace.id;
       },
       { independentlyArchivedFile, cascadeArchivedFile },
@@ -846,6 +1010,38 @@ test("workspace and session archive state persists across relaunch", async () =>
   const secondLaunch = await launchPiDeck(env);
   try {
     await expectHealthyPreload(secondLaunch.page);
+    await expectAllWorkLaunch(secondLaunch.page);
+    const defaultWorkspace = await secondLaunch.page.evaluate(async () => {
+      const result = await window.piDeck.workspaces.getActive();
+      const workspace = result.workspaces.find(
+        (candidate) => candidate.isDefault === true,
+      );
+      if (workspace === undefined) {
+        throw new Error(
+          "Expected the stable default workspace after relaunch.",
+        );
+      }
+      return workspace;
+    });
+    await expect(
+      secondLaunch.page.getByRole("button", {
+        name: `Workspace: ${defaultWorkspace.name}`,
+      }),
+    ).toHaveCount(0);
+    await expect(
+      secondLaunch.page
+        .getByLabel("Current Work scope", { exact: true })
+        .locator("option")
+        .filter({ hasText: defaultWorkspace.name }),
+    ).toHaveCount(0);
+    await expect(
+      secondLaunch.page.getByRole("button", { name: /^Archived/ }).first(),
+    ).toBeVisible();
+    await secondLaunch.page.getByRole("button", { name: /^Archived/ }).click();
+    await expect(secondLaunch.page.getByTestId("archived-tree")).toContainText(
+      "Persistent archive topic",
+    );
+
     const persisted = await secondLaunch.page.evaluate(async (workspaceId) => {
       const api = window.piDeck;
       const listed = await api.workspaces.getActive();
@@ -1058,13 +1254,169 @@ test("fake mode launches with backend runtime and send enabled", async () => {
     await expectHealthyPreload(page);
     await expect(page.getByText(/Local demo mode active/i)).toBeVisible();
     await expect(page.getByTestId("workspace-tree")).toBeVisible();
-    await expect(
-      page.getByRole("button", { name: "Workspace: Default workspace" }),
-    ).toHaveAttribute("aria-current", "page");
+    await expectAllWorkLaunch(page);
+    await enterSessionDetail(page);
     await page.getByLabel("Prompt text").fill("fake e2e prompt");
     await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
   } finally {
     await app.close();
+  }
+});
+
+test("fake named workspace drafts keep fake backend and sidebar behavior", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-fake-workspace-draft-"),
+  );
+  const { app, page } = await launchPiDeck({
+    PI_DECK_BACKEND: "fake",
+    PI_DECK_HOME: path.join(root, "pideck-home"),
+    PI_DECK_USER_DATA_DIR: path.join(root, "user-data"),
+  });
+  try {
+    await expectHealthyPreload(page);
+    await createWorkspaceInUi(page, "Fake named workspace");
+    await selectWorkspaceInUi(page, "Fake named workspace");
+    await enterSessionDetail(page);
+
+    await expect(
+      page.getByRole("heading", { name: /Untitled new session/ }),
+    ).toBeVisible();
+    await expect(page.locator(".pi-configuration-trigger")).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Refresh sessions" }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Delete saved sessions" }),
+    ).toHaveCount(0);
+    await expect(page.locator('[data-testid^="session-actions-"]')).toHaveCount(
+      0,
+    );
+
+    const prompt = "fake named workspace prompt";
+    await page.getByLabel("Prompt text").fill(prompt);
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText(`Fake response to: ${prompt}`, { exact: true }),
+    ).toBeVisible();
+
+    const runtime = await page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      const active = await window.piDeck.workspaces.getActive();
+      return {
+        backendMode: snapshot.backendMode,
+        snapshotWorkspaceId: snapshot.workspaceId,
+        activeWorkspaceId: active.activeWorkspace?.id,
+        activeWorkspaceName: active.activeWorkspace?.name,
+      };
+    });
+    expect(runtime).toMatchObject({
+      backendMode: "fake",
+      activeWorkspaceName: "Fake named workspace",
+    });
+    expect(runtime.activeWorkspaceId).toEqual(expect.any(String));
+    expect(runtime.snapshotWorkspaceId).toBe(runtime.activeWorkspaceId);
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("default workspace stays implicit until a named workspace exists", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-default-disclosure-"),
+  );
+  const { app, page } = await launchPiDeck({
+    PI_DECK_BACKEND: "fake",
+    PI_DECK_HOME: path.join(root, "pideck-home"),
+    PI_DECK_USER_DATA_DIR: path.join(root, "user-data"),
+  });
+  try {
+    await expectHealthyPreload(page);
+    await expectAllWorkLaunch(page);
+
+    const defaultWorkspace = await page.evaluate(async () => {
+      const result = await window.piDeck.workspaces.getActive();
+      const workspace = result.workspaces.find(
+        (candidate) => candidate.isDefault === true,
+      );
+      if (workspace === undefined) {
+        throw new Error("Expected a stable default workspace.");
+      }
+      return workspace;
+    });
+    const defaultRow = page.getByRole("button", {
+      name: `Workspace: ${defaultWorkspace.name}`,
+    });
+    await expect(defaultRow).toHaveCount(0);
+    await expect(
+      page
+        .getByLabel("Current Work scope", { exact: true })
+        .locator("option")
+        .filter({ hasText: defaultWorkspace.name }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByTestId("workspace-tree").getByText("No workspaces yet.", {
+        exact: true,
+      }),
+    ).toHaveCount(0);
+    await expect(sidebarNewSessionButton(page)).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "New workspace…", exact: true }),
+    ).toBeVisible();
+    const defaultOwnedWork = page
+      .locator(".activity-inbox-row")
+      .filter({ hasText: "Extension approval request" });
+    await expect(defaultOwnedWork).toBeVisible();
+    await expect(defaultOwnedWork).not.toContainText(defaultWorkspace.name);
+    await expect(defaultOwnedWork).not.toHaveAttribute(
+      "aria-label",
+      new RegExp(defaultWorkspace.name),
+    );
+
+    const globalPrompt = "Default-only global session";
+    await enterSessionDetail(page);
+    await page.getByLabel("Prompt text").fill(globalPrompt);
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText(`Fake response to: ${globalPrompt}`, { exact: true }),
+    ).toBeVisible();
+    const globalSnapshot = await page.evaluate(() =>
+      window.piDeck.chat.getSnapshot(),
+    );
+    expect(globalSnapshot.workspaceId).toBe(defaultWorkspace.id);
+    await page.getByRole("button", { name: /^All Work/ }).click();
+    await expectAllWorkLaunch(page);
+    const persistedDefaultRow = page
+      .locator(".activity-inbox-row")
+      .filter({ hasText: globalPrompt });
+    await expect(persistedDefaultRow).toBeVisible();
+    await expect(persistedDefaultRow).not.toContainText(defaultWorkspace.name);
+
+    await createWorkspaceInUi(page, "Named disclosure workspace");
+    await expect(defaultRow).toBeVisible();
+    await expect(
+      page.getByRole("button", {
+        name: "Workspace: Named disclosure workspace",
+      }),
+    ).toBeVisible();
+    await expect(
+      page
+        .getByLabel("Current Work scope", { exact: true })
+        .locator("option")
+        .filter({ hasText: defaultWorkspace.name }),
+    ).toHaveCount(1);
+
+    const firstSessionRow = page.locator(".session-item").first();
+    const sessionList = firstSessionRow.locator("..");
+    await expect(firstSessionRow).toHaveCSS("display", "grid");
+    const sessionListBox = await sessionList.boundingBox();
+    const firstSessionRowBox = await firstSessionRow.boundingBox();
+    expect(firstSessionRowBox?.width).toBeGreaterThanOrEqual(
+      (sessionListBox?.width ?? 0) - 1,
+    );
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -1129,6 +1481,7 @@ test("icon controls retain names, neutral styles, and fit a 900×600 viewport", 
   try {
     await page.setViewportSize({ width: 900, height: 600 });
     await expectHealthyPreload(page);
+    await enterSessionDetail(page);
 
     const send = page.getByRole("button", { name: "Send" });
     await page.getByLabel("Prompt text").fill("style check");
@@ -1158,15 +1511,6 @@ test("icon controls retain names, neutral styles, and fit a 900×600 viewport", 
     await expect(userBubble).toHaveCSS("color", "rgb(47, 47, 47)");
     await expect(userBubble).toHaveCSS("box-shadow", "none");
 
-    const sessionList = page.locator(".session-list");
-    const firstSessionRow = sessionList.locator(".session-item").first();
-    await expect(firstSessionRow).toHaveCSS("display", "grid");
-    const sessionListBox = await sessionList.boundingBox();
-    const firstSessionRowBox = await firstSessionRow.boundingBox();
-    expect(firstSessionRowBox?.width).toBeGreaterThanOrEqual(
-      (sessionListBox?.width ?? 0) - 1,
-    );
-
     const sidebarToggle = page.locator(".topbar .sidebar-toggle");
     await page.getByLabel("Prompt text").hover();
     await expect(sidebarToggle).not.toHaveAttribute("aria-describedby");
@@ -1195,6 +1539,7 @@ test("long unbroken chat text does not overflow at 900×600", async () => {
   try {
     await page.setViewportSize({ width: 900, height: 600 });
     await expectHealthyPreload(page);
+    await enterSessionDetail(page);
 
     const token = "unbroken-chat-token-".repeat(180);
     const prompt = page.getByLabel("Prompt text");
@@ -1226,6 +1571,7 @@ test("composer has symmetric gutters at and below 560px", async () => {
   const { app, page } = await launchPiDeck({ PI_DECK_BACKEND: "fake" });
   try {
     await expectHealthyPreload(page);
+    await enterSessionDetail(page);
     for (const width of [560, 320]) {
       await page.setViewportSize({ width, height: 600 });
       const composer = page.locator(".composer");
@@ -1294,6 +1640,8 @@ test("appearance preference switches themes and persists across relaunch", async
   try {
     await launched.page.setViewportSize({ width: 900, height: 600 });
     await expectHealthyPreload(launched.page);
+    await expectAllWorkLaunch(launched.page);
+    await enterSessionDetail(launched.page);
     const darkTrigger = launched.page.getByRole("button", {
       name: "Appearance: Dark",
     });
@@ -1448,6 +1796,7 @@ test("working sessions expose steer, follow-up, extension, and abort interventio
   );
   try {
     await expectHealthyPreload(page);
+    await enterSessionDetail(page);
     const composer = page.getByLabel("Prompt text");
     await composer.fill("start intervention fixture");
     await page.getByRole("button", { name: "Send" }).click();
@@ -1508,6 +1857,7 @@ test("extension UI confirm request completes through renderer, IPC, and fake Pi"
   );
   try {
     await expectHealthyPreload(page);
+    await enterSessionDetail(page);
     await page.getByLabel("Prompt text").fill("confirm extension request");
     await page.getByRole("button", { name: "Send" }).click();
     await expect(page.getByText("Fake confirm", { exact: true })).toBeVisible();
@@ -1515,11 +1865,37 @@ test("extension UI confirm request completes through renderer, IPC, and fake Pi"
       page.getByText("Approve fake extension UI request?"),
     ).toBeVisible();
 
+    const waitingComposer = page.getByLabel("Prompt text");
+    await waitingComposer.fill("blocked while extension input is pending");
+    await expect(page.getByRole("button", { name: "Send" })).toBeDisabled();
+    await waitingComposer.fill("");
+
+    const waitingSessionActions = page.getByRole("button", {
+      name: "Session actions for confirm extension request",
+    });
+    await expect(waitingSessionActions).toBeVisible();
+    await waitingSessionActions.click();
+    const waitingActionsMenu = page.getByRole("menu", {
+      name: "Session actions for confirm extension request",
+    });
+    await expect(
+      waitingActionsMenu.getByRole("menuitem", {
+        name: "Move to workspace…",
+      }),
+    ).toBeDisabled();
+    await expect(
+      waitingActionsMenu.getByRole("menuitem", { name: "Archive session" }),
+    ).toBeDisabled();
+    await expect(
+      waitingActionsMenu.getByRole("menuitem", {
+        name: "Remove from workspace",
+      }),
+    ).toBeDisabled();
+    await page.keyboard.press("Escape");
+
     // A waiting worker remains in the sidebar after the user moves elsewhere;
     // receiving extension input never steals foreground selection.
-    await page
-      .getByRole("button", { name: "New session", exact: true })
-      .click();
+    await sidebarNewSessionButton(page).click();
     await expect(
       page.getByRole("heading", { name: /Untitled new session/ }),
     ).toBeVisible();
@@ -1565,6 +1941,7 @@ test("real mode renders a draft shell before an unavailable backend is touched",
   });
   try {
     await expectHealthyPreload(page);
+    await enterSessionDetail(page);
     await expect(
       page.getByRole("heading", { name: /Untitled new session/ }),
     ).toBeVisible();
@@ -1587,6 +1964,7 @@ test("fake delegation is status-only, parent-scoped, and honors direct handling"
   });
   try {
     await expectHealthyPreload(page);
+    await enterSessionDetail(page);
 
     // A fresh draft can opt in before its first prompt. The initial mode is
     // passed to worker creation so that first prompt can be delegated.
@@ -1730,6 +2108,7 @@ test("model submenu stays inside a narrow viewport", async () => {
   );
   try {
     await expectHealthyPreload(page);
+    await enterSessionDetail(page);
     await page.setViewportSize({ width: 390, height: 600 });
     await page.locator(".pi-configuration-trigger").click();
     await page.getByRole("menuitem", { name: /Fake model/ }).click();
@@ -1759,6 +2138,8 @@ test("bootstrap creates no saved session and the first draft send creates one", 
   );
   try {
     await expectHealthyPreload(page);
+    await expectAllWorkLaunch(page);
+    await enterSessionDetail(page);
     const configuration = page.locator(".pi-configuration-trigger");
     await expect(configuration).toHaveAttribute("data-model-id", "fake-model");
     await expect(configuration).toHaveAttribute(
@@ -1857,6 +2238,7 @@ test("failed draft setup releases its worker before the next retry", async () =>
   let trackingStarted = false;
   try {
     await expectHealthyPreload(page);
+    await enterSessionDetail(page);
     await expect(page.locator(".pi-configuration-trigger")).toHaveAttribute(
       "data-model-id",
       "fake-model",
@@ -2013,6 +2395,7 @@ test("metadata-only model and thinking changes preserve session title, transcrip
   try {
     await expectHealthyPreload(page);
     await selectWorkspaceInUi(page, path.basename(projectCwd));
+    await enterSessionDetail(page);
     await page.getByLabel("Prompt text").fill(prompt);
     await page.getByRole("button", { name: "Send" }).click();
     await expect(
@@ -2099,6 +2482,7 @@ test("idle runtime shutdown stays internal during session archive and restore", 
   );
   try {
     await expectHealthyPreload(page);
+    await enterSessionDetail(page);
     await page.getByLabel("Prompt text").fill("archive runtime recovery");
     await page.getByRole("button", { name: "Send" }).click();
     await expect(
@@ -2639,6 +3023,7 @@ test("real mode keeps attention sessions visible, labels queues, searches, and r
   try {
     await expectHealthyPreload(page);
     await selectWorkspaceInUi(page, path.basename(projectCwd));
+    await enterSessionDetail(page);
     await page.getByLabel("Prompt text").fill("attention stays visible");
     await page.getByRole("button", { name: "Send" }).click();
     const sidebar = page.getByLabel("Sessions");
@@ -2771,6 +3156,7 @@ test("real mode lists a newly prompted session after restart with fake Pi", asyn
   try {
     await expectHealthyPreload(firstLaunch.page);
     await selectWorkspaceInUi(firstLaunch.page, path.basename(projectCwd));
+    await enterSessionDetail(firstLaunch.page);
     await firstLaunch.page
       .getByLabel("Prompt text")
       .fill(`persisted restart session ${token}`);
@@ -2850,6 +3236,7 @@ test("real mode authorizes opaque project IDs before any project-scoped Pi work"
   try {
     await expectHealthyPreload(page);
     await selectWorkspaceInUi(page, "selected-project");
+    await enterSessionDetail(page);
 
     const rejectionMessages = await page.evaluate(
       async ({ projectId, sessionFile }) => {
@@ -2911,8 +3298,8 @@ test("real mode authorizes opaque project IDs before any project-scoped Pi work"
     expect(snapshot.projectId).toBe(selectedProjectId);
     expect(snapshot.state.cwd).toBe(selectedProject);
     await expect(
-      page.getByRole("button", { name: "Workspace: selected-project" }),
-    ).toHaveAttribute("aria-current", "page");
+      page.locator('.workspace[data-primary-view="session"]'),
+    ).toBeVisible();
 
     const runtimeProjectRejection = await page.evaluate(
       async ({ runtimeId, projectId }) => {
@@ -2960,6 +3347,7 @@ test("background worker continues while a directory-independent workspace is cre
   );
   try {
     await expectHealthyPreload(page);
+    await enterSessionDetail(page);
     await page.getByLabel("Prompt text").fill("workspace background worker");
     await page.getByRole("button", { name: "Send" }).click();
     await expect(page.getByRole("button", { name: "Abort" })).toBeVisible();
@@ -2990,6 +3378,9 @@ test("background worker continues while a directory-independent workspace is cre
       )
       .toBe(false);
     await selectWorkspaceInUi(page, "Default workspace");
+    await page
+      .getByRole("button", { name: "Session: workspace background worker" })
+      .click();
     await expect(
       page.getByText(/Fake response to: workspace background worker/),
     ).toBeVisible();
@@ -3024,6 +3415,7 @@ test("managed workspace context persists across relaunch", async () => {
   try {
     await expectHealthyPreload(firstLaunch.page);
     await createWorkspaceInUi(firstLaunch.page, "Persistent topic");
+    await enterSessionDetail(firstLaunch.page);
     await expect(
       firstLaunch.page.locator(".pi-configuration-trigger"),
     ).toHaveAttribute("data-model-id", "fake-model");
@@ -3074,11 +3466,8 @@ test("managed workspace context persists across relaunch", async () => {
   );
   try {
     await expectHealthyPreload(secondLaunch.page);
-    await expect(
-      secondLaunch.page.getByRole("button", {
-        name: "Workspace: Persistent topic",
-      }),
-    ).toHaveAttribute("aria-current", "page");
+    await expectAllWorkLaunch(secondLaunch.page);
+    await selectWorkspaceInUi(secondLaunch.page, "Persistent topic");
     const activeWorkspace = await secondLaunch.page.evaluate(async () => {
       const result = await window.piDeck.workspaces.getActive();
       return result.activeWorkspace;
@@ -3120,6 +3509,7 @@ test("real mode explains long no-output active work with fake Pi", async () => {
   );
   try {
     await expectHealthyPreload(page);
+    await enterSessionDetail(page);
     await page.getByLabel("Prompt text").fill("slow first output");
     await page.getByRole("button", { name: "Send" }).click();
     await expect(
@@ -3154,6 +3544,7 @@ test("real mode surfaces asynchronous provider errors with fake Pi", async () =>
   );
   try {
     await expectHealthyPreload(page);
+    await enterSessionDetail(page);
     await page.getByLabel("Prompt text").fill("trigger usage limit");
     await page.getByRole("button", { name: "Send" }).click();
     await expect(
@@ -3188,6 +3579,7 @@ test("real mode reconciles a working session when completion event is missed", a
   );
   try {
     await expectHealthyPreload(page);
+    await enterSessionDetail(page);
     await page.getByLabel("Prompt text").fill("missed completion event");
     await page.getByRole("button", { name: "Send" }).click();
     await expect(
@@ -3224,13 +3616,14 @@ test("real mode routes background session events to the right session with fake 
   );
   try {
     await expectHealthyPreload(page);
+    await enterSessionDetail(page);
     await page.getByLabel("Prompt text").fill("background route one");
     await page.getByRole("button", { name: "Send" }).click();
     await expect(
       page.locator(".session-item", { hasText: "background route one" }),
     ).toBeVisible();
 
-    await page.getByRole("button", { name: "New session" }).click();
+    await sidebarNewSessionButton(page).click();
     await page.getByLabel("Prompt text").fill("foreground route two");
     await page.getByRole("button", { name: "Send" }).click();
     await expect(
@@ -3264,7 +3657,7 @@ test("real mode compact plus creates another attached session with fake Pi", asy
   );
   try {
     await expectHealthyPreload(page);
-    await page.getByRole("button", { name: "New session" }).click();
+    await sidebarNewSessionButton(page).click();
     await page.getByLabel("Prompt text").fill("start draft session");
     await page.getByRole("button", { name: "Send" }).click();
     await expect(
@@ -3310,6 +3703,7 @@ test("real mode does not fall back to fake/local UI and can send from active run
   });
   try {
     await expectHealthyPreload(page);
+    await enterSessionDetail(page);
     await expect(page.getByTestId("workspace-tree")).toBeVisible();
     await expect(page.getByText(/Real Pi mode active/i)).toBeVisible();
     await expect(page.getByText("Local projects")).toHaveCount(0);
@@ -3330,87 +3724,520 @@ test("real mode does not fall back to fake/local UI and can send from active run
   }
 });
 
-test("Work inbox scopes work by workspace and opens a row with the keyboard", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-activity-"));
-  const projectCwd = path.join(root, "activity-source");
-  const agentDir = path.join(root, "agent");
-  fs.mkdirSync(projectCwd, { recursive: true });
-  fs.mkdirSync(agentDir, { recursive: true });
-
-  const { app, page } = await launchPiDeck(
-    fakeRealModeEnv({
-      root,
-      projectCwd,
-      agentDir,
-      fakePiArgs: ["--stream-delay-ms", "20000"],
-    }),
-  );
-  try {
-    await expectHealthyPreload(page);
-    await page.getByLabel("Prompt text").fill("activity keyboard route");
-    await page.getByRole("button", { name: "Send" }).click();
-    await expect(page.getByRole("button", { name: "Abort" })).toBeVisible();
-
-    await createWorkspaceInUi(page, "Activity secondary");
-    await page
-      .getByRole("button", { name: "Workspace actions for Activity secondary" })
-      .click();
-    await expect(
-      page.getByRole("menuitem", { name: "View work inbox" }),
-    ).toBeVisible();
-    await page.keyboard.press("Escape");
-
-    await page.getByRole("button", { name: "Work inbox" }).click();
-    await expect(
-      page.getByRole("heading", { name: "Work inbox" }),
-    ).toBeVisible();
-    await expect(page.getByLabel("Work inbox workspace")).toHaveValue("all");
-    await expect(
-      page.getByRole("button", { name: /^In progress \d+$/ }),
-    ).toBeVisible();
-    for (const control of await page
-      .locator(".activity-inbox-close, .activity-inbox-filter")
-      .all()) {
-      const box = await control.boundingBox();
-      if (box === null) throw new Error("Activity inbox control has no bounds");
-      expect(box.width).toBeGreaterThanOrEqual(40);
-      expect(box.height).toBeGreaterThanOrEqual(40);
-    }
-    await page.getByLabel("Close work inbox").click();
-    await expect(page.getByLabel("Prompt text")).toBeVisible();
-    await page.getByRole("button", { name: "Work inbox", exact: true }).click();
-    await expect(
-      page.getByRole("heading", { name: "Work inbox" }),
-    ).toBeVisible();
-
-    await page
-      .getByRole("button", { name: "New session", exact: true })
-      .click();
-    await expect(page.getByRole("heading", { name: "Work inbox" })).toHaveCount(
-      0,
+test.describe("Unified Work", () => {
+  test("Unified Work routes launch, scopes, origins, ownership, and runtimes", async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "pi-deck-e2e-unified-work-"),
     );
-    await expect(page.getByLabel("Prompt text")).toBeVisible();
-    await page.getByRole("button", { name: "Work inbox", exact: true }).click();
-    await expect(
-      page.getByRole("heading", { name: "Work inbox" }),
-    ).toBeVisible();
+    const projectCwd = path.join(root, "activity-source");
+    const agentDir = path.join(root, "agent");
+    const userDataDir = path.join(root, "user-data");
+    fs.mkdirSync(projectCwd, { recursive: true });
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.mkdirSync(userDataDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(userDataDir, "settings.json"),
+      `${JSON.stringify({ maxRunningSessions: 12 })}\n`,
+    );
 
-    await page.getByLabel("Work inbox workspace").selectOption({
-      label: "Default workspace (1)",
+    const { app, page } = await launchPiDeck(
+      fakeRealModeEnv({ root, projectCwd, agentDir, userDataDir }),
+    );
+    try {
+      await expectHealthyPreload(page);
+      // Keep the fresh-launch contract visible before entering either chat
+      // journey below: launch is All Work, not an implicit session detail.
+      await expectAllWorkLaunch(page);
+      const allWork = page.getByRole("button", { name: /^All Work/ });
+      await expect(allWork).toHaveAttribute("aria-current", "page");
+      const defaultWorkspace = await page.evaluate(async () => {
+        const result = await window.piDeck.workspaces.getActive();
+        const workspace =
+          result.workspaces.find((candidate) => candidate.isDefault) ??
+          result.activeWorkspace;
+        if (workspace === undefined) {
+          throw new Error("Expected a default workspace at launch.");
+        }
+        return { id: workspace.id, name: workspace.name };
+      });
+      const workspaceId = async (name: string): Promise<string> => {
+        const id = await page
+          .getByRole("button", { name: `Workspace: ${name}` })
+          .getAttribute("data-workspace-id");
+        if (id === null) throw new Error(`Missing workspace id for ${name}.`);
+        return id;
+      };
+      const activityRow = (title: string) =>
+        page.locator(".activity-inbox-row").filter({ hasText: title });
+
+      await createWorkspaceInUi(page, "Unified A");
+      const unifiedAId = await workspaceId("Unified A");
+      await expectWorkRoute(page, unifiedAId);
+      await expect(
+        page.getByRole("heading", { name: "Unified A Work", exact: true }),
+      ).toBeVisible();
+      await expect(page.locator(".surface-title")).toHaveText("Unified A Work");
+
+      await createWorkspaceInUi(page, "Unified B");
+      const unifiedBId = await workspaceId("Unified B");
+      await expectWorkRoute(page, unifiedBId);
+      await expect(
+        page.getByRole("heading", { name: "Unified B Work", exact: true }),
+      ).toBeVisible();
+      await expect(page.locator(".surface-title")).toHaveText("Unified B Work");
+
+      await selectWorkspaceInUi(page, "Unified A");
+      await expectWorkRoute(page, unifiedAId);
+      await enterSessionDetail(page);
+      const aPrompt = "Unified A active runtime";
+      await page.getByLabel("Prompt text").fill(aPrompt);
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect(
+        page.getByText(`Fake response to: ${aPrompt}`, { exact: true }),
+      ).toBeVisible();
+      const aRuntimeId = await page.evaluate(
+        async () => (await window.piDeck.chat.getSnapshot()).runtimeId,
+      );
+
+      await allWork.click();
+      await expectAllWorkLaunch(page);
+      await expectRuntimeIds(page, [aRuntimeId]);
+      await selectWorkspaceInUi(page, "Unified B");
+      await expectWorkRoute(page, unifiedBId);
+      await enterSessionDetail(page);
+      const bPrompt = "Unified B active runtime";
+      await page.getByLabel("Prompt text").fill(bPrompt);
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect(
+        page.getByText(`Fake response to: ${bPrompt}`, { exact: true }),
+      ).toBeVisible();
+      const bRuntimeId = await page.evaluate(
+        async () => (await window.piDeck.chat.getSnapshot()).runtimeId,
+      );
+      expect(bRuntimeId).not.toBe(aRuntimeId);
+      await expectRuntimeIds(page, [aRuntimeId, bRuntimeId]);
+
+      // Navigation between the global and scoped routes must retain both
+      // workers; only the primary view and selected session change.
+      await allWork.click();
+      await expectAllWorkLaunch(page);
+      await expectRuntimeIds(page, [aRuntimeId, bRuntimeId]);
+      await selectWorkspaceInUi(page, "Unified A");
+      await expectWorkRoute(page, unifiedAId);
+      await expectRuntimeIds(page, [aRuntimeId, bRuntimeId]);
+      await allWork.click();
+      await expectAllWorkLaunch(page);
+      await selectWorkspaceInUi(page, "Unified B");
+      await expectWorkRoute(page, unifiedBId);
+      await expectRuntimeIds(page, [aRuntimeId, bRuntimeId]);
+
+      // Global creation is routed to the persisted default workspace even
+      // while the current visible Work scope is B.
+      await allWork.click();
+      await expectAllWorkLaunch(page);
+      await enterSessionDetail(page);
+      const globalOwner = await page.evaluate(async () => {
+        const result = await window.piDeck.workspaces.getActive();
+        return result.activeWorkspace;
+      });
+      expect(globalOwner?.id).toBe(defaultWorkspace.id);
+      expect(globalOwner?.name).toBe(defaultWorkspace.name);
+
+      // A scoped New session follows the selected workspace instead of the
+      // default/global creation rule.
+      await allWork.click();
+      await expectAllWorkLaunch(page);
+      await selectWorkspaceInUi(page, "Unified B");
+      await expectWorkRoute(page, unifiedBId);
+      await enterSessionDetail(page);
+      const scopedOwner = await page.evaluate(async () => {
+        const result = await window.piDeck.workspaces.getActive();
+        return result.activeWorkspace;
+      });
+      expect(scopedOwner?.id).toBe(unifiedBId);
+      expect(scopedOwner?.name).toBe("Unified B");
+
+      // Drill-in preserves the exact origin for both global and scoped Work.
+      await allWork.click();
+      await expectAllWorkLaunch(page);
+      const globalA = activityRow(aPrompt);
+      await expect(globalA).toHaveCount(1);
+      await globalA.focus();
+      await globalA.press("Enter");
+      await expect(
+        page.locator('.workspace[data-primary-view="session"]'),
+      ).toBeVisible();
+      await expect(page.getByTestId("session-origin-back")).toHaveAttribute(
+        "aria-label",
+        "Back to All Work",
+      );
+      await expect(
+        page
+          .getByLabel("Chat / Agent Timeline")
+          .getByText(aPrompt, { exact: true }),
+      ).toBeVisible();
+      const backToAllWork = page.getByTestId("session-origin-back");
+      await backToAllWork.focus();
+      await page.keyboard.press("Enter");
+      await expectAllWorkLaunch(page);
+      await expect(globalA).toBeFocused();
+
+      await selectWorkspaceInUi(page, "Unified A");
+      await expectWorkRoute(page, unifiedAId);
+      const scopedA = activityRow(aPrompt);
+      await expect(scopedA).toHaveCount(1);
+      await scopedA.click();
+      await expect(page.getByTestId("session-origin-back")).toHaveAttribute(
+        "aria-label",
+        "Back to Unified A Work",
+      );
+      await page.getByTestId("session-origin-back").click();
+      await expectWorkRoute(page, unifiedAId);
+
+      // A targeted action in A must not appear after navigating to B.
+      await allWork.click();
+      await expectAllWorkLaunch(page);
+      await activityRow(aPrompt).click();
+      const targetedPrompt = "Only Unified A receives this follow-up";
+      await page.getByLabel("Prompt text").fill(targetedPrompt);
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect(
+        page.getByText(`Fake response to: ${targetedPrompt}`, { exact: true }),
+      ).toBeVisible();
+      await expectRuntimeIds(page, [aRuntimeId, bRuntimeId]);
+
+      await allWork.click();
+      await expectAllWorkLaunch(page);
+      await activityRow(bPrompt).click();
+      const bTimeline = page.getByLabel("Chat / Agent Timeline");
+      await expect(bTimeline.getByText(bPrompt, { exact: true })).toBeVisible();
+      await expect(
+        bTimeline.getByText(targetedPrompt, { exact: true }),
+      ).toHaveCount(0);
+      await expectRuntimeIds(page, [aRuntimeId, bRuntimeId]);
+
+      // Populate enough ordinary Work rows to make the real Work viewport
+      // scrollable without modifying production layout or row ordering.
+      await allWork.click();
+      await expectAllWorkLaunch(page);
+      for (const prompt of Array.from(
+        { length: 6 },
+        (_, index) => `Unified Work scroll filler ${index + 1}`,
+      )) {
+        await enterSessionDetail(page);
+        await page.getByLabel("Prompt text").fill(prompt);
+        await page.getByRole("button", { name: "Send" }).click();
+        await expect(
+          page.getByText(`Fake response to: ${prompt}`, { exact: true }),
+        ).toBeVisible();
+        await allWork.click();
+        await expectAllWorkLaunch(page);
+      }
+      const inbox = page.locator(".activity-inbox");
+      await inbox.hover();
+      await page.mouse.wheel(0, 300);
+      const savedWorkScrollTop = await inbox.evaluate((element) =>
+        Math.round(element.scrollTop),
+      );
+      expect(savedWorkScrollTop).toBeGreaterThan(100);
+      const scrollTargetId = await inbox.evaluate((element) => {
+        const inboxBounds = element.getBoundingClientRect();
+        const target = Array.from(
+          element.querySelectorAll<HTMLElement>("[data-activity-item-id]"),
+        ).find((row) => {
+          const bounds = row.getBoundingClientRect();
+          return (
+            bounds.top >= inboxBounds.top && bounds.bottom <= inboxBounds.bottom
+          );
+        });
+        return target?.dataset.activityItemId;
+      });
+      if (scrollTargetId === undefined) {
+        throw new Error("Missing a visible Work row after mouse scrolling.");
+      }
+      const scrollTarget = page.locator(
+        `[data-activity-item-id=${JSON.stringify(scrollTargetId)}]`,
+      );
+      const scrollTargetBox = await scrollTarget.boundingBox();
+      if (scrollTargetBox === null) {
+        throw new Error("Scrolled Work row has no bounding box.");
+      }
+      await page.mouse.click(
+        scrollTargetBox.x + scrollTargetBox.width / 2,
+        scrollTargetBox.y + scrollTargetBox.height / 2,
+      );
+      await expect(
+        page.locator('.workspace[data-primary-view="session"]'),
+      ).toBeVisible();
+      const backToScrolledWork = page.getByTestId("session-origin-back");
+      await backToScrolledWork.focus();
+      await page.keyboard.press("Enter");
+      await expectAllWorkLaunch(page);
+      await expect(scrollTarget).toBeFocused();
+      await expect
+        .poll(() => inbox.evaluate((element) => Math.round(element.scrollTop)))
+        .toBe(savedWorkScrollTop);
+    } finally {
+      await app.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("Unified Work retains scoped status filters through Session and Back", async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "pi-deck-e2e-work-filter-state-"),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    const userDataDir = path.join(root, "user-data");
+    fs.mkdirSync(projectCwd, { recursive: true });
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.mkdirSync(userDataDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(userDataDir, "settings.json"),
+      `${JSON.stringify({ maxRunningSessions: 12 })}\n`,
+    );
+    const { app, page } = await launchPiDeck(
+      fakeRealModeEnv({
+        root,
+        projectCwd,
+        agentDir,
+        userDataDir,
+        fakePiArgs: [
+          "--prompt-scenario",
+          "extension-ui",
+          "--extension-ui-auto-complete-timeout-ms",
+          "120000",
+        ],
+      }),
+    );
+    try {
+      await expectHealthyPreload(page);
+      await expectAllWorkLaunch(page);
+      await createWorkspaceInUi(page, "Filter state workspace");
+      const workspaceId = await page
+        .getByRole("button", { name: "Workspace: Filter state workspace" })
+        .getAttribute("data-workspace-id");
+      if (workspaceId === null) throw new Error("Missing filter workspace id.");
+
+      await enterSessionDetail(page);
+      const prompt = "filter state extension request";
+      await page.getByLabel("Prompt text").fill(prompt);
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect(
+        page.getByText("Fake confirm", { exact: true }),
+      ).toBeVisible();
+
+      // All Work retains its Needs attention filter and restores the opened row.
+      await page.getByRole("button", { name: /^All Work/ }).click();
+      await expectAllWorkLaunch(page);
+      const allNeedsAttention = page
+        .getByRole("group", { name: "Filter Work by status" })
+        .getByRole("button", { name: /^Needs attention/ });
+      await allNeedsAttention.click();
+      await expect(allNeedsAttention).toHaveAttribute("aria-pressed", "true");
+      const allRow = page
+        .locator(".activity-inbox-row")
+        .filter({ hasText: prompt });
+      await expect(allRow).toHaveCount(1);
+      await allRow.click();
+      await page.getByTestId("session-origin-back").click();
+      await expectAllWorkLaunch(page);
+      await expect(allNeedsAttention).toHaveAttribute("aria-pressed", "true");
+      await expect(allRow).toBeFocused();
+
+      // The workspace keeps an independent filter. Resolving the row changes
+      // its category; Back retains Needs attention and falls back to the title.
+      await selectWorkspaceInUi(page, "Filter state workspace");
+      await expectWorkRoute(page, workspaceId);
+      const workspaceRoute = page.locator(
+        '.workspace[data-primary-view="work"]',
+      );
+      const workspaceInbox = workspaceRoute.locator(".activity-inbox");
+      const workspaceNeedsAttention = workspaceInbox
+        .getByRole("group", { name: "Filter Work by status" })
+        .getByRole("button", { name: /^Needs attention/ });
+      await expect(workspaceNeedsAttention).toHaveAttribute(
+        "aria-pressed",
+        "false",
+      );
+
+      // Keep enough matching rows in this scoped filter for a real, meaningful
+      // mouse scroll before the opened row disappears from it.
+      for (const filler of Array.from({ length: 8 }, (_, index) => index + 1)) {
+        await enterSessionDetail(page);
+        await page
+          .getByLabel("Prompt text")
+          .fill(`filter state scroll filler ${filler}`);
+        await page.getByRole("button", { name: "Send" }).click();
+        await expect(
+          page.getByText("Fake confirm", { exact: true }),
+        ).toBeVisible();
+        await page.getByTestId("session-origin-back").click();
+        await expectWorkRoute(page, workspaceId);
+      }
+
+      await workspaceNeedsAttention.click();
+      await expect(workspaceNeedsAttention).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      const workspaceRow = workspaceInbox
+        .locator(".activity-inbox-row")
+        .filter({ hasText: prompt });
+      await expect(workspaceRow).toHaveCount(1);
+      await expect(workspaceRow).toHaveClass(
+        /activity-inbox-row--needsAttention/,
+      );
+      const activityItemId = await workspaceRow.getAttribute(
+        "data-activity-item-id",
+      );
+      if (activityItemId === null) {
+        throw new Error("Missing stable activity item identity.");
+      }
+      await workspaceInbox.hover();
+      await page.mouse.wheel(0, 400);
+      const savedFilteredScrollTop = await workspaceInbox.evaluate((element) =>
+        Math.round(element.scrollTop),
+      );
+      expect(savedFilteredScrollTop).toBeGreaterThan(100);
+      await workspaceRow.click();
+      await page.getByRole("button", { name: "Confirm", exact: true }).click();
+      await expect(
+        page.getByText("Extension UI response delivered to Pi."),
+      ).toBeVisible();
+      await expect(
+        page.getByText(`Fake response to: ${prompt}`, { exact: true }),
+      ).toBeVisible();
+      const completedSessionActions = page.getByRole("button", {
+        name: "Session actions for filter state extension request",
+      });
+      await completedSessionActions.click();
+      const completedActionsMenu = page.getByRole("menu", {
+        name: "Session actions for filter state extension request",
+      });
+      await expect(
+        completedActionsMenu.getByRole("menuitem", { name: "Archive session" }),
+      ).toBeEnabled();
+      await page.keyboard.press("Escape");
+      await page.getByTestId("session-origin-back").click();
+      await expectWorkRoute(page, workspaceId);
+      await expect(workspaceNeedsAttention).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      await expect(workspaceRow).toHaveCount(0);
+      const workspaceHeading = workspaceInbox.locator("#activity-inbox-title");
+      await expect(workspaceHeading).toBeFocused();
+      await expect
+        .poll(() =>
+          workspaceInbox.evaluate((element) => Math.round(element.scrollTop)),
+        )
+        .toBe(0);
+      await expect
+        .poll(() =>
+          workspaceInbox.evaluate((inbox) => {
+            const heading = inbox.querySelector("#activity-inbox-title");
+            if (heading === null) return false;
+            const inboxBounds = inbox.getBoundingClientRect();
+            const headingBounds = heading.getBoundingClientRect();
+            return (
+              headingBounds.top >= inboxBounds.top &&
+              headingBounds.bottom <= inboxBounds.bottom
+            );
+          }),
+        )
+        .toBe(true);
+
+      const workspaceCompleted = workspaceInbox
+        .getByRole("group", { name: "Filter Work by status" })
+        .getByRole("button", { name: /^Completed/ });
+      await workspaceCompleted.click();
+      await expect(workspaceCompleted).toHaveAttribute("aria-pressed", "true");
+      const completedRow = page.locator(
+        `[data-activity-item-id=${JSON.stringify(activityItemId)}]`,
+      );
+      await expect(completedRow).toHaveCount(1);
+      await expect(
+        completedRow.locator(".activity-inbox-row-title"),
+      ).toHaveText(prompt);
+      await expect(completedRow).toHaveClass(/activity-inbox-row--completed/);
+    } finally {
+      await app.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("Unified Work keeps private task status out of Work while workflows coexist", async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "pi-deck-e2e-unified-work-private-"),
+    );
+    const { app, page } = await launchPiDeck({
+      PI_DECK_FAKE_DELEGATE_SCENARIO: "1",
+      PI_DECK_HOME: path.join(root, "pideck-home"),
+      PI_DECK_USER_DATA_DIR: path.join(root, "user-data"),
     });
-    await expect(
-      page.getByRole("heading", { name: /Work inbox · Default workspace/i }),
-    ).toBeVisible();
-    const activityRow = page.getByRole("button", {
-      name: /^In progress: activity keyboard route,/i,
-    });
-    await activityRow.focus();
-    await activityRow.press("Enter");
-    await expect(page.getByLabel("Prompt text")).toBeVisible();
-  } finally {
-    await app.close();
-    fs.rmSync(root, { recursive: true, force: true });
-  }
+    try {
+      await expectHealthyPreload(page);
+      await expectAllWorkLaunch(page);
+      await enterSessionDetail(page);
+      const multitaskControl = page.locator(".multitask-control");
+      await expect(multitaskControl).toHaveText("Parallel: Off");
+      await multitaskControl.click();
+      await page.getByLabel("Prompt destination").selectOption("parent");
+      const privatePrompt = "Unified Work private task parent";
+      await page.getByLabel("Prompt text").fill(privatePrompt);
+      await page.getByRole("button", { name: "Send" }).click();
+      const taskPanel = page.getByRole("region", {
+        name: "Parallel task sessions",
+      });
+      await expect(
+        taskPanel.locator('[data-lifecycle="completed"]'),
+      ).toBeVisible();
+      await multitaskControl.focus();
+      const taskStatuses = page.getByRole("list", { name: "Task statuses" });
+      await expect(taskStatuses).toContainText(
+        "#1 Fake delegated task — completed",
+      );
+      await expect(
+        page.getByLabel("Sessions").locator(".session-item", {
+          hasText: "Fake delegated task",
+        }),
+      ).toHaveCount(0);
+
+      await page.getByRole("button", { name: "Agent Workflows" }).click();
+      await expect(
+        page.locator('.workspace[data-primary-view="workflow"]'),
+      ).toBeVisible();
+      await page.getByRole("button", { name: /^All Work/ }).click();
+      await expectAllWorkLaunch(page);
+      await expect(
+        page
+          .locator(".activity-inbox-row")
+          .filter({ hasText: "Fake delegated task" }),
+      ).toHaveCount(0);
+      const parentRow = page
+        .locator(".activity-inbox-row")
+        .filter({ hasText: privatePrompt });
+      await expect(parentRow).toHaveCount(1);
+      await parentRow.click();
+      await expect(
+        page.locator('.workspace[data-primary-view="session"]'),
+      ).toBeVisible();
+      await expect(
+        page.getByLabel("Chat / Agent Timeline").getByText(privatePrompt, {
+          exact: true,
+        }),
+      ).toBeVisible();
+      await multitaskControl.focus();
+      await expect(taskStatuses).toContainText(
+        "#1 Fake delegated task — completed",
+      );
+    } finally {
+      await app.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 /** Deterministic fake-RPC coverage of the production task-session route. */
@@ -3459,6 +4286,7 @@ test.describe("task-session routing acceptance", () => {
     });
     try {
       await expectHealthyPreload(page);
+      await enterSessionDetail(page);
       // Leave room for the parent plus all ten active child workers.
       await page.evaluate(() =>
         window.piDeck.settings.update({ maxRunningSessions: 20 }),
@@ -3570,10 +4398,10 @@ test.describe("task-session routing acceptance", () => {
           .locator(".session-item", { hasText: "Inventory affected files" }),
       ).toHaveCount(0);
       await expect(
-        page.getByRole("heading", { name: "Work inbox" }),
+        page.getByRole("heading", { name: "All Work", exact: true }),
       ).toHaveCount(0);
       await expect(
-        page.getByRole("button", { name: "Work inbox" }),
+        page.getByRole("button", { name: /^All Work/ }),
       ).toBeVisible();
 
       // The configured failure retries three times after its initial attempt.
@@ -3673,6 +4501,7 @@ test.describe("task-session routing acceptance", () => {
     });
     try {
       await expectHealthyPreload(page);
+      await enterSessionDetail(page);
       await page.getByLabel("Prompt text").fill("Create the parent runtime.");
       await page.getByRole("button", { name: "Send" }).click();
       await expect(
@@ -3796,6 +4625,7 @@ test.describe("task-session routing acceptance", () => {
     const first = await launchPiDeck(env);
     try {
       await expectHealthyPreload(first.page);
+      await enterSessionDetail(first.page);
       await first.page
         .getByRole("button", { name: "Parallel multitasking: Off" })
         .click();
@@ -3822,10 +4652,10 @@ test.describe("task-session routing acceptance", () => {
     const second = await launchPiDeck(env);
     try {
       await expectHealthyPreload(second.page);
-      await selectWorkspaceInUi(second.page, "Default workspace");
-      const savedSession = second.page
-        .getByRole("button", { name: /^Session:/ })
-        .first();
+      await expectAllWorkLaunch(second.page);
+      const savedSession = second.page.locator(".activity-inbox-row").filter({
+        hasText: "Start work that will be interrupted by restart.",
+      });
       await expect(savedSession).toBeVisible();
       await savedSession.click();
       await expect(second.page.locator(".multitask-control")).toBeEnabled({

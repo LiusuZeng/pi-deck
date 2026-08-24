@@ -18,6 +18,8 @@ const outputs = [
 ];
 
 function resolvePiBinary() {
+  // This separate opt-in capture intentionally resolves an actual Pi binary;
+  // the standard docs:capture command uses production-shaped fake RPC fixtures.
   const candidate = process.env.PI_DECK_PI_BINARY || "/usr/local/bin/pi";
   if (!fs.existsSync(candidate)) {
     throw new Error(`Pi executable not found: ${candidate}`);
@@ -178,7 +180,12 @@ async function main() {
       ...process.env,
       PI_DECK_BACKEND: "real",
       PI_DECK_E2E_HIDE_WINDOWS: "1",
-      PI_DECK_E2E_DELEGATE_HARNESS: "1",
+      // Explicitly clear compatibility switches so inherited shell state
+      // cannot redirect this capture away from the shipped planner.
+      PI_DECK_E2E_DELEGATE_HARNESS: "",
+      PI_DECK_ENABLE_LEGACY_DELEGATE_BRIDGE: "",
+      PI_DECK_E2E_TASK_SESSION_ACCEPTANCE: "",
+      PI_DECK_TEST_TASK_ROUTING_FIXTURE: "",
       PI_DECK_PI_BINARY: resolvePiBinary(),
       PI_DECK_PROJECT_CWD: projectCwd,
       PI_DECK_USER_DATA_DIR: userDataDir,
@@ -242,13 +249,15 @@ async function main() {
     captured.set(run.name, runPath);
 
     await page.getByRole("button", { name: "Back" }).click();
-    await page.getByRole("button", { name: "Work inbox", exact: true }).click();
-    await page.getByRole("heading", { name: /Work inbox/i }).waitFor();
-    await page.getByRole("button", { name: "Work inbox", exact: true }).click();
-    await page.getByLabel("Prompt text").waitFor();
+    await page.getByRole("button", { name: /^All Work/ }).click();
     await page
+      .getByRole("heading", { name: "All Work", exact: true })
+      .waitFor();
+    await page
+      .getByRole("complementary", { name: "Sessions" })
       .getByRole("button", { name: "New session", exact: true })
       .click();
+    await page.getByLabel("Prompt text").waitFor();
     await page
       .getByLabel("Prompt text")
       .fill("Reply with exactly: Parent session ready.");
@@ -264,40 +273,31 @@ async function main() {
     await multitaskControl.click();
     await page.evaluate(() => {
       const captureWindow = window;
-      captureWindow.__piDeckCaptureDelegateStates = [];
-      captureWindow.__piDeckCaptureDelegateUnsubscribe?.();
-      captureWindow.__piDeckCaptureDelegateUnsubscribe =
+      captureWindow.__piDeckCapturePlannerStates = [];
+      captureWindow.__piDeckCapturePlannerUnsubscribe?.();
+      captureWindow.__piDeckCapturePlannerUnsubscribe =
         window.piDeck.multitask.onState((state) =>
-          captureWindow.__piDeckCaptureDelegateStates.push(state),
+          captureWindow.__piDeckCapturePlannerStates.push(state),
         );
     });
     await page
       .getByLabel("Prompt text")
       .fill(
-        "PI_DECK_E2E_INVOKE_DECK_DELEGATE: use deck_delegate now for one tiny task.",
+        "Run exactly three independent release checks in parallel: the first replies with exactly ALPHA, the second replies with exactly BETA, and the third replies with exactly GAMMA. Then report their combined result.",
       );
     await page.getByRole("button", { name: "Send" }).click();
     await page.waitForFunction(
       () =>
-        window.__piDeckCaptureDelegateStates
-          .flatMap((state) => state.tasks)
-          .some(
-            (task) =>
-              task.generatedName === "Real delegated acceptance task" &&
-              task.status === "completed",
-          ),
+        window.__piDeckCapturePlannerStates?.some(
+          (state) => state.tasks?.length === 3,
+        ),
       undefined,
       {
-        timeout: Number(
-          process.env.PI_DECK_REAL_DELEGATE_TIMEOUT_MS ?? 180_000,
-        ),
+        timeout: Number(process.env.PI_DECK_REAL_PLANNER_TIMEOUT_MS ?? 180_000),
       },
     );
     await multitaskControl.focus();
-    await page
-      .getByRole("list", { name: "Task statuses" })
-      .getByText("Real delegated acceptance task", { exact: false })
-      .waitFor();
+    await page.getByRole("list", { name: "Task statuses" }).waitFor();
     const multitask = outputs[2];
     await page.setViewportSize({
       width: multitask.width,

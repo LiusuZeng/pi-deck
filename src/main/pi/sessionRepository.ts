@@ -42,6 +42,10 @@ export interface ReadPiSessionSummaryOptions {
   sessionFile: string;
   sessionDir: string;
   maxBytesPerFile?: number;
+  /** Total header and durable-metadata bytes permitted for this refresh. */
+  maxTotalBytes?: number;
+  /** Wall-time permitted for durable-metadata discovery. */
+  maxWallTimeMs?: number;
 }
 
 export interface ReadPiSessionSummaryResult {
@@ -54,6 +58,8 @@ interface ParsedSessionFile {
   sessionId?: string;
   cwd?: string;
   title?: string;
+  /** Latest Pi `session_info.name` in JSONL record order, including empty. */
+  sessionName?: string;
   preview?: string;
   createdAtMs?: number;
   updatedAtMs?: number;
@@ -67,6 +73,8 @@ const DEFAULT_MAX_BYTES_PER_FILE = 256 * 1024;
 const DEFAULT_MAX_TOTAL_BYTES = 250 * 1024 * 1024;
 const DEFAULT_MAX_WALL_TIME_MS = 15_000;
 const PI_SESSION_HEADER_MAX_BYTES = 64 * 1024;
+const SESSION_INFO_SCAN_CHUNK_BYTES = 64 * 1024;
+const SESSION_INFO_MAX_RECORD_BYTES = 1024 * 1024;
 
 /**
  * Validates a renderer-supplied path against the active Pi configuration.
@@ -155,11 +163,17 @@ export async function readPiSessionSummary(
 ): Promise<ReadPiSessionSummaryResult> {
   const diagnostics: string[] = [];
   const sessionDir = await canonicalOrResolved(options.sessionDir);
+  const maxBytesPerFile = options.maxBytesPerFile ?? DEFAULT_MAX_BYTES_PER_FILE;
+  const maxTotalBytes = options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES;
+  const maxWallTimeMs = options.maxWallTimeMs ?? DEFAULT_MAX_WALL_TIME_MS;
+  const startedAt = Date.now();
   const result = await summarizeSessionFile(
     options.sessionFile,
     sessionDir,
     undefined,
-    options.maxBytesPerFile ?? DEFAULT_MAX_BYTES_PER_FILE,
+    Math.min(maxBytesPerFile, maxTotalBytes),
+    maxTotalBytes,
+    startedAt + maxWallTimeMs,
     diagnostics,
   );
   return result.summary === undefined
@@ -244,6 +258,7 @@ export async function scanSessionRepository(
     let entries: import("node:fs").Dirent[];
     try {
       entries = await fs.readdir(directory, { withFileTypes: true });
+      entries.sort((left, right) => left.name.localeCompare(right.name));
     } catch (error) {
       diagnostics.push(
         `Could not read session directory ${directory}: ${errorMessage(error)}`,
@@ -285,6 +300,8 @@ export async function scanSessionRepository(
         sessionDir,
         projectCwd,
         Math.min(maxBytesPerFile, remainingBytes),
+        remainingBytes,
+        startedAt + maxWallTimeMs,
         diagnostics,
       );
       totalBytesRead += result.bytesRead;
@@ -311,6 +328,8 @@ async function summarizeSessionFile(
   sessionDir: string,
   projectCwd: string | undefined,
   maxBytes: number,
+  maxMetadataBytes: number,
+  deadline: number | undefined,
   diagnostics: string[],
 ): Promise<{ summary?: ChatSessionSummary; bytesRead: number }> {
   let canonicalFile: string;
@@ -343,17 +362,32 @@ async function summarizeSessionFile(
   if (projectCwd !== undefined && cwd !== projectCwd) {
     return { bytesRead: parsed.bytesRead };
   }
+  // Names are durable metadata rather than transcript content. Search from
+  // EOF independently so an append-only Pi session can retain its latest name
+  // even when normal message/preview parsing reaches its bounded head cap.
+  const metadata = await findLatestSessionInfoName(
+    canonicalFile,
+    Math.max(0, maxMetadataBytes - parsed.bytesRead),
+    deadline,
+    diagnostics,
+  );
+  if (metadata.found) {
+    parsed.sessionName = metadata.name;
+  }
 
   const updatedAtMs = parsed.updatedAtMs ?? stat.mtimeMs;
   const createdAtMs = parsed.createdAtMs ?? stat.birthtimeMs;
   return {
-    bytesRead: parsed.bytesRead,
+    bytesRead: parsed.bytesRead + metadata.bytesRead,
     summary: {
       id: canonicalFile,
       sessionFile: canonicalFile,
       sessionId: parsed.header.id,
       cwd,
-      title: parsed.title ?? path.basename(canonicalFile, ".jsonl"),
+      title:
+        parsed.sessionName ||
+        parsed.title ||
+        path.basename(canonicalFile, ".jsonl"),
       updatedAtMs,
       createdAtMs,
       messageCount: parsed.messageCount,
@@ -469,6 +503,149 @@ async function parseSessionFile(
     ingestRecord(parsed, record as Record<string, unknown>);
   }
   return parsed;
+}
+
+type SessionInfoNameResult = { found: true; name: string } | { found: false };
+
+type LatestSessionInfoNameResult = SessionInfoNameResult & {
+  bytesRead: number;
+};
+
+async function findLatestSessionInfoName(
+  filePath: string,
+  maxBytes: number,
+  deadline: number | undefined,
+  diagnostics: string[],
+): Promise<LatestSessionInfoNameResult> {
+  let handle: fs.FileHandle | undefined;
+  let bytesRead = 0;
+  let oversizedRecordReported = false;
+  try {
+    handle = await fs.open(filePath, "r");
+    const { size } = await handle.stat();
+    let end = size;
+    let tailParts: Buffer[] = [];
+    let tailBytes = 0;
+    let tailOversized = false;
+
+    // JSONL permits a complete reverse search without loading the transcript.
+    // Retain at most one bounded partial record; an oversized record is skipped
+    // at its newline so older records remain discoverable.
+    while (end > 0 && bytesRead < maxBytes) {
+      if (deadline !== undefined && Date.now() >= deadline) {
+        diagnostics.push(
+          `Stopped session metadata scan after wall-time limit.`,
+        );
+        break;
+      }
+      const length = Math.min(
+        SESSION_INFO_SCAN_CHUNK_BYTES,
+        end,
+        maxBytes - bytesRead,
+      );
+      const start = end - length;
+      const chunk = Buffer.alloc(length);
+      let offset = 0;
+      while (offset < length) {
+        const result = await handle.read(
+          chunk,
+          offset,
+          length - offset,
+          start + offset,
+        );
+        bytesRead += result.bytesRead;
+        offset += result.bytesRead;
+        if (result.bytesRead === 0) {
+          diagnostics.push(
+            `Could not fully read session metadata ${filePath}; stopping safely.`,
+          );
+          return { found: false, bytesRead };
+        }
+      }
+
+      let lineEnd = chunk.length;
+      let newline = chunk.lastIndexOf(0x0a, lineEnd - 1);
+      while (newline !== -1) {
+        const line = chunk.subarray(newline + 1, lineEnd);
+        if (!tailOversized) {
+          const recordBytes = line.length + tailBytes;
+          if (recordBytes <= SESSION_INFO_MAX_RECORD_BYTES) {
+            const result = sessionInfoName(
+              tailParts.length === 0
+                ? line
+                : Buffer.concat([line, ...tailParts]),
+            );
+            if (result.found) return { ...result, bytesRead };
+          } else if (!oversizedRecordReported) {
+            diagnostics.push(
+              `Skipped oversized session metadata record in ${filePath}.`,
+            );
+            oversizedRecordReported = true;
+          }
+        }
+        tailParts = [];
+        tailBytes = 0;
+        tailOversized = false;
+        lineEnd = newline;
+        newline = lineEnd === 0 ? -1 : chunk.lastIndexOf(0x0a, lineEnd - 1);
+      }
+
+      const prefix = chunk.subarray(0, lineEnd);
+      if (!tailOversized && prefix.length > 0) {
+        if (prefix.length + tailBytes <= SESSION_INFO_MAX_RECORD_BYTES) {
+          tailParts.unshift(prefix);
+          tailBytes += prefix.length;
+        } else {
+          tailParts = [];
+          tailBytes = 0;
+          tailOversized = true;
+          if (!oversizedRecordReported) {
+            diagnostics.push(
+              `Skipped oversized session metadata record in ${filePath}.`,
+            );
+            oversizedRecordReported = true;
+          }
+        }
+      }
+      end = start;
+    }
+    if (end > 0 && bytesRead >= maxBytes) {
+      diagnostics.push(
+        `Stopped session metadata scan after reading ${maxBytes} bytes.`,
+      );
+      return { found: false, bytesRead };
+    }
+    if (!tailOversized && tailBytes > 0) {
+      return { ...sessionInfoName(Buffer.concat(tailParts)), bytesRead };
+    }
+    return { found: false, bytesRead };
+  } catch (error) {
+    diagnostics.push(
+      `Could not scan session metadata ${filePath}: ${errorMessage(error)}`,
+    );
+    return { found: false, bytesRead };
+  } finally {
+    await handle?.close();
+  }
+}
+
+function sessionInfoName(line: Buffer): SessionInfoNameResult {
+  if (line.length === 0) {
+    return { found: false };
+  }
+  try {
+    const record = JSON.parse(line.toString("utf8")) as unknown;
+    if (!record || typeof record !== "object" || Array.isArray(record)) {
+      return { found: false };
+    }
+    const value = record as Record<string, unknown>;
+    if (value.type === "session_info" && typeof value.name === "string") {
+      return { found: true, name: summarize(value.name, 80) };
+    }
+  } catch {
+    // Malformed records are not durable metadata; keep scanning backward.
+  }
+  return { found: false };
 }
 
 function ingestRecord(

@@ -40,7 +40,7 @@ Useful fixture flags:
 - `--exit-after-first-command` — exits before responding to the first command for pending-request rejection tests.
 - `--ignore-command <name>` — accepts a command but never responds, for deterministic timeout tests.
 - `--drop-completion-events` — persists the final assistant message and marks fake state idle, but does not emit final `message_update done` or `agent_end`; useful for UI reconciliation regressions.
-- `--production-shaped` — keeps the deterministic transport but uses realistic model names, assistant copy, and extension-request wording for documentation captures. Tests retain the explicit fake labels by default.
+- `--production-shaped` — keeps the deterministic fake transport but uses realistic model names, assistant copy, and extension-request wording for documentation captures. `npm run docs:capture` combines this fixture with Electron's real-mode UI; it does not invoke an actual Pi executable or contact a provider. Tests retain the explicit fake labels by default.
 - `--prompt-scenario <name>` — emits additional deterministic prompt-side events. Supported names:
   - `basic` — default `agent_start`, streaming `message_update`, `agent_end`.
   - `tool` — adds `tool_execution_start/update/end`.

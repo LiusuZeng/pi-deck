@@ -91,6 +91,9 @@ function encodeGif(frames, width, height) {
 }
 
 function createFakePiBinary(root, extraArgs = []) {
+  // Keep the production real-mode UI/backend wiring while substituting a
+  // deterministic, production-shaped fake Pi RPC process. This capture never
+  // invokes an installed Pi executable or contacts a model provider.
   const fakePiPath = path.join(root, "fake-pi.js");
   fs.writeFileSync(
     fakePiPath,
@@ -133,6 +136,20 @@ ${JSON.stringify({
 })}
 `,
   );
+}
+
+function writeAttachmentFixture(file) {
+  const image = new PNG({ width: 160, height: 90 });
+  for (let y = 0; y < image.height; y += 1) {
+    for (let x = 0; x < image.width; x += 1) {
+      const offset = (y * image.width + x) * 4;
+      image.data[offset] = 28 + Math.round((x / image.width) * 35);
+      image.data[offset + 1] = 78 + Math.round((y / image.height) * 60);
+      image.data[offset + 2] = 121;
+      image.data[offset + 3] = 255;
+    }
+  }
+  fs.writeFileSync(file, PNG.sync.write(image));
 }
 
 async function waitForReady(page) {
@@ -182,6 +199,11 @@ async function captureExtensionScreenshot(root, output) {
     const page = await app.firstWindow();
     await page.waitForLoadState("domcontentloaded");
     await waitForReady(page);
+    await page
+      .getByRole("complementary", { name: "Sessions" })
+      .getByRole("button", { name: "New session", exact: true })
+      .click();
+    await page.locator('.workspace[data-primary-view="session"]').waitFor();
     await page
       .getByLabel("Prompt text")
       .fill("Approve this extension request.");
@@ -246,6 +268,12 @@ async function main() {
       title: "test5",
       ageMs: 37 * 60 * 1000,
     },
+    {
+      file: path.join(sessionDir, "release-review.jsonl"),
+      id: "release-review-session",
+      title: "validate the unified Work release.",
+      ageMs: 12 * 60 * 1000,
+    },
   ];
   for (const session of sessions) {
     writeSessionFixture(
@@ -256,10 +284,9 @@ async function main() {
       session.ageMs,
     );
   }
-  const attachmentImageBase64 = fs.readFileSync(
-    path.join(repoRoot, "docs/assets/pi-deck-dark.png"),
-    "base64",
-  );
+  const attachmentFixture = path.join(root, "workspace-reference.png");
+  writeAttachmentFixture(attachmentFixture);
+  const attachmentImageBase64 = fs.readFileSync(attachmentFixture, "base64");
 
   const app = await electron.launch({
     executablePath: electronPath,
@@ -313,17 +340,20 @@ async function main() {
           throw new Error("Could not create the seeded project workspace.");
         }
 
-        const activity = await api.workspaces.create({
-          name: "activity-inbox-integration",
+        const review = await api.workspaces.create({
+          name: "release-review",
         });
-        const activityWorkspace = activity.activeWorkspace;
-        if (!activityWorkspace) {
-          throw new Error("Could not create the activity workspace.");
+        const reviewWorkspace = review.activeWorkspace;
+        if (!reviewWorkspace) {
+          throw new Error("Could not create the release-review workspace.");
         }
 
-        for (const sessionFile of sessionFiles) {
+        for (const [index, sessionFile] of sessionFiles.entries()) {
           await api.workspaces.addSession({
-            workspaceId: projectWorkspace.id,
+            workspaceId:
+              index === sessionFiles.length - 1
+                ? reviewWorkspace.id
+                : projectWorkspace.id,
             sessionFile,
           });
         }
@@ -340,7 +370,7 @@ async function main() {
         return {
           defaultWorkspaceId: defaultWorkspace.id,
           projectWorkspaceId: projectWorkspace.id,
-          activityWorkspaceId: activityWorkspace.id,
+          reviewWorkspaceId: reviewWorkspace.id,
         };
       },
       sessions.map((session) => session.file),
@@ -355,8 +385,24 @@ async function main() {
         )?.textContent === "2",
       workspaceIds.projectWorkspaceId,
     );
+    await page.waitForFunction(
+      (workspaceId) =>
+        document.querySelector(
+          `[data-workspace-id="${workspaceId}"] .workspace-tree-count`,
+        )?.textContent === "1",
+      workspaceIds.reviewWorkspaceId,
+    );
     await page.getByRole("status").waitFor({ state: "hidden" });
 
+    // Fresh launches open at All Work. Capture the workspace shell from the
+    // existing session surface before returning to the global Work overview.
+    await page
+      .locator(".activity-inbox-row")
+      .filter({
+        hasText: "read this repo and come up with 3 next roadmap items.",
+      })
+      .click();
+    await page.locator('.workspace[data-primary-view="session"]').waitFor();
     await page.getByLabel(/Model and thinking\. Current model:/).click();
     await page
       .getByRole("menu", { name: "Model and thinking options" })
@@ -406,9 +452,11 @@ async function main() {
     await page.screenshot({ path: workspaceScreenshot });
     capturedScreenshots.set(workspaceOutput.name, workspaceScreenshot);
 
-    const inboxOutput = siteOutputs[1];
-    await page.getByRole("button", { name: "Work inbox", exact: true }).click();
-    await page.getByRole("heading", { name: "Work inbox" }).waitFor();
+    const allWorkOutput = siteOutputs[1];
+    await page.getByRole("button", { name: /^All Work/ }).click();
+    await page
+      .getByRole("heading", { name: "All Work", exact: true })
+      .waitFor();
     await page.getByRole("status").waitFor({ state: "hidden" });
     await page
       .getByRole("complementary", { name: "Sessions" })
@@ -418,53 +466,38 @@ async function main() {
       .getByRole("complementary", { name: "Sessions" })
       .waitFor({ state: "detached" });
     await page.setViewportSize({
-      width: inboxOutput.width,
-      height: inboxOutput.height,
+      width: allWorkOutput.width,
+      height: allWorkOutput.height,
     });
-    const inboxScreenshot = path.join(root, inboxOutput.name);
-    await page.screenshot({ path: inboxScreenshot });
-    capturedScreenshots.set(inboxOutput.name, inboxScreenshot);
+    const allWorkScreenshot = path.join(root, allWorkOutput.name);
+    await page.screenshot({ path: allWorkScreenshot });
+    capturedScreenshots.set(allWorkOutput.name, allWorkScreenshot);
 
     await page.getByLabel("Show sessions").click();
     await page.getByRole("complementary", { name: "Sessions" }).waitFor();
-    await page.getByRole("button", { name: "Work inbox", exact: true }).click();
-    await page.getByRole("heading", { name: "Work inbox" }).waitFor({
-      state: "detached",
-    });
+    await page
+      .locator(".activity-inbox-row")
+      .filter({
+        hasText: "read this repo and come up with 3 next roadmap items.",
+      })
+      .click();
+    await page.locator('.workspace[data-primary-view="session"]').waitFor();
     await page.getByRole("button", { name: "Workspace: pi-deck" }).click();
-    await page.waitForFunction(
-      () =>
-        document.querySelector(
-          '[aria-label="Workspace: pi-deck"][aria-current="page"]',
-        ) !== null,
-    );
     await page
-      .getByRole("button", { name: "Workspace actions for pi-deck" })
-      .click();
-    await page
-      .getByRole("menuitem", { name: "View work inbox", exact: true })
-      .click();
-    await page
-      .getByRole("heading", { name: /Work inbox · pi-deck/i })
+      .getByRole("heading", { name: "pi-deck Work", exact: true })
       .waitFor();
     await page.getByRole("status").waitFor({ state: "hidden" });
-    const workspaceInboxOutput = additionalOutputs[0];
-    const workspaceInboxScreenshot = path.join(root, workspaceInboxOutput.name);
+    const workspaceWorkOutput = additionalOutputs[0];
+    const workspaceWorkScreenshot = path.join(root, workspaceWorkOutput.name);
     await page.setViewportSize({
-      width: workspaceInboxOutput.width,
-      height: workspaceInboxOutput.height,
+      width: workspaceWorkOutput.width,
+      height: workspaceWorkOutput.height,
     });
-    await page.screenshot({ path: workspaceInboxScreenshot });
-    capturedScreenshots.set(
-      workspaceInboxOutput.name,
-      workspaceInboxScreenshot,
-    );
+    await page.screenshot({ path: workspaceWorkScreenshot });
+    capturedScreenshots.set(workspaceWorkOutput.name, workspaceWorkScreenshot);
 
-    await page.getByRole("button", { name: "Work inbox", exact: true }).click();
-    await page.getByRole("heading", { name: /Work inbox · pi-deck/i }).waitFor({
-      state: "detached",
-    });
     await page
+      .getByRole("complementary", { name: "Sessions" })
       .getByRole("button", { name: "New session", exact: true })
       .click();
     await page.getByLabel("Prompt text").waitFor();

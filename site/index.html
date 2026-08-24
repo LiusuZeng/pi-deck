@@ -5,23 +5,23 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#0a0c14" />
     <title>Pi Deck — Local workflows for Pi coding agents</title>
-    <meta name="description" content="Pi Deck is a local macOS desktop control plane for Pi: organize sessions, run reusable Agent Workflows, and delegate parallel work." />
+    <meta name="description" content="Pi Deck is a local macOS desktop control plane for Pi: follow All Work across workspaces, open session detail, run Agent Workflows, and plan private parallel tasks." />
     <link rel="canonical" href="https://liusuzeng.github.io/pi-deck/" />
     <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Pi Deck" />
     <meta property="og:title" content="Pi Deck — Local workflows for Pi coding agents" />
-    <meta property="og:description" content="Organize local Pi sessions, run reusable Agent Workflows, and delegate parallel work from one macOS desktop app." />
+    <meta property="og:description" content="Follow All Work across workspaces, open Pi session detail, run reusable Agent Workflows, and plan private parallel tasks from one macOS desktop app." />
     <meta property="og:url" content="https://liusuzeng.github.io/pi-deck/" />
     <meta property="og:image" content="https://liusuzeng.github.io/pi-deck/assets/social-preview.png" />
     <meta property="og:image:width" content="1280" />
     <meta property="og:image:height" content="640" />
-    <meta property="og:image:alt" content="Pi Deck showing a local Pi workflow with a completed worker and Human checkpoint" />
+    <meta property="og:image:alt" content="Pi Deck showing All Work across active workspaces" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="Pi Deck — Local workflows for Pi coding agents" />
-    <meta name="twitter:description" content="Organize local Pi sessions, run reusable Agent Workflows, and delegate parallel work from one macOS desktop app." />
+    <meta name="twitter:description" content="Follow All Work across workspaces, open Pi session detail, run reusable Agent Workflows, and plan private parallel tasks from one macOS desktop app." />
     <meta name="twitter:image" content="https://liusuzeng.github.io/pi-deck/assets/social-preview.png" />
-    <meta name="twitter:image:alt" content="Pi Deck showing a local Pi workflow with a completed worker and Human checkpoint" />
+    <meta name="twitter:image:alt" content="Pi Deck showing All Work across active workspaces" />
     <link rel="stylesheet" href="styles.css" />
     <script type="application/ld+json">
       {
@@ -30,7 +30,7 @@
         "name": "Pi Deck",
         "applicationCategory": "DeveloperApplication",
         "operatingSystem": "macOS",
-        "description": "A local macOS Electron desktop app for organizing Pi coding-agent sessions, running reusable Agent Workflows, and monitoring work by status.",
+        "description": "A local macOS Electron desktop app for following All Work across workspaces, opening Pi session detail, running reusable Agent Workflows, and monitoring work by status.",
         "url": "https://liusuzeng.github.io/pi-deck/",
         "codeRepository": "https://github.com/LiusuZeng/pi-deck"
       }
@@ -55,12 +55,12 @@
         <div class="hero-copy">
           <p class="eyebrow">A local workspace for agentic development</p>
           <h1 id="hero-heading">Organize, orchestrate, and direct your Pi agents.</h1>
-          <p class="lede">Pi Deck gives Pi a focused local control plane: create named workspaces, run reusable Agent Workflows, delegate parallel work, and use the Work inbox to see what needs attention without juggling terminal windows.</p>
+          <p class="lede">Pi Deck gives Pi a focused local control plane: start from All Work, scope the same Work surface to a workspace, open session detail when you need to intervene, and keep Agent Workflows as a separate advanced surface—without juggling terminal windows.</p>
           <div class="actions">
             <a class="button button-primary" href="#run-from-source">Run from source <span aria-hidden="true">↓</span></a>
             <a class="button button-secondary" href="https://github.com/LiusuZeng/pi-deck">View source on GitHub <span aria-hidden="true">↗</span></a>
           </div>
-          <p class="status"><span aria-hidden="true">●</span> Active pre-release MVP · macOS · runs locally from source</p>
+          <p class="status"><span aria-hidden="true">●</span> Unified Work source candidate · macOS · runs locally from source</p>
         </div>
         <div class="hero-art" aria-hidden="true">
           <div class="orbit orbit-one"></div><div class="orbit orbit-two"></div>
@@ -71,7 +71,7 @@
       <section class="proof" aria-label="Pi Deck capabilities">
         <div><strong>Named workspaces</strong><span>Group related sessions and workflows by work, not by folder.</span></div>
         <div><strong>Agent Workflows</strong><span>Build reusable multi-agent execution graphs.</span></div>
-        <div><strong>Work inbox</strong><span>See all work—or narrow it by workspace and status.</span></div>
+        <div><strong>All Work</strong><span>See work across workspaces, scope it, and open session detail.</span></div>
         <div><strong>Pi-native by design</strong><span>Uses Pi’s models, settings, tools, and session files.</span></div>
       </section>
 
@@ -79,44 +79,44 @@
         <div class="section-heading"><p class="eyebrow">Pi stays in charge</p><h2 id="pi-and-deck-heading">Pi runs the agent. Pi Deck runs the desk.</h2><p>Pi Deck adds a local desktop control plane without replacing the Pi CLI, its providers, tools, settings, resources, or session files.</p></div>
         <div class="pi-and-deck-grid">
           <article><h3>Pi</h3><p>Owns model access, provider authentication, tools, resources, settings, and JSONL conversation history.</p></article>
-          <article><h3>Pi Deck</h3><p>Organizes sessions, keeps active work visible, runs explicit workflows, and gives you local controls for intervention and delegation.</p></article>
+          <article><h3>Pi Deck</h3><p>Derives All Work from runtime and Pi session state, keeps active work visible, runs explicit workflows, and gives you local controls for intervention and private planning.</p></article>
         </div>
       </section>
 
       <section id="features" class="section feature-evidence" aria-labelledby="features-heading">
-        <div class="section-heading"><p class="eyebrow">Built around Pi</p><h2 id="features-heading">A control plane for sessions and repeatable work.</h2><p>Organize the work, find what needs attention, build explicit workflows, and intervene at the right moment—all while Pi remains the local agent runtime.</p></div>
+        <div class="section-heading"><p class="eyebrow">Built around Pi</p><h2 id="features-heading">One Work path, plus explicit workflows.</h2><p>Start at All Work, scope it to a workspace, open session detail when you need to intervene, or switch to Agent Workflows for repeatable orchestration—all while Pi remains the local agent runtime.</p></div>
         <div class="evidence-grid">
           <article class="evidence-card">
             <div class="evidence-copy"><span class="feature-number">01</span><h3>Organize by workspace</h3><p>Create named workspaces for projects, clients, experiments, or any other way you divide your work. Select a workspace to see its sessions, independent of the folders they use.</p></div>
             <figure>
               <a class="lightbox-trigger" href="assets/pi-deck.png" aria-label="Open the Pi Deck workspace screenshot full size">
-                <img src="assets/pi-deck.png" width="1193" height="776" alt="Pi Deck showing workspace navigation, active sessions, and the new session composer" />
+                <img src="assets/pi-deck.png" width="1193" height="776" alt="Pi Deck showing workspace navigation, the All Work entry, and the new session composer" />
               </a>
               <figcaption>Workspace navigation keeps active sessions and new work visible.<span class="lightbox-hint">Click the image to enlarge.</span></figcaption>
             </figure>
           </article>
           <article class="evidence-card">
-            <div class="evidence-copy"><span class="feature-number">02</span><h3>Find work in one inbox</h3><p>Use the global Work inbox to scan every workspace, or scope it to the workspace you are in. Filter by needs attention, failed, pending, in progress, completed, or idle.</p></div>
+            <div class="evidence-copy"><span class="feature-number">02</span><h3>Follow one Work surface</h3><p>Start at All Work to scan every active workspace, select a workspace to scope that same surface, and open a row for session detail. Filter by needs attention, failed, pending, in progress, completed, or idle.</p></div>
             <div class="evidence-media evidence-media-pair">
               <figure>
-                <a class="lightbox-trigger" href="assets/pi-deck-dark.png" aria-label="Open the global Work inbox screenshot full size">
-                  <img src="assets/pi-deck-dark.png" width="931" height="672" alt="Pi Deck showing the global Work inbox with workspace scope and idle session filtering" />
+                <a class="lightbox-trigger" href="assets/pi-deck-dark.png" aria-label="Open the All Work screenshot full size">
+                  <img src="assets/pi-deck-dark.png" width="931" height="672" alt="Pi Deck showing All Work across multiple workspaces with status filters and saved sessions" />
                 </a>
-                <figcaption>Review all workspaces together.<span class="lightbox-hint">Click to enlarge.</span></figcaption>
+                <figcaption>Review All Work across workspaces.<span class="lightbox-hint">Click to enlarge.</span></figcaption>
               </figure>
               <figure>
-                <a class="lightbox-trigger" href="assets/pi-deck-inbox.png" aria-label="Open the workspace Work inbox screenshot full size">
-                  <img src="assets/pi-deck-inbox.png" width="1193" height="776" alt="Pi Deck showing a workspace-scoped Work inbox with idle sessions and status filters" />
+                <a class="lightbox-trigger" href="assets/pi-deck-inbox.png" aria-label="Open the workspace Work screenshot full size">
+                  <img src="assets/pi-deck-inbox.png" width="1193" height="776" alt="Pi Deck showing Work scoped to one workspace with saved sessions and status filters" />
                 </a>
-                <figcaption>Scope the queue to one workspace.<span class="lightbox-hint">Click to enlarge.</span></figcaption>
+                <figcaption>Scope Work to one workspace.<span class="lightbox-hint">Click to enlarge.</span></figcaption>
               </figure>
             </div>
           </article>
           <article class="evidence-card">
             <div class="evidence-copy"><span class="feature-number">03</span><h3>Keep Pi’s source of truth</h3><p>Resume Pi JSONL sessions and use the models, provider authentication, resources, commands, and settings you already configured. Model-backed workflow roles use Pi sessions too.</p></div>
             <figure>
-              <a class="lightbox-trigger" href="assets/pi-deck-conversation.png" aria-label="Open the live Pi conversation screenshot full size">
-                <img src="assets/pi-deck-conversation.png" width="1193" height="776" alt="Pi Deck showing a live Pi conversation with an image attachment, tool execution card, streaming response, and intervention controls" />
+              <a class="lightbox-trigger" href="assets/pi-deck-conversation.png" aria-label="Open the Pi session detail screenshot full size">
+                <img src="assets/pi-deck-conversation.png" width="1193" height="776" alt="Pi Deck showing Pi session detail reached from scoped Work with an image attachment, tool execution card, and intervention controls" />
               </a>
               <figcaption>Continue a Pi-native conversation with its work in view.<span class="lightbox-hint">Click the image to enlarge.</span></figcaption>
             </figure>
@@ -128,7 +128,7 @@
                 <a class="lightbox-trigger" href="assets/pi-deck-conversation.gif" aria-label="Open the Pi Deck conversation walkthrough full size">
                   <img src="assets/pi-deck-conversation.gif" width="896" height="582" alt="Animated Pi Deck walkthrough showing an image attachment, tool execution, streaming response, and intervention controls" />
                 </a>
-                <figcaption>Steer a real-mode turn as it runs.<span class="lightbox-hint">Click the animation to enlarge.</span></figcaption>
+                <figcaption>Deterministic real-mode UI capture driven by production-shaped fake Pi RPC fixtures.<span class="lightbox-hint">Click the animation to enlarge.</span></figcaption>
               </figure>
               <figure>
                 <a class="lightbox-trigger" href="assets/pi-deck-extension.png" aria-label="Open the extension request screenshot full size">
@@ -156,26 +156,26 @@
             </div>
           </article>
           <article class="evidence-card">
-            <div class="evidence-copy"><span class="feature-number">06</span><h3>Delegate isolated child tasks</h3><p>Enable parallel multitasking for a parent conversation when Pi should delegate substantive independent work. Pi Deck queues and monitors local child tasks, then returns their status and handoff to the parent—without exposing child conversations as separate controls.</p></div>
+            <div class="evidence-copy"><span class="feature-number">06</span><h3>Plan private parallel work</h3><p>Enable Parallel mode on a parent conversation when a prompt contains independent work. Pi Deck deterministically plans private task sessions, queues and monitors them, then returns status and handoff to the parent—without exposing child conversations as separate controls. Choose <strong>Work in parent</strong> for a one-prompt override.</p></div>
             <figure>
               <a class="lightbox-trigger" href="assets/pi-deck-multitasking.png" aria-label="Open the parallel multitasking screenshot full size">
-                <img src="assets/pi-deck-multitasking.png" width="1193" height="776" alt="Pi Deck showing a parent conversation with a completed delegated child task status" />
+                <img src="assets/pi-deck-multitasking.png" width="1193" height="776" alt="Pi Deck showing a parent conversation with private tasks starting and queued" />
               </a>
-              <figcaption>Keep delegated child-task status with the parent conversation.<span class="lightbox-hint">Click to enlarge.</span></figcaption>
+              <figcaption>Keep private task-session status with the parent conversation.<span class="lightbox-hint">Click to enlarge.</span></figcaption>
             </figure>
           </article>
         </div>
       </section>
 
       <section id="use-cases" class="section use-cases" aria-labelledby="use-cases-heading">
-        <div class="section-heading"><p class="eyebrow">What can I run?</p><h2 id="use-cases-heading">Start with the shape of work you already have.</h2><p>Use a normal Pi conversation for ad-hoc work, save an Agent Workflow when the process should be explicit and repeatable, or let one parent conversation delegate independent tasks.</p></div>
+        <div class="section-heading"><p class="eyebrow">What can I run?</p><h2 id="use-cases-heading">Start with the shape of work you already have.</h2><p>Use a normal Pi session for ad-hoc work, save an Agent Workflow when the process should be explicit and repeatable, or let one parent conversation plan private independent tasks.</p></div>
         <div class="use-case-grid">
           <article><span class="feature-number">01</span><h3>Feature delivery</h3><p>Plan a change, implement it, verify the result, and pause for a Human approval. Use Workers for the work, a Decider to route it, and a checkpoint when a person should choose what happens next.</p></article>
           <article><span class="feature-number">02</span><h3>Parallel investigation</h3><p>Use an Orchestrator to fan out bounded-concurrency research, review, or validation work. Follow every occurrence in the live graph, then use the resulting handoffs in the next step.</p></article>
-          <article><span class="feature-number">03</span><h3>One-off delegation</h3><p>Keep an exploratory task in one Pi conversation and enable parallel multitasking when it contains substantive independent work. Pi delegates child tasks locally; their status and handoff stay with the parent.</p></article>
+          <article><span class="feature-number">03</span><h3>One-off Parallel work</h3><p>Keep an exploratory task in one Pi session and enable Parallel mode when it contains substantive independent work. Pi Deck plans private task sessions locally; their status and handoff stay with the parent.</p></article>
         </div>
         <ul class="capability-strip" aria-label="Core capabilities">
-          <li>Local Pi sessions</li><li>Reusable workflows</li><li>Four role types</li><li>Loops and fan-out</li><li>Live graph and retries</li><li>Human checkpoints</li><li>Opt-in delegation</li>
+          <li>Local Pi sessions</li><li>All Work overview</li><li>Scoped Work</li><li>Reusable workflows</li><li>Live graph and retries</li><li>Human checkpoints</li><li>Private Parallel tasks</li>
         </ul>
       </section>
 
@@ -200,15 +200,15 @@
       <section id="how-it-works" class="section workflow" aria-labelledby="workflow-heading">
         <div class="section-heading"><p class="eyebrow">How it works</p><h2 id="workflow-heading">A desktop layer over your existing Pi workflow.</h2></div>
         <ol>
-          <li><span>1</span><div><h3>Create or select a workspace</h3><p>Choose a named workspace for related sessions and workflow definitions. Add existing Pi sessions or open a project folder when you are ready to start one.</p></div></li>
+          <li><span>1</span><div><h3>Start at All Work</h3><p>All Work opens on launch as a stable primary surface for active and saved work. You can start sessions without managing workspaces; the persisted default stays hidden until you create a named workspace.</p></div></li>
           <li><span>2</span><div><h3>Start a conversation or workflow</h3><p>Use a local <code>pi --mode rpc</code> worker for ad-hoc work, or start a reusable Agent Workflow when the work needs explicit roles, decisions, loops, fan-out, or a Human checkpoint.</p></div></li>
-          <li><span>3</span><div><h3>Follow and direct execution</h3><p>Use the Work inbox for sessions, or a live workflow graph for routes, retries, fan-out and loop activity. Open an associated Pi session when you need to steer the work.</p></div></li>
-          <li><span>4</span><div><h3>Delegate when it fits</h3><p>Enable parallel multitasking on a parent conversation to let Pi delegate independent local child tasks. Their status and completed handoff stay with the parent.</p></div></li>
+          <li><span>3</span><div><h3>Open session detail</h3><p>Select a row from All Work or scoped Work to open the existing Pi session detail. Use the timeline and controls to steer the work, then return to the exact Work origin.</p></div></li>
+          <li><span>4</span><div><h3>Use Agent Workflows or Parallel mode</h3><p>Open Agent Workflows for explicit repeatable orchestration, or enable Parallel mode on a parent to plan private task sessions. Their status and completed handoff stay parent-facing.</p></div></li>
         </ol>
       </section>
 
       <section id="run-from-source" class="section install" aria-labelledby="install-heading">
-        <div class="install-copy"><p class="eyebrow">Get started</p><h2 id="install-heading">Run Pi Deck from source.</h2><p>Pi Deck is currently a macOS Electron pre-release. You will need Node.js 22.12+, npm, and a working Pi executable with its normal provider authentication configured.</p><ol class="quickstart-list"><li><strong>Check Pi.</strong> Run <code>pi --version</code> in your terminal.</li><li><strong>Launch a project.</strong> Use the command beside this list with an absolute project path.</li><li><strong>Choose the work mode.</strong> Start a session, create a workflow, or enable delegation on a parent conversation.</li></ol><a class="button button-primary" href="https://github.com/LiusuZeng/pi-deck#quick-start">Read the setup guide <span aria-hidden="true">↗</span></a></div>
+        <div class="install-copy"><p class="eyebrow">Get started</p><h2 id="install-heading">Run Pi Deck from source.</h2><p>Pi Deck is currently a macOS Electron pre-release. You will need Node.js 22.12+, npm, and a working Pi executable with its normal provider authentication configured.</p><ol class="quickstart-list"><li><strong>Check Pi.</strong> Run <code>pi --version</code> in your terminal.</li><li><strong>Launch a project.</strong> Use the command beside this list with an absolute project path.</li><li><strong>Choose the work mode.</strong> Start a session, open Agent Workflows, or enable Parallel mode on a parent conversation.</li></ol><a class="button button-primary" href="https://github.com/LiusuZeng/pi-deck#quick-start">Read the setup guide <span aria-hidden="true">↗</span></a></div>
         <pre aria-label="Installation commands"><code>git clone https://github.com/LiusuZeng/pi-deck.git
 cd pi-deck
 npm ci
@@ -221,28 +221,28 @@ npm run deck:real -- /absolute/path/to/your/project</code></pre>
         <ul>
           <li><strong>Bring your Pi setup.</strong> Pi Deck uses your local Pi executable, provider authentication, models, tools, settings, and resources.</li>
           <li><strong>Local and source-first.</strong> This macOS pre-release runs from source; there is not yet a signed or notarized installer.</li>
-          <li><strong>Delegation is deliberate.</strong> Parallel multitasking is opt-in per parent conversation. Child tasks expose parent-facing status and handoff, not separate child-session controls.</li>
+          <li><strong>Parallel work is deliberate.</strong> Parallel mode is opt-in per parent conversation. Private task sessions expose parent-facing status and handoff, not separate session controls.</li>
         </ul>
       </section>
 
       <section class="section release-confidence" aria-labelledby="release-confidence-heading">
-        <div><p class="eyebrow">Release confidence</p><h2 id="release-confidence-heading">See the current state before you commit.</h2></div>
-        <div><p><strong data-release-version="0.5.5">v0.5.5</strong> is the current pre-release source version, with Agent Workflows and interactive multitasking introduced in v0.5.0.</p><p>Read the release notes, review the documented validation paths, or inspect the source before trying it with your own Pi setup.</p><p class="release-links"><a href="https://github.com/LiusuZeng/pi-deck/blob/main/CHANGELOG.md">Changelog <span aria-hidden="true">↗</span></a><a href="https://github.com/LiusuZeng/pi-deck/blob/main/docs/real-pi-gui-chat-validation.md">Validation record <span aria-hidden="true">↗</span></a><a href="https://github.com/LiusuZeng/pi-deck/releases">Releases <span aria-hidden="true">↗</span></a></p></div>
+        <div><p class="eyebrow">Source candidate</p><h2 id="release-confidence-heading">Inspect the source before you commit.</h2></div>
+        <div><p><strong data-release-version="0.6.0">v0.6.0 source candidate</strong> is an unreleased Unified Work candidate: All Work, scoped Work, session detail, Agent Workflows, and deterministic private Parallel tasks share one local control plane.</p><p>This page describes a source-based evaluation candidate, not a tagged, packaged, or authenticated release. Run the documented checks on the final candidate before making release claims.</p><p class="release-links"><a href="https://github.com/LiusuZeng/pi-deck#quick-start">Setup guide <span aria-hidden="true">↗</span></a><a href="https://github.com/LiusuZeng/pi-deck/blob/main/docs/release-checklist.md">Release checklist <span aria-hidden="true">↗</span></a><a href="https://github.com/LiusuZeng/pi-deck">Source <span aria-hidden="true">↗</span></a></p></div>
       </section>
 
       <section class="section privacy" aria-labelledby="privacy-heading">
         <div><p class="eyebrow">Privacy and boundaries</p><h2 id="privacy-heading">Your sessions stay where Pi keeps them.</h2></div>
-        <div><p>Pi Deck has no hosted backend and does not sync application data. Pi-owned JSONL files remain the source of truth for conversations; Pi Deck stores local metadata for workspaces, workflow definitions and runs, and delegated-task status.</p><p>Pi itself may contact configured model providers or run network-capable tools according to your Pi settings and environment.</p><a href="https://github.com/LiusuZeng/pi-deck#local-data-and-privacy">Read the privacy details <span aria-hidden="true">↗</span></a></div>
+        <div><p>Pi Deck has no hosted backend and does not sync application data. Pi-owned JSONL files remain the source of truth for conversations; Pi Deck stores local metadata for workspaces, workflow definitions and runs, and parent-facing task status. Work itself is derived in the renderer, not persisted as a separate entity.</p><p>Pi itself may contact configured model providers or run network-capable tools according to your Pi settings and environment.</p><a href="https://github.com/LiusuZeng/pi-deck#local-data-and-privacy">Read the privacy details <span aria-hidden="true">↗</span></a></div>
       </section>
 
       <section id="faq" class="section faq" aria-labelledby="faq-heading">
         <div class="section-heading"><p class="eyebrow">FAQ</p><h2 id="faq-heading">Questions developers ask.</h2></div>
         <div class="faq-grid">
           <details><summary>Is Pi Deck a GUI for the Pi coding agent?</summary><p>Yes. Pi Deck is a local macOS desktop GUI and control plane for Pi coding-agent sessions. It complements Pi’s CLI workflow rather than replacing Pi itself.</p></details>
-          <details><summary>What is a Pi Deck workspace?</summary><p>A workspace is a named way to organize Pi sessions. It is independent of the folders those sessions use, so you can group work by project, client, topic, or any other context. A default workspace keeps ungrouped sessions discoverable.</p></details>
-          <details><summary>Can Pi Deck manage multiple Pi sessions?</summary><p>Yes. Each attached conversation has an independent local Pi worker. The Work inbox lets you monitor sessions across every workspace or narrow the view to one workspace and a status.</p></details>
+          <details><summary>What is a Pi Deck workspace?</summary><p>A workspace is an optional, named way to organize Pi sessions independently of their folders. Pi Deck keeps globally created sessions owned internally without showing the default workspace in navigation until you create a named workspace.</p></details>
+          <details><summary>Can Pi Deck manage multiple Pi sessions?</summary><p>Yes. Each attached conversation has an independent local Pi worker. All Work lets you monitor sessions across every workspace; selecting a workspace scopes the same Work surface to one context and a status.</p></details>
           <details><summary>What is an Agent Workflow?</summary><p>An Agent Workflow is a reusable, explicit execution graph. Combine Worker, Decider, Orchestrator, and Human roles to route work, make decisions, run bounded loops or fan-out work, and pause for input when needed.</p></details>
-          <details><summary>How is multitasking different from a workflow?</summary><p>Workflows are saved orchestration definitions that you start and monitor. Parallel multitasking is an opt-in mode for one parent Pi conversation: Pi can delegate independent child tasks, while their status and handoff remain parent-facing.</p></details>
+          <details><summary>How is multitasking different from a workflow?</summary><p>Workflows are saved orchestration definitions that you start and monitor. Parallel mode is an opt-in setting for one parent Pi conversation: Pi Deck deterministically plans private independent tasks, while their status and handoff remain parent-facing.</p></details>
           <details><summary>Does Pi Deck run locally?</summary><p>Yes. Pi Deck is a local Electron desktop app with no Pi Deck-hosted backend. Pi’s own configured providers and tools retain their usual behavior.</p></details>
           <details><summary>Is there a downloadable macOS installer?</summary><p>Not yet. Pi Deck is an active pre-release MVP that currently runs from source on macOS.</p></details>
         </div>

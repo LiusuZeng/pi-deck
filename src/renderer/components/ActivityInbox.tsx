@@ -1,4 +1,4 @@
-import { useMemo, useState, type KeyboardEvent } from "react";
+import { useMemo, type KeyboardEvent } from "react";
 import type {
   ActivityInboxModel,
   ActivityItem,
@@ -11,9 +11,11 @@ import {
   tagsForScope,
   tagsForStatus,
 } from "../activityInbox.js";
-import { Check, CircleAlert, CircleDot, LoaderCircle, X } from "./ui/icons.js";
+import { Check, CircleAlert, CircleDot, LoaderCircle } from "./ui/icons.js";
 
-type ActivityFilter = "all" | ActivityStatus;
+export type ActivityInboxFilter = "all" | ActivityStatus;
+
+const ALL_WORK_LABEL = "All Work";
 
 export interface ActivityWorkspace {
   id: string;
@@ -59,29 +61,58 @@ function formatTimestamp(timestamp: number): string {
   }).format(new Date(timestamp));
 }
 
+function workScopeLabel(
+  scope: ActivityScope,
+  workspaceName: string | undefined,
+): string {
+  if (scope.type === "all") {
+    return ALL_WORK_LABEL;
+  }
+  return workspaceName === undefined
+    ? "Workspace Work"
+    : `${workspaceName} Work`;
+}
+
+function availableActivityCount(model: ActivityInboxModel): number {
+  // The workspace map is intentionally computed before scope/status filters;
+  // use it instead of model.items.length when App supplies a scoped model.
+  const availableCount = Object.values(model.availableWorkspaceCounts).reduce(
+    (total, count) => total + count,
+    0,
+  );
+  return availableCount;
+}
+
 export interface ActivityInboxProps {
   model: ActivityInboxModel;
   scope: ActivityScope;
   workspaces: readonly ActivityWorkspace[];
   onOpenActivityItem: (item: ActivityItem) => void;
   onScopeChange: (scope: ActivityScope) => void;
-  onClose: () => void;
+  selectedFilter: ActivityInboxFilter;
+  onSelectedFilterChange: (filter: ActivityInboxFilter) => void;
+  /** Optional for compatibility with pre-CTA embedders. */
+  onNewSession?: () => void;
 }
 
-/** A scoped, presentational work inbox. Classification and tags remain domain-owned. */
+/** A scoped, presentational Work overview. Classification and tags remain domain-owned. */
 export function ActivityInbox({
   model,
   scope,
   workspaces,
   onOpenActivityItem,
   onScopeChange,
-  onClose,
+  selectedFilter,
+  onSelectedFilterChange,
+  onNewSession,
 }: ActivityInboxProps) {
-  const [selectedFilter, setSelectedFilter] = useState<ActivityFilter>("all");
   const workspaceName =
     scope.type === "workspace"
       ? workspaces.find((workspace) => workspace.id === scope.workspaceId)?.name
       : undefined;
+  // Keep this boundary compatible with both global and pre-scoped models:
+  // applying the same tag twice is idempotent while App transitions to a
+  // single unscoped source model.
   const scopedItems = useMemo(
     () => filterActivityItems(model.items, tagsForScope(scope)),
     [model.items, scope],
@@ -100,6 +131,12 @@ export function ActivityInbox({
       ),
     [scopedItems],
   );
+  const availableCount = availableActivityCount(model);
+  const scopeLabel = workScopeLabel(scope, workspaceName);
+  const description =
+    scope.type === "all"
+      ? "Monitor work across active workspaces and jump to sessions that need you."
+      : "Monitor work in this workspace and jump to sessions that need you.";
   const groups = useMemo(
     () =>
       ACTIVITY_STATUSES.reduce(
@@ -116,65 +153,86 @@ export function ActivityInbox({
   const visibleKinds =
     selectedFilter === "all" ? ACTIVITY_STATUSES : [selectedFilter];
   const visibleItems = visibleKinds.flatMap((kind) => groups[kind]);
-  const scopeLabel = workspaceName ?? "All workspaces";
+  const showWorkspaceControls = workspaces.length > 0;
+  const showWorkspaceContext = scope.type === "all" && workspaces.length > 0;
 
   return (
-    <main className="activity-inbox" aria-labelledby="activity-inbox-title">
+    <main
+      aria-describedby="activity-inbox-description"
+      aria-labelledby="activity-inbox-title"
+      className="activity-inbox"
+    >
       <header className="activity-inbox-header">
         <div>
           <p className="activity-inbox-eyebrow">
-            {scope.type === "all" ? "All workspaces" : "Workspace work inbox"}
+            {scope.type === "all" ? ALL_WORK_LABEL : "Workspace Work"}
           </p>
-          <h1 id="activity-inbox-title">
-            {workspaceName ? `Work inbox · ${workspaceName}` : "Work inbox"}
+          <h1 id="activity-inbox-title" tabIndex={-1}>
+            {scopeLabel}
           </h1>
-          <p className="activity-inbox-description">
-            Monitor parallel work and jump to sessions that need you.
+          <p
+            className="activity-inbox-description"
+            id="activity-inbox-description"
+          >
+            {description}
           </p>
         </div>
-        <button
-          aria-label="Close work inbox"
-          className="activity-inbox-close"
-          onClick={onClose}
-          type="button"
-        >
-          <X aria-hidden="true" focusable="false" />
-        </button>
       </header>
 
-      <label className="activity-inbox-workspace-filter">
-        <span>Workspace scope</span>
-        <select
-          aria-label="Work inbox workspace"
-          onChange={(event) =>
-            onScopeChange(
-              event.target.value === "all"
-                ? { type: "all" }
-                : { type: "workspace", workspaceId: event.target.value },
-            )
-          }
-          value={scope.type === "workspace" ? scope.workspaceId : "all"}
+      {showWorkspaceControls ? (
+        <label
+          className="activity-inbox-workspace-filter"
+          htmlFor="activity-inbox-workspace-scope"
         >
-          <option value="all">All workspaces ({model.items.length})</option>
-          {workspaces.map((workspace) => {
-            const count = model.availableWorkspaceCounts[workspace.id] ?? 0;
-            return (
-              <option key={workspace.id} value={workspace.id}>
-                {workspace.name} ({count})
-              </option>
-            );
-          })}
-        </select>
-      </label>
+          <span id="activity-inbox-workspace-scope-label">
+            Current Work scope
+          </span>
+          <select
+            aria-describedby="activity-inbox-scope-status"
+            aria-label="Current Work scope"
+            id="activity-inbox-workspace-scope"
+            onChange={(event) =>
+              onScopeChange(
+                event.target.value === "all"
+                  ? { type: "all" }
+                  : { type: "workspace", workspaceId: event.target.value },
+              )
+            }
+            value={scope.type === "workspace" ? scope.workspaceId : "all"}
+          >
+            <option value="all">
+              {ALL_WORK_LABEL} ({availableCount})
+            </option>
+            {workspaces.map((workspace) => {
+              const count = model.availableWorkspaceCounts[workspace.id] ?? 0;
+              return (
+                <option key={workspace.id} value={workspace.id}>
+                  {workspace.name} ({count})
+                </option>
+              );
+            })}
+          </select>
+        </label>
+      ) : null}
+      <span
+        aria-live="polite"
+        className="activity-inbox-scope-status sr-only"
+        id="activity-inbox-scope-status"
+      >
+        Current scope: {scopeLabel}.
+      </span>
 
       <div
+        aria-controls="activity-inbox-content"
+        aria-describedby="activity-inbox-scope-status"
+        aria-label="Filter Work by status"
         className="activity-inbox-filters"
-        aria-label="Filter work inbox status"
+        role="group"
       >
         <button
           aria-pressed={selectedFilter === "all"}
           className="activity-inbox-filter"
-          onClick={() => setSelectedFilter("all")}
+          onClick={() => onSelectedFilterChange("all")}
           type="button"
         >
           <span>All</span>
@@ -189,7 +247,7 @@ export function ActivityInbox({
               aria-pressed={selectedFilter === kind}
               className="activity-inbox-filter"
               key={kind}
-              onClick={() => setSelectedFilter(kind)}
+              onClick={() => onSelectedFilterChange(kind)}
               type="button"
             >
               <span>{meta.label}</span>
@@ -201,16 +259,20 @@ export function ActivityInbox({
         })}
       </div>
 
-      <div className="activity-inbox-content">
+      <div className="activity-inbox-content" id="activity-inbox-content">
         {visibleItems.length === 0 ? (
-          <EmptyState filter={selectedFilter} scopeLabel={scopeLabel} />
+          <EmptyState
+            filter={selectedFilter}
+            {...(onNewSession === undefined ? {} : { onNewSession })}
+            scopeLabel={scopeLabel}
+          />
         ) : (
           visibleKinds.map((kind) => {
             const items = groups[kind];
             return items.length > 0 ? (
               <ActivitySection
-                isGlobalScope={scope.type === "all"}
                 items={items}
+                showWorkspaceContext={showWorkspaceContext}
                 key={kind}
                 kind={kind}
                 onOpenActivityItem={onOpenActivityItem}
@@ -225,34 +287,45 @@ export function ActivityInbox({
 
 function EmptyState({
   filter,
+  onNewSession,
   scopeLabel,
 }: {
-  filter: ActivityFilter;
+  filter: ActivityInboxFilter;
+  onNewSession?: () => void;
   scopeLabel: string;
 }) {
   const message =
     filter === "all"
-      ? `No work in ${scopeLabel}. Start work in a session to see it here.`
+      ? `No work in ${scopeLabel}. Start a session to see it here.`
       : `No ${ACTIVITY_META[filter].emptyLabel.toLowerCase()} work in ${scopeLabel}.`;
 
   return (
     <div className="activity-inbox-empty" role="status">
-      <h2>{filter === "all" ? "No work yet" : "Nothing here"}</h2>
+      <h2>{filter === "all" ? "No work yet" : "No matching work"}</h2>
       <p>{message}</p>
+      {filter === "all" && onNewSession !== undefined ? (
+        <button
+          className="activity-inbox-empty-action"
+          onClick={onNewSession}
+          type="button"
+        >
+          New session
+        </button>
+      ) : null}
     </div>
   );
 }
 
 function ActivitySection({
-  isGlobalScope,
   items,
   kind,
   onOpenActivityItem,
+  showWorkspaceContext,
 }: {
-  isGlobalScope: boolean;
   items: ActivityItem[];
   kind: ActivityStatus;
   onOpenActivityItem: (item: ActivityItem) => void;
+  showWorkspaceContext: boolean;
 }) {
   const { Icon, label } = ACTIVITY_META[kind];
   const headingId = `activity-inbox-${kind}`;
@@ -267,8 +340,8 @@ function ActivitySection({
       <div className="activity-inbox-list">
         {items.map((item) => (
           <ActivityRow
-            isGlobalScope={isGlobalScope}
             item={item}
+            showWorkspaceContext={showWorkspaceContext}
             key={item.id}
             onOpenActivityItem={onOpenActivityItem}
           />
@@ -279,17 +352,20 @@ function ActivitySection({
 }
 
 function ActivityRow({
-  isGlobalScope,
   item,
   onOpenActivityItem,
+  showWorkspaceContext,
 }: {
-  isGlobalScope: boolean;
   item: ActivityItem;
   onOpenActivityItem: (item: ActivityItem) => void;
+  showWorkspaceContext: boolean;
 }) {
   const kind = item.status;
   const { Icon, label } = ACTIVITY_META[kind];
   const relativeTime = formatRelativeTime(item.updatedAtMs);
+  const workspaceContext = showWorkspaceContext
+    ? `, ${item.workspaceName}`
+    : "";
   const activate = () => onOpenActivityItem(item);
   const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (event.key === "Enter" || event.key === " ") {
@@ -300,8 +376,9 @@ function ActivityRow({
 
   return (
     <button
-      aria-label={`${label}: ${item.title}, ${item.workspaceName}. ${item.actionLabel}.`}
+      aria-label={`${label}: ${item.title}${workspaceContext}. ${item.detail}. Updated ${relativeTime}. ${item.actionLabel}.`}
       className={`activity-inbox-row activity-inbox-row--${kind}`}
+      data-activity-item-id={item.id}
       onClick={activate}
       onKeyDown={onKeyDown}
       type="button"
@@ -312,7 +389,7 @@ function ActivityRow({
       </span>
       <span className="activity-inbox-row-copy">
         <span className="activity-inbox-row-title">{item.title}</span>
-        {isGlobalScope ? (
+        {showWorkspaceContext ? (
           <span className="activity-inbox-row-context">
             {item.workspaceName}
           </span>

@@ -1,7 +1,10 @@
 # How to Run and Test Pi Deck
 
-Status date: 2026-06-28  
-Current demo readiness: fake-backend integrated shell accepted for Demo Slices 1 and 2.
+Status: v0.6 source-candidate run/test guide
+
+The normative navigation path is **All Work → scoped Work → session detail**.
+Local UI development uses deterministic fake Pi RPC; authenticated real-Pi commands
+are separate release evidence. See [the release checklist](release-checklist.md).
 
 ## 1. Setup
 
@@ -34,7 +37,7 @@ npm run build
 Common starts:
 
 ```bash
-# Daily dogfood: real Pi backend using the existing dist output (never rebuilds)
+# Real-Pi dogfood using the existing dist output (never rebuilds)
 npm start
 # or explicitly:
 npm run deck:real -- /path/to/project
@@ -46,7 +49,7 @@ npm run deck:real:build -- /path/to/project
 # Real Pi backend with Vite renderer hot reload
 npm run dev:real -- /path/to/project
 
-# Safe fake backend demo mode using the existing dist output
+# Deterministic fake-RPC development mode using the existing dist output
 npm run deck:fake
 
 # Launcher help / dry-run plan
@@ -70,7 +73,7 @@ scripts/launch-real-pi.sh [project-dir]
 
 ## 3. Raw Development Launch
 
-Use the raw Vite + Electron development loop for fake/local development only:
+Use the raw Vite + Electron development loop for deterministic fake-RPC development only:
 
 ```bash
 npm run dev
@@ -135,22 +138,25 @@ npm run smoke:real
 npm run smoke:real:prompt
 ```
 
-Current expected state on latest accepted main:
+The CI-equivalent gate is expected to cover the following; these are not
+validation results until the commands are run on the final candidate HEAD:
 
-- Unit/integration tests pass, including fake RPC, platform, IPC, and renderer shell coverage.
-- TypeScript checks pass for main/preload/shared and renderer code.
-- Electron main/preload and Vite renderer build successfully.
-- Prettier formatting check passes.
-- Playwright Electron E2E checks fake launch, real startup failure labeling, real-mode no-fallback/send-enabled, and saved-session refresh/resume regressions when local Pi is available.
-- `npm run smoke:real` checks the installed real Pi RPC path without fake RPC; `npm run smoke:real:prompt` additionally verifies the simplest real prompt round-trip when auth is configured.
+- Unit/integration tests, including fake RPC, platform, IPC, and renderer shell coverage.
+- TypeScript checks for main/preload/shared and renderer code.
+- Successful Electron main/preload and Vite renderer builds.
+- Prettier formatting.
+- Playwright Electron E2E coverage for fake launch, real startup failure labeling, real-mode no-fallback/send-enabled, and saved-session refresh/resume regressions.
+- `npm run smoke:real` checking the installed real Pi RPC path without fake RPC; `npm run smoke:real:prompt` additionally checks a minimal real prompt round-trip when auth is configured.
 
-## 6. Fake Pi Demo Checklist
+## 6. Deterministic fake-Pi development checklist
 
-The current GUI demo uses the fake RPC worker path. This is intentional for Demo Slices 1 and 2.
+Use the fake RPC worker path for local UI and regression checks that do not need
+provider credentials. This section is development coverage, not evidence from
+an actual Pi worker or a release acceptance record.
 
 Suggested smoke flow:
 
-1. Run `npm run deck:fake` for a production-ish fake launch, or `npm run dev` for raw fake dev mode.
+1. Run `npm run deck:fake` for a deterministic fake-RPC launch, or `npm run dev` for raw fake dev mode.
 2. Confirm the app window opens and the security/status badges render.
 3. Confirm the fake backend session appears in the sidebar/header.
 4. Send a multiline prompt.
@@ -163,20 +169,22 @@ Suggested smoke flow:
 11. Confirm attachment examples label non-image files as `Referenced path`.
 12. Quit the app and confirm no fake RPC worker remains intentionally running.
 
-Demo Slice status:
+The fixture flow above validates the fake-RPC development path only. It does not
+establish authenticated real-Pi behavior or final release evidence. Native Finder
+dialog interaction remains a separate hands-on check when validating picker UX.
 
-- Demo Slice 1: accepted for local fake-agent chat loop.
-- Demo Slice 2: accepted for the fake-backend integrated shell covering chat/sidebar/model/thinking/slash UI.
-- Native Finder dialog hands-on validation for project and attachment picker cancel/select paths is deferred as user feedback/polish, not a blocker. The project picker and attachment picker code paths exist through preload/main APIs, but literal Finder dialog interaction was not hands-on validated in this demo pass.
+## 7. Real-Pi validation posture
 
-## 7. Real Pi Current Status
+Fake RPC is the safest path for deterministic local UI work, but it is not actual
+Pi evidence. `npm run dev` and `npm run deck:fake` use fake RPC; `npm start`,
+`deck:real`, and `dev:real` use an actual Pi executable and may contact the
+configured provider. Do not claim broad real-Pi GUI usability beyond the checks
+that were actually run.
 
-Fake RPC remains the default and safest demo mode. Do not claim broad real Pi GUI usability yet.
+Current behavior:
 
-Current reality:
-
-- Default GUI chat uses the fake RPC worker.
-- An opt-in real backend mode exists for the narrow Demo Slice 3 vertical slice.
+- The development fake paths use the fake RPC worker.
+- An opt-in real backend mode uses one actual `pi --mode rpc` worker.
 - Real mode launches one real `pi --mode rpc` worker, loads `get_state` / `get_messages`, sends prompts through the existing GUI chat path, streams RPC events, supports `abort`, and closes the worker on app quit.
 - Real Pi binary resolution, environment resolution, EffectivePiConfig, JSONL transport, and minimal RPC smoke-test foundations exist.
 - Real Pi can create additional in-window sessions with the compact `+`, up to `maxRunningSessions`. Real mode scans the authoritative session directory for the selected project, clicking a saved row attempts `pi --mode rpc --session <file>` with canonical `get_state.sessionFile` verification, and the P0 restart/resume/project-handoff path is covered by `npm run test:e2e:real-smoke`. Candidate session dirs, refresh/error polish, project trust UX, and robust scheduler-backed multi-session orchestration remain future M3/M5+ work. Model/thinking controls are available in the composer for the active real worker with capability labels. Real slash commands use active-worker `get_commands` when available. Attachments include image capability gating and large-image blocking, while actual image resizing/package work remains future. Real-worker prewarming is disabled: current Pi can only create either a persisted session or an ephemeral `--no-session` worker, and cannot promote the latter when it is used.
@@ -208,10 +216,12 @@ Real mode expectations:
 2. Initial snapshot should come from real `get_state` / `get_messages` or show an actionable diagnostic if Pi cannot start.
 3. Prompt send should call real RPC `prompt` and stream returned events into the chat timeline.
 4. Abort should call real RPC `abort` and recover the UI or show a non-fatal error.
-5. Saved prior sessions for the launch project should appear in the sidebar; clicking one should resume it or show a clear error.
+5. Saved prior sessions for the launch project should appear in All Work or scoped Work; opening one should resume it or show a clear error.
 6. Quitting the app should close/kill real workers; no `pi --mode rpc` process should intentionally remain.
 
-Record real-mode validation evidence in `docs/real-pi-gui-chat-validation.md` before claiming this slice accepted.
+For a release candidate, record exact real-Pi command output only after running
+it on the final HEAD. Use the template in [the release checklist](release-checklist.md);
+do not reuse historical validation records as final-candidate evidence.
 
 ## 8. Real Pi Smoke Commands
 

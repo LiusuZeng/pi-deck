@@ -202,6 +202,122 @@ describe("buildActivityInbox", () => {
     ).toEqual(["pending"]);
   });
 
+  it("keeps simultaneous workspace and status fixtures consistent across scopes", () => {
+    const fixture = [
+      source("default-needs", {
+        workspaceId: "workspace-default",
+        workspaceName: "Default workspace",
+        baseState: "waitingForInput",
+      }),
+      source("default-idle", {
+        workspaceId: "workspace-default",
+        workspaceName: "Default workspace",
+        sessionFile: "/sessions/default-idle.jsonl",
+        sessionId: "default-idle-session",
+      }),
+      source("atlas-working", {
+        workspaceId: "workspace-atlas",
+        workspaceName: "Project Atlas",
+        baseState: "working",
+      }),
+      source("atlas-pending", {
+        workspaceId: "workspace-atlas",
+        workspaceName: "Project Atlas",
+        overlays: overlays({ piQueuedFollowUpCount: 1 }),
+      }),
+      source("borealis-failed", {
+        workspaceId: "workspace-borealis",
+        workspaceName: "Project Borealis",
+        baseState: "error",
+      }),
+      source("borealis-completed", {
+        workspaceId: "workspace-borealis",
+        workspaceName: "Project Borealis",
+        completedAtMs: 99,
+      }),
+      source("archived-borealis", {
+        workspaceId: "workspace-borealis",
+        workspaceName: "Project Borealis",
+        baseState: "error",
+        archivedAtMs: 98,
+      }),
+      source("draft-atlas", {
+        workspaceId: "workspace-atlas",
+        workspaceName: "Project Atlas",
+        draftSession: true,
+      }),
+    ];
+    const global = buildActivityInbox(fixture);
+
+    expect(
+      global.items.map(({ sessionKey, status }) => [sessionKey, status]),
+    ).toEqual([
+      ["default-needs", "needsAttention"],
+      ["borealis-failed", "failed"],
+      ["atlas-pending", "pending"],
+      ["atlas-working", "inProgress"],
+      ["borealis-completed", "completed"],
+      ["/sessions/default-idle.jsonl", "idle"],
+    ]);
+    expect(global.counts).toEqual({
+      needsAttention: 1,
+      failed: 1,
+      pending: 1,
+      inProgress: 1,
+      completed: 1,
+      idle: 1,
+    });
+    expect(global.actionableCount).toBe(3);
+    expect(global.availableWorkspaceCounts).toEqual({
+      "workspace-default": 2,
+      "workspace-atlas": 2,
+      "workspace-borealis": 2,
+    });
+
+    const atlas = buildActivityInbox(
+      fixture,
+      tagsForScope({ type: "workspace", workspaceId: "workspace-atlas" }),
+    );
+    const borealis = buildActivityInbox(
+      fixture,
+      tagsForScope({ type: "workspace", workspaceId: "workspace-borealis" }),
+    );
+
+    expect(
+      atlas.items.map(({ sessionKey, status }) => [sessionKey, status]),
+    ).toEqual([
+      ["atlas-pending", "pending"],
+      ["atlas-working", "inProgress"],
+    ]);
+    expect(atlas.actionableCount).toBe(1);
+    const defaultWorkspace = buildActivityInbox(
+      fixture,
+      tagsForScope({ type: "workspace", workspaceId: "workspace-default" }),
+    );
+    expect(
+      defaultWorkspace.items.map(({ sessionKey, status }) => [
+        sessionKey,
+        status,
+      ]),
+    ).toEqual([
+      ["default-needs", "needsAttention"],
+      ["/sessions/default-idle.jsonl", "idle"],
+    ]);
+    expect(defaultWorkspace.actionableCount).toBe(1);
+    expect(
+      borealis.items.map(({ sessionKey, status }) => [sessionKey, status]),
+    ).toEqual([
+      ["borealis-failed", "failed"],
+      ["borealis-completed", "completed"],
+    ]);
+    expect(borealis.actionableCount).toBe(1);
+    expect(
+      filterActivityItems(borealis.items, {
+        includeAll: ["workspace:workspace-borealis", statusTag("failed")],
+      }).map((item) => item.sessionKey),
+    ).toEqual(["borealis-failed"]);
+  });
+
   it("excludes archived sessions by default and provides scoped actionable counts", () => {
     const inbox = buildActivityInbox([
       source("active", { overlays: overlays({ needsUserInput: true }) }),

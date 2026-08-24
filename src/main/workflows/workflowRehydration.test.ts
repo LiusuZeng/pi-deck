@@ -106,6 +106,92 @@ describe("workflow rehydration", () => {
     expect(scheduled).toHaveLength(1);
   });
 
+  it("keeps an archived canonical queue durable until restore", async () => {
+    const definition = {
+      format: "pi-deck.agent-workflow" as const,
+      schemaVersion: 2 as const,
+      id: "00000000-0000-4000-8000-000000000130",
+      revision: 1,
+      name: "Archived queue",
+      inputs: [],
+      entryNodeId: "00000000-0000-4000-8000-000000000131",
+      nodes: [
+        {
+          id: "00000000-0000-4000-8000-000000000131",
+          name: "Work",
+          role: "worker" as const,
+          config: { instructions: "work" },
+        },
+      ],
+      relationships: [],
+    };
+    const initial = createWorkflowRoleRun(definition, "archived-workspace");
+    const queued = {
+      ...initial,
+      occurrences: initial.occurrences.map((item) => ({
+        ...item,
+        status: "queued" as const,
+      })),
+    };
+    const errors: string[] = [];
+    const updated: (typeof initial)[] = [];
+    const scheduled: (typeof initial)[] = [];
+
+    await rehydrateCanonicalWorkflowRuns([queued], {
+      resolveWorkspace: async () => {
+        throw new Error("Workspace is archived: archived-workspace");
+      },
+      updateRun: async (run) => {
+        updated.push(run);
+        return run;
+      },
+      schedule: async (run) => {
+        scheduled.push(run);
+        return run;
+      },
+      emit: () => undefined,
+      recordError: (message) => errors.push(message),
+    });
+
+    expect(updated).toHaveLength(0);
+    expect(scheduled).toHaveLength(0);
+    expect(queued.occurrences[0]?.status).toBe("queued");
+    expect(errors).toHaveLength(1);
+
+    await rehydrateCanonicalWorkflowRuns([queued], {
+      resolveWorkspace: async () => undefined,
+      updateRun: async (run) => {
+        updated.push(run);
+        return run;
+      },
+      schedule: async (run) => {
+        scheduled.push(run);
+        return run;
+      },
+      emit: () => undefined,
+      recordError: () => undefined,
+    });
+
+    expect(updated.at(-1)?.occurrences[0]?.status).toBe("ready");
+    expect(scheduled).toHaveLength(1);
+
+    const ready = createWorkflowRoleRun(definition, "archived-workspace");
+    await rehydrateCanonicalWorkflowRuns([ready], {
+      resolveWorkspace: async () => {
+        throw new Error("Workspace is archived: archived-workspace");
+      },
+      updateRun: async (run) => run,
+      schedule: async (run) => {
+        scheduled.push(run);
+        return run;
+      },
+      emit: () => undefined,
+      recordError: () => undefined,
+    });
+    expect(scheduled).toHaveLength(1);
+    expect(ready.occurrences[0]?.status).toBe("ready");
+  });
+
   it("preserves fan-out queue ownership across restart so concurrency remains bounded", async () => {
     const definition = {
       format: "pi-deck.agent-workflow" as const,

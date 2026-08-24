@@ -2,55 +2,49 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeAll, test, vi } from "vitest";
+import { afterEach, test } from "vitest";
+import {
+  claimUnassignedChatResumeWorkspace,
+  resolveChatCreationWorkspaceId,
+  resolveChatResumeWorkspace,
+  resolveChatResumeWorkspaceId,
+} from "./chatWorkspaceOwnership.js";
 import { WorkspaceStore } from "./workspaces/workspaceStore.js";
 
-const electronMock = vi.hoisted(() => ({
-  app: {
-    on: vi.fn(),
-    whenReady: vi.fn(() => new Promise<void>(() => {})),
-    setPath: vi.fn(),
-    quit: vi.fn(),
-  },
-}));
 const temporaryRoots: string[] = [];
 
-vi.mock("electron", () => ({
-  app: electronMock.app,
-  BrowserWindow: class {},
-  dialog: {},
-  nativeTheme: { on: vi.fn() },
-  shell: {},
-  session: {},
-  nativeImage: {},
-  webContents: {},
-}));
-
-test("compatibility chat creation resolves the stable default without activation", async () => {
-  const { resolveChatCreationWorkspaceId } = await import("./main.js");
+async function createWorkspaceFixture(): Promise<{
+  root: string;
+  store: WorkspaceStore;
+  namedId: string;
+  defaultId: string;
+}> {
   const root = await fs.mkdtemp(
     path.join(os.tmpdir(), "pi-deck-default-workspace-fallback-"),
   );
   temporaryRoots.push(root);
-  const home = path.join(root, "home");
-  const store = new WorkspaceStore(home);
+  const store = new WorkspaceStore(path.join(root, "home"));
   const named = await store.create({ name: "Named workspace" });
   const defaultWorkspace = await store.ensureDefaultWorkspace();
+  return {
+    root,
+    store,
+    namedId: named.id,
+    defaultId: defaultWorkspace.id,
+  };
+}
 
-  assert.equal(
-    resolveChatCreationWorkspaceId(undefined, defaultWorkspace.id),
-    defaultWorkspace.id,
-  );
-  assert.equal(
-    resolveChatCreationWorkspaceId(named.id, defaultWorkspace.id),
-    named.id,
-  );
-  assert.equal((await store.getActiveWorkspace())?.id, named.id);
+test("compatibility chat creation resolves the stable default without activation", async () => {
+  const { root, store, namedId, defaultId } = await createWorkspaceFixture();
+
+  assert.equal(resolveChatCreationWorkspaceId(undefined, defaultId), defaultId);
+  assert.equal(resolveChatCreationWorkspaceId(namedId, defaultId), namedId);
+  assert.equal((await store.getActiveWorkspace())?.id, namedId);
 
   const sessionFile = path.join(root, "session.jsonl");
   await fs.writeFile(sessionFile, "session\n");
   await store.upsertSessionRefFromSnapshot({
-    workspaceId: resolveChatCreationWorkspaceId(undefined, defaultWorkspace.id),
+    workspaceId: resolveChatCreationWorkspaceId(undefined, defaultId),
     sessionFile,
     sessionId: "pi-session",
     title: "Compatibility session",
@@ -58,30 +52,85 @@ test("compatibility chat creation resolves the stable default without activation
   });
 
   const owner = await store.getSessionOwner(sessionFile);
-  assert.equal(owner?.workspaceId, defaultWorkspace.id);
+  assert.equal(owner?.workspaceId, defaultId);
   assert.equal(
-    (await store.getSessionRefs(named.id)).some(
+    (await store.getSessionRefs(namedId)).some(
       (ref) => ref.sessionFile === owner?.sessionFile,
     ),
     false,
   );
   assert.equal(
-    (await store.getSessionRefs(defaultWorkspace.id)).filter(
+    (await store.getSessionRefs(defaultId)).filter(
       (ref) => ref.sessionFile === owner?.sessionFile,
     ).length,
     1,
   );
 
-  const reloadedStore = new WorkspaceStore(home);
+  const reloadedStore = new WorkspaceStore(path.join(root, "home"));
   const reloadedDefault = await reloadedStore.ensureDefaultWorkspace();
-  assert.equal(reloadedDefault.id, defaultWorkspace.id);
-  assert.equal((await reloadedStore.getActiveWorkspace())?.id, named.id);
+  assert.equal(reloadedDefault.id, defaultId);
+  assert.equal((await reloadedStore.getActiveWorkspace())?.id, namedId);
 });
 
-test("chat creation rejects an unresolved workspace instead of creating an unowned runtime", async () => {
-  const { resolveChatCreationWorkspaceId } = await import("./main.js");
+test("resume ownership keeps a canonical existing owner instead of using the default", async () => {
+  const { root, store, namedId, defaultId } = await createWorkspaceFixture();
+  const sessionFile = path.join(root, "owned.jsonl");
+  const alias = path.join(root, "owned-alias.jsonl");
+  await fs.writeFile(sessionFile, "session\n");
+  await fs.symlink(sessionFile, alias);
+  await store.upsertSessionRefFromSnapshot({
+    workspaceId: namedId,
+    sessionFile,
+    title: "Owned session",
+  });
+
+  const ownership = await resolveChatResumeWorkspace(store, alias);
+  assert.deepEqual(ownership, { workspaceId: namedId, source: "existing" });
+  assert.equal(
+    await store.getSessionOwner(alias).then((owner) => owner?.workspaceId),
+    namedId,
+  );
+  assert.equal((await store.getSessionRefs(defaultId)).length, 0);
+  assert.equal((await store.getActiveWorkspace())?.id, namedId);
+});
+
+test("unassigned resume claims the stable default without activating it", async () => {
+  const { root, store, namedId, defaultId } = await createWorkspaceFixture();
+  const sessionFile = path.join(root, "unassigned.jsonl");
+  await fs.writeFile(sessionFile, "session\n");
+
+  const ownership = await resolveChatResumeWorkspace(store, sessionFile);
+  assert.deepEqual(ownership, { workspaceId: defaultId, source: "default" });
+  await claimUnassignedChatResumeWorkspace(
+    store,
+    ownership.workspaceId,
+    sessionFile,
+  );
+
+  assert.equal(
+    (await store.getSessionOwner(sessionFile))?.workspaceId,
+    defaultId,
+  );
+  await assert.rejects(
+    claimUnassignedChatResumeWorkspace(store, namedId, sessionFile),
+    /ownership changed/i,
+  );
+  assert.equal(
+    (await store.getSessionOwner(sessionFile))?.workspaceId,
+    defaultId,
+  );
+  assert.equal((await store.getActiveWorkspace())?.id, namedId);
+});
+
+test("workspace ownership resolvers prefer ownership and reject unresolved fallbacks", () => {
+  assert.equal(resolveChatResumeWorkspaceId("owned", "default"), "owned");
+  assert.equal(resolveChatResumeWorkspaceId(undefined, "default"), "default");
   assert.throws(
     () => resolveChatCreationWorkspaceId(undefined, undefined),
+    /requires a workspace/i,
+  );
+  assert.throws(
+    () => resolveChatResumeWorkspaceId(undefined, undefined),
     /requires a workspace/i,
   );
 });
@@ -90,8 +139,4 @@ afterEach(async () => {
   await Promise.all(
     temporaryRoots.splice(0).map((root) => fs.rm(root, { recursive: true })),
   );
-});
-
-beforeAll(async () => {
-  await import("./main.js");
 });

@@ -1,46 +1,52 @@
-# Activity Inbox: Tagged Filtering Integration Plan
+# All Work: Tagged Filtering Integration Plan
 
-Status: proposed implementation plan
+Status: proposed implementation plan; user-facing terminology follows the v0.6
+Work model.
 Date: 2026-08-03
 Baseline: `origin/main` (`v0.3.0`, workspace feature complete)
 
+> `Activity*` names below are internal implementation identifiers retained for
+> the renderer model and module names. User-facing copy uses **All Work**,
+> **scoped Work**, and **session detail**.
+
 ## 1. Outcome
 
-Activity is one operational inbox over live, recently completed, and idle
-saved-session work. The global inbox and each workspace inbox are the same
-view with a different pre-applied filter:
+Work is one renderer-derived overview over live, recently completed, and idle
+saved-session work. **All Work** and workspace-scoped Work are the same view
+with a different pre-applied filter:
 
-- **All workspaces**: no workspace filter; aggregate activity across every
-  non-archived workspace.
-- **Workspace Activity**: apply `workspace:<workspaceId>` to the same feed.
+- **All Work**: no workspace filter; aggregate work across every non-archived
+  workspace.
+- **Scoped Work**: apply `workspace:<workspaceId>` to the same feed.
 - **Status filters**: apply `status:<kind>` to the same feed.
 
 This avoids separate global/workspace implementations. Rendering, counts,
-empty states, navigation, and future filters all operate on one normalized
-activity model.
+empty states, navigation to session detail, and future filters all operate on
+one normalized Work/activity model.
 
 The feature remains renderer-derived in the first release. Workspace metadata
 and membership are owned by the main-process workspace store; runtime state is
-owned by the existing session/runtime projection. Activity combines those
-inputs and does not create a second persistence layer.
+owned by the existing session/runtime projection. Work combines those inputs
+and does not create a second persistence layer.
 
 ## 2. Product behavior
 
 ### 2.1 Entry points and scopes
 
-1. The global sidebar **Activity** action opens `ActivityScope = { type:
+1. The global sidebar **All Work** action opens `ActivityScope = { type:
    "all" }`.
-2. A workspace row/header **Activity** action opens the same screen with
+2. A workspace row/header **scoped Work** action opens the same screen with
    `ActivityScope = { type: "workspace", workspaceId }`.
-3. The global screen can select a workspace filter. Selecting a workspace from
-   the tree while in a workspace-scoped inbox changes the scope to the newly
-   selected workspace. The global scope remains global when the user is merely
-   browsing the tree.
-4. Clearing the workspace filter returns to the all-workspaces view.
+3. The All Work screen can select a workspace filter. Selecting a workspace
+   from the tree while in scoped Work changes the scope to the newly selected
+   workspace. The global scope remains global when the user is merely browsing
+   the tree.
+4. Clearing the workspace filter returns to **All Work**.
 
-The view title/eyebrow must make scope explicit (`Activity` / `Activity ·
-<workspace name>`). A workspace name is shown on every global row; it may be
-de-emphasized in the workspace-scoped view.
+The view title/eyebrow must make scope explicit (`All Work` / `<workspace
+name> Work`). Selecting a row opens session detail; Back returns to the exact
+All Work or scoped Work origin. A workspace name is shown on every global row;
+it may be de-emphasized in the scoped view.
 
 ### 2.2 System tags
 
@@ -86,12 +92,12 @@ added.
 ### 2.3 Counts and badges
 
 - Filter-chip counts are calculated from the same filtered item set.
-- Global sidebar badge = `needsAttention + failed + pending` across all active
-  workspaces.
+- All Work sidebar badge = `needsAttention + failed + pending` across all
+  active workspaces.
 - Workspace tree badge = the same actionable count after applying that
   workspace tag.
-- `inProgress` and `completed` remain visible in the inbox but do not increase
-  the actionable badge.
+- `inProgress` and `completed` remain visible in All Work and scoped Work but
+  do not increase the actionable badge.
 - `idle` remains visible for browsing but does not increase the actionable
   badge.
 
@@ -106,7 +112,7 @@ Each row carries `{ workspaceId, sessionFile?, sessionId?, runtimeId? }`.
 - If a runtime is already present, select that runtime/session.
 - Otherwise resume through
   `chat.resumeSession({ workspaceId, sessionFile })`.
-- Activity navigation never invokes a project/folder picker.
+- Work navigation never invokes a project/folder picker.
 - Archived rows are not shown by default. If an archived view is introduced,
   the primary action is restore, followed by normal navigation.
 
@@ -220,8 +226,7 @@ so the UI can render workspace filter counts without rebuilding ad hoc state.
 
 In `src/renderer/App.tsx`:
 
-- Add `activityScope` state and an Activity-visible state if not already
-  present.
+- Add `activityScope` state and a Work-visible state if not already present.
 - Build sources from `sessions`, excluding archived memberships by default,
   and join workspace names from `workspaces`/`archivedWorkspaces`.
 - Keep the source list cross-workspace. Do not replace it with only the active
@@ -230,9 +235,9 @@ In `src/renderer/App.tsx`:
 - Pass scope/filter state into `ActivityInbox`.
 - On row activation, use the existing workspace switch/select helper and then
   select/resume using the row's canonical session identity.
-- Global Activity toggle must remain reversible: opening it from the sidebar
-  opens the feed; activating the same button closes it and returns to session
-  view.
+- Global All Work toggle must remain reversible: opening it from the sidebar
+  opens the overview; activating the same button closes it and returns to
+  session detail.
 
 When a workspace list refresh renames a workspace, update the joined display
 name in existing sources without changing item identity or tags.
@@ -241,7 +246,7 @@ name in existing sources without changing item identity or tags.
 
 Refactor `src/renderer/components/ActivityInbox.tsx` to render:
 
-- scope title and optional “All workspaces” / current workspace selector;
+- scope title and optional **All Work** / current workspace selector;
 - status chips generated from `ACTIVITY_STATUSES` and counts from the model;
 - the same grouped rows for both scopes;
 - workspace context on global rows;
@@ -254,10 +259,10 @@ scope changes and row activation. It must not call IPC directly.
 
 ### 4.4 Workspace navigation affordance
 
-Add one workspace-scoped Activity entry without introducing a second screen:
+Add one scoped Work entry without introducing a second screen:
 
 - preferred: workspace header action or workspace-row context action labelled
-  “View activity”;
+  “View scoped Work”;
 - optional later: compact actionable badge on each workspace row.
 
 The action calls `onOpenActivity({ type: "workspace", workspaceId })`.
@@ -275,8 +280,8 @@ and chat APIs already provide the needed identity and membership:
 
 If current bootstrap/listing does not expose a saved session's `workspaceId`,
 join the result using the workspace request that produced it. Do not infer it
-from `cwd` or `projectPath`. A future durable Activity history would require a
-new store, but that is explicitly out of scope here.
+from `cwd` or `projectPath`. A future durable Work history would require a new
+store, but that is explicitly out of scope here.
 
 ## 6. Workstream ownership
 
@@ -315,25 +320,26 @@ Unit/domain:
 - workspace filter excludes every other workspace;
 - status filters are tag intersections and retain precedence;
 - archived memberships are hidden by default;
-- idle saved sessions appear under All, workspace scopes, and the Idle filter;
-- unsaved draft sessions remain out of the inbox;
+- idle saved sessions appear under All Work, scoped Work, and the Idle filter;
+- unsaved draft sessions remain outside All Work and scoped Work;
 - IDs remain stable across workspace rename;
 - actionable counts are correct per scope.
 
 Renderer/App:
 
-- global Activity can open a session from an inactive workspace;
-- opening the row selects the workspace, then selects/resumes the session;
+- All Work can open a session from an inactive workspace;
+- opening the row selects the workspace, then opens session detail or resumes
+  the session;
 - workspace switching retains runtime-backed sessions in other workspaces;
-- workspace-scoped Activity follows the selected workspace;
-- toggling Activity returns to session view;
+- scoped Work follows the selected workspace;
+- toggling All Work returns to session detail;
 - new/resumed sessions never open a directory picker.
 
 UI/e2e:
 
-- sidebar Activity opens the all-workspaces view;
-- workspace “View activity” opens the same view with a workspace filter;
-- clearing the filter returns to global Activity;
+- sidebar All Work opens the global view;
+- workspace “View scoped Work” opens the same view with a workspace filter;
+- clearing the filter returns to All Work;
 - status chip counts update within the active workspace scope;
 - row labels remain accessible and keyboard-activatable;
 - no-activity and no-results copy names the active scope.
@@ -354,9 +360,9 @@ UI/e2e:
 ## 9. Explicit non-goals
 
 - No user-authored arbitrary tags yet.
-- No persisted Activity history or notifications database.
-- No new workspace/session IPC solely for Activity.
+- No persisted Work history or notifications database.
+- No new workspace/session IPC solely for Work.
 - No folder/path-derived workspace identity.
-- No separate global and workspace Activity components.
+- No separate global and workspace Work components.
 - No automatic restore of archived workspaces merely by clicking an archived
-  Activity row.
+  Work row.

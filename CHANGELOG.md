@@ -5,7 +5,64 @@ All notable changes to Pi Deck will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0] - 2026-08-24
+
+Unified Work brings workspace navigation, cross-workspace supervision, and
+per-session interaction into one Work-oriented experience. All Work and
+workspace Work are renderer-derived projections of runtime and Pi session
+state; Work is not a persisted entity. Sessions created from All Work still
+receive the persisted default workspace internally, while workspace
+organization remains optional in the user experience.
+
+### Added
+
+- Added **All Work**, a global overview of active and saved work across active
+  workspaces, with the same surface available as workspace-scoped Work.
+- Added direct workspace-to-Work navigation and exact Work-origin return paths
+  from session detail.
+
+### Changed
+
+- Replaced the former Work inbox destination with **All Work** and scoped
+  **Work**, keeping one navigation path from global overview to session detail.
+- Changed workspace selection to open that workspace's Work overview instead of
+  treating workspace browsing and work supervision as unrelated modes.
+- Kept the persisted default workspace as an internal fallback for global
+  session creation while hiding its sidebar row, scope option, and Work-row
+  provenance until a named workspace exists.
+- Made Work a stable primary surface rather than a closable inbox; session
+  detail now requires an explicit Work row, New Session, saved-session, or
+  workflow drill-in action.
+- Kept **Agent Workflows** as a separate, explicit advanced orchestration
+  surface rather than folding workflow runs into normal Work.
+
+### Fixed
+
+- Preserved canonical saved-session identity and workspace ownership while
+  opening Work rows, resuming sessions, and switching workspace scope.
+- Kept active runtimes attached while navigating between All Work, scoped Work,
+  session detail, and Agent Workflows.
+- Read Pi's durable `session_info` names during static discovery so a Parallel
+  parent's synthesis turn cannot relabel the canonical parent as a top-level
+  internal session after refresh or restart; identity is structural rather than
+  repaired with heuristic cleanup.
+- Preserved each Work scope's status filter, focus, and scroll context through
+  Session drill-in and Back: a stable row restores meaningful mouse offset and
+  keyboard focus, while a missing row gracefully resets and focuses the visible
+  heading.
+- Kept extension-input waits mutation-protected and retained fake backend mode
+  when creating drafts in named workspaces.
+
+### Tests
+
+- Added integrated fake Electron coverage for launch at All Work, global and
+  workspace-scoped navigation, Work-row session drill-in and Back origins,
+  default-workspace global creation and progressive disclosure, removal of the
+  legacy Work close action, retained Work filters/focus, runtime retention,
+  ownership, and private task exclusion.
+- Extended authenticated production Parallel coverage through synthesis and
+  restart, proving one durable parent JSONL and identity/title across the
+  sidebar, All Work, scoped Work, and Pi JSONL discovery.
 
 ## [0.5.5] - 2026-08-22
 
@@ -372,7 +429,8 @@ coding-agent sessions.
   crash; persisted sessions can be reopened, but unsaved partial stream text may
   be lost.
 
-[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.5...HEAD
+[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.5...v0.6.0
 [0.5.5]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.2...v0.5.3

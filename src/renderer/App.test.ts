@@ -48,6 +48,105 @@ it("offers every active workflow workspace once and excludes archived workspaces
   ]);
 });
 
+it("progressively discloses the stable default workspace", () => {
+  const workspace = (id: string, name: string, isDefault = false) => ({
+    id,
+    name,
+    ...(isDefault ? { isDefault: true } : {}),
+    lastOpenedAt: 1,
+  });
+  const defaultWorkspace = workspace(
+    "workspace-default",
+    "Default workspace",
+    true,
+  );
+  const namedWorkspace = workspace("workspace-named", "Named workspace");
+
+  expect(
+    __rendererTestHooks.workspaceRowsForProgressiveDisclosure([
+      defaultWorkspace,
+    ]),
+  ).toEqual([]);
+  expect(
+    __rendererTestHooks.workspaceRowsForProgressiveDisclosure([
+      defaultWorkspace,
+      namedWorkspace,
+    ]),
+  ).toEqual([defaultWorkspace, namedWorkspace]);
+  expect(
+    __rendererTestHooks.workspaceRowsForProgressiveDisclosure([namedWorkspace]),
+  ).toEqual([namedWorkspace]);
+});
+
+it("uses Pi durable sessionId instead of a canonical file path", () => {
+  const session = __rendererTestHooks.sessionFromSummary(
+    {
+      id: "/sessions/canonical.jsonl",
+      sessionFile: "/sessions/canonical.jsonl",
+      sessionId: "pi-durable-id",
+      title: "Saved session",
+      updatedAtMs: 1,
+      messageCount: 2,
+    } as any,
+    "workspace-a",
+    "project-a",
+  );
+
+  expect(session).toMatchObject({
+    id: "pi-durable-id",
+    sessionId: "pi-durable-id",
+    sessionFile: "/sessions/canonical.jsonl",
+  });
+});
+
+it("re-homes fake fixtures to the bootstrapped workspace", () => {
+  const sessions = __rendererTestHooks.fakeSessionsForWorkspace({
+    id: "fixture-bootstrap",
+    name: "Fixture workspace",
+    defaultProjectId: "fixture-project",
+    lastOpenedAt: 1,
+  });
+
+  expect(sessions.length).toBeGreaterThan(0);
+  expect(new Set(sessions.map((session: any) => session.workspaceId))).toEqual(
+    new Set(["fixture-bootstrap"]),
+  );
+  expect(new Set(sessions.map((session: any) => session.project))).toEqual(
+    new Set(["Fixture workspace"]),
+  );
+});
+
+it("resolves global creation to the default workspace and first-send owner", () => {
+  const current = {
+    id: "workspace-current",
+    name: "Current",
+    lastOpenedAt: 1,
+  };
+  const defaultWorkspace = {
+    id: "workspace-default",
+    name: "Default",
+    isDefault: true,
+    lastOpenedAt: 2,
+  };
+
+  expect(
+    __rendererTestHooks.defaultWorkspaceFor(
+      [current, defaultWorkspace],
+      current,
+    ),
+  ).toBe(defaultWorkspace);
+  expect(
+    __rendererTestHooks.workspaceForSessionOwner(
+      {
+        workspaceId: defaultWorkspace.id,
+        project: defaultWorkspace.name,
+      },
+      current,
+      [current, defaultWorkspace],
+    ),
+  ).toBe(defaultWorkspace);
+});
+
 function baseSession() {
   return {
     id: "session-1",
@@ -1071,6 +1170,35 @@ describe("Pi draft defaults and thinking capabilities", () => {
     expect(draft.thinkingLevel).toBe("xhigh");
   });
 
+  it("keeps fake workspace drafts fake without Pi defaults", () => {
+    const draft = __rendererTestHooks.draftSessionForWorkspace(
+      {
+        id: "workspace-fake",
+        name: "Fake workspace",
+        lastOpenedAt: 1,
+      },
+      "draft-fake",
+      "fake",
+      {
+        models: [],
+        activeModel: {
+          id: "real-model",
+          name: "Real model",
+          provider: "real-provider",
+        },
+        thinkingLevel: "high",
+        thinkingLevels: ["off", "high"],
+      },
+    );
+
+    expect(draft).toMatchObject({
+      backendMode: "fake",
+      draftSession: true,
+    });
+    expect(draft).not.toHaveProperty("modelLabel");
+    expect(draft).not.toHaveProperty("thinkingLevel");
+  });
+
   it("discovers models through a folderless workspace", () => {
     expect(
       __rendererTestHooks.modelDiscoveryRequestForWorkspace({
@@ -1197,6 +1325,62 @@ describe("renderer session actions", () => {
         baseState: "working",
       }),
     ).toBe(false);
+  });
+
+  it("blocks waiting sessions from prompts and membership mutations", () => {
+    const waiting = {
+      ...baseSession(),
+      status: "waiting",
+      baseState: "waitingForInput",
+      overlays: { ...emptyOverlays, needsUserInput: true },
+      sessionFile: "/sessions/waiting.jsonl",
+      runtimeBacked: true,
+      resumeBacked: false,
+      pendingExtensionUiRequests: [
+        {
+          id: "request-1",
+          method: "confirm",
+          title: "Confirm",
+        },
+      ],
+    } as any;
+
+    expect(__rendererTestHooks.isSessionBusy(waiting)).toBe(true);
+    expect(__rendererTestHooks.canManageWorkspaceMembership(waiting)).toBe(
+      false,
+    );
+    expect(
+      __rendererTestHooks.archiveWorkspaceBlockReason(
+        [waiting],
+        {},
+        "workspace-a",
+        2,
+      ),
+    ).toMatch(/finish active sessions/i);
+    expect(
+      __rendererTestHooks.canSubmitTaskPrompt(
+        waiting,
+        "newTaskSession",
+        false,
+        "plan this",
+        true,
+      ),
+    ).toBe(false);
+    expect(
+      __rendererTestHooks.canSubmitTaskPrompt(
+        {
+          ...waiting,
+          status: "working",
+          baseState: "working",
+          overlays: { ...emptyOverlays },
+          pendingExtensionUiRequests: [],
+        },
+        "newTaskSession",
+        false,
+        "plan this",
+        true,
+      ),
+    ).toBe(true);
   });
 
   it("preserves a background runtime update when an awaited resume completes", () => {
@@ -1356,6 +1540,34 @@ describe("renderer session actions", () => {
       "draft-b",
       "saved-a-fresh",
     ]);
+  });
+
+  it("uses the refreshed durable title for an attached saved session", () => {
+    const runtime = {
+      ...baseSession(),
+      id: "runtime-a",
+      workspaceId: "workspace-a",
+      runtimeBacked: true,
+      sessionFile: "/sessions/parent.jsonl",
+      title: "Snapshot title",
+    };
+    const saved = {
+      ...runtime,
+      id: "/sessions/parent.jsonl",
+      runtimeBacked: false,
+      resumeBacked: true,
+      title: "Durable title",
+    };
+
+    const result = __rendererTestHooks.replaceWorkspaceSavedRows(
+      [runtime] as any,
+      "workspace-a",
+      [saved] as any,
+      {},
+    );
+
+    expect(result).toHaveLength(1);
+    expect((result[0] as any).title).toBe("Durable title");
   });
 
   it("uses the session working folder for attachments over the workspace default", () => {
@@ -1537,6 +1749,97 @@ describe("renderer session actions", () => {
         2,
       ),
     ).toMatch(/attachments/i);
+  });
+
+  it("blocks archive for pending planning and every nonterminal private task lifecycle", () => {
+    const parent = {
+      ...baseSession(),
+      id: "parent-runtime",
+      status: "idle",
+    } as any;
+    const pendingPlanning = {
+      "parent-runtime": {
+        text: "delegate this",
+        attachments: [],
+        timelineItemId: "planning-item",
+      },
+    } as any;
+    expect(
+      __rendererTestHooks.archiveWorkspaceBlockReason(
+        [parent],
+        {},
+        "workspace-a",
+        2,
+        pendingPlanning,
+        {},
+      ),
+    ).toMatch(/parallel task planning/i);
+
+    for (const lifecycle of [
+      "queued",
+      "starting",
+      "running",
+      "retrying",
+      "waiting-parent",
+    ]) {
+      expect(
+        __rendererTestHooks.archiveWorkspaceBlockReason(
+          [parent],
+          {},
+          "workspace-a",
+          2,
+          {},
+          {
+            "parent-runtime": {
+              runtimeId: "parent-runtime",
+              mode: "parallel",
+              settings: {},
+              activeCount: 1,
+              activeLimit: 2,
+              tasks: [
+                {
+                  taskNumber: 1,
+                  generatedName: "private task",
+                  brief: "Keep working",
+                  lifecycle,
+                  attempt: 1,
+                  elapsedMs: 0,
+                },
+              ],
+            },
+          } as any,
+        ),
+      ).toMatch(/private parallel tasks/i);
+    }
+
+    expect(
+      __rendererTestHooks.archiveWorkspaceBlockReason(
+        [parent],
+        {},
+        "workspace-a",
+        2,
+        {},
+        {
+          "parent-runtime": {
+            runtimeId: "parent-runtime",
+            mode: "parallel",
+            settings: {},
+            activeCount: 0,
+            activeLimit: 2,
+            tasks: [
+              {
+                taskNumber: 1,
+                generatedName: "private task",
+                brief: "Done",
+                lifecycle: "completed",
+                attempt: 1,
+                elapsedMs: 10,
+              },
+            ],
+          },
+        } as any,
+      ),
+    ).toBeUndefined();
   });
 
   it("keeps a destructive dialog busy and rejects duplicate transactions", async () => {
@@ -2051,11 +2354,16 @@ describe("renderer message_update reduction", () => {
     expect(afterThinking.timeline).toEqual(current.timeline);
   });
 
-  it("uses Pi's production sessionName as the snapshot title", () => {
+  it("uses Pi's production sessionName and session identity from the snapshot", () => {
     const session = __rendererTestHooks.sessionFromSnapshot({
       runtimeId: "runtime-1",
       backendMode: "real",
-      state: { cwd: "/tmp/project", sessionName: "  Named by Pi  " },
+      state: {
+        cwd: "/tmp/project",
+        sessionName: "  Named by Pi  ",
+        sessionFile: "/canonical/sessions/parent.jsonl",
+        sessionId: "parent-session-id",
+      },
       messages: [
         {
           id: "user-1",
@@ -2066,6 +2374,8 @@ describe("renderer message_update reduction", () => {
     } as any);
 
     expect(session.title).toBe("Named by Pi");
+    expect(session.sessionFile).toBe("/canonical/sessions/parent.jsonl");
+    expect(session.sessionId).toBe("parent-session-id");
   });
 
   it("upserts a runtime snapshot so workflow runtime sessions can be selected", () => {
@@ -2159,6 +2469,52 @@ describe("renderer message_update reduction", () => {
         activeStatus,
       ).status,
     ).toBe("aborting");
+  });
+
+  it("preserves waiting extension input during status reconciliation", () => {
+    const waiting = {
+      ...baseSession(),
+      status: "waiting",
+      baseState: "waitingForInput",
+      overlays: { ...emptyOverlays, needsUserInput: true },
+      pendingExtensionUiRequests: [
+        {
+          id: "request-1",
+          method: "confirm",
+          title: "Confirm",
+        },
+      ],
+    } as any;
+    const activeStatus = {
+      runtimeId: "session-1",
+      backendMode: "real",
+      state: { isAgentActive: true },
+    } as any;
+    const inactiveStatus = {
+      ...activeStatus,
+      state: { isAgentActive: false },
+    };
+
+    expect(
+      __rendererTestHooks.reconcileSessionWithRuntimeStatus(
+        waiting,
+        activeStatus,
+      ),
+    ).toBe(waiting);
+    expect(
+      __rendererTestHooks.reconcileSessionWithRuntimeStatus(
+        waiting,
+        inactiveStatus,
+      ),
+    ).toBe(waiting);
+    expect(__rendererTestHooks.shouldReconcileSession(waiting)).toBe(true);
+    expect(waiting).toMatchObject({
+      status: "waiting",
+      baseState: "waitingForInput",
+      pendingExtensionUiRequests: [
+        expect.objectContaining({ id: "request-1" }),
+      ],
+    });
   });
 
   it("keeps quiet working reconciliation runtime-scoped", () => {
