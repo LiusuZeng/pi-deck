@@ -3731,11 +3731,17 @@ test.describe("Unified Work", () => {
     );
     const projectCwd = path.join(root, "activity-source");
     const agentDir = path.join(root, "agent");
+    const userDataDir = path.join(root, "user-data");
     fs.mkdirSync(projectCwd, { recursive: true });
     fs.mkdirSync(agentDir, { recursive: true });
+    fs.mkdirSync(userDataDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(userDataDir, "settings.json"),
+      `${JSON.stringify({ maxRunningSessions: 12 })}\n`,
+    );
 
     const { app, page } = await launchPiDeck(
-      fakeRealModeEnv({ root, projectCwd, agentDir }),
+      fakeRealModeEnv({ root, projectCwd, agentDir, userDataDir }),
     );
     try {
       await expectHealthyPreload(page);
@@ -3870,8 +3876,11 @@ test.describe("Unified Work", () => {
           .getByLabel("Chat / Agent Timeline")
           .getByText(aPrompt, { exact: true }),
       ).toBeVisible();
-      await page.getByTestId("session-origin-back").click();
+      const backToAllWork = page.getByTestId("session-origin-back");
+      await backToAllWork.focus();
+      await page.keyboard.press("Enter");
       await expectAllWorkLaunch(page);
+      await expect(globalA).toBeFocused();
 
       await selectWorkspaceInUi(page, "Unified A");
       await expectWorkRoute(page, unifiedAId);
@@ -3906,6 +3915,68 @@ test.describe("Unified Work", () => {
         bTimeline.getByText(targetedPrompt, { exact: true }),
       ).toHaveCount(0);
       await expectRuntimeIds(page, [aRuntimeId, bRuntimeId]);
+
+      // Populate enough ordinary Work rows to make the real Work viewport
+      // scrollable without modifying production layout or row ordering.
+      await allWork.click();
+      await expectAllWorkLaunch(page);
+      for (const prompt of Array.from(
+        { length: 6 },
+        (_, index) => `Unified Work scroll filler ${index + 1}`,
+      )) {
+        await enterSessionDetail(page);
+        await page.getByLabel("Prompt text").fill(prompt);
+        await page.getByRole("button", { name: "Send" }).click();
+        await expect(
+          page.getByText(`Fake response to: ${prompt}`, { exact: true }),
+        ).toBeVisible();
+        await allWork.click();
+        await expectAllWorkLaunch(page);
+      }
+      const inbox = page.locator(".activity-inbox");
+      await inbox.hover();
+      await page.mouse.wheel(0, 300);
+      const savedWorkScrollTop = await inbox.evaluate((element) =>
+        Math.round(element.scrollTop),
+      );
+      expect(savedWorkScrollTop).toBeGreaterThan(100);
+      const scrollTargetId = await inbox.evaluate((element) => {
+        const inboxBounds = element.getBoundingClientRect();
+        const target = Array.from(
+          element.querySelectorAll<HTMLElement>("[data-activity-item-id]"),
+        ).find((row) => {
+          const bounds = row.getBoundingClientRect();
+          return (
+            bounds.top >= inboxBounds.top && bounds.bottom <= inboxBounds.bottom
+          );
+        });
+        return target?.dataset.activityItemId;
+      });
+      if (scrollTargetId === undefined) {
+        throw new Error("Missing a visible Work row after mouse scrolling.");
+      }
+      const scrollTarget = page.locator(
+        `[data-activity-item-id=${JSON.stringify(scrollTargetId)}]`,
+      );
+      const scrollTargetBox = await scrollTarget.boundingBox();
+      if (scrollTargetBox === null) {
+        throw new Error("Scrolled Work row has no bounding box.");
+      }
+      await page.mouse.click(
+        scrollTargetBox.x + scrollTargetBox.width / 2,
+        scrollTargetBox.y + scrollTargetBox.height / 2,
+      );
+      await expect(
+        page.locator('.workspace[data-primary-view="session"]'),
+      ).toBeVisible();
+      const backToScrolledWork = page.getByTestId("session-origin-back");
+      await backToScrolledWork.focus();
+      await page.keyboard.press("Enter");
+      await expectAllWorkLaunch(page);
+      await expect(scrollTarget).toBeFocused();
+      await expect
+        .poll(() => inbox.evaluate((element) => Math.round(element.scrollTop)))
+        .toBe(savedWorkScrollTop);
     } finally {
       await app.close();
       fs.rmSync(root, { recursive: true, force: true });
@@ -3918,13 +3989,20 @@ test.describe("Unified Work", () => {
     );
     const projectCwd = path.join(root, "project");
     const agentDir = path.join(root, "agent");
+    const userDataDir = path.join(root, "user-data");
     fs.mkdirSync(projectCwd, { recursive: true });
     fs.mkdirSync(agentDir, { recursive: true });
+    fs.mkdirSync(userDataDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(userDataDir, "settings.json"),
+      `${JSON.stringify({ maxRunningSessions: 12 })}\n`,
+    );
     const { app, page } = await launchPiDeck(
       fakeRealModeEnv({
         root,
         projectCwd,
         agentDir,
+        userDataDir,
         fakePiArgs: [
           "--prompt-scenario",
           "extension-ui",
@@ -3972,19 +4050,39 @@ test.describe("Unified Work", () => {
       // its category; Back retains Needs attention and falls back to the title.
       await selectWorkspaceInUi(page, "Filter state workspace");
       await expectWorkRoute(page, workspaceId);
-      const workspaceNeedsAttention = page
+      const workspaceRoute = page.locator(
+        '.workspace[data-primary-view="work"]',
+      );
+      const workspaceInbox = workspaceRoute.locator(".activity-inbox");
+      const workspaceNeedsAttention = workspaceInbox
         .getByRole("group", { name: "Filter Work by status" })
         .getByRole("button", { name: /^Needs attention/ });
       await expect(workspaceNeedsAttention).toHaveAttribute(
         "aria-pressed",
         "false",
       );
+
+      // Keep enough matching rows in this scoped filter for a real, meaningful
+      // mouse scroll before the opened row disappears from it.
+      for (const filler of Array.from({ length: 8 }, (_, index) => index + 1)) {
+        await enterSessionDetail(page);
+        await page
+          .getByLabel("Prompt text")
+          .fill(`filter state scroll filler ${filler}`);
+        await page.getByRole("button", { name: "Send" }).click();
+        await expect(
+          page.getByText("Fake confirm", { exact: true }),
+        ).toBeVisible();
+        await page.getByTestId("session-origin-back").click();
+        await expectWorkRoute(page, workspaceId);
+      }
+
       await workspaceNeedsAttention.click();
       await expect(workspaceNeedsAttention).toHaveAttribute(
         "aria-pressed",
         "true",
       );
-      const workspaceRow = page
+      const workspaceRow = workspaceInbox
         .locator(".activity-inbox-row")
         .filter({ hasText: prompt });
       await expect(workspaceRow).toHaveCount(1);
@@ -3997,6 +4095,12 @@ test.describe("Unified Work", () => {
       if (activityItemId === null) {
         throw new Error("Missing stable activity item identity.");
       }
+      await workspaceInbox.hover();
+      await page.mouse.wheel(0, 400);
+      const savedFilteredScrollTop = await workspaceInbox.evaluate((element) =>
+        Math.round(element.scrollTop),
+      );
+      expect(savedFilteredScrollTop).toBeGreaterThan(100);
       await workspaceRow.click();
       await page.getByRole("button", { name: "Confirm", exact: true }).click();
       await expect(
@@ -4023,9 +4127,29 @@ test.describe("Unified Work", () => {
         "true",
       );
       await expect(workspaceRow).toHaveCount(0);
-      await expect(page.locator("#activity-inbox-title")).toBeFocused();
+      const workspaceHeading = workspaceInbox.locator("#activity-inbox-title");
+      await expect(workspaceHeading).toBeFocused();
+      await expect
+        .poll(() =>
+          workspaceInbox.evaluate((element) => Math.round(element.scrollTop)),
+        )
+        .toBe(0);
+      await expect
+        .poll(() =>
+          workspaceInbox.evaluate((inbox) => {
+            const heading = inbox.querySelector("#activity-inbox-title");
+            if (heading === null) return false;
+            const inboxBounds = inbox.getBoundingClientRect();
+            const headingBounds = heading.getBoundingClientRect();
+            return (
+              headingBounds.top >= inboxBounds.top &&
+              headingBounds.bottom <= inboxBounds.bottom
+            );
+          }),
+        )
+        .toBe(true);
 
-      const workspaceCompleted = page
+      const workspaceCompleted = workspaceInbox
         .getByRole("group", { name: "Filter Work by status" })
         .getByRole("button", { name: /^Completed/ });
       await workspaceCompleted.click();

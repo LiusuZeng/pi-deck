@@ -981,6 +981,9 @@ export function App(): ReactElement {
   const pendingActivityFocusItemId = useRef<string | null | undefined>(
     undefined,
   );
+  // Work is remounted for a session drill-in; retain its viewport only for the
+  // renderer lifetime and independently for each visible scope.
+  const activityScrollTopByScope = useRef(new Map<string, number>());
   const lastOpenedActivityItemId = useRef<string | undefined>(undefined);
   const sessionListGeneration = useRef(0);
   const reconciliationRetryTimers = useRef(new Map<string, number>());
@@ -1642,16 +1645,35 @@ export function App(): ReactElement {
     if (primaryView.kind !== "work") return;
     const itemId = pendingActivityFocusItemId.current;
     if (itemId === undefined) return;
+    const scopeKey =
+      primaryView.scope.type === "all"
+        ? "all"
+        : `workspace:${primaryView.scope.workspaceId}`;
+    const inbox = document.querySelector<HTMLElement>(".activity-inbox");
     const row =
-      itemId === null
+      itemId === null || inbox === null
         ? undefined
         : Array.from(
-            document.querySelectorAll<HTMLElement>("[data-activity-item-id]"),
+            inbox.querySelectorAll<HTMLElement>("[data-activity-item-id]"),
           ).find((candidate) => candidate.dataset.activityItemId === itemId);
-    const target = row ?? document.getElementById("activity-inbox-title");
-    if (target === null) return;
+    const heading = inbox?.querySelector<HTMLElement>("#activity-inbox-title");
     pendingActivityFocusItemId.current = undefined;
-    target.focus();
+
+    if (row !== undefined && inbox !== null) {
+      const scrollTop = activityScrollTopByScope.current.get(scopeKey);
+      if (scrollTop !== undefined) inbox.scrollTop = scrollTop;
+      row.focus({ preventScroll: true });
+      // A status update can move the returned row outside its saved viewport.
+      row.scrollIntoView({ block: "nearest" });
+      return;
+    }
+
+    if (heading === null || heading === undefined) return;
+    // The returned row no longer belongs to this filtered scope, so do not
+    // retain its old viewport. Return the fallback landmark to view instead.
+    if (inbox !== null) inbox.scrollTop = 0;
+    heading.focus({ preventScroll: true });
+    heading.scrollIntoView({ block: "nearest" });
   }, [activityInboxModel, primaryView]);
 
   const selectedModel =
@@ -2567,6 +2589,16 @@ export function App(): ReactElement {
   }
 
   async function openActivityItem(item: ActivityItem): Promise<void> {
+    if (primaryView.kind === "work") {
+      const scopeKey =
+        primaryView.scope.type === "all"
+          ? "all"
+          : `workspace:${primaryView.scope.workspaceId}`;
+      const inbox = document.querySelector<HTMLElement>(".activity-inbox");
+      if (inbox !== null) {
+        activityScrollTopByScope.current.set(scopeKey, inbox.scrollTop);
+      }
+    }
     const generation = beginNavigation();
     lastOpenedActivityItemId.current = item.id;
     const origin = workOriginForPrimaryView(

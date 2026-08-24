@@ -364,7 +364,7 @@ describe("ActivityInbox", () => {
     expect(row?.dataset.activityItemId).toBe("needsAttention-attention");
   });
 
-  it("activates a full row by click or keyboard with its canonical item", () => {
+  it("activates a full row once by click, Enter, or Space with its canonical item", () => {
     const onOpenActivityItem = vi.fn();
     const model = modelWithEveryKind();
     const { view } = renderInbox(model, { type: "all" }, onOpenActivityItem);
@@ -376,11 +376,23 @@ describe("ActivityInbox", () => {
 
     expect(row?.getAttribute("aria-label")).toContain("Needs attention");
     expect(row?.getAttribute("aria-label")).toContain("Respond");
+    act(() => row?.click());
+    expect(onOpenActivityItem).toHaveBeenCalledTimes(1);
+    expect(onOpenActivityItem).toHaveBeenLastCalledWith(model.items[0]);
     act(() =>
       row?.dispatchEvent(
         new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }),
       ),
     );
-    expect(onOpenActivityItem).toHaveBeenCalledWith(model.items[0]);
+    expect(onOpenActivityItem).toHaveBeenCalledTimes(2);
+    const space = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: " ",
+    });
+    act(() => row?.dispatchEvent(space));
+    expect(space.defaultPrevented).toBe(true);
+    expect(onOpenActivityItem).toHaveBeenCalledTimes(3);
+    expect(onOpenActivityItem).toHaveBeenLastCalledWith(model.items[0]);
   });
 });
