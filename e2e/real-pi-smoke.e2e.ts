@@ -930,7 +930,12 @@ test("real Pi production routing plans multiple private task sessions without br
       await expect(
         page.getByRole("region", { name: "Parallel task sessions" }),
       ).toHaveCount(0, { timeout: 180_000 });
+      const liveParentRow = page.locator(".session-list .session-item").first();
       await expect(page.locator(".session-list .session-item")).toHaveCount(1);
+      await expect(liveParentRow.locator(".session-title-copy")).toHaveText(
+        /^Run exactly three independent tasks in parallel:/,
+      );
+      await expect(liveParentRow).not.toContainText(/^Task-session synthesis/i);
       await expect
         .poll(() => listJsonlFiles(sessionDir).length, {
           message: "Private planner/task workers must not persist sessions",
@@ -988,6 +993,10 @@ test("real Pi production routing plans multiple private task sessions without br
         sessionFile: expect.any(String),
         sessionId: expect.any(String),
       });
+      expect(durableParent!.title).toMatch(
+        /^Run exactly three independent tasks in parallel:/,
+      );
+      expect(durableParent!.title).not.toMatch(/^Task-session synthesis/i);
       expect(durableParent!.messageCount).toBeGreaterThan(0);
       expect(durableParent!.sessionFile).toBe(activeParentSnapshot.sessionFile);
       expect(durableParent!.sessionId).toBe(activeParentSnapshot.sessionId);
@@ -1075,10 +1084,17 @@ test("real Pi production routing plans multiple private task sessions without br
         };
       }, workspaceId!);
       expect(rediscovered).toEqual(durableParent);
+      expect(rediscovered.title).toMatch(
+        /^Run exactly three independent tasks in parallel:/,
+      );
+      expect(rediscovered.title).not.toMatch(/^Task-session synthesis/i);
       const restartedSidebar = restarted.page.getByLabel("Sessions", {
         exact: true,
       });
       await expect(restartedSidebar.locator(".session-item")).toHaveCount(1);
+      await expect(
+        restartedSidebar.locator(".session-item .session-title-copy"),
+      ).toHaveText(/^Run exactly three independent tasks in parallel:/);
       await expect(
         restartedSidebar.getByRole("button", {
           name: `Session: ${durableParent!.title}`,
