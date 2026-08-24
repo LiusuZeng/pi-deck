@@ -1,9 +1,9 @@
 # Agent Workflows — Completion Gap and Parallel Plan
 
-**Status:** Build/Graph/home completion integrated; occurrence-run UI wiring remains tracked
+**Status:** Historical completion and coordination record (2026-08-08). For current behavior and status, see the [README](../README.md) and [Canonical Agent Workflows design](agent-workflows-role-based-design.md).
 **Date:** 2026-08-08
 **Design source:** [Canonical Agent Workflows](agent-workflows-role-based-design.md)
-**Baseline:** `dev/agent-workflows-prompt-first` at merge `c5b41ba`
+**Historical baseline:** `dev/agent-workflows-prompt-first` at merge `c5b41ba`
 
 ## 1. Goal
 

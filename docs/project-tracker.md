@@ -1,10 +1,11 @@
 # Pi Deck MVP Tracker
 
-Status: active implementation tracker
+Status: historical implementation snapshot; not the release source of truth
 Last updated: 2026-07-09
+Current release requirements: [Release Checklist](release-checklist.md)
 Source plan: `docs/project-task-breakdown.md`
 Worktree setup: `docs/git-worktree-parallel-setup.md`
-Update cadence: daily during active implementation; weekly milestone review.
+Historical update cadence: daily during active implementation; weekly milestone review.
 
 ## Status Legend
 
@@ -17,9 +18,9 @@ Update cadence: daily during active implementation; weekly milestone review.
 | Done        | Meets acceptance criteria                  |
 | Deferred    | Explicitly moved out of MVP                |
 
-## Current Dogfood TODO List — Source of Truth
+## Historical Dogfood TODO List
 
-This section supersedes stale milestone optimism below. Pi Deck is currently good enough for a **single active real Pi chat smoke**, not yet a daily-use multi-session control plane.
+This historical snapshot supersedes stale milestone optimism below for its implementation period. It is not the release source of truth; see the [Release Checklist](release-checklist.md) for current release requirements.
 
 ### Current working baseline
 
@@ -53,7 +54,7 @@ This section supersedes stale milestone optimism below. Pi Deck is currently goo
 - [x] Async provider/usage-limit errors emitted after prompt acceptance are surfaced as session errors instead of being treated as normal idle completion.
 - [x] Long active runs with no visible output show elapsed time, last backend phase, and an explicit no-visible-output-yet explanation instead of a bare stuck-looking spinner.
 
-### Immediate execution order — current priority stack
+### Historical implementation priority stack
 
 1. **M5 scheduler:** default concurrency cap 4, hard cap 20, blocked-send/explicit queue states.
 2. **Active-run controls:** steer, follow-up, abort/queue count polish.

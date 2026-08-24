@@ -1,6 +1,6 @@
 # How to Run and Test Pi Deck
 
-Status: v0.6 source-candidate run/test guide
+Status: v0.6.0 source-only pre-release run/test guide
 
 The normative navigation path is **All Work → scoped Work → session detail**.
 Local UI development uses deterministic fake Pi RPC; authenticated real-Pi commands
@@ -138,8 +138,9 @@ npm run smoke:real
 npm run smoke:real:prompt
 ```
 
-The CI-equivalent gate is expected to cover the following; these are not
-validation results until the commands are run on the final candidate HEAD:
+The CI-equivalent gate covers the following. Record command results in the
+[v0.6.0 validation record](reviews/v0.6-unified-work-release-validation.md)
+before treating them as release evidence:
 
 - Unit/integration tests, including fake RPC, platform, IPC, and renderer shell coverage.
 - TypeScript checks for main/preload/shared and renderer code.

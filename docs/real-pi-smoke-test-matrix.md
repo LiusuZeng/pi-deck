@@ -67,12 +67,12 @@ The deterministic fake RPC harness covers pre-real-Pi automation for:
 - reducer extension events via `--prompt-scenario all`: tool, queue, compaction, retry, extension UI request.
 - platform G1 smoke plumbing through a fake `pi` shim.
 
-## Current Blockers / Manual Inputs
+## Coverage / Deferred Packaging Status
 
 - P0 real GUI prompt/resume and one-worker Agent Workflow persistence paths are covered by `npm run test:e2e:real-smoke` against the installed Pi binary.
 - The `PI_DECK_E2E_DELEGATE_HARNESS=1` companion extension remains a **separate bridge transport** test: with `PI_DECK_ENABLE_LEGACY_DELEGATE_BRIDGE=1` it confirms the tool is registered before invoking it, validates the real extension loader/authenticated bridge/private worker, then relaunches without the compatibility opt-in and confirms the model-visible tool is absent.
 - SM-021 is ungated fake-RPC production-route coverage and deliberately does not use the bridge harness. Its test-only fixture controls bounded planning and child outcomes so capacity, retries, synthesis, attachment consumption/privacy, and restart interruption remain deterministic.
 - SM-022 is authenticated real-Pi coverage of the production model-backed planner. It supplies no fixture and no `deck_delegate` marker, so a one-task fallback fails the test instead of masquerading as planner success.
-- Broader M7.4 release matrix execution still needs planned pass/fail artifact collection across all rows.
-- G3 requires platform packaging measurements before image support can ship.
-- G4 requires a real or fake extension fixture once extension UI backend IPC is implemented.
+- Broad M7.4 row-by-row pass/fail artifact collection is post-v0.6 source-only hardening and is non-gating for this source-only release.
+- G3 platform packaging measurements for the implemented image UI are deferred until a packaged distribution exists; they are not a source-only v0.6 gate.
+- The deterministic extension UI renderer/IPC E2E test in `e2e/pi-deck.e2e.ts` covers the implemented successful G4 `confirm` flow only. Timeout/late-response and stdin-write-failure rows SM-014/SM-015 remain planned v0.6.x hardening and are not required by the canonical v0.6 source-only release checklist.
