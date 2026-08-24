@@ -106,7 +106,10 @@ import {
   type ActivityItem,
   type ActivitySourceSession,
 } from "./activityInbox.js";
-import { ActivityInbox } from "./components/ActivityInbox.js";
+import {
+  ActivityInbox,
+  type ActivityInboxFilter,
+} from "./components/ActivityInbox.js";
 import {
   isNavigationGenerationCurrent,
   nextNavigationGeneration,
@@ -912,6 +915,11 @@ export function App(): ReactElement {
   const [primaryView, setPrimaryView] = useState<PrimaryView>(() =>
     allWorkView(),
   );
+  // Work status filters are renderer-lifetime presentation state. Keep each
+  // scope independent without adding filter state to session/origin contracts.
+  const [activityFiltersByScope, setActivityFiltersByScope] = useState<
+    Record<string, ActivityInboxFilter>
+  >({});
   const [workflowDefinitions, setWorkflowDefinitions] = useState<
     WorkflowDefinition[]
   >([]);
@@ -1092,6 +1100,12 @@ export function App(): ReactElement {
     primaryView.kind === "workflow" ? primaryView.view : undefined;
   const activityScope: WorkScope =
     primaryView.kind === "work" ? primaryView.scope : { type: "all" };
+  const activityFilterScopeKey =
+    activityScope.type === "all"
+      ? "all"
+      : `workspace:${activityScope.workspaceId}`;
+  const selectedActivityFilter =
+    activityFiltersByScope[activityFilterScopeKey] ?? "all";
 
   useEffect(() => {
     const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
@@ -2196,6 +2210,13 @@ export function App(): ReactElement {
 
   function handleActivityScopeChange(scope: WorkScope): void {
     showWork(scope);
+  }
+
+  function handleActivityFilterChange(filter: ActivityInboxFilter): void {
+    setActivityFiltersByScope((current) => ({
+      ...current,
+      [activityFilterScopeKey]: filter,
+    }));
   }
 
   function handleBackToWork(): void {
@@ -5408,6 +5429,8 @@ export function App(): ReactElement {
             model={activityInboxModel}
             scope={activityScope}
             workspaces={workScopeWorkspaces}
+            selectedFilter={selectedActivityFilter}
+            onSelectedFilterChange={handleActivityFilterChange}
             onScopeChange={handleActivityScopeChange}
             onOpenActivityItem={handleOpenActivityItem}
             onNewSession={() => void handleNewSession()}

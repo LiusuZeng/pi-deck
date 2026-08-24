@@ -3912,6 +3912,138 @@ test.describe("Unified Work", () => {
     }
   });
 
+  test("Unified Work retains scoped status filters through Session and Back", async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "pi-deck-e2e-work-filter-state-"),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    fs.mkdirSync(projectCwd, { recursive: true });
+    fs.mkdirSync(agentDir, { recursive: true });
+    const { app, page } = await launchPiDeck(
+      fakeRealModeEnv({
+        root,
+        projectCwd,
+        agentDir,
+        fakePiArgs: [
+          "--prompt-scenario",
+          "extension-ui",
+          "--extension-ui-auto-complete-timeout-ms",
+          "120000",
+        ],
+      }),
+    );
+    try {
+      await expectHealthyPreload(page);
+      await expectAllWorkLaunch(page);
+      await createWorkspaceInUi(page, "Filter state workspace");
+      const workspaceId = await page
+        .getByRole("button", { name: "Workspace: Filter state workspace" })
+        .getAttribute("data-workspace-id");
+      if (workspaceId === null) throw new Error("Missing filter workspace id.");
+
+      await enterSessionDetail(page);
+      const prompt = "filter state extension request";
+      await page.getByLabel("Prompt text").fill(prompt);
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect(
+        page.getByText("Fake confirm", { exact: true }),
+      ).toBeVisible();
+
+      // All Work retains its Needs attention filter and restores the opened row.
+      await page.getByRole("button", { name: /^All Work/ }).click();
+      await expectAllWorkLaunch(page);
+      const allNeedsAttention = page
+        .getByRole("group", { name: "Filter Work by status" })
+        .getByRole("button", { name: /^Needs attention/ });
+      await allNeedsAttention.click();
+      await expect(allNeedsAttention).toHaveAttribute("aria-pressed", "true");
+      const allRow = page
+        .locator(".activity-inbox-row")
+        .filter({ hasText: prompt });
+      await expect(allRow).toHaveCount(1);
+      await allRow.click();
+      await page.getByTestId("session-origin-back").click();
+      await expectAllWorkLaunch(page);
+      await expect(allNeedsAttention).toHaveAttribute("aria-pressed", "true");
+      await expect(allRow).toBeFocused();
+
+      // The workspace keeps an independent filter. Resolving the row changes
+      // its category; Back retains Needs attention and falls back to the title.
+      await selectWorkspaceInUi(page, "Filter state workspace");
+      await expectWorkRoute(page, workspaceId);
+      const workspaceNeedsAttention = page
+        .getByRole("group", { name: "Filter Work by status" })
+        .getByRole("button", { name: /^Needs attention/ });
+      await expect(workspaceNeedsAttention).toHaveAttribute(
+        "aria-pressed",
+        "false",
+      );
+      await workspaceNeedsAttention.click();
+      await expect(workspaceNeedsAttention).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      const workspaceRow = page
+        .locator(".activity-inbox-row")
+        .filter({ hasText: prompt });
+      await expect(workspaceRow).toHaveCount(1);
+      await expect(workspaceRow).toHaveClass(
+        /activity-inbox-row--needsAttention/,
+      );
+      const activityItemId = await workspaceRow.getAttribute(
+        "data-activity-item-id",
+      );
+      if (activityItemId === null) {
+        throw new Error("Missing stable activity item identity.");
+      }
+      await workspaceRow.click();
+      await page.getByRole("button", { name: "Confirm", exact: true }).click();
+      await expect(
+        page.getByText("Extension UI response delivered to Pi."),
+      ).toBeVisible();
+      await expect(
+        page.getByText(`Fake response to: ${prompt}`, { exact: true }),
+      ).toBeVisible();
+      const completedSessionActions = page.getByRole("button", {
+        name: "Session actions for filter state extension request",
+      });
+      await completedSessionActions.click();
+      const completedActionsMenu = page.getByRole("menu", {
+        name: "Session actions for filter state extension request",
+      });
+      await expect(
+        completedActionsMenu.getByRole("menuitem", { name: "Archive session" }),
+      ).toBeEnabled();
+      await page.keyboard.press("Escape");
+      await page.getByTestId("session-origin-back").click();
+      await expectWorkRoute(page, workspaceId);
+      await expect(workspaceNeedsAttention).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      await expect(workspaceRow).toHaveCount(0);
+      await expect(page.locator("#activity-inbox-title")).toBeFocused();
+
+      const workspaceCompleted = page
+        .getByRole("group", { name: "Filter Work by status" })
+        .getByRole("button", { name: /^Completed/ });
+      await workspaceCompleted.click();
+      await expect(workspaceCompleted).toHaveAttribute("aria-pressed", "true");
+      const completedRow = page.locator(
+        `[data-activity-item-id=${JSON.stringify(activityItemId)}]`,
+      );
+      await expect(completedRow).toHaveCount(1);
+      await expect(
+        completedRow.locator(".activity-inbox-row-title"),
+      ).toHaveText(prompt);
+      await expect(completedRow).toHaveClass(/activity-inbox-row--completed/);
+    } finally {
+      await app.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("Unified Work keeps private task status out of Work while workflows coexist", async () => {
     const root = fs.mkdtempSync(
       path.join(os.tmpdir(), "pi-deck-e2e-unified-work-private-"),

@@ -1,4 +1,4 @@
-import { useMemo, useState, type KeyboardEvent } from "react";
+import { useMemo, type KeyboardEvent } from "react";
 import type {
   ActivityInboxModel,
   ActivityItem,
@@ -13,7 +13,7 @@ import {
 } from "../activityInbox.js";
 import { Check, CircleAlert, CircleDot, LoaderCircle } from "./ui/icons.js";
 
-type ActivityFilter = "all" | ActivityStatus;
+export type ActivityInboxFilter = "all" | ActivityStatus;
 
 const ALL_WORK_LABEL = "All Work";
 
@@ -89,6 +89,8 @@ export interface ActivityInboxProps {
   workspaces: readonly ActivityWorkspace[];
   onOpenActivityItem: (item: ActivityItem) => void;
   onScopeChange: (scope: ActivityScope) => void;
+  selectedFilter: ActivityInboxFilter;
+  onSelectedFilterChange: (filter: ActivityInboxFilter) => void;
   /** Optional for compatibility with pre-CTA embedders. */
   onNewSession?: () => void;
 }
@@ -100,9 +102,10 @@ export function ActivityInbox({
   workspaces,
   onOpenActivityItem,
   onScopeChange,
+  selectedFilter,
+  onSelectedFilterChange,
   onNewSession,
 }: ActivityInboxProps) {
-  const [selectedFilter, setSelectedFilter] = useState<ActivityFilter>("all");
   const workspaceName =
     scope.type === "workspace"
       ? workspaces.find((workspace) => workspace.id === scope.workspaceId)?.name
@@ -229,7 +232,7 @@ export function ActivityInbox({
         <button
           aria-pressed={selectedFilter === "all"}
           className="activity-inbox-filter"
-          onClick={() => setSelectedFilter("all")}
+          onClick={() => onSelectedFilterChange("all")}
           type="button"
         >
           <span>All</span>
@@ -244,7 +247,7 @@ export function ActivityInbox({
               aria-pressed={selectedFilter === kind}
               className="activity-inbox-filter"
               key={kind}
-              onClick={() => setSelectedFilter(kind)}
+              onClick={() => onSelectedFilterChange(kind)}
               type="button"
             >
               <span>{meta.label}</span>
@@ -287,7 +290,7 @@ function EmptyState({
   onNewSession,
   scopeLabel,
 }: {
-  filter: ActivityFilter;
+  filter: ActivityInboxFilter;
   onNewSession?: () => void;
   scopeLabel: string;
 }) {

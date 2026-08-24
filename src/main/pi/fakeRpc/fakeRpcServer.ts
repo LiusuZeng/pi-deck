@@ -32,6 +32,7 @@ interface FakeOptions {
   promptScenario: PromptScenario;
   dropCompletionEvents: boolean;
   extensionUiMethod: "select" | "confirm" | "input" | "editor";
+  extensionUiAutoCompleteTimeoutMs: number;
   extraModel: boolean;
   productionShaped: boolean;
   noSession: boolean;
@@ -46,6 +47,8 @@ interface FakeOptions {
   taskRoutingFixture?: string;
   fixtureTraceFile?: string;
 }
+
+const MAX_NODE_TIMEOUT_MS = 2_147_483_647;
 
 type FakeCommandRecord = JsonObject & {
   id?: string;
@@ -65,6 +68,7 @@ function parseOptions(argv: string[]): FakeOptions {
     promptScenario: "basic",
     dropCompletionEvents: false,
     extensionUiMethod: "confirm",
+    extensionUiAutoCompleteTimeoutMs: 5_000,
     extraModel: false,
     productionShaped: false,
     noSession: false,
@@ -105,6 +109,16 @@ function parseOptions(argv: string[]): FakeOptions {
         method === "editor"
       ) {
         options.extensionUiMethod = method;
+      }
+      index += 1;
+    } else if (arg === "--extension-ui-auto-complete-timeout-ms") {
+      const timeout = Number(argv[index + 1]);
+      if (
+        Number.isSafeInteger(timeout) &&
+        timeout >= 0 &&
+        timeout <= MAX_NODE_TIMEOUT_MS
+      ) {
+        options.extensionUiAutoCompleteTimeoutMs = timeout;
       }
       index += 1;
     } else if (arg === "--extra-model") {
@@ -708,7 +722,7 @@ class FakeRpcServer {
           this.pendingExtensionUi = undefined;
           this.completePrompt(assistantId, text);
         }
-      }, 5_000);
+      }, this.options.extensionUiAutoCompleteTimeoutMs);
       this.pendingExtensionUi = { id, assistantId, promptText: text, timer };
       return;
     }
@@ -912,7 +926,7 @@ class FakeRpcServer {
         ...(method === "select" ? { options: ["Allow", "Block"] } : {}),
         ...(method === "input" ? { placeholder: "Type a fake value" } : {}),
         ...(method === "editor" ? { prefill: "Fake editable text" } : {}),
-        timeout: 5_000,
+        timeout: this.options.extensionUiAutoCompleteTimeoutMs,
       });
     }
   }
@@ -949,6 +963,11 @@ class FakeRpcServer {
   }
 
   private handleAbort(command: FakeCommandRecord): void {
+    const pendingExtensionUi = this.pendingExtensionUi;
+    if (pendingExtensionUi) {
+      clearTimeout(pendingExtensionUi.timer);
+      this.pendingExtensionUi = undefined;
+    }
     for (const timer of this.currentTimers) {
       clearTimeout(timer);
     }

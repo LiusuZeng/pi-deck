@@ -12,7 +12,11 @@ import {
   type ActivityScope,
   type ActivitySourceSession,
 } from "../activityInbox.js";
-import { ActivityInbox, type ActivityWorkspace } from "./ActivityInbox.js";
+import {
+  ActivityInbox,
+  type ActivityInboxFilter,
+  type ActivityWorkspace,
+} from "./ActivityInbox.js";
 
 let root: Root | undefined;
 let container: HTMLDivElement | undefined;
@@ -99,6 +103,8 @@ function renderInbox(
   onScopeChange = vi.fn(),
   workspaceOptions: readonly ActivityWorkspace[] = workspaces,
   onNewSession = vi.fn(),
+  selectedFilter: ActivityInboxFilter = "all",
+  onSelectedFilterChange = vi.fn(),
 ) {
   container = document.createElement("div");
   document.body.append(container);
@@ -109,13 +115,20 @@ function renderInbox(
         model={model}
         onOpenActivityItem={onOpenActivityItem}
         onScopeChange={onScopeChange}
+        onSelectedFilterChange={onSelectedFilterChange}
+        selectedFilter={selectedFilter}
         onNewSession={onNewSession}
         scope={scope}
         workspaces={workspaceOptions}
       />,
     );
   });
-  return { onOpenActivityItem, onScopeChange, view: container };
+  return {
+    onOpenActivityItem,
+    onScopeChange,
+    onSelectedFilterChange,
+    view: container,
+  };
 }
 
 afterEach(() => {
@@ -262,21 +275,59 @@ describe("ActivityInbox", () => {
     );
   });
 
-  it("filters by status and provides scoped empty state copy", () => {
-    const { view } = renderInbox(modelWithEveryKind(), {
-      type: "workspace",
-      workspaceId: "workspace-atlas",
-    });
+  it("uses App-controlled status filters and provides scoped empty state copy", () => {
+    const onSelectedFilterChange = vi.fn();
+    const { view } = renderInbox(
+      modelWithEveryKind(),
+      { type: "workspace", workspaceId: "workspace-atlas" },
+      vi.fn(),
+      vi.fn(),
+      workspaces,
+      vi.fn(),
+      "failed",
+      onSelectedFilterChange,
+    );
     const failedFilter = Array.from(view.querySelectorAll("button")).find(
       (button) => button.textContent?.includes("Failed"),
     );
-
-    act(() => failedFilter?.click());
 
     expect(failedFilter?.getAttribute("aria-pressed")).toBe("true");
     expect(view.querySelector('[role="status"]')?.textContent).toContain(
       "No failed work in Project Atlas Work.",
     );
+    act(() => failedFilter?.click());
+    expect(onSelectedFilterChange).toHaveBeenCalledWith("failed");
+  });
+
+  it("renders a retained App-owned filter after an inbox remount", () => {
+    const renderWithRetainedFilter = () =>
+      root?.render(
+        <ActivityInbox
+          model={modelWithEveryKind()}
+          onOpenActivityItem={vi.fn()}
+          onScopeChange={vi.fn()}
+          onSelectedFilterChange={vi.fn()}
+          scope={{ type: "all" }}
+          selectedFilter="needsAttention"
+          workspaces={workspaces}
+        />,
+      );
+
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    act(renderWithRetainedFilter);
+    act(() => root?.unmount());
+    root = createRoot(container);
+    act(renderWithRetainedFilter);
+
+    expect(
+      Array.from(
+        container.querySelectorAll<HTMLButtonElement>(".activity-inbox-filter"),
+      )
+        .find((button) => button.textContent?.includes("Needs attention"))
+        ?.getAttribute("aria-pressed"),
+    ).toBe("true");
   });
 
   it("offers New session from an empty Work surface", () => {
