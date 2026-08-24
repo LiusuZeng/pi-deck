@@ -1,6 +1,6 @@
 # v0.5.5 Release-Candidate Validation
 
-Date: 2026-08-22  
+Date: 2026-08-22
 Branch: `release/v0.5.5`
 Validated code commit: `ebbf37558ffa3b7d361cc4376139a85a59557921`
 
