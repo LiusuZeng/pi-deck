@@ -1263,6 +1263,64 @@ test("fake mode launches with backend runtime and send enabled", async () => {
   }
 });
 
+test("fake named workspace drafts keep fake backend and sidebar behavior", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-fake-workspace-draft-"),
+  );
+  const { app, page } = await launchPiDeck({
+    PI_DECK_BACKEND: "fake",
+    PI_DECK_HOME: path.join(root, "pideck-home"),
+    PI_DECK_USER_DATA_DIR: path.join(root, "user-data"),
+  });
+  try {
+    await expectHealthyPreload(page);
+    await createWorkspaceInUi(page, "Fake named workspace");
+    await selectWorkspaceInUi(page, "Fake named workspace");
+    await enterSessionDetail(page);
+
+    await expect(
+      page.getByRole("heading", { name: /Untitled new session/ }),
+    ).toBeVisible();
+    await expect(page.locator(".pi-configuration-trigger")).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Refresh sessions" }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Delete saved sessions" }),
+    ).toHaveCount(0);
+    await expect(page.locator('[data-testid^="session-actions-"]')).toHaveCount(
+      0,
+    );
+
+    const prompt = "fake named workspace prompt";
+    await page.getByLabel("Prompt text").fill(prompt);
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText(`Fake response to: ${prompt}`, { exact: true }),
+    ).toBeVisible();
+
+    const runtime = await page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      const active = await window.piDeck.workspaces.getActive();
+      return {
+        backendMode: snapshot.backendMode,
+        snapshotWorkspaceId: snapshot.workspaceId,
+        activeWorkspaceId: active.activeWorkspace?.id,
+        activeWorkspaceName: active.activeWorkspace?.name,
+      };
+    });
+    expect(runtime).toMatchObject({
+      backendMode: "fake",
+      activeWorkspaceName: "Fake named workspace",
+    });
+    expect(runtime.activeWorkspaceId).toEqual(expect.any(String));
+    expect(runtime.snapshotWorkspaceId).toBe(runtime.activeWorkspaceId);
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("default workspace stays implicit until a named workspace exists", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-e2e-default-disclosure-"),
@@ -1806,6 +1864,34 @@ test("extension UI confirm request completes through renderer, IPC, and fake Pi"
     await expect(
       page.getByText("Approve fake extension UI request?"),
     ).toBeVisible();
+
+    const waitingComposer = page.getByLabel("Prompt text");
+    await waitingComposer.fill("blocked while extension input is pending");
+    await expect(page.getByRole("button", { name: "Send" })).toBeDisabled();
+    await waitingComposer.fill("");
+
+    const waitingSessionActions = page.getByRole("button", {
+      name: "Session actions for confirm extension request",
+    });
+    await expect(waitingSessionActions).toBeVisible();
+    await waitingSessionActions.click();
+    const waitingActionsMenu = page.getByRole("menu", {
+      name: "Session actions for confirm extension request",
+    });
+    await expect(
+      waitingActionsMenu.getByRole("menuitem", {
+        name: "Move to workspace…",
+      }),
+    ).toBeDisabled();
+    await expect(
+      waitingActionsMenu.getByRole("menuitem", { name: "Archive session" }),
+    ).toBeDisabled();
+    await expect(
+      waitingActionsMenu.getByRole("menuitem", {
+        name: "Remove from workspace",
+      }),
+    ).toBeDisabled();
+    await page.keyboard.press("Escape");
 
     // A waiting worker remains in the sidebar after the user moves elsewhere;
     // receiving extension input never steals foreground selection.

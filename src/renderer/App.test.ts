@@ -1170,6 +1170,35 @@ describe("Pi draft defaults and thinking capabilities", () => {
     expect(draft.thinkingLevel).toBe("xhigh");
   });
 
+  it("keeps fake workspace drafts fake without Pi defaults", () => {
+    const draft = __rendererTestHooks.draftSessionForWorkspace(
+      {
+        id: "workspace-fake",
+        name: "Fake workspace",
+        lastOpenedAt: 1,
+      },
+      "draft-fake",
+      "fake",
+      {
+        models: [],
+        activeModel: {
+          id: "real-model",
+          name: "Real model",
+          provider: "real-provider",
+        },
+        thinkingLevel: "high",
+        thinkingLevels: ["off", "high"],
+      },
+    );
+
+    expect(draft).toMatchObject({
+      backendMode: "fake",
+      draftSession: true,
+    });
+    expect(draft).not.toHaveProperty("modelLabel");
+    expect(draft).not.toHaveProperty("thinkingLevel");
+  });
+
   it("discovers models through a folderless workspace", () => {
     expect(
       __rendererTestHooks.modelDiscoveryRequestForWorkspace({
@@ -1296,6 +1325,62 @@ describe("renderer session actions", () => {
         baseState: "working",
       }),
     ).toBe(false);
+  });
+
+  it("blocks waiting sessions from prompts and membership mutations", () => {
+    const waiting = {
+      ...baseSession(),
+      status: "waiting",
+      baseState: "waitingForInput",
+      overlays: { ...emptyOverlays, needsUserInput: true },
+      sessionFile: "/sessions/waiting.jsonl",
+      runtimeBacked: true,
+      resumeBacked: false,
+      pendingExtensionUiRequests: [
+        {
+          id: "request-1",
+          method: "confirm",
+          title: "Confirm",
+        },
+      ],
+    } as any;
+
+    expect(__rendererTestHooks.isSessionBusy(waiting)).toBe(true);
+    expect(__rendererTestHooks.canManageWorkspaceMembership(waiting)).toBe(
+      false,
+    );
+    expect(
+      __rendererTestHooks.archiveWorkspaceBlockReason(
+        [waiting],
+        {},
+        "workspace-a",
+        2,
+      ),
+    ).toMatch(/finish active sessions/i);
+    expect(
+      __rendererTestHooks.canSubmitTaskPrompt(
+        waiting,
+        "newTaskSession",
+        false,
+        "plan this",
+        true,
+      ),
+    ).toBe(false);
+    expect(
+      __rendererTestHooks.canSubmitTaskPrompt(
+        {
+          ...waiting,
+          status: "working",
+          baseState: "working",
+          overlays: { ...emptyOverlays },
+          pendingExtensionUiRequests: [],
+        },
+        "newTaskSession",
+        false,
+        "plan this",
+        true,
+      ),
+    ).toBe(true);
   });
 
   it("preserves a background runtime update when an awaited resume completes", () => {
@@ -2349,6 +2434,52 @@ describe("renderer message_update reduction", () => {
         activeStatus,
       ).status,
     ).toBe("aborting");
+  });
+
+  it("preserves waiting extension input during status reconciliation", () => {
+    const waiting = {
+      ...baseSession(),
+      status: "waiting",
+      baseState: "waitingForInput",
+      overlays: { ...emptyOverlays, needsUserInput: true },
+      pendingExtensionUiRequests: [
+        {
+          id: "request-1",
+          method: "confirm",
+          title: "Confirm",
+        },
+      ],
+    } as any;
+    const activeStatus = {
+      runtimeId: "session-1",
+      backendMode: "real",
+      state: { isAgentActive: true },
+    } as any;
+    const inactiveStatus = {
+      ...activeStatus,
+      state: { isAgentActive: false },
+    };
+
+    expect(
+      __rendererTestHooks.reconcileSessionWithRuntimeStatus(
+        waiting,
+        activeStatus,
+      ),
+    ).toBe(waiting);
+    expect(
+      __rendererTestHooks.reconcileSessionWithRuntimeStatus(
+        waiting,
+        inactiveStatus,
+      ),
+    ).toBe(waiting);
+    expect(__rendererTestHooks.shouldReconcileSession(waiting)).toBe(true);
+    expect(waiting).toMatchObject({
+      status: "waiting",
+      baseState: "waitingForInput",
+      pendingExtensionUiRequests: [
+        expect.objectContaining({ id: "request-1" }),
+      ],
+    });
   });
 
   it("keeps quiet working reconciliation runtime-scoped", () => {

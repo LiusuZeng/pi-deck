@@ -174,6 +174,9 @@ type SessionStatus =
   | "waiting"
   | "error";
 
+type BackendMode = "fake" | "real";
+type PromptDestination = "parent" | "newTaskSession";
+
 type ExtensionUiDialogMethod = "select" | "confirm" | "input" | "editor";
 
 interface PendingExtensionUiRequest {
@@ -838,6 +841,7 @@ const fakeAttachmentFixture: AttachmentDraft[] = [
 
 export function App(): ReactElement {
   const [loadState, setLoadState] = useState<LoadState>({ state: "loading" });
+  const [backendMode, setBackendMode] = useState<BackendMode>("real");
   const [sessions, setSessions] = useState<SessionViewModel[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState("");
   const [composerDrafts, setComposerDrafts] = useState<ComposerDraftsBySession>(
@@ -958,6 +962,7 @@ export function App(): ReactElement {
   const selectedSessionIdRef = useRef(selectedSessionId);
   const currentProjectRef = useRef(currentProject);
   const currentWorkspaceRef = useRef(currentWorkspace);
+  const backendModeRef = useRef<BackendMode>("real");
   // Route commits from workspace activation, resume, and draft materialization
   // may resolve after a newer user navigation. Keep this token separate from
   // session-list freshness so stale completions cannot steal the visible
@@ -1230,6 +1235,9 @@ export function App(): ReactElement {
         if (disposed) {
           return;
         }
+
+        backendModeRef.current = bootstrap.backendMode;
+        setBackendMode(bootstrap.backendMode);
 
         // A draft is a renderer-only shell. It intentionally has no runtime
         // id, so the first send is the only path that can create a Pi worker.
@@ -1678,7 +1686,7 @@ export function App(): ReactElement {
       ? (multitask[selectedSession.id] ??
         initialDraftMultitaskState(selectedSession.id))
       : undefined;
-  const promptDestination =
+  const promptDestination: PromptDestination =
     multitaskState?.mode === "parallel" && !workInParentOnce[selectedSession.id]
       ? "newTaskSession"
       : "parent";
@@ -1686,7 +1694,7 @@ export function App(): ReactElement {
   const isWorking = selectedSession.status === "working";
   const isBusy = isSessionBusy(selectedSession);
   const isResuming = selectedSession.status === "reconnecting";
-  const isRealBackendMode = selectedSession.backendMode === "real";
+  const isRealBackendMode = backendMode === "real";
   const hasBlockingAttachment = attachments.some(
     (attachment) => attachment.status !== "ready",
   );
@@ -1703,13 +1711,13 @@ export function App(): ReactElement {
     isWorking &&
     !isResuming &&
     loadState.state === "ready";
-  const canSendTask =
-    promptDestination === "newTaskSession" &&
-    pendingTaskSubmissions[selectedSession.id] === undefined &&
-    draft.trim().length > 0 &&
-    !isLifecycleTransition(selectedSession.status) &&
-    !selectedSession.overlays.retrying &&
-    loadState.state === "ready";
+  const canSendTask = canSubmitTaskPrompt(
+    selectedSession,
+    promptDestination,
+    pendingTaskSubmissions[selectedSession.id] !== undefined,
+    draft,
+    loadState.state === "ready",
+  );
   const availableSlashCommands = isRealBackendMode
     ? realCommands
     : slashCommands;
@@ -3659,15 +3667,26 @@ export function App(): ReactElement {
         existingRuntime?.id ??
         existingDraft?.id ??
         createId("draft-session");
+      const activeBackendMode = backendModeRef.current;
+      const draftConfiguration =
+        activeBackendMode === "real" &&
+        currentWorkspaceRef.current.id === workspace.id
+          ? projectModelConfiguration
+          : undefined;
       const draft =
         existingRuntime === undefined && existingDraft === undefined
-          ? draftSessionForWorkspace(workspace, selectedId)
+          ? draftSessionForWorkspace(
+              workspace,
+              selectedId,
+              activeBackendMode,
+              draftConfiguration,
+            )
           : undefined;
       // Fake mode's fixture rows are renderer-owned, not saved-session rows.
       // Never let a compatibility list call evict them during workspace
       // activation; real mode continues to replace only canonical saved rows.
       setSessions((items) =>
-        isRealBackendMode
+        activeBackendMode === "real"
           ? replaceWorkspaceTreeSavedRows(
               items,
               nextWorkspaces.map((candidate) => candidate.id),
@@ -3685,21 +3704,23 @@ export function App(): ReactElement {
         setCurrentProject(workspace.defaultProject);
       }
       setSelectedSessionId(selectedId);
-      void window.piDeck.chat
-        .listModels(modelDiscoveryRequestForWorkspace(workspace))
-        .then((result) => {
-          // Model discovery belongs to the activated workspace, not to the
-          // transient route that initiated activation. A user can enter a
-          // session before discovery completes; the latest session-list token
-          // still prevents an older workspace result from winning.
-          if (sessionListRequest === sessionListGeneration.current) {
-            setProjectModelConfiguration(result);
-            setSessions((items) =>
-              applyPiDefaultsToDraftSessions(items, workspace.id, result),
-            );
-          }
-        })
-        .catch(() => undefined);
+      if (activeBackendMode === "real") {
+        void window.piDeck.chat
+          .listModels(modelDiscoveryRequestForWorkspace(workspace))
+          .then((result) => {
+            // Model discovery belongs to the activated workspace, not to the
+            // transient route that initiated activation. A user can enter a
+            // session before discovery completes; the latest session-list token
+            // still prevents an older workspace result from winning.
+            if (sessionListRequest === sessionListGeneration.current) {
+              setProjectModelConfiguration(result);
+              setSessions((items) =>
+                applyPiDefaultsToDraftSessions(items, workspace.id, result),
+              );
+            }
+          })
+          .catch(() => undefined);
+      }
       setUiMessage(
         `Workspace switched to ${workspace.name}. Sessions remain grouped by workspace.`,
       );
@@ -6233,12 +6254,18 @@ function draftSessionForWorkspace(
   configuration?: ChatListModelsResult,
 ): SessionViewModel {
   const workingDirectory = defaultWorkingDirectory(workspace);
+  const applicableConfiguration =
+    backendMode === "real" ? configuration : undefined;
   return {
-    ...(configuration?.activeModel
-      ? { modelLabel: modelLabelForChatModel(configuration.activeModel) }
+    ...(applicableConfiguration?.activeModel
+      ? {
+          modelLabel: modelLabelForChatModel(
+            applicableConfiguration.activeModel,
+          ),
+        }
       : {}),
-    ...(configuration?.thinkingLevel !== undefined
-      ? { thinkingLevel: configuration.thinkingLevel }
+    ...(applicableConfiguration?.thinkingLevel !== undefined
+      ? { thinkingLevel: applicableConfiguration.thinkingLevel }
       : {}),
     id,
     workspaceId: workspace.id,
@@ -10744,14 +10771,33 @@ function isSessionBusy(
   return (
     isLifecycleTransition(session.status) ||
     session.status === "working" ||
+    session.status === "waiting" ||
     session.overlays.retrying
+  );
+}
+
+function canSubmitTaskPrompt(
+  session: Pick<SessionViewModel, "status" | "overlays">,
+  promptDestination: PromptDestination,
+  hasPendingTaskSubmission: boolean,
+  draft: string,
+  loadReady: boolean,
+): boolean {
+  return (
+    promptDestination === "newTaskSession" &&
+    !hasPendingTaskSubmission &&
+    draft.trim().length > 0 &&
+    session.status !== "waiting" &&
+    !isLifecycleTransition(session.status) &&
+    !session.overlays.retrying &&
+    loadReady
   );
 }
 
 function shouldReconcileSession(session: SessionViewModel): boolean {
   // Runtime events remain authoritative, but a bounded status fallback must
-  // include working turns so dropping both terminal events cannot leave the UI
-  // permanently busy.
+  // include active and waiting turns so dropping lifecycle events cannot leave
+  // the UI permanently out of sync with Pi.
   return session.runtimeBacked && isSessionBusy(session);
 }
 
@@ -10763,6 +10809,12 @@ function reconcileSessionWithRuntimeStatus(
   if (status.runtimeId !== session.id) {
     return session;
   }
+  // Extension UI input remains pending until its response is delivered or the
+  // request times out, regardless of the compact runtime's active flag.
+  if (session.status === "waiting") {
+    return session;
+  }
+
   if (status.state.isAgentActive) {
     // Abort remains pending until Pi reports a terminal completion event or an
     // authoritative inactive status; a still-active status is not success.
@@ -11469,6 +11521,7 @@ export const __rendererTestHooks = {
   queueBadgeLabels,
   isSessionBusy,
   shouldReconcileSession,
+  canSubmitTaskPrompt,
   reconcileSessionWithRuntimeStatus,
   mergeSessionUsageFromRuntimeStatus,
   updateSessionByRuntimeId,
