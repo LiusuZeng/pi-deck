@@ -1,0 +1,238 @@
+Validation timestamp (UTC): 2026-08-24T16:33:39Z
+Candidate: 29cb814fa35e50d2fb92b870a02cb8d5a376fc47
+Branch: feature/v0.6-unified-work
+Working tree before validation:
+Command: npm run verify:release
+
+> pi-deck@0.6.0 verify:release
+> npm run verify:ci && npm run test:e2e:real-smoke
+
+
+> pi-deck@0.6.0 verify:ci
+> npm run format && npm run typecheck && npm test && npm run build && npm run check:site && npm run test:e2e
+
+
+> pi-deck@0.6.0 format
+> prettier --check "index.html" "package*.json" "*.config.ts" "tsconfig*.json" "scripts/**/*.mjs" "src/**/*.{ts,tsx,css}" "e2e/**/*.ts"
+
+Checking formatting...
+All matched files use Prettier code style!
+
+> pi-deck@0.6.0 typecheck
+> tsc --noEmit -p tsconfig.main.json && tsc --noEmit -p tsconfig.renderer.json
+
+
+> pi-deck@0.6.0 test
+> vitest run
+
+
+ RUN  v4.1.9 /Users/liusu/pi-deck-worktrees/v0.6-unified-work-integration
+
+
+ Test Files  74 passed (74)
+      Tests  593 passed | 2 todo (595)
+   Start at  09:33:53
+   Duration  9.76s (transform 4.45s, setup 0ms, import 12.00s, tests 27.06s, environment 9.25s)
+
+
+> pi-deck@0.6.0 build
+> npm run build:main && npm run build:renderer && node scripts/write-build-manifest.mjs
+
+
+> pi-deck@0.6.0 build:main
+> tsc -p tsconfig.main.json && esbuild src/preload/index.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist/preload/index.js --sourcemap
+
+
+  dist/preload/index.js      628.2kb
+  dist/preload/index.js.map    1.1mb
+
+⚡ Done in 77ms
+
+> pi-deck@0.6.0 build:renderer
+> vite build
+
+vite v8.1.0 building client environment for production...
+transforming...✓ 165 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/renderer/index.html                                           0.64 kB │ gzip:   0.37 kB
+dist/renderer/assets/index-Bcqzoc0t.css                           88.46 kB │ gzip:  15.61 kB
+dist/renderer/assets/LegacyWorkflowRunCompatibility-CD9L1OZN.js    3.83 kB │ gzip:   1.17 kB
+dist/renderer/assets/WorkflowOccurrenceRunView-DBnSM6X1.js         7.03 kB │ gzip:   2.29 kB
+dist/renderer/assets/AgentWorkflowGraph-CcDBSiND.js                7.90 kB │ gzip:   2.91 kB
+dist/renderer/assets/AgentWorkflowHome-hYt3mRbj.js                13.33 kB │ gzip:   3.54 kB
+dist/renderer/assets/agentWorkflowGraph-CDRTX2yZ.js               51.34 kB │ gzip:  17.41 kB
+dist/renderer/assets/AgentWorkflowBuilder-l6r12hlt.js            112.14 kB │ gzip:  28.67 kB
+dist/renderer/assets/index-CgaVjUyd.js                           374.58 kB │ gzip: 111.07 kB
+
+✓ built in 252ms
+
+> pi-deck@0.6.0 check:site
+> node scripts/check-site.mjs
+
+Site validation passed (18 IDs, 12 images, version 0.6.0).
+
+> pi-deck@0.6.0 pretest:e2e
+> node scripts/check-macos-gui-launch.mjs
+
+
+> pi-deck@0.6.0 test:e2e
+> npm run build && playwright test -c e2e/playwright.config.ts
+
+
+> pi-deck@0.6.0 build
+> npm run build:main && npm run build:renderer && node scripts/write-build-manifest.mjs
+
+
+> pi-deck@0.6.0 build:main
+> tsc -p tsconfig.main.json && esbuild src/preload/index.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist/preload/index.js --sourcemap
+
+
+  dist/preload/index.js      628.2kb
+  dist/preload/index.js.map    1.1mb
+
+⚡ Done in 78ms
+
+> pi-deck@0.6.0 build:renderer
+> vite build
+
+vite v8.1.0 building client environment for production...
+transforming...✓ 165 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/renderer/index.html                                           0.64 kB │ gzip:   0.37 kB
+dist/renderer/assets/index-Bcqzoc0t.css                           88.46 kB │ gzip:  15.61 kB
+dist/renderer/assets/LegacyWorkflowRunCompatibility-CD9L1OZN.js    3.83 kB │ gzip:   1.17 kB
+dist/renderer/assets/WorkflowOccurrenceRunView-DBnSM6X1.js         7.03 kB │ gzip:   2.29 kB
+dist/renderer/assets/AgentWorkflowGraph-CcDBSiND.js                7.90 kB │ gzip:   2.91 kB
+dist/renderer/assets/AgentWorkflowHome-hYt3mRbj.js                13.33 kB │ gzip:   3.54 kB
+dist/renderer/assets/agentWorkflowGraph-CDRTX2yZ.js               51.34 kB │ gzip:  17.41 kB
+dist/renderer/assets/AgentWorkflowBuilder-l6r12hlt.js            112.14 kB │ gzip:  28.67 kB
+dist/renderer/assets/index-CgaVjUyd.js                           374.58 kB │ gzip: 111.07 kB
+
+✓ built in 255ms
+
+Running 67 tests using 1 worker
+
+  ✓   1 e2e/agent-workflows.e2e.ts:303:5 › workflow API creates a template, starts a fake run, and persists both across reopen (1.6s)
+  ✓   2 e2e/agent-workflows.e2e.ts:424:5 › live graph subscribes, renders a human conditional route, and completes after approval (980ms)
+  ✓   3 e2e/agent-workflows.e2e.ts:544:5 › workflow graph supports keyboard traversal, text parity, and narrow-screen scrolling (1.0s)
+  ✓   4 e2e/agent-workflows.e2e.ts:633:5 › live graph shows cancellation from a waiting human gate (946ms)
+  ✓   5 e2e/agent-workflows.e2e.ts:665:5 › failed fake worker exposes retry and preserves its graph identity across attempts (2.0s)
+  ✓   6 e2e/agent-workflows.e2e.ts:714:5 › duplicate node names retain ID relationships, fanout ownership, bindings, and historical run routing after rename (2.7s)
+  ✓   7 e2e/agent-workflows.e2e.ts:1002:5 › fake backend bounds fan-out concurrency and persists its complete graph (3.0s)
+  ✓   8 e2e/agent-workflows.e2e.ts:1174:5 › fake backend persists loop iterations and strict decider outcomes (1.9s)
+  ✓   9 e2e/agent-workflows.e2e.ts:1308:5 › restart recovery never resurrects a fake in-flight canonical occurrence (7.6s)
+  ✓  10 e2e/agent-workflows.e2e.ts:1444:5 › a cancellation race leaves no persisted runtime or late completion (3.2s)
+  ✓  11 e2e/agent-workflows.e2e.ts:1504:5 › a non-empty unsupported workflow store leaves the shell usable and remains unchanged (474ms)
+  ✓  12 e2e/agent-workflows.e2e.ts:1541:5 › the known empty v2 workflow store boots through the node-ID migration (1.3s)
+  ✓  13 e2e/pi-deck.e2e.ts:245:5 › workspace management UI keeps Pi JSONL membership reversible and deletion explicit (2.9s)
+  ✓  14 e2e/pi-deck.e2e.ts:503:5 › Unified Work opens a saved sidebar row across workspaces through canonical resume (1.5s)
+  ✓  15 e2e/pi-deck.e2e.ts:598:5 › new workspaces send with managed context and model defaults without a folder picker (1.6s)
+  ✓  16 e2e/pi-deck.e2e.ts:717:5 › real-mode workspace membership lifecycle stays explicit and reversible (753ms)
+  ✓  17 e2e/pi-deck.e2e.ts:926:5 › workspace and session archive state persists across relaunch (1.4s)
+  ✓  18 e2e/pi-deck.e2e.ts:1096:5 › removed legacy workspace sessions stay excluded and survive bulk delete (1.4s)
+  ✓  19 e2e/pi-deck.e2e.ts:1249:5 › fake mode launches with backend runtime and send enabled (4.4s)
+  ✓  20 e2e/pi-deck.e2e.ts:1266:5 › fake named workspace drafts keep fake backend and sidebar behavior (1.5s)
+  ✓  21 e2e/pi-deck.e2e.ts:1324:5 › default workspace stays implicit until a named workspace exists (1.5s)
+  ✓  22 e2e/pi-deck.e2e.ts:1423:5 › attachment selections release and revoke through preload/main IPC (4.4s)
+  ✓  23 e2e/pi-deck.e2e.ts:1475:5 › icon controls retain names, neutral styles, and fit a 900×600 viewport (2.0s)
+  ✓  24 e2e/pi-deck.e2e.ts:1537:5 › long unbroken chat text does not overflow at 900×600 (5.3s)
+  ✓  25 e2e/pi-deck.e2e.ts:1570:5 › composer has symmetric gutters at and below 560px (4.4s)
+  ✓  26 e2e/pi-deck.e2e.ts:1632:5 › appearance preference switches themes and persists across relaunch (1.2s)
+  ✓  27 e2e/pi-deck.e2e.ts:1781:5 › working sessions expose steer, follow-up, extension, and abort interventions (1.5s)
+  ✓  28 e2e/pi-deck.e2e.ts:1837:5 › extension UI confirm request completes through renderer, IPC, and fake Pi (1.5s)
+  ✓  29 e2e/pi-deck.e2e.ts:1927:5 › real mode renders a draft shell before an unavailable backend is touched (496ms)
+  ✓  30 e2e/pi-deck.e2e.ts:1958:5 › fake delegation is status-only, parent-scoped, and honors direct handling (2.9s)
+  ✓  31 e2e/pi-deck.e2e.ts:2097:5 › model submenu stays inside a narrow viewport (1.3s)
+  ✓  32 e2e/pi-deck.e2e.ts:2129:5 › bootstrap creates no saved session and the first draft send creates one (1.9s)
+  ✓  33 e2e/pi-deck.e2e.ts:2222:5 › failed draft setup releases its worker before the next retry (3.4s)
+  ✓  34 e2e/pi-deck.e2e.ts:2305:5 › failed initial snapshots release runtime maps and capacity (1.6s)
+  ✓  35 e2e/pi-deck.e2e.ts:2378:5 › metadata-only model and thinking changes preserve session title, transcript, and cache (1.8s)
+  ✓  36 e2e/pi-deck.e2e.ts:2471:5 › idle runtime shutdown stays internal during session archive and restore (1.7s)
+  ✓  37 e2e/pi-deck.e2e.ts:2522:5 › failed saved-session deletion preserves the composer draft and attachment owner (1.2s)
+  ✓  38 e2e/pi-deck.e2e.ts:2673:5 › post-close delete failure keeps the saved file and composer generation resumable (17.0s)
+  ✓  39 e2e/pi-deck.e2e.ts:2787:5 › bulk deletion reports exact removals and releases only deleted saved-session owners (914ms)
+  ✓  40 e2e/pi-deck.e2e.ts:2888:5 › saved session deletion control is reachable and activated with the keyboard (875ms)
+  ✓  41 e2e/pi-deck.e2e.ts:2942:5 › real mode can show and resume a saved project session with fake Pi (1.0s)
+  ✓  42 e2e/pi-deck.e2e.ts:2989:5 › real mode keeps attention sessions visible, labels queues, searches, and refreshes (1.6s)
+  ✓  43 e2e/pi-deck.e2e.ts:3057:5 › real mode concurrent duplicate resume reuses one runtime with fake Pi (944ms)
+  ✓  44 e2e/pi-deck.e2e.ts:3103:5 › real mode removes missing saved session after resume failure with fake Pi (819ms)
+  ✓  45 e2e/pi-deck.e2e.ts:3146:5 › real mode lists a newly prompted session after restart with fake Pi (1.9s)
+  ✓  46 e2e/pi-deck.e2e.ts:3197:5 › real mode authorizes opaque project IDs before any project-scoped Pi work (1.2s)
+  ✓  47 e2e/pi-deck.e2e.ts:3331:5 › background worker continues while a directory-independent workspace is created (3.4s)
+  ✓  48 e2e/pi-deck.e2e.ts:3393:5 › managed workspace context persists across relaunch (2.0s)
+  ✓  49 e2e/pi-deck.e2e.ts:3495:5 › real mode explains long no-output active work with fake Pi (4.2s)
+  ✓  50 e2e/pi-deck.e2e.ts:3528:5 › real mode surfaces asynchronous provider errors with fake Pi (1.4s)
+  ✓  51 e2e/pi-deck.e2e.ts:3565:5 › real mode reconciles a working session when completion event is missed (4.4s)
+  ✓  52 e2e/pi-deck.e2e.ts:3602:5 › real mode routes background session events to the right session with fake Pi (2.2s)
+  ✓  53 e2e/pi-deck.e2e.ts:3648:5 › real mode compact plus creates another attached session with fake Pi (1.4s)
+  ✓  54 e2e/pi-deck.e2e.ts:3689:5 › real mode does not fall back to fake/local UI and can send from active runtime (1.8s)
+  ✓  55 e2e/pi-deck.e2e.ts:3728:7 › Unified Work › Unified Work routes launch, scopes, origins, ownership, and runtimes (4.1s)
+  ✓  56 e2e/pi-deck.e2e.ts:3986:7 › Unified Work › Unified Work retains scoped status filters through Session and Back (3.6s)
+  ✓  57 e2e/pi-deck.e2e.ts:4171:7 › Unified Work › Unified Work keeps private task status out of Work while workflows coexist (860ms)
+  ✓  58 e2e/pi-deck.e2e.ts:4245:7 › task-session routing acceptance › routes a 12-task plan through the flat parent projection (11.7s)
+  ✓  59 e2e/pi-deck.e2e.ts:4466:7 › task-session routing acceptance › materializes task attachments once without persisting private payloads (1.8s)
+  ✓  60 e2e/pi-deck.e2e.ts:4584:7 › task-session routing acceptance › restart preserves interrupted trace without resuming private work (2.8s)
+  -  61 e2e/real-pi-smoke.e2e.ts:109:5 › real Pi Parallel worker model selection remains selected
+  -  62 e2e/real-pi-smoke.e2e.ts:164:5 › real Pi Agent Workflow: real worker persists run, session, and graph across restart
+  -  63 e2e/real-pi-smoke.e2e.ts:376:5 › real Pi bridge transport: default workspace prompt, resume, and explicit deck_delegate harness
+  -  64 e2e/real-pi-smoke.e2e.ts:593:5 › real Pi ordinary parent omits the legacy deck_delegate tool
+  -  65 e2e/real-pi-smoke.e2e.ts:657:5 › real Pi: draft parallel opt-in delegates from its first prompt
+  -  66 e2e/real-pi-smoke.e2e.ts:784:5 › real Pi production routing plans multiple private task sessions without bridge election
+  ✓  67 e2e/workflow-builder-ui.e2e.ts:38:5 › workflow builder remains interactive after renaming workflow and step (1.0s)
+
+  6 skipped
+  61 passed (2.6m)
+
+> pi-deck@0.6.0 pretest:e2e:real-smoke
+> node scripts/check-macos-gui-launch.mjs
+
+
+> pi-deck@0.6.0 test:e2e:real-smoke
+> npm run build && PI_DECK_E2E_REAL_SMOKE=1 playwright test -c e2e/playwright.config.ts e2e/real-pi-smoke.e2e.ts
+
+
+> pi-deck@0.6.0 build
+> npm run build:main && npm run build:renderer && node scripts/write-build-manifest.mjs
+
+
+> pi-deck@0.6.0 build:main
+> tsc -p tsconfig.main.json && esbuild src/preload/index.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist/preload/index.js --sourcemap
+
+
+  dist/preload/index.js      628.2kb
+  dist/preload/index.js.map    1.1mb
+
+⚡ Done in 76ms
+
+> pi-deck@0.6.0 build:renderer
+> vite build
+
+vite v8.1.0 building client environment for production...
+transforming...✓ 165 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/renderer/index.html                                           0.64 kB │ gzip:   0.37 kB
+dist/renderer/assets/index-Bcqzoc0t.css                           88.46 kB │ gzip:  15.61 kB
+dist/renderer/assets/LegacyWorkflowRunCompatibility-CD9L1OZN.js    3.83 kB │ gzip:   1.17 kB
+dist/renderer/assets/WorkflowOccurrenceRunView-DBnSM6X1.js         7.03 kB │ gzip:   2.29 kB
+dist/renderer/assets/AgentWorkflowGraph-CcDBSiND.js                7.90 kB │ gzip:   2.91 kB
+dist/renderer/assets/AgentWorkflowHome-hYt3mRbj.js                13.33 kB │ gzip:   3.54 kB
+dist/renderer/assets/agentWorkflowGraph-CDRTX2yZ.js               51.34 kB │ gzip:  17.41 kB
+dist/renderer/assets/AgentWorkflowBuilder-l6r12hlt.js            112.14 kB │ gzip:  28.67 kB
+dist/renderer/assets/index-CgaVjUyd.js                           374.58 kB │ gzip: 111.07 kB
+
+✓ built in 258ms
+
+Running 6 tests using 1 worker
+
+  ✓  1 e2e/real-pi-smoke.e2e.ts:109:5 › real Pi Parallel worker model selection remains selected (3.1s)
+  ✓  2 e2e/real-pi-smoke.e2e.ts:164:5 › real Pi Agent Workflow: real worker persists run, session, and graph across restart (9.2s)
+  ✓  3 e2e/real-pi-smoke.e2e.ts:376:5 › real Pi bridge transport: default workspace prompt, resume, and explicit deck_delegate harness (11.9s)
+  ✓  4 e2e/real-pi-smoke.e2e.ts:593:5 › real Pi ordinary parent omits the legacy deck_delegate tool (12.5s)
+  ✓  5 e2e/real-pi-smoke.e2e.ts:657:5 › real Pi: draft parallel opt-in delegates from its first prompt (6.6s)
+  ✓  6 e2e/real-pi-smoke.e2e.ts:784:5 › real Pi production routing plans multiple private task sessions without bridge election (37.0s)
+
+  6 passed (1.4m)
+Working tree after validation:

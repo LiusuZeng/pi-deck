@@ -5,7 +5,7 @@ All notable changes to Pi Deck will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0] - 2026-08-23
+## [0.6.0] - 2026-08-24
 
 Unified Work brings workspace navigation, cross-workspace supervision, and
 per-session interaction into one Work-oriented experience. All Work and
@@ -43,10 +43,13 @@ organization remains optional in the user experience.
 - Kept active runtimes attached while navigating between All Work, scoped Work,
   session detail, and Agent Workflows.
 - Read Pi's durable `session_info` names during static discovery so a Parallel
-  parent's synthesis turn cannot relabel it as a top-level internal session
-  after refresh or restart; canonical file/session identity remains stable.
-- Preserved each Work scope's status filter through Session drill-in and Back,
-  including row-focus restoration and heading fallback after status changes.
+  parent's synthesis turn cannot relabel the canonical parent as a top-level
+  internal session after refresh or restart; identity is structural rather than
+  repaired with heuristic cleanup.
+- Preserved each Work scope's status filter, focus, and scroll context through
+  Session drill-in and Back: a stable row restores meaningful mouse offset and
+  keyboard focus, while a missing row gracefully resets and focuses the visible
+  heading.
 - Kept extension-input waits mutation-protected and retained fake backend mode
   when creating drafts in named workspaces.
 
@@ -58,8 +61,8 @@ organization remains optional in the user experience.
   legacy Work close action, retained Work filters/focus, runtime retention,
   ownership, and private task exclusion.
 - Extended authenticated production Parallel coverage through synthesis and
-  restart, proving one durable parent identity/title across the sidebar, All
-  Work, scoped Work, and Pi JSONL discovery.
+  restart, proving one durable parent JSONL and identity/title across the
+  sidebar, All Work, scoped Work, and Pi JSONL discovery.
 
 ## [0.5.5] - 2026-08-22
 
