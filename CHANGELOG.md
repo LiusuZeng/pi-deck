@@ -42,14 +42,24 @@ organization remains optional in the user experience.
   opening Work rows, resuming sessions, and switching workspace scope.
 - Kept active runtimes attached while navigating between All Work, scoped Work,
   session detail, and Agent Workflows.
+- Read Pi's durable `session_info` names during static discovery so a Parallel
+  parent's synthesis turn cannot relabel it as a top-level internal session
+  after refresh or restart; canonical file/session identity remains stable.
+- Preserved each Work scope's status filter through Session drill-in and Back,
+  including row-focus restoration and heading fallback after status changes.
+- Kept extension-input waits mutation-protected and retained fake backend mode
+  when creating drafts in named workspaces.
 
 ### Tests
 
 - Added integrated fake Electron coverage for launch at All Work, global and
   workspace-scoped navigation, Work-row session drill-in and Back origins,
   default-workspace global creation and progressive disclosure, removal of the
-  legacy Work close action, runtime retention, ownership, and private task
-  exclusion.
+  legacy Work close action, retained Work filters/focus, runtime retention,
+  ownership, and private task exclusion.
+- Extended authenticated production Parallel coverage through synthesis and
+  restart, proving one durable parent identity/title across the sidebar, All
+  Work, scoped Work, and Pi JSONL discovery.
 
 ## [0.5.5] - 2026-08-22
 
