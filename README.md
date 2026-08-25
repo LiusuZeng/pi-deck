@@ -133,7 +133,7 @@ Pi Deck's approved multitasking model is based on parent-owned **task sessions**
 - Failed tasks retry up to three times. Once every task for that prompt is terminal, the parent reports successful results and terminal failures, then clears those task rows.
 - Unfinished private sessions do not resume after restart; the parent restores their context and trace and reports them as interrupted.
 
-The canonical behavior and security contract is [Parallel Task Sessions Design](docs/parallel-task-sessions-design.md). Interactive multitasking predates v0.5.5; v0.5.5 specifically shipped deterministic private Parallel task-session routing. The v0.6.0 pre-release carries that routing forward and integrates it with Unified Work. The v0.6.0 candidate retains deterministic routing, private model-backed planning, the prompt destination/settings UI, task panel, retries, synthesis, attachment handling, and interrupted restart behavior. Private task sessions stay parent-facing and are not promoted into normal Work rows.
+The canonical behavior and security contract is [Parallel Task Sessions Design](docs/parallel-task-sessions-design.md). Interactive multitasking predates v0.5.5; v0.5.5 specifically shipped deterministic private Parallel task-session routing. v0.6.0 carries that routing forward and integrates it with Unified Work. Its implementation retains deterministic routing, private model-backed planning, the prompt destination/settings UI, task panel, retries, synthesis, attachment handling, and interrupted restart behavior. Private task sessions stay parent-facing and are not promoted into normal Work rows.
 
 <p align="center">
   <a href="docs/assets/pi-deck-multitasking.png" title="Open the parallel multitasking screenshot full size">
