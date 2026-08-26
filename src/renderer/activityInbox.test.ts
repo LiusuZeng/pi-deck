@@ -70,6 +70,30 @@ describe("buildActivityInbox", () => {
     );
   });
 
+  it("preserves source order within a status instead of sorting by recency", () => {
+    const inbox = buildActivityInbox([
+      source("older-working", { baseState: "working", updatedAtMs: 100 }),
+      source("newer-working", { baseState: "working", updatedAtMs: 200 }),
+      source("older-failed", { baseState: "error", updatedAtMs: 100 }),
+      source("newer-failed", { baseState: "error", updatedAtMs: 200 }),
+    ]);
+
+    expect(inbox.groups.inProgress.map((item) => item.sessionKey)).toEqual([
+      "older-working",
+      "newer-working",
+    ]);
+    expect(inbox.groups.failed.map((item) => item.sessionKey)).toEqual([
+      "older-failed",
+      "newer-failed",
+    ]);
+    expect(inbox.items.map((item) => item.sessionKey)).toEqual([
+      "older-failed",
+      "newer-failed",
+      "older-working",
+      "newer-working",
+    ]);
+  });
+
   it("keeps precedence exclusive: attention, failure, pending, progress, completion", () => {
     expect(
       classifyActivity(

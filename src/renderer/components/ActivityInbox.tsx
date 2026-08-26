@@ -137,13 +137,13 @@ export function ActivityInbox({
     scope.type === "all"
       ? "Monitor work across active workspaces and jump to sessions that need you."
       : "Monitor work in this workspace and jump to sessions that need you.";
+  // Preserve model order within a status: updatedAtMs remains visible recency
+  // metadata, but must not be a live layout key for active Work supervision.
   const groups = useMemo(
     () =>
       ACTIVITY_STATUSES.reduce(
         (result, kind) => {
-          result[kind] = filterActivityItems(scopedItems, tagsForStatus(kind))
-            .slice()
-            .sort((left, right) => right.updatedAtMs - left.updatedAtMs);
+          result[kind] = filterActivityItems(scopedItems, tagsForStatus(kind));
           return result;
         },
         {} as Record<ActivityStatus, ActivityItem[]>,
