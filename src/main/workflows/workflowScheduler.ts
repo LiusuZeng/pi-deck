@@ -29,6 +29,10 @@ import type {
   WorkflowTransition,
 } from "../../shared/workflowSchemas.js";
 import { isWorkspaceRuntimeLifecycleConflictError } from "../workspaceRuntimeLifecycleGate.js";
+import type {
+  WorkflowRuntimeOwnershipClaim,
+  WorkflowRuntimeOwnershipMetadata,
+} from "../workflowRuntimeOwnership.js";
 import { z } from "zod";
 interface WorkflowMessage {
   role: string;
@@ -49,10 +53,19 @@ export interface WorkflowSessionSnapshot {
     sessionFile?: string | undefined;
   };
   messages: WorkflowMessage[];
+  workflowOwnershipClaim?: WorkflowRuntimeOwnershipClaim | undefined;
 }
 
+type WorkflowRuntimeOwnershipRequest = Omit<
+  WorkflowRuntimeOwnershipMetadata,
+  "workspaceId" | "sessionFile"
+>;
+
 export interface WorkflowSchedulerDependencies {
-  createSession(workspaceId: string): Promise<WorkflowSessionSnapshot>;
+  createSession(
+    workspaceId: string,
+    ownership?: WorkflowRuntimeOwnershipRequest,
+  ): Promise<WorkflowSessionSnapshot>;
   prompt(runtimeId: string, text: string): Promise<void>;
   getSnapshot(runtimeId: string): Promise<WorkflowSessionSnapshot>;
   closeSession(runtimeId: string): Promise<void>;
@@ -76,6 +89,7 @@ interface ActiveStep {
   kind: "step" | "condition";
   stepRunId?: string;
   transitionRunId?: string;
+  claim?: WorkflowRuntimeOwnershipClaim | undefined;
 }
 
 type RuntimeOwnership = { runtimeId: string; active: ActiveStep };
@@ -139,7 +153,7 @@ export class WorkflowScheduler {
     for (const [runtimeId, active] of this.activeByRuntime) {
       if (active.runId === run.id) {
         this.activeByRuntime.delete(runtimeId);
-        await this.closeQuietly(runtimeId);
+        await this.closeAndReleaseQuietly(runtimeId, active);
       }
     }
     if (run.status === "stopped" || run.status === "failed") return run;
@@ -156,9 +170,14 @@ export class WorkflowScheduler {
     // Pi can emit an intermediate error agent_end before its automatic retry.
     // Keep ownership of the runtime until the authoritative terminal event.
     if (event.type === "agent_end" && event.willRetry === true) return;
+    active.claim?.markPhase("terminal");
     const ownership: RuntimeOwnership = { runtimeId: event.runtimeId, active };
     const run = await this.getOwnedRun(ownership);
-    if (run === undefined) return;
+    if (run === undefined) {
+      const released = await this.releaseOwnership(ownership);
+      if (released) await this.closeAndReleaseQuietly(event.runtimeId, active);
+      return;
+    }
 
     if (event.type === "worker_exit") {
       try {
@@ -179,7 +198,8 @@ export class WorkflowScheduler {
         }
       } finally {
         const released = await this.releaseOwnership(ownership);
-        if (released) await this.closeQuietly(event.runtimeId);
+        if (released)
+          await this.closeAndReleaseQuietly(event.runtimeId, active);
       }
       await this.pumpQueuedRuns();
       return;
@@ -212,7 +232,8 @@ export class WorkflowScheduler {
         }
       } finally {
         const released = await this.releaseOwnership(ownership);
-        if (released) await this.closeQuietly(event.runtimeId);
+        if (released)
+          await this.closeAndReleaseQuietly(event.runtimeId, active);
       }
       await this.pumpQueuedRuns();
       return;
@@ -307,7 +328,7 @@ export class WorkflowScheduler {
     } finally {
       const released = await this.releaseOwnership(ownership);
       if (released) {
-        await this.closeQuietly(event.runtimeId);
+        await this.closeAndReleaseQuietly(event.runtimeId, active);
         await this.pump(run.id);
         await this.pumpQueuedRuns();
       }
@@ -353,7 +374,12 @@ export class WorkflowScheduler {
 
       let session: WorkflowSessionSnapshot;
       try {
-        session = await this.dependencies.createSession(run.workspaceId);
+        session = await this.dependencies.createSession(run.workspaceId, {
+          scheduler: "legacy",
+          runId,
+          itemId: step?.id ?? conditionEntry!.id,
+          itemKind: step !== undefined ? "step" : "condition",
+        });
       } catch (error) {
         // A workspace lifecycle conflict is a transient archive boundary, not
         // a workflow failure. Preserve ready work until the workspace can be
@@ -396,7 +422,9 @@ export class WorkflowScheduler {
         latest.status === "stopped" ||
         version !== (this.mutationVersions.get(runId) ?? 0)
       ) {
-        await this.closeQuietly(session.runtimeId);
+        await this.closeAndReleaseQuietly(session.runtimeId, {
+          claim: session.workflowOwnershipClaim,
+        });
         if (latest !== undefined) this.runsSet(latest);
         return latest ?? run;
       }
@@ -413,7 +441,9 @@ export class WorkflowScheduler {
             run: latest,
           });
         } catch (error) {
-          await this.closeQuietly(session.runtimeId);
+          await this.closeAndReleaseQuietly(session.runtimeId, {
+            claim: session.workflowOwnershipClaim,
+          });
           return this.finishFailed(
             latest,
             step.id,
@@ -448,6 +478,7 @@ export class WorkflowScheduler {
           version,
           kind: "step",
           stepRunId: step.id,
+          claim: session.workflowOwnershipClaim,
         };
         this.activeByRuntime.set(session.runtimeId, active);
         await this.persistAndEmit(this.runsSet(withMetadata), {
@@ -474,7 +505,7 @@ export class WorkflowScheduler {
             );
           }
           if (await this.releaseOwnership(ownership))
-            await this.closeQuietly(session.runtimeId);
+            await this.closeAndReleaseQuietly(session.runtimeId, active);
         }
       } else {
         const transition = run.templateSnapshot.transitions.find(
@@ -486,7 +517,9 @@ export class WorkflowScheduler {
                 ?.templateTransitionId && candidate.kind === "condition",
         );
         if (transition === undefined) {
-          await this.closeQuietly(session.runtimeId);
+          await this.closeAndReleaseQuietly(session.runtimeId, {
+            claim: session.workflowOwnershipClaim,
+          });
           return this.finishConditionFailed(
             latest,
             conditionEntry!.id,
@@ -505,6 +538,7 @@ export class WorkflowScheduler {
           version,
           kind: "condition",
           transitionRunId: conditionEntry!.id,
+          claim: session.workflowOwnershipClaim,
         };
         this.activeByRuntime.set(session.runtimeId, active);
         try {
@@ -526,7 +560,7 @@ export class WorkflowScheduler {
             );
           }
           if (await this.releaseOwnership(ownership))
-            await this.closeQuietly(session.runtimeId);
+            await this.closeAndReleaseQuietly(session.runtimeId, active);
         }
       }
       return this.runs.get(runId)!;
@@ -651,12 +685,53 @@ export class WorkflowScheduler {
     return true;
   }
 
+  async shutdown(reason: "appQuit" | "reset" = "appQuit"): Promise<void> {
+    const message =
+      reason === "reset"
+        ? "Pi Deck reset before the workflow step completed."
+        : "Pi Deck shut down before the workflow step completed.";
+    const conditionMessage =
+      reason === "reset"
+        ? "Pi Deck reset before the condition judge completed."
+        : "Pi Deck shut down before the condition judge completed.";
+    for (const [runtimeId, active] of [...this.activeByRuntime.entries()]) {
+      const ownership: RuntimeOwnership = { runtimeId, active };
+      const run = await this.getOwnedRun(ownership);
+      if (this.activeByRuntime.get(runtimeId) !== active) continue;
+      this.activeByRuntime.delete(runtimeId);
+      if (run !== undefined) {
+        if (active.kind === "step" && active.stepRunId !== undefined) {
+          await this.finishFailed(run, active.stepRunId, message);
+        } else if (active.transitionRunId !== undefined) {
+          await this.finishConditionFailed(
+            run,
+            active.transitionRunId,
+            conditionMessage,
+          );
+        }
+      }
+      await this.closeAndReleaseQuietly(runtimeId, active);
+    }
+  }
+
   private async closeQuietly(runtimeId: string): Promise<void> {
     try {
       await this.dependencies.closeSession(runtimeId);
     } catch {
       // The workflow result is already persisted. A dead worker is reclaimed
       // by the main runtime event router, so cleanup failure is non-fatal here.
+    }
+  }
+
+  private async closeAndReleaseQuietly(
+    runtimeId: string,
+    owner: { claim?: WorkflowRuntimeOwnershipClaim | undefined },
+  ): Promise<void> {
+    owner.claim?.markPhase("closing");
+    try {
+      await this.closeQuietly(runtimeId);
+    } finally {
+      owner.claim?.release();
     }
   }
 
@@ -821,7 +896,11 @@ export class WorkflowOccurrenceScheduler {
   /** A runtime is owned by one occurrence; deleting it before mutation makes late events harmless. */
   private readonly active = new Map<
     string,
-    { runId: string; occurrenceId: string }
+    {
+      runId: string;
+      occurrenceId: string;
+      claim?: WorkflowRuntimeOwnershipClaim | undefined;
+    }
   >();
   private readonly now: () => number;
   /** Serialize read-modify-write transitions for each canonical run. */
@@ -927,9 +1006,9 @@ export class WorkflowOccurrenceScheduler {
       const owned = [...this.active.entries()].filter(
         ([, owner]) => owner.runId === runId,
       );
-      for (const [runtimeId] of owned) {
+      for (const [runtimeId, owner] of owned) {
         this.active.delete(runtimeId);
-        await this.closeQuietly(runtimeId);
+        await this.closeAndReleaseQuietly(runtimeId, owner);
       }
       const stopped = await this.save(stopWorkflowRoleRun(run, this.now()));
       this.cleanupLifecycleWake(runId, stopped);
@@ -969,6 +1048,7 @@ export class WorkflowOccurrenceScheduler {
     // Pi may emit an intermediate failed end while retaining this runtime for
     // automatic retry. Keep ownership so its eventual completion is accepted.
     if (event.type === "agent_end" && event.willRetry === true) return;
+    owner.claim?.markPhase("terminal");
     this.active.delete(event.runtimeId);
     await this.serialize(owner.runId, async () => {
       try {
@@ -998,9 +1078,22 @@ export class WorkflowOccurrenceScheduler {
           );
           return;
         }
-        const answer = findFinalAssistant(
-          (await this.dependencies.getSnapshot(event.runtimeId)).messages,
-        );
+        let answer: FinalAssistant | undefined;
+        try {
+          answer = findFinalAssistant(
+            (await this.dependencies.getSnapshot(event.runtimeId)).messages,
+          );
+        } catch (error) {
+          await this.save(
+            failWorkflowOccurrence(
+              run,
+              occurrence.id,
+              error instanceof Error ? error.message : String(error),
+              this.now(),
+            ),
+          );
+          return;
+        }
         if (!answer?.content || answer.error) {
           await this.save(
             failWorkflowOccurrence(
@@ -1042,7 +1135,7 @@ export class WorkflowOccurrenceScheduler {
             ),
           );
       } finally {
-        await this.closeQuietly(event.runtimeId);
+        await this.closeAndReleaseQuietly(event.runtimeId, owner);
         await this.pump(owner.runId);
       }
     });
@@ -1076,9 +1169,16 @@ export class WorkflowOccurrenceScheduler {
       }
       if (occurrence.role === "human") continue;
       let runtimeId: string | undefined;
+      let claim: WorkflowRuntimeOwnershipClaim | undefined;
       try {
-        const session = await this.dependencies.createSession(run.workspaceId);
+        const session = await this.dependencies.createSession(run.workspaceId, {
+          scheduler: "occurrence",
+          runId,
+          itemId: occurrence.id,
+          itemKind: "occurrence",
+        });
         runtimeId = session.runtimeId;
+        claim = session.workflowOwnershipClaim;
         const sessionFile = session.state.sessionFile;
         if (typeof sessionFile !== "string" || !sessionFile.trim()) {
           throw new Error(
@@ -1096,7 +1196,11 @@ export class WorkflowOccurrenceScheduler {
             sessionFile,
           ),
         );
-        this.active.set(runtimeId, { runId, occurrenceId: occurrence.id });
+        this.active.set(runtimeId, {
+          runId,
+          occurrenceId: occurrence.id,
+          claim,
+        });
         const node = run.definition.nodes.find(
           (item) => item.id === occurrence.nodeId,
         );
@@ -1121,7 +1225,7 @@ export class WorkflowOccurrenceScheduler {
       } catch (error) {
         if (runtimeId) {
           this.active.delete(runtimeId);
-          await this.closeQuietly(runtimeId);
+          await this.closeAndReleaseQuietly(runtimeId, { claim });
         }
         const lifecycleConflict =
           isWorkspaceRuntimeLifecycleConflictError(error) ||
@@ -1253,11 +1357,58 @@ export class WorkflowOccurrenceScheduler {
     this.dependencies.emit(saved);
     return saved;
   }
+
+  async shutdown(reason: "appQuit" | "reset" = "appQuit"): Promise<void> {
+    const message =
+      reason === "reset"
+        ? "Pi Deck reset before the workflow occurrence completed."
+        : "Pi Deck shut down before the workflow occurrence completed.";
+    for (const [runtimeId, owner] of [...this.active.entries()]) {
+      this.active.delete(runtimeId);
+      await this.serialize(owner.runId, async () => {
+        const run = await this.current(owner.runId);
+        const occurrence = run?.occurrences.find(
+          (item) => item.id === owner.occurrenceId,
+        );
+        if (
+          run !== undefined &&
+          occurrence !== undefined &&
+          occurrence.runtimeId === runtimeId &&
+          occurrence.status === "running"
+        ) {
+          const failed = await this.save(
+            failWorkflowOccurrence(run, occurrence.id, message, this.now()),
+          );
+          this.cleanupLifecycleWake(owner.runId, failed);
+        }
+      });
+      await this.closeAndReleaseQuietly(runtimeId, owner);
+    }
+    for (const unsubscribe of this.lifecycleWakeUnsubscribers.values()) {
+      unsubscribe();
+    }
+    this.lifecycleWakeUnsubscribers.clear();
+    this.lifecycleWakePending.clear();
+    this.lifecycleQueued.clear();
+  }
+
   private async closeQuietly(runtimeId: string): Promise<void> {
     try {
       await this.dependencies.closeSession(runtimeId);
     } catch {
       /* already closed */
+    }
+  }
+
+  private async closeAndReleaseQuietly(
+    runtimeId: string,
+    owner: { claim?: WorkflowRuntimeOwnershipClaim | undefined },
+  ): Promise<void> {
+    owner.claim?.markPhase("closing");
+    try {
+      await this.closeQuietly(runtimeId);
+    } finally {
+      owner.claim?.release();
     }
   }
 }
