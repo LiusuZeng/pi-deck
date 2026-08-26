@@ -96,6 +96,25 @@ function modelWithEveryKind(): ActivityInboxModel {
   };
 }
 
+function rowTitles(view: ParentNode): string[] {
+  return Array.from(
+    view.querySelectorAll<HTMLElement>(".activity-inbox-row-title"),
+  ).map((element) => element.textContent ?? "");
+}
+
+function rowForTitle(
+  view: ParentNode,
+  title: string,
+): HTMLButtonElement | undefined {
+  return Array.from(
+    view.querySelectorAll<HTMLButtonElement>(".activity-inbox-row"),
+  ).find((row) =>
+    row
+      .querySelector(".activity-inbox-row-title")
+      ?.textContent?.includes(title),
+  );
+}
+
 function renderInbox(
   model: ActivityInboxModel,
   scope: ActivityScope = { type: "all" },
@@ -221,6 +240,199 @@ describe("ActivityInbox", () => {
     expect(
       view.querySelector(".activity-inbox-content")?.textContent,
     ).not.toContain("borealis-failed");
+  });
+
+  it("keeps same-status row order stable when recency updates in All Work", () => {
+    const initialUpdatedAtMs = 1_700_000_000_000;
+    const refreshedUpdatedAtMs = initialUpdatedAtMs + 120_000;
+    const initial = buildActivityInbox([
+      sourceSession("alpha", {
+        title: "Alpha active session",
+        baseState: "working",
+        updatedAtMs: initialUpdatedAtMs,
+      }),
+      sourceSession("beta", {
+        title: "Beta active session",
+        baseState: "working",
+        updatedAtMs: initialUpdatedAtMs + 60_000,
+      }),
+    ]);
+    const refreshed = buildActivityInbox([
+      sourceSession("alpha", {
+        title: "Alpha active session",
+        baseState: "working",
+        updatedAtMs: refreshedUpdatedAtMs,
+      }),
+      sourceSession("beta", {
+        title: "Beta active session",
+        baseState: "working",
+        updatedAtMs: initialUpdatedAtMs,
+      }),
+    ]);
+    const { view } = renderInbox(
+      initial,
+      { type: "all" },
+      vi.fn(),
+      vi.fn(),
+      workspaces,
+      vi.fn(),
+      "inProgress",
+    );
+
+    expect(rowTitles(view)).toEqual([
+      "Alpha active session",
+      "Beta active session",
+    ]);
+
+    act(() => {
+      root?.render(
+        <ActivityInbox
+          model={refreshed}
+          onOpenActivityItem={vi.fn()}
+          onScopeChange={vi.fn()}
+          onSelectedFilterChange={vi.fn()}
+          selectedFilter="inProgress"
+          scope={{ type: "all" }}
+          workspaces={workspaces}
+        />,
+      );
+    });
+
+    expect(rowTitles(view)).toEqual([
+      "Alpha active session",
+      "Beta active session",
+    ]);
+    expect(rowForTitle(view, "Alpha")?.querySelector("time")?.dateTime).toBe(
+      new Date(refreshedUpdatedAtMs).toISOString(),
+    );
+  });
+
+  it("keeps same-status row order stable in workspace-scoped Work", () => {
+    const initial = buildActivityInbox([
+      sourceSession("atlas-alpha", {
+        title: "Atlas alpha",
+        baseState: "working",
+        updatedAtMs: 100,
+      }),
+      sourceSession("atlas-beta", {
+        title: "Atlas beta",
+        baseState: "working",
+        updatedAtMs: 300,
+      }),
+      sourceSession("borealis", {
+        title: "Borealis active",
+        workspaceId: workspaces[1]!.id,
+        workspaceName: workspaces[1]!.name,
+        baseState: "working",
+        updatedAtMs: 200,
+      }),
+    ]);
+    const refreshed = buildActivityInbox([
+      sourceSession("atlas-alpha", {
+        title: "Atlas alpha",
+        baseState: "working",
+        updatedAtMs: 400,
+      }),
+      sourceSession("atlas-beta", {
+        title: "Atlas beta",
+        baseState: "working",
+        updatedAtMs: 100,
+      }),
+      sourceSession("borealis", {
+        title: "Borealis active",
+        workspaceId: workspaces[1]!.id,
+        workspaceName: workspaces[1]!.name,
+        baseState: "working",
+        updatedAtMs: 500,
+      }),
+    ]);
+    const scope: ActivityScope = {
+      type: "workspace",
+      workspaceId: workspaces[0]!.id,
+    };
+    const { view } = renderInbox(
+      initial,
+      scope,
+      vi.fn(),
+      vi.fn(),
+      workspaces,
+      vi.fn(),
+      "inProgress",
+    );
+
+    expect(rowTitles(view)).toEqual(["Atlas alpha", "Atlas beta"]);
+
+    act(() => {
+      root?.render(
+        <ActivityInbox
+          model={refreshed}
+          onOpenActivityItem={vi.fn()}
+          onScopeChange={vi.fn()}
+          onSelectedFilterChange={vi.fn()}
+          selectedFilter="inProgress"
+          scope={scope}
+          workspaces={workspaces}
+        />,
+      );
+    });
+
+    expect(rowTitles(view)).toEqual(["Atlas alpha", "Atlas beta"]);
+    expect(view.textContent).not.toContain("Borealis active");
+  });
+
+  it("moves a row immediately when it transitions to another status", () => {
+    const initial = buildActivityInbox([
+      sourceSession("alpha", {
+        title: "Alpha active session",
+        baseState: "working",
+      }),
+      sourceSession("beta", {
+        title: "Beta active session",
+        baseState: "working",
+      }),
+    ]);
+    const transitioned = buildActivityInbox([
+      sourceSession("alpha", {
+        title: "Alpha active session",
+        baseState: "waitingForInput",
+      }),
+      sourceSession("beta", {
+        title: "Beta active session",
+        baseState: "working",
+      }),
+    ]);
+    const { view } = renderInbox(initial);
+
+    expect(
+      rowForTitle(view, "Alpha")
+        ?.closest(".activity-inbox-section")
+        ?.querySelector("h2")?.textContent,
+    ).toContain("In progress");
+
+    act(() => {
+      root?.render(
+        <ActivityInbox
+          model={transitioned}
+          onOpenActivityItem={vi.fn()}
+          onScopeChange={vi.fn()}
+          onSelectedFilterChange={vi.fn()}
+          selectedFilter="all"
+          scope={{ type: "all" }}
+          workspaces={workspaces}
+        />,
+      );
+    });
+
+    expect(
+      rowForTitle(view, "Alpha")
+        ?.closest(".activity-inbox-section")
+        ?.querySelector("h2")?.textContent,
+    ).toContain("Needs attention");
+    expect(
+      rowForTitle(view, "Beta")
+        ?.closest(".activity-inbox-section")
+        ?.querySelector("h2")?.textContent,
+    ).toContain("In progress");
   });
 
   it("changes workspace scope through the selector and uses scoped status counts", () => {

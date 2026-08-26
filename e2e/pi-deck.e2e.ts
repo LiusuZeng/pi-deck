@@ -3983,6 +3983,109 @@ test.describe("Unified Work", () => {
     }
   });
 
+  test("Unified Work keeps in-progress card order stable during runtime updates", async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "pi-deck-e2e-work-stable-order-"),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    const userDataDir = path.join(root, "user-data");
+    fs.mkdirSync(projectCwd, { recursive: true });
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.mkdirSync(userDataDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(userDataDir, "settings.json"),
+      `${JSON.stringify({ maxRunningSessions: 12 })}\n`,
+    );
+
+    const { app, page } = await launchPiDeck(
+      fakeRealModeEnv({
+        root,
+        projectCwd,
+        agentDir,
+        userDataDir,
+        fakePiArgs: ["--stream-delay-ms", "8000", "--drop-completion-events"],
+      }),
+    );
+    try {
+      await expectHealthyPreload(page);
+      await expectAllWorkLaunch(page);
+      await createWorkspaceInUi(page, "Stable order workspace");
+      const workspaceId = await page
+        .getByRole("button", { name: "Workspace: Stable order workspace" })
+        .getAttribute("data-workspace-id");
+      if (workspaceId === null) {
+        throw new Error("Missing stable-order workspace id.");
+      }
+
+      const marker = "Stable order active";
+      const alphaPrompt = `${marker} alpha`;
+      const betaPrompt = `${marker} beta`;
+      const visibleStableOrderTitles = () =>
+        page
+          .locator(".activity-inbox-row-title")
+          .evaluateAll(
+            (nodes, markerText) =>
+              nodes
+                .map((node) => node.textContent?.trim() ?? "")
+                .filter((title) => title.includes(markerText)),
+            marker,
+          );
+      const rowUpdatedAtMs = (title: string) =>
+        page
+          .locator(".activity-inbox-row", { hasText: title })
+          .locator("time")
+          .evaluate((time) => Date.parse(time.dateTime));
+
+      await enterSessionDetail(page);
+      await page.getByLabel("Prompt text").fill(alphaPrompt);
+      await page.getByRole("button", { name: "Send" }).click();
+      await page.waitForTimeout(1000);
+      await page.getByRole("button", { name: /^All Work/ }).click();
+      await expectAllWorkLaunch(page);
+
+      await selectWorkspaceInUi(page, "Stable order workspace");
+      await expectWorkRoute(page, workspaceId);
+      await enterSessionDetail(page);
+      await page.getByLabel("Prompt text").fill(betaPrompt);
+      await page.getByRole("button", { name: "Send" }).click();
+
+      await page.getByRole("button", { name: /^All Work/ }).click();
+      await expectAllWorkLaunch(page);
+      await expect(
+        page.locator(".activity-inbox-row--inProgress", {
+          hasText: alphaPrompt,
+        }),
+      ).toHaveCount(1);
+      await expect(
+        page.locator(".activity-inbox-row--inProgress", {
+          hasText: betaPrompt,
+        }),
+      ).toHaveCount(1);
+      const initialOrder = [betaPrompt, alphaPrompt];
+      await expect.poll(visibleStableOrderTitles).toEqual(initialOrder);
+
+      // Let alpha receive a normal runtime message_update after beta has
+      // entered In progress, but before beta's first stream chunk. The row's
+      // recency metadata should change without becoming a live layout key.
+      await expect
+        .poll(
+          async () =>
+            (await rowUpdatedAtMs(alphaPrompt)) >
+            (await rowUpdatedAtMs(betaPrompt)),
+        )
+        .toBe(true);
+      await expect.poll(visibleStableOrderTitles).toEqual(initialOrder);
+
+      await selectWorkspaceInUi(page, "Stable order workspace");
+      await expectWorkRoute(page, workspaceId);
+      await expect.poll(visibleStableOrderTitles).toEqual(initialOrder);
+    } finally {
+      await app.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("Unified Work retains scoped status filters through Session and Back", async () => {
     const root = fs.mkdtempSync(
       path.join(os.tmpdir(), "pi-deck-e2e-work-filter-state-"),

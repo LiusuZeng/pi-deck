@@ -122,10 +122,8 @@ export function buildActivityInbox(
   for (const item of items) {
     groups[item.status].push(item);
   }
-  for (const status of ACTIVITY_STATUSES) {
-    groups[status].sort((left, right) => right.updatedAtMs - left.updatedAtMs);
-  }
-
+  // Keep activity recency display-only. Preserving source order within a
+  // status prevents ordinary progress updates from reshuffling Work cards.
   const counts = countActivityStatuses(items);
   const orderedItems = ACTIVITY_STATUSES.flatMap((status) => groups[status]);
 
