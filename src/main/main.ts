@@ -170,6 +170,19 @@ import {
 } from "./workspaces/workspaceStore.js";
 import { WorkspaceRuntimeLifecycleGate } from "./workspaceRuntimeLifecycleGate.js";
 import { WorkspaceRuntimeShutdownTombstones } from "./workspaceRuntimeShutdownTombstones.js";
+import {
+  WorkflowRuntimeOwnershipRegistry,
+  type WorkflowRuntimeOwnershipClaim,
+  type WorkflowRuntimeOwnershipMetadata,
+} from "./workflowRuntimeOwnership.js";
+import {
+  assertNoWorkflowRuntimesForReset,
+  assertRuntimeNotWorkflowOwned as assertRuntimeNotWorkflowOwnedForRegistry,
+  assertSessionFileNotWorkflowOwned as assertSessionFileNotWorkflowOwnedForRegistry,
+  assertWorkspaceNotWorkflowOwned,
+  chatSessionIsBusyForMutation,
+  workflowRuntimeMutationBlockedMessage,
+} from "./workflowRuntimeDestructiveGuards.js";
 import { SettingsStore } from "./settings/settingsStore.js";
 import {
   applyThemePreference,
@@ -329,6 +342,7 @@ const chatSessionResumeWorkspaceIds = new Map<string, string>();
 const chatSessionMutationReservations = new Set<string>();
 const chatWorkspaceMutationReservations = new Set<string>();
 const workspaceRuntimeLifecycle = new WorkspaceRuntimeLifecycleGate();
+const workflowRuntimeOwnership = new WorkflowRuntimeOwnershipRegistry();
 // A single-delete transaction may detach Pi before filesystem removal commits.
 // Its worker-exit event must not revoke retryable composer selections.
 const attachmentPreservingRuntimeClosures = new Set<string>();
@@ -917,6 +931,7 @@ function registerIpcHandlers(
     handler: async ({ runtimeId }) => {
       const adapter = await ensureChatAdapter(store, diagnosticsService);
       const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
+      assertRuntimeNotWorkflowOwned(activeRuntimeId, "closing this session");
       const status = await getChatRuntimeStatus(activeRuntimeId);
       if (status.state.isAgentActive) {
         throw new Error("Finish the active turn before closing this session.");
@@ -966,6 +981,9 @@ function registerIpcHandlers(
     responseSchema: chatSnapshotSchema,
     diagnostics: diagnosticsService,
     handler: async () => {
+      assertNoWorkflowRuntimesForReset(workflowRuntimeOwnership);
+      await chatWorkerCreationTail;
+      assertNoWorkflowRuntimesForReset(workflowRuntimeOwnership);
       await closeChatWorker();
       // Reset is an explicit new-session action, unlike application bootstrap.
       const { project, workspaceId } = await resolveChatCreationContext(
@@ -1177,6 +1195,11 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async ({ workspaceId }) =>
       withChatWorkspaceMutation(workspaceId, async () => {
+        assertWorkspaceNotWorkflowOwned(
+          workflowRuntimeOwnership,
+          workspaceId,
+          "archiving this workspace",
+        );
         if (
           [...chatRuntimeWorkspaceIds.entries()].some(
             ([runtimeId, ownerWorkspaceId]) =>
@@ -1229,6 +1252,7 @@ function registerIpcHandlers(
     handler: async ({ sessionFile, toWorkspaceId }) => {
       const canonical =
         (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
+      assertSessionFileNotWorkflowOwned(canonical, "moving this session");
       return withChatSessionMutation(
         canonical,
         "Close the attached session before moving it to another workspace.",
@@ -1255,6 +1279,7 @@ function registerIpcHandlers(
     handler: async ({ workspaceId, sessionFile }) => {
       const canonical =
         (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
+      assertSessionFileNotWorkflowOwned(canonical, "removing this session");
       return withChatSessionMutation(
         canonical,
         "Close the attached session before removing it from a workspace.",
@@ -1278,6 +1303,7 @@ function registerIpcHandlers(
     handler: async ({ workspaceId, sessionFile }) => {
       const canonical =
         (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
+      assertSessionFileNotWorkflowOwned(canonical, "archiving this session");
       return withChatSessionMutation(
         canonical,
         "Finish the attached session before archiving it.",
@@ -1916,17 +1942,32 @@ function createWorkflowScheduler(
   diagnosticsService: DiagnosticsService,
 ): WorkflowScheduler {
   return new WorkflowScheduler({
-    createSession: async (workspaceId) => {
+    createSession: async (workspaceId, ownership) => {
+      let workflowOwnershipClaim: WorkflowRuntimeOwnershipClaim | undefined;
       const snapshot = await createChatSessionSnapshot(
         store,
         diagnosticsService,
         undefined,
         workspaceId,
+        "sequential",
+        ownership === undefined
+          ? undefined
+          : (runtimeId) => {
+              workflowOwnershipClaim = claimWorkflowRuntimeOwnership(
+                runtimeId,
+                {
+                  ...ownership,
+                  workspaceId,
+                },
+              );
+              return workflowOwnershipClaim;
+            },
       );
       return {
         runtimeId: snapshot.runtimeId,
         state: snapshot.state,
         messages: snapshot.messages,
+        workflowOwnershipClaim,
       };
     },
     prompt: async (runtimeId, text) => {
@@ -2017,17 +2058,32 @@ function createWorkflowOccurrenceScheduler(
   diagnosticsService: DiagnosticsService,
 ): WorkflowOccurrenceScheduler {
   return new WorkflowOccurrenceScheduler({
-    createSession: async (workspaceId) => {
+    createSession: async (workspaceId, ownership) => {
+      let workflowOwnershipClaim: WorkflowRuntimeOwnershipClaim | undefined;
       const snapshot = await createChatSessionSnapshot(
         store,
         diagnosticsService,
         undefined,
         workspaceId,
+        "sequential",
+        ownership === undefined
+          ? undefined
+          : (runtimeId) => {
+              workflowOwnershipClaim = claimWorkflowRuntimeOwnership(
+                runtimeId,
+                {
+                  ...ownership,
+                  workspaceId,
+                },
+              );
+              return workflowOwnershipClaim;
+            },
       );
       return {
         runtimeId: snapshot.runtimeId,
         state: snapshot.state,
         messages: snapshot.messages,
+        workflowOwnershipClaim,
       };
     },
     prompt: async (runtimeId, text) => {
@@ -2877,12 +2933,20 @@ async function initializeChatAdapter(
     // Workflow handling runs before worker-exit cleanup. agent_end needs the
     // live worker to read its final transcript; worker_exit itself is handled
     // as a terminal workflow failure before the adapter forgets the worker.
-    void workflowScheduler?.handleRuntimeEvent(
-      parsed.data as WorkflowRuntimeEvent,
-    );
-    void workflowOccurrenceScheduler?.handleRuntimeEvent(
-      parsed.data as WorkflowRuntimeEvent,
-    );
+    void workflowScheduler
+      ?.handleRuntimeEvent(parsed.data as WorkflowRuntimeEvent)
+      .catch((error) => {
+        diagnosticsService.recordError(
+          `Workflow runtime event handling failed for ${parsed.data.runtimeId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    void workflowOccurrenceScheduler
+      ?.handleRuntimeEvent(parsed.data as WorkflowRuntimeEvent)
+      .catch((error) => {
+        diagnosticsService.recordError(
+          `Workflow occurrence runtime event handling failed for ${parsed.data.runtimeId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
     if (parsed.data.type === "worker_exit") {
       chatRuntimeShutdownFailures.confirmExit(parsed.data.runtimeId);
       // A child exit does not go through closeSession(), so remove it from the
@@ -2948,6 +3012,7 @@ async function createChatWorker(
   project: ProjectRef | undefined,
   workspaceId: string,
   initialMultitaskMode: "sequential" | "parallel" = "sequential",
+  onRegistered?: (runtimeId: string) => void,
 ): Promise<ChatWorkerSpec> {
   return serializeChatWorkerCreation(async () => {
     let workerSpec: ChatWorkerSpec | undefined;
@@ -2963,6 +3028,7 @@ async function createChatWorker(
             )
           : await createFakeChatWorker(adapter, store, capacity, workspaceId);
       registerChatWorker(workerSpec, mode, initialMultitaskMode);
+      onRegistered?.(workerSpec.worker.runtimeId);
       return workerSpec;
     } catch (error) {
       if (workerSpec !== undefined) {
@@ -3219,11 +3285,49 @@ function resolveChatBackendMode(): ChatBackendMode {
 }
 
 function chatSessionIsBusy(canonicalSessionFile: string): boolean {
-  return (
-    chatSessionFileLocks.has(canonicalSessionFile) ||
-    chatSessionResumePromises.has(canonicalSessionFile) ||
-    chatSessionMutationReservations.has(canonicalSessionFile)
+  return chatSessionIsBusyForMutation({
+    canonicalSessionFile,
+    sessionFileLocks: chatSessionFileLocks,
+    sessionResumePromises: chatSessionResumePromises,
+    sessionMutationReservations: chatSessionMutationReservations,
+    workflowRuntimeOwnership,
+  });
+}
+
+function assertRuntimeNotWorkflowOwned(
+  runtimeId: string,
+  action: string,
+): void {
+  assertRuntimeNotWorkflowOwnedForRegistry(
+    workflowRuntimeOwnership,
+    runtimeId,
+    action,
   );
+}
+
+function assertSessionFileNotWorkflowOwned(
+  sessionFile: string,
+  action: string,
+): void {
+  assertSessionFileNotWorkflowOwnedForRegistry(
+    workflowRuntimeOwnership,
+    sessionFile,
+    action,
+  );
+}
+
+function claimWorkflowRuntimeOwnership(
+  runtimeId: string,
+  metadata: WorkflowRuntimeOwnershipMetadata,
+): WorkflowRuntimeOwnershipClaim {
+  return workflowRuntimeOwnership.claim(runtimeId, metadata);
+}
+
+async function shutdownWorkflowSchedulers(
+  reason: "appQuit" | "reset",
+): Promise<void> {
+  await workflowOccurrenceScheduler?.shutdown(reason);
+  await workflowScheduler?.shutdown(reason);
 }
 
 async function withChatSessionMutation<T>(
@@ -4397,7 +4501,13 @@ async function resolveRealChatProject(
   return projects.resolveAuthorizedProject(project.id);
 }
 
-async function closeChatWorker(): Promise<void> {
+async function closeChatWorker(
+  options: { shutdownWorkflowRuntimes?: boolean } = {},
+): Promise<void> {
+  await chatWorkerCreationTail;
+  if (options.shutdownWorkflowRuntimes === true) {
+    await shutdownWorkflowSchedulers("appQuit");
+  }
   const adapter = chatAdapter;
   const runtimeIds = [...chatRuntimeIds];
   const runtimeWorkspaceIds = new Map(chatRuntimeWorkspaceIds);
@@ -5095,8 +5205,13 @@ async function deleteChatSession(
     canonicalSessionFile,
     "Finish the attached or resuming session before deleting it.",
     async () => {
+      assertSessionFileNotWorkflowOwned(
+        canonicalSessionFile,
+        "deleting this session",
+      );
       const lockedRuntimeId = chatSessionFileLocks.get(canonicalSessionFile);
       if (lockedRuntimeId !== undefined) {
+        assertRuntimeNotWorkflowOwned(lockedRuntimeId, "deleting this session");
         // Closing must precede removal so Pi cannot keep writing the session
         // while it is moved. Keep the composer's generation alive until file
         // removal commits.
@@ -5493,6 +5608,9 @@ async function createChatSessionSnapshot(
   project: ProjectRef | undefined,
   workspaceId: string,
   initialMultitaskMode: "sequential" | "parallel" = "sequential",
+  claimWorkflowOwnership?: (
+    runtimeId: string,
+  ) => WorkflowRuntimeOwnershipClaim | undefined,
 ): Promise<ChatSnapshot> {
   return withChatWorkspaceCreation(workspaceId, async () => {
     const adapter = await ensureChatAdapter(store, diagnosticsService);
@@ -5502,6 +5620,7 @@ async function createChatSessionSnapshot(
       (mode === "real"
         ? await resolveWorkspaceProject(workspaceId)
         : undefined);
+    let workflowOwnershipClaim: WorkflowRuntimeOwnershipClaim | undefined;
     const workerSpec = await createChatWorker(
       adapter,
       store,
@@ -5510,6 +5629,9 @@ async function createChatSessionSnapshot(
       resolvedProject,
       workspaceId,
       initialMultitaskMode,
+      (runtimeId) => {
+        workflowOwnershipClaim = claimWorkflowOwnership?.(runtimeId);
+      },
     );
     const runtimeId = workerSpec.worker.runtimeId;
     try {
@@ -5522,6 +5644,9 @@ async function createChatSessionSnapshot(
         },
       );
       await persistMultitaskSupervisor(runtimeId);
+      if (typeof snapshot.state.sessionFile === "string") {
+        workflowOwnershipClaim?.updateSessionFile(snapshot.state.sessionFile);
+      }
       return snapshot;
     } catch (error) {
       try {
@@ -5531,6 +5656,7 @@ async function createChatSessionSnapshot(
           `Failed to clean up newly created chat worker ${runtimeId}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
         );
       }
+      workflowOwnershipClaim?.release();
       throw error;
     }
   });
@@ -6321,15 +6447,15 @@ function isPathInside(candidate: string, root: string): boolean {
 app.on("before-quit", (event) => {
   if (
     isQuittingAfterChatWorkerCleanup ||
-    chatAdapter === undefined ||
-    chatRuntimeIds.size === 0
+    ((chatAdapter === undefined || chatRuntimeIds.size === 0) &&
+      !workflowRuntimeOwnership.hasOwnedRuntimes())
   ) {
     return;
   }
 
   event.preventDefault();
   isQuittingAfterChatWorkerCleanup = true;
-  void closeChatWorker().finally(() => {
+  void closeChatWorker({ shutdownWorkflowRuntimes: true }).finally(() => {
     app.quit();
   });
 });

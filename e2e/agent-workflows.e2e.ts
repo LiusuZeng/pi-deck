@@ -1538,6 +1538,159 @@ test("a non-empty unsupported workflow store leaves the shell usable and remains
   }
 });
 
+test("workflow-owned runtime rejects renderer destructive IPC while running", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-workflow-ownership-"),
+  );
+  const env = graphEnvironment(root, undefined, ["--stream-delay-ms", "30000"]);
+
+  let app: ElectronApplication | undefined;
+  try {
+    ({ app } = await launch(env));
+    const page = await app.firstWindow();
+    const created = await page.evaluate(async () => {
+      const active = await window.piDeck.workspaces.getActive();
+      if (!active.activeWorkspace) throw new Error("No active workspace");
+      const workflow = {
+        format: "pi-deck.agent-workflow" as const,
+        schemaVersion: 2 as const,
+        id: "30000000-0000-4000-8000-000000000001",
+        revision: 1,
+        name: "Workflow runtime ownership guard",
+        inputs: [],
+        entryNodeId: "30000000-0000-4000-8000-000000000002",
+        nodes: [
+          {
+            id: "30000000-0000-4000-8000-000000000002",
+            name: "Slow worker",
+            role: "worker" as const,
+            config: {
+              instructions:
+                "Stay running long enough for destructive IPC checks.",
+            },
+          },
+        ],
+        relationships: [
+          {
+            id: "30000000-0000-4000-8000-000000000003",
+            from: "30000000-0000-4000-8000-000000000002",
+            to: { end: "done" },
+          },
+        ],
+      };
+      await window.piDeck.workflows.createWorkflow({
+        workspaceId: active.activeWorkspace.id,
+        scopeWorkspaceId: null,
+        workflow,
+      });
+      const run = await window.piDeck.workflows.canonicalStartRun({
+        workflowId: workflow.id,
+        workspaceId: active.activeWorkspace.id,
+        inputs: {},
+      });
+      return { runId: run.id, workspaceId: active.activeWorkspace.id };
+    });
+
+    await expect
+      .poll(
+        () =>
+          page.evaluate(async ({ runId }) => {
+            const run = await window.piDeck.workflows.canonicalGetRun({
+              runId,
+            });
+            const occurrence = run.occurrences.find(
+              (item) => item.role === "worker",
+            );
+            return Boolean(
+              occurrence?.status === "running" &&
+              occurrence.runtimeId &&
+              occurrence.sessionFile,
+            );
+          }, created),
+        { timeout: 20_000 },
+      )
+      .toBe(true);
+
+    const owned = await page.evaluate(async ({ runId }) => {
+      const run = await window.piDeck.workflows.canonicalGetRun({ runId });
+      const occurrence = run.occurrences.find((item) => item.role === "worker");
+      if (
+        occurrence?.status !== "running" ||
+        !occurrence.runtimeId ||
+        !occurrence.sessionFile
+      ) {
+        throw new Error("Workflow occurrence did not expose an owned runtime");
+      }
+      return {
+        runtimeId: occurrence.runtimeId,
+        sessionFile: occurrence.sessionFile,
+      };
+    }, created);
+
+    const results = await page.evaluate(
+      async ({ runId, workspaceId, runtimeId, sessionFile }) => {
+        async function errorMessage(operation: () => Promise<unknown>) {
+          try {
+            await operation();
+            return undefined;
+          } catch (error) {
+            return error instanceof Error ? error.message : String(error);
+          }
+        }
+        const closeError = await errorMessage(() =>
+          window.piDeck.chat.closeSession({ runtimeId }),
+        );
+        const deleteError = await errorMessage(() =>
+          window.piDeck.chat.deleteSession({ workspaceId, sessionFile }),
+        );
+        const archiveError = await errorMessage(() =>
+          window.piDeck.workspaces.archive({ workspaceId }),
+        );
+        const resetError = await errorMessage(() => window.piDeck.chat.reset());
+        const deleteAll = await window.piDeck.chat.deleteAllSessions({
+          workspaceId,
+        });
+        const stillRunning = await window.piDeck.workflows.canonicalGetRun({
+          runId,
+        });
+        const occurrence = stillRunning.occurrences.find(
+          (item) => item.role === "worker",
+        );
+        return {
+          closeError,
+          deleteError,
+          archiveError,
+          resetError,
+          deleteAll,
+          occurrenceStatus: occurrence?.status,
+          occurrenceRuntimeId: occurrence?.runtimeId,
+        };
+      },
+      { ...created, ...owned },
+    );
+
+    for (const message of [
+      results.closeError,
+      results.deleteError,
+      results.archiveError,
+      results.resetError,
+    ]) {
+      expect(message).toMatch(/Workflow runtime is still finalizing/);
+    }
+    expect(results.deleteAll.deletedCount).toBe(0);
+    expect(results.deleteAll.skippedCount).toBeGreaterThanOrEqual(1);
+    expect(results.occurrenceStatus).toBe("running");
+    expect(results.occurrenceRuntimeId).toBe(owned.runtimeId);
+
+    await page.evaluate(async ({ runId }) => {
+      await window.piDeck.workflows.canonicalStopRun({ runId });
+    }, created);
+  } finally {
+    await app?.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("the known empty v2 workflow store boots through the node-ID migration", async () => {
   // This fixture exercises the deliberately narrow, atomic v2 node-ID migration.
   // The preceding test covers a non-empty unsupported store that must never be

@@ -359,6 +359,150 @@ describe("WorkflowScheduler", () => {
     );
   });
 
+  it("keeps workflow ownership through terminal snapshot persistence and internal close", async () => {
+    let releases = 0;
+    const phases: string[] = [];
+    const persisted: WorkflowRun[] = [];
+    const closed: string[] = [];
+    let created = 0;
+    const scheduler = new WorkflowScheduler({
+      createSession: async (_workspaceId, ownership) => {
+        expect(ownership).toMatchObject({
+          scheduler: "legacy",
+          itemKind: "step",
+        });
+        const runtimeId = `runtime-${++created}`;
+        return {
+          ...snapshot(runtimeId, ""),
+          workflowOwnershipClaim: {
+            runtimeId,
+            metadata: {
+              scheduler: "legacy",
+              runId: ownership!.runId,
+              itemId: ownership!.itemId,
+              itemKind: ownership!.itemKind,
+              workspaceId: "workspace",
+            },
+            markPhase: (phase) => {
+              phases.push(`${runtimeId}:${phase}`);
+            },
+            updateSessionFile: () => undefined,
+            release: () => {
+              releases += 1;
+            },
+          },
+        };
+      },
+      prompt: async () => undefined,
+      getSnapshot: async (runtimeId) => {
+        expect(releases).toBe(0);
+        return {
+          ...snapshot(runtimeId, ""),
+          messages: [{ role: "assistant", content: "done" }],
+        };
+      },
+      closeSession: async (runtimeId) => {
+        expect(releases).toBe(0);
+        closed.push(runtimeId);
+      },
+      persist: async (run) => {
+        persisted.push(run);
+        return run;
+      },
+      emit: () => undefined,
+      now: () => 10,
+    });
+    const run = createWorkflowRun({
+      template,
+      workspaceId: "workspace",
+      inputs: {},
+      now: 1,
+    });
+
+    await scheduler.schedule(run);
+    await scheduler.handleRuntimeEvent({
+      type: "agent_end",
+      runtimeId: "runtime-1",
+      status: "completed",
+    });
+
+    expect(persisted.at(-1)?.stepRuns).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          templateStepId: "first",
+          status: "completed",
+          finalAnswer: "done",
+        }),
+        expect.objectContaining({
+          templateStepId: "second",
+          status: "running",
+          runtimeId: "runtime-2",
+        }),
+      ]),
+    );
+    expect(closed).toEqual(["runtime-1"]);
+    expect(releases).toBe(1);
+    expect(phases).toEqual(["runtime-1:terminal", "runtime-1:closing"]);
+  });
+
+  it("shutdown fails active legacy workflow work, closes internally, and releases once", async () => {
+    let releases = 0;
+    const phases: string[] = [];
+    const persisted: WorkflowRun[] = [];
+    const closed: string[] = [];
+    const scheduler = new WorkflowScheduler({
+      createSession: async (_workspaceId, ownership) => ({
+        ...snapshot("runtime-shutdown", ""),
+        workflowOwnershipClaim: {
+          runtimeId: "runtime-shutdown",
+          metadata: {
+            scheduler: "legacy",
+            runId: ownership!.runId,
+            itemId: ownership!.itemId,
+            itemKind: ownership!.itemKind,
+            workspaceId: "workspace",
+          },
+          markPhase: (phase) => {
+            phases.push(phase);
+          },
+          updateSessionFile: () => undefined,
+          release: () => {
+            releases += 1;
+          },
+        },
+      }),
+      prompt: async () => undefined,
+      getSnapshot: async () => snapshot("runtime-shutdown", ""),
+      closeSession: async (runtimeId) => {
+        closed.push(runtimeId);
+        throw new Error("adapter close failed");
+      },
+      persist: async (run) => {
+        persisted.push(run);
+        return run;
+      },
+      emit: () => undefined,
+      now: () => 10,
+    });
+    const run = createWorkflowRun({
+      template,
+      workspaceId: "workspace",
+      inputs: {},
+      now: 1,
+    });
+
+    await scheduler.schedule(run);
+    await scheduler.shutdown("appQuit");
+
+    expect(persisted.at(-1)?.stepRuns[0]).toMatchObject({
+      status: "failed",
+      error: "Pi Deck shut down before the workflow step completed.",
+    });
+    expect(closed).toEqual(["runtime-shutdown"]);
+    expect(releases).toBe(1);
+    expect(phases).toEqual(["closing"]);
+  });
+
   it("persists a bounded transcript from the completed Pi snapshot", async () => {
     const fixture = setup();
     const run = createWorkflowRun({
@@ -632,6 +776,129 @@ describe("WorkflowScheduler", () => {
 });
 
 describe("WorkflowOccurrenceScheduler lifecycle conflicts", () => {
+  it("persists snapshot failures, closes internally, and releases workflow ownership", async () => {
+    let releases = 0;
+    const phases: string[] = [];
+    const persisted: WorkflowRoleRun[] = [];
+    const closed: string[] = [];
+    const scheduler = new WorkflowOccurrenceScheduler({
+      createSession: async (_workspaceId, ownership) => ({
+        runtimeId: "runtime-owned",
+        state: {
+          sessionId: "session-owned",
+          sessionFile: "/tmp/runtime-owned.jsonl",
+        },
+        messages: [],
+        workflowOwnershipClaim: {
+          runtimeId: "runtime-owned",
+          metadata: {
+            scheduler: "occurrence",
+            runId: ownership!.runId,
+            itemId: ownership!.itemId,
+            itemKind: ownership!.itemKind,
+            workspaceId: "workspace",
+          },
+          markPhase: (phase) => {
+            phases.push(phase);
+          },
+          updateSessionFile: () => undefined,
+          release: () => {
+            releases += 1;
+          },
+        },
+      }),
+      prompt: async () => undefined,
+      getSnapshot: async () => {
+        expect(releases).toBe(0);
+        throw new Error("snapshot unavailable");
+      },
+      closeSession: async (runtimeId) => {
+        expect(releases).toBe(0);
+        closed.push(runtimeId);
+      },
+      persist: async (run) => {
+        persisted.push(run);
+        return run;
+      },
+      emit: () => undefined,
+      now: () => 10,
+    });
+    const run = createWorkflowRoleRun(lifecycleDefinition, "workspace", {}, 1);
+
+    await scheduler.schedule(run);
+    await scheduler.handleRuntimeEvent({
+      type: "agent_end",
+      runtimeId: "runtime-owned",
+      status: "completed",
+    });
+
+    expect(persisted.at(-1)?.occurrences[0]).toMatchObject({
+      status: "failed",
+      error: "snapshot unavailable",
+    });
+    expect(closed).toEqual(["runtime-owned"]);
+    expect(releases).toBe(1);
+    expect(phases).toEqual(["terminal", "closing"]);
+  });
+
+  it("shutdown fails active canonical workflow work, closes internally, and releases once", async () => {
+    let releases = 0;
+    const phases: string[] = [];
+    const persisted: WorkflowRoleRun[] = [];
+    const closed: string[] = [];
+    const scheduler = new WorkflowOccurrenceScheduler({
+      createSession: async (_workspaceId, ownership) => ({
+        runtimeId: "runtime-shutdown",
+        state: {
+          sessionId: "session-shutdown",
+          sessionFile: "/tmp/runtime-shutdown.jsonl",
+        },
+        messages: [],
+        workflowOwnershipClaim: {
+          runtimeId: "runtime-shutdown",
+          metadata: {
+            scheduler: "occurrence",
+            runId: ownership!.runId,
+            itemId: ownership!.itemId,
+            itemKind: ownership!.itemKind,
+            workspaceId: "workspace",
+          },
+          markPhase: (phase) => {
+            phases.push(phase);
+          },
+          updateSessionFile: () => undefined,
+          release: () => {
+            releases += 1;
+          },
+        },
+      }),
+      prompt: async () => undefined,
+      getSnapshot: async (runtimeId) => snapshot(runtimeId, ""),
+      closeSession: async (runtimeId) => {
+        closed.push(runtimeId);
+        throw new Error("adapter close failed");
+      },
+      persist: async (run) => {
+        persisted.push(run);
+        return run;
+      },
+      emit: () => undefined,
+      now: () => 10,
+    });
+    const run = createWorkflowRoleRun(lifecycleDefinition, "workspace", {}, 1);
+
+    await scheduler.schedule(run);
+    await scheduler.shutdown("reset");
+
+    expect(persisted.at(-1)?.occurrences[0]).toMatchObject({
+      status: "failed",
+      error: "Pi Deck reset before the workflow occurrence completed.",
+    });
+    expect(closed).toEqual(["runtime-shutdown"]);
+    expect(releases).toBe(1);
+    expect(phases).toEqual(["closing"]);
+  });
+
   it("reschedules a lifecycle-conflict occurrence when the workspace is released", async () => {
     const fixture = setupOccurrenceLifecycle();
 
