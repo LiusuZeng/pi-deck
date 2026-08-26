@@ -18,6 +18,8 @@ export function Menu(props: {
   children: ReactNode;
   className?: string;
   icon?: LucideIcon;
+  /** Optional class applied to the portalled popover only. */
+  popoverClassName?: string;
   disabled?: boolean;
   loading?: boolean;
   menuLabel?: string;
@@ -175,7 +177,7 @@ export function Menu(props: {
       {isOpen
         ? createPortal(
             <div
-              className={`ui-menu-popover ${props.className ?? ""}`}
+              className={`ui-menu-popover ${props.popoverClassName ?? ""}`}
               id={menuId}
               aria-label={props.menuLabel}
               ref={popoverRef}

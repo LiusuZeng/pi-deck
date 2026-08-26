@@ -227,6 +227,66 @@ async function openWorkspaceActions(page: Page, name: string): Promise<void> {
     .click();
 }
 
+async function expectWorkspaceActionsMenuLayout(
+  page: Page,
+  name: string,
+): Promise<void> {
+  const trigger = page.getByRole("button", {
+    name: `Workspace actions for ${name}`,
+  });
+  const menu = page.getByRole("menu", {
+    name: `Workspace actions for ${name}`,
+  });
+  await expect(menu).toBeVisible();
+  await expect(menu).toHaveCSS("display", "grid");
+  await expect(menu).not.toHaveClass(/workspace-tree-actions/);
+
+  const items = [
+    page.getByRole("menuitem", { name: "View Work" }),
+    page.getByRole("menuitem", { name: "Rename workspace" }),
+    page.getByRole("menuitem", { name: "Archive workspace" }),
+  ];
+  for (const item of items) {
+    await expect(item).toBeVisible();
+  }
+  await expect(items[2]!).toHaveCSS("justify-content", "flex-start");
+
+  const triggerBounds = await trigger.boundingBox();
+  const menuBounds = await menu.boundingBox();
+  const itemBounds = await Promise.all(items.map((item) => item.boundingBox()));
+  if (!triggerBounds || !menuBounds || itemBounds.some((bounds) => !bounds)) {
+    throw new Error(`Workspace actions menu for ${name} has no bounding box`);
+  }
+
+  const viewport = await page.evaluate(() => ({
+    height: window.innerHeight,
+    width: window.innerWidth,
+  }));
+  expect(menuBounds.x).toBeGreaterThanOrEqual(0);
+  expect(menuBounds.y).toBeGreaterThanOrEqual(0);
+  expect(menuBounds.x + menuBounds.width).toBeLessThanOrEqual(viewport.width);
+  expect(menuBounds.y + menuBounds.height).toBeLessThanOrEqual(viewport.height);
+  expect(menuBounds.width).toBeLessThanOrEqual(260);
+  expect(triggerBounds.x).toBeGreaterThanOrEqual(menuBounds.x);
+  expect(triggerBounds.x).toBeLessThanOrEqual(menuBounds.x + menuBounds.width);
+
+  const concreteItemBounds = itemBounds as Array<
+    NonNullable<(typeof itemBounds)[number]>
+  >;
+  concreteItemBounds.forEach((bounds) => {
+    expect(bounds.x).toBeGreaterThanOrEqual(menuBounds.x);
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(
+      menuBounds.x + menuBounds.width,
+    );
+    expect(bounds.height).toBeGreaterThan(20);
+  });
+  for (let index = 1; index < concreteItemBounds.length; index += 1) {
+    const previous = concreteItemBounds[index - 1]!;
+    const current = concreteItemBounds[index]!;
+    expect(current.y).toBeGreaterThanOrEqual(previous.y + previous.height);
+  }
+}
+
 async function selectWorkspaceInUi(page: Page, name: string): Promise<void> {
   const workspace = page.getByRole("button", { name: `Workspace: ${name}` });
   await workspace.click();
@@ -241,6 +301,50 @@ async function confirmDeleteSessionDialog(page: Page): Promise<void> {
   await expect(dialog).toBeVisible();
   await dialog.getByRole("button", { name: "Delete session" }).click();
 }
+
+async function selectPromptDestinationInUi(
+  page: Page,
+  destination: "parent" | "newTaskSession",
+): Promise<void> {
+  const promptDestination = page.getByLabel("Prompt destination");
+  await promptDestination.selectOption(destination);
+  await expect(promptDestination).toHaveValue(destination);
+}
+
+test("workspace overflow menu remains compact and vertical with a long workspace name", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-workspace-menu-layout-"),
+  );
+  const projectCwd = path.join(root, "authorized-project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+    }),
+  );
+  try {
+    await page.setViewportSize({ width: 800, height: 700 });
+    await expectHealthyPreload(page);
+    const longWorkspaceName =
+      "Workspace with an extremely long name that should never stretch actions";
+    await createWorkspaceInUi(page, longWorkspaceName);
+
+    await openWorkspaceActions(page, longWorkspaceName);
+    await expectWorkspaceActionsMenuLayout(page, longWorkspaceName);
+    await page.keyboard.press("Escape");
+
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openWorkspaceActions(page, longWorkspaceName);
+    await expectWorkspaceActionsMenuLayout(page, longWorkspaceName);
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("workspace management UI keeps Pi JSONL membership reversible and deletion explicit", async () => {
   // The fixture JSONL is written directly to the deterministic fake-real-mode
@@ -301,9 +405,7 @@ test("workspace management UI keeps Pi JSONL membership reversible and deletion 
     }, busyRuntimeId);
     expect(busyCloseError).toMatch(/finish the active turn/i);
     await openWorkspaceActions(page, "authorized-project");
-    await expect(
-      page.getByRole("menuitem", { name: "Archive workspace" }),
-    ).toHaveCSS("justify-content", "flex-start");
+    await expectWorkspaceActionsMenuLayout(page, "authorized-project");
     await page.getByRole("menuitem", { name: "Archive workspace" }).click();
     const blockedArchiveDialog = page.getByTestId("workspace-archive-dialog");
     await expect(
@@ -316,24 +418,7 @@ test("workspace management UI keeps Pi JSONL membership reversible and deletion 
 
     await createWorkspaceInUi(page, "UI source");
     await openWorkspaceActions(page, "UI source");
-    const workspaceActionsMenu = page.getByRole("menu", {
-      name: "Workspace actions for UI source",
-    });
-    await expect(workspaceActionsMenu).toBeVisible();
-    const menuBounds = await workspaceActionsMenu.boundingBox();
-    if (!menuBounds) {
-      throw new Error("Workspace actions menu has no bounding box");
-    }
-    const viewport = await page.evaluate(() => ({
-      height: window.innerHeight,
-      width: window.innerWidth,
-    }));
-    expect(menuBounds.x).toBeGreaterThanOrEqual(0);
-    expect(menuBounds.y).toBeGreaterThanOrEqual(0);
-    expect(menuBounds.x + menuBounds.width).toBeLessThanOrEqual(viewport.width);
-    expect(menuBounds.y + menuBounds.height).toBeLessThanOrEqual(
-      viewport.height,
-    );
+    await expectWorkspaceActionsMenuLayout(page, "UI source");
     await page.getByRole("menuitem", { name: "Rename workspace" }).click();
     const renameDialog = page.getByTestId("workspace-rename-dialog");
     await expect(renameDialog).toBeVisible();
@@ -2106,7 +2191,7 @@ test("fake delegation is status-only, parent-scoped, and honors direct handling"
     await expect(multitaskControl).toHaveText("Parallel: On");
     await expect(multitaskControl).toHaveAttribute("aria-pressed", "true");
     // deck_delegate is a parent extension bridge, not production task routing.
-    await page.getByLabel("Prompt destination").selectOption("parent");
+    await selectPromptDestinationInUi(page, "parent");
 
     await page.evaluate(() => {
       const testWindow = window as typeof window & {
@@ -2173,7 +2258,7 @@ test("fake delegation is status-only, parent-scoped, and honors direct handling"
           }
         ).__piDeckMultitaskStates?.length ?? 0,
     );
-    await page.getByLabel("Prompt destination").selectOption("parent");
+    await selectPromptDestinationInUi(page, "parent");
     await page.getByLabel("Prompt text").fill("Handle this directly.");
     await page.getByRole("button", { name: "Send" }).click();
     await expect(
@@ -4401,7 +4486,7 @@ test.describe("Unified Work", () => {
       const multitaskControl = page.locator(".multitask-control");
       await expect(multitaskControl).toHaveText("Parallel: Off");
       await multitaskControl.click();
-      await page.getByLabel("Prompt destination").selectOption("parent");
+      await selectPromptDestinationInUi(page, "parent");
       const privatePrompt = "Unified Work private task parent";
       await page.getByLabel("Prompt text").fill(privatePrompt);
       await page.getByRole("button", { name: "Send" }).click();

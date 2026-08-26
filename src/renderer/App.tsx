@@ -8920,6 +8920,7 @@ function AppearanceMenu(props: {
       label={`Appearance: ${current.label}${props.pending ? ", saving" : ""}`}
       loading={props.pending}
       menuLabel="Appearance options"
+      popoverClassName="appearance-menu"
     >
       {options.map((option) => {
         const selected = option.theme === props.theme;

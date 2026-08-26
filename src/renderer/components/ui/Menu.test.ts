@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act } from "react";
 import { createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -10,12 +12,24 @@ import { Menu } from "./Menu.js";
 
 let root: Root | undefined;
 let container: HTMLDivElement | undefined;
+let rendererStyle: HTMLStyleElement | undefined;
+
+function installRendererStyles(): void {
+  rendererStyle = document.createElement("style");
+  rendererStyle.textContent = readFileSync(
+    resolve(process.cwd(), "src/renderer/styles.css"),
+    "utf8",
+  );
+  document.head.append(rendererStyle);
+}
 
 afterEach(() => {
   act(() => root?.unmount());
   container?.remove();
+  rendererStyle?.remove();
   root = undefined;
   container = undefined;
+  rendererStyle = undefined;
 });
 
 describe("Menu", () => {
@@ -147,6 +161,100 @@ describe("Menu", () => {
       });
     }
     expect(document.activeElement).toBe(items[0]);
+  });
+
+  it("keeps wrapper layout classes off the portalled popover", () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    act(() => {
+      root?.render(
+        createElement(
+          Menu,
+          {
+            className: "workspace-tree-actions",
+            label: "Workspace actions",
+          },
+          createElement(Button, { role: "menuitem" }, "View Work"),
+        ),
+      );
+    });
+
+    const trigger = container.querySelector<HTMLButtonElement>("button");
+    expect(container.querySelector(".ui-menu")?.classList).toContain(
+      "workspace-tree-actions",
+    );
+
+    act(() => trigger?.click());
+
+    const menu = document.body.querySelector('[role="menu"]');
+    expect(menu?.classList).toContain("ui-menu-popover");
+    expect(menu?.classList).not.toContain("workspace-tree-actions");
+  });
+
+  it("keeps workspace action popovers on the base vertical menu layout", () => {
+    installRendererStyles();
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    act(() => {
+      root?.render(
+        createElement(
+          Menu,
+          {
+            className: "workspace-tree-actions",
+            label: "Workspace actions",
+          },
+          createElement(Button, { role: "menuitem" }, "View Work"),
+          createElement(Button, { role: "menuitem" }, "Rename workspace"),
+          createElement(
+            Button,
+            { role: "menuitem", variant: "danger" },
+            "Archive workspace",
+          ),
+        ),
+      );
+    });
+
+    const trigger = container.querySelector<HTMLButtonElement>("button");
+    act(() => trigger?.click());
+
+    const menu = document.body.querySelector<HTMLElement>('[role="menu"]');
+    expect(menu).not.toBeNull();
+    expect(getComputedStyle(menu!).display).toBe("grid");
+    expect(getComputedStyle(menu!).justifyContent).not.toBe("center");
+    expect(
+      Array.from(menu!.querySelectorAll('[role="menuitem"]')).map((item) =>
+        item.textContent?.trim(),
+      ),
+    ).toEqual(["View Work", "Rename workspace", "Archive workspace"]);
+  });
+
+  it("supports popover-specific classes", () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    act(() => {
+      root?.render(
+        createElement(
+          Menu,
+          {
+            className: "appearance-trigger",
+            label: "Appearance",
+            popoverClassName: "appearance-menu",
+          },
+          createElement(Button, { role: "menuitemradio" }, "Dark"),
+        ),
+      );
+    });
+
+    const trigger = container.querySelector<HTMLButtonElement>("button");
+    act(() => trigger?.click());
+
+    const menu = document.body.querySelector('[role="menu"]');
+    expect(menu?.classList).toContain("ui-menu-popover");
+    expect(menu?.classList).toContain("appearance-menu");
+    expect(menu?.classList).not.toContain("appearance-trigger");
   });
 
   it("supports a disabled loading trigger with a contextual icon", () => {
