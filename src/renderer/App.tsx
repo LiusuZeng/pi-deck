@@ -10,7 +10,9 @@ import {
   type ClipboardEvent,
   type DragEvent,
   type KeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type ReactElement,
+  type SyntheticEvent,
 } from "react";
 import type {
   AppBootstrapState,
@@ -9654,6 +9656,81 @@ function isScrolledNearBottom(scrollContainer: HTMLElement): boolean {
   return distanceFromBottom < 80;
 }
 
+type TimelineRevealRect = Pick<DOMRectReadOnly, "top" | "bottom" | "height">;
+
+const TIMELINE_DETAILS_REVEAL_GAP_PX = 12;
+const TIMELINE_DETAILS_REVEAL_INTERVAL_MS = 250;
+const TIMELINE_DETAILS_REVEAL_INTERVAL_TICKS = 12;
+
+function timelineDetailsRevealScrollDelta(options: {
+  scrollRect: TimelineRevealRect;
+  targetRect: TimelineRevealRect;
+  composerRect?: TimelineRevealRect | undefined;
+  gap?: number | undefined;
+}): number {
+  const gap = options.gap ?? TIMELINE_DETAILS_REVEAL_GAP_PX;
+  const safeTop = options.scrollRect.top + gap;
+  const obscuredBottom =
+    options.composerRect === undefined
+      ? options.scrollRect.bottom
+      : Math.min(options.scrollRect.bottom, options.composerRect.top);
+  const safeBottom = obscuredBottom - gap;
+  const safeHeight = safeBottom - safeTop;
+
+  if (safeHeight <= 0) {
+    return 0;
+  }
+
+  if (options.targetRect.height <= safeHeight) {
+    if (options.targetRect.bottom > safeBottom) {
+      return Math.ceil(options.targetRect.bottom - safeBottom);
+    }
+    if (options.targetRect.top < safeTop) {
+      return Math.floor(options.targetRect.top - safeTop);
+    }
+    return 0;
+  }
+
+  // Very tall details cannot fit in one viewport. Prefer keeping the bottom of
+  // the opened panel reachable, because that is where native payload scrollbars
+  // appear and where the composer overlap is most disruptive.
+  if (options.targetRect.bottom > safeBottom) {
+    return Math.ceil(options.targetRect.bottom - safeBottom);
+  }
+  if (options.targetRect.top < safeTop) {
+    return Math.floor(options.targetRect.top - safeTop);
+  }
+  return 0;
+}
+
+function timelineComposerElement(
+  scrollContainer: HTMLElement,
+): HTMLElement | null {
+  const sessionContent =
+    scrollContainer.closest<HTMLElement>(".session-content");
+  return sessionContent?.querySelector<HTMLElement>(".composer") ?? null;
+}
+
+function revealTimelineElement(
+  scrollContainer: HTMLElement,
+  targetElement: HTMLElement,
+  composerElement: HTMLElement | null = timelineComposerElement(
+    scrollContainer,
+  ),
+): void {
+  const delta = timelineDetailsRevealScrollDelta({
+    scrollRect: scrollContainer.getBoundingClientRect(),
+    targetRect: targetElement.getBoundingClientRect(),
+    ...(composerElement === null
+      ? {}
+      : { composerRect: composerElement.getBoundingClientRect() }),
+  });
+
+  if (delta !== 0) {
+    scrollContainer.scrollTop += delta;
+  }
+}
+
 function getTimelineScrollMarker(session: SessionViewModel): string {
   const timelineMarker = session.timeline
     .map((item) => {
@@ -9715,6 +9792,10 @@ function ChatTimeline(props: {
   const timelineScrollRef = useRef<HTMLDivElement | null>(null);
   const shouldStickToBottomRef = useRef(true);
   const previousSessionIdRef = useRef(props.session.id);
+  const openedTimelineDetailsRef = useRef<HTMLDetailsElement | null>(null);
+  const pendingDetailsRevealFrameRef = useRef<number | null>(null);
+  const openedDetailsResizeObserverRef = useRef<ResizeObserver | null>(null);
+  const openedDetailsRevealIntervalRef = useRef<number | null>(null);
   const timelineScrollMarker = getTimelineScrollMarker(props.session);
 
   useLayoutEffect(() => {
@@ -9725,6 +9806,12 @@ function ChatTimeline(props: {
 
     const sessionChanged = previousSessionIdRef.current !== props.session.id;
     previousSessionIdRef.current = props.session.id;
+    if (sessionChanged) {
+      openedTimelineDetailsRef.current = null;
+      cancelPendingDetailsReveal();
+      disconnectOpenedDetailsObserver();
+      clearOpenedDetailsRevealInterval();
+    }
     if (!sessionChanged && !shouldStickToBottomRef.current) {
       return;
     }
@@ -9738,6 +9825,145 @@ function ChatTimeline(props: {
       window.cancelAnimationFrame(animationFrameId);
     };
   }, [props.session.id, timelineScrollMarker]);
+
+  function cancelPendingDetailsReveal(): void {
+    if (pendingDetailsRevealFrameRef.current === null) {
+      return;
+    }
+    window.cancelAnimationFrame(pendingDetailsRevealFrameRef.current);
+    pendingDetailsRevealFrameRef.current = null;
+  }
+
+  function disconnectOpenedDetailsObserver(): void {
+    openedDetailsResizeObserverRef.current?.disconnect();
+    openedDetailsResizeObserverRef.current = null;
+  }
+
+  function clearOpenedDetailsRevealInterval(): void {
+    if (openedDetailsRevealIntervalRef.current === null) {
+      return;
+    }
+    window.clearInterval(openedDetailsRevealIntervalRef.current);
+    openedDetailsRevealIntervalRef.current = null;
+  }
+
+  function scheduleTimelineDetailsReveal(
+    detailsElement: HTMLDetailsElement,
+  ): void {
+    cancelPendingDetailsReveal();
+    pendingDetailsRevealFrameRef.current = window.requestAnimationFrame(() => {
+      pendingDetailsRevealFrameRef.current = null;
+      const scrollContainer = timelineScrollRef.current;
+      if (
+        openedTimelineDetailsRef.current !== detailsElement ||
+        !detailsElement.open ||
+        !detailsElement.isConnected
+      ) {
+        if (openedTimelineDetailsRef.current === detailsElement) {
+          openedTimelineDetailsRef.current = null;
+          disconnectOpenedDetailsObserver();
+          clearOpenedDetailsRevealInterval();
+        }
+        return;
+      }
+      if (scrollContainer !== null) {
+        revealTimelineElement(scrollContainer, detailsElement);
+      }
+    });
+  }
+
+  function observeOpenedDetails(detailsElement: HTMLDetailsElement): void {
+    disconnectOpenedDetailsObserver();
+    if (typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const observer = new ResizeObserver(() => {
+      if (
+        openedTimelineDetailsRef.current === detailsElement &&
+        detailsElement.open
+      ) {
+        scheduleTimelineDetailsReveal(detailsElement);
+      }
+    });
+    observer.observe(detailsElement);
+    const scrollContainer = timelineScrollRef.current;
+    if (scrollContainer !== null) {
+      observer.observe(scrollContainer);
+      const composerElement = timelineComposerElement(scrollContainer);
+      if (composerElement !== null) {
+        observer.observe(composerElement);
+      }
+    }
+    openedDetailsResizeObserverRef.current = observer;
+  }
+
+  function revealOpenedTimelineDetails(
+    detailsElement: HTMLDetailsElement,
+  ): void {
+    openedTimelineDetailsRef.current = detailsElement;
+    observeOpenedDetails(detailsElement);
+    clearOpenedDetailsRevealInterval();
+    let remainingRevealTicks = TIMELINE_DETAILS_REVEAL_INTERVAL_TICKS;
+    openedDetailsRevealIntervalRef.current = window.setInterval(() => {
+      remainingRevealTicks -= 1;
+      if (
+        remainingRevealTicks <= 0 ||
+        openedTimelineDetailsRef.current !== detailsElement ||
+        !detailsElement.open ||
+        !detailsElement.isConnected
+      ) {
+        clearOpenedDetailsRevealInterval();
+        return;
+      }
+      scheduleTimelineDetailsReveal(detailsElement);
+    }, TIMELINE_DETAILS_REVEAL_INTERVAL_MS);
+    scheduleTimelineDetailsReveal(detailsElement);
+  }
+
+  function handleTimelineDetailsToggle(
+    event: SyntheticEvent<HTMLDetailsElement>,
+  ): void {
+    const detailsElement = event.currentTarget;
+    if (!detailsElement.open) {
+      if (openedTimelineDetailsRef.current === detailsElement) {
+        openedTimelineDetailsRef.current = null;
+        cancelPendingDetailsReveal();
+        disconnectOpenedDetailsObserver();
+        clearOpenedDetailsRevealInterval();
+      }
+      return;
+    }
+
+    revealOpenedTimelineDetails(detailsElement);
+  }
+
+  function handleTimelineDetailsSummaryClick(
+    event: ReactMouseEvent<HTMLElement>,
+  ): void {
+    const detailsElement = event.currentTarget.closest("details");
+    if (detailsElement instanceof HTMLDetailsElement) {
+      revealOpenedTimelineDetails(detailsElement);
+    }
+  }
+
+  useEffect(() => {
+    function handleResize(): void {
+      const detailsElement = openedTimelineDetailsRef.current;
+      if (detailsElement !== null && detailsElement.open) {
+        scheduleTimelineDetailsReveal(detailsElement);
+      }
+    }
+
+    window.addEventListener("resize", handleResize);
+    window.visualViewport?.addEventListener("resize", handleResize);
+    return () => {
+      window.removeEventListener("resize", handleResize);
+      window.visualViewport?.removeEventListener("resize", handleResize);
+      cancelPendingDetailsReveal();
+      disconnectOpenedDetailsObserver();
+      clearOpenedDetailsRevealInterval();
+    };
+  }, []);
 
   function handleTimelineScroll(): void {
     const scrollContainer = timelineScrollRef.current;
@@ -9816,7 +10042,12 @@ function ChatTimeline(props: {
         ))}
 
         {props.session.timeline.map((item) => (
-          <TimelineRow key={item.id} item={item} />
+          <TimelineRow
+            key={item.id}
+            item={item}
+            onDetailsSummaryClick={handleTimelineDetailsSummaryClick}
+            onDetailsToggle={handleTimelineDetailsToggle}
+          />
         ))}
         {showPendingAgent ? (
           <PendingAgentRow session={props.session} nowMs={props.nowMs} />
@@ -10012,7 +10243,11 @@ function ExtensionUiCard(props: {
   );
 }
 
-function TimelineRow(props: { item: TimelineItem }): ReactElement {
+function TimelineRow(props: {
+  item: TimelineItem;
+  onDetailsSummaryClick(event: ReactMouseEvent<HTMLElement>): void;
+  onDetailsToggle(event: SyntheticEvent<HTMLDetailsElement>): void;
+}): ReactElement {
   if (props.item.kind === "user") {
     return (
       <article className="timeline-row user-row">
@@ -10048,8 +10283,8 @@ function TimelineRow(props: { item: TimelineItem }): ReactElement {
   if (props.item.kind === "thinking") {
     return (
       <article className="thinking-row">
-        <details>
-          <summary>
+        <details onToggle={props.onDetailsToggle}>
+          <summary onClick={props.onDetailsSummaryClick}>
             <ChevronRight
               aria-hidden="true"
               className="disclosure-chevron"
@@ -10067,8 +10302,8 @@ function TimelineRow(props: { item: TimelineItem }): ReactElement {
   if (props.item.kind === "tool") {
     return (
       <article className={`tool-card ${props.item.status}`}>
-        <details>
-          <summary>
+        <details onToggle={props.onDetailsToggle}>
+          <summary onClick={props.onDetailsSummaryClick}>
             <span className="tool-copy">
               <span className="tool-title">{props.item.title}</span>
               <span className="tool-summary">{props.item.summary}</span>
@@ -11649,4 +11884,5 @@ export const __rendererTestHooks = {
   modelDiscoveryRequestForWorkspace,
   draftSessionForWorkspace,
   draftSessionForProject,
+  timelineDetailsRevealScrollDelta,
 };

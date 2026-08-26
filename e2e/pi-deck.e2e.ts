@@ -1263,6 +1263,118 @@ test("fake mode launches with backend runtime and send enabled", async () => {
   }
 });
 
+test("expanded tool details stay scrollable above the composer", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-tool-detail-layout-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: ["--prompt-scenario", "tool", "--stream-delay-ms", "1"],
+    }),
+  );
+  try {
+    await page.setViewportSize({ width: 920, height: 560 });
+    await expectHealthyPreload(page);
+    await enterSessionDetail(page);
+    await page.getByLabel("Prompt text").fill("show a tool detail card");
+    await page.getByRole("button", { name: "Send" }).click();
+
+    const toolCard = page.locator(".tool-card").first();
+    await expect(toolCard).toBeVisible();
+    await expect(toolCard.getByText("read", { exact: true })).toBeVisible();
+
+    await toolCard.locator("pre").evaluate((pre) => {
+      pre.style.whiteSpace = "pre";
+      const wideLine = "wide-output-".repeat(90);
+      pre.textContent = Array.from(
+        { length: 80 },
+        (_, index) => `${String(index + 1).padStart(2, "0")} ${wideLine}`,
+      ).join("\n");
+    });
+    await page.locator(".timeline-scroll").evaluate((timeline) => {
+      timeline.scrollTop = timeline.scrollHeight;
+    });
+
+    async function expandedToolMetrics(): Promise<{
+      composerTop: number;
+      detailsBottom: number;
+      preBottom: number;
+      preClientHeight: number;
+      preScrollHeight: number;
+      preClientWidth: number;
+      preScrollWidth: number;
+    }> {
+      return page.evaluate(() => {
+        const timeline =
+          document.querySelector<HTMLElement>(".timeline-scroll");
+        const composer = document.querySelector<HTMLElement>(".composer");
+        const details =
+          document.querySelector<HTMLElement>(".tool-card details");
+        const pre = document.querySelector<HTMLElement>(".tool-card pre");
+        if (
+          timeline === null ||
+          composer === null ||
+          details === null ||
+          pre === null
+        ) {
+          throw new Error("Missing expanded tool detail layout fixture.");
+        }
+        const timelineRect = timeline.getBoundingClientRect();
+        const composerRect = composer.getBoundingClientRect();
+        const detailsRect = details.getBoundingClientRect();
+        const preRect = pre.getBoundingClientRect();
+        return {
+          composerTop: Math.min(timelineRect.bottom, composerRect.top),
+          detailsBottom: detailsRect.bottom,
+          preBottom: preRect.bottom,
+          preClientHeight: pre.clientHeight,
+          preScrollHeight: pre.scrollHeight,
+          preClientWidth: pre.clientWidth,
+          preScrollWidth: pre.scrollWidth,
+        };
+      });
+    }
+
+    await toolCard.locator("summary").click();
+    await expect(toolCard.locator("details")).toHaveAttribute("open", "");
+    await expect
+      .poll(async () => {
+        const metrics = await expandedToolMetrics();
+        return metrics.detailsBottom <= metrics.composerTop - 1;
+      })
+      .toBe(true);
+    let metrics = await expandedToolMetrics();
+    expect(metrics.preBottom).toBeLessThanOrEqual(metrics.composerTop - 1);
+    expect(metrics.preScrollHeight).toBeGreaterThan(metrics.preClientHeight);
+    expect(metrics.preScrollWidth).toBeGreaterThan(metrics.preClientWidth);
+
+    await toolCard.locator("summary").click();
+    await expect(toolCard.locator("details")).not.toHaveAttribute("open", "");
+    await toolCard.locator("summary").click();
+    await expect(toolCard.locator("details")).toHaveAttribute("open", "");
+    await page.setViewportSize({ width: 920, height: 500 });
+    await expect
+      .poll(async () => {
+        const metrics = await expandedToolMetrics();
+        return metrics.detailsBottom <= metrics.composerTop - 1;
+      })
+      .toBe(true);
+    metrics = await expandedToolMetrics();
+    expect(metrics.preBottom).toBeLessThanOrEqual(metrics.composerTop - 1);
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("fake named workspace drafts keep fake backend and sidebar behavior", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-e2e-fake-workspace-draft-"),

@@ -24,6 +24,43 @@ it("renders pipe tables as safe semantic table markup", () => {
   expect(markup).not.toContain("|---|---:|---|");
 });
 
+it("computes composer-aware reveal scrolling for expanded timeline details", () => {
+  expect(
+    __rendererTestHooks.timelineDetailsRevealScrollDelta({
+      scrollRect: { top: 100, bottom: 520, height: 420 },
+      composerRect: { top: 480, bottom: 580, height: 100 },
+      targetRect: { top: 410, bottom: 510, height: 100 },
+    }),
+  ).toBe(42);
+
+  expect(
+    __rendererTestHooks.timelineDetailsRevealScrollDelta({
+      scrollRect: { top: 100, bottom: 520, height: 420 },
+      composerRect: { top: 480, bottom: 580, height: 100 },
+      targetRect: { top: 180, bottom: 320, height: 140 },
+    }),
+  ).toBe(0);
+});
+
+it("keeps the bottom of oversized expanded details reachable", () => {
+  expect(
+    __rendererTestHooks.timelineDetailsRevealScrollDelta({
+      scrollRect: { top: 100, bottom: 520, height: 420 },
+      composerRect: { top: 480, bottom: 580, height: 100 },
+      targetRect: { top: 80, bottom: 620, height: 540 },
+    }),
+  ).toBe(152);
+});
+
+it("scrolls upward when an expanded detail starts above the timeline viewport", () => {
+  expect(
+    __rendererTestHooks.timelineDetailsRevealScrollDelta({
+      scrollRect: { top: 100, bottom: 520, height: 420 },
+      targetRect: { top: 80, bottom: 180, height: 100 },
+    }),
+  ).toBe(-32);
+});
+
 it("offers every active workflow workspace once and excludes archived workspaces", () => {
   const workspace = (id: string, name: string) => ({
     id,
