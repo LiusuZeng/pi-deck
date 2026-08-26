@@ -2070,6 +2070,7 @@ test("real mode renders a draft shell before an unavailable backend is touched",
 test("fake delegation is status-only, parent-scoped, and honors direct handling", async () => {
   const root = fs.mkdtempSync("/tmp/pd-");
   const { app, page } = await launchPiDeck({
+    PI_DECK_BACKEND: "fake",
     PI_DECK_FAKE_DELEGATE_SCENARIO: "1",
     PI_DECK_HOME: path.join(root, "pideck-home"),
     PI_DECK_USER_DATA_DIR: path.join(root, "user-data"),
@@ -4388,6 +4389,7 @@ test.describe("Unified Work", () => {
       path.join(os.tmpdir(), "pi-deck-e2e-unified-work-private-"),
     );
     const { app, page } = await launchPiDeck({
+      PI_DECK_BACKEND: "fake",
       PI_DECK_FAKE_DELEGATE_SCENARIO: "1",
       PI_DECK_HOME: path.join(root, "pideck-home"),
       PI_DECK_USER_DATA_DIR: path.join(root, "user-data"),
