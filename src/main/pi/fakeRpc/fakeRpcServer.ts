@@ -912,6 +912,12 @@ class FakeRpcServer {
           args: { pattern: "TimelineRow" },
           output: "found timeline renderer",
         },
+        ...Array.from({ length: 56 }, (_, index) => ({
+          id: `tool_fake_read_${index + 1}`,
+          name: "read",
+          args: { path: `src/renderer/fixture-${index + 1}.ts` },
+          output: `read fixture file ${index + 1}`,
+        })),
         {
           id: "tool_fake_bash",
           name: "bash",

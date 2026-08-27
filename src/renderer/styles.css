@@ -5948,3 +5948,96 @@ body {
   display: grid;
   gap: 8px;
 }
+
+/* Issue #18 dogfood regression: expanded activity is a compact step list. */
+.agent-activity-steps {
+  gap: 0;
+  max-height: min(58vh, 560px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  list-style: none;
+  padding: 3px 9px 9px;
+  border-top: 1px solid var(--color-border);
+}
+
+.agent-activity-step {
+  padding-left: 0;
+  border-bottom: 1px solid
+    color-mix(in srgb, var(--color-border) 72%, transparent);
+}
+
+.agent-activity-step:last-child {
+  border-bottom: 0;
+}
+
+.agent-activity-thinking {
+  border-left: 0;
+  padding: 0;
+}
+
+.agent-activity-thinking summary {
+  min-height: 30px;
+  padding: 4px 2px;
+}
+
+.agent-activity-thinking p {
+  margin: 3px 0 6px 23px;
+}
+
+.tool-card.agent-activity-tool-card {
+  max-width: 100%;
+  margin-left: 0;
+  border-width: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.tool-card.agent-activity-tool-card details {
+  padding: 0;
+}
+
+.tool-card.agent-activity-tool-card summary {
+  min-height: 30px;
+  gap: 8px;
+  padding: 4px 2px;
+}
+
+.tool-card.agent-activity-tool-card .tool-copy {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.tool-card.agent-activity-tool-card .tool-title {
+  flex: 0 0 auto;
+}
+
+.tool-card.agent-activity-tool-card .tool-summary {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: none;
+}
+
+.tool-card.agent-activity-tool-card.success .tool-status,
+.tool-card.agent-activity-tool-card.collapsed .tool-status {
+  display: none;
+}
+
+.tool-card.agent-activity-tool-card details[open] {
+  margin: 3px 0 5px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 6px 8px 8px;
+  background: var(--color-surface-raised);
+}
+
+.tool-card.agent-activity-tool-card details[open] > summary {
+  min-height: 24px;
+  padding: 0 0 5px;
+}
