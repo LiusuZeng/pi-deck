@@ -61,6 +61,140 @@ it("scrolls upward when an expanded detail starts above the timeline viewport", 
   ).toBe(-32);
 });
 
+describe("timeline presentation grouping", () => {
+  const user = (id: string) => ({
+    id,
+    kind: "user",
+    content: `prompt ${id}`,
+    createdAt: "10:00",
+  });
+  const assistant = (id: string) => ({
+    id,
+    kind: "assistant",
+    content: `answer ${id}`,
+    createdAt: "10:01",
+  });
+  const thinking = (id: string, streaming = false) => ({
+    id,
+    kind: "thinking",
+    content: "internal work",
+    createdAt: "10:01",
+    streaming,
+  });
+  const tool = (
+    id: string,
+    status: "running" | "success" | "error" | "collapsed" = "success",
+  ) => ({
+    id,
+    kind: "tool",
+    title: "read",
+    status,
+    summary: '{"title":"read","result":"raw"}',
+    details: '{"title":"read","result":"raw"}',
+    createdAt: "10:01",
+  });
+
+  it("groups consecutive tools and thinking between user and assistant messages", () => {
+    const grouped = __rendererTestHooks.timelinePresentationItems([
+      user("u1"),
+      tool("t1"),
+      thinking("th1"),
+      tool("t2"),
+      assistant("a1"),
+    ] as any) as any[];
+
+    expect(grouped.map((item) => item.kind)).toEqual([
+      "message",
+      "activity",
+      "message",
+    ]);
+    expect(grouped[1]).toMatchObject({
+      id: "agent-activity-t1",
+      state: "completed",
+    });
+    expect(grouped[1].items.map((item: any) => item.id)).toEqual([
+      "t1",
+      "th1",
+      "t2",
+    ]);
+  });
+
+  it("keeps separate turns and active trailing activity deterministic", () => {
+    const timeline = [
+      user("u1"),
+      tool("t1"),
+      assistant("a1"),
+      user("u2"),
+      thinking("th2", true),
+      tool("t2", "running"),
+    ] as any;
+    const grouped = __rendererTestHooks.timelinePresentationItems(
+      timeline,
+    ) as any[];
+
+    expect(
+      grouped
+        .filter((item) => item.kind === "activity")
+        .map((item) => ({ id: item.id, state: item.state })),
+    ).toEqual([
+      { id: "agent-activity-t1", state: "completed" },
+      { id: "agent-activity-th2", state: "running" },
+    ]);
+    expect(__rendererTestHooks.timelinePresentationItems(timeline)).toEqual(
+      grouped,
+    );
+  });
+
+  it("marks tool failures without hiding diagnostics in an activity group", () => {
+    const grouped = __rendererTestHooks.timelinePresentationItems([
+      user("u1"),
+      tool("t1", "error"),
+      {
+        id: "d1",
+        kind: "diagnostic",
+        tone: "error",
+        content: "Provider failed",
+        createdAt: "10:02",
+      },
+      assistant("a1"),
+    ] as any) as any[];
+
+    expect(grouped.map((item) => item.kind)).toEqual([
+      "message",
+      "activity",
+      "diagnostic",
+      "message",
+    ]);
+    expect(grouped[1]).toMatchObject({ state: "error" });
+    expect(grouped[2].item).toMatchObject({
+      kind: "diagnostic",
+      tone: "error",
+    });
+  });
+
+  it("uses conservative activity labels instead of raw serialized summaries", () => {
+    expect(__rendererTestHooks.activityStepLabel(tool("t1") as any)).toBe(
+      "Read",
+    );
+    expect(
+      __rendererTestHooks.activityStepLabel({
+        ...tool("t2"),
+        title: '{"tool":"read"}',
+      } as any),
+    ).toBe("Tool");
+    expect(
+      __rendererTestHooks.activityStepSummary(tool("t3") as any),
+    ).toBeUndefined();
+    expect(
+      __rendererTestHooks.activityStepSummary({
+        ...tool("t4"),
+        summary: "src/renderer/App.tsx",
+        details: "full details",
+      } as any),
+    ).toBe("src/renderer/App.tsx");
+  });
+});
+
 it("offers every active workflow workspace once and excludes archived workspaces", () => {
   const workspace = (id: string, name: string) => ({
     id,

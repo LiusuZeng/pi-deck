@@ -1281,10 +1281,15 @@ h1 {
   }
 }
 
-.thinking-row {
+.thinking-row,
+.agent-activity-row {
   max-width: min(920px, 90%);
   margin-left: 33px;
   color: #667085;
+}
+
+.agent-activity-row {
+  width: min(760px, calc(100% - 33px));
 }
 
 .thinking-row details {
@@ -1305,6 +1310,132 @@ h1 {
   margin: 8px 0 0;
   font-size: 13px;
   line-height: 1.45;
+}
+
+.agent-activity-group {
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-surface-subtle);
+}
+
+.agent-activity-row.running .agent-activity-group {
+  border-color: color-mix(in srgb, var(--color-info) 45%, var(--color-border));
+}
+
+.agent-activity-row.error .agent-activity-group {
+  border-color: color-mix(
+    in srgb,
+    var(--color-danger) 52%,
+    var(--color-border)
+  );
+  background: var(--color-danger-surface);
+}
+
+.agent-activity-group > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  cursor: pointer;
+}
+
+.agent-activity-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  flex: 1 1 auto;
+}
+
+.agent-activity-title {
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 760;
+}
+
+.agent-activity-latest {
+  overflow: hidden;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-activity-status {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-weight: 760;
+}
+
+.agent-activity-status.running {
+  color: var(--color-info);
+}
+
+.agent-activity-status.error {
+  color: var(--color-danger-fg);
+}
+
+.agent-activity-status.completed {
+  color: var(--color-success);
+}
+
+.agent-activity-steps {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0 9px 9px 34px;
+}
+
+.agent-activity-step {
+  min-width: 0;
+  padding-left: 4px;
+}
+
+.agent-activity-thinking {
+  border-left: 2px solid var(--color-border-strong);
+  padding: 3px 0 3px 8px;
+}
+
+.agent-activity-thinking summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.agent-activity-thinking p {
+  margin: 6px 0 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.agent-activity-step-mark {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  color: var(--color-text-muted);
+  background: var(--color-surface-muted);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.agent-activity-step-mark.running {
+  color: var(--color-info);
+}
+
+.agent-activity-step-mark.error {
+  color: var(--color-danger-fg);
+  background: var(--color-danger-surface);
 }
 
 .markdown-body {
@@ -1561,6 +1692,39 @@ h1 {
   background: #111827;
   overscroll-behavior: contain;
   white-space: pre-wrap;
+}
+
+.agent-activity-tool-card {
+  max-width: 100%;
+  margin-left: 0;
+  border-color: var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface-raised);
+  box-shadow: none;
+}
+
+.agent-activity-tool-card details {
+  padding: 6px 8px;
+}
+
+.agent-activity-tool-card summary {
+  gap: 8px;
+}
+
+.agent-activity-tool-card .tool-title {
+  color: var(--color-text);
+  font-size: 12px;
+}
+
+.agent-activity-tool-card .tool-summary {
+  max-width: 520px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.agent-activity-tool-card pre {
+  max-height: min(42vh, 420px);
+  font-size: 12px;
 }
 
 .composer {
@@ -1896,6 +2060,7 @@ h1 {
 .transcript-loading,
 .empty-state,
 .thinking-row,
+.agent-activity-row,
 .pending-agent-message,
 .stream-placeholder,
 .composer-meta,
@@ -2931,19 +3096,25 @@ summary::marker {
 }
 
 .thinking-row summary,
-.tool-card summary {
+.tool-card summary,
+.agent-activity-group > summary,
+.agent-activity-thinking summary {
   list-style: none;
 }
 
 .thinking-row .disclosure-chevron,
-.tool-card .disclosure-chevron {
+.tool-card .disclosure-chevron,
+.agent-activity-group .disclosure-chevron,
+.agent-activity-thinking .disclosure-chevron {
   flex: 0 0 auto;
   color: var(--color-text-muted);
   transition: transform 150ms ease;
 }
 
-.thinking-row details[open] .disclosure-chevron,
-.tool-card details[open] .disclosure-chevron {
+.thinking-row details[open] > summary .disclosure-chevron,
+.tool-card details[open] > summary .disclosure-chevron,
+.agent-activity-group[open] > summary .disclosure-chevron,
+.agent-activity-thinking[open] > summary .disclosure-chevron {
   transform: rotate(90deg);
 }
 
