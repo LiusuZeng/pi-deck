@@ -5,6 +5,53 @@ All notable changes to Pi Deck will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-08-26
+
+First dogfood stabilization release after Unified Work. This patch focuses on
+making daily supervision more reliable, spatially stable, and easier to read
+without changing the v0.6 product model.
+
+### Added
+
+- Added shell-style `ArrowUp` / `ArrowDown` prompt history for the current
+  session while preserving unsent drafts, native multiline caret movement,
+  modifier-key navigation, IME composition, and text-only recall semantics.
+- Added a compact **Agent activity** presentation that groups consecutive
+  thinking and tool execution beneath the conversational timeline while keeping
+  completed activity collapsed by default and failures inspectable.
+
+### Changed
+
+- Ordered Completed Work as a deterministic oldest-completed-first follow-up
+  queue using completion time instead of generic activity recency.
+- Kept same-status Work cards spatially stable while ordinary runtime progress
+  updates arrive, while still allowing meaningful status transitions to move
+  work between sections.
+- Made assistant responses visually primary over execution trace so tool-heavy
+  sessions are easier to scan without removing diagnostic transparency.
+
+### Fixed
+
+- Hardened workflow-owned Pi runtime lifecycle handling so public session close,
+  delete, reset, and workspace archive operations cannot race scheduler-owned
+  terminal persistence or retirement.
+- Kept expanded tool and subagent detail content fully scrollable above the
+  fixed composer, including resize and re-expansion cases.
+- Restored workspace overflow actions to a compact vertical menu with distinct,
+  usable targets instead of an overlapping horizontal layout.
+- Removed raw serialized tool payloads from the normal collapsed Agent activity
+  surface while retaining full details on demand.
+
+### Tests
+
+- Added deterministic unit, renderer, scheduler, and Electron regressions for
+  workflow runtime ownership, expanded-detail geometry, stable Work ordering,
+  workspace menu layout, Completed queue semantics, prompt-history boundaries,
+  and Agent activity grouping/failure visibility.
+- Verified the integrated patch set on the merged `main` candidate before
+  release preparation; final exact-main `verify:release` evidence remains
+  required before tagging.
+
 ## [0.6.0] - 2026-08-24
 
 Unified Work brings workspace navigation, cross-workspace supervision, and
@@ -429,7 +476,8 @@ coding-agent sessions.
   crash; persisted sessions can be reopened, but unsaved partial stream text may
   be lost.
 
-[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.5...v0.6.0
 [0.5.5]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.3...v0.5.4
