@@ -1509,7 +1509,7 @@ test("tool-heavy turns use a compact agent activity hierarchy", async () => {
     const activityGroup = page.locator(".agent-activity-group").first();
     const groupSummary = activityGroup.locator(":scope > summary");
     await expect(groupSummary).toContainText("Agent activity");
-    await expect(groupSummary).toContainText(/4 steps/);
+    await expect(groupSummary).toContainText(/60 steps/);
     await expect(groupSummary).not.toContainText("toolName");
     await expect(groupSummary).not.toContainText("renderer tests passed");
 
@@ -1517,7 +1517,7 @@ test("tool-heavy turns use a compact agent activity hierarchy", async () => {
       page.getByText("Fake response to: summarize after tool work"),
     ).toBeVisible();
     await expect(
-      page.getByLabel("Agent activity, 4 steps, completed"),
+      page.getByLabel("Agent activity, 60 steps, completed"),
     ).toBeVisible();
     await expect(activityGroup).not.toHaveAttribute("open", "");
 
@@ -1525,12 +1525,33 @@ test("tool-heavy turns use a compact agent activity hierarchy", async () => {
     await expect(groupSummary).toBeFocused();
     await page.keyboard.press("Enter");
     await expect(activityGroup).toHaveAttribute("open", "");
-    await expect(activityGroup.locator(".agent-activity-step")).toHaveCount(4);
+    await expect(activityGroup.locator(".agent-activity-step")).toHaveCount(60);
+    const compactToolCards = activityGroup.locator(".agent-activity-tool-card");
+    await expect(compactToolCards).toHaveCount(59);
+    await expect(compactToolCards.first()).toHaveCSS("border-top-width", "0px");
+    await expect(
+      compactToolCards.first().locator(".tool-summary"),
+    ).toBeHidden();
+    await expect(compactToolCards.first().locator(".tool-status")).toBeHidden();
+    await expect(activityGroup.locator(".agent-activity-steps")).toHaveCSS(
+      "overflow-y",
+      "auto",
+    );
+    const activityStepsBox = await activityGroup
+      .locator(".agent-activity-steps")
+      .boundingBox();
+    expect(
+      activityStepsBox?.height ?? Number.POSITIVE_INFINITY,
+    ).toBeLessThanOrEqual(570);
+    const compactHeights = await compactToolCards.evaluateAll((cards) =>
+      cards.slice(0, 12).map((card) => card.getBoundingClientRect().height),
+    );
+    expect(Math.max(...compactHeights)).toBeLessThanOrEqual(36);
     await expect(activityGroup.locator(".tool-card").first()).toBeVisible();
     await expect(activityGroup.getByText("Thinking…")).toHaveCount(0);
     await expect(activityGroup.getByText("Thought process")).toBeVisible();
     await expect(
-      activityGroup.getByText("Read", { exact: true }),
+      activityGroup.getByText("Read", { exact: true }).first(),
     ).toBeVisible();
     await expect(
       activityGroup.getByText("Search", { exact: true }),
