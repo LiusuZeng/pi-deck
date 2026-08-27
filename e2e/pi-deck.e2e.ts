@@ -4284,6 +4284,131 @@ test.describe("Unified Work", () => {
     }
   });
 
+  test("Unified Work orders Completed as a completion-time follow-up queue", async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "pi-deck-e2e-work-completed-queue-"),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    const userDataDir = path.join(root, "user-data");
+    fs.mkdirSync(projectCwd, { recursive: true });
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.mkdirSync(userDataDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(userDataDir, "settings.json"),
+      `${JSON.stringify({ maxRunningSessions: 12 })}\n`,
+    );
+
+    const { app, page } = await launchPiDeck(
+      fakeRealModeEnv({
+        root,
+        projectCwd,
+        agentDir,
+        userDataDir,
+        fakePiArgs: ["--stream-delay-ms", "800"],
+      }),
+    );
+    try {
+      await expectHealthyPreload(page);
+      await expectAllWorkLaunch(page);
+
+      const marker = `Completed queue ${Date.now()}`;
+      const alphaPrompt = `${marker} alpha`;
+      const betaPrompt = `${marker} beta`;
+      const alphaFollowUp = `${marker} alpha follow-up`;
+      const allWork = page.getByRole("button", { name: /^All Work/ });
+      const completedRow = (title: string) =>
+        page
+          .locator(".activity-inbox-row--completed")
+          .filter({ hasText: title });
+      const inProgressRow = (title: string) =>
+        page
+          .locator(".activity-inbox-row--inProgress")
+          .filter({ hasText: title });
+      const completedQueueTitles = () =>
+        page
+          .locator(".activity-inbox-row--completed .activity-inbox-row-title")
+          .evaluateAll(
+            (nodes, markerText) =>
+              nodes
+                .map((node) => node.textContent?.trim() ?? "")
+                .filter((title) => title.includes(markerText)),
+            marker,
+          );
+      const completedDateTime = async (title: string): Promise<number> => {
+        const dateTime = await completedRow(title)
+          .locator("time")
+          .getAttribute("datetime");
+        if (dateTime === null) throw new Error(`Missing time for ${title}.`);
+        return Date.parse(dateTime);
+      };
+
+      await enterSessionDetail(page);
+      await page.getByLabel("Prompt text").fill(alphaPrompt);
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect(page.getByRole("button", { name: "Abort" })).toBeVisible();
+
+      await allWork.click();
+      await expectAllWorkLaunch(page);
+      await enterSessionDetail(page);
+      await page.getByLabel("Prompt text").fill(betaPrompt);
+      await page.getByRole("button", { name: "Send" }).click();
+
+      await allWork.click();
+      await expectAllWorkLaunch(page);
+      await expect(completedRow(alphaPrompt)).toHaveCount(1, {
+        timeout: 10_000,
+      });
+      await expect(completedRow(betaPrompt)).toHaveCount(1, {
+        timeout: 10_000,
+      });
+      await expect
+        .poll(completedQueueTitles)
+        .toEqual([alphaPrompt, betaPrompt]);
+      await expect(completedRow(alphaPrompt)).toHaveAttribute(
+        "aria-label",
+        /Completed .+ View result\./,
+      );
+      const alphaCompletedAt = await completedDateTime(alphaPrompt);
+      const betaCompletedAt = await completedDateTime(betaPrompt);
+      expect(alphaCompletedAt).toBeLessThanOrEqual(betaCompletedAt);
+
+      // Opening a completed result for review must not mutate its queue slot.
+      await completedRow(betaPrompt).click();
+      await expect(
+        page.locator('.workspace[data-primary-view="session"]'),
+      ).toBeVisible();
+      await page.getByTestId("session-origin-back").click();
+      await expectAllWorkLaunch(page);
+      await expect
+        .poll(completedQueueTitles)
+        .toEqual([alphaPrompt, betaPrompt]);
+
+      // Sending a follow-up removes alpha from Completed, then its new terminal
+      // event gives it a fresh queue position behind beta.
+      await completedRow(alphaPrompt).click();
+      await page.getByLabel("Prompt text").fill(alphaFollowUp);
+      await page.getByRole("button", { name: "Send" }).click();
+      await allWork.click();
+      await expectAllWorkLaunch(page);
+      await expect(completedRow(alphaPrompt)).toHaveCount(0);
+      await expect(inProgressRow(alphaPrompt)).toHaveCount(1);
+      await expect(completedRow(betaPrompt)).toHaveCount(1);
+      await expect(completedRow(alphaPrompt)).toHaveCount(1, {
+        timeout: 10_000,
+      });
+      await expect
+        .poll(completedQueueTitles)
+        .toEqual([betaPrompt, alphaPrompt]);
+      expect(await completedDateTime(alphaPrompt)).toBeGreaterThan(
+        betaCompletedAt,
+      );
+    } finally {
+      await app.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("Unified Work retains scoped status filters through Session and Back", async () => {
     const root = fs.mkdtempSync(
       path.join(os.tmpdir(), "pi-deck-e2e-work-filter-state-"),

@@ -389,6 +389,9 @@ function sessionForActivityItem(
     status: "idle",
     updatedAt: formatRelativeTime(item.updatedAtMs),
     updatedAtMs: item.updatedAtMs,
+    ...(item.completedAtMs !== undefined
+      ? { completedAtMs: item.completedAtMs }
+      : {}),
     timeline: [],
     baseState: "idle",
     overlays: { ...emptyOverlays },
