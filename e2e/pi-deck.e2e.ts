@@ -1531,7 +1531,11 @@ test("tool-heavy turns use a compact agent activity hierarchy", async () => {
     await expect(compactToolCards.first()).toHaveCSS("border-top-width", "0px");
     await expect(
       compactToolCards.first().locator(".tool-summary"),
-    ).toBeHidden();
+    ).toBeVisible();
+    await expect(compactToolCards.first().locator(".tool-copy")).toHaveCSS(
+      "display",
+      "flex",
+    );
     await expect(compactToolCards.first().locator(".tool-status")).toBeHidden();
     await expect(activityGroup.locator(".agent-activity-steps")).toHaveCSS(
       "overflow-y",

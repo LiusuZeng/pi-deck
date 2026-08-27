@@ -6005,12 +6005,23 @@ body {
 }
 
 .tool-card.agent-activity-tool-card .tool-copy {
-  display: block;
+  display: flex;
+  flex: 1 1 auto;
   min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.tool-card.agent-activity-tool-card .tool-title {
+  flex: 0 0 auto;
 }
 
 .tool-card.agent-activity-tool-card .tool-summary {
-  display: none;
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: none;
 }
 
 .tool-card.agent-activity-tool-card.success .tool-status,
