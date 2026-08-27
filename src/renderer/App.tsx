@@ -252,6 +252,148 @@ type TimelineItem =
       createdAt: string;
     };
 
+type MessageTimelineItem = Extract<
+  TimelineItem,
+  { kind: "user" | "assistant" }
+>;
+type ActivityTimelineItem = Extract<
+  TimelineItem,
+  { kind: "thinking" | "tool" }
+>;
+type DiagnosticTimelineItem = Extract<TimelineItem, { kind: "diagnostic" }>;
+type AgentActivityState = "running" | "completed" | "error";
+
+type TimelinePresentationItem =
+  | { kind: "message"; item: MessageTimelineItem }
+  | {
+      kind: "activity";
+      id: string;
+      items: ActivityTimelineItem[];
+      state: AgentActivityState;
+    }
+  | { kind: "diagnostic"; item: DiagnosticTimelineItem };
+
+function timelinePresentationItems(
+  items: readonly TimelineItem[],
+): TimelinePresentationItem[] {
+  const presentationItems: TimelinePresentationItem[] = [];
+  let pendingActivity: ActivityTimelineItem[] = [];
+
+  function flushActivity(): void {
+    const firstActivityItem = pendingActivity[0];
+    if (firstActivityItem === undefined) {
+      return;
+    }
+    const activityItems = pendingActivity;
+    pendingActivity = [];
+    presentationItems.push({
+      kind: "activity",
+      id: `agent-activity-${firstActivityItem.id}`,
+      items: activityItems,
+      state: agentActivityState(activityItems),
+    });
+  }
+
+  items.forEach((item) => {
+    if (isActivityTimelineItem(item)) {
+      pendingActivity.push(item);
+      return;
+    }
+
+    flushActivity();
+    if (item.kind === "diagnostic") {
+      presentationItems.push({ kind: "diagnostic", item });
+      return;
+    }
+    presentationItems.push({ kind: "message", item });
+  });
+
+  flushActivity();
+  return presentationItems;
+}
+
+function isActivityTimelineItem(
+  item: TimelineItem,
+): item is ActivityTimelineItem {
+  return item.kind === "thinking" || item.kind === "tool";
+}
+
+function agentActivityState(
+  items: readonly ActivityTimelineItem[],
+): AgentActivityState {
+  if (items.some((item) => item.kind === "tool" && item.status === "error")) {
+    return "error";
+  }
+  if (
+    items.some(
+      (item) =>
+        (item.kind === "tool" && item.status === "running") ||
+        (item.kind === "thinking" && item.streaming === true),
+    )
+  ) {
+    return "running";
+  }
+  return "completed";
+}
+
+function latestActivityItem(
+  items: readonly ActivityTimelineItem[],
+): ActivityTimelineItem | undefined {
+  return items[items.length - 1];
+}
+
+function activityStepLabel(item: ActivityTimelineItem): string {
+  if (item.kind === "thinking") {
+    return item.streaming === true ? "Thinking…" : "Thought process";
+  }
+
+  const title = item.title.trim();
+  if (title.length === 0 || looksSerialized(title)) {
+    return "Tool";
+  }
+
+  const normalized = title
+    .toLowerCase()
+    .replace(/[_.-]+/g, " ")
+    .trim();
+  const knownLabels: Record<string, string> = {
+    bash: "Bash",
+    command: "Command",
+    edit: "Edit",
+    "edit file": "Edit file",
+    grep: "Search",
+    read: "Read",
+    "read file": "Read file",
+    search: "Search",
+    subagent: "Subagent",
+    tool: "Tool",
+    write: "Write file",
+  };
+  return knownLabels[normalized] ?? title;
+}
+
+function activityStepSummary(item: ActivityTimelineItem): string | undefined {
+  if (item.kind === "thinking") {
+    return undefined;
+  }
+
+  const summary = item.summary.trim();
+  if (
+    summary.length === 0 ||
+    looksSerialized(summary) ||
+    summary === item.details.trim() ||
+    summary === item.title.trim()
+  ) {
+    return undefined;
+  }
+  return summary;
+}
+
+function looksSerialized(value: string): boolean {
+  const trimmed = value.trim();
+  return trimmed.startsWith("{") || trimmed.startsWith("[");
+}
+
 interface UsageStats {
   inputTokens: number;
   outputTokens: number;
@@ -6804,9 +6946,10 @@ function parseToolPayload(
     };
   }
   if (typeof record.tool === "string" || typeof record.name === "string") {
+    const toolName = String(record.tool ?? record.name);
     return {
-      title: String(record.tool ?? record.name),
-      summary: summarizeToolDetails(details, 180),
+      title: toolName,
+      summary: toolName,
       details,
     };
   }
@@ -7464,11 +7607,7 @@ function toolTimelineItemFromRuntimeEvent(
   const output = getString(event, "output");
   const command = getStringFromRecord(args, "command");
   const path = getStringFromRecord(args, "path");
-  const summary =
-    command ??
-    path ??
-    output ??
-    summarizeToolDetails(JSON.stringify({ title, args, result }, null, 2), 180);
+  const summary = command ?? path ?? title;
   const details = safeToolDetails(
     JSON.stringify(
       {
@@ -9854,6 +9993,13 @@ function ChatTimeline(props: {
   const pendingDetailsRevealFrameRef = useRef<number | null>(null);
   const openedDetailsResizeObserverRef = useRef<ResizeObserver | null>(null);
   const openedDetailsRevealIntervalRef = useRef<number | null>(null);
+  const [activityDisclosureById, setActivityDisclosureById] = useState<
+    Record<string, boolean>
+  >({});
+  const presentationItems = useMemo(
+    () => timelinePresentationItems(props.session.timeline),
+    [props.session.timeline],
+  );
   const timelineScrollMarker = getTimelineScrollMarker(props.session);
 
   useLayoutEffect(() => {
@@ -10005,6 +10151,10 @@ function ChatTimeline(props: {
   }
 
   useEffect(() => {
+    setActivityDisclosureById({});
+  }, [props.session.id]);
+
+  useEffect(() => {
     function handleResize(): void {
       const detailsElement = openedTimelineDetailsRef.current;
       if (detailsElement !== null && detailsElement.open) {
@@ -10029,6 +10179,64 @@ function ChatTimeline(props: {
       return;
     }
     shouldStickToBottomRef.current = isScrolledNearBottom(scrollContainer);
+  }
+
+  function handleActivityToggle(
+    event: SyntheticEvent<HTMLDetailsElement>,
+  ): void {
+    if (event.target !== event.currentTarget) {
+      return;
+    }
+    handleTimelineDetailsToggle(event);
+  }
+
+  function setManualActivityDisclosure(
+    activityId: string,
+    open: boolean,
+  ): void {
+    setActivityDisclosureById((current) => ({
+      ...current,
+      [activityId]: open,
+    }));
+  }
+
+  function handleActivitySummaryClick(
+    activityId: string,
+    open: boolean,
+    event: ReactMouseEvent<HTMLElement>,
+  ): void {
+    event.preventDefault();
+    setManualActivityDisclosure(activityId, !open);
+    handleTimelineDetailsSummaryClick(event);
+  }
+
+  function handleActivitySummaryKeyDown(
+    activityId: string,
+    open: boolean,
+    event: KeyboardEvent<HTMLElement>,
+  ): void {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      setManualActivityDisclosure(activityId, !open);
+    }
+  }
+
+  function handleActivityFocus(activityId: string): void {
+    setActivityDisclosureById((current) =>
+      current[activityId] === true
+        ? current
+        : { ...current, [activityId]: true },
+    );
+  }
+
+  function isActivityOpen(
+    item: Extract<TimelinePresentationItem, { kind: "activity" }>,
+  ): boolean {
+    const manualDisclosure = activityDisclosureById[item.id];
+    if (manualDisclosure !== undefined) {
+      return manualDisclosure;
+    }
+    return item.state !== "completed";
   }
 
   return (
@@ -10099,14 +10307,44 @@ function ChatTimeline(props: {
           />
         ))}
 
-        {props.session.timeline.map((item) => (
-          <TimelineRow
-            key={item.id}
-            item={item}
-            onDetailsSummaryClick={handleTimelineDetailsSummaryClick}
-            onDetailsToggle={handleTimelineDetailsToggle}
-          />
-        ))}
+        {presentationItems.map((item) => {
+          if (item.kind === "activity") {
+            return (
+              <AgentActivityGroup
+                key={item.id}
+                group={item}
+                open={isActivityOpen(item)}
+                onGroupFocus={() => handleActivityFocus(item.id)}
+                onGroupSummaryClick={(event) =>
+                  handleActivitySummaryClick(
+                    item.id,
+                    isActivityOpen(item),
+                    event,
+                  )
+                }
+                onGroupSummaryKeyDown={(event) =>
+                  handleActivitySummaryKeyDown(
+                    item.id,
+                    isActivityOpen(item),
+                    event,
+                  )
+                }
+                onGroupToggle={handleActivityToggle}
+                onDetailsSummaryClick={handleTimelineDetailsSummaryClick}
+                onDetailsToggle={handleTimelineDetailsToggle}
+              />
+            );
+          }
+
+          return (
+            <TimelineRow
+              key={item.item.id}
+              item={item.item}
+              onDetailsSummaryClick={handleTimelineDetailsSummaryClick}
+              onDetailsToggle={handleTimelineDetailsToggle}
+            />
+          );
+        })}
         {showPendingAgent ? (
           <PendingAgentRow session={props.session} nowMs={props.nowMs} />
         ) : null}
@@ -10299,6 +10537,189 @@ function ExtensionUiCard(props: {
       ) : null}
     </article>
   );
+}
+
+function AgentActivityGroup(props: {
+  group: Extract<TimelinePresentationItem, { kind: "activity" }>;
+  open: boolean;
+  onGroupFocus(): void;
+  onGroupSummaryClick(event: ReactMouseEvent<HTMLElement>): void;
+  onGroupSummaryKeyDown(event: KeyboardEvent<HTMLElement>): void;
+  onGroupToggle(event: SyntheticEvent<HTMLDetailsElement>): void;
+  onDetailsSummaryClick(event: ReactMouseEvent<HTMLElement>): void;
+  onDetailsToggle(event: SyntheticEvent<HTMLDetailsElement>): void;
+}): ReactElement {
+  const { group } = props;
+  const latest = latestActivityItem(group.items);
+  const stateLabel = formatAgentActivityState(group.state);
+  const stepCount = group.items.length;
+  const ariaLabel = `Agent activity, ${stepCount} ${stepCount === 1 ? "step" : "steps"}, ${stateLabel}`;
+
+  return (
+    <article className={`agent-activity-row ${group.state}`}>
+      <details
+        className="agent-activity-group"
+        open={props.open}
+        onFocusCapture={() => {
+          if (group.state !== "completed" && props.open) {
+            props.onGroupFocus();
+          }
+        }}
+        onToggle={props.onGroupToggle}
+      >
+        <summary
+          aria-label={ariaLabel}
+          onClick={props.onGroupSummaryClick}
+          onKeyDown={props.onGroupSummaryKeyDown}
+        >
+          <ChevronRight
+            aria-hidden="true"
+            className="disclosure-chevron"
+            size={16}
+            strokeWidth={1.75}
+          />
+          <span className="agent-activity-copy">
+            <span className="agent-activity-title">
+              Agent activity · {formatInteger(stepCount)}{" "}
+              {stepCount === 1 ? "step" : "steps"}
+            </span>
+            {latest !== undefined ? (
+              <span className="agent-activity-latest">
+                Latest: {activityStepLabel(latest)}
+              </span>
+            ) : null}
+          </span>
+          <AgentActivityStatus state={group.state} />
+        </summary>
+        <ol className="agent-activity-steps">
+          {group.items.map((item) => (
+            <AgentActivityStep
+              item={item}
+              key={item.id}
+              onDetailsSummaryClick={props.onDetailsSummaryClick}
+              onDetailsToggle={props.onDetailsToggle}
+            />
+          ))}
+        </ol>
+      </details>
+    </article>
+  );
+}
+
+function AgentActivityStatus(props: {
+  state: AgentActivityState;
+}): ReactElement {
+  const Icon =
+    props.state === "running"
+      ? LoaderCircle
+      : props.state === "error"
+        ? CircleAlert
+        : Check;
+  return (
+    <span className={`agent-activity-status ${props.state}`}>
+      <Icon aria-hidden="true" size={14} strokeWidth={1.75} />
+      {formatAgentActivityState(props.state)}
+    </span>
+  );
+}
+
+function AgentActivityStep(props: {
+  item: ActivityTimelineItem;
+  onDetailsSummaryClick(event: ReactMouseEvent<HTMLElement>): void;
+  onDetailsToggle(event: SyntheticEvent<HTMLDetailsElement>): void;
+}): ReactElement {
+  if (props.item.kind === "thinking") {
+    return (
+      <li className="agent-activity-step thinking">
+        <details
+          className="agent-activity-thinking"
+          onToggle={props.onDetailsToggle}
+        >
+          <summary onClick={props.onDetailsSummaryClick}>
+            <ActivityStepMark item={props.item} />
+            <span>{activityStepLabel(props.item)}</span>
+            <ChevronRight
+              aria-hidden="true"
+              className="disclosure-chevron"
+              size={16}
+              strokeWidth={1.75}
+            />
+          </summary>
+          <p>{props.item.content}</p>
+        </details>
+      </li>
+    );
+  }
+
+  const summary = activityStepSummary(props.item);
+  return (
+    <li className="agent-activity-step tool">
+      <article
+        className={`tool-card agent-activity-tool-card ${props.item.status}`}
+      >
+        <details onToggle={props.onDetailsToggle}>
+          <summary onClick={props.onDetailsSummaryClick}>
+            <ActivityStepMark item={props.item} />
+            <span className="tool-copy">
+              <span className="tool-title">
+                {activityStepLabel(props.item)}
+              </span>
+              {summary !== undefined ? (
+                <span className="tool-summary">{summary}</span>
+              ) : null}
+            </span>
+            <ToolStatus status={props.item.status} />
+            <ChevronRight
+              aria-hidden="true"
+              className="disclosure-chevron"
+              size={16}
+              strokeWidth={1.75}
+            />
+          </summary>
+          <pre>{props.item.details}</pre>
+        </details>
+      </article>
+    </li>
+  );
+}
+
+function ActivityStepMark(props: { item: ActivityTimelineItem }): ReactElement {
+  if (props.item.kind === "thinking") {
+    return (
+      <span
+        className={`agent-activity-step-mark ${props.item.streaming === true ? "running" : "success"}`}
+        aria-hidden="true"
+      >
+        {props.item.streaming === true ? "◌" : "✓"}
+      </span>
+    );
+  }
+
+  const mark =
+    props.item.status === "running"
+      ? "▶"
+      : props.item.status === "error"
+        ? "!"
+        : "✓";
+  return (
+    <span
+      className={`agent-activity-step-mark ${props.item.status}`}
+      aria-hidden="true"
+    >
+      {mark}
+    </span>
+  );
+}
+
+function formatAgentActivityState(state: AgentActivityState): string {
+  switch (state) {
+    case "running":
+      return "working";
+    case "error":
+      return "needs attention";
+    case "completed":
+      return "completed";
+  }
 }
 
 function TimelineRow(props: {
@@ -11943,4 +12364,7 @@ export const __rendererTestHooks = {
   draftSessionForWorkspace,
   draftSessionForProject,
   timelineDetailsRevealScrollDelta,
+  timelinePresentationItems,
+  activityStepLabel,
+  activityStepSummary,
 };
