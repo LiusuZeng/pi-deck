@@ -70,7 +70,7 @@ describe("buildActivityInbox", () => {
     );
   });
 
-  it("preserves source order within a status instead of sorting by recency", () => {
+  it("preserves source order within active statuses instead of sorting by recency", () => {
     const inbox = buildActivityInbox([
       source("older-working", { baseState: "working", updatedAtMs: 100 }),
       source("newer-working", { baseState: "working", updatedAtMs: 200 }),
@@ -92,6 +92,81 @@ describe("buildActivityInbox", () => {
       "older-working",
       "newer-working",
     ]);
+  });
+
+  it("orders Completed as a FIFO queue by completedAtMs, not updatedAtMs", () => {
+    const inbox = buildActivityInbox([
+      source("updated-newest", { completedAtMs: 300, updatedAtMs: 900 }),
+      source("completed-oldest", { completedAtMs: 100, updatedAtMs: 500 }),
+      source("completed-middle", { completedAtMs: 200, updatedAtMs: 100 }),
+    ]);
+
+    expect(inbox.groups.completed.map((item) => item.sessionKey)).toEqual([
+      "completed-oldest",
+      "completed-middle",
+      "updated-newest",
+    ]);
+    expect(inbox.groups.completed.map((item) => item.completedAtMs)).toEqual([
+      100, 200, 300,
+    ]);
+  });
+
+  it("does not reorder Completed when only generic updatedAtMs changes", () => {
+    const initial = buildActivityInbox([
+      source("first", { completedAtMs: 100, updatedAtMs: 100 }),
+      source("second", { completedAtMs: 200, updatedAtMs: 200 }),
+    ]);
+    const refreshed = buildActivityInbox([
+      source("first", { completedAtMs: 100, updatedAtMs: 900 }),
+      source("second", { completedAtMs: 200, updatedAtMs: 50 }),
+    ]);
+
+    expect(initial.groups.completed.map((item) => item.sessionKey)).toEqual([
+      "first",
+      "second",
+    ]);
+    expect(refreshed.groups.completed.map((item) => item.sessionKey)).toEqual([
+      "first",
+      "second",
+    ]);
+  });
+
+  it("inserts newly Completed work by completion time with deterministic ties", () => {
+    const inbox = buildActivityInbox([
+      source("later", { completedAtMs: 300, updatedAtMs: 300 }),
+      source("tie-b", { completedAtMs: 200, updatedAtMs: 200 }),
+      source("tie-a", { completedAtMs: 200, updatedAtMs: 900 }),
+      source("new-middle", { completedAtMs: 250, updatedAtMs: 250 }),
+      source("earlier", { completedAtMs: 100, updatedAtMs: 100 }),
+    ]);
+
+    expect(inbox.groups.completed.map((item) => item.sessionKey)).toEqual([
+      "earlier",
+      "tie-a",
+      "tie-b",
+      "new-middle",
+      "later",
+    ]);
+  });
+
+  it("uses the same Completed queue ordering in All Work and workspace scopes", () => {
+    const fixture = [
+      source("atlas-late", { completedAtMs: 300, workspaceId: "atlas" }),
+      source("atlas-early", { completedAtMs: 100, workspaceId: "atlas" }),
+      source("borealis", { completedAtMs: 200, workspaceId: "borealis" }),
+    ];
+
+    expect(
+      buildActivityInbox(fixture).groups.completed.map(
+        (item) => item.sessionKey,
+      ),
+    ).toEqual(["atlas-early", "borealis", "atlas-late"]);
+    expect(
+      buildActivityInbox(
+        fixture,
+        tagsForScope({ type: "workspace", workspaceId: "atlas" }),
+      ).groups.completed.map((item) => item.sessionKey),
+    ).toEqual(["atlas-early", "atlas-late"]);
   });
 
   it("keeps precedence exclusive: attention, failure, pending, progress, completion", () => {
@@ -130,6 +205,42 @@ describe("buildActivityInbox", () => {
         source("working-done", { baseState: "working", completedAtMs: 1 }),
       ),
     ).toBe("inProgress");
+  });
+
+  it("moves Completed work out of the queue when a follow-up is pending", () => {
+    const inbox = buildActivityInbox([
+      source("follow-up", {
+        completedAtMs: 100,
+        overlays: overlays({ piQueuedFollowUpCount: 1 }),
+      }),
+      source("completed", { completedAtMs: 200 }),
+    ]);
+
+    expect(inbox.groups.completed.map((item) => item.sessionKey)).toEqual([
+      "completed",
+    ]);
+    expect(inbox.groups.pending.map((item) => item.sessionKey)).toEqual([
+      "follow-up",
+    ]);
+    expect(inbox.groups.pending[0]?.completedAtMs).toBeUndefined();
+  });
+
+  it("uses a fresh completion timestamp when follow-up work completes again", () => {
+    const beforeFollowUp = buildActivityInbox([
+      source("existing", { completedAtMs: 200 }),
+      source("follow-up", { completedAtMs: 100 }),
+    ]);
+    const afterFollowUp = buildActivityInbox([
+      source("existing", { completedAtMs: 200 }),
+      source("follow-up", { completedAtMs: 300 }),
+    ]);
+
+    expect(
+      beforeFollowUp.groups.completed.map((item) => item.sessionKey),
+    ).toEqual(["follow-up", "existing"]);
+    expect(
+      afterFollowUp.groups.completed.map((item) => item.sessionKey),
+    ).toEqual(["existing", "follow-up"]);
   });
 
   it("classifies idle sessions after completion precedence and skips drafts", () => {

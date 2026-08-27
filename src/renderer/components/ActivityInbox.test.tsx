@@ -576,6 +576,38 @@ describe("ActivityInbox", () => {
     expect(row?.dataset.activityItemId).toBe("needsAttention-attention");
   });
 
+  it("shows the Completed row timestamp from completedAtMs", () => {
+    const now = 1_700_000_600_000;
+    const completedAtMs = now - 300_000;
+    const updatedAtMs = now - 60_000;
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(now);
+    const model = buildActivityInbox([
+      sourceSession("done", {
+        title: "Done session",
+        completedAtMs,
+        updatedAtMs,
+      }),
+    ]);
+
+    const { view } = renderInbox(
+      model,
+      { type: "all" },
+      vi.fn(),
+      vi.fn(),
+      workspaces,
+      vi.fn(),
+      "completed",
+    );
+    const row = rowForTitle(view, "Done session");
+    const time = row?.querySelector("time");
+
+    expect(row?.getAttribute("aria-label")).toContain("Completed 5m ago");
+    expect(time?.textContent).toBe("5m ago");
+    expect(time?.dateTime).toBe(new Date(completedAtMs).toISOString());
+    expect(time?.dateTime).not.toBe(new Date(updatedAtMs).toISOString());
+    nowSpy.mockRestore();
+  });
+
   it("activates a full row once by click, Enter, or Space with its canonical item", () => {
     const onOpenActivityItem = vi.fn();
     const model = modelWithEveryKind();

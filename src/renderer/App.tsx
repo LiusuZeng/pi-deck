@@ -58,6 +58,15 @@ import {
   type BaseSessionState,
   type SessionOverlays,
 } from "./sessionState.js";
+import {
+  canNavigatePromptHistoryDown,
+  canNavigatePromptHistoryUp,
+  initialPromptHistoryState,
+  navigatePromptHistory,
+  promptHistoryDirectionForKeyEvent,
+  submittedPromptHistory,
+  type PromptHistoryState,
+} from "./promptHistory.js";
 import { Button } from "./components/ui/Button.js";
 import { IconButton } from "./components/ui/IconButton.js";
 import { MultitaskControl } from "./components/multitask/MultitaskControl.js";
@@ -531,6 +540,9 @@ function sessionForActivityItem(
     status: "idle",
     updatedAt: formatRelativeTime(item.updatedAtMs),
     updatedAtMs: item.updatedAtMs,
+    ...(item.completedAtMs !== undefined
+      ? { completedAtMs: item.completedAtMs }
+      : {}),
     timeline: [],
     baseState: "idle",
     overlays: { ...emptyOverlays },
@@ -1107,6 +1119,9 @@ export function App(): ReactElement {
   const reconcilingRuntimeIds = useRef(new Set<string>());
   const sessionsRef = useRef<SessionViewModel[]>([]);
   const composerDraftsRef = useRef<ComposerDraftsBySession>({});
+  const promptHistoryStateRef = useRef<PromptHistoryState>(
+    initialPromptHistoryState(),
+  );
   // Stable session IDs can reappear after project switches/reloads, so each
   // composer incarnation gets a unique, one-use attachment owner generation.
   const attachmentOwnersBySession = useRef(new Map<string, string>());
@@ -1715,6 +1730,11 @@ export function App(): ReactElement {
     sessions.find((session) => session.id === selectedSessionId) ??
     sessions[0] ??
     loadingSession;
+
+  useEffect(() => {
+    promptHistoryStateRef.current = initialPromptHistoryState();
+  }, [selectedSession.id]);
+
   const activityWorkspaces = useMemo(
     () => [
       currentWorkspace,
@@ -2316,6 +2336,40 @@ export function App(): ReactElement {
   function handleComposerKeyDown(
     event: KeyboardEvent<HTMLTextAreaElement>,
   ): void {
+    const historyDirection = promptHistoryDirectionForKeyEvent(event);
+    if (historyDirection !== undefined) {
+      const target = event.currentTarget;
+      const canNavigate =
+        historyDirection === "up"
+          ? canNavigatePromptHistoryUp(target)
+          : canNavigatePromptHistoryDown(target);
+      if (canNavigate) {
+        const navigation = navigatePromptHistory(
+          promptHistoryStateRef.current,
+          submittedPromptHistory(selectedSession.timeline),
+          target.value,
+          historyDirection,
+        );
+        if (navigation !== undefined) {
+          event.preventDefault();
+          promptHistoryStateRef.current = navigation.state;
+          setComposerDrafts((items) =>
+            updateComposerDraft(items, selectedSession.id, (current) => ({
+              ...current,
+              text: navigation.text,
+              slashOpen: false,
+            })),
+          );
+          window.requestAnimationFrame(() => {
+            const caret =
+              historyDirection === "up" ? 0 : navigation.text.length;
+            target.setSelectionRange(caret, caret);
+          });
+          return;
+        }
+      }
+    }
+
     if (
       event.key !== "Enter" ||
       event.shiftKey ||
@@ -2342,6 +2396,7 @@ export function App(): ReactElement {
   }
 
   function handleDraftChange(value: string): void {
+    promptHistoryStateRef.current = initialPromptHistoryState();
     setComposerDrafts((items) =>
       updateComposerDraft(items, selectedSession.id, (current) => ({
         ...current,
@@ -3004,6 +3059,7 @@ export function App(): ReactElement {
     if (!canSend && !canSendTask) {
       return;
     }
+    promptHistoryStateRef.current = initialPromptHistoryState();
     const prompt = draft.trimEnd();
     const promptAttachments = attachments;
     const validationError = validateComposerInput({
@@ -5136,6 +5192,7 @@ export function App(): ReactElement {
 
   function handleSelectCommand(command: SlashCommand): void {
     const inserted = command.insertText ?? `${command.name} `;
+    promptHistoryStateRef.current = initialPromptHistoryState();
     setComposerDrafts((items) =>
       updateComposerDraft(items, selectedSession.id, (current) => ({
         ...current,

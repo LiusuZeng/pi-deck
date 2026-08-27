@@ -61,6 +61,28 @@ function formatTimestamp(timestamp: number): string {
   }).format(new Date(timestamp));
 }
 
+function finiteTimestamp(timestamp: number | undefined): number | undefined {
+  return timestamp !== undefined && Number.isFinite(timestamp)
+    ? timestamp
+    : undefined;
+}
+
+function activityRowTimestamp(item: ActivityItem): number {
+  const completedAtMs = finiteTimestamp(item.completedAtMs);
+  return item.status === "completed" && completedAtMs !== undefined
+    ? completedAtMs
+    : item.updatedAtMs;
+}
+
+function activityRowTimestampLabel(
+  item: ActivityItem,
+): "Completed" | "Updated" {
+  return item.status === "completed" &&
+    finiteTimestamp(item.completedAtMs) !== undefined
+    ? "Completed"
+    : "Updated";
+}
+
 function workScopeLabel(
   scope: ActivityScope,
   workspaceName: string | undefined,
@@ -137,8 +159,8 @@ export function ActivityInbox({
     scope.type === "all"
       ? "Monitor work across active workspaces and jump to sessions that need you."
       : "Monitor work in this workspace and jump to sessions that need you.";
-  // Preserve model order within a status: updatedAtMs remains visible recency
-  // metadata, but must not be a live layout key for active Work supervision.
+  // Preserve domain model order within a status. Active supervision statuses
+  // retain stable source order; Completed is already queued by completion time.
   const groups = useMemo(
     () =>
       ACTIVITY_STATUSES.reduce(
@@ -362,7 +384,9 @@ function ActivityRow({
 }) {
   const kind = item.status;
   const { Icon, label } = ACTIVITY_META[kind];
-  const relativeTime = formatRelativeTime(item.updatedAtMs);
+  const timestampMs = activityRowTimestamp(item);
+  const timestampLabel = activityRowTimestampLabel(item);
+  const relativeTime = formatRelativeTime(timestampMs);
   const workspaceContext = showWorkspaceContext
     ? `, ${item.workspaceName}`
     : "";
@@ -376,7 +400,7 @@ function ActivityRow({
 
   return (
     <button
-      aria-label={`${label}: ${item.title}${workspaceContext}. ${item.detail}. Updated ${relativeTime}. ${item.actionLabel}.`}
+      aria-label={`${label}: ${item.title}${workspaceContext}. ${item.detail}. ${timestampLabel} ${relativeTime}. ${item.actionLabel}.`}
       className={`activity-inbox-row activity-inbox-row--${kind}`}
       data-activity-item-id={item.id}
       onClick={activate}
@@ -398,8 +422,8 @@ function ActivityRow({
       </span>
       <span className="activity-inbox-row-meta">
         <time
-          dateTime={new Date(item.updatedAtMs).toISOString()}
-          title={formatTimestamp(item.updatedAtMs)}
+          dateTime={new Date(timestampMs).toISOString()}
+          title={formatTimestamp(timestampMs)}
         >
           {relativeTime}
         </time>

@@ -78,6 +78,7 @@ export interface ActivityItem {
   title: string;
   detail: string;
   updatedAtMs: number;
+  completedAtMs?: number;
   actionLabel: string;
 }
 
@@ -122,8 +123,13 @@ export function buildActivityInbox(
   for (const item of items) {
     groups[item.status].push(item);
   }
-  // Keep activity recency display-only. Preserving source order within a
-  // status prevents ordinary progress updates from reshuffling Work cards.
+  // Keep activity recency display-only for active supervision statuses.
+  // Completed is an explicit follow-up queue ordered by completion time.
+  for (const status of ACTIVITY_STATUSES) {
+    groups[status].sort((left, right) =>
+      compareActivityItemsForStatus(status, left, right),
+    );
+  }
   const counts = countActivityStatuses(items);
   const orderedItems = ACTIVITY_STATUSES.flatMap((status) => groups[status]);
 
@@ -196,6 +202,32 @@ export function classifyActivity(
   return source.baseState === "idle" ? "idle" : undefined;
 }
 
+export function compareActivityItemsForStatus(
+  status: ActivityStatus,
+  left: ActivityItem,
+  right: ActivityItem,
+): number {
+  if (status !== "completed") {
+    return 0;
+  }
+  const leftCompletedAtMs = finiteTimestamp(left.completedAtMs);
+  const rightCompletedAtMs = finiteTimestamp(right.completedAtMs);
+  if (
+    leftCompletedAtMs !== undefined &&
+    rightCompletedAtMs !== undefined &&
+    leftCompletedAtMs !== rightCompletedAtMs
+  ) {
+    return leftCompletedAtMs - rightCompletedAtMs;
+  }
+  if (leftCompletedAtMs !== undefined && rightCompletedAtMs === undefined) {
+    return -1;
+  }
+  if (leftCompletedAtMs === undefined && rightCompletedAtMs !== undefined) {
+    return 1;
+  }
+  return left.id.localeCompare(right.id);
+}
+
 export function countActivityStatuses(
   items: readonly ActivityItem[],
 ): Record<ActivityStatus, number> {
@@ -230,6 +262,8 @@ function normalizeActivity(source: ActivitySourceSession): ActivityItem[] {
     return [];
   }
   const sessionKey = source.sessionFile ?? source.id;
+  const completedAtMs =
+    status === "completed" ? finiteTimestamp(source.completedAtMs) : undefined;
   return [
     {
       id: `activity:${source.workspaceId}:${sessionKey}`,
@@ -250,6 +284,7 @@ function normalizeActivity(source: ActivitySourceSession): ActivityItem[] {
       title: source.title,
       detail: activityDetail(source, status),
       updatedAtMs: source.updatedAtMs,
+      ...(completedAtMs === undefined ? {} : { completedAtMs }),
       actionLabel: actionLabels[status],
     },
   ];
@@ -300,7 +335,11 @@ function isInProgress(source: ActivitySourceSession): boolean {
 }
 
 function hasCompletionTimestamp(value: number | undefined): boolean {
-  return value !== undefined && Number.isFinite(value);
+  return finiteTimestamp(value) !== undefined;
+}
+
+function finiteTimestamp(value: number | undefined): number | undefined {
+  return value !== undefined && Number.isFinite(value) ? value : undefined;
 }
 
 function activityDetail(
