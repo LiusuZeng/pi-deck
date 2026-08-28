@@ -166,6 +166,45 @@ describe("ActivityInbox", () => {
     expect(view.querySelector("h1")?.getAttribute("tabindex")).toBe("-1");
   });
 
+  it("shows expandable workspace usage with partial cost wording", () => {
+    const { view } = renderInbox(modelWithEveryKind(), {
+      type: "workspace",
+      workspaceId: workspaces[0]!.id,
+    });
+
+    act(() => {
+      root?.render(
+        <ActivityInbox
+          model={modelWithEveryKind()}
+          onOpenActivityItem={vi.fn()}
+          onScopeChange={vi.fn()}
+          onSelectedFilterChange={vi.fn()}
+          selectedFilter="all"
+          onNewSession={vi.fn()}
+          scope={{ type: "workspace", workspaceId: workspaces[0]!.id }}
+          usage={{
+            inputTokens: 1_400,
+            outputTokens: 300,
+            cacheReadTokens: 600,
+            cacheWriteTokens: 10,
+            totalTokens: 2_310,
+            knownCostUsd: 0.18,
+            contributorsWithCost: 1,
+            contributorsWithoutCost: 2,
+          }}
+          workspaces={workspaces}
+        />,
+      );
+    });
+
+    expect(view.querySelector(".activity-inbox-usage")?.textContent).toContain(
+      "2.31K tokens",
+    );
+    expect(view.querySelector(".activity-inbox-usage")?.textContent).toContain(
+      "2 executions without cost data",
+    );
+  });
+
   it("keeps default-only Work free of workspace presentation mechanics", () => {
     const { view } = renderInbox(
       modelWithEveryKind(),

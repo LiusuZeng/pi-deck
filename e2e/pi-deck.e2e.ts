@@ -346,6 +346,145 @@ test("workspace overflow menu remains compact and vertical with a long workspace
   }
 });
 
+test("Workspace Work displays durable usage across relaunch, move, and delete", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-workspace-usage-"),
+  );
+  const projectCwd = path.join(root, "authorized-project");
+  const agentDir = path.join(root, "agent");
+  const sessionFile = path.join(
+    agentDir,
+    "sessions",
+    "--usage--",
+    "usage.jsonl",
+  );
+  fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.writeFileSync(
+    sessionFile,
+    [
+      JSON.stringify({
+        type: "session",
+        id: "usage-session",
+        timestamp: "2026-08-21T10:00:00.000Z",
+        cwd: projectCwd,
+      }),
+      JSON.stringify({
+        type: "message",
+        timestamp: "2026-08-21T10:00:01.000Z",
+        message: { id: "user-one", role: "user", content: "usage please" },
+      }),
+      JSON.stringify({
+        type: "message",
+        timestamp: "2026-08-21T10:00:02.000Z",
+        message: {
+          id: "assistant-known-cost",
+          role: "assistant",
+          content: "known cost",
+          usage: {
+            inputTokens: 1000,
+            outputTokens: 400,
+            cacheReadTokens: 100,
+            cacheWriteTokens: 0,
+            totalTokens: 1500,
+            totalCostUsd: 0.42,
+            contextUsedTokens: 999999,
+          },
+        },
+      }),
+      JSON.stringify({
+        type: "message",
+        timestamp: "2026-08-21T10:00:03.000Z",
+        message: {
+          id: "assistant-missing-cost",
+          role: "assistant",
+          content: "missing cost",
+          usage: { inputTokens: 3, outputTokens: 2, totalTokens: 5 },
+        },
+      }),
+    ].join("\n"),
+  );
+
+  const env = fakeRealModeEnv({ root, projectCwd, agentDir });
+  let launched = await launchPiDeck(env);
+  let app = launched.app;
+  let page = launched.page;
+  try {
+    await expectHealthyPreload(page);
+    await selectWorkspaceInUi(page, path.basename(projectCwd));
+    await expect(page.locator(".activity-inbox-usage")).toContainText(
+      "1.50K tokens",
+    );
+    await expect(page.locator(".activity-inbox-usage")).toContainText(
+      "$0.42 known cost · 1 executions without cost data",
+    );
+    await page.locator(".activity-inbox-usage summary").click();
+    await expect(page.locator(".activity-inbox-usage dl")).toContainText(
+      "1,505",
+    );
+    await expect(page.locator(".activity-inbox-usage dl")).not.toContainText(
+      "999999",
+    );
+
+    await app.close();
+    launched = await launchPiDeck(env);
+    app = launched.app;
+    page = launched.page;
+    await expectHealthyPreload(page);
+    await selectWorkspaceInUi(page, path.basename(projectCwd));
+    await expect(page.locator(".activity-inbox-usage")).toContainText(
+      "1.50K tokens",
+    );
+
+    const moved = await page.evaluate(async (file) => {
+      const before = await window.piDeck.workspaces.list();
+      const sourceId = before.activeWorkspaceId!;
+      await window.piDeck.workspaces.create({ name: "Usage target" });
+      const afterCreate = await window.piDeck.workspaces.list();
+      const targetId = afterCreate.activeWorkspaceId!;
+      await window.piDeck.workspaces.moveSession({
+        sessionFile: file,
+        toWorkspaceId: targetId,
+      });
+      return {
+        source: await window.piDeck.workspaces.getUsage({
+          workspaceId: sourceId,
+        }),
+        target: await window.piDeck.workspaces.getUsage({
+          workspaceId: targetId,
+        }),
+        targetId,
+      };
+    }, sessionFile);
+    expect(moved.source.usage.totalTokens).toBe(0);
+    expect(moved.target.usage.totalTokens).toBe(1505);
+
+    await page.evaluate(
+      async ({ workspaceId, file }) => {
+        await window.piDeck.chat.deleteSession({
+          workspaceId,
+          sessionFile: file,
+        });
+      },
+      { workspaceId: moved.targetId, file: sessionFile },
+    );
+    expect(fs.existsSync(sessionFile)).toBe(false);
+
+    await app.close();
+    launched = await launchPiDeck(env);
+    app = launched.app;
+    page = launched.page;
+    await expectHealthyPreload(page);
+    await selectWorkspaceInUi(page, "Usage target");
+    await expect(page.locator(".activity-inbox-usage")).toContainText(
+      "1.50K tokens",
+    );
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("workspace management UI keeps Pi JSONL membership reversible and deletion explicit", async () => {
   // The fixture JSONL is written directly to the deterministic fake-real-mode
   // repository, then discovered and managed exclusively through visible app

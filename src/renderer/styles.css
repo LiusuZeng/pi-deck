@@ -2214,6 +2214,64 @@ h3 {
   font-size: 14px;
 }
 
+.activity-inbox-usage {
+  max-width: 560px;
+  margin-top: 12px;
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+
+.activity-inbox-usage summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: baseline;
+  width: fit-content;
+  max-width: 100%;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  cursor: pointer;
+  background: var(--color-surface-subtle);
+}
+
+.activity-inbox-usage summary:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+  box-shadow: var(--focus-ring);
+}
+
+.activity-inbox-usage summary strong {
+  color: var(--color-text-strong);
+}
+
+.activity-inbox-usage dl {
+  display: grid;
+  gap: 6px;
+  max-width: 360px;
+  margin: 10px 0 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  background: var(--color-surface);
+}
+
+.activity-inbox-usage dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.activity-inbox-usage dt,
+.activity-inbox-usage dd {
+  margin: 0;
+}
+
+.activity-inbox-usage dd {
+  color: var(--color-text-strong);
+  text-align: right;
+}
+
 .activity-inbox-workspace-filter {
   display: grid;
   gap: 4px;

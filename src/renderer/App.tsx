@@ -31,6 +31,7 @@ import type {
   ProjectRef,
   WorkspaceListResult,
   WorkspaceRef as SharedWorkspaceRef,
+  WorkspaceUsageResult,
   ThemePreference,
   MultitaskStateEvent,
   MultitaskTaskSummary,
@@ -905,6 +906,9 @@ export function App(): ReactElement {
   const [archivedSessions, setArchivedSessions] = useState<SessionViewModel[]>(
     [],
   );
+  const [workspaceUsageById, setWorkspaceUsageById] = useState<
+    Record<string, WorkspaceUsageResult>
+  >({});
   const [showArchived, setShowArchived] = useState(false);
   const [workspaceDialog, setWorkspaceDialog] =
     useState<WorkspaceDialogState>(undefined);
@@ -1629,6 +1633,36 @@ export function App(): ReactElement {
     () => buildActivityInbox(activitySources),
     [activitySources],
   );
+  const scopedWorkspaceUsage =
+    activityScope.type === "workspace"
+      ? workspaceUsageById[activityScope.workspaceId]
+      : undefined;
+
+  useEffect(() => {
+    if (primaryView.kind !== "work" || primaryView.scope.type !== "workspace") {
+      return;
+    }
+    const workspaceId = primaryView.scope.workspaceId;
+    let disposed = false;
+    void window.piDeck.workspaces
+      .getUsage({ workspaceId })
+      .then((usage) => {
+        if (disposed) return;
+        setWorkspaceUsageById((current) => ({
+          ...current,
+          [workspaceId]: usage,
+        }));
+      })
+      .catch((error) => {
+        if (disposed) return;
+        setUiMessage(
+          `Workspace usage unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [primaryView, sessions, archivedSessions, multitask]);
 
   useEffect(() => {
     if (
@@ -5519,6 +5553,7 @@ export function App(): ReactElement {
           <ActivityInbox
             model={activityInboxModel}
             scope={activityScope}
+            usage={scopedWorkspaceUsage?.usage}
             workspaces={workScopeWorkspaces}
             selectedFilter={selectedActivityFilter}
             onSelectedFilterChange={handleActivityFilterChange}
