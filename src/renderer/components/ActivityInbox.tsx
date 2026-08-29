@@ -1,4 +1,5 @@
 import { useMemo, type KeyboardEvent } from "react";
+import type { WorkspaceUsageTotals } from "../../shared/types.js";
 import type {
   ActivityInboxModel,
   ActivityItem,
@@ -94,6 +95,44 @@ function workScopeLabel(
     : `${workspaceName} Work`;
 }
 
+function formatCompactTokens(tokens: number): string {
+  if (tokens >= 1_000_000)
+    return `${formatCompactNumber(tokens, 1_000_000)}M tokens`;
+  if (tokens >= 1_000) return `${formatCompactNumber(tokens, 1_000)}K tokens`;
+  return `${Math.round(tokens).toLocaleString()} tokens`;
+}
+
+function formatCompactNumber(value: number, divisor: number): string {
+  const scaled = value / divisor;
+  return scaled >= 10 ? scaled.toFixed(1) : scaled.toFixed(2);
+}
+
+function formatExactTokens(tokens: number): string {
+  return Math.round(tokens).toLocaleString();
+}
+
+function formatUsd(value: number): string {
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value);
+}
+
+function costSummary(usage: WorkspaceUsageTotals): string {
+  if (usage.contributorsWithCost === 0 && usage.contributorsWithoutCost === 0) {
+    return "No reported cost yet";
+  }
+  if (usage.contributorsWithCost === 0) {
+    return `${usage.contributorsWithoutCost.toLocaleString()} executions without cost data`;
+  }
+  if (usage.contributorsWithoutCost > 0) {
+    return `${formatUsd(usage.knownCostUsd)} known cost · ${usage.contributorsWithoutCost.toLocaleString()} executions without cost data`;
+  }
+  return `${formatUsd(usage.knownCostUsd)} reported cost`;
+}
+
 function availableActivityCount(model: ActivityInboxModel): number {
   // The workspace map is intentionally computed before scope/status filters;
   // use it instead of model.items.length when App supplies a scoped model.
@@ -108,6 +147,7 @@ export interface ActivityInboxProps {
   model: ActivityInboxModel;
   scope: ActivityScope;
   workspaces: readonly ActivityWorkspace[];
+  usage?: WorkspaceUsageTotals | undefined;
   onOpenActivityItem: (item: ActivityItem) => void;
   onScopeChange: (scope: ActivityScope) => void;
   selectedFilter: ActivityInboxFilter;
@@ -121,6 +161,7 @@ export function ActivityInbox({
   model,
   scope,
   workspaces,
+  usage,
   onOpenActivityItem,
   onScopeChange,
   selectedFilter,
@@ -197,6 +238,41 @@ export function ActivityInbox({
           >
             {description}
           </p>
+          {scope.type === "workspace" && usage !== undefined ? (
+            <details className="activity-inbox-usage">
+              <summary>
+                <span>Usage</span>
+                <strong>{formatCompactTokens(usage.totalTokens)}</strong>
+                <span>{costSummary(usage)}</span>
+              </summary>
+              <dl aria-label="Workspace usage breakdown">
+                <div>
+                  <dt>Total tokens</dt>
+                  <dd>{formatExactTokens(usage.totalTokens)}</dd>
+                </div>
+                <div>
+                  <dt>Input</dt>
+                  <dd>{formatExactTokens(usage.inputTokens)}</dd>
+                </div>
+                <div>
+                  <dt>Output</dt>
+                  <dd>{formatExactTokens(usage.outputTokens)}</dd>
+                </div>
+                <div>
+                  <dt>Cache read</dt>
+                  <dd>{formatExactTokens(usage.cacheReadTokens)}</dd>
+                </div>
+                <div>
+                  <dt>Cache write</dt>
+                  <dd>{formatExactTokens(usage.cacheWriteTokens)}</dd>
+                </div>
+                <div>
+                  <dt>Reported cost</dt>
+                  <dd>{costSummary(usage)}</dd>
+                </div>
+              </dl>
+            </details>
+          ) : null}
         </div>
       </header>
 

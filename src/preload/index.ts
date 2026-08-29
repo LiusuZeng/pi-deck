@@ -60,6 +60,8 @@ import {
   workspaceSelectRequestSchema,
   workspaceSessionMutationResultSchema,
   workspaceUpdateRequestSchema,
+  workspaceUsageRequestSchema,
+  workspaceUsageResultSchema,
 } from "../shared/ipcSchemas.js";
 import {
   workflowApproveGateRequestSchema,
@@ -123,6 +125,7 @@ import type {
   WorkspaceRemoveSessionRequest,
   WorkspaceRestoreSessionRequest,
   WorkspaceUpdateRequest,
+  WorkspaceUsageRequest,
   WorkflowApproveGateRequest,
   WorkflowRetryConditionRequest,
   WorkflowOverrideConditionRequest,
@@ -477,6 +480,12 @@ const api: PiDeckApi = Object.freeze({
         channel: ipcChannels.workspaceListSessions,
         request: workspaceListSessionsRequestSchema.parse(request),
         responseSchema: chatListSessionsResultSchema,
+      }),
+    getUsage: (request: WorkspaceUsageRequest) =>
+      invokeValidated({
+        channel: ipcChannels.workspaceGetUsage,
+        request: workspaceUsageRequestSchema.parse(request),
+        responseSchema: workspaceUsageResultSchema,
       }),
     listUnassignedSessions: () =>
       invokeValidated({

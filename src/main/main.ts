@@ -62,6 +62,8 @@ import {
   workspaceListResultSchema,
   workspaceListSessionsRequestSchema,
   workspaceMoveSessionRequestSchema,
+  workspaceUsageRequestSchema,
+  workspaceUsageResultSchema,
   workspaceRemoveSessionRequestSchema,
   workspaceRestoreSessionRequestSchema,
   workspaceRestoreRequestSchema,
@@ -168,6 +170,11 @@ import {
   WorkspaceStore,
   type WorkspaceRecord,
 } from "./workspaces/workspaceStore.js";
+import {
+  WorkspaceUsageStore,
+  contributionsFromSessionFile,
+  contributionsFromSessionMessages,
+} from "./workspaces/workspaceUsage.js";
 import { WorkspaceRuntimeLifecycleGate } from "./workspaceRuntimeLifecycleGate.js";
 import { WorkspaceRuntimeShutdownTombstones } from "./workspaceRuntimeShutdownTombstones.js";
 import {
@@ -284,6 +291,7 @@ let mainWindow: BrowserWindow | undefined;
 let settingsStore: SettingsStore | undefined;
 let projectStore: ProjectStore | undefined;
 let workspaceStore: WorkspaceStore | undefined;
+let workspaceUsageStore: WorkspaceUsageStore | undefined;
 let workflowInitialization: WorkflowInitialization<WorkflowStore> | undefined;
 const realChatLaunchConfigCache = new RealChatLaunchConfigCache();
 let diagnostics: DiagnosticsService | undefined;
@@ -411,7 +419,11 @@ async function bootstrap(): Promise<void> {
     resolvePiDeckHome(process.env),
     diagnostics,
   );
-  await workspaceStore.loadIfNeeded();
+  workspaceUsageStore = new WorkspaceUsageStore(resolvePiDeckHome(process.env));
+  await Promise.all([
+    workspaceStore.loadIfNeeded(),
+    workspaceUsageStore.loadIfNeeded(),
+  ]);
   workflowInitialization = await initializeWorkflows(async () => {
     const store = new WorkflowStore(
       resolvePiDeckHome(process.env),
@@ -1334,6 +1346,14 @@ function registerIpcHandlers(
   });
 
   registerValidatedIpc({
+    channel: ipcChannels.workspaceGetUsage,
+    requestSchema: workspaceUsageRequestSchema,
+    responseSchema: workspaceUsageResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ workspaceId }) => getWorkspaceUsage(store, workspaceId),
+  });
+
+  registerValidatedIpc({
     channel: ipcChannels.workspaceListUnassignedSessions,
     requestSchema: noPayloadSchema,
     responseSchema: chatListSessionsResultSchema,
@@ -1884,6 +1904,13 @@ function ensureWorkspaceStore(): WorkspaceStore {
     throw new Error("Workspace store is not initialized");
   }
   return workspaceStore;
+}
+
+function ensureWorkspaceUsageStore(): WorkspaceUsageStore {
+  if (workspaceUsageStore === undefined) {
+    throw new Error("Workspace usage store is not initialized");
+  }
+  return workspaceUsageStore;
 }
 
 function ensureWorkflowStore(): WorkflowStore {
@@ -2929,6 +2956,22 @@ async function initializeChatAdapter(
     if (chatRuntimeIds.has(parsed.data.runtimeId)) {
       trackExtensionUiRuntimeEvent(parsed.data);
       sendChatEventToRenderer(parsed.data);
+      if (parsed.data.type === "agent_end") {
+        void adapter
+          .getMessages(parsed.data.runtimeId)
+          .then((messages) =>
+            recordRuntimeMessagesUsage({
+              runtimeId: parsed.data.runtimeId,
+              messages,
+              source: "session",
+            }),
+          )
+          .catch((error) => {
+            diagnosticsService.recordError(
+              `Failed to record usage for ${parsed.data.runtimeId}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          });
+      }
     }
     // Workflow handling runs before worker-exit cleanup. agent_end needs the
     // live worker to read its final transcript; worker_exit itself is handled
@@ -3871,6 +3914,15 @@ async function createTaskSessionWorker(
       void worker
         .getMessages()
         .then((messages) => {
+          void recordPrivateWorkerMessagesUsage({
+            parentId: launch.parentId,
+            childRuntimeId: worker.runtimeId,
+            messages,
+          }).catch((error) =>
+            diagnostics?.recordError(
+              `Failed to record private task usage for ${worker.runtimeId}: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          );
           if (
             testBehavior?.lifecycle === "failed" &&
             launch.attempt <= testBehavior.attempts
@@ -4164,6 +4216,15 @@ async function createDelegatedChild(
       void worker
         .getMessages()
         .then((messages) => {
+          void recordPrivateWorkerMessagesUsage({
+            parentId,
+            childRuntimeId: worker.runtimeId,
+            messages,
+          }).catch((error) =>
+            diagnostics?.recordError(
+              `Failed to record delegated task usage for ${worker.runtimeId}: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          );
           const last = messages.at(-1);
           const failure = piMessageFailure(last);
           if (failure) callbacks.failed({ summary: failure });
@@ -5079,6 +5140,58 @@ async function refreshWorkspaceSessionSummaries(
   }
 }
 
+async function getWorkspaceUsage(
+  settings: SettingsStore,
+  workspaceId: string,
+): Promise<z.infer<typeof workspaceUsageResultSchema>> {
+  const diagnostics: string[] = [];
+  const listed = await listWorkspaceChatSessions(settings, workspaceId, {
+    discoverLegacySessions: false,
+    includeArchived: true,
+  });
+  await Promise.all(
+    listed.sessions.map(async (session) => {
+      const result = await contributionsFromSessionFile({
+        workspaceId,
+        sessionFile: session.sessionFile,
+        source: "session",
+      });
+      diagnostics.push(...result.diagnostics);
+      await ensureWorkspaceUsageStore().upsertContributions(
+        result.contributions,
+      );
+    }),
+  );
+  const refs = await ensureWorkspaceStore().getSessionRefs(workspaceId);
+  const usage = await ensureWorkspaceUsageStore().getWorkspaceUsage({
+    workspaceId,
+    sessionFiles: refs
+      .filter((ref) => ref.missingSinceMs === undefined)
+      .map((ref) => ref.sessionFile),
+  });
+  return { workspaceId, usage, diagnostics };
+}
+
+async function recordSessionUsageForDeletion(
+  workspaceId: string,
+  sessionFile: string,
+): Promise<void> {
+  const result = await contributionsFromSessionFile({
+    workspaceId,
+    sessionFile,
+    source: "session",
+  });
+  if (result.diagnostics.length > 0) {
+    for (const diagnostic of result.diagnostics)
+      diagnostics?.recordError(diagnostic);
+  }
+  await ensureWorkspaceUsageStore().upsertContributions(result.contributions);
+  await ensureWorkspaceUsageStore().freezeSessionUsage({
+    workspaceId,
+    sessionFile,
+  });
+}
+
 async function projectForWorkspaceSession(
   workspaceId: string,
   sessionFile: string,
@@ -5218,11 +5331,21 @@ async function deleteChatSession(
         await closeRuntimeForDeletedSession(lockedRuntimeId, true);
       }
 
+      const deletionWorkspaceId =
+        workspaceId ??
+        (await workspaceStore?.getSessionOwner(canonicalSessionFile))
+          ?.workspaceId;
+      if (deletionWorkspaceId !== undefined) {
+        await recordSessionUsageForDeletion(
+          deletionWorkspaceId,
+          canonicalSessionFile,
+        );
+      }
       await removePersistedPiSessionFile(
         launch.projectId,
         canonicalSessionFile,
         diagnosticsService,
-        workspaceId,
+        deletionWorkspaceId,
       );
       if (lockedRuntimeId !== undefined) {
         attachmentPreservingRuntimeClosures.delete(lockedRuntimeId);
@@ -5292,12 +5415,23 @@ async function deleteAllChatSessions(
       await withChatSessionMutation(
         canonicalSessionFile,
         "Finish the attached or resuming session before deleting it.",
-        () =>
-          removePersistedPiSessionFile(
+        async () => {
+          const deletionWorkspaceId = (
+            await workspaceStore?.getSessionOwner(canonicalSessionFile)
+          )?.workspaceId;
+          if (deletionWorkspaceId !== undefined) {
+            await recordSessionUsageForDeletion(
+              deletionWorkspaceId,
+              canonicalSessionFile,
+            );
+          }
+          await removePersistedPiSessionFile(
             launch.projectId,
             canonicalSessionFile,
             diagnosticsService,
-          ),
+            deletionWorkspaceId,
+          );
+        },
       );
       deletedSessionFiles.push(canonicalSessionFile);
       deletedCount += 1;
@@ -5758,6 +5892,45 @@ function compactRuntimeStatusModel(
       : {}),
   };
   return Object.keys(compact).length > 0 ? compact : undefined;
+}
+
+async function recordRuntimeMessagesUsage(options: {
+  runtimeId: string;
+  messages: readonly PiMessage[];
+  source: "session" | "parallel" | "workflow";
+  ownerSessionFile?: string;
+}): Promise<void> {
+  const workspaceId = chatRuntimeWorkspaceIds.get(options.runtimeId);
+  if (workspaceId === undefined) return;
+  const sessionFile =
+    options.ownerSessionFile ?? chatRuntimeSessionFiles.get(options.runtimeId);
+  const contributions = contributionsFromSessionMessages({
+    workspaceId,
+    ...(sessionFile !== undefined ? { sessionFile } : {}),
+    sessionId:
+      chatRuntimeSessionFiles.get(options.runtimeId) ?? options.runtimeId,
+    source: options.source,
+    messages: options.messages,
+  });
+  await ensureWorkspaceUsageStore().upsertContributions(contributions);
+}
+
+async function recordPrivateWorkerMessagesUsage(options: {
+  parentId: string;
+  childRuntimeId: string;
+  messages: readonly PiMessage[];
+}): Promise<void> {
+  const workspaceId = chatRuntimeWorkspaceIds.get(options.parentId);
+  const sessionFile = chatRuntimeSessionFiles.get(options.parentId);
+  if (workspaceId === undefined) return;
+  const contributions = contributionsFromSessionMessages({
+    workspaceId,
+    ...(sessionFile !== undefined ? { sessionFile } : {}),
+    sessionId: `${options.parentId}:private:${options.childRuntimeId}`,
+    source: "parallel",
+    messages: options.messages,
+  });
+  await ensureWorkspaceUsageStore().upsertContributions(contributions);
 }
 
 function runtimeUsageFromState(

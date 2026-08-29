@@ -37,6 +37,7 @@ interface FakeOptions {
   extensionUiAutoCompleteTimeoutMs: number;
   extraModel: boolean;
   productionShaped: boolean;
+  includeUsage: boolean;
   noSession: boolean;
   sessionFile?: string;
   workflowDecisions: boolean[];
@@ -73,6 +74,7 @@ function parseOptions(argv: string[]): FakeOptions {
     extensionUiAutoCompleteTimeoutMs: 5_000,
     extraModel: false,
     productionShaped: false,
+    includeUsage: false,
     noSession: false,
     workflowDecisions: [],
   };
@@ -127,6 +129,8 @@ function parseOptions(argv: string[]): FakeOptions {
       options.extraModel = true;
     } else if (arg === "--production-shaped") {
       options.productionShaped = true;
+    } else if (arg === "--include-usage") {
+      options.includeUsage = true;
     } else if (arg === "--no-session") {
       options.noSession = true;
     } else if (arg === "--session") {
@@ -803,6 +807,18 @@ class FakeRpcServer {
             role: "assistant",
             content: accumulated,
             createdAt: Date.now(),
+            ...(this.options.includeUsage
+              ? {
+                  usage: {
+                    inputTokens: 100,
+                    outputTokens: 10,
+                    cacheReadTokens: 5,
+                    cacheWriteTokens: 0,
+                    totalTokens: 115,
+                    totalCostUsd: 0.05,
+                  },
+                }
+              : {}),
           };
           this.messages.push(assistantMessage);
           this.appendPersistedMessage(assistantMessage);
