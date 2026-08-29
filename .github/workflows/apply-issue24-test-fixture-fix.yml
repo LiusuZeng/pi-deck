@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   apply:
-    runs-on: macos-26-arm64
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -23,7 +23,7 @@ jobs:
       - run: npm ci
       - run: node scripts/apply-issue24-test-fixture-fix.mjs
       - run: npx prettier --write e2e/pi-deck.e2e.ts src/main/pi/fakeRpc/fakeRpcServer.ts scripts/apply-issue24-test-fixture-fix.mjs
-      - run: npm run verify:ci
+      - run: npm run format && npm run typecheck && npm test && npm run build && npm run check:site
       - name: Commit test-only fix
         run: |
           rm scripts/apply-issue24-test-fixture-fix.mjs
