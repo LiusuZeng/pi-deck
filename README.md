@@ -64,7 +64,7 @@ Pi remains the agent runtime: it owns models, provider authentication, tools, re
 
 ### All Work, workspace Work, and session detail
 
-**All Work** is the global Work overview for supervising active and saved work across active workspaces. Selecting a workspace opens the same Work surface scoped to that workspace; it is a context choice, not a separate mode. Filter by **Needs attention**, **Failed**, **Pending**, **In progress**, **Completed**, or **Idle**. Idle saved sessions remain discoverable without increasing actionable counts.
+**All Work** is the global Work overview for supervising operationally meaningful work across active workspaces. Selecting a workspace opens the same Work surface scoped to that workspace; it is a context choice, not a separate mode. Filter by **Needs attention**, **Failed**, **Queued**, **In progress**, or **Completed**. Idle sessions remain discoverable through normal session navigation instead of appearing as first-class Work items.
 
 Work is a stable primary surface, not a closable inbox or persisted Work entity. It is a renderer-derived projection of runtime state and Pi session metadata. Selecting a Work row opens the existing Pi session detail, and Back returns to the exact All Work or workspace Work origin. Users can choose **New session** from either surface without managing workspace membership first: global creation uses the persisted default workspace internally, while scoped creation uses the selected workspace.
 

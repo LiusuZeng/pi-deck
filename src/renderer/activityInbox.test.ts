@@ -31,14 +31,14 @@ function overlays(patch: Partial<SessionOverlays>): SessionOverlays {
 }
 
 describe("buildActivityInbox", () => {
-  it("classifies every state into one tagged status with its action label", () => {
+  it("classifies operational states into one tagged status with its action label", () => {
     const inbox = buildActivityInbox([
       source("attention", { baseState: "waitingForInput" }),
       source("failed", {
         baseState: "error",
         lastError: "Provider unavailable",
       }),
-      source("pending", { overlays: overlays({ piQueuedFollowUpCount: 1 }) }),
+      source("queued", { overlays: overlays({ piQueuedFollowUpCount: 1 }) }),
       source("working", { baseState: "working" }),
       source("completed", { completedAtMs: 99 }),
       source("idle"),
@@ -47,18 +47,16 @@ describe("buildActivityInbox", () => {
     expect(inbox.items.map((item) => [item.sessionKey, item.status])).toEqual([
       ["attention", "needsAttention"],
       ["failed", "failed"],
-      ["pending", "pending"],
+      ["queued", "queued"],
       ["working", "inProgress"],
       ["completed", "completed"],
-      ["idle", "idle"],
     ]);
     expect(inbox.items.map((item) => item.actionLabel)).toEqual([
       "Respond",
       "Review failure",
-      "View pending",
+      "View queued work",
       "View progress",
       "View result",
-      "Open session",
     ]);
     expect(inbox.items[0]?.tags).toEqual([
       "workspace:workspace-a",
@@ -169,7 +167,7 @@ describe("buildActivityInbox", () => {
     ).toEqual(["atlas-early", "atlas-late"]);
   });
 
-  it("keeps precedence exclusive: attention, failure, pending, progress, completion", () => {
+  it("keeps precedence exclusive: attention, failure, queued, progress, completion", () => {
     expect(
       classifyActivity(
         source("all", {
@@ -199,7 +197,7 @@ describe("buildActivityInbox", () => {
           completedAtMs: 1,
         }),
       ),
-    ).toBe("pending");
+    ).toBe("queued");
     expect(
       classifyActivity(
         source("working-done", { baseState: "working", completedAtMs: 1 }),
@@ -207,7 +205,7 @@ describe("buildActivityInbox", () => {
     ).toBe("inProgress");
   });
 
-  it("moves Completed work out of the queue when a follow-up is pending", () => {
+  it("moves Completed work out of the queue when a follow-up is queued", () => {
     const inbox = buildActivityInbox([
       source("follow-up", {
         completedAtMs: 100,
@@ -219,10 +217,10 @@ describe("buildActivityInbox", () => {
     expect(inbox.groups.completed.map((item) => item.sessionKey)).toEqual([
       "completed",
     ]);
-    expect(inbox.groups.pending.map((item) => item.sessionKey)).toEqual([
+    expect(inbox.groups.queued.map((item) => item.sessionKey)).toEqual([
       "follow-up",
     ]);
-    expect(inbox.groups.pending[0]?.completedAtMs).toBeUndefined();
+    expect(inbox.groups.queued[0]?.completedAtMs).toBeUndefined();
   });
 
   it("uses a fresh completion timestamp when follow-up work completes again", () => {
@@ -243,24 +241,37 @@ describe("buildActivityInbox", () => {
     ).toEqual(["existing", "follow-up"]);
   });
 
-  it("classifies idle sessions after completion precedence and skips drafts", () => {
-    expect(classifyActivity(source("idle"))).toBe("idle");
+  it("omits idle sessions without dropping completed work or queued work", () => {
+    expect(classifyActivity(source("idle"))).toBeUndefined();
     expect(
       classifyActivity(source("idle-completed", { completedAtMs: 1 })),
     ).toBe("completed");
+    expect(
+      classifyActivity(
+        source("idle-queued", {
+          overlays: overlays({ piQueuedFollowUpCount: 1 }),
+        }),
+      ),
+    ).toBe("queued");
     expect(classifyActivity(source("draft", { draftSession: true }))).toBe(
       undefined,
     );
     expect(
-      buildActivityInbox([source("draft", { draftSession: true })]),
+      buildActivityInbox([
+        source("idle"),
+        source("draft", { draftSession: true }),
+      ]),
     ).toMatchObject({
+      items: [],
       totalCount: 0,
-      counts: { idle: 0 },
-    });
-    expect(buildActivityInbox([source("idle")]).items[0]).toMatchObject({
-      detail: "No active work",
-      actionLabel: "Open session",
-      tags: ["workspace:workspace-a", "status:idle", "kind:session"],
+      counts: {
+        needsAttention: 0,
+        failed: 0,
+        queued: 0,
+        inProgress: 0,
+        completed: 0,
+      },
+      availableWorkspaceCounts: {},
     });
   });
 
@@ -314,7 +325,7 @@ describe("buildActivityInbox", () => {
         workspaceId: "workspace-b",
         workspaceName: "Workspace B",
       }),
-      source("pending", {
+      source("queued", {
         overlays: overlays({ piQueuedFollowUpCount: 1 }),
         workspaceId: "workspace-b",
         workspaceName: "Workspace B",
@@ -329,12 +340,12 @@ describe("buildActivityInbox", () => {
         items,
         tagsForScope({ type: "workspace", workspaceId: "workspace-b" }),
       ).map((item) => item.sessionKey),
-    ).toEqual(["error", "pending"]);
+    ).toEqual(["error", "queued"]);
     expect(
       filterActivityItems(items, {
-        includeAll: ["workspace:workspace-b", statusTag("pending")],
+        includeAll: ["workspace:workspace-b", statusTag("queued")],
       }).map((item) => item.sessionKey),
-    ).toEqual(["pending"]);
+    ).toEqual(["queued"]);
   });
 
   it("keeps simultaneous workspace and status fixtures consistent across scopes", () => {
@@ -355,7 +366,7 @@ describe("buildActivityInbox", () => {
         workspaceName: "Project Atlas",
         baseState: "working",
       }),
-      source("atlas-pending", {
+      source("atlas-queued", {
         workspaceId: "workspace-atlas",
         workspaceName: "Project Atlas",
         overlays: overlays({ piQueuedFollowUpCount: 1 }),
@@ -389,22 +400,21 @@ describe("buildActivityInbox", () => {
     ).toEqual([
       ["default-needs", "needsAttention"],
       ["borealis-failed", "failed"],
-      ["atlas-pending", "pending"],
+      ["atlas-queued", "queued"],
       ["atlas-working", "inProgress"],
       ["borealis-completed", "completed"],
-      ["/sessions/default-idle.jsonl", "idle"],
     ]);
     expect(global.counts).toEqual({
       needsAttention: 1,
       failed: 1,
-      pending: 1,
+      queued: 1,
       inProgress: 1,
       completed: 1,
-      idle: 1,
     });
     expect(global.actionableCount).toBe(3);
+    expect(global.totalCount).toBe(5);
     expect(global.availableWorkspaceCounts).toEqual({
-      "workspace-default": 2,
+      "workspace-default": 1,
       "workspace-atlas": 2,
       "workspace-borealis": 2,
     });
@@ -421,7 +431,7 @@ describe("buildActivityInbox", () => {
     expect(
       atlas.items.map(({ sessionKey, status }) => [sessionKey, status]),
     ).toEqual([
-      ["atlas-pending", "pending"],
+      ["atlas-queued", "queued"],
       ["atlas-working", "inProgress"],
     ]);
     expect(atlas.actionableCount).toBe(1);
@@ -434,10 +444,7 @@ describe("buildActivityInbox", () => {
         sessionKey,
         status,
       ]),
-    ).toEqual([
-      ["default-needs", "needsAttention"],
-      ["/sessions/default-idle.jsonl", "idle"],
-    ]);
+    ).toEqual([["default-needs", "needsAttention"]]);
     expect(defaultWorkspace.actionableCount).toBe(1);
     expect(
       borealis.items.map(({ sessionKey, status }) => [sessionKey, status]),

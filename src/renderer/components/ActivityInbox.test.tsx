@@ -62,13 +62,11 @@ function activity(
         ? "Respond"
         : status === "failed"
           ? "Review failure"
-          : status === "pending"
-            ? "View pending"
+          : status === "queued"
+            ? "View queued work"
             : status === "inProgress"
               ? "View progress"
-              : status === "completed"
-                ? "View result"
-                : "Open session",
+              : "View result",
   };
 }
 
@@ -76,10 +74,9 @@ function modelWithEveryKind(): ActivityInboxModel {
   const groups = {
     needsAttention: [activity("needsAttention", "attention")],
     failed: [activity("failed", "failure", workspaces[1])],
-    pending: [activity("pending", "pending")],
+    queued: [activity("queued", "queued")],
     inProgress: [activity("inProgress", "progress")],
     completed: [activity("completed", "complete")],
-    idle: [activity("idle", "idle")],
   };
   return {
     items: Object.values(groups).flat(),
@@ -88,9 +85,9 @@ function modelWithEveryKind(): ActivityInboxModel {
       Object.entries(groups).map(([kind, items]) => [kind, items.length]),
     ) as ActivityInboxModel["counts"],
     actionableCount: 3,
-    totalCount: 6,
+    totalCount: 5,
     availableWorkspaceCounts: {
-      "workspace-atlas": 5,
+      "workspace-atlas": 4,
       "workspace-borealis": 1,
     },
   };
@@ -237,14 +234,17 @@ describe("ActivityInbox", () => {
       "Project Borealis (1)",
     );
     expect(view.querySelector('option[value="all"]')?.textContent).toBe(
-      "All Work (6)",
+      "All Work (5)",
     );
     expect(view.querySelector('[aria-pressed="true"]')?.textContent).toContain(
       "All",
     );
     expect(view.textContent).toContain("Respond");
     expect(view.textContent).toContain("Review failure");
-    expect(view.textContent).toContain("Idle");
+    expect(view.textContent).toContain("Queued");
+    expect(view.textContent).toContain("View queued work");
+    expect(view.textContent).not.toContain("Pending");
+    expect(view.textContent).not.toContain("Idle");
   });
 
   it("keeps All Work availability counts global when App passes a scoped model", () => {
@@ -522,7 +522,7 @@ describe("ActivityInbox", () => {
       "No work in Project Cygnus Work.",
     );
     expect(view.querySelector('option[value="all"]')?.textContent).toBe(
-      "All Work (6)",
+      "All Work (5)",
     );
   });
 
