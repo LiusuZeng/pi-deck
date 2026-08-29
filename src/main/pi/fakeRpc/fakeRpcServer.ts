@@ -13,6 +13,8 @@ import type {
 type PromptScenario =
   | "basic"
   | "tool"
+  | "tool-heavy"
+  | "tool-error"
   | "queue"
   | "compaction"
   | "retry"
@@ -171,6 +173,8 @@ function isPromptScenario(value: string): value is PromptScenario {
   return [
     "basic",
     "tool",
+    "tool-heavy",
+    "tool-error",
     "queue",
     "compaction",
     "retry",
@@ -901,7 +905,61 @@ class FakeRpcServer {
       this.write({ type: "auto_retry_end", attempt: 1, status: "recovered" });
     }
 
-    if (shouldEmit("tool")) {
+    if (scenario === "tool-heavy") {
+      this.write({
+        type: "message_update",
+        messageId: `thinking_${assistantId}`,
+        assistantMessageEvent: {
+          type: "thinking_delta",
+          content: "Inspecting project files before answering.",
+        },
+        done: true,
+      });
+      [
+        {
+          id: "tool_fake_read",
+          name: "read",
+          args: { path: "src/renderer/App.tsx" },
+          output: "read App.tsx",
+        },
+        {
+          id: "tool_fake_search",
+          name: "search",
+          args: { pattern: "TimelineRow" },
+          output: "found timeline renderer",
+        },
+        ...Array.from({ length: 56 }, (_, index) => ({
+          id: `tool_fake_read_${index + 1}`,
+          name: "read",
+          args: { path: `src/renderer/fixture-${index + 1}.ts` },
+          output: `read fixture file ${index + 1}`,
+        })),
+        {
+          id: "tool_fake_bash",
+          name: "bash",
+          args: { command: "npm test -- --run src/renderer/App.test.ts" },
+          output: "renderer tests passed",
+        },
+      ].forEach((tool) => {
+        this.write({
+          type: "tool_execution_start",
+          toolCallId: tool.id,
+          toolName: tool.name,
+          args: tool.args,
+        });
+        this.write({
+          type: "tool_execution_end",
+          toolCallId: tool.id,
+          toolName: tool.name,
+          args: tool.args,
+          status: "completed",
+          output: tool.output,
+        });
+      });
+    }
+
+    if (shouldEmit("tool") || scenario === "tool-error") {
+      const toolFailed = scenario === "tool-error";
       this.write({
         type: "tool_execution_start",
         toolCallId: "tool_fake_1",
@@ -917,8 +975,9 @@ class FakeRpcServer {
         type: "tool_execution_end",
         toolCallId: "tool_fake_1",
         toolName: "read",
-        status: "completed",
-        output: "final tool output",
+        status: toolFailed ? "error" : "completed",
+        isError: toolFailed,
+        output: toolFailed ? "fake tool failed" : "final tool output",
       });
     }
 

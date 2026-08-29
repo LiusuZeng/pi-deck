@@ -1611,9 +1611,24 @@ test("expanded tool details stay scrollable above the composer", async () => {
     await page.getByLabel("Prompt text").fill("show a tool detail card");
     await page.getByRole("button", { name: "Send" }).click();
 
-    const toolCard = page.locator(".tool-card").first();
+    const activityGroup = page.locator(".agent-activity-group").first();
+    await expect(activityGroup).toBeVisible();
+    await expect(activityGroup.locator(":scope > summary")).toContainText(
+      "Agent activity",
+    );
+    await expect(activityGroup.locator(":scope > summary")).not.toContainText(
+      "toolName",
+    );
+    await expect(
+      page.getByText("Fake response to: show a tool detail card"),
+    ).toBeVisible();
+    await expect(activityGroup).not.toHaveAttribute("open", "");
+    await activityGroup.locator(":scope > summary").click();
+    await expect(activityGroup).toHaveAttribute("open", "");
+
+    const toolCard = activityGroup.locator(".tool-card").first();
     await expect(toolCard).toBeVisible();
-    await expect(toolCard.getByText("read", { exact: true })).toBeVisible();
+    await expect(toolCard.getByText("Read", { exact: true })).toBeVisible();
 
     await toolCard.locator("pre").evaluate((pre) => {
       pre.style.whiteSpace = "pre";
@@ -1640,9 +1655,12 @@ test("expanded tool details stay scrollable above the composer", async () => {
         const timeline =
           document.querySelector<HTMLElement>(".timeline-scroll");
         const composer = document.querySelector<HTMLElement>(".composer");
-        const details =
-          document.querySelector<HTMLElement>(".tool-card details");
-        const pre = document.querySelector<HTMLElement>(".tool-card pre");
+        const details = document.querySelector<HTMLElement>(
+          ".agent-activity-group .tool-card details",
+        );
+        const pre = document.querySelector<HTMLElement>(
+          ".agent-activity-group .tool-card pre",
+        );
         if (
           timeline === null ||
           composer === null ||
@@ -1693,6 +1711,155 @@ test("expanded tool details stay scrollable above the composer", async () => {
       .toBe(true);
     metrics = await expandedToolMetrics();
     expect(metrics.preBottom).toBeLessThanOrEqual(metrics.composerTop - 1);
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("tool-heavy turns use a compact agent activity hierarchy", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-agent-activity-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: [
+        "--prompt-scenario",
+        "tool-heavy",
+        "--stream-delay-ms",
+        "10",
+      ],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await enterSessionDetail(page);
+    await page.getByLabel("Prompt text").fill("summarize after tool work");
+    await page.getByRole("button", { name: "Send" }).click();
+
+    const activityGroup = page.locator(".agent-activity-group").first();
+    const groupSummary = activityGroup.locator(":scope > summary");
+    await expect(groupSummary).toContainText("Agent activity");
+    await expect(groupSummary).toContainText(/60 steps/);
+    await expect(groupSummary).not.toContainText("toolName");
+    await expect(groupSummary).not.toContainText("renderer tests passed");
+
+    await expect(
+      page.getByText("Fake response to: summarize after tool work"),
+    ).toBeVisible();
+    await expect(
+      page.getByLabel("Agent activity, 60 steps, completed"),
+    ).toBeVisible();
+    await expect(activityGroup).not.toHaveAttribute("open", "");
+
+    await groupSummary.focus();
+    await expect(groupSummary).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(activityGroup).toHaveAttribute("open", "");
+    await expect(activityGroup.locator(".agent-activity-step")).toHaveCount(60);
+    const compactToolCards = activityGroup.locator(".agent-activity-tool-card");
+    await expect(compactToolCards).toHaveCount(59);
+    await expect(compactToolCards.first()).toHaveCSS("border-top-width", "0px");
+    await expect(
+      compactToolCards.first().locator(".tool-summary"),
+    ).toBeVisible();
+    await expect(compactToolCards.first().locator(".tool-copy")).toHaveCSS(
+      "display",
+      "flex",
+    );
+    await expect(compactToolCards.first().locator(".tool-status")).toBeHidden();
+    await expect(activityGroup.locator(".agent-activity-steps")).toHaveCSS(
+      "overflow-y",
+      "auto",
+    );
+    const activityStepsBox = await activityGroup
+      .locator(".agent-activity-steps")
+      .boundingBox();
+    expect(
+      activityStepsBox?.height ?? Number.POSITIVE_INFINITY,
+    ).toBeLessThanOrEqual(570);
+    const compactHeights = await compactToolCards.evaluateAll((cards) =>
+      cards.slice(0, 12).map((card) => card.getBoundingClientRect().height),
+    );
+    expect(Math.max(...compactHeights)).toBeLessThanOrEqual(36);
+    await expect(activityGroup.locator(".tool-card").first()).toBeVisible();
+    await expect(activityGroup.getByText("Thinking…")).toHaveCount(0);
+    await expect(activityGroup.getByText("Thought process")).toBeVisible();
+    await expect(
+      activityGroup.getByText("Read", { exact: true }).first(),
+    ).toBeVisible();
+    await expect(
+      activityGroup.getByText("Search", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      activityGroup.getByText("Bash", { exact: true }),
+    ).toBeVisible();
+
+    const bashSummary = activityGroup
+      .locator(".tool-card")
+      .filter({ hasText: "Bash" })
+      .locator("summary");
+    await bashSummary.focus();
+    await expect(bashSummary).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(
+      activityGroup
+        .locator(".tool-card pre")
+        .filter({ hasText: "renderer tests passed" }),
+    ).toBeVisible();
+    await expect(page.locator(".assistant-message").last()).toContainText(
+      "Fake response to: summarize after tool work",
+    );
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("failed tool activity remains conspicuous and inspectable", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-agent-activity-error-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: ["--prompt-scenario", "tool-error", "--stream-delay-ms", "1"],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await enterSessionDetail(page);
+    await page.getByLabel("Prompt text").fill("show a failed tool");
+    await page.getByRole("button", { name: "Send" }).click();
+
+    const activityGroup = page.locator(".agent-activity-group").first();
+    await expect(activityGroup.locator(":scope > summary")).toContainText(
+      "needs attention",
+    );
+    await expect(activityGroup).toHaveAttribute("open", "");
+    await expect(
+      activityGroup.locator(".tool-status.error").first(),
+    ).toContainText("error");
+
+    await activityGroup.locator(".tool-card summary").first().click();
+    await expect(activityGroup.locator(".tool-card pre").first()).toContainText(
+      "fake tool failed",
+    );
   } finally {
     await app.close();
     fs.rmSync(root, { recursive: true, force: true });
