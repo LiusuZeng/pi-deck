@@ -69,6 +69,46 @@ function createFakePiBinary(root: string, extraArgs: string[] = []): string {
   return fakePiPath;
 }
 
+function createSequencedFakePiBinary(
+  root: string,
+  workerArgsByStart: string[][],
+): string {
+  const fakePiPath = path.join(root, "fake-pi-sequenced.js");
+  const workerCountPath = path.join(root, "fake-pi-worker-count.json");
+  fs.writeFileSync(
+    fakePiPath,
+    `#!/usr/bin/env node
+const fs = require("fs");
+const cwdLogPath = process.env.PI_DECK_TEST_FAKE_PI_CWD_LOG;
+if (cwdLogPath) {
+  fs.appendFileSync(cwdLogPath, process.cwd() + "\\n");
+}
+if (process.argv.includes("--version")) {
+  console.log("v42.5.0");
+  process.exit(0);
+}
+if (process.argv.includes("--list-models")) {
+  console.log("provider  model       context  max-out  thinking  images");
+  console.log("fake-provider  fake-model  128K     32K      yes       yes");
+  process.exit(0);
+}
+const workerCountPath = ${JSON.stringify(workerCountPath)};
+const workerArgsByStart = ${JSON.stringify(workerArgsByStart)};
+let workerCount = 0;
+try {
+  workerCount = JSON.parse(fs.readFileSync(workerCountPath, "utf8")).workerCount || 0;
+} catch {}
+workerCount += 1;
+fs.writeFileSync(workerCountPath, JSON.stringify({ workerCount }) + "\\n");
+const workerArgs = workerArgsByStart[Math.min(workerCount - 1, workerArgsByStart.length - 1)] || [];
+process.argv.push(...workerArgs);
+require(${JSON.stringify(path.join(repoRoot, "dist/main/pi/fakeRpc/fakeRpcServer.js"))});
+`,
+    { mode: 0o755 },
+  );
+  return fakePiPath;
+}
+
 function fakeRealModeEnv(options: {
   root: string;
   projectCwd?: string;
@@ -4342,6 +4382,109 @@ test.describe("Unified Work", () => {
       await expect
         .poll(() => inbox.evaluate((element) => Math.round(element.scrollTop)))
         .toBe(savedWorkScrollTop);
+    } finally {
+      await app.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("Unified Work All Work counts use the same total across sidebar, scope, and filter", async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "pi-deck-e2e-work-count-consistency-"),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    const userDataDir = path.join(root, "user-data");
+    fs.mkdirSync(projectCwd, { recursive: true });
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.mkdirSync(userDataDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(userDataDir, "settings.json"),
+      `${JSON.stringify({ maxRunningSessions: 12, warmWorkerLimit: 0 })}\n`,
+    );
+
+    const { app, page } = await launchPiDeck({
+      PI_DECK_BACKEND: "real",
+      PI_DECK_PI_BINARY: createSequencedFakePiBinary(root, [
+        ["--stream-delay-ms", "120000"],
+        ["--stream-delay-ms", "120000"],
+        ["--prompt-scenario", "error"],
+        ["--prompt-scenario", "error"],
+        ["--prompt-scenario", "error"],
+        ["--prompt-scenario", "error"],
+      ]),
+      PI_DECK_PROJECT_CWD: projectCwd,
+      PI_CODING_AGENT_DIR: agentDir,
+      PI_DECK_HOME: path.join(root, "pideck-home"),
+      PI_DECK_USER_DATA_DIR: userDataDir,
+    });
+    try {
+      await expectHealthyPreload(page);
+      await expectAllWorkLaunch(page);
+      const allWork = page
+        .getByLabel("Sessions", { exact: true })
+        .getByRole("button", { name: /^All Work/ });
+
+      for (const prompt of [
+        "count consistency running 1",
+        "count consistency running 2",
+      ]) {
+        await enterSessionDetail(page);
+        await page.getByLabel("Prompt text").fill(prompt);
+        await page.getByRole("button", { name: "Send" }).click();
+        await expect(page.getByText("Pi agent started")).toBeVisible();
+        await allWork.click();
+        await expectAllWorkLaunch(page);
+      }
+
+      for (const prompt of [
+        "count consistency failed 1",
+        "count consistency failed 2",
+        "count consistency failed 3",
+        "count consistency failed 4",
+      ]) {
+        await enterSessionDetail(page);
+        await page.getByLabel("Prompt text").fill(prompt);
+        await page.getByRole("button", { name: "Send" }).click();
+        await expect(
+          page.locator('[role="alert"]').filter({
+            hasText: "Usage limit reached for fake provider.",
+          }),
+        ).toBeVisible();
+        await allWork.click();
+        await expectAllWorkLaunch(page);
+      }
+
+      const route = page.locator(
+        '.workspace[data-primary-view="work"][data-work-scope="all"]',
+      );
+      const filters = route.getByRole("group", {
+        name: "Filter Work by status",
+      });
+
+      await expect(
+        allWork.locator(".activity-inbox-badge [aria-hidden]"),
+      ).toHaveText("6");
+      await expect(allWork).toHaveAccessibleName(
+        /All Work\s+6 total work items/,
+      );
+      await expect(route.locator('option[value="all"]')).toHaveText(
+        "All Work (6)",
+      );
+      await expect(
+        filters.getByRole("button", { name: /^All\s+6$/ }),
+      ).toBeVisible();
+      await expect(
+        filters.getByRole("button", { name: /^Failed\s+4$/ }),
+      ).toBeVisible();
+      await expect(
+        filters.getByRole("button", { name: /^In progress\s+2$/ }),
+      ).toBeVisible();
+      await expect(route.locator(".activity-inbox-row")).toHaveCount(6);
+      await expect(route.locator(".activity-inbox-row--failed")).toHaveCount(4);
+      await expect(
+        route.locator(".activity-inbox-row--inProgress"),
+      ).toHaveCount(2);
     } finally {
       await app.close();
       fs.rmSync(root, { recursive: true, force: true });

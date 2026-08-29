@@ -197,15 +197,35 @@ describe("ActivityInbox", () => {
     expect(view.querySelector('option[value="all"]')?.textContent).toBe(
       "All Work (5)",
     );
-    expect(view.querySelector('[aria-pressed="true"]')?.textContent).toContain(
-      "All",
-    );
+    const selectedAllFilter = view.querySelector('[aria-pressed="true"]');
+    expect(selectedAllFilter?.textContent).toContain("All");
+    expect(
+      selectedAllFilter?.querySelector(".activity-inbox-filter-count")
+        ?.textContent,
+    ).toBe("5");
     expect(view.textContent).toContain("Respond");
     expect(view.textContent).toContain("Review failure");
     expect(view.textContent).toContain("Queued");
     expect(view.textContent).toContain("View queued work");
     expect(view.textContent).not.toContain("Pending");
     expect(view.textContent).not.toContain("Idle");
+  });
+
+  it("uses total Work, not actionable Work, for All Work-labeled counts", () => {
+    const model = modelWithEveryKind();
+    expect(model.actionableCount).toBe(3);
+    expect(model.totalCount).toBe(5);
+
+    const { view } = renderInbox(model);
+
+    expect(view.querySelector('option[value="all"]')?.textContent).toBe(
+      "All Work (5)",
+    );
+    expect(
+      view
+        .querySelector('[aria-pressed="true"]')
+        ?.querySelector(".activity-inbox-filter-count")?.textContent,
+    ).toBe("5");
   });
 
   it("keeps All Work availability counts global when App passes a scoped model", () => {

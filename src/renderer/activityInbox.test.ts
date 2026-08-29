@@ -317,6 +317,29 @@ describe("buildActivityInbox", () => {
     expect(renamed?.runtimeId).toBe("runtime-2");
   });
 
+  it("keeps the canonical total distinct from the hidden actionable subset", () => {
+    const inbox = buildActivityInbox([
+      source("failed-1", { baseState: "error" }),
+      source("failed-2", { baseState: "error" }),
+      source("failed-3", { baseState: "error" }),
+      source("failed-4", { baseState: "error" }),
+      source("running", { baseState: "working" }),
+      source("done", { completedAtMs: 1 }),
+      source("idle"),
+      source("draft", { draftSession: true }),
+      source("archived", { baseState: "error", archivedAtMs: 1 }),
+    ]);
+
+    expect(inbox.counts).toMatchObject({
+      failed: 4,
+      inProgress: 1,
+      completed: 1,
+    });
+    expect(inbox.actionableCount).toBe(4);
+    expect(inbox.totalCount).toBe(6);
+    expect(inbox.items).toHaveLength(6);
+  });
+
   it("filters all-workspace, workspace, and status tags by intersection", () => {
     const items = buildActivityInbox([
       source("waiting", { overlays: overlays({ needsUserInput: true }) }),

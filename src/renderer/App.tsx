@@ -5406,7 +5406,7 @@ export function App(): ReactElement {
           showArchived={showArchived}
           composerDrafts={composerDrafts}
           primaryView={primaryView}
-          activityActionableCount={activityInboxModel.actionableCount}
+          activityTotalCount={activityInboxModel.totalCount}
           onSelect={handleSelectSession}
           onOpenActivity={handleToggleActivity}
           onOpenWorkflows={handleOpenWorkflows}
@@ -8200,7 +8200,7 @@ function SessionSidebar(props: {
   showArchived: boolean;
   composerDrafts: ComposerDraftsBySession;
   primaryView: PrimaryView;
-  activityActionableCount: number;
+  activityTotalCount: number;
   onSelect(sessionId: string): void;
   onOpenActivity(): void;
   onOpenWorkflows(): void;
@@ -8500,9 +8500,12 @@ function SessionSidebar(props: {
       >
         <History aria-hidden="true" size={16} strokeWidth={1.75} />
         All Work
-        {props.activityActionableCount > 0 ? (
+        {props.activityTotalCount > 0 ? (
           <span className="activity-inbox-badge" aria-live="polite">
-            {props.activityActionableCount}
+            <span aria-hidden="true">{props.activityTotalCount}</span>
+            <span className="sr-only">
+              {props.activityTotalCount} total work items
+            </span>
           </span>
         ) : null}
       </Button>
