@@ -1,6 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { buildActivityInbox } from "./activityInbox.js";
 import { emptyOverlays } from "./sessionState.js";
 import { defaultAgentWorkflowDefinition } from "./workflows/agentWorkflowDefinition.js";
 import { __rendererTestHooks, MarkdownView } from "./App.js";
@@ -268,6 +269,28 @@ it("uses Pi durable sessionId instead of a canonical file path", () => {
     sessionId: "pi-durable-id",
     sessionFile: "/sessions/canonical.jsonl",
   });
+});
+
+it("carries durable saved-session completion metadata into Work", () => {
+  const session = __rendererTestHooks.sessionFromSummary(
+    {
+      id: "/sessions/completed.jsonl",
+      sessionFile: "/sessions/completed.jsonl",
+      sessionId: "completed-session",
+      title: "Completed saved session",
+      updatedAtMs: 2_000,
+      completedAtMs: 1_500,
+      messageCount: 2,
+    } as any,
+    "workspace-a",
+    "project-a",
+  );
+
+  const [source] = __rendererTestHooks.activitySourceSessions([session], {
+    "workspace-a": "Workspace A",
+  });
+  expect(source?.completedAtMs).toBe(1_500);
+  expect(buildActivityInbox([source as any]).groups.completed).toHaveLength(1);
 });
 
 it("re-homes fake fixtures to the bootstrapped workspace", () => {

@@ -158,6 +158,127 @@ test("refreshes one explicit session summary without scanning the repository", a
   assert.equal(clearedName.sessions[0]?.messageCount, 1);
 });
 
+test("reconstructs Completed metadata from the latest durable assistant turn", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-deck-completed-"));
+  const project = path.join(root, "project");
+  const sessionDir = path.join(root, "sessions");
+  const sessionFile = path.join(sessionDir, "completed.jsonl");
+  await fs.mkdir(project, { recursive: true });
+  await fs.mkdir(sessionDir, { recursive: true });
+  const completedAtMs = Date.parse("2026-08-03T03:49:00.000Z");
+  await fs.writeFile(
+    sessionFile,
+    [
+      JSON.stringify({
+        type: "session",
+        id: "completed-session",
+        timestamp: "2026-08-03T03:48:31.582Z",
+        cwd: project,
+      }),
+      JSON.stringify({
+        type: "message",
+        timestamp: "2026-08-03T03:48:32.000Z",
+        message: { role: "user", content: "Durable completed prompt" },
+      }),
+      JSON.stringify({
+        type: "message",
+        timestamp: "2026-08-03T03:49:01.000Z",
+        message: {
+          role: "assistant",
+          content: "Durable completed answer",
+          createdAt: completedAtMs,
+        },
+      }),
+    ].join("\n"),
+  );
+
+  const completed = await readPiSessionSummary({ sessionFile, sessionDir });
+  assert.equal(completed.summary?.completedAtMs, completedAtMs);
+  assert.equal(completed.summary?.title, "Durable completed prompt");
+
+  await fs.appendFile(
+    sessionFile,
+    `\n${JSON.stringify({
+      type: "message",
+      timestamp: "2026-08-03T03:50:00.000Z",
+      message: { role: "user", content: "Unanswered follow-up" },
+    })}`,
+  );
+  const unanswered = await readPiSessionSummary({ sessionFile, sessionDir });
+  assert.equal(unanswered.summary?.completedAtMs, undefined);
+
+  await fs.appendFile(
+    sessionFile,
+    `\n${JSON.stringify({
+      type: "message",
+      timestamp: "2026-08-03T03:51:00.000Z",
+      message: {
+        role: "assistant",
+        content: "Provider failed",
+        createdAt: Date.parse("2026-08-03T03:51:00.000Z"),
+        stopReason: "error",
+        errorMessage: "Usage limit reached",
+      },
+    })}`,
+  );
+  const failed = await readPiSessionSummary({ sessionFile, sessionDir });
+  assert.equal(failed.summary?.completedAtMs, undefined);
+});
+
+test("discovers the latest completion timestamp beyond the capped head parse", async () => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "pi-deck-completed-tail-"),
+  );
+  const project = path.join(root, "project");
+  const sessionDir = path.join(root, "sessions");
+  const sessionFile = path.join(sessionDir, "long-completed.jsonl");
+  const latestCompletedAtMs = Date.parse("2026-08-03T04:10:00.000Z");
+  await fs.mkdir(project, { recursive: true });
+  await fs.mkdir(sessionDir, { recursive: true });
+  await fs.writeFile(
+    sessionFile,
+    [
+      JSON.stringify({ type: "session", id: "long-completed", cwd: project }),
+      JSON.stringify({
+        type: "message",
+        timestamp: "2026-08-03T03:48:32.000Z",
+        message: { role: "user", content: "Older prompt title" },
+      }),
+      JSON.stringify({
+        type: "message",
+        timestamp: "2026-08-03T03:49:00.000Z",
+        message: {
+          role: "assistant",
+          content: "Older answer",
+          createdAt: Date.parse("2026-08-03T03:49:00.000Z"),
+        },
+      }),
+      "not-json\n".repeat(40_000),
+      JSON.stringify({
+        type: "message",
+        timestamp: "2026-08-03T04:09:00.000Z",
+        message: { role: "user", content: "Latest prompt" },
+      }),
+      JSON.stringify({
+        type: "message",
+        timestamp: "2026-08-03T04:10:01.000Z",
+        message: {
+          role: "assistant",
+          content: "Latest durable answer",
+          createdAt: latestCompletedAtMs,
+        },
+      }),
+    ].join("\n"),
+  );
+
+  const result = await readPiSessionSummary({
+    sessionFile,
+    sessionDir,
+    maxBytesPerFile: 256,
+  });
+  assert.equal(result.summary?.completedAtMs, latestCompletedAtMs);
+});
+
 test("bounds explicit summary metadata bytes and wall time", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-deck-metadata-"));
   const project = path.join(root, "project");

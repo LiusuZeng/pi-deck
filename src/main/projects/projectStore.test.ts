@@ -278,6 +278,7 @@ test("ProjectStore returns cached bootstrap summaries without touching session f
       sessionFile,
       title: "Cached session",
       updatedAtMs: 123,
+      completedAtMs: 456,
       messageCount: 2,
     },
   ]);
@@ -291,6 +292,7 @@ test("ProjectStore returns cached bootstrap summaries without touching session f
       sessionFile,
       title: "Cached session",
       updatedAtMs: 123,
+      completedAtMs: 456,
       messageCount: 2,
     },
   ]);

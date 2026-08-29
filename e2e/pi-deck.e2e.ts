@@ -4958,6 +4958,93 @@ test.describe("Unified Work", () => {
     }
   });
 
+  test("Unified Work preserves Completed saved sessions across app relaunch", async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "pi-deck-e2e-work-completed-relaunch-"),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    const userDataDir = path.join(root, "user-data");
+    fs.mkdirSync(projectCwd, { recursive: true });
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.mkdirSync(userDataDir, { recursive: true });
+
+    const env = fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      userDataDir,
+      fakePiArgs: ["--stream-delay-ms", "80"],
+    });
+    let launched = await launchPiDeck(env);
+    let app = launched.app;
+    let page = launched.page;
+    const prompt = `Durable completed relaunch ${Date.now()}`;
+    const completedRow = () =>
+      page
+        .locator(".activity-inbox-row--completed")
+        .filter({ hasText: prompt });
+    const completedDateTime = async (): Promise<number> => {
+      const dateTime = await completedRow()
+        .locator("time")
+        .getAttribute("datetime");
+      if (dateTime === null)
+        throw new Error("Missing completed row timestamp.");
+      return Date.parse(dateTime);
+    };
+    const persistedAssistantCreatedAt = (): number => {
+      const sessionRoot = path.join(agentDir, "sessions", "--fake-rpc--");
+      const files = fs
+        .readdirSync(sessionRoot)
+        .filter((name) => name.endsWith(".jsonl"))
+        .map((name) => path.join(sessionRoot, name));
+      expect(files).toHaveLength(1);
+      const assistantMessages = fs
+        .readFileSync(files[0]!, "utf8")
+        .split(/\r?\n/)
+        .flatMap((line) => {
+          if (line.trim().length === 0) return [];
+          const record = JSON.parse(line) as {
+            message?: { role?: string; createdAt?: number };
+          };
+          return record.message?.role === "assistant" &&
+            typeof record.message.createdAt === "number"
+            ? [record.message.createdAt]
+            : [];
+        });
+      expect(assistantMessages).toHaveLength(1);
+      return assistantMessages[0]!;
+    };
+
+    try {
+      await expectHealthyPreload(page);
+      await expectAllWorkLaunch(page);
+      await enterSessionDetail(page);
+      await page.getByLabel("Prompt text").fill(prompt);
+      await page.getByRole("button", { name: "Send" }).click();
+      await page.getByRole("button", { name: /^All Work/ }).click();
+      await expectAllWorkLaunch(page);
+      await expect(completedRow()).toHaveCount(1, { timeout: 10_000 });
+      const liveCompletedAt = await completedDateTime();
+      const durableCompletedAt = persistedAssistantCreatedAt();
+      expect(Math.abs(liveCompletedAt - durableCompletedAt)).toBeLessThan(
+        5_000,
+      );
+
+      await app.close();
+      launched = await launchPiDeck(env);
+      app = launched.app;
+      page = launched.page;
+      await expectHealthyPreload(page);
+      await expectAllWorkLaunch(page);
+      await expect(completedRow()).toHaveCount(1, { timeout: 10_000 });
+      expect(await completedDateTime()).toBe(durableCompletedAt);
+    } finally {
+      await app.close().catch(() => undefined);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("Unified Work shows Queued work and omits idle saved sessions from Work", async () => {
     const root = fs.mkdtempSync(
       path.join(os.tmpdir(), "pi-deck-e2e-work-queued-taxonomy-"),

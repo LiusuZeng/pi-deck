@@ -243,6 +243,7 @@ export const chatSessionSummarySchema = z
     title: z.string(),
     updatedAtMs: z.number(),
     createdAtMs: z.number().optional(),
+    completedAtMs: z.number().optional(),
     messageCount: z.number().int().min(0),
     preview: z.string().optional(),
     attachedRuntimeId: z.string().optional(),

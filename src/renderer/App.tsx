@@ -6641,6 +6641,9 @@ function sessionFromSummary(
     ...(summary.archivedAtMs !== undefined
       ? { archivedAtMs: summary.archivedAtMs }
       : {}),
+    ...(summary.completedAtMs !== undefined
+      ? { completedAtMs: summary.completedAtMs }
+      : {}),
     timeline: summary.preview
       ? [
           {

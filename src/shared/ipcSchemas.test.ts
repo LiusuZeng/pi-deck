@@ -126,6 +126,20 @@ describe("IPC schemas", () => {
     ).toThrow();
   });
 
+  it("allows durable completion metadata on saved-session summaries", () => {
+    expect(
+      chatSessionSummarySchema.parse({
+        id: "saved-1",
+        sessionFile: "/sessions/saved-1.jsonl",
+        title: "Saved",
+        updatedAtMs: 1_000,
+        createdAtMs: 900,
+        completedAtMs: 1_100,
+        messageCount: 2,
+      }),
+    ).toMatchObject({ completedAtMs: 1_100 });
+  });
+
   it("validates project picker metadata and rejects unknown fields", () => {
     const project = {
       id: "/project/app",

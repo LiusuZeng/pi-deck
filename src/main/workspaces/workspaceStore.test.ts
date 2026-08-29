@@ -90,6 +90,29 @@ test("WorkspaceStore archives session membership without touching the Pi file", 
   assert.equal((await store.getCachedSessionSummaries(workspace.id)).length, 1);
 });
 
+test("WorkspaceStore persists durable completion metadata in cached summaries", async () => {
+  const { root, home } = await temporaryHome();
+  const sessionFile = path.join(root, "completed.jsonl");
+  await fs.writeFile(sessionFile, "completed\n");
+  const store = new WorkspaceStore(home);
+  const workspace = await store.create({ name: "Completed" });
+
+  await store.upsertSessionRef(workspace.id, {
+    ...summary(sessionFile),
+    completedAtMs: 456,
+  });
+  assert.equal(
+    (await store.getCachedSessionSummaries(workspace.id))[0]?.completedAtMs,
+    456,
+  );
+
+  await store.upsertSessionRef(workspace.id, summary(sessionFile));
+  assert.equal(
+    (await store.getCachedSessionSummaries(workspace.id))[0]?.completedAtMs,
+    undefined,
+  );
+});
+
 test("WorkspaceStore cascades archive and restores only cascade-owned sessions", async () => {
   const { root, home } = await temporaryHome();
   const firstFile = path.join(root, "first.jsonl");
