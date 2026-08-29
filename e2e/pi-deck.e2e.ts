@@ -485,6 +485,106 @@ test("Workspace Work displays durable usage across relaunch, move, and delete", 
   }
 });
 
+test("Workspace usage includes private task attempts and parent synthesis exactly once", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-private-usage-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  const fixture = path.join(root, "usage-plan.json");
+  for (const directory of [projectCwd, agentDir, userDataDir]) {
+    fs.mkdirSync(directory, { recursive: true });
+  }
+  fs.writeFileSync(
+    path.join(userDataDir, "settings.json"),
+    '{"maxRunningSessions":4}',
+  );
+  fs.writeFileSync(
+    fixture,
+    JSON.stringify({
+      version: 1,
+      tasks: [
+        { name: "Count private worker usage", lifecycle: "completed" },
+        {
+          name: "Retry before success",
+          lifecycle: "failed",
+          attempts: 2,
+        },
+      ],
+      synthesis: "Synthesis: private usage counted.",
+    }),
+  );
+
+  const { app, page } = await launchPiDeck({
+    ...fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      userDataDir,
+      fakePiArgs: [
+        "--prompt-scenario",
+        "routing",
+        "--task-routing-fixture",
+        fixture,
+        "--include-usage",
+        "--stream-delay-ms",
+        "10",
+      ],
+    }),
+    NODE_ENV: "test",
+    PI_DECK_E2E_TASK_SESSION_ACCEPTANCE: "1",
+    PI_DECK_TEST_TASK_ROUTING_FIXTURE: fixture,
+  });
+  try {
+    await expectHealthyPreload(page);
+    await selectWorkspaceInUi(page, path.basename(projectCwd));
+    const workspaceId = await page.evaluate(
+      async () => (await window.piDeck.workspaces.list()).activeWorkspaceId!,
+    );
+    await page.evaluate(() =>
+      window.piDeck.settings.update({ maxRunningSessions: 4 }),
+    );
+    await enterSessionDetail(page);
+    await page
+      .getByRole("button", { name: "Parallel multitasking: Off" })
+      .click();
+    await selectPromptDestinationInUi(page, "newTaskSession");
+    await page
+      .getByLabel("Prompt text")
+      .fill("Run usage-accounting private tasks.");
+    await page.getByRole("button", { name: "Send" }).click();
+
+    const panel = page.getByRole("region", {
+      name: "Parallel task sessions",
+    });
+    await expect(panel.getByRole("listitem")).toHaveCount(2);
+    await expect(panel).toHaveCount(0, { timeout: 30_000 });
+
+    const usage = await page.evaluate(
+      async (id) =>
+        (await window.piDeck.workspaces.getUsage({ workspaceId: id })).usage,
+      workspaceId,
+    );
+    // Five settled model executions report usage: one successful private task,
+    // the retrying task's two failed provider attempts plus its successful
+    // third attempt, and the parent synthesis turn. Re-querying proves the
+    // cumulative runtime/session views are upserted rather than appended.
+    expect(usage.totalTokens).toBe(575);
+    expect(usage.contributorsWithCost).toBe(5);
+    expect(usage.knownCostUsd).toBeCloseTo(0.25, 8);
+    const repeated = await page.evaluate(
+      async (id) =>
+        (await window.piDeck.workspaces.getUsage({ workspaceId: id })).usage,
+      workspaceId,
+    );
+    expect(repeated.totalTokens).toBe(575);
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("workspace management UI keeps Pi JSONL membership reversible and deletion explicit", async () => {
   // The fixture JSONL is written directly to the deterministic fake-real-mode
   // repository, then discovered and managed exclusively through visible app
