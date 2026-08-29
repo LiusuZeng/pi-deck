@@ -69,46 +69,6 @@ function createFakePiBinary(root: string, extraArgs: string[] = []): string {
   return fakePiPath;
 }
 
-function createSequencedFakePiBinary(
-  root: string,
-  workerArgsByStart: string[][],
-): string {
-  const fakePiPath = path.join(root, "fake-pi-sequenced.js");
-  const workerCountPath = path.join(root, "fake-pi-worker-count.json");
-  fs.writeFileSync(
-    fakePiPath,
-    `#!/usr/bin/env node
-const fs = require("fs");
-const cwdLogPath = process.env.PI_DECK_TEST_FAKE_PI_CWD_LOG;
-if (cwdLogPath) {
-  fs.appendFileSync(cwdLogPath, process.cwd() + "\\n");
-}
-if (process.argv.includes("--version")) {
-  console.log("v42.5.0");
-  process.exit(0);
-}
-if (process.argv.includes("--list-models")) {
-  console.log("provider  model       context  max-out  thinking  images");
-  console.log("fake-provider  fake-model  128K     32K      yes       yes");
-  process.exit(0);
-}
-const workerCountPath = ${JSON.stringify(workerCountPath)};
-const workerArgsByStart = ${JSON.stringify(workerArgsByStart)};
-let workerCount = 0;
-try {
-  workerCount = JSON.parse(fs.readFileSync(workerCountPath, "utf8")).workerCount || 0;
-} catch {}
-workerCount += 1;
-fs.writeFileSync(workerCountPath, JSON.stringify({ workerCount }) + "\\n");
-const workerArgs = workerArgsByStart[Math.min(workerCount - 1, workerArgsByStart.length - 1)] || [];
-process.argv.push(...workerArgs);
-require(${JSON.stringify(path.join(repoRoot, "dist/main/pi/fakeRpc/fakeRpcServer.js"))});
-`,
-    { mode: 0o755 },
-  );
-  return fakePiPath;
-}
-
 function fakeRealModeEnv(options: {
   root: string;
   projectCwd?: string;
@@ -4644,13 +4604,11 @@ test.describe("Unified Work", () => {
 
     const { app, page } = await launchPiDeck({
       PI_DECK_BACKEND: "real",
-      PI_DECK_PI_BINARY: createSequencedFakePiBinary(root, [
-        ["--stream-delay-ms", "120000"],
-        ["--stream-delay-ms", "120000"],
-        ["--prompt-scenario", "error"],
-        ["--prompt-scenario", "error"],
-        ["--prompt-scenario", "error"],
-        ["--prompt-scenario", "error"],
+      PI_DECK_PI_BINARY: createFakePiBinary(root, [
+        "--stream-delay-ms",
+        "120000",
+        "--prompt-error-prefix",
+        "count consistency failed",
       ]),
       PI_DECK_PROJECT_CWD: projectCwd,
       PI_CODING_AGENT_DIR: agentDir,
