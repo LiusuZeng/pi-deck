@@ -1,0 +1,33 @@
+name: Apply issue 24 test fixture fix
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: macos-26-arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/issue-24-test-fixture
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node scripts/apply-issue24-test-fixture-fix.mjs
+      - run: npx prettier --write e2e/pi-deck.e2e.ts src/main/pi/fakeRpc/fakeRpcServer.ts scripts/apply-issue24-test-fixture-fix.mjs
+      - run: npm run verify:ci
+      - name: Commit test-only fix
+        run: |
+          rm scripts/apply-issue24-test-fixture-fix.mjs
+          rm .github/workflows/apply-issue24-test-fixture-fix.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "test: make All Work count fixture deterministic"
+          git push origin HEAD:fix/issue-24-test-fixture
