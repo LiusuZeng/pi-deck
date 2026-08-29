@@ -32,14 +32,13 @@ const ACTIVITY_META: Record<
     Icon: CircleDot,
   },
   failed: { emptyLabel: "Failed", label: "Failed", Icon: CircleAlert },
-  pending: { emptyLabel: "Pending", label: "Pending", Icon: CircleDot },
+  queued: { emptyLabel: "Queued", label: "Queued", Icon: CircleDot },
   inProgress: {
     emptyLabel: "In progress",
     label: "In progress",
     Icon: LoaderCircle,
   },
   completed: { emptyLabel: "Completed", label: "Completed", Icon: Check },
-  idle: { emptyLabel: "Idle", label: "Idle", Icon: CircleDot },
 };
 
 function formatRelativeTime(timestamp: number): string {

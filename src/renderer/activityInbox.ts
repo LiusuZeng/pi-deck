@@ -7,10 +7,9 @@ import {
 export type ActivityStatus =
   | "needsAttention"
   | "failed"
-  | "pending"
+  | "queued"
   | "inProgress"
-  | "completed"
-  | "idle";
+  | "completed";
 
 /** @deprecated Use ActivityStatus. */
 export type ActivityKind = ActivityStatus;
@@ -18,10 +17,9 @@ export type ActivityKind = ActivityStatus;
 export const ACTIVITY_STATUSES = [
   "needsAttention",
   "failed",
-  "pending",
+  "queued",
   "inProgress",
   "completed",
-  "idle",
 ] as const satisfies readonly ActivityStatus[];
 
 /** @deprecated Use ACTIVITY_STATUSES. */
@@ -95,10 +93,9 @@ export interface ActivityInboxModel {
 const actionLabels: Record<ActivityStatus, string> = {
   needsAttention: "Respond",
   failed: "Review failure",
-  pending: "View pending",
+  queued: "View queued work",
   inProgress: "View progress",
   completed: "View result",
-  idle: "Open session",
 };
 
 const archivedTag: ActivityTag = "visibility:archived";
@@ -191,7 +188,7 @@ export function classifyActivity(
     return "failed";
   }
   if (getQueuedCount(source.overlays) > 0) {
-    return "pending";
+    return "queued";
   }
   if (isInProgress(source)) {
     return "inProgress";
@@ -199,7 +196,7 @@ export function classifyActivity(
   if (hasCompletionTimestamp(source.completedAtMs)) {
     return "completed";
   }
-  return source.baseState === "idle" ? "idle" : undefined;
+  return undefined;
 }
 
 export function compareActivityItemsForStatus(
@@ -243,7 +240,7 @@ export function countActivityStatuses(
 export function actionableActivityCount(
   counts: Readonly<Record<ActivityStatus, number>>,
 ): number {
-  return counts.needsAttention + counts.failed + counts.pending;
+  return counts.needsAttention + counts.failed + counts.queued;
 }
 
 export function countActivityWorkspaces(
@@ -313,10 +310,9 @@ function createEmptyGroups(): Record<ActivityStatus, ActivityItem[]> {
   return {
     needsAttention: [],
     failed: [],
-    pending: [],
+    queued: [],
     inProgress: [],
     completed: [],
-    idle: [],
   };
 }
 
@@ -351,14 +347,12 @@ function activityDetail(
       return "Waiting for your response";
     case "failed":
       return source.lastError ?? "The latest run failed";
-    case "pending":
+    case "queued":
       return queuedDetail(source.overlays);
     case "inProgress":
       return inProgressDetail(source);
     case "completed":
       return "Latest turn completed";
-    case "idle":
-      return "No active work";
   }
 }
 
