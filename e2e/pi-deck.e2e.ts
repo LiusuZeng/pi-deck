@@ -4576,6 +4576,107 @@ test.describe("Unified Work", () => {
     }
   });
 
+  test("Unified Work shows Queued work and omits idle saved sessions from Work", async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "pi-deck-e2e-work-queued-taxonomy-"),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    const idleSessionFile = path.join(
+      agentDir,
+      "sessions",
+      "--work-taxonomy--",
+      "idle-saved-session.jsonl",
+    );
+    fs.mkdirSync(projectCwd, { recursive: true });
+    fs.mkdirSync(agentDir, { recursive: true });
+    writePiSessionFixture({
+      sessionFile: idleSessionFile,
+      sessionId: "idle-saved-session",
+      projectCwd,
+    });
+
+    const { app, page } = await launchPiDeck(
+      fakeRealModeEnv({
+        root,
+        projectCwd,
+        agentDir,
+        fakePiArgs: ["--stream-delay-ms", "20000"],
+      }),
+    );
+    try {
+      await expectHealthyPreload(page);
+      await expectAllWorkLaunch(page);
+      await page.evaluate(async (sessionFile) => {
+        const active = await window.piDeck.workspaces.getActive();
+        const workspace = active.activeWorkspace;
+        if (workspace === undefined) {
+          throw new Error("Expected an active workspace for taxonomy test.");
+        }
+        await window.piDeck.workspaces.addSession({
+          workspaceId: workspace.id,
+          sessionFile,
+        });
+      }, fs.realpathSync(idleSessionFile));
+      await page.getByLabel("Refresh sessions").click();
+      const inbox = page.locator(".activity-inbox");
+      const statusFilters = inbox.getByRole("group", {
+        name: "Filter Work by status",
+      });
+
+      await expect(
+        page.getByRole("button", { name: "Session: idle-saved-session" }),
+      ).toBeVisible();
+      await expect(
+        inbox.locator(".activity-inbox-row", {
+          hasText: "idle-saved-session",
+        }),
+      ).toHaveCount(0);
+      await expect(
+        statusFilters.getByRole("button", { name: /^Queued/ }),
+      ).toBeVisible();
+      await expect(
+        statusFilters.getByRole("button", { name: /^Pending/ }),
+      ).toHaveCount(0);
+      await expect(
+        statusFilters.getByRole("button", { name: /^Idle/ }),
+      ).toHaveCount(0);
+
+      const queuedPrompt = "Work taxonomy queued parent";
+      await enterSessionDetail(page);
+      await page.getByLabel("Prompt text").fill(queuedPrompt);
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect(
+        page.getByRole("button", { name: "Follow-up" }),
+      ).toBeVisible();
+      await page
+        .getByLabel("Prompt text")
+        .fill("Run this after the current turn");
+      await page.getByRole("button", { name: "Follow-up" }).click();
+      await expect(
+        page.getByText("Follow-up queued in Pi after current work."),
+      ).toBeVisible();
+
+      await page.getByRole("button", { name: /^All Work/ }).click();
+      await expectAllWorkLaunch(page);
+      const queuedRow = page
+        .locator(".activity-inbox-row--queued")
+        .filter({ hasText: queuedPrompt });
+      await expect(queuedRow).toHaveCount(1);
+      await expect(queuedRow).toContainText("Queued");
+      await expect(queuedRow).toContainText("1 follow-up queued");
+      await expect(queuedRow).toContainText("View queued work");
+      await expect(
+        inbox.locator(".activity-inbox-row", {
+          hasText: "idle-saved-session",
+        }),
+      ).toHaveCount(0);
+    } finally {
+      await app.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("Unified Work retains scoped status filters through Session and Back", async () => {
     const root = fs.mkdtempSync(
       path.join(os.tmpdir(), "pi-deck-e2e-work-filter-state-"),
@@ -5247,8 +5348,13 @@ test.describe("task-session routing acceptance", () => {
     try {
       await expectHealthyPreload(second.page);
       await expectAllWorkLaunch(second.page);
-      const savedSession = second.page.locator(".activity-inbox-row").filter({
-        hasText: "Start work that will be interrupted by restart.",
+      await expect(
+        second.page.locator(".activity-inbox-row").filter({
+          hasText: "Start work that will be interrupted by restart.",
+        }),
+      ).toHaveCount(0);
+      const savedSession = second.page.getByRole("button", {
+        name: "Session: Start work that will be interrupted by restart.",
       });
       await expect(savedSession).toBeVisible();
       await savedSession.click();
