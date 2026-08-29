@@ -60,6 +60,9 @@ import type {
   workspaceSessionMutationResultSchema,
   workspaceRestoreRequestSchema,
   workspaceUpdateRequestSchema,
+  workspaceUsageRequestSchema,
+  workspaceUsageResultSchema,
+  workspaceUsageTotalsSchema,
 } from "./ipcSchemas.js";
 import type {
   workflowApproveGateRequestSchema,
@@ -223,6 +226,9 @@ export type WorkspaceRemoveSessionRequest = z.infer<
 export type WorkspaceSessionMutationResult = z.infer<
   typeof workspaceSessionMutationResultSchema
 >;
+export type WorkspaceUsageRequest = z.infer<typeof workspaceUsageRequestSchema>;
+export type WorkspaceUsageTotals = z.infer<typeof workspaceUsageTotalsSchema>;
+export type WorkspaceUsageResult = z.infer<typeof workspaceUsageResultSchema>;
 export type AttachmentDraft = z.infer<typeof attachmentDraftSchema>;
 export type AttachmentImportDroppedFilesRequest = z.infer<
   typeof attachmentImportDroppedFilesRequestSchema
@@ -387,6 +393,7 @@ export interface PiDeckApi {
     listSessions(
       request: WorkspaceListSessionsRequest,
     ): Promise<ChatListSessionsResult>;
+    getUsage(request: WorkspaceUsageRequest): Promise<WorkspaceUsageResult>;
     listUnassignedSessions(): Promise<ChatListSessionsResult>;
   };
   workflows: {

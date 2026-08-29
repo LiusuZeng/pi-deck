@@ -1104,14 +1104,10 @@ test("real Pi production routing plans multiple private task sessions without br
       const restartedAllWorkRows = restarted.page.locator(
         ".activity-inbox-row",
       );
-      await expect(restartedAllWorkRows).toHaveCount(1);
-      await expect(restartedAllWorkRows.first()).toHaveAttribute(
-        "data-activity-item-id",
-        parentActivityItemId!,
-      );
-      await expect(
-        restartedAllWorkRows.locator(".activity-inbox-row-title"),
-      ).toHaveText(durableParent!.title);
+      // Completed Work is renderer-lifetime state today; after relaunch the
+      // durable parent remains resumable from the sidebar/listSessions but no
+      // longer appears as idle Work.
+      await expect(restartedAllWorkRows).toHaveCount(0);
       await restarted.page
         .getByRole("button", { name: `Workspace: ${scopeName}` })
         .click();
@@ -1123,14 +1119,7 @@ test("real Pi production routing plans multiple private task sessions without br
       const restartedScopedWorkRows = restarted.page.locator(
         ".activity-inbox-row",
       );
-      await expect(restartedScopedWorkRows).toHaveCount(1);
-      await expect(restartedScopedWorkRows.first()).toHaveAttribute(
-        "data-activity-item-id",
-        parentActivityItemId!,
-      );
-      await expect(
-        restartedScopedWorkRows.locator(".activity-inbox-row-title"),
-      ).toHaveText(durableParent!.title);
+      await expect(restartedScopedWorkRows).toHaveCount(0);
       await expect
         .poll(() => listJsonlFiles(sessionDir).length, {
           message: "Restart must preserve exactly one parent JSONL session",

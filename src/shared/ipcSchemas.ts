@@ -612,6 +612,33 @@ export const workspaceListSessionsRequestSchema = z
   })
   .strict();
 
+export const workspaceUsageRequestSchema = z
+  .object({
+    workspaceId: z.string().min(1),
+  })
+  .strict();
+
+export const workspaceUsageTotalsSchema = z
+  .object({
+    inputTokens: z.number().nonnegative(),
+    outputTokens: z.number().nonnegative(),
+    cacheReadTokens: z.number().nonnegative(),
+    cacheWriteTokens: z.number().nonnegative(),
+    totalTokens: z.number().nonnegative(),
+    knownCostUsd: z.number().nonnegative(),
+    contributorsWithCost: z.number().int().nonnegative(),
+    contributorsWithoutCost: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const workspaceUsageResultSchema = z
+  .object({
+    workspaceId: z.string().min(1),
+    usage: workspaceUsageTotalsSchema,
+    diagnostics: z.array(z.string()),
+  })
+  .strict();
+
 export const workspaceSessionMutationResultSchema = z
   .object({
     workspaceId: z.string().min(1),
@@ -878,6 +905,7 @@ export const ipcChannels = {
   workspaceArchiveSession: "workspaces:archiveSession",
   workspaceRestoreSession: "workspaces:restoreSession",
   workspaceListSessions: "workspaces:listSessions",
+  workspaceGetUsage: "workspaces:getUsage",
   workspaceListUnassignedSessions: "workspaces:listUnassignedSessions",
   attachmentsPickFiles: "attachments:pickFiles",
   attachmentsImportDroppedFiles: "attachments:importDroppedFiles",

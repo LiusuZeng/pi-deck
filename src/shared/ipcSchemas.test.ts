@@ -36,6 +36,8 @@ import {
   workspaceMoveSessionRequestSchema,
   workspaceRestoreRequestSchema,
   workspaceUpdateRequestSchema,
+  workspaceUsageRequestSchema,
+  workspaceUsageResultSchema,
 } from "./ipcSchemas.js";
 
 describe("IPC schemas", () => {
@@ -230,6 +232,27 @@ describe("IPC schemas", () => {
         messageCount: 1,
         archivedAtMs: 2,
       }).archivedAtMs,
+    ).toBe(2);
+    expect(
+      workspaceUsageRequestSchema.parse({ workspaceId: workspace.id }),
+    ).toEqual({
+      workspaceId: workspace.id,
+    });
+    expect(
+      workspaceUsageResultSchema.parse({
+        workspaceId: workspace.id,
+        usage: {
+          inputTokens: 10,
+          outputTokens: 5,
+          cacheReadTokens: 3,
+          cacheWriteTokens: 2,
+          totalTokens: 20,
+          knownCostUsd: 0.12,
+          contributorsWithCost: 1,
+          contributorsWithoutCost: 2,
+        },
+        diagnostics: [],
+      }).usage.contributorsWithoutCost,
     ).toBe(2);
   });
 
