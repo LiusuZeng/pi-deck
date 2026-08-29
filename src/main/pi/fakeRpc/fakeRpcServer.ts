@@ -32,6 +32,8 @@ interface FakeOptions {
   ignoredCommands: Set<string>;
   failedCommands: Set<string>;
   promptScenario: PromptScenario;
+  /** Test-only selector for deterministic per-prompt provider failures. */
+  promptErrorPrefix?: string;
   dropCompletionEvents: boolean;
   extensionUiMethod: "select" | "confirm" | "input" | "editor";
   extensionUiAutoCompleteTimeoutMs: number;
@@ -101,6 +103,10 @@ function parseOptions(argv: string[]): FakeOptions {
       if (isPromptScenario(scenario)) {
         options.promptScenario = scenario;
       }
+      index += 1;
+    } else if (arg === "--prompt-error-prefix") {
+      const prefix = argv[index + 1];
+      if (prefix) options.promptErrorPrefix = prefix;
       index += 1;
     } else if (arg === "--drop-completion-events") {
       options.dropCompletionEvents = true;
@@ -671,7 +677,11 @@ class FakeRpcServer {
       this.exerciseDelegationBridge(text);
     }
 
-    if (this.options.promptScenario === "error") {
+    if (
+      this.options.promptScenario === "error" ||
+      (this.options.promptErrorPrefix !== undefined &&
+        text.startsWith(this.options.promptErrorPrefix))
+    ) {
       const errorMessage = "Usage limit reached for fake provider.";
       const failedAssistant = {
         role: "assistant",
