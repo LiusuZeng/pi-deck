@@ -1,7 +1,9 @@
 name: Apply issue 24 test fixture fix
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - fix/issue-24-test-fixture
 
 permissions:
   contents: write
