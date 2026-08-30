@@ -1753,6 +1753,15 @@ export function App(): ReactElement {
     () => workspaceRowsForProgressiveDisclosure(activityWorkspaces),
     [activityWorkspaces],
   );
+  const newSessionWorkspaceChoices = useMemo(
+    () =>
+      newSessionWorkspaceOwnershipChoices(
+        currentWorkspace,
+        workspaces,
+        archivedWorkspaces,
+      ),
+    [archivedWorkspaces, currentWorkspace, workspaces],
+  );
   const activityWorkspaceNameById = useMemo(
     () =>
       Object.fromEntries(
@@ -1805,6 +1814,34 @@ export function App(): ReactElement {
       disposed = true;
     };
   }, [primaryView, sessions, archivedSessions, multitask]);
+
+  useEffect(() => {
+    if (newSessionWorkspaceChoices.length === 0) return;
+    const fallbackWorkspace = defaultWorkspaceFor(
+      newSessionWorkspaceChoices,
+      currentWorkspace,
+    );
+    const activeWorkspaceIds = new Set(
+      newSessionWorkspaceChoices.map((workspace) => workspace.id),
+    );
+    const staleDraft = sessionsRef.current.find(
+      (session) =>
+        session.draftSession === true &&
+        !activeWorkspaceIds.has(session.workspaceId),
+    );
+    if (staleDraft === undefined) return;
+    setSessions((items) =>
+      items.map((session) =>
+        session.draftSession === true &&
+        !activeWorkspaceIds.has(session.workspaceId)
+          ? rehomeDraftSession(session, fallbackWorkspace)
+          : session,
+      ),
+    );
+    setUiMessage(
+      `The selected draft workspace is no longer available. New work will be created in ${fallbackWorkspace.name}.`,
+    );
+  }, [currentWorkspace, newSessionWorkspaceChoices]);
 
   useEffect(() => {
     if (
@@ -1978,6 +2015,11 @@ export function App(): ReactElement {
         archivedWorkspaces,
       ),
     [archivedWorkspaces, currentWorkspace, workspaces],
+  );
+  const selectedSessionWorkspace = workspaceForSessionOwner(
+    selectedSession,
+    currentWorkspace,
+    newSessionWorkspaceChoices,
   );
 
   const agentWorkflowDefinitions = useMemo(
@@ -2438,6 +2480,30 @@ export function App(): ReactElement {
         slashOpen: value.trimStart().startsWith("/"),
       })),
     );
+  }
+
+  function handleDraftWorkspaceChange(
+    sessionId: string,
+    workspaceId: string,
+  ): void {
+    const workspace = newSessionWorkspaceChoices.find(
+      (candidate) => candidate.id === workspaceId,
+    );
+    if (workspace === undefined) {
+      setComposerError("That workspace is not available for new sessions.");
+      return;
+    }
+    setComposerError(null);
+    setSessions((items) =>
+      items.map((session) =>
+        session.id === sessionId &&
+        session.draftSession === true &&
+        !session.runtimeBacked
+          ? rehomeDraftSession(session, workspace)
+          : session,
+      ),
+    );
+    setUiMessage(`New session workspace set to ${workspace.name}.`);
   }
 
   function handleDismissSlashPicker(): void {
@@ -4228,14 +4294,26 @@ export function App(): ReactElement {
       const result = await window.piDeck.workspaces.archive({
         workspaceId,
       });
+      const fallbackWorkspace = result.activeWorkspace ?? result.workspaces[0];
+      if (fallbackWorkspace === undefined) {
+        throw new Error("Cannot archive the last open workspace.");
+      }
       if (isNavigationCurrent(generation)) {
         applyWorkspaceListResult(result);
       }
       // Archived membership is no longer an active Work source. Attached
       // runtimes were closed above, so dropping these renderer rows does not
       // terminate live work and prevents stale archived rows in global Work.
+      // Empty New Session drafts are the exception: they are renderer-owned
+      // setup state, so re-home them to the fallback instead of losing the
+      // visible composer when a workspace is archived from the sidebar.
       setSessions((items) =>
-        items.filter((session) => session.workspaceId !== workspaceId),
+        items.flatMap((session) => {
+          if (session.workspaceId !== workspaceId) return [session];
+          return session.draftSession === true
+            ? [rehomeDraftSession(session, fallbackWorkspace)]
+            : [];
+        }),
       );
       if (showArchived) await refreshArchivedSessions();
       if (!isNavigationCurrent(generation)) return;
@@ -4249,10 +4327,7 @@ export function App(): ReactElement {
       // A scoped Work route cannot point at an archived workspace. This also
       // handles archiving the execution workspace while viewing global Work.
       showAllWork(generation);
-      const next = result.activeWorkspace ?? result.workspaces[0];
-      if (next === undefined) {
-        throw new Error("Cannot archive the last open workspace.");
-      }
+      const next = fallbackWorkspace;
       setWorkspaceDialog(undefined);
       await switchWorkspaceView(next, result.workspaces, undefined, generation);
       if (isNavigationCurrent(generation)) {
@@ -5510,6 +5585,8 @@ export function App(): ReactElement {
           }
           showSessionControls={primaryView.kind === "session"}
           selectedSession={selectedSession}
+          selectedSessionWorkspace={selectedSessionWorkspace}
+          workspaceChoices={newSessionWorkspaceChoices}
           selectedModelId={selectedModelId}
           selectedThinking={selectedThinking}
           realMode={isRealBackendMode}
@@ -5523,6 +5600,9 @@ export function App(): ReactElement {
           }
           onAppearanceThemeChange={(theme) =>
             void handleAppearanceThemeChange(theme)
+          }
+          onDraftWorkspaceChange={(workspaceId) =>
+            handleDraftWorkspaceChange(selectedSession.id, workspaceId)
           }
           onModelChange={setSelectedModelId}
           onThinkingChange={(level) => {
@@ -6520,6 +6600,43 @@ function defaultWorkspaceFor(
       (workspace) => workspace.isDefault === true,
     ) ?? currentWorkspace
   );
+}
+
+function newSessionWorkspaceOwnershipChoices(
+  currentWorkspace: WorkspaceRef,
+  workspaces: readonly WorkspaceRef[],
+  archivedWorkspaces: readonly WorkspaceRef[] = [],
+): WorkspaceRef[] {
+  const archivedIds = new Set(
+    archivedWorkspaces.map((workspace) => workspace.id),
+  );
+  return [currentWorkspace, ...workspaces].filter(
+    (workspace, index, choices) =>
+      workspace.id !== invalidDemoWorkspace.id &&
+      !archivedIds.has(workspace.id) &&
+      choices.findIndex((candidate) => candidate.id === workspace.id) === index,
+  );
+}
+
+function rehomeDraftSession(
+  session: SessionViewModel,
+  workspace: WorkspaceRef,
+): SessionViewModel {
+  const {
+    workingDirectory: _workingDirectory,
+    projectId: _projectId,
+    ...sessionWithoutWorkspaceContext
+  } = session;
+  const workingDirectory = defaultWorkingDirectory(workspace);
+  const projectId = projectIdForWorkspace(workspace);
+  return {
+    ...sessionWithoutWorkspaceContext,
+    workspaceId: workspace.id,
+    project: workspace.name,
+    projectPath: workingDirectory ?? "Managed context",
+    ...(workingDirectory !== undefined ? { workingDirectory } : {}),
+    ...(projectId !== undefined ? { projectId } : {}),
+  };
 }
 
 function workspaceForSessionOwner(
@@ -9054,11 +9171,63 @@ function StatusMark(props: { status: SessionStatus }): ReactElement {
   );
 }
 
+function SessionWorkspaceOwnership(props: {
+  session: SessionViewModel;
+  workspace: WorkspaceRef;
+  workspaceChoices: readonly WorkspaceRef[];
+  onChange(workspaceId: string): void;
+}): ReactElement {
+  const isDraft = props.session.draftSession === true;
+  const selectedAvailable = props.workspaceChoices.some(
+    (workspace) => workspace.id === props.workspace.id,
+  );
+  if (!isDraft) {
+    return (
+      <span
+        aria-label={`Workspace: ${props.workspace.name}`}
+        className="session-workspace-context"
+        title={`Workspace: ${props.workspace.name}`}
+      >
+        <span aria-hidden="true">Workspace:</span>
+        <strong>{props.workspace.name}</strong>
+      </span>
+    );
+  }
+
+  return (
+    <label
+      className="draft-workspace-control"
+      title={`Workspace: ${props.workspace.name}`}
+    >
+      <span>Workspace:</span>
+      <select
+        aria-label="New session workspace"
+        disabled={props.session.status === "starting"}
+        value={props.workspace.id}
+        onChange={(event) => props.onChange(event.target.value)}
+      >
+        {!selectedAvailable ? (
+          <option disabled value={props.workspace.id}>
+            {props.workspace.name} (unavailable)
+          </option>
+        ) : null}
+        {props.workspaceChoices.map((workspace) => (
+          <option key={workspace.id} value={workspace.id}>
+            {workspace.name}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 function AppHeader(props: {
   loadState: LoadState;
   surfaceTitle: string;
   showSessionControls: boolean;
   selectedSession: SessionViewModel;
+  selectedSessionWorkspace: WorkspaceRef;
+  workspaceChoices: readonly WorkspaceRef[];
   selectedModelId: string;
   selectedThinking: string;
   realMode: boolean;
@@ -9069,6 +9238,7 @@ function AppHeader(props: {
   onToggleSidebar(): void;
   onToggleUsageStats(): void;
   onAppearanceThemeChange(theme: ThemePreference): void;
+  onDraftWorkspaceChange(workspaceId: string): void;
   onModelChange(id: string): void;
   onThinkingChange(id: string): void;
 }): ReactElement {
@@ -9088,6 +9258,12 @@ function AppHeader(props: {
               <>
                 <h1>{props.surfaceTitle}</h1>
                 <StatusMark status={props.selectedSession.status} />
+                <SessionWorkspaceOwnership
+                  session={props.selectedSession}
+                  workspace={props.selectedSessionWorkspace}
+                  workspaceChoices={props.workspaceChoices}
+                  onChange={props.onDraftWorkspaceChange}
+                />
               </>
             ) : (
               <span className="surface-title">{props.surfaceTitle}</span>
@@ -12387,6 +12563,8 @@ export const __rendererTestHooks = {
   allWorkView,
   backToWorkView,
   defaultWorkspaceFor,
+  newSessionWorkspaceOwnershipChoices,
+  rehomeDraftSession,
   replaceSessionRouteId,
   sessionView,
   workflowPrimaryView,

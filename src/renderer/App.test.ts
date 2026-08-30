@@ -318,6 +318,89 @@ it("resolves global creation to the default workspace and first-send owner", () 
   ).toBe(defaultWorkspace);
 });
 
+it("offers active draft ownership choices by stable id and excludes archived workspaces", () => {
+  const current = {
+    id: "workspace-current",
+    name: "Current",
+    lastOpenedAt: 1,
+  };
+  const duplicateCurrent = { ...current, name: "Renamed current" };
+  const named = {
+    id: "workspace-named",
+    name: "Named",
+    lastOpenedAt: 2,
+  };
+  const archived = {
+    id: "workspace-archived",
+    name: "Archived",
+    lastOpenedAt: 3,
+  };
+
+  expect(
+    __rendererTestHooks
+      .newSessionWorkspaceOwnershipChoices(
+        current,
+        [
+          duplicateCurrent,
+          named,
+          archived,
+          { id: "demo-deleted-workspace", name: "Invalid", lastOpenedAt: 4 },
+        ],
+        [archived],
+      )
+      .map((workspace) => [workspace.id, workspace.name]),
+  ).toEqual([
+    ["workspace-current", "Current"],
+    ["workspace-named", "Named"],
+  ]);
+});
+
+it("re-homes only draft ownership context while preserving draft identity and selections", () => {
+  const source = {
+    id: "workspace-source",
+    name: "Source",
+    defaultProjectId: "project-source",
+    defaultProject: {
+      id: "project-source",
+      path: "/tmp/source",
+      canonicalPath: "/tmp/source",
+      displayName: "Source",
+      lastOpenedAt: 1,
+    },
+    lastOpenedAt: 1,
+  };
+  const destination = {
+    id: "workspace-destination",
+    name: "Destination",
+    lastOpenedAt: 2,
+  };
+  const draft = {
+    ...__rendererTestHooks.draftSessionForWorkspace(
+      source,
+      "draft-session-1",
+      "real",
+    ),
+    modelLabel: "provider / model-a",
+    thinkingLevel: "high",
+  };
+
+  expect(
+    __rendererTestHooks.rehomeDraftSession(draft, destination),
+  ).toMatchObject({
+    id: "draft-session-1",
+    workspaceId: "workspace-destination",
+    project: "Destination",
+    projectPath: "Managed context",
+    modelLabel: "provider / model-a",
+    thinkingLevel: "high",
+    draftSession: true,
+    runtimeBacked: false,
+  });
+  expect(
+    "projectId" in __rendererTestHooks.rehomeDraftSession(draft, destination),
+  ).toBe(false);
+});
+
 function baseSession() {
   return {
     id: "session-1",
