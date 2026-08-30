@@ -336,6 +336,37 @@ async function selectWorkspaceInUi(page: Page, name: string): Promise<void> {
   ).toBeVisible();
 }
 
+async function pasteTinyImageAttachment(
+  page: Page,
+  fileName = "draft-image.png",
+): Promise<void> {
+  const base64 = tinyPngBase64();
+  await page.getByLabel("Prompt text").focus();
+  await page.evaluate(
+    ({ base64, fileName }) => {
+      const textarea = document.querySelector<HTMLTextAreaElement>(
+        'textarea[aria-label="Prompt text"]',
+      );
+      if (textarea === null) throw new Error("Prompt text area not found.");
+      const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+      const file = new File([bytes], fileName, { type: "image/png" });
+      const dataTransfer = new DataTransfer();
+      dataTransfer.items.add(file);
+      textarea.dispatchEvent(
+        new ClipboardEvent("paste", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: dataTransfer,
+        }),
+      );
+    },
+    { base64, fileName },
+  );
+  await expect(page.locator(".composer .attachment-chip")).toContainText(
+    fileName,
+  );
+}
+
 async function confirmDeleteSessionDialog(page: Page): Promise<void> {
   const dialog = page.getByTestId("session-delete-dialog");
   await expect(dialog).toBeVisible();
@@ -350,6 +381,194 @@ async function selectPromptDestinationInUi(
   await promptDestination.selectOption(destination);
   await expect(promptDestination).toHaveValue(destination);
 }
+
+test("New Session draft shows and commits inline workspace ownership", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-draft-workspace-"),
+  );
+  const projectCwd = path.join(root, "default-project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: ["--include-usage"],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await expectAllWorkLaunch(page);
+    await createWorkspaceInUi(page, "Inline Alpha");
+    await createWorkspaceInUi(page, "Inline Beta");
+    const workspaceIds = await page.evaluate(async () => {
+      const result = await window.piDeck.workspaces.list();
+      const defaultWorkspace = result.workspaces.find(
+        (workspace) => workspace.isDefault === true,
+      );
+      if (defaultWorkspace === undefined) {
+        throw new Error("Default workspace not found.");
+      }
+      return {
+        ...Object.fromEntries(
+          result.workspaces.map((workspace) => [workspace.name, workspace.id]),
+        ),
+        default: defaultWorkspace.id,
+      };
+    });
+    expect(workspaceIds["Inline Alpha"]).toEqual(expect.any(String));
+    expect(workspaceIds["Inline Beta"]).toEqual(expect.any(String));
+    expect(workspaceIds.default).toEqual(expect.any(String));
+    await page.getByRole("button", { name: "All Work" }).click();
+    await expectAllWorkLaunch(page);
+
+    await sidebarNewSessionButton(page).click();
+    await expect(
+      page.locator('.workspace[data-primary-view="session"]'),
+    ).toBeVisible();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    const globalWorkspace = page.getByLabel("New session workspace");
+    await expect(globalWorkspace).toBeVisible();
+    await expect(globalWorkspace).toHaveValue(workspaceIds.default!);
+    await globalWorkspace.focus();
+    await expect(globalWorkspace).toBeFocused();
+    await expect(page.getByTestId("session-origin-back")).toHaveAttribute(
+      "aria-label",
+      "Back to All Work",
+    );
+
+    const prompt = page.getByLabel("Prompt text");
+    await prompt.fill("global draft follows inline ownership");
+    await pasteTinyImageAttachment(page);
+    await globalWorkspace.selectOption({ label: "Inline Alpha" });
+    await expect(globalWorkspace).toHaveValue(workspaceIds["Inline Alpha"]!);
+    await expect(prompt).toHaveValue("global draft follows inline ownership");
+    await expect(page.locator(".composer .attachment-chip")).toContainText(
+      "draft-image.png",
+    );
+    await expect(page.getByTestId("session-origin-back")).toHaveAttribute(
+      "aria-label",
+      "Back to All Work",
+    );
+
+    await expect
+      .poll(async () =>
+        page.evaluate(
+          async (workspaceIds) => {
+            const [defaultSessions, alphaSessions, betaSessions] =
+              await Promise.all([
+                window.piDeck.chat.listSessions({
+                  workspaceId: workspaceIds.defaultWorkspaceId,
+                }),
+                window.piDeck.chat.listSessions({
+                  workspaceId: workspaceIds.alphaWorkspaceId,
+                }),
+                window.piDeck.chat.listSessions({
+                  workspaceId: workspaceIds.betaWorkspaceId,
+                }),
+              ]);
+            return {
+              default: defaultSessions.sessions.length,
+              alpha: alphaSessions.sessions.length,
+              beta: betaSessions.sessions.length,
+            };
+          },
+          {
+            defaultWorkspaceId: workspaceIds.default!,
+            alphaWorkspaceId: workspaceIds["Inline Alpha"]!,
+            betaWorkspaceId: workspaceIds["Inline Beta"]!,
+          },
+        ),
+      )
+      .toEqual({ default: 0, alpha: 0, beta: 0 });
+
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText(/Fake response to: global draft follows inline ownership/),
+    ).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByLabel("New session workspace")).toHaveCount(0);
+    await expect(
+      page.locator(".topbar .session-workspace-context"),
+    ).toHaveAccessibleName("Workspace: Inline Alpha");
+    const committed = await page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      const alphaSessions = await window.piDeck.chat.listSessions({
+        workspaceId: snapshot.workspaceId,
+      });
+      return {
+        workspaceId: snapshot.workspaceId,
+        title: alphaSessions.sessions[0]?.title,
+        count: alphaSessions.sessions.length,
+      };
+    });
+    expect(committed).toMatchObject({
+      workspaceId: workspaceIds["Inline Alpha"],
+      title: "global draft follows inline ownership",
+      count: 1,
+    });
+
+    await page.getByTestId("session-origin-back").click();
+    await expectAllWorkLaunch(page);
+    await selectWorkspaceInUi(page, "Inline Beta");
+    await sidebarNewSessionButton(page).click();
+    const scopedWorkspace = page.getByLabel("New session workspace");
+    await expect(scopedWorkspace).toHaveValue(workspaceIds["Inline Beta"]!);
+    await page
+      .getByLabel("Prompt text")
+      .fill("scoped draft can switch before first prompt");
+    await scopedWorkspace.selectOption({ label: "Inline Alpha" });
+    await expect(scopedWorkspace).toHaveValue(workspaceIds["Inline Alpha"]!);
+    await expect(page.getByTestId("session-origin-back")).toHaveAttribute(
+      "aria-label",
+      "Back to Inline Beta Work",
+    );
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText(
+        /Fake response to: scoped draft can switch before first prompt/,
+      ),
+    ).toBeVisible({ timeout: 20_000 });
+    await expect
+      .poll(async () =>
+        page.evaluate(
+          async (workspaceIds) => {
+            const [alphaSessions, betaSessions] = await Promise.all([
+              window.piDeck.chat.listSessions({
+                workspaceId: workspaceIds.alphaWorkspaceId,
+              }),
+              window.piDeck.chat.listSessions({
+                workspaceId: workspaceIds.betaWorkspaceId,
+              }),
+            ]);
+            return {
+              alphaTitles: alphaSessions.sessions
+                .map((session) => session.title)
+                .sort(),
+              betaCount: betaSessions.sessions.length,
+            };
+          },
+          {
+            alphaWorkspaceId: workspaceIds["Inline Alpha"]!,
+            betaWorkspaceId: workspaceIds["Inline Beta"]!,
+          },
+        ),
+      )
+      .toEqual({
+        alphaTitles: [
+          "global draft follows inline ownership",
+          "scoped draft can switch before first prompt",
+        ],
+        betaCount: 0,
+      });
+    await page.getByTestId("session-origin-back").click();
+    await expectWorkRoute(page, workspaceIds["Inline Beta"]!);
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("workspace overflow menu remains compact and vertical with a long workspace name", async () => {
   const root = fs.mkdtempSync(
@@ -2903,6 +3122,7 @@ test("failed draft setup releases its worker before the next retry", async () =>
       await expect(page.locator(".composer-error")).toHaveText(
         "Fake RPC configured to fail command: set_model",
       );
+      await expect(page.getByLabel("New session workspace")).toBeEnabled();
     }
 
     const failedRuntimeIds = await trackedRuntimeExitIds(page);

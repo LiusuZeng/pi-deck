@@ -3691,6 +3691,63 @@ body {
   font-size: 0;
 }
 
+.draft-workspace-control,
+.session-workspace-context {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: min(34vw, 260px);
+  gap: 4px;
+  border: 1px solid var(--control-border-subtle);
+  border-radius: 999px;
+  padding: 3px 7px;
+  color: var(--color-text-muted);
+  background: color-mix(in srgb, var(--color-surface-muted) 70%, transparent);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.draft-workspace-control span,
+.session-workspace-context span {
+  flex: 0 0 auto;
+}
+
+.draft-workspace-control select {
+  min-width: 0;
+  max-width: 150px;
+  border: 0;
+  padding: 0 16px 0 0;
+  color: var(--color-text);
+  background: transparent;
+  overflow: hidden;
+  font: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.draft-workspace-control select:focus-visible {
+  outline: none;
+}
+
+.draft-workspace-control:focus-within {
+  box-shadow: var(--focus-ring);
+}
+
+.draft-workspace-control select:disabled {
+  color: var(--color-text-muted);
+  opacity: 1;
+}
+
+.session-workspace-context strong {
+  overflow: hidden;
+  min-width: 0;
+  color: var(--color-text);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .project-context {
   display: inline-flex;
   align-items: center;
