@@ -232,6 +232,7 @@ test("WorkspaceStore preserves a durable title across title-less model and think
     sessionFile,
     sessionId: "parent-id",
     title: "Durable parent title",
+    completedAtMs: 456,
     messageCount: 3,
   });
   // Model and thinking updates are state-only snapshots and have no title.
@@ -242,6 +243,8 @@ test("WorkspaceStore preserves a durable title across title-less model and think
   });
   const preserved = await store.getSessionRefs(workspace.id);
   assert.equal(preserved[0]?.title, "Durable parent title");
+  assert.equal(preserved[0]?.messageCount, 3);
+  assert.equal(preserved[0]?.completedAtMs, 456);
 
   const newFile = path.join(root, "new-parent.jsonl");
   await store.upsertSessionRefFromSnapshot({

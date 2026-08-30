@@ -456,7 +456,7 @@ interface SessionViewModel {
   /** A provider failure observed in a Pi runtime event, not a local UI error. */
   providerErrorObserved?: boolean;
   archivedAtMs?: number;
-  /** Set only after a successful or aborted runtime turn in this renderer run. */
+  /** Timestamp of the latest durable or live successful/usable aborted turn. */
   completedAtMs?: number | undefined;
 }
 
@@ -6686,6 +6686,9 @@ function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
     getContextWindowTokens(snapshot.state),
   );
   const isAgentActive = isSnapshotAgentActive(snapshot);
+  const completedAtMs = isAgentActive
+    ? undefined
+    : completedAtFromSnapshotMessages(snapshot.messages);
 
   const session: SessionViewModel = {
     id: snapshot.runtimeId,
@@ -6717,6 +6720,7 @@ function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
     runtimeBacked: true,
     resumeBacked: false,
     backendMode: snapshot.backendMode,
+    ...(completedAtMs !== undefined ? { completedAtMs } : {}),
     ...(snapshot.projectId !== undefined
       ? { projectId: snapshot.projectId }
       : snapshot.state.cwd
@@ -6810,6 +6814,40 @@ function summarizeTitle(value: string, maxLength: number): string {
     return singleLine;
   }
   return `${singleLine.slice(0, maxLength - 1)}…`;
+}
+
+function completedAtFromSnapshotMessages(
+  messages: readonly ChatMessage[],
+): number | undefined {
+  const latestMessage = [...messages]
+    .reverse()
+    .find((message) => ["user", "assistant"].includes(message.role));
+  if (latestMessage?.role !== "assistant") {
+    return undefined;
+  }
+  const content = extractTextContent(latestMessage.content);
+  if (
+    content === undefined ||
+    content.trim().length === 0 ||
+    isAssistantFailureMessage(latestMessage)
+  ) {
+    return undefined;
+  }
+  return typeof latestMessage.createdAt === "number" &&
+    Number.isFinite(latestMessage.createdAt)
+    ? latestMessage.createdAt
+    : undefined;
+}
+
+function isAssistantFailureMessage(message: ChatMessage): boolean {
+  const record = message as Record<string, unknown>;
+  return (
+    record.status === "error" ||
+    record.stopReason === "error" ||
+    record.reason === "error" ||
+    typeof record.errorMessage === "string" ||
+    record.error !== undefined
+  );
 }
 
 function mergeSessionUsageFromSnapshot(
@@ -7370,8 +7408,8 @@ function reduceRuntimeEvent(
 
       const nextSession: SessionViewModel = {
         ...session,
-        // Completed activity is intentionally ephemeral and only records an
-        // authoritative, non-error terminal agent_end from this renderer run.
+        // A live authoritative, non-error terminal event supersedes any
+        // reconstructed durable completion timestamp for this session.
         completedAtMs: endedWithError ? undefined : Date.now(),
         awaitingAgentEnd: false,
         ...(usageByMessageId !== undefined ? { usageByMessageId } : {}),

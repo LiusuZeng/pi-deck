@@ -387,6 +387,7 @@ test("ProjectStore preserves cached transcript fields for metadata-only snapshot
     cwd: project,
     title: "First prompt title",
     updatedAtMs: 123,
+    completedAtMs: 456,
     messageCount: 2,
     preview: "Latest assistant reply",
   });
@@ -404,6 +405,7 @@ test("ProjectStore preserves cached transcript fields for metadata-only snapshot
   assert.equal(ref?.title, "Named by Pi");
   assert.equal(ref?.cwd, project);
   assert.equal(ref?.messageCount, 2);
+  assert.equal(ref?.completedAtMs, 456);
   assert.equal(ref?.preview, "Latest assistant reply");
   assert.equal(ref?.lastKnownUpdatedAtMs, 123);
 });

@@ -4979,56 +4979,93 @@ test.describe("Unified Work", () => {
     let launched = await launchPiDeck(env);
     let app = launched.app;
     let page = launched.page;
-    const prompt = `Durable completed relaunch ${Date.now()}`;
-    const completedRow = () =>
+    const marker = `Durable completed relaunch ${Date.now()}`;
+    const alphaPrompt = `${marker} alpha`;
+    const betaPrompt = `${marker} beta`;
+    const prompts = [alphaPrompt, betaPrompt];
+    const completedRow = (title: string) =>
+      page.locator(".activity-inbox-row--completed").filter({ hasText: title });
+    const completedQueueTitles = () =>
       page
-        .locator(".activity-inbox-row--completed")
-        .filter({ hasText: prompt });
-    const completedDateTime = async (): Promise<number> => {
-      const dateTime = await completedRow()
+        .locator(".activity-inbox-row--completed .activity-inbox-row-title")
+        .evaluateAll(
+          (nodes, markerText) =>
+            nodes
+              .map((node) => node.textContent?.trim() ?? "")
+              .filter((title) => title.includes(markerText)),
+          marker,
+        );
+    const completedDateTime = async (title: string): Promise<number> => {
+      const dateTime = await completedRow(title)
         .locator("time")
         .getAttribute("datetime");
       if (dateTime === null)
-        throw new Error("Missing completed row timestamp.");
+        throw new Error(`Missing completed row timestamp for ${title}.`);
       return Date.parse(dateTime);
     };
-    const persistedAssistantCreatedAt = (): number => {
+    const persistedAssistantCreatedAts = (): Record<string, number> => {
       const sessionRoot = path.join(agentDir, "sessions", "--fake-rpc--");
       const files = fs
         .readdirSync(sessionRoot)
         .filter((name) => name.endsWith(".jsonl"))
         .map((name) => path.join(sessionRoot, name));
-      expect(files).toHaveLength(1);
-      const assistantMessages = fs
-        .readFileSync(files[0]!, "utf8")
-        .split(/\r?\n/)
-        .flatMap((line) => {
-          if (line.trim().length === 0) return [];
-          const record = JSON.parse(line) as {
-            message?: { role?: string; createdAt?: number };
-          };
-          return record.message?.role === "assistant" &&
-            typeof record.message.createdAt === "number"
-            ? [record.message.createdAt]
-            : [];
-        });
-      expect(assistantMessages).toHaveLength(1);
-      return assistantMessages[0]!;
+      expect(files).toHaveLength(2);
+      return Object.fromEntries(
+        files.map((file) => {
+          let title: string | undefined;
+          let assistantCreatedAt: number | undefined;
+          for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
+            if (line.trim().length === 0) continue;
+            const record = JSON.parse(line) as {
+              message?: {
+                role?: string;
+                content?: unknown;
+                createdAt?: number;
+              };
+            };
+            if (
+              record.message?.role === "user" &&
+              typeof record.message.content === "string"
+            ) {
+              title = record.message.content;
+            }
+            if (
+              record.message?.role === "assistant" &&
+              typeof record.message.createdAt === "number"
+            ) {
+              assistantCreatedAt = record.message.createdAt;
+            }
+          }
+          if (title === undefined || assistantCreatedAt === undefined) {
+            throw new Error(`Missing durable completion metadata in ${file}.`);
+          }
+          return [title, assistantCreatedAt];
+        }),
+      );
     };
 
     try {
       await expectHealthyPreload(page);
       await expectAllWorkLaunch(page);
-      await enterSessionDetail(page);
-      await page.getByLabel("Prompt text").fill(prompt);
-      await page.getByRole("button", { name: "Send" }).click();
-      await page.getByRole("button", { name: /^All Work/ }).click();
-      await expectAllWorkLaunch(page);
-      await expect(completedRow()).toHaveCount(1, { timeout: 10_000 });
-      const liveCompletedAt = await completedDateTime();
-      const durableCompletedAt = persistedAssistantCreatedAt();
-      expect(Math.abs(liveCompletedAt - durableCompletedAt)).toBeLessThan(
-        5_000,
+      for (const prompt of prompts) {
+        await enterSessionDetail(page);
+        await page.getByLabel("Prompt text").fill(prompt);
+        await page.getByRole("button", { name: "Send" }).click();
+        await page.getByRole("button", { name: /^All Work/ }).click();
+        await expectAllWorkLaunch(page);
+        await expect(completedRow(prompt)).toHaveCount(1, { timeout: 10_000 });
+      }
+      await expect.poll(completedQueueTitles).toEqual(prompts);
+      const durableCompletedAts = persistedAssistantCreatedAts();
+      for (const prompt of prompts) {
+        expect(
+          Math.abs(
+            (await completedDateTime(prompt)) - durableCompletedAts[prompt]!,
+          ),
+        ).toBeLessThan(5_000);
+      }
+      expect(durableCompletedAts[alphaPrompt]!).toBeLessThanOrEqual(
+        durableCompletedAts[betaPrompt]!,
       );
 
       await app.close();
@@ -5037,8 +5074,27 @@ test.describe("Unified Work", () => {
       page = launched.page;
       await expectHealthyPreload(page);
       await expectAllWorkLaunch(page);
-      await expect(completedRow()).toHaveCount(1, { timeout: 10_000 });
-      expect(await completedDateTime()).toBe(durableCompletedAt);
+      for (const prompt of prompts) {
+        await expect(completedRow(prompt)).toHaveCount(1, { timeout: 10_000 });
+        expect(await completedDateTime(prompt)).toBe(
+          durableCompletedAts[prompt],
+        );
+      }
+      await expect.poll(completedQueueTitles).toEqual(prompts);
+
+      await completedRow(betaPrompt).click();
+      await expect(
+        page.locator('.workspace[data-primary-view="session"]'),
+      ).toBeVisible();
+      await page.getByTestId("session-origin-back").click();
+      await expectAllWorkLaunch(page);
+      await expect.poll(completedQueueTitles).toEqual(prompts);
+      for (const prompt of prompts) {
+        await expect(completedRow(prompt)).toHaveCount(1);
+        expect(await completedDateTime(prompt)).toBe(
+          durableCompletedAts[prompt],
+        );
+      }
     } finally {
       await app.close().catch(() => undefined);
       fs.rmSync(root, { recursive: true, force: true });

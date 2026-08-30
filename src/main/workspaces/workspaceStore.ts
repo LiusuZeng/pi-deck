@@ -672,7 +672,33 @@ export class WorkspaceStore {
     const sessionFile = await canonicalOrResolved(
       z.string().min(1).parse(options.sessionFile),
     );
-    const summary = sessionSummaryFromSnapshot(sessionFile, options);
+    await this.loadIfNeeded();
+    const existing = this.state.sessionRefs.find(
+      (ref) => ref.sessionFile === sessionFile,
+    );
+    const metadataOnly =
+      options.completedAtMs === undefined && options.messageCount === undefined;
+    const summary = sessionSummaryFromSnapshot(sessionFile, {
+      ...options,
+      ...(options.updatedAtMs !== undefined
+        ? {}
+        : existing?.lastKnownUpdatedAtMs !== undefined
+          ? { updatedAtMs: existing.lastKnownUpdatedAtMs }
+          : {}),
+      ...(metadataOnly && existing?.completedAtMs !== undefined
+        ? { completedAtMs: existing.completedAtMs }
+        : {}),
+      ...(options.messageCount !== undefined
+        ? {}
+        : existing?.messageCount !== undefined
+          ? { messageCount: existing.messageCount }
+          : {}),
+      ...(options.preview !== undefined
+        ? {}
+        : existing?.preview !== undefined
+          ? { preview: existing.preview }
+          : {}),
+    });
     return this.upsertSessionRef(workspaceId, summary);
   }
 

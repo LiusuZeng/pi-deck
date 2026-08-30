@@ -440,7 +440,10 @@ export class ProjectStore {
       ...(existing?.createdAtMs ? { createdAtMs: existing.createdAtMs } : {}),
       ...(options.completedAtMs !== undefined
         ? { completedAtMs: options.completedAtMs }
-        : {}),
+        : options.messageCount === undefined &&
+            existing?.completedAtMs !== undefined
+          ? { completedAtMs: existing.completedAtMs }
+          : {}),
       messageCount: options.messageCount ?? existing?.messageCount ?? 0,
     };
     if (index >= 0) {

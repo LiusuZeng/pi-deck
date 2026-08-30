@@ -2572,6 +2572,67 @@ describe("renderer message_update reduction", () => {
     expect(session.sessionId).toBe("parent-session-id");
   });
 
+  it("reconstructs completed activity when resuming a saved snapshot", () => {
+    const completed = __rendererTestHooks.sessionFromSnapshot({
+      runtimeId: "runtime-1",
+      backendMode: "real",
+      state: {
+        cwd: "/tmp/project",
+        sessionFile: "/canonical/sessions/completed.jsonl",
+        sessionId: "completed-session-id",
+        isAgentActive: false,
+      },
+      messages: [
+        {
+          id: "user-1",
+          role: "user",
+          content: "Saved prompt",
+          createdAt: 100,
+        },
+        {
+          id: "assistant-1",
+          role: "assistant",
+          content: "Saved answer",
+          createdAt: 200,
+        },
+      ],
+    } as any);
+    expect(completed.completedAtMs).toBe(200);
+
+    const unanswered = __rendererTestHooks.sessionFromSnapshot({
+      runtimeId: "runtime-2",
+      backendMode: "real",
+      state: { cwd: "/tmp/project", isAgentActive: false },
+      messages: [
+        { id: "user-1", role: "user", content: "Saved prompt" },
+        {
+          id: "assistant-1",
+          role: "assistant",
+          content: "Saved answer",
+          createdAt: 200,
+        },
+        { id: "user-2", role: "user", content: "Follow-up" },
+      ],
+    } as any);
+    expect(unanswered.completedAtMs).toBeUndefined();
+
+    const active = __rendererTestHooks.sessionFromSnapshot({
+      runtimeId: "runtime-3",
+      backendMode: "real",
+      state: { cwd: "/tmp/project", isAgentActive: true },
+      messages: [
+        { id: "user-1", role: "user", content: "Saved prompt" },
+        {
+          id: "assistant-1",
+          role: "assistant",
+          content: "Saved answer",
+          createdAt: 200,
+        },
+      ],
+    } as any);
+    expect(active.completedAtMs).toBeUndefined();
+  });
+
   it("upserts a runtime snapshot so workflow runtime sessions can be selected", () => {
     const existing = {
       ...baseSession(),
