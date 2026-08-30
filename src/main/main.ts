@@ -231,6 +231,10 @@ import {
   resolveTaskSessionPlannerTimeoutMs,
   TASK_SESSION_PLANNER_MAX_TASKS,
 } from "./multitask/taskSessionPlanner.js";
+import {
+  recordTaskSessionPromptAfterParentIdle,
+  resolveTaskSessionPromptRecordTimeoutMs,
+} from "./multitask/taskSessionParentRecorder.js";
 import { deliverWithAttachmentConsumption } from "./attachmentDelivery.js";
 import {
   approveWorkflowStep,
@@ -806,13 +810,13 @@ function registerIpcHandlers(
               taskAttachments,
               attachmentOwnerId,
             );
-            await recordTaskSessionPrompt(adapter, activeRuntimeId, text);
             await orchestrator.submit(
               activeRuntimeId,
               text,
               toTaskSessionSettings(workerOverrides),
               { input: taskInput } satisfies TaskSessionPromptRuntimeContext,
             );
+            enqueueTaskSessionPromptRecord(adapter, activeRuntimeId, text);
           },
         });
         return undefined;
@@ -3673,16 +3677,19 @@ async function planTaskSession(
   }
 }
 
-async function recordTaskSessionPrompt(
+function enqueueTaskSessionPromptRecord(
   adapter: SinglePiAdapter,
   parentId: string,
   prompt: string,
-): Promise<void> {
-  const encoded = Buffer.from(JSON.stringify({ prompt }), "utf8").toString(
-    "base64url",
-  );
-  await adapter.prompt(parentId, {
-    text: `/deck-task-prompt ${encoded}`,
+): void {
+  void queueTaskSessionParentTurn(parentId, () =>
+    recordTaskSessionPromptAfterParentIdle(adapter, parentId, prompt, {
+      timeoutMs: resolveTaskSessionPromptRecordTimeoutMs(),
+    }),
+  ).catch((error) => {
+    diagnostics?.recordError(
+      `Failed to record task-session prompt for parent ${parentId}: ${error instanceof Error ? error.message : String(error)}`,
+    );
   });
 }
 

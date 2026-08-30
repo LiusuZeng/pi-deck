@@ -68,6 +68,10 @@ describe("Deck delegate extension source generator", () => {
     expect(source).toContain("createDeckDelegateTool(pi).execute");
     expect(source).toContain("PI_DECK_E2E_INVOKE_DECK_DELEGATE");
     expect(source).toContain("PI_DECK_E2E_ASSERT_DECK_DELEGATE_ABSENT");
+    expect(source).toContain("PI_DECK_E2E_KEEP_PARENT_ACTIVE");
+    expect(source).toContain("PI_DECK_E2E_PARENT_ACTIVE_STARTED");
+    expect(source).toContain('pi.on("input"');
+    expect(source).toContain('action: "handled"');
     expect(source).toContain("pi.getAllTools()");
     expect(source).toContain("PI_DECK_E2E_DECK_DELEGATE_NOT_REGISTERED");
   });
@@ -103,6 +107,12 @@ describe("Deck delegate extension source generator", () => {
     );
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain(
       'appendEntry("deck_task_prompt"',
+    );
+    expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain(
+      'registerCommand("deck-e2e-parent-active-sleep"',
+    );
+    expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain(
+      "PI_DECK_E2E_PARENT_ACTIVE_MARKER_FILE",
     );
     expect(DECK_DELEGATE_EXTENSION_SOURCE).toContain(
       "queryMode(config.endpoint, config.capability)",

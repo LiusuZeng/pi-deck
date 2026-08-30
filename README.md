@@ -385,6 +385,7 @@ Useful environment overrides:
 | `PI_CODING_AGENT_SESSION_DIR`                  | Override Pi's session directory                                                                                  |
 | `PI_DECK_HOME`                                 | Override Pi Deck's local metadata directory                                                                      |
 | `PI_DECK_REAL_RPC_TIMEOUT_MS`                  | Override the RPC command-response timeout                                                                        |
+| `PI_DECK_TASK_PROMPT_RECORD_TIMEOUT_MS`        | Positive integer milliseconds to wait for an active parent to become idle before recording a private task prompt (default: `180000`) |
 | `PI_DECK_SCAN_PROJECT_SESSION_DIR_CANDIDATE=1` | Explicitly include a trust-dependent project `sessionDir` candidate in bounded scanning                          |
 | `PI_DECK_ENABLE_LEGACY_DELEGATE_BRIDGE=1`      | Opt in to the model-visible legacy `deck_delegate` compatibility tool; ordinary Parallel routing does not use it |
 
