@@ -63,6 +63,7 @@ interface ParsedSessionFile {
   preview?: string;
   createdAtMs?: number;
   updatedAtMs?: number;
+  completedAtMs?: number;
   messageCount: number;
   bytesRead: number;
 }
@@ -362,17 +363,25 @@ async function summarizeSessionFile(
   if (projectCwd !== undefined && cwd !== projectCwd) {
     return { bytesRead: parsed.bytesRead };
   }
-  // Names are durable metadata rather than transcript content. Search from
-  // EOF independently so an append-only Pi session can retain its latest name
-  // even when normal message/preview parsing reaches its bounded head cap.
-  const metadata = await findLatestSessionInfoName(
+  // Names and the latest turn outcome are durable metadata. Search from EOF
+  // independently so an append-only Pi session can retain its latest name and
+  // Completed queue timestamp even when normal parsing reaches its bounded
+  // head cap.
+  const metadata = await findLatestSessionMetadata(
     canonicalFile,
     Math.max(0, maxMetadataBytes - parsed.bytesRead),
     deadline,
     diagnostics,
   );
-  if (metadata.found) {
-    parsed.sessionName = metadata.name;
+  if (metadata.name.found) {
+    parsed.sessionName = metadata.name.name;
+  }
+  if (metadata.latestMessage.found) {
+    if (metadata.latestMessage.completedAtMs === undefined) {
+      delete parsed.completedAtMs;
+    } else {
+      parsed.completedAtMs = metadata.latestMessage.completedAtMs;
+    }
   }
 
   const updatedAtMs = parsed.updatedAtMs ?? stat.mtimeMs;
@@ -390,6 +399,9 @@ async function summarizeSessionFile(
         path.basename(canonicalFile, ".jsonl"),
       updatedAtMs,
       createdAtMs,
+      ...(parsed.completedAtMs !== undefined
+        ? { completedAtMs: parsed.completedAtMs }
+        : {}),
       messageCount: parsed.messageCount,
       ...(parsed.preview ? { preview: parsed.preview } : {}),
     },
@@ -507,19 +519,53 @@ async function parseSessionFile(
 
 type SessionInfoNameResult = { found: true; name: string } | { found: false };
 
-type LatestSessionInfoNameResult = SessionInfoNameResult & {
+type LatestMessageCompletionResult =
+  | { found: true; completedAtMs?: number }
+  | { found: false };
+
+type LatestSessionMetadataResult = {
+  name: SessionInfoNameResult;
+  latestMessage: LatestMessageCompletionResult;
   bytesRead: number;
 };
 
-async function findLatestSessionInfoName(
+async function findLatestSessionMetadata(
   filePath: string,
   maxBytes: number,
   deadline: number | undefined,
   diagnostics: string[],
-): Promise<LatestSessionInfoNameResult> {
+): Promise<LatestSessionMetadataResult> {
   let handle: fs.FileHandle | undefined;
   let bytesRead = 0;
   let oversizedRecordReported = false;
+  let name: SessionInfoNameResult = { found: false };
+  let latestMessage: LatestMessageCompletionResult = { found: false };
+  const emptyResult = (): LatestSessionMetadataResult => ({
+    name,
+    latestMessage,
+    bytesRead,
+  });
+
+  const ingestLine = (line: Buffer): boolean => {
+    const record = parseJsonRecord(line);
+    if (record === undefined) {
+      return false;
+    }
+    if (!name.found) {
+      const recordName = sessionInfoName(record);
+      if (recordName.found) {
+        name = recordName;
+      }
+    }
+    if (!latestMessage.found) {
+      const recordCompletion = latestMessageCompletion(record);
+      if (recordCompletion.found) {
+        latestMessage = recordCompletion;
+      }
+    }
+    return name.found && latestMessage.found;
+  };
+
   try {
     handle = await fs.open(filePath, "r");
     const { size } = await handle.stat();
@@ -559,7 +605,7 @@ async function findLatestSessionInfoName(
           diagnostics.push(
             `Could not fully read session metadata ${filePath}; stopping safely.`,
           );
-          return { found: false, bytesRead };
+          return emptyResult();
         }
       }
 
@@ -570,12 +616,11 @@ async function findLatestSessionInfoName(
         if (!tailOversized) {
           const recordBytes = line.length + tailBytes;
           if (recordBytes <= SESSION_INFO_MAX_RECORD_BYTES) {
-            const result = sessionInfoName(
+            const fullLine =
               tailParts.length === 0
                 ? line
-                : Buffer.concat([line, ...tailParts]),
-            );
-            if (result.found) return { ...result, bytesRead };
+                : Buffer.concat([line, ...tailParts]);
+            if (ingestLine(fullLine)) return emptyResult();
           } else if (!oversizedRecordReported) {
             diagnostics.push(
               `Skipped oversized session metadata record in ${filePath}.`,
@@ -613,39 +658,89 @@ async function findLatestSessionInfoName(
       diagnostics.push(
         `Stopped session metadata scan after reading ${maxBytes} bytes.`,
       );
-      return { found: false, bytesRead };
+      return emptyResult();
     }
     if (!tailOversized && tailBytes > 0) {
-      return { ...sessionInfoName(Buffer.concat(tailParts)), bytesRead };
+      ingestLine(Buffer.concat(tailParts));
     }
-    return { found: false, bytesRead };
+    return emptyResult();
   } catch (error) {
     diagnostics.push(
       `Could not scan session metadata ${filePath}: ${errorMessage(error)}`,
     );
-    return { found: false, bytesRead };
+    return emptyResult();
   } finally {
     await handle?.close();
   }
 }
 
-function sessionInfoName(line: Buffer): SessionInfoNameResult {
+function parseJsonRecord(line: Buffer): Record<string, unknown> | undefined {
   if (line.length === 0) {
-    return { found: false };
+    return undefined;
   }
   try {
     const record = JSON.parse(line.toString("utf8")) as unknown;
-    if (!record || typeof record !== "object" || Array.isArray(record)) {
-      return { found: false };
-    }
-    const value = record as Record<string, unknown>;
-    if (value.type === "session_info" && typeof value.name === "string") {
-      return { found: true, name: summarize(value.name, 80) };
-    }
+    return record && typeof record === "object" && !Array.isArray(record)
+      ? (record as Record<string, unknown>)
+      : undefined;
   } catch {
     // Malformed records are not durable metadata; keep scanning backward.
+    return undefined;
   }
-  return { found: false };
+}
+
+function sessionInfoName(
+  record: Record<string, unknown>,
+): SessionInfoNameResult {
+  return record.type === "session_info" && typeof record.name === "string"
+    ? { found: true, name: summarize(record.name, 80) }
+    : { found: false };
+}
+
+function latestMessageCompletion(
+  record: Record<string, unknown>,
+): LatestMessageCompletionResult {
+  if (record.type !== "message") {
+    return { found: false };
+  }
+  const message = record.message;
+  if (!message || typeof message !== "object" || Array.isArray(message)) {
+    return { found: false };
+  }
+  const messageRecord = message as Record<string, unknown>;
+  if (messageRecord.role === "user") {
+    return { found: true };
+  }
+  if (messageRecord.role !== "assistant") {
+    return { found: false };
+  }
+  if (isAssistantFailure(record, messageRecord)) {
+    return { found: true };
+  }
+  const text = extractTextContent(messageRecord.content);
+  if (text === undefined || text.trim().length === 0) {
+    return { found: true };
+  }
+  const completedAtMs =
+    parseTimestamp(messageRecord.createdAt) ?? parseTimestamp(record.timestamp);
+  return completedAtMs === undefined
+    ? { found: true }
+    : { found: true, completedAtMs };
+}
+
+function isAssistantFailure(
+  record: Record<string, unknown>,
+  message: Record<string, unknown>,
+): boolean {
+  return (
+    record.status === "error" ||
+    record.stopReason === "error" ||
+    message.status === "error" ||
+    message.stopReason === "error" ||
+    message.reason === "error" ||
+    typeof message.errorMessage === "string" ||
+    message.error !== undefined
+  );
 }
 
 function ingestRecord(
@@ -668,6 +763,15 @@ function ingestRecord(
       parsed.createdAtMs = timestamp;
     }
     return;
+  }
+
+  const completion = latestMessageCompletion(record);
+  if (completion.found) {
+    if (completion.completedAtMs === undefined) {
+      delete parsed.completedAtMs;
+    } else {
+      parsed.completedAtMs = completion.completedAtMs;
+    }
   }
 
   if (record.type !== "message") {

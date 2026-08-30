@@ -1,6 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { buildActivityInbox } from "./activityInbox.js";
 import { emptyOverlays } from "./sessionState.js";
 import { defaultAgentWorkflowDefinition } from "./workflows/agentWorkflowDefinition.js";
 import { __rendererTestHooks, MarkdownView } from "./App.js";
@@ -268,6 +269,28 @@ it("uses Pi durable sessionId instead of a canonical file path", () => {
     sessionId: "pi-durable-id",
     sessionFile: "/sessions/canonical.jsonl",
   });
+});
+
+it("carries durable saved-session completion metadata into Work", () => {
+  const session = __rendererTestHooks.sessionFromSummary(
+    {
+      id: "/sessions/completed.jsonl",
+      sessionFile: "/sessions/completed.jsonl",
+      sessionId: "completed-session",
+      title: "Completed saved session",
+      updatedAtMs: 2_000,
+      completedAtMs: 1_500,
+      messageCount: 2,
+    } as any,
+    "workspace-a",
+    "project-a",
+  );
+
+  const [source] = __rendererTestHooks.activitySourceSessions([session], {
+    "workspace-a": "Workspace A",
+  });
+  expect(source?.completedAtMs).toBe(1_500);
+  expect(buildActivityInbox([source as any]).groups.completed).toHaveLength(1);
 });
 
 it("re-homes fake fixtures to the bootstrapped workspace", () => {
@@ -2630,6 +2653,67 @@ describe("renderer message_update reduction", () => {
     expect(session.title).toBe("Named by Pi");
     expect(session.sessionFile).toBe("/canonical/sessions/parent.jsonl");
     expect(session.sessionId).toBe("parent-session-id");
+  });
+
+  it("reconstructs completed activity when resuming a saved snapshot", () => {
+    const completed = __rendererTestHooks.sessionFromSnapshot({
+      runtimeId: "runtime-1",
+      backendMode: "real",
+      state: {
+        cwd: "/tmp/project",
+        sessionFile: "/canonical/sessions/completed.jsonl",
+        sessionId: "completed-session-id",
+        isAgentActive: false,
+      },
+      messages: [
+        {
+          id: "user-1",
+          role: "user",
+          content: "Saved prompt",
+          createdAt: 100,
+        },
+        {
+          id: "assistant-1",
+          role: "assistant",
+          content: "Saved answer",
+          createdAt: 200,
+        },
+      ],
+    } as any);
+    expect(completed.completedAtMs).toBe(200);
+
+    const unanswered = __rendererTestHooks.sessionFromSnapshot({
+      runtimeId: "runtime-2",
+      backendMode: "real",
+      state: { cwd: "/tmp/project", isAgentActive: false },
+      messages: [
+        { id: "user-1", role: "user", content: "Saved prompt" },
+        {
+          id: "assistant-1",
+          role: "assistant",
+          content: "Saved answer",
+          createdAt: 200,
+        },
+        { id: "user-2", role: "user", content: "Follow-up" },
+      ],
+    } as any);
+    expect(unanswered.completedAtMs).toBeUndefined();
+
+    const active = __rendererTestHooks.sessionFromSnapshot({
+      runtimeId: "runtime-3",
+      backendMode: "real",
+      state: { cwd: "/tmp/project", isAgentActive: true },
+      messages: [
+        { id: "user-1", role: "user", content: "Saved prompt" },
+        {
+          id: "assistant-1",
+          role: "assistant",
+          content: "Saved answer",
+          createdAt: 200,
+        },
+      ],
+    } as any);
+    expect(active.completedAtMs).toBeUndefined();
   });
 
   it("upserts a runtime snapshot so workflow runtime sessions can be selected", () => {

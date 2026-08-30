@@ -5271,6 +5271,9 @@ async function mergeProjectSessionRefs(
       title: ref.title ?? path.basename(canonical, ".jsonl"),
       updatedAtMs: ref.lastKnownUpdatedAtMs ?? ref.lastSeenAtMs,
       ...(ref.createdAtMs ? { createdAtMs: ref.createdAtMs } : {}),
+      ...(ref.completedAtMs !== undefined
+        ? { completedAtMs: ref.completedAtMs }
+        : {}),
       messageCount: ref.messageCount ?? 0,
       ...(ref.preview ? { preview: ref.preview } : {}),
     });
@@ -6026,6 +6029,9 @@ async function getChatSnapshotForRuntime(
     const hasTranscript = !options.skipMessages && messages.length > 0;
     if (workspaceId !== undefined) {
       const preview = hasTranscript ? previewFromMessages(messages) : undefined;
+      const completedAtMs = hasTranscript
+        ? completedAtFromMessages(messages)
+        : undefined;
       await workspaceStore?.upsertSessionRefFromSnapshot({
         workspaceId,
         sessionFile: canonicalSessionFile,
@@ -6037,6 +6043,7 @@ async function getChatSnapshotForRuntime(
         ...(hasTranscript
           ? { updatedAtMs: Date.now(), messageCount: messages.length }
           : {}),
+        ...(completedAtMs !== undefined ? { completedAtMs } : {}),
         ...(preview !== undefined ? { preview } : {}),
       });
     }
@@ -6046,6 +6053,9 @@ async function getChatSnapshotForRuntime(
       (hasTranscript || title !== undefined)
     ) {
       const preview = hasTranscript ? previewFromMessages(messages) : undefined;
+      const completedAtMs = hasTranscript
+        ? completedAtFromMessages(messages)
+        : undefined;
       await projectStore?.upsertSessionRefFromSnapshot({
         projectId,
         sessionFile: canonicalSessionFile,
@@ -6057,6 +6067,7 @@ async function getChatSnapshotForRuntime(
         ...(hasTranscript
           ? { updatedAtMs: Date.now(), messageCount: messages.length }
           : {}),
+        ...(completedAtMs !== undefined ? { completedAtMs } : {}),
         ...(preview !== undefined ? { preview } : {}),
       });
     }
@@ -6107,6 +6118,34 @@ function previewFromMessages(messages: PiMessage[]): string | undefined {
     return undefined;
   }
   return content.trim().replace(/\s+/g, " ").slice(0, 160);
+}
+
+function completedAtFromMessages(messages: PiMessage[]): number | undefined {
+  const latestMessage = [...messages]
+    .reverse()
+    .find((message) => ["user", "assistant"].includes(message.role));
+  if (latestMessage?.role !== "assistant") {
+    return undefined;
+  }
+  const content =
+    typeof latestMessage.content === "string" ? latestMessage.content : "";
+  if (content.trim().length === 0 || isAssistantFailureMessage(latestMessage)) {
+    return undefined;
+  }
+  return typeof latestMessage.createdAt === "number" &&
+    Number.isFinite(latestMessage.createdAt)
+    ? latestMessage.createdAt
+    : undefined;
+}
+
+function isAssistantFailureMessage(message: PiMessage): boolean {
+  return (
+    message.status === "error" ||
+    message.stopReason === "error" ||
+    message.reason === "error" ||
+    typeof message.errorMessage === "string" ||
+    message.error !== undefined
+  );
 }
 
 async function safeRealpath(filePath: string): Promise<string | undefined> {

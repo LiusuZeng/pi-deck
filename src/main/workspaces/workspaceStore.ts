@@ -39,6 +39,7 @@ const workspaceSessionRefSchema = z
     lastSeenAtMs: z.number(),
     lastKnownUpdatedAtMs: z.number().optional(),
     createdAtMs: z.number().optional(),
+    completedAtMs: z.number().optional(),
     messageCount: z.number().int().min(0).optional(),
     missingSinceMs: z.number().optional(),
     archivedAtMs: z.number().optional(),
@@ -160,6 +161,7 @@ const legacyProjectSessionRefSchema = z
     lastSeenAtMs: z.number(),
     lastKnownUpdatedAtMs: z.number().optional(),
     createdAtMs: z.number().optional(),
+    completedAtMs: z.number().optional(),
     messageCount: z.number().int().min(0).optional(),
     missingSinceMs: z.number().optional(),
   })
@@ -662,6 +664,7 @@ export class WorkspaceStore {
     cwd?: string;
     title?: string;
     updatedAtMs?: number;
+    completedAtMs?: number;
     messageCount?: number;
     preview?: string;
   }): Promise<WorkspaceSessionMutationResult> {
@@ -669,7 +672,33 @@ export class WorkspaceStore {
     const sessionFile = await canonicalOrResolved(
       z.string().min(1).parse(options.sessionFile),
     );
-    const summary = sessionSummaryFromSnapshot(sessionFile, options);
+    await this.loadIfNeeded();
+    const existing = this.state.sessionRefs.find(
+      (ref) => ref.sessionFile === sessionFile,
+    );
+    const metadataOnly =
+      options.completedAtMs === undefined && options.messageCount === undefined;
+    const summary = sessionSummaryFromSnapshot(sessionFile, {
+      ...options,
+      ...(options.updatedAtMs !== undefined
+        ? {}
+        : existing?.lastKnownUpdatedAtMs !== undefined
+          ? { updatedAtMs: existing.lastKnownUpdatedAtMs }
+          : {}),
+      ...(metadataOnly && existing?.completedAtMs !== undefined
+        ? { completedAtMs: existing.completedAtMs }
+        : {}),
+      ...(options.messageCount !== undefined
+        ? {}
+        : existing?.messageCount !== undefined
+          ? { messageCount: existing.messageCount }
+          : {}),
+      ...(options.preview !== undefined
+        ? {}
+        : existing?.preview !== undefined
+          ? { preview: existing.preview }
+          : {}),
+    });
     return this.upsertSessionRef(workspaceId, summary);
   }
 
@@ -686,6 +715,7 @@ export class WorkspaceStore {
     cwd?: string;
     title?: string;
     updatedAtMs?: number;
+    completedAtMs?: number;
     messageCount?: number;
     preview?: string;
   }): Promise<WorkspaceSessionMutationResult> {
@@ -1078,6 +1108,9 @@ export class WorkspaceStore {
           ...(ref.createdAtMs !== undefined
             ? { createdAtMs: ref.createdAtMs }
             : {}),
+          ...(ref.completedAtMs !== undefined
+            ? { completedAtMs: ref.completedAtMs }
+            : {}),
           ...(ref.messageCount !== undefined
             ? { messageCount: ref.messageCount }
             : {}),
@@ -1280,6 +1313,7 @@ function sessionSummaryFromSnapshot(
     cwd?: string;
     title?: string;
     updatedAtMs?: number;
+    completedAtMs?: number;
     messageCount?: number;
     preview?: string;
   },
@@ -1295,6 +1329,9 @@ function sessionSummaryFromSnapshot(
     ...(options.sessionId ? { sessionId: options.sessionId } : {}),
     ...(options.cwd ? { cwd: options.cwd } : {}),
     ...(options.preview ? { preview: options.preview } : {}),
+    ...(options.completedAtMs !== undefined
+      ? { completedAtMs: options.completedAtMs }
+      : {}),
   });
 }
 
@@ -1339,6 +1376,9 @@ function sessionRefFromSummary(
       : existing?.createdAtMs !== undefined
         ? { createdAtMs: existing.createdAtMs }
         : {}),
+    ...(summary.completedAtMs !== undefined
+      ? { completedAtMs: summary.completedAtMs }
+      : {}),
     messageCount: summary.messageCount,
   };
 }
@@ -1352,6 +1392,9 @@ function toCachedSummary(ref: WorkspaceSessionRef): ChatSessionSummary {
     title: ref.title ?? path.basename(ref.sessionFile, ".jsonl"),
     updatedAtMs: ref.lastKnownUpdatedAtMs ?? ref.lastSeenAtMs,
     ...(ref.createdAtMs !== undefined ? { createdAtMs: ref.createdAtMs } : {}),
+    ...(ref.completedAtMs !== undefined
+      ? { completedAtMs: ref.completedAtMs }
+      : {}),
     messageCount: ref.messageCount ?? 0,
     ...(ref.preview ? { preview: ref.preview } : {}),
     ...(ref.archivedAtMs !== undefined
@@ -1373,6 +1416,7 @@ function sameSessionRefData(
     existing.preview === candidate.preview &&
     existing.lastKnownUpdatedAtMs === candidate.lastKnownUpdatedAtMs &&
     existing.createdAtMs === candidate.createdAtMs &&
+    existing.completedAtMs === candidate.completedAtMs &&
     existing.messageCount === candidate.messageCount &&
     existing.missingSinceMs === undefined
   );

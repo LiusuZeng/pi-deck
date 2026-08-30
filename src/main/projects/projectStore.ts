@@ -35,6 +35,7 @@ const projectSessionRefSchema = z
     lastSeenAtMs: z.number(),
     lastKnownUpdatedAtMs: z.number().optional(),
     createdAtMs: z.number().optional(),
+    completedAtMs: z.number().optional(),
     messageCount: z.number().int().min(0).optional(),
     missingSinceMs: z.number().optional(),
   })
@@ -340,6 +341,9 @@ export class ProjectStore {
         ...(summary.createdAtMs !== undefined
           ? { createdAtMs: summary.createdAtMs }
           : {}),
+        ...(summary.completedAtMs !== undefined
+          ? { completedAtMs: summary.completedAtMs }
+          : {}),
         messageCount: summary.messageCount,
       };
 
@@ -395,6 +399,7 @@ export class ProjectStore {
     cwd?: string;
     title?: string;
     updatedAtMs?: number;
+    completedAtMs?: number;
     messageCount?: number;
     preview?: string;
   }): Promise<void> {
@@ -433,6 +438,12 @@ export class ProjectStore {
       lastKnownUpdatedAtMs:
         options.updatedAtMs ?? existing?.lastKnownUpdatedAtMs ?? now,
       ...(existing?.createdAtMs ? { createdAtMs: existing.createdAtMs } : {}),
+      ...(options.completedAtMs !== undefined
+        ? { completedAtMs: options.completedAtMs }
+        : options.messageCount === undefined &&
+            existing?.completedAtMs !== undefined
+          ? { completedAtMs: existing.completedAtMs }
+          : {}),
       messageCount: options.messageCount ?? existing?.messageCount ?? 0,
     };
     if (index >= 0) {
@@ -471,6 +482,9 @@ export class ProjectStore {
         updatedAtMs: ref.lastKnownUpdatedAtMs ?? ref.lastSeenAtMs,
         ...(ref.createdAtMs !== undefined
           ? { createdAtMs: ref.createdAtMs }
+          : {}),
+        ...(ref.completedAtMs !== undefined
+          ? { completedAtMs: ref.completedAtMs }
           : {}),
         messageCount: ref.messageCount ?? 0,
         ...(ref.preview ? { preview: ref.preview } : {}),
@@ -564,6 +578,7 @@ function sameSessionRefData(
     existing.preview === candidate.preview &&
     existing.lastKnownUpdatedAtMs === candidate.lastKnownUpdatedAtMs &&
     existing.createdAtMs === candidate.createdAtMs &&
+    existing.completedAtMs === candidate.completedAtMs &&
     existing.messageCount === candidate.messageCount &&
     existing.missingSinceMs === undefined
   );

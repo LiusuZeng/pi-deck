@@ -90,6 +90,29 @@ test("WorkspaceStore archives session membership without touching the Pi file", 
   assert.equal((await store.getCachedSessionSummaries(workspace.id)).length, 1);
 });
 
+test("WorkspaceStore persists durable completion metadata in cached summaries", async () => {
+  const { root, home } = await temporaryHome();
+  const sessionFile = path.join(root, "completed.jsonl");
+  await fs.writeFile(sessionFile, "completed\n");
+  const store = new WorkspaceStore(home);
+  const workspace = await store.create({ name: "Completed" });
+
+  await store.upsertSessionRef(workspace.id, {
+    ...summary(sessionFile),
+    completedAtMs: 456,
+  });
+  assert.equal(
+    (await store.getCachedSessionSummaries(workspace.id))[0]?.completedAtMs,
+    456,
+  );
+
+  await store.upsertSessionRef(workspace.id, summary(sessionFile));
+  assert.equal(
+    (await store.getCachedSessionSummaries(workspace.id))[0]?.completedAtMs,
+    undefined,
+  );
+});
+
 test("WorkspaceStore cascades archive and restores only cascade-owned sessions", async () => {
   const { root, home } = await temporaryHome();
   const firstFile = path.join(root, "first.jsonl");
@@ -209,6 +232,7 @@ test("WorkspaceStore preserves a durable title across title-less model and think
     sessionFile,
     sessionId: "parent-id",
     title: "Durable parent title",
+    completedAtMs: 456,
     messageCount: 3,
   });
   // Model and thinking updates are state-only snapshots and have no title.
@@ -219,6 +243,8 @@ test("WorkspaceStore preserves a durable title across title-less model and think
   });
   const preserved = await store.getSessionRefs(workspace.id);
   assert.equal(preserved[0]?.title, "Durable parent title");
+  assert.equal(preserved[0]?.messageCount, 3);
+  assert.equal(preserved[0]?.completedAtMs, 456);
 
   const newFile = path.join(root, "new-parent.jsonl");
   await store.upsertSessionRefFromSnapshot({
