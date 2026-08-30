@@ -39,6 +39,7 @@ interface FakeOptions {
   productionShaped: boolean;
   includeUsage: boolean;
   noSession: boolean;
+  failTaskPromptRecordWhileActive: boolean;
   sessionFile?: string;
   workflowDecisions: boolean[];
   workflowDecisionStateFile?: string;
@@ -76,6 +77,7 @@ function parseOptions(argv: string[]): FakeOptions {
     productionShaped: false,
     includeUsage: false,
     noSession: false,
+    failTaskPromptRecordWhileActive: false,
     workflowDecisions: [],
   };
 
@@ -133,6 +135,8 @@ function parseOptions(argv: string[]): FakeOptions {
       options.includeUsage = true;
     } else if (arg === "--no-session") {
       options.noSession = true;
+    } else if (arg === "--fail-task-prompt-record-while-active") {
+      options.failTaskPromptRecordWhileActive = true;
     } else if (arg === "--session") {
       const sessionFile = argv[index + 1];
       if (sessionFile) {
@@ -633,6 +637,20 @@ class FakeRpcServer {
           ? params.text
           : "";
     const recordedTaskPrompt = this.decodeTaskSessionPrompt(text);
+    if (
+      recordedTaskPrompt !== undefined &&
+      this.options.failTaskPromptRecordWhileActive &&
+      this.agentActive
+    ) {
+      this.respond(
+        command.id,
+        "prompt",
+        undefined,
+        "Fake RPC configured to reject task-session prompt records while active.",
+      );
+      this.traceFixture("task_session_prompt_record_rejected_while_active");
+      return;
+    }
     const userMessage: PiMessage = {
       id: `msg_user_${this.promptCounter + 1}`,
       role: "user",

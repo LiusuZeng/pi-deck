@@ -101,7 +101,7 @@ export async function writeDeckDelegateAcceptanceHarness(
   await fs.mkdir(path.dirname(path.resolve(outputPath)), { recursive: true });
   await fs.writeFile(
     outputPath,
-    `// Generated Pi Deck E2E acceptance harness. Never load outside E2E.\nimport type { ExtensionAPI } from "@earendil-works/pi-coding-agent";\nimport { createDeckDelegateTool } from ${JSON.stringify(path.resolve(delegateExtensionPath))};\n\nconst invokeMarker = "PI_DECK_E2E_INVOKE_DECK_DELEGATE";\nconst absentMarker = "PI_DECK_E2E_ASSERT_DECK_DELEGATE_ABSENT";\n\nexport default function deckDelegateAcceptanceHarness(pi: ExtensionAPI): void {\n  pi.on("before_agent_start", async (event) => {\n    const registered = pi.getAllTools().some((tool) => tool.name === "deck_delegate");\n    if (event.prompt.includes(absentMarker)) {\n      pi.sendMessage({ customType: "deck_delegate_registration", content: registered ? "PI_DECK_E2E_DECK_DELEGATE_UNEXPECTEDLY_PRESENT" : "PI_DECK_E2E_DECK_DELEGATE_ABSENT", display: true });\n      return undefined;\n    }\n    if (!event.prompt.includes(invokeMarker)) return undefined;\n    if (!registered) {\n      pi.sendMessage({ customType: "deck_delegate_acceptance", content: "PI_DECK_E2E_DECK_DELEGATE_NOT_REGISTERED", display: true });\n      return undefined;\n    }\n    const result = await createDeckDelegateTool(pi).execute(\n      "pi-deck-e2e-delegate",\n      { action: "delegate", name: "Real delegated acceptance task", task: "Reply with exactly: PI_DECK_REAL_DELEGATE_OK" },\n      new AbortController().signal,\n    );\n    pi.sendMessage({ customType: "deck_delegate_acceptance", content: "Deck delegate acceptance result: " + result.content.map((part) => part.type === "text" ? part.text : "").join(""), display: true });\n    return undefined;\n  });\n}\n`,
+    `// Generated Pi Deck E2E acceptance harness. Never load outside E2E.\nimport type { ExtensionAPI } from "@earendil-works/pi-coding-agent";\nimport { createDeckDelegateTool } from ${JSON.stringify(path.resolve(delegateExtensionPath))};\n\nconst invokeMarker = "PI_DECK_E2E_INVOKE_DECK_DELEGATE";\nconst absentMarker = "PI_DECK_E2E_ASSERT_DECK_DELEGATE_ABSENT";\nconst parentActiveMarker = "PI_DECK_E2E_KEEP_PARENT_ACTIVE";\n\nexport default function deckDelegateAcceptanceHarness(pi: ExtensionAPI): void {\n  pi.on("input", async (event) => {\n    if (!event.text.includes(parentActiveMarker)) return { action: "continue" };\n    const delayMs = Number(process.env.PI_DECK_E2E_PARENT_ACTIVE_DELAY_MS || "45000");\n    await new Promise((resolve) => setTimeout(resolve, Number.isFinite(delayMs) && delayMs > 0 ? delayMs : 45000));\n    return { action: "handled" };\n  });\n\n  pi.on("before_agent_start", async (event) => {\n    const registered = pi.getAllTools().some((tool) => tool.name === "deck_delegate");\n    if (event.prompt.includes(parentActiveMarker)) {\n      return { message: { customType: "parent_active_acceptance", content: "PI_DECK_E2E_PARENT_ACTIVE_STARTED", display: true } };\n    }\n    if (event.prompt.includes(absentMarker)) {\n      pi.sendMessage({ customType: "deck_delegate_registration", content: registered ? "PI_DECK_E2E_DECK_DELEGATE_UNEXPECTEDLY_PRESENT" : "PI_DECK_E2E_DECK_DELEGATE_ABSENT", display: true });\n      return undefined;\n    }\n    if (!event.prompt.includes(invokeMarker)) return undefined;\n    if (!registered) {\n      pi.sendMessage({ customType: "deck_delegate_acceptance", content: "PI_DECK_E2E_DECK_DELEGATE_NOT_REGISTERED", display: true });\n      return undefined;\n    }\n    const result = await createDeckDelegateTool(pi).execute(\n      "pi-deck-e2e-delegate",\n      { action: "delegate", name: "Real delegated acceptance task", task: "Reply with exactly: PI_DECK_REAL_DELEGATE_OK" },\n      new AbortController().signal,\n    );\n    pi.sendMessage({ customType: "deck_delegate_acceptance", content: "Deck delegate acceptance result: " + result.content.map((part) => part.type === "text" ? part.text : "").join(""), display: true });\n    return undefined;\n  });\n}\n`,
     "utf8",
   );
 }
@@ -395,6 +395,26 @@ export default function deckDelegateExtension(pi: ExtensionAPI): void {
       }
     },
   });
+
+  if (process.env.PI_DECK_E2E_TASK_SESSION_ACCEPTANCE === "1") {
+    pi.registerCommand("deck-e2e-parent-active-sleep", {
+      description: "E2E-only command that keeps a parent RPC prompt active.",
+      handler: async (args) => {
+        const requestedDelay = Number(args.trim() || process.env.PI_DECK_E2E_PARENT_ACTIVE_DELAY_MS || "45000");
+        const delayMs = Number.isFinite(requestedDelay) && requestedDelay > 0 ? requestedDelay : 45000;
+        const markerFile = process.env.PI_DECK_E2E_PARENT_ACTIVE_MARKER_FILE;
+        if (markerFile) {
+          const fs = await import("node:fs/promises");
+          await fs.appendFile(markerFile, "started\n", "utf8");
+        }
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        if (markerFile) {
+          const fs = await import("node:fs/promises");
+          await fs.appendFile(markerFile, "finished\n", "utf8");
+        }
+      },
+    });
+  }
 
   // This hook runs before each agent start. It queries Deck over the
   // capability-bound bridge rather than inferring mode from conversation text.

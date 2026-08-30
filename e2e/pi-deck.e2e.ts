@@ -5319,6 +5319,142 @@ test.describe("Unified Work", () => {
 
 /** Deterministic fake-RPC coverage of the production task-session route. */
 test.describe("task-session routing acceptance", () => {
+  test("starts and advances a private task session while the parent turn is active", async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "pi-deck-task-parent-active-"),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    const userDataDir = path.join(root, "user-data");
+    const traceFile = path.join(root, "fixture-trace.log");
+    const fixture = path.join(root, "parent-active-plan.json");
+    for (const directory of [projectCwd, agentDir, userDataDir])
+      fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(
+      path.join(userDataDir, "settings.json"),
+      JSON.stringify({ maxRunningSessions: 4 }),
+    );
+    fs.writeFileSync(
+      fixture,
+      JSON.stringify({
+        tasks: [{ name: "Independent task while parent is busy" }],
+      }),
+    );
+
+    const parentArgs = [
+      "--prompt-scenario",
+      "routing",
+      "--task-routing-fixture",
+      fixture,
+      "--fixture-trace-file",
+      traceFile,
+      "--stream-delay-ms",
+      "3000",
+      "--fail-task-prompt-record-while-active",
+    ];
+    const fakePiBinary = createFakePiBinary(root, parentArgs);
+    const { app, page } = await launchPiDeck({
+      PI_DECK_BACKEND: "real",
+      PI_DECK_PI_BINARY: fakePiBinary,
+      PI_DECK_PROJECT_CWD: projectCwd,
+      PI_CODING_AGENT_DIR: agentDir,
+      PI_DECK_HOME: path.join(root, "pideck-home"),
+      PI_DECK_USER_DATA_DIR: userDataDir,
+      NODE_ENV: "test",
+      PI_DECK_E2E_TASK_SESSION_ACCEPTANCE: "1",
+      PI_DECK_TEST_TASK_ROUTING_FIXTURE: fixture,
+    });
+    try {
+      await expectHealthyPreload(page);
+      await enterSessionDetail(page);
+      await page.evaluate(() =>
+        window.piDeck.settings.update({ maxRunningSessions: 4 }),
+      );
+      await page
+        .getByRole("button", { name: "Parallel multitasking: Off" })
+        .click();
+      const destination = page.getByLabel("Prompt destination");
+      await expect(destination).toHaveValue("newTaskSession");
+
+      await page.evaluate(() => {
+        const w = window as typeof window & {
+          __parentActiveTaskStates?: Array<{
+            tasks: Array<{ lifecycle: string }>;
+          }>;
+          __stopParentActiveTaskStates?: () => void;
+        };
+        w.__stopParentActiveTaskStates?.();
+        w.__parentActiveTaskStates = [];
+        w.__stopParentActiveTaskStates = window.piDeck.multitask.onState(
+          (state) => w.__parentActiveTaskStates?.push(state),
+        );
+      });
+
+      await destination.selectOption("parent");
+      await page
+        .getByLabel("Prompt text")
+        .fill("Keep the parent turn active while starting private work.");
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect(page.getByRole("button", { name: "Abort" })).toBeVisible();
+      await expect(page.getByText(/Working in Pi RPC backend/)).toBeVisible();
+      await expect(destination).toHaveValue("newTaskSession");
+
+      await page
+        .getByLabel("Prompt text")
+        .fill("Start independent private work while the parent is active.");
+      await page.getByRole("button", { name: "Plan task" }).click();
+
+      const panel = page.getByRole("region", {
+        name: "Parallel task sessions",
+      });
+      await expect(panel.getByRole("listitem")).toHaveCount(1, {
+        timeout: 8_000,
+      });
+      await expect(panel.getByRole("listitem").first()).toContainText(
+        "Independent task while parent is busy",
+      );
+      await expect
+        .poll(() =>
+          page.evaluate(() => {
+            const states =
+              (
+                window as typeof window & {
+                  __parentActiveTaskStates?: Array<{
+                    tasks: Array<{ lifecycle: string }>;
+                  }>;
+                }
+              ).__parentActiveTaskStates ?? [];
+            return states.flatMap((state) =>
+              state.tasks.map((task) => task.lifecycle),
+            );
+          }),
+        )
+        .toEqual(expect.arrayContaining(["queued", "running", "completed"]));
+      await expect
+        .poll(
+          () =>
+            fs.existsSync(traceFile) ? fs.readFileSync(traceFile, "utf8") : "",
+          { timeout: 25_000 },
+        )
+        .toContain("task_session_prompt_recorded");
+      expect(
+        fs.existsSync(traceFile) ? fs.readFileSync(traceFile, "utf8") : "",
+      ).not.toContain("task_session_prompt_record_rejected_while_active");
+      await expect(page.getByText(/Working in Pi RPC backend/)).toHaveCount(0, {
+        timeout: 10_000,
+      });
+    } finally {
+      await page.evaluate(() => {
+        const w = window as typeof window & {
+          __stopParentActiveTaskStates?: () => void;
+        };
+        w.__stopParentActiveTaskStates?.();
+      });
+      await app.close().catch(() => undefined);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("routes a 12-task plan through the flat parent projection", async () => {
     const root = fs.mkdtempSync(
       path.join(os.tmpdir(), "pi-deck-task-routing-"),

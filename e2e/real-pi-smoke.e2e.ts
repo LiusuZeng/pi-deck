@@ -781,6 +781,173 @@ test("real Pi: draft parallel opt-in delegates from its first prompt", async () 
   }
 });
 
+test("real Pi starts a task session while the parent turn is active", async () => {
+  test.setTimeout(
+    Number(process.env.PI_DECK_E2E_REAL_SMOKE_TIMEOUT_MS ?? 300_000),
+  );
+  const piBinary = requirePiBinary();
+
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-real-parent-active-task-"),
+  );
+  const userDataDir = path.join(root, "user-data");
+  const piDeckHome = path.join(root, "pideck-home");
+  const sessionDir = path.join(root, "sessions");
+  const projectCwd = path.join(root, "project");
+  const fixture = path.join(root, "parent-active-task-plan.json");
+  const parentActiveMarker = path.join(root, "parent-active-marker.log");
+  for (const directory of [userDataDir, piDeckHome, sessionDir, projectCwd])
+    fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(
+    path.join(userDataDir, "settings.json"),
+    JSON.stringify({ maxRunningSessions: 4 }),
+  );
+  fs.writeFileSync(
+    fixture,
+    JSON.stringify({
+      tasks: [
+        {
+          name: "Real child while parent active",
+          brief: "Reply with exactly: PI_DECK_REAL_PARENT_ACTIVE_CHILD_OK",
+        },
+      ],
+    }),
+  );
+
+  const env: NodeJS.ProcessEnv = {
+    PI_DECK_BACKEND: "real",
+    PI_DECK_PI_BINARY: piBinary,
+    PI_DECK_USER_DATA_DIR: userDataDir,
+    PI_DECK_HOME: piDeckHome,
+    PI_CODING_AGENT_SESSION_DIR: sessionDir,
+    PI_DECK_PROJECT_CWD: projectCwd,
+    PI_DECK_E2E_DELEGATE_HARNESS: "1",
+    PI_DECK_E2E_PARENT_ACTIVE_DELAY_MS:
+      process.env.PI_DECK_E2E_PARENT_ACTIVE_DELAY_MS ?? "45000",
+    PI_DECK_E2E_PARENT_ACTIVE_MARKER_FILE: parentActiveMarker,
+    PI_DECK_E2E_TASK_SESSION_ACCEPTANCE: "1",
+    PI_DECK_TEST_TASK_ROUTING_FIXTURE: fixture,
+    NODE_ENV: "test",
+  };
+
+  try {
+    const { app, page } = await launchPiDeck(env);
+    try {
+      await expectHealthyPreload(page);
+      await sidebarNewSessionButton(page).click();
+      await expect(page.getByLabel("Prompt text")).toBeVisible();
+      await page.evaluate(() =>
+        window.piDeck.settings.update({ maxRunningSessions: 4 }),
+      );
+      await page
+        .getByRole("button", {
+          name: "Parallel multitasking: Off",
+          exact: true,
+        })
+        .click();
+      const destination = page.getByLabel("Prompt destination");
+      await destination.selectOption("parent");
+
+      await page.evaluate(() => {
+        const testWindow = window as typeof window & {
+          __realParentActiveTaskStates?: Array<{
+            tasks: Array<{ lifecycle: string }>;
+          }>;
+          __stopRealParentActiveTaskStates?: () => void;
+        };
+        testWindow.__stopRealParentActiveTaskStates?.();
+        testWindow.__realParentActiveTaskStates = [];
+        testWindow.__stopRealParentActiveTaskStates =
+          window.piDeck.multitask.onState((state) =>
+            testWindow.__realParentActiveTaskStates?.push(state),
+          );
+      });
+
+      await page
+        .getByLabel("Prompt text")
+        .fill("/deck-e2e-parent-active-sleep");
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect
+        .poll(
+          () =>
+            fs.existsSync(parentActiveMarker)
+              ? fs.readFileSync(parentActiveMarker, "utf8")
+              : "",
+          { timeout: 30_000 },
+        )
+        .toContain("started");
+      expect(fs.readFileSync(parentActiveMarker, "utf8")).not.toContain(
+        "finished",
+      );
+      await destination.selectOption("newTaskSession");
+      await expect(destination).toHaveValue("newTaskSession");
+
+      await page
+        .getByLabel("Prompt text")
+        .fill("Start one private task while the parent is still active.");
+      await page.getByRole("button", { name: "Send" }).click();
+
+      const panel = page.getByRole("region", {
+        name: "Parallel task sessions",
+      });
+      await expect(panel.getByRole("listitem")).toHaveCount(1, {
+        timeout: 60_000,
+      });
+      await expect(panel.getByRole("listitem").first()).toContainText(
+        "Real child while parent active",
+      );
+      expect(fs.readFileSync(parentActiveMarker, "utf8")).not.toContain(
+        "finished",
+      );
+      await expect
+        .poll(
+          async () => {
+            const lifecycles = await page.evaluate(() => {
+              const states =
+                (
+                  window as typeof window & {
+                    __realParentActiveTaskStates?: Array<{
+                      tasks: Array<{ lifecycle: string }>;
+                    }>;
+                  }
+                ).__realParentActiveTaskStates ?? [];
+              return states.flatMap((state) =>
+                state.tasks.map((task) => task.lifecycle),
+              );
+            });
+            const marker = fs.existsSync(parentActiveMarker)
+              ? fs.readFileSync(parentActiveMarker, "utf8")
+              : "";
+            return (
+              lifecycles.includes("queued") &&
+              lifecycles.includes("running") &&
+              !marker.includes("finished")
+            );
+          },
+          {
+            timeout: Number(
+              process.env.PI_DECK_E2E_REAL_DELEGATE_TIMEOUT_MS ?? 180_000,
+            ),
+          },
+        )
+        .toBe(true);
+    } finally {
+      await page.evaluate(() => {
+        (
+          window as typeof window & {
+            __stopRealParentActiveTaskStates?: () => void;
+          }
+        ).__stopRealParentActiveTaskStates?.();
+      });
+      await app.close();
+    }
+  } finally {
+    if (process.env.PI_DECK_E2E_KEEP_REAL_SMOKE_ARTIFACTS !== "1") {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("real Pi production routing plans multiple private task sessions without bridge election", async () => {
   test.setTimeout(
     Number(process.env.PI_DECK_E2E_REAL_SMOKE_TIMEOUT_MS ?? 300_000),
