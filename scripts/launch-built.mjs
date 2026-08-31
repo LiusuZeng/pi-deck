@@ -12,6 +12,7 @@ export const requiredOutputs = [
   "main/main.js",
   "preload/index.js",
   "renderer/index.html",
+  "renderer/pi-deck-app-icon.png",
 ];
 const buildInputs = [
   "index.html",
@@ -21,6 +22,7 @@ const buildInputs = [
   "tsconfig.main.json",
   "tsconfig.renderer.json",
   "vite.config.ts",
+  "scripts/copy-app-icon.mjs",
 ];
 
 async function fileStats(filePath) {
@@ -121,7 +123,7 @@ export async function validateBuiltApp(root = repoRoot) {
       const inputStats = await fileStats(path.join(root, relativePath));
       newestInputMtime = Math.max(newestInputMtime, inputStats?.mtimeMs ?? 0);
     }
-    for (const buildTree of ["src", "public"]) {
+    for (const buildTree of ["src", "public", "assets"]) {
       const directory = path.join(root, buildTree);
       if ((await fileStats(directory))?.isDirectory()) {
         newestInputMtime = Math.max(

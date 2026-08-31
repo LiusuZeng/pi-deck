@@ -14,6 +14,7 @@ import {
   type ReactElement,
   type SyntheticEvent,
 } from "react";
+import appIconMark from "../../assets/branding/pi-deck-app-icon.svg";
 import type {
   AppBootstrapState,
   AppSettings,
@@ -8611,9 +8612,7 @@ function SessionSidebar(props: {
     <aside className="sidebar" aria-label="Sessions">
       <div className="sidebar-header">
         <div className="sidebar-brand-row">
-          <span className="brand-mark" aria-hidden="true">
-            π
-          </span>
+          <img className="brand-mark" src={appIconMark} alt="" />
           <span className="brand">Pi Deck</span>
         </div>
         <div className="sidebar-header-actions">

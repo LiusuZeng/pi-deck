@@ -3412,15 +3412,9 @@ body {
 }
 
 .brand-mark {
-  display: grid;
-  place-items: center;
   width: 28px;
   height: 28px;
-  border-radius: 999px;
-  color: var(--action-solid-fg);
-  background: var(--action-solid-bg);
-  font-size: 15px;
-  font-weight: 700;
+  flex: 0 0 auto;
 }
 
 .brand {
