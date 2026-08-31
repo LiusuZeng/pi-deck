@@ -173,7 +173,67 @@ describe("timeline presentation grouping", () => {
     });
   });
 
+  it("projects repetitive tool calls into fewer semantic milestones", () => {
+    const trace = [
+      thinking("th1"),
+      tool("read-1"),
+      tool("read-2"),
+      { ...tool("search-1"), title: "search" },
+      ...Array.from({ length: 48 }, (_, index) => tool(`read-${index + 3}`)),
+      { ...tool("bash-1"), title: "bash" },
+    ] as any;
+    const milestones = __rendererTestHooks.activityMilestones(trace) as any[];
+
+    expect(milestones).toHaveLength(5);
+    expect(milestones.map((milestone) => milestone.items.length)).toEqual([
+      1, 2, 1, 48, 1,
+    ]);
+    expect(milestones.map((milestone) => milestone.label)).toEqual([
+      "Reasoned about the task",
+      "Inspected files",
+      "Searched the codebase",
+      "Inspected files",
+      "Ran a shell command",
+    ]);
+    expect(__rendererTestHooks.activityMilestoneLabel(milestones[3])).toBe(
+      "Inspected files · 48 raw steps",
+    );
+  });
+
+  it("does not merge distinct tools that share a display label", () => {
+    const milestones = __rendererTestHooks.activityMilestones([
+      { ...tool("grep-1"), title: "grep" },
+      { ...tool("search-1"), title: "search" },
+    ] as any) as any[];
+
+    expect(milestones).toHaveLength(2);
+    expect(milestones.map((milestone) => milestone.label)).toEqual([
+      "Searched the codebase",
+      "Searched the codebase",
+    ]);
+  });
+
+  it("keeps failed calls as their own visible semantic milestone", () => {
+    const milestones = __rendererTestHooks.activityMilestones([
+      tool("read-1"),
+      tool("read-failed", "error"),
+      tool("read-2"),
+    ] as any) as any[];
+
+    expect(milestones.map((milestone) => milestone.state)).toEqual([
+      "completed",
+      "error",
+      "completed",
+    ]);
+    expect(milestones.map((milestone) => milestone.items.length)).toEqual([
+      1, 1, 1,
+    ]);
+  });
+
   it("uses conservative activity labels instead of raw serialized summaries", () => {
+    expect(__rendererTestHooks.activitySemanticLabel(tool("t1") as any)).toBe(
+      "Inspected files",
+    );
     expect(__rendererTestHooks.activityStepLabel(tool("t1") as any)).toBe(
       "Read",
     );

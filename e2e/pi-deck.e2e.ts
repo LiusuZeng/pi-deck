@@ -1845,6 +1845,15 @@ test("expanded tool details stay scrollable above the composer", async () => {
     await activityGroup.locator(":scope > summary").click();
     await expect(activityGroup).toHaveAttribute("open", "");
 
+    const toolMilestone = activityGroup
+      .locator(".agent-activity-milestone")
+      .filter({ hasText: "Inspected files" })
+      .first();
+    await expect(
+      toolMilestone.locator(":scope > details > summary"),
+    ).toBeVisible();
+    await toolMilestone.locator(":scope > details > summary").click();
+
     const toolCard = activityGroup.locator(".tool-card").first();
     await expect(toolCard).toBeVisible();
     await expect(toolCard.getByText("Read", { exact: true })).toBeVisible();
@@ -1967,7 +1976,7 @@ test("tool-heavy turns use a compact agent activity hierarchy", async () => {
     const activityGroup = page.locator(".agent-activity-group").first();
     const groupSummary = activityGroup.locator(":scope > summary");
     await expect(groupSummary).toContainText("Agent activity");
-    await expect(groupSummary).toContainText(/60 steps/);
+    await expect(groupSummary).toContainText(/5 milestones/);
     await expect(groupSummary).not.toContainText("toolName");
     await expect(groupSummary).not.toContainText("renderer tests passed");
 
@@ -1975,7 +1984,7 @@ test("tool-heavy turns use a compact agent activity hierarchy", async () => {
       page.getByText("Fake response to: summarize after tool work"),
     ).toBeVisible();
     await expect(
-      page.getByLabel("Agent activity, 60 steps, completed"),
+      page.getByLabel("Agent activity, 5 milestones from 60 steps, completed"),
     ).toBeVisible();
     await expect(activityGroup).not.toHaveAttribute("open", "");
 
@@ -1983,18 +1992,15 @@ test("tool-heavy turns use a compact agent activity hierarchy", async () => {
     await expect(groupSummary).toBeFocused();
     await page.keyboard.press("Enter");
     await expect(activityGroup).toHaveAttribute("open", "");
-    await expect(activityGroup.locator(".agent-activity-step")).toHaveCount(60);
-    const compactToolCards = activityGroup.locator(".agent-activity-tool-card");
-    await expect(compactToolCards).toHaveCount(59);
-    await expect(compactToolCards.first()).toHaveCSS("border-top-width", "0px");
+    const milestones = activityGroup.locator(".agent-activity-milestone");
+    await expect(milestones).toHaveCount(5);
     await expect(
-      compactToolCards.first().locator(".tool-summary"),
-    ).toBeVisible();
-    await expect(compactToolCards.first().locator(".tool-copy")).toHaveCSS(
-      "display",
-      "flex",
-    );
-    await expect(compactToolCards.first().locator(".tool-status")).toBeHidden();
+      activityGroup.locator(".agent-activity-tool-card"),
+    ).toHaveCount(59);
+    await expect(
+      activityGroup.locator(".agent-activity-tool-card").first(),
+    ).toBeHidden();
+    await expect(activityGroup.locator(".tool-status").first()).toBeHidden();
     await expect(activityGroup.locator(".agent-activity-steps")).toHaveCSS(
       "overflow-y",
       "auto",
@@ -2005,30 +2011,52 @@ test("tool-heavy turns use a compact agent activity hierarchy", async () => {
     expect(
       activityStepsBox?.height ?? Number.POSITIVE_INFINITY,
     ).toBeLessThanOrEqual(570);
-    const compactHeights = await compactToolCards.evaluateAll((cards) =>
-      cards.slice(0, 12).map((card) => card.getBoundingClientRect().height),
-    );
-    expect(Math.max(...compactHeights)).toBeLessThanOrEqual(36);
-    await expect(activityGroup.locator(".tool-card").first()).toBeVisible();
     await expect(activityGroup.getByText("Thinking…")).toHaveCount(0);
-    await expect(activityGroup.getByText("Thought process")).toBeVisible();
     await expect(
-      activityGroup.getByText("Read", { exact: true }).first(),
+      activityGroup.getByText("Reasoned about the task"),
     ).toBeVisible();
     await expect(
-      activityGroup.getByText("Search", { exact: true }),
+      activityGroup.locator(
+        '.agent-activity-milestone > details > summary:has-text("Inspected files · 56 raw steps")',
+      ),
     ).toBeVisible();
     await expect(
-      activityGroup.getByText("Bash", { exact: true }),
+      activityGroup.locator(
+        '.agent-activity-milestone > details > summary:has-text("Searched the codebase")',
+      ),
+    ).toBeVisible();
+    await expect(
+      activityGroup.locator(
+        '.agent-activity-milestone > details > summary:has-text("Ran a shell command")',
+      ),
     ).toBeVisible();
 
+    const repeatedReadSummary = activityGroup
+      .locator(".agent-activity-milestone")
+      .filter({ hasText: "Inspected files · 56 raw steps" })
+      .locator(":scope > details > summary");
+    await repeatedReadSummary.click();
+    const repeatedReadTrace = repeatedReadSummary.locator("..");
+    await expect(
+      repeatedReadTrace.locator(
+        ".agent-activity-raw-trace .agent-activity-step",
+      ),
+    ).toHaveCount(56);
+    await expect(
+      repeatedReadTrace.locator(".agent-activity-tool-card"),
+    ).toHaveCount(56);
+
     const bashSummary = activityGroup
-      .locator(".tool-card")
-      .filter({ hasText: "Bash" })
-      .locator("summary");
-    await bashSummary.focus();
-    await expect(bashSummary).toBeFocused();
-    await page.keyboard.press("Enter");
+      .locator(".agent-activity-milestone")
+      .filter({ hasText: "Ran a shell command" })
+      .locator(":scope > details > summary");
+    await bashSummary.click();
+    await expect(
+      activityGroup
+        .locator(".tool-card pre")
+        .filter({ hasText: "renderer tests passed" }),
+    ).toBeHidden();
+    await bashSummary.locator("..").locator(".tool-card summary").click();
     await expect(
       activityGroup
         .locator(".tool-card pre")
@@ -2071,12 +2099,18 @@ test("failed tool activity remains conspicuous and inspectable", async () => {
       "needs attention",
     );
     await expect(activityGroup).toHaveAttribute("open", "");
-    await expect(
-      activityGroup.locator(".tool-status.error").first(),
-    ).toContainText("error");
+    const failedMilestone = activityGroup
+      .locator(".agent-activity-milestone.error")
+      .filter({ hasText: "Failed" })
+      .first();
+    await expect(failedMilestone).toContainText("Failed");
+    await failedMilestone.locator(":scope > details > summary").click();
+    await expect(failedMilestone.locator(".tool-status.error")).toContainText(
+      "error",
+    );
 
-    await activityGroup.locator(".tool-card summary").first().click();
-    await expect(activityGroup.locator(".tool-card pre").first()).toContainText(
+    await failedMilestone.locator(".tool-card summary").click();
+    await expect(failedMilestone.locator(".tool-card pre")).toContainText(
       "fake tool failed",
     );
   } finally {

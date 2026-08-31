@@ -1382,11 +1382,52 @@ h1 {
   color: var(--color-success);
 }
 
+.agent-activity-steps,
+.agent-activity-raw-trace {
+  list-style: none;
+}
+
 .agent-activity-steps {
   display: grid;
-  gap: 6px;
+  gap: 2px;
+  max-height: min(52vh, 570px);
   margin: 0;
   padding: 0 9px 9px 34px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.agent-activity-milestone {
+  min-width: 0;
+  border-left: 2px solid var(--color-border);
+  padding: 4px 0 4px 8px;
+}
+
+.agent-activity-milestone.error {
+  border-left-color: var(--color-danger-fg);
+}
+
+.agent-activity-milestone summary,
+.agent-activity-milestone-static {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--color-text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.agent-activity-error-label {
+  color: var(--color-danger-fg);
+  font-size: 11px;
+}
+
+.agent-activity-raw-trace {
+  display: grid;
+  gap: 4px;
+  margin: 5px 0 0;
+  padding: 0 0 0 8px;
 }
 
 .agent-activity-step {
@@ -3156,14 +3197,16 @@ summary::marker {
 .thinking-row summary,
 .tool-card summary,
 .agent-activity-group > summary,
-.agent-activity-thinking summary {
+.agent-activity-thinking summary,
+.agent-activity-milestone summary {
   list-style: none;
 }
 
 .thinking-row .disclosure-chevron,
 .tool-card .disclosure-chevron,
 .agent-activity-group .disclosure-chevron,
-.agent-activity-thinking .disclosure-chevron {
+.agent-activity-thinking .disclosure-chevron,
+.agent-activity-milestone .disclosure-chevron {
   flex: 0 0 auto;
   color: var(--color-text-muted);
   transition: transform 150ms ease;
@@ -3172,7 +3215,8 @@ summary::marker {
 .thinking-row details[open] > summary .disclosure-chevron,
 .tool-card details[open] > summary .disclosure-chevron,
 .agent-activity-group[open] > summary .disclosure-chevron,
-.agent-activity-thinking[open] > summary .disclosure-chevron {
+.agent-activity-thinking[open] > summary .disclosure-chevron,
+.agent-activity-milestone details[open] > summary .disclosure-chevron {
   transform: rotate(90deg);
 }
 
