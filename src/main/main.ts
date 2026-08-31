@@ -14,6 +14,7 @@ import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
+import { initializeMacOSDockIcon, resolveAppIconPath } from "./appIcon.js";
 import {
   appBootstrapStateSchema,
   appSettingsPatchSchema,
@@ -398,6 +399,22 @@ async function bootstrap(): Promise<void> {
 
   await app.whenReady();
 
+  if (process.platform === "darwin") {
+    const dock = app.dock;
+    if (dock) {
+      initializeMacOSDockIcon({
+        platform: process.platform,
+        dock,
+        iconPath: resolveAppIconPath({
+          isDev,
+          appPath: app.getAppPath(),
+          mainDirectory: __dirname,
+        }),
+        nativeImage,
+      });
+    }
+  }
+
   diagnostics = new DiagnosticsService(
     app.getVersion(),
     app.getPath("userData"),
@@ -480,6 +497,11 @@ function createMainWindow(): void {
     minWidth: 900,
     minHeight: 600,
     title: "Pi Deck",
+    icon: resolveAppIconPath({
+      isDev,
+      appPath: app.getAppPath(),
+      mainDirectory: __dirname,
+    }),
     backgroundColor: effectiveWindowBackground(nativeTheme),
     show: process.env.PI_DECK_E2E_HIDE_WINDOWS !== "1",
     webPreferences: buildSecureWebPreferences(preloadPath),

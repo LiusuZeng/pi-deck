@@ -1806,6 +1806,31 @@ test("fake mode launches with backend runtime and send enabled", async () => {
   }
 });
 
+test("sidebar loads the Pi Deck deck icon brand mark", async () => {
+  const { app, page } = await launchPiDeck({
+    PI_DECK_BACKEND: "fake",
+  });
+  try {
+    await expectHealthyPreload(page);
+    const brandMark = page.locator(".sidebar .brand-mark").first();
+    await expect(brandMark).toBeVisible();
+    const imageState = await brandMark.evaluate((element) => {
+      const image = element as HTMLImageElement;
+      return {
+        complete: image.complete,
+        naturalHeight: image.naturalHeight,
+        naturalWidth: image.naturalWidth,
+      };
+    });
+    expect(imageState).toMatchObject({ complete: true });
+    expect(imageState.naturalWidth).toBeGreaterThan(0);
+    expect(imageState.naturalHeight).toBeGreaterThan(0);
+    await expect(page.locator(".sidebar-brand-row")).not.toContainText("π");
+  } finally {
+    await app.close();
+  }
+});
+
 test("expanded tool details stay scrollable above the composer", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-e2e-tool-detail-layout-"),

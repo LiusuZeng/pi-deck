@@ -20,7 +20,7 @@
     "launch:real": "node scripts/start-pi-deck.mjs --real --launch",
     "start": "npm run deck:real",
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
-    "build": "npm run build:main && npm run build:renderer && node scripts/write-build-manifest.mjs",
+    "build": "npm run build:main && npm run build:renderer && node scripts/copy-app-icon.mjs && node scripts/write-build-manifest.mjs",
     "build:main": "tsc -p tsconfig.main.json && esbuild src/preload/index.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist/preload/index.js --sourcemap",
     "build:renderer": "vite build",
     "typecheck": "tsc --noEmit -p tsconfig.main.json && tsc --noEmit -p tsconfig.renderer.json",

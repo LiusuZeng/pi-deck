@@ -11,6 +11,7 @@ const requiredOutputs = [
   "main/main.js",
   "preload/index.js",
   "renderer/index.html",
+  "renderer/pi-deck-app-icon.png",
 ];
 
 async function main() {
