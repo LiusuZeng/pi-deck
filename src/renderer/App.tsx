@@ -264,6 +264,13 @@ type ActivityTimelineItem = Extract<
 type DiagnosticTimelineItem = Extract<TimelineItem, { kind: "diagnostic" }>;
 type AgentActivityState = "running" | "completed" | "error";
 
+type ActivityMilestone = {
+  id: string;
+  label: string;
+  items: ActivityTimelineItem[];
+  state: AgentActivityState;
+};
+
 type TimelinePresentationItem =
   | { kind: "message"; item: MessageTimelineItem }
   | {
@@ -341,6 +348,111 @@ function latestActivityItem(
   items: readonly ActivityTimelineItem[],
 ): ActivityTimelineItem | undefined {
   return items[items.length - 1];
+}
+
+/**
+ * Projects an execution trace into a short, readable narrative. Tool calls only
+ * share a milestone when they are adjacent and represent the same operation;
+ * this keeps ordering meaningful while collapsing repetitive file reads.
+ */
+function activityMilestones(
+  items: readonly ActivityTimelineItem[],
+): ActivityMilestone[] {
+  const milestones: ActivityMilestone[] = [];
+
+  items.forEach((item) => {
+    const previous = milestones[milestones.length - 1];
+    const canAppend =
+      item.kind === "tool" &&
+      previous !== undefined &&
+      previous.items[0]?.kind === "tool" &&
+      toolActivityKey(previous.items[0]) === toolActivityKey(item) &&
+      previous.state === toolActivityState(item);
+
+    if (canAppend) {
+      previous.items.push(item);
+      return;
+    }
+
+    milestones.push({
+      id: `activity-milestone-${item.id}`,
+      label: activitySemanticLabel(item),
+      items: [item],
+      state:
+        item.kind === "tool"
+          ? toolActivityState(item)
+          : thinkingActivityState(item),
+    });
+  });
+
+  return milestones;
+}
+
+function toolActivityKey(
+  item: Extract<ActivityTimelineItem, { kind: "tool" }>,
+): string {
+  const title = item.title.trim();
+  return title.length === 0 || looksSerialized(title)
+    ? "tool"
+    : title
+        .toLowerCase()
+        .replace(/[_.-]+/g, " ")
+        .trim();
+}
+
+function toolActivityState(
+  item: Extract<ActivityTimelineItem, { kind: "tool" }>,
+): AgentActivityState {
+  if (item.status === "error") {
+    return "error";
+  }
+  return item.status === "running" ? "running" : "completed";
+}
+
+function thinkingActivityState(
+  item: Extract<ActivityTimelineItem, { kind: "thinking" }>,
+): AgentActivityState {
+  return item.streaming === true ? "running" : "completed";
+}
+
+function activityMilestoneLabel(milestone: ActivityMilestone): string {
+  const count = milestone.items.length;
+  if (count === 1) {
+    return milestone.label;
+  }
+  return `${milestone.label} · ${count} raw steps`;
+}
+
+function activitySemanticLabel(item: ActivityTimelineItem): string {
+  if (item.kind === "thinking") {
+    return item.streaming === true
+      ? "Reasoning about the task"
+      : "Reasoned about the task";
+  }
+
+  const title = item.title.trim();
+  if (title.length === 0 || looksSerialized(title)) {
+    return "Used a tool";
+  }
+
+  const normalized = title
+    .toLowerCase()
+    .replace(/[_.-]+/g, " ")
+    .trim();
+  const semanticLabels: Record<string, string> = {
+    bash: "Ran a shell command",
+    command: "Ran a shell command",
+    edit: "Updated files",
+    "edit file": "Updated files",
+    grep: "Searched the codebase",
+    read: "Inspected files",
+    "read file": "Inspected files",
+    search: "Searched the codebase",
+    subagent: "Delegated parallel work",
+    tool: "Used a tool",
+    write: "Updated files",
+  };
+  return semanticLabels[normalized] ?? `Used ${title}`;
 }
 
 function activityStepLabel(item: ActivityTimelineItem): string {
@@ -10806,9 +10918,11 @@ function AgentActivityGroup(props: {
 }): ReactElement {
   const { group } = props;
   const latest = latestActivityItem(group.items);
+  const milestones = activityMilestones(group.items);
   const stateLabel = formatAgentActivityState(group.state);
   const stepCount = group.items.length;
-  const ariaLabel = `Agent activity, ${stepCount} ${stepCount === 1 ? "step" : "steps"}, ${stateLabel}`;
+  const milestoneCount = milestones.length;
+  const ariaLabel = `Agent activity, ${milestoneCount} ${milestoneCount === 1 ? "milestone" : "milestones"} from ${stepCount} ${stepCount === 1 ? "step" : "steps"}, ${stateLabel}`;
 
   return (
     <article className={`agent-activity-row ${group.state}`}>
@@ -10835,22 +10949,22 @@ function AgentActivityGroup(props: {
           />
           <span className="agent-activity-copy">
             <span className="agent-activity-title">
-              Agent activity · {formatInteger(stepCount)}{" "}
-              {stepCount === 1 ? "step" : "steps"}
+              Agent activity · {formatInteger(milestoneCount)}{" "}
+              {milestoneCount === 1 ? "milestone" : "milestones"}
             </span>
             {latest !== undefined ? (
               <span className="agent-activity-latest">
-                Latest: {activityStepLabel(latest)}
+                Latest: {activitySemanticLabel(latest)}
               </span>
             ) : null}
           </span>
           <AgentActivityStatus state={group.state} />
         </summary>
-        <ol className="agent-activity-steps">
-          {group.items.map((item) => (
-            <AgentActivityStep
-              item={item}
-              key={item.id}
+        <ol className="agent-activity-steps" aria-label="Activity milestones">
+          {milestones.map((milestone) => (
+            <ActivityMilestoneRow
+              key={milestone.id}
+              milestone={milestone}
               onDetailsSummaryClick={props.onDetailsSummaryClick}
               onDetailsToggle={props.onDetailsToggle}
             />
@@ -10858,6 +10972,68 @@ function AgentActivityGroup(props: {
         </ol>
       </details>
     </article>
+  );
+}
+
+function ActivityMilestoneRow(props: {
+  milestone: ActivityMilestone;
+  onDetailsSummaryClick(event: ReactMouseEvent<HTMLElement>): void;
+  onDetailsToggle(event: SyntheticEvent<HTMLDetailsElement>): void;
+}): ReactElement {
+  const { milestone } = props;
+  const hasRawTrace = milestone.items.length > 0;
+
+  return (
+    <li className={`agent-activity-milestone ${milestone.state}`}>
+      {hasRawTrace ? (
+        <details onToggle={props.onDetailsToggle}>
+          <summary onClick={props.onDetailsSummaryClick}>
+            <ActivityMilestoneMark state={milestone.state} />
+            <span>{activityMilestoneLabel(milestone)}</span>
+            {milestone.state === "error" ? (
+              <span className="agent-activity-error-label">Failed</span>
+            ) : null}
+            <ChevronRight
+              aria-hidden="true"
+              className="disclosure-chevron"
+              size={16}
+              strokeWidth={1.75}
+            />
+          </summary>
+          <ol
+            className="agent-activity-raw-trace"
+            aria-label={`${activityMilestoneLabel(milestone)} raw trace`}
+          >
+            {milestone.items.map((item) => (
+              <AgentActivityStep
+                item={item}
+                key={item.id}
+                onDetailsSummaryClick={props.onDetailsSummaryClick}
+                onDetailsToggle={props.onDetailsToggle}
+              />
+            ))}
+          </ol>
+        </details>
+      ) : (
+        <div className="agent-activity-milestone-static">
+          <ActivityMilestoneMark state={milestone.state} />
+          <span>{activityMilestoneLabel(milestone)}</span>
+        </div>
+      )}
+    </li>
+  );
+}
+
+function ActivityMilestoneMark(props: {
+  state: AgentActivityState;
+}): ReactElement {
+  return (
+    <span
+      className={`agent-activity-step-mark ${props.state}`}
+      aria-hidden="true"
+    >
+      {props.state === "error" ? "!" : props.state === "running" ? "▶" : "✓"}
+    </span>
   );
 }
 
@@ -12622,6 +12798,9 @@ export const __rendererTestHooks = {
   draftSessionForProject,
   timelineDetailsRevealScrollDelta,
   timelinePresentationItems,
+  activityMilestones,
+  activityMilestoneLabel,
+  activitySemanticLabel,
   activityStepLabel,
   activityStepSummary,
 };
