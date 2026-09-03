@@ -105,6 +105,22 @@ export interface ResolveEffectivePiConfigOptions {
   trustOverride?: TrustOverride;
 }
 
+export interface CaptureLoginShellEnvOptions {
+  enabled?: boolean;
+  baseEnv?: NodeJS.ProcessEnv;
+  shellPath?: string;
+  timeoutMs?: number;
+}
+
+export interface CaptureLoginShellEnvResult {
+  enabled: boolean;
+  ok: boolean;
+  shellPath?: string;
+  env: NodeJS.ProcessEnv;
+  diagnostics: DiagnosticMessage[];
+  envSummary: EnvDiagnosticSummary;
+}
+
 export interface EffectivePiConfigResult {
   config: EffectivePiConfig;
   diagnostics: DiagnosticMessage[];
@@ -198,6 +214,116 @@ function splitPath(value: string): string[] {
   return value.split(path.delimiter).filter(function (entry: string): boolean {
     return entry.length > 0;
   });
+}
+
+export async function captureLoginShellEnv(
+  options?: CaptureLoginShellEnvOptions,
+): Promise<CaptureLoginShellEnvResult> {
+  const opts = options || {};
+  const enabled = opts.enabled !== false;
+  const baseEnv: NodeJS.ProcessEnv = Object.assign(
+    {},
+    opts.baseEnv || process.env,
+  );
+  const diagnostics: DiagnosticMessage[] = [];
+  if (!enabled) {
+    diagnostics.push({
+      level: "info",
+      code: "LOGIN_SHELL_ENV_CAPTURE_DISABLED",
+      message:
+        "Login-shell environment capture is disabled; using the Electron process environment for Pi workers.",
+    });
+    return {
+      enabled,
+      ok: true,
+      env: baseEnv,
+      diagnostics,
+      envSummary: redactEnv(baseEnv),
+    };
+  }
+
+  const shellPath = opts.shellPath || baseEnv.SHELL || "/bin/zsh";
+  const timeoutMs = opts.timeoutMs || 10000;
+  const startMarker = "__PI_DECK_ENV_START__";
+  const endMarker = "__PI_DECK_ENV_END__";
+  const command = [
+    `printf '%s\\0' ${shellQuote(startMarker)}`,
+    "/usr/bin/env -0",
+    `printf '%s\\0' ${shellQuote(endMarker)}`,
+  ].join("; ");
+
+  try {
+    const result = await execFilePromise(shellPath, ["-lic", command], {
+      env: baseEnv,
+      timeout: timeoutMs,
+      windowsHide: true,
+      maxBuffer: 1024 * 1024,
+    });
+    const captured = parseEnvBlock(result.stdout, startMarker, endMarker);
+    diagnostics.push({
+      level: "info",
+      code: "LOGIN_SHELL_ENV_CAPTURED",
+      message: "Captured login-shell environment for Pi workers.",
+      details: {
+        shellPath,
+        pathEntryCount: splitPath(captured.PATH || "").length,
+      },
+    });
+    return {
+      enabled,
+      ok: true,
+      shellPath,
+      env: captured,
+      diagnostics,
+      envSummary: redactEnv(captured),
+    };
+  } catch (err) {
+    diagnostics.push({
+      level: "warning",
+      code: "LOGIN_SHELL_ENV_CAPTURE_FAILED",
+      message:
+        "Could not capture the login-shell environment; Pi workers will use the Electron process environment.",
+      details: { shellPath, error: errorMessage(err) },
+    });
+    return {
+      enabled,
+      ok: false,
+      shellPath,
+      env: baseEnv,
+      diagnostics,
+      envSummary: redactEnv(baseEnv),
+    };
+  }
+}
+
+function parseEnvBlock(
+  stdout: string,
+  startMarker: string,
+  endMarker: string,
+): NodeJS.ProcessEnv {
+  const startToken = `${startMarker}\0`;
+  const endToken = `${endMarker}\0`;
+  const start = stdout.indexOf(startToken);
+  const end = stdout.indexOf(endToken, start + startToken.length);
+  if (start === -1 || end === -1 || end <= start) {
+    throw new Error(
+      "Login shell did not return a parseable environment block.",
+    );
+  }
+  const fields = stdout.slice(start + startToken.length, end).split("\0");
+  const env: NodeJS.ProcessEnv = {};
+  for (const field of fields) {
+    const separator = field.indexOf("=");
+    if (separator <= 0) {
+      continue;
+    }
+    env[field.slice(0, separator)] = field.slice(separator + 1);
+  }
+  return env;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 function expandHome(inputPath: string, homeDir: string): string {

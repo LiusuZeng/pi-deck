@@ -69,6 +69,29 @@ function createFakePiBinary(root: string, extraArgs: string[] = []): string {
   return fakePiPath;
 }
 
+function createAbsoluteShebangFakePiBinary(
+  fakePiPath: string,
+  extraArgs: string[] = [],
+): string {
+  fs.mkdirSync(path.dirname(fakePiPath), { recursive: true });
+  fs.writeFileSync(
+    fakePiPath,
+    `#!${process.execPath}\nif (process.argv.includes("--version")) {\n  console.log("v42.5.0");\n  process.exit(0);\n}\nif (process.argv.includes("--list-models")) {\n  console.log("provider  model       context  max-out  thinking  images");\n  console.log("fake-provider  fake-model  128K     32K      yes       yes");\n  process.exit(0);\n}\nprocess.argv.push(...${JSON.stringify(extraArgs)});\nrequire(${JSON.stringify(path.join(repoRoot, "dist/main/pi/fakeRpc/fakeRpcServer.js"))});\n`,
+    { mode: 0o755 },
+  );
+  return fakePiPath;
+}
+
+function createLoginEnvShell(shellPath: string, pathPrefix: string): string {
+  fs.mkdirSync(path.dirname(shellPath), { recursive: true });
+  fs.writeFileSync(
+    shellPath,
+    `#!${process.execPath}\nconst path = require("node:path");\nif (process.argv[2] === "-lic" && (process.argv[3] || "").includes("__PI_DECK_ENV_START__")) {\n  process.stdout.write("shell startup noise\\n");\n  process.stdout.write("__PI_DECK_ENV_START__\\0");\n  for (const [key, value] of Object.entries(process.env)) {\n    if (key !== "PATH") process.stdout.write(key + "=" + value + "\\0");\n  }\n  process.stdout.write("PATH=" + ${JSON.stringify(pathPrefix)} + path.delimiter + (process.env.PATH || "") + "\\0");\n  process.stdout.write("AWS_PROFILE=deck-e2e\\0");\n  process.stdout.write("__PI_DECK_ENV_END__\\0");\n  process.exit(0);\n}\nconsole.error("unexpected shell args " + process.argv.slice(2).join(" "));\nprocess.exit(2);\n`,
+    { mode: 0o755 },
+  );
+  return shellPath;
+}
+
 function fakeRealModeEnv(options: {
   root: string;
   projectCwd?: string;
@@ -79,14 +102,37 @@ function fakeRealModeEnv(options: {
   fakePiArgs?: string[];
   fakePiCwdLog?: string;
 }): NodeJS.ProcessEnv {
+  const userDataDir =
+    options.userDataDir ?? path.join(options.root, "user-data");
+  fs.mkdirSync(userDataDir, { recursive: true });
+  const settingsPath = path.join(userDataDir, "settings.json");
+  const existingSettings = fs.existsSync(settingsPath)
+    ? (JSON.parse(fs.readFileSync(settingsPath, "utf8")) as Record<
+        string,
+        unknown
+      >)
+    : {};
+  fs.writeFileSync(
+    settingsPath,
+    `${JSON.stringify(
+      {
+        theme: "system",
+        maxRunningSessions: 4,
+        warmWorkerLimit: 1,
+        enableLoginShellEnvCapture: false,
+        ...existingSettings,
+      },
+      null,
+      2,
+    )}\n`,
+  );
   return {
     PI_DECK_BACKEND: "real",
     PI_DECK_PI_BINARY: createFakePiBinary(options.root, options.fakePiArgs),
     ...(options.projectCwd ? { PI_DECK_PROJECT_CWD: options.projectCwd } : {}),
     PI_CODING_AGENT_DIR: options.agentDir,
     PI_DECK_HOME: path.join(options.root, "pideck-home"),
-    PI_DECK_USER_DATA_DIR:
-      options.userDataDir ?? path.join(options.root, "user-data"),
+    PI_DECK_USER_DATA_DIR: userDataDir,
     ...(options.testPickProjectCwd
       ? { PI_DECK_TEST_PICK_PROJECT_CWD: options.testPickProjectCwd }
       : {}),
@@ -1961,6 +2007,91 @@ test("sidebar loads the Pi Deck deck icon brand mark", async () => {
     expect(imageState.naturalWidth).toBeGreaterThan(0);
     expect(imageState.naturalHeight).toBeGreaterThan(0);
     await expect(page.locator(".sidebar-brand-row")).not.toContainText("π");
+  } finally {
+    await app.close();
+  }
+});
+
+test("real-mode session usage updates from get_session_stats after a turn", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-session-usage-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: ["--stream-delay-ms", "1", "--include-usage"],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await enterSessionDetail(page);
+    await page.getByLabel("Prompt text").fill("usage stats please");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Fake response to: usage stats please"),
+    ).toBeVisible({ timeout: 20_000 });
+
+    await page.locator(".usage-toggle").click();
+    const usage = page.locator(".usage-stats");
+    await expect(usage).toContainText("Context: 105 / 128,000");
+    await expect(usage).toContainText("Tokens: 100 in / 10 out");
+    await expect(usage).toContainText("Cache: 5 read / 0 write");
+    await expect(usage).toContainText("Cost: $0.05");
+  } finally {
+    await app.close();
+  }
+});
+
+test("real-mode workers inherit login-shell PATH for terminal CLI parity", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-shell-env-"));
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const fakeBin = path.join(root, "fake-bin");
+  const awsBin = path.join(root, "aws-bin");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+  fs.mkdirSync(fakeBin, { recursive: true });
+  fs.mkdirSync(awsBin, { recursive: true });
+  createAbsoluteShebangFakePiBinary(path.join(fakeBin, "pi"), [
+    "--prompt-scenario",
+    "env-probe",
+    "--stream-delay-ms",
+    "1",
+  ]);
+  fs.writeFileSync(
+    path.join(awsBin, "aws"),
+    `#!${process.execPath}\nconsole.log("aws-cli/2.99.0 deck-e2e");\n`,
+    { mode: 0o755 },
+  );
+  const shellPath = createLoginEnvShell(
+    path.join(root, "shell", "fake-login-shell"),
+    [fakeBin, awsBin].join(path.delimiter),
+  );
+
+  const { app, page } = await launchPiDeck({
+    PI_DECK_BACKEND: "real",
+    PI_DECK_PROJECT_CWD: projectCwd,
+    PI_CODING_AGENT_DIR: agentDir,
+    PI_DECK_HOME: path.join(root, "pideck-home"),
+    PI_DECK_USER_DATA_DIR: path.join(root, "user-data"),
+    SHELL: shellPath,
+    PATH: "/usr/bin:/bin",
+  });
+  try {
+    await expectHealthyPreload(page);
+    await enterSessionDetail(page);
+    await page.getByLabel("Prompt text").fill("run aws probe");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("AWS probe succeeded: aws-cli/2.99.0 deck-e2e"),
+    ).toBeVisible({ timeout: 20_000 });
   } finally {
     await app.close();
   }

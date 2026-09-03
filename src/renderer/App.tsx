@@ -517,11 +517,11 @@ function looksSerialized(value: string): boolean {
 }
 
 interface UsageStats {
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-  totalTokens: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  totalTokens?: number;
   contextUsedTokens?: number;
   contextWindowTokens?: number;
   totalCostUsd?: number;
@@ -1525,10 +1525,11 @@ export function App(): ReactElement {
           }
           eventBuffer?.handle(event);
           // agent_end is a synchronous buffer barrier, so its preceding
-          // message/tool updates have already reached the reducer here.
-          // Pi's final event often already contains usage. Only fall back to
-          // compact get_state metadata when it does not.
-          if (event.type === "agent_end" && !eventHasUsageMetadata(event)) {
+          // message/tool updates have already reached the reducer here. Always
+          // follow it with compact runtime-status/session-stats reconciliation:
+          // current Pi reports authoritative usage via get_session_stats, not
+          // get_state or every terminal event shape.
+          if (event.type === "agent_end" || event.type === "agent_settled") {
             void refreshRuntimeUsage(event.runtimeId);
           }
         });
@@ -8212,7 +8213,7 @@ function usageFromMessages(
       return {};
     }
     return {
-      usageStats: summarizeUsageByMessage({}, contextWindowTokens),
+      usageStats: { contextWindowTokens },
     };
   }
 
@@ -8270,7 +8271,21 @@ function sumUsage(
 function getMessageUsageFromEvent(
   event: ChatRuntimeEvent,
 ): MessageUsage | undefined {
-  return extractMessageUsage(getRecord(event, "message") ?? event);
+  const direct = extractMessageUsage(getRecord(event, "message") ?? event);
+  if (direct !== undefined) {
+    return direct;
+  }
+  const messages = getArray(event, "messages");
+  if (messages === undefined) {
+    return undefined;
+  }
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const usage = extractMessageUsage(messages[index]);
+    if (usage !== undefined) {
+      return usage;
+    }
+  }
+  return undefined;
 }
 
 function eventHasUsageMetadata(event: ChatRuntimeEvent): boolean {
@@ -9574,12 +9589,12 @@ function UsageStatsPanel(props: { session: SessionViewModel }): ReactElement {
         Context: {formatContextUsage(stats)}
       </span>
       <span title="Session token totals from Pi message usage">
-        Tokens: {formatInteger(stats.inputTokens)} in /{" "}
-        {formatInteger(stats.outputTokens)} out
+        Tokens: {formatIntegerOrUnavailable(stats.inputTokens)} in /{" "}
+        {formatIntegerOrUnavailable(stats.outputTokens)} out
       </span>
       <span title="Cached token totals, when reported by the provider">
-        Cache: {formatInteger(stats.cacheReadTokens)} read /{" "}
-        {formatInteger(stats.cacheWriteTokens)} write
+        Cache: {formatIntegerOrUnavailable(stats.cacheReadTokens)} read /{" "}
+        {formatIntegerOrUnavailable(stats.cacheWriteTokens)} write
       </span>
       <span title="Total reported provider cost for this loaded session">
         Cost: {formatCurrency(stats.totalCostUsd)}
@@ -12647,7 +12662,7 @@ function formatContextUsage(stats: UsageStats): string {
   if (stats.contextUsedTokens === undefined) {
     return stats.contextWindowTokens === undefined
       ? "unknown"
-      : `0 / ${formatInteger(stats.contextWindowTokens)}`;
+      : `unknown / ${formatInteger(stats.contextWindowTokens)}`;
   }
   if (stats.contextWindowTokens === undefined) {
     return formatInteger(stats.contextUsedTokens);
@@ -12663,6 +12678,10 @@ function formatInteger(value: number): string {
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(
     value,
   );
+}
+
+function formatIntegerOrUnavailable(value: number | undefined): string {
+  return value === undefined ? "unavailable" : formatInteger(value);
 }
 
 function formatCurrency(value: number | undefined): string {

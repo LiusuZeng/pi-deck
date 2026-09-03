@@ -69,6 +69,67 @@ process.exit(2);
 `;
 }
 
+function fakeEnvCaptureShellScript(extraPath: string): string {
+  return `#!${process.execPath}
+const command = process.argv[3] || '';
+if (process.argv[2] === '-lic' && command.includes('__PI_DECK_ENV_START__')) {
+  process.stdout.write('profile noise before marker\\n');
+  process.stdout.write('__PI_DECK_ENV_START__\\0');
+  process.stdout.write('PATH=' + ${JSON.stringify(extraPath)} + require('node:path').delimiter + (process.env.PATH || '') + '\\0');
+  process.stdout.write('AWS_PROFILE=deck-profile\\0');
+  process.stdout.write('MULTILINE=value line one\\nvalue line two\\0');
+  process.stdout.write('OPENAI_API_KEY=secret-from-shell\\0');
+  process.stdout.write('__PI_DECK_ENV_END__\\0');
+  process.exit(0);
+}
+console.error('unexpected shell args', process.argv.slice(2).join(' '));
+process.exit(2);
+`;
+}
+
+test("captureLoginShellEnv imports PATH and tool variables from the user's shell with redaction", async () => {
+  const root = tempDir("pi-deck-env-capture-");
+  const shellPath = path.join(root, "fake-shell");
+  const awsBin = path.join(root, "aws-bin");
+  writeExecutable(shellPath, fakeEnvCaptureShellScript(awsBin));
+
+  const result = await platform.captureLoginShellEnv({
+    enabled: true,
+    shellPath,
+    baseEnv: { PATH: "/usr/bin", SHELL: shellPath },
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  assert.equal(result.env.AWS_PROFILE, "deck-profile");
+  assert.equal(result.env.MULTILINE, "value line one\nvalue line two");
+  assert.equal(result.env.PATH?.startsWith(awsBin + path.delimiter), true);
+  assert.equal(result.envSummary.keys.OPENAI_API_KEY, "<redacted>");
+  assert.equal(result.diagnostics[0]?.code, "LOGIN_SHELL_ENV_CAPTURED");
+});
+
+test("captureLoginShellEnv can be disabled and falls back on capture failure", async () => {
+  const disabled = await platform.captureLoginShellEnv({
+    enabled: false,
+    baseEnv: { PATH: "/gui/bin" },
+  });
+  assert.equal(disabled.ok, true);
+  assert.equal(disabled.env.PATH, "/gui/bin");
+  assert.equal(
+    disabled.diagnostics[0]?.code,
+    "LOGIN_SHELL_ENV_CAPTURE_DISABLED",
+  );
+
+  const failed = await platform.captureLoginShellEnv({
+    enabled: true,
+    shellPath: path.join(tempDir("pi-deck-missing-shell-"), "missing-shell"),
+    baseEnv: { PATH: "/gui/bin" },
+    timeoutMs: 50,
+  });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.env.PATH, "/gui/bin");
+  assert.equal(failed.diagnostics[0]?.code, "LOGIN_SHELL_ENV_CAPTURE_FAILED");
+});
+
 test("resolvePiBinary honors configured app binary path, canonicalizes, captures version, and redacts env", async () => {
   const root = tempDir("pi-deck-bin-app-");
   const realPi = path.join(root, "real-pi");

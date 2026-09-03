@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import childProcess from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
@@ -22,6 +23,7 @@ type PromptScenario =
   | "error"
   | "delegate"
   | "routing"
+  | "env-probe"
   | "all";
 
 interface FakeOptions {
@@ -192,6 +194,7 @@ function isPromptScenario(value: string): value is PromptScenario {
     "error",
     "delegate",
     "routing",
+    "env-probe",
     "all",
   ].includes(value);
 }
@@ -517,6 +520,9 @@ class FakeRpcServer {
       case "get_messages":
         this.respond(command.id, name, { messages: this.messages });
         break;
+      case "get_session_stats":
+        this.respond(command.id, name, this.getSessionStats());
+        break;
       case "prompt":
         this.handlePrompt(command);
         break;
@@ -631,6 +637,63 @@ class FakeRpcServer {
       provider: this.currentProvider,
       thinkingLevel: this.currentThinkingLevel,
       isStreaming: this.agentActive,
+    };
+  }
+
+  private getSessionStats(): JsonObject {
+    const usageMessages = this.messages
+      .map((message) => message.usage)
+      .filter(
+        (usage): usage is Record<string, unknown> =>
+          Boolean(usage) && typeof usage === "object" && !Array.isArray(usage),
+      );
+    const number = (usage: Record<string, unknown>, keys: string[]): number => {
+      for (const key of keys) {
+        const value = usage[key];
+        if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+          return value;
+        }
+      }
+      return 0;
+    };
+    const totals: {
+      input: number;
+      output: number;
+      cacheRead: number;
+      cacheWrite: number;
+      cost: number;
+    } = usageMessages.reduce<{
+      input: number;
+      output: number;
+      cacheRead: number;
+      cacheWrite: number;
+      cost: number;
+    }>(
+      (acc, usage) => {
+        acc.input += number(usage, ["inputTokens", "input"]);
+        acc.output += number(usage, ["outputTokens", "output"]);
+        acc.cacheRead += number(usage, ["cacheReadTokens", "cacheRead"]);
+        acc.cacheWrite += number(usage, ["cacheWriteTokens", "cacheWrite"]);
+        acc.cost += number(usage, ["totalCostUsd", "cost"]);
+        return acc;
+      },
+      { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
+    );
+    const total =
+      totals.input + totals.output + totals.cacheRead + totals.cacheWrite;
+    return {
+      tokens: {
+        input: totals.input,
+        output: totals.output,
+        cacheRead: totals.cacheRead,
+        cacheWrite: totals.cacheWrite,
+        total,
+      },
+      cost: totals.cost,
+      contextUsage: {
+        tokens: totals.input + totals.cacheRead + totals.cacheWrite,
+        contextWindow: 128000,
+      },
     };
   }
 
@@ -792,6 +855,20 @@ class FakeRpcServer {
     return /\bhandle(?:\s+this)?\s+directly\b/i.test(text);
   }
 
+  private environmentProbeResponse(): string {
+    const result = childProcess.spawnSync("aws", ["--version"], {
+      encoding: "utf8",
+      timeout: 5000,
+    });
+    if (result.error) {
+      return `AWS probe failed: ${result.error.message}`;
+    }
+    if (result.status !== 0) {
+      return `AWS probe failed: ${(result.stderr || result.stdout || `exit ${result.status}`).trim()}`;
+    }
+    return `AWS probe succeeded: ${(result.stdout || result.stderr).trim()}`;
+  }
+
   private completePrompt(assistantId: string, text: string): void {
     const decision = this.workflowDecision(text);
     const chunks =
@@ -804,9 +881,14 @@ class FakeRpcServer {
                 "Ordinary routing fixture accepted ",
                 `(${this.options.taskRoutingFixture ?? "default"}).`,
               ]
-            : this.options.productionShaped
-              ? ["I’ll review the workspace", " and summarize the next steps."]
-              : ["Fake response", " to: ", text || "(empty prompt)"];
+            : this.options.promptScenario === "env-probe"
+              ? [this.environmentProbeResponse()]
+              : this.options.productionShaped
+                ? [
+                    "I’ll review the workspace",
+                    " and summarize the next steps.",
+                  ]
+                : ["Fake response", " to: ", text || "(empty prompt)"];
     let accumulated = "";
     chunks.forEach((chunk, index) => {
       this.currentTimers.push(
@@ -862,6 +944,12 @@ class FakeRpcServer {
               type: "agent_end",
               runId: `run_${this.promptCounter}`,
               status: "completed",
+              ...(this.options.productionShaped
+                ? {
+                    messages: [assistantMessage as unknown as JsonObject],
+                    willRetry: false,
+                  }
+                : {}),
             });
             this.write({ type: "agent_settled" });
           }

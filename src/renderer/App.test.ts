@@ -3012,6 +3012,34 @@ describe("renderer message_update reduction", () => {
     expect(next.usageStats).toMatchObject({ inputTokens: 10, outputTokens: 5 });
   });
 
+  it("reads production-shaped agent_end message usage", () => {
+    const event = {
+      type: "agent_end",
+      runtimeId: "session-1",
+      messages: [
+        { id: "user-1", role: "user", content: "prompt" },
+        {
+          id: "assistant-1",
+          role: "assistant",
+          content: "done",
+          usage: { input: 22, output: 7, cacheRead: 3, totalCostUsd: 0.01 },
+        },
+      ],
+    } as any;
+    expect(__rendererTestHooks.eventHasUsageMetadata(event)).toBe(true);
+
+    const next = __rendererTestHooks.reduceRuntimeEvent(
+      { ...baseSession(), status: "working", baseState: "working" } as any,
+      event,
+    );
+    expect(next.usageStats).toMatchObject({
+      inputTokens: 22,
+      outputTokens: 7,
+      cacheReadTokens: 3,
+      totalCostUsd: 0.01,
+    });
+  });
+
   it("merges status usage only into the requested runtime", () => {
     const session = baseSession() as any;
     const otherStatus = {
@@ -3111,6 +3139,20 @@ describe("renderer message_update reduction", () => {
         ],
       },
     ]);
+  });
+
+  it("keeps context-window-only snapshots honest instead of showing zero usage", () => {
+    const session = __rendererTestHooks.sessionFromSnapshot({
+      runtimeId: "runtime-1",
+      backendMode: "real",
+      state: {
+        cwd: "/tmp/project",
+        model: { id: "model-1", provider: "test", contextWindow: 200000 },
+      },
+      messages: [{ id: "assistant-1", role: "assistant", content: "Done" }],
+    } as any);
+
+    expect(session.usageStats).toEqual({ contextWindowTokens: 200000 });
   });
 
   it("summarizes Pi message usage and model context window", () => {

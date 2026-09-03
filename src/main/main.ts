@@ -146,6 +146,10 @@ import {
   parsePiRuntimeModelDiscovery,
 } from "./pi/modelDiscovery.js";
 import { SinglePiAdapter } from "./pi/piAdapter.js";
+import {
+  runtimeUsageFromSessionStats,
+  runtimeUsageFromState,
+} from "./pi/runtimeUsage.js";
 import { WorkerCapacity, WorkerCapacityError } from "./pi/workerCapacity.js";
 import { selectAvailableRuntime } from "./runtimeSelection.js";
 import {
@@ -155,6 +159,7 @@ import {
   validatePiSessionFile,
 } from "./pi/sessionRepository.js";
 import type { PiMessage, PiState, PromptInput } from "./pi/types.js";
+import { captureLoginShellEnv } from "./platform/piEnvironment.js";
 import type {
   AppPiSettings,
   EffectivePiConfigResult,
@@ -299,6 +304,12 @@ let workspaceStore: WorkspaceStore | undefined;
 let workspaceUsageStore: WorkspaceUsageStore | undefined;
 let workflowInitialization: WorkflowInitialization<WorkflowStore> | undefined;
 const realChatLaunchConfigCache = new RealChatLaunchConfigCache();
+let loginShellEnvCaptureCache:
+  | {
+      key: string;
+      result: Awaited<ReturnType<typeof captureLoginShellEnv>>;
+    }
+  | undefined;
 let diagnostics: DiagnosticsService | undefined;
 let multitaskStateStore: MultitaskStateStore | undefined;
 let taskSessionStateStore: TaskSessionMainStateStore | undefined;
@@ -624,6 +635,7 @@ function registerIpcHandlers(
       applyAppTheme(updated);
       // App settings are an explicit configuration generation boundary.
       realChatLaunchConfigCache.clear();
+      loginShellEnvCaptureCache = undefined;
       maxRunningWorkers = updated.maxRunningSessions;
       taskSessionOrchestrator?.scheduleAll();
       return updated;
@@ -4509,17 +4521,82 @@ async function resolveRealChatLaunchConfig(
   const settings = await store.get();
   const appSettings = applyRealBackendEnvOverrides(settings);
   const project = await resolveRealChatProject(settings, requestedProject);
+  const shellEnv = await resolveCachedLoginShellEnvCapture(
+    settings.enableLoginShellEnvCapture !== false,
+  );
   const effective = await realChatLaunchConfigCache.resolve({
     appSettings,
-    env: process.env,
+    env: shellEnv.env,
     projectCwd: project.canonicalPath,
   });
   return {
     appSettings,
     projectId: project.id,
     projectCwd: project.canonicalPath,
-    effective,
+    effective: {
+      ...effective,
+      diagnostics: [...shellEnv.diagnostics, ...effective.diagnostics],
+    },
   };
+}
+
+async function resolveCachedLoginShellEnvCapture(
+  enabled: boolean,
+): Promise<Awaited<ReturnType<typeof captureLoginShellEnv>>> {
+  const key = JSON.stringify({
+    enabled,
+    shell: process.env.SHELL,
+    home: process.env.HOME,
+    path: process.env.PATH,
+    piBinary: process.env.PI_DECK_PI_BINARY,
+    agentDir: process.env.PI_CODING_AGENT_DIR,
+    sessionDir: process.env.PI_CODING_AGENT_SESSION_DIR,
+  });
+  if (loginShellEnvCaptureCache?.key === key) {
+    return loginShellEnvCaptureCache.result;
+  }
+  const result = await captureLoginShellEnv({
+    enabled,
+    baseEnv: process.env,
+  });
+  loginShellEnvCaptureCache = { key, result };
+  return result;
+}
+
+function withTimeoutOrUndefined<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+): Promise<T | undefined> {
+  const safeTimeoutMs =
+    Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 1500;
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(undefined);
+    }, safeTimeoutMs);
+    promise.then(
+      (value) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolve(undefined);
+      },
+    );
+  });
 }
 
 function applyRealBackendEnvOverrides(settings: AppSettings): AppPiSettings {
@@ -5860,8 +5937,15 @@ async function getChatRuntimeStatus(
   const mode = chatRuntimeModes.get(runtimeId) ?? resolveChatBackendMode();
   // Do not replace this with getChatSnapshot: status reconciliation must never
   // transfer get_messages/history across RPC or Electron IPC.
-  const state = await adapter.getRuntimeStatus(runtimeId);
-  const usage = runtimeUsageFromState(state);
+  const [state, sessionStats] = await Promise.all([
+    adapter.getRuntimeStatus(runtimeId),
+    withTimeoutOrUndefined(
+      adapter.getSessionStats(runtimeId),
+      Number(process.env.PI_DECK_SESSION_STATS_TIMEOUT_MS ?? 1500),
+    ),
+  ]);
+  const usage =
+    runtimeUsageFromSessionStats(sessionStats) ?? runtimeUsageFromState(state);
   return {
     runtimeId,
     backendMode: mode,
@@ -5963,66 +6047,6 @@ async function recordPrivateWorkerMessagesUsage(options: {
     messages: options.messages,
   });
   await ensureWorkspaceUsageStore().upsertContributions(contributions);
-}
-
-function runtimeUsageFromState(
-  state: PiState,
-): ChatRuntimeStatus["usage"] | undefined {
-  const usage = (state as Record<string, unknown>).usage;
-  if (!usage || typeof usage !== "object" || Array.isArray(usage)) {
-    return undefined;
-  }
-  const record = usage as Record<string, unknown>;
-  const number = (...keys: string[]): number | undefined => {
-    for (const key of keys) {
-      const value = record[key];
-      if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
-        return value;
-      }
-    }
-    return undefined;
-  };
-  const inputTokens = number("inputTokens", "input");
-  const outputTokens = number("outputTokens", "output");
-  const cacheReadTokens = number("cacheReadTokens", "cacheRead") ?? 0;
-  const cacheWriteTokens = number("cacheWriteTokens", "cacheWrite") ?? 0;
-  const nestedCost = record.cost;
-  const nestedCostTotal =
-    nestedCost && typeof nestedCost === "object" && !Array.isArray(nestedCost)
-      ? (nestedCost as Record<string, unknown>).total
-      : undefined;
-  const totalCostUsd =
-    number("totalCostUsd", "cost") ??
-    (typeof nestedCostTotal === "number" &&
-    Number.isFinite(nestedCostTotal) &&
-    nestedCostTotal >= 0
-      ? nestedCostTotal
-      : undefined);
-  if (
-    inputTokens === undefined &&
-    outputTokens === undefined &&
-    totalCostUsd === undefined
-  ) {
-    return undefined;
-  }
-  const safeInputTokens = inputTokens ?? 0;
-  const safeOutputTokens = outputTokens ?? 0;
-  return {
-    inputTokens: safeInputTokens,
-    outputTokens: safeOutputTokens,
-    cacheReadTokens,
-    cacheWriteTokens,
-    totalTokens:
-      number("totalTokens", "total") ??
-      safeInputTokens + safeOutputTokens + cacheReadTokens + cacheWriteTokens,
-    ...(number("contextUsedTokens", "contextUsed") !== undefined
-      ? { contextUsedTokens: number("contextUsedTokens", "contextUsed") }
-      : {}),
-    ...(number("contextWindowTokens", "contextWindow") !== undefined
-      ? { contextWindowTokens: number("contextWindowTokens", "contextWindow") }
-      : {}),
-    ...(totalCostUsd !== undefined ? { totalCostUsd } : {}),
-  };
 }
 
 async function getChatSnapshotForRuntime(
