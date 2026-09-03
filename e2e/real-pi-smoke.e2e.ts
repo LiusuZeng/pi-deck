@@ -1271,10 +1271,16 @@ test("real Pi production routing plans multiple private task sessions without br
       const restartedAllWorkRows = restarted.page.locator(
         ".activity-inbox-row",
       );
-      // Completed Work is renderer-lifetime state today; after relaunch the
-      // durable parent remains resumable from the sidebar/listSessions but no
-      // longer appears as idle Work.
-      await expect(restartedAllWorkRows).toHaveCount(0);
+      // Completed Work is durable; after relaunch the completed parent remains
+      // resumable from the sidebar/listSessions and visible in Work.
+      await expect(restartedAllWorkRows).toHaveCount(1);
+      await expect(
+        restartedAllWorkRows.locator(".activity-inbox-row-title"),
+      ).toHaveText(durableParent!.title);
+      await expect(restartedAllWorkRows.first()).toHaveAttribute(
+        "data-activity-item-id",
+        parentActivityItemId!,
+      );
       await restarted.page
         .getByRole("button", { name: `Workspace: ${scopeName}` })
         .click();
@@ -1286,7 +1292,14 @@ test("real Pi production routing plans multiple private task sessions without br
       const restartedScopedWorkRows = restarted.page.locator(
         ".activity-inbox-row",
       );
-      await expect(restartedScopedWorkRows).toHaveCount(0);
+      await expect(restartedScopedWorkRows).toHaveCount(1);
+      await expect(
+        restartedScopedWorkRows.locator(".activity-inbox-row-title"),
+      ).toHaveText(durableParent!.title);
+      await expect(restartedScopedWorkRows.first()).toHaveAttribute(
+        "data-activity-item-id",
+        parentActivityItemId!,
+      );
       await expect
         .poll(() => listJsonlFiles(sessionDir).length, {
           message: "Restart must preserve exactly one parent JSONL session",

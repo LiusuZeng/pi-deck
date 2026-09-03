@@ -116,6 +116,8 @@ export interface PiAdapter {
   getState(runtimeId: RuntimeSessionId): Promise<PiState>;
   /** Lightweight lifecycle state; this must not request conversation messages. */
   getRuntimeStatus(runtimeId: RuntimeSessionId): Promise<PiState>;
+  /** Authoritative cumulative session usage when Pi exposes it. */
+  getSessionStats(runtimeId: RuntimeSessionId): Promise<unknown>;
   getMessages(runtimeId: RuntimeSessionId): Promise<PiMessage[]>;
   prompt(runtimeId: RuntimeSessionId, input: PromptInput): Promise<void>;
   steer(runtimeId: RuntimeSessionId, input: PromptInput): Promise<void>;

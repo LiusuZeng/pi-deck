@@ -139,6 +139,10 @@ export class PiWorker {
     return this.getState();
   }
 
+  getSessionStats(): Promise<unknown> {
+    return this.client.request("get_session_stats");
+  }
+
   async getMessages(): Promise<PiMessage[]> {
     const response = await this.client.request("get_messages");
     const messages = Array.isArray(response)

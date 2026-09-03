@@ -312,6 +312,33 @@ test("PiWorker unexpected exit rejects pending request and emits error diagnosti
   assert.equal(worker.getDiagnostics().healthy, false);
 });
 
+test("session stats uses get_session_stats without transferring messages", async () => {
+  const worker = createWorker(["--stream-delay-ms", "1", "--include-usage"]);
+  const getMessages = vi.spyOn(worker, "getMessages");
+  const request = vi.spyOn((worker as any).client, "request");
+  try {
+    await worker.prompt({ text: "usage please" });
+    await waitForWorkerEvent(worker, (event) => event.type === "agent_end");
+    const stats = await worker.getSessionStats();
+    assert.deepEqual((stats as any).tokens, {
+      input: 100,
+      output: 10,
+      cacheRead: 5,
+      cacheWrite: 0,
+      total: 115,
+    });
+    assert.equal(getMessages.mock.calls.length, 0);
+    assert.equal(
+      request.mock.calls.some(
+        ([command]: [string]) => command === "get_session_stats",
+      ),
+      true,
+    );
+  } finally {
+    await worker.closeSession();
+  }
+});
+
 test("runtime status uses get_state only and stays scoped to its runtime", async () => {
   const adapter = new SinglePiAdapter();
   const workerA = adapter.createWorker({
