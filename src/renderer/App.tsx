@@ -194,6 +194,12 @@ type BackendMode = "fake" | "real";
 type PromptDestination = "parent" | "newTaskSession";
 
 type ExtensionUiDialogMethod = "select" | "confirm" | "input" | "editor";
+type ExtensionUiFireAndForgetMethod =
+  | "notify"
+  | "setStatus"
+  | "setWidget"
+  | "setTitle"
+  | "set_editor_text";
 
 interface PendingExtensionUiRequest {
   id: string;
@@ -7751,6 +7757,9 @@ function reduceExtensionUiRequestEvent(
 ): SessionViewModel {
   const method = getString(event, "method");
   if (!isExtensionUiDialogMethod(method)) {
+    if (isExtensionUiFireAndForgetMethod(method)) {
+      return session;
+    }
     return appendDiagnostic(session, {
       tone: "info",
       content: `Extension UI method “${method ?? "unknown"}” is not supported by Pi Deck. Only select, confirm, input, and editor requests can be answered.`,
@@ -7844,6 +7853,18 @@ function isExtensionUiDialogMethod(
     method === "confirm" ||
     method === "input" ||
     method === "editor"
+  );
+}
+
+function isExtensionUiFireAndForgetMethod(
+  method: string | undefined,
+): method is ExtensionUiFireAndForgetMethod {
+  return (
+    method === "notify" ||
+    method === "setStatus" ||
+    method === "setWidget" ||
+    method === "setTitle" ||
+    method === "set_editor_text"
   );
 }
 

@@ -2501,13 +2501,37 @@ describe("renderer message_update reduction", () => {
     ]);
   });
 
-  it("explains unsupported extension UI methods instead of silently ignoring them", () => {
+  it("accepts fire-and-forget extension UI methods without user-facing diagnostics", () => {
+    for (const method of [
+      "notify",
+      "setStatus",
+      "setWidget",
+      "setTitle",
+      "set_editor_text",
+    ]) {
+      const original = baseSession();
+      const next = __rendererTestHooks.reduceRuntimeEvent(original, {
+        type: "extension_ui_request",
+        runtimeId: "session-1",
+        id: `${method}-1`,
+        method,
+        message: "Background update",
+      } as any);
+
+      expect(next).toBe(original);
+      expect(next.timeline).toEqual([]);
+      expect(next.overlays.needsUserInput).toBe(false);
+      expect(next.pendingExtensionUiRequests).toBeUndefined();
+    }
+  });
+
+  it("explains unknown extension UI methods instead of silently ignoring them", () => {
     const next = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {
       type: "extension_ui_request",
       runtimeId: "session-1",
-      id: "notify-1",
-      method: "notify",
-      message: "Background notification",
+      id: "unknown-1",
+      method: "customWidgetPrompt",
+      message: "Unsupported interactive extension request",
     } as any);
 
     expect(next.timeline).toEqual(
