@@ -1005,7 +1005,9 @@ class FakeRpcServer {
         toolName: "read",
         status: toolFailed ? "error" : "completed",
         isError: toolFailed,
-        output: toolFailed ? "fake tool failed" : "final tool output",
+        output: toolFailed
+          ? "fake tool failed"
+          : "final tool output https://example.com/tool-output",
       });
     }
 

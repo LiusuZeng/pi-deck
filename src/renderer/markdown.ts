@@ -130,23 +130,19 @@ export function parseInlineMarkdown(text: string): InlineToken[] {
   const tokens: InlineToken[] = [];
   let cursor = 0;
 
-  const pushText = (value: string): void => {
-    if (value.length === 0) {
-      return;
-    }
-    const last = tokens[tokens.length - 1];
-    if (last?.type === "text") {
-      last.text += value;
-      return;
-    }
-    tokens.push({ type: "text", text: value });
-  };
+  const pushText = createTextPusher(tokens);
 
   while (cursor < text.length) {
     const nextCode = text.indexOf("`", cursor);
     const nextStrong = text.indexOf("**", cursor);
     const nextLink = text.indexOf("[", cursor);
-    const next = smallestNonNegative(nextCode, nextStrong, nextLink);
+    const nextAutolink = findNextAutolink(text, cursor)?.start ?? -1;
+    const next = smallestNonNegative(
+      nextCode,
+      nextStrong,
+      nextLink,
+      nextAutolink,
+    );
 
     if (next === -1) {
       pushText(text.slice(cursor));
@@ -189,6 +185,23 @@ export function parseInlineMarkdown(text: string): InlineToken[] {
       continue;
     }
 
+    if (next === nextAutolink) {
+      const autolink = findNextAutolink(text, cursor);
+      if (autolink === undefined || autolink.start !== cursor) {
+        pushText(text[cursor] ?? "");
+        cursor += 1;
+        continue;
+      }
+      tokens.push({
+        type: "link",
+        text: autolink.href,
+        href: autolink.href,
+      });
+      pushText(autolink.trailingText);
+      cursor = autolink.end;
+      continue;
+    }
+
     const closeText = text.indexOf("]", cursor + 1);
     const openHref = closeText === -1 ? -1 : text.indexOf("(", closeText + 1);
     const closeHref = openHref === -1 ? -1 : text.indexOf(")", openHref + 1);
@@ -209,6 +222,128 @@ export function parseInlineMarkdown(text: string): InlineToken[] {
   }
 
   return tokens;
+}
+
+export function parsePlainTextAutolinks(text: string): InlineToken[] {
+  const tokens: InlineToken[] = [];
+  const pushText = createTextPusher(tokens);
+  let cursor = 0;
+
+  while (cursor < text.length) {
+    const autolink = findNextAutolink(text, cursor);
+    if (autolink === undefined) {
+      pushText(text.slice(cursor));
+      break;
+    }
+
+    pushText(text.slice(cursor, autolink.start));
+    tokens.push({ type: "link", text: autolink.href, href: autolink.href });
+    pushText(autolink.trailingText);
+    cursor = autolink.end;
+  }
+
+  return tokens;
+}
+
+const autolinkPattern = /\b(?:https?:\/\/|mailto:)[^\s<>"'`]+/gi;
+const trailingAutolinkPunctuation = /[.,;:!?]+$/;
+const closingAutolinkDelimiters = {
+  ")": "(",
+  "]": "[",
+  "}": "{",
+} as const;
+
+type AutolinkMatch = {
+  start: number;
+  end: number;
+  href: string;
+  trailingText: string;
+};
+
+function createTextPusher(tokens: InlineToken[]): (value: string) => void {
+  return (value: string): void => {
+    if (value.length === 0) {
+      return;
+    }
+    const last = tokens[tokens.length - 1];
+    if (last?.type === "text") {
+      last.text += value;
+      return;
+    }
+    tokens.push({ type: "text", text: value });
+  };
+}
+
+function findNextAutolink(
+  text: string,
+  startIndex: number,
+): AutolinkMatch | undefined {
+  autolinkPattern.lastIndex = startIndex;
+
+  for (;;) {
+    const match = autolinkPattern.exec(text);
+    if (match === null) {
+      return undefined;
+    }
+
+    const rawHref = match[0] ?? "";
+    const { href, trailingText } = trimAutolinkHref(rawHref);
+    if (href.length === 0 || !isAllowedExternalHref(href)) {
+      continue;
+    }
+
+    return {
+      start: match.index,
+      end: match.index + rawHref.length,
+      href,
+      trailingText,
+    };
+  }
+}
+
+function trimAutolinkHref(rawHref: string): {
+  href: string;
+  trailingText: string;
+} {
+  let href = rawHref;
+  let trailingText = "";
+
+  for (;;) {
+    const punctuation = href.match(trailingAutolinkPunctuation)?.[0] ?? "";
+    if (punctuation.length > 0) {
+      href = href.slice(0, href.length - punctuation.length);
+      trailingText = punctuation + trailingText;
+      continue;
+    }
+
+    const lastCharacter = href[href.length - 1] as
+      | keyof typeof closingAutolinkDelimiters
+      | undefined;
+    const openingCharacter =
+      lastCharacter === undefined
+        ? undefined
+        : closingAutolinkDelimiters[lastCharacter];
+    if (
+      lastCharacter !== undefined &&
+      openingCharacter !== undefined &&
+      countCharacter(href, lastCharacter) >
+        countCharacter(href, openingCharacter)
+    ) {
+      href = href.slice(0, -1);
+      trailingText = lastCharacter + trailingText;
+      continue;
+    }
+
+    return { href, trailingText };
+  }
+}
+
+function countCharacter(text: string, character: string): number {
+  let count = 0;
+  for (const candidate of text) {
+    if (candidate === character) count += 1;
+  }
+  return count;
 }
 
 export function isAllowedExternalHref(href: string): boolean {

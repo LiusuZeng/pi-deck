@@ -50,6 +50,8 @@ import type {
   WorkflowTransitionRun,
 } from "../shared/workflowSchemas.js";
 import {
+  isAllowedExternalHref,
+  parsePlainTextAutolinks,
   parseSafeMarkdown,
   type InlineToken,
   type MarkdownBlock,
@@ -11127,7 +11129,9 @@ function AgentActivityStep(props: {
               strokeWidth={1.75}
             />
           </summary>
-          <pre>{props.item.details}</pre>
+          <pre>
+            <AutolinkedText text={props.item.details} />
+          </pre>
         </details>
       </article>
     </li>
@@ -11182,7 +11186,9 @@ function TimelineRow(props: {
     return (
       <article className="timeline-row user-row">
         <div className="bubble user-bubble">
-          <p>{props.item.content}</p>
+          <p>
+            <AutolinkedText text={props.item.content} />
+          </p>
           {props.item.attachments ? (
             <TimelineAttachmentGrid attachments={props.item.attachments} />
           ) : null}
@@ -11246,7 +11252,9 @@ function TimelineRow(props: {
               strokeWidth={1.75}
             />
           </summary>
-          <pre>{props.item.details}</pre>
+          <pre>
+            <AutolinkedText text={props.item.details} />
+          </pre>
         </details>
       </article>
     );
@@ -11404,6 +11412,14 @@ function MarkdownBlockView(props: { block: MarkdownBlock }): ReactElement {
   }
 }
 
+export function AutolinkedText(props: { text: string }): ReactElement {
+  const tokens = useMemo(
+    () => parsePlainTextAutolinks(props.text),
+    [props.text],
+  );
+  return <InlineTokens tokens={tokens} />;
+}
+
 function InlineTokens(props: { tokens: InlineToken[] }): ReactElement {
   return (
     <>
@@ -11425,7 +11441,9 @@ function InlineTokens(props: { tokens: InlineToken[] }): ReactElement {
               key={index}
               onClick={(event) => {
                 event.preventDefault();
-                window.open(token.href, "_blank", "noopener,noreferrer");
+                if (isAllowedExternalHref(token.href)) {
+                  window.open(token.href, "_blank", "noopener,noreferrer");
+                }
               }}
               rel="noreferrer"
               target="_blank"

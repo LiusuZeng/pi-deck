@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { buildActivityInbox } from "./activityInbox.js";
 import { emptyOverlays } from "./sessionState.js";
 import { defaultAgentWorkflowDefinition } from "./workflows/agentWorkflowDefinition.js";
-import { __rendererTestHooks, MarkdownView } from "./App.js";
+import { __rendererTestHooks, AutolinkedText, MarkdownView } from "./App.js";
 
 it("renders pipe tables as safe semantic table markup", () => {
   const markup = renderToStaticMarkup(
@@ -23,6 +23,36 @@ it("renders pipe tables as safe semantic table markup", () => {
   expect(markup).toContain("<strong><span>35.2°C</span></strong>");
   expect(markup).toContain('href="https://example.com"');
   expect(markup).not.toContain("|---|---:|---|");
+});
+
+it("renders bare URLs as safe clickable links in MarkdownView", () => {
+  const markup = renderToStaticMarkup(
+    createElement(MarkdownView, {
+      markdown: "Message link: https://rippling.slack.com/archives/C123/p123.",
+    }),
+  );
+
+  expect(markup).toContain(
+    'href="https://rippling.slack.com/archives/C123/p123"',
+  );
+  expect(markup).toContain(
+    '<a href="https://rippling.slack.com/archives/C123/p123" rel="noreferrer" target="_blank">https://rippling.slack.com/archives/C123/p123</a><span>.</span>',
+  );
+});
+
+it("renders tool-detail plain text URLs as links without markdown emphasis", () => {
+  const markup = renderToStaticMarkup(
+    createElement("pre", null, [
+      createElement(AutolinkedText, {
+        key: "text",
+        text: "**raw** output: https://example.com/logs",
+      }),
+    ]),
+  );
+
+  expect(markup).toContain("<span>**raw** output: </span>");
+  expect(markup).toContain('href="https://example.com/logs"');
+  expect(markup).not.toContain("<strong>");
 });
 
 it("computes composer-aware reveal scrolling for expanded timeline details", () => {

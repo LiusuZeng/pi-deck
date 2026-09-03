@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   isAllowedExternalHref,
   parseInlineMarkdown,
+  parsePlainTextAutolinks,
   parseSafeMarkdown,
 } from "./markdown.js";
 
@@ -34,6 +35,74 @@ describe("safe markdown parser", () => {
     });
     expect(JSON.stringify(tokens)).not.toContain('"href":"javascript:');
     expect(JSON.stringify(tokens)).not.toContain('"href":"/docs"');
+  });
+
+  it("autolinks bare allowed URLs in inline markdown", () => {
+    const tokens = parseInlineMarkdown(
+      "Message link: https://rippling.slack.com/archives/C123/p123",
+    );
+
+    expect(tokens).toEqual([
+      { type: "text", text: "Message link: " },
+      {
+        type: "link",
+        text: "https://rippling.slack.com/archives/C123/p123",
+        href: "https://rippling.slack.com/archives/C123/p123",
+      },
+    ]);
+  });
+
+  it("keeps trailing sentence punctuation out of bare URL hrefs", () => {
+    const tokens = parseInlineMarkdown("See (https://example.com/path).");
+
+    expect(tokens).toEqual([
+      { type: "text", text: "See (" },
+      {
+        type: "link",
+        text: "https://example.com/path",
+        href: "https://example.com/path",
+      },
+      { type: "text", text: ")." },
+    ]);
+  });
+
+  it("autolinks mailto URLs but not disallowed bare schemes", () => {
+    const tokens = parseInlineMarkdown(
+      "Email mailto:user@example.com but not javascript:alert(1) or file:///etc/passwd",
+    );
+
+    expect(tokens).toContainEqual({
+      type: "link",
+      text: "mailto:user@example.com",
+      href: "mailto:user@example.com",
+    });
+    expect(JSON.stringify(tokens)).not.toContain('"href":"javascript:');
+    expect(JSON.stringify(tokens)).not.toContain('"href":"file:');
+  });
+
+  it("does not autolink URLs inside code spans or fenced blocks", () => {
+    expect(parseInlineMarkdown("`https://example.com`")).toEqual([
+      { type: "code", text: "https://example.com" },
+    ]);
+
+    expect(parseSafeMarkdown("```\nhttps://example.com\n```")).toEqual([
+      { type: "code", code: "https://example.com" },
+    ]);
+  });
+
+  it("autolinks plain tool-card text without applying full markdown", () => {
+    const tokens = parsePlainTextAutolinks(
+      "**raw** output: https://example.com/logs",
+    );
+
+    expect(tokens).toEqual([
+      { type: "text", text: "**raw** output: " },
+      {
+        type: "link",
+        text: "https://example.com/logs",
+        href: "https://example.com/logs",
+      },
+    ]);
   });
 
   it("parses common chat markdown blocks without using raw html", () => {

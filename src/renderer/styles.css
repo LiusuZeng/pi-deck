@@ -2240,7 +2240,9 @@ h1 {
   background: transparent;
 }
 
-.markdown-body a {
+.markdown-body a,
+.user-bubble a,
+.tool-card pre a {
   color: var(--color-accent-hover);
 }
 

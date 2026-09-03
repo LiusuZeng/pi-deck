@@ -166,6 +166,51 @@ async function enterSessionDetail(page: Page): Promise<void> {
   await expect(page.getByLabel("Prompt text")).toBeVisible();
 }
 
+async function captureWindowOpenCalls(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    (
+      window as unknown as { __piDeckOpenedUrls: unknown[] }
+    ).__piDeckOpenedUrls = [];
+    window.open = ((url?: string | URL, target?: string, features?: string) => {
+      (
+        window as unknown as {
+          __piDeckOpenedUrls: Array<{
+            url: string;
+            target: string | undefined;
+            features: string | undefined;
+          }>;
+        }
+      ).__piDeckOpenedUrls.push({
+        url: url === undefined ? "" : String(url),
+        target,
+        features,
+      });
+      return null;
+    }) as typeof window.open;
+  });
+}
+
+async function windowOpenCalls(page: Page): Promise<
+  Array<{
+    url: string;
+    target: string | undefined;
+    features: string | undefined;
+  }>
+> {
+  return page.evaluate(
+    () =>
+      (
+        window as unknown as {
+          __piDeckOpenedUrls?: Array<{
+            url: string;
+            target: string | undefined;
+            features: string | undefined;
+          }>;
+        }
+      ).__piDeckOpenedUrls ?? [],
+  );
+}
+
 async function expectWorkRoute(page: Page, scope: string): Promise<void> {
   const route = page.locator('.workspace[data-primary-view="work"]');
   await expect(route).toBeVisible();
@@ -1801,6 +1846,96 @@ test("fake mode launches with backend runtime and send enabled", async () => {
     await enterSessionDetail(page);
     await page.getByLabel("Prompt text").fill("fake e2e prompt");
     await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+  } finally {
+    await app.close();
+  }
+});
+
+test("bare URLs in assistant session text are clickable external links", async () => {
+  const { app, page } = await launchPiDeck({
+    PI_DECK_BACKEND: "fake",
+  });
+  try {
+    await expectHealthyPreload(page);
+    await enterSessionDetail(page);
+    await captureWindowOpenCalls(page);
+
+    const url = "https://rippling.slack.com/archives/C123/p123";
+    await page.getByLabel("Prompt text").fill(`Message link: ${url}.`);
+    await page.getByRole("button", { name: "Send" }).click();
+
+    const assistantMessage = page.locator(".assistant-message").last();
+    const link = assistantMessage.getByRole("link", { name: url });
+    await expect(link).toBeVisible();
+    await expect(link).toHaveAttribute("href", url);
+    await expect(
+      assistantMessage.locator("code", { hasText: url }),
+    ).toHaveCount(0);
+
+    await link.click();
+    expect(await windowOpenCalls(page)).toContainEqual({
+      url,
+      target: "_blank",
+      features: "noopener,noreferrer",
+    });
+  } finally {
+    await app.close();
+  }
+});
+
+test("bare URLs in tool details are clickable without markdown rendering", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-tool-link-"));
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: ["--prompt-scenario", "tool", "--stream-delay-ms", "1"],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await enterSessionDetail(page);
+    await captureWindowOpenCalls(page);
+
+    await page.getByLabel("Prompt text").fill("show linked tool output");
+    await page.getByRole("button", { name: "Send" }).click();
+
+    const activityGroup = page.locator(".agent-activity-group").first();
+    await expect(activityGroup).toBeVisible();
+    await activityGroup.locator(":scope > summary").click();
+
+    const toolMilestone = activityGroup
+      .locator(".agent-activity-milestone")
+      .filter({ hasText: "Inspected files" })
+      .first();
+    await expect(
+      toolMilestone.locator(":scope > details > summary"),
+    ).toBeVisible();
+    await toolMilestone.locator(":scope > details > summary").click();
+
+    const toolCard = activityGroup.locator(".tool-card").first();
+    await expect(toolCard).toBeVisible();
+    await toolCard.locator(":scope details > summary").click();
+
+    const url = "https://example.com/tool-output";
+    const pre = toolCard.locator("pre");
+    const link = pre.getByRole("link", { name: url });
+    await expect(link).toBeVisible();
+    await expect(link).toHaveAttribute("href", url);
+    await expect(pre.locator("strong")).toHaveCount(0);
+
+    await link.click();
+    expect(await windowOpenCalls(page)).toContainEqual({
+      url,
+      target: "_blank",
+      features: "noopener,noreferrer",
+    });
   } finally {
     await app.close();
   }
