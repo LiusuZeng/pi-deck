@@ -40,6 +40,7 @@ interface FakeOptions {
   extensionUiMethod: "select" | "confirm" | "input" | "editor";
   extensionUiAutoCompleteTimeoutMs: number;
   extraModel: boolean;
+  collidingModels: boolean;
   productionShaped: boolean;
   includeUsage: boolean;
   noSession: boolean;
@@ -78,6 +79,7 @@ function parseOptions(argv: string[]): FakeOptions {
     extensionUiMethod: "confirm",
     extensionUiAutoCompleteTimeoutMs: 5_000,
     extraModel: false,
+    collidingModels: false,
     productionShaped: false,
     includeUsage: false,
     noSession: false,
@@ -137,6 +139,8 @@ function parseOptions(argv: string[]): FakeOptions {
       index += 1;
     } else if (arg === "--extra-model") {
       options.extraModel = true;
+    } else if (arg === "--colliding-models") {
+      options.collidingModels = true;
     } else if (arg === "--production-shaped") {
       options.productionShaped = true;
     } else if (arg === "--include-usage") {
@@ -244,10 +248,14 @@ class FakeRpcServer {
   private workflowDecisionIndex = 0;
   private currentTimers: NodeJS.Timeout[] = [];
   private agentActive = false;
-  private currentModel = "fake-model";
-  private currentProvider = this.options.productionShaped
+  private currentModel = this.options.collidingModels
+    ? "claude-opus-4-5"
+    : "fake-model";
+  private currentProvider = this.options.collidingModels
     ? "anthropic"
-    : "fake-provider";
+    : this.options.productionShaped
+      ? "anthropic"
+      : "fake-provider";
   private currentThinkingLevel = "medium";
   private pendingExtensionUi:
     | {
@@ -326,6 +334,15 @@ class FakeRpcServer {
   ];
 
   private modelDisplayName(modelId: string): string {
+    if (this.options.collidingModels) {
+      if (modelId === "claude-opus-4-5") return "Claude Opus 4.5";
+      if (modelId === "global.anthropic.claude-opus-4-5-20251101-v1:0") {
+        return "Claude Opus 4.5";
+      }
+      if (modelId === "claude-opus-4-5-20251101") {
+        return "claude-opus-4-5-20251101";
+      }
+    }
     if (this.options.productionShaped) {
       return modelId === "fake-model-2" ? "GPT-5 Codex" : "Claude Sonnet 4.5";
     }
@@ -333,6 +350,12 @@ class FakeRpcServer {
   }
 
   private modelDisplayProvider(modelId: string): string {
+    if (this.options.collidingModels) {
+      if (modelId === "global.anthropic.claude-opus-4-5-20251101-v1:0") {
+        return "llm-gateway-bedrock";
+      }
+      return "anthropic";
+    }
     if (this.options.productionShaped) {
       return modelId === "fake-model-2" ? "openai" : "anthropic";
     }
@@ -537,31 +560,61 @@ class FakeRpcServer {
         break;
       case "get_available_models":
         this.respond(command.id, name, {
-          models: [
-            {
-              id: "fake-model",
-              name: this.modelDisplayName("fake-model"),
-              provider: this.modelDisplayProvider("fake-model"),
-              reasoning: true,
-              thinkingLevelMap: {
-                minimal: "minimal",
-                xhigh: "xhigh",
-                max: "max",
-              },
-              input: ["text", "image"],
-            },
-            ...(this.options.extraModel
-              ? [
-                  {
-                    id: "fake-model-2",
-                    name: this.modelDisplayName("fake-model-2"),
-                    provider: this.modelDisplayProvider("fake-model-2"),
-                    reasoning: true,
-                    input: ["text", "image"],
+          models: this.options.collidingModels
+            ? [
+                {
+                  id: "claude-opus-4-5",
+                  name: this.modelDisplayName("claude-opus-4-5"),
+                  provider: this.modelDisplayProvider("claude-opus-4-5"),
+                  reasoning: true,
+                  input: ["text", "image"],
+                },
+                {
+                  id: "global.anthropic.claude-opus-4-5-20251101-v1:0",
+                  name: this.modelDisplayName(
+                    "global.anthropic.claude-opus-4-5-20251101-v1:0",
+                  ),
+                  provider: this.modelDisplayProvider(
+                    "global.anthropic.claude-opus-4-5-20251101-v1:0",
+                  ),
+                  reasoning: true,
+                  input: ["text", "image"],
+                },
+                {
+                  id: "claude-opus-4-5-20251101",
+                  name: this.modelDisplayName("claude-opus-4-5-20251101"),
+                  provider: this.modelDisplayProvider(
+                    "claude-opus-4-5-20251101",
+                  ),
+                  reasoning: true,
+                  input: ["text", "image"],
+                },
+              ]
+            : [
+                {
+                  id: "fake-model",
+                  name: this.modelDisplayName("fake-model"),
+                  provider: this.modelDisplayProvider("fake-model"),
+                  reasoning: true,
+                  thinkingLevelMap: {
+                    minimal: "minimal",
+                    xhigh: "xhigh",
+                    max: "max",
                   },
-                ]
-              : []),
-          ],
+                  input: ["text", "image"],
+                },
+                ...(this.options.extraModel
+                  ? [
+                      {
+                        id: "fake-model-2",
+                        name: this.modelDisplayName("fake-model-2"),
+                        provider: this.modelDisplayProvider("fake-model-2"),
+                        reasoning: true,
+                        input: ["text", "image"],
+                      },
+                    ]
+                  : []),
+              ],
         });
         break;
       case "get_available_thinking_levels":
