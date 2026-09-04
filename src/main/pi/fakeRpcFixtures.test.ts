@@ -362,6 +362,39 @@ test("fake RPC prompt scenario exposes reducer extension event fixtures", async 
   }
 });
 
+test("fake RPC command failure fixture exposes stderr and exit code", async () => {
+  const client = spawnFakeRpc([
+    "--stream-delay-ms",
+    "1",
+    "--prompt-scenario",
+    "tool-error",
+  ]);
+  try {
+    const toolEnd = waitForEvents(client, (events) =>
+      events.some(
+        (event) =>
+          event.type === "tool_execution_end" &&
+          (event as JsonObject).status === "error",
+      ),
+    );
+    await client.request("prompt", { text: "exercise failed command fixture" });
+    const events = await toolEnd;
+    const failedToolEnd = events.find(
+      (event) =>
+        event.type === "tool_execution_end" &&
+        (event as JsonObject).status === "error",
+    ) as JsonObject | undefined;
+    assert.equal(failedToolEnd?.toolName, "bash");
+    assert.deepEqual(failedToolEnd?.args, {
+      command: "npm test -- --run fake-failure.test.ts",
+    });
+    assert.equal(failedToolEnd?.stderr, "fake command failed on stderr");
+    assert.equal(failedToolEnd?.exitCode, 1);
+  } finally {
+    client.close();
+  }
+});
+
 test("fake RPC malformed JSON and pending-exit fixtures exercise transport failure paths", async () => {
   const malformed = spawnFakeRpc(["--malformed-on-start"]);
   try {

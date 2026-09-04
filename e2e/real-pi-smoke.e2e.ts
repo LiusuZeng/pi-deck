@@ -590,6 +590,131 @@ test("real Pi bridge transport: default workspace prompt, resume, and explicit d
   }
 });
 
+test("real Pi command activity exposes stdout, stderr, and exit status", async () => {
+  test.setTimeout(
+    Number(process.env.PI_DECK_E2E_REAL_SMOKE_TIMEOUT_MS ?? 240_000),
+  );
+  const piBinary = requirePiBinary();
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-real-command-"));
+  const userDataDir = path.join(root, "user-data");
+  const piDeckHome = path.join(root, "pideck-home");
+  const sessionDir = path.join(root, "sessions");
+  const projectCwd = path.join(root, "project");
+  for (const directory of [userDataDir, piDeckHome, sessionDir, projectCwd]) {
+    fs.mkdirSync(directory, { recursive: true });
+  }
+
+  const token = `PI_DECK_REAL_COMMAND_${Date.now()}`;
+  const command = `printf '${token}_STDOUT\\n'; printf '${token}_STDERR\\n' >&2`;
+
+  try {
+    const { app, page } = await launchPiDeck({
+      PI_DECK_BACKEND: "real",
+      PI_DECK_PI_BINARY: piBinary,
+      PI_DECK_USER_DATA_DIR: userDataDir,
+      PI_DECK_HOME: piDeckHome,
+      PI_CODING_AGENT_SESSION_DIR: sessionDir,
+      PI_DECK_PROJECT_CWD: projectCwd,
+    });
+    try {
+      await expectHealthyPreload(page);
+      await sidebarNewSessionButton(page).click();
+      await page
+        .getByLabel("Prompt text")
+        .fill(
+          [
+            "Use the Bash tool exactly once to run this non-interactive command:",
+            command,
+            `After the command finishes, reply exactly: ${token}_DONE`,
+          ].join("\n"),
+        );
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect(page.getByText("Agent is working…")).toHaveCount(0, {
+        timeout: Number(
+          process.env.PI_DECK_E2E_REAL_PROMPT_TIMEOUT_MS ?? 180_000,
+        ),
+      });
+
+      const timeline = page.getByLabel("Chat / Agent Timeline");
+      await expect(timeline.getByText(`${token}_DONE`).first()).toBeVisible();
+
+      const activityGroup = page.locator(".agent-activity-group").first();
+      await expect(activityGroup.locator(":scope > summary")).toContainText(
+        "Agent activity",
+      );
+      await activityGroup.evaluate((details) => {
+        if (details instanceof HTMLDetailsElement) {
+          details.open = true;
+        }
+      });
+      await expect(activityGroup).toHaveJSProperty("open", true);
+
+      const commandMilestone = activityGroup
+        .locator(".agent-activity-milestone")
+        .filter({ hasText: /Ran a shell command|Used Bash|Used bash/ })
+        .first();
+      await expect(commandMilestone).toBeVisible();
+      const commandMilestoneDetails =
+        commandMilestone.locator(":scope > details");
+      await commandMilestoneDetails.evaluate((details) => {
+        if (details instanceof HTMLDetailsElement) {
+          details.open = true;
+        }
+      });
+      const toolCard = commandMilestone.locator(".tool-card").first();
+      const toolCardDetails = toolCard.locator(":scope > details");
+      await toolCardDetails.evaluate((details) => {
+        if (details instanceof HTMLDetailsElement) {
+          details.open = true;
+        }
+      });
+
+      const sectionTitles = await toolCard
+        .locator(".tool-detail-section h4")
+        .allTextContents();
+      expect(sectionTitles).toContain("Command");
+      expect(sectionTitles).toContain("Exit status");
+      // Real Pi protocol may expose Bash streams separately, or as one
+      // combined command result. Both are valid as long as Deck renders the
+      // execution result as structured text instead of raw tool-call JSON.
+      expect(
+        sectionTitles.includes("Output") ||
+          (sectionTitles.includes("stdout") &&
+            sectionTitles.includes("stderr")),
+      ).toBe(true);
+      const detailSections = await toolCard
+        .locator(".tool-detail-section")
+        .evaluateAll((sections) =>
+          sections.map((section) => ({
+            title: section.querySelector("h4")?.textContent ?? "",
+            content: section.querySelector("pre")?.textContent ?? "",
+          })),
+        );
+      expect(
+        detailSections.some(
+          (section) =>
+            ["Output", "stdout"].includes(section.title) &&
+            section.content.includes(`${token}_STDOUT`),
+        ),
+      ).toBe(true);
+      expect(
+        detailSections.some(
+          (section) =>
+            ["Output", "stderr"].includes(section.title) &&
+            section.content.includes(`${token}_STDERR`),
+        ),
+      ).toBe(true);
+    } finally {
+      await app.close();
+    }
+  } finally {
+    if (process.env.PI_DECK_E2E_KEEP_REAL_SMOKE_ARTIFACTS !== "1") {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("real Pi ordinary parent omits the legacy deck_delegate tool", async () => {
   test.setTimeout(
     Number(process.env.PI_DECK_E2E_REAL_SMOKE_TIMEOUT_MS ?? 240_000),

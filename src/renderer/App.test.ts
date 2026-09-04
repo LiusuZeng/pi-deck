@@ -286,6 +286,209 @@ describe("timeline presentation grouping", () => {
   });
 });
 
+describe("tool execution activity details", () => {
+  it("separates command input, stdout, stderr, and exit status", () => {
+    const item = __rendererTestHooks.toolTimelineItemFromRuntimeEvent(
+      {
+        type: "tool_execution_end",
+        runtimeId: "runtime-test",
+        toolCallId: "tool-bash",
+        toolName: "bash",
+        args: { command: "npm test -- --run App.test.ts" },
+        result: {
+          stdout: "✓ renderer tests passed",
+          stderr: "node warning on stderr",
+          exitCode: 0,
+        },
+        status: "completed",
+        isError: false,
+      } as any,
+      "success",
+    ) as any;
+
+    expect(item.summary).toBe("npm test -- --run App.test.ts");
+    expect(item.detailSections.map((section: any) => section.title)).toEqual([
+      "Command",
+      "stdout",
+      "stderr",
+      "Exit status",
+    ]);
+    expect(item.detailSections[0].content).toBe(
+      "npm test -- --run App.test.ts",
+    );
+    expect(item.detailSections[1].content).toContain("renderer tests passed");
+    expect(item.detailSections[2]).toMatchObject({
+      title: "stderr",
+      content: "node warning on stderr",
+      tone: "error",
+    });
+    expect(item.detailSections[3].content).toContain("code: 0");
+    expect(item.detailSections[3].content).toContain("status: completed");
+    expect(item.details).not.toContain('"args"');
+  });
+
+  it("shows combined output honestly when stdout and stderr are not separate", () => {
+    const item = __rendererTestHooks.toolTimelineItemFromRuntimeEvent(
+      {
+        type: "tool_execution_end",
+        runtimeId: "runtime-test",
+        toolCallId: "tool-combined",
+        toolName: "bash",
+        args: { command: "npm run build" },
+        output: "build output from Pi",
+        status: "completed",
+      } as any,
+      "success",
+    ) as any;
+
+    expect(item.detailSections.map((section: any) => section.title)).toEqual([
+      "Command",
+      "Output",
+      "Exit status",
+    ]);
+    expect(item.detailSections[1]).toMatchObject({
+      title: "Output",
+      content: "build output from Pi",
+    });
+  });
+
+  it("updates one running command step from partial output to final output", () => {
+    const session = {
+      id: "runtime-test",
+      title: "Test session",
+      project: "Project",
+      projectPath: "/tmp/project",
+      subtitle: "Working",
+      status: "working",
+      updatedAt: "Now",
+      updatedAtMs: 0,
+      timeline: [],
+      baseState: "working",
+      overlays: { ...emptyOverlays },
+      runtimeBacked: true,
+      backendMode: "real",
+    } as any;
+
+    const withPartial = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "tool_execution_update",
+      runtimeId: "runtime-test",
+      toolCallId: "tool-bash",
+      toolName: "bash",
+      args: { command: "npm test" },
+      output: "partial test output",
+    } as any) as any;
+    const withFinal = __rendererTestHooks.reduceRuntimeEvent(withPartial, {
+      type: "tool_execution_end",
+      runtimeId: "runtime-test",
+      toolCallId: "tool-bash",
+      toolName: "bash",
+      result: { content: [{ type: "text", text: "final test output" }] },
+      status: "completed",
+    } as any) as any;
+
+    expect(withFinal.timeline).toHaveLength(1);
+    expect(withFinal.timeline[0].summary).toBe("npm test");
+    expect(withFinal.timeline[0].detailSections[0]).toMatchObject({
+      title: "Command",
+      content: "npm test",
+    });
+    expect(withFinal.timeline[0].detailSections[1]).toMatchObject({
+      title: "Output",
+      content: "final test output",
+    });
+    expect(withFinal.timeline[0].details).not.toContain("partial test output");
+  });
+
+  it("preserves latest incremental output when final status has no output", () => {
+    const session = {
+      id: "runtime-test",
+      title: "Test session",
+      project: "Project",
+      projectPath: "/tmp/project",
+      subtitle: "Working",
+      status: "working",
+      updatedAt: "Now",
+      updatedAtMs: 0,
+      timeline: [],
+      baseState: "working",
+      overlays: { ...emptyOverlays },
+      runtimeBacked: true,
+      backendMode: "real",
+    } as any;
+
+    const withPartial = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "tool_execution_update",
+      runtimeId: "runtime-test",
+      toolCallId: "tool-bash",
+      toolName: "bash",
+      args: { command: "npm test" },
+      output: "latest streamed test output",
+    } as any) as any;
+    const withFinalStatus = __rendererTestHooks.reduceRuntimeEvent(
+      withPartial,
+      {
+        type: "tool_execution_end",
+        runtimeId: "runtime-test",
+        toolCallId: "tool-bash",
+        toolName: "bash",
+        status: "completed",
+        isError: false,
+      } as any,
+    ) as any;
+
+    expect(withFinalStatus.timeline).toHaveLength(1);
+    expect(withFinalStatus.timeline[0].summary).toBe("npm test");
+    expect(withFinalStatus.timeline[0].detailSections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ title: "Command", content: "npm test" }),
+        expect.objectContaining({
+          title: "Output",
+          content: "latest streamed test output",
+        }),
+        expect.objectContaining({ title: "Exit status" }),
+      ]),
+    );
+  });
+
+  it("surfaces failed command stderr and error text", () => {
+    const item = __rendererTestHooks.toolTimelineItemFromRuntimeEvent(
+      {
+        type: "tool_execution_end",
+        runtimeId: "runtime-test",
+        toolCallId: "tool-fail",
+        toolName: "bash",
+        args: { command: "npm test" },
+        output: "combined failure output",
+        stderr: "expected failure stack",
+        errorMessage: "process exited 1",
+        exitCode: 1,
+        status: "error",
+        isError: true,
+      } as any,
+      "error",
+    ) as any;
+
+    expect(item.status).toBe("error");
+    expect(item.detailSections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: "stderr",
+          content: "expected failure stack",
+        }),
+        expect.objectContaining({
+          title: "Output",
+          content: "combined failure output",
+        }),
+        expect.objectContaining({
+          title: "Error",
+          content: "process exited 1",
+        }),
+        expect.objectContaining({ title: "Exit status" }),
+      ]),
+    );
+  });
+});
+
 it("offers every active workflow workspace once and excludes archived workspaces", () => {
   const workspace = (id: string, name: string) => ({
     id,

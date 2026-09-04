@@ -223,6 +223,12 @@ interface TimelineAttachment {
   previewDataUrl?: string;
 }
 
+interface ToolDetailSection {
+  title: string;
+  content: string;
+  tone?: "default" | "error";
+}
+
 type TimelineItem =
   | {
       id: string;
@@ -259,6 +265,7 @@ type TimelineItem =
       status: "running" | "success" | "error" | "collapsed";
       summary: string;
       details: string;
+      detailSections?: ToolDetailSection[];
       createdAt: string;
     };
 
@@ -7210,13 +7217,21 @@ function toolTimelineItemFromContent(options: {
     status: options.status,
     summary: toolPayload?.summary ?? summarizeToolDetails(options.content, 180),
     details: toolPayload?.details ?? options.content,
+    ...(toolPayload?.detailSections !== undefined
+      ? { detailSections: toolPayload.detailSections }
+      : {}),
     createdAt: options.createdAt,
   };
 }
 
-function parseToolPayload(
-  content: string,
-): { title: string; summary: string; details: string } | undefined {
+function parseToolPayload(content: string):
+  | {
+      title: string;
+      summary: string;
+      details: string;
+      detailSections?: ToolDetailSection[];
+    }
+  | undefined {
   const trimmed = content.trim();
   if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
     return undefined;
@@ -7235,10 +7250,20 @@ function parseToolPayload(
   const record = parsed as Record<string, unknown>;
   const details = JSON.stringify(record, null, 2);
   if (typeof record.command === "string") {
+    const detailSections = toolDetailSectionsFromRuntimeEvent(
+      {
+        type: "tool_payload",
+        runtimeId: "tool-payload",
+        ...record,
+      } as ChatRuntimeEvent,
+      "Command",
+      record,
+    );
     return {
       title: "Command",
       summary: record.command,
       details,
+      ...(detailSections.length > 0 ? { detailSections } : {}),
     };
   }
   if (typeof record.path === "string") {
@@ -7891,7 +7916,11 @@ function reduceToolExecutionEvent(
         ? "error"
         : "success"
       : "running";
-  const toolItem = toolTimelineItemFromRuntimeEvent(event, status);
+  const existingTool = existingToolTimelineItem(session.timeline, event);
+  const eventToolItem = toolTimelineItemFromRuntimeEvent(event, status);
+  const toolItem = eventToolItem
+    ? mergeToolTimelineItemDetails(eventToolItem, existingTool)
+    : undefined;
   const timeline = toolItem
     ? upsertToolMessage(session.timeline, toolItem)
     : session.timeline;
@@ -7921,6 +7950,19 @@ function reduceToolExecutionEvent(
   };
 }
 
+function existingToolTimelineItem(
+  timeline: readonly TimelineItem[],
+  event: ChatRuntimeEvent,
+): Extract<TimelineItem, { kind: "tool" }> | undefined {
+  const id = getString(event, "toolCallId") ?? getString(event, "id");
+  return id === undefined
+    ? undefined
+    : timeline.find(
+        (item): item is Extract<TimelineItem, { kind: "tool" }> =>
+          item.kind === "tool" && item.id === id,
+      );
+}
+
 function toolTimelineItemFromRuntimeEvent(
   event: ChatRuntimeEvent,
   status: "running" | "success" | "error" | "collapsed",
@@ -7931,27 +7973,15 @@ function toolTimelineItemFromRuntimeEvent(
   }
   const title =
     getString(event, "toolName") ?? getString(event, "name") ?? "Tool";
-  const args = getRecord(event, "args");
-  const result =
-    getRecord(event, "result") ?? getRecord(event, "partialResult");
-  const output = getString(event, "output");
-  const command = getStringFromRecord(args, "command");
+  const args = getToolEventArgs(event);
+  const command = getCommandFromToolArgs(args) ?? getString(event, "command");
   const path = getStringFromRecord(args, "path");
   const summary = command ?? path ?? title;
+  const detailSections = toolDetailSectionsFromRuntimeEvent(event, title, args);
   const details = safeToolDetails(
-    JSON.stringify(
-      {
-        type: event.type,
-        toolName: title,
-        ...(args !== undefined ? { args } : {}),
-        ...(output !== undefined ? { output } : {}),
-        ...(result !== undefined ? { result } : {}),
-        status: getString(event, "status"),
-        isError: getBoolean(event, "isError"),
-      },
-      null,
-      2,
-    ),
+    detailSections.length > 0
+      ? detailSectionsToText(detailSections)
+      : rawToolEventDetails(event, title, args),
   );
 
   return {
@@ -7961,8 +7991,263 @@ function toolTimelineItemFromRuntimeEvent(
     status,
     summary,
     details,
+    ...(detailSections.length > 0 ? { detailSections } : {}),
     createdAt: formatTime(),
   };
+}
+
+function mergeToolTimelineItemDetails(
+  next: Extract<TimelineItem, { kind: "tool" }>,
+  existing: Extract<TimelineItem, { kind: "tool" }> | undefined,
+): Extract<TimelineItem, { kind: "tool" }> {
+  if (existing === undefined) {
+    return next;
+  }
+
+  const nextSections = next.detailSections;
+  const existingInputSection =
+    existing.detailSections?.find(isToolInputSection);
+  const nextHasInputSection = nextSections?.some(isToolInputSection);
+  const nextHasOutputSection = nextSections?.some(isToolOutputSection);
+  const preservedOutputSections =
+    nextHasOutputSection === true
+      ? []
+      : (existing.detailSections?.filter(isToolOutputSection) ?? []);
+  const nextStatusSections = nextSections?.filter(isToolStatusSection) ?? [];
+  const nextNonStatusSections =
+    nextSections?.filter((section) => !isToolStatusSection(section)) ?? [];
+  const detailSections = [
+    ...(existingInputSection !== undefined && nextHasInputSection !== true
+      ? [existingInputSection]
+      : []),
+    ...nextNonStatusSections,
+    ...preservedOutputSections,
+    ...nextStatusSections,
+  ];
+
+  const summary =
+    next.summary === next.title && existing.summary.trim().length > 0
+      ? existing.summary
+      : next.summary;
+
+  return {
+    ...next,
+    summary,
+    createdAt: existing.createdAt,
+    ...(detailSections.length > 0
+      ? {
+          detailSections,
+          details: safeToolDetails(detailSectionsToText(detailSections)),
+        }
+      : {}),
+  };
+}
+
+function isToolInputSection(section: ToolDetailSection): boolean {
+  return section.title === "Command" || section.title === "Input";
+}
+
+function isToolOutputSection(section: ToolDetailSection): boolean {
+  return ["stdout", "stderr", "Output", "Error"].includes(section.title);
+}
+
+function isToolStatusSection(section: ToolDetailSection): boolean {
+  return section.title === "Exit status";
+}
+
+function getToolEventArgs(
+  event: ChatRuntimeEvent,
+): Record<string, unknown> | undefined {
+  return (
+    getRecord(event, "args") ??
+    getRecord(event, "arguments") ??
+    getRecord(event, "input") ??
+    getRecord(event, "toolInput")
+  );
+}
+
+function getCommandFromToolArgs(
+  args: Record<string, unknown> | undefined,
+): string | undefined {
+  return (
+    getStringFromRecord(args, "command") ??
+    getStringFromRecord(args, "cmd") ??
+    getStringFromRecord(args, "script")
+  );
+}
+
+function toolDetailSectionsFromRuntimeEvent(
+  event: ChatRuntimeEvent,
+  toolName: string,
+  args: Record<string, unknown> | undefined,
+): ToolDetailSection[] {
+  const sections: ToolDetailSection[] = [];
+  const result = getToolEventResult(event);
+  const outputRecord = recordFromUnknown(getUnknown(event, "output"));
+  const resultOutputRecord = recordFromUnknown(result?.output);
+
+  const command = getCommandFromToolArgs(args) ?? getString(event, "command");
+  if (command !== undefined) {
+    sections.push({ title: "Command", content: command });
+  } else if (args !== undefined) {
+    sections.push({ title: "Input", content: JSON.stringify(args, null, 2) });
+  }
+
+  const stdout = firstString(
+    getString(event, "stdout"),
+    getStringFromRecord(outputRecord, "stdout"),
+    getStringFromRecord(result, "stdout"),
+    getStringFromRecord(resultOutputRecord, "stdout"),
+  );
+  const stderr = firstString(
+    getString(event, "stderr"),
+    getStringFromRecord(outputRecord, "stderr"),
+    getStringFromRecord(result, "stderr"),
+    getStringFromRecord(resultOutputRecord, "stderr"),
+  );
+  const combinedOutput = firstString(
+    getString(event, "output"),
+    stringFromUnknown(getUnknown(event, "result")),
+    stringFromUnknown(getUnknown(event, "partialResult")),
+    getStringFromRecord(outputRecord, "output"),
+    getStringFromRecord(outputRecord, "result"),
+    extractTextContent(outputRecord?.content),
+    getStringFromRecord(outputRecord, "text"),
+    getStringFromRecord(result, "output"),
+    getStringFromRecord(result, "result"),
+    extractTextContent(result?.content),
+    getStringFromRecord(result, "content"),
+    getStringFromRecord(result, "text"),
+    getStringFromRecord(resultOutputRecord, "output"),
+    extractTextContent(resultOutputRecord?.content),
+  );
+
+  if (stdout !== undefined) {
+    sections.push({ title: "stdout", content: stdout });
+  }
+  if (stderr !== undefined) {
+    sections.push({ title: "stderr", content: stderr, tone: "error" });
+  }
+  if (
+    combinedOutput !== undefined &&
+    combinedOutput !== stdout &&
+    combinedOutput !== stderr
+  ) {
+    sections.push({ title: "Output", content: combinedOutput });
+  }
+
+  const error = firstString(
+    getString(event, "errorMessage"),
+    stringFromUnknown(getUnknown(event, "error")),
+    getErrorMessageFromRecord(recordFromUnknown(getUnknown(event, "error"))),
+    getStringFromRecord(outputRecord, "error"),
+    getStringFromRecord(outputRecord, "message"),
+    getStringFromRecord(result, "errorMessage"),
+    getStringFromRecord(result, "error"),
+    getStringFromRecord(result, "message"),
+    getErrorMessageFromRecord(getRecordFromRecord(result, "error")),
+  );
+  if (
+    error !== undefined &&
+    error !== stderr &&
+    error !== combinedOutput &&
+    error !== stdout
+  ) {
+    sections.push({ title: "Error", content: error, tone: "error" });
+  }
+
+  const exitStatus = commandExitStatusFromRuntimeEvent(
+    event,
+    result,
+    outputRecord,
+    resultOutputRecord,
+  );
+  if (exitStatus !== undefined) {
+    sections.push({ title: "Exit status", content: exitStatus });
+  }
+
+  if (sections.length === 0 && toolName.trim().length > 0) {
+    sections.push({ title: "Tool", content: toolName });
+  }
+  return sections.map((section) => ({
+    ...section,
+    content: safeToolDetails(section.content),
+  }));
+}
+
+function getToolEventResult(
+  event: ChatRuntimeEvent,
+): Record<string, unknown> | undefined {
+  return getRecord(event, "result") ?? getRecord(event, "partialResult");
+}
+
+function commandExitStatusFromRuntimeEvent(
+  event: ChatRuntimeEvent,
+  result: Record<string, unknown> | undefined,
+  outputRecord: Record<string, unknown> | undefined,
+  resultOutputRecord: Record<string, unknown> | undefined,
+): string | undefined {
+  const exitCode = firstNumber(
+    getNumber(event, "exitCode"),
+    getNumber(event, "exit_code"),
+    getNumber(event, "code"),
+    getNumberFromRecord(outputRecord, "exitCode"),
+    getNumberFromRecord(outputRecord, "exit_code"),
+    getNumberFromRecord(outputRecord, "code"),
+    getNumberFromRecord(result, "exitCode"),
+    getNumberFromRecord(result, "exit_code"),
+    getNumberFromRecord(result, "code"),
+    getNumberFromRecord(resultOutputRecord, "exitCode"),
+    getNumberFromRecord(resultOutputRecord, "exit_code"),
+    getNumberFromRecord(resultOutputRecord, "code"),
+  );
+  const status = firstString(
+    getString(event, "status"),
+    getStringFromRecord(outputRecord, "status"),
+    getStringFromRecord(result, "status"),
+    getStringFromRecord(resultOutputRecord, "status"),
+  );
+  const isError = getBoolean(event, "isError");
+  const parts: string[] = [];
+  if (exitCode !== undefined) {
+    parts.push(`code: ${exitCode}`);
+  }
+  if (status !== undefined) {
+    parts.push(`status: ${status}`);
+  }
+  if (isError !== undefined) {
+    parts.push(`isError: ${String(isError)}`);
+  }
+  return parts.length > 0 ? parts.join("\n") : undefined;
+}
+
+function rawToolEventDetails(
+  event: ChatRuntimeEvent,
+  toolName: string,
+  args: Record<string, unknown> | undefined,
+): string {
+  const result = getToolEventResult(event);
+  return JSON.stringify(
+    {
+      type: event.type,
+      toolName,
+      ...(args !== undefined ? { args } : {}),
+      ...(getUnknown(event, "output") !== undefined
+        ? { output: getUnknown(event, "output") }
+        : {}),
+      ...(result !== undefined ? { result } : {}),
+      status: getString(event, "status"),
+      isError: getBoolean(event, "isError"),
+    },
+    null,
+    2,
+  );
+}
+
+function detailSectionsToText(sections: readonly ToolDetailSection[]): string {
+  return sections
+    .map((section) => `${section.title}\n${section.content}`)
+    .join("\n\n");
 }
 
 function reduceMessageUpdate(
@@ -11144,12 +11429,39 @@ function AgentActivityStep(props: {
               strokeWidth={1.75}
             />
           </summary>
-          <pre>
-            <AutolinkedText text={props.item.details} />
-          </pre>
+          <ToolDetails item={props.item} />
         </details>
       </article>
     </li>
+  );
+}
+
+function ToolDetails(props: {
+  item: Extract<TimelineItem, { kind: "tool" }>;
+}): ReactElement {
+  const sections = props.item.detailSections;
+  if (sections === undefined || sections.length === 0) {
+    return (
+      <pre>
+        <AutolinkedText text={props.item.details} />
+      </pre>
+    );
+  }
+
+  return (
+    <div className="tool-detail-sections">
+      {sections.map((section, index) => (
+        <section
+          className={`tool-detail-section ${section.tone ?? "default"}`}
+          key={`${section.title}-${index}`}
+        >
+          <h4>{section.title}</h4>
+          <pre>
+            <AutolinkedText text={section.content} />
+          </pre>
+        </section>
+      ))}
+    </div>
   );
 }
 
@@ -11267,9 +11579,7 @@ function TimelineRow(props: {
               strokeWidth={1.75}
             />
           </summary>
-          <pre>
-            <AutolinkedText text={props.item.details} />
-          </pre>
+          <ToolDetails item={props.item} />
         </details>
       </article>
     );
@@ -12506,10 +12816,43 @@ function getRecordFromRecord(
   record: Record<string, unknown> | undefined,
   key: string,
 ): Record<string, unknown> | undefined {
+  return recordFromUnknown(record?.[key]);
+}
+
+function getNumberFromRecord(
+  record: Record<string, unknown> | undefined,
+  key: string,
+): number | undefined {
   const value = record?.[key];
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
+function recordFromUnknown(
+  value: unknown,
+): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+function stringFromUnknown(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return undefined;
+  }
+  return value === undefined || value === null ? undefined : String(value);
+}
+
+function firstString(...values: Array<string | undefined>): string | undefined {
+  return values.find((value) => value !== undefined);
+}
+
+function firstNumber(...values: Array<number | undefined>): number | undefined {
+  return values.find((value) => value !== undefined);
 }
 
 function getArray(event: ChatRuntimeEvent, key: string): unknown[] | undefined {
@@ -12860,4 +13203,6 @@ export const __rendererTestHooks = {
   activitySemanticLabel,
   activityStepLabel,
   activityStepSummary,
+  toolTimelineItemFromRuntimeEvent,
+  toolDetailSectionsFromRuntimeEvent,
 };
