@@ -2149,7 +2149,11 @@ test("expanded tool details stay scrollable above the composer", async () => {
     await expect(toolCard).toBeVisible();
     await expect(toolCard.getByText("Read", { exact: true })).toBeVisible();
 
-    await toolCard.locator("pre").evaluate((pre) => {
+    const outputPre = toolCard
+      .locator(".tool-detail-section")
+      .filter({ hasText: "Output" })
+      .locator("pre");
+    await outputPre.evaluate((pre) => {
       pre.style.whiteSpace = "pre";
       const wideLine = "wide-output-".repeat(90);
       pre.textContent = Array.from(
@@ -2177,9 +2181,11 @@ test("expanded tool details stay scrollable above the composer", async () => {
         const details = document.querySelector<HTMLElement>(
           ".agent-activity-group .tool-card details",
         );
-        const pre = document.querySelector<HTMLElement>(
-          ".agent-activity-group .tool-card pre",
-        );
+        const pre = [
+          ...document.querySelectorAll<HTMLElement>(
+            ".agent-activity-group .tool-card .tool-detail-section pre",
+          ),
+        ].find((candidate) => candidate.textContent?.includes("wide-output-"));
         if (
           timeline === null ||
           composer === null ||
@@ -2348,6 +2354,20 @@ test("tool-heavy turns use a compact agent activity hierarchy", async () => {
         .filter({ hasText: "renderer tests passed" }),
     ).toBeHidden();
     await bashSummary.locator("..").locator(".tool-card summary").click();
+    const bashToolDetails = bashSummary.locator("..").locator(".tool-card");
+    await expect(
+      bashToolDetails.locator(".tool-detail-section h4", {
+        hasText: "Command",
+      }),
+    ).toBeVisible();
+    await expect(
+      bashToolDetails.locator(".tool-detail-section h4", { hasText: "stdout" }),
+    ).toBeVisible();
+    await expect(
+      bashToolDetails.locator(".tool-detail-section h4", {
+        hasText: "Exit status",
+      }),
+    ).toBeVisible();
     await expect(
       activityGroup
         .locator(".tool-card pre")
@@ -2401,9 +2421,29 @@ test("failed tool activity remains conspicuous and inspectable", async () => {
     );
 
     await failedMilestone.locator(".tool-card summary").click();
-    await expect(failedMilestone.locator(".tool-card pre")).toContainText(
-      "fake tool failed",
-    );
+    await expect(
+      failedMilestone.locator(".tool-detail-section h4", {
+        hasText: "Command",
+      }),
+    ).toBeVisible();
+    await expect(
+      failedMilestone.locator(".tool-detail-section h4", { hasText: "stderr" }),
+    ).toBeVisible();
+    await expect(
+      failedMilestone.locator(".tool-detail-section h4", {
+        hasText: "Exit status",
+      }),
+    ).toBeVisible();
+    await expect(
+      failedMilestone
+        .locator(".tool-card pre")
+        .filter({ hasText: "fake command failed on stderr" }),
+    ).toBeVisible();
+    await expect(
+      failedMilestone
+        .locator(".tool-card pre")
+        .filter({ hasText: "fake tool failed" }),
+    ).toBeVisible();
   } finally {
     await app.close();
     fs.rmSync(root, { recursive: true, force: true });

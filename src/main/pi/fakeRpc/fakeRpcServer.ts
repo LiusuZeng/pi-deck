@@ -1055,6 +1055,8 @@ class FakeRpcServer {
           name: "bash",
           args: { command: "npm test -- --run src/renderer/App.test.ts" },
           output: "renderer tests passed",
+          stdout: "renderer tests passed",
+          exitCode: 0,
         },
       ].forEach((tool) => {
         this.write({
@@ -1070,32 +1072,51 @@ class FakeRpcServer {
           args: tool.args,
           status: "completed",
           output: tool.output,
+          ...("stdout" in tool && typeof tool.stdout === "string"
+            ? { stdout: tool.stdout }
+            : {}),
+          ...("stderr" in tool && typeof tool.stderr === "string"
+            ? { stderr: tool.stderr }
+            : {}),
+          ...("exitCode" in tool && typeof tool.exitCode === "number"
+            ? { exitCode: tool.exitCode }
+            : {}),
         });
       });
     }
 
     if (shouldEmit("tool") || scenario === "tool-error") {
       const toolFailed = scenario === "tool-error";
+      const fixtureToolName = toolFailed ? "bash" : "read";
+      const fixtureToolArgs = toolFailed
+        ? { command: "npm test -- --run fake-failure.test.ts" }
+        : undefined;
       this.write({
         type: "tool_execution_start",
         toolCallId: "tool_fake_1",
-        toolName: "read",
+        toolName: fixtureToolName,
+        ...(fixtureToolArgs ? { args: fixtureToolArgs } : {}),
       });
       this.write({
         type: "tool_execution_update",
         toolCallId: "tool_fake_1",
-        toolName: "read",
+        toolName: fixtureToolName,
+        ...(fixtureToolArgs ? { args: fixtureToolArgs } : {}),
         output: "partial tool output",
       });
       this.write({
         type: "tool_execution_end",
         toolCallId: "tool_fake_1",
-        toolName: "read",
+        toolName: fixtureToolName,
+        ...(fixtureToolArgs ? { args: fixtureToolArgs } : {}),
         status: toolFailed ? "error" : "completed",
         isError: toolFailed,
         output: toolFailed
           ? "fake tool failed"
           : "final tool output https://example.com/tool-output",
+        ...(toolFailed
+          ? { stderr: "fake command failed on stderr", exitCode: 1 }
+          : {}),
       });
     }
 

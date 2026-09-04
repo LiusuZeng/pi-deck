@@ -1724,7 +1724,9 @@ h1 {
 }
 
 .tool-card pre {
+  box-sizing: border-box;
   overflow: auto;
+  max-width: 100%;
   max-height: min(52vh, 520px);
   margin: 8px 0 0;
   border-radius: 8px;
@@ -1733,6 +1735,36 @@ h1 {
   background: #111827;
   overscroll-behavior: contain;
   white-space: pre-wrap;
+}
+
+.tool-detail-sections {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.tool-detail-section {
+  min-width: 0;
+}
+
+.tool-detail-section h4 {
+  margin: 0 0 4px;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-weight: 760;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.tool-detail-section pre {
+  margin-top: 0;
+}
+
+.tool-detail-section.error pre {
+  border: 1px solid #fda29b;
+  color: #fff7ed;
+  background: #7f1d1d;
 }
 
 .agent-activity-tool-card {
@@ -1764,7 +1796,7 @@ h1 {
 }
 
 .agent-activity-tool-card pre {
-  max-height: min(42vh, 420px);
+  max-height: min(30vh, 300px);
   font-size: 12px;
 }
 
