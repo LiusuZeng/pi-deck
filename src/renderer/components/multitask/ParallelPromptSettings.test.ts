@@ -34,6 +34,23 @@ const selectedModelWithControlCharacters = {
   provider: modelWithControlCharacters.provider!,
   modelId: modelWithControlCharacters.id,
 };
+const collidingCatalog: ChatModelSummary[] = [
+  {
+    provider: "anthropic",
+    id: "claude-opus-4-5",
+    name: "Claude Opus 4.5",
+  },
+  {
+    provider: "llm-gateway-bedrock",
+    id: "global.anthropic.claude-opus-4-5-20251101-v1:0",
+    name: "Claude Opus 4.5",
+  },
+  {
+    provider: "anthropic",
+    id: "claude-opus-4-5-20251101",
+    name: "claude-opus-4-5-20251101",
+  },
+];
 
 afterEach(() => {
   act(() => root?.unmount());
@@ -115,6 +132,36 @@ describe("ParallelPromptSettings", () => {
     if (!destination) throw new Error("destination missing");
     selectValue(destination, "parent");
     expect(props.onSetDestination).toHaveBeenCalledWith("parent");
+  });
+
+  it("renders unique worker-model labels for same-named provider catalog rows", () => {
+    const { props } = renderSettings({ models: collidingCatalog });
+    openWorkerSettings();
+
+    for (const label of ["Worker model override", "Persistent worker model"]) {
+      const optionLabels = Array.from(workerSelect(label).options)
+        .slice(1)
+        .map((option) => option.textContent);
+      expect(optionLabels).toEqual([
+        "Claude Opus 4.5 — claude-opus-4-5 [anthropic]",
+        "Claude Opus 4.5 — global.anthropic.claude-opus-4-5-20251101-v1:0 [llm-gateway-bedrock]",
+        "claude-opus-4-5-20251101 [anthropic]",
+      ]);
+      expect(new Set(optionLabels).size).toBe(optionLabels.length);
+    }
+
+    const overrideSelect = workerSelect("Worker model override");
+    selectValue(overrideSelect, overrideSelect.options[1].value);
+    expect(props.onOverrideModel).toHaveBeenCalledWith({
+      provider: "anthropic",
+      modelId: "claude-opus-4-5",
+    });
+
+    selectValue(overrideSelect, overrideSelect.options[2].value);
+    expect(props.onOverrideModel).toHaveBeenLastCalledWith({
+      provider: "llm-gateway-bedrock",
+      modelId: "global.anthropic.claude-opus-4-5-20251101-v1:0",
+    });
   });
 
   it("round-trips a worker model override through DOM-safe option values", () => {

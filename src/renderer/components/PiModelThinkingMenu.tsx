@@ -8,6 +8,7 @@ import {
   type ReactElement,
 } from "react";
 import type { ChatModelSummary } from "../../shared/types.js";
+import { modelPickerLabelParts } from "../modelPickerLabels.js";
 import { Button } from "./ui/Button.js";
 import { Check, ChevronDown, ChevronRight } from "./ui/icons.js";
 
@@ -138,8 +139,10 @@ export function PiModelThinkingMenu(props: {
     setModelMenuOpen(true);
   }
 
-  const modelName =
-    props.selectedModel?.name ?? props.selectedModel?.id ?? "Model";
+  const selectedModelLabel = props.selectedModel
+    ? modelPickerLabelParts(props.selectedModel)
+    : undefined;
+  const modelName = selectedModelLabel?.compact ?? "Model";
   const thinkingName = props.selectedThinking ?? "Thinking";
 
   return (
@@ -197,6 +200,7 @@ export function PiModelThinkingMenu(props: {
         data-thinking-level={props.selectedThinking}
         disabled={props.disabled}
         size="sm"
+        title={`Model: ${modelName}; thinking: ${thinkingName}`}
         onClick={() => {
           setOpen((value) => !value);
           setModelMenuOpen(false);
@@ -272,10 +276,11 @@ export function PiModelThinkingMenu(props: {
                     const selected =
                       model.id === props.selectedModel?.id &&
                       model.provider === props.selectedModel?.provider;
-                    const name = model.name ?? model.id;
+                    const label = modelPickerLabelParts(model);
                     return (
                       <Button
                         aria-checked={selected}
+                        aria-label={label.compact}
                         className="pi-configuration-option model-choice"
                         data-model-id={model.id}
                         data-model-provider={model.provider}
@@ -289,7 +294,19 @@ export function PiModelThinkingMenu(props: {
                             props.onSelectModel(model.provider, model.id);
                         }}
                       >
-                        <span title={name}>{name}</span>
+                        <span
+                          className="pi-model-choice-label"
+                          title={label.compact}
+                        >
+                          <span className="pi-model-choice-label__primary">
+                            {label.primary}
+                          </span>
+                          {label.secondary !== undefined ? (
+                            <span className="pi-model-choice-label__secondary">
+                              {label.secondary}
+                            </span>
+                          ) : null}
+                        </span>
                         <Check
                           aria-hidden="true"
                           size={14}

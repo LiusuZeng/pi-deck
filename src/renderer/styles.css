@@ -4108,7 +4108,7 @@ body {
 .pi-model-submenu {
   bottom: 6px;
   left: calc(100% + 6px);
-  width: 196px;
+  width: 320px;
   max-height: var(--pi-model-submenu-max-height, 280px);
   min-height: 0;
   overflow-y: auto;
@@ -4149,7 +4149,31 @@ body {
 }
 
 .pi-configuration-option.model-choice {
+  align-items: center;
   gap: 8px;
+  height: auto;
+  min-height: 46px;
+}
+
+.pi-configuration-option > .pi-model-choice-label {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  line-height: 1.15;
+  white-space: normal;
+}
+
+.pi-model-choice-label__primary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pi-model-choice-label__secondary {
+  color: var(--color-text-subtle);
+  font-size: 11px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
 }
 
 .pi-configuration-divider {
@@ -4240,7 +4264,7 @@ body {
   .pi-model-submenu {
     bottom: calc(100% + 6px);
     left: 0;
-    width: min(196px, calc(100vw - 20px));
+    width: min(320px, calc(100vw - 20px));
   }
 
   .pi-model-submenu--below {

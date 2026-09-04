@@ -3314,6 +3314,90 @@ test("model submenu stays inside a narrow viewport", async () => {
   }
 });
 
+test("model picker shows id and provider for colliding display names", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-model-collisions-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: ["--colliding-models"],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await enterSessionDetail(page);
+
+    const configuration = page.locator(".pi-configuration-trigger");
+    await expect(configuration).toHaveAttribute(
+      "data-model-id",
+      "claude-opus-4-5",
+    );
+    await expect(configuration).toHaveAttribute(
+      "data-model-provider",
+      "anthropic",
+    );
+    await expect(configuration).toHaveAttribute(
+      "aria-label",
+      /Claude Opus 4\.5 — claude-opus-4-5 \[anthropic\]/,
+    );
+
+    await configuration.click();
+    await page
+      .getByRole("menuitem", {
+        name: "Claude Opus 4.5 — claude-opus-4-5 [anthropic]",
+      })
+      .click();
+    const modelMenu = page.getByRole("menu", { name: "Available Pi models" });
+    await expect(modelMenu).toBeVisible();
+    await expect(modelMenu.getByRole("menuitemradio")).toHaveCount(3);
+
+    await expect(
+      modelMenu.getByRole("menuitemradio", {
+        name: "Claude Opus 4.5 — claude-opus-4-5 [anthropic]",
+      }),
+    ).toBeVisible();
+    await expect(
+      modelMenu.getByRole("menuitemradio", {
+        name: "Claude Opus 4.5 — global.anthropic.claude-opus-4-5-20251101-v1:0 [llm-gateway-bedrock]",
+      }),
+    ).toBeVisible();
+    await expect(
+      modelMenu.getByRole("menuitemradio", {
+        name: "claude-opus-4-5-20251101 [anthropic]",
+      }),
+    ).toBeVisible();
+
+    await modelMenu
+      .getByRole("menuitemradio", {
+        name: "Claude Opus 4.5 — global.anthropic.claude-opus-4-5-20251101-v1:0 [llm-gateway-bedrock]",
+      })
+      .click();
+    await expect(configuration).toHaveAttribute(
+      "data-model-id",
+      "global.anthropic.claude-opus-4-5-20251101-v1:0",
+    );
+    await expect(configuration).toHaveAttribute(
+      "data-model-provider",
+      "llm-gateway-bedrock",
+    );
+    await expect(configuration).toHaveAttribute(
+      "aria-label",
+      /Claude Opus 4\.5 — global\.anthropic\.claude-opus-4-5-20251101-v1:0 \[llm-gateway-bedrock\]/,
+    );
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("bootstrap creates no saved session and the first draft send creates one", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-lazy-new-"));
   const projectCwd = path.join(root, "project");
@@ -3626,10 +3710,16 @@ test("metadata-only model and thinking changes preserve session title, transcrip
 
     await configuration.click();
     await page
-      .getByRole("menuitem", { name: "Fake model", exact: true })
+      .getByRole("menuitem", {
+        name: "Fake model — fake-model [fake-provider]",
+        exact: true,
+      })
       .click();
     await page
-      .getByRole("menuitemradio", { name: "Fake model 2", exact: true })
+      .getByRole("menuitemradio", {
+        name: "Fake model 2 — fake-model-2 [fake-provider]",
+        exact: true,
+      })
       .click();
     await expect(
       page.getByText("Switched model to fake-provider/fake-model-2."),

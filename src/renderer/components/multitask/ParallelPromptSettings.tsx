@@ -2,6 +2,7 @@ import type {
   ChatModelSummary,
   ParallelWorkerSettings,
 } from "../../../shared/types.js";
+import { modelPickerLabelParts } from "../../modelPickerLabels.js";
 import { Menu } from "../ui/Menu.js";
 
 export interface ParallelPromptSettingsProps {
@@ -87,7 +88,7 @@ export function ParallelPromptSettings({
                           modelId: model.id,
                         })}
                       >
-                        {model.name ?? model.id}
+                        {modelPickerLabelParts(model).compact}
                       </option>,
                     ]
                   : [],
@@ -140,7 +141,7 @@ export function ParallelPromptSettings({
                             modelId: model.id,
                           })}
                         >
-                          {model.name ?? model.id}
+                          {modelPickerLabelParts(model).compact}
                         </option>,
                       ]
                     : [],
