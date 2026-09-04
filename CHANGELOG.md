@@ -14,35 +14,35 @@ trustworthy usage/accounting while keeping the v0.6 product model intact.
 ### Added
 
 - Added durable workspace-level token and reported-cost accounting that includes
-  normal sessions and private Parallel work while avoiding double counting.
+  normal sessions and private Parallel work while avoiding double counting (#21).
 - Added inline workspace ownership for New Session drafts so users can start
-  immediately and optionally change workspace before the first prompt.
+  immediately and optionally change workspace before the first prompt (#23).
 - Added Pi Deck's own three-card application/Dock icon instead of Electron
-  branding.
+  branding (#26).
 
 ### Changed
 
 - Simplified Work status taxonomy by renaming Pending to Queued and removing
-  Idle from the operational Work surface.
+  Idle from the operational Work surface (#22).
 - Refined Agent activity into a more semantic execution narrative while keeping
-  lower-level tool details available on demand.
+  lower-level tool details available on demand (#18).
 - Made All Work counts use one consistent total-Work meaning across navigation,
-  scope selection, and filters.
+  scope selection, and filters (#24).
 
 ### Fixed
 
 - Preserved Completed Work and its stable completion timestamp across app
-  relaunch and saved-session rehydration.
+  relaunch and saved-session rehydration (#25).
 - Allowed private Parallel task sessions to start and progress while the parent
-  session is busy running a command.
+  session is busy running a command (#32).
 - Fixed real-Pi session usage metering by mapping current Pi session statistics
-  instead of leaving token/cache/cost fields at zero.
+  instead of leaving token/cache/cost fields at zero (#27).
 - Restored login-shell environment capture for real Pi workers so normal
-  non-interactive terminal tools and PATH-dependent CLIs are available in Deck.
+  non-interactive terminal tools and PATH-dependent CLIs are available in Deck (#38).
 - Made bare http(s) and mailto URLs clickable in session text and tool details
-  while preserving safe-scheme and code-block behavior.
+  while preserving safe-scheme and code-block behavior (#28).
 - Accepted fire-and-forget Extension UI updates such as setWidget without
-  surfacing misleading user-facing Diagnostics.
+  surfacing misleading user-facing Diagnostics (#36).
 
 ### Tests
 
