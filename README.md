@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/branding/pi-deck-app-icon.svg" alt="Pi Deck three-card app icon" width="112">
+</p>
+
 # Pi Deck — macOS desktop app for Pi coding agents
 
 **A local macOS desktop app for Pi coding agents.**
