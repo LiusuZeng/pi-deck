@@ -5,6 +5,55 @@ All notable changes to Pi Deck will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-09-03
+
+Second dogfood stabilization release after Unified Work. This patch focuses on
+durable Work continuity, real-Pi parity, clearer session activity, and
+trustworthy usage/accounting while keeping the v0.6 product model intact.
+
+### Added
+
+- Added durable workspace-level token and reported-cost accounting that includes
+  normal sessions and private Parallel work while avoiding double counting.
+- Added inline workspace ownership for New Session drafts so users can start
+  immediately and optionally change workspace before the first prompt.
+- Added Pi Deck's own three-card application/Dock icon instead of Electron
+  branding.
+
+### Changed
+
+- Simplified Work status taxonomy by renaming Pending to Queued and removing
+  Idle from the operational Work surface.
+- Refined Agent activity into a more semantic execution narrative while keeping
+  lower-level tool details available on demand.
+- Made All Work counts use one consistent total-Work meaning across navigation,
+  scope selection, and filters.
+
+### Fixed
+
+- Preserved Completed Work and its stable completion timestamp across app
+  relaunch and saved-session rehydration.
+- Allowed private Parallel task sessions to start and progress while the parent
+  session is busy running a command.
+- Fixed real-Pi session usage metering by mapping current Pi session statistics
+  instead of leaving token/cache/cost fields at zero.
+- Restored login-shell environment capture for real Pi workers so normal
+  non-interactive terminal tools and PATH-dependent CLIs are available in Deck.
+- Made bare http(s) and mailto URLs clickable in session text and tool details
+  while preserving safe-scheme and code-block behavior.
+- Accepted fire-and-forget Extension UI updates such as setWidget without
+  surfacing misleading user-facing Diagnostics.
+
+### Tests
+
+- Added deterministic regression coverage for durable Completed rehydration,
+  Work taxonomy/count semantics, workspace usage accounting, inline workspace
+  ownership, Parallel parent-busy concurrency, semantic Agent activity, app
+  identity, safe autolinking, real-Pi usage mapping, and login-shell environment
+  parity.
+- Kept the release gate as exact-main `npm run verify:release`, including the
+  authenticated real-Pi smoke suite, before tagging.
+
 ## [0.6.1] - 2026-08-26
 
 First dogfood stabilization release after Unified Work. This patch focuses on
@@ -476,7 +525,8 @@ coding-agent sessions.
   crash; persisted sessions can be reopened, but unsaved partial stream text may
   be lost.
 
-[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.5...v0.6.0
 [0.5.5]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.4...v0.5.5
