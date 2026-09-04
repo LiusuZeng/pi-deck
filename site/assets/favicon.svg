@@ -1,5 +1,29 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="16" fill="#0a0c14"/>
-  <circle cx="32" cy="32" r="22" fill="#70e6e0"/>
-  <text x="32" y="43" text-anchor="middle" font-family="Georgia,serif" font-size="35" font-weight="700" fill="#0a0c14">π</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#222831"/>
+      <stop offset="1" stop-color="#0f141c"/>
+    </linearGradient>
+    <linearGradient id="blue" x1="0" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#4f8df7"/>
+      <stop offset="1" stop-color="#1f5fc9"/>
+    </linearGradient>
+    <linearGradient id="slate" x1="0" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#5b6678"/>
+      <stop offset="1" stop-color="#303846"/>
+    </linearGradient>
+    <linearGradient id="paper" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#e9edf2"/>
+    </linearGradient>
+    <filter id="shadow" x="-50%" y="-50%" width="200%" height="200%">
+      <feDropShadow dx="0" dy="28" stdDeviation="28" flood-color="#000" flood-opacity=".42"/>
+    </filter>
+  </defs>
+  <rect x="80" y="80" width="864" height="864" rx="190" fill="url(#bg)"/>
+  <g filter="url(#shadow)" transform="translate(512 512)">
+    <rect x="-210" y="-285" width="420" height="570" rx="58" fill="url(#slate)" transform="rotate(14) translate(72 28)"/>
+    <rect x="-210" y="-285" width="420" height="570" rx="58" fill="url(#blue)" transform="rotate(5) translate(34 10)"/>
+    <rect x="-210" y="-285" width="420" height="570" rx="58" fill="url(#paper)" transform="rotate(-13)"/>
+  </g>
 </svg>
