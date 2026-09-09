@@ -259,6 +259,53 @@ describe("workspace usage accounting", () => {
     assert.equal(await fs.readFile(store.storeFile, "utf8"), before);
   });
 
+  it("coalesces concurrent refreshes for the same session file", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-usage-coalesce-"),
+    );
+    const sessionFile = path.join(root, "session.jsonl");
+    await fs.writeFile(
+      sessionFile,
+      JSON.stringify({
+        type: "message",
+        message: {
+          id: "assistant-one",
+          role: "assistant",
+          usage: { inputTokens: 5, outputTokens: 7, totalTokens: 12 },
+        },
+      }),
+    );
+    const store = new WorkspaceUsageStore(root);
+
+    const results = await Promise.all(
+      Array.from({ length: 32 }, () =>
+        store.refreshSessionFileUsage({
+          workspaceId: workspaceA,
+          sessionFile,
+        }),
+      ),
+    );
+
+    assert.equal(results.every((result) => result === results[0]), true);
+    assert.equal(results[0]?.refreshed, true);
+    assert.equal(
+      (
+        await store.getWorkspaceUsage({
+          workspaceId: workspaceA,
+          sessionFiles: [sessionFile],
+        })
+      ).totalTokens,
+      12,
+    );
+    assert.deepEqual(
+      await store.refreshSessionFileUsage({
+        workspaceId: workspaceA,
+        sessionFile,
+      }),
+      { diagnostics: [], refreshed: false },
+    );
+  });
+
   it("refreshes a session JSONL once per file signature", async () => {
     const root = await fs.mkdtemp(
       path.join(os.tmpdir(), "pi-deck-usage-refresh-"),
