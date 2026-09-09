@@ -116,38 +116,53 @@ npm run build && npm run launch
 
 ## 5. Automated Validation Commands
 
-Run this required CI-equivalent validation before demo/release-readiness handoff:
+GitHub Actions is the authoritative PR and merge validation environment. Local
+test execution is optional for debugging; a change is considered validated only
+when the protected **Verify desktop app** check passes on the PR commit.
+
+The canonical CI contract remains:
 
 ```bash
 npm run verify:ci
 ```
 
-Real Pi smoke checks are separate because prompt smoke requires local Pi/model-provider auth. Before tagging a release, run the authenticated real-Pi GUI smoke too:
+GitHub CI runs that command on `macos-latest` after a clean `npm ci` install
+and installs the pinned Pi CLI version declared in `.github/workflows/ci.yml`.
+That makes the same deterministic checks available remotely instead of relying
+on a developer machine.
+
+The required CI gate covers:
+
+- Prettier formatting.
+- TypeScript checks for main/preload/shared and renderer code.
+- The complete Vitest unit/integration suite, including fake RPC, platform, IPC,
+  workflows, multitask orchestration, security, and renderer coverage.
+- Successful Electron main/preload and Vite renderer builds.
+- GitHub Pages/site validation.
+- `npm run smoke:real`: an isolated real `pi --mode rpc`
+  `get_state`/`get_messages` health check with no model prompt or provider
+  authentication.
+- The standard Playwright Electron E2E suite on macOS. CI provides
+  `PI_DECK_PI_BINARY`, so the real-mode startup/no-fallback E2Es in
+  `e2e/pi-deck.e2e.ts` run instead of being skipped.
+- Playwright screenshots, traces, and reports uploaded as a GitHub Actions
+  artifact when E2E validation fails.
+
+The authenticated real-Pi acceptance suite is intentionally outside the normal
+PR gate because it sends model prompts and depends on provider credentials:
 
 ```bash
+# Minimal authenticated prompt round-trip.
+npm run smoke:real:prompt
+
+# Authenticated real GUI/worker release acceptance.
 npm run test:e2e:real-smoke
 ```
 
-See [the release checklist](release-checklist.md) for the mandatory user-journey and evidence requirements. The non-prompt smoke uses an isolated temp agent dir; prompt smoke uses Pi's default/user agent dir so auth is available:
-
-```bash
-# Starts a real temp pi --mode rpc session and checks get_state/get_messages.
-npm run smoke:real
-
-# Sends a tiny real prompt and waits for agent_end. Requires configured provider auth.
-npm run smoke:real:prompt
-```
-
-The CI-equivalent gate covers the following. Record command results in the
-[v0.6.0 validation record](reviews/v0.6-unified-work-release-validation.md)
-before treating them as release evidence:
-
-- Unit/integration tests, including fake RPC, platform, IPC, and renderer shell coverage.
-- TypeScript checks for main/preload/shared and renderer code.
-- Successful Electron main/preload and Vite renderer builds.
-- Prettier formatting.
-- Playwright Electron E2E coverage for fake launch, real startup failure labeling, real-mode no-fallback/send-enabled, and saved-session refresh/resume regressions.
-- `npm run smoke:real` checking the installed real Pi RPC path without fake RPC; `npm run smoke:real:prompt` additionally checks a minimal real prompt round-trip when auth is configured.
+Those authenticated checks remain required release evidence where the release
+checklist calls for them; they are not a substitute for the protected GitHub CI
+gate. See [the release checklist](release-checklist.md) for final-candidate
+evidence requirements.
 
 ## 6. Deterministic fake-Pi development checklist
 
