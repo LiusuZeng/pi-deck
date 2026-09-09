@@ -179,7 +179,6 @@ import {
 } from "./workspaces/workspaceStore.js";
 import {
   WorkspaceUsageStore,
-  contributionsFromSessionFile,
   contributionsFromSessionMessages,
 } from "./workspaces/workspaceUsage.js";
 import { WorkspaceRuntimeLifecycleGate } from "./workspaceRuntimeLifecycleGate.js";
@@ -1398,7 +1397,7 @@ function registerIpcHandlers(
     requestSchema: workspaceUsageRequestSchema,
     responseSchema: workspaceUsageResultSchema,
     diagnostics: diagnosticsService,
-    handler: async ({ workspaceId }) => getWorkspaceUsage(store, workspaceId),
+    handler: async ({ workspaceId }) => getWorkspaceUsage(workspaceId),
   });
 
   registerValidatedIpc({
@@ -5257,33 +5256,40 @@ async function refreshWorkspaceSessionSummaries(
 }
 
 async function getWorkspaceUsage(
-  settings: SettingsStore,
   workspaceId: string,
 ): Promise<z.infer<typeof workspaceUsageResultSchema>> {
   const diagnostics: string[] = [];
-  const listed = await listWorkspaceChatSessions(settings, workspaceId, {
-    discoverLegacySessions: false,
-    includeArchived: true,
-  });
-  await Promise.all(
-    listed.sessions.map(async (session) => {
-      const result = await contributionsFromSessionFile({
-        workspaceId,
-        sessionFile: session.sessionFile,
-        source: "session",
-      });
-      diagnostics.push(...result.diagnostics);
-      await ensureWorkspaceUsageStore().upsertContributions(
-        result.contributions,
-      );
-    }),
-  );
   const refs = await ensureWorkspaceStore().getSessionRefs(workspaceId);
-  const usage = await ensureWorkspaceUsageStore().getWorkspaceUsage({
+  const sessionFiles = refs
+    .filter((ref) => ref.missingSinceMs === undefined)
+    .map((ref) => ref.sessionFile);
+  const usageStore = ensureWorkspaceUsageStore();
+
+  // Historical/import recovery is intentionally bounded. A normal usage read
+  // first stats each session and only reparses JSONL when the file changed;
+  // refreshSessionFileUsage also coalesces concurrent requests for the same
+  // session. Keep cold recovery batches small so one workspace cannot allocate
+  // every large transcript at once.
+  const refreshBatchSize = 4;
+  for (let index = 0; index < sessionFiles.length; index += refreshBatchSize) {
+    const batch = sessionFiles.slice(index, index + refreshBatchSize);
+    const results = await Promise.all(
+      batch.map((sessionFile) =>
+        usageStore.refreshSessionFileUsage({
+          workspaceId,
+          sessionFile,
+          source: "session",
+        }),
+      ),
+    );
+    for (const result of results) {
+      diagnostics.push(...result.diagnostics);
+    }
+  }
+
+  const usage = await usageStore.getWorkspaceUsage({
     workspaceId,
-    sessionFiles: refs
-      .filter((ref) => ref.missingSinceMs === undefined)
-      .map((ref) => ref.sessionFile),
+    sessionFiles,
   });
   return { workspaceId, usage, diagnostics };
 }
@@ -5292,17 +5298,18 @@ async function recordSessionUsageForDeletion(
   workspaceId: string,
   sessionFile: string,
 ): Promise<void> {
-  const result = await contributionsFromSessionFile({
+  const usageStore = ensureWorkspaceUsageStore();
+  const result = await usageStore.refreshSessionFileUsage({
     workspaceId,
     sessionFile,
     source: "session",
   });
   if (result.diagnostics.length > 0) {
-    for (const diagnostic of result.diagnostics)
+    for (const diagnostic of result.diagnostics) {
       diagnostics?.recordError(diagnostic);
+    }
   }
-  await ensureWorkspaceUsageStore().upsertContributions(result.contributions);
-  await ensureWorkspaceUsageStore().freezeSessionUsage({
+  await usageStore.freezeSessionUsage({
     workspaceId,
     sessionFile,
   });
