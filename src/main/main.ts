@@ -177,10 +177,7 @@ import {
   WorkspaceStore,
   type WorkspaceRecord,
 } from "./workspaces/workspaceStore.js";
-import {
-  WorkspaceUsageStore,
-  contributionsFromSessionMessages,
-} from "./workspaces/workspaceUsage.js";
+import { WorkspaceUsageStore } from "./workspaces/workspaceUsage.js";
 import { WorkspaceRuntimeLifecycleGate } from "./workspaceRuntimeLifecycleGate.js";
 import { WorkspaceRuntimeShutdownTombstones } from "./workspaceRuntimeShutdownTombstones.js";
 import {
@@ -2545,6 +2542,15 @@ async function addSessionToWorkspace(
           messageCount: 0,
         },
       );
+      const usageRecovery =
+        await ensureWorkspaceUsageStore().refreshSessionFileUsage({
+          workspaceId: result.workspaceId,
+          sessionFile: result.sessionFile,
+          source: "session",
+        });
+      for (const diagnostic of usageRecovery.diagnostics) {
+        diagnostics?.recordError(diagnostic);
+      }
       return {
         workspaceId: result.workspaceId,
         sessionFile: result.sessionFile,
@@ -5164,6 +5170,11 @@ async function listWorkspaceChatSessions(
       ...(attachedRuntimeId ? { attachedRuntimeId } : {}),
     });
   }
+  await recoverWorkspaceSessionUsage(
+    workspace.id,
+    sessions.map((session) => session.sessionFile),
+    diagnostics,
+  );
   const defaultProject = workspace.defaultProjectId
     ? await ensureProjectStore()
         .resolveAuthorizedProject(workspace.defaultProjectId)
@@ -5255,43 +5266,48 @@ async function refreshWorkspaceSessionSummaries(
   }
 }
 
-async function getWorkspaceUsage(
+async function recoverWorkspaceSessionUsage(
   workspaceId: string,
-): Promise<z.infer<typeof workspaceUsageResultSchema>> {
-  const diagnostics: string[] = [];
-  const refs = await ensureWorkspaceStore().getSessionRefs(workspaceId);
-  const sessionFiles = refs
-    .filter((ref) => ref.missingSinceMs === undefined)
-    .map((ref) => ref.sessionFile);
+  sessionFiles: readonly string[],
+  diagnostics: string[],
+): Promise<void> {
+  if (resolveChatBackendMode() !== "real" || sessionFiles.length === 0) return;
   const usageStore = ensureWorkspaceUsageStore();
-
-  // Historical/import recovery is intentionally bounded. A normal usage read
-  // first stats each session and only reparses JSONL when the file changed;
-  // refreshSessionFileUsage also coalesces concurrent requests for the same
-  // session. Keep cold recovery batches small so one workspace cannot allocate
-  // every large transcript at once.
-  const refreshBatchSize = 4;
-  for (let index = 0; index < sessionFiles.length; index += refreshBatchSize) {
-    const batch = sessionFiles.slice(index, index + refreshBatchSize);
+  const recoveryBatchSize = 2;
+  for (
+    let index = 0;
+    index < sessionFiles.length;
+    index += recoveryBatchSize
+  ) {
     const results = await Promise.all(
-      batch.map((sessionFile) =>
-        usageStore.refreshSessionFileUsage({
-          workspaceId,
-          sessionFile,
-          source: "session",
-        }),
-      ),
+      sessionFiles
+        .slice(index, index + recoveryBatchSize)
+        .map((sessionFile) =>
+          usageStore.refreshSessionFileUsage({
+            workspaceId,
+            sessionFile,
+            source: "session",
+          }),
+        ),
     );
     for (const result of results) {
       diagnostics.push(...result.diagnostics);
     }
   }
+}
 
-  const usage = await usageStore.getWorkspaceUsage({
+async function getWorkspaceUsage(
+  workspaceId: string,
+): Promise<z.infer<typeof workspaceUsageResultSchema>> {
+  const refs = await ensureWorkspaceStore().getSessionRefs(workspaceId);
+  const sessionFiles = refs
+    .filter((ref) => ref.missingSinceMs === undefined)
+    .map((ref) => ref.sessionFile);
+  const usage = await ensureWorkspaceUsageStore().getWorkspaceUsage({
     workspaceId,
     sessionFiles,
   });
-  return { workspaceId, usage, diagnostics };
+  return { workspaceId, usage, diagnostics: [] };
 }
 
 async function recordSessionUsageForDeletion(
@@ -5963,6 +5979,13 @@ async function getChatRuntimeStatus(
   ]);
   const usage =
     runtimeUsageFromSessionStats(sessionStats) ?? runtimeUsageFromState(state);
+  if (usage !== undefined) {
+    void recordRuntimeCumulativeUsage(runtimeId, state, usage).catch((error) => {
+      diagnostics?.recordError(
+        `Failed to record cumulative usage for ${runtimeId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+  }
   return {
     runtimeId,
     backendMode: mode,
@@ -6027,6 +6050,23 @@ function compactRuntimeStatusModel(
   return Object.keys(compact).length > 0 ? compact : undefined;
 }
 
+async function recordRuntimeCumulativeUsage(
+  runtimeId: string,
+  state: PiState,
+  usage: NonNullable<ChatRuntimeStatus["usage"]>,
+): Promise<void> {
+  const workspaceId = chatRuntimeWorkspaceIds.get(runtimeId);
+  const sessionFile =
+    chatRuntimeSessionFiles.get(runtimeId) ??
+    (typeof state.sessionFile === "string" ? state.sessionFile : undefined);
+  if (workspaceId === undefined || sessionFile === undefined) return;
+  await ensureWorkspaceUsageStore().recordRuntimeUsage({
+    workspaceId,
+    sessionFile,
+    usage,
+  });
+}
+
 async function recordRuntimeMessagesUsage(options: {
   runtimeId: string;
   messages: readonly PiMessage[];
@@ -6037,15 +6077,16 @@ async function recordRuntimeMessagesUsage(options: {
   if (workspaceId === undefined) return;
   const sessionFile =
     options.ownerSessionFile ?? chatRuntimeSessionFiles.get(options.runtimeId);
-  const contributions = contributionsFromSessionMessages({
+  await ensureWorkspaceUsageStore().recordSessionMessagesUsage({
     workspaceId,
     ...(sessionFile !== undefined ? { sessionFile } : {}),
-    sessionId:
-      chatRuntimeSessionFiles.get(options.runtimeId) ?? options.runtimeId,
+    sessionKey:
+      options.source === "session"
+        ? (sessionFile ?? options.runtimeId)
+        : options.runtimeId,
     source: options.source,
     messages: options.messages,
   });
-  await ensureWorkspaceUsageStore().upsertContributions(contributions);
 }
 
 async function recordPrivateWorkerMessagesUsage(options: {
@@ -6056,14 +6097,13 @@ async function recordPrivateWorkerMessagesUsage(options: {
   const workspaceId = chatRuntimeWorkspaceIds.get(options.parentId);
   const sessionFile = chatRuntimeSessionFiles.get(options.parentId);
   if (workspaceId === undefined) return;
-  const contributions = contributionsFromSessionMessages({
+  await ensureWorkspaceUsageStore().recordSessionMessagesUsage({
     workspaceId,
     ...(sessionFile !== undefined ? { sessionFile } : {}),
-    sessionId: `${options.parentId}:private:${options.childRuntimeId}`,
+    sessionKey: `${options.parentId}:private:${options.childRuntimeId}`,
     source: "parallel",
     messages: options.messages,
   });
-  await ensureWorkspaceUsageStore().upsertContributions(contributions);
 }
 
 async function getChatSnapshotForRuntime(
@@ -6141,6 +6181,17 @@ async function getChatSnapshotForRuntime(
         ...(preview !== undefined ? { preview } : {}),
       });
     }
+  }
+
+  if (!options.skipMessages && messages.length > 0) {
+    await recordRuntimeMessagesUsage({
+      runtimeId,
+      messages,
+      source: "session",
+      ...(canonicalSessionFile !== undefined
+        ? { ownerSessionFile: canonicalSessionFile }
+        : {}),
+    });
   }
 
   await reconcileMultitaskRuntime(runtimeId, state.sessionFile);
