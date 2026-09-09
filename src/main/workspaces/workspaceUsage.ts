@@ -235,7 +235,9 @@ export class WorkspaceUsageStore {
     const ownerSessionFile = await canonicalOrResolved(options.sessionFile);
     await this.loadIfNeeded();
     const id = sessionSnapshotId(ownerSessionFile);
-    const existing = this.state.snapshots.find((snapshot) => snapshot.id === id);
+    const existing = this.state.snapshots.find(
+      (snapshot) => snapshot.id === id,
+    );
     const hasReportedUsage =
       options.usage.totalTokens > 0 || options.usage.totalCostUsd !== undefined;
     const contributorsWithCost =
@@ -256,7 +258,10 @@ export class WorkspaceUsageStore {
       totalTokens: options.usage.totalTokens,
       ...(options.usage.totalCostUsd !== undefined ||
       existing?.totalCostUsd !== undefined
-        ? { totalCostUsd: options.usage.totalCostUsd ?? existing?.totalCostUsd }
+        ? {
+            totalCostUsd:
+              options.usage.totalCostUsd ?? existing?.totalCostUsd,
+          }
         : {}),
       contributorsWithCost,
       contributorsWithoutCost,
@@ -375,7 +380,9 @@ export class WorkspaceUsageStore {
     await this.loadIfNeeded();
     // Workspace refs are already canonicalized by WorkspaceStore. Avoid
     // realpath/stat here so this read path performs no session-file I/O.
-    const sessionFiles = new Set(options.sessionFiles.map((file) => path.resolve(file)));
+    const sessionFiles = new Set(
+      options.sessionFiles.map((file) => path.resolve(file)),
+    );
     let totals = emptyUsageTotals();
     for (const snapshot of this.state.snapshots) {
       const included =
@@ -392,7 +399,9 @@ export class WorkspaceUsageStore {
   private async upsertSnapshot(snapshot: UsageSnapshot): Promise<void> {
     const parsed = await canonicalSnapshot(snapshot);
     await this.loadIfNeeded();
-    const index = this.state.snapshots.findIndex((item) => item.id === parsed.id);
+    const index = this.state.snapshots.findIndex(
+      (item) => item.id === parsed.id,
+    );
     if (index >= 0 && sameSnapshot(this.state.snapshots[index]!, parsed)) {
       await this.persistIfDirty();
       return;
@@ -406,7 +415,9 @@ export class WorkspaceUsageStore {
   private async load(): Promise<void> {
     await fs.mkdir(this.piDeckHome, { recursive: true, mode: 0o700 });
     try {
-      const raw: unknown = JSON.parse(await fs.readFile(this.storeFile, "utf8"));
+      const raw: unknown = JSON.parse(
+        await fs.readFile(this.storeFile, "utf8"),
+      );
       const current = usageStoreSchema.safeParse(raw);
       if (current.success) {
         this.state = {
@@ -683,7 +694,9 @@ async function canonicalSnapshot(
     ...snapshot,
     ...(snapshot.ownerSessionFile !== undefined
       ? {
-          ownerSessionFile: await canonicalOrResolved(snapshot.ownerSessionFile),
+          ownerSessionFile: await canonicalOrResolved(
+            snapshot.ownerSessionFile,
+          ),
         }
       : {}),
   });
@@ -778,44 +791,29 @@ export async function contributionsFromSessionFile(options: {
   sessionFile: string;
   source?: UsageContributionSource;
 }): Promise<{ contributions: UsageContribution[]; diagnostics: string[] }> {
+  const canonicalSessionFile = await canonicalOrResolved(options.sessionFile);
   const contributions: UsageContribution[] = [];
   const now = Date.now();
   const source = options.source ?? "session";
   const scanned = await scanSessionFileUsage(
-    options.sessionFile,
+    canonicalSessionFile,
     (usage, messageId, lineNumber) => {
       contributions.push({
         id:
           messageId !== undefined
-            ? `${source}:${scannedPathPlaceholder(options.sessionFile)}:${messageId}`
-            : `${source}:${scannedPathPlaceholder(options.sessionFile)}:line:${lineNumber}`,
+            ? `${source}:${canonicalSessionFile}:${messageId}`
+            : `${source}:${canonicalSessionFile}:line:${lineNumber}`,
         workspaceId: options.workspaceId,
-        ownerSessionFile: scannedPathPlaceholder(options.sessionFile),
+        ownerSessionFile: canonicalSessionFile,
         source,
         ...usage,
         recordedAtMs: now,
       });
     },
   );
-  if (scanned.diagnostics.length > 0) {
-    return { contributions: [], diagnostics: scanned.diagnostics };
-  }
-  // The visitor runs before scanSessionFileUsage returns its canonical path.
-  // Normalize ids/ownership once here without retaining transcript contents.
-  return {
-    contributions: contributions.map((contribution) => {
-      const suffix = contribution.id.slice(
-        contribution.id.indexOf(scannedPathPlaceholder(options.sessionFile)) +
-          scannedPathPlaceholder(options.sessionFile).length,
-      );
-      return {
-        ...contribution,
-        id: `${source}:${scanned.canonicalSessionFile}${suffix}`,
-        ownerSessionFile: scanned.canonicalSessionFile,
-      };
-    }),
-    diagnostics: [],
-  };
+  return scanned.diagnostics.length > 0
+    ? { contributions: [], diagnostics: scanned.diagnostics }
+    : { contributions, diagnostics: [] };
 }
 
 type ExtractedUsage = NonNullable<ReturnType<typeof extractUsage>>;
@@ -875,10 +873,6 @@ async function scanSessionFileUsage(
       ],
     };
   }
-}
-
-function scannedPathPlaceholder(sessionFile: string): string {
-  return path.resolve(sessionFile);
 }
 
 export function runtimeUsageContribution(options: {
@@ -1014,6 +1008,36 @@ function hashStable(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 16);
 }
 
+async function canonicalOrResolved(filePath: string): Promise<string> {
+  const resolved = path.resolve(filePath);
+  try {
+    return await fs.realpath(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+function toUsageContribution(
+  parsed: z.infer<typeof usageContributionSchema>,
+): UsageContribution {
+  return {
+    id: parsed.id,
+    workspaceId: parsed.workspaceId,
+    ...(parsed.ownerSessionFile !== undefined
+      ? { ownerSessionFile: parsed.ownerSessionFile }
+      : {}),
+    source: parsed.source,
+    inputTokens: parsed.inputTokens,
+    outputTokens: parsed.outputTokens,
+    cacheReadTokens: parsed.cacheReadTokens,
+    cacheWriteTokens: parsed.cacheWriteTokens,
+    totalTokens: parsed.totalTokens,
+    ...(parsed.totalCostUsd !== undefined
+      ? { totalCostUsd: parsed.totalCostUsd }
+      : {}),
+    recordedAtMs: parsed.recordedAtMs,
+  };
+}
 
 function isMissingFile(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === "ENOENT";
