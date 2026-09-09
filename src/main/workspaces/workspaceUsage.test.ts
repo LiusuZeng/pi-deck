@@ -584,6 +584,73 @@ describe("workspace usage accounting", () => {
     );
   });
 
+  it("freezes deletion without retaining duplicate owned snapshots", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-usage-freeze-compact-"),
+    );
+    const sessionFile = path.join(root, "session.jsonl");
+    await fs.writeFile(sessionFile, "");
+    const store = new WorkspaceUsageStore(root);
+
+    await store.recordSessionMessagesUsage({
+      workspaceId: workspaceA,
+      sessionFile,
+      sessionKey: sessionFile,
+      source: "session",
+      messages: [
+        {
+          id: "assistant-parent",
+          role: "assistant",
+          usage: { inputTokens: 2, outputTokens: 3, totalTokens: 5 },
+        },
+      ],
+    });
+    await store.recordSessionMessagesUsage({
+      workspaceId: workspaceA,
+      sessionFile,
+      sessionKey: "private-child",
+      source: "parallel",
+      messages: [
+        {
+          id: "assistant-child",
+          role: "assistant",
+          usage: {
+            inputTokens: 4,
+            outputTokens: 6,
+            totalTokens: 10,
+            totalCostUsd: 0.02,
+          },
+        },
+      ],
+    });
+
+    await store.freezeSessionUsage({ workspaceId: workspaceA, sessionFile });
+
+    const persisted = JSON.parse(
+      await fs.readFile(store.storeFile, "utf8"),
+    ) as {
+      snapshots: Array<{ id: string; ownerSessionFile?: string }>;
+    };
+    assert.equal(persisted.snapshots.length, 2);
+    assert.equal(
+      persisted.snapshots.every(
+        (snapshot) =>
+          snapshot.id.startsWith("deleted:") &&
+          snapshot.ownerSessionFile === undefined,
+      ),
+      true,
+    );
+    assert.equal(
+      (
+        await store.getWorkspaceUsage({
+          workspaceId: workspaceA,
+          sessionFiles: [],
+        })
+      ).totalTokens,
+      15,
+    );
+  });
+
   it("serves cached workspace usage without reading the session file", async () => {
     const root = await fs.mkdtemp(
       path.join(os.tmpdir(), "pi-deck-usage-cheap-read-"),
