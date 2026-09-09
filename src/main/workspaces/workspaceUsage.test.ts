@@ -286,7 +286,10 @@ describe("workspace usage accounting", () => {
       ),
     );
 
-    assert.equal(results.every((result) => result === results[0]), true);
+    assert.equal(
+      results.every((result) => result === results[0]),
+      true,
+    );
     assert.equal(results[0]?.refreshed, true);
     assert.equal(
       (
