@@ -789,7 +789,8 @@ export async function contributionsFromSessionFile(options: {
   sessionFile: string;
   source?: UsageContributionSource;
 }): Promise<{ contributions: UsageContribution[]; diagnostics: string[] }> {
-  const canonicalSessionFile = await canonicalOrResolved(options.sessionFile);
+  const canonicalSessionFile =
+    await canonicalRealpathOrResolved(options.sessionFile);
   const contributions: UsageContribution[] = [];
   const now = Date.now();
   const source = options.source ?? "session";
@@ -1011,6 +1012,17 @@ async function canonicalOrResolved(filePath: string): Promise<string> {
   // Keep usage identity lexical so maintained-state reads never depend on
   // filesystem alias resolution and tests/imports remain stable after deletion.
   return path.resolve(filePath);
+}
+
+async function canonicalRealpathOrResolved(
+  filePath: string,
+): Promise<string> {
+  const resolved = path.resolve(filePath);
+  try {
+    return await fs.realpath(resolved);
+  } catch {
+    return resolved;
+  }
 }
 
 function toUsageContribution(
