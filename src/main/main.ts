@@ -5274,11 +5274,7 @@ async function recoverWorkspaceSessionUsage(
   if (resolveChatBackendMode() !== "real" || sessionFiles.length === 0) return;
   const usageStore = ensureWorkspaceUsageStore();
   const recoveryBatchSize = 2;
-  for (
-    let index = 0;
-    index < sessionFiles.length;
-    index += recoveryBatchSize
-  ) {
+  for (let index = 0; index < sessionFiles.length; index += recoveryBatchSize) {
     const results = await Promise.all(
       sessionFiles
         .slice(index, index + recoveryBatchSize)
