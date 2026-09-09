@@ -21,6 +21,10 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Format draft and show diff
+        run: |
+          npx prettier --write src/main/main.ts src/main/workspaces/workspaceUsage.ts src/main/workspaces/workspaceUsage.test.ts
+          git diff -- src/main/main.ts src/main/workspaces/workspaceUsage.ts src/main/workspaces/workspaceUsage.test.ts
       - run: npm run verify:ci
       - name: Upload Playwright diagnostics
         if: failure()
