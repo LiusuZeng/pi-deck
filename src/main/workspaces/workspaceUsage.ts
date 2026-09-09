@@ -24,6 +24,24 @@ export interface UsageContribution {
   recordedAtMs: number;
 }
 
+export interface UsageSnapshot {
+  id: string;
+  workspaceId: string;
+  ownerSessionFile?: string;
+  source: UsageContributionSource;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  totalTokens: number;
+  totalCostUsd?: number;
+  contributorsWithCost: number;
+  contributorsWithoutCost: number;
+  recordedAtMs: number;
+  sessionFileSize?: number;
+  sessionFileMtimeMs?: number;
+}
+
 export const emptyUsageTotals = (): WorkspaceUsageTotals => ({
   inputTokens: 0,
   outputTokens: 0,
@@ -85,19 +103,46 @@ const usageContributionSchema = z
   })
   .strict();
 
-const usageStoreSchema = z
+const usageSnapshotSchema = z
+  .object({
+    id: z.string().min(1),
+    workspaceId: z.string().min(1),
+    ownerSessionFile: z.string().min(1).optional(),
+    source: z.enum(["session", "parallel", "workflow"]),
+    inputTokens: z.number().nonnegative(),
+    outputTokens: z.number().nonnegative(),
+    cacheReadTokens: z.number().nonnegative(),
+    cacheWriteTokens: z.number().nonnegative(),
+    totalTokens: z.number().nonnegative(),
+    totalCostUsd: z.number().nonnegative().optional(),
+    contributorsWithCost: z.number().int().nonnegative(),
+    contributorsWithoutCost: z.number().int().nonnegative(),
+    recordedAtMs: z.number().nonnegative(),
+    sessionFileSize: z.number().nonnegative().optional(),
+    sessionFileMtimeMs: z.number().nonnegative().optional(),
+  })
+  .strict();
+
+const legacyUsageStoreSchema = z
   .object({
     version: z.literal(1),
     contributions: z.array(usageContributionSchema),
   })
   .strict();
 
+const usageStoreSchema = z
+  .object({
+    version: z.literal(2),
+    snapshots: z.array(usageSnapshotSchema),
+  })
+  .strict();
+
 interface UsageStoreState {
-  version: 1;
-  contributions: UsageContribution[];
+  version: 2;
+  snapshots: UsageSnapshot[];
 }
 
-const emptyStore = (): UsageStoreState => ({ version: 1, contributions: [] });
+const emptyStore = (): UsageStoreState => ({ version: 2, snapshots: [] });
 
 export class WorkspaceUsageStore {
   readonly storeFile: string;
@@ -107,7 +152,6 @@ export class WorkspaceUsageStore {
   private persistTail: Promise<void> = Promise.resolve();
   private generation = 0;
   private persistedGeneration = 0;
-  private readonly sessionRefreshSignatures = new Map<string, string>();
   private readonly sessionRefreshInFlight = new Map<
     string,
     Promise<{ diagnostics: string[]; refreshed: boolean }>
@@ -123,52 +167,104 @@ export class WorkspaceUsageStore {
     await this.loadPromise;
   }
 
+  /**
+   * Compatibility entry point for callers/tests that still produce discrete
+   * contributions. Production live accounting uses compact session snapshots.
+   */
   async upsertContribution(contribution: UsageContribution): Promise<void> {
-    const parsed = await canonicalContribution(contribution);
-    await this.loadIfNeeded();
-    const index = this.state.contributions.findIndex(
-      (item) => item.id === parsed.id,
-    );
-    if (
-      index >= 0 &&
-      sameContribution(this.state.contributions[index]!, parsed)
-    ) {
-      await this.persistIfDirty();
-      return;
-    }
-    const contributions = [...this.state.contributions];
-    if (index >= 0) contributions[index] = parsed;
-    else contributions.push(parsed);
-    await this.commit({ version: 1, contributions });
+    await this.upsertSnapshot(snapshotFromContribution(contribution));
   }
 
   async upsertContributions(
     contributions: readonly UsageContribution[],
   ): Promise<void> {
-    if (contributions.length === 0) return;
-    const parsed = await Promise.all(contributions.map(canonicalContribution));
-    await this.loadIfNeeded();
-    let changed = false;
-    const byId = new Map(
-      this.state.contributions.map((contribution, index) => [
-        contribution.id,
-        index,
-      ]),
-    );
-    const next = [...this.state.contributions];
-    for (const contribution of parsed) {
-      const index = byId.get(contribution.id);
-      if (index === undefined) {
-        byId.set(contribution.id, next.length);
-        next.push(contribution);
-        changed = true;
-      } else if (!sameContribution(next[index]!, contribution)) {
-        next[index] = contribution;
-        changed = true;
+    for (const contribution of contributions) {
+      await this.upsertContribution(contribution);
+    }
+  }
+
+  async recordSessionMessagesUsage(options: {
+    workspaceId: string;
+    sessionFile?: string;
+    sessionKey: string;
+    source: UsageContributionSource;
+    messages: readonly PiMessage[];
+    recordedAtMs?: number;
+  }): Promise<void> {
+    const ownerSessionFile =
+      options.sessionFile === undefined
+        ? undefined
+        : await canonicalOrResolved(options.sessionFile);
+    const id =
+      options.source === "session" && ownerSessionFile !== undefined
+        ? sessionSnapshotId(ownerSessionFile)
+        : \`\${options.source}:\${options.sessionKey}\`;
+    const snapshot = usageSnapshotFromMessages({
+      id,
+      workspaceId: options.workspaceId,
+      ...(ownerSessionFile !== undefined ? { ownerSessionFile } : {}),
+      source: options.source,
+      messages: options.messages,
+      recordedAtMs: options.recordedAtMs,
+    });
+    if (snapshot === undefined) return;
+
+    if (options.source === "session" && ownerSessionFile !== undefined) {
+      const signature = await sessionFileSignature(ownerSessionFile);
+      if (signature !== undefined) {
+        snapshot.sessionFileSize = signature.size;
+        snapshot.sessionFileMtimeMs = signature.mtimeMs;
       }
     }
-    if (changed) await this.commit({ version: 1, contributions: next });
-    else await this.persistIfDirty();
+    await this.upsertSnapshot(snapshot);
+  }
+
+  /**
+   * Replace one cumulative normal-session snapshot from Pi's compact
+   * get_session_stats payload. Execution-count metadata is retained until an
+   * agent-end transcript/message reconciliation can make it exact.
+   */
+  async recordRuntimeUsage(options: {
+    workspaceId: string;
+    sessionFile: string;
+    usage: ChatRuntimeUsage;
+    recordedAtMs?: number;
+  }): Promise<void> {
+    const ownerSessionFile = await canonicalOrResolved(options.sessionFile);
+    await this.loadIfNeeded();
+    const id = sessionSnapshotId(ownerSessionFile);
+    const existing = this.state.snapshots.find((snapshot) => snapshot.id === id);
+    const hasReportedUsage =
+      options.usage.totalTokens > 0 || options.usage.totalCostUsd !== undefined;
+    const contributorsWithCost =
+      existing?.contributorsWithCost ??
+      (hasReportedUsage && options.usage.totalCostUsd !== undefined ? 1 : 0);
+    const contributorsWithoutCost =
+      existing?.contributorsWithoutCost ??
+      (hasReportedUsage && options.usage.totalCostUsd === undefined ? 1 : 0);
+    await this.upsertSnapshot({
+      id,
+      workspaceId: options.workspaceId,
+      ownerSessionFile,
+      source: "session",
+      inputTokens: options.usage.inputTokens,
+      outputTokens: options.usage.outputTokens,
+      cacheReadTokens: options.usage.cacheReadTokens,
+      cacheWriteTokens: options.usage.cacheWriteTokens,
+      totalTokens: options.usage.totalTokens,
+      ...(options.usage.totalCostUsd !== undefined
+        ? { totalCostUsd: options.usage.totalCostUsd }
+        : {}),
+      contributorsWithCost,
+      contributorsWithoutCost,
+      recordedAtMs: options.recordedAtMs ?? Date.now(),
+      ...(existing?.sessionFileSize !== undefined
+        ? { sessionFileSize: existing.sessionFileSize }
+        : {}),
+      ...(existing?.sessionFileMtimeMs !== undefined
+        ? { sessionFileMtimeMs: existing.sessionFileMtimeMs }
+        : {}),
+    });
   }
 
   async refreshSessionFileUsage(options: {
@@ -178,46 +274,53 @@ export class WorkspaceUsageStore {
   }): Promise<{ diagnostics: string[]; refreshed: boolean }> {
     const canonicalSessionFile = await canonicalOrResolved(options.sessionFile);
     const source = options.source ?? "session";
-    const refreshKey = `${source}:${canonicalSessionFile}`;
-    const existing = this.sessionRefreshInFlight.get(refreshKey);
-    if (existing !== undefined) {
-      return existing;
+    const refreshKey = \`\${source}:\${canonicalSessionFile}\`;
+    const existingRefresh = this.sessionRefreshInFlight.get(refreshKey);
+    if (existingRefresh !== undefined) {
+      return existingRefresh;
     }
 
     const refresh = (async () => {
-      let signature: string;
-      try {
-        const stat = await fs.stat(canonicalSessionFile);
-        signature = `${stat.size}:${stat.mtimeMs}`;
-      } catch (error) {
+      await this.loadIfNeeded();
+      const signature = await sessionFileSignature(canonicalSessionFile);
+      if (signature === undefined) {
         return {
           diagnostics: [
-            `Could not stat session usage ${options.sessionFile}: ${error instanceof Error ? error.message : String(error)}`,
+            \`Could not stat session usage \${options.sessionFile}: file is missing or unreadable\`,
           ],
           refreshed: false,
         };
       }
 
-      if (this.sessionRefreshSignatures.get(refreshKey) === signature) {
+      const id =
+        source === "session"
+          ? sessionSnapshotId(canonicalSessionFile)
+          : \`\${source}:recovery:\${canonicalSessionFile}\`;
+      const existing = this.state.snapshots.find(
+        (snapshot) => snapshot.id === id,
+      );
+      if (
+        existing?.sessionFileSize === signature.size &&
+        existing.sessionFileMtimeMs === signature.mtimeMs
+      ) {
         return { diagnostics: [], refreshed: false };
       }
 
-      const result = await contributionsFromSessionFile({
+      const result = await usageSnapshotFromSessionFile({
+        id,
         workspaceId: options.workspaceId,
         sessionFile: canonicalSessionFile,
         source,
+        recordedAtMs: Date.now(),
+        signature,
       });
-      if (result.diagnostics.length === 0) {
-        await this.upsertContributions(result.contributions);
-        // Remember the signature observed before the read. If Pi appends while
-        // recovery is running, the next request sees a different signature and
-        // safely performs another bounded refresh instead of marking stale data
-        // as current.
-        this.sessionRefreshSignatures.set(refreshKey, signature);
+      if (result.snapshot !== undefined && result.diagnostics.length === 0) {
+        await this.upsertSnapshot(result.snapshot);
       }
       return {
         diagnostics: result.diagnostics,
-        refreshed: result.diagnostics.length === 0,
+        refreshed:
+          result.snapshot !== undefined && result.diagnostics.length === 0,
       };
     })();
 
@@ -237,25 +340,29 @@ export class WorkspaceUsageStore {
   }): Promise<void> {
     await this.loadIfNeeded();
     const sessionFile = await canonicalOrResolved(options.sessionFile);
-    const frozen = this.state.contributions
-      .filter((contribution) => contribution.ownerSessionFile === sessionFile)
+    const frozen = this.state.snapshots
+      .filter((snapshot) => snapshot.ownerSessionFile === sessionFile)
       .map(
-        (contribution): UsageContribution => ({
-          id: `deleted:${contribution.id}`,
+        (snapshot): UsageSnapshot => ({
+          id: \`deleted:\${snapshot.id}\`,
           workspaceId: options.workspaceId,
-          source: contribution.source,
-          inputTokens: contribution.inputTokens,
-          outputTokens: contribution.outputTokens,
-          cacheReadTokens: contribution.cacheReadTokens,
-          cacheWriteTokens: contribution.cacheWriteTokens,
-          totalTokens: contribution.totalTokens,
-          ...(contribution.totalCostUsd !== undefined
-            ? { totalCostUsd: contribution.totalCostUsd }
+          source: snapshot.source,
+          inputTokens: snapshot.inputTokens,
+          outputTokens: snapshot.outputTokens,
+          cacheReadTokens: snapshot.cacheReadTokens,
+          cacheWriteTokens: snapshot.cacheWriteTokens,
+          totalTokens: snapshot.totalTokens,
+          ...(snapshot.totalCostUsd !== undefined
+            ? { totalCostUsd: snapshot.totalCostUsd }
             : {}),
+          contributorsWithCost: snapshot.contributorsWithCost,
+          contributorsWithoutCost: snapshot.contributorsWithoutCost,
           recordedAtMs: Date.now(),
         }),
       );
-    await this.upsertContributions(frozen);
+    for (const snapshot of frozen) {
+      await this.upsertSnapshot(snapshot);
+    }
   }
 
   async getWorkspaceUsage(options: {
@@ -263,36 +370,59 @@ export class WorkspaceUsageStore {
     sessionFiles: readonly string[];
   }): Promise<WorkspaceUsageTotals> {
     await this.loadIfNeeded();
-    const sessionFiles = new Set(
-      await Promise.all(options.sessionFiles.map(canonicalOrResolved)),
-    );
+    // Workspace refs are already canonicalized by WorkspaceStore. Avoid
+    // realpath/stat here so this read path performs no session-file I/O.
+    const sessionFiles = new Set(options.sessionFiles.map((file) => path.resolve(file)));
     let totals = emptyUsageTotals();
-    for (const contribution of this.state.contributions) {
+    for (const snapshot of this.state.snapshots) {
       const included =
-        contribution.ownerSessionFile !== undefined
-          ? sessionFiles.has(contribution.ownerSessionFile)
-          : contribution.workspaceId === options.workspaceId;
+        snapshot.ownerSessionFile !== undefined
+          ? sessionFiles.has(path.resolve(snapshot.ownerSessionFile))
+          : snapshot.workspaceId === options.workspaceId;
       if (included) {
-        totals = addUsageContribution(totals, contribution);
+        totals = addUsageSnapshot(totals, snapshot);
       }
     }
     return totals;
   }
 
+  private async upsertSnapshot(snapshot: UsageSnapshot): Promise<void> {
+    const parsed = await canonicalSnapshot(snapshot);
+    await this.loadIfNeeded();
+    const index = this.state.snapshots.findIndex((item) => item.id === parsed.id);
+    if (index >= 0 && sameSnapshot(this.state.snapshots[index]!, parsed)) {
+      await this.persistIfDirty();
+      return;
+    }
+    const snapshots = [...this.state.snapshots];
+    if (index >= 0) snapshots[index] = parsed;
+    else snapshots.push(parsed);
+    await this.commit({ version: 2, snapshots });
+  }
+
   private async load(): Promise<void> {
     await fs.mkdir(this.piDeckHome, { recursive: true, mode: 0o700 });
     try {
-      const parsed = usageStoreSchema.parse(
-        JSON.parse(await fs.readFile(this.storeFile, "utf8")),
-      );
-      this.state = {
-        version: 1,
-        contributions: parsed.contributions.map(toUsageContribution),
-      };
+      const raw: unknown = JSON.parse(await fs.readFile(this.storeFile, "utf8"));
+      const current = usageStoreSchema.safeParse(raw);
+      if (current.success) {
+        this.state = {
+          version: 2,
+          snapshots: current.data.snapshots.map(toUsageSnapshot),
+        };
+      } else {
+        const legacy = legacyUsageStoreSchema.parse(raw);
+        this.state = {
+          version: 2,
+          snapshots: migrateLegacyContributions(legacy.contributions),
+        };
+        this.generation += 1;
+        await this.persist();
+      }
     } catch (error) {
       if (!isMissingFile(error)) {
         await fs
-          .rename(this.storeFile, `${this.storeFile}.corrupt-${Date.now()}`)
+          .rename(this.storeFile, \`\${this.storeFile}.corrupt-\${Date.now()}\`)
           .catch(() => undefined);
       }
       this.state = emptyStore();
@@ -305,8 +435,8 @@ export class WorkspaceUsageStore {
   private async commit(next: UsageStoreState): Promise<void> {
     const parsed = usageStoreSchema.parse(next);
     this.state = {
-      version: 1,
-      contributions: parsed.contributions.map(toUsageContribution),
+      version: 2,
+      snapshots: parsed.snapshots.map(toUsageSnapshot),
     };
     this.generation += 1;
     await this.persist();
@@ -322,8 +452,8 @@ export class WorkspaceUsageStore {
       .then(async () => {
         const generation = this.generation;
         await fs.mkdir(this.piDeckHome, { recursive: true, mode: 0o700 });
-        const temp = `${this.storeFile}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        await fs.writeFile(temp, `${JSON.stringify(this.state, null, 2)}\n`, {
+        const temp = \`\${this.storeFile}.tmp-\${process.pid}-\${Date.now()}-\${Math.random().toString(36).slice(2)}\`;
+        await fs.writeFile(temp, \`\${JSON.stringify(this.state, null, 2)}\\n\`, {
           mode: 0o600,
         });
         await fs.rename(temp, this.storeFile);
