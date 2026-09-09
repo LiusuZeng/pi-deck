@@ -198,7 +198,7 @@ export class WorkspaceUsageStore {
     const id =
       options.source === "session" && ownerSessionFile !== undefined
         ? sessionSnapshotId(ownerSessionFile)
-        : \`\${options.source}:\${options.sessionKey}\`;
+        : `${options.source}:${options.sessionKey}`;
     const snapshot = usageSnapshotFromMessages({
       id,
       workspaceId: options.workspaceId,
@@ -274,7 +274,7 @@ export class WorkspaceUsageStore {
   }): Promise<{ diagnostics: string[]; refreshed: boolean }> {
     const canonicalSessionFile = await canonicalOrResolved(options.sessionFile);
     const source = options.source ?? "session";
-    const refreshKey = \`\${source}:\${canonicalSessionFile}\`;
+    const refreshKey = `${source}:${canonicalSessionFile}`;
     const existingRefresh = this.sessionRefreshInFlight.get(refreshKey);
     if (existingRefresh !== undefined) {
       return existingRefresh;
@@ -286,7 +286,7 @@ export class WorkspaceUsageStore {
       if (signature === undefined) {
         return {
           diagnostics: [
-            \`Could not stat session usage \${options.sessionFile}: file is missing or unreadable\`,
+            `Could not stat session usage ${options.sessionFile}: file is missing or unreadable`,
           ],
           refreshed: false,
         };
@@ -295,7 +295,7 @@ export class WorkspaceUsageStore {
       const id =
         source === "session"
           ? sessionSnapshotId(canonicalSessionFile)
-          : \`\${source}:recovery:\${canonicalSessionFile}\`;
+          : `${source}:recovery:${canonicalSessionFile}`;
       const existing = this.state.snapshots.find(
         (snapshot) => snapshot.id === id,
       );
@@ -344,7 +344,7 @@ export class WorkspaceUsageStore {
       .filter((snapshot) => snapshot.ownerSessionFile === sessionFile)
       .map(
         (snapshot): UsageSnapshot => ({
-          id: \`deleted:\${snapshot.id}\`,
+          id: `deleted:${snapshot.id}`,
           workspaceId: options.workspaceId,
           source: snapshot.source,
           inputTokens: snapshot.inputTokens,
@@ -422,7 +422,7 @@ export class WorkspaceUsageStore {
     } catch (error) {
       if (!isMissingFile(error)) {
         await fs
-          .rename(this.storeFile, \`\${this.storeFile}.corrupt-\${Date.now()}\`)
+          .rename(this.storeFile, `${this.storeFile}.corrupt-${Date.now()}`)
           .catch(() => undefined);
       }
       this.state = emptyStore();
@@ -452,8 +452,8 @@ export class WorkspaceUsageStore {
       .then(async () => {
         const generation = this.generation;
         await fs.mkdir(this.piDeckHome, { recursive: true, mode: 0o700 });
-        const temp = \`\${this.storeFile}.tmp-\${process.pid}-\${Date.now()}-\${Math.random().toString(36).slice(2)}\`;
-        await fs.writeFile(temp, \`\${JSON.stringify(this.state, null, 2)}\\n\`, {
+        const temp = `${this.storeFile}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        await fs.writeFile(temp, `${JSON.stringify(this.state, null, 2)}\\n`, {
           mode: 0o600,
         });
         await fs.rename(temp, this.storeFile);
@@ -464,6 +464,265 @@ export class WorkspaceUsageStore {
       });
     return this.persistTail;
   }
+}
+
+function addUsageSnapshot(
+  totals: WorkspaceUsageTotals,
+  snapshot: UsageSnapshot,
+): WorkspaceUsageTotals {
+  return {
+    inputTokens: totals.inputTokens + snapshot.inputTokens,
+    outputTokens: totals.outputTokens + snapshot.outputTokens,
+    cacheReadTokens: totals.cacheReadTokens + snapshot.cacheReadTokens,
+    cacheWriteTokens: totals.cacheWriteTokens + snapshot.cacheWriteTokens,
+    totalTokens: totals.totalTokens + snapshot.totalTokens,
+    knownCostUsd: totals.knownCostUsd + (snapshot.totalCostUsd ?? 0),
+    contributorsWithCost:
+      totals.contributorsWithCost + snapshot.contributorsWithCost,
+    contributorsWithoutCost:
+      totals.contributorsWithoutCost + snapshot.contributorsWithoutCost,
+  };
+}
+
+function sessionSnapshotId(sessionFile: string): string {
+  return `session:${path.resolve(sessionFile)}`;
+}
+
+function snapshotFromContribution(
+  contribution: UsageContribution,
+): UsageSnapshot {
+  return {
+    id: `legacy-input:${contribution.id}`,
+    workspaceId: contribution.workspaceId,
+    ...(contribution.ownerSessionFile !== undefined
+      ? { ownerSessionFile: contribution.ownerSessionFile }
+      : {}),
+    source: contribution.source,
+    inputTokens: contribution.inputTokens,
+    outputTokens: contribution.outputTokens,
+    cacheReadTokens: contribution.cacheReadTokens,
+    cacheWriteTokens: contribution.cacheWriteTokens,
+    totalTokens: contribution.totalTokens,
+    ...(contribution.totalCostUsd !== undefined
+      ? { totalCostUsd: contribution.totalCostUsd }
+      : {}),
+    contributorsWithCost: contribution.totalCostUsd === undefined ? 0 : 1,
+    contributorsWithoutCost: contribution.totalCostUsd === undefined ? 1 : 0,
+    recordedAtMs: contribution.recordedAtMs,
+  };
+}
+
+function usageSnapshotFromMessages(options: {
+  id: string;
+  workspaceId: string;
+  ownerSessionFile?: string;
+  source: UsageContributionSource;
+  messages: readonly PiMessage[];
+  recordedAtMs?: number;
+}): UsageSnapshot | undefined {
+  let totals = emptyUsageTotals();
+  let found = false;
+  for (const message of options.messages) {
+    const usage = extractUsage(message);
+    if (usage === undefined) continue;
+    found = true;
+    totals = {
+      inputTokens: totals.inputTokens + usage.inputTokens,
+      outputTokens: totals.outputTokens + usage.outputTokens,
+      cacheReadTokens: totals.cacheReadTokens + usage.cacheReadTokens,
+      cacheWriteTokens: totals.cacheWriteTokens + usage.cacheWriteTokens,
+      totalTokens: totals.totalTokens + usage.totalTokens,
+      knownCostUsd: totals.knownCostUsd + (usage.totalCostUsd ?? 0),
+      contributorsWithCost:
+        totals.contributorsWithCost +
+        (usage.totalCostUsd === undefined ? 0 : 1),
+      contributorsWithoutCost:
+        totals.contributorsWithoutCost +
+        (usage.totalCostUsd === undefined ? 1 : 0),
+    };
+  }
+  if (!found) return undefined;
+  return {
+    id: options.id,
+    workspaceId: options.workspaceId,
+    ...(options.ownerSessionFile !== undefined
+      ? { ownerSessionFile: options.ownerSessionFile }
+      : {}),
+    source: options.source,
+    inputTokens: totals.inputTokens,
+    outputTokens: totals.outputTokens,
+    cacheReadTokens: totals.cacheReadTokens,
+    cacheWriteTokens: totals.cacheWriteTokens,
+    totalTokens: totals.totalTokens,
+    ...(totals.contributorsWithCost > 0
+      ? { totalCostUsd: totals.knownCostUsd }
+      : {}),
+    contributorsWithCost: totals.contributorsWithCost,
+    contributorsWithoutCost: totals.contributorsWithoutCost,
+    recordedAtMs: options.recordedAtMs ?? Date.now(),
+  };
+}
+
+async function usageSnapshotFromSessionFile(options: {
+  id: string;
+  workspaceId: string;
+  sessionFile: string;
+  source: UsageContributionSource;
+  recordedAtMs: number;
+  signature: { size: number; mtimeMs: number };
+}): Promise<{ snapshot?: UsageSnapshot; diagnostics: string[] }> {
+  const result = await contributionsFromSessionFile({
+    workspaceId: options.workspaceId,
+    sessionFile: options.sessionFile,
+    source: options.source,
+  });
+  if (result.diagnostics.length > 0) {
+    return { diagnostics: result.diagnostics };
+  }
+  let totals = emptyUsageTotals();
+  for (const contribution of result.contributions) {
+    totals = addUsageContribution(totals, contribution);
+  }
+  return {
+    snapshot: {
+      id: options.id,
+      workspaceId: options.workspaceId,
+      ownerSessionFile: path.resolve(options.sessionFile),
+      source: options.source,
+      inputTokens: totals.inputTokens,
+      outputTokens: totals.outputTokens,
+      cacheReadTokens: totals.cacheReadTokens,
+      cacheWriteTokens: totals.cacheWriteTokens,
+      totalTokens: totals.totalTokens,
+      ...(totals.contributorsWithCost > 0
+        ? { totalCostUsd: totals.knownCostUsd }
+        : {}),
+      contributorsWithCost: totals.contributorsWithCost,
+      contributorsWithoutCost: totals.contributorsWithoutCost,
+      recordedAtMs: options.recordedAtMs,
+      sessionFileSize: options.signature.size,
+      sessionFileMtimeMs: options.signature.mtimeMs,
+    },
+    diagnostics: [],
+  };
+}
+
+async function sessionFileSignature(
+  sessionFile: string,
+): Promise<{ size: number; mtimeMs: number } | undefined> {
+  try {
+    const stat = await fs.stat(sessionFile);
+    return { size: stat.size, mtimeMs: stat.mtimeMs };
+  } catch {
+    return undefined;
+  }
+}
+
+function migrateLegacyContributions(
+  contributions: readonly z.infer<typeof usageContributionSchema>[],
+): UsageSnapshot[] {
+  const grouped = new Map<string, UsageSnapshot>();
+  for (const parsed of contributions) {
+    const contribution = toUsageContribution(parsed);
+    const ownerSessionFile =
+      contribution.ownerSessionFile === undefined
+        ? undefined
+        : path.resolve(contribution.ownerSessionFile);
+    const id =
+      ownerSessionFile !== undefined && contribution.source === "session"
+        ? sessionSnapshotId(ownerSessionFile)
+        : ownerSessionFile !== undefined
+          ? `legacy:${contribution.source}:${ownerSessionFile}`
+          : `legacy:${contribution.source}:${contribution.workspaceId}`;
+    const current = grouped.get(id);
+    const next = snapshotFromContribution({
+      ...contribution,
+      ...(ownerSessionFile !== undefined ? { ownerSessionFile } : {}),
+    });
+    if (current === undefined) {
+      grouped.set(id, {
+        ...next,
+        id,
+      });
+      continue;
+    }
+    current.inputTokens += next.inputTokens;
+    current.outputTokens += next.outputTokens;
+    current.cacheReadTokens += next.cacheReadTokens;
+    current.cacheWriteTokens += next.cacheWriteTokens;
+    current.totalTokens += next.totalTokens;
+    current.totalCostUsd =
+      current.totalCostUsd === undefined && next.totalCostUsd === undefined
+        ? undefined
+        : (current.totalCostUsd ?? 0) + (next.totalCostUsd ?? 0);
+    current.contributorsWithCost += next.contributorsWithCost;
+    current.contributorsWithoutCost += next.contributorsWithoutCost;
+    current.recordedAtMs = Math.max(current.recordedAtMs, next.recordedAtMs);
+  }
+  return [...grouped.values()];
+}
+
+async function canonicalSnapshot(
+  snapshot: UsageSnapshot,
+): Promise<UsageSnapshot> {
+  const parsed = usageSnapshotSchema.parse({
+    ...snapshot,
+    ...(snapshot.ownerSessionFile !== undefined
+      ? {
+          ownerSessionFile: await canonicalOrResolved(snapshot.ownerSessionFile),
+        }
+      : {}),
+  });
+  return toUsageSnapshot(parsed);
+}
+
+function toUsageSnapshot(
+  parsed: z.infer<typeof usageSnapshotSchema>,
+): UsageSnapshot {
+  return {
+    id: parsed.id,
+    workspaceId: parsed.workspaceId,
+    ...(parsed.ownerSessionFile !== undefined
+      ? { ownerSessionFile: parsed.ownerSessionFile }
+      : {}),
+    source: parsed.source,
+    inputTokens: parsed.inputTokens,
+    outputTokens: parsed.outputTokens,
+    cacheReadTokens: parsed.cacheReadTokens,
+    cacheWriteTokens: parsed.cacheWriteTokens,
+    totalTokens: parsed.totalTokens,
+    ...(parsed.totalCostUsd !== undefined
+      ? { totalCostUsd: parsed.totalCostUsd }
+      : {}),
+    contributorsWithCost: parsed.contributorsWithCost,
+    contributorsWithoutCost: parsed.contributorsWithoutCost,
+    recordedAtMs: parsed.recordedAtMs,
+    ...(parsed.sessionFileSize !== undefined
+      ? { sessionFileSize: parsed.sessionFileSize }
+      : {}),
+    ...(parsed.sessionFileMtimeMs !== undefined
+      ? { sessionFileMtimeMs: parsed.sessionFileMtimeMs }
+      : {}),
+  };
+}
+
+function sameSnapshot(left: UsageSnapshot, right: UsageSnapshot): boolean {
+  return (
+    left.id === right.id &&
+    left.workspaceId === right.workspaceId &&
+    left.ownerSessionFile === right.ownerSessionFile &&
+    left.source === right.source &&
+    left.inputTokens === right.inputTokens &&
+    left.outputTokens === right.outputTokens &&
+    left.cacheReadTokens === right.cacheReadTokens &&
+    left.cacheWriteTokens === right.cacheWriteTokens &&
+    left.totalTokens === right.totalTokens &&
+    left.totalCostUsd === right.totalCostUsd &&
+    left.contributorsWithCost === right.contributorsWithCost &&
+    left.contributorsWithoutCost === right.contributorsWithoutCost &&
+    left.sessionFileSize === right.sessionFileSize &&
+    left.sessionFileMtimeMs === right.sessionFileMtimeMs
+  );
 }
 
 export function contributionsFromSessionMessages(options: {
@@ -692,73 +951,6 @@ function hashStable(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 16);
 }
 
-async function canonicalContribution(
-  contribution: UsageContribution,
-): Promise<UsageContribution> {
-  const parsed = usageContributionSchema.parse({
-    ...contribution,
-    ...(contribution.ownerSessionFile !== undefined
-      ? {
-          ownerSessionFile: await canonicalOrResolved(
-            contribution.ownerSessionFile,
-          ),
-        }
-      : {}),
-  });
-  return toUsageContribution(parsed);
-}
-
-async function canonicalOrResolved(filePath: string): Promise<string> {
-  const resolved = path.resolve(filePath);
-  try {
-    return await fs.realpath(resolved);
-  } catch {
-    return resolved;
-  }
-}
-
-function toUsageContribution(
-  parsed: z.infer<typeof usageContributionSchema>,
-): UsageContribution {
-  return {
-    id: parsed.id,
-    workspaceId: parsed.workspaceId,
-    ...(parsed.ownerSessionFile !== undefined
-      ? { ownerSessionFile: parsed.ownerSessionFile }
-      : {}),
-    source: parsed.source,
-    inputTokens: parsed.inputTokens,
-    outputTokens: parsed.outputTokens,
-    cacheReadTokens: parsed.cacheReadTokens,
-    cacheWriteTokens: parsed.cacheWriteTokens,
-    totalTokens: parsed.totalTokens,
-    ...(parsed.totalCostUsd !== undefined
-      ? { totalCostUsd: parsed.totalCostUsd }
-      : {}),
-    recordedAtMs: parsed.recordedAtMs,
-  };
-}
-
-function sameContribution(
-  left: UsageContribution,
-  right: UsageContribution,
-): boolean {
-  // recordedAtMs is observation metadata, not usage identity. Treating a
-  // timestamp-only refresh as changed rewrites the entire persisted usage
-  // store even when token/cost values are identical.
-  return (
-    left.id === right.id &&
-    left.workspaceId === right.workspaceId &&
-    left.ownerSessionFile === right.ownerSessionFile &&
-    left.source === right.source &&
-    left.inputTokens === right.inputTokens &&
-    left.outputTokens === right.outputTokens &&
-    left.cacheReadTokens === right.cacheReadTokens &&
-    left.cacheWriteTokens === right.cacheWriteTokens &&
-    left.totalTokens === right.totalTokens &&
-    left.totalCostUsd === right.totalCostUsd
-  );
-}
 
 function isMissingFile(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === "ENOENT";
