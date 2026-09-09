@@ -207,7 +207,9 @@ export class WorkspaceUsageStore {
       ...(ownerSessionFile !== undefined ? { ownerSessionFile } : {}),
       source: options.source,
       messages: options.messages,
-      recordedAtMs: options.recordedAtMs,
+      ...(options.recordedAtMs !== undefined
+        ? { recordedAtMs: options.recordedAtMs }
+        : {}),
     });
     if (snapshot === undefined) return;
 
@@ -246,6 +248,8 @@ export class WorkspaceUsageStore {
     const contributorsWithoutCost =
       existing?.contributorsWithoutCost ??
       (hasReportedUsage && options.usage.totalCostUsd === undefined ? 1 : 0);
+    const totalCostUsd =
+      options.usage.totalCostUsd ?? existing?.totalCostUsd;
     await this.upsertSnapshot({
       id,
       workspaceId: options.workspaceId,
@@ -256,13 +260,7 @@ export class WorkspaceUsageStore {
       cacheReadTokens: options.usage.cacheReadTokens,
       cacheWriteTokens: options.usage.cacheWriteTokens,
       totalTokens: options.usage.totalTokens,
-      ...(options.usage.totalCostUsd !== undefined ||
-      existing?.totalCostUsd !== undefined
-        ? {
-            totalCostUsd:
-              options.usage.totalCostUsd ?? existing?.totalCostUsd,
-          }
-        : {}),
+      ...(totalCostUsd !== undefined ? { totalCostUsd } : {}),
       contributorsWithCost,
       contributorsWithoutCost,
       recordedAtMs: options.recordedAtMs ?? Date.now(),
@@ -676,10 +674,10 @@ function migrateLegacyContributions(
     current.cacheReadTokens += next.cacheReadTokens;
     current.cacheWriteTokens += next.cacheWriteTokens;
     current.totalTokens += next.totalTokens;
-    current.totalCostUsd =
-      current.totalCostUsd === undefined && next.totalCostUsd === undefined
-        ? undefined
-        : (current.totalCostUsd ?? 0) + (next.totalCostUsd ?? 0);
+    if (next.totalCostUsd !== undefined) {
+      current.totalCostUsd =
+        (current.totalCostUsd ?? 0) + next.totalCostUsd;
+    }
     current.contributorsWithCost += next.contributorsWithCost;
     current.contributorsWithoutCost += next.contributorsWithoutCost;
     current.recordedAtMs = Math.max(current.recordedAtMs, next.recordedAtMs);
