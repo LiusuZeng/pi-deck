@@ -6,14 +6,22 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
+
+env:
+  CI: "true"
+  PI_CODING_AGENT_VERSION: "0.85.0"
 
 jobs:
   verify:
     name: Verify desktop app
     runs-on: macos-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -21,7 +29,15 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run verify:ci
+      - name: Install Pi CLI for real integration coverage
+        run: |
+          npm install --global --ignore-scripts "@earendil-works/pi-coding-agent@${PI_CODING_AGENT_VERSION}"
+          PI_BINARY="$(command -v pi)"
+          test -x "$PI_BINARY"
+          echo "PI_DECK_PI_BINARY=$PI_BINARY" >> "$GITHUB_ENV"
+          "$PI_BINARY" --version
+      - name: Run authoritative validation
+        run: npm run verify:ci
       - name: Upload Playwright diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
