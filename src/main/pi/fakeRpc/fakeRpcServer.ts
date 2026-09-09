@@ -15,6 +15,7 @@ type PromptScenario =
   | "basic"
   | "tool"
   | "tool-heavy"
+  | "tool-stream-scroll"
   | "tool-error"
   | "queue"
   | "compaction"
@@ -190,6 +191,7 @@ function isPromptScenario(value: string): value is PromptScenario {
     "basic",
     "tool",
     "tool-heavy",
+    "tool-stream-scroll",
     "tool-error",
     "queue",
     "compaction",
@@ -866,7 +868,7 @@ class FakeRpcServer {
     const isExtensionUiScenario =
       this.options.promptScenario === "extension-ui" ||
       this.options.promptScenario === "all";
-    this.emitPromptScenarioEvents(assistantId);
+    const promptScenarioDelayMs = this.emitPromptScenarioEvents(assistantId);
     if (isExtensionUiScenario) {
       const id = "ext_fake_dialog_1";
       const timer = setTimeout(() => {
@@ -878,7 +880,7 @@ class FakeRpcServer {
       this.pendingExtensionUi = { id, assistantId, promptText: text, timer };
       return;
     }
-    this.completePrompt(assistantId, text);
+    this.completePrompt(assistantId, text, promptScenarioDelayMs);
   }
 
   private decodeTaskSessionPrompt(text: string): string | undefined {
@@ -922,7 +924,11 @@ class FakeRpcServer {
     return `AWS probe succeeded: ${(result.stdout || result.stderr).trim()}`;
   }
 
-  private completePrompt(assistantId: string, text: string): void {
+  private completePrompt(
+    assistantId: string,
+    text: string,
+    initialDelayMs = 0,
+  ): void {
     const decision = this.workflowDecision(text);
     const chunks =
       decision !== undefined
@@ -957,7 +963,7 @@ class FakeRpcServer {
               done: false,
             });
           },
-          this.options.streamDelayMs * (index + 1),
+          initialDelayMs + this.options.streamDelayMs * (index + 1),
         ),
       );
     });
@@ -1007,7 +1013,7 @@ class FakeRpcServer {
             this.write({ type: "agent_settled" });
           }
         },
-        this.options.streamDelayMs * (chunks.length + 1),
+        initialDelayMs + this.options.streamDelayMs * (chunks.length + 1),
       ),
     );
   }
@@ -1048,7 +1054,7 @@ class FakeRpcServer {
     }
   }
 
-  private emitPromptScenarioEvents(assistantId: string): void {
+  private emitPromptScenarioEvents(assistantId: string): number {
     const scenario = this.options.promptScenario;
     const shouldEmit = (target: PromptScenario): boolean =>
       scenario === target || scenario === "all";
@@ -1138,6 +1144,10 @@ class FakeRpcServer {
       });
     }
 
+    if (scenario === "tool-stream-scroll") {
+      return this.emitToolStreamScrollScenarioEvents(assistantId);
+    }
+
     if (shouldEmit("tool") || scenario === "tool-error") {
       const toolFailed = scenario === "tool-error";
       const fixtureToolName = toolFailed ? "bash" : "read";
@@ -1196,6 +1206,88 @@ class FakeRpcServer {
         timeout: this.options.extensionUiAutoCompleteTimeoutMs,
       });
     }
+
+    return 0;
+  }
+
+  private emitToolStreamScrollScenarioEvents(assistantId: string): number {
+    const delayMs = Math.max(1, this.options.streamDelayMs);
+    let tick = 0;
+    const schedule = (record: JsonObject): void => {
+      tick += 1;
+      this.currentTimers.push(
+        setTimeout(() => this.write(record), delayMs * tick),
+      );
+    };
+
+    schedule({
+      type: "message_update",
+      messageId: `thinking_${assistantId}`,
+      assistantMessageEvent: {
+        type: "thinking_delta",
+        content: "Following a long stream of tool activity.",
+      },
+      done: true,
+    });
+
+    Array.from({ length: 18 }, (_, index) => {
+      const toolIndex = index + 1;
+      const toolName = toolIndex % 2 === 0 ? "search" : "read";
+      const args =
+        toolName === "search"
+          ? { pattern: `scroll-fixture-${toolIndex}` }
+          : { path: `src/renderer/scroll-fixture-${toolIndex}.ts` };
+      schedule({
+        type: "tool_execution_start",
+        toolCallId: `tool_scroll_${toolIndex}`,
+        toolName,
+        args,
+      });
+      schedule({
+        type: "tool_execution_end",
+        toolCallId: `tool_scroll_${toolIndex}`,
+        toolName,
+        args,
+        status: "completed",
+        output: `${toolName} scroll fixture ${toolIndex}`,
+      });
+    });
+
+    const commandArgs = { command: "node scripts/long-running-output.js" };
+    schedule({
+      type: "tool_execution_start",
+      toolCallId: "tool_scroll_streaming_command",
+      toolName: "bash",
+      args: commandArgs,
+    });
+    Array.from({ length: 8 }, (_, index) => {
+      const lineCount = index + 1;
+      const stdout = Array.from(
+        { length: lineCount },
+        (_, lineIndex) => `streamed stdout line ${lineIndex + 1}`,
+      ).join("\n");
+      schedule({
+        type: "tool_execution_update",
+        toolCallId: "tool_scroll_streaming_command",
+        toolName: "bash",
+        args: commandArgs,
+        stdout,
+        output: stdout,
+      });
+    });
+    schedule({
+      type: "tool_execution_end",
+      toolCallId: "tool_scroll_streaming_command",
+      toolName: "bash",
+      args: commandArgs,
+      status: "completed",
+      stdout:
+        "streamed stdout line 1\nstreamed stdout line 2\nstreamed stdout line 3",
+      output: "streamed command completed",
+      exitCode: 0,
+    });
+
+    return delayMs * (tick + 1);
   }
 
   private handleExtensionUiResponse(command: FakeCommandRecord): void {

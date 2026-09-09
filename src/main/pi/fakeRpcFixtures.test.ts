@@ -362,6 +362,70 @@ test("fake RPC prompt scenario exposes reducer extension event fixtures", async 
   }
 });
 
+test("fake RPC streaming-scroll scenario emits delayed tool updates before completion", async () => {
+  const client = spawnFakeRpc([
+    "--stream-delay-ms",
+    "1",
+    "--prompt-scenario",
+    "tool-stream-scroll",
+  ]);
+  try {
+    const streamFixture = waitForEvents(
+      client,
+      (events) =>
+        events.filter(
+          (event) =>
+            event.type === "tool_execution_update" &&
+            (event as JsonObject).toolCallId ===
+              "tool_scroll_streaming_command",
+        ).length === 8 &&
+        events.some(
+          (event) =>
+            event.type === "tool_execution_end" &&
+            (event as JsonObject).toolCallId ===
+              "tool_scroll_streaming_command",
+        ) &&
+        events.some(
+          (event) =>
+            event.type === "message_update" &&
+            typeof (event as JsonObject).content === "string" &&
+            ((event as JsonObject).content as string).includes(
+              "Fake response to:",
+            ),
+        ),
+    );
+    await client.request("prompt", { text: "exercise scroll stream fixture" });
+    const events = await streamFixture;
+    const updateIndex = events.findIndex(
+      (event) =>
+        event.type === "tool_execution_update" &&
+        (event as JsonObject).toolCallId === "tool_scroll_streaming_command",
+    );
+    const toolEndIndex = events.findIndex(
+      (event) =>
+        event.type === "tool_execution_end" &&
+        (event as JsonObject).toolCallId === "tool_scroll_streaming_command",
+    );
+    const finalMessageIndex = events.findIndex(
+      (event) =>
+        event.type === "message_update" &&
+        typeof (event as JsonObject).content === "string" &&
+        ((event as JsonObject).content as string).includes("Fake response to:"),
+    );
+    const updates = events.filter(
+      (event) =>
+        event.type === "tool_execution_update" &&
+        (event as JsonObject).toolCallId === "tool_scroll_streaming_command",
+    );
+    assert.equal(updates.length, 8);
+    assert.ok(updateIndex >= 0);
+    assert.ok(toolEndIndex > updateIndex);
+    assert.ok(finalMessageIndex > toolEndIndex);
+  } finally {
+    client.close();
+  }
+});
+
 test("fake RPC command failure fixture exposes stderr and exit code", async () => {
   const client = spawnFakeRpc([
     "--stream-delay-ms",
