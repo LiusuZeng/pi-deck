@@ -381,6 +381,7 @@ describe("workspace usage accounting", () => {
       { diagnostics: [], refreshed: false },
     );
   });
+
   it("stores one compact snapshot for a long normal session", async () => {
     const root = await fs.mkdtemp(
       path.join(os.tmpdir(), "pi-deck-usage-compact-"),
@@ -407,7 +408,9 @@ describe("workspace usage accounting", () => {
       messages,
     });
 
-    const persisted = JSON.parse(await fs.readFile(store.storeFile, "utf8")) as {
+    const persisted = JSON.parse(
+      await fs.readFile(store.storeFile, "utf8"),
+    ) as {
       version: number;
       snapshots: Array<{
         totalTokens: number;
@@ -469,7 +472,9 @@ describe("workspace usage accounting", () => {
       },
     });
 
-    const persisted = JSON.parse(await fs.readFile(store.storeFile, "utf8")) as {
+    const persisted = JSON.parse(
+      await fs.readFile(store.storeFile, "utf8"),
+    ) as {
       snapshots: Array<{
         totalTokens: number;
         totalCostUsd?: number;
@@ -524,7 +529,9 @@ describe("workspace usage accounting", () => {
 
     const store = new WorkspaceUsageStore(root);
     await store.loadIfNeeded();
-    const persisted = JSON.parse(await fs.readFile(store.storeFile, "utf8")) as {
+    const persisted = JSON.parse(
+      await fs.readFile(store.storeFile, "utf8"),
+    ) as {
       version: number;
       snapshots: Array<{
         totalTokens: number;
@@ -610,5 +617,4 @@ describe("workspace usage accounting", () => {
       10,
     );
   });
-
 });
