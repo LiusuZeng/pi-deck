@@ -92,6 +92,41 @@ it("scrolls upward when an expanded detail starts above the timeline viewport", 
   ).toBe(-32);
 });
 
+it("tracks timeline bottom-follow state with a stable threshold", () => {
+  expect(
+    __rendererTestHooks.timelineBottomDistance({
+      scrollHeight: 1_000,
+      scrollTop: 520,
+      clientHeight: 400,
+    }),
+  ).toBe(80);
+  expect(
+    __rendererTestHooks.timelineBottomDistance({
+      scrollHeight: 300,
+      scrollTop: 0,
+      clientHeight: 400,
+    }),
+  ).toBe(0);
+  expect(
+    __rendererTestHooks.shouldAutoFollowTimelineUpdate({
+      sessionChanged: false,
+      followingBottom: true,
+    }),
+  ).toBe(true);
+  expect(
+    __rendererTestHooks.shouldAutoFollowTimelineUpdate({
+      sessionChanged: false,
+      followingBottom: false,
+    }),
+  ).toBe(false);
+  expect(
+    __rendererTestHooks.shouldAutoFollowTimelineUpdate({
+      sessionChanged: true,
+      followingBottom: false,
+    }),
+  ).toBe(true);
+});
+
 describe("timeline presentation grouping", () => {
   const user = (id: string) => ({
     id,
@@ -174,6 +209,29 @@ describe("timeline presentation grouping", () => {
     expect(__rendererTestHooks.timelinePresentationItems(timeline)).toEqual(
       grouped,
     );
+  });
+
+  it("keeps completed activity groups open for the whole working turn", () => {
+    const grouped = __rendererTestHooks.timelinePresentationItems([
+      user("u1"),
+      tool("t1", "success"),
+      assistant("a1"),
+    ] as any) as any[];
+    const activityGroup = grouped[1];
+
+    expect(activityGroup).toMatchObject({ state: "completed" });
+    expect(
+      __rendererTestHooks.shouldDefaultOpenActivityGroup({
+        group: activityGroup,
+        sessionStatus: "working",
+      }),
+    ).toBe(true);
+    expect(
+      __rendererTestHooks.shouldDefaultOpenActivityGroup({
+        group: activityGroup,
+        sessionStatus: "idle",
+      }),
+    ).toBe(false);
   });
 
   it("marks tool failures without hiding diagnostics in an activity group", () => {

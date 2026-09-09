@@ -366,6 +366,15 @@ function latestActivityItem(
   return items[items.length - 1];
 }
 
+function shouldDefaultOpenActivityGroup(options: {
+  group: Extract<TimelinePresentationItem, { kind: "activity" }>;
+  sessionStatus: SessionStatus;
+}): boolean {
+  return (
+    options.group.state !== "completed" || options.sessionStatus === "working"
+  );
+}
+
 /**
  * Projects an execution trace into a short, readable narrative. Tool calls only
  * share a milestone when they are adjacent and represent the same operation;
@@ -10534,12 +10543,31 @@ function LoadStateBadge(props: { loadState: LoadState }): ReactElement | null {
   return null;
 }
 
+const TIMELINE_FOLLOW_BOTTOM_THRESHOLD_PX = 80;
+
+function timelineBottomDistance(metrics: {
+  scrollHeight: number;
+  scrollTop: number;
+  clientHeight: number;
+}): number {
+  return Math.max(
+    0,
+    metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight,
+  );
+}
+
 function isScrolledNearBottom(scrollContainer: HTMLElement): boolean {
-  const distanceFromBottom =
-    scrollContainer.scrollHeight -
-    scrollContainer.scrollTop -
-    scrollContainer.clientHeight;
-  return distanceFromBottom < 80;
+  return (
+    timelineBottomDistance(scrollContainer) <=
+    TIMELINE_FOLLOW_BOTTOM_THRESHOLD_PX
+  );
+}
+
+function shouldAutoFollowTimelineUpdate(options: {
+  sessionChanged: boolean;
+  followingBottom: boolean;
+}): boolean {
+  return options.sessionChanged || options.followingBottom;
 }
 
 type TimelineRevealRect = Pick<DOMRectReadOnly, "top" | "bottom" | "height">;
@@ -10677,6 +10705,7 @@ function ChatTimeline(props: {
     !hasActiveTimelineOutput(props.session.timeline);
   const timelineScrollRef = useRef<HTMLDivElement | null>(null);
   const shouldStickToBottomRef = useRef(true);
+  const pendingAutoFollowFrameRef = useRef<number | null>(null);
   const previousSessionIdRef = useRef(props.session.id);
   const openedTimelineDetailsRef = useRef<HTMLDetailsElement | null>(null);
   const pendingDetailsRevealFrameRef = useRef<number | null>(null);
@@ -10691,6 +10720,10 @@ function ChatTimeline(props: {
   );
   const timelineScrollMarker = getTimelineScrollMarker(props.session);
 
+  // Timeline scroll ownership is intentionally centralized here: live content
+  // may auto-follow only while the user is already at the bottom. Explicit
+  // details reveal requests are one-shot corrections and must not compete with
+  // this per-frame bottom-follow adjustment.
   useLayoutEffect(() => {
     const scrollContainer = timelineScrollRef.current;
     if (scrollContainer === null) {
@@ -10700,24 +10733,46 @@ function ChatTimeline(props: {
     const sessionChanged = previousSessionIdRef.current !== props.session.id;
     previousSessionIdRef.current = props.session.id;
     if (sessionChanged) {
+      shouldStickToBottomRef.current = true;
       openedTimelineDetailsRef.current = null;
+      cancelPendingAutoFollow();
       cancelPendingDetailsReveal();
       disconnectOpenedDetailsObserver();
       clearOpenedDetailsRevealInterval();
     }
-    if (!sessionChanged && !shouldStickToBottomRef.current) {
+    if (
+      !shouldAutoFollowTimelineUpdate({
+        sessionChanged,
+        followingBottom: shouldStickToBottomRef.current,
+      })
+    ) {
       return;
     }
 
-    const animationFrameId = window.requestAnimationFrame(() => {
+    scheduleTimelineAutoFollow(scrollContainer);
+  }, [props.session.id, timelineScrollMarker]);
+
+  function cancelPendingAutoFollow(): void {
+    if (pendingAutoFollowFrameRef.current === null) {
+      return;
+    }
+    window.cancelAnimationFrame(pendingAutoFollowFrameRef.current);
+    pendingAutoFollowFrameRef.current = null;
+  }
+
+  function scheduleTimelineAutoFollow(scrollContainer: HTMLElement): void {
+    if (pendingAutoFollowFrameRef.current !== null) {
+      return;
+    }
+    pendingAutoFollowFrameRef.current = window.requestAnimationFrame(() => {
+      pendingAutoFollowFrameRef.current = null;
+      if (!shouldStickToBottomRef.current) {
+        return;
+      }
       scrollContainer.scrollTop = scrollContainer.scrollHeight;
       shouldStickToBottomRef.current = true;
     });
-
-    return () => {
-      window.cancelAnimationFrame(animationFrameId);
-    };
-  }, [props.session.id, timelineScrollMarker]);
+  }
 
   function cancelPendingDetailsReveal(): void {
     if (pendingDetailsRevealFrameRef.current === null) {
@@ -10743,6 +10798,12 @@ function ChatTimeline(props: {
   function scheduleTimelineDetailsReveal(
     detailsElement: HTMLDetailsElement,
   ): void {
+    if (
+      pendingAutoFollowFrameRef.current !== null &&
+      shouldStickToBottomRef.current
+    ) {
+      return;
+    }
     cancelPendingDetailsReveal();
     pendingDetailsRevealFrameRef.current = window.requestAnimationFrame(() => {
       pendingDetailsRevealFrameRef.current = null;
@@ -10827,16 +10888,22 @@ function ChatTimeline(props: {
       return;
     }
 
-    revealOpenedTimelineDetails(detailsElement);
+    if (openedTimelineDetailsRef.current === detailsElement) {
+      scheduleTimelineDetailsReveal(detailsElement);
+    }
+  }
+
+  function revealTimelineDetailsFromSummary(summaryElement: HTMLElement): void {
+    const detailsElement = summaryElement.closest("details");
+    if (detailsElement instanceof HTMLDetailsElement) {
+      revealOpenedTimelineDetails(detailsElement);
+    }
   }
 
   function handleTimelineDetailsSummaryClick(
     event: ReactMouseEvent<HTMLElement>,
   ): void {
-    const detailsElement = event.currentTarget.closest("details");
-    if (detailsElement instanceof HTMLDetailsElement) {
-      revealOpenedTimelineDetails(detailsElement);
-    }
+    revealTimelineDetailsFromSummary(event.currentTarget);
   }
 
   useEffect(() => {
@@ -10856,6 +10923,7 @@ function ChatTimeline(props: {
     return () => {
       window.removeEventListener("resize", handleResize);
       window.visualViewport?.removeEventListener("resize", handleResize);
+      cancelPendingAutoFollow();
       cancelPendingDetailsReveal();
       disconnectOpenedDetailsObserver();
       clearOpenedDetailsRevealInterval();
@@ -10867,7 +10935,11 @@ function ChatTimeline(props: {
     if (scrollContainer === null) {
       return;
     }
-    shouldStickToBottomRef.current = isScrolledNearBottom(scrollContainer);
+    const followingBottom = isScrolledNearBottom(scrollContainer);
+    shouldStickToBottomRef.current = followingBottom;
+    if (!followingBottom) {
+      cancelPendingAutoFollow();
+    }
   }
 
   function handleActivityToggle(
@@ -10907,6 +10979,7 @@ function ChatTimeline(props: {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
       setManualActivityDisclosure(activityId, !open);
+      revealTimelineDetailsFromSummary(event.currentTarget);
     }
   }
 
@@ -10925,7 +10998,10 @@ function ChatTimeline(props: {
     if (manualDisclosure !== undefined) {
       return manualDisclosure;
     }
-    return item.state !== "completed";
+    return shouldDefaultOpenActivityGroup({
+      group: item,
+      sessionStatus: props.session.status,
+    });
   }
 
   return (
@@ -13196,10 +13272,14 @@ export const __rendererTestHooks = {
   modelDiscoveryRequestForWorkspace,
   draftSessionForWorkspace,
   draftSessionForProject,
+  timelineBottomDistance,
+  isScrolledNearBottom,
+  shouldAutoFollowTimelineUpdate,
   timelineDetailsRevealScrollDelta,
   timelinePresentationItems,
   activityMilestones,
   activityMilestoneLabel,
+  shouldDefaultOpenActivityGroup,
   activitySemanticLabel,
   activityStepLabel,
   activityStepSummary,

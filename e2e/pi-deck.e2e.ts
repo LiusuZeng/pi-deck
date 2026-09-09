@@ -2242,6 +2242,215 @@ test("expanded tool details stay scrollable above the composer", async () => {
   }
 });
 
+test("streaming Agent activity follows bottom without bouncing", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-scroll-follow-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: [
+        "--prompt-scenario",
+        "tool-stream-scroll",
+        "--stream-delay-ms",
+        "25",
+      ],
+    }),
+  );
+  try {
+    await page.setViewportSize({ width: 920, height: 500 });
+    await expectHealthyPreload(page);
+    await enterSessionDetail(page);
+    await page.getByLabel("Prompt text").fill("stream scroll follow");
+    const sendButton = page.getByRole("button", { name: "Send" });
+    await expect(sendButton).toBeEnabled({ timeout: 30_000 });
+    await sendButton.click();
+    await expect(page.locator(".agent-activity-group").first()).toBeVisible();
+    await page.evaluate(() => {
+      type ScrollSample = {
+        bottomDistance: number;
+        finalVisible: boolean;
+        scrollHeight: number;
+        scrollTop: number;
+        clientHeight: number;
+      };
+      const windowWithSamples = window as unknown as {
+        __piDeckScrollSamples?: ScrollSample[];
+        __piDeckScrollSampler?: number;
+      };
+      const timeline = document.querySelector<HTMLElement>(".timeline-scroll");
+      if (timeline === null) {
+        throw new Error("Missing timeline scroll container.");
+      }
+      windowWithSamples.__piDeckScrollSamples = [];
+      const sample = (): void => {
+        windowWithSamples.__piDeckScrollSamples?.push({
+          bottomDistance: Math.max(
+            0,
+            timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight,
+          ),
+          finalVisible: Boolean(
+            [...document.querySelectorAll(".assistant-message")].some((node) =>
+              node.textContent?.includes(
+                "Fake response to: stream scroll follow",
+              ),
+            ),
+          ),
+          scrollHeight: timeline.scrollHeight,
+          scrollTop: timeline.scrollTop,
+          clientHeight: timeline.clientHeight,
+        });
+      };
+      sample();
+      windowWithSamples.__piDeckScrollSampler = window.setInterval(sample, 16);
+    });
+    await expect(
+      page.getByText("Fake response to: stream scroll follow"),
+    ).toBeVisible({ timeout: 20_000 });
+    // The final assistant delta precedes agent_settled; leave the sampler active
+    // long enough to include that terminal transition as well.
+    await page.waitForTimeout(250);
+
+    const samples = await page.evaluate(() => {
+      type ScrollSample = {
+        bottomDistance: number;
+        finalVisible: boolean;
+        scrollHeight: number;
+        scrollTop: number;
+        clientHeight: number;
+      };
+      const windowWithSamples = window as unknown as {
+        __piDeckScrollSamples?: ScrollSample[];
+        __piDeckScrollSampler?: number;
+      };
+      if (windowWithSamples.__piDeckScrollSampler !== undefined) {
+        window.clearInterval(windowWithSamples.__piDeckScrollSampler);
+      }
+      return windowWithSamples.__piDeckScrollSamples ?? [];
+    });
+
+    const overflowingSamples = samples.filter(
+      (sample) => sample.scrollHeight > sample.clientHeight + 20,
+    );
+    expect(overflowingSamples.length).toBeGreaterThan(5);
+    const upwardDrops = overflowingSamples.slice(1).filter((sample, index) => {
+      const previous = overflowingSamples[index];
+      return (
+        sample.scrollHeight >= previous.scrollHeight &&
+        sample.scrollTop + 2 < previous.scrollTop
+      );
+    });
+    expect(upwardDrops).toEqual([]);
+    const finalSample = samples[samples.length - 1];
+    expect(
+      finalSample?.bottomDistance ?? Number.POSITIVE_INFINITY,
+    ).toBeLessThanOrEqual(80);
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("streaming Agent activity respects manual scroll intent", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-scroll-manual-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: [
+        "--prompt-scenario",
+        "tool-stream-scroll",
+        "--stream-delay-ms",
+        "60",
+      ],
+    }),
+  );
+  try {
+    await page.setViewportSize({ width: 920, height: 500 });
+    await expectHealthyPreload(page);
+    await enterSessionDetail(page);
+    await page.getByLabel("Prompt text").fill("stream manual scroll");
+    const sendButton = page.getByRole("button", { name: "Send" });
+    await expect(sendButton).toBeEnabled({ timeout: 30_000 });
+    await sendButton.click();
+    await expect
+      .poll(async () =>
+        page
+          .locator(".timeline-scroll")
+          .evaluate((timeline: HTMLElement) =>
+            Math.max(0, timeline.scrollHeight - timeline.clientHeight),
+          ),
+      )
+      .toBeGreaterThan(120);
+
+    const manualStart = await page
+      .locator(".timeline-scroll")
+      .evaluate((timeline: HTMLElement) => {
+        timeline.scrollTop = 0;
+        timeline.dispatchEvent(new Event("scroll", { bubbles: true }));
+        return {
+          bottomDistance: Math.max(
+            0,
+            timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight,
+          ),
+          scrollTop: timeline.scrollTop,
+        };
+      });
+    expect(manualStart.bottomDistance).toBeGreaterThan(80);
+    expect(manualStart.scrollTop).toBe(0);
+
+    await expect
+      .poll(async () => page.locator(".agent-activity-milestone").count())
+      .toBeGreaterThanOrEqual(14);
+    const whileReading = await page
+      .locator(".timeline-scroll")
+      .evaluate((timeline: HTMLElement) => ({
+        bottomDistance: Math.max(
+          0,
+          timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight,
+        ),
+        scrollTop: timeline.scrollTop,
+      }));
+    expect(whileReading.scrollTop).toBeLessThanOrEqual(30);
+    expect(whileReading.bottomDistance).toBeGreaterThan(80);
+
+    await page.locator(".timeline-scroll").evaluate((timeline: HTMLElement) => {
+      timeline.scrollTop = timeline.scrollHeight;
+      timeline.dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+    await expect(
+      page.getByText("Fake response to: stream manual scroll"),
+    ).toBeVisible({ timeout: 20_000 });
+    const finalDistance = await page
+      .locator(".timeline-scroll")
+      .evaluate((timeline: HTMLElement) =>
+        Math.max(
+          0,
+          timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight,
+        ),
+      );
+    expect(finalDistance).toBeLessThanOrEqual(80);
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("tool-heavy turns use a compact agent activity hierarchy", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-e2e-agent-activity-"),
