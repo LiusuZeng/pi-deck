@@ -6180,13 +6180,17 @@ async function getChatSnapshotForRuntime(
   }
 
   if (!options.skipMessages && messages.length > 0) {
-    await recordRuntimeMessagesUsage({
+    void recordRuntimeMessagesUsage({
       runtimeId,
       messages,
       source: "session",
       ...(canonicalSessionFile !== undefined
         ? { ownerSessionFile: canonicalSessionFile }
         : {}),
+    }).catch((error) => {
+      diagnostics?.recordError(
+        `Failed to reconcile resumed usage for ${runtimeId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
     });
   }
 
