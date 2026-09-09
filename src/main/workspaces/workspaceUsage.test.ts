@@ -214,6 +214,7 @@ describe("workspace usage accounting", () => {
       10,
     );
   });
+
   it("does not rewrite persisted usage when only recordedAtMs changes", async () => {
     const root = await fs.mkdtemp(
       path.join(os.tmpdir(), "pi-deck-usage-timestamp-"),
@@ -330,5 +331,4 @@ describe("workspace usage accounting", () => {
       { diagnostics: [], refreshed: false },
     );
   });
-
 });
