@@ -346,29 +346,46 @@ export class WorkspaceUsageStore {
   }): Promise<void> {
     await this.loadIfNeeded();
     const sessionFile = await canonicalOrResolved(options.sessionFile);
-    const frozen = this.state.snapshots
-      .filter((snapshot) => snapshot.ownerSessionFile === sessionFile)
-      .map(
-        (snapshot): UsageSnapshot => ({
-          id: `deleted:${snapshot.id}`,
-          workspaceId: options.workspaceId,
-          source: snapshot.source,
-          inputTokens: snapshot.inputTokens,
-          outputTokens: snapshot.outputTokens,
-          cacheReadTokens: snapshot.cacheReadTokens,
-          cacheWriteTokens: snapshot.cacheWriteTokens,
-          totalTokens: snapshot.totalTokens,
-          ...(snapshot.totalCostUsd !== undefined
-            ? { totalCostUsd: snapshot.totalCostUsd }
-            : {}),
-          contributorsWithCost: snapshot.contributorsWithCost,
-          contributorsWithoutCost: snapshot.contributorsWithoutCost,
-          recordedAtMs: Date.now(),
-        }),
-      );
+    const owned = this.state.snapshots.filter(
+      (snapshot) => snapshot.ownerSessionFile === sessionFile,
+    );
+    if (owned.length === 0) return;
+
+    const frozen = owned.map(
+      (snapshot): UsageSnapshot => ({
+        id: `deleted:${snapshot.id}`,
+        workspaceId: options.workspaceId,
+        source: snapshot.source,
+        inputTokens: snapshot.inputTokens,
+        outputTokens: snapshot.outputTokens,
+        cacheReadTokens: snapshot.cacheReadTokens,
+        cacheWriteTokens: snapshot.cacheWriteTokens,
+        totalTokens: snapshot.totalTokens,
+        ...(snapshot.totalCostUsd !== undefined
+          ? { totalCostUsd: snapshot.totalCostUsd }
+          : {}),
+        contributorsWithCost: snapshot.contributorsWithCost,
+        contributorsWithoutCost: snapshot.contributorsWithoutCost,
+        recordedAtMs: Date.now(),
+      }),
+    );
+
+    const snapshots = this.state.snapshots.filter(
+      (snapshot) => snapshot.ownerSessionFile !== sessionFile,
+    );
+    const byId = new Map(
+      snapshots.map((snapshot, index) => [snapshot.id, index]),
+    );
     for (const snapshot of frozen) {
-      await this.upsertSnapshot(snapshot);
+      const index = byId.get(snapshot.id);
+      if (index === undefined) {
+        byId.set(snapshot.id, snapshots.length);
+        snapshots.push(snapshot);
+      } else {
+        snapshots[index] = snapshot;
+      }
     }
+    await this.commit({ version: 2, snapshots });
   }
 
   async getWorkspaceUsage(options: {
