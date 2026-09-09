@@ -3554,6 +3554,7 @@ describe("renderer message_update reduction", () => {
       totalCostUsd: 0.0123,
     });
   });
+
   it("keeps workspace usage refresh revision stable across streamed deltas", () => {
     const busy = {
       ...baseSession(),
@@ -3620,5 +3621,4 @@ describe("renderer message_update reduction", () => {
       ),
     );
   });
-
 });
