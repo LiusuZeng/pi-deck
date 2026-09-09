@@ -34,6 +34,7 @@ const workspaceSessionRefSchema = z
     sessionId: z.string().min(1).optional(),
     cwd: z.string().min(1).optional(),
     title: z.string().min(1).optional(),
+    titleOverride: z.string().min(1).max(120).optional(),
     preview: z.string().min(1).optional(),
     addedAtMs: z.number(),
     lastSeenAtMs: z.number(),
@@ -156,6 +157,7 @@ const legacyProjectSessionRefSchema = z
     sessionId: z.string().min(1).optional(),
     cwd: z.string().min(1).optional(),
     title: z.string().min(1).optional(),
+    titleOverride: z.string().min(1).max(120).optional(),
     preview: z.string().min(1).optional(),
     addedAtMs: z.number(),
     lastSeenAtMs: z.number(),
@@ -864,6 +866,37 @@ export class WorkspaceStore {
     return true;
   }
 
+  async renameSession(
+    sessionFile: string,
+    title: string,
+  ): Promise<WorkspaceSessionMutationResult> {
+    const canonical = await canonicalOrResolved(
+      z.string().min(1).parse(sessionFile),
+    );
+    const normalizedTitle = normalizeSessionTitleOverride(title);
+    await this.loadIfNeeded();
+    const index = this.state.sessionRefs.findIndex(
+      (ref) => ref.sessionFile === canonical,
+    );
+    if (index < 0) {
+      throw new Error(`Session is not assigned to a workspace: ${canonical}`);
+    }
+    const existing = this.state.sessionRefs[index]!;
+    this.requireOpenWorkspaceIndex(existing.workspaceId);
+    if (existing.titleOverride === normalizedTitle) {
+      await this.persistIfDirty();
+      return { workspaceId: existing.workspaceId, sessionFile: canonical };
+    }
+    await this.commit({
+      ...this.state,
+      sessionRefs: replaceAt(this.state.sessionRefs, index, {
+        ...existing,
+        titleOverride: normalizedTitle,
+      }),
+    });
+    return { workspaceId: existing.workspaceId, sessionFile: canonical };
+  }
+
   async archiveSession(
     workspaceId: string,
     sessionFile: string,
@@ -1099,6 +1132,7 @@ export class WorkspaceStore {
           ...(ref.sessionId ? { sessionId: ref.sessionId } : {}),
           ...(ref.cwd ? { cwd: ref.cwd } : {}),
           ...(ref.title ? { title: ref.title } : {}),
+          ...(ref.titleOverride ? { titleOverride: ref.titleOverride } : {}),
           ...(ref.preview ? { preview: ref.preview } : {}),
           addedAtMs: ref.addedAtMs,
           lastSeenAtMs: ref.lastSeenAtMs,
@@ -1249,6 +1283,14 @@ function normalizeWorkspaceName(raw: string): string {
   return normalized;
 }
 
+function normalizeSessionTitleOverride(raw: string): string {
+  const normalized = raw.trim();
+  if (!normalized) throw new Error("Session title is required.");
+  if (normalized.length > 120)
+    throw new Error("Session title must be 120 characters or fewer.");
+  return normalized;
+}
+
 function cloneWorkspace(workspace: WorkspaceRecord): WorkspaceRecord {
   return {
     ...workspace,
@@ -1357,6 +1399,11 @@ function sessionRefFromSummary(
         : {}),
     title:
       summary.title || existing?.title || path.basename(sessionFile, ".jsonl"),
+    ...(summary.titleOverride
+      ? { titleOverride: summary.titleOverride }
+      : existing?.titleOverride
+        ? { titleOverride: existing.titleOverride }
+        : {}),
     ...(summary.preview
       ? { preview: summary.preview }
       : existing?.preview
@@ -1389,7 +1436,11 @@ function toCachedSummary(ref: WorkspaceSessionRef): ChatSessionSummary {
     sessionFile: ref.sessionFile,
     ...(ref.sessionId ? { sessionId: ref.sessionId } : {}),
     ...(ref.cwd ? { cwd: ref.cwd } : {}),
-    title: ref.title ?? path.basename(ref.sessionFile, ".jsonl"),
+    title:
+      ref.titleOverride ??
+      ref.title ??
+      path.basename(ref.sessionFile, ".jsonl"),
+    ...(ref.titleOverride ? { titleOverride: ref.titleOverride } : {}),
     updatedAtMs: ref.lastKnownUpdatedAtMs ?? ref.lastSeenAtMs,
     ...(ref.createdAtMs !== undefined ? { createdAtMs: ref.createdAtMs } : {}),
     ...(ref.completedAtMs !== undefined
@@ -1413,6 +1464,7 @@ function sameSessionRefData(
     existing.sessionId === candidate.sessionId &&
     existing.cwd === candidate.cwd &&
     existing.title === candidate.title &&
+    existing.titleOverride === candidate.titleOverride &&
     existing.preview === candidate.preview &&
     existing.lastKnownUpdatedAtMs === candidate.lastKnownUpdatedAtMs &&
     existing.createdAtMs === candidate.createdAtMs &&

@@ -55,6 +55,7 @@ import {
   workspaceListSessionsRequestSchema,
   workspaceMoveSessionRequestSchema,
   workspaceRemoveSessionRequestSchema,
+  workspaceRenameSessionRequestSchema,
   workspaceRestoreSessionRequestSchema,
   workspaceRestoreRequestSchema,
   workspaceSelectRequestSchema,
@@ -123,6 +124,7 @@ import type {
   WorkspaceListSessionsRequest,
   WorkspaceMoveSessionRequest,
   WorkspaceRemoveSessionRequest,
+  WorkspaceRenameSessionRequest,
   WorkspaceRestoreSessionRequest,
   WorkspaceUpdateRequest,
   WorkspaceUsageRequest,
@@ -461,6 +463,12 @@ const api: PiDeckApi = Object.freeze({
       invokeValidated({
         channel: ipcChannels.workspaceRemoveSession,
         request: workspaceRemoveSessionRequestSchema.parse(request),
+        responseSchema: workspaceSessionMutationResultSchema,
+      }),
+    renameSession: (request: WorkspaceRenameSessionRequest) =>
+      invokeValidated({
+        channel: ipcChannels.workspaceRenameSession,
+        request: workspaceRenameSessionRequestSchema.parse(request),
         responseSchema: workspaceSessionMutationResultSchema,
       }),
     archiveSession: (request: WorkspaceArchiveSessionRequest) =>

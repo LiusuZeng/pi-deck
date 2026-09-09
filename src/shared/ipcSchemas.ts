@@ -234,6 +234,12 @@ export const chatRuntimeStatusSchema = z
   })
   .strict();
 
+export const sessionTitleOverrideSchema = z
+  .string()
+  .trim()
+  .min(1, "Session title is required.")
+  .max(120, "Session title must be 120 characters or fewer.");
+
 export const chatSessionSummarySchema = z
   .object({
     id: z.string(),
@@ -241,6 +247,7 @@ export const chatSessionSummarySchema = z
     sessionId: z.string().optional(),
     cwd: z.string().optional(),
     title: z.string(),
+    titleOverride: sessionTitleOverrideSchema.optional(),
     updatedAtMs: z.number(),
     createdAtMs: z.number().optional(),
     completedAtMs: z.number().optional(),
@@ -606,6 +613,13 @@ export const workspaceArchiveSessionRequestSchema =
 export const workspaceRestoreSessionRequestSchema =
   workspaceAddSessionRequestSchema;
 
+export const workspaceRenameSessionRequestSchema = z
+  .object({
+    sessionFile: z.string().min(1),
+    title: sessionTitleOverrideSchema,
+  })
+  .strict();
+
 export const workspaceListSessionsRequestSchema = z
   .object({
     workspaceId: z.string().min(1),
@@ -905,6 +919,7 @@ export const ipcChannels = {
   workspaceRemoveSession: "workspaces:removeSession",
   workspaceArchiveSession: "workspaces:archiveSession",
   workspaceRestoreSession: "workspaces:restoreSession",
+  workspaceRenameSession: "workspaces:renameSession",
   workspaceListSessions: "workspaces:listSessions",
   workspaceGetUsage: "workspaces:getUsage",
   workspaceListUnassignedSessions: "workspaces:listUnassignedSessions",
