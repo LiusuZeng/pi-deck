@@ -381,4 +381,234 @@ describe("workspace usage accounting", () => {
       { diagnostics: [], refreshed: false },
     );
   });
+  it("stores one compact snapshot for a long normal session", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-usage-compact-"),
+    );
+    const sessionFile = path.join(root, "session.jsonl");
+    await fs.writeFile(sessionFile, "");
+    const store = new WorkspaceUsageStore(root);
+    const messages = Array.from({ length: 500 }, (_, index) => ({
+      id: `assistant-${index}`,
+      role: "assistant",
+      usage: {
+        inputTokens: 2,
+        outputTokens: 1,
+        totalTokens: 3,
+        totalCostUsd: 0.001,
+      },
+    }));
+
+    await store.recordSessionMessagesUsage({
+      workspaceId: workspaceA,
+      sessionFile,
+      sessionKey: sessionFile,
+      source: "session",
+      messages,
+    });
+
+    const persisted = JSON.parse(await fs.readFile(store.storeFile, "utf8")) as {
+      version: number;
+      snapshots: Array<{
+        totalTokens: number;
+        contributorsWithCost: number;
+      }>;
+    };
+    assert.equal(persisted.version, 2);
+    assert.equal(persisted.snapshots.length, 1);
+    assert.equal(persisted.snapshots[0]?.totalTokens, 1500);
+    assert.equal(persisted.snapshots[0]?.contributorsWithCost, 500);
+  });
+
+  it("replaces cumulative runtime usage without growing snapshot state", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-usage-runtime-"),
+    );
+    const sessionFile = path.join(root, "session.jsonl");
+    await fs.writeFile(sessionFile, "");
+    const store = new WorkspaceUsageStore(root);
+
+    await store.recordSessionMessagesUsage({
+      workspaceId: workspaceA,
+      sessionFile,
+      sessionKey: sessionFile,
+      source: "session",
+      messages: [
+        {
+          id: "assistant-one",
+          role: "assistant",
+          usage: {
+            inputTokens: 10,
+            outputTokens: 5,
+            totalTokens: 15,
+            totalCostUsd: 0.02,
+          },
+        },
+        {
+          id: "assistant-two",
+          role: "assistant",
+          usage: {
+            inputTokens: 20,
+            outputTokens: 10,
+            totalTokens: 30,
+            totalCostUsd: 0.03,
+          },
+        },
+      ],
+    });
+    await store.recordRuntimeUsage({
+      workspaceId: workspaceA,
+      sessionFile,
+      usage: {
+        inputTokens: 40,
+        outputTokens: 20,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        totalTokens: 60,
+        totalCostUsd: 0.08,
+      },
+    });
+
+    const persisted = JSON.parse(await fs.readFile(store.storeFile, "utf8")) as {
+      snapshots: Array<{
+        totalTokens: number;
+        totalCostUsd?: number;
+        contributorsWithCost: number;
+      }>;
+    };
+    assert.equal(persisted.snapshots.length, 1);
+    assert.equal(persisted.snapshots[0]?.totalTokens, 60);
+    assert.equal(persisted.snapshots[0]?.totalCostUsd, 0.08);
+    assert.equal(persisted.snapshots[0]?.contributorsWithCost, 2);
+  });
+
+  it("migrates the v1 per-message store into compact v2 snapshots", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-usage-migrate-"),
+    );
+    const sessionFile = path.join(root, "session.jsonl");
+    await fs.writeFile(sessionFile, "");
+    await fs.writeFile(
+      path.join(root, "workspace-usage.json"),
+      JSON.stringify({
+        version: 1,
+        contributions: [
+          {
+            id: `session:${sessionFile}:assistant-one`,
+            workspaceId: workspaceA,
+            ownerSessionFile: sessionFile,
+            source: "session",
+            inputTokens: 10,
+            outputTokens: 5,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            totalTokens: 15,
+            totalCostUsd: 0.02,
+            recordedAtMs: 1,
+          },
+          {
+            id: `session:${sessionFile}:assistant-two`,
+            workspaceId: workspaceA,
+            ownerSessionFile: sessionFile,
+            source: "session",
+            inputTokens: 20,
+            outputTokens: 10,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            totalTokens: 30,
+            recordedAtMs: 2,
+          },
+        ],
+      }),
+    );
+
+    const store = new WorkspaceUsageStore(root);
+    await store.loadIfNeeded();
+    const persisted = JSON.parse(await fs.readFile(store.storeFile, "utf8")) as {
+      version: number;
+      snapshots: Array<{
+        totalTokens: number;
+        contributorsWithCost: number;
+        contributorsWithoutCost: number;
+      }>;
+    };
+    assert.equal(persisted.version, 2);
+    assert.equal(persisted.snapshots.length, 1);
+    assert.equal(persisted.snapshots[0]?.totalTokens, 45);
+    assert.equal(persisted.snapshots[0]?.contributorsWithCost, 1);
+    assert.equal(persisted.snapshots[0]?.contributorsWithoutCost, 1);
+  });
+
+  it("persists recovery signatures across store reloads", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-usage-signature-"),
+    );
+    const sessionFile = path.join(root, "session.jsonl");
+    await fs.writeFile(
+      sessionFile,
+      JSON.stringify({
+        type: "message",
+        message: {
+          id: "assistant-one",
+          role: "assistant",
+          usage: { inputTokens: 2, outputTokens: 3, totalTokens: 5 },
+        },
+      }),
+    );
+
+    const firstStore = new WorkspaceUsageStore(root);
+    assert.equal(
+      (
+        await firstStore.refreshSessionFileUsage({
+          workspaceId: workspaceA,
+          sessionFile,
+        })
+      ).refreshed,
+      true,
+    );
+
+    const reloaded = new WorkspaceUsageStore(root);
+    assert.deepEqual(
+      await reloaded.refreshSessionFileUsage({
+        workspaceId: workspaceA,
+        sessionFile,
+      }),
+      { diagnostics: [], refreshed: false },
+    );
+  });
+
+  it("serves cached workspace usage without reading the session file", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-usage-cheap-read-"),
+    );
+    const sessionFile = path.join(root, "session.jsonl");
+    await fs.writeFile(
+      sessionFile,
+      JSON.stringify({
+        type: "message",
+        message: {
+          id: "assistant-one",
+          role: "assistant",
+          usage: { inputTokens: 4, outputTokens: 6, totalTokens: 10 },
+        },
+      }),
+    );
+    const store = new WorkspaceUsageStore(root);
+    await store.refreshSessionFileUsage({
+      workspaceId: workspaceA,
+      sessionFile,
+    });
+    await fs.unlink(sessionFile);
+
+    assert.equal(
+      (
+        await store.getWorkspaceUsage({
+          workspaceId: workspaceA,
+          sessionFiles: [sessionFile],
+        })
+      ).totalTokens,
+      10,
+    );
+  });
+
 });
