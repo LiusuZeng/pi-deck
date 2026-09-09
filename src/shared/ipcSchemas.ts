@@ -2,6 +2,20 @@ import { z } from "zod";
 
 export const themePreferenceSchema = z.enum(["system", "light", "dark"]);
 
+export const sessionSoundSettingsSchema = z
+  .object({
+    needsAttention: z.boolean().default(true),
+    completed: z.boolean().default(true),
+  })
+  .strict();
+
+const sessionSoundSettingsPatchSchema = z
+  .object({
+    needsAttention: z.boolean().optional(),
+    completed: z.boolean().optional(),
+  })
+  .strict();
+
 const appSettingsShape = {
   piBinaryPath: z.string().min(1).optional(),
   agentDir: z.string().min(1).optional(),
@@ -18,6 +32,7 @@ const appSettingsShape = {
   maxRunningSessions: z.number().int().min(1).max(20),
   warmWorkerLimit: z.number().int().min(0).max(20),
   enableLoginShellEnvCapture: z.boolean(),
+  sessionSounds: sessionSoundSettingsSchema.optional(),
 } satisfies z.ZodRawShape;
 
 export const appSettingsSchema = z
@@ -28,11 +43,18 @@ export const appSettingsSchema = z
     warmWorkerLimit: appSettingsShape.warmWorkerLimit.default(1),
     enableLoginShellEnvCapture:
       appSettingsShape.enableLoginShellEnvCapture.default(true),
+    sessionSounds: sessionSoundSettingsSchema.default({
+      needsAttention: true,
+      completed: true,
+    }),
   })
   .strict();
 
 export const appSettingsPatchSchema = z
-  .object(appSettingsShape)
+  .object({
+    ...appSettingsShape,
+    sessionSounds: sessionSoundSettingsPatchSchema.optional(),
+  })
   .partial()
   .strict();
 

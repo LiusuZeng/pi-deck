@@ -48,6 +48,7 @@ describe("IPC schemas", () => {
       warmWorkerLimit: 1,
       enableLoginShellEnvCapture: true,
       theme: "system",
+      sessionSounds: { needsAttention: true, completed: true },
     });
     expect(appSettingsPatchSchema.parse({})).toEqual({});
     expect(() =>
@@ -56,6 +57,11 @@ describe("IPC schemas", () => {
     expect(appSettingsPatchSchema.parse({ theme: "dark" })).toEqual({
       theme: "dark",
     });
+    expect(
+      appSettingsPatchSchema.parse({
+        sessionSounds: { needsAttention: false },
+      }),
+    ).toEqual({ sessionSounds: { needsAttention: false } });
     expect(() => appSettingsPatchSchema.parse({ theme: "midnight" })).toThrow();
   });
 

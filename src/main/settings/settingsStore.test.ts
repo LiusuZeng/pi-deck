@@ -1,4 +1,11 @@
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -70,13 +77,75 @@ describe("SettingsStore", () => {
     });
   });
 
-  it("rejects invalid updates without corrupting current settings", async () => {
+  it("persists session sound preferences and preserves sibling toggles", async () => {
     const dir = await tempUserDataDir();
+    const store = new SettingsStore(dir);
+
+    await expect(
+      store.update({ sessionSounds: { needsAttention: false } }),
+    ).resolves.toMatchObject({
+      sessionSounds: { needsAttention: false, completed: true },
+    });
+    await expect(
+      store.update({ sessionSounds: { completed: false } }),
+    ).resolves.toMatchObject({
+      sessionSounds: { needsAttention: false, completed: false },
+    });
+    await expect(new SettingsStore(dir).get()).resolves.toMatchObject({
+      sessionSounds: { needsAttention: false, completed: false },
+    });
+  });
+
+  it("serializes concurrent updates so their settings both persist", async () => {
+    const dir = await tempUserDataDir();
+    const store = new SettingsStore(dir);
+
+    await Promise.all([
+      store.update({ theme: "dark" }),
+      store.update({ sessionSounds: { completed: false } }),
+    ]);
+
+    await expect(new SettingsStore(dir).get()).resolves.toMatchObject({
+      theme: "dark",
+      sessionSounds: { needsAttention: true, completed: false },
+    });
+  });
+
+  it("keeps its update queue usable after a rejected update", async () => {
+    const dir = await tempUserDataDir();
+    const store = new SettingsStore(dir);
+
+    await expect(store.update({ maxRunningSessions: 21 })).rejects.toThrow();
+    await expect(
+      store.update({ maxRunningSessions: 6 }),
+    ).resolves.toMatchObject({
+      maxRunningSessions: 6,
+    });
+  });
+
+  it("rejects failed writes without corrupting current settings", async () => {
+    const dir = await tempUserDataDir();
+    const settingsFile = path.join(dir, "settings.json");
     const store = new SettingsStore(dir);
     await store.update({ maxRunningSessions: 6 });
 
-    await expect(store.update({ maxRunningSessions: 21 })).rejects.toThrow();
-    await expect(store.get()).resolves.toMatchObject({ maxRunningSessions: 6 });
+    await rm(settingsFile);
+    await mkdir(settingsFile);
+
+    await expect(store.update({ maxRunningSessions: 7 })).rejects.toThrow();
+    await expect(store.get()).resolves.toMatchObject({
+      maxRunningSessions: 6,
+    });
+
+    await rm(settingsFile, { recursive: true });
+    await expect(store.update({ theme: "dark" })).resolves.toMatchObject({
+      theme: "dark",
+      maxRunningSessions: 6,
+    });
+    await expect(new SettingsStore(dir).get()).resolves.toMatchObject({
+      theme: "dark",
+      maxRunningSessions: 6,
+    });
   });
 
   it("backs up corrupt settings and applies defaults", async () => {

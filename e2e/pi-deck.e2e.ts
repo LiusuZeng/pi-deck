@@ -59,6 +59,24 @@ function persistedTheme(userDataDir: string): string | undefined {
   }
 }
 
+function persistedSessionSounds(userDataDir: string):
+  | {
+      needsAttention?: boolean;
+      completed?: boolean;
+    }
+  | undefined {
+  try {
+    const settings = JSON.parse(
+      fs.readFileSync(path.join(userDataDir, "settings.json"), "utf8"),
+    ) as {
+      sessionSounds?: { needsAttention?: boolean; completed?: boolean };
+    };
+    return settings.sessionSounds;
+  } catch {
+    return undefined;
+  }
+}
+
 function createFakePiBinary(root: string, extraArgs: string[] = []): string {
   const fakePiPath = path.join(root, "fake-pi.js");
   fs.writeFileSync(
@@ -2959,6 +2977,77 @@ test("appearance preference switches themes and persists across relaunch", async
         launched.app.evaluate(({ nativeTheme }) => nativeTheme.themeSource),
       )
       .toBe("system");
+  } finally {
+    await launched.app.close().catch(() => undefined);
+    fs.rmSync(userDataDir, { recursive: true, force: true });
+  }
+});
+
+test("session sound preferences toggle independently and persist across relaunch", async () => {
+  const userDataDir = createThemeUserData("system");
+  const env = {
+    PI_DECK_BACKEND: "fake",
+    PI_DECK_USER_DATA_DIR: userDataDir,
+  };
+  let launched = await launchPiDeck(env);
+
+  try {
+    await launched.page.setViewportSize({ width: 900, height: 600 });
+    await expectHealthyPreload(launched.page);
+    await expectAllWorkLaunch(launched.page);
+
+    await launched.page
+      .getByRole("button", { name: "Appearance: System" })
+      .click();
+    const needsAttentionToggle = launched.page.getByRole("button", {
+      name: "Needs attention",
+      exact: true,
+    });
+    const completedToggle = launched.page.getByRole("button", {
+      name: "Completed",
+      exact: true,
+    });
+    await expect(needsAttentionToggle).toHaveAttribute("aria-pressed", "true");
+    await expect(completedToggle).toHaveAttribute("aria-pressed", "true");
+
+    await needsAttentionToggle.click();
+    await expect
+      .poll(() => persistedSessionSounds(userDataDir))
+      .toEqual({ needsAttention: false, completed: true });
+
+    await launched.page
+      .getByRole("button", { name: "Appearance: System" })
+      .click();
+    await launched.page
+      .getByRole("button", { name: "Completed", exact: true })
+      .click();
+    await expect
+      .poll(() => persistedSessionSounds(userDataDir))
+      .toEqual({ needsAttention: false, completed: false });
+
+    await launched.app.close();
+    launched = await launchPiDeck(env);
+    await launched.page.setViewportSize({ width: 900, height: 600 });
+    await expectHealthyPreload(launched.page);
+    await launched.page
+      .getByRole("button", { name: "Appearance: System" })
+      .click();
+    await expect(
+      launched.page.getByRole("button", {
+        name: "Needs attention",
+        exact: true,
+      }),
+    ).toHaveAttribute("aria-pressed", "false");
+    await expect(
+      launched.page.getByRole("button", { name: "Completed", exact: true }),
+    ).toHaveAttribute("aria-pressed", "false");
+
+    await launched.page
+      .getByRole("button", { name: "Completed", exact: true })
+      .click();
+    await expect
+      .poll(() => persistedSessionSounds(userDataDir))
+      .toEqual({ needsAttention: false, completed: true });
   } finally {
     await launched.app.close().catch(() => undefined);
     fs.rmSync(userDataDir, { recursive: true, force: true });

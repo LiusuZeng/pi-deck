@@ -1,6 +1,7 @@
 import type { z } from "zod";
 import type {
   appBootstrapStateSchema,
+  appSettingsPatchSchema,
   appSettingsSchema,
   attachmentAssignOwnerRequestSchema,
   attachmentDraftSchema,
@@ -124,6 +125,7 @@ export type WorkflowGraphSnapshot = z.infer<typeof workflowGraphSnapshotSchema>;
 export type WorkflowGraphEvent = z.infer<typeof workflowGraphEventSchema>;
 export type ThemePreference = z.infer<typeof themePreferenceSchema>;
 export type AppSettings = z.infer<typeof appSettingsSchema>;
+export type AppSettingsPatch = z.infer<typeof appSettingsPatchSchema>;
 export type AppBootstrapState = z.infer<typeof appBootstrapStateSchema>;
 export type DiagnosticsSummary = z.infer<typeof diagnosticsSummarySchema>;
 export type IpcErrorPayload = z.infer<typeof ipcErrorSchema>;
@@ -313,7 +315,7 @@ export interface PiDeckApi {
   };
   settings: {
     get(): Promise<AppSettings>;
-    update(patch: Partial<AppSettings>): Promise<AppSettings>;
+    update(patch: AppSettingsPatch): Promise<AppSettings>;
   };
   chat: {
     getSnapshot(request?: ChatSnapshotRequest): Promise<ChatSnapshot>;
