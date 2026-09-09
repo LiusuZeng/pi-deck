@@ -1007,12 +1007,10 @@ function hashStable(value: string): string {
 }
 
 async function canonicalOrResolved(filePath: string): Promise<string> {
-  const resolved = path.resolve(filePath);
-  try {
-    return await fs.realpath(resolved);
-  } catch {
-    return resolved;
-  }
+  // Workspace/session ownership is canonicalized before it reaches this store.
+  // Keep usage identity lexical so maintained-state reads never depend on
+  // filesystem alias resolution and tests/imports remain stable after deletion.
+  return path.resolve(filePath);
 }
 
 function toUsageContribution(
