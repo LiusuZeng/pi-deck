@@ -107,6 +107,11 @@ export class WorkspaceUsageStore {
   private persistTail: Promise<void> = Promise.resolve();
   private generation = 0;
   private persistedGeneration = 0;
+  private readonly sessionRefreshSignatures = new Map<string, string>();
+  private readonly sessionRefreshInFlight = new Map<
+    string,
+    Promise<{ diagnostics: string[]; refreshed: boolean }>
+  >();
 
   constructor(private readonly piDeckHome: string) {
     this.storeFile = path.join(piDeckHome, "workspace-usage.json");
@@ -166,6 +171,66 @@ export class WorkspaceUsageStore {
     else await this.persistIfDirty();
   }
 
+  async refreshSessionFileUsage(options: {
+    workspaceId: string;
+    sessionFile: string;
+    source?: UsageContributionSource;
+  }): Promise<{ diagnostics: string[]; refreshed: boolean }> {
+    const canonicalSessionFile = await canonicalOrResolved(options.sessionFile);
+    const source = options.source ?? "session";
+    const refreshKey = `${source}:${canonicalSessionFile}`;
+    const existing = this.sessionRefreshInFlight.get(refreshKey);
+    if (existing !== undefined) {
+      return existing;
+    }
+
+    const refresh = (async () => {
+      let signature: string;
+      try {
+        const stat = await fs.stat(canonicalSessionFile);
+        signature = `${stat.size}:${stat.mtimeMs}`;
+      } catch (error) {
+        return {
+          diagnostics: [
+            `Could not stat session usage ${options.sessionFile}: ${error instanceof Error ? error.message : String(error)}`,
+          ],
+          refreshed: false,
+        };
+      }
+
+      if (this.sessionRefreshSignatures.get(refreshKey) === signature) {
+        return { diagnostics: [], refreshed: false };
+      }
+
+      const result = await contributionsFromSessionFile({
+        workspaceId: options.workspaceId,
+        sessionFile: canonicalSessionFile,
+        source,
+      });
+      if (result.diagnostics.length === 0) {
+        await this.upsertContributions(result.contributions);
+        // Remember the signature observed before the read. If Pi appends while
+        // recovery is running, the next request sees a different signature and
+        // safely performs another bounded refresh instead of marking stale data
+        // as current.
+        this.sessionRefreshSignatures.set(refreshKey, signature);
+      }
+      return {
+        diagnostics: result.diagnostics,
+        refreshed: result.diagnostics.length === 0,
+      };
+    })();
+
+    this.sessionRefreshInFlight.set(refreshKey, refresh);
+    try {
+      return await refresh;
+    } finally {
+      if (this.sessionRefreshInFlight.get(refreshKey) === refresh) {
+        this.sessionRefreshInFlight.delete(refreshKey);
+      }
+    }
+  }
+
   async freezeSessionUsage(options: {
     workspaceId: string;
     sessionFile: string;
@@ -201,13 +266,17 @@ export class WorkspaceUsageStore {
     const sessionFiles = new Set(
       await Promise.all(options.sessionFiles.map(canonicalOrResolved)),
     );
-    const contributions = this.state.contributions.filter((contribution) => {
-      if (contribution.ownerSessionFile !== undefined) {
-        return sessionFiles.has(contribution.ownerSessionFile);
+    let totals = emptyUsageTotals();
+    for (const contribution of this.state.contributions) {
+      const included =
+        contribution.ownerSessionFile !== undefined
+          ? sessionFiles.has(contribution.ownerSessionFile)
+          : contribution.workspaceId === options.workspaceId;
+      if (included) {
+        totals = addUsageContribution(totals, contribution);
       }
-      return contribution.workspaceId === options.workspaceId;
-    });
-    return summarizeUsageContributions(contributions);
+    }
+    return totals;
   }
 
   private async load(): Promise<void> {
@@ -544,7 +613,21 @@ function sameContribution(
   left: UsageContribution,
   right: UsageContribution,
 ): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  // recordedAtMs is observation metadata, not usage identity. Treating a
+  // timestamp-only refresh as changed rewrites the entire persisted usage
+  // store even when token/cost values are identical.
+  return (
+    left.id === right.id &&
+    left.workspaceId === right.workspaceId &&
+    left.ownerSessionFile === right.ownerSessionFile &&
+    left.source === right.source &&
+    left.inputTokens === right.inputTokens &&
+    left.outputTokens === right.outputTokens &&
+    left.cacheReadTokens === right.cacheReadTokens &&
+    left.cacheWriteTokens === right.cacheWriteTokens &&
+    left.totalTokens === right.totalTokens &&
+    left.totalCostUsd === right.totalCostUsd
+  );
 }
 
 function isMissingFile(error: unknown): boolean {
