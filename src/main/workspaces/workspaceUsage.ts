@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { createInterface } from "node:readline";
 import { z } from "zod";
 import type {
   ChatRuntimeUsage,
@@ -252,8 +254,9 @@ export class WorkspaceUsageStore {
       cacheReadTokens: options.usage.cacheReadTokens,
       cacheWriteTokens: options.usage.cacheWriteTokens,
       totalTokens: options.usage.totalTokens,
-      ...(options.usage.totalCostUsd !== undefined
-        ? { totalCostUsd: options.usage.totalCostUsd }
+      ...(options.usage.totalCostUsd !== undefined ||
+      existing?.totalCostUsd !== undefined
+        ? { totalCostUsd: options.usage.totalCostUsd ?? existing?.totalCostUsd }
         : {}),
       contributorsWithCost,
       contributorsWithoutCost,
@@ -453,7 +456,7 @@ export class WorkspaceUsageStore {
         const generation = this.generation;
         await fs.mkdir(this.piDeckHome, { recursive: true, mode: 0o700 });
         const temp = `${this.storeFile}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        await fs.writeFile(temp, `${JSON.stringify(this.state, null, 2)}\\n`, {
+        await fs.writeFile(temp, `${JSON.stringify(this.state, null, 2)}\n`, {
           mode: 0o600,
         });
         await fs.rename(temp, this.storeFile);
@@ -571,23 +574,34 @@ async function usageSnapshotFromSessionFile(options: {
   recordedAtMs: number;
   signature: { size: number; mtimeMs: number };
 }): Promise<{ snapshot?: UsageSnapshot; diagnostics: string[] }> {
-  const result = await contributionsFromSessionFile({
-    workspaceId: options.workspaceId,
-    sessionFile: options.sessionFile,
-    source: options.source,
-  });
-  if (result.diagnostics.length > 0) {
-    return { diagnostics: result.diagnostics };
-  }
   let totals = emptyUsageTotals();
-  for (const contribution of result.contributions) {
-    totals = addUsageContribution(totals, contribution);
+  const scanned = await scanSessionFileUsage(
+    options.sessionFile,
+    (usage) => {
+      totals = {
+        inputTokens: totals.inputTokens + usage.inputTokens,
+        outputTokens: totals.outputTokens + usage.outputTokens,
+        cacheReadTokens: totals.cacheReadTokens + usage.cacheReadTokens,
+        cacheWriteTokens: totals.cacheWriteTokens + usage.cacheWriteTokens,
+        totalTokens: totals.totalTokens + usage.totalTokens,
+        knownCostUsd: totals.knownCostUsd + (usage.totalCostUsd ?? 0),
+        contributorsWithCost:
+          totals.contributorsWithCost +
+          (usage.totalCostUsd === undefined ? 0 : 1),
+        contributorsWithoutCost:
+          totals.contributorsWithoutCost +
+          (usage.totalCostUsd === undefined ? 1 : 0),
+      };
+    },
+  );
+  if (scanned.diagnostics.length > 0) {
+    return { diagnostics: scanned.diagnostics };
   }
   return {
     snapshot: {
       id: options.id,
       workspaceId: options.workspaceId,
-      ownerSessionFile: path.resolve(options.sessionFile),
+      ownerSessionFile: scanned.canonicalSessionFile,
       source: options.source,
       inputTokens: totals.inputTokens,
       outputTokens: totals.outputTokens,
@@ -764,58 +778,107 @@ export async function contributionsFromSessionFile(options: {
   sessionFile: string;
   source?: UsageContributionSource;
 }): Promise<{ contributions: UsageContribution[]; diagnostics: string[] }> {
-  const diagnostics: string[] = [];
-  const canonicalSessionFile = await canonicalOrResolved(options.sessionFile);
-  const stableSessionKey = canonicalSessionFile;
-  let text: string;
-  try {
-    text = await fs.readFile(canonicalSessionFile, "utf8");
-  } catch (error) {
-    diagnostics.push(
-      `Could not read session usage ${options.sessionFile}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-    return { contributions: [], diagnostics };
-  }
   const contributions: UsageContribution[] = [];
   const now = Date.now();
-  text.split(/\r?\n/).forEach((line, index) => {
-    if (line.trim().length === 0) return;
-    let record: unknown;
-    try {
-      record = JSON.parse(line);
-    } catch {
-      return;
+  const source = options.source ?? "session";
+  const scanned = await scanSessionFileUsage(
+    options.sessionFile,
+    (usage, messageId, lineNumber) => {
+      contributions.push({
+        id:
+          messageId !== undefined
+            ? `${source}:${scannedPathPlaceholder(options.sessionFile)}:${messageId}`
+            : `${source}:${scannedPathPlaceholder(options.sessionFile)}:line:${lineNumber}`,
+        workspaceId: options.workspaceId,
+        ownerSessionFile: scannedPathPlaceholder(options.sessionFile),
+        source,
+        ...usage,
+        recordedAtMs: now,
+      });
+    },
+  );
+  if (scanned.diagnostics.length > 0) {
+    return { contributions: [], diagnostics: scanned.diagnostics };
+  }
+  // The visitor runs before scanSessionFileUsage returns its canonical path.
+  // Normalize ids/ownership once here without retaining transcript contents.
+  return {
+    contributions: contributions.map((contribution) => {
+      const suffix = contribution.id.slice(
+        contribution.id.indexOf(scannedPathPlaceholder(options.sessionFile)) +
+          scannedPathPlaceholder(options.sessionFile).length,
+      );
+      return {
+        ...contribution,
+        id: `${source}:${scanned.canonicalSessionFile}${suffix}`,
+        ownerSessionFile: scanned.canonicalSessionFile,
+      };
+    }),
+    diagnostics: [],
+  };
+}
+
+type ExtractedUsage = NonNullable<ReturnType<typeof extractUsage>>;
+
+async function scanSessionFileUsage(
+  sessionFile: string,
+  visitor: (
+    usage: ExtractedUsage,
+    messageId: string | undefined,
+    lineNumber: number,
+  ) => void,
+): Promise<{ canonicalSessionFile: string; diagnostics: string[] }> {
+  const canonicalSessionFile = await canonicalOrResolved(sessionFile);
+  try {
+    const input = createReadStream(canonicalSessionFile, { encoding: "utf8" });
+    const lines = createInterface({ input, crlfDelay: Infinity });
+    let lineNumber = 0;
+    for await (const line of lines) {
+      lineNumber += 1;
+      if (line.trim().length === 0) continue;
+      let record: unknown;
+      try {
+        record = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (!record || typeof record !== "object" || Array.isArray(record)) {
+        continue;
+      }
+      const object = record as Record<string, unknown>;
+      if (object.type !== "message") continue;
+      const usage = extractUsage(object.message ?? object);
+      if (usage === undefined) continue;
+      const message =
+        object.message &&
+        typeof object.message === "object" &&
+        !Array.isArray(object.message)
+          ? (object.message as Record<string, unknown>)
+          : object;
+      visitor(
+        usage,
+        firstString(
+          message.id,
+          object.id,
+          message.responseId,
+          object.responseId,
+        ),
+        lineNumber,
+      );
     }
-    if (!record || typeof record !== "object" || Array.isArray(record)) return;
-    const object = record as Record<string, unknown>;
-    if (object.type !== "message") return;
-    const usage = extractUsage(object.message ?? object);
-    if (usage === undefined) return;
-    const message =
-      object.message &&
-      typeof object.message === "object" &&
-      !Array.isArray(object.message)
-        ? (object.message as Record<string, unknown>)
-        : object;
-    const messageId = firstString(
-      message.id,
-      object.id,
-      message.responseId,
-      object.responseId,
-    );
-    contributions.push({
-      id:
-        messageId !== undefined
-          ? `${options.source ?? "session"}:${stableSessionKey}:${messageId}`
-          : `${options.source ?? "session"}:${stableSessionKey}:line:${index + 1}`,
-      workspaceId: options.workspaceId,
-      ownerSessionFile: canonicalSessionFile,
-      source: options.source ?? "session",
-      ...usage,
-      recordedAtMs: now,
-    });
-  });
-  return { contributions, diagnostics };
+    return { canonicalSessionFile, diagnostics: [] };
+  } catch (error) {
+    return {
+      canonicalSessionFile,
+      diagnostics: [
+        `Could not read session usage ${sessionFile}: ${error instanceof Error ? error.message : String(error)}`,
+      ],
+    };
+  }
+}
+
+function scannedPathPlaceholder(sessionFile: string): string {
+  return path.resolve(sessionFile);
 }
 
 export function runtimeUsageContribution(options: {
