@@ -122,6 +122,15 @@ import {
   type ActivitySourceSession,
 } from "./activityInbox.js";
 import {
+  collectSessionSoundRequests,
+  createDefaultSessionSoundPlayer,
+  normalizeSessionSoundSettings,
+  type SessionSoundCue,
+  type SessionSoundMemoryByKey,
+  type SessionSoundPlayer,
+  type SessionSoundSettings,
+} from "./sessionSounds.js";
+import {
   ActivityInbox,
   type ActivityInboxFilter,
 } from "./components/ActivityInbox.js";
@@ -1239,6 +1248,13 @@ export function App(): ReactElement {
     useState<ThemePreference>("system");
   const [appearanceThemePending, setAppearanceThemePending] = useState(false);
   const appearanceThemePendingRef = useRef(false);
+  const [sessionSoundSettingsPending, setSessionSoundSettingsPending] =
+    useState(false);
+  const sessionSoundSettingsPendingRef = useRef(false);
+  const sessionSoundMemoryByKey = useRef<SessionSoundMemoryByKey>({});
+  const sessionSoundPlayerRef = useRef<SessionSoundPlayer | undefined>(
+    undefined,
+  );
   const [uiMessage, setUiMessage] = useState(
     "Starting Pi Deck and resolving the active backend session.",
   );
@@ -1913,6 +1929,34 @@ export function App(): ReactElement {
     () => buildActivityInbox(activitySources),
     [activitySources],
   );
+  const sessionSoundSettings =
+    loadState.state === "ready" ? loadState.settings.sessionSounds : undefined;
+
+  useEffect(() => {
+    if (loadState.state !== "ready") {
+      return;
+    }
+    const result = collectSessionSoundRequests({
+      previous: sessionSoundMemoryByKey.current,
+      sources: activitySources,
+      settings: sessionSoundSettings,
+    });
+    sessionSoundMemoryByKey.current = result.next;
+    for (const request of result.requests) {
+      playSessionSoundCue(request.cue);
+    }
+  }, [activitySources, loadState.state, sessionSoundSettings]);
+
+  useEffect(() => {
+    const unlock = () => getSessionSoundPlayer().unlock();
+    document.addEventListener("pointerdown", unlock, { capture: true });
+    document.addEventListener("keydown", unlock, { capture: true });
+    return () => {
+      document.removeEventListener("pointerdown", unlock, { capture: true });
+      document.removeEventListener("keydown", unlock, { capture: true });
+    };
+  }, []);
+
   const scopedWorkspaceUsage =
     activityScope.type === "workspace"
       ? workspaceUsageById[activityScope.workspaceId]
@@ -5477,6 +5521,72 @@ export function App(): ReactElement {
     }
   }
 
+  function getSessionSoundPlayer(): SessionSoundPlayer {
+    const player =
+      sessionSoundPlayerRef.current ?? createDefaultSessionSoundPlayer();
+    sessionSoundPlayerRef.current = player;
+    return player;
+  }
+
+  function playSessionSoundCue(cue: SessionSoundCue): void {
+    getSessionSoundPlayer().play(cue);
+  }
+
+  async function handleSessionSoundSettingChange(
+    cue: SessionSoundCue,
+    enabled: boolean,
+  ): Promise<void> {
+    if (loadState.state !== "ready" || sessionSoundSettingsPendingRef.current) {
+      return;
+    }
+    const previousSettings = loadState.settings;
+    const previousSessionSounds = normalizeSessionSoundSettings(
+      previousSettings.sessionSounds,
+    );
+    const nextSessionSounds = {
+      ...previousSessionSounds,
+      [cue]: enabled,
+    };
+    sessionSoundSettingsPendingRef.current = true;
+    setSessionSoundSettingsPending(true);
+    setLoadState((current) =>
+      current.state === "ready"
+        ? {
+            ...current,
+            settings: { ...current.settings, sessionSounds: nextSessionSounds },
+          }
+        : current,
+    );
+    try {
+      const settings = await window.piDeck.settings.update({
+        sessionSounds: { [cue]: enabled },
+      });
+      setLoadState((current) =>
+        current.state === "ready" ? { ...current, settings } : current,
+      );
+      setUiMessage(
+        `${cue === "needsAttention" ? "Needs attention" : "Completed"} session sound ${enabled ? "enabled" : "disabled"}.`,
+      );
+    } catch (error) {
+      setLoadState((current) =>
+        current.state === "ready"
+          ? {
+              ...current,
+              settings: {
+                ...current.settings,
+                sessionSounds: previousSessionSounds,
+              },
+            }
+          : current,
+      );
+      const message = error instanceof Error ? error.message : String(error);
+      setUiMessage(`Could not update session sounds: ${message}`);
+    } finally {
+      sessionSoundSettingsPendingRef.current = false;
+      setSessionSoundSettingsPending(false);
+    }
+  }
+
   const composer = (
     <Composer
       value={draft}
@@ -5723,6 +5833,12 @@ export function App(): ReactElement {
           usageStatsVisible={usageStatsVisible}
           appearanceTheme={appearanceTheme}
           appearanceThemePending={appearanceThemePending}
+          sessionSoundSettings={normalizeSessionSoundSettings(
+            loadState.state === "ready"
+              ? loadState.settings.sessionSounds
+              : undefined,
+          )}
+          sessionSoundSettingsPending={sessionSoundSettingsPending}
           onToggleSidebar={() => handleSidebarVisibleChange(!sidebarVisible)}
           onToggleUsageStats={() =>
             handleUsageStatsVisibleChange(!usageStatsVisible)
@@ -5730,6 +5846,10 @@ export function App(): ReactElement {
           onAppearanceThemeChange={(theme) =>
             void handleAppearanceThemeChange(theme)
           }
+          onSessionSoundSettingChange={(cue, enabled) =>
+            void handleSessionSoundSettingChange(cue, enabled)
+          }
+          onTestSessionSound={playSessionSoundCue}
           onDraftWorkspaceChange={(workspaceId) =>
             handleDraftWorkspaceChange(selectedSession.id, workspaceId)
           }
@@ -9710,9 +9830,13 @@ function AppHeader(props: {
   usageStatsVisible: boolean;
   appearanceTheme: ThemePreference;
   appearanceThemePending: boolean;
+  sessionSoundSettings: SessionSoundSettings;
+  sessionSoundSettingsPending: boolean;
   onToggleSidebar(): void;
   onToggleUsageStats(): void;
   onAppearanceThemeChange(theme: ThemePreference): void;
+  onSessionSoundSettingChange(cue: SessionSoundCue, enabled: boolean): void;
+  onTestSessionSound(cue: SessionSoundCue): void;
   onDraftWorkspaceChange(workspaceId: string): void;
   onModelChange(id: string): void;
   onThinkingChange(id: string): void;
@@ -9751,7 +9875,11 @@ function AppHeader(props: {
         <AppearanceMenu
           theme={props.appearanceTheme}
           pending={props.appearanceThemePending}
+          sessionSoundSettings={props.sessionSoundSettings}
+          sessionSoundSettingsPending={props.sessionSoundSettingsPending}
           onChange={props.onAppearanceThemeChange}
+          onSessionSoundSettingChange={props.onSessionSoundSettingChange}
+          onTestSessionSound={props.onTestSessionSound}
         />
         {props.showSessionControls ? (
           <>
@@ -9784,7 +9912,11 @@ function AppHeader(props: {
 function AppearanceMenu(props: {
   theme: ThemePreference;
   pending: boolean;
+  sessionSoundSettings: SessionSoundSettings;
+  sessionSoundSettingsPending: boolean;
   onChange(theme: ThemePreference): void;
+  onSessionSoundSettingChange(cue: SessionSoundCue, enabled: boolean): void;
+  onTestSessionSound(cue: SessionSoundCue): void;
 }): ReactElement {
   const options: Array<{
     theme: ThemePreference;
@@ -9831,7 +9963,63 @@ function AppearanceMenu(props: {
           </Button>
         );
       })}
+      <div className="menu-separator" role="separator" />
+      <div className="menu-section-label">Session sounds</div>
+      <SessionSoundMenuItem
+        checked={props.sessionSoundSettings.needsAttention}
+        cue="needsAttention"
+        disabled={props.sessionSoundSettingsPending}
+        label="Needs attention"
+        onChange={props.onSessionSoundSettingChange}
+        onTest={props.onTestSessionSound}
+      />
+      <SessionSoundMenuItem
+        checked={props.sessionSoundSettings.completed}
+        cue="completed"
+        disabled={props.sessionSoundSettingsPending}
+        label="Completed"
+        onChange={props.onSessionSoundSettingChange}
+        onTest={props.onTestSessionSound}
+      />
     </Menu>
+  );
+}
+
+function SessionSoundMenuItem(props: {
+  checked: boolean;
+  cue: SessionSoundCue;
+  disabled: boolean;
+  label: string;
+  onChange(cue: SessionSoundCue, enabled: boolean): void;
+  onTest(cue: SessionSoundCue): void;
+}): ReactElement {
+  return (
+    <div className="session-sound-menu-row">
+      <Button
+        aria-pressed={props.checked}
+        disabled={props.disabled}
+        size="sm"
+        variant="menuItem"
+        onClick={() => props.onChange(props.cue, !props.checked)}
+      >
+        <span>{props.label}</span>
+        <Check
+          aria-hidden="true"
+          size={14}
+          strokeWidth={1.75}
+          visibility={props.checked ? "visible" : "hidden"}
+        />
+      </Button>
+      <Button
+        aria-label={`Test ${props.label.toLowerCase()} sound`}
+        disabled={props.disabled}
+        size="sm"
+        variant="subtle"
+        onClick={() => props.onTest(props.cue)}
+      >
+        Play
+      </Button>
+    </div>
   );
 }
 

@@ -12,12 +12,17 @@ export const defaultAppSettings: AppSettings = Object.freeze({
   maxRunningSessions: 4,
   warmWorkerLimit: 1,
   enableLoginShellEnvCapture: true,
+  sessionSounds: {
+    needsAttention: true,
+    completed: true,
+  },
 });
 
 export class SettingsStore {
   readonly settingsFile: string;
   private settings: AppSettings = { ...defaultAppSettings };
   private loaded = false;
+  private updateTail: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly userDataPath: string,
@@ -28,16 +33,35 @@ export class SettingsStore {
 
   async get(): Promise<AppSettings> {
     await this.loadIfNeeded();
-    return { ...this.settings };
+    return copySettings(this.settings);
   }
 
-  async update(patch: unknown): Promise<AppSettings> {
-    await this.loadIfNeeded();
-    const parsedPatch = appSettingsPatchSchema.parse(patch);
-    const next = appSettingsSchema.parse({ ...this.settings, ...parsedPatch });
-    this.settings = next;
-    await this.persist();
-    return { ...this.settings };
+  update(patch: unknown): Promise<AppSettings> {
+    const operation = this.updateTail.then(async () => {
+      await this.loadIfNeeded();
+      const parsedPatch = appSettingsPatchSchema.parse(patch);
+      const next = appSettingsSchema.parse({
+        ...this.settings,
+        ...parsedPatch,
+        ...(parsedPatch.sessionSounds === undefined
+          ? {}
+          : {
+              sessionSounds: {
+                ...this.settings.sessionSounds,
+                ...parsedPatch.sessionSounds,
+              },
+            }),
+      });
+      await this.persist(next);
+      this.settings = next;
+      return copySettings(next);
+    });
+    // Keep the queue live after a rejected validation or filesystem operation.
+    this.updateTail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
   }
 
   async loadIfNeeded(): Promise<void> {
@@ -70,11 +94,11 @@ export class SettingsStore {
     this.loaded = true;
   }
 
-  private async persist(): Promise<void> {
+  private async persist(settings: AppSettings = this.settings): Promise<void> {
     await mkdir(this.userDataPath, { recursive: true });
     await writeFile(
       this.settingsFile,
-      `${JSON.stringify(this.settings, null, 2)}\n`,
+      `${JSON.stringify(settings, null, 2)}\n`,
       { mode: 0o600 },
     );
   }
@@ -92,6 +116,16 @@ export class SettingsStore {
       );
     }
   }
+}
+
+function copySettings(settings: AppSettings): AppSettings {
+  return {
+    ...settings,
+    ...(settings.images === undefined
+      ? {}
+      : { images: { ...settings.images } }),
+    sessionSounds: { ...settings.sessionSounds },
+  };
 }
 
 function isMissingFile(error: unknown): boolean {

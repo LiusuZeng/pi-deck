@@ -101,7 +101,7 @@ import {
   workflowUpdateRequestSchema,
 } from "../shared/agentWorkflowSchemas.js";
 import type {
-  AppSettings,
+  AppSettingsPatch,
   AttachmentAssignOwnerRequest,
   AttachmentImportImageRequest,
   AttachmentReleaseOwnerRequest,
@@ -186,7 +186,7 @@ const api: PiDeckApi = Object.freeze({
         request: undefined,
         responseSchema: appSettingsSchema,
       }),
-    update: (patch: Partial<AppSettings>) =>
+    update: (patch: AppSettingsPatch) =>
       invokeValidated({
         channel: ipcChannels.settingsUpdate,
         request: appSettingsPatchSchema.parse(patch),

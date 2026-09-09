@@ -3206,6 +3206,33 @@ h3 {
   margin-left: auto;
 }
 
+.menu-separator {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--color-border);
+}
+
+.menu-section-label {
+  padding: 2px 8px 4px;
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.session-sound-menu-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.session-sound-menu-row .ui-button[aria-label^="Test"] {
+  width: auto;
+  min-width: 52px;
+}
+
 .sr-only {
   position: absolute;
   width: 1px;
