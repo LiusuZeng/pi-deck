@@ -56,6 +56,7 @@ import type {
   workspaceMoveSessionRequestSchema,
   workspaceRefSchema,
   workspaceRemoveSessionRequestSchema,
+  workspaceRenameSessionRequestSchema,
   workspaceRestoreSessionRequestSchema,
   workspaceSessionMutationResultSchema,
   workspaceRestoreRequestSchema,
@@ -223,6 +224,9 @@ export type WorkspaceMoveSessionRequest = z.infer<
 export type WorkspaceRemoveSessionRequest = z.infer<
   typeof workspaceRemoveSessionRequestSchema
 >;
+export type WorkspaceRenameSessionRequest = z.infer<
+  typeof workspaceRenameSessionRequestSchema
+>;
 export type WorkspaceSessionMutationResult = z.infer<
   typeof workspaceSessionMutationResultSchema
 >;
@@ -383,6 +387,9 @@ export interface PiDeckApi {
     ): Promise<WorkspaceSessionMutationResult>;
     removeSession(
       request: WorkspaceRemoveSessionRequest,
+    ): Promise<WorkspaceSessionMutationResult>;
+    renameSession(
+      request: WorkspaceRenameSessionRequest,
     ): Promise<WorkspaceSessionMutationResult>;
     archiveSession(
       request: WorkspaceArchiveSessionRequest,

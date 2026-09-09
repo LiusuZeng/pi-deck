@@ -66,6 +66,7 @@ import {
   workspaceUsageRequestSchema,
   workspaceUsageResultSchema,
   workspaceRemoveSessionRequestSchema,
+  workspaceRenameSessionRequestSchema,
   workspaceRestoreSessionRequestSchema,
   workspaceRestoreRequestSchema,
   workspaceSelectRequestSchema,
@@ -1369,6 +1370,15 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async ({ workspaceId, sessionFile }) =>
       ensureWorkspaceStore().restoreSession(workspaceId, sessionFile),
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.workspaceRenameSession,
+    requestSchema: workspaceRenameSessionRequestSchema,
+    responseSchema: workspaceSessionMutationResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ sessionFile, title }) =>
+      ensureWorkspaceStore().renameSession(sessionFile, title),
   });
 
   registerValidatedIpc({

@@ -34,6 +34,7 @@ import {
   workspaceListSessionsRequestSchema,
   workspaceListResultSchema,
   workspaceMoveSessionRequestSchema,
+  workspaceRenameSessionRequestSchema,
   workspaceRestoreRequestSchema,
   workspaceUpdateRequestSchema,
   workspaceUsageRequestSchema,
@@ -232,6 +233,24 @@ describe("IPC schemas", () => {
       sessionFile: "/sessions/one.jsonl",
     });
     expect(
+      workspaceRenameSessionRequestSchema.parse({
+        sessionFile: "/sessions/one.jsonl",
+        title: "  My session  ",
+      }),
+    ).toEqual({ sessionFile: "/sessions/one.jsonl", title: "My session" });
+    expect(() =>
+      workspaceRenameSessionRequestSchema.parse({
+        sessionFile: "/sessions/one.jsonl",
+        title: " ",
+      }),
+    ).toThrow();
+    expect(() =>
+      workspaceRenameSessionRequestSchema.parse({
+        sessionFile: "/sessions/one.jsonl",
+        title: "x".repeat(121),
+      }),
+    ).toThrow();
+    expect(
       workspaceListSessionsRequestSchema.parse({
         workspaceId: workspace.id,
         includeArchived: true,
@@ -245,8 +264,9 @@ describe("IPC schemas", () => {
         updatedAtMs: 1,
         messageCount: 1,
         archivedAtMs: 2,
-      }).archivedAtMs,
-    ).toBe(2);
+        titleOverride: "Custom title",
+      }).titleOverride,
+    ).toBe("Custom title");
     expect(
       workspaceUsageRequestSchema.parse({ workspaceId: workspace.id }),
     ).toEqual({

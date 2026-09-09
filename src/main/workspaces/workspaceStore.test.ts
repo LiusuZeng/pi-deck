@@ -90,6 +90,42 @@ test("WorkspaceStore archives session membership without touching the Pi file", 
   assert.equal((await store.getCachedSessionSummaries(workspace.id)).length, 1);
 });
 
+test("WorkspaceStore persists session title overrides and preserves them on refresh", async () => {
+  const { root, home } = await temporaryHome();
+  const sessionFile = path.join(root, "renamed.jsonl");
+  await fs.writeFile(sessionFile, "session\n");
+  const store = new WorkspaceStore(home);
+  const workspace = await store.create({ name: "Renamed sessions" });
+  await store.upsertSessionRef(workspace.id, summary(sessionFile, "Generated"));
+
+  await store.renameSession(sessionFile, "  My session  ");
+  assert.equal(
+    (await store.getCachedSessionSummaries(workspace.id))[0]?.title,
+    "My session",
+  );
+  await store.upsertSessionRef(workspace.id, summary(sessionFile, "Refreshed"));
+  assert.equal(
+    (await store.getCachedSessionSummaries(workspace.id))[0]?.title,
+    "My session",
+  );
+  const reloaded = new WorkspaceStore(home);
+  assert.equal(
+    (await reloaded.getCachedSessionSummaries(workspace.id))[0]?.titleOverride,
+    "My session",
+  );
+
+  await assert.rejects(store.renameSession(sessionFile, "   "), /required/i);
+  await assert.rejects(
+    store.renameSession(sessionFile, "x".repeat(121)),
+    /120 characters/i,
+  );
+  await store.archive(workspace.id);
+  await assert.rejects(
+    store.renameSession(sessionFile, "Archived"),
+    /archived/i,
+  );
+});
+
 test("WorkspaceStore persists durable completion metadata in cached summaries", async () => {
   const { root, home } = await temporaryHome();
   const sessionFile = path.join(root, "completed.jsonl");

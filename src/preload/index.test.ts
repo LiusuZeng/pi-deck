@@ -473,6 +473,10 @@ describe("preload PiDeck API validation", () => {
       sessionFile: "/sessions/one.jsonl",
       toWorkspaceId: "workspace-2",
     });
+    await api.workspaces.renameSession({
+      sessionFile: "/sessions/one.jsonl",
+      title: "  Renamed session  ",
+    });
     await api.workspaces.removeSession({
       workspaceId: "workspace-2",
       sessionFile: "/sessions/one.jsonl",
@@ -492,6 +496,14 @@ describe("preload PiDeck API validation", () => {
       {
         sessionFile: "/sessions/one.jsonl",
         toWorkspaceId: "workspace-2",
+      },
+    );
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenNthCalledWith(
+      3,
+      "workspaces:renameSession",
+      {
+        sessionFile: "/sessions/one.jsonl",
+        title: "Renamed session",
       },
     );
   });

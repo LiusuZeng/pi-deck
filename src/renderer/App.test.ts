@@ -1558,6 +1558,110 @@ describe("renderer attachment actions", () => {
 });
 
 describe("renderer resume recovery", () => {
+  it("carries a durable display-name override from saved summaries", () => {
+    expect(
+      __rendererTestHooks.sessionFromSummary(
+        {
+          id: "/sessions/saved.jsonl",
+          sessionFile: "/sessions/saved.jsonl",
+          title: "My display name",
+          titleOverride: "My display name",
+          updatedAtMs: 1,
+          messageCount: 0,
+        },
+        "workspace-1",
+      ),
+    ).toMatchObject({
+      title: "My display name",
+      titleOverride: "My display name",
+    });
+  });
+
+  it("uses the latest saved-session row when resume completes after rename", () => {
+    const original = {
+      ...baseSession(),
+      id: "saved-before-resume",
+      title: "Generated title",
+      sessionFile: "/sessions/saved.jsonl",
+      resumeBacked: true,
+      runtimeBacked: false,
+    } as any;
+    const renamed = {
+      ...original,
+      title: "Renamed while resuming",
+      titleOverride: "Renamed while resuming",
+      status: "reconnecting",
+      isResuming: true,
+    } as any;
+
+    expect(
+      __rendererTestHooks.currentSessionForSavedResume([renamed], original),
+    ).toMatchObject({
+      title: "Renamed while resuming",
+      titleOverride: "Renamed while resuming",
+    });
+  });
+
+  it("preserves a queued rename when replacing a resumed saved session", () => {
+    const original = {
+      ...baseSession(),
+      id: "saved-before-resume",
+      title: "Generated title",
+      sessionFile: "/sessions/saved.jsonl",
+      resumeBacked: true,
+      runtimeBacked: false,
+    } as any;
+    const queuedRename = {
+      ...original,
+      title: "Queued rename",
+      titleOverride: "Queued rename",
+      status: "reconnecting",
+      isResuming: true,
+    } as any;
+    const runtime = {
+      ...baseSession(),
+      id: "runtime-after-resume",
+      title: "Pi generated runtime title",
+      sessionFile: "/sessions/saved.jsonl",
+      runtimeBacked: true,
+      resumeBacked: false,
+    } as any;
+
+    const replaced = __rendererTestHooks.replaceResumedSession(
+      [queuedRename],
+      original.id,
+      __rendererTestHooks.resumedSessionForCurrentSavedRow(
+        runtime,
+        __rendererTestHooks.currentSessionForSavedResume(
+          [queuedRename],
+          original,
+        ),
+      ),
+    );
+
+    expect(replaced).toHaveLength(1);
+    expect(replaced[0]).toMatchObject({
+      id: "runtime-after-resume",
+      title: "Queued rename",
+      titleOverride: "Queued rename",
+      workspaceId: original.workspaceId,
+    });
+  });
+
+  it("does not allow renaming while a saved session is reconnecting", () => {
+    expect(
+      __rendererTestHooks.canRenameSavedSession(
+        {
+          ...baseSession(),
+          sessionFile: "/sessions/saved.jsonl",
+          status: "reconnecting",
+          isResuming: true,
+        } as any,
+        true,
+      ),
+    ).toBe(false);
+  });
+
   it("recognizes missing saved session files as refreshable rows", () => {
     expect(
       __rendererTestHooks.isMissingSessionFileError(

@@ -549,6 +549,8 @@ interface SessionViewModel {
   /** Pi execution context for this particular session/draft. */
   workingDirectory?: string;
   title: string;
+  /** A durable Pi Deck-only display-name override for a saved session. */
+  titleOverride?: string;
   project: string;
   projectPath: string;
   subtitle: string;
@@ -751,6 +753,10 @@ type WorkspaceCapableApi = {
       sessionFile: string;
       toWorkspaceId: string;
     }): Promise<unknown>;
+    renameSession?(request: {
+      sessionFile: string;
+      title: string;
+    }): Promise<unknown>;
     removeSession?(request: {
       workspaceId: string;
       sessionFile: string;
@@ -824,6 +830,7 @@ type WorkspaceDialogState =
   | { kind: "archive"; workspaceId: string }
   | { kind: "unassigned" }
   | { kind: "move"; sessionId: string }
+  | { kind: "renameSession"; sessionId: string }
   | { kind: "remove"; sessionId: string }
   | { kind: "delete"; sessionId: string }
   | { kind: "deleteAll" }
@@ -3177,7 +3184,16 @@ export function App(): ReactElement {
       // Use the state at completion time: another runtime can stream while
       // this saved session is being resumed. This merge is intentionally not
       // guarded by navigation: the worker must remain retained in background.
-      setSessions((items) => replaceResumedSession(items, session.id, resumed));
+      setSessions((items) =>
+        replaceResumedSession(
+          items,
+          session.id,
+          resumedSessionForCurrentSavedRow(
+            resumed,
+            currentSessionForSavedResume(items, session),
+          ),
+        ),
+      );
       setComposerDrafts((items) =>
         moveComposerDraft(items, session.id, resumed.id),
       );
@@ -4595,6 +4611,46 @@ export function App(): ReactElement {
     }
   }
 
+  async function renameSavedSession(
+    sessionId: string,
+    title: string,
+  ): Promise<void> {
+    const session = sessionsRef.current.find((item) => item.id === sessionId);
+    const normalizedTitle = title.trim();
+    if (
+      !canRenameSavedSession(session, isRealBackendMode) ||
+      normalizedTitle.length === 0
+    ) {
+      return;
+    }
+    setWorkspaceDialogBusy(true);
+    try {
+      await window.piDeck.workspaces.renameSession({
+        sessionFile: session.sessionFile,
+        title: normalizedTitle,
+      });
+      setSessions((items) =>
+        items.map((item) =>
+          item.sessionFile === session.sessionFile
+            ? {
+                ...item,
+                title: normalizedTitle,
+                titleOverride: normalizedTitle,
+              }
+            : item,
+        ),
+      );
+      setWorkspaceDialog(undefined);
+      setUiMessage(`Renamed session to ${normalizedTitle}.`);
+    } catch (error) {
+      setUiMessage(
+        `Failed to rename session: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      setWorkspaceDialogBusy(false);
+    }
+  }
+
   async function removeSavedSession(sessionId: string): Promise<void> {
     const session = sessionsRef.current.find((item) => item.id === sessionId);
     if (
@@ -5675,6 +5731,9 @@ export function App(): ReactElement {
           onMoveSession={(sessionId) =>
             setWorkspaceDialog({ kind: "move", sessionId })
           }
+          onRenameSession={(sessionId) =>
+            setWorkspaceDialog({ kind: "renameSession", sessionId })
+          }
           onRemoveSession={(sessionId) =>
             setWorkspaceDialog({ kind: "remove", sessionId })
           }
@@ -5988,6 +6047,9 @@ export function App(): ReactElement {
               void moveSavedSession(sessionId, workspaceId)
             }
             onRemove={(sessionId) => void removeSavedSession(sessionId)}
+            onRenameSession={(sessionId, name) =>
+              void renameSavedSession(sessionId, name)
+            }
             onRename={(name) =>
               void renameWorkspace(
                 name,
@@ -6333,6 +6395,41 @@ function validateComposerInput(input: {
     return "Selected model does not support image input.";
   }
   return undefined;
+}
+
+function currentSessionForSavedResume(
+  sessions: SessionViewModel[],
+  session: SessionViewModel,
+): SessionViewModel {
+  return (
+    sessions.find((item) => item.id === session.id) ??
+    sessions.find(
+      (item) =>
+        session.sessionFile !== undefined &&
+        item.sessionFile === session.sessionFile,
+    ) ??
+    session
+  );
+}
+
+function resumedSessionForCurrentSavedRow(
+  resumed: SessionViewModel,
+  currentSession: SessionViewModel,
+): SessionViewModel {
+  const titleOverride = currentSession.titleOverride;
+  return {
+    ...resumed,
+    // Pi snapshots carry the generated title. Preserve the latest local
+    // display-name override, including a rename that was queued while this
+    // saved session was being resumed.
+    ...(titleOverride !== undefined
+      ? {
+          title: titleOverride,
+          titleOverride,
+        }
+      : {}),
+    workspaceId: currentSession.workspaceId,
+  };
 }
 
 function replaceResumedSession(
@@ -6869,6 +6966,9 @@ function sessionFromSummary(
     sessionId: durableSessionId,
     ...(summary.cwd !== undefined ? { workingDirectory: summary.cwd } : {}),
     title: summary.title,
+    ...(summary.titleOverride !== undefined
+      ? { titleOverride: summary.titleOverride }
+      : {}),
     project: summary.cwd?.split(/[\\/]/).pop() ?? "Pi project",
     projectPath: summary.cwd ?? "Unknown project",
     ...(projectId !== undefined ? { projectId } : {}),
@@ -8846,6 +8946,7 @@ function SessionSidebar(props: {
   onNewWorkspace(): void;
   onDeleteSession(sessionId: string): void;
   onMoveSession(sessionId: string): void;
+  onRenameSession(sessionId: string): void;
   onRemoveSession(sessionId: string): void;
   onOpenUnassigned(): void;
   onDeleteAllSessions(): void;
@@ -8946,6 +9047,7 @@ function SessionSidebar(props: {
 
   function renderSession(session: SessionViewModel): ReactElement {
     const canDelete = isSessionDeletable(session, props.realMode);
+    const canRename = canRenameSavedSession(session, props.realMode);
     const canManageMembership =
       props.realMode &&
       canDelete &&
@@ -8992,6 +9094,20 @@ function SessionSidebar(props: {
               label={`Session actions for ${session.title}`}
               menuLabel={`Session actions for ${session.title}`}
             >
+              <Button
+                disabled={!canRename}
+                role="menuitem"
+                size="sm"
+                title={
+                  canRename
+                    ? undefined
+                    : "Finish the active session state before renaming this session."
+                }
+                variant="menuItem"
+                onClick={() => props.onRenameSession(session.id)}
+              >
+                Rename session…
+              </Button>
               <Button
                 disabled={!canManageMembership}
                 role="menuitem"
@@ -9446,6 +9562,17 @@ function isSessionDeletable(
     session.backendMode === "real" &&
     typeof session.sessionFile === "string" &&
     session.sessionFile.length > 0
+  );
+}
+
+function canRenameSavedSession(
+  session: SessionViewModel | undefined,
+  realMode: boolean,
+): session is SessionViewModel & { sessionFile: string } {
+  return (
+    session !== undefined &&
+    isSessionDeletable(session, realMode) &&
+    !isSessionBusy(session)
   );
 }
 
@@ -9908,6 +10035,7 @@ function WorkspaceManagementDialog(props: {
   onMove(sessionId: string, workspaceId: string): void;
   onRemove(sessionId: string): void;
   onRename(name: string): void;
+  onRenameSession(sessionId: string, name: string): void;
 }): ReactElement {
   const targetWorkspaceId =
     props.dialog.kind === "rename" || props.dialog.kind === "archive"
@@ -9916,15 +10044,21 @@ function WorkspaceManagementDialog(props: {
   const targetWorkspace =
     props.workspaces.find((workspace) => workspace.id === targetWorkspaceId) ??
     props.currentWorkspace;
-  const [name, setName] = useState(() =>
-    initialWorkspaceDialogName(props.dialog.kind, targetWorkspace.name),
-  );
+  const renameSessionId =
+    props.dialog.kind === "renameSession" ? props.dialog.sessionId : undefined;
+  const initialName =
+    renameSessionId !== undefined
+      ? (props.sessions.find((item) => item.id === renameSessionId)?.title ??
+        "")
+      : initialWorkspaceDialogName(props.dialog.kind, targetWorkspace.name);
+  const [name, setName] = useState(initialName);
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
   const [destinationWorkspaceId, setDestinationWorkspaceId] = useState("");
   const dialogRef = useRef<HTMLElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const sessionId =
     props.dialog.kind === "move" ||
+    props.dialog.kind === "renameSession" ||
     props.dialog.kind === "remove" ||
     props.dialog.kind === "delete"
       ? props.dialog.sessionId
@@ -9956,11 +10090,13 @@ function WorkspaceManagementDialog(props: {
             ? "unassigned-sessions"
             : props.dialog.kind === "move"
               ? "session-move-dialog"
-              : props.dialog.kind === "remove"
-                ? "session-remove-dialog"
-                : props.dialog.kind === "delete"
-                  ? "session-delete-dialog"
-                  : "session-delete-all-dialog";
+              : props.dialog.kind === "renameSession"
+                ? "session-rename-dialog"
+                : props.dialog.kind === "remove"
+                  ? "session-remove-dialog"
+                  : props.dialog.kind === "delete"
+                    ? "session-delete-dialog"
+                    : "session-delete-all-dialog";
   const title =
     props.dialog.kind === "create"
       ? "New workspace"
@@ -9972,11 +10108,13 @@ function WorkspaceManagementDialog(props: {
             ? "Unassigned sessions"
             : props.dialog.kind === "move"
               ? "Move session to workspace"
-              : props.dialog.kind === "remove"
-                ? "Remove session from workspace"
-                : props.dialog.kind === "delete"
-                  ? "Delete session"
-                  : "Delete saved sessions";
+              : props.dialog.kind === "renameSession"
+                ? "Rename session"
+                : props.dialog.kind === "remove"
+                  ? "Remove session from workspace"
+                  : props.dialog.kind === "delete"
+                    ? "Delete session"
+                    : "Delete saved sessions";
 
   useLayoutEffect(() => {
     returnFocusRef.current =
@@ -10095,6 +10233,43 @@ function WorkspaceManagementDialog(props: {
                 {props.dialog.kind === "create"
                   ? "Create workspace"
                   : "Save name"}
+              </Button>
+            </div>
+          </form>
+        ) : null}
+
+        {props.dialog.kind === "renameSession" ? (
+          <form
+            className="workspace-modal-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (session) props.onRenameSession(session.id, name);
+            }}
+          >
+            <label>
+              Session title
+              <input
+                autoFocus
+                data-dialog-initial-focus
+                disabled={props.busy}
+                maxLength={120}
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+              />
+            </label>
+            <p className="workspace-modal-note">
+              This changes only Pi Deck's display name, not the Pi JSONL file.
+            </p>
+            <div className="workspace-modal-actions">
+              <Button disabled={props.busy} onClick={props.onClose}>
+                Cancel
+              </Button>
+              <Button
+                disabled={props.busy || name.trim().length === 0}
+                type="submit"
+                variant="solid"
+              >
+                Save name
               </Button>
             </div>
           </form>
@@ -13140,6 +13315,7 @@ export const __rendererTestHooks = {
   isMissingSessionFileError,
   isDetachedRuntimeError,
   isSessionDeletable,
+  canRenameSavedSession,
   canManageWorkspaceMembership,
   listProjectsIfAvailable,
   selectProjectIfAvailable,
@@ -13156,6 +13332,8 @@ export const __rendererTestHooks = {
   mergeSessionUsageFromRuntimeStatus,
   updateSessionByRuntimeId,
   eventHasUsageMetadata,
+  currentSessionForSavedResume,
+  resumedSessionForCurrentSavedRow,
   replaceResumedSession,
   removeSessionById,
   removeSessionsByIds,
