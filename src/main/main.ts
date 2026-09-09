@@ -5276,15 +5276,13 @@ async function recoverWorkspaceSessionUsage(
   const recoveryBatchSize = 2;
   for (let index = 0; index < sessionFiles.length; index += recoveryBatchSize) {
     const results = await Promise.all(
-      sessionFiles
-        .slice(index, index + recoveryBatchSize)
-        .map((sessionFile) =>
-          usageStore.refreshSessionFileUsage({
-            workspaceId,
-            sessionFile,
-            source: "session",
-          }),
-        ),
+      sessionFiles.slice(index, index + recoveryBatchSize).map((sessionFile) =>
+        usageStore.refreshSessionFileUsage({
+          workspaceId,
+          sessionFile,
+          source: "session",
+        }),
+      ),
     );
     for (const result of results) {
       diagnostics.push(...result.diagnostics);
@@ -5976,11 +5974,13 @@ async function getChatRuntimeStatus(
   const usage =
     runtimeUsageFromSessionStats(sessionStats) ?? runtimeUsageFromState(state);
   if (usage !== undefined) {
-    void recordRuntimeCumulativeUsage(runtimeId, state, usage).catch((error) => {
-      diagnostics?.recordError(
-        `Failed to record cumulative usage for ${runtimeId}: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    });
+    void recordRuntimeCumulativeUsage(runtimeId, state, usage).catch(
+      (error) => {
+        diagnostics?.recordError(
+          `Failed to record cumulative usage for ${runtimeId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      },
+    );
   }
   return {
     runtimeId,
