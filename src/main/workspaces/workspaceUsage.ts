@@ -248,8 +248,7 @@ export class WorkspaceUsageStore {
     const contributorsWithoutCost =
       existing?.contributorsWithoutCost ??
       (hasReportedUsage && options.usage.totalCostUsd === undefined ? 1 : 0);
-    const totalCostUsd =
-      options.usage.totalCostUsd ?? existing?.totalCostUsd;
+    const totalCostUsd = options.usage.totalCostUsd ?? existing?.totalCostUsd;
     await this.upsertSnapshot({
       id,
       workspaceId: options.workspaceId,
@@ -601,25 +600,22 @@ async function usageSnapshotFromSessionFile(options: {
   signature: { size: number; mtimeMs: number };
 }): Promise<{ snapshot?: UsageSnapshot; diagnostics: string[] }> {
   let totals = emptyUsageTotals();
-  const scanned = await scanSessionFileUsage(
-    options.sessionFile,
-    (usage) => {
-      totals = {
-        inputTokens: totals.inputTokens + usage.inputTokens,
-        outputTokens: totals.outputTokens + usage.outputTokens,
-        cacheReadTokens: totals.cacheReadTokens + usage.cacheReadTokens,
-        cacheWriteTokens: totals.cacheWriteTokens + usage.cacheWriteTokens,
-        totalTokens: totals.totalTokens + usage.totalTokens,
-        knownCostUsd: totals.knownCostUsd + (usage.totalCostUsd ?? 0),
-        contributorsWithCost:
-          totals.contributorsWithCost +
-          (usage.totalCostUsd === undefined ? 0 : 1),
-        contributorsWithoutCost:
-          totals.contributorsWithoutCost +
-          (usage.totalCostUsd === undefined ? 1 : 0),
-      };
-    },
-  );
+  const scanned = await scanSessionFileUsage(options.sessionFile, (usage) => {
+    totals = {
+      inputTokens: totals.inputTokens + usage.inputTokens,
+      outputTokens: totals.outputTokens + usage.outputTokens,
+      cacheReadTokens: totals.cacheReadTokens + usage.cacheReadTokens,
+      cacheWriteTokens: totals.cacheWriteTokens + usage.cacheWriteTokens,
+      totalTokens: totals.totalTokens + usage.totalTokens,
+      knownCostUsd: totals.knownCostUsd + (usage.totalCostUsd ?? 0),
+      contributorsWithCost:
+        totals.contributorsWithCost +
+        (usage.totalCostUsd === undefined ? 0 : 1),
+      contributorsWithoutCost:
+        totals.contributorsWithoutCost +
+        (usage.totalCostUsd === undefined ? 1 : 0),
+    };
+  });
   if (scanned.diagnostics.length > 0) {
     return { diagnostics: scanned.diagnostics };
   }
@@ -692,8 +688,7 @@ function migrateLegacyContributions(
     current.cacheWriteTokens += next.cacheWriteTokens;
     current.totalTokens += next.totalTokens;
     if (next.totalCostUsd !== undefined) {
-      current.totalCostUsd =
-        (current.totalCostUsd ?? 0) + next.totalCostUsd;
+      current.totalCostUsd = (current.totalCostUsd ?? 0) + next.totalCostUsd;
     }
     current.contributorsWithCost += next.contributorsWithCost;
     current.contributorsWithoutCost += next.contributorsWithoutCost;
@@ -806,8 +801,9 @@ export async function contributionsFromSessionFile(options: {
   sessionFile: string;
   source?: UsageContributionSource;
 }): Promise<{ contributions: UsageContribution[]; diagnostics: string[] }> {
-  const canonicalSessionFile =
-    await canonicalRealpathOrResolved(options.sessionFile);
+  const canonicalSessionFile = await canonicalRealpathOrResolved(
+    options.sessionFile,
+  );
   const contributions: UsageContribution[] = [];
   const now = Date.now();
   const source = options.source ?? "session";
@@ -1031,9 +1027,7 @@ async function canonicalOrResolved(filePath: string): Promise<string> {
   return path.resolve(filePath);
 }
 
-async function canonicalRealpathOrResolved(
-  filePath: string,
-): Promise<string> {
+async function canonicalRealpathOrResolved(filePath: string): Promise<string> {
   const resolved = path.resolve(filePath);
   try {
     return await fs.realpath(resolved);
