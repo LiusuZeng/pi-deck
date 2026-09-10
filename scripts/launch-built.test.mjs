@@ -37,6 +37,13 @@ async function writeCompletedBuild(
   );
 }
 
+async function writeSourceRows(sourceDir, start, end) {
+  for (let index = start; index < end; index += 1) {
+    const sourcePath = path.join(sourceDir, `row-${index}.ts`);
+    await writeFile(sourcePath, "export {};\n");
+  }
+}
+
 describe("built launch validation", () => {
   it("reports actionable missing completed-build outputs", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "pi-deck-build-"));
@@ -67,7 +74,7 @@ describe("built launch validation", () => {
     }
   });
 
-  it("rejects required outputs that no longer match the completed build", async () => {
+  it("rejects required outputs changed after build", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "pi-deck-build-"));
     try {
       await writeCompletedBuild(root);
@@ -81,15 +88,13 @@ describe("built launch validation", () => {
     }
   });
 
-  it("does not traverse source trees during normal launch validation", async () => {
+  it("keeps normal validation constant-cost as source grows", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "pi-deck-build-"));
     try {
       await writeCompletedBuild(root);
       const sourceDir = path.join(root, "src", "renderer", "history");
       await mkdir(sourceDir, { recursive: true });
-      for (let index = 0; index < 200; index += 1) {
-        await writeFile(path.join(sourceDir, `row-${index}.ts`), "export {};\n");
-      }
+      await writeSourceRows(sourceDir, 0, 200);
 
       const firstMetrics = {};
       await expect(
@@ -97,9 +102,7 @@ describe("built launch validation", () => {
       ).resolves.toEqual([]);
       expect(firstMetrics.readdirCalls ?? 0).toBe(0);
 
-      for (let index = 200; index < 400; index += 1) {
-        await writeFile(path.join(sourceDir, `row-${index}.ts`), "export {};\n");
-      }
+      await writeSourceRows(sourceDir, 200, 400);
       const secondMetrics = {};
       await expect(
         validateBuiltApp(root, { metrics: secondMetrics }),
@@ -113,7 +116,7 @@ describe("built launch validation", () => {
     }
   });
 
-  it("keeps stale-source detection in the explicit deep validation path", async () => {
+  it("retains stale-source detection in deep validation", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "pi-deck-build-"));
     try {
       await writeCompletedBuild(root, { sourceMtimeMs: 1 });
