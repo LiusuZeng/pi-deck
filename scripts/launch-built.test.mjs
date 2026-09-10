@@ -4,7 +4,10 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { validateBuiltApp } from "./launch-built.mjs";
 
-async function writeCompletedBuild(root, { includeIcon = true } = {}) {
+async function writeCompletedBuild(
+  root,
+  { includeIcon = true, sourceMtimeMs = Date.now() } = {},
+) {
   const outputs = ["main/main.js", "preload/index.js", "renderer/index.html"];
   if (includeIcon) {
     outputs.push("renderer/pi-deck-app-icon.png");
@@ -26,8 +29,9 @@ async function writeCompletedBuild(root, { includeIcon = true } = {}) {
   await writeFile(
     path.join(root, "dist", ".pi-deck-build.json"),
     JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: 2,
       builtAtMs: Date.now(),
+      sourceMtimeMs,
       outputs: manifestOutputs,
     }),
   );
@@ -57,6 +61,69 @@ describe("built launch validation", () => {
 
       await expect(validateBuiltApp(root)).resolves.toContain(
         "Required build output is missing or empty: dist/renderer/pi-deck-app-icon.png",
+      );
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects required outputs that no longer match the completed build", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "pi-deck-build-"));
+    try {
+      await writeCompletedBuild(root);
+      await writeFile(path.join(root, "dist", "main", "main.js"), "changed");
+
+      await expect(validateBuiltApp(root)).resolves.toContain(
+        "Build output does not match the completed build: dist/main/main.js",
+      );
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  it("does not traverse source trees during normal launch validation", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "pi-deck-build-"));
+    try {
+      await writeCompletedBuild(root);
+      const sourceDir = path.join(root, "src", "renderer", "history");
+      await mkdir(sourceDir, { recursive: true });
+      for (let index = 0; index < 200; index += 1) {
+        await writeFile(path.join(sourceDir, `row-${index}.ts`), "export {};\n");
+      }
+
+      const firstMetrics = {};
+      await expect(
+        validateBuiltApp(root, { metrics: firstMetrics }),
+      ).resolves.toEqual([]);
+      expect(firstMetrics.readdirCalls ?? 0).toBe(0);
+
+      for (let index = 200; index < 400; index += 1) {
+        await writeFile(path.join(sourceDir, `row-${index}.ts`), "export {};\n");
+      }
+      const secondMetrics = {};
+      await expect(
+        validateBuiltApp(root, { metrics: secondMetrics }),
+      ).resolves.toEqual([]);
+
+      expect(secondMetrics.readdirCalls ?? 0).toBe(0);
+      expect(secondMetrics.statCalls).toBe(firstMetrics.statCalls);
+      expect(secondMetrics.readFileCalls).toBe(firstMetrics.readFileCalls);
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  it("keeps stale-source detection in the explicit deep validation path", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "pi-deck-build-"));
+    try {
+      await writeCompletedBuild(root, { sourceMtimeMs: 1 });
+      const sourceDir = path.join(root, "src");
+      await mkdir(sourceDir, { recursive: true });
+      await writeFile(path.join(sourceDir, "changed.ts"), "export {};\n");
+
+      await expect(validateBuiltApp(root)).resolves.toEqual([]);
+      await expect(validateBuiltApp(root, { deep: true })).resolves.toContain(
+        "Source or build configuration changed after the completed build.",
       );
     } finally {
       await rm(root, { force: true, recursive: true });
