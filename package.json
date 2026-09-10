@@ -39,7 +39,7 @@
     "lint": "npm run typecheck && npm run check:site",
     "verify:ci": "npm run format && npm run typecheck && npm test && npm run build && npm run check:site && npm run smoke:real && npm run test:e2e",
     "verify:release": "npm run verify:ci && npm run test:e2e:real-smoke",
-    "format": "prettier --write \"src/renderer/App.tsx\" && git diff -- src/renderer/App.tsx && false"
+    "format": "prettier --check \"index.html\" \"package*.json\" \"*.config.ts\" \"tsconfig*.json\" \"scripts/**/*.mjs\" \"src/**/*.{ts,tsx,css}\" \"e2e/**/*.ts\""
   },
   "dependencies": {
     "@dagrejs/dagre": "^3.1.1",
