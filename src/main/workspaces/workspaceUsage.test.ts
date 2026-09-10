@@ -528,7 +528,9 @@ describe("workspace usage accounting", () => {
     assert.equal(parsed.version, 2);
     assert.equal(parsed.snapshots.length, 3);
     assert.deepEqual(
-      parsed.snapshots.map((snapshot) => snapshot.totalTokens).sort((a, b) => a - b),
+      parsed.snapshots
+        .map((snapshot) => snapshot.totalTokens)
+        .sort((a, b) => a - b),
       [500, 750, 1000],
     );
     assert.ok(
