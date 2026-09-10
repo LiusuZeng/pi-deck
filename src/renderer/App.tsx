@@ -614,7 +614,9 @@ function activityInboxModelForPrimaryView(
   primaryView: PrimaryView,
   sources: readonly ActivitySourceSession[],
 ) {
-  return primaryView.kind === "work" ? buildActivityInbox(sources) : undefined;
+  return primaryView.kind === "work"
+    ? buildActivityInbox(sources)
+    : undefined;
 }
 
 function useStableEvent<TArguments extends unknown[], TResult>(
@@ -1340,7 +1342,9 @@ export function App(): ReactElement {
   const onRespondToChatTimelineExtensionUi = useStableEvent(
     handleExtensionUiResponse,
   );
-  const onRetryChatTimelineSession = useStableEvent(handleRetrySelectedSession);
+  const onRetryChatTimelineSession = useStableEvent(
+    handleRetrySelectedSession,
+  );
   const onCopyChatTimelineDiagnostics = useStableEvent(() => {
     void handleCopySelectedDiagnostics();
   });
