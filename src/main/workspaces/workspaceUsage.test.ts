@@ -214,4 +214,549 @@ describe("workspace usage accounting", () => {
       10,
     );
   });
+
+  it("does not rewrite persisted usage when only recordedAtMs changes", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-usage-timestamp-"),
+    );
+    const sessionFile = path.join(root, "session.jsonl");
+    await fs.writeFile(sessionFile, "");
+    const store = new WorkspaceUsageStore(root);
+
+    await store.upsertContributions(
+      contributionsFromSessionMessages({
+        workspaceId: workspaceA,
+        sessionFile,
+        sessionId: "stable-session",
+        recordedAtMs: 1,
+        messages: [
+          {
+            id: "assistant-one",
+            role: "assistant",
+            usage: { input: 4, output: 6, total: 10, totalCostUsd: 0.02 },
+          },
+        ],
+      }),
+    );
+    const before = await fs.readFile(store.storeFile, "utf8");
+
+    await store.upsertContributions(
+      contributionsFromSessionMessages({
+        workspaceId: workspaceA,
+        sessionFile,
+        sessionId: "stable-session",
+        recordedAtMs: 2,
+        messages: [
+          {
+            id: "assistant-one",
+            role: "assistant",
+            usage: { input: 4, output: 6, total: 10, totalCostUsd: 0.02 },
+          },
+        ],
+      }),
+    );
+
+    assert.equal(await fs.readFile(store.storeFile, "utf8"), before);
+  });
+
+  it("coalesces concurrent refreshes for the same session file", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-usage-coalesce-"),
+    );
+    const sessionFile = path.join(root, "session.jsonl");
+    await fs.writeFile(
+      sessionFile,
+      JSON.stringify({
+        type: "message",
+        message: {
+          id: "assistant-one",
+          role: "assistant",
+          usage: { inputTokens: 5, outputTokens: 7, totalTokens: 12 },
+        },
+      }),
+    );
+    const store = new WorkspaceUsageStore(root);
+
+    const results = await Promise.all(
+      Array.from({ length: 32 }, () =>
+        store.refreshSessionFileUsage({
+          workspaceId: workspaceA,
+          sessionFile,
+        }),
+      ),
+    );
+
+    assert.equal(
+      results.every((result) => result === results[0]),
+      true,
+    );
+    assert.equal(results[0]?.refreshed, true);
+    assert.equal(
+      (
+        await store.getWorkspaceUsage({
+          workspaceId: workspaceA,
+          sessionFiles: [sessionFile],
+        })
+      ).totalTokens,
+      12,
+    );
+    assert.deepEqual(
+      await store.refreshSessionFileUsage({
+        workspaceId: workspaceA,
+        sessionFile,
+      }),
+      { diagnostics: [], refreshed: false },
+    );
+  });
+
+  it("refreshes a session JSONL once per file signature", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-usage-refresh-"),
+    );
+    const sessionFile = path.join(root, "session.jsonl");
+    await fs.writeFile(
+      sessionFile,
+      JSON.stringify({
+        type: "message",
+        message: {
+          id: "assistant-one",
+          role: "assistant",
+          usage: { inputTokens: 1, outputTokens: 2, totalTokens: 3 },
+        },
+      }),
+    );
+    const store = new WorkspaceUsageStore(root);
+
+    const first = await store.refreshSessionFileUsage({
+      workspaceId: workspaceA,
+      sessionFile,
+    });
+    assert.equal(first.refreshed, true);
+    assert.equal(
+      (
+        await store.getWorkspaceUsage({
+          workspaceId: workspaceA,
+          sessionFiles: [sessionFile],
+        })
+      ).totalTokens,
+      3,
+    );
+
+    const unchanged = await store.refreshSessionFileUsage({
+      workspaceId: workspaceA,
+      sessionFile,
+    });
+    assert.deepEqual(unchanged, { diagnostics: [], refreshed: false });
+
+    await fs.appendFile(
+      sessionFile,
+      `\n${JSON.stringify({
+        type: "message",
+        message: {
+          id: "assistant-two",
+          role: "assistant",
+          usage: { inputTokens: 2, outputTokens: 3, totalTokens: 5 },
+        },
+      })}`,
+    );
+    const changed = await store.refreshSessionFileUsage({
+      workspaceId: workspaceA,
+      sessionFile,
+    });
+    assert.equal(changed.refreshed, true);
+    assert.equal(
+      (
+        await store.getWorkspaceUsage({
+          workspaceId: workspaceA,
+          sessionFiles: [sessionFile],
+        })
+      ).totalTokens,
+      8,
+    );
+    assert.deepEqual(
+      await store.refreshSessionFileUsage({
+        workspaceId: workspaceA,
+        sessionFile,
+      }),
+      { diagnostics: [], refreshed: false },
+    );
+  });
+
+  it("stores one compact snapshot for a long normal session", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-usage-compact-"),
+    );
+    const sessionFile = path.join(root, "session.jsonl");
+    await fs.writeFile(sessionFile, "");
+    const store = new WorkspaceUsageStore(root);
+    const messages = Array.from({ length: 500 }, (_, index) => ({
+      id: `assistant-${index}`,
+      role: "assistant",
+      usage: {
+        inputTokens: 2,
+        outputTokens: 1,
+        totalTokens: 3,
+        totalCostUsd: 0.001,
+      },
+    }));
+
+    await store.recordSessionMessagesUsage({
+      workspaceId: workspaceA,
+      sessionFile,
+      sessionKey: sessionFile,
+      source: "session",
+      messages,
+    });
+
+    const persisted = JSON.parse(
+      await fs.readFile(store.storeFile, "utf8"),
+    ) as {
+      version: number;
+      snapshots: Array<{
+        totalTokens: number;
+        contributorsWithCost: number;
+      }>;
+    };
+    assert.equal(persisted.version, 2);
+    assert.equal(persisted.snapshots.length, 1);
+    assert.equal(persisted.snapshots[0]?.totalTokens, 1500);
+    assert.equal(persisted.snapshots[0]?.contributorsWithCost, 500);
+  });
+
+  it("replaces cumulative runtime usage without growing snapshot state", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-usage-runtime-"),
+    );
+    const sessionFile = path.join(root, "session.jsonl");
+    await fs.writeFile(sessionFile, "");
+    const store = new WorkspaceUsageStore(root);
+
+    await store.recordSessionMessagesUsage({
+      workspaceId: workspaceA,
+      sessionFile,
+      sessionKey: sessionFile,
+      source: "session",
+      messages: [
+        {
+          id: "assistant-one",
+          role: "assistant",
+          usage: {
+            inputTokens: 10,
+            outputTokens: 5,
+            totalTokens: 15,
+            totalCostUsd: 0.02,
+          },
+        },
+        {
+          id: "assistant-two",
+          role: "assistant",
+          usage: {
+            inputTokens: 20,
+            outputTokens: 10,
+            totalTokens: 30,
+            totalCostUsd: 0.03,
+          },
+        },
+      ],
+    });
+    await store.recordRuntimeUsage({
+      workspaceId: workspaceA,
+      sessionFile,
+      usage: {
+        inputTokens: 40,
+        outputTokens: 20,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        totalTokens: 60,
+        totalCostUsd: 0.08,
+      },
+    });
+
+    const persisted = JSON.parse(
+      await fs.readFile(store.storeFile, "utf8"),
+    ) as {
+      snapshots: Array<{
+        totalTokens: number;
+        totalCostUsd?: number;
+        contributorsWithCost: number;
+      }>;
+    };
+    assert.equal(persisted.snapshots.length, 1);
+    assert.equal(persisted.snapshots[0]?.totalTokens, 60);
+    assert.equal(persisted.snapshots[0]?.totalCostUsd, 0.08);
+    assert.equal(persisted.snapshots[0]?.contributorsWithCost, 2);
+  });
+
+  it("keeps three high-frequency live sessions bounded to three snapshots", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-usage-live-stress-"),
+    );
+    const sessionFiles = await Promise.all(
+      Array.from({ length: 3 }, async (_, index) => {
+        const sessionFile = path.join(root, `session-${index}.jsonl`);
+        await fs.writeFile(sessionFile, "");
+        return sessionFile;
+      }),
+    );
+    const store = new WorkspaceUsageStore(root);
+
+    for (let turn = 1; turn <= 250; turn += 1) {
+      await Promise.all(
+        sessionFiles.map((sessionFile, sessionIndex) =>
+          store.recordRuntimeUsage({
+            workspaceId: workspaceA,
+            sessionFile,
+            usage: {
+              inputTokens: turn * (sessionIndex + 1),
+              outputTokens: turn,
+              cacheReadTokens: 0,
+              cacheWriteTokens: 0,
+              totalTokens: turn * (sessionIndex + 2),
+              totalCostUsd: turn * 0.001,
+            },
+            recordedAtMs: turn,
+          }),
+        ),
+      );
+    }
+
+    const persistedBeforeUnchanged = await fs.readFile(store.storeFile, "utf8");
+    const parsed = JSON.parse(persistedBeforeUnchanged) as {
+      version: number;
+      snapshots: Array<{ totalTokens: number }>;
+    };
+    assert.equal(parsed.version, 2);
+    assert.equal(parsed.snapshots.length, 3);
+    assert.deepEqual(
+      parsed.snapshots
+        .map((snapshot) => snapshot.totalTokens)
+        .sort((a, b) => a - b),
+      [500, 750, 1000],
+    );
+    assert.ok(
+      Buffer.byteLength(persistedBeforeUnchanged, "utf8") < 10_000,
+      "live usage persistence should stay bounded by sessions, not update count",
+    );
+
+    await Promise.all(
+      sessionFiles.map((sessionFile, sessionIndex) =>
+        store.recordRuntimeUsage({
+          workspaceId: workspaceA,
+          sessionFile,
+          usage: {
+            inputTokens: 250 * (sessionIndex + 1),
+            outputTokens: 250,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            totalTokens: 250 * (sessionIndex + 2),
+            totalCostUsd: 0.25,
+          },
+          recordedAtMs: 10_000,
+        }),
+      ),
+    );
+    assert.equal(
+      await fs.readFile(store.storeFile, "utf8"),
+      persistedBeforeUnchanged,
+      "timestamp-only live refreshes must not rewrite compact accounting",
+    );
+  });
+
+  it("migrates the v1 per-message store into compact v2 snapshots", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-usage-migrate-"),
+    );
+    const sessionFile = path.join(root, "session.jsonl");
+    await fs.writeFile(sessionFile, "");
+    await fs.writeFile(
+      path.join(root, "workspace-usage.json"),
+      JSON.stringify({
+        version: 1,
+        contributions: [
+          {
+            id: `session:${sessionFile}:assistant-one`,
+            workspaceId: workspaceA,
+            ownerSessionFile: sessionFile,
+            source: "session",
+            inputTokens: 10,
+            outputTokens: 5,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            totalTokens: 15,
+            totalCostUsd: 0.02,
+            recordedAtMs: 1,
+          },
+          {
+            id: `session:${sessionFile}:assistant-two`,
+            workspaceId: workspaceA,
+            ownerSessionFile: sessionFile,
+            source: "session",
+            inputTokens: 20,
+            outputTokens: 10,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            totalTokens: 30,
+            recordedAtMs: 2,
+          },
+        ],
+      }),
+    );
+
+    const store = new WorkspaceUsageStore(root);
+    await store.loadIfNeeded();
+    const persisted = JSON.parse(
+      await fs.readFile(store.storeFile, "utf8"),
+    ) as {
+      version: number;
+      snapshots: Array<{
+        totalTokens: number;
+        contributorsWithCost: number;
+        contributorsWithoutCost: number;
+      }>;
+    };
+    assert.equal(persisted.version, 2);
+    assert.equal(persisted.snapshots.length, 1);
+    assert.equal(persisted.snapshots[0]?.totalTokens, 45);
+    assert.equal(persisted.snapshots[0]?.contributorsWithCost, 1);
+    assert.equal(persisted.snapshots[0]?.contributorsWithoutCost, 1);
+  });
+
+  it("persists recovery signatures across store reloads", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-usage-signature-"),
+    );
+    const sessionFile = path.join(root, "session.jsonl");
+    await fs.writeFile(
+      sessionFile,
+      JSON.stringify({
+        type: "message",
+        message: {
+          id: "assistant-one",
+          role: "assistant",
+          usage: { inputTokens: 2, outputTokens: 3, totalTokens: 5 },
+        },
+      }),
+    );
+
+    const firstStore = new WorkspaceUsageStore(root);
+    assert.equal(
+      (
+        await firstStore.refreshSessionFileUsage({
+          workspaceId: workspaceA,
+          sessionFile,
+        })
+      ).refreshed,
+      true,
+    );
+
+    const reloaded = new WorkspaceUsageStore(root);
+    assert.deepEqual(
+      await reloaded.refreshSessionFileUsage({
+        workspaceId: workspaceA,
+        sessionFile,
+      }),
+      { diagnostics: [], refreshed: false },
+    );
+  });
+
+  it("freezes deletion without retaining duplicate owned snapshots", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-usage-freeze-compact-"),
+    );
+    const sessionFile = path.join(root, "session.jsonl");
+    await fs.writeFile(sessionFile, "");
+    const store = new WorkspaceUsageStore(root);
+
+    await store.recordSessionMessagesUsage({
+      workspaceId: workspaceA,
+      sessionFile,
+      sessionKey: sessionFile,
+      source: "session",
+      messages: [
+        {
+          id: "assistant-parent",
+          role: "assistant",
+          usage: { inputTokens: 2, outputTokens: 3, totalTokens: 5 },
+        },
+      ],
+    });
+    await store.recordSessionMessagesUsage({
+      workspaceId: workspaceA,
+      sessionFile,
+      sessionKey: "private-child",
+      source: "parallel",
+      messages: [
+        {
+          id: "assistant-child",
+          role: "assistant",
+          usage: {
+            inputTokens: 4,
+            outputTokens: 6,
+            totalTokens: 10,
+            totalCostUsd: 0.02,
+          },
+        },
+      ],
+    });
+
+    await store.freezeSessionUsage({ workspaceId: workspaceA, sessionFile });
+
+    const persisted = JSON.parse(
+      await fs.readFile(store.storeFile, "utf8"),
+    ) as {
+      snapshots: Array<{ id: string; ownerSessionFile?: string }>;
+    };
+    assert.equal(persisted.snapshots.length, 2);
+    assert.equal(
+      persisted.snapshots.every(
+        (snapshot) =>
+          snapshot.id.startsWith("deleted:") &&
+          snapshot.ownerSessionFile === undefined,
+      ),
+      true,
+    );
+    assert.equal(
+      (
+        await store.getWorkspaceUsage({
+          workspaceId: workspaceA,
+          sessionFiles: [],
+        })
+      ).totalTokens,
+      15,
+    );
+  });
+
+  it("serves cached workspace usage without reading the session file", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-usage-cheap-read-"),
+    );
+    const sessionFile = path.join(root, "session.jsonl");
+    await fs.writeFile(
+      sessionFile,
+      JSON.stringify({
+        type: "message",
+        message: {
+          id: "assistant-one",
+          role: "assistant",
+          usage: { inputTokens: 4, outputTokens: 6, totalTokens: 10 },
+        },
+      }),
+    );
+    const store = new WorkspaceUsageStore(root);
+    await store.refreshSessionFileUsage({
+      workspaceId: workspaceA,
+      sessionFile,
+    });
+    await fs.unlink(sessionFile);
+
+    assert.equal(
+      (
+        await store.getWorkspaceUsage({
+          workspaceId: workspaceA,
+          sessionFiles: [sessionFile],
+        })
+      ).totalTokens,
+      10,
+    );
+  });
 });

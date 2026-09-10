@@ -177,11 +177,7 @@ import {
   WorkspaceStore,
   type WorkspaceRecord,
 } from "./workspaces/workspaceStore.js";
-import {
-  WorkspaceUsageStore,
-  contributionsFromSessionFile,
-  contributionsFromSessionMessages,
-} from "./workspaces/workspaceUsage.js";
+import { WorkspaceUsageStore } from "./workspaces/workspaceUsage.js";
 import { WorkspaceRuntimeLifecycleGate } from "./workspaceRuntimeLifecycleGate.js";
 import { WorkspaceRuntimeShutdownTombstones } from "./workspaceRuntimeShutdownTombstones.js";
 import {
@@ -1398,7 +1394,7 @@ function registerIpcHandlers(
     requestSchema: workspaceUsageRequestSchema,
     responseSchema: workspaceUsageResultSchema,
     diagnostics: diagnosticsService,
-    handler: async ({ workspaceId }) => getWorkspaceUsage(store, workspaceId),
+    handler: async ({ workspaceId }) => getWorkspaceUsage(workspaceId),
   });
 
   registerValidatedIpc({
@@ -2546,6 +2542,15 @@ async function addSessionToWorkspace(
           messageCount: 0,
         },
       );
+      const usageRecovery =
+        await ensureWorkspaceUsageStore().refreshSessionFileUsage({
+          workspaceId: result.workspaceId,
+          sessionFile: result.sessionFile,
+          source: "session",
+        });
+      for (const diagnostic of usageRecovery.diagnostics) {
+        diagnostics?.recordError(diagnostic);
+      }
       return {
         workspaceId: result.workspaceId,
         sessionFile: result.sessionFile,
@@ -5165,6 +5170,11 @@ async function listWorkspaceChatSessions(
       ...(attachedRuntimeId ? { attachedRuntimeId } : {}),
     });
   }
+  await recoverWorkspaceSessionUsage(
+    workspace.id,
+    sessions.map((session) => session.sessionFile),
+    diagnostics,
+  );
   const defaultProject = workspace.defaultProjectId
     ? await ensureProjectStore()
         .resolveAuthorizedProject(workspace.defaultProjectId)
@@ -5256,53 +5266,60 @@ async function refreshWorkspaceSessionSummaries(
   }
 }
 
+async function recoverWorkspaceSessionUsage(
+  workspaceId: string,
+  sessionFiles: readonly string[],
+  diagnostics: string[],
+): Promise<void> {
+  if (resolveChatBackendMode() !== "real" || sessionFiles.length === 0) return;
+  const usageStore = ensureWorkspaceUsageStore();
+  const recoveryBatchSize = 2;
+  for (let index = 0; index < sessionFiles.length; index += recoveryBatchSize) {
+    const results = await Promise.all(
+      sessionFiles.slice(index, index + recoveryBatchSize).map((sessionFile) =>
+        usageStore.refreshSessionFileUsage({
+          workspaceId,
+          sessionFile,
+          source: "session",
+        }),
+      ),
+    );
+    for (const result of results) {
+      diagnostics.push(...result.diagnostics);
+    }
+  }
+}
+
 async function getWorkspaceUsage(
-  settings: SettingsStore,
   workspaceId: string,
 ): Promise<z.infer<typeof workspaceUsageResultSchema>> {
-  const diagnostics: string[] = [];
-  const listed = await listWorkspaceChatSessions(settings, workspaceId, {
-    discoverLegacySessions: false,
-    includeArchived: true,
-  });
-  await Promise.all(
-    listed.sessions.map(async (session) => {
-      const result = await contributionsFromSessionFile({
-        workspaceId,
-        sessionFile: session.sessionFile,
-        source: "session",
-      });
-      diagnostics.push(...result.diagnostics);
-      await ensureWorkspaceUsageStore().upsertContributions(
-        result.contributions,
-      );
-    }),
-  );
   const refs = await ensureWorkspaceStore().getSessionRefs(workspaceId);
+  const sessionFiles = refs
+    .filter((ref) => ref.missingSinceMs === undefined)
+    .map((ref) => ref.sessionFile);
   const usage = await ensureWorkspaceUsageStore().getWorkspaceUsage({
     workspaceId,
-    sessionFiles: refs
-      .filter((ref) => ref.missingSinceMs === undefined)
-      .map((ref) => ref.sessionFile),
+    sessionFiles,
   });
-  return { workspaceId, usage, diagnostics };
+  return { workspaceId, usage, diagnostics: [] };
 }
 
 async function recordSessionUsageForDeletion(
   workspaceId: string,
   sessionFile: string,
 ): Promise<void> {
-  const result = await contributionsFromSessionFile({
+  const usageStore = ensureWorkspaceUsageStore();
+  const result = await usageStore.refreshSessionFileUsage({
     workspaceId,
     sessionFile,
     source: "session",
   });
   if (result.diagnostics.length > 0) {
-    for (const diagnostic of result.diagnostics)
+    for (const diagnostic of result.diagnostics) {
       diagnostics?.recordError(diagnostic);
+    }
   }
-  await ensureWorkspaceUsageStore().upsertContributions(result.contributions);
-  await ensureWorkspaceUsageStore().freezeSessionUsage({
+  await usageStore.freezeSessionUsage({
     workspaceId,
     sessionFile,
   });
@@ -5956,6 +5973,15 @@ async function getChatRuntimeStatus(
   ]);
   const usage =
     runtimeUsageFromSessionStats(sessionStats) ?? runtimeUsageFromState(state);
+  if (usage !== undefined) {
+    void recordRuntimeCumulativeUsage(runtimeId, state, usage).catch(
+      (error) => {
+        diagnostics?.recordError(
+          `Failed to record cumulative usage for ${runtimeId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      },
+    );
+  }
   return {
     runtimeId,
     backendMode: mode,
@@ -6020,6 +6046,23 @@ function compactRuntimeStatusModel(
   return Object.keys(compact).length > 0 ? compact : undefined;
 }
 
+async function recordRuntimeCumulativeUsage(
+  runtimeId: string,
+  state: PiState,
+  usage: NonNullable<ChatRuntimeStatus["usage"]>,
+): Promise<void> {
+  const workspaceId = chatRuntimeWorkspaceIds.get(runtimeId);
+  const sessionFile =
+    chatRuntimeSessionFiles.get(runtimeId) ??
+    (typeof state.sessionFile === "string" ? state.sessionFile : undefined);
+  if (workspaceId === undefined || sessionFile === undefined) return;
+  await ensureWorkspaceUsageStore().recordRuntimeUsage({
+    workspaceId,
+    sessionFile,
+    usage,
+  });
+}
+
 async function recordRuntimeMessagesUsage(options: {
   runtimeId: string;
   messages: readonly PiMessage[];
@@ -6030,15 +6073,16 @@ async function recordRuntimeMessagesUsage(options: {
   if (workspaceId === undefined) return;
   const sessionFile =
     options.ownerSessionFile ?? chatRuntimeSessionFiles.get(options.runtimeId);
-  const contributions = contributionsFromSessionMessages({
+  await ensureWorkspaceUsageStore().recordSessionMessagesUsage({
     workspaceId,
     ...(sessionFile !== undefined ? { sessionFile } : {}),
-    sessionId:
-      chatRuntimeSessionFiles.get(options.runtimeId) ?? options.runtimeId,
+    sessionKey:
+      options.source === "session"
+        ? (sessionFile ?? options.runtimeId)
+        : options.runtimeId,
     source: options.source,
     messages: options.messages,
   });
-  await ensureWorkspaceUsageStore().upsertContributions(contributions);
 }
 
 async function recordPrivateWorkerMessagesUsage(options: {
@@ -6049,14 +6093,13 @@ async function recordPrivateWorkerMessagesUsage(options: {
   const workspaceId = chatRuntimeWorkspaceIds.get(options.parentId);
   const sessionFile = chatRuntimeSessionFiles.get(options.parentId);
   if (workspaceId === undefined) return;
-  const contributions = contributionsFromSessionMessages({
+  await ensureWorkspaceUsageStore().recordSessionMessagesUsage({
     workspaceId,
     ...(sessionFile !== undefined ? { sessionFile } : {}),
-    sessionId: `${options.parentId}:private:${options.childRuntimeId}`,
+    sessionKey: `${options.parentId}:private:${options.childRuntimeId}`,
     source: "parallel",
     messages: options.messages,
   });
-  await ensureWorkspaceUsageStore().upsertContributions(contributions);
 }
 
 async function getChatSnapshotForRuntime(
@@ -6134,6 +6177,21 @@ async function getChatSnapshotForRuntime(
         ...(preview !== undefined ? { preview } : {}),
       });
     }
+  }
+
+  if (!options.skipMessages && messages.length > 0) {
+    void recordRuntimeMessagesUsage({
+      runtimeId,
+      messages,
+      source: "session",
+      ...(canonicalSessionFile !== undefined
+        ? { ownerSessionFile: canonicalSessionFile }
+        : {}),
+    }).catch((error) => {
+      diagnostics?.recordError(
+        `Failed to reconcile resumed usage for ${runtimeId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
   }
 
   await reconcileMultitaskRuntime(runtimeId, state.sessionFile);

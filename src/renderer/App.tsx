@@ -646,6 +646,28 @@ function activitySourceSessions(
   }));
 }
 
+function workspaceUsageRefreshRevision(
+  workspaceId: string,
+  sessions: readonly SessionViewModel[],
+  archivedSessions: readonly SessionViewModel[],
+): string {
+  return [...sessions, ...archivedSessions]
+    .filter((session) => session.workspaceId === workspaceId)
+    .map((session) => {
+      const key = session.sessionFile ?? session.sessionId ?? session.id;
+      const phase = isSessionBusy(session) ? "busy" : "settled";
+      return [
+        key,
+        phase,
+        session.completedAtMs ?? "",
+        session.archivedAtMs ?? "",
+        session.runtimeBacked ? "runtime" : "saved",
+      ].join(":");
+    })
+    .sort()
+    .join("|");
+}
+
 function activitySessionForItem(
   sessions: readonly SessionViewModel[],
   item: ActivityItem,
@@ -1977,12 +1999,27 @@ export function App(): ReactElement {
     activityScope.type === "workspace"
       ? workspaceUsageById[activityScope.workspaceId]
       : undefined;
+  const workspaceUsageWorkspaceId =
+    primaryView.kind === "work" && primaryView.scope.type === "workspace"
+      ? primaryView.scope.workspaceId
+      : undefined;
+  const workspaceUsageRevision = useMemo(
+    () =>
+      workspaceUsageWorkspaceId === undefined
+        ? undefined
+        : workspaceUsageRefreshRevision(
+            workspaceUsageWorkspaceId,
+            sessions,
+            archivedSessions,
+          ),
+    [archivedSessions, sessions, workspaceUsageWorkspaceId],
+  );
 
   useEffect(() => {
-    if (primaryView.kind !== "work" || primaryView.scope.type !== "workspace") {
+    if (workspaceUsageWorkspaceId === undefined) {
       return;
     }
-    const workspaceId = primaryView.scope.workspaceId;
+    const workspaceId = workspaceUsageWorkspaceId;
     let disposed = false;
     void window.piDeck.workspaces
       .getUsage({ workspaceId })
@@ -2002,7 +2039,7 @@ export function App(): ReactElement {
     return () => {
       disposed = true;
     };
-  }, [primaryView, sessions, archivedSessions, multitask]);
+  }, [workspaceUsageRevision, workspaceUsageWorkspaceId]);
 
   useEffect(() => {
     if (newSessionWorkspaceChoices.length === 0) return;
@@ -13569,6 +13606,7 @@ export const __rendererTestHooks = {
   moveComposerDraft,
   hasComposerDraft,
   activitySourceSessions,
+  workspaceUsageRefreshRevision,
   activitySessionForItem,
   sessionForActivityItem,
   validateComposerInput,

@@ -3554,4 +3554,71 @@ describe("renderer message_update reduction", () => {
       totalCostUsd: 0.0123,
     });
   });
+
+  it("keeps workspace usage refresh revision stable across streamed deltas", () => {
+    const busy = {
+      ...baseSession(),
+      id: "runtime-usage",
+      workspaceId: "workspace-usage",
+      sessionFile: "/sessions/usage.jsonl",
+      status: "working",
+      baseState: "working",
+      updatedAtMs: 100,
+      timeline: [
+        {
+          id: "assistant-one",
+          kind: "assistant",
+          content: "partial",
+          createdAt: "now",
+          streaming: true,
+        },
+      ],
+    } as any;
+    const streamed = {
+      ...busy,
+      updatedAtMs: 200,
+      lastRuntimeEventLabel: "message_update",
+      timeline: [
+        {
+          ...busy.timeline[0],
+          content: "partial response grew",
+        },
+      ],
+    } as any;
+
+    expect(
+      __rendererTestHooks.workspaceUsageRefreshRevision(
+        "workspace-usage",
+        [busy],
+        [],
+      ),
+    ).toBe(
+      __rendererTestHooks.workspaceUsageRefreshRevision(
+        "workspace-usage",
+        [streamed],
+        [],
+      ),
+    );
+
+    const settled = {
+      ...streamed,
+      status: "idle",
+      baseState: "idle",
+      completedAtMs: 300,
+      overlays: { ...emptyOverlays },
+    } as any;
+    expect(
+      __rendererTestHooks.workspaceUsageRefreshRevision(
+        "workspace-usage",
+        [settled],
+        [],
+      ),
+    ).not.toBe(
+      __rendererTestHooks.workspaceUsageRefreshRevision(
+        "workspace-usage",
+        [busy],
+        [],
+      ),
+    );
+  });
 });
