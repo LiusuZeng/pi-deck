@@ -46,7 +46,10 @@ async function newestBuildTreeMtime(directory, metrics) {
     ) {
       // Renderer imports can include JSON, SVG, fonts, and images in addition
       // to TS/CSS. Conservatively include every non-test file in build trees.
-      newest = Math.max(newest, (await fileStats(entryPath, metrics))?.mtimeMs ?? 0);
+      newest = Math.max(
+        newest,
+        (await fileStats(entryPath, metrics))?.mtimeMs ?? 0,
+      );
     }
   }
   return newest;
