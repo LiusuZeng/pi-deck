@@ -610,11 +610,6 @@ interface SessionViewModel {
   completedAtMs?: number | undefined;
 }
 
-/**
- * Activity has a canonical identity that does not depend on the current
- * workspace view. Keep this projection separate from chat-specific fields so
- * hidden runtimes and saved rows remain usable across workspace switches.
- */
 function activityInboxModelForPrimaryView(
   primaryView: PrimaryView,
   sources: readonly ActivitySourceSession[],
@@ -637,6 +632,11 @@ function useStableEvent<TArguments extends unknown[], TResult>(
   );
 }
 
+/**
+ * Activity has a canonical identity that does not depend on the current
+ * workspace view. Keep this projection separate from chat-specific fields so
+ * hidden runtimes and saved rows remain usable across workspace switches.
+ */
 function activitySourceSessions(
   sessions: readonly SessionViewModel[],
   workspaceNameById: Readonly<Record<string, string>>,
@@ -6118,17 +6118,17 @@ export function App(): ReactElement {
           </div>
         ) : primaryView.kind === "work" ? (
           activityInboxModel === undefined ? null : (
-          <ActivityInbox
-            model={activityInboxModel}
-            scope={activityScope}
-            usage={scopedWorkspaceUsage?.usage}
-            workspaces={workScopeWorkspaces}
-            selectedFilter={selectedActivityFilter}
-            onSelectedFilterChange={handleActivityFilterChange}
-            onScopeChange={handleActivityScopeChange}
-            onOpenActivityItem={handleOpenActivityItem}
-            onNewSession={() => void handleNewSession()}
-          />
+            <ActivityInbox
+              model={activityInboxModel}
+              scope={activityScope}
+              usage={scopedWorkspaceUsage?.usage}
+              workspaces={workScopeWorkspaces}
+              selectedFilter={selectedActivityFilter}
+              onSelectedFilterChange={handleActivityFilterChange}
+              onScopeChange={handleActivityScopeChange}
+              onOpenActivityItem={handleOpenActivityItem}
+              onNewSession={() => void handleNewSession()}
+            />
           )
         ) : (
           <div className="session-surface">
