@@ -4706,6 +4706,9 @@ test("real mode removes missing saved session after resume failure with fake Pi"
       name: "Session: missing-before-resume",
     });
     await expect(missingSession).toBeVisible();
+    await expect(page.locator(".ui-status-message")).toContainText(
+      /Found \d+ saved session\(s\) across \d+ workspace\(s\)\./,
+    );
     fs.rmSync(sessionFile, { force: true });
     await missingSession.click();
     await expect(
@@ -6380,10 +6383,12 @@ test.describe("Unified Work", () => {
           exact: true,
         }),
       ).toBeVisible();
-      await multitaskControl.focus();
-      await expect(taskStatuses).toContainText(
-        "#1 Fake delegated task — completed",
-      );
+      await expect(
+        taskPanel.getByRole("list", { name: "Task session status" }),
+      ).toContainText("#1 Fake delegated task");
+      await expect(
+        taskPanel.locator('[data-lifecycle="completed"]'),
+      ).toHaveText("completed");
     } finally {
       await app.close();
       fs.rmSync(root, { recursive: true, force: true });
