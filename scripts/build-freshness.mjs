@@ -36,20 +36,16 @@ async function newestBuildTreeMtime(directory, metrics) {
   for (const entry of entries) {
     const entryPath = path.join(directory, entry.name);
     if (entry.isDirectory()) {
-      newest = Math.max(
-        newest,
-        await newestBuildTreeMtime(entryPath, metrics),
-      );
+      const childMtime = await newestBuildTreeMtime(entryPath, metrics);
+      newest = Math.max(newest, childMtime);
     } else if (
       entry.isFile() &&
       !/\.(?:test|spec)\.(?:[cm]?[jt]sx?)$/.test(entry.name)
     ) {
       // Renderer imports can include JSON, SVG, fonts, and images in addition
       // to TS/CSS. Conservatively include every non-test file in build trees.
-      newest = Math.max(
-        newest,
-        (await fileStats(entryPath, metrics))?.mtimeMs ?? 0,
-      );
+      const entryStats = await fileStats(entryPath, metrics);
+      newest = Math.max(newest, entryStats?.mtimeMs ?? 0);
     }
   }
   return newest;
@@ -58,18 +54,14 @@ async function newestBuildTreeMtime(directory, metrics) {
 export async function newestBuildInputMtime(root, metrics) {
   let newest = 0;
   for (const relativePath of buildInputs) {
-    newest = Math.max(
-      newest,
-      (await fileStats(path.join(root, relativePath), metrics))?.mtimeMs ?? 0,
-    );
+    const inputStats = await fileStats(path.join(root, relativePath), metrics);
+    newest = Math.max(newest, inputStats?.mtimeMs ?? 0);
   }
   for (const buildTree of buildTrees) {
     const directory = path.join(root, buildTree);
     if ((await fileStats(directory, metrics))?.isDirectory()) {
-      newest = Math.max(
-        newest,
-        await newestBuildTreeMtime(directory, metrics),
-      );
+      const treeMtime = await newestBuildTreeMtime(directory, metrics);
+      newest = Math.max(newest, treeMtime);
     }
   }
   return newest;
