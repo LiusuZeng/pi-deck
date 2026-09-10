@@ -6,6 +6,31 @@ import { emptyOverlays } from "./sessionState.js";
 import { defaultAgentWorkflowDefinition } from "./workflows/agentWorkflowDefinition.js";
 import { __rendererTestHooks, AutolinkedText, MarkdownView } from "./App.js";
 
+it("only materializes the Work inbox model while Work is visible", () => {
+  const activitySource = {
+    id: "runtime-1",
+    workspaceId: "workspace-a",
+    title: "Working session",
+    workspaceName: "Workspace A",
+    updatedAtMs: 100,
+    baseState: "working",
+    overlays: { ...emptyOverlays },
+  } as any;
+
+  expect(
+    __rendererTestHooks.activityInboxModelForPrimaryView(
+      { kind: "session" } as any,
+      [activitySource],
+    ),
+  ).toBeUndefined();
+  expect(
+    __rendererTestHooks.activityInboxModelForPrimaryView(
+      { kind: "work", scope: { type: "all" } } as any,
+      [activitySource],
+    )?.totalCount,
+  ).toBe(1);
+});
+
 it("renders pipe tables as safe semantic table markup", () => {
   const markup = renderToStaticMarkup(
     createElement(MarkdownView, {
