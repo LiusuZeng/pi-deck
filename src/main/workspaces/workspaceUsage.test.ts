@@ -487,6 +487,79 @@ describe("workspace usage accounting", () => {
     assert.equal(persisted.snapshots[0]?.contributorsWithCost, 2);
   });
 
+  it("keeps three high-frequency live sessions bounded to three snapshots", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-usage-live-stress-"),
+    );
+    const sessionFiles = await Promise.all(
+      Array.from({ length: 3 }, async (_, index) => {
+        const sessionFile = path.join(root, `session-${index}.jsonl`);
+        await fs.writeFile(sessionFile, "");
+        return sessionFile;
+      }),
+    );
+    const store = new WorkspaceUsageStore(root);
+
+    for (let turn = 1; turn <= 250; turn += 1) {
+      await Promise.all(
+        sessionFiles.map((sessionFile, sessionIndex) =>
+          store.recordRuntimeUsage({
+            workspaceId: workspaceA,
+            sessionFile,
+            usage: {
+              inputTokens: turn * (sessionIndex + 1),
+              outputTokens: turn,
+              cacheReadTokens: 0,
+              cacheWriteTokens: 0,
+              totalTokens: turn * (sessionIndex + 2),
+              totalCostUsd: turn * 0.001,
+            },
+            recordedAtMs: turn,
+          }),
+        ),
+      );
+    }
+
+    const persistedBeforeUnchanged = await fs.readFile(store.storeFile, "utf8");
+    const parsed = JSON.parse(persistedBeforeUnchanged) as {
+      version: number;
+      snapshots: Array<{ totalTokens: number }>;
+    };
+    assert.equal(parsed.version, 2);
+    assert.equal(parsed.snapshots.length, 3);
+    assert.deepEqual(
+      parsed.snapshots.map((snapshot) => snapshot.totalTokens).sort((a, b) => a - b),
+      [500, 750, 1000],
+    );
+    assert.ok(
+      Buffer.byteLength(persistedBeforeUnchanged, "utf8") < 10_000,
+      "live usage persistence should stay bounded by sessions, not update count",
+    );
+
+    await Promise.all(
+      sessionFiles.map((sessionFile, sessionIndex) =>
+        store.recordRuntimeUsage({
+          workspaceId: workspaceA,
+          sessionFile,
+          usage: {
+            inputTokens: 250 * (sessionIndex + 1),
+            outputTokens: 250,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            totalTokens: 250 * (sessionIndex + 2),
+            totalCostUsd: 0.25,
+          },
+          recordedAtMs: 10_000,
+        }),
+      ),
+    );
+    assert.equal(
+      await fs.readFile(store.storeFile, "utf8"),
+      persistedBeforeUnchanged,
+      "timestamp-only live refreshes must not rewrite compact accounting",
+    );
+  });
+
   it("migrates the v1 per-message store into compact v2 snapshots", async () => {
     const root = await fs.mkdtemp(
       path.join(os.tmpdir(), "pi-deck-usage-migrate-"),
