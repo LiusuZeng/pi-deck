@@ -6154,7 +6154,6 @@ export function App(): ReactElement {
                 <>
                   <ChatTimeline
                     session={selectedSession}
-                    uiMessage={uiMessage}
                     showAttachmentExamples={!isRealBackendMode}
                     multitaskState={multitaskState}
                     taskPlanning={
@@ -11076,7 +11075,6 @@ function TranscriptLoading(props: { sessionTitle: string }): ReactElement {
 
 const ChatTimeline = memo(function ChatTimeline(props: {
   session: SessionViewModel;
-  uiMessage: string;
   showAttachmentExamples: boolean;
   multitaskState: MultitaskStateEvent | undefined;
   taskPlanning: boolean;
