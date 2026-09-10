@@ -61,6 +61,23 @@ describe("built launch validation", () => {
     }
   });
 
+  it("rejects a corrupt completed-build manifest", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "pi-deck-build-"));
+    try {
+      await writeCompletedBuild(root);
+      await writeFile(
+        path.join(root, "dist", ".pi-deck-build.json"),
+        "{not-json",
+      );
+
+      await expect(validateBuiltApp(root)).resolves.toContain(
+        "No complete Pi Deck build was found (dist/.pi-deck-build.json is missing or invalid).",
+      );
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
   it("requires the explicitly copied app icon in a completed build", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "pi-deck-build-"));
     try {
