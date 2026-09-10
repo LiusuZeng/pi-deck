@@ -16,3 +16,17 @@
 - The primary agent owns integration: review every subagent diff, resolve shared
   contracts centrally, run the combined verification suite, and report any
   checks that could not be executed.
+
+## Authoritative validation
+
+- GitHub CI is the authoritative pull-request correctness gate. Do not require
+  local test execution when the same deterministic validation is available in
+  CI; local runs are optional for debugging.
+- `npm run verify:ci` is the canonical CI contract. When adding a deterministic
+  test or validation command that should gate merges, wire it into that script
+  so GitHub CI picks it up automatically.
+- Before integration or merge handoff, require the protected **Verify desktop
+  app** check to pass on the current PR commit. Inspect uploaded Playwright
+  diagnostics rather than accepting a retry as evidence when E2E fails.
+- Authenticated provider/model smoke tests remain release-only unless CI is
+  explicitly given a safe credentialed environment.

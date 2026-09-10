@@ -437,31 +437,35 @@ Security boundaries include:
 
 ## Development and validation
 
-Run the standard checks:
+GitHub Actions is the authoritative correctness gate for pull requests. Local
+test runs are optional for debugging; merge readiness is determined by the
+protected **Verify desktop app** check.
+
+The canonical validation command is:
 
 ```bash
-npm test
-npm run typecheck
-npm run format
-npm run build
-npm run check:site
-npm run test:e2e
+npm run verify:ci
 ```
 
-Validate the installed Pi RPC path separately:
+CI runs it on macOS after a clean install and a pinned Pi CLI install. The gate
+covers formatting, TypeScript, the full Vitest unit/integration suite, production
+builds, site validation, a no-prompt real Pi RPC smoke check, and Playwright
+Electron E2E. Providing a real Pi binary in CI also ensures the non-authenticated
+real-mode E2Es do not silently skip.
+
+Authenticated checks remain separate because they may contact the configured
+model provider:
 
 ```bash
-# Isolated get_state/get_messages health check; no model prompt
-npm run smoke:real
-
 # Minimal authenticated prompt round-trip
 npm run smoke:real:prompt
 
-# Real GUI project/session restart-and-resume flow
+# Real GUI/worker release acceptance
 npm run test:e2e:real-smoke
 ```
 
-The prompt and GUI smoke commands require working provider authentication and may contact the configured model provider. The GitHub Pages deployment also runs `npm run check:site` before uploading the site artifact.
+When standard E2E fails in GitHub Actions, the workflow uploads Playwright
+screenshots, traces, and the HTML report for remote diagnosis.
 
 ## Repository layout
 
