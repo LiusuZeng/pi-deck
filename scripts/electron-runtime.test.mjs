@@ -95,7 +95,10 @@ describe("Pi Deck Electron runtime", () => {
     async () => {
       const electronExecutable = resolveInstalledElectronExecutable();
       const sourceBundle = findMacOSAppBundle(electronExecutable);
-      const brandedBundle = path.join(path.dirname(sourceBundle), piDeckBundleName);
+      const brandedBundle = path.join(
+        path.dirname(sourceBundle),
+        piDeckBundleName,
+      );
       const markerPath = path.join(
         path.dirname(sourceBundle),
         ".pi-deck-electron-runtime.json",
@@ -122,7 +125,9 @@ describe("Pi Deck Electron runtime", () => {
           readMacOSPlistString(infoPlist, "CFBundleIdentifier"),
         ).resolves.toBe(piDeckBundleIdentifier);
 
-        const { stdout } = await execFileAsync(brandedExecutable, ["--version"]);
+        const { stdout } = await execFileAsync(brandedExecutable, [
+          "--version",
+        ]);
         expect(stdout.trim()).toMatch(/^v?\d+\.\d+\.\d+/);
       } finally {
         await Promise.all([

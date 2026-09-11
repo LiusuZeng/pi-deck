@@ -42,7 +42,10 @@ export function findMacOSAppBundle(executablePath) {
 }
 
 function runtimeIdentityMarkerPath(sourceBundle) {
-  return path.join(path.dirname(sourceBundle), ".pi-deck-electron-runtime.json");
+  return path.join(
+    path.dirname(sourceBundle),
+    ".pi-deck-electron-runtime.json",
+  );
 }
 
 async function runCommand(command, args, { captureStdout = false } = {}) {
