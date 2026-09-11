@@ -378,8 +378,7 @@ function createTimelinePresentationProjector(
         previousTailStart > 0 &&
         items.length >= previousTailStart &&
         items[0] === previousSource[0] &&
-        items[previousTailStart - 1] ===
-          previousSource[previousTailStart - 1];
+        items[previousTailStart - 1] === previousSource[previousTailStart - 1];
       const restartIndex = canReusePrefix ? previousTailStart : 0;
       options.onProjectRange?.(
         restartIndex,
@@ -399,9 +398,7 @@ function createTimelinePresentationProjector(
   };
 }
 
-function timelinePresentationTailStart(
-  items: readonly TimelineItem[],
-): number {
+function timelinePresentationTailStart(items: readonly TimelineItem[]): number {
   if (items.length === 0) return 0;
   let index = items.length - 1;
   if (!isActivityTimelineItem(items[index]!)) return index;
@@ -11211,8 +11208,7 @@ const ChatTimeline = memo(function ChatTimeline(props: {
     presentationProjectorRef.current = createTimelinePresentationProjector();
   }
   const presentationItems = useMemo(
-    () =>
-      presentationProjectorRef.current!.project(props.session.timeline),
+    () => presentationProjectorRef.current!.project(props.session.timeline),
     [props.session.timeline],
   );
   const timelineScrollMarker = getTimelineScrollMarker(props.session);

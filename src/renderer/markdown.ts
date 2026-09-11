@@ -176,9 +176,7 @@ export function createIncrementalMarkdownParser(
       if (nextStablePrefixEnd > stablePrefixEnd) {
         stableBlocks = [
           ...stableBlocks,
-          ...parseSegment(
-            source.slice(stablePrefixEnd, nextStablePrefixEnd),
-          ),
+          ...parseSegment(source.slice(stablePrefixEnd, nextStablePrefixEnd)),
         ];
         stablePrefixEnd = nextStablePrefixEnd;
       }

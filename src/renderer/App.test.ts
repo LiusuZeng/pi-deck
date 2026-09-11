@@ -3648,15 +3648,13 @@ describe("renderer message_update reduction", () => {
   });
 });
 
-
 describe("incremental timeline projection", () => {
   it("reprojects only the mutable tail while immutable history is shared", () => {
     const ranges: Array<[number, number]> = [];
-    const projector =
-      __rendererTestHooks.createTimelinePresentationProjector({
-        onProjectRange: (startIndex: number, itemCount: number) =>
-          ranges.push([startIndex, itemCount]),
-      });
+    const projector = __rendererTestHooks.createTimelinePresentationProjector({
+      onProjectRange: (startIndex: number, itemCount: number) =>
+        ranges.push([startIndex, itemCount]),
+    });
     const history = Array.from({ length: 120 }, (_, index) => ({
       id: `history-${index}`,
       kind: "user",

@@ -221,13 +221,10 @@ describe("safe markdown parser", () => {
     ].join("\n");
     expect(parser.parse(partial)).toEqual(parseSafeMarkdown(partial));
 
-    const completed = `${partial}\n```\n\nDone`;
+    const completed = `${partial}\n` + "```\n\nDone";
     expect(parser.parse(completed)).toEqual(parseSafeMarkdown(completed));
 
     const replacement = "# Replaced\n\nSafe <script>text</script>";
-    expect(parser.parse(replacement)).toEqual(
-      parseSafeMarkdown(replacement),
-    );
+    expect(parser.parse(replacement)).toEqual(parseSafeMarkdown(replacement));
   });
-
 });
