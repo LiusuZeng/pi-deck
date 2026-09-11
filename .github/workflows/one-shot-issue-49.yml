@@ -1,0 +1,143 @@
+name: One-shot issue 49 patch
+
+on:
+  push:
+    branches:
+      - fix/issue-49-stable-sidebar-order
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/issue-49-stable-sidebar-order
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Apply deterministic sidebar ordering fix
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          app_path = Path("src/renderer/App.tsx")
+          app = app_path.read_text()
+          old = '''  return {
+            needsInput: newestFirst(inbox.needsInput),
+            errors: newestFirst(inbox.errors),
+            working: newestFirst(inbox.working),
+            queued: newestFirst(inbox.queued),
+            attached: newestFirst(inbox.attached),
+            idleSaved: newestFirst(inbox.idleSaved),
+          };
+          '''
+          new = '''  return {
+            // Live buckets intentionally retain their source order. Runtime events
+            // update `updatedAtMs` frequently, so sorting these buckets by recency
+            // turns stable navigation into a live activity feed. Initial hydration
+            // already supplies a useful deterministic source order, while status
+            // transitions still move a row once between buckets.
+            needsInput: inbox.needsInput,
+            errors: inbox.errors,
+            working: inbox.working,
+            queued: inbox.queued,
+            attached: inbox.attached,
+            // Saved idle sessions do not receive live runtime churn, so recency is
+            // still useful for their initial/default presentation.
+            idleSaved: newestFirst(inbox.idleSaved),
+          };
+          '''
+          if app.count(old) != 1:
+              raise SystemExit(f"expected one sidebar ordering block, found {app.count(old)}")
+          app_path.write_text(app.replace(old, new))
+
+          test_path = Path("src/renderer/App.test.ts")
+          tests = test_path.read_text()
+          marker = 'it("only materializes the Work inbox model while Work is visible", () => {'
+          if tests.count(marker) != 1:
+              raise SystemExit("App test insertion marker changed")
+          regression = '''it("keeps live sidebar buckets in source order while idle saved rows use recency", () => {
+            const liveSession = (id: string, updatedAtMs: number) => ({
+              id,
+              title: id,
+              subtitle: "Working",
+              project: "Project",
+              projectPath: "/tmp/project",
+              status: "working",
+              updatedAt: "Now",
+              updatedAtMs,
+              timeline: [],
+              baseState: "working",
+              overlays: { ...emptyOverlays },
+              runtimeBacked: true,
+            });
+            const savedSession = (id: string, updatedAtMs: number) => ({
+              ...liveSession(id, updatedAtMs),
+              status: "idle",
+              baseState: "idle",
+              runtimeBacked: false,
+            });
+
+            const first = liveSession("first", 300);
+            const second = liveSession("second", 100);
+            expect(
+              __rendererTestHooks
+                .buildRealSessionInbox([first, second] as any, "")
+                .working.map((session: any) => session.id),
+            ).toEqual(["first", "second"]);
+
+            // A later event for the second session must update its row in place,
+            // not move it above the first Working session.
+            expect(
+              __rendererTestHooks
+                .buildRealSessionInbox(
+                  [first, { ...second, updatedAtMs: 400 }] as any,
+                  "",
+                )
+                .working.map((session: any) => session.id),
+            ).toEqual(["first", "second"]);
+
+            expect(
+              __rendererTestHooks
+                .buildRealSessionInbox(
+                  [savedSession("older", 100), savedSession("newer", 200)] as any,
+                  "",
+                )
+                .idleSaved.map((session: any) => session.id),
+            ).toEqual(["newer", "older"]);
+          });
+
+          '''
+          test_path.write_text(tests.replace(marker, regression + marker))
+
+          style_path = Path("src/renderer/styles.css")
+          styles = style_path.read_text()
+          style_old = '''.session-item {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr) auto;
+          '''
+          style_new = '''.session-item {
+            display: grid;
+            min-height: 46px;
+            grid-template-columns: auto minmax(0, 1fr) auto;
+          '''
+          if styles.count(style_old) != 1:
+              raise SystemExit(f"expected one session layout block, found {styles.count(style_old)}")
+          style_path.write_text(styles.replace(style_old, style_new))
+          PY
+      - run: npx prettier --write src/renderer/App.tsx src/renderer/App.test.ts src/renderer/styles.css
+      - run: npm test -- --run src/renderer/App.test.ts
+      - name: Commit final patch and remove one-shot workflow
+        run: |
+          rm .github/workflows/one-shot-issue-49.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: stabilize sidebar session ordering"
+          git push origin HEAD:fix/issue-49-stable-sidebar-order
