@@ -8,6 +8,7 @@ export const piDeckApplicationName = "Pi Deck";
 export const piDeckBundleName = `${piDeckApplicationName}.app`;
 
 const require = createRequire(import.meta.url);
+const copyTimestampToleranceMs = 2_000;
 
 export function resolveInstalledElectronExecutable() {
   return require("electron");
@@ -41,7 +42,8 @@ async function executableLooksCurrent(sourceExecutable, brandedExecutable) {
       sourceStats.isFile() &&
       brandedStats.isFile() &&
       sourceStats.size === brandedStats.size &&
-      sourceStats.mtimeMs === brandedStats.mtimeMs
+      Math.abs(sourceStats.mtimeMs - brandedStats.mtimeMs) <=
+        copyTimestampToleranceMs
     );
   } catch {
     return false;
