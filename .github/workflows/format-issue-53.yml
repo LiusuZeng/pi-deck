@@ -1,0 +1,37 @@
+name: Fix and format issue 53 implementation
+on:
+  push:
+    branches: [perf/issue-53-incremental-streaming]
+permissions:
+  contents: write
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/issue-53-incremental-streaming
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Fix malformed fenced-code fixture
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('src/renderer/markdown.test.ts')
+          text = path.read_text()
+          old = '    const completed = `${partial}\\n```\\n\\nDone`;\n'
+          new = '    const completed = `${partial}\\n` + "```\\n\\nDone";\n'
+          assert text.count(old) == 1, 'fixture anchor missing'
+          path.write_text(text.replace(old, new, 1))
+          PY
+      - run: npx prettier --write src/renderer/App.tsx src/renderer/App.test.ts src/renderer/markdown.ts src/renderer/markdown.test.ts
+      - run: rm .github/workflows/format-issue-53.yml
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: format incremental streaming"
+          git push origin HEAD:perf/issue-53-incremental-streaming
