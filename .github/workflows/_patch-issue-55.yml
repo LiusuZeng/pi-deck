@@ -1,0 +1,61 @@
+name: Patch issue 55
+
+on:
+  push:
+    branches:
+      - perf/issue-55-resume-latency
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/issue-55-resume-latency
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Apply snapshot read optimization
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          main = Path('src/main/main.ts')
+          text = main.read_text()
+          import_anchor = 'import type { PiMessage, PiState, PromptInput } from "./pi/types.js";\n'
+          import_line = 'import { readChatSnapshotInputs } from "./chatSnapshotRead.js";\n'
+          if import_line not in text:
+              if import_anchor not in text:
+                  raise SystemExit('pi types import anchor not found')
+              text = text.replace(import_anchor, import_anchor + import_line, 1)
+
+          old = '''  const state = await adapter.getState(runtimeId);\n  const messages = options.skipMessages\n    ? []\n    : await adapter.getMessages(runtimeId);\n'''
+          new = '''  const { state, messages } = await readChatSnapshotInputs(\n    adapter,\n    runtimeId,\n    options,\n  );\n'''
+          if old not in text:
+              raise SystemExit('snapshot read sequence not found')
+          text = text.replace(old, new, 1)
+          main.write_text(text)
+
+          Path('src/main/chatSnapshotRead.ts').write_text('''export interface ChatSnapshotReader<State, Message> {\n  getState(runtimeId: string): Promise<State>;\n  getMessages(runtimeId: string): Promise<Message[]>;\n}\n\nexport interface ChatSnapshotReadOptions {\n  skipMessages?: boolean;\n}\n\n/**\n * Fetch the independent Pi snapshot inputs concurrently. Resume correctness\n * (canonical file/workspace ownership) is established before this helper is\n * called; this only removes avoidable RPC serialization from first paint.\n */\nexport async function readChatSnapshotInputs<State, Message>(\n  reader: ChatSnapshotReader<State, Message>,\n  runtimeId: string,\n  options: ChatSnapshotReadOptions = {},\n): Promise<{ state: State; messages: Message[] }> {\n  if (options.skipMessages === true) {\n    return { state: await reader.getState(runtimeId), messages: [] };\n  }\n\n  const [state, messages] = await Promise.all([\n    reader.getState(runtimeId),\n    reader.getMessages(runtimeId),\n  ]);\n  return { state, messages };\n}\n''')
+
+          Path('src/main/chatSnapshotRead.test.ts').write_text('''import { describe, expect, it, vi } from "vitest";\nimport { readChatSnapshotInputs } from "./chatSnapshotRead.js";\n\nfunction deferred<T>() {\n  let resolve!: (value: T) => void;\n  const promise = new Promise<T>((next) => {\n    resolve = next;\n  });\n  return { promise, resolve };\n}\n\ndescribe("chat snapshot reads", () => {\n  it("starts state and transcript RPCs concurrently", async () => {\n    const state = deferred<{ isAgentActive: boolean }>();\n    const messages = deferred<Array<{ role: string }>>();\n    const getState = vi.fn(() => state.promise);\n    const getMessages = vi.fn(() => messages.promise);\n\n    const pending = readChatSnapshotInputs(\n      { getState, getMessages },\n      "runtime-1",\n    );\n\n    expect(getState).toHaveBeenCalledWith("runtime-1");\n    expect(getMessages).toHaveBeenCalledWith("runtime-1");\n\n    messages.resolve([{ role: "assistant" }]);\n    await Promise.resolve();\n    let settled = false;\n    void pending.then(() => {\n      settled = true;\n    });\n    await Promise.resolve();\n    expect(settled).toBe(false);\n\n    state.resolve({ isAgentActive: false });\n    await expect(pending).resolves.toEqual({\n      state: { isAgentActive: false },\n      messages: [{ role: "assistant" }],\n    });\n  });\n\n  it("does not issue a transcript RPC for state-only snapshots", async () => {\n    const getState = vi.fn(async () => ({ isAgentActive: true }));\n    const getMessages = vi.fn(async () => [{ role: "assistant" }]);\n\n    await expect(\n      readChatSnapshotInputs(\n        { getState, getMessages },\n        "runtime-2",\n        { skipMessages: true },\n      ),\n    ).resolves.toEqual({\n      state: { isAgentActive: true },\n      messages: [],\n    });\n    expect(getMessages).not.toHaveBeenCalled();\n  });\n});\n''')
+          PY
+      - name: Format and test
+        run: |
+          npx prettier --write src/main/main.ts src/main/chatSnapshotRead.ts src/main/chatSnapshotRead.test.ts
+          npx vitest run src/main/chatSnapshotRead.test.ts
+      - name: Commit patch and remove helper workflow
+        shell: bash
+        run: |
+          rm .github/workflows/_patch-issue-55.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/main/main.ts src/main/chatSnapshotRead.ts src/main/chatSnapshotRead.test.ts .github/workflows/_patch-issue-55.yml
+          git commit -m "perf: overlap saved-session snapshot reads"
+          git push origin HEAD:perf/issue-55-resume-latency
