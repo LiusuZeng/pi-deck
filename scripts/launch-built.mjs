@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-import { readdir, readFile, stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { checkMacOsGuiLaunch } from "./check-macos-gui-launch.mjs";
+import { newestBuildInputMtime } from "./build-freshness.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 export const repoRoot = path.resolve(scriptDir, "..");
@@ -14,18 +15,15 @@ export const requiredOutputs = [
   "renderer/index.html",
   "renderer/pi-deck-app-icon.png",
 ];
-const buildInputs = [
-  "index.html",
-  "package.json",
-  "package-lock.json",
-  "tsconfig.base.json",
-  "tsconfig.main.json",
-  "tsconfig.renderer.json",
-  "vite.config.ts",
-  "scripts/copy-app-icon.mjs",
-];
 
-async function fileStats(filePath) {
+function record(metrics, key) {
+  if (metrics) {
+    metrics[key] = (metrics[key] ?? 0) + 1;
+  }
+}
+
+async function fileStats(filePath, metrics) {
+  record(metrics, "statCalls");
   try {
     return await stat(filePath);
   } catch {
@@ -33,33 +31,22 @@ async function fileStats(filePath) {
   }
 }
 
-async function newestBuildTreeMtime(directory) {
-  let newest = 0;
-  const entries = await readdir(directory, { withFileTypes: true });
-  for (const entry of entries) {
-    const entryPath = path.join(directory, entry.name);
-    if (entry.isDirectory()) {
-      newest = Math.max(newest, await newestBuildTreeMtime(entryPath));
-    } else if (
-      entry.isFile() &&
-      !/\.(?:test|spec)\.(?:[cm]?[jt]sx?)$/.test(entry.name)
-    ) {
-      // Renderer imports can include JSON, SVG, fonts, and images in addition
-      // to TS/CSS. Conservatively include every non-test file in build trees.
-      newest = Math.max(newest, (await stat(entryPath)).mtimeMs);
-    }
-  }
-  return newest;
+async function readText(filePath, metrics) {
+  record(metrics, "readFileCalls");
+  return readFile(filePath, "utf8");
 }
 
-export async function validateBuiltApp(root = repoRoot) {
+export async function validateBuiltApp(
+  root = repoRoot,
+  { deep = false, metrics } = {},
+) {
   const rootDistDir = path.join(root, "dist");
   const rootManifestPath = path.join(rootDistDir, ".pi-deck-build.json");
   const errors = [];
   let manifest;
 
   try {
-    manifest = JSON.parse(await readFile(rootManifestPath, "utf8"));
+    manifest = JSON.parse(await readText(rootManifestPath, metrics));
   } catch {
     errors.push(
       "No complete Pi Deck build was found (dist/.pi-deck-build.json is missing or invalid).",
@@ -68,8 +55,9 @@ export async function validateBuiltApp(root = repoRoot) {
 
   if (
     manifest &&
-    (manifest.schemaVersion !== 1 ||
+    (manifest.schemaVersion !== 2 ||
       typeof manifest.builtAtMs !== "number" ||
+      typeof manifest.sourceMtimeMs !== "number" ||
       !manifest.outputs ||
       typeof manifest.outputs !== "object")
   ) {
@@ -78,7 +66,10 @@ export async function validateBuiltApp(root = repoRoot) {
   }
 
   for (const relativePath of requiredOutputs) {
-    const outputStats = await fileStats(path.join(rootDistDir, relativePath));
+    const outputStats = await fileStats(
+      path.join(rootDistDir, relativePath),
+      metrics,
+    );
     if (!outputStats?.isFile() || outputStats.size === 0) {
       errors.push(
         `Required build output is missing or empty: dist/${relativePath}`,
@@ -99,13 +90,14 @@ export async function validateBuiltApp(root = repoRoot) {
 
   const rendererIndex = path.join(rootDistDir, "renderer", "index.html");
   try {
-    const rendererHtml = await readFile(rendererIndex, "utf8");
+    const rendererHtml = await readText(rendererIndex, metrics);
     const assetPaths = [
       ...rendererHtml.matchAll(/(?:src|href)="\.\/([^"?#]+)(?:[?#][^"]*)?"/g),
     ].map((match) => match[1]);
     for (const assetPath of assetPaths) {
       const assetStats = await fileStats(
         path.join(rootDistDir, "renderer", assetPath),
+        metrics,
       );
       if (!assetStats?.isFile() || assetStats.size === 0) {
         errors.push(
@@ -117,22 +109,9 @@ export async function validateBuiltApp(root = repoRoot) {
     // The required renderer index error above explains this condition.
   }
 
-  if (manifest) {
-    let newestInputMtime = 0;
-    for (const relativePath of buildInputs) {
-      const inputStats = await fileStats(path.join(root, relativePath));
-      newestInputMtime = Math.max(newestInputMtime, inputStats?.mtimeMs ?? 0);
-    }
-    for (const buildTree of ["src", "public", "assets"]) {
-      const directory = path.join(root, buildTree);
-      if ((await fileStats(directory))?.isDirectory()) {
-        newestInputMtime = Math.max(
-          newestInputMtime,
-          await newestBuildTreeMtime(directory),
-        );
-      }
-    }
-    if (newestInputMtime > manifest.builtAtMs) {
+  if (deep && manifest) {
+    const currentSourceMtimeMs = await newestBuildInputMtime(root, metrics);
+    if (currentSourceMtimeMs > manifest.sourceMtimeMs) {
       errors.push(
         "Source or build configuration changed after the completed build.",
       );
@@ -152,16 +131,40 @@ function printBuildError(errors) {
   );
 }
 
+function printValidationMetrics(metrics, elapsedMs, deep) {
+  console.error(
+    `Pi Deck ${deep ? "deep " : ""}build validation: ${elapsedMs.toFixed(1)} ms; ${metrics.statCalls ?? 0} stat calls; ${metrics.readFileCalls ?? 0} file reads; ${metrics.readdirCalls ?? 0} directory reads.`,
+  );
+}
+
 async function main() {
+  const args = new Set(process.argv.slice(2));
+  const knownArgs = new Set(["--deep", "--metrics", "--validate-only"]);
+  for (const arg of args) {
+    if (!knownArgs.has(arg)) {
+      throw new Error(`Unknown launch argument: ${arg}`);
+    }
+  }
+
   if (!checkMacOsGuiLaunch()) {
     process.exitCode = 2;
     return;
   }
 
-  const errors = await validateBuiltApp();
+  const deep = args.has("--deep");
+  const metrics = {};
+  const validationStartedAt = performance.now();
+  const errors = await validateBuiltApp(repoRoot, { deep, metrics });
+  const validationElapsedMs = performance.now() - validationStartedAt;
+  if (args.has("--metrics")) {
+    printValidationMetrics(metrics, validationElapsedMs, deep);
+  }
   if (errors.length > 0) {
     printBuildError(errors);
     process.exit(1);
+  }
+  if (args.has("--validate-only")) {
+    return;
   }
 
   const electron = path.join(
