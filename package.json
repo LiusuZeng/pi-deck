@@ -15,6 +15,7 @@
     "deck:real:build": "node scripts/start-pi-deck.mjs --real --launch --build",
     "dev:real": "node scripts/start-pi-deck.mjs --real --dev",
     "launch": "node scripts/launch-built.mjs",
+    "check:built": "node scripts/launch-built.mjs --validate-only --deep",
     "prelaunch:build": "node scripts/check-macos-gui-launch.mjs",
     "launch:build": "npm run clean && npm run build && npm run launch",
     "launch:real": "node scripts/start-pi-deck.mjs --real --launch",
@@ -37,7 +38,7 @@
     "smoke:real": "node scripts/smoke-real-pi.mjs",
     "smoke:real:prompt": "node scripts/smoke-real-pi.mjs --prompt \"Reply with exactly: PI_DECK_REAL_SMOKE_OK\"",
     "lint": "npm run typecheck && npm run check:site",
-    "verify:ci": "npm run format && npm run typecheck && npm test && npm run build && npm run check:site && npm run smoke:real && npm run test:e2e",
+    "verify:ci": "npm run format && npm run typecheck && npm test && npm run build && npm run check:built && npm run check:site && npm run smoke:real && npm run test:e2e",
     "verify:release": "npm run verify:ci && npm run test:e2e:real-smoke",
     "format": "prettier --check \"index.html\" \"package*.json\" \"*.config.ts\" \"tsconfig*.json\" \"scripts/**/*.mjs\" \"src/**/*.{ts,tsx,css}\" \"e2e/**/*.ts\""
   },

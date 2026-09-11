@@ -2,6 +2,7 @@
 import { mkdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { newestBuildInputMtime } from "./build-freshness.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
@@ -30,13 +31,19 @@ async function main() {
     };
   }
 
+  // Deep source traversal belongs to build/verification, not the repeated
+  // launch path. Persist the newest build-input mtime so an explicit deep
+  // validation can later detect a stale build without weakening normal launch.
+  const sourceMtimeMs = await newestBuildInputMtime(repoRoot);
+
   await mkdir(distDir, { recursive: true });
   await writeFile(
     manifestPath,
     `${JSON.stringify(
       {
-        schemaVersion: 1,
+        schemaVersion: 2,
         builtAtMs: Date.now(),
+        sourceMtimeMs,
         outputs,
       },
       null,
