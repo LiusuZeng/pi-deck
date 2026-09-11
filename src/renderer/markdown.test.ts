@@ -90,6 +90,36 @@ describe("safe markdown parser", () => {
     ]);
   });
 
+  it("hides recognized language hints from inline code display text", () => {
+    expect(
+      parseInlineMarkdown(
+        "`py if col_b` `python spine_ch` `js const x = 1` `ts type X = string` `bash echo hi`",
+      ),
+    ).toEqual([
+      { type: "code", text: "if col_b" },
+      { type: "text", text: " " },
+      { type: "code", text: "spine_ch" },
+      { type: "text", text: " " },
+      { type: "code", text: "const x = 1" },
+      { type: "text", text: " " },
+      { type: "code", text: "type X = string" },
+      { type: "text", text: " " },
+      { type: "code", text: "echo hi" },
+    ]);
+  });
+
+  it("preserves ordinary inline code that does not use a known language hint", () => {
+    expect(
+      parseInlineMarkdown("`status ready` `py` `pythonista value`"),
+    ).toEqual([
+      { type: "code", text: "status ready" },
+      { type: "text", text: " " },
+      { type: "code", text: "py" },
+      { type: "text", text: " " },
+      { type: "code", text: "pythonista value" },
+    ]);
+  });
+
   it("autolinks plain tool-card text without applying full markdown", () => {
     const tokens = parsePlainTextAutolinks(
       "**raw** output: https://example.com/logs",

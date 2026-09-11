@@ -19,6 +19,22 @@ export type MarkdownBlock =
       rows: InlineToken[][][];
     };
 
+const inlineCodeLanguageHints = new Set([
+  "bash",
+  "js",
+  "javascript",
+  "jsx",
+  "json",
+  "py",
+  "python",
+  "sh",
+  "shell",
+  "ts",
+  "tsx",
+  "typescript",
+  "zsh",
+]);
+
 export function parseSafeMarkdown(markdown: string): MarkdownBlock[] {
   const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
   const blocks: MarkdownBlock[] = [];
@@ -164,7 +180,9 @@ export function parseInlineMarkdown(text: string): InlineToken[] {
       }
       tokens.push({
         type: "code",
-        text: text.slice(cursor + delimiter.length, close),
+        text: inlineCodeDisplayText(
+          text.slice(cursor + delimiter.length, close),
+        ),
       });
       cursor = close + delimiter.length;
       continue;
@@ -222,6 +240,19 @@ export function parseInlineMarkdown(text: string): InlineToken[] {
   }
 
   return tokens;
+}
+
+function inlineCodeDisplayText(text: string): string {
+  const languagePrefix = text.match(/^([A-Za-z][A-Za-z0-9+#.-]*)\s+(.+)$/s);
+  if (languagePrefix === null) {
+    return text;
+  }
+
+  const language = (languagePrefix[1] ?? "").toLocaleLowerCase();
+  const code = languagePrefix[2] ?? "";
+  return inlineCodeLanguageHints.has(language) && code.trim().length > 0
+    ? code
+    : text;
 }
 
 export function parsePlainTextAutolinks(text: string): InlineToken[] {
