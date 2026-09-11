@@ -109,7 +109,9 @@ describe("safe markdown parser", () => {
   });
 
   it("preserves ordinary inline code that does not use a known language hint", () => {
-    expect(parseInlineMarkdown("`status ready` `py` `pythonista value`")).toEqual([
+    expect(
+      parseInlineMarkdown("`status ready` `py` `pythonista value`"),
+    ).toEqual([
       { type: "code", text: "status ready" },
       { type: "text", text: " " },
       { type: "code", text: "py" },
