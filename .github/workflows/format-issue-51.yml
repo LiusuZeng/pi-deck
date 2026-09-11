@@ -1,0 +1,26 @@
+name: Format issue 51 implementation
+on:
+  push:
+    branches: [perf/issue-51-progressive-startup]
+permissions:
+  contents: write
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/issue-51-progressive-startup
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prettier --write src/main/main.ts src/main/progressiveStartup.ts src/main/progressiveStartup.test.ts
+      - run: rm .github/workflows/format-issue-51.yml
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: format progressive startup"
+          git push origin HEAD:perf/issue-51-progressive-startup
