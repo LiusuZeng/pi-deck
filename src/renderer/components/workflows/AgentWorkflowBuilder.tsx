@@ -503,9 +503,10 @@ export function AgentWorkflowBuilder(props: {
                 }}
               />
             </label>
-            <label className="workflow-field">
+            <label className="workflow-field workflow-scope-field">
               <span>Workflow scope</span>
               <select
+                className="workflow-scope-select"
                 aria-label="Workflow scope"
                 value={scopeWorkspaceId ?? ""}
                 onChange={(event) =>
