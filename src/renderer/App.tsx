@@ -1,5 +1,6 @@
 import {
   lazy,
+  memo,
   Suspense,
   useEffect,
   useId,
@@ -118,6 +119,7 @@ import {
 import { RuntimeEventBuffer } from "./runtimeEventBuffer.js";
 import {
   buildActivityInbox,
+  countActivityInboxItems,
   type ActivityItem,
   type ActivitySourceSession,
 } from "./activityInbox.js";
@@ -606,6 +608,28 @@ interface SessionViewModel {
   archivedAtMs?: number;
   /** Timestamp of the latest durable or live successful/usable aborted turn. */
   completedAtMs?: number | undefined;
+}
+
+function activityInboxModelForPrimaryView(
+  primaryView: PrimaryView,
+  sources: readonly ActivitySourceSession[],
+) {
+  return primaryView.kind === "work" ? buildActivityInbox(sources) : undefined;
+}
+
+function useStableEvent<TArguments extends unknown[], TResult>(
+  callback: (...args: TArguments) => TResult,
+): (...args: TArguments) => TResult {
+  const callbackRef = useRef(callback);
+  useLayoutEffect(() => {
+    callbackRef.current = callback;
+  }, [callback]);
+  return useMemo(
+    () =>
+      (...args: TArguments): TResult =>
+        callbackRef.current(...args),
+    [],
+  );
 }
 
 /**
@@ -1296,7 +1320,6 @@ export function App(): ReactElement {
   const [uiMessage, setUiMessage] = useState(
     "Starting Pi Deck and resolving the active backend session.",
   );
-  const [nowMs, setNowMs] = useState(() => Date.now());
   // closeSession intentionally terminates its child process. Ignore that
   // expected worker_exit while converting the row to a resumable saved session.
   const intentionallyClosingRuntimeIds = useRef(new Set<string>());
@@ -1333,6 +1356,16 @@ export function App(): ReactElement {
   const sessionListGeneration = useRef(0);
   const reconciliationRetryTimers = useRef(new Map<string, number>());
   const reconciliationRetryAttempts = useRef(new Map<string, number>());
+  const onRecoverChatTimelineSession = useStableEvent(
+    handleRecoverSelectedSession,
+  );
+  const onRespondToChatTimelineExtensionUi = useStableEvent(
+    handleExtensionUiResponse,
+  );
+  const onRetryChatTimelineSession = useStableEvent(handleRetrySelectedSession);
+  const onCopyChatTimelineDiagnostics = useStableEvent(() => {
+    void handleCopySelectedDiagnostics();
+  });
   sessionsRef.current = sessions;
   composerDraftsRef.current = composerDrafts;
   pendingTaskSubmissionsRef.current = pendingTaskSubmissions;
@@ -1964,7 +1997,11 @@ export function App(): ReactElement {
     [activityWorkspaceNameById, archivedSessions, sessions],
   );
   const activityInboxModel = useMemo(
-    () => buildActivityInbox(activitySources),
+    () => activityInboxModelForPrimaryView(primaryView, activitySources),
+    [activitySources, primaryView],
+  );
+  const activityTotalCount = useMemo(
+    () => countActivityInboxItems(activitySources),
     [activitySources],
   );
   const sessionSoundSettings =
@@ -2289,15 +2326,6 @@ export function App(): ReactElement {
       );
     };
   }, []);
-
-  useEffect(() => {
-    const hasWorkingSession = sessions.some(isSessionBusy);
-    if (!hasWorkingSession) {
-      return;
-    }
-    const intervalId = window.setInterval(() => setNowMs(Date.now()), 1_000);
-    return () => window.clearInterval(intervalId);
-  }, [sessions]);
 
   useEffect(() => {
     if (loadState.state !== "ready") {
@@ -5856,7 +5884,7 @@ export function App(): ReactElement {
           showArchived={showArchived}
           composerDrafts={composerDrafts}
           primaryView={primaryView}
-          activityTotalCount={activityInboxModel.totalCount}
+          activityTotalCount={activityTotalCount}
           onSelect={handleSelectSession}
           onOpenActivity={handleToggleActivity}
           onOpenWorkflows={handleOpenWorkflows}
@@ -6126,17 +6154,19 @@ export function App(): ReactElement {
             </Suspense>
           </div>
         ) : primaryView.kind === "work" ? (
-          <ActivityInbox
-            model={activityInboxModel}
-            scope={activityScope}
-            usage={scopedWorkspaceUsage?.usage}
-            workspaces={workScopeWorkspaces}
-            selectedFilter={selectedActivityFilter}
-            onSelectedFilterChange={handleActivityFilterChange}
-            onScopeChange={handleActivityScopeChange}
-            onOpenActivityItem={handleOpenActivityItem}
-            onNewSession={() => void handleNewSession()}
-          />
+          activityInboxModel === undefined ? null : (
+            <ActivityInbox
+              model={activityInboxModel}
+              scope={activityScope}
+              usage={scopedWorkspaceUsage?.usage}
+              workspaces={workScopeWorkspaces}
+              selectedFilter={selectedActivityFilter}
+              onSelectedFilterChange={handleActivityFilterChange}
+              onScopeChange={handleActivityScopeChange}
+              onOpenActivityItem={handleOpenActivityItem}
+              onNewSession={() => void handleNewSession()}
+            />
+          )
         ) : (
           <div className="session-surface">
             <Button
@@ -6161,19 +6191,15 @@ export function App(): ReactElement {
                 <>
                   <ChatTimeline
                     session={selectedSession}
-                    uiMessage={uiMessage}
                     showAttachmentExamples={!isRealBackendMode}
-                    nowMs={nowMs}
                     multitaskState={multitaskState}
                     taskPlanning={
                       pendingTaskSubmissions[selectedSession.id] !== undefined
                     }
-                    onRecoverSession={handleRecoverSelectedSession}
-                    onRespondToExtensionUi={handleExtensionUiResponse}
-                    onRetrySession={handleRetrySelectedSession}
-                    onCopyDiagnostics={() =>
-                      void handleCopySelectedDiagnostics()
-                    }
+                    onRecoverSession={onRecoverChatTimelineSession}
+                    onRespondToExtensionUi={onRespondToChatTimelineExtensionUi}
+                    onRetrySession={onRetryChatTimelineSession}
+                    onCopyDiagnostics={onCopyChatTimelineDiagnostics}
                   />
                   {composer}
                 </>
@@ -11084,11 +11110,9 @@ function TranscriptLoading(props: { sessionTitle: string }): ReactElement {
   );
 }
 
-function ChatTimeline(props: {
+const ChatTimeline = memo(function ChatTimeline(props: {
   session: SessionViewModel;
-  uiMessage: string;
   showAttachmentExamples: boolean;
-  nowMs: number;
   multitaskState: MultitaskStateEvent | undefined;
   taskPlanning: boolean;
   onRecoverSession(): void;
@@ -11510,13 +11534,11 @@ function ChatTimeline(props: {
             />
           );
         })}
-        {showPendingAgent ? (
-          <PendingAgentRow session={props.session} nowMs={props.nowMs} />
-        ) : null}
+        {showPendingAgent ? <PendingAgentRow session={props.session} /> : null}
       </div>
     </section>
   );
-}
+});
 
 function hasActiveTimelineOutput(items: TimelineItem[]): boolean {
   return items.some(
@@ -11527,13 +11549,16 @@ function hasActiveTimelineOutput(items: TimelineItem[]): boolean {
   );
 }
 
-function PendingAgentRow(props: {
-  session: SessionViewModel;
-  nowMs: number;
-}): ReactElement {
+function PendingAgentRow(props: { session: SessionViewModel }): ReactElement {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const intervalId = window.setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => window.clearInterval(intervalId);
+  }, []);
+
   const startedAt =
     props.session.workingStartedAtMs ?? props.session.updatedAtMs;
-  const elapsedMs = Math.max(0, props.nowMs - startedAt);
+  const elapsedMs = Math.max(0, nowMs - startedAt);
   const showNoOutputNotice = elapsedMs >= NO_VISIBLE_OUTPUT_NOTICE_MS;
   const lastEvent = props.session.lastRuntimeEventLabel ?? "Prompt sent to Pi";
 
@@ -13606,6 +13631,7 @@ export const __rendererTestHooks = {
   moveComposerDraft,
   hasComposerDraft,
   activitySourceSessions,
+  activityInboxModelForPrimaryView,
   workspaceUsageRefreshRevision,
   activitySessionForItem,
   sessionForActivityItem,

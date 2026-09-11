@@ -4,6 +4,7 @@ import {
   activityTags,
   buildActivityInbox,
   classifyActivity,
+  countActivityInboxItems,
   filterActivityItems,
   statusTag,
   tagsForScope,
@@ -31,6 +32,22 @@ function overlays(patch: Partial<SessionOverlays>): SessionOverlays {
 }
 
 describe("buildActivityInbox", () => {
+  it("counts visible activity without materializing the full inbox model", () => {
+    const fixture = [
+      source("attention", { baseState: "waitingForInput" }),
+      source("working", { baseState: "working" }),
+      source("completed", { completedAtMs: 99 }),
+      source("idle"),
+      source("draft", { draftSession: true }),
+      source("archived", { baseState: "error", archivedAtMs: 1 }),
+    ];
+
+    expect(countActivityInboxItems(fixture)).toBe(3);
+    expect(countActivityInboxItems(fixture)).toBe(
+      buildActivityInbox(fixture).totalCount,
+    );
+  });
+
   it("classifies operational states into one tagged status with its action label", () => {
     const inbox = buildActivityInbox([
       source("attention", { baseState: "waitingForInput" }),

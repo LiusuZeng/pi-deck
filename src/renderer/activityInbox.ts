@@ -100,6 +100,21 @@ const actionLabels: Record<ActivityStatus, string> = {
 
 const archivedTag: ActivityTag = "visibility:archived";
 
+export function countActivityInboxItems(
+  sources: readonly ActivitySourceSession[],
+): number {
+  let total = 0;
+  for (const source of sources) {
+    if (
+      source.archivedAtMs === undefined &&
+      classifyActivity(source) !== undefined
+    ) {
+      total += 1;
+    }
+  }
+  return total;
+}
+
 export function buildActivityInbox(
   sources: readonly ActivitySourceSession[],
   filter: ActivityFilter = {},
