@@ -6,6 +6,55 @@ import { emptyOverlays } from "./sessionState.js";
 import { defaultAgentWorkflowDefinition } from "./workflows/agentWorkflowDefinition.js";
 import { __rendererTestHooks, AutolinkedText, MarkdownView } from "./App.js";
 
+it("keeps live sidebar buckets in source order while idle saved rows use recency", () => {
+  const liveSession = (id: string, updatedAtMs: number) => ({
+    id,
+    title: id,
+    subtitle: "Working",
+    project: "Project",
+    projectPath: "/tmp/project",
+    status: "working",
+    updatedAt: "Now",
+    updatedAtMs,
+    timeline: [],
+    baseState: "working",
+    overlays: { ...emptyOverlays },
+    runtimeBacked: true,
+  });
+  const savedSession = (id: string, updatedAtMs: number) => ({
+    ...liveSession(id, updatedAtMs),
+    status: "idle",
+    baseState: "idle",
+    runtimeBacked: false,
+  });
+
+  const first = liveSession("first", 300);
+  const second = liveSession("second", 100);
+  expect(
+    __rendererTestHooks
+      .buildRealSessionInbox([first, second] as any, "")
+      .working.map((session: any) => session.id),
+  ).toEqual(["first", "second"]);
+
+  expect(
+    __rendererTestHooks
+      .buildRealSessionInbox(
+        [first, { ...second, updatedAtMs: 400 }] as any,
+        "",
+      )
+      .working.map((session: any) => session.id),
+  ).toEqual(["first", "second"]);
+
+  expect(
+    __rendererTestHooks
+      .buildRealSessionInbox(
+        [savedSession("older", 100), savedSession("newer", 200)] as any,
+        "",
+      )
+      .idleSaved.map((session: any) => session.id),
+  ).toEqual(["newer", "older"]);
+});
+
 it("only materializes the Work inbox model while Work is visible", () => {
   const activitySource = {
     id: "runtime-1",
@@ -2691,8 +2740,8 @@ describe("renderer attention-first inbox", () => {
     ]);
     expect(inbox.errors.map((session: any) => session.id)).toEqual(["error"]);
     expect(inbox.working.map((session: any) => session.id)).toEqual([
-      "working-new",
       "working-old",
+      "working-new",
     ]);
     expect(inbox.idleSaved.map((session: any) => session.id)).toEqual([
       "saved-6",

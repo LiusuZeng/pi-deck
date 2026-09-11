@@ -292,6 +292,7 @@ textarea:disabled {
 
 .session-item {
   display: grid;
+  min-height: 46px;
   grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 6px;
   align-items: center;

@@ -9890,11 +9890,15 @@ function buildRealSessionInbox(
   }
 
   return {
-    needsInput: newestFirst(inbox.needsInput),
-    errors: newestFirst(inbox.errors),
-    working: newestFirst(inbox.working),
-    queued: newestFirst(inbox.queued),
-    attached: newestFirst(inbox.attached),
+    // Preserve source order inside live status buckets. Runtime events update
+    // `updatedAtMs` continuously; recency-sorting these rows makes navigation
+    // jump under the pointer. Initial hydration defines the deterministic
+    // starting order, while meaningful status transitions still move rows.
+    needsInput: inbox.needsInput,
+    errors: inbox.errors,
+    working: inbox.working,
+    queued: inbox.queued,
+    attached: inbox.attached,
     idleSaved: newestFirst(inbox.idleSaved),
   };
 }
