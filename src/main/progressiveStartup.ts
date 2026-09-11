@@ -16,9 +16,7 @@ export interface ProgressiveStartupOptions {
  * backend initialization on the caller-provided scheduler. Keeping the
  * scheduler injectable makes startup ordering deterministic in tests.
  */
-export function startProgressiveStartup(
-  options: ProgressiveStartupOptions,
-): {
+export function startProgressiveStartup(options: ProgressiveStartupOptions): {
   shellReadyMs: number;
   backendReady: Promise<ProgressiveStartupTimings>;
 } {

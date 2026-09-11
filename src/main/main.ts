@@ -450,9 +450,7 @@ async function bootstrap(): Promise<void> {
   projectStore = projects;
   const multitask = new MultitaskStateStore(app.getPath("userData"));
   multitaskStateStore = multitask;
-  const taskSessions = new TaskSessionMainStateStore(
-    app.getPath("userData"),
-  );
+  const taskSessions = new TaskSessionMainStateStore(app.getPath("userData"));
   taskSessionStateStore = taskSessions;
   const workspacesStore = new WorkspaceStore(
     resolvePiDeckHome(process.env),
@@ -495,7 +493,10 @@ async function bootstrap(): Promise<void> {
         return store;
       });
       if (workflowInitialization.status === "available") {
-        workflowScheduler = createWorkflowScheduler(settings, diagnosticsService);
+        workflowScheduler = createWorkflowScheduler(
+          settings,
+          diagnosticsService,
+        );
         workflowOccurrenceScheduler = createWorkflowOccurrenceScheduler(
           settings,
           diagnosticsService,
@@ -508,8 +509,7 @@ async function bootstrap(): Promise<void> {
         (await workspacesStore.list()).workspaces.length > 0;
       await migrateLegacyProjectsToWorkspaces();
       await workspacesStore.ensureDefaultWorkspace({
-        activate:
-          !hadWorkspaceMetadata || resolveChatBackendMode() === "fake",
+        activate: !hadWorkspaceMetadata || resolveChatBackendMode() === "fake",
       });
       await startDelegationBridge();
       await ensureChatAdapter(settings, diagnosticsService);
@@ -642,13 +642,13 @@ function registerIpcHandlers(
     responseSchema: appBootstrapStateSchema,
     diagnostics: diagnosticsService,
     handler: async () => {
-    const backendReady = backendInitializationPromise;
-    if (backendReady === undefined) {
-      throw new Error("Pi Deck backend initialization has not started.");
-    }
-    await backendReady;
-    return getAppBootstrapState(store, diagnosticsService);
-  },
+      const backendReady = backendInitializationPromise;
+      if (backendReady === undefined) {
+        throw new Error("Pi Deck backend initialization has not started.");
+      }
+      await backendReady;
+      return getAppBootstrapState(store, diagnosticsService);
+    },
   });
 
   registerValidatedIpc({
