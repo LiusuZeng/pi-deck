@@ -173,6 +173,7 @@ import {
   shouldAllowNavigation,
 } from "./security.js";
 import { ProjectStore, resolvePiDeckHome } from "./projects/projectStore.js";
+import { startProgressiveStartup } from "./progressiveStartup.js";
 import {
   WorkspaceStore,
   type WorkspaceRecord,
@@ -386,6 +387,8 @@ let testProjectPickQueue: string[] | undefined;
 
 let workflowScheduler: WorkflowScheduler | undefined;
 let workflowOccurrenceScheduler: WorkflowOccurrenceScheduler | undefined;
+let backendInitializationPromise: Promise<void> | undefined;
+const processStartedAtMs = Date.now();
 
 const maxImportedImageBytes = MAX_IMAGE_BYTES;
 const maxPromptImages = 10;
@@ -423,78 +426,105 @@ async function bootstrap(): Promise<void> {
     }
   }
 
-  diagnostics = new DiagnosticsService(
+  const diagnosticsService = new DiagnosticsService(
     app.getVersion(),
     app.getPath("userData"),
   );
-  await diagnostics.initialize();
-  settingsStore = new SettingsStore(app.getPath("userData"), diagnostics);
-  await settingsStore.loadIfNeeded();
-  applyAppTheme(await settingsStore.get());
+  diagnostics = diagnosticsService;
+  const settings = new SettingsStore(
+    app.getPath("userData"),
+    diagnosticsService,
+  );
+  settingsStore = settings;
+  // Theme is the one persisted dependency that must precede first paint.
+  await settings.loadIfNeeded();
+  applyAppTheme(await settings.get());
   nativeTheme.on("updated", () => {
     updateWindowBackground(mainWindow, nativeTheme);
   });
-  projectStore = new ProjectStore(resolvePiDeckHome(process.env), diagnostics);
-  multitaskStateStore = new MultitaskStateStore(app.getPath("userData"));
-  taskSessionStateStore = new TaskSessionMainStateStore(
-    app.getPath("userData"),
-  );
-  await Promise.all([
-    multitaskStateStore.loadIfNeeded(),
-    taskSessionStateStore.loadIfNeeded(),
-  ]);
-  await projectStore.loadIfNeeded();
-  workspaceStore = new WorkspaceStore(
+
+  const projects = new ProjectStore(
     resolvePiDeckHome(process.env),
-    diagnostics,
+    diagnosticsService,
   );
-  workspaceUsageStore = new WorkspaceUsageStore(resolvePiDeckHome(process.env));
-  await Promise.all([
-    workspaceStore.loadIfNeeded(),
-    workspaceUsageStore.loadIfNeeded(),
-  ]);
-  workflowInitialization = await initializeWorkflows(async () => {
-    const store = new WorkflowStore(
-      resolvePiDeckHome(process.env),
-      diagnostics,
-    );
-    await store.loadIfNeeded();
-    return store;
-  });
-  if (workflowInitialization.status === "available") {
-    workflowScheduler = createWorkflowScheduler(settingsStore, diagnostics);
-    workflowOccurrenceScheduler = createWorkflowOccurrenceScheduler(
-      settingsStore,
-      diagnostics,
-    );
-  } else {
-    diagnostics.recordError(workflowInitialization.diagnostic);
-  }
-  const hadWorkspaceMetadata =
-    (await workspaceStore.list()).workspaces.length > 0;
-  await migrateLegacyProjectsToWorkspaces();
-  // Keep a stable, folderless bucket for sessions that are not explicitly
-  // grouped. On a fresh install it is the initial selection; real-mode users
-  // retain their last active named workspace while still seeing the bucket.
-  await workspaceStore.ensureDefaultWorkspace({
-    activate: !hadWorkspaceMetadata || resolveChatBackendMode() === "fake",
-  });
-  // Rehydrated canonical occurrences may immediately create Pi sessions. An
-  // adapter is safe to initialize here (it creates no worker by itself), while
-  // scheduling before it exists would turn resumable queued work into failure.
-  await startDelegationBridge();
-  await ensureChatAdapter(settingsStore, diagnostics);
-  await rehydrateWorkflowRuns();
+  projectStore = projects;
+  const multitask = new MultitaskStateStore(app.getPath("userData"));
+  multitaskStateStore = multitask;
+  const taskSessions = new TaskSessionMainStateStore(app.getPath("userData"));
+  taskSessionStateStore = taskSessions;
+  const workspacesStore = new WorkspaceStore(
+    resolvePiDeckHome(process.env),
+    diagnosticsService,
+  );
+  workspaceStore = workspacesStore;
+  const usageStore = new WorkspaceUsageStore(resolvePiDeckHome(process.env));
+  workspaceUsageStore = usageStore;
 
-  configureCsp();
-  registerIpcHandlers(settingsStore, diagnostics);
-  createMainWindow();
-
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
+  const startup = startProgressiveStartup({
+    startedAtMs: processStartedAtMs,
+    now: Date.now,
+    schedule: (callback) => setImmediate(callback),
+    prepareShell: () => {
+      configureCsp();
+      registerIpcHandlers(settings, diagnosticsService);
       createMainWindow();
+      app.on("activate", () => {
+        if (BrowserWindow.getAllWindows().length === 0) {
+          createMainWindow();
+        }
+      });
+    },
+    initializeBackend: async () => {
+      await Promise.all([
+        diagnosticsService.initialize(),
+        multitask.loadIfNeeded(),
+        taskSessions.loadIfNeeded(),
+        projects.loadIfNeeded(),
+        workspacesStore.loadIfNeeded(),
+        usageStore.loadIfNeeded(),
+      ]);
+
+      workflowInitialization = await initializeWorkflows(async () => {
+        const store = new WorkflowStore(
+          resolvePiDeckHome(process.env),
+          diagnosticsService,
+        );
+        await store.loadIfNeeded();
+        return store;
+      });
+      if (workflowInitialization.status === "available") {
+        workflowScheduler = createWorkflowScheduler(
+          settings,
+          diagnosticsService,
+        );
+        workflowOccurrenceScheduler = createWorkflowOccurrenceScheduler(
+          settings,
+          diagnosticsService,
+        );
+      } else {
+        diagnosticsService.recordError(workflowInitialization.diagnostic);
+      }
+
+      const hadWorkspaceMetadata =
+        (await workspacesStore.list()).workspaces.length > 0;
+      await migrateLegacyProjectsToWorkspaces();
+      await workspacesStore.ensureDefaultWorkspace({
+        activate: !hadWorkspaceMetadata || resolveChatBackendMode() === "fake",
+      });
+      await startDelegationBridge();
+      await ensureChatAdapter(settings, diagnosticsService);
+      await rehydrateWorkflowRuns();
+    },
+  });
+
+  backendInitializationPromise = startup.backendReady.then((timings) => {
+    if (process.env.PI_DECK_STARTUP_METRICS === "1") {
+      console.info(
+        `[startup] shell-ready=${timings.shellReadyMs}ms backend-ready=${timings.backendReadyMs}ms`,
+      );
     }
   });
+  await backendInitializationPromise;
 }
 
 function createMainWindow(): void {
@@ -611,7 +641,14 @@ function registerIpcHandlers(
     requestSchema: noPayloadSchema,
     responseSchema: appBootstrapStateSchema,
     diagnostics: diagnosticsService,
-    handler: async () => getAppBootstrapState(store, diagnosticsService),
+    handler: async () => {
+      const backendReady = backendInitializationPromise;
+      if (backendReady === undefined) {
+        throw new Error("Pi Deck backend initialization has not started.");
+      }
+      await backendReady;
+      return getAppBootstrapState(store, diagnosticsService);
+    },
   });
 
   registerValidatedIpc({
