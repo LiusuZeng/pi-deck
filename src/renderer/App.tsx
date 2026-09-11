@@ -51,6 +51,7 @@ import type {
   WorkflowTransitionRun,
 } from "../shared/workflowSchemas.js";
 import {
+  createIncrementalMarkdownParser,
   isAllowedExternalHref,
   parsePlainTextAutolinks,
   parseSafeMarkdown,
@@ -345,6 +346,66 @@ function timelinePresentationItems(
 
   flushActivity();
   return presentationItems;
+}
+
+type TimelinePresentationProjectorOptions = {
+  onProjectRange?(startIndex: number, itemCount: number): void;
+};
+
+/**
+ * Live runtime updates preserve immutable history and replace/append the
+ * mutable tail. Reuse every completed presentation group before that
+ * tail; snapshot/session replacements fail back to a full projection.
+ */
+function createTimelinePresentationProjector(
+  options: TimelinePresentationProjectorOptions = {},
+): { project(items: readonly TimelineItem[]): TimelinePresentationItem[] } {
+  let previousSource: readonly TimelineItem[] = [];
+  let previousPresentation: TimelinePresentationItem[] = [];
+
+  return {
+    project(items) {
+      if (items.length === 0) {
+        previousSource = items;
+        previousPresentation = [];
+        options.onProjectRange?.(0, 0);
+        return [];
+      }
+
+      const previousTailStart = timelinePresentationTailStart(previousSource);
+      const canReusePrefix =
+        previousSource.length > 1 &&
+        previousTailStart > 0 &&
+        items.length >= previousTailStart &&
+        items[0] === previousSource[0] &&
+        items[previousTailStart - 1] === previousSource[previousTailStart - 1];
+      const restartIndex = canReusePrefix ? previousTailStart : 0;
+      options.onProjectRange?.(
+        restartIndex,
+        Math.max(0, items.length - restartIndex),
+      );
+
+      const projectedTail = timelinePresentationItems(
+        items.slice(restartIndex),
+      );
+      const presentation = canReusePrefix
+        ? [...previousPresentation.slice(0, -1), ...projectedTail]
+        : projectedTail;
+      previousSource = items;
+      previousPresentation = presentation;
+      return presentation;
+    },
+  };
+}
+
+function timelinePresentationTailStart(items: readonly TimelineItem[]): number {
+  if (items.length === 0) return 0;
+  let index = items.length - 1;
+  if (!isActivityTimelineItem(items[index]!)) return index;
+  while (index > 0 && isActivityTimelineItem(items[index - 1]!)) {
+    index -= 1;
+  }
+  return index;
 }
 
 function isActivityTimelineItem(
@@ -11076,17 +11137,19 @@ function revealTimelineElement(
 }
 
 function getTimelineScrollMarker(session: SessionViewModel): string {
+  // Scroll ownership only needs the mutable end of the transcript. Keep
+  // the marker bounded so a token delta never serializes all history.
   const timelineMarker = session.timeline
+    .slice(-12)
     .map((item) => {
       if (item.kind === "tool") {
         return `${item.id}:${item.status}:${item.summary.length}:${item.details.length}`;
       }
-
       return `${item.id}:${item.kind}:${"content" in item ? item.content.length : 0}`;
     })
     .join("|");
 
-  return `${session.id}|${session.status}|${session.baseState}|${session.overlays.streaming}|${session.overlays.toolRunning}|${timelineMarker}`;
+  return `${session.id}|${session.status}|${session.baseState}|${session.overlays.streaming}|${session.overlays.toolRunning}|${session.timeline.length}|${timelineMarker}`;
 }
 
 function StarterPage(props: { composer: ReactElement }): ReactElement {
@@ -11142,8 +11205,14 @@ const ChatTimeline = memo(function ChatTimeline(props: {
   const [activityDisclosureById, setActivityDisclosureById] = useState<
     Record<string, boolean>
   >({});
+  const presentationProjectorRef = useRef<
+    ReturnType<typeof createTimelinePresentationProjector> | undefined
+  >(undefined);
+  if (presentationProjectorRef.current === undefined) {
+    presentationProjectorRef.current = createTimelinePresentationProjector();
+  }
   const presentationItems = useMemo(
-    () => timelinePresentationItems(props.session.timeline),
+    () => presentationProjectorRef.current!.project(props.session.timeline),
     [props.session.timeline],
   );
   const timelineScrollMarker = getTimelineScrollMarker(props.session);
@@ -12146,8 +12215,14 @@ function TimelineAttachmentGrid(props: {
 }
 
 export function MarkdownView(props: { markdown: string }): ReactElement {
+  const parserRef = useRef<
+    ReturnType<typeof createIncrementalMarkdownParser> | undefined
+  >(undefined);
+  if (parserRef.current === undefined) {
+    parserRef.current = createIncrementalMarkdownParser();
+  }
   const blocks = useMemo(
-    () => parseSafeMarkdown(props.markdown),
+    () => parserRef.current!.parse(props.markdown),
     [props.markdown],
   );
 
@@ -13711,6 +13786,8 @@ export const __rendererTestHooks = {
   shouldAutoFollowTimelineUpdate,
   timelineDetailsRevealScrollDelta,
   timelinePresentationItems,
+  createTimelinePresentationProjector,
+  getTimelineScrollMarker,
   activityMilestones,
   activityMilestoneLabel,
   shouldDefaultOpenActivityGroup,

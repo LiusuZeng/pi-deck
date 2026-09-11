@@ -3696,3 +3696,63 @@ describe("renderer message_update reduction", () => {
     );
   });
 });
+
+describe("incremental timeline projection", () => {
+  it("reprojects only the mutable tail while immutable history is shared", () => {
+    const ranges: Array<[number, number]> = [];
+    const projector = __rendererTestHooks.createTimelinePresentationProjector({
+      onProjectRange: (startIndex: number, itemCount: number) =>
+        ranges.push([startIndex, itemCount]),
+    });
+    const history = Array.from({ length: 120 }, (_, index) => ({
+      id: `history-${index}`,
+      kind: "user",
+      content: `history ${index}`,
+      createdAt: "00:00",
+    })) as any[];
+
+    projector.project(history as any);
+    const streaming = [
+      ...history,
+      {
+        id: "streaming-answer",
+        kind: "assistant",
+        content: "hello",
+        createdAt: "00:01",
+        streaming: true,
+      },
+    ] as any[];
+    projector.project(streaming as any);
+    const next = [
+      ...streaming.slice(0, -1),
+      { ...streaming.at(-1), content: "hello world" },
+    ] as any[];
+    const incremental = projector.project(next as any);
+
+    expect(incremental).toEqual(
+      __rendererTestHooks.timelinePresentationItems(next as any),
+    );
+    expect(ranges[0]).toEqual([0, 120]);
+    expect(ranges.at(-1)?.[0]).toBeGreaterThan(110);
+    expect(ranges.at(-1)?.[1]).toBeLessThan(5);
+  });
+
+  it("keeps the scroll marker bounded for very long transcripts", () => {
+    const timeline = Array.from({ length: 500 }, (_, index) => ({
+      id: `message-${index}`,
+      kind: "assistant",
+      content: "x".repeat(200),
+      createdAt: "00:00",
+    }));
+    const marker = __rendererTestHooks.getTimelineScrollMarker({
+      id: "long-session",
+      status: "working",
+      baseState: "working",
+      overlays: { streaming: true, toolRunning: false },
+      timeline,
+    } as any);
+
+    expect(marker.length).toBeLessThan(1_000);
+    expect(marker).toContain("|500|");
+  });
+});

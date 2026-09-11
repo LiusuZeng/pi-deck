@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  createIncrementalMarkdownParser,
   isAllowedExternalHref,
   parseInlineMarkdown,
   parsePlainTextAutolinks,
@@ -214,5 +215,46 @@ describe("safe markdown parser", () => {
     expect(isAllowedExternalHref("mailto:user@example.com")).toBe(true);
     expect(isAllowedExternalHref("file:///etc/passwd")).toBe(false);
     expect(isAllowedExternalHref("/relative")).toBe(false);
+  });
+
+  it("reuses finalized blocks while a long Markdown response grows", () => {
+    let parsedCharacters = 0;
+    const parser = createIncrementalMarkdownParser({
+      onParseSegment: (length) => {
+        parsedCharacters += length;
+      },
+    });
+    const paragraphs = Array.from(
+      { length: 160 },
+      (_, index) =>
+        `## Section ${index}\n\nParagraph ${index} ${"content ".repeat(20)}`,
+    );
+    let streamed = "";
+    for (const paragraph of paragraphs) {
+      streamed += `${paragraph}\n\n`;
+      parser.parse(streamed);
+    }
+
+    expect(parser.parse(streamed)).toEqual(parseSafeMarkdown(streamed));
+    expect(parsedCharacters).toBeLessThan(streamed.length * 3);
+  });
+
+  it("falls back safely for replacements and keeps fenced blank lines mutable", () => {
+    const parser = createIncrementalMarkdownParser();
+    const partial = [
+      "Intro",
+      "",
+      "```ts",
+      "const first = 1;",
+      "",
+      "const second = 2;",
+    ].join("\n");
+    expect(parser.parse(partial)).toEqual(parseSafeMarkdown(partial));
+
+    const completed = `${partial}\n` + "```\n\nDone";
+    expect(parser.parse(completed)).toEqual(parseSafeMarkdown(completed));
+
+    const replacement = "# Replaced\n\nSafe <script>text</script>";
+    expect(parser.parse(replacement)).toEqual(parseSafeMarkdown(replacement));
   });
 });

@@ -142,6 +142,94 @@ export function parseSafeMarkdown(markdown: string): MarkdownBlock[] {
   return blocks;
 }
 
+export interface IncrementalMarkdownParserOptions {
+  onParseSegment?(length: number): void;
+}
+
+export interface IncrementalMarkdownParser {
+  parse(markdown: string): MarkdownBlock[];
+  reset(): void;
+}
+
+/**
+ * Keeps blank-line-delimited, already-finished Markdown blocks parsed
+ * while reparsing only the mutable tail. Non-append edits fail back to
+ * the canonical full parser, so final rendering and safety semantics
+ * stay identical to parseSafeMarkdown().
+ */
+export function createIncrementalMarkdownParser(
+  options: IncrementalMarkdownParserOptions = {},
+): IncrementalMarkdownParser {
+  let previousSource = "";
+  let stablePrefixEnd = 0;
+  let stableBlocks: MarkdownBlock[] = [];
+
+  const parseSegment = (segment: string): MarkdownBlock[] => {
+    if (segment.length === 0) return [];
+    options.onParseSegment?.(segment.length);
+    return parseSafeMarkdown(segment);
+  };
+
+  const reset = (): void => {
+    previousSource = "";
+    stablePrefixEnd = 0;
+    stableBlocks = [];
+  };
+
+  return {
+    reset,
+    parse(markdown) {
+      const source = markdown.replace(/\r\n?/g, "\n");
+      if (!source.startsWith(previousSource)) {
+        reset();
+      }
+
+      const nextStablePrefixEnd = stableMarkdownPrefixEnd(source);
+      if (nextStablePrefixEnd < stablePrefixEnd) {
+        reset();
+      }
+
+      if (nextStablePrefixEnd > stablePrefixEnd) {
+        stableBlocks = [
+          ...stableBlocks,
+          ...parseSegment(source.slice(stablePrefixEnd, nextStablePrefixEnd)),
+        ];
+        stablePrefixEnd = nextStablePrefixEnd;
+      }
+
+      const tailBlocks = parseSegment(source.slice(stablePrefixEnd));
+      previousSource = source;
+      return [...stableBlocks, ...tailBlocks];
+    },
+  };
+}
+
+function stableMarkdownPrefixEnd(source: string): number {
+  let offset = 0;
+  let stableEnd = 0;
+  let inFence = false;
+
+  while (offset <= source.length) {
+    const newline = source.indexOf("\n", offset);
+    const hasNewline = newline !== -1;
+    const end = hasNewline ? newline : source.length;
+    const line = source.slice(offset, end);
+
+    if (inFence) {
+      if (line.startsWith("```")) inFence = false;
+    } else if (/^```[^`]*$/.test(line)) {
+      inFence = true;
+    } else if (line.trim().length === 0 && hasNewline) {
+      stableEnd = end + 1;
+    }
+
+    if (!hasNewline) break;
+    offset = end + 1;
+  }
+
+  return stableEnd;
+}
+
 export function parseInlineMarkdown(text: string): InlineToken[] {
   const tokens: InlineToken[] = [];
   let cursor = 0;
