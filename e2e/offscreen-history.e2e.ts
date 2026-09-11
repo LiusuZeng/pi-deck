@@ -43,42 +43,52 @@ test("long transcript rows skip offscreen rendering work", async () => {
       page.getByText(/Fake response to: offscreen containment probe/),
     ).toBeVisible();
 
-    const result = await page.locator(".timeline-scroll").evaluate(async (root) => {
-      const source = root.querySelector<HTMLElement>(".timeline-row");
-      if (source === null) throw new Error("Expected a timeline row fixture.");
+    const result = await page
+      .locator(".timeline-scroll")
+      .evaluate(async (root) => {
+        const source = root.querySelector<HTMLElement>(".timeline-row");
+        if (source === null) {
+          throw new Error("Expected a timeline row fixture.");
+        }
 
-      for (let index = 0; index < 500; index += 1) {
-        root.append(source.cloneNode(true));
-      }
-      root.scrollTop = root.scrollHeight;
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        for (let index = 0; index < 500; index += 1) {
+          root.append(source.cloneNode(true));
+        }
+        root.scrollTop = root.scrollHeight;
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => resolve()),
+        );
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => resolve()),
+        );
 
-      const rows = Array.from(root.querySelectorAll<HTMLElement>(".timeline-row"));
-      const first = rows[0];
-      const last = rows[rows.length - 1];
-      if (first === undefined || last === undefined) {
-        throw new Error("Expected synthetic long transcript rows.");
-      }
+        const rows = Array.from(
+          root.querySelectorAll<HTMLElement>(".timeline-row"),
+        );
+        const first = rows[0];
+        const last = rows[rows.length - 1];
+        if (first === undefined || last === undefined) {
+          throw new Error("Expected synthetic long transcript rows.");
+        }
 
-      const checkRendered = (element: HTMLElement): boolean =>
-        (
-          element as HTMLElement & {
-            checkVisibility(options?: {
-              contentVisibilityAuto?: boolean;
-            }): boolean;
-          }
-        ).checkVisibility({ contentVisibilityAuto: true });
+        const checkRendered = (element: HTMLElement): boolean =>
+          (
+            element as HTMLElement & {
+              checkVisibility(options?: {
+                contentVisibilityAuto?: boolean;
+              }): boolean;
+            }
+          ).checkVisibility({ contentVisibilityAuto: true });
 
-      const firstStyle = getComputedStyle(first);
-      return {
-        count: rows.length,
-        contentVisibility: firstStyle.contentVisibility,
-        intrinsicSize: firstStyle.getPropertyValue("contain-intrinsic-size"),
-        firstRendered: checkRendered(first),
-        lastRendered: checkRendered(last),
-      };
-    });
+        const firstStyle = getComputedStyle(first);
+        return {
+          count: rows.length,
+          contentVisibility: firstStyle.contentVisibility,
+          intrinsicSize: firstStyle.getPropertyValue("contain-intrinsic-size"),
+          firstRendered: checkRendered(first),
+          lastRendered: checkRendered(last),
+        };
+      });
 
     expect(result.count).toBeGreaterThan(500);
     expect(result.contentVisibility).toBe("auto");
