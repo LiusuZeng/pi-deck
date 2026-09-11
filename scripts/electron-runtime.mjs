@@ -52,9 +52,13 @@ async function executableLooksCurrent(sourceExecutable, brandedExecutable) {
 
 async function runCloneCopy(sourceBundle, destinationBundle) {
   await new Promise((resolve, reject) => {
-    const child = spawn("/bin/cp", ["-R", "-c", sourceBundle, destinationBundle], {
-      stdio: "ignore",
-    });
+    const child = spawn(
+      "/bin/cp",
+      ["-R", "-c", sourceBundle, destinationBundle],
+      {
+        stdio: "ignore",
+      },
+    );
     child.once("error", reject);
     child.once("exit", (code, signal) => {
       if (signal) {
@@ -106,7 +110,10 @@ export async function preparePiDeckElectronExecutable({
   }
 
   const sourceBundle = findMacOSAppBundle(electronExecutable);
-  const executableRelativePath = path.relative(sourceBundle, electronExecutable);
+  const executableRelativePath = path.relative(
+    sourceBundle,
+    electronExecutable,
+  );
   if (
     executableRelativePath.length === 0 ||
     executableRelativePath.startsWith("..") ||

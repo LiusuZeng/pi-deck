@@ -15,6 +15,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { initializeMacOSDockIcon, resolveAppIconPath } from "./appIcon.js";
+import { initializeAppIdentity } from "./appIdentity.js";
 import {
   appBootstrapStateSchema,
   appSettingsPatchSchema,
@@ -408,6 +409,7 @@ async function bootstrap(): Promise<void> {
     app.setPath("userData", path.resolve(userDataOverride));
   }
 
+  initializeAppIdentity(app);
   await app.whenReady();
 
   if (process.platform === "darwin") {

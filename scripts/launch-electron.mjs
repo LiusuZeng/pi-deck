@@ -32,7 +32,9 @@ export async function launchElectron(
 async function main() {
   const [entry, ...args] = process.argv.slice(2);
   if (!entry) {
-    throw new Error("Usage: node scripts/launch-electron.mjs <entry> [args...]");
+    throw new Error(
+      "Usage: node scripts/launch-electron.mjs <entry> [args...]",
+    );
   }
   await launchElectron(entry, args);
 }

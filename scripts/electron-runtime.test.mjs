@@ -20,9 +20,7 @@ async function writeFakeElectronBundle(root) {
 describe("Pi Deck Electron runtime", () => {
   it("locates the containing macOS app bundle", () => {
     expect(
-      findMacOSAppBundle(
-        "/tmp/Electron.app/Contents/MacOS/Electron",
-      ),
+      findMacOSAppBundle("/tmp/Electron.app/Contents/MacOS/Electron"),
     ).toBe("/tmp/Electron.app");
   });
 
