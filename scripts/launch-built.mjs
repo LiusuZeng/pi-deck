@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { checkMacOsGuiLaunch } from "./check-macos-gui-launch.mjs";
 import { newestBuildInputMtime } from "./build-freshness.mjs";
+import { preparePiDeckElectronExecutable } from "./electron-runtime.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 export const repoRoot = path.resolve(scriptDir, "..");
@@ -167,19 +168,14 @@ async function main() {
     return;
   }
 
-  const electron = path.join(
-    repoRoot,
-    "node_modules",
-    ".bin",
-    process.platform === "win32" ? "electron.cmd" : "electron",
-  );
+  const electron = await preparePiDeckElectronExecutable();
   const child = spawn(electron, [path.join(distDir, "main", "main.js")], {
     cwd: repoRoot,
     env: process.env,
     stdio: "inherit",
   });
   child.on("error", (error) => {
-    console.error(`Could not start Electron: ${error.message}`);
+    console.error(`Could not start Pi Deck Electron runtime: ${error.message}`);
     process.exit(1);
   });
   child.on("exit", (code, signal) => {
