@@ -1,0 +1,111 @@
+name: One-shot issue 35 patch
+
+on:
+  push:
+    branches:
+      - fix/issue-35-workflow-switcher-layout
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/issue-35-workflow-switcher-layout
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Apply current workflow scope containment fix
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          builder_path = Path("src/renderer/components/workflows/AgentWorkflowBuilder.tsx")
+          builder = builder_path.read_text()
+          old = '''            <label className="workflow-field">
+              <span>Workflow scope</span>
+              <select
+                aria-label="Workflow scope"'''
+          new = '''            <label className="workflow-field workflow-scope-field">
+              <span>Workflow scope</span>
+              <select
+                className="workflow-scope-select"
+                aria-label="Workflow scope"'''
+          if builder.count(old) != 1:
+              raise SystemExit(f"expected one workflow scope control, found {builder.count(old)}")
+          builder_path.write_text(builder.replace(old, new))
+
+          style_path = Path("src/renderer/styles.css")
+          styles = style_path.read_text()
+          styles += '''
+
+/* Keep long workflow workspace names contained in the current scope control.
+   The legacy header pill/sessions-control layout no longer exists; this is the
+   durable equivalent that must remain bounded at narrow widths. */
+.workflow-scope-field {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.workflow-scope-select {
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  text-overflow: ellipsis;
+}
+'''
+          style_path.write_text(styles)
+
+          test_path = Path("src/renderer/components/workflows/AgentWorkflowBuilder.test.ts")
+          tests = test_path.read_text()
+          marker = '  it("defaults to global scope and retains an unavailable saved scope when editing", async () => {'
+          if tests.count(marker) != 1:
+              raise SystemExit("workflow test insertion marker changed")
+          regression = '''  it("contains long workflow workspace labels in the dedicated scope control", () => {
+            render();
+            const longWorkspaceName =
+              "PJR Enterprise Really Long Workspace Name That Must Stay Contained";
+            act(() =>
+              root?.render(
+                createElement(AgentWorkflowBuilder, {
+                  workspaceChoices: [
+                    { id: "workspace-long", name: longWorkspaceName },
+                  ],
+                  onSave: vi.fn(),
+                  onCancel: () => undefined,
+                }),
+              ),
+            );
+
+            const field = container!.querySelector<HTMLElement>(
+              ".workflow-scope-field",
+            )!;
+            const scope = field.querySelector<HTMLSelectElement>(
+              ".workflow-scope-select",
+            )!;
+            expect(scope.getAttribute("aria-label")).toBe("Workflow scope");
+            expect(scope.parentElement).toBe(field);
+            expect([...scope.options].map((option) => option.textContent)).toContain(
+              longWorkspaceName,
+            );
+          });
+
+'''
+          test_path.write_text(tests.replace(marker, regression + marker))
+          PY
+      - run: npx prettier --write src/renderer/components/workflows/AgentWorkflowBuilder.tsx src/renderer/components/workflows/AgentWorkflowBuilder.test.ts src/renderer/styles.css
+      - run: npm test -- --run src/renderer/components/workflows/AgentWorkflowBuilder.test.ts
+      - name: Commit final patch and remove one-shot workflow
+        run: |
+          rm .github/workflows/one-shot-issue-35.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: contain workflow scope workspace labels"
+          git push origin HEAD:fix/issue-35-workflow-switcher-layout
