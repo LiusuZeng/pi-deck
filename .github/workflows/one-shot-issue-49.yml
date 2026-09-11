@@ -28,34 +28,28 @@ jobs:
 
           app_path = Path("src/renderer/App.tsx")
           app = app_path.read_text()
-          old = '''  return {
-            needsInput: newestFirst(inbox.needsInput),
-            errors: newestFirst(inbox.errors),
-            working: newestFirst(inbox.working),
-            queued: newestFirst(inbox.queued),
-            attached: newestFirst(inbox.attached),
-            idleSaved: newestFirst(inbox.idleSaved),
-          };
-          '''
-          new = '''  return {
-            // Live buckets intentionally retain their source order. Runtime events
-            // update `updatedAtMs` frequently, so sorting these buckets by recency
-            // turns stable navigation into a live activity feed. Initial hydration
-            // already supplies a useful deterministic source order, while status
-            // transitions still move a row once between buckets.
-            needsInput: inbox.needsInput,
-            errors: inbox.errors,
-            working: inbox.working,
-            queued: inbox.queued,
-            attached: inbox.attached,
-            // Saved idle sessions do not receive live runtime churn, so recency is
-            // still useful for their initial/default presentation.
-            idleSaved: newestFirst(inbox.idleSaved),
-          };
-          '''
-          if app.count(old) != 1:
-              raise SystemExit(f"expected one sidebar ordering block, found {app.count(old)}")
-          app_path.write_text(app.replace(old, new))
+          replacements = {
+              "needsInput: newestFirst(inbox.needsInput),": "needsInput: inbox.needsInput,",
+              "errors: newestFirst(inbox.errors),": "errors: inbox.errors,",
+              "working: newestFirst(inbox.working),": "working: inbox.working,",
+              "queued: newestFirst(inbox.queued),": "queued: inbox.queued,",
+              "attached: newestFirst(inbox.attached),": "attached: inbox.attached,",
+          }
+          for old, new in replacements.items():
+              if app.count(old) != 1:
+                  raise SystemExit(f"expected one {old!r}, found {app.count(old)}")
+              app = app.replace(old, new)
+          comment_anchor = "    needsInput: inbox.needsInput,"
+          comment = """    // Preserve the source order inside live status buckets. Runtime events
+            // update `updatedAtMs` continuously, and recency-sorting these rows makes
+            // navigation jump under the pointer. Initial hydration still defines the
+            // deterministic starting order; meaningful status transitions move rows
+            // between buckets once.
+            needsInput: inbox.needsInput,"""
+          if app.count(comment_anchor) != 1:
+              raise SystemExit("sidebar comment anchor changed")
+          app = app.replace(comment_anchor, comment)
+          app_path.write_text(app)
 
           test_path = Path("src/renderer/App.test.ts")
           tests = test_path.read_text()
@@ -118,18 +112,16 @@ jobs:
 
           style_path = Path("src/renderer/styles.css")
           styles = style_path.read_text()
-          style_old = '''.session-item {
-            display: grid;
-            grid-template-columns: auto minmax(0, 1fr) auto;
-          '''
-          style_new = '''.session-item {
-            display: grid;
-            min-height: 46px;
-            grid-template-columns: auto minmax(0, 1fr) auto;
-          '''
-          if styles.count(style_old) != 1:
-              raise SystemExit(f"expected one session layout block, found {styles.count(style_old)}")
-          style_path.write_text(styles.replace(style_old, style_new))
+          style_anchor = ".session-item {\n  display: grid;"
+          if styles.count(style_anchor) != 1:
+              raise SystemExit(
+                  f"expected one session layout anchor, found {styles.count(style_anchor)}"
+              )
+          styles = styles.replace(
+              style_anchor,
+              ".session-item {\n  display: grid;\n  min-height: 46px;",
+          )
+          style_path.write_text(styles)
           PY
       - run: npx prettier --write src/renderer/App.tsx src/renderer/App.test.ts src/renderer/styles.css
       - run: npm test -- --run src/renderer/App.test.ts
