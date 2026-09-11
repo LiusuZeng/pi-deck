@@ -39,17 +39,15 @@ jobs:
               if app.count(old) != 1:
                   raise SystemExit(f"expected one {old!r}, found {app.count(old)}")
               app = app.replace(old, new)
-          comment_anchor = "    needsInput: inbox.needsInput,"
-          comment = """    // Preserve the source order inside live status buckets. Runtime events
-            // update `updatedAtMs` continuously, and recency-sorting these rows makes
-            // navigation jump under the pointer. Initial hydration still defines the
-            // deterministic starting order; meaningful status transitions move rows
-            // between buckets once.
+          anchor = "    needsInput: inbox.needsInput,"
+          comment = """    // Preserve source order inside live status buckets. Runtime events update
+            // `updatedAtMs` continuously; recency-sorting these rows makes navigation
+            // jump under the pointer. Initial hydration defines the deterministic
+            // starting order, while meaningful status transitions still move rows.
             needsInput: inbox.needsInput,"""
-          if app.count(comment_anchor) != 1:
+          if app.count(anchor) != 1:
               raise SystemExit("sidebar comment anchor changed")
-          app = app.replace(comment_anchor, comment)
-          app_path.write_text(app)
+          app_path.write_text(app.replace(anchor, comment))
 
           test_path = Path("src/renderer/App.test.ts")
           tests = test_path.read_text()
@@ -86,8 +84,6 @@ jobs:
                 .working.map((session: any) => session.id),
             ).toEqual(["first", "second"]);
 
-            // A later event for the second session must update its row in place,
-            // not move it above the first Working session.
             expect(
               __rendererTestHooks
                 .buildRealSessionInbox(
@@ -108,7 +104,23 @@ jobs:
           });
 
           '''
-          test_path.write_text(tests.replace(marker, regression + marker))
+          tests = tests.replace(marker, regression + marker)
+          old_expectation = '''expect(inbox.working.map((session: any) => session.id)).toEqual([
+                "working-new",
+                "working-old",
+              ]);'''
+          if tests.count(old_expectation) != 1:
+              raise SystemExit(
+                  f"expected one old working-order assertion, found {tests.count(old_expectation)}"
+              )
+          tests = tests.replace(
+              old_expectation,
+              '''expect(inbox.working.map((session: any) => session.id)).toEqual([
+                "working-old",
+                "working-new",
+              ]);''',
+          )
+          test_path.write_text(tests)
 
           style_path = Path("src/renderer/styles.css")
           styles = style_path.read_text()
@@ -117,11 +129,12 @@ jobs:
               raise SystemExit(
                   f"expected one session layout anchor, found {styles.count(style_anchor)}"
               )
-          styles = styles.replace(
-              style_anchor,
-              ".session-item {\n  display: grid;\n  min-height: 46px;",
+          style_path.write_text(
+              styles.replace(
+                  style_anchor,
+                  ".session-item {\n  display: grid;\n  min-height: 46px;",
+              )
           )
-          style_path.write_text(styles)
           PY
       - run: npx prettier --write src/renderer/App.tsx src/renderer/App.test.ts src/renderer/styles.css
       - run: npm test -- --run src/renderer/App.test.ts
