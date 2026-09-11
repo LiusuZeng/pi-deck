@@ -161,6 +161,7 @@ import {
   validatePiSessionFile,
 } from "./pi/sessionRepository.js";
 import type { PiMessage, PiState, PromptInput } from "./pi/types.js";
+import { readChatSnapshotInputs } from "./chatSnapshotRead.js";
 import { captureLoginShellEnv } from "./platform/piEnvironment.js";
 import type {
   AppPiSettings,
@@ -6153,10 +6154,11 @@ async function getChatSnapshotForRuntime(
   if (workspaceId === undefined) {
     throw new Error(`Chat runtime has no workspace ownership: ${runtimeId}`);
   }
-  const state = await adapter.getState(runtimeId);
-  const messages = options.skipMessages
-    ? []
-    : await adapter.getMessages(runtimeId);
+  const { state, messages } = await readChatSnapshotInputs(
+    adapter,
+    runtimeId,
+    options,
+  );
   let canonicalSessionFile: string | undefined;
   if (typeof state.sessionFile === "string") {
     const resolvedSessionFile = await safeRealpath(state.sessionFile);
