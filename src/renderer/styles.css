@@ -6279,3 +6279,16 @@ body {
   min-height: 24px;
   padding: 0 0 5px;
 }
+
+/* Keep long workflow workspace names bounded at narrow widths. */
+.workflow-scope-field {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.workflow-scope-select {
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  text-overflow: ellipsis;
+}
