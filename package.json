@@ -1,6 +1,5 @@
 {
   "name": "pi-deck",
-  "productName": "Pi Deck",
   "version": "0.6.2",
   "private": true,
   "description": "Local macOS Electron GUI control plane for Pi agents.",
@@ -60,7 +59,7 @@
     "electron": "42.5.0",
     "esbuild": "0.28.1",
     "gifenc": "^1.0.3",
-    "jsdom": "^29.1.1",
+    "jsdom": "^29.1.0",
     "pngjs": "^7.0.0",
     "prettier": "3.8.5",
     "typescript": "6.0.3",
