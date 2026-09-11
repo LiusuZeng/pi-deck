@@ -44,22 +44,22 @@ jobs:
           style_path = Path("src/renderer/styles.css")
           styles = style_path.read_text()
           styles += '''
-  
-  /* Keep long workflow workspace names contained in the current scope control.
-     The legacy header pill/sessions-control layout no longer exists; this is the
-     durable equivalent that must remain bounded at narrow widths. */
-  .workflow-scope-field {
-    min-width: 0;
-    max-width: 100%;
-  }
-  
-  .workflow-scope-select {
-    min-width: 0;
-    width: 100%;
-    max-width: 100%;
-    text-overflow: ellipsis;
-  }
-  '''
+
+          /* Keep long workflow workspace names contained in the current scope control.
+             The legacy header pill/sessions-control layout no longer exists; this is the
+             durable equivalent that must remain bounded at narrow widths. */
+          .workflow-scope-field {
+            min-width: 0;
+            max-width: 100%;
+          }
+
+          .workflow-scope-select {
+            min-width: 0;
+            width: 100%;
+            max-width: 100%;
+            text-overflow: ellipsis;
+          }
+          '''
           style_path.write_text(styles)
 
           test_path = Path("src/renderer/components/workflows/AgentWorkflowBuilder.test.ts")
