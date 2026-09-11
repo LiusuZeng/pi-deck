@@ -1,0 +1,32 @@
+name: One-shot issue 48 patch
+on:
+  push:
+    branches: [fix/issue-48-app-name]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/issue-48-app-name
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Wire Pi Deck application identity before Electron readiness
+        run: |
+          python -c 'from pathlib import Path; p=Path("src/main/main.ts"); s=p.read_text(); a="import { initializeMacOSDockIcon, resolveAppIconPath } from \"./appIcon.js\";"; b=a+"\nimport { initializeAppIdentity } from \"./appIdentity.js\";"; assert s.count(a)==1, s.count(a); s=s.replace(a,b); a2="  }\n\n  await app.whenReady();"; b2="  }\n\n  initializeAppIdentity(app);\n  await app.whenReady();"; assert s.count(a2)==1, s.count(a2); p.write_text(s.replace(a2,b2))'
+      - run: npx prettier --write src/main/main.ts src/main/appIdentity.ts src/main/appIdentity.test.ts scripts/electron-runtime.mjs scripts/electron-runtime.test.mjs scripts/launch-electron.mjs scripts/launch-built.mjs package.json
+      - run: npm test -- --run src/main/appIdentity.test.ts scripts/electron-runtime.test.mjs scripts/launch-built.test.mjs
+      - name: Commit patch and remove helper workflow
+        run: |
+          rm .github/workflows/one-shot-issue-48.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: complete Pi Deck macOS runtime identity"
+          git push origin HEAD:fix/issue-48-app-name
