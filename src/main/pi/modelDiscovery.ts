@@ -143,10 +143,15 @@ function parseActiveModel(
   value: unknown,
   provider: string | undefined,
 ): ChatModelSummary | undefined {
+  const record = asRecord(value);
   const candidate =
     typeof value === "string"
       ? { id: value, name: value, ...(provider ? { provider } : {}) }
-      : value;
+      : record !== undefined &&
+          provider !== undefined &&
+          typeof record.provider !== "string"
+        ? { ...record, provider }
+        : value;
   return normalizePiModelSummary(candidate);
 }
 
