@@ -1,0 +1,7 @@
+
+Running 1 test using 1 worker
+
+{"modelId":"gpt-5.6-sol","provider":"openai-codex","thinkingLevels":["off","minimal","low","medium","high","xhigh","max"]}
+  ✓  1 e2e/v0.6.3-thinking-release-check.e2e.ts:10:5 › v0.6.3 real Pi reasoning model retains thinking choices (2.1s)
+
+  1 passed (2.8s)
