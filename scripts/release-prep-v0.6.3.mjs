@@ -64,8 +64,8 @@ and more predictable without changing the v0.6 product model.
   updates instead of continuously re-sorting by activity recency (${issue(49)}).
 - Fixed Agent Workflows workspace-scope controls so long labels remain contained
   instead of clipping or overlapping adjacent UI (${issue(35)}).
-- Hid Markdown code language hints such as `py`, `js`, and `bash` from the
-  rendered code text while retaining them as parsing/highlighting metadata (${issue(37)}).
+- Hid Markdown code language hints such as py, js, and bash from the rendered
+  code text while retaining them as parsing/highlighting metadata (${issue(37)}).
 - Completed macOS runtime identity so normal source/built launches present as
   Pi Deck rather than Electron in the Dock (${issue(48)}).
 
@@ -77,7 +77,7 @@ and more predictable without changing the v0.6 product model.
   startup ordering, renderer isolation, incremental streaming, long transcripts,
   saved-session resume latency, model/thinking capability discovery, session
   rename/sounds, navigation stability, and macOS runtime identity.
-- Keep the final release gate as exact-main `npm run verify:release`, including
+- Keep the final release gate as exact-main npm run verify:release, including
   the authenticated real-Pi smoke suite, before tagging.
 `;
 
@@ -159,21 +159,19 @@ Third dogfood stabilization patch after **v0.6.0 Unified Work**, focused on elim
 
 ## Validation
 
-Product work was frozen at `1aa5e39c560ff1670bffa014a73e8be6df4332e8` before release preparation.
+Product work was frozen at 1aa5e39c560ff1670bffa014a73e8be6df4332e8 before release preparation.
 
 GitHub CI is the authoritative routine validation gate. The known nondeterministic Electron E2E failures were fixed without adding retries (${issue(61)}).
 
-The release-preparation branch must pass hosted **Verify desktop app** CI. After merge, the exact `main` commit must pass:
+The release-preparation branch must pass hosted **Verify desktop app** CI. After merge, the exact main commit must pass:
 
-\`\`\`bash
-npm run verify:release
-\`\`\`
+    npm run verify:release
 
 That release gate includes formatting, typechecks, unit/integration tests, production build and deep build validation, site validation, deterministic Electron E2E, real Pi RPC smoke, and the authenticated real-Pi smoke suite.
 
 Because ${issue(72)} was reproduced against released v0.6.2 with a real reasoning-capable model, the authenticated release smoke should explicitly confirm real-Pi model/thinking behavior before tagging.
 
-Only the exact green merged-main SHA should be tagged `v0.6.3`.
+Only the exact green merged-main SHA should be tagged v0.6.3.
 
 ## Distribution
 
