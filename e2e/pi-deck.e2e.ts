@@ -2445,20 +2445,30 @@ test("streaming Agent activity respects manual scroll intent", async () => {
       )
       .toBeGreaterThan(120);
 
-    const manualStart = await page
-      .locator(".timeline-scroll")
-      .evaluate((timeline: HTMLElement) => {
-        timeline.scrollTop = 0;
-        timeline.dispatchEvent(new Event("scroll", { bubbles: true }));
-        return {
-          bottomDistance: Math.max(
-            0,
-            timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight,
-          ),
-          scrollTop: timeline.scrollTop,
-        };
-      });
-    expect(manualStart.bottomDistance).toBeGreaterThan(80);
+    let manualStart = { bottomDistance: 0, scrollTop: 0 };
+    await expect
+      .poll(async () => {
+        manualStart = await page
+          .locator(".timeline-scroll")
+          .evaluate((timeline: HTMLElement) => {
+            timeline.dispatchEvent(
+              new WheelEvent("wheel", { bubbles: true, deltaY: -1_000 }),
+            );
+            timeline.scrollTop = 0;
+            timeline.dispatchEvent(new Event("scroll", { bubbles: true }));
+            return {
+              bottomDistance: Math.max(
+                0,
+                timeline.scrollHeight -
+                  timeline.scrollTop -
+                  timeline.clientHeight,
+              ),
+              scrollTop: timeline.scrollTop,
+            };
+          });
+        return manualStart.bottomDistance;
+      })
+      .toBeGreaterThan(80);
     expect(manualStart.scrollTop).toBe(0);
 
     await expect
