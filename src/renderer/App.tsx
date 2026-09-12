@@ -12,6 +12,7 @@ import {
   type DragEvent,
   type KeyboardEvent,
   type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactElement,
   type SyntheticEvent,
 } from "react";
@@ -11061,6 +11062,17 @@ function shouldAutoFollowTimelineUpdate(options: {
   return options.sessionChanged || options.followingBottom;
 }
 
+const TIMELINE_USER_SCROLL_INTENT_WINDOW_MS = 1_000;
+const TIMELINE_SCROLL_KEYS = new Set([
+  "ArrowDown",
+  "ArrowUp",
+  "End",
+  "Home",
+  "PageDown",
+  "PageUp",
+  " ",
+]);
+
 type TimelineRevealRect = Pick<DOMRectReadOnly, "top" | "bottom" | "height">;
 
 const TIMELINE_DETAILS_REVEAL_GAP_PX = 12;
@@ -11197,6 +11209,7 @@ const ChatTimeline = memo(function ChatTimeline(props: {
   const timelineScrollRef = useRef<HTMLDivElement | null>(null);
   const shouldStickToBottomRef = useRef(true);
   const pendingAutoFollowFrameRef = useRef<number | null>(null);
+  const userScrollIntentUntilRef = useRef(0);
   const previousSessionIdRef = useRef(props.session.id);
   const openedTimelineDetailsRef = useRef<HTMLDetailsElement | null>(null);
   const pendingDetailsRevealFrameRef = useRef<number | null>(null);
@@ -11231,6 +11244,7 @@ const ChatTimeline = memo(function ChatTimeline(props: {
     previousSessionIdRef.current = props.session.id;
     if (sessionChanged) {
       shouldStickToBottomRef.current = true;
+      userScrollIntentUntilRef.current = 0;
       openedTimelineDetailsRef.current = null;
       cancelPendingAutoFollow();
       cancelPendingDetailsReveal();
@@ -11246,6 +11260,10 @@ const ChatTimeline = memo(function ChatTimeline(props: {
       return;
     }
 
+    // Correct the committed layout before paint so streamed height changes do
+    // not expose one frame at the old offset. Keep the coalesced frame follow
+    // as a second pass for browser layout/anchoring that settles afterward.
+    scrollContainer.scrollTop = scrollContainer.scrollHeight;
     scheduleTimelineAutoFollow(scrollContainer);
   }, [props.session.id, timelineScrollMarker]);
 
@@ -11427,15 +11445,56 @@ const ChatTimeline = memo(function ChatTimeline(props: {
     };
   }, []);
 
+  function markTimelineUserScrollIntent(): void {
+    userScrollIntentUntilRef.current =
+      window.performance.now() + TIMELINE_USER_SCROLL_INTENT_WINDOW_MS;
+  }
+
+  function handleTimelinePointerIntent(
+    event: ReactPointerEvent<HTMLDivElement>,
+  ): void {
+    const scrollContainer = event.currentTarget;
+    const scrollbarGutter = Math.max(
+      12,
+      scrollContainer.offsetWidth - scrollContainer.clientWidth,
+    );
+    if (
+      event.clientX >=
+      scrollContainer.getBoundingClientRect().right - scrollbarGutter
+    ) {
+      markTimelineUserScrollIntent();
+    }
+  }
+
+  function handleTimelineKeyIntent(event: KeyboardEvent<HTMLDivElement>): void {
+    if (TIMELINE_SCROLL_KEYS.has(event.key)) {
+      markTimelineUserScrollIntent();
+    }
+  }
+
   function handleTimelineScroll(): void {
     const scrollContainer = timelineScrollRef.current;
     if (scrollContainer === null) {
       return;
     }
+
     const followingBottom = isScrolledNearBottom(scrollContainer);
-    shouldStickToBottomRef.current = followingBottom;
-    if (!followingBottom) {
+    if (followingBottom) {
+      shouldStickToBottomRef.current = true;
+      return;
+    }
+
+    // Geometry alone cannot distinguish a user's scroll from a delayed native
+    // event caused by our own scrollTop write or by streaming layout changes.
+    // Only explicit user input may revoke bottom-follow ownership.
+    if (window.performance.now() <= userScrollIntentUntilRef.current) {
+      shouldStickToBottomRef.current = false;
       cancelPendingAutoFollow();
+      return;
+    }
+
+    if (shouldStickToBottomRef.current) {
+      scheduleTimelineAutoFollow(scrollContainer);
     }
   }
 
@@ -11506,7 +11565,16 @@ const ChatTimeline = memo(function ChatTimeline(props: {
       <div
         className="timeline-scroll"
         ref={timelineScrollRef}
+        onKeyDownCapture={handleTimelineKeyIntent}
+        onPointerDownCapture={handleTimelinePointerIntent}
+        onPointerMoveCapture={(event) => {
+          if (event.buttons !== 0) {
+            handleTimelinePointerIntent(event);
+          }
+        }}
         onScroll={handleTimelineScroll}
+        onTouchMoveCapture={markTimelineUserScrollIntent}
+        onWheelCapture={markTimelineUserScrollIntent}
       >
         {props.taskPlanning ? (
           <div className="state-banner waiting" role="status">
