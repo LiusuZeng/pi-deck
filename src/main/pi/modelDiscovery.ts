@@ -161,7 +161,9 @@ function normalizePiModelSummary(value: unknown): ChatModelSummary | undefined {
     return undefined;
   }
 
-  const supportedThinkingLevels = parseStringArray(record.supportedThinkingLevels);
+  const supportedThinkingLevels = parseStringArray(
+    record.supportedThinkingLevels,
+  );
   const normalized =
     supportedThinkingLevels === undefined
       ? record
@@ -187,7 +189,8 @@ function mergeActiveModel(
   const exactMatch = models.find(
     (model) =>
       model.id === activeModel.id &&
-      (activeModel.provider === undefined || model.provider === activeModel.provider),
+      (activeModel.provider === undefined ||
+        model.provider === activeModel.provider),
   );
   if (exactMatch === undefined) {
     return activeModel;
