@@ -94,7 +94,10 @@ test("long transcript rows enable offscreen rendering containment", async () => 
     expect(result.firstIsAboveViewport).toBe(true);
     expect(result.lastIntersectsViewport).toBe(true);
     expect(result.scrollTop).toBeGreaterThan(0);
-    expect(result.scrollTop).toBeCloseTo(result.maxScrollTop, 0);
+    // Chromium can expose the clamped scroll offset on a fractional CSS pixel.
+    expect(
+      Math.abs(result.maxScrollTop - result.scrollTop),
+    ).toBeLessThanOrEqual(1);
   } finally {
     await app.close();
   }
