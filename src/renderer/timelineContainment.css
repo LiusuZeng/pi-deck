@@ -1,0 +1,12 @@
+/*
+ * Preserve the full semantic transcript in the DOM while allowing Chromium to
+ * skip rendering work for history outside the viewport. `auto` intrinsic size
+ * remembers measured row heights once visited, so dynamic Markdown and
+ * expandable activity cards do not depend on a fixed-height virtual list.
+ */
+.timeline-row,
+.agent-activity-row,
+.diagnostic-message {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
+}
