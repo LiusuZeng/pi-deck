@@ -36,3 +36,5 @@ jobs:
           git add CHANGELOG.md package.json package-lock.json site/index.html docs/reviews/v0.6.3-github-release-notes.md
           git commit -m "release: prepare Pi Deck v0.6.3"
           git push origin HEAD:release/v0.6.3
+
+# Temporary branch-only workflow; removed before the release PR is opened.
