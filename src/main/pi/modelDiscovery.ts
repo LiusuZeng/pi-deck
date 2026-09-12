@@ -155,17 +155,13 @@ function parseActiveModel(
   return normalizePiModelSummary(candidate);
 }
 
-function normalizePiModelSummary(
-  value: unknown,
-): ChatModelSummary | undefined {
+function normalizePiModelSummary(value: unknown): ChatModelSummary | undefined {
   const record = asRecord(value);
   if (record === undefined) {
     return undefined;
   }
 
-  const supportedThinkingLevels = parseStringArray(
-    record.supportedThinkingLevels,
-  );
+  const supportedThinkingLevels = parseStringArray(record.supportedThinkingLevels);
   const normalized =
     supportedThinkingLevels === undefined
       ? record
