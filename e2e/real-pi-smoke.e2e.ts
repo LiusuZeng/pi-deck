@@ -670,41 +670,45 @@ test("real Pi command activity exposes stdout, stderr, and exit status", async (
         }
       });
 
-      const sectionTitles = await toolCard
-        .locator(".tool-detail-section h4")
-        .allTextContents();
-      expect(sectionTitles).toContain("Command");
-      expect(sectionTitles).toContain("Exit status");
-      // Real Pi protocol may expose Bash streams separately, or as one
-      // combined command result. Both are valid as long as Deck renders the
-      // execution result as structured text instead of raw tool-call JSON.
-      expect(
-        sectionTitles.includes("Output") ||
-          (sectionTitles.includes("stdout") &&
-            sectionTitles.includes("stderr")),
-      ).toBe(true);
-      const detailSections = await toolCard
-        .locator(".tool-detail-section")
-        .evaluateAll((sections) =>
+      const readDetailSections = () =>
+        toolCard.locator(".tool-detail-section").evaluateAll((sections) =>
           sections.map((section) => ({
             title: section.querySelector("h4")?.textContent ?? "",
             content: section.querySelector("pre")?.textContent ?? "",
           })),
         );
-      expect(
-        detailSections.some(
-          (section) =>
-            ["Output", "stdout"].includes(section.title) &&
-            section.content.includes(`${token}_STDOUT`),
-        ),
-      ).toBe(true);
-      expect(
-        detailSections.some(
-          (section) =>
-            ["Output", "stderr"].includes(section.title) &&
-            section.content.includes(`${token}_STDERR`),
-        ),
-      ).toBe(true);
+      await expect
+        .poll(async () => {
+          const sections = await readDetailSections();
+          const titles = sections.map((section) => section.title);
+          // Real Pi protocol may expose Bash streams separately, or as one
+          // combined command result. Both are valid as long as Deck renders
+          // the result as structured text instead of raw tool-call JSON.
+          return {
+            hasCommand: titles.includes("Command"),
+            hasExitStatus: titles.includes("Exit status"),
+            hasOutput:
+              titles.includes("Output") ||
+              (titles.includes("stdout") && titles.includes("stderr")),
+            hasStdout: sections.some(
+              (section) =>
+                ["Output", "stdout"].includes(section.title) &&
+                section.content.includes(`${token}_STDOUT`),
+            ),
+            hasStderr: sections.some(
+              (section) =>
+                ["Output", "stderr"].includes(section.title) &&
+                section.content.includes(`${token}_STDERR`),
+            ),
+          };
+        })
+        .toEqual({
+          hasCommand: true,
+          hasExitStatus: true,
+          hasOutput: true,
+          hasStdout: true,
+          hasStderr: true,
+        });
     } finally {
       await app.close();
     }
