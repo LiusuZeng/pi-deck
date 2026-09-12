@@ -5332,7 +5332,14 @@ test("real mode does not fall back to fake/local UI and can send from active run
     await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
   } finally {
     await app.close();
-    fs.rmSync(root, { recursive: true, force: true });
+    // The real Pi child can finish a final session write just after Electron
+    // exits. Let Node retry transient ENOTEMPTY cleanup races on hosted macOS.
+    fs.rmSync(root, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 100,
+    });
   }
 });
 
