@@ -1,0 +1,193 @@
+import fs from "node:fs";
+import path from "node:path";
+
+const version = "0.6.3";
+const date = "2026-09-11";
+const repo = "https://github.com/LiusuZeng/pi-deck";
+const issue = (n) => `[#${n}](${repo}/issues/${n})`;
+
+for (const file of ["package.json", "package-lock.json"]) {
+  const json = JSON.parse(fs.readFileSync(file, "utf8"));
+  json.version = version;
+  if (file === "package-lock.json" && json.packages?.[""]) {
+    json.packages[""].version = version;
+  }
+  fs.writeFileSync(file, `${JSON.stringify(json, null, 2)}\n`);
+}
+
+const changelogPath = "CHANGELOG.md";
+const current = fs.readFileSync(changelogPath, "utf8");
+const release = `## [0.6.3] - ${date}
+
+Third dogfood stabilization release after Unified Work. This patch closes the
+remaining v0.6.2 dogfood backlog, fixes the workspace-usage scalability
+regression introduced in v0.6.2, and makes long-running real-Pi sessions faster
+and more predictable without changing the v0.6 product model.
+
+### Added
+
+- Added durable user-owned session titles that survive prompts, resume, relaunch,
+  workspace moves, and archive/restore without changing Pi session identity (${issue(42)}).
+- Added configurable audible cues for newly-entered Needs attention and Completed
+  states, with transition deduplication and persisted preferences (${issue(44)}).
+
+### Changed
+
+- Made model choices unambiguous by exposing stable model id/provider identity in
+  session and Parallel model pickers instead of relying on colliding friendly names (${issue(30)}).
+- Painted the Pi Deck shell before heavyweight backend initialization and gated
+  backend-dependent operations on explicit readiness (${issue(51)}).
+- Isolated live chat streaming from unrelated App/Work renderer recomputation so
+  active and background sessions update narrower UI boundaries (${issue(52)}).
+- Made streaming Markdown and timeline derivation incremental so long responses
+  reprocess the mutable tail instead of repeatedly walking finalized history (${issue(53)}).
+- Skipped layout/paint work for offscreen transcript history while preserving
+  dynamic row heights, scrolling, and expandable details (${issue(54)}).
+- Reduced saved-session click-to-transcript latency by overlapping independent Pi
+  state and message reads while preserving canonical resume validation (${issue(55)}).
+- Made normal built-app launch validation constant-time, moving recursive source
+  freshness checks to explicit deep validation/CI (${issue(56)}).
+
+### Fixed
+
+- Redesigned workspace usage accounting around compact maintained snapshots so
+  reads no longer rescan full JSONL transcripts on live UI updates, eliminating
+  the v0.6.2 multi-session slowdown / main-process OOM regression (${issue(50)}).
+- Fixed real-Pi thinking capability discovery so reasoning-capable models no
+  longer collapse to an Off-only Thinking menu when runtime level discovery is
+  sparse; model capabilities now provide the correct fallback (${issue(72)}).
+- Preserved and surfaced command execution results in expanded Agent activity
+  details, including useful output/error/status information when Pi reports it (${issue(41)}).
+- Stabilized live Agent activity timeline scrolling so bottom-follow remains
+  pinned without fighting deliberate manual scrolling (${issue(43)}).
+- Kept live sidebar session ordering spatially stable during same-status runtime
+  updates instead of continuously re-sorting by activity recency (${issue(49)}).
+- Fixed Agent Workflows workspace-scope controls so long labels remain contained
+  instead of clipping or overlapping adjacent UI (${issue(35)}).
+- Hid Markdown code language hints such as `py`, `js`, and `bash` from the
+  rendered code text while retaining them as parsing/highlighting metadata (${issue(37)}).
+- Completed macOS runtime identity so normal source/built launches present as
+  Pi Deck rather than Electron in the Dock (${issue(48)}).
+
+### Tests
+
+- Made GitHub CI the authoritative routine correctness gate and removed known
+  nondeterministic Electron E2E races rather than masking them with retries (${issue(61)}).
+- Expanded deterministic regression coverage for compact usage accounting,
+  startup ordering, renderer isolation, incremental streaming, long transcripts,
+  saved-session resume latency, model/thinking capability discovery, session
+  rename/sounds, navigation stability, and macOS runtime identity.
+- Keep the final release gate as exact-main `npm run verify:release`, including
+  the authenticated real-Pi smoke suite, before tagging.
+`;
+
+const unreleasedStart = current.indexOf("## [Unreleased]");
+const previousReleaseStart = current.indexOf("## [0.6.2]");
+if (
+  unreleasedStart < 0 ||
+  previousReleaseStart < 0 ||
+  previousReleaseStart <= unreleasedStart
+) {
+  throw new Error("Could not locate CHANGELOG release boundaries");
+}
+let next = `${current.slice(0, unreleasedStart)}## [Unreleased]\n\n${release}\n${current.slice(previousReleaseStart)}`;
+next = next.replace(
+  "[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.2...HEAD",
+  "[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.3...HEAD\n[0.6.3]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.2...v0.6.3",
+);
+fs.writeFileSync(changelogPath, next);
+
+const sitePath = "site/index.html";
+let site = fs.readFileSync(sitePath, "utf8");
+site = site.replace(
+  "v0.6.2 Work continuity + real-Pi parity · macOS · runs locally from source",
+  "v0.6.3 Performance + dogfood stabilization · macOS · runs locally from source",
+);
+site = site.replace(
+  '<h2 id="release-confidence-heading">Explore Pi Deck v0.6.2 from source.</h2>',
+  '<h2 id="release-confidence-heading">Explore Pi Deck v0.6.3 from source.</h2>',
+);
+site = site.replace(
+  '<strong data-release-version="0.6.2">v0.6.2</strong> is the current source-only pre-release. This second dogfood stabilization patch preserves Completed Work across relaunch, simplifies Work status semantics, adds durable workspace usage accounting, and improves real-Pi environment and usage parity while keeping the Unified Work model intact.',
+  '<strong data-release-version="0.6.3">v0.6.3</strong> is the current source-only pre-release. This third dogfood stabilization patch fixes the v0.6.2 workspace-usage scalability regression, improves long-session streaming and startup performance, completes the remaining v0.6.2 dogfood backlog, and restores real-Pi model/thinking parity while keeping the Unified Work model intact.',
+);
+if (!site.includes('data-release-version="0.6.3"')) {
+  throw new Error("Site release marker was not updated");
+}
+fs.writeFileSync(sitePath, site);
+
+const notesPath = "docs/reviews/v0.6.3-github-release-notes.md";
+fs.mkdirSync(path.dirname(notesPath), { recursive: true });
+fs.writeFileSync(
+  notesPath,
+  `# Pi Deck v0.6.3
+
+Third dogfood stabilization patch after **v0.6.0 Unified Work**, focused on eliminating the v0.6.2 scalability regression, improving long-session performance, and completing the remaining v0.6.x dogfood fixes.
+
+## Highlights
+
+- **Workspace usage no longer scales with transcript history.** Compact maintained accounting replaces repeated live JSONL rescans that could slow several concurrent sessions and eventually exhaust Electron's heap (${issue(50)}).
+- **Long sessions are substantially cheaper to render.** Live chat updates are isolated from unrelated UI, Markdown/timeline work is incremental, and offscreen transcript rows avoid unnecessary layout/paint (${issue(52)}, ${issue(53)}, ${issue(54)}).
+- **Real Pi model controls are trustworthy again.** Model picker rows show stable id/provider identity (${issue(30)}), and reasoning-capable models retain their supported Thinking choices instead of collapsing to Off (${issue(72)}).
+- **The v0.6.2 dogfood backlog is closed.** Workflow-scope clipping, code-language leakage, command-output details, session rename, live-scroll stability, and session sounds are all addressed (${issue(35)}, ${issue(37)}, ${issue(41)}, ${issue(42)}, ${issue(43)}, ${issue(44)}).
+
+## Reliability and performance
+
+- Reworked workspace usage into compact cumulative per-session/private-work snapshots with cached/coalesced historical recovery and no transcript scanning on the normal read path (${issue(50)}).
+- Painted a correct shell before workflow/runtime rehydration completes, while preserving readiness gates for backend-dependent operations (${issue(51)}).
+- Narrowed live renderer invalidation so background/active session streams do not recompute unrelated Work or transcript surfaces (${issue(52)}).
+- Reused finalized Markdown/timeline history and recomputed only the live mutable tail during streaming (${issue(53)}).
+- Added Chromium content visibility containment for large offscreen transcript histories (${issue(54)}).
+- Overlapped independent saved-session state/message RPC reads to reduce resume latency (${issue(55)}).
+- Moved recursive build freshness scans out of normal launch and into deep validation/CI (${issue(56)}).
+
+## Sessions and supervision
+
+- Added durable session display-title overrides that survive relaunch/resume/move/archive lifecycle without changing Pi identity (${issue(42)}).
+- Added optional Needs attention and Completed session sounds with once-per-transition semantics and persisted preferences (${issue(44)}).
+- Stabilized the session timeline's bottom-follow/manual-scroll ownership during tool-heavy Agent activity (${issue(43)}).
+- Kept same-status sidebar session rows spatially stable while live updates arrive (${issue(49)}).
+- Surfaced real command execution output/status in expanded Agent activity details (${issue(41)}).
+
+## Pi parity and interface fixes
+
+- Made model labels unique using model id/provider identity across session and Parallel selectors (${issue(30)}).
+- Normalized current Pi thinking-capability metadata so supported levels remain available even when runtime level discovery is empty/sparse (${issue(72)}).
+- Contained long Agent Workflow scope labels instead of clipping/overlapping controls (${issue(35)}).
+- Removed visible Markdown language-tag prefixes from code content (${issue(37)}).
+- Completed Pi Deck's macOS Dock/runtime application identity instead of leaking Electron branding (${issue(48)}).
+
+## Validation
+
+Product work was frozen at `1aa5e39c560ff1670bffa014a73e8be6df4332e8` before release preparation.
+
+GitHub CI is the authoritative routine validation gate. The known nondeterministic Electron E2E failures were fixed without adding retries (${issue(61)}).
+
+The release-preparation branch must pass hosted **Verify desktop app** CI. After merge, the exact `main` commit must pass:
+
+\`\`\`bash
+npm run verify:release
+\`\`\`
+
+That release gate includes formatting, typechecks, unit/integration tests, production build and deep build validation, site validation, deterministic Electron E2E, real Pi RPC smoke, and the authenticated real-Pi smoke suite.
+
+Because ${issue(72)} was reproduced against released v0.6.2 with a real reasoning-capable model, the authenticated release smoke should explicitly confirm real-Pi model/thinking behavior before tagging.
+
+Only the exact green merged-main SHA should be tagged `v0.6.3`.
+
+## Distribution
+
+This remains a source-only macOS pre-release. It does not include a packaged, signed, or notarized macOS installer and is not published to npm.
+`,
+);
+
+const requiredIssues = [
+  30, 35, 37, 41, 42, 43, 44, 48, 49, 50, 51, 52, 53, 54, 55, 56, 61, 72,
+];
+const updatedChangelog = fs.readFileSync(changelogPath, "utf8");
+for (const n of requiredIssues) {
+  const link = `[#${n}](${repo}/issues/${n})`;
+  if (!updatedChangelog.includes(link)) {
+    throw new Error(`CHANGELOG missing issue link ${n}`);
+  }
+}
