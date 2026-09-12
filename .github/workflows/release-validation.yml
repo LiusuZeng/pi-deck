@@ -1,0 +1,57 @@
+name: Release validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "release-validation/**"
+
+concurrency:
+  group: release-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CI: "true"
+  PI_CODING_AGENT_VERSION: "0.85.0"
+
+jobs:
+  verify-release:
+    name: Verify release candidate
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install Pi CLI
+        run: |
+          npm install --global --ignore-scripts "@earendil-works/pi-coding-agent@${PI_CODING_AGENT_VERSION}"
+          PI_BINARY="$(command -v pi)"
+          test -x "$PI_BINARY"
+          echo "PI_DECK_PI_BINARY=$PI_BINARY" >> "$GITHUB_ENV"
+          "$PI_BINARY" --version
+      - name: Require authenticated Pi provider
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${ANTHROPIC_API_KEY:-}" && -z "${OPENAI_API_KEY:-}" && ! -f "$HOME/.pi/agent/auth.json" ]]; then
+            echo "::error::Release validation requires authenticated Pi provider credentials. Configure the release workflow to expose an Actions secret as ANTHROPIC_API_KEY or OPENAI_API_KEY, or provision ~/.pi/agent/auth.json."
+            exit 1
+          fi
+      - name: Run exact release gate
+        run: npm run verify:release
+      - name: Upload Playwright diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-playwright-diagnostics
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
