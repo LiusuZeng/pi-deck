@@ -7,6 +7,16 @@ import type {
 } from "../../shared/types.js";
 import { PiWorker } from "./piWorker.js";
 
+const PI_THINKING_LEVELS = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
+
 export async function discoverPiRuntimeModels(options: {
   command: string;
   args?: string[];
@@ -64,15 +74,18 @@ export function parsePiRuntimeModelDiscovery(
   const thinkingLevelsRecord = asRecord(thinkingLevelsResponse);
   const models = Array.isArray(modelsRecord?.models)
     ? modelsRecord.models.flatMap((value) => {
-        const parsed = chatModelSummarySchema.safeParse(value);
-        return parsed.success ? [parsed.data] : [];
+        const parsed = normalizePiModelSummary(value);
+        return parsed === undefined ? [] : [parsed];
       })
     : [];
-  const activeModel = parseActiveModel(
-    stateRecord?.model,
-    typeof stateRecord?.provider === "string"
-      ? stateRecord.provider
-      : undefined,
+  const activeModel = mergeActiveModel(
+    parseActiveModel(
+      stateRecord?.model,
+      typeof stateRecord?.provider === "string"
+        ? stateRecord.provider
+        : undefined,
+    ),
+    models,
   );
   const thinkingLevels = Array.isArray(thinkingLevelsRecord?.levels)
     ? thinkingLevelsRecord.levels.filter(
@@ -130,12 +143,91 @@ function parseActiveModel(
   value: unknown,
   provider: string | undefined,
 ): ChatModelSummary | undefined {
+  const record = asRecord(value);
   const candidate =
     typeof value === "string"
       ? { id: value, name: value, ...(provider ? { provider } : {}) }
-      : value;
-  const parsed = chatModelSummarySchema.safeParse(candidate);
+      : record !== undefined &&
+          provider !== undefined &&
+          typeof record.provider !== "string"
+        ? { ...record, provider }
+        : value;
+  return normalizePiModelSummary(candidate);
+}
+
+function normalizePiModelSummary(value: unknown): ChatModelSummary | undefined {
+  const record = asRecord(value);
+  if (record === undefined) {
+    return undefined;
+  }
+
+  const supportedThinkingLevels = parseStringArray(
+    record.supportedThinkingLevels,
+  );
+  const normalized =
+    supportedThinkingLevels === undefined
+      ? record
+      : {
+          ...record,
+          reasoning: supportedThinkingLevels.some((level) => level !== "off"),
+          thinkingLevelMap: thinkingLevelMapForSupportedLevels(
+            supportedThinkingLevels,
+            record.thinkingLevelMap,
+          ),
+        };
+  const parsed = chatModelSummarySchema.safeParse(normalized);
   return parsed.success ? parsed.data : undefined;
+}
+
+function mergeActiveModel(
+  activeModel: ChatModelSummary | undefined,
+  models: ChatModelSummary[],
+): ChatModelSummary | undefined {
+  if (activeModel === undefined) {
+    return undefined;
+  }
+  const exactMatch = models.find(
+    (model) =>
+      model.id === activeModel.id &&
+      (activeModel.provider === undefined ||
+        model.provider === activeModel.provider),
+  );
+  if (exactMatch === undefined) {
+    return activeModel;
+  }
+  return {
+    ...exactMatch,
+    ...activeModel,
+    reasoning: activeModel.reasoning ?? exactMatch.reasoning,
+    thinkingLevelMap:
+      activeModel.thinkingLevelMap ?? exactMatch.thinkingLevelMap,
+  };
+}
+
+function thinkingLevelMapForSupportedLevels(
+  supportedThinkingLevels: string[],
+  existingValue: unknown,
+): Record<string, string | null> {
+  const supported = new Set(supportedThinkingLevels);
+  const existing = asRecord(existingValue) ?? {};
+  return Object.fromEntries(
+    PI_THINKING_LEVELS.map((level) => {
+      if (!supported.has(level)) {
+        return [level, null];
+      }
+      const mapped = existing[level];
+      return [level, typeof mapped === "string" ? mapped : level];
+    }),
+  );
+}
+
+function parseStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  return value.filter(
+    (item): item is string => typeof item === "string" && item.length > 0,
+  );
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
