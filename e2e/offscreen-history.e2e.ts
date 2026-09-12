@@ -25,7 +25,7 @@ async function launchPiDeck(): Promise<{
   return { app, page };
 }
 
-test("long transcript rows skip offscreen rendering work", async () => {
+test("long transcript rows enable offscreen rendering containment", async () => {
   const { app, page } = await launchPiDeck();
   try {
     await expect(
@@ -71,30 +71,30 @@ test("long transcript rows skip offscreen rendering work", async () => {
           throw new Error("Expected synthetic long transcript rows.");
         }
 
-        const checkRendered = (element: HTMLElement): boolean =>
-          (
-            element as HTMLElement & {
-              checkVisibility(options?: {
-                contentVisibilityAuto?: boolean;
-              }): boolean;
-            }
-          ).checkVisibility({ contentVisibilityAuto: true });
-
         const firstStyle = getComputedStyle(first);
+        const rootRect = root.getBoundingClientRect();
+        const firstRect = first.getBoundingClientRect();
+        const lastRect = last.getBoundingClientRect();
+
         return {
           count: rows.length,
           contentVisibility: firstStyle.contentVisibility,
           intrinsicSize: firstStyle.getPropertyValue("contain-intrinsic-size"),
-          firstRendered: checkRendered(first),
-          lastRendered: checkRendered(last),
+          firstIsAboveViewport: firstRect.bottom < rootRect.top,
+          lastIntersectsViewport:
+            lastRect.bottom > rootRect.top && lastRect.top < rootRect.bottom,
+          scrollTop: root.scrollTop,
+          maxScrollTop: root.scrollHeight - root.clientHeight,
         };
       });
 
     expect(result.count).toBeGreaterThan(500);
     expect(result.contentVisibility).toBe("auto");
     expect(result.intrinsicSize).toContain("120px");
-    expect(result.firstRendered).toBe(false);
-    expect(result.lastRendered).toBe(true);
+    expect(result.firstIsAboveViewport).toBe(true);
+    expect(result.lastIntersectsViewport).toBe(true);
+    expect(result.scrollTop).toBeGreaterThan(0);
+    expect(result.scrollTop).toBeCloseTo(result.maxScrollTop, 0);
   } finally {
     await app.close();
   }
