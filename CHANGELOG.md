@@ -7,9 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-09-11
+
+Third dogfood stabilization release after Unified Work. This patch closes the
+remaining v0.6.2 dogfood backlog, fixes the workspace-usage scalability
+regression introduced in v0.6.2, and makes long-running real-Pi sessions faster
+and more predictable without changing the v0.6 product model.
+
+### Added
+
+- Added durable user-owned session titles that survive prompts, resume, relaunch,
+  workspace moves, and archive/restore without changing Pi session identity ([#42](https://github.com/LiusuZeng/pi-deck/issues/42)).
+- Added configurable audible cues for newly-entered Needs attention and Completed
+  states, with transition deduplication and persisted preferences ([#44](https://github.com/LiusuZeng/pi-deck/issues/44)).
+
+### Changed
+
+- Made model choices unambiguous by exposing stable model id/provider identity in
+  session and Parallel model pickers instead of relying on colliding friendly names ([#30](https://github.com/LiusuZeng/pi-deck/issues/30)).
+- Painted the Pi Deck shell before heavyweight backend initialization and gated
+  backend-dependent operations on explicit readiness ([#51](https://github.com/LiusuZeng/pi-deck/issues/51)).
+- Isolated live chat streaming from unrelated App/Work renderer recomputation so
+  active and background sessions update narrower UI boundaries ([#52](https://github.com/LiusuZeng/pi-deck/issues/52)).
+- Made streaming Markdown and timeline derivation incremental so long responses
+  reprocess the mutable tail instead of repeatedly walking finalized history ([#53](https://github.com/LiusuZeng/pi-deck/issues/53)).
+- Skipped layout/paint work for offscreen transcript history while preserving
+  dynamic row heights, scrolling, and expandable details ([#54](https://github.com/LiusuZeng/pi-deck/issues/54)).
+- Reduced saved-session click-to-transcript latency by overlapping independent Pi
+  state and message reads while preserving canonical resume validation ([#55](https://github.com/LiusuZeng/pi-deck/issues/55)).
+- Made normal built-app launch validation constant-time, moving recursive source
+  freshness checks to explicit deep validation/CI ([#56](https://github.com/LiusuZeng/pi-deck/issues/56)).
+
 ### Fixed
 
-- Stabilized live Agent activity timeline scrolling so tool-heavy streams stay pinned while following the bottom and respect deliberate manual scrolling ([#43](https://github.com/LiusuZeng/pi-deck/issues/43)).
+- Redesigned workspace usage accounting around compact maintained snapshots so
+  reads no longer rescan full JSONL transcripts on live UI updates, eliminating
+  the v0.6.2 multi-session slowdown / main-process OOM regression ([#50](https://github.com/LiusuZeng/pi-deck/issues/50)).
+- Fixed real-Pi thinking capability discovery so reasoning-capable models no
+  longer collapse to an Off-only Thinking menu when runtime level discovery is
+  sparse; model capabilities now provide the correct fallback ([#72](https://github.com/LiusuZeng/pi-deck/issues/72)).
+- Preserved and surfaced command execution results in expanded Agent activity
+  details, including useful output/error/status information when Pi reports it ([#41](https://github.com/LiusuZeng/pi-deck/issues/41)).
+- Stabilized live Agent activity timeline scrolling so bottom-follow remains
+  pinned without fighting deliberate manual scrolling ([#43](https://github.com/LiusuZeng/pi-deck/issues/43)).
+- Kept live sidebar session ordering spatially stable during same-status runtime
+  updates instead of continuously re-sorting by activity recency ([#49](https://github.com/LiusuZeng/pi-deck/issues/49)).
+- Fixed Agent Workflows workspace-scope controls so long labels remain contained
+  instead of clipping or overlapping adjacent UI ([#35](https://github.com/LiusuZeng/pi-deck/issues/35)).
+- Hid Markdown code language hints such as py, js, and bash from the rendered
+  code text while retaining them as parsing/highlighting metadata ([#37](https://github.com/LiusuZeng/pi-deck/issues/37)).
+- Completed macOS runtime identity so normal source/built launches present as
+  Pi Deck rather than Electron in the Dock ([#48](https://github.com/LiusuZeng/pi-deck/issues/48)).
+
+### Tests
+
+- Made GitHub CI the authoritative routine correctness gate and removed known
+  nondeterministic Electron E2E races rather than masking them with retries ([#61](https://github.com/LiusuZeng/pi-deck/issues/61)).
+- Expanded deterministic regression coverage for compact usage accounting,
+  startup ordering, renderer isolation, incremental streaming, long transcripts,
+  saved-session resume latency, model/thinking capability discovery, session
+  rename/sounds, navigation stability, and macOS runtime identity.
+- Keep the final release gate as exact-main npm run verify:release, including
+  the authenticated real-Pi smoke suite, before tagging.
 
 ## [0.6.2] - 2026-09-03
 
@@ -531,7 +590,8 @@ coding-agent sessions.
   crash; persisted sessions can be reopened, but unsaved partial stream text may
   be lost.
 
-[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.3...HEAD
+[0.6.3]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/LiusuZeng/pi-deck/compare/v0.5.5...v0.6.0
