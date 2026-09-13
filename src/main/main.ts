@@ -2256,10 +2256,35 @@ async function validatePendingFailedForkCleanupTarget(
       }
     }
     const uniqueCandidates = [...candidates].sort();
-    if (uniqueCandidates.length !== 1) {
-      return "repository no longer has exactly one plausible child";
-    }
-    if (uniqueCandidates[0] !== target.sessionFile) {
+    if (
+      uniqueCandidates.length !== 1 ||
+      uniqueCandidates[0] !== target.sessionFile
+    ) {
+      // Restart recovery blocks every provenance match before declining an
+      // ambiguous claim. Do the same before retaining this live transaction:
+      // otherwise a replacement child (or the extra ambiguous children) can
+      // attach or mutate until this process exits and recovery runs.
+      const journal = ensureForkCleanupJournal();
+      for (const sessionFile of uniqueCandidates) {
+        await journal.blockDiscoveredTarget({
+          sessionFile,
+          sourceSessionFile: pending.sourceSessionFile,
+          transactionId: pending.transactionId,
+          workspaceId: target.workspaceId,
+          ...(target.projectId !== undefined
+            ? { projectId: target.projectId }
+            : {}),
+        });
+        // Journal blocks are the authoritative cross-operation guard; retain
+        // the mutation reservations too, so a concurrent in-process request
+        // cannot pass a pre-existing attachment/mutation gate while this
+        // terminal failed transaction remains alive.
+        retainedForkReservationFiles.add(sessionFile);
+        chatSessionMutationReservations.add(sessionFile);
+      }
+      if (uniqueCandidates.length !== 1) {
+        return "repository no longer has exactly one plausible child";
+      }
       return "repository's unique child no longer matches the validated target";
     }
     const validation = await validatePiSessionFile({

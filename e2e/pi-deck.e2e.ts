@@ -7690,6 +7690,318 @@ test("same-process failed-fork cleanup revalidates its exact target before worke
   }
 });
 
+test("same-process failed-fork cleanup blocks replacement and ambiguous children through restart", async () => {
+  for (const fixture of [
+    { name: "unique-replacement", kind: "replacement" },
+    { name: "multiple-plausible", kind: "ambiguous" },
+  ] as const) {
+    const root = fs.mkdtempSync(
+      path.join(
+        os.tmpdir(),
+        `pi-deck-e2e-fork-live-candidates-${fixture.name}-`,
+      ),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    const userDataDir = path.join(root, "user-data");
+    const targetFile = path.join(
+      agentDir,
+      "sessions",
+      "--fake-rpc--",
+      "live-candidates-target.jsonl",
+    );
+    const promotionFailureSignal = path.join(root, "promotion-failed");
+    const sigtermReceivedSignal = path.join(root, "sigterm-received");
+    const allowExitSignal = path.join(root, "allow-worker-exit");
+    let app: ElectronApplication | undefined;
+    let restarted: ElectronApplication | undefined;
+    try {
+      fs.mkdirSync(projectCwd, { recursive: true });
+      const launched = await launchPiDeck({
+        ...fakeRealModeEnv({
+          root,
+          projectCwd,
+          agentDir,
+          userDataDir,
+          fakePiArgs: [
+            "--fork-target",
+            targetFile,
+            "--sigterm-received-signal-file",
+            sigtermReceivedSignal,
+            "--sigterm-exit-wait-file",
+            allowExitSignal,
+          ],
+        }),
+        PI_DECK_TEST_FAIL_FORK_PROMOTION_PERSISTENCE: "write-once",
+        PI_DECK_TEST_FORK_PROMOTION_FAILURE_SIGNAL: promotionFailureSignal,
+      });
+      app = launched.app;
+      await expectHealthyPreload(launched.page);
+      await sidebarNewSessionButton(launched.page).click();
+      await launched.page.getByLabel("Prompt text").fill(fixture.name);
+      await launched.page.getByRole("button", { name: "Send" }).click();
+      await expect(
+        launched.page.getByText(`Fake response to: ${fixture.name}`),
+      ).toBeVisible({ timeout: 20_000 });
+      const source = await launched.page.evaluate(async () => {
+        const snapshot = await window.piDeck.chat.getSnapshot();
+        return {
+          workspaceId: snapshot.workspaceId!,
+          sessionFile: snapshot.state.sessionFile!,
+        };
+      });
+      await launched.page.evaluate((source) => {
+        (window as Window & { pendingFork?: Promise<unknown> }).pendingFork =
+          window.piDeck.chat.forkSession(source);
+      }, source);
+      await expect
+        .poll(() =>
+          fs.existsSync(promotionFailureSignal)
+            ? fs.readFileSync(promotionFailureSignal, "utf8").trim()
+            : "",
+        )
+        .toBe("write");
+      await expect
+        .poll(() =>
+          fs.existsSync(sigtermReceivedSignal)
+            ? fs.readFileSync(sigtermReceivedSignal, "utf8").trim()
+            : "",
+        )
+        .toBe("received");
+
+      const canonicalTarget = fs.realpathSync(targetFile);
+      const extraChildFile = path.join(
+        path.dirname(targetFile),
+        `${fixture.name}-child.jsonl`,
+      );
+      if (fixture.kind === "replacement") {
+        // Replace the observed path with an ineligible child and leave one
+        // different, valid provenance match for live revalidation to find.
+        fs.writeFileSync(
+          targetFile,
+          `${JSON.stringify({
+            type: "session",
+            version: 3,
+            id: "replaced-observed-child",
+            timestamp: new Date().toISOString(),
+            cwd: projectCwd,
+            parentSession: path.join(root, "different-parent.jsonl"),
+          })}\n`,
+        );
+      }
+      fs.writeFileSync(
+        extraChildFile,
+        `${JSON.stringify({
+          type: "session",
+          version: 3,
+          id: `${fixture.name}-child`,
+          timestamp: new Date().toISOString(),
+          cwd: projectCwd,
+          parentSession: source.sessionFile,
+        })}\n`,
+      );
+      const candidateFiles =
+        fixture.kind === "replacement"
+          ? [fs.realpathSync(extraChildFile)]
+          : [canonicalTarget, fs.realpathSync(extraChildFile)];
+      const destinationWorkspaceId = await launched.page.evaluate(async () => {
+        await window.piDeck.workspaces.create({ name: "blocked destination" });
+        return (await window.piDeck.workspaces.getActive()).activeWorkspaceId!;
+      });
+
+      // Give every valid candidate a ref before worker_exit. A blocked error
+      // therefore proves the cleanup gate, not merely missing ownership.
+      const workspaceFile = path.join(root, "pideck-home", "workspaces.json");
+      const workspaceState = JSON.parse(
+        fs.readFileSync(workspaceFile, "utf8"),
+      ) as {
+        sessionRefs: Array<Record<string, unknown>>;
+      };
+      const sourceRef = workspaceState.sessionRefs.find(
+        (ref) => ref.sessionFile === source.sessionFile,
+      );
+      expect(sourceRef).toBeDefined();
+      for (const sessionFile of candidateFiles) {
+        workspaceState.sessionRefs.push({
+          ...sourceRef,
+          sessionFile,
+          sessionId: path.basename(sessionFile, ".jsonl"),
+          addedAtMs: Date.now(),
+          lastSeenAtMs: Date.now(),
+        });
+      }
+      fs.writeFileSync(workspaceFile, `${JSON.stringify(workspaceState)}\n`);
+
+      fs.writeFileSync(allowExitSignal, "continue\n");
+      const forkError = await launched.page.evaluate(async () => {
+        try {
+          await (window as Window & { pendingFork: Promise<unknown> })
+            .pendingFork;
+          return "";
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      });
+      expect(forkError).toMatch(/failed fork cleanup is retained/i);
+
+      const blocked = await launched.page.evaluate(
+        async ({ workspaceId, candidateFiles, destinationWorkspaceId }) => {
+          const errorOf = async (operation: () => Promise<unknown>) => {
+            try {
+              await operation();
+              return "";
+            } catch (error) {
+              return error instanceof Error ? error.message : String(error);
+            }
+          };
+          const blocked = [];
+          for (const sessionFile of candidateFiles) {
+            blocked.push({
+              resume: await errorOf(() =>
+                window.piDeck.chat.resumeSession({ workspaceId, sessionFile }),
+              ),
+              import: await errorOf(() =>
+                window.piDeck.workspaces.addSession({
+                  workspaceId,
+                  sessionFile,
+                }),
+              ),
+              remove: await errorOf(() =>
+                window.piDeck.workspaces.removeSession({
+                  workspaceId,
+                  sessionFile,
+                }),
+              ),
+              delete: await errorOf(() =>
+                window.piDeck.chat.deleteSession({ workspaceId, sessionFile }),
+              ),
+              fork: await errorOf(() =>
+                window.piDeck.chat.forkSession({ workspaceId, sessionFile }),
+              ),
+              move: await errorOf(() =>
+                window.piDeck.workspaces.moveSession({
+                  sessionFile,
+                  toWorkspaceId: destinationWorkspaceId,
+                }),
+              ),
+            });
+          }
+          return blocked;
+        },
+        {
+          workspaceId: source.workspaceId,
+          candidateFiles,
+          destinationWorkspaceId,
+        },
+      );
+      for (const candidate of blocked) {
+        for (const [operation, error] of Object.entries(candidate)) {
+          // The already-running store can reject the manually seeded ref
+          // before it reaches the journal, but it must never attach or mutate.
+          expect(error, operation).not.toBe("");
+        }
+      }
+      const journalFile = path.join(
+        root,
+        "pideck-home",
+        "failed-fork-cleanup.json",
+      );
+      const retainedJournal = JSON.parse(
+        fs.readFileSync(journalFile, "utf8"),
+      ) as {
+        entries: Array<{ kind: string }>;
+      };
+      expect(retainedJournal.entries).toHaveLength(1);
+      expect(retainedJournal.entries[0]?.kind).toBe("source");
+      const persistedRefs = fs.readFileSync(workspaceFile, "utf8");
+      for (const sessionFile of candidateFiles) {
+        expect(persistedRefs).toContain(sessionFile);
+      }
+
+      await app.close();
+      app = undefined;
+      const recovered = await launchPiDeck({
+        ...fakeRealModeEnv({
+          root,
+          projectCwd,
+          agentDir,
+          userDataDir,
+          fakePiArgs: ["--fork-target", targetFile],
+        }),
+        PI_DECK_TEST_DEFER_FORK_RECOVERY_CLEANUP: "1",
+      });
+      restarted = recovered.app;
+      await expectHealthyPreload(recovered.page);
+      const restartBlocked = await recovered.page.evaluate(
+        async ({ workspaceId, candidateFiles }) => {
+          const errorOf = async (operation: () => Promise<unknown>) => {
+            try {
+              await operation();
+              return "";
+            } catch (error) {
+              return error instanceof Error ? error.message : String(error);
+            }
+          };
+          await window.piDeck.workspaces.create({
+            name: "restart destination",
+          });
+          const destination = await window.piDeck.workspaces.getActive();
+          const blocked = [];
+          for (const sessionFile of candidateFiles) {
+            blocked.push({
+              resume: await errorOf(() =>
+                window.piDeck.chat.resumeSession({ workspaceId, sessionFile }),
+              ),
+              import: await errorOf(() =>
+                window.piDeck.workspaces.addSession({
+                  workspaceId,
+                  sessionFile,
+                }),
+              ),
+              remove: await errorOf(() =>
+                window.piDeck.workspaces.removeSession({
+                  workspaceId,
+                  sessionFile,
+                }),
+              ),
+              delete: await errorOf(() =>
+                window.piDeck.chat.deleteSession({ workspaceId, sessionFile }),
+              ),
+              fork: await errorOf(() =>
+                window.piDeck.chat.forkSession({ workspaceId, sessionFile }),
+              ),
+              move: await errorOf(() =>
+                window.piDeck.workspaces.moveSession({
+                  sessionFile,
+                  toWorkspaceId: destination.activeWorkspaceId!,
+                }),
+              ),
+            });
+          }
+          return blocked;
+        },
+        { workspaceId: source.workspaceId, candidateFiles },
+      );
+      for (const candidate of restartBlocked) {
+        for (const error of Object.values(candidate)) {
+          expect(error).toMatch(/awaiting durable cleanup/i);
+        }
+      }
+      const restartJournal = JSON.parse(
+        fs.readFileSync(journalFile, "utf8"),
+      ) as {
+        entries: Array<{ kind: string }>;
+      };
+      expect(restartJournal.entries).toHaveLength(1);
+      expect(restartJournal.entries[0]?.kind).toBe("source");
+    } finally {
+      await app?.close().catch(() => undefined);
+      await restarted?.close().catch(() => undefined);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("normal fork success clears its durable reservation after registration commit", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-fork-ok-"));
   const projectCwd = path.join(root, "project");
