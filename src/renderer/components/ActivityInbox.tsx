@@ -9,6 +9,8 @@ import type {
 import {
   ACTIVITY_STATUSES,
   filterActivityItems,
+  filterActivityItemsBySearchQuery,
+  normalizeActivitySearchText,
   tagsForScope,
   tagsForStatus,
 } from "../activityInbox.js";
@@ -152,6 +154,8 @@ export interface ActivityInboxProps {
   onScopeChange: (scope: ActivityScope) => void;
   selectedFilter: ActivityInboxFilter;
   onSelectedFilterChange: (filter: ActivityInboxFilter) => void;
+  searchQuery?: string;
+  onSearchQueryChange?: (query: string) => void;
   /** Optional for compatibility with pre-CTA embedders. */
   onNewSession?: () => void;
   openAiCodexAuthRequiredCount?: number;
@@ -168,6 +172,8 @@ export function ActivityInbox({
   onScopeChange,
   selectedFilter,
   onSelectedFilterChange,
+  searchQuery = "",
+  onSearchQueryChange = () => undefined,
   onNewSession,
   openAiCodexAuthRequiredCount = 0,
   onRepairOpenAiCodexAuth,
@@ -183,19 +189,26 @@ export function ActivityInbox({
     () => filterActivityItems(model.items, tagsForScope(scope)),
     [model.items, scope],
   );
+  // Search composes after scope and before status counts/filters. It only
+  // considers title and workspace name, never transcript or failure detail.
+  const searchedItems = useMemo(
+    () => filterActivityItemsBySearchQuery(scopedItems, searchQuery),
+    [scopedItems, searchQuery],
+  );
+  const searchActive = normalizeActivitySearchText(searchQuery).length > 0;
   const counts = useMemo(
     () =>
       ACTIVITY_STATUSES.reduce(
         (result, kind) => {
           result[kind] = filterActivityItems(
-            scopedItems,
+            searchedItems,
             tagsForStatus(kind),
           ).length;
           return result;
         },
         {} as Record<ActivityStatus, number>,
       ),
-    [scopedItems],
+    [searchedItems],
   );
   const availableCount = availableActivityCount(model);
   const scopeLabel = workScopeLabel(scope, workspaceName);
@@ -203,18 +216,22 @@ export function ActivityInbox({
     scope.type === "all"
       ? "Monitor work across active workspaces and jump to sessions that need you."
       : "Monitor work in this workspace and jump to sessions that need you.";
-  // Preserve domain model order within a status. Active supervision statuses
-  // retain stable source order; Completed is already queued by completion time.
+  // Preserve the status-specific order chosen by the domain model after
+  // applying search: triage statuses are newest-first, active queues stable,
+  // and Completed remains FIFO.
   const groups = useMemo(
     () =>
       ACTIVITY_STATUSES.reduce(
         (result, kind) => {
-          result[kind] = filterActivityItems(scopedItems, tagsForStatus(kind));
+          result[kind] = filterActivityItems(
+            searchedItems,
+            tagsForStatus(kind),
+          );
           return result;
         },
         {} as Record<ActivityStatus, ActivityItem[]>,
       ),
-    [scopedItems],
+    [searchedItems],
   );
   const visibleKinds =
     selectedFilter === "all" ? ACTIVITY_STATUSES : [selectedFilter];
@@ -355,6 +372,26 @@ export function ActivityInbox({
         Current scope: {scopeLabel}.
       </span>
 
+      <div className="activity-inbox-search">
+        <label htmlFor="activity-inbox-search">Search Work</label>
+        <div className="activity-inbox-search-control">
+          <input
+            aria-controls="activity-inbox-content"
+            aria-describedby="activity-inbox-scope-status"
+            id="activity-inbox-search"
+            onChange={(event) => onSearchQueryChange(event.target.value)}
+            placeholder="Search title or workspace"
+            type="search"
+            value={searchQuery}
+          />
+          {searchQuery.length > 0 ? (
+            <button onClick={() => onSearchQueryChange("")} type="button">
+              Clear search
+            </button>
+          ) : null}
+        </div>
+      </div>
+
       <div
         aria-controls="activity-inbox-content"
         aria-describedby="activity-inbox-scope-status"
@@ -370,7 +407,7 @@ export function ActivityInbox({
         >
           <span>All</span>
           <span className="activity-inbox-filter-count">
-            {scopedItems.length}
+            {searchedItems.length}
           </span>
         </button>
         {ACTIVITY_STATUSES.map((kind) => {
@@ -397,6 +434,7 @@ export function ActivityInbox({
           <EmptyState
             filter={selectedFilter}
             {...(onNewSession === undefined ? {} : { onNewSession })}
+            {...(searchActive ? { searchQuery } : {})}
             scopeLabel={scopeLabel}
           />
         ) : (
@@ -422,21 +460,31 @@ function EmptyState({
   filter,
   onNewSession,
   scopeLabel,
+  searchQuery,
 }: {
   filter: ActivityInboxFilter;
   onNewSession?: () => void;
   scopeLabel: string;
+  searchQuery?: string;
 }) {
-  const message =
-    filter === "all"
+  const searching = searchQuery !== undefined;
+  const message = searching
+    ? `No ${filter === "all" ? "Work" : ACTIVITY_META[filter].emptyLabel.toLowerCase()} matches “${searchQuery.trim()}” in ${scopeLabel}. Clear search to see all Work.`
+    : filter === "all"
       ? `No work in ${scopeLabel}. Start a session to see it here.`
       : `No ${ACTIVITY_META[filter].emptyLabel.toLowerCase()} work in ${scopeLabel}.`;
 
   return (
     <div className="activity-inbox-empty" role="status">
-      <h2>{filter === "all" ? "No work yet" : "No matching work"}</h2>
+      <h2>
+        {searching
+          ? "No search matches"
+          : filter === "all"
+            ? "No work yet"
+            : "No matching work"}
+      </h2>
       <p>{message}</p>
-      {filter === "all" && onNewSession !== undefined ? (
+      {!searching && filter === "all" && onNewSession !== undefined ? (
         <button
           className="activity-inbox-empty-action"
           onClick={onNewSession}

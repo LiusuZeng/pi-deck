@@ -138,8 +138,9 @@ export function buildActivityInbox(
   for (const item of items) {
     groups[item.status].push(item);
   }
-  // Keep activity recency display-only for active supervision statuses.
-  // Completed is an explicit follow-up queue ordered by completion time.
+  // Needs attention and Failed put newest updates first for triage. Queued and
+  // In progress preserve source order, while Completed is a FIFO follow-up
+  // queue ordered by completion time.
   for (const status of ACTIVITY_STATUSES) {
     groups[status].sort((left, right) =>
       compareActivityItemsForStatus(status, left, right),
@@ -170,6 +171,27 @@ export function filterActivityItems(
       includeAll.every((tag) => item.tags.includes(tag)) &&
       !exclude.some((tag) => item.tags.includes(tag)),
   );
+}
+
+/** Normalizes local Work search without inspecting transcript or error detail. */
+export function normalizeActivitySearchText(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+/** Matches only predictable Work fields: session title and workspace name. */
+export function filterActivityItemsBySearchQuery(
+  items: readonly ActivityItem[],
+  query: string,
+): ActivityItem[] {
+  const normalizedQuery = normalizeActivitySearchText(query);
+  if (normalizedQuery.length === 0) return [...items];
+  return items.filter((item) => {
+    const title = normalizeActivitySearchText(item.title);
+    const workspaceName = normalizeActivitySearchText(item.workspaceName);
+    return (
+      title.includes(normalizedQuery) || workspaceName.includes(normalizedQuery)
+    );
+  });
 }
 
 export function tagsForScope(scope: ActivityScope): ActivityFilter {
@@ -222,9 +244,25 @@ export function compareActivityItemsForStatus(
   left: ActivityItem,
   right: ActivityItem,
 ): number {
-  if (status !== "completed") {
-    return 0;
+  if (status === "needsAttention" || status === "failed") {
+    const leftUpdatedAtMs = finiteTimestamp(left.updatedAtMs);
+    const rightUpdatedAtMs = finiteTimestamp(right.updatedAtMs);
+    if (
+      leftUpdatedAtMs !== undefined &&
+      rightUpdatedAtMs !== undefined &&
+      leftUpdatedAtMs !== rightUpdatedAtMs
+    ) {
+      return rightUpdatedAtMs - leftUpdatedAtMs;
+    }
+    if (leftUpdatedAtMs !== undefined && rightUpdatedAtMs === undefined) {
+      return -1;
+    }
+    if (leftUpdatedAtMs === undefined && rightUpdatedAtMs !== undefined) {
+      return 1;
+    }
+    return left.id.localeCompare(right.id);
   }
+  if (status !== "completed") return 0;
   const leftCompletedAtMs = finiteTimestamp(left.completedAtMs);
   const rightCompletedAtMs = finiteTimestamp(right.completedAtMs);
   if (

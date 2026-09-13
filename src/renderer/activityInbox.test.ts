@@ -6,6 +6,8 @@ import {
   classifyActivity,
   countActivityInboxItems,
   filterActivityItems,
+  filterActivityItemsBySearchQuery,
+  normalizeActivitySearchText,
   statusTag,
   tagsForScope,
   type ActivitySourceSession,
@@ -112,10 +114,18 @@ describe("buildActivityInbox", () => {
     ).toBe(true);
   });
 
-  it("preserves source order within active statuses instead of sorting by recency", () => {
+  it("orders triage statuses newest first while active queues retain source order", () => {
     const inbox = buildActivityInbox([
       source("older-working", { baseState: "working", updatedAtMs: 100 }),
       source("newer-working", { baseState: "working", updatedAtMs: 200 }),
+      source("older-attention", {
+        baseState: "waitingForInput",
+        updatedAtMs: 100,
+      }),
+      source("newer-attention", {
+        baseState: "waitingForInput",
+        updatedAtMs: 200,
+      }),
       source("older-failed", { baseState: "error", updatedAtMs: 100 }),
       source("newer-failed", { baseState: "error", updatedAtMs: 200 }),
     ]);
@@ -124,16 +134,81 @@ describe("buildActivityInbox", () => {
       "older-working",
       "newer-working",
     ]);
+    expect(inbox.groups.needsAttention.map((item) => item.sessionKey)).toEqual([
+      "newer-attention",
+      "older-attention",
+    ]);
     expect(inbox.groups.failed.map((item) => item.sessionKey)).toEqual([
-      "older-failed",
       "newer-failed",
+      "older-failed",
     ]);
     expect(inbox.items.map((item) => item.sessionKey)).toEqual([
-      "older-failed",
+      "newer-attention",
+      "older-attention",
       "newer-failed",
+      "older-failed",
       "older-working",
       "newer-working",
     ]);
+  });
+
+  it("uses stable ids to break triage recency ties", () => {
+    const inbox = buildActivityInbox([
+      source("failed-zeta", { baseState: "error", updatedAtMs: 200 }),
+      source("failed-alpha", { baseState: "error", updatedAtMs: 200 }),
+      source("attention-zeta", {
+        baseState: "waitingForInput",
+        updatedAtMs: 200,
+      }),
+      source("attention-alpha", {
+        baseState: "waitingForInput",
+        updatedAtMs: 200,
+      }),
+      source("older", { baseState: "error", updatedAtMs: 100 }),
+    ]);
+
+    expect(inbox.groups.failed.map((item) => item.sessionKey)).toEqual([
+      "failed-alpha",
+      "failed-zeta",
+      "older",
+    ]);
+    expect(inbox.groups.needsAttention.map((item) => item.sessionKey)).toEqual([
+      "attention-alpha",
+      "attention-zeta",
+    ]);
+  });
+
+  it("matches normalized title and workspace search without error detail", () => {
+    const inbox = buildActivityInbox([
+      source("title", {
+        title: "  Plan\nAtlas   release  ",
+        workspaceName: "Project Atlas",
+        baseState: "working",
+        lastError: "secret transcript phrase",
+      }),
+      source("workspace", {
+        title: "Unrelated title",
+        workspaceId: "workspace-b",
+        workspaceName: "  Project\tBorealis ",
+        baseState: "error",
+        lastError: "Searchable diagnostic only",
+      }),
+    ]);
+
+    expect(normalizeActivitySearchText("  PLAN\t atlas  ")).toBe("plan atlas");
+    expect(
+      filterActivityItemsBySearchQuery(inbox.items, " plan atlas release ").map(
+        (item) => item.sessionKey,
+      ),
+    ).toEqual(["title"]);
+    expect(
+      filterActivityItemsBySearchQuery(inbox.items, "PROJECT borealis").map(
+        (item) => item.sessionKey,
+      ),
+    ).toEqual(["workspace"]);
+    expect(
+      filterActivityItemsBySearchQuery(inbox.items, "diagnostic only"),
+    ).toEqual([]);
   });
 
   it("orders Completed as a FIFO queue by completedAtMs, not updatedAtMs", () => {

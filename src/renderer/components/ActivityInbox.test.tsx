@@ -282,6 +282,134 @@ describe("ActivityInbox", () => {
     expect(view.textContent).not.toContain("Idle");
   });
 
+  it("composes normalized title and workspace search with scope and status filters", () => {
+    const { view } = renderInbox(modelWithEveryKind());
+
+    act(() => {
+      root?.render(
+        <ActivityInbox
+          model={modelWithEveryKind()}
+          onOpenActivityItem={vi.fn()}
+          onScopeChange={vi.fn()}
+          onSelectedFilterChange={vi.fn()}
+          searchQuery={"  project\tBOREALIS "}
+          selectedFilter="failed"
+          scope={{ type: "all" }}
+          workspaces={workspaces}
+        />,
+      );
+    });
+
+    const search = view.querySelector<HTMLInputElement>('input[type="search"]');
+    expect(
+      view.querySelector('label[for="activity-inbox-search"]')?.textContent,
+    ).toBe("Search Work");
+    expect(search?.value).toBe("  project\tBOREALIS ");
+    expect(rowTitles(view)).toEqual(["failed session failure"]);
+    expect(view.querySelector('option[value="all"]')?.textContent).toBe(
+      "All Work (5)",
+    );
+    expect(
+      Array.from(view.querySelectorAll(".activity-inbox-filter")).find(
+        (button) => button.textContent?.includes("All"),
+      )?.textContent,
+    ).toContain("1");
+
+    act(() => {
+      root?.render(
+        <ActivityInbox
+          model={modelWithEveryKind()}
+          onOpenActivityItem={vi.fn()}
+          onScopeChange={vi.fn()}
+          onSelectedFilterChange={vi.fn()}
+          searchQuery="project borealis"
+          selectedFilter="failed"
+          scope={{ type: "workspace", workspaceId: "workspace-atlas" }}
+          workspaces={workspaces}
+        />,
+      );
+    });
+    expect(view.querySelector('[role="status"]')?.textContent).toContain(
+      "No failed matches “project borealis” in Project Atlas Work.",
+    );
+  });
+
+  it("applies an active query before every status filter", () => {
+    const model = modelWithEveryKind();
+    const filters: ActivityInboxFilter[] = [
+      "needsAttention",
+      "failed",
+      "queued",
+      "inProgress",
+      "completed",
+    ];
+    const expectedTitleByFilter: Record<ActivityInboxFilter, string> = {
+      all: "",
+      needsAttention: "needsAttention session attention",
+      failed: "failed session failure",
+      queued: "queued session queued",
+      inProgress: "inProgress session progress",
+      completed: "completed session complete",
+    };
+    const { view } = renderInbox(model);
+
+    for (const selectedFilter of filters) {
+      act(() => {
+        root?.render(
+          <ActivityInbox
+            model={model}
+            onOpenActivityItem={vi.fn()}
+            onScopeChange={vi.fn()}
+            onSelectedFilterChange={vi.fn()}
+            searchQuery="session"
+            selectedFilter={selectedFilter}
+            scope={{ type: "all" }}
+            workspaces={workspaces}
+          />,
+        );
+      });
+      expect(rowTitles(view)).toEqual([expectedTitleByFilter[selectedFilter]]);
+    }
+  });
+
+  it("does not search row error detail and offers an explicit clear action", () => {
+    const clear = vi.fn();
+    const model = buildActivityInbox([
+      sourceSession("failed", {
+        baseState: "error",
+        title: "Known task",
+        lastError: "private diagnostic phrase",
+      }),
+    ]);
+    const { view } = renderInbox(model);
+
+    act(() => {
+      root?.render(
+        <ActivityInbox
+          model={model}
+          onOpenActivityItem={vi.fn()}
+          onScopeChange={vi.fn()}
+          onSearchQueryChange={clear}
+          onSelectedFilterChange={vi.fn()}
+          searchQuery="diagnostic phrase"
+          selectedFilter="all"
+          scope={{ type: "all" }}
+          workspaces={workspaces}
+        />,
+      );
+    });
+
+    expect(rowTitles(view)).toEqual([]);
+    expect(view.querySelector('[role="status"]')?.textContent).toContain(
+      "No Work matches “diagnostic phrase”",
+    );
+    const clearButton = Array.from(view.querySelectorAll("button")).find(
+      (button) => button.textContent === "Clear search",
+    );
+    act(() => clearButton?.click());
+    expect(clear).toHaveBeenCalledWith("");
+  });
+
   it("marks only in-progress session row icons as active", () => {
     const { view } = renderInbox(modelWithEveryKind());
 

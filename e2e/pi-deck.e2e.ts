@@ -6966,6 +6966,144 @@ test.describe("Unified Work", () => {
     }
   });
 
+  test("Unified Work search composes with scope and status while retaining keyboard Back state", async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "pi-deck-e2e-work-search-"),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    fs.mkdirSync(projectCwd, { recursive: true });
+    fs.mkdirSync(agentDir, { recursive: true });
+
+    const env = fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: ["--stream-delay-ms", "80"],
+    });
+    let launched = await launchPiDeck(env);
+    let app = launched.app;
+    let page = launched.page;
+    try {
+      await expectHealthyPreload(page);
+      await expectAllWorkLaunch(page);
+      await createWorkspaceInUi(page, "Search Atlas");
+      const atlasId = await page
+        .getByRole("button", { name: "Workspace: Search Atlas" })
+        .getAttribute("data-workspace-id");
+      if (atlasId === null) throw new Error("Missing Search Atlas workspace.");
+      const atlasTitle = "Search normalization Atlas task";
+      await enterSessionDetail(page);
+      await page.getByLabel("Prompt text").fill(atlasTitle);
+      await page.getByRole("button", { name: "Send" }).click();
+      await page.getByRole("button", { name: /^All Work/ }).click();
+      await expectAllWorkLaunch(page);
+      await expect(
+        page.locator(".activity-inbox-row--completed", { hasText: atlasTitle }),
+      ).toHaveCount(1, { timeout: 10_000 });
+
+      await createWorkspaceInUi(page, "Search Borealis");
+      const borealisTitle = "Search normalization Borealis task";
+      await enterSessionDetail(page);
+      await page.getByLabel("Prompt text").fill(borealisTitle);
+      await page.getByRole("button", { name: "Send" }).click();
+      await page.getByRole("button", { name: /^All Work/ }).click();
+      await expectAllWorkLaunch(page);
+      await expect(
+        page.locator(".activity-inbox-row--completed", {
+          hasText: borealisTitle,
+        }),
+      ).toHaveCount(1, { timeout: 10_000 });
+
+      const search = page.getByRole("searchbox", { name: "Search Work" });
+      await expect(search).toHaveAttribute("type", "search");
+      // Workspace-name search finds a cross-workspace row without relying on
+      // any transcript or row-detail content.
+      await search.fill("  search\tATLAS ");
+      await expect(
+        page.locator(".activity-inbox-row", { hasText: atlasTitle }),
+      ).toHaveCount(1);
+      await expect(
+        page.locator(".activity-inbox-row", { hasText: borealisTitle }),
+      ).toHaveCount(0);
+
+      // A title query is equally available from All Work.
+      await search.fill("borealis task");
+      await expect(
+        page.locator(".activity-inbox-row", { hasText: borealisTitle }),
+      ).toHaveCount(1);
+
+      // Scope owns an independent transient query. Complete is selected before
+      // drill-in, then both status and query survive keyboard open and Back.
+      await page.getByLabel("Current Work scope").selectOption(atlasId);
+      await expectWorkRoute(page, atlasId);
+      await expect(search).toHaveValue("");
+      await page.getByLabel("Current Work scope").selectOption("all");
+      await expectAllWorkLaunch(page);
+      await expect(search).toHaveValue("borealis task");
+      await page.getByLabel("Current Work scope").selectOption(atlasId);
+      await expectWorkRoute(page, atlasId);
+      await expect(search).toHaveValue("");
+      const completed = page
+        .getByRole("group", { name: "Filter Work by status" })
+        .getByRole("button", { name: /^Completed/ });
+      await completed.click();
+      await search.fill("ATLAS TASK");
+      const atlasRow = page
+        .locator(".activity-inbox-row--completed")
+        .filter({ hasText: atlasTitle });
+      await expect(atlasRow).toHaveCount(1);
+      await atlasRow.focus();
+      await page.keyboard.press("Enter");
+      await expect(
+        page.locator('.workspace[data-primary-view="session"]'),
+      ).toBeVisible();
+      await page.getByTestId("session-origin-back").click();
+      await expectWorkRoute(page, atlasId);
+      await expect(search).toHaveValue("ATLAS TASK");
+      await expect(completed).toHaveAttribute("aria-pressed", "true");
+      await expect(atlasRow).toBeFocused();
+
+      await search.fill("no such Work item");
+      await expect(
+        page.locator('.activity-inbox-empty[role="status"]'),
+      ).toContainText("No search matches");
+      await expect(
+        page.getByRole("button", { name: "Clear search" }),
+      ).toBeVisible();
+      await page.getByRole("button", { name: "Clear search" }).click();
+      await expect(search).toHaveValue("");
+      await expect(atlasRow).toHaveCount(1);
+
+      // The labeled control stays keyboard-focusable and visible at a narrow
+      // viewport in either system color scheme.
+      await page.setViewportSize({ width: 500, height: 640 });
+      await page.emulateMedia({ colorScheme: "dark" });
+      await search.focus();
+      await expect(search).toBeFocused();
+      await expect(search).toHaveCSS("outline-style", "solid");
+      await expect(search).toBeVisible();
+      await page.emulateMedia({ colorScheme: "light" });
+      await expect(search).toBeVisible();
+
+      // Search is intentionally renderer-lifetime state rather than persisted
+      // workspace/session metadata, so a relaunch starts with an empty query.
+      await search.fill("transient relaunch query");
+      await app.close();
+      launched = await launchPiDeck(env);
+      app = launched.app;
+      page = launched.page;
+      await expectHealthyPreload(page);
+      await expectAllWorkLaunch(page);
+      await expect(
+        page.getByRole("searchbox", { name: "Search Work" }),
+      ).toHaveValue("");
+    } finally {
+      await app.close().catch(() => undefined);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("Unified Work keeps in-progress card order stable during runtime updates", async () => {
     const root = fs.mkdtempSync(
       path.join(os.tmpdir(), "pi-deck-e2e-work-stable-order-"),
