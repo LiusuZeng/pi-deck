@@ -4,8 +4,11 @@ import {
   activityTags,
   buildActivityInbox,
   classifyActivity,
+  compareActivityItemsForStatus,
   countActivityInboxItems,
   filterActivityItems,
+  filterActivityItemsBySearchQuery,
+  normalizeActivitySearchText,
   statusTag,
   tagsForScope,
   type ActivitySourceSession,
@@ -112,10 +115,18 @@ describe("buildActivityInbox", () => {
     ).toBe(true);
   });
 
-  it("preserves source order within active statuses instead of sorting by recency", () => {
+  it("orders triage statuses newest first while active queues retain source order", () => {
     const inbox = buildActivityInbox([
       source("older-working", { baseState: "working", updatedAtMs: 100 }),
       source("newer-working", { baseState: "working", updatedAtMs: 200 }),
+      source("older-attention", {
+        baseState: "waitingForInput",
+        updatedAtMs: 100,
+      }),
+      source("newer-attention", {
+        baseState: "waitingForInput",
+        updatedAtMs: 200,
+      }),
       source("older-failed", { baseState: "error", updatedAtMs: 100 }),
       source("newer-failed", { baseState: "error", updatedAtMs: 200 }),
     ]);
@@ -124,16 +135,130 @@ describe("buildActivityInbox", () => {
       "older-working",
       "newer-working",
     ]);
+    expect(inbox.groups.needsAttention.map((item) => item.sessionKey)).toEqual([
+      "newer-attention",
+      "older-attention",
+    ]);
     expect(inbox.groups.failed.map((item) => item.sessionKey)).toEqual([
-      "older-failed",
       "newer-failed",
+      "older-failed",
     ]);
     expect(inbox.items.map((item) => item.sessionKey)).toEqual([
-      "older-failed",
+      "newer-attention",
+      "older-attention",
       "newer-failed",
+      "older-failed",
       "older-working",
       "newer-working",
     ]);
+  });
+
+  it("uses code-unit stable IDs to break equal triage timestamps", () => {
+    const inbox = buildActivityInbox([
+      source("failed-ä", { baseState: "error", updatedAtMs: 200 }),
+      source("failed-z", { baseState: "error", updatedAtMs: 200 }),
+      source("attention-ä", {
+        baseState: "waitingForInput",
+        updatedAtMs: 200,
+      }),
+      source("attention-z", {
+        baseState: "waitingForInput",
+        updatedAtMs: 200,
+      }),
+    ]);
+
+    // UTF-16 code-unit order is deterministic: `z` precedes `ä`, regardless
+    // of the host locale's collation rules.
+    expect(inbox.groups.failed.map((item) => item.sessionKey)).toEqual([
+      "failed-z",
+      "failed-ä",
+    ]);
+    expect(inbox.groups.needsAttention.map((item) => item.sessionKey)).toEqual([
+      "attention-z",
+      "attention-ä",
+    ]);
+  });
+
+  it("orders malformed triage timestamps after valid timestamps by stable ID", () => {
+    const malformedTimestamp = (value: unknown): number => value as number;
+    const buildInbox = () =>
+      buildActivityInbox([
+        source("failed-z-string", {
+          baseState: "error",
+          updatedAtMs: malformedTimestamp("not a timestamp"),
+        }),
+        source("failed-a-nan", {
+          baseState: "error",
+          updatedAtMs: malformedTimestamp(Number.NaN),
+        }),
+        source("failed-m-infinity", {
+          baseState: "error",
+          updatedAtMs: malformedTimestamp(Number.POSITIVE_INFINITY),
+        }),
+        source("failed-oldest-valid", { baseState: "error", updatedAtMs: 100 }),
+        source("failed-newest-valid", { baseState: "error", updatedAtMs: 200 }),
+        source("failed-out-of-range", {
+          baseState: "error",
+          updatedAtMs: malformedTimestamp(8.64e15 + 1),
+        }),
+        source("attention-z-malformed", {
+          baseState: "waitingForInput",
+          updatedAtMs: malformedTimestamp(undefined),
+        }),
+        source("attention-a-valid", {
+          baseState: "waitingForInput",
+          updatedAtMs: 200,
+        }),
+      ]);
+
+    expect(buildInbox).not.toThrow();
+    const inbox = buildInbox();
+
+    expect(inbox.groups.failed.map((item) => item.sessionKey)).toEqual([
+      "failed-newest-valid",
+      "failed-oldest-valid",
+      "failed-a-nan",
+      "failed-m-infinity",
+      "failed-out-of-range",
+      "failed-z-string",
+    ]);
+    expect(inbox.groups.needsAttention.map((item) => item.sessionKey)).toEqual([
+      "attention-a-valid",
+      "attention-z-malformed",
+    ]);
+  });
+
+  it("matches normalized title and workspace search without error detail", () => {
+    const inbox = buildActivityInbox([
+      source("title", {
+        title: "  Plan\nAtlas   release  ",
+        workspaceName: "Project Atlas",
+        baseState: "working",
+        lastError: "secret transcript phrase",
+      }),
+      source("workspace", {
+        title: "Unrelated title",
+        workspaceId: "workspace-b",
+        workspaceName: "  Project\tBorealis ",
+        baseState: "error",
+        lastError: "Searchable diagnostic only",
+      }),
+    ]);
+
+    expect(normalizeActivitySearchText("  PLAN\t atlas  ")).toBe("plan atlas");
+    expect(
+      filterActivityItemsBySearchQuery(inbox.items, " plan atlas release ").map(
+        (item) => item.sessionKey,
+      ),
+    ).toEqual(["title"]);
+    expect(
+      filterActivityItemsBySearchQuery(inbox.items, "PROJECT borealis").map(
+        (item) => item.sessionKey,
+      ),
+    ).toEqual(["workspace"]);
+    expect(
+      filterActivityItemsBySearchQuery(inbox.items, "diagnostic only"),
+    ).toEqual([]);
   });
 
   it("orders Completed as a FIFO queue by completedAtMs, not updatedAtMs", () => {
@@ -189,6 +314,30 @@ describe("buildActivityInbox", () => {
       "new-middle",
       "later",
     ]);
+  });
+
+  it("uses code-unit stable IDs for equal and malformed Completed ties", () => {
+    const inbox = buildActivityInbox([
+      source("completed-ä", { completedAtMs: 200 }),
+      source("completed-z", { completedAtMs: 200 }),
+    ]);
+
+    expect(inbox.groups.completed.map((item) => item.sessionKey)).toEqual([
+      "completed-z",
+      "completed-ä",
+    ]);
+
+    const malformedTimestamps = inbox.groups.completed.map((item) => ({
+      ...item,
+      completedAtMs: Number.NaN,
+    }));
+    expect(
+      malformedTimestamps
+        .sort((left, right) =>
+          compareActivityItemsForStatus("completed", left, right),
+        )
+        .map((item) => item.sessionKey),
+    ).toEqual(["completed-z", "completed-ä"]);
   });
 
   it("uses the same Completed queue ordering in All Work and workspace scopes", () => {
@@ -319,7 +468,7 @@ describe("buildActivityInbox", () => {
     });
   });
 
-  it("requires an explicit finite completion timestamp", () => {
+  it("requires an explicit Date-valid completion timestamp", () => {
     expect(
       classifyActivity(
         source("undefined", { baseState: "working", completedAtMs: undefined }),
@@ -328,6 +477,14 @@ describe("buildActivityInbox", () => {
     expect(
       classifyActivity(
         source("invalid", { baseState: "unloaded", completedAtMs: Number.NaN }),
+      ),
+    ).toBeUndefined();
+    expect(
+      classifyActivity(
+        source("out-of-range", {
+          baseState: "unloaded",
+          completedAtMs: 8.64e15 + 1,
+        }),
       ),
     ).toBeUndefined();
     expect(classifyActivity(source("completed", { completedAtMs: 0 }))).toBe(

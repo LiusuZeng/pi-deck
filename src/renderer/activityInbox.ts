@@ -138,8 +138,9 @@ export function buildActivityInbox(
   for (const item of items) {
     groups[item.status].push(item);
   }
-  // Keep activity recency display-only for active supervision statuses.
-  // Completed is an explicit follow-up queue ordered by completion time.
+  // Needs attention and Failed put newest updates first for triage. Queued and
+  // In progress preserve source order, while Completed is a FIFO follow-up
+  // queue ordered by completion time.
   for (const status of ACTIVITY_STATUSES) {
     groups[status].sort((left, right) =>
       compareActivityItemsForStatus(status, left, right),
@@ -170,6 +171,27 @@ export function filterActivityItems(
       includeAll.every((tag) => item.tags.includes(tag)) &&
       !exclude.some((tag) => item.tags.includes(tag)),
   );
+}
+
+/** Normalizes local Work search without inspecting transcript or error detail. */
+export function normalizeActivitySearchText(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+/** Matches only predictable Work fields: session title and workspace name. */
+export function filterActivityItemsBySearchQuery(
+  items: readonly ActivityItem[],
+  query: string,
+): ActivityItem[] {
+  const normalizedQuery = normalizeActivitySearchText(query);
+  if (normalizedQuery.length === 0) return [...items];
+  return items.filter((item) => {
+    const title = normalizeActivitySearchText(item.title);
+    const workspaceName = normalizeActivitySearchText(item.workspaceName);
+    return (
+      title.includes(normalizedQuery) || workspaceName.includes(normalizedQuery)
+    );
+  });
 }
 
 export function tagsForScope(scope: ActivityScope): ActivityFilter {
@@ -222,11 +244,23 @@ export function compareActivityItemsForStatus(
   left: ActivityItem,
   right: ActivityItem,
 ): number {
-  if (status !== "completed") {
-    return 0;
+  if (status === "needsAttention" || status === "failed") {
+    const leftUpdatedAtMs = normalizeActivityTimestamp(left.updatedAtMs);
+    const rightUpdatedAtMs = normalizeActivityTimestamp(right.updatedAtMs);
+    if (leftUpdatedAtMs !== undefined && rightUpdatedAtMs !== undefined) {
+      if (leftUpdatedAtMs !== rightUpdatedAtMs) {
+        return leftUpdatedAtMs > rightUpdatedAtMs ? -1 : 1;
+      }
+    } else if (leftUpdatedAtMs !== undefined) {
+      return -1;
+    } else if (rightUpdatedAtMs !== undefined) {
+      return 1;
+    }
+    return compareCodeUnitLexically(left.id, right.id);
   }
-  const leftCompletedAtMs = finiteTimestamp(left.completedAtMs);
-  const rightCompletedAtMs = finiteTimestamp(right.completedAtMs);
+  if (status !== "completed") return 0;
+  const leftCompletedAtMs = normalizeActivityTimestamp(left.completedAtMs);
+  const rightCompletedAtMs = normalizeActivityTimestamp(right.completedAtMs);
   if (
     leftCompletedAtMs !== undefined &&
     rightCompletedAtMs !== undefined &&
@@ -240,7 +274,7 @@ export function compareActivityItemsForStatus(
   if (leftCompletedAtMs === undefined && rightCompletedAtMs !== undefined) {
     return 1;
   }
-  return left.id.localeCompare(right.id);
+  return compareCodeUnitLexically(left.id, right.id);
 }
 
 export function countActivityStatuses(
@@ -278,7 +312,9 @@ function normalizeActivity(source: ActivitySourceSession): ActivityItem[] {
   }
   const sessionKey = source.sessionFile ?? source.id;
   const completedAtMs =
-    status === "completed" ? finiteTimestamp(source.completedAtMs) : undefined;
+    status === "completed"
+      ? normalizeActivityTimestamp(source.completedAtMs)
+      : undefined;
   return [
     {
       id: `activity:${source.workspaceId}:${sessionKey}`,
@@ -355,11 +391,25 @@ function isInProgress(source: ActivitySourceSession): boolean {
 }
 
 function hasCompletionTimestamp(value: number | undefined): boolean {
-  return finiteTimestamp(value) !== undefined;
+  return normalizeActivityTimestamp(value) !== undefined;
 }
 
-function finiteTimestamp(value: number | undefined): number | undefined {
-  return value !== undefined && Number.isFinite(value) ? value : undefined;
+/** Locale-independent UTF-16 code-unit order for persistent identifiers. */
+function compareCodeUnitLexically(left: string, right: string): number {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
+}
+
+/**
+ * Reject malformed runtime data and values outside the JavaScript Date range
+ * rather than coercing either into a timestamp.
+ */
+export function normalizeActivityTimestamp(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+  return Number.isFinite(new Date(value).getTime()) ? value : undefined;
 }
 
 function activityDetail(

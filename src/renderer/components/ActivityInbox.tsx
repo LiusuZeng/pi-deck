@@ -1,4 +1,4 @@
-import { useMemo, type KeyboardEvent } from "react";
+import { useLayoutEffect, useMemo, useRef, type KeyboardEvent } from "react";
 import type { WorkspaceUsageTotals } from "../../shared/types.js";
 import type {
   ActivityInboxModel,
@@ -9,6 +9,9 @@ import type {
 import {
   ACTIVITY_STATUSES,
   filterActivityItems,
+  filterActivityItemsBySearchQuery,
+  normalizeActivitySearchText,
+  normalizeActivityTimestamp,
   tagsForScope,
   tagsForStatus,
 } from "../activityInbox.js";
@@ -61,24 +64,18 @@ function formatTimestamp(timestamp: number): string {
   }).format(new Date(timestamp));
 }
 
-function finiteTimestamp(timestamp: number | undefined): number | undefined {
-  return timestamp !== undefined && Number.isFinite(timestamp)
-    ? timestamp
-    : undefined;
-}
-
-function activityRowTimestamp(item: ActivityItem): number {
-  const completedAtMs = finiteTimestamp(item.completedAtMs);
+function activityRowTimestamp(item: ActivityItem): number | undefined {
+  const completedAtMs = normalizeActivityTimestamp(item.completedAtMs);
   return item.status === "completed" && completedAtMs !== undefined
     ? completedAtMs
-    : item.updatedAtMs;
+    : normalizeActivityTimestamp(item.updatedAtMs);
 }
 
 function activityRowTimestampLabel(
   item: ActivityItem,
 ): "Completed" | "Updated" {
   return item.status === "completed" &&
-    finiteTimestamp(item.completedAtMs) !== undefined
+    normalizeActivityTimestamp(item.completedAtMs) !== undefined
     ? "Completed"
     : "Updated";
 }
@@ -93,6 +90,21 @@ function workScopeLabel(
   return workspaceName === undefined
     ? "Workspace Work"
     : `${workspaceName} Work`;
+}
+
+function activityResultSummary(
+  count: number,
+  filter: ActivityInboxFilter,
+  scopeLabel: string,
+  searchQuery: string | undefined,
+): string {
+  const resultKind =
+    filter === "all"
+      ? "result"
+      : `${ACTIVITY_META[filter].label.toLowerCase()} result`;
+  const queryContext =
+    searchQuery === undefined ? "" : ` for “${searchQuery.trim()}”`;
+  return `${count} ${resultKind}${count === 1 ? "" : "s"}${queryContext} in ${scopeLabel}.`;
 }
 
 function formatCompactTokens(tokens: number): string {
@@ -152,6 +164,8 @@ export interface ActivityInboxProps {
   onScopeChange: (scope: ActivityScope) => void;
   selectedFilter: ActivityInboxFilter;
   onSelectedFilterChange: (filter: ActivityInboxFilter) => void;
+  searchQuery?: string;
+  onSearchQueryChange?: (query: string) => void;
   /** Optional for compatibility with pre-CTA embedders. */
   onNewSession?: () => void;
   openAiCodexAuthRequiredCount?: number;
@@ -168,10 +182,24 @@ export function ActivityInbox({
   onScopeChange,
   selectedFilter,
   onSelectedFilterChange,
+  searchQuery = "",
+  onSearchQueryChange = () => undefined,
   onNewSession,
   openAiCodexAuthRequiredCount = 0,
   onRepairOpenAiCodexAuth,
 }: ActivityInboxProps) {
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const restoreSearchFocusRef = useRef(false);
+  useLayoutEffect(() => {
+    if (restoreSearchFocusRef.current && searchQuery.length === 0) {
+      restoreSearchFocusRef.current = false;
+      searchInputRef.current?.focus();
+    }
+  }, [searchQuery]);
+  const clearSearch = () => {
+    restoreSearchFocusRef.current = true;
+    onSearchQueryChange("");
+  };
   const workspaceName =
     scope.type === "workspace"
       ? workspaces.find((workspace) => workspace.id === scope.workspaceId)?.name
@@ -183,19 +211,26 @@ export function ActivityInbox({
     () => filterActivityItems(model.items, tagsForScope(scope)),
     [model.items, scope],
   );
+  // Search composes after scope and before status counts/filters. It only
+  // considers title and workspace name, never transcript or failure detail.
+  const searchedItems = useMemo(
+    () => filterActivityItemsBySearchQuery(scopedItems, searchQuery),
+    [scopedItems, searchQuery],
+  );
+  const searchActive = normalizeActivitySearchText(searchQuery).length > 0;
   const counts = useMemo(
     () =>
       ACTIVITY_STATUSES.reduce(
         (result, kind) => {
           result[kind] = filterActivityItems(
-            scopedItems,
+            searchedItems,
             tagsForStatus(kind),
           ).length;
           return result;
         },
         {} as Record<ActivityStatus, number>,
       ),
-    [scopedItems],
+    [searchedItems],
   );
   const availableCount = availableActivityCount(model);
   const scopeLabel = workScopeLabel(scope, workspaceName);
@@ -203,22 +238,32 @@ export function ActivityInbox({
     scope.type === "all"
       ? "Monitor work across active workspaces and jump to sessions that need you."
       : "Monitor work in this workspace and jump to sessions that need you.";
-  // Preserve domain model order within a status. Active supervision statuses
-  // retain stable source order; Completed is already queued by completion time.
+  // Preserve the status-specific order chosen by the domain model after
+  // applying search: triage statuses are newest-first, active queues stable,
+  // and Completed remains FIFO.
   const groups = useMemo(
     () =>
       ACTIVITY_STATUSES.reduce(
         (result, kind) => {
-          result[kind] = filterActivityItems(scopedItems, tagsForStatus(kind));
+          result[kind] = filterActivityItems(
+            searchedItems,
+            tagsForStatus(kind),
+          );
           return result;
         },
         {} as Record<ActivityStatus, ActivityItem[]>,
       ),
-    [scopedItems],
+    [searchedItems],
   );
   const visibleKinds =
     selectedFilter === "all" ? ACTIVITY_STATUSES : [selectedFilter];
   const visibleItems = visibleKinds.flatMap((kind) => groups[kind]);
+  const resultSummary = activityResultSummary(
+    visibleItems.length,
+    selectedFilter,
+    scopeLabel,
+    searchActive ? searchQuery : undefined,
+  );
   const showWorkspaceControls = workspaces.length > 0;
   const showWorkspaceContext = scope.type === "all" && workspaces.length > 0;
 
@@ -348,12 +393,32 @@ export function ActivityInbox({
         </label>
       ) : null}
       <span
-        aria-live="polite"
         className="activity-inbox-scope-status sr-only"
         id="activity-inbox-scope-status"
       >
         Current scope: {scopeLabel}.
       </span>
+
+      <div className="activity-inbox-search">
+        <label htmlFor="activity-inbox-search">Search Work</label>
+        <div className="activity-inbox-search-control">
+          <input
+            aria-controls="activity-inbox-content"
+            ref={searchInputRef}
+            aria-describedby="activity-inbox-scope-status"
+            id="activity-inbox-search"
+            onChange={(event) => onSearchQueryChange(event.target.value)}
+            placeholder="Search title or workspace"
+            type="search"
+            value={searchQuery}
+          />
+          {searchQuery.length > 0 ? (
+            <button onClick={clearSearch} type="button">
+              Clear search
+            </button>
+          ) : null}
+        </div>
+      </div>
 
       <div
         aria-controls="activity-inbox-content"
@@ -370,7 +435,7 @@ export function ActivityInbox({
         >
           <span>All</span>
           <span className="activity-inbox-filter-count">
-            {scopedItems.length}
+            {searchedItems.length}
           </span>
         </button>
         {ACTIVITY_STATUSES.map((kind) => {
@@ -392,11 +457,20 @@ export function ActivityInbox({
         })}
       </div>
 
+      <p
+        aria-live="polite"
+        className="activity-inbox-result-summary sr-only"
+        role="status"
+      >
+        {resultSummary}
+      </p>
+
       <div className="activity-inbox-content" id="activity-inbox-content">
         {visibleItems.length === 0 ? (
           <EmptyState
             filter={selectedFilter}
             {...(onNewSession === undefined ? {} : { onNewSession })}
+            {...(searchActive ? { searchQuery } : {})}
             scopeLabel={scopeLabel}
           />
         ) : (
@@ -422,21 +496,31 @@ function EmptyState({
   filter,
   onNewSession,
   scopeLabel,
+  searchQuery,
 }: {
   filter: ActivityInboxFilter;
   onNewSession?: () => void;
   scopeLabel: string;
+  searchQuery?: string;
 }) {
-  const message =
-    filter === "all"
+  const searching = searchQuery !== undefined;
+  const message = searching
+    ? `No ${filter === "all" ? "Work" : ACTIVITY_META[filter].emptyLabel.toLowerCase()} matches “${searchQuery.trim()}” in ${scopeLabel}. Clear search to see all Work.`
+    : filter === "all"
       ? `No work in ${scopeLabel}. Start a session to see it here.`
       : `No ${ACTIVITY_META[filter].emptyLabel.toLowerCase()} work in ${scopeLabel}.`;
 
   return (
-    <div className="activity-inbox-empty" role="status">
-      <h2>{filter === "all" ? "No work yet" : "No matching work"}</h2>
+    <div className="activity-inbox-empty">
+      <h2>
+        {searching
+          ? "No search matches"
+          : filter === "all"
+            ? "No work yet"
+            : "No matching work"}
+      </h2>
       <p>{message}</p>
-      {filter === "all" && onNewSession !== undefined ? (
+      {!searching && filter === "all" && onNewSession !== undefined ? (
         <button
           className="activity-inbox-empty-action"
           onClick={onNewSession}
@@ -497,7 +581,12 @@ function ActivityRow({
   const { Icon, label } = ACTIVITY_META[kind];
   const timestampMs = activityRowTimestamp(item);
   const timestampLabel = activityRowTimestampLabel(item);
-  const relativeTime = formatRelativeTime(timestampMs);
+  const relativeTime =
+    timestampMs === undefined ? undefined : formatRelativeTime(timestampMs);
+  const timestampDescription =
+    relativeTime === undefined
+      ? "Updated time unavailable"
+      : `${timestampLabel} ${relativeTime}`;
   const workspaceContext = showWorkspaceContext
     ? `, ${item.workspaceName}`
     : "";
@@ -511,7 +600,7 @@ function ActivityRow({
 
   return (
     <button
-      aria-label={`${label}: ${item.title}${workspaceContext}. ${item.detail}. ${timestampLabel} ${relativeTime}. ${item.actionLabel}.`}
+      aria-label={`${label}: ${item.title}${workspaceContext}. ${item.detail}. ${timestampDescription}. ${item.actionLabel}.`}
       className={`activity-inbox-row activity-inbox-row--${kind}`}
       data-activity-item-id={item.id}
       onClick={activate}
@@ -539,12 +628,16 @@ function ActivityRow({
         <span className="activity-inbox-row-detail">{item.detail}</span>
       </span>
       <span className="activity-inbox-row-meta">
-        <time
-          dateTime={new Date(timestampMs).toISOString()}
-          title={formatTimestamp(timestampMs)}
-        >
-          {relativeTime}
-        </time>
+        {timestampMs === undefined ? (
+          <time title={timestampDescription}>{timestampDescription}</time>
+        ) : (
+          <time
+            dateTime={new Date(timestampMs).toISOString()}
+            title={formatTimestamp(timestampMs)}
+          >
+            {relativeTime}
+          </time>
+        )}
         <span className="activity-inbox-row-action">{item.actionLabel}</span>
       </span>
     </button>

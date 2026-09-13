@@ -1432,11 +1432,13 @@ export function App(): ReactElement {
   const [primaryView, setPrimaryView] = useState<PrimaryView>(() =>
     allWorkView(),
   );
-  // Work status filters are renderer-lifetime presentation state. Keep each
-  // scope independent without adding filter state to session/origin contracts.
+  // Work filters and search are renderer-lifetime presentation state. Keep
+  // each scope independent without adding UI state to session/origin contracts.
   const [activityFiltersByScope, setActivityFiltersByScope] = useState<
     Record<string, ActivityInboxFilter>
   >({});
+  const [activitySearchQueriesByScope, setActivitySearchQueriesByScope] =
+    useState<Record<string, string>>({});
   const [workflowDefinitions, setWorkflowDefinitions] = useState<
     WorkflowDefinition[]
   >([]);
@@ -1652,6 +1654,8 @@ export function App(): ReactElement {
       : `workspace:${activityScope.workspaceId}`;
   const selectedActivityFilter =
     activityFiltersByScope[activityFilterScopeKey] ?? "all";
+  const activitySearchQuery =
+    activitySearchQueriesByScope[activityFilterScopeKey] ?? "";
 
   useEffect(() => {
     const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
@@ -2973,6 +2977,13 @@ export function App(): ReactElement {
     setActivityFiltersByScope((current) => ({
       ...current,
       [activityFilterScopeKey]: filter,
+    }));
+  }
+
+  function handleActivitySearchQueryChange(query: string): void {
+    setActivitySearchQueriesByScope((current) => ({
+      ...current,
+      [activityFilterScopeKey]: query,
     }));
   }
 
@@ -6453,6 +6464,8 @@ export function App(): ReactElement {
               workspaces={workScopeWorkspaces}
               selectedFilter={selectedActivityFilter}
               onSelectedFilterChange={handleActivityFilterChange}
+              searchQuery={activitySearchQuery}
+              onSearchQueryChange={handleActivitySearchQueryChange}
               onScopeChange={handleActivityScopeChange}
               onOpenActivityItem={handleOpenActivityItem}
               onNewSession={() => void handleNewSession()}

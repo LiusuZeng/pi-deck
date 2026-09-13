@@ -282,6 +282,200 @@ describe("ActivityInbox", () => {
     expect(view.textContent).not.toContain("Idle");
   });
 
+  it("composes normalized title and workspace search with scope and status filters", () => {
+    const { view } = renderInbox(modelWithEveryKind());
+
+    act(() => {
+      root?.render(
+        <ActivityInbox
+          model={modelWithEveryKind()}
+          onOpenActivityItem={vi.fn()}
+          onScopeChange={vi.fn()}
+          onSelectedFilterChange={vi.fn()}
+          searchQuery={"  project\tBOREALIS "}
+          selectedFilter="failed"
+          scope={{ type: "all" }}
+          workspaces={workspaces}
+        />,
+      );
+    });
+
+    const search = view.querySelector<HTMLInputElement>('input[type="search"]');
+    expect(
+      view.querySelector('label[for="activity-inbox-search"]')?.textContent,
+    ).toBe("Search Work");
+    expect(search?.value).toBe("  project\tBOREALIS ");
+    expect(rowTitles(view)).toEqual(["failed session failure"]);
+    expect(view.querySelector('option[value="all"]')?.textContent).toBe(
+      "All Work (5)",
+    );
+    expect(
+      Array.from(view.querySelectorAll(".activity-inbox-filter")).find(
+        (button) => button.textContent?.includes("All"),
+      )?.textContent,
+    ).toContain("1");
+
+    act(() => {
+      root?.render(
+        <ActivityInbox
+          model={modelWithEveryKind()}
+          onOpenActivityItem={vi.fn()}
+          onScopeChange={vi.fn()}
+          onSelectedFilterChange={vi.fn()}
+          searchQuery="project borealis"
+          selectedFilter="failed"
+          scope={{ type: "workspace", workspaceId: "workspace-atlas" }}
+          workspaces={workspaces}
+        />,
+      );
+    });
+    expect(view.querySelector(".activity-inbox-empty")?.textContent).toContain(
+      "No failed matches “project borealis” in Project Atlas Work.",
+    );
+  });
+
+  it("applies an active query before every status filter", () => {
+    const model = modelWithEveryKind();
+    const filters: ActivityInboxFilter[] = [
+      "needsAttention",
+      "failed",
+      "queued",
+      "inProgress",
+      "completed",
+    ];
+    const expectedTitleByFilter: Record<ActivityInboxFilter, string> = {
+      all: "",
+      needsAttention: "needsAttention session attention",
+      failed: "failed session failure",
+      queued: "queued session queued",
+      inProgress: "inProgress session progress",
+      completed: "completed session complete",
+    };
+    const { view } = renderInbox(model);
+
+    for (const selectedFilter of filters) {
+      act(() => {
+        root?.render(
+          <ActivityInbox
+            model={model}
+            onOpenActivityItem={vi.fn()}
+            onScopeChange={vi.fn()}
+            onSelectedFilterChange={vi.fn()}
+            searchQuery="session"
+            selectedFilter={selectedFilter}
+            scope={{ type: "all" }}
+            workspaces={workspaces}
+          />,
+        );
+      });
+      expect(rowTitles(view)).toEqual([expectedTitleByFilter[selectedFilter]]);
+    }
+  });
+
+  it("does not search row error detail and offers an explicit clear action", () => {
+    const clear = vi.fn();
+    const model = buildActivityInbox([
+      sourceSession("failed", {
+        baseState: "error",
+        title: "Known task",
+        lastError: "private diagnostic phrase",
+      }),
+    ]);
+    const { view } = renderInbox(model);
+
+    act(() => {
+      root?.render(
+        <ActivityInbox
+          model={model}
+          onOpenActivityItem={vi.fn()}
+          onScopeChange={vi.fn()}
+          onSearchQueryChange={clear}
+          onSelectedFilterChange={vi.fn()}
+          searchQuery="diagnostic phrase"
+          selectedFilter="all"
+          scope={{ type: "all" }}
+          workspaces={workspaces}
+        />,
+      );
+    });
+
+    expect(rowTitles(view)).toEqual([]);
+    expect(view.querySelector(".activity-inbox-empty")?.textContent).toContain(
+      "No Work matches “diagnostic phrase”",
+    );
+    const clearButton = Array.from(view.querySelectorAll("button")).find(
+      (button) => button.textContent === "Clear search",
+    );
+    act(() => clearButton?.click());
+    expect(clear).toHaveBeenCalledWith("");
+  });
+
+  it("announces query counts, clear results, and composed status filters", () => {
+    const onSearchQueryChange = vi.fn();
+    const model = modelWithEveryKind();
+    const { view } = renderInbox(model);
+    const renderWith = (
+      searchQuery: string,
+      selectedFilter: ActivityInboxFilter,
+    ) => {
+      act(() => {
+        root?.render(
+          <ActivityInbox
+            model={model}
+            onOpenActivityItem={vi.fn()}
+            onScopeChange={vi.fn()}
+            onSearchQueryChange={onSearchQueryChange}
+            onSelectedFilterChange={vi.fn()}
+            searchQuery={searchQuery}
+            selectedFilter={selectedFilter}
+            scope={{ type: "all" }}
+            workspaces={workspaces}
+          />,
+        );
+      });
+    };
+
+    renderWith("project borealis", "all");
+    expect(
+      view.querySelector(".activity-inbox-result-summary")?.textContent,
+    ).toBe("1 result for “project borealis” in All Work.");
+    expect(view.querySelectorAll('[role="status"]')).toHaveLength(1);
+    expect(
+      view
+        .querySelector(".activity-inbox-result-summary")
+        ?.getAttribute("aria-live"),
+    ).toBe("polite");
+
+    const clearButton = Array.from(view.querySelectorAll("button")).find(
+      (button) => button.textContent === "Clear search",
+    );
+    act(() => clearButton?.focus());
+    expect(clearButton).toBe(document.activeElement);
+    act(() => clearButton?.click());
+    expect(onSearchQueryChange).toHaveBeenCalledWith("");
+    renderWith("", "all");
+    expect(view.querySelector<HTMLInputElement>('input[type="search"]')).toBe(
+      document.activeElement,
+    );
+    expect(
+      view.querySelector(".activity-inbox-result-summary")?.textContent,
+    ).toBe("5 results in All Work.");
+
+    renderWith("project borealis", "failed");
+    expect(
+      view.querySelector(".activity-inbox-result-summary")?.textContent,
+    ).toBe("1 failed result for “project borealis” in All Work.");
+
+    renderWith("project borealis", "needsAttention");
+    expect(
+      view.querySelector(".activity-inbox-result-summary")?.textContent,
+    ).toBe("0 needs attention results for “project borealis” in All Work.");
+    expect(view.querySelectorAll('[role="status"]')).toHaveLength(1);
+    expect(view.querySelector(".activity-inbox-empty")?.textContent).toContain(
+      "No needs attention matches “project borealis” in All Work.",
+    );
+  });
+
   it("marks only in-progress session row icons as active", () => {
     const { view } = renderInbox(modelWithEveryKind());
 
@@ -605,7 +799,7 @@ describe("ActivityInbox", () => {
     );
 
     expect(view.querySelector("h1")?.textContent).toBe("Project Cygnus Work");
-    expect(view.querySelector('[role="status"]')?.textContent).toContain(
+    expect(view.querySelector(".activity-inbox-empty")?.textContent).toContain(
       "No work in Project Cygnus Work.",
     );
     expect(view.querySelector('option[value="all"]')?.textContent).toBe(
@@ -630,7 +824,7 @@ describe("ActivityInbox", () => {
     );
 
     expect(failedFilter?.getAttribute("aria-pressed")).toBe("true");
-    expect(view.querySelector('[role="status"]')?.textContent).toContain(
+    expect(view.querySelector(".activity-inbox-empty")?.textContent).toContain(
       "No failed work in Project Atlas Work.",
     );
     act(() => failedFilter?.click());
@@ -763,6 +957,74 @@ describe("ActivityInbox", () => {
     expect(time?.dateTime).not.toBe(new Date(updatedAtMs).toISOString());
     nowSpy.mockRestore();
   });
+
+  it.each([
+    ["NaN", Number.NaN],
+    ["Infinity", Number.POSITIVE_INFINITY],
+    ["string", "not a timestamp"],
+    ["undefined", undefined],
+    ["out-of-range number", 8.64e15 + 1],
+  ])(
+    "renders a safe timestamp fallback for malformed %s values",
+    (_fixture, updatedAtMs) => {
+      const model = modelWithEveryKind();
+      const item = model.items.find(
+        (candidate) => candidate.status === "inProgress",
+      );
+      item!.updatedAtMs = updatedAtMs as number;
+
+      const { view } = renderInbox(
+        model,
+        { type: "all" },
+        vi.fn(),
+        vi.fn(),
+        workspaces,
+        vi.fn(),
+        "inProgress",
+      );
+      const row = rowForTitle(view, "inProgress session progress");
+      const time = row?.querySelector("time");
+
+      expect(time?.textContent).toBe("Updated time unavailable");
+      expect(time?.getAttribute("datetime")).toBeNull();
+      expect(row?.getAttribute("aria-label")).toContain(
+        "Updated time unavailable",
+      );
+    },
+  );
+
+  it.each([
+    ["NaN", Number.NaN],
+    ["out-of-range number", 8.64e15 + 1],
+  ])(
+    "falls back to a valid update time when a Completed timestamp is malformed: %s",
+    (_fixture, completedAtMs) => {
+      const updatedAtMs = 1_700_000_000_000;
+      const model = modelWithEveryKind();
+      const item = model.items.find(
+        (candidate) => candidate.status === "completed",
+      );
+      item!.completedAtMs = completedAtMs;
+      item!.updatedAtMs = updatedAtMs;
+
+      const { view } = renderInbox(
+        model,
+        { type: "all" },
+        vi.fn(),
+        vi.fn(),
+        workspaces,
+        vi.fn(),
+        "completed",
+      );
+      const row = rowForTitle(view, "completed session complete");
+      const time = row?.querySelector("time");
+
+      expect(time?.dateTime).toBe(new Date(updatedAtMs).toISOString());
+      expect(row?.getAttribute("aria-label")).toMatch(
+        /Detail for completed\. Updated .+ ago\./,
+      );
+    },
+  );
 
   it("activates a full row once by click, Enter, or Space with its canonical item", () => {
     const onOpenActivityItem = vi.fn();
