@@ -2460,11 +2460,6 @@ h3 {
   background: var(--color-text-strong);
 }
 
-.activity-inbox-header-action:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-}
-
 .activity-inbox-eyebrow {
   margin: 0 0 4px;
   color: var(--color-text-muted);

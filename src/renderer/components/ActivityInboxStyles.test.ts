@@ -18,6 +18,12 @@ it("keeps the workspace New session action responsive and theme-token based", ()
     "color: var(--action-solid-fg);\n  background: var(--action-solid-bg);",
   );
   expect(styles).toContain(
+    "button:focus-visible,\ninput:focus-visible,\ntextarea:focus-visible,\nselect:focus-visible,\nsummary:focus-visible {\n  outline: 2px solid var(--color-focus);\n  outline-offset: 2px;",
+  );
+  expect(styles).not.toContain(
+    ".activity-inbox-header-action:focus-visible {\n  outline: none;",
+  );
+  expect(styles).toContain(
     ".activity-inbox-header {\n    flex-direction: column;\n    gap: 14px;\n  }",
   );
 });
