@@ -57,7 +57,7 @@ export async function rehydrateCanonicalWorkflowRuns(
     // Fan-out queues are normally released by a child terminal transition.
     // After a capacity queue survives restart there may be no active child to
     // produce that transition, so deterministically refill each running
-    // fan-out's available slots (creation time, then occurrence ID).
+    // fan-out's available slots in durable occurrence order.
     const resumableFanoutQueued = new Set<string>();
     for (const owner of persisted.occurrences) {
       const definitionNode = persisted.definition.nodes.find(
@@ -83,11 +83,6 @@ export async function rehydrateCanonicalWorkflowRuns(
       if (available <= 0) continue;
       children
         .filter((item) => item.status === "queued")
-        .sort(
-          (left, right) =>
-            left.createdAtMs - right.createdAtMs ||
-            left.id.localeCompare(right.id),
-        )
         .slice(0, available)
         .forEach((item) => resumableFanoutQueued.add(item.id));
     }

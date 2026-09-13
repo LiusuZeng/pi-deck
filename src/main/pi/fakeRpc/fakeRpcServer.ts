@@ -37,6 +37,8 @@ interface FakeOptions {
   promptScenario: PromptScenario;
   /** Test-only selector for deterministic per-prompt provider failures. */
   promptErrorPrefix?: string;
+  /** Fails the matching prompt only once across fake Pi processes. */
+  promptErrorOnceFile?: string;
   dropCompletionEvents: boolean;
   extensionUiMethod: "select" | "confirm" | "input" | "editor";
   extensionUiAutoCompleteTimeoutMs: number;
@@ -116,6 +118,10 @@ function parseOptions(argv: string[]): FakeOptions {
     } else if (arg === "--prompt-error-prefix") {
       const prefix = argv[index + 1];
       if (prefix) options.promptErrorPrefix = prefix;
+      index += 1;
+    } else if (arg === "--prompt-error-once-file") {
+      const file = argv[index + 1];
+      if (file) options.promptErrorOnceFile = file;
       index += 1;
     } else if (arg === "--drop-completion-events") {
       options.dropCompletionEvents = true;
@@ -819,13 +825,11 @@ class FakeRpcServer {
       this.exerciseDelegationBridge(text);
     }
 
-    if (
-      this.options.promptScenario === "error" ||
-      (this.options.promptErrorPrefix !== undefined &&
-        text.startsWith(this.options.promptErrorPrefix))
-    ) {
+    if (this.shouldFailPrompt(text)) {
       const errorMessage = "Usage limit reached for fake provider.";
+      const timestamp = Date.now();
       const failedAssistant = {
+        id: assistantId,
         role: "assistant",
         content: [],
         api: "openai-completions",
@@ -848,8 +852,14 @@ class FakeRpcServer {
         },
         stopReason: "error",
         errorMessage,
-        timestamp: Date.now(),
+        createdAt: timestamp,
+        timestamp,
       };
+      // A terminal provider failure is a real assistant turn. Keep the fake
+      // RPC's live and durable session views aligned with its terminal event.
+      const persistedFailedAssistant = failedAssistant as unknown as PiMessage;
+      this.messages.push(persistedFailedAssistant);
+      this.appendPersistedMessage(persistedFailedAssistant);
       this.agentActive = false;
       // Mirror Pi 0.81's assistant-stream failure and terminal event shapes,
       // rather than the legacy fixture-only status/error fields.
@@ -887,6 +897,24 @@ class FakeRpcServer {
       return;
     }
     this.completePrompt(assistantId, text, promptScenarioDelayMs);
+  }
+
+  private shouldFailPrompt(text: string): boolean {
+    if (this.options.promptScenario === "error") return true;
+    if (
+      this.options.promptErrorPrefix === undefined ||
+      !text.startsWith(this.options.promptErrorPrefix)
+    )
+      return false;
+    const onceFile = this.options.promptErrorOnceFile;
+    if (!onceFile) return true;
+    try {
+      fs.writeFileSync(onceFile, "failed\\n", { flag: "wx" });
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw error;
+    }
   }
 
   private decodeTaskSessionPrompt(text: string): string | undefined {

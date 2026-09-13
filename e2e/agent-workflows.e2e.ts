@@ -725,10 +725,11 @@ test("failed fake worker exposes retry and preserves its graph identity across a
   }
 });
 
-test("retrying a failed managed fan-out child keeps orchestrator context in the relaunched prompt", async () => {
+test("a successful managed fan-out retry completes its orchestrator and run", async () => {
   const root = fs.mkdtempSync(
-    path.join(os.tmpdir(), "pi-deck-e2e-managed-retry-context-"),
+    path.join(os.tmpdir(), "pi-deck-e2e-managed-retry-completion-"),
   );
+  const promptErrorOnceFile = path.join(root, "managed-child-failed-once");
   const ids = {
     workflow: "50000000-0000-4000-8000-000000000001",
     fanout: "50000000-0000-4000-8000-000000000002",
@@ -741,6 +742,8 @@ test("retrying a failed managed fan-out child keeps orchestrator context in the 
       graphEnvironment(root, undefined, [
         "--prompt-error-prefix",
         "Managed child should fail",
+        "--prompt-error-once-file",
+        promptErrorOnceFile,
       ]),
     ));
     const page = await app.firstWindow();
@@ -830,7 +833,31 @@ test("retrying a failed managed fan-out child keeps orchestrator context in the 
           ),
         { timeout: 20_000 },
       )
-      .toBe("failed");
+      .toBe("completed");
+
+    const graph = page.locator('[aria-label="Live workflow execution graph"]');
+    const managedCard = graph.locator(
+      `article.agent-workflow-graph-node:has(button[data-workflow-node-id="${ids.managed}"])`,
+    );
+    await expect(managedCard).toHaveClass(/is-completed/);
+    const counts = managedCard.locator(".agent-workflow-graph-counts");
+    await expect(counts).toContainText("1 completed");
+    await expect(counts).toContainText("1 skipped");
+    await expect(counts).toContainText("1 retry");
+    await expect(
+      page
+        .getByRole("region", { name: "Workflow run" })
+        .locator('p[aria-live="polite"]'),
+    ).toHaveText("Status: Completed · Outcome: done");
+    const history = page
+      .locator(`#workflow-node-${ids.managed}`)
+      .getByRole("list", { name: "Managed child attempt history" });
+    await expect(
+      history.locator("li").nth(0).locator(".workflow-step-status"),
+    ).toHaveText("Skipped");
+    await expect(
+      history.locator("li").nth(1).locator(".workflow-step-status"),
+    ).toHaveText("Completed");
 
     const retried = await page.evaluate(
       async ({ runId, ids }) => {
@@ -843,12 +870,24 @@ test("retrying a failed managed fan-out child keeps orchestrator context in the 
           .map((item) => ({
             attempt: item.attempt,
             status: item.status,
+            error: item.error,
             context: item.context,
             parentOrchestratorRunId: item.parentOrchestratorRunId,
             sessionFile: item.sessionFile,
           }))
           .sort((left, right) => left.attempt - right.attempt);
-        return { ownerId: owner?.id, attempts };
+        return {
+          run: {
+            status: run.status,
+            terminalOutcome: run.terminalOutcome,
+          },
+          owner: {
+            id: owner?.id,
+            status: owner?.status,
+            output: owner?.output,
+          },
+          attempts,
+        };
       },
       { runId, ids },
     );
@@ -856,16 +895,24 @@ test("retrying a failed managed fan-out child keeps orchestrator context in the 
       expect.objectContaining({
         attempt: 1,
         status: "skipped",
+        error: expect.any(String),
         context: [orchestrationInput],
-        parentOrchestratorRunId: retried.ownerId,
+        parentOrchestratorRunId: retried.owner.id,
       }),
       expect.objectContaining({
         attempt: 2,
-        status: "failed",
+        status: "completed",
         context: [orchestrationInput],
-        parentOrchestratorRunId: retried.ownerId,
+        parentOrchestratorRunId: retried.owner.id,
       }),
     ]);
+    expect(retried).toMatchObject({
+      run: { status: "completed", terminalOutcome: "done" },
+      owner: {
+        status: "completed",
+        output: [expect.stringContaining("Fake response to:")],
+      },
+    });
     const attemptTwo = retried.attempts[1];
     expect(sessionUserMessages(attemptTwo?.sessionFile).at(-1)).toContain(
       `Context:\n${orchestrationInput}`,

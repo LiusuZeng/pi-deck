@@ -10,6 +10,7 @@ import {
 import {
   completeWorkflowOccurrence,
   createWorkflowRoleRun,
+  failWorkflowOccurrence,
   retryWorkflowOccurrence,
   startWorkflowOccurrence,
   startWorkflowOrchestrator,
@@ -280,6 +281,510 @@ describe("workflow rehydration", () => {
       resumed[0]?.occurrences.filter((item) => item.status === "queued"),
     ).toHaveLength(1);
   });
+
+  it("rehydrates a skipped fan-out predecessor and successful retry without exceeding concurrency", async () => {
+    const fanout = "00000000-0000-4000-8000-000000000141";
+    const firstWorker = "00000000-0000-4000-8000-000000000142";
+    const secondWorker = "00000000-0000-4000-8000-000000000143";
+    const definition = {
+      format: "pi-deck.agent-workflow" as const,
+      schemaVersion: 2 as const,
+      id: "00000000-0000-4000-8000-000000000140",
+      revision: 1,
+      name: "Retry fan-out restart",
+      inputs: [],
+      entryNodeId: fanout,
+      nodes: [
+        {
+          id: fanout,
+          name: "Fan",
+          role: "orchestrator" as const,
+          config: {
+            mode: "fanout" as const,
+            agents: [firstWorker, secondWorker],
+            maxConcurrency: 1,
+            completion: "all" as const,
+          },
+        },
+        {
+          id: firstWorker,
+          name: "First",
+          role: "worker" as const,
+          managedBy: fanout,
+          config: { instructions: "first" },
+        },
+        {
+          id: secondWorker,
+          name: "Second",
+          role: "worker" as const,
+          managedBy: fanout,
+          config: { instructions: "second" },
+        },
+      ],
+      relationships: [
+        {
+          id: "00000000-0000-4000-8000-000000000144",
+          from: fanout,
+          to: { end: "done" },
+        },
+      ],
+    };
+    let persisted = createWorkflowRoleRun(definition, "workspace", {}, 1);
+    const owner = persisted.occurrences[0]!;
+    persisted = startWorkflowOrchestrator(persisted, owner.id, 2);
+    const first = persisted.occurrences.find(
+      (item) => item.nodeId === firstWorker,
+    )!;
+    const second = persisted.occurrences.find(
+      (item) => item.nodeId === secondWorker,
+    )!;
+    persisted = startWorkflowOccurrence(
+      persisted,
+      first.id,
+      "first",
+      undefined,
+      3,
+    );
+    persisted = failWorkflowOccurrence(persisted, first.id, "first failed", 4);
+    persisted = retryWorkflowOccurrence(persisted, first.id, 5);
+    const retry = persisted.occurrences.at(-1)!;
+
+    // A scheduler-capacity failure can leave every child queued. Persisted
+    // occurrence order, not random IDs assigned in the same millisecond, must
+    // decide which logical child gets the recovered slot.
+    const olderSiblingId = "00000000-0000-4000-8000-000000000149";
+    const retryId = "00000000-0000-4000-8000-000000000148";
+    const stalledQueue = {
+      ...persisted,
+      occurrences: persisted.occurrences.map((item) =>
+        item.id === second.id
+          ? {
+              ...item,
+              id: olderSiblingId,
+              status: "queued" as const,
+              createdAtMs: 2,
+            }
+          : item.id === retry.id
+            ? {
+                ...item,
+                id: retryId,
+                status: "queued" as const,
+                createdAtMs: 2,
+              }
+            : item,
+      ),
+    };
+    let fifoRecovered: typeof persisted | undefined;
+    await rehydrateCanonicalWorkflowRuns(
+      [JSON.parse(JSON.stringify(stalledQueue))],
+      {
+        resolveWorkspace: async () => undefined,
+        updateRun: async (run) => {
+          fifoRecovered = run;
+          return run;
+        },
+        schedule: async (run) => run,
+        emit: () => undefined,
+        recordError: () => undefined,
+      },
+      6,
+    );
+    expect(
+      fifoRecovered?.occurrences.find((item) => item.id === olderSiblingId),
+    ).toMatchObject({ status: "ready" });
+    expect(
+      fifoRecovered?.occurrences.find((item) => item.id === retryId),
+    ).toMatchObject({ status: "queued" });
+
+    let recovered: typeof persisted | undefined;
+    const scheduled: (typeof persisted)[] = [];
+    await rehydrateCanonicalWorkflowRuns(
+      [JSON.parse(JSON.stringify(persisted))],
+      {
+        resolveWorkspace: async () => undefined,
+        updateRun: async (run) => {
+          recovered = run;
+          return run;
+        },
+        schedule: async (run) => {
+          scheduled.push(run);
+          return run;
+        },
+        emit: () => undefined,
+        recordError: () => undefined,
+      },
+      6,
+    );
+
+    expect(scheduled).toHaveLength(1);
+    expect(recovered?.occurrences).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: first.id,
+          attempt: 1,
+          status: "skipped",
+          error: "first failed",
+          parentOrchestratorRunId: owner.id,
+        }),
+        expect.objectContaining({
+          id: retry.id,
+          attempt: 2,
+          status: "queued",
+          parentOrchestratorRunId: owner.id,
+        }),
+        expect.objectContaining({ id: second.id, status: "ready" }),
+      ]),
+    );
+    expect(
+      recovered?.occurrences.filter((item) => item.status === "ready"),
+    ).toHaveLength(1);
+
+    expect(() =>
+      startWorkflowOccurrence(
+        recovered!,
+        retry.id,
+        "retry-too-early",
+        undefined,
+        7,
+      ),
+    ).toThrow("Only ready Worker or Decider occurrences may own Pi sessions.");
+    let completed = startWorkflowOccurrence(
+      recovered!,
+      second.id,
+      "second",
+      undefined,
+      7,
+    );
+    completed = completeWorkflowOccurrence(completed, second.id, "B", 8);
+    expect(
+      completed.occurrences.find((item) => item.id === retry.id),
+    ).toMatchObject({
+      status: "ready",
+    });
+    completed = startWorkflowOccurrence(
+      completed,
+      retry.id,
+      "retry",
+      undefined,
+      9,
+    );
+    completed = completeWorkflowOccurrence(completed, retry.id, "A retry", 10);
+
+    expect(
+      completed.occurrences.find((item) => item.id === owner.id),
+    ).toMatchObject({
+      status: "completed",
+      output: ["B", "A retry"],
+    });
+    expect(completed).toMatchObject({
+      status: "completed",
+      terminalOutcome: "done",
+    });
+    expect(
+      completed.occurrences
+        .filter((item) => item.parentOrchestratorRunId === owner.id)
+        .map((item) => [item.attempt, item.status, item.output, item.error]),
+    ).toEqual([
+      [1, "skipped", undefined, "first failed"],
+      [1, "completed", "B", undefined],
+      [2, "completed", "A retry", undefined],
+    ]);
+  });
+
+  it("keeps a constrained fan-out any retry queued across restart", async () => {
+    const fanout = "00000000-0000-4000-8000-000000000151";
+    const firstWorker = "00000000-0000-4000-8000-000000000152";
+    const secondWorker = "00000000-0000-4000-8000-000000000153";
+    const definition = {
+      format: "pi-deck.agent-workflow" as const,
+      schemaVersion: 2 as const,
+      id: "00000000-0000-4000-8000-000000000150",
+      revision: 1,
+      name: "Constrained retry fan-out restart",
+      inputs: [],
+      entryNodeId: fanout,
+      nodes: [
+        {
+          id: fanout,
+          name: "Fan",
+          role: "orchestrator" as const,
+          config: {
+            mode: "fanout" as const,
+            agents: [firstWorker, secondWorker],
+            maxConcurrency: 1,
+            completion: "any" as const,
+          },
+        },
+        {
+          id: firstWorker,
+          name: "First",
+          role: "worker" as const,
+          managedBy: fanout,
+          config: { instructions: "first" },
+        },
+        {
+          id: secondWorker,
+          name: "Second",
+          role: "worker" as const,
+          managedBy: fanout,
+          config: { instructions: "second" },
+        },
+      ],
+      relationships: [],
+    };
+    let persisted = createWorkflowRoleRun(definition, "workspace", {}, 1);
+    const owner = persisted.occurrences[0]!;
+    persisted = startWorkflowOrchestrator(persisted, owner.id, 2);
+    const first = persisted.occurrences.find(
+      (item) => item.nodeId === firstWorker,
+    )!;
+    const second = persisted.occurrences.find(
+      (item) => item.nodeId === secondWorker,
+    )!;
+    persisted = startWorkflowOccurrence(
+      persisted,
+      first.id,
+      "first",
+      undefined,
+      3,
+    );
+    persisted = failWorkflowOccurrence(persisted, first.id, "first failed", 4);
+    persisted = startWorkflowOccurrence(
+      persisted,
+      second.id,
+      "second",
+      undefined,
+      5,
+    );
+    persisted = retryWorkflowOccurrence(persisted, first.id, 6);
+    const retry = persisted.occurrences.at(-1)!;
+    expect(retry.status).toBe("queued");
+
+    let recovered: typeof persisted | undefined;
+    const scheduled: (typeof persisted)[] = [];
+    await rehydrateCanonicalWorkflowRuns(
+      [JSON.parse(JSON.stringify(persisted))],
+      {
+        resolveWorkspace: async () => undefined,
+        updateRun: async (run) => {
+          recovered = run;
+          return run;
+        },
+        schedule: async (run) => {
+          scheduled.push(run);
+          return run;
+        },
+        emit: () => undefined,
+        recordError: () => undefined,
+      },
+      7,
+    );
+
+    // The running sibling lost its session and needs attention, but recovery
+    // must not promote the retry merely because that conversion frees a slot.
+    expect(recovered).toMatchObject({ status: "needsAttention" });
+    expect(recovered?.occurrences).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: first.id, status: "skipped" }),
+        expect.objectContaining({ id: second.id, status: "failed" }),
+        expect.objectContaining({ id: retry.id, status: "queued", attempt: 2 }),
+      ]),
+    );
+    expect(
+      recovered?.occurrences.filter(
+        (item) =>
+          item.parentOrchestratorRunId === owner.id &&
+          ["ready", "running"].includes(item.status),
+      ),
+    ).toHaveLength(0);
+    expect(scheduled).toHaveLength(0);
+  });
+
+  it.each(["all", "any"] as const)(
+    "retries a recovered bounded %s fan-out in FIFO order without exceeding capacity",
+    async (completion) => {
+      const fanout = "00000000-0000-4000-8000-000000000161";
+      const firstWorker = "00000000-0000-4000-8000-000000000162";
+      const secondWorker = "00000000-0000-4000-8000-000000000163";
+      const definition = {
+        format: "pi-deck.agent-workflow" as const,
+        schemaVersion: 2 as const,
+        id: "00000000-0000-4000-8000-000000000160",
+        revision: 1,
+        name: `Recovered ${completion} fan-out`,
+        inputs: [],
+        entryNodeId: fanout,
+        nodes: [
+          {
+            id: fanout,
+            name: "Fan",
+            role: "orchestrator" as const,
+            config: {
+              mode: "fanout" as const,
+              agents: [firstWorker, secondWorker],
+              maxConcurrency: 1,
+              completion,
+            },
+          },
+          ...[
+            [firstWorker, "First"],
+            [secondWorker, "Second"],
+          ].map(([id, name]) => ({
+            id,
+            name,
+            role: "worker" as const,
+            managedBy: fanout,
+            config: { instructions: name },
+          })),
+        ],
+        relationships: [
+          {
+            id: "00000000-0000-4000-8000-000000000164",
+            from: fanout,
+            to: { end: "done" },
+          },
+        ],
+      };
+      let persisted = createWorkflowRoleRun(definition, "workspace", {}, 1);
+      const owner = persisted.occurrences[0]!;
+      persisted = startWorkflowOrchestrator(persisted, owner.id, 2);
+      const first = persisted.occurrences.find(
+        (item) => item.nodeId === firstWorker,
+      )!;
+      const second = persisted.occurrences.find(
+        (item) => item.nodeId === secondWorker,
+      )!;
+      persisted = startWorkflowOccurrence(
+        persisted,
+        first.id,
+        "first",
+        undefined,
+        3,
+      );
+
+      let recovered: typeof persisted | undefined;
+      const scheduled: (typeof persisted)[] = [];
+      await rehydrateCanonicalWorkflowRuns(
+        [JSON.parse(JSON.stringify(persisted))],
+        {
+          resolveWorkspace: async () => undefined,
+          updateRun: async (run) => {
+            recovered = run;
+            return run;
+          },
+          schedule: async (run) => {
+            scheduled.push(run);
+            return run;
+          },
+          emit: () => undefined,
+          recordError: () => undefined,
+        },
+        4,
+      );
+
+      expect(recovered).toMatchObject({ status: "needsAttention" });
+      expect(recovered?.occurrences).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: owner.id, status: "running" }),
+          expect.objectContaining({ id: first.id, status: "failed" }),
+          expect.objectContaining({ id: second.id, status: "queued" }),
+        ]),
+      );
+      expect(scheduled).toHaveLength(0);
+
+      let run = retryWorkflowOccurrence(recovered!, first.id, 5);
+      const retry = run.occurrences.at(-1)!;
+      const activeChildren = () =>
+        run.occurrences.filter(
+          (item) =>
+            item.parentOrchestratorRunId === owner.id &&
+            ["ready", "running"].includes(item.status),
+        );
+      expect(
+        run.occurrences.find((item) => item.id === owner.id),
+      ).toMatchObject({ status: "running" });
+      expect(
+        run.occurrences.find((item) => item.id === second.id),
+      ).toMatchObject({ status: "ready" });
+      expect(retry).toMatchObject({ attempt: 2, status: "queued" });
+      expect(activeChildren()).toEqual([
+        expect.objectContaining({ id: second.id, status: "ready" }),
+      ]);
+
+      run = startWorkflowOccurrence(run, second.id, "second", undefined, 6);
+      expect(activeChildren()).toEqual([
+        expect.objectContaining({ id: second.id, status: "running" }),
+      ]);
+      run = completeWorkflowOccurrence(run, second.id, "B", 7);
+
+      if (completion === "all") {
+        expect(
+          run.occurrences.find((item) => item.id === retry.id),
+        ).toMatchObject({ status: "ready" });
+        expect(activeChildren()).toEqual([
+          expect.objectContaining({ id: retry.id, status: "ready" }),
+        ]);
+        run = startWorkflowOccurrence(run, retry.id, "retry", undefined, 8);
+        expect(activeChildren()).toEqual([
+          expect.objectContaining({ id: retry.id, status: "running" }),
+        ]);
+        run = completeWorkflowOccurrence(run, retry.id, "A retry", 9);
+        expect(
+          run.occurrences.find((item) => item.id === owner.id),
+        ).toMatchObject({ status: "completed", output: ["B", "A retry"] });
+        expect(
+          run.occurrences
+            .filter((item) => item.parentOrchestratorRunId === owner.id)
+            .map((item) => [
+              item.attempt,
+              item.status,
+              item.output,
+              item.error,
+            ]),
+        ).toEqual([
+          [
+            1,
+            "skipped",
+            undefined,
+            "Pi session was interrupted by restart; retry this occurrence.",
+          ],
+          [1, "completed", "B", undefined],
+          [2, "completed", "A retry", undefined],
+        ]);
+      } else {
+        expect(
+          run.occurrences.find((item) => item.id === retry.id),
+        ).toMatchObject({ status: "skipped" });
+        expect(activeChildren()).toHaveLength(0);
+        expect(
+          run.occurrences.find((item) => item.id === owner.id),
+        ).toMatchObject({ status: "completed", output: ["B"] });
+        expect(
+          run.occurrences
+            .filter((item) => item.parentOrchestratorRunId === owner.id)
+            .map((item) => [
+              item.attempt,
+              item.status,
+              item.output,
+              item.error,
+            ]),
+        ).toEqual([
+          [
+            1,
+            "skipped",
+            undefined,
+            "Pi session was interrupted by restart; retry this occurrence.",
+          ],
+          [1, "completed", "B", undefined],
+          [2, "skipped", undefined, undefined],
+        ]);
+      }
+      expect(run).toMatchObject({
+        status: "completed",
+        terminalOutcome: "done",
+      });
+    },
+  );
 
   it("marks genuinely lost canonical running ownership as attention without scheduling", async () => {
     const definition = {
