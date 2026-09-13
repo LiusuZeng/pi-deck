@@ -74,6 +74,27 @@ import {
   type FailureKind,
 } from "./openaiCodexAuth.js";
 import {
+  reconcileSessionWithRuntimeStatus as reconcileSessionWithRuntimeStatusInDomain,
+  shouldReconcileSession as shouldReconcileSessionInDomain,
+} from "./sessionRuntimeReconciliation.js";
+import {
+  clampThinkingLevel,
+  eventHasUsageMetadata,
+  extractTextContent,
+  getContextWindowTokens,
+  getMessageUsageFromEvent,
+  mergeSessionUsageFromRuntimeStatus,
+  mergeSessionUsageFromSnapshot,
+  modelLabelForChatModel,
+  modelLabelFromState,
+  parseModelLabel,
+  summarizeUsageByMessage,
+  thinkingLevelsForModel,
+  usageFromMessages,
+  type MessageUsage,
+  type UsageStats,
+} from "./sessionUsageProjection.js";
+import {
   canNavigatePromptHistoryDown,
   canNavigatePromptHistoryUp,
   initialPromptHistoryState,
@@ -127,6 +148,13 @@ import {
   transferAttachmentOwnership,
 } from "./attachmentLifecycle.js";
 import { RuntimeEventBuffer } from "./runtimeEventBuffer.js";
+import {
+  getAssistantMessageEventType,
+  getMessageTextUpdate,
+  getMessageUpdateId,
+  getMessageUpdateRole,
+  getThinkingUpdateContent,
+} from "./runtimeMessageProjection.js";
 import {
   buildActivityInbox,
   countActivityInboxItems,
@@ -694,25 +722,6 @@ function looksSerialized(value: string): boolean {
   return trimmed.startsWith("{") || trimmed.startsWith("[");
 }
 
-interface UsageStats {
-  inputTokens?: number;
-  outputTokens?: number;
-  cacheReadTokens?: number;
-  cacheWriteTokens?: number;
-  totalTokens?: number;
-  contextUsedTokens?: number;
-  contextWindowTokens?: number;
-  totalCostUsd?: number;
-}
-
-interface MessageUsage {
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-  totalCostUsd?: number;
-}
-
 interface SessionViewModel {
   id: string;
   /** Durable grouping identity. This is never inferred from a filesystem path. */
@@ -1110,16 +1119,6 @@ type RuntimeCapabilitiesById = Record<string, RuntimeCapabilities>;
 const appStartedAt = Date.now();
 const WORKING_SESSION_RECONCILE_AFTER_MS = 3_000;
 const NO_VISIBLE_OUTPUT_NOTICE_MS = 3_000;
-const PI_THINKING_LEVELS = [
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-] as const;
-
 const modelOptions: ModelOption[] = [
   {
     provider: "anthropic",
@@ -7339,10 +7338,6 @@ function applyPiDefaultsToDraftSessions(
   );
 }
 
-function modelLabelForChatModel(model: ChatModelSummary): string {
-  return model.provider ? `${model.provider} / ${model.id}` : model.id;
-}
-
 function workflowModelChoicesFor(
   models: readonly ChatModelSummary[],
   fallbackThinkingLevels: readonly string[] = [],
@@ -7842,98 +7837,6 @@ function isAssistantFailureMessage(message: ChatMessage): boolean {
     typeof record.errorMessage === "string" ||
     record.error !== undefined
   );
-}
-
-function mergeSessionUsageFromSnapshot(
-  session: SessionViewModel,
-  snapshotSession: SessionViewModel,
-): SessionViewModel {
-  return {
-    ...session,
-    ...(snapshotSession.usageStats !== undefined
-      ? { usageStats: snapshotSession.usageStats }
-      : {}),
-    ...(snapshotSession.usageByMessageId !== undefined
-      ? { usageByMessageId: snapshotSession.usageByMessageId }
-      : {}),
-    ...(snapshotSession.modelLabel !== undefined
-      ? { modelLabel: snapshotSession.modelLabel }
-      : {}),
-    ...(snapshotSession.thinkingLevel !== undefined
-      ? { thinkingLevel: snapshotSession.thinkingLevel }
-      : {}),
-  };
-}
-
-function mergeSessionUsageFromRuntimeStatus(
-  session: SessionViewModel,
-  status: ChatRuntimeStatus,
-): SessionViewModel {
-  if (status.runtimeId !== session.id || status.usage === undefined) {
-    return session;
-  }
-  return {
-    ...session,
-    usageStats: {
-      inputTokens: status.usage.inputTokens,
-      outputTokens: status.usage.outputTokens,
-      cacheReadTokens: status.usage.cacheReadTokens,
-      cacheWriteTokens: status.usage.cacheWriteTokens,
-      totalTokens: status.usage.totalTokens,
-      ...(status.usage.contextUsedTokens !== undefined
-        ? { contextUsedTokens: status.usage.contextUsedTokens }
-        : {}),
-      ...(status.usage.contextWindowTokens !== undefined
-        ? { contextWindowTokens: status.usage.contextWindowTokens }
-        : {}),
-      ...(status.usage.totalCostUsd !== undefined
-        ? { totalCostUsd: status.usage.totalCostUsd }
-        : {}),
-    },
-    ...(modelLabelFromState(status.state).length > 0
-      ? { modelLabel: modelLabelFromState(status.state) }
-      : {}),
-    ...(status.state.thinkingLevel !== undefined
-      ? { thinkingLevel: status.state.thinkingLevel }
-      : {}),
-  };
-}
-
-function modelLabelFromState(state: ChatSnapshot["state"]): string {
-  const provider = typeof state.provider === "string" ? state.provider : "";
-  const model = state.model;
-  if (typeof model === "string") {
-    return [provider, model].filter((part) => part.length > 0).join(" / ");
-  }
-  if (model && typeof model === "object" && !Array.isArray(model)) {
-    const modelId =
-      typeof model.id === "string"
-        ? model.id
-        : typeof model.name === "string"
-          ? model.name
-          : "";
-    const modelProvider =
-      typeof model.provider === "string" ? model.provider : provider;
-    return [modelProvider, modelId]
-      .filter((part) => part.length > 0)
-      .join(" / ");
-  }
-  return provider;
-}
-
-function parseModelLabel(
-  label: string | undefined,
-): { provider: string; modelId: string } | undefined {
-  if (!label) {
-    return undefined;
-  }
-  const separator = label.indexOf("/");
-  if (separator === -1) {
-    return undefined;
-  }
-  const provider = label.slice(0, separator).trim();
-  const modelId = label.slice(separator + 1).trim();
-  return provider && modelId ? { provider, modelId } : undefined;
 }
 
 function timelineToolStatus(streaming: boolean): "running" | "success" {
@@ -9363,214 +9266,6 @@ function upsertThinkingMessage(
   ];
 }
 
-function usageFromMessages(
-  messages: ChatMessage[],
-  contextWindowTokens: number | undefined,
-): {
-  usageStats?: UsageStats;
-  usageByMessageId?: Record<string, MessageUsage>;
-} {
-  const usageByMessageId: Record<string, MessageUsage> = {};
-  messages.forEach((message, index) => {
-    const usage = extractMessageUsage(message);
-    if (usage !== undefined) {
-      usageByMessageId[message.id ?? `message-${index}`] = usage;
-    }
-  });
-
-  if (Object.keys(usageByMessageId).length === 0) {
-    if (contextWindowTokens === undefined) {
-      return {};
-    }
-    return {
-      usageStats: { contextWindowTokens },
-    };
-  }
-
-  return {
-    usageByMessageId,
-    usageStats: summarizeUsageByMessage(usageByMessageId, contextWindowTokens),
-  };
-}
-
-function summarizeUsageByMessage(
-  usageByMessageId: Record<string, MessageUsage>,
-  contextWindowTokens: number | undefined,
-): UsageStats {
-  const values = Object.values(usageByMessageId);
-  const inputTokens = sumUsage(values, "inputTokens");
-  const outputTokens = sumUsage(values, "outputTokens");
-  const cacheReadTokens = sumUsage(values, "cacheReadTokens");
-  const cacheWriteTokens = sumUsage(values, "cacheWriteTokens");
-  const contextUsedTokens = values.reduce((peak, usage) => {
-    const contextTokens =
-      usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
-    return Math.max(peak, contextTokens);
-  }, 0);
-  const costValues = values
-    .map((usage) => usage.totalCostUsd)
-    .filter((value): value is number => value !== undefined);
-  const totalCostUsd =
-    costValues.length > 0
-      ? costValues.reduce((total, value) => total + value, 0)
-      : undefined;
-
-  return {
-    inputTokens,
-    outputTokens,
-    cacheReadTokens,
-    cacheWriteTokens,
-    totalTokens:
-      inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
-    ...(contextUsedTokens > 0 ? { contextUsedTokens } : {}),
-    ...(contextWindowTokens !== undefined ? { contextWindowTokens } : {}),
-    ...(totalCostUsd !== undefined ? { totalCostUsd } : {}),
-  };
-}
-
-function sumUsage(
-  values: MessageUsage[],
-  key: keyof Pick<
-    MessageUsage,
-    "inputTokens" | "outputTokens" | "cacheReadTokens" | "cacheWriteTokens"
-  >,
-): number {
-  return values.reduce((total, usage) => total + usage[key], 0);
-}
-
-function getMessageUsageFromEvent(
-  event: ChatRuntimeEvent,
-): MessageUsage | undefined {
-  const direct = extractMessageUsage(getRecord(event, "message") ?? event);
-  if (direct !== undefined) {
-    return direct;
-  }
-  const messages = getArray(event, "messages");
-  if (messages === undefined) {
-    return undefined;
-  }
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const usage = extractMessageUsage(messages[index]);
-    if (usage !== undefined) {
-      return usage;
-    }
-  }
-  return undefined;
-}
-
-function eventHasUsageMetadata(event: ChatRuntimeEvent): boolean {
-  return getMessageUsageFromEvent(event) !== undefined;
-}
-
-function extractMessageUsage(value: unknown): MessageUsage | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return undefined;
-  }
-  const record = value as Record<string, unknown>;
-  const usage = record.usage;
-  const usageRecord =
-    usage && typeof usage === "object" && !Array.isArray(usage)
-      ? (usage as Record<string, unknown>)
-      : record;
-  const inputTokens = readNumber(usageRecord, [
-    "input",
-    "inputTokens",
-    "promptTokens",
-    "prompt_tokens",
-  ]);
-  const outputTokens = readNumber(usageRecord, [
-    "output",
-    "outputTokens",
-    "completionTokens",
-    "completion_tokens",
-  ]);
-  const cacheReadTokens = readNumber(usageRecord, [
-    "cacheRead",
-    "cacheReadTokens",
-    "cache_read",
-    "cache_read_tokens",
-  ]);
-  const cacheWriteTokens = readNumber(usageRecord, [
-    "cacheWrite",
-    "cacheWriteTokens",
-    "cache_write",
-    "cache_write_tokens",
-  ]);
-  const totalCostUsd = readCostUsd(usageRecord);
-
-  if (
-    inputTokens === undefined &&
-    outputTokens === undefined &&
-    cacheReadTokens === undefined &&
-    cacheWriteTokens === undefined &&
-    totalCostUsd === undefined
-  ) {
-    return undefined;
-  }
-
-  return {
-    inputTokens: inputTokens ?? 0,
-    outputTokens: outputTokens ?? 0,
-    cacheReadTokens: cacheReadTokens ?? 0,
-    cacheWriteTokens: cacheWriteTokens ?? 0,
-    ...(totalCostUsd !== undefined ? { totalCostUsd } : {}),
-  };
-}
-
-function getContextWindowTokens(
-  state: ChatSnapshot["state"],
-): number | undefined {
-  const direct = readNumber(state as Record<string, unknown>, [
-    "contextWindow",
-    "contextWindowTokens",
-    "context_window",
-  ]);
-  if (direct !== undefined) {
-    return direct;
-  }
-  const model = state.model;
-  if (!model || typeof model !== "object" || Array.isArray(model)) {
-    return undefined;
-  }
-  return readNumber(model as Record<string, unknown>, [
-    "contextWindow",
-    "contextWindowTokens",
-    "context_window",
-  ]);
-}
-
-function readCostUsd(record: Record<string, unknown>): number | undefined {
-  const direct = readNumber(record, [
-    "costUsd",
-    "totalCostUsd",
-    "total_cost_usd",
-  ]);
-  if (direct !== undefined) {
-    return direct;
-  }
-  const cost = record.cost;
-  if (typeof cost === "number" && Number.isFinite(cost)) {
-    return cost;
-  }
-  if (cost && typeof cost === "object" && !Array.isArray(cost)) {
-    return readNumber(cost as Record<string, unknown>, ["total", "usd"]);
-  }
-  return undefined;
-}
-
-function readNumber(
-  record: Record<string, unknown>,
-  keys: string[],
-): number | undefined {
-  for (const key of keys) {
-    const value = record[key];
-    if (typeof value === "number" && Number.isFinite(value)) {
-      return value;
-    }
-  }
-  return undefined;
-}
-
 function selectedSessionSupportsImages(
   session: SessionViewModel,
   realModels: ChatModelSummary[],
@@ -9601,54 +9296,6 @@ function realModelSupportsImages(model: ChatModelSummary | undefined): boolean {
     return true;
   }
   return model.input?.some((value) => /image/i.test(value)) ?? false;
-}
-
-function thinkingLevelsForModel(
-  model: ChatModelSummary | undefined,
-  fallback: string[],
-): string[] {
-  if (model === undefined || model.reasoning === undefined) {
-    return fallback.length > 0 ? fallback : ["off"];
-  }
-  if (!model.reasoning) {
-    return ["off"];
-  }
-  return PI_THINKING_LEVELS.filter((level) => {
-    const mapped = model.thinkingLevelMap?.[level];
-    if (mapped === null) {
-      return false;
-    }
-    return level !== "xhigh" && level !== "max" ? true : mapped !== undefined;
-  });
-}
-
-function clampThinkingLevel(level: string, availableLevels: string[]): string {
-  if (availableLevels.includes(level)) {
-    return level;
-  }
-  const requestedIndex = PI_THINKING_LEVELS.indexOf(
-    level as (typeof PI_THINKING_LEVELS)[number],
-  );
-  if (requestedIndex === -1) {
-    return availableLevels[0] ?? "off";
-  }
-  for (
-    let index = requestedIndex;
-    index < PI_THINKING_LEVELS.length;
-    index += 1
-  ) {
-    const candidate = PI_THINKING_LEVELS[index];
-    if (candidate !== undefined && availableLevels.includes(candidate)) {
-      return candidate;
-    }
-  }
-  for (let index = requestedIndex - 1; index >= 0; index -= 1) {
-    const candidate = PI_THINKING_LEVELS[index];
-    if (candidate !== undefined && availableLevels.includes(candidate)) {
-      return candidate;
-    }
-  }
-  return availableLevels[0] ?? "off";
 }
 
 function backendLabel(session: SessionViewModel): string {
@@ -13684,73 +13331,19 @@ function canSubmitTaskPrompt(
 }
 
 function shouldReconcileSession(session: SessionViewModel): boolean {
-  // Runtime events remain authoritative, but a bounded status fallback must
-  // include active and waiting turns so dropping lifecycle events cannot leave
-  // the UI permanently out of sync with Pi.
-  return session.runtimeBacked && isSessionBusy(session);
+  return shouldReconcileSessionInDomain(session);
 }
 
 function reconcileSessionWithRuntimeStatus(
   session: SessionViewModel,
   status: ChatRuntimeStatus,
 ): SessionViewModel {
-  // A response for another runtime must never mutate the selected/session row.
-  if (status.runtimeId !== session.id) {
-    return session;
-  }
-  // Extension UI input remains pending until its response is delivered or the
-  // request times out, regardless of the compact runtime's active flag.
-  if (session.status === "waiting") {
-    return session;
-  }
-
-  if (status.state.isAgentActive) {
-    // Abort remains pending until Pi reports a terminal completion event or an
-    // authoritative inactive status; a still-active status is not success.
-    if (session.status === "aborting" || session.status === "working") {
-      return session;
-    }
-    return {
-      ...session,
-      status: "working",
-      baseState: "working",
-      overlays: { ...session.overlays, streaming: true },
-      subtitle: `Working · ${backendLabel(session)} confirmed by Pi`,
-      lastRuntimeEventLabel: "Pi reconciliation confirmed active work",
-    };
-  }
-
-  const authStillPending = session.failureKind === "auth-required";
-  return appendDiagnostic(
-    {
-      ...session,
-      status: authStillPending ? "error" : "idle",
-      baseState: authStillPending ? "error" : "idle",
-      awaitingAgentEnd: false,
-      providerErrorObserved: authStillPending
-        ? session.providerErrorObserved === true
-        : false,
-      ...(authStillPending ? {} : { lastError: undefined }),
-      overlays: {
-        ...session.overlays,
-        streaming: false,
-        toolRunning: false,
-        retrying: false,
-      },
-      workingStartedAtMs: undefined,
-      subtitle: authStillPending
-        ? "Error · OpenAI authentication verification pending"
-        : `Idle · ${backendLabel(session)} reconciled`,
-      lastRuntimeEventLabel: "Pi reconciliation confirmed completion",
-      updatedAt: "Now",
-      updatedAtMs: Date.now(),
-    },
-    {
-      tone: "info",
-      content:
-        "Reconciled from Pi runtime status because the live completion event was not observed.",
-    },
-  );
+  return reconcileSessionWithRuntimeStatusInDomain(session, status, {
+    backendLabel,
+    appendInfoDiagnostic: (reconciled, content) =>
+      appendDiagnostic(reconciled, { tone: "info", content }),
+    now: Date.now,
+  });
 }
 
 function updateSessionByRuntimeId(
@@ -13773,193 +13366,6 @@ function updateSessionByRuntimeId(
   const next = sessions.slice();
   next[index] = updated;
   return next;
-}
-
-function getMessageUpdateId(event: ChatRuntimeEvent): string | undefined {
-  const direct = getString(event, "messageId");
-  if (direct !== undefined) {
-    return direct;
-  }
-
-  const message = getRecord(event, "message");
-  const messageId = getStringFromRecord(message, "id");
-  if (messageId !== undefined) {
-    return messageId;
-  }
-  const responseId = getStringFromRecord(message, "responseId");
-  if (responseId !== undefined) {
-    return responseId;
-  }
-
-  const assistantEvent = getRecord(event, "assistantMessageEvent");
-  const assistantResponseId = getStringFromRecord(assistantEvent, "responseId");
-  if (assistantResponseId !== undefined) {
-    return assistantResponseId;
-  }
-  const partial = getRecordFromRecord(assistantEvent, "partial");
-  return getStringFromRecord(partial, "responseId");
-}
-
-function getMessageUpdateRole(event: ChatRuntimeEvent): string | undefined {
-  const message = getRecord(event, "message");
-  return getString(event, "role") ?? getStringFromRecord(message, "role");
-}
-
-type MessageTextUpdate = {
-  content: string;
-  mode: "replace" | "append";
-};
-
-function getMessageTextUpdate(
-  event: ChatRuntimeEvent,
-): MessageTextUpdate | undefined {
-  const directDelta = getString(event, "delta");
-  const assistantDelta = getAssistantMessageDelta(event);
-  if (directDelta !== undefined) {
-    return { content: directDelta, mode: "append" };
-  }
-  if (assistantDelta !== undefined) {
-    return { content: assistantDelta, mode: "append" };
-  }
-
-  const directContent = getString(event, "content");
-  if (directContent !== undefined) {
-    return { content: directContent, mode: "replace" };
-  }
-
-  const messageContent = getMessageUpdateContent(event);
-  if (messageContent !== undefined) {
-    return { content: messageContent, mode: "replace" };
-  }
-
-  const assistantContent = getAssistantMessageContent(event);
-  if (assistantContent !== undefined) {
-    return { content: assistantContent, mode: "replace" };
-  }
-
-  return undefined;
-}
-
-function getMessageUpdateContent(event: ChatRuntimeEvent): string | undefined {
-  const message = getUnknown(event, "message");
-  if (!message || typeof message !== "object" || Array.isArray(message)) {
-    return undefined;
-  }
-  return extractTextContent((message as Record<string, unknown>).content);
-}
-
-function getAssistantMessageEventType(
-  event: ChatRuntimeEvent,
-): string | undefined {
-  const assistantEvent = getUnknown(event, "assistantMessageEvent");
-  if (
-    !assistantEvent ||
-    typeof assistantEvent !== "object" ||
-    Array.isArray(assistantEvent)
-  ) {
-    return undefined;
-  }
-  const type = (assistantEvent as Record<string, unknown>).type;
-  return typeof type === "string" ? type : undefined;
-}
-
-function getAssistantMessageDelta(event: ChatRuntimeEvent): string | undefined {
-  const assistantEvent = getUnknown(event, "assistantMessageEvent");
-  if (
-    !assistantEvent ||
-    typeof assistantEvent !== "object" ||
-    Array.isArray(assistantEvent)
-  ) {
-    return undefined;
-  }
-  const record = assistantEvent as Record<string, unknown>;
-  const type = typeof record.type === "string" ? record.type : "";
-  if (type !== "" && type !== "text_delta") {
-    return undefined;
-  }
-  return typeof record.delta === "string" ? record.delta : undefined;
-}
-
-function getAssistantMessageContent(
-  event: ChatRuntimeEvent,
-): string | undefined {
-  const assistantEvent = getUnknown(event, "assistantMessageEvent");
-  if (
-    !assistantEvent ||
-    typeof assistantEvent !== "object" ||
-    Array.isArray(assistantEvent)
-  ) {
-    return undefined;
-  }
-  const record = assistantEvent as Record<string, unknown>;
-  const type = typeof record.type === "string" ? record.type : "";
-  if (type !== "" && !type.startsWith("text_") && type !== "done") {
-    return undefined;
-  }
-  if (type === "done") {
-    return extractTextContent(record.partial);
-  }
-  if (typeof record.content === "string") {
-    return record.content;
-  }
-  return extractTextContent(record.partial);
-}
-
-function getThinkingUpdateContent(event: ChatRuntimeEvent): string | undefined {
-  const assistantEvent = getRecord(event, "assistantMessageEvent");
-  const type = getStringFromRecord(assistantEvent, "type") ?? "";
-  if (type.includes("thinking")) {
-    return (
-      getStringFromRecord(assistantEvent, "delta") ??
-      getStringFromRecord(assistantEvent, "content") ??
-      extractThinkingContent(assistantEvent?.partial)
-    );
-  }
-  return extractThinkingContent(getRecord(event, "message")?.content);
-}
-
-function extractTextContent(value: unknown): string | undefined {
-  if (typeof value === "string") {
-    return value;
-  }
-  if (!Array.isArray(value)) {
-    return undefined;
-  }
-  const parts = value.flatMap((item): string[] => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
-      return [];
-    }
-    const record = item as Record<string, unknown>;
-    if (typeof record.text === "string") {
-      return [record.text];
-    }
-    return [];
-  });
-  return parts.length > 0 ? parts.join("\n") : undefined;
-}
-
-function extractThinkingContent(value: unknown): string | undefined {
-  if (!Array.isArray(value)) {
-    return undefined;
-  }
-  const parts = value.flatMap((item): string[] => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
-      return [];
-    }
-    const record = item as Record<string, unknown>;
-    if (typeof record.thinking === "string") {
-      return [record.thinking];
-    }
-    if (
-      typeof record.type === "string" &&
-      record.type.includes("thinking") &&
-      typeof record.text === "string"
-    ) {
-      return [record.text];
-    }
-    return [];
-  });
-  return parts.length > 0 ? parts.join("\n") : undefined;
 }
 
 function getRuntimeEventErrorMessage(
