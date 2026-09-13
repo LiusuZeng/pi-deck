@@ -9,6 +9,9 @@ const entrySchema = z
   .object({
     sessionFile: z.string().min(1),
     workspaceId: z.string().uuid(),
+    // Older journals predate source reservation persistence. Keep them
+    // readable, while every new fork records both sides fail-closed.
+    sourceSessionFile: z.string().min(1).optional(),
     projectId: z.string().min(1).optional(),
   })
   .strict();
@@ -28,6 +31,7 @@ export class ForkCleanupJournal {
   readonly storeFile: string;
   private state: ForkCleanupFile = { version: 1, entries: [] };
   private loaded = false;
+  private loadPromise: Promise<void> | undefined;
   // A corrupt journal has unknowable outstanding targets. Fail closed for
   // attach/fork operations rather than silently making them available.
   private corrupt = false;
@@ -46,6 +50,14 @@ export class ForkCleanupJournal {
 
   async loadIfNeeded(): Promise<void> {
     if (this.loaded) return;
+    // IPC registration precedes backend initialization. Publish this promise
+    // synchronously so an early reserve cannot be overwritten by a second,
+    // stale initial read that races startup.
+    this.loadPromise ??= this.load();
+    await this.loadPromise;
+  }
+
+  private async load(): Promise<void> {
     await fs.mkdir(path.dirname(this.storeFile), {
       recursive: true,
       mode: 0o700,
@@ -115,40 +127,56 @@ export class ForkCleanupJournal {
     return (
       this.corrupt ||
       this.ephemeralEntries.has(sessionFile) ||
-      this.state.entries.some((entry) => entry.sessionFile === sessionFile)
+      [...this.ephemeralEntries.values()].some(
+        (entry) => entry.sourceSessionFile === sessionFile,
+      ) ||
+      this.state.entries.some(
+        (entry) =>
+          entry.sessionFile === sessionFile ||
+          entry.sourceSessionFile === sessionFile,
+      )
     );
   }
 
-  async retry(
+  /**
+   * Compensate one target only after its owning child has emitted worker_exit.
+   * A journal recovered at startup has no such proof: its old child may have
+   * survived a crashed parent, so callers must leave it blocked rather than
+   * treating restart as confirmation.
+   */
+  async retryAfterConfirmedExit(
+    sessionFile: string,
     workspaceStore: WorkspaceStore,
     projectStore: ProjectStore | undefined,
   ): Promise<void> {
     await this.loadIfNeeded();
     if (this.corrupt) return;
-    const entries = new Map<string, ForkCleanupEntry>(
-      this.state.entries.map((entry) => [entry.sessionFile, entry]),
-    );
-    for (const entry of this.ephemeralEntries.values()) {
-      entries.set(entry.sessionFile, entry);
-    }
-    for (const entry of entries.values()) {
-      try {
-        await workspaceStore.removeSession(
-          entry.workspaceId,
-          entry.sessionFile,
-        );
-        if (entry.projectId !== undefined) {
-          await projectStore?.removeSessionRef(
-            entry.projectId,
-            entry.sessionFile,
-          );
-        }
-        await this.complete(entry.sessionFile);
-      } catch (error) {
-        this.diagnostics?.recordError(
-          `Failed to retry failed fork cleanup for ${entry.sessionFile}: ${error instanceof Error ? error.message : String(error)}`,
+    const entry =
+      this.ephemeralEntries.get(sessionFile) ??
+      this.state.entries.find((item) => item.sessionFile === sessionFile);
+    if (entry === undefined) return;
+    try {
+      // A renderer mutation must not move a blocked target, but retain the
+      // block even if legacy/corrupt metadata already did: removing only the
+      // recorded source reference would otherwise release a live reference.
+      const owner = await workspaceStore.getSessionOwner(entry.sessionFile);
+      if (owner !== undefined && owner.workspaceId !== entry.workspaceId) {
+        throw new Error(
+          `Failed fork cleanup target moved from its reserved workspace ${entry.workspaceId}.`,
         );
       }
+      await workspaceStore.removeSession(entry.workspaceId, entry.sessionFile);
+      if (entry.projectId !== undefined) {
+        if (projectStore === undefined) {
+          throw new Error("Failed fork cleanup project store is unavailable.");
+        }
+        await projectStore.removeSessionRef(entry.projectId, entry.sessionFile);
+      }
+      await this.complete(entry.sessionFile);
+    } catch (error) {
+      this.diagnostics?.recordError(
+        `Failed to retry failed fork cleanup for ${entry.sessionFile}: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 

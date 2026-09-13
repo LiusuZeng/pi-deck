@@ -52,6 +52,7 @@ export class PiWorker {
   private exitCode: number | null | undefined;
   private signal: NodeJS.Signals | null | undefined;
   private isClosingIntentionally = false;
+  private workerExitEmitted = false;
   /** Resolves exactly when the child is terminal (or spawn itself failed). */
   private readonly exitPromise: Promise<void>;
   private resolveExit!: () => void;
@@ -92,7 +93,14 @@ export class PiWorker {
     // Keep shutdown confirmation coupled to ChildProcess itself as well as the
     // JSONL transport event. A stream teardown must not strand ownership after
     // the OS has already confirmed the child exited.
-    this.client.child.once("exit", () => this.resolveExit());
+    this.client.child.once("exit", (code, signal) => {
+      this.exitCode = code;
+      this.signal = signal;
+      // OS child exit is the terminal ownership proof. JSONL transport close
+      // can arrive later, after lifecycle teardown has unsubscribed listeners.
+      this.emitWorkerExit(code, signal);
+      this.resolveExit();
+    });
 
     this.client.typedOn("event", (event) => {
       this.emitEvent({
@@ -125,15 +133,24 @@ export class PiWorker {
       // A SIGTERM may be reported by a launcher as exit code 143 instead of a
       // signal. Preserve our lifecycle intent so consumers do not mistake the
       // deliberate close for an RPC/backend crash.
-      this.emitEvent({
-        type: "worker_exit",
-        runtimeId: this.runtimeId,
-        code,
-        signal,
-        intentional: this.isClosingIntentionally,
-      } as RuntimeEvent);
+      this.emitWorkerExit(code, signal);
       this.resolveExit();
     });
+  }
+
+  private emitWorkerExit(
+    code: number | null,
+    signal: NodeJS.Signals | null,
+  ): void {
+    if (this.workerExitEmitted) return;
+    this.workerExitEmitted = true;
+    this.emitEvent({
+      type: "worker_exit",
+      runtimeId: this.runtimeId,
+      code,
+      signal,
+      intentional: this.isClosingIntentionally,
+    } as RuntimeEvent);
   }
 
   async getState(): Promise<PiState> {

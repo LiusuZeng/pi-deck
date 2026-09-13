@@ -33,13 +33,17 @@ test("failed fork cleanup remains blocked through restart until both stores pers
   writeFile.mockRejectedValueOnce(
     new Error("injected workspace remove failure"),
   );
-  await journal.retry(workspaces, projects);
+  await journal.retryAfterConfirmedExit(sessionFile, workspaces, projects);
   assert.equal(await journal.blocks(sessionFile), true);
   assert.equal((await workspaces.getSessionRefs(workspace.id)).length, 1);
 
   writeFile.mockRestore();
   const restarted = new ForkCleanupJournal(home);
-  await restarted.retry(new WorkspaceStore(home), new ProjectStore(home));
+  await restarted.retryAfterConfirmedExit(
+    sessionFile,
+    new WorkspaceStore(home),
+    new ProjectStore(home),
+  );
   assert.equal(await restarted.blocks(sessionFile), false);
   assert.equal(
     (await new WorkspaceStore(home).getSessionRefs(workspace.id)).length,
@@ -74,18 +78,107 @@ test("persistent reserve failure remains process-blocked until cleanup succeeds"
 
     let cleanupFails = true;
     const workspaces = {
+      getSessionOwner: async () => undefined,
       removeSession: async () => {
         if (cleanupFails) throw new Error("cleanup still fails");
       },
     } as unknown as WorkspaceStore;
-    await journal.retry(workspaces, undefined);
+    await journal.retryAfterConfirmedExit(sessionFile, workspaces, undefined);
     assert.equal(await journal.blocks(sessionFile), true);
 
     cleanupFails = false;
-    await journal.retry(workspaces, undefined);
+    await journal.retryAfterConfirmedExit(sessionFile, workspaces, undefined);
     assert.equal(await journal.blocks(sessionFile), false);
   } finally {
     writeFile.mockRestore();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("source reservations remain blocked through a journal restart", async () => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "pi-deck-fork-journal-source-"),
+  );
+  try {
+    const sessionFile = path.join(root, "fork-target.jsonl");
+    const sourceSessionFile = path.join(root, "fork-source.jsonl");
+    const journal = new ForkCleanupJournal(path.join(root, "home"));
+    await journal.reserve({
+      sessionFile,
+      sourceSessionFile,
+      workspaceId: "9f9b3c42-841c-4ef5-8a9b-9a229924ad1e",
+    });
+    assert.equal(await journal.blocks(sourceSessionFile), true);
+    assert.equal(
+      await new ForkCleanupJournal(path.join(root, "home")).blocks(
+        sourceSessionFile,
+      ),
+      true,
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("confirmed-exit retry retains a target moved outside its reserved workspace", async () => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "pi-deck-fork-journal-moved-"),
+  );
+  try {
+    const sessionFile = path.join(root, "fork-target.jsonl");
+    const journal = new ForkCleanupJournal(path.join(root, "home"));
+    await journal.reserve({
+      sessionFile,
+      workspaceId: "9f9b3c42-841c-4ef5-8a9b-9a229924ad1e",
+    });
+    let removed = false;
+    await journal.retryAfterConfirmedExit(
+      sessionFile,
+      {
+        getSessionOwner: async () => ({
+          workspaceId: "3f8a3c42-841c-4ef5-8a9b-9a229924ad1e",
+        }),
+        removeSession: async () => {
+          removed = true;
+          return true;
+        },
+      } as unknown as WorkspaceStore,
+      undefined,
+    );
+    assert.equal(removed, false);
+    assert.equal(await journal.blocks(sessionFile), true);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("confirmed-exit retry retains project compensation without its project store", async () => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "pi-deck-fork-journal-project-"),
+  );
+  try {
+    const sessionFile = path.join(root, "fork-target.jsonl");
+    const journal = new ForkCleanupJournal(path.join(root, "home"));
+    await journal.reserve({
+      sessionFile,
+      workspaceId: "9f9b3c42-841c-4ef5-8a9b-9a229924ad1e",
+      projectId: "/project",
+    });
+    let removed = false;
+    await journal.retryAfterConfirmedExit(
+      sessionFile,
+      {
+        getSessionOwner: async () => undefined,
+        removeSession: async () => {
+          removed = true;
+          return true;
+        },
+      } as unknown as WorkspaceStore,
+      undefined,
+    );
+    assert.equal(removed, true);
+    assert.equal(await journal.blocks(sessionFile), true);
+  } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
 });

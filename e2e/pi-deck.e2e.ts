@@ -7070,8 +7070,18 @@ test("journal-blocked targets reject resume, import, and fork source before work
         }),
       );
       await window.piDeck.chat.closeSession({ runtimeId: source.runtimeId });
+      await window.piDeck.workspaces.create({
+        name: "Blocked target destination",
+      });
+      const destination = await window.piDeck.workspaces.getActive();
       return {
         forkError,
+        moveError: await errorOf(() =>
+          window.piDeck.workspaces.moveSession({
+            sessionFile: source.state.sessionFile!,
+            toWorkspaceId: destination.activeWorkspaceId!,
+          }),
+        ),
         resumeError: await errorOf(() =>
           window.piDeck.chat.resumeSession({
             workspaceId: source.workspaceId!,
@@ -7087,6 +7097,7 @@ test("journal-blocked targets reject resume, import, and fork source before work
       };
     });
     expect(result.forkError).toMatch(/awaiting durable cleanup/i);
+    expect(result.moveError).toMatch(/awaiting durable cleanup/i);
     expect(result.resumeError).toMatch(/awaiting durable cleanup/i);
     expect(result.importError).toMatch(/awaiting durable cleanup/i);
     expect(fs.existsSync(forkTarget)).toBe(false);
@@ -7450,6 +7461,91 @@ test("quit cancels a spawned fork before runtime registration", async () => {
   }
 });
 
+test("quit cancels a fork at its final snapshot boundary and compensates after exit", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-fork-final-snapshot-quit-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  const targetFile = path.join(
+    agentDir,
+    "sessions",
+    "--fake-rpc--",
+    "fork-final-snapshot-quit-target.jsonl",
+  );
+  const snapshotSignalFile = path.join(root, "fork-final-snapshot-started");
+  const exitSignalFile = path.join(root, "fork-final-snapshot-exited");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      userDataDir,
+      fakePiArgs: [
+        "--fork-target",
+        targetFile,
+        "--fork-delay-get-messages-ms",
+        "10000",
+        "--get-messages-signal-file",
+        snapshotSignalFile,
+        "--fork-exit-signal-file",
+        exitSignalFile,
+      ],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await sidebarNewSessionButton(page).click();
+    await page.getByLabel("Prompt text").fill("quit final snapshot source");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Fake response to: quit final snapshot source"),
+    ).toBeVisible({ timeout: 20_000 });
+    fs.rmSync(snapshotSignalFile, { force: true });
+    await page.evaluate(async () => {
+      const source = await window.piDeck.chat.getSnapshot();
+      void window.piDeck.chat.forkSession({
+        workspaceId: source.workspaceId!,
+        sessionFile: source.state.sessionFile!,
+      });
+    });
+    await expect
+      .poll(() =>
+        fs.existsSync(snapshotSignalFile)
+          ? fs.readFileSync(snapshotSignalFile, "utf8").trim()
+          : "",
+      )
+      .toBe(targetFile);
+    await page.evaluate(() => window.close());
+    await expect
+      .poll(() =>
+        fs.existsSync(exitSignalFile)
+          ? fs.readFileSync(exitSignalFile, "utf8")
+          : "",
+      )
+      .toContain(targetFile);
+    const canonicalTarget = fs.realpathSync(targetFile);
+    const workspaceStore = fs.readFileSync(
+      path.join(root, "pideck-home", "workspaces.json"),
+      "utf8",
+    );
+    expect(workspaceStore).not.toContain(canonicalTarget);
+    const journalFile = path.join(
+      root,
+      "pideck-home",
+      "failed-fork-cleanup.json",
+    );
+    expect(
+      fs.existsSync(journalFile) ? fs.readFileSync(journalFile, "utf8") : "",
+    ).not.toContain(canonicalTarget);
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("fork reserves its fresh target against default-workspace resume and unwinds late failure", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-fork-race-"));
   const projectCwd = path.join(root, "project");
@@ -7462,6 +7558,7 @@ test("fork reserves its fresh target against default-workspace resume and unwind
     "fork-race-target.jsonl",
   );
   const snapshotSignalFile = path.join(root, "fork-snapshot-started");
+  const forkExitSignalFile = path.join(root, "fork-cleanup-exited");
   fs.mkdirSync(projectCwd, { recursive: true });
   const sourceToken = `fork-race-source-${Date.now()}`;
   const env = fakeRealModeEnv({
@@ -7476,6 +7573,10 @@ test("fork reserves its fresh target against default-workspace resume and unwind
       "1500",
       "--get-messages-signal-file",
       snapshotSignalFile,
+      "--sigterm-exit-delay-ms",
+      "750",
+      "--fork-exit-signal-file",
+      forkExitSignalFile,
     ],
   });
   const { app, page } = await launchPiDeck(env);
@@ -7523,9 +7624,26 @@ test("fork reserves its fresh target against default-workspace resume and unwind
     expect(resumeError).toMatch(
       /already being changed|awaiting durable cleanup/i,
     );
+    const moveError = await page.evaluate(async (sessionFile) => {
+      await window.piDeck.workspaces.create({
+        name: "Blocked fork cleanup destination",
+      });
+      const destination = await window.piDeck.workspaces.getActive();
+      try {
+        await window.piDeck.workspaces.moveSession({
+          sessionFile,
+          toWorkspaceId: destination.activeWorkspaceId!,
+        });
+        return "";
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    }, targetFile);
+    expect(moveError).toMatch(/awaiting durable cleanup/i);
     // Change the durable header after the claim but before delayed snapshot
     // registration. The worker still reports the original ID, so fork must
-    // fail and remove its reservation/claimed workspace metadata.
+    // fail. Its delayed SIGTERM exit keeps both reservations and the journal
+    // block in place until worker_exit drives the compensation retry.
     fs.writeFileSync(
       targetFile,
       `${JSON.stringify({
@@ -7536,6 +7654,17 @@ test("fork reserves its fresh target against default-workspace resume and unwind
         cwd: projectCwd,
       })}\n`,
     );
+    await page.waitForTimeout(100);
+    expect(fs.existsSync(forkExitSignalFile)).toBe(false);
+    const forkWhileClosingError = await page.evaluate(async (source) => {
+      try {
+        await window.piDeck.chat.forkSession(source);
+        return "";
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    }, source);
+    expect(forkWhileClosingError).toMatch(/active or changing session/i);
     const forkError = await page.evaluate(async () => {
       try {
         await (
@@ -7549,6 +7678,13 @@ test("fork reserves its fresh target against default-workspace resume and unwind
       }
     });
     expect(forkError).toMatch(/persisted target identity/i);
+    await expect
+      .poll(() =>
+        fs.existsSync(forkExitSignalFile)
+          ? fs.readFileSync(forkExitSignalFile, "utf8")
+          : "",
+      )
+      .toContain(targetFile);
     const cleanup = await page.evaluate(async (source) => {
       const sessions = await window.piDeck.chat.listSessions({
         workspaceId: source.workspaceId,
