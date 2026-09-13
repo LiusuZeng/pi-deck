@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-09-12
+
+Fourth dogfood stabilization release after Unified Work. This patch corrects a
+remaining timeline scroll-follow race without changing the v0.6 product model.
+
+### Fixed
+
+- Preserved bottom-follow ownership through streaming layout changes so live
+  Agent activity remains pinned to the latest output without bouncing, while
+  deliberate wheel, touch, keyboard, and scrollbar scrolling still preserves
+  the user's reading position ([#43](https://github.com/LiusuZeng/pi-deck/issues/43), [#92](https://github.com/LiusuZeng/pi-deck/pull/92)).
+
+### Tests
+
+- Kept the streaming trajectory assertion intact and made manual-scroll coverage
+  establish explicit user intent before verifying that subsequent live activity
+  does not pull the timeline back to the bottom.
+- Retried transient temporary-directory cleanup races after Electron exits in
+  authenticated real-Pi UI smoke tests, avoiding hosted macOS `ENOTEMPTY`
+  teardown failures without changing application behavior ([#91](https://github.com/LiusuZeng/pi-deck/pull/91)).
+
 ## [0.6.3] - 2026-09-11
 
 Third dogfood stabilization release after Unified Work. This patch closes the
@@ -590,7 +611,8 @@ coding-agent sessions.
   crash; persisted sessions can be reopened, but unsaved partial stream text may
   be lost.
 
-[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.3...HEAD
+[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.4...HEAD
+[0.6.4]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.3...v0.6.4
 [0.6.3]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.0...v0.6.1
