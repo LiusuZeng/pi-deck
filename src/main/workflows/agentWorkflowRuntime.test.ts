@@ -235,6 +235,14 @@ describe("agentWorkflow occurrence runtime", () => {
     expect(renderWorkflowOccurrencePrompt(run, child)).toContain(
       "shared orchestration input",
     );
+    run = startWorkflowOccurrence(run, child.id, "child-runtime");
+    run = failWorkflowOccurrence(run, child.id, "retry managed child");
+    run = retryWorkflowOccurrence(run, child.id);
+    const retry = run.occurrences.at(-1)!;
+    expect(retry.context).toEqual(child.context);
+    expect(renderWorkflowOccurrencePrompt(run, retry)).toContain(
+      "shared orchestration input",
+    );
   });
 
   it("passes an immutable bound source to fan-out and loop managed children", () => {
@@ -310,6 +318,20 @@ describe("agentWorkflow occurrence runtime", () => {
       run = startWorkflowOrchestrator(run, orchestrator.id, 4);
       const child = readyWorkflowOccurrences(run)[0]!;
       expect(renderWorkflowOccurrencePrompt(run, child)).toContain(
+        `${mode} source`,
+      );
+      run = startWorkflowOccurrence(
+        run,
+        child.id,
+        `${mode}-child`,
+        undefined,
+        5,
+      );
+      run = failWorkflowOccurrence(run, child.id, "retry managed child", 6);
+      run = retryWorkflowOccurrence(run, child.id, 7);
+      const retry = run.occurrences.at(-1)!;
+      expect(retry.context).toEqual(child.context);
+      expect(renderWorkflowOccurrencePrompt(run, retry)).toContain(
         `${mode} source`,
       );
     };
@@ -592,6 +614,7 @@ describe("agentWorkflow occurrence runtime", () => {
             agents: [ids.work],
             decider: ids.ready,
             maxIterations: 2,
+            input: "loop shared context",
           },
         },
         {
@@ -624,6 +647,13 @@ describe("agentWorkflow occurrence runtime", () => {
     run = completeWorkflowOccurrence(run, decider.id, false, 6);
     work = readyWorkflowOccurrences(run)[0]!;
     expect(work.iteration).toBe(2);
+    expect(renderWorkflowOccurrencePrompt(run, work)).toContain("first");
+    expect(renderWorkflowOccurrencePrompt(run, work)).toContain(
+      "Decider result: false",
+    );
+    expect(renderWorkflowOccurrencePrompt(run, work)).toContain(
+      "loop shared context",
+    );
     run = startWorkflowOccurrence(run, work.id, "r3", "s3", 7);
     run = completeWorkflowOccurrence(run, work.id, "second", 8);
     decider = readyWorkflowOccurrences(run)[0]!;
@@ -633,6 +663,70 @@ describe("agentWorkflow occurrence runtime", () => {
     expect(
       run.occurrences.filter((item) => item.nodeId === ids.work),
     ).toHaveLength(2);
+  });
+
+  it("preserves loop re-iteration context when retrying a managed child", () => {
+    const definition: WorkflowRoleDefinition = {
+      ...base,
+      entryNodeId: ids.loop,
+      nodes: [
+        {
+          id: ids.loop,
+          name: "Loop",
+          role: "orchestrator",
+          config: {
+            mode: "loop",
+            agents: [ids.work],
+            decider: ids.ready,
+            maxIterations: 2,
+            input: "loop shared context",
+          },
+        },
+        {
+          id: ids.work,
+          name: "Work",
+          role: "worker",
+          managedBy: ids.loop,
+          config: { instructions: "work" },
+        },
+        {
+          id: ids.ready,
+          name: "Ready",
+          role: "decider",
+          managedBy: ids.loop,
+          config: { question: "done?" },
+        },
+      ],
+    };
+    let run = createWorkflowRoleRun(definition, "workspace", {}, 1);
+    const orchestration = readyWorkflowOccurrences(run)[0]!;
+    run = startWorkflowOrchestrator(run, orchestration.id, 2);
+    let work = readyWorkflowOccurrences(run)[0]!;
+    run = startWorkflowOccurrence(run, work.id, "r1", "s1", 3);
+    run = completeWorkflowOccurrence(run, work.id, "first", 4);
+    const decider = readyWorkflowOccurrences(run)[0]!;
+    run = startWorkflowOccurrence(run, decider.id, "r2", "s2", 5);
+    run = completeWorkflowOccurrence(run, decider.id, false, 6);
+    work = readyWorkflowOccurrences(run)[0]!;
+    expect(work.context).toEqual(
+      expect.arrayContaining([
+        "first",
+        "Decider result: false",
+        "loop shared context",
+      ]),
+    );
+    run = startWorkflowOccurrence(run, work.id, "r3", "s3", 7);
+    run = failWorkflowOccurrence(run, work.id, "retry second iteration", 8);
+    run = retryWorkflowOccurrence(run, work.id, 9);
+    const retry = run.occurrences.at(-1)!;
+    expect(retry.context).toEqual(work.context);
+    expect(renderWorkflowOccurrencePrompt(run, retry)).toContain("first");
+    expect(renderWorkflowOccurrencePrompt(run, retry)).toContain(
+      "Decider result: false",
+    );
+    expect(renderWorkflowOccurrencePrompt(run, retry)).toContain(
+      "loop shared context",
+    );
   });
 
   it("pauses Human input, approval, and choice without a Pi session", () => {
