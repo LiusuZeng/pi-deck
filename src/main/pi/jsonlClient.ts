@@ -228,6 +228,7 @@ export class JsonlRpcClient extends EventEmitter {
   private closed = false;
   private exitCode: number | null = null;
   private signal: NodeJS.Signals | null = null;
+  private closeEmitted = false;
 
   constructor(
     readonly child: ChildProcess,
@@ -256,18 +257,17 @@ export class JsonlRpcClient extends EventEmitter {
       this.emit("diagnostic", text);
     });
     child.on("error", (error) => {
-      this.rejectAll(new Error(`RPC subprocess error: ${error.message}`));
+      // A spawn failure has no process exit event to wait for. It is still a
+      // terminal lifecycle event: consumers must release capacity exactly as
+      // they would after a normal child exit, and only once.
+      this.closeOnce(null, null, `RPC subprocess error: ${error.message}`);
     });
     child.on("exit", (code, signal) => {
-      this.closed = true;
-      this.exitCode = code;
-      this.signal = signal;
-      this.rejectAll(
-        new Error(
-          `RPC subprocess exited (code=${code ?? "null"}, signal=${signal ?? "null"})`,
-        ),
+      this.closeOnce(
+        code,
+        signal,
+        `RPC subprocess exited (code=${code ?? "null"}, signal=${signal ?? "null"})`,
       );
-      this.emit("close", { code, signal });
     });
   }
 
@@ -374,6 +374,20 @@ export class JsonlRpcClient extends EventEmitter {
       return;
     }
     this.child.kill(signal);
+  }
+
+  private closeOnce(
+    code: number | null,
+    signal: NodeJS.Signals | null,
+    reason: string,
+  ): void {
+    if (this.closeEmitted) return;
+    this.closeEmitted = true;
+    this.closed = true;
+    this.exitCode = code;
+    this.signal = signal;
+    this.rejectAll(new Error(reason));
+    this.emit("close", { code, signal });
   }
 
   private handleRecord(record: JsonValue): void {

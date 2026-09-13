@@ -105,18 +105,25 @@ export class SinglePiAdapter implements PiAdapter {
 
   async closeSession(runtimeId: RuntimeSessionId): Promise<void> {
     const worker = this.getWorker(runtimeId);
-    try {
-      await worker.closeSession();
-    } finally {
-      // A failed/forced shutdown must not retain a dead worker or consume a
-      // capacity slot indefinitely.
+    // Do not free this map/capacity slot until PiWorker has observed terminal
+    // child exit. A sent SIGTERM is not ownership-safe cleanup.
+    await worker.closeAndWait();
+    if (this.workers.get(runtimeId) === worker) {
       this.workers.delete(runtimeId);
     }
   }
 
   /** Remove a worker that has already emitted its process-exit event. */
-  forgetExitedWorker(runtimeId: RuntimeSessionId): void {
-    this.workers.delete(runtimeId);
+  forgetExitedWorker(
+    runtimeId: RuntimeSessionId,
+    expectedWorker?: PiWorker,
+  ): void {
+    if (
+      expectedWorker === undefined ||
+      this.workers.get(runtimeId) === expectedWorker
+    ) {
+      this.workers.delete(runtimeId);
+    }
   }
 
   onEvent(listener: (event: RuntimeEvent) => void): Unsubscribe {

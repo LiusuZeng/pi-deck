@@ -1,5 +1,14 @@
 #!/usr/bin/env node
-import { mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -191,8 +200,32 @@ async function runSmoke(options) {
         () => events.some((event) => event.type === "agent_end"),
         "agent_end event",
       );
-      console.log("  Prompt events: agent_end observed");
+      child.stdin.write(
+        `${makeRequest("messages-after-prompt", "get_messages")}\n`,
+      );
+      await waitUntil(
+        () => responses.has("messages-after-prompt"),
+        "post-prompt get_messages response",
+      );
+      assertSuccessfulResponse(
+        responses.get("messages-after-prompt"),
+        "post-prompt get_messages",
+      );
+      assertSuccessfulAssistantOutput(
+        responses.get("messages-after-prompt")?.data,
+        "prompt",
+      );
+      console.log("  Prompt events: agent_end and assistant output observed");
     }
+
+    await runNativeForkSmoke({
+      piBinary,
+      project,
+      workerEnv,
+      timeoutAt,
+      sourceState: stateResponse.data,
+      prompt: options.prompt,
+    });
 
     child.stdin.write(`${makeRequest("state-2", "get_state")}\n`);
     await waitUntil(() => responses.has("state-2"), "final get_state response");
@@ -207,11 +240,7 @@ async function runSmoke(options) {
 
     console.log("PASS real Pi RPC smoke");
   } finally {
-    child.kill("SIGTERM");
-    setTimeout(() => {
-      if (child.exitCode === null && child.signalCode === null)
-        child.kill("SIGKILL");
-    }, 1_000).unref();
+    await terminateAndWait(child);
     if (!options.keepTemp) {
       rmSync(root, { recursive: true, force: true });
     } else {
@@ -221,6 +250,185 @@ async function runSmoke(options) {
       console.error("Worker stderr:");
       console.error(stderr.join("").trim());
     }
+  }
+}
+
+async function runNativeForkSmoke({
+  piBinary,
+  project,
+  workerEnv,
+  timeoutAt,
+  sourceState,
+  prompt,
+}) {
+  const sourceFile = sourceState?.sessionFile;
+  const sourceId = sourceState?.sessionId;
+  if (typeof sourceFile !== "string" || typeof sourceId !== "string") {
+    throw new Error(
+      "Source get_state did not report a session file and identity",
+    );
+  }
+  // A no-prompt RPC worker reports its planned session path before Pi writes
+  // a header. Seed the documented v3 header only for this isolated smoke so
+  // native --fork has a real persisted source without provider credentials.
+  if (!existsSync(sourceFile)) {
+    mkdirSync(path.dirname(sourceFile), { recursive: true, mode: 0o700 });
+    writeFileSync(
+      sourceFile,
+      `${JSON.stringify({
+        type: "session",
+        version: 3,
+        id: sourceId,
+        timestamp: new Date().toISOString(),
+        cwd: project,
+      })}\n`,
+      { mode: 0o600 },
+    );
+  }
+  const canonicalSource = realpathSync(sourceFile);
+  // Snapshot only after any source prompt completes: from this point onward
+  // every byte difference must be attributable to an unsafe fork child.
+  const sourceBytes = readFileSync(canonicalSource);
+
+  const child = spawn(piBinary, ["--mode", "rpc", "--fork", canonicalSource], {
+    cwd: project,
+    env: workerEnv,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const responses = new Map();
+  const events = [];
+  const stderr = [];
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => stderr.push(chunk));
+  const rl = readline.createInterface({ input: child.stdout });
+  rl.on("line", (line) => {
+    try {
+      const record = JSON.parse(line);
+      if (record.type === "response") responses.set(record.id, record);
+      else events.push(record);
+    } catch {
+      // The request timeout below reports a useful failure without trusting
+      // malformed child output as a successful fork.
+    }
+  });
+  const waitUntil = async (predicate, label) => {
+    while (Date.now() < timeoutAt) {
+      if (predicate()) return;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error(`Timed out waiting for native fork ${label}`);
+  };
+  try {
+    child.stdin.write(`${makeRequest("fork-state", "get_state")}\n`);
+    await waitUntil(() => responses.has("fork-state"), "get_state response");
+    const state = responses.get("fork-state");
+    assertSuccessfulResponse(state, "native fork get_state");
+    const forkFile = state.data?.sessionFile;
+    const forkId = state.data?.sessionId;
+    if (typeof forkFile !== "string" || typeof forkId !== "string") {
+      throw new Error("Native fork did not report a session file and identity");
+    }
+    if (realpathSync(forkFile) === canonicalSource || forkId === sourceId) {
+      throw new Error("Native fork reused the source session identity");
+    }
+    if (
+      state.data?.isStreaming === true ||
+      state.data?.isAgentActive === true
+    ) {
+      throw new Error("Native fork started with active/streaming work");
+    }
+    child.stdin.write(`${makeRequest("fork-messages", "get_messages")}\n`);
+    await waitUntil(
+      () => responses.has("fork-messages"),
+      "get_messages response",
+    );
+    assertSuccessfulResponse(
+      responses.get("fork-messages"),
+      "native fork get_messages",
+    );
+
+    // Authenticated prompt smoke additionally proves a child-only turn never
+    // changes the exact source bytes. The no-prompt CI smoke still exercises
+    // the real native --fork protocol without requiring provider credentials.
+    if (prompt) {
+      child.stdin.write(
+        `${makeRequest("fork-prompt", "prompt", { message: `${prompt} (fork child only)` })}\n`,
+      );
+      await waitUntil(() => responses.has("fork-prompt"), "prompt acceptance");
+      assertSuccessfulResponse(
+        responses.get("fork-prompt"),
+        "native fork prompt",
+      );
+      await waitUntil(
+        () => events.some((event) => event.type === "agent_end"),
+        "agent_end",
+      );
+      child.stdin.write(
+        `${makeRequest("fork-messages-after-prompt", "get_messages")}\n`,
+      );
+      await waitUntil(
+        () => responses.has("fork-messages-after-prompt"),
+        "post-prompt get_messages response",
+      );
+      const messages = responses.get("fork-messages-after-prompt");
+      assertSuccessfulResponse(
+        messages,
+        "native fork post-prompt get_messages",
+      );
+      assertSuccessfulAssistantOutput(messages.data, "native fork prompt");
+    }
+    if (!readFileSync(canonicalSource).equals(sourceBytes)) {
+      throw new Error(
+        "Native fork child-only work changed the source JSONL bytes",
+      );
+    }
+    console.log(
+      "  Native fork: distinct identity and source-byte isolation verified",
+    );
+  } finally {
+    await terminateAndWait(child);
+    rl.close();
+    if (stderr.join("").trim()) {
+      console.error("Native fork stderr:");
+      console.error(stderr.join("").trim());
+    }
+  }
+}
+
+async function terminateAndWait(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise((resolve) => child.once("exit", resolve));
+  child.kill("SIGTERM");
+  const graceful = await Promise.race([
+    exited.then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), 1_000)),
+  ]);
+  if (!graceful && child.exitCode === null && child.signalCode === null) {
+    child.kill("SIGKILL");
+  }
+  await exited;
+}
+
+function assertSuccessfulAssistantOutput(data, label) {
+  const messages = Array.isArray(data)
+    ? data
+    : Array.isArray(data?.messages)
+      ? data.messages
+      : [];
+  const assistant = messages.findLast(
+    (message) => message?.role === "assistant",
+  );
+  const content = Array.isArray(assistant?.content)
+    ? assistant.content.map((part) => part?.text ?? "").join("")
+    : assistant?.content;
+  if (
+    !assistant ||
+    assistant.status === "error" ||
+    assistant.stopReason === "error" ||
+    typeof content !== "string" ||
+    content.trim().length === 0
+  ) {
+    throw new Error(`${label} did not produce successful assistant output`);
   }
 }
 

@@ -52,8 +52,14 @@ export class PiWorker {
   private exitCode: number | null | undefined;
   private signal: NodeJS.Signals | null | undefined;
   private isClosingIntentionally = false;
+  /** Resolves exactly when the child is terminal (or spawn itself failed). */
+  private readonly exitPromise: Promise<void>;
+  private resolveExit!: () => void;
 
   constructor(readonly options: PiWorkerSpawnOptions) {
+    this.exitPromise = new Promise<void>((resolve) => {
+      this.resolveExit = resolve;
+    });
     this.runtimeId = options.runtimeId ?? generateRuntimeId();
     this.killGraceMs = options.killGraceMs ?? 2_000;
     const args = options.args ?? ["--mode", "rpc"];
@@ -83,6 +89,10 @@ export class PiWorker {
     );
     this.pid = this.client.child.pid;
     this.health = "healthy";
+    // Keep shutdown confirmation coupled to ChildProcess itself as well as the
+    // JSONL transport event. A stream teardown must not strand ownership after
+    // the OS has already confirmed the child exited.
+    this.client.child.once("exit", () => this.resolveExit());
 
     this.client.typedOn("event", (event) => {
       this.emitEvent({
@@ -122,6 +132,7 @@ export class PiWorker {
         signal,
         intentional: this.isClosingIntentionally,
       } as RuntimeEvent);
+      this.resolveExit();
     });
   }
 
@@ -187,41 +198,68 @@ export class PiWorker {
     return this.client.request(command, params);
   }
 
-  async closeSession(): Promise<void> {
-    if (this.health === "closed") {
-      return;
-    }
-
+  /**
+   * Request shutdown, escalate after a bounded SIGTERM grace period, and wait
+   * for terminal child confirmation. Callers must keep every runtime/session
+   * ownership claim until this resolves: `ChildProcess.killed` only says that
+   * a signal was sent, not that Pi has stopped writing its JSONL.
+   */
+  async closeAndWait(): Promise<void> {
     const child = this.client.child;
-    if (child.exitCode !== null || child.signalCode !== null || child.killed) {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      await this.waitForChildExit();
       return;
     }
 
-    await new Promise<void>((resolve) => {
-      const done = (): void => resolve();
-      const timer = setTimeout(() => {
-        if (
-          child.exitCode === null &&
-          child.signalCode === null &&
-          !child.killed
-        ) {
+    // Mark intent before signalling so an immediate exit remains a clean
+    // shutdown. Do not use `child.killed` as a lifecycle predicate: it flips
+    // after SIGTERM even when the child ignores that signal.
+    this.isClosingIntentionally = true;
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      // The process can race us to exit; the terminal promise below is the
+      // authoritative outcome in either case.
+    }
+
+    const escalation = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) {
+        try {
           child.kill("SIGKILL");
+        } catch {
+          // Keep waiting. A failed kill is not proof that the process exited.
         }
-        resolve();
-      }, this.killGraceMs);
-      child.once("exit", () => {
-        clearTimeout(timer);
-        done();
-      });
-      // Mark the exit expected only after SIGTERM was actually sent. A worker
-      // that races us to an unplanned exit must retain its crash diagnostic.
-      if (child.kill("SIGTERM")) {
-        this.health = "closed";
-        this.isClosingIntentionally = true;
-      } else {
-        clearTimeout(timer);
-        done();
       }
+    }, this.killGraceMs);
+    try {
+      await this.waitForChildExit();
+    } finally {
+      clearTimeout(escalation);
+    }
+  }
+
+  /** Backward-compatible lifecycle entry point. */
+  closeSession(): Promise<void> {
+    return this.closeAndWait();
+  }
+
+  private waitForChildExit(): Promise<void> {
+    const child = this.client.child;
+    if (child.exitCode !== null || child.signalCode !== null) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      const timer = setInterval(() => {
+        if (child.exitCode !== null || child.signalCode !== null) {
+          clearInterval(timer);
+          resolve();
+        }
+      }, 10);
+      timer.unref();
+      void this.exitPromise.then(() => {
+        clearInterval(timer);
+        resolve();
+      });
     });
   }
 

@@ -334,6 +334,49 @@ test("PiWorker abort path emits a sensible aborted end state", async () => {
   }
 });
 
+test("PiWorker closeAndWait retains adapter capacity until delayed child exit", async () => {
+  const adapter = new SinglePiAdapter();
+  const worker = adapter.createWorker({
+    runtimeId: "delayed-close",
+    command: process.execPath,
+    args: [fakePath(), "--sigterm-exit-delay-ms", "80"],
+    cwd: process.cwd(),
+    env: process.env,
+    requestTimeoutMs: 5_000,
+    killGraceMs: 500,
+  });
+  await worker.getState();
+
+  const close = adapter.closeSession(worker.runtimeId);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(adapter.hasRuntime(worker.runtimeId), true);
+  assert.equal(adapter.workerCount(), 1);
+  await close;
+  assert.equal(adapter.hasRuntime(worker.runtimeId), false);
+  assert.equal(adapter.workerCount(), 0);
+});
+
+test("PiWorker escalates a SIGTERM-ignoring child and waits for SIGKILL exit", async () => {
+  const adapter = new SinglePiAdapter();
+  const worker = adapter.createWorker({
+    runtimeId: "stuck-close",
+    command: process.execPath,
+    args: [fakePath(), "--ignore-sigterm"],
+    cwd: process.cwd(),
+    env: process.env,
+    requestTimeoutMs: 5_000,
+    killGraceMs: 50,
+  });
+  await worker.getState();
+
+  const close = adapter.closeSession(worker.runtimeId);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(adapter.hasRuntime(worker.runtimeId), true);
+  await close;
+  assert.equal(adapter.workerCount(), 0);
+  assert.equal(worker.getDiagnostics().signal, "SIGKILL");
+});
+
 test("PiWorker intentional close does not create error diagnostic", async () => {
   const worker = createWorker();
   const exit = waitForWorkerEvent(

@@ -64,6 +64,10 @@ interface FakeOptions {
   forkTargetFile?: string;
   /** Hold get_state replies so E2E can interleave ownership operations. */
   getStateDelayMs: number;
+  /** Ignore SIGTERM so lifecycle tests exercise SIGKILL escalation. */
+  ignoreSigterm: boolean;
+  /** Delay a cooperative SIGTERM exit for cleanup-ordering tests. */
+  sigtermExitDelayMs: number;
   /** Hold snapshot history after fork ownership has been claimed. */
   getMessagesDelayMs: number;
   /** Write when get_messages begins, for deterministic E2E interleaving. */
@@ -112,6 +116,8 @@ function parseOptions(argv: string[]): FakeOptions {
     failTaskPromptRecordWhileActive: false,
     taskSessionProgressFixture: false,
     getStateDelayMs: 0,
+    ignoreSigterm: false,
+    sigtermExitDelayMs: 0,
     getMessagesDelayMs: 0,
     workflowDecisions: [],
   };
@@ -207,6 +213,14 @@ function parseOptions(argv: string[]): FakeOptions {
     } else if (arg === "--fork-target") {
       const targetFile = argv[index + 1];
       if (targetFile) options.forkTargetFile = targetFile;
+      index += 1;
+    } else if (arg === "--ignore-sigterm") {
+      options.ignoreSigterm = true;
+    } else if (arg === "--sigterm-exit-delay-ms") {
+      const delay = Number(argv[index + 1]);
+      if (Number.isSafeInteger(delay) && delay >= 0) {
+        options.sigtermExitDelayMs = delay;
+      }
       index += 1;
     } else if (arg === "--delay-get-state-ms") {
       const delay = Number(argv[index + 1]);
@@ -445,6 +459,15 @@ class FakeRpcServer {
   }
 
   start(): void {
+    if (this.options.ignoreSigterm || this.options.sigtermExitDelayMs > 0) {
+      process.on("SIGTERM", () => {
+        if (this.options.ignoreSigterm) {
+          // Intentionally empty; PiWorker must not mistake signal delivery for exit.
+          return;
+        }
+        setTimeout(() => process.exit(0), this.options.sigtermExitDelayMs);
+      });
+    }
     this.ensurePersistedSessionRecord();
     this.rehydratePersistedMessages();
     if (this.options.stderrOnStart) {

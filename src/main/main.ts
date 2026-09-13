@@ -393,6 +393,10 @@ const pendingExtensionUiRequests = new Map<
 >();
 const extensionUiTimeoutGraceMs = 1_000;
 let chatWorkerCreationTail: Promise<void> = Promise.resolve();
+// Serializes every Pi session discovery/attach/fork registration transaction.
+// The lock begins before native fork inventory and ends only after durable
+// ownership plus runtime identity registration, eliminating inventory TOCTOU.
+let chatSessionAttachmentTail: Promise<void> = Promise.resolve();
 let chatEventUnsubscribe: (() => void) | undefined;
 let selectedRealProjectCwd: string | undefined;
 let isQuittingAfterChatWorkerCleanup = false;
@@ -1054,6 +1058,7 @@ function registerIpcHandlers(
     handler: async ({ runtimeId }) => {
       const adapter = await ensureChatAdapter(store, diagnosticsService);
       const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
+      assertChatRuntimeSessionNotMutating(activeRuntimeId, "aborting it");
       await adapter.abort(activeRuntimeId);
       return undefined;
     },
@@ -3150,9 +3155,9 @@ async function initializeChatAdapter(
       });
     if (parsed.data.type === "worker_exit") {
       chatRuntimeShutdownFailures.confirmExit(parsed.data.runtimeId);
-      // A child exit does not go through closeSession(), so remove it from the
-      // adapter as well as the UI/runtime maps or it would consume capacity.
-      adapter.forgetExitedWorker(parsed.data.runtimeId);
+      // PiWorker's adapter listener removes the exact exited worker after
+      // forwarding this event. Do not delete by runtime id here: an old exit
+      // must never erase a replacement that reused that id.
       const preserveAttachments = attachmentPreservingRuntimeClosures.has(
         parsed.data.runtimeId,
       );
@@ -3244,6 +3249,16 @@ async function createChatWorker(
       throw error;
     }
   });
+}
+
+async function enterChatSessionAttachment(): Promise<() => void> {
+  const previous = chatSessionAttachmentTail;
+  let release: (() => void) | undefined;
+  chatSessionAttachmentTail = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await previous;
+  return (): void => release?.();
 }
 
 async function serializeChatWorkerCreation<T>(
@@ -3392,6 +3407,10 @@ async function respondToExtensionUi(
   }
 
   try {
+    assertChatRuntimeSessionNotMutating(
+      request.runtimeId,
+      "responding to its extension request",
+    );
     await adapter.respondToExtensionUi(request.runtimeId, {
       id: request.requestId,
       ...request.response,
@@ -4912,7 +4931,7 @@ async function closeChatWorker(
   chatRuntimeWorkspaceIds.clear();
   // Failed shutdown tombstones intentionally survive reset/adapter teardown so
   // an unconfirmed worker can never make its workspace appear archivable.
-  chatSessionFileLocks.clear();
+  // Keep file locks too until every child has actually exited below.
   chatSessionResumePromises.clear();
   chatSessionResumeWorkspaceIds.clear();
   chatSessionMutationReservations.clear();
@@ -4958,6 +4977,9 @@ async function closeChatWorker(
     }),
   );
   disposeShutdownWatcherIfSettled();
+  // closeSession resolves only after PiWorker observed terminal child exit.
+  // It is now safe to release target attachment locks during reset.
+  chatSessionFileLocks.clear();
 }
 
 async function listChatModels(
@@ -5122,6 +5144,7 @@ async function setChatModel(
 ): Promise<ChatSnapshot> {
   const adapter = await ensureChatAdapter(store, diagnosticsService);
   const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
+  assertChatRuntimeSessionNotMutating(activeRuntimeId, "changing its model");
   await adapter.request(activeRuntimeId, "set_model", { provider, modelId });
   return getChatSnapshotForRuntime(
     adapter,
@@ -5139,6 +5162,10 @@ async function setChatThinking(
 ): Promise<ChatSnapshot> {
   const adapter = await ensureChatAdapter(store, diagnosticsService);
   const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
+  assertChatRuntimeSessionNotMutating(
+    activeRuntimeId,
+    "changing its thinking level",
+  );
   await adapter.request(activeRuntimeId, "set_thinking_level", { level });
   return getChatSnapshotForRuntime(
     adapter,
@@ -5904,6 +5931,7 @@ async function forkChatSession(
   for (const file of sourceReservationKeys) {
     chatSessionMutationReservations.add(file);
   }
+  let releaseSessionAttachment: (() => void) | undefined;
   try {
     const project = await projectForWorkspaceSession(workspaceId, sessionFile);
     const launch = await resolveRealChatLaunchConfig(store, project);
@@ -5938,7 +5966,7 @@ async function forkChatSession(
     sourceReservationKeys.add(canonicalSourceSessionFile);
     chatSessionMutationReservations.add(canonicalSourceSessionFile);
 
-    return withChatWorkspaceCreation(workspaceId, () =>
+    return await withChatWorkspaceCreation(workspaceId, () =>
       withChatSessionMutation(
         canonicalSourceSessionFile,
         "Finish the active or changing session before forking it.",
@@ -6003,6 +6031,10 @@ async function forkChatSession(
             );
           }
           sourceSessionId = durableSourceSessionId;
+          // Registration is globally exclusive from target inventory through
+          // durable claim and runtime lock publication. Discovery and resume
+          // paths use the same gate before attaching a session.
+          releaseSessionAttachment = await enterChatSessionAttachment();
           // Native Pi chooses the target filename. Record the complete
           // pre-fork inventory so a faulty worker cannot return an unowned,
           // pre-existing JSONL as though it had just created it.
@@ -6293,6 +6325,7 @@ async function forkChatSession(
       ),
     );
   } finally {
+    releaseSessionAttachment?.();
     for (const file of sourceReservationKeys) {
       chatSessionMutationReservations.delete(file);
     }
@@ -6344,6 +6377,12 @@ async function resumeChatSession(
   });
   chatSessionResumePromises.set(canonicalSessionFile, resumePromise);
   chatSessionResumeWorkspaceIds.set(canonicalSessionFile, workspaceId);
+  if (chatSessionMutationReservations.has(canonicalSessionFile)) {
+    chatSessionResumePromises.delete(canonicalSessionFile);
+    chatSessionResumeWorkspaceIds.delete(canonicalSessionFile);
+    throw new Error("Session is already being changed.");
+  }
+  const releaseSessionAttachment = await enterChatSessionAttachment();
 
   try {
     await withChatWorkspaceCreation(workspaceId, async () => {
@@ -6391,6 +6430,7 @@ async function resumeChatSession(
   } catch (error) {
     rejectPending(error);
   } finally {
+    releaseSessionAttachment();
     if (chatSessionResumePromises.get(canonicalSessionFile) === resumePromise) {
       chatSessionResumePromises.delete(canonicalSessionFile);
     }
@@ -6433,6 +6473,17 @@ async function attachRealResumeWorker(
         adapter,
         runtimeId,
         "real",
+        {
+          // Validate before generic registration can replace the provisional
+          // requested-file lock or persist a different session's ownership.
+          beforeSessionRegistration: ({ sessionFile }) => {
+            if (sessionFile !== canonicalSessionFile) {
+              throw new Error(
+                `Pi resume opened a different session. Requested ${canonicalSessionFile}, got ${sessionFile}.`,
+              );
+            }
+          },
+        },
       );
       const returnedSessionFile = snapshot.state.sessionFile;
       if (typeof returnedSessionFile !== "string") {
