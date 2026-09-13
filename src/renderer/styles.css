@@ -2460,6 +2460,38 @@ h3 {
   background: var(--color-text-strong);
 }
 
+.openai-codex-auth-repair {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+  max-width: 960px;
+  margin: 18px auto 0;
+  border: 1px solid
+    color-mix(in srgb, var(--color-warning) 55%, var(--color-border));
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  color: var(--color-text);
+  background: var(--color-surface-subtle);
+}
+
+.openai-codex-auth-repair p {
+  margin: 4px 0 0;
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+
+.openai-codex-auth-repair button {
+  flex: 0 0 auto;
+  min-height: 36px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  padding: 7px 14px;
+  color: var(--action-solid-fg);
+  background: var(--action-solid-bg);
+  font-weight: 700;
+}
+
 .activity-inbox-eyebrow {
   margin: 0 0 4px;
   color: var(--color-text-muted);

@@ -330,6 +330,83 @@ test("fake RPC persists a one-shot terminal error in live and reloaded sessions"
   }
 });
 
+test("fake RPC emits a production-shaped OpenAI Codex auth-expiry failure", async () => {
+  const client = spawnFakeRpc([
+    "--production-shaped",
+    "--openai-codex-auth-expired",
+  ]);
+  try {
+    const terminal = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "agent_end"),
+    );
+    await client.request("prompt", { message: "continue durable work" });
+    const update = (await terminal).find(
+      (event) => event.type === "message_update",
+    ) as JsonObject;
+    const assistant = update.message as JsonObject;
+    assert.equal(assistant.provider, "openai-codex");
+    assert.equal(
+      assistant.errorMessage,
+      "Provided authentication token is expired.",
+    );
+    assert.equal((update.assistantMessageEvent as JsonObject).type, "error");
+  } finally {
+    client.close();
+  }
+});
+
+test("fake RPC auth expiry is one-shot across replacement workers", async () => {
+  const directory = tempDir("pi-deck-fake-auth-once-");
+  const marker = path.join(directory, "auth-expired.marker");
+  const args = [
+    "--production-shaped",
+    "--openai-codex-auth-expired",
+    "--openai-codex-auth-expired-once-file",
+    marker,
+    "--stream-delay-ms",
+    "1",
+  ];
+  const failed = spawnFakeRpc(args);
+  try {
+    const terminal = waitForEvents(failed, (events) =>
+      events.some((event) => event.type === "agent_end"),
+    );
+    await failed.request("prompt", { message: "first attempt" });
+    const update = (await terminal).find(
+      (event) => event.type === "message_update",
+    ) as JsonObject;
+    assert.equal(
+      (update.message as JsonObject).errorMessage,
+      "Provided authentication token is expired.",
+    );
+    assert.ok(fs.existsSync(marker));
+  } finally {
+    failed.close();
+  }
+
+  const recovered = spawnFakeRpc(args);
+  try {
+    const terminal = waitForEvents(recovered, (events) =>
+      events.some((event) => event.type === "agent_end"),
+    );
+    await recovered.request("prompt", { message: "verified after repair" });
+    const events = await terminal;
+    assert.ok(events.some((event) => event.type === "agent_end"));
+    const completed = events.find(
+      (event) => event.type === "agent_end",
+    ) as JsonObject;
+    const messages = completed.messages as JsonObject[];
+    assert.equal(
+      messages.at(-1)?.content,
+      "I’ll review the workspace and summarize the next steps.",
+    );
+    assert.equal(messages.at(-1)?.stopReason, "stop");
+  } finally {
+    recovered.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("fake RPC accepts exact steer and follow_up commands and emits full queues", async () => {
   const client = spawnFakeRpc(["--stream-delay-ms", "50"]);
   try {
