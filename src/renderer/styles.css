@@ -2431,9 +2431,33 @@ h3 {
 }
 
 .activity-inbox-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
   max-width: 960px;
   margin: 0 auto;
   width: 100%;
+}
+
+.activity-inbox-header-copy {
+  min-width: 0;
+}
+
+.activity-inbox-header-action {
+  flex: 0 0 auto;
+  min-height: 36px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  padding: 7px 14px;
+  color: var(--action-solid-fg);
+  background: var(--action-solid-bg);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.activity-inbox-header-action:hover {
+  background: var(--color-text-strong);
 }
 
 .activity-inbox-eyebrow {
@@ -2841,6 +2865,15 @@ h3 {
 @media (max-width: 640px) {
   .activity-inbox {
     padding: 20px 16px;
+  }
+
+  .activity-inbox-header {
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .activity-inbox-header-action {
+    align-self: flex-start;
   }
 
   .activity-inbox-filters {

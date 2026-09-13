@@ -636,6 +636,36 @@ describe("ActivityInbox", () => {
     ).toBe("true");
   });
 
+  it("offers an accessible workspace-scoped New session header action", () => {
+    const onNewSession = vi.fn();
+    const { view } = renderInbox(
+      modelWithEveryKind(),
+      { type: "workspace", workspaceId: "workspace-atlas" },
+      vi.fn(),
+      vi.fn(),
+      workspaces,
+      onNewSession,
+    );
+    const action = view.querySelector<HTMLButtonElement>(
+      '[data-testid="workspace-work-new-session"]',
+    );
+
+    expect(action?.textContent).toBe("New session");
+    expect(action?.getAttribute("aria-describedby")).toBe(
+      "activity-inbox-description",
+    );
+    act(() => action?.click());
+    expect(onNewSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the workspace-scoped header action out of All Work", () => {
+    const { view } = renderInbox(modelWithEveryKind());
+
+    expect(
+      view.querySelector('[data-testid="workspace-work-new-session"]'),
+    ).toBeNull();
+  });
+
   it("offers New session from an empty Work surface", () => {
     const onNewSession = vi.fn();
     const { view } = renderInbox(

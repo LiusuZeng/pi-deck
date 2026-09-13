@@ -249,6 +249,61 @@ function sidebarNewSessionButton(page: Page) {
     .getByRole("button", { name: "New session", exact: true });
 }
 
+function workspaceWorkNewSessionButton(page: Page) {
+  return page.getByTestId("workspace-work-new-session");
+}
+
+async function expectWorkspaceWorkNewSessionKeyboardFocus(
+  page: Page,
+): Promise<void> {
+  const action = workspaceWorkNewSessionButton(page);
+  await page.getByLabel("Current Work scope").focus();
+  await page.keyboard.press("Shift+Tab");
+  await expect(action).toBeFocused();
+  expect(
+    await action.evaluate((button) => button.matches(":focus-visible")),
+  ).toBe(true);
+  await expect(action).toHaveCSS("outline-width", "2px");
+  await expect(action).toHaveCSS("outline-style", "solid");
+  await expect(action).toHaveCSS("outline-offset", "2px");
+  const focusColor = await action.evaluate((button) => {
+    const probe = document.createElement("span");
+    probe.style.color = "var(--color-focus)";
+    button.append(probe);
+    const color = getComputedStyle(probe).color;
+    probe.remove();
+    return color;
+  });
+  await expect(action).toHaveCSS("outline-color", focusColor);
+}
+
+async function expectWorkspaceWorkNewSessionNarrowGeometry(
+  page: Page,
+): Promise<void> {
+  const action = workspaceWorkNewSessionButton(page);
+  await expect
+    .poll(() =>
+      action.evaluate((button) => {
+        const headerCopy = document.querySelector(
+          ".activity-inbox-header-copy",
+        );
+        if (headerCopy === null) return false;
+
+        const actionBounds = button.getBoundingClientRect();
+        const headerCopyBounds = headerCopy.getBoundingClientRect();
+        // A 2px outline with a 2px offset must remain inside the viewport.
+        return (
+          Math.round(actionBounds.left) === Math.round(headerCopyBounds.left) &&
+          actionBounds.top >= headerCopyBounds.bottom + 13.5 &&
+          actionBounds.height >= 36 &&
+          actionBounds.left >= 4 &&
+          actionBounds.right <= window.innerWidth - 4
+        );
+      }),
+    )
+    .toBe(true);
+}
+
 async function enterSessionDetail(page: Page): Promise<void> {
   const newSession = sidebarNewSessionButton(page);
   await expect(newSession).toBeVisible();
@@ -555,13 +610,20 @@ test("New Session draft shows and commits inline workspace ownership", async () 
   );
   const projectCwd = path.join(root, "default-project");
   const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
   fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(userDataDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(userDataDir, "settings.json"),
+    `${JSON.stringify({ theme: "light" })}\n`,
+  );
 
   const { app, page } = await launchPiDeck(
     fakeRealModeEnv({
       root,
       projectCwd,
       agentDir,
+      userDataDir,
       fakePiArgs: ["--include-usage"],
     }),
   );
@@ -590,6 +652,7 @@ test("New Session draft shows and commits inline workspace ownership", async () 
     expect(workspaceIds.default).toEqual(expect.any(String));
     await page.getByRole("button", { name: "All Work" }).click();
     await expectAllWorkLaunch(page);
+    await expect(workspaceWorkNewSessionButton(page)).toHaveCount(0);
 
     await sidebarNewSessionButton(page).click();
     await expect(
@@ -679,7 +742,14 @@ test("New Session draft shows and commits inline workspace ownership", async () 
     await page.getByTestId("session-origin-back").click();
     await expectAllWorkLaunch(page);
     await selectWorkspaceInUi(page, "Inline Beta");
-    await sidebarNewSessionButton(page).click();
+    await expect(page.locator("html")).toHaveCSS("color-scheme", "light");
+    await expect(workspaceWorkNewSessionButton(page)).toBeVisible();
+    await expectWorkspaceWorkNewSessionKeyboardFocus(page);
+    await page.keyboard.press("Enter");
+    await expect(
+      page.locator('.workspace[data-primary-view="session"]'),
+    ).toBeVisible();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
     const scopedWorkspace = page.getByLabel("New session workspace");
     await expect(scopedWorkspace).toHaveValue(workspaceIds["Inline Beta"]!);
     await page
@@ -728,6 +798,54 @@ test("New Session draft shows and commits inline workspace ownership", async () 
           "scoped draft can switch before first prompt",
         ],
         betaCount: 0,
+      });
+    await page.getByTestId("session-origin-back").click();
+    await expectWorkRoute(page, workspaceIds["Inline Beta"]!);
+
+    // The workspace-header path must create in the stable scoped workspace,
+    // even after a prior draft changed the active workspace before sending.
+    await page.setViewportSize({ width: 320, height: 600 });
+    await page.getByRole("button", { name: "Appearance: Light" }).click();
+    await page
+      .getByRole("menuitemradio", { name: "Dark", exact: true })
+      .click();
+    await expect(page.locator("html")).toHaveCSS("color-scheme", "dark");
+    await expectWorkspaceWorkNewSessionKeyboardFocus(page);
+    await expectWorkspaceWorkNewSessionNarrowGeometry(page);
+    await page.keyboard.press("Enter");
+    const headerScopedWorkspace = page.getByLabel("New session workspace");
+    await expect(headerScopedWorkspace).toHaveValue(
+      workspaceIds["Inline Beta"]!,
+    );
+    await expect(page.getByTestId("session-origin-back")).toHaveAttribute(
+      "aria-label",
+      "Back to Inline Beta Work",
+    );
+    await page
+      .getByLabel("Prompt text")
+      .fill("workspace header creates in its current workspace");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText(
+        /Fake response to: workspace header creates in its current workspace/,
+      ),
+    ).toBeVisible({ timeout: 20_000 });
+    await expect
+      .poll(async () =>
+        page.evaluate(async (workspaceId) => {
+          const snapshot = await window.piDeck.chat.getSnapshot();
+          const sessions = await window.piDeck.chat.listSessions({
+            workspaceId,
+          });
+          return {
+            activeWorkspaceId: snapshot.workspaceId,
+            titles: sessions.sessions.map((session) => session.title),
+          };
+        }, workspaceIds["Inline Beta"]!),
+      )
+      .toEqual({
+        activeWorkspaceId: workspaceIds["Inline Beta"],
+        titles: ["workspace header creates in its current workspace"],
       });
     await page.getByTestId("session-origin-back").click();
     await expectWorkRoute(page, workspaceIds["Inline Beta"]!);
