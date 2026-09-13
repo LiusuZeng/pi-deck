@@ -5471,6 +5471,106 @@ test("bulk deletion reports exact removals and releases only deleted saved-sessi
   }
 });
 
+test("project bulk delete retains recovered fork-cleanup source and target", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-bulk-delete-journal-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  const sessionDir = path.join(
+    agentDir,
+    "sessions",
+    "--e2e-bulk-delete-journal--",
+  );
+  const sourceFile = path.join(sessionDir, "fork-source.jsonl");
+  const targetFile = path.join(sessionDir, "fork-target.jsonl");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(sessionDir, { recursive: true });
+  const contents = new Map([
+    [sourceFile, "fork-journal-source"],
+    [targetFile, "fork-journal-target"],
+  ]);
+  for (const [file, id] of contents) {
+    fs.writeFileSync(
+      file,
+      `${JSON.stringify({
+        type: "session",
+        version: 3,
+        id,
+        timestamp: "2026-07-02T00:00:00.000Z",
+        cwd: projectCwd,
+      })}\n`,
+    );
+  }
+  const canonicalSourceFile = fs.realpathSync(sourceFile);
+  const canonicalTargetFile = fs.realpathSync(targetFile);
+  const env = fakeRealModeEnv({
+    root,
+    projectCwd,
+    agentDir,
+    userDataDir,
+  });
+  let app: ElectronApplication | undefined;
+  try {
+    // Initialize the project once, then seed the durable entry before a fresh
+    // process reloads it. A reload has no confirmed child exit, so both sides
+    // of the recovered fork reservation must remain unavailable.
+    const initial = await launchPiDeck(env);
+    app = initial.app;
+    await expectHealthyPreload(initial.page);
+    await app.close();
+    app = undefined;
+    const home = path.join(root, "pideck-home");
+    fs.writeFileSync(
+      path.join(home, "failed-fork-cleanup.json"),
+      `${JSON.stringify({
+        version: 1,
+        entries: [
+          {
+            sessionFile: canonicalTargetFile,
+            sourceSessionFile: canonicalSourceFile,
+            workspaceId: "9f9b3c42-841c-4ef5-8a9b-9a229924ad1e",
+          },
+        ],
+      })}\n`,
+    );
+
+    const reloaded = await launchPiDeck(env);
+    app = reloaded.app;
+    await expectHealthyPreload(reloaded.page);
+    const result = await reloaded.page.evaluate(async () => {
+      const project = await window.piDeck.projects.getActive();
+      const projectId = project.activeProject?.id;
+      if (projectId === undefined) {
+        throw new Error("Expected an active project.");
+      }
+      return window.piDeck.chat.deleteAllSessions({ projectId });
+    });
+
+    expect(result).toEqual({
+      deleted: true,
+      deletedCount: 0,
+      skippedCount: 2,
+      deletedSessionFiles: [],
+    });
+    // These stable bytes prove bulk delete neither removes the recovered
+    // reservation nor races a nonexistent pre-crash child into rewriting it.
+    expect(fs.readFileSync(canonicalSourceFile, "utf8")).toContain(
+      "fork-journal-source",
+    );
+    expect(fs.readFileSync(canonicalTargetFile, "utf8")).toContain(
+      "fork-journal-target",
+    );
+    expect(
+      fs.readFileSync(path.join(home, "failed-fork-cleanup.json"), "utf8"),
+    ).toContain(canonicalTargetFile);
+  } finally {
+    await app?.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("saved session deletion control is reachable and activated with the keyboard", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-delete-"));
   const projectCwd = path.join(root, "project");

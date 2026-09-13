@@ -6203,6 +6203,7 @@ async function deleteAllChatSessions(
         continue;
       }
       const canonicalSessionFile = validation.sessionFile;
+      await assertForkCleanupTargetAvailable(canonicalSessionFile, "deleted");
       if (chatSessionIsBusy(canonicalSessionFile)) {
         skippedCount += 1;
         continue;
