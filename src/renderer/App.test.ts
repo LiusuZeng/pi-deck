@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { buildActivityInbox } from "./activityInbox.js";
-import { emptyOverlays } from "./sessionState.js";
+import { emptyOverlays, selectSidebarIndicator } from "./sessionState.js";
 import { defaultAgentWorkflowDefinition } from "./workflows/agentWorkflowDefinition.js";
 import { __rendererTestHooks, AutolinkedText, MarkdownView } from "./App.js";
 
@@ -939,6 +939,99 @@ describe("worker exit lifecycle", () => {
     expect(next.baseState).toBe("error");
     expect(runtimeErrorDiagnostics(next)).toHaveLength(1);
   });
+
+  it("keeps an unplanned-exit response race terminal across detail, sidebar, and Work", () => {
+    let session = __rendererTestHooks.reduceRuntimeEvent(
+      baseSession() as any,
+      {
+        type: "extension_ui_request",
+        runtimeId: "session-1",
+        id: "approval-1",
+        method: "confirm",
+        title: "Approve worker action",
+      } as any,
+    );
+    expect(session.pendingExtensionUiRequests).toMatchObject([
+      { id: "approval-1" },
+    ]);
+    expect(selectSidebarIndicator(session).kind).toBe("needsInput");
+
+    // The renderer may receive a successful response write after main has
+    // already forwarded the terminal exit and revoked response ownership.
+    const exited = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "worker_exit",
+      runtimeId: "session-1",
+      code: 42,
+      signal: null,
+      intentional: false,
+    } as any);
+    session = __rendererTestHooks.reduceRuntimeEvent(exited, {
+      type: "extension_ui_response_sent",
+      runtimeId: "session-1",
+      requestId: "approval-1",
+    } as any);
+    const source = __rendererTestHooks.activitySourceSessions([session], {
+      "workspace-a": "Workspace A",
+    })[0]!;
+    const inbox = buildActivityInbox([source]);
+
+    expect(session).toBe(exited);
+    expect(session).toMatchObject({
+      status: "error",
+      baseState: "error",
+      overlays: { needsUserInput: false },
+      pendingExtensionUiRequests: [],
+    });
+    expect(selectSidebarIndicator(session).kind).toBe("error");
+    expect(inbox.groups.needsAttention).toHaveLength(0);
+    expect(inbox.groups.failed).toHaveLength(1);
+    expect(runtimeErrorDiagnostics(session)).toHaveLength(1);
+  });
+
+  it("clears planned-exit extension input without changing its saved terminal state", () => {
+    let session = __rendererTestHooks.reduceRuntimeEvent(
+      {
+        ...baseSession(),
+        sessionFile: "/tmp/planned-worker-exit.jsonl",
+      } as any,
+      {
+        type: "extension_ui_request",
+        runtimeId: "session-1",
+        id: "approval-1",
+        method: "confirm",
+        title: "Approve planned worker action",
+      } as any,
+    );
+    const exited = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "worker_exit",
+      runtimeId: "session-1",
+      code: 0,
+      signal: null,
+      intentional: true,
+    } as any);
+    session = __rendererTestHooks.reduceRuntimeEvent(exited, {
+      type: "extension_ui_response_sent",
+      runtimeId: "session-1",
+      requestId: "approval-1",
+    } as any);
+    const source = __rendererTestHooks.activitySourceSessions([session], {
+      "workspace-a": "Workspace A",
+    })[0]!;
+    const inbox = buildActivityInbox([source]);
+
+    expect(session).toBe(exited);
+    expect(session).toMatchObject({
+      status: "idle",
+      baseState: "idle",
+      subtitle: "Saved · click to resume",
+      overlays: { needsUserInput: false },
+      pendingExtensionUiRequests: [],
+    });
+    expect(selectSidebarIndicator(session).kind).toBe("idle");
+    expect(inbox.groups.needsAttention).toHaveLength(0);
+    expect(inbox.groups.failed).toHaveLength(0);
+    expect(runtimeErrorDiagnostics(session)).toEqual([]);
+  });
 });
 
 describe("canonical occurrence Pi-session navigation", () => {
@@ -957,6 +1050,321 @@ describe("canonical occurrence Pi-session navigation", () => {
         sessionFile: "/tmp/completed-session.jsonl",
       } as any),
     ).toEqual({ sessionFile: "/tmp/completed-session.jsonl" });
+  });
+});
+
+describe("actionable session attention", () => {
+  it("keeps failed tool activity visible without promoting the session to Needs attention", () => {
+    let session = __rendererTestHooks.reduceRuntimeEvent(
+      baseSession() as any,
+      { type: "agent_start", runtimeId: "session-1" } as any,
+    );
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "tool_execution_start",
+      runtimeId: "session-1",
+      toolCallId: "tool-failed",
+      toolName: "bash",
+      args: { command: "exit 1" },
+    } as any);
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "tool_execution_end",
+      runtimeId: "session-1",
+      toolCallId: "tool-failed",
+      toolName: "bash",
+      status: "completed",
+      exitCode: 1,
+      output: "command failed",
+    } as any);
+
+    expect(session).toMatchObject({
+      status: "working",
+      baseState: "working",
+      overlays: { needsUserInput: false },
+    });
+    expect(selectSidebarIndicator(session).kind).toBe("working");
+    expect(
+      __rendererTestHooks.timelinePresentationItems(session.timeline)[0],
+    ).toMatchObject({ state: "error" });
+    expect(__rendererTestHooks.formatAgentActivityState("error")).toBe(
+      "failed",
+    );
+
+    const source = __rendererTestHooks.activitySourceSessions([session], {
+      "workspace-a": "Workspace A",
+    })[0]!;
+    expect(buildActivityInbox([source]).groups.inProgress).toHaveLength(1);
+    expect(buildActivityInbox([source]).groups.needsAttention).toHaveLength(0);
+
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "extension_ui_request",
+      runtimeId: "session-1",
+      id: "approval-1",
+      method: "confirm",
+      title: "Approve command retry",
+    } as any);
+    const waitingSource = __rendererTestHooks.activitySourceSessions(
+      [session],
+      {
+        "workspace-a": "Workspace A",
+      },
+    )[0]!;
+    expect(selectSidebarIndicator(session).kind).toBe("needsInput");
+    expect(
+      buildActivityInbox([waitingSource]).groups.needsAttention,
+    ).toHaveLength(1);
+
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "extension_ui_response_sent",
+      runtimeId: "session-1",
+      requestId: "approval-1",
+    } as any);
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "agent_end",
+      runtimeId: "session-1",
+      messages: [productionAssistantMessage("stop")],
+      willRetry: false,
+    } as any);
+    const resolvedSource = __rendererTestHooks.activitySourceSessions(
+      [session],
+      {
+        "workspace-a": "Workspace A",
+      },
+    )[0]!;
+    const resolvedInbox = buildActivityInbox([resolvedSource]);
+    expect(resolvedInbox.groups.needsAttention).toHaveLength(0);
+    expect(resolvedInbox.groups.completed).toHaveLength(1);
+    expect(
+      __rendererTestHooks.timelinePresentationItems(session.timeline)[0],
+    ).toMatchObject({ state: "error" });
+  });
+
+  it("restores terminal provider failure after its pending extension dialog clears", () => {
+    const errorMessage = "Provider failed after requesting approval.";
+    const failedAssistant = productionAssistantMessage("error", errorMessage);
+    let session = __rendererTestHooks.reduceRuntimeEvent(
+      baseSession() as any,
+      {
+        type: "extension_ui_request",
+        runtimeId: "session-1",
+        id: "approval-1",
+        method: "confirm",
+        title: "Approve command retry",
+      } as any,
+    );
+    expect(session.pendingExtensionUiRequests).toMatchObject([
+      { id: "approval-1", method: "confirm" },
+    ]);
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "message_update",
+      runtimeId: "session-1",
+      message: failedAssistant,
+      assistantMessageEvent: {
+        type: "error",
+        reason: "error",
+        error: failedAssistant,
+      },
+    } as any);
+    expect(session.status).toBe("waiting");
+    expect(session.baseState).toBe("waitingForInput");
+    expect(session.overlays.needsUserInput).toBe(true);
+    expect(selectSidebarIndicator(session).kind).toBe("needsInput");
+    expect(runtimeErrorDiagnostics(session)).toMatchObject([
+      { content: errorMessage },
+    ]);
+
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "agent_end",
+      runtimeId: "session-1",
+      messages: [failedAssistant],
+      willRetry: false,
+    } as any);
+    const waitingSource = __rendererTestHooks.activitySourceSessions(
+      [session],
+      {
+        "workspace-a": "Workspace A",
+      },
+    )[0]!;
+
+    expect(session.status).toBe("waiting");
+    expect(session.baseState).toBe("waitingForInput");
+    expect(session.overlays).toMatchObject({
+      needsUserInput: true,
+      streaming: false,
+      toolRunning: false,
+    });
+    expect(session.pendingExtensionUiRequests).toMatchObject([
+      { id: "approval-1", method: "confirm" },
+    ]);
+    expect(selectSidebarIndicator(session).kind).toBe("needsInput");
+    expect(
+      buildActivityInbox([waitingSource]).groups.needsAttention,
+    ).toHaveLength(1);
+    expect(buildActivityInbox([waitingSource]).groups.failed).toHaveLength(0);
+    expect(runtimeErrorDiagnostics(session)).toMatchObject([
+      { content: errorMessage },
+    ]);
+
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "extension_ui_response_sent",
+      runtimeId: "session-1",
+      requestId: "approval-1",
+    } as any);
+    const failedSource = __rendererTestHooks.activitySourceSessions([session], {
+      "workspace-a": "Workspace A",
+    })[0]!;
+    expect(session.status).toBe("error");
+    expect(session.baseState).toBe("error");
+    expect(session.overlays.needsUserInput).toBe(false);
+    expect(selectSidebarIndicator(session).kind).toBe("error");
+    expect(
+      buildActivityInbox([failedSource]).groups.needsAttention,
+    ).toHaveLength(0);
+    expect(buildActivityInbox([failedSource]).groups.failed).toHaveLength(1);
+    expect(runtimeErrorDiagnostics(session)).toMatchObject([
+      { content: errorMessage },
+    ]);
+  });
+
+  it("keeps a failed extension response Needs attention while its dialog remains pending", () => {
+    let session = __rendererTestHooks.reduceRuntimeEvent(
+      baseSession() as any,
+      {
+        type: "extension_ui_request",
+        runtimeId: "session-1",
+        id: "approval-1",
+        method: "confirm",
+        title: "Approve command retry",
+      } as any,
+    );
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "extension_ui_response_failed",
+      runtimeId: "session-1",
+      requestId: "approval-1",
+      message: "Extension response transport failed.",
+    } as any);
+    const source = __rendererTestHooks.activitySourceSessions([session], {
+      "workspace-a": "Workspace A",
+    })[0]!;
+
+    expect(session.status).toBe("waiting");
+    expect(session.baseState).toBe("waitingForInput");
+    expect(selectSidebarIndicator(session).kind).toBe("needsInput");
+    expect(buildActivityInbox([source]).groups.needsAttention).toHaveLength(1);
+    expect(runtimeErrorDiagnostics(session)).toMatchObject([
+      { content: "Extension response transport failed." },
+    ]);
+  });
+
+  it("keeps production extension input actionable through tool and retry failure until acknowledgement", () => {
+    const finalError = "Retry failed after approval was requested.";
+    let session = baseSession() as any;
+    const events = [
+      {
+        type: "extension_ui_request",
+        runtimeId: "session-1",
+        id: "approval-1",
+        method: "confirm",
+        title: "Approve retry",
+      },
+      {
+        type: "tool_execution_start",
+        runtimeId: "session-1",
+        toolCallId: "tool-1",
+        toolName: "bash",
+      },
+      {
+        type: "tool_execution_update",
+        runtimeId: "session-1",
+        toolCallId: "tool-1",
+        output: "checking",
+      },
+      {
+        type: "tool_execution_end",
+        runtimeId: "session-1",
+        toolCallId: "tool-1",
+        output: "done",
+      },
+      { type: "agent_end", runtimeId: "session-1", willRetry: true },
+      {
+        type: "auto_retry_start",
+        runtimeId: "session-1",
+        attempt: 1,
+        maxAttempts: 1,
+      },
+      {
+        type: "auto_retry_end",
+        runtimeId: "session-1",
+        success: false,
+        attempt: 1,
+        finalError,
+      },
+    ];
+
+    for (const event of events) {
+      session = __rendererTestHooks.reduceRuntimeEvent(session, event as any);
+      expect(session).toMatchObject({
+        status: "waiting",
+        baseState: "waitingForInput",
+        overlays: { needsUserInput: true },
+        pendingExtensionUiRequests: [{ id: "approval-1" }],
+      });
+    }
+
+    expect(session.overlays).toMatchObject({
+      toolRunning: false,
+      retrying: false,
+    });
+    expect(session.providerErrorObserved).toBe(true);
+    expect(runtimeErrorDiagnostics(session)).toMatchObject([
+      { content: finalError },
+    ]);
+    expect(selectSidebarIndicator(session).kind).toBe("needsInput");
+    const waitingSource = __rendererTestHooks.activitySourceSessions(
+      [session],
+      {
+        "workspace-a": "Workspace A",
+      },
+    )[0]!;
+    expect(
+      buildActivityInbox([waitingSource]).groups.needsAttention,
+    ).toHaveLength(1);
+
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "extension_ui_response_sent",
+      runtimeId: "session-1",
+      requestId: "approval-1",
+    } as any);
+
+    expect(session).toMatchObject({
+      status: "error",
+      baseState: "error",
+      overlays: { needsUserInput: false },
+      pendingExtensionUiRequests: [],
+    });
+    expect(selectSidebarIndicator(session).kind).toBe("error");
+    const failedSource = __rendererTestHooks.activitySourceSessions([session], {
+      "workspace-a": "Workspace A",
+    })[0]!;
+    expect(buildActivityInbox([failedSource]).groups.failed).toHaveLength(1);
+  });
+
+  it("keeps a terminal provider failure Failed without an actionable request", () => {
+    const failed = __rendererTestHooks.reduceRuntimeEvent(
+      baseSession() as any,
+      {
+        type: "agent_end",
+        runtimeId: "session-1",
+        messages: [productionAssistantMessage("error", "Provider failed.")],
+        willRetry: false,
+      } as any,
+    );
+    const source = __rendererTestHooks.activitySourceSessions([failed], {
+      "workspace-a": "Workspace A",
+    })[0]!;
+
+    expect(selectSidebarIndicator(failed).kind).toBe("error");
+    expect(buildActivityInbox([source]).groups.failed).toHaveLength(1);
+    expect(buildActivityInbox([source]).groups.needsAttention).toHaveLength(0);
   });
 });
 
@@ -2250,6 +2658,10 @@ describe("renderer session actions", () => {
       id: "saved-runtime",
       projectId: "/projects/a",
       sessionFile: "/sessions/saved.jsonl",
+      pendingExtensionUiRequests: [
+        { id: "approval-1", method: "confirm", title: "Approve close" },
+      ],
+      overlays: { ...emptyOverlays, needsUserInput: true },
     };
     const savedRow = {
       ...baseSession(),
@@ -2271,7 +2683,12 @@ describe("renderer session actions", () => {
 
     expect(
       afterClose.find((session: any) => session.id === savedRuntime.id),
-    ).toMatchObject({ runtimeBacked: false, resumeBacked: true });
+    ).toMatchObject({
+      runtimeBacked: false,
+      resumeBacked: true,
+      pendingExtensionUiRequests: [],
+      overlays: { needsUserInput: false },
+    });
     expect(
       afterClose.find((session: any) => session.id === "background-runtime"),
     ).toMatchObject({ status: "working" });

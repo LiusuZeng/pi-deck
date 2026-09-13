@@ -61,6 +61,7 @@ import {
 } from "./markdown.js";
 import {
   emptyOverlays,
+  isToolExecutionFailure,
   selectSidebarIndicator,
   type BaseSessionState,
   type SessionOverlays,
@@ -6731,6 +6732,8 @@ function closeRuntimeInSessionState(
         resumeBacked: true,
         status: "idle" as const,
         baseState: "idle" as const,
+        pendingExtensionUiRequests: [],
+        overlays: { ...session.overlays, needsUserInput: false },
         subtitle: "Saved · click to resume",
       },
     ];
@@ -7786,6 +7789,18 @@ function reduceRuntimeEvent(
   session: SessionViewModel,
   event: ChatRuntimeEvent,
 ): SessionViewModel {
+  // A dialog remains actionable until Pi acknowledges its response or the
+  // request times out. Apply this projection after every event reduction so
+  // concurrent tool/retry/terminal events cannot mask pending input.
+  return prioritizePendingExtensionUiRequest(
+    reduceRuntimeEventUnprioritized(session, event),
+  );
+}
+
+function reduceRuntimeEventUnprioritized(
+  session: SessionViewModel,
+  event: ChatRuntimeEvent,
+): SessionViewModel {
   switch (event.type) {
     case "agent_start":
       return {
@@ -7939,25 +7954,41 @@ function reduceRuntimeEvent(
         : nextSession;
     }
     case "extension_ui_request":
-      return reduceExtensionUiRequestEvent(session, event);
+      return session.runtimeBacked
+        ? reduceExtensionUiRequestEvent(session, event)
+        : session;
     case "extension_ui_response_sent":
     case "extension_ui_request_timeout":
-      return clearExtensionUiRequest(session, getString(event, "requestId"));
-    case "extension_ui_response_failed":
-      return appendDiagnostic(
+      // Main has already detached this terminal runtime. A late write
+      // acknowledgement is not permission to revive its prior working state.
+      return session.runtimeBacked
+        ? clearExtensionUiRequest(session, getString(event, "requestId"))
+        : session;
+    case "extension_ui_response_failed": {
+      if (!session.runtimeBacked) {
+        return session;
+      }
+      const stillWaitingForInput =
+        (session.pendingExtensionUiRequests?.length ?? 0) > 0;
+      // The response write failed, so its request remains actionable. Keep the
+      // detail banner aligned with the sidebar and Work attention state.
+      return appendRuntimeErrorDiagnostic(
         {
           ...session,
-          status: "error",
-          baseState: "error",
-          subtitle: "Error · extension UI response was not delivered",
+          status: stillWaitingForInput ? "waiting" : "error",
+          baseState: stillWaitingForInput ? "waitingForInput" : "error",
+          overlays: {
+            ...session.overlays,
+            needsUserInput: stillWaitingForInput,
+          },
+          subtitle: stillWaitingForInput
+            ? "Waiting · extension input required"
+            : "Error · extension UI response was not delivered",
         },
-        {
-          tone: "error",
-          content:
-            getString(event, "message") ??
-            "Pi Deck could not write the extension UI response to Pi.",
-        },
+        getString(event, "message") ??
+          "Pi Deck could not write the extension UI response to Pi.",
       );
+    }
     case "agent_end": {
       const status = getString(event, "status");
       const willRetry = getBoolean(event, "willRetry") === true;
@@ -7969,7 +8000,12 @@ function reduceRuntimeEvent(
       const endedWithError =
         !willRetry &&
         (hasRuntimeEventError(event) || session.providerErrorObserved === true);
-      const stillWaitingForInput = session.overlays.needsUserInput;
+      // A dialog is still actionable until Pi acknowledges its response or it
+      // times out. Its queue, rather than a potentially stale overlay, is the
+      // source of truth and takes precedence over a terminal error so every
+      // surface continues to route the user to the required response.
+      const stillWaitingForInput =
+        (session.pendingExtensionUiRequests?.length ?? 0) > 0;
       const finalEventUsage = getMessageUsageFromEvent(event);
       const finalUsageMessageId =
         getMessageUpdateId(event) ??
@@ -8039,29 +8075,31 @@ function reduceRuntimeEvent(
               ),
             }
           : {}),
-        status: endedWithError
-          ? "error"
-          : stillWaitingForInput
-            ? "waiting"
+        status: stillWaitingForInput
+          ? "waiting"
+          : endedWithError
+            ? "error"
             : "idle",
-        baseState: endedWithError
-          ? "error"
-          : stillWaitingForInput
-            ? "waitingForInput"
+        baseState: stillWaitingForInput
+          ? "waitingForInput"
+          : endedWithError
+            ? "error"
             : "idle",
-        providerErrorObserved: false,
+        // Preserve a terminal provider failure behind an actionable dialog so
+        // clearing the final request restores Failed rather than working/idle.
+        providerErrorObserved: endedWithError,
         ...(endedWithError ? {} : { lastError: undefined }),
         overlays: {
           ...session.overlays,
           streaming: false,
           toolRunning: false,
           retrying: false,
-          needsUserInput: stillWaitingForInput && !endedWithError,
+          needsUserInput: stillWaitingForInput,
         },
-        subtitle: endedWithError
-          ? "Error · backend stream failed"
-          : stillWaitingForInput
-            ? "Waiting · extension input required"
+        subtitle: stillWaitingForInput
+          ? "Waiting · extension input required"
+          : endedWithError
+            ? "Error · backend stream failed"
             : status === "aborted"
               ? "Idle · backend stream aborted"
               : "Idle · backend stream complete",
@@ -8093,9 +8131,10 @@ function reduceRuntimeEvent(
       // SIGTERM is expected when Pi Deck detaches a completed session. Shell
       // launchers may expose it as code 143; preserve its durable file as a
       // resumable row rather than presenting a backend failure.
+      const detachedSession = clearPendingExtensionUiRequests(session);
       if (intentional && session.sessionFile !== undefined) {
         return {
-          ...session,
+          ...detachedSession,
           status: "idle",
           baseState: "idle",
           awaitingAgentEnd: false,
@@ -8106,18 +8145,21 @@ function reduceRuntimeEvent(
       }
       // An intentional close already detached this runtime and preserved the
       // saved-session row. Its late process-exit event must not turn that row
-      // into an error.
+      // into an error, but it must still discard any unanswerable dialog.
       if (!session.runtimeBacked && session.resumeBacked === true) {
-        return session;
+        return detachedSession;
       }
       return appendDiagnostic(
         {
-          ...session,
+          ...detachedSession,
+          // Main detaches response ownership on every worker exit, so clear
+          // queued dialogs before the pending-input priority projection runs.
           status: "error",
           baseState: "error",
           awaitingAgentEnd: false,
           runtimeBacked: false,
           resumeBacked: session.sessionFile !== undefined,
+          overlays: detachedSession.overlays,
           subtitle: session.sessionFile
             ? "Error · worker exited; click to resume saved session"
             : "Error · backend worker exited",
@@ -8131,6 +8173,32 @@ function reduceRuntimeEvent(
     default:
       return session;
   }
+}
+
+function clearPendingExtensionUiRequests(
+  session: SessionViewModel,
+): SessionViewModel {
+  return {
+    ...session,
+    pendingExtensionUiRequests: [],
+    overlays: { ...session.overlays, needsUserInput: false },
+  };
+}
+
+function prioritizePendingExtensionUiRequest(
+  session: SessionViewModel,
+): SessionViewModel {
+  if ((session.pendingExtensionUiRequests?.length ?? 0) === 0) {
+    return session;
+  }
+
+  return {
+    ...session,
+    status: "waiting",
+    baseState: "waitingForInput",
+    overlays: { ...session.overlays, needsUserInput: true },
+    subtitle: "Waiting · extension input required",
+  };
 }
 
 function reduceExtensionUiRequestEvent(
@@ -8213,15 +8281,26 @@ function clearExtensionUiRequest(
       ? pending.slice(1)
       : pending.filter((request) => request.id !== requestId);
   const stillWaiting = pendingExtensionUiRequests.length > 0;
+  const terminalProviderFailure = session.providerErrorObserved === true;
   return {
     ...session,
-    status: stillWaiting ? "waiting" : "working",
-    baseState: stillWaiting ? "waitingForInput" : "working",
+    status: stillWaiting
+      ? "waiting"
+      : terminalProviderFailure
+        ? "error"
+        : "working",
+    baseState: stillWaiting
+      ? "waitingForInput"
+      : terminalProviderFailure
+        ? "error"
+        : "working",
     pendingExtensionUiRequests,
     overlays: { ...session.overlays, needsUserInput: stillWaiting },
     subtitle: stillWaiting
       ? "Waiting · extension input required"
-      : `Working · ${backendLabel(session)} stream`,
+      : terminalProviderFailure
+        ? "Error · backend stream failed"
+        : `Working · ${backendLabel(session)} stream`,
     updatedAt: "Now",
     updatedAtMs: Date.now(),
   };
@@ -8266,7 +8345,7 @@ function reduceToolExecutionEvent(
 ): SessionViewModel {
   const status =
     event.type === "tool_execution_end"
-      ? getBoolean(event, "isError") || getString(event, "status") === "error"
+      ? isToolExecutionFailure(event)
         ? "error"
         : "success"
       : "running";
@@ -8678,6 +8757,10 @@ function reduceMessageUpdate(
 
   const errorMessage = getRuntimeEventErrorMessage(event);
   const isErrorUpdate = hasRuntimeEventError(event);
+  // An actionable dialog takes precedence over all stream updates, including
+  // the provider error update that precedes a production agent_end.
+  const stillWaitingForInput =
+    (session.pendingExtensionUiRequests?.length ?? 0) > 0;
   const nextSession: SessionViewModel = {
     ...session,
     ...(usageByMessageId !== undefined ? { usageByMessageId } : {}),
@@ -8686,20 +8769,32 @@ function reduceMessageUpdate(
       isErrorUpdate || session.providerErrorObserved === true,
     // An assistant message's `done` only completes that message. The agent
     // may still be running tools or emit an authoritative agent_end next.
-    status: isErrorUpdate
-      ? "error"
-      : session.status === "aborting"
-        ? "aborting"
+    status: stillWaitingForInput
+      ? "waiting"
+      : isErrorUpdate
+        ? "error"
+        : session.status === "aborting"
+          ? "aborting"
+          : "working",
+    baseState: stillWaitingForInput
+      ? "waitingForInput"
+      : isErrorUpdate
+        ? "error"
         : "working",
-    baseState: isErrorUpdate ? "error" : "working",
-    overlays: { ...session.overlays, streaming: !done && !isErrorUpdate },
-    subtitle: isErrorUpdate
-      ? "Error · backend stream failed"
-      : session.status === "aborting"
-        ? "Aborting · waiting for Pi confirmation"
-        : done
-          ? "Working · waiting for Pi completion"
-          : `Working · ${backendLabel(session)} stream`,
+    overlays: {
+      ...session.overlays,
+      streaming: !done && !isErrorUpdate,
+      needsUserInput: stillWaitingForInput,
+    },
+    subtitle: stillWaitingForInput
+      ? "Waiting · extension input required"
+      : isErrorUpdate
+        ? "Error · backend stream failed"
+        : session.status === "aborting"
+          ? "Aborting · waiting for Pi confirmation"
+          : done
+            ? "Working · waiting for Pi completion"
+            : `Working · ${backendLabel(session)} stream`,
     ...(isErrorUpdate ? { workingStartedAtMs: undefined } : {}),
     awaitingAgentEnd: done && !isErrorUpdate,
     lastRuntimeEventLabel: isErrorUpdate
@@ -9162,14 +9257,28 @@ function appendRuntimeErrorDiagnostic(
     mostRecentTimelineItem.tone === "error" &&
     mostRecentTimelineItem.content === content
   ) {
-    return {
-      ...session,
-      status: "error",
-      baseState: "error",
-      lastError: content,
-    };
+    return { ...session, lastError: content };
   }
-  return appendDiagnostic(session, { tone: "error", content });
+
+  // Callers have already reduced the runtime event's state. Unlike a local UI
+  // failure, recording its diagnostic must not reclassify a still-actionable
+  // extension request from waiting back to error.
+  return {
+    ...session,
+    lastError: content,
+    updatedAt: "Now",
+    updatedAtMs: Date.now(),
+    timeline: [
+      ...session.timeline,
+      {
+        id: createId("diagnostic"),
+        kind: "diagnostic",
+        tone: "error",
+        content,
+        createdAt: formatTime(),
+      },
+    ],
+  };
 }
 
 function SessionSidebar(props: {
@@ -12136,7 +12245,7 @@ function formatAgentActivityState(state: AgentActivityState): string {
     case "running":
       return "working";
     case "error":
-      return "needs attention";
+      return "failed";
     case "completed":
       return "completed";
   }
@@ -13854,6 +13963,7 @@ export const __rendererTestHooks = {
   getTimelineScrollMarker,
   activityMilestones,
   activityMilestoneLabel,
+  formatAgentActivityState,
   shouldDefaultOpenActivityGroup,
   activitySemanticLabel,
   activityStepLabel,

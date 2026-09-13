@@ -3021,7 +3021,7 @@ test("failed tool activity remains conspicuous and inspectable", async () => {
 
     const activityGroup = page.locator(".agent-activity-group").first();
     await expect(activityGroup.locator(":scope > summary")).toContainText(
-      "needs attention",
+      "failed",
     );
     await expect(activityGroup).toHaveAttribute("open", "");
     const failedMilestone = activityGroup
@@ -3058,6 +3058,20 @@ test("failed tool activity remains conspicuous and inspectable", async () => {
         .locator(".tool-card pre")
         .filter({ hasText: "fake tool failed" }),
     ).toBeVisible();
+    await expect(page.locator(".assistant-message").last()).toContainText(
+      "Fake response to: show a failed tool",
+    );
+
+    await page.getByRole("button", { name: /^All Work/ }).click();
+    const completedRow = page
+      .locator(".activity-inbox-row")
+      .filter({ hasText: "show a failed tool" });
+    await expect(completedRow).toHaveClass(/activity-inbox-row--completed/);
+    await expect(
+      page
+        .locator(".activity-inbox-row--needsAttention")
+        .filter({ hasText: "show a failed tool" }),
+    ).toHaveCount(0);
   } finally {
     await app.close();
     fs.rmSync(root, { recursive: true, force: true });
@@ -3914,6 +3928,67 @@ test("extension UI confirm request completes through renderer, IPC, and fake Pi"
       page.getByText(/Fake response to: confirm extension request/),
     ).toBeVisible();
     await expect(page.getByText("Needs input", { exact: true })).toHaveCount(0);
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("unplanned worker exit clears stale extension UI and marks the session Failed", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-extension-ui-exit-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+  const prompt = "request extension input then exit";
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: [
+        "--prompt-scenario",
+        "extension-ui",
+        "--exit-after-extension-ui-request",
+        "--stream-delay-ms",
+        "500",
+      ],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await enterSessionDetail(page);
+    await page.getByLabel("Prompt text").fill(prompt);
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(page.getByText("Fake confirm", { exact: true })).toBeVisible();
+
+    // Main detaches the worker after forwarding worker_exit. The renderer must
+    // not keep an extension card whose response would now be rejected.
+    await expect(page.getByText("Fake confirm", { exact: true })).toHaveCount(
+      0,
+    );
+    await expect(page.locator(".state-banner.error")).toContainText(
+      "error state",
+    );
+    await expect(
+      page
+        .getByRole("button", { name: `Session: ${prompt}` })
+        .getByRole("img", { name: "Error" }),
+    ).toBeVisible();
+
+    await page.getByRole("button", { name: /^All Work/ }).click();
+    await expectAllWorkLaunch(page);
+    const failedRow = page
+      .locator(".activity-inbox-row--failed")
+      .filter({ hasText: prompt });
+    await expect(failedRow).toContainText("Failed");
+    await expect(
+      page
+        .locator(".activity-inbox-row--needsAttention")
+        .filter({ hasText: prompt }),
+    ).toHaveCount(0);
   } finally {
     await app.close();
     fs.rmSync(root, { recursive: true, force: true });
@@ -5656,6 +5731,100 @@ test("real mode surfaces asynchronous provider errors with fake Pi", async () =>
   }
 });
 
+test("responding to extension input after a provider error restores Failed diagnostics", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-extension-ui-error-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: [
+        "--prompt-scenario",
+        "extension-ui-error",
+        "--stream-delay-ms",
+        "10",
+      ],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await enterSessionDetail(page);
+    const prompt = "request approval before provider failure";
+    await page.getByLabel("Prompt text").fill(prompt);
+    await page.getByRole("button", { name: "Send" }).click();
+
+    // Detail keeps the actionable card even though the terminal event failed.
+    await expect(page.getByText("Fake confirm", { exact: true })).toBeVisible();
+    await expect(page.locator(".state-banner.waiting")).toContainText(
+      "waiting for user input",
+    );
+    await expect(
+      page.getByText("Fake provider failed after requesting extension input."),
+    ).toBeVisible();
+
+    // Sidebar and Work use the same actionable-input priority.
+    await expect(
+      page
+        .getByRole("button", { name: `Session: ${prompt}` })
+        .getByRole("img", { name: "Needs input" }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: /^All Work/ }).click();
+    await expectAllWorkLaunch(page);
+    const workRow = page
+      .locator(".activity-inbox-row--needsAttention")
+      .filter({ hasText: prompt });
+    await expect(workRow).toHaveCount(1);
+    await expect(workRow).toContainText("Needs attention");
+
+    await workRow.click();
+    await expect(page.getByText("Fake confirm", { exact: true })).toBeVisible();
+    await expect(page.locator(".state-banner.waiting")).toContainText(
+      "waiting for user input",
+    );
+
+    // The fake retains its pending dialog after its production-shaped terminal
+    // error, so delivery clears the final request without manufacturing a
+    // completion. The terminal failure and its diagnostic must resurface.
+    await page.getByRole("button", { name: "Confirm", exact: true }).click();
+    await expect(
+      page.getByText("Extension UI response delivered to Pi."),
+    ).toBeVisible();
+    await expect(page.getByText("Fake confirm", { exact: true })).toHaveCount(
+      0,
+    );
+    await expect(page.locator(".state-banner.error")).toContainText(
+      "error state",
+    );
+    await expect(
+      page.getByText("Fake provider failed after requesting extension input."),
+    ).toBeVisible();
+    await expect(page.getByText("Agent is working…")).toHaveCount(0);
+    await expect(
+      page
+        .getByRole("button", { name: `Session: ${prompt}` })
+        .getByRole("img", { name: "Error" }),
+    ).toBeVisible();
+
+    await page.getByRole("button", { name: /^All Work/ }).click();
+    await expectAllWorkLaunch(page);
+    const failedRow = page
+      .locator(".activity-inbox-row--failed")
+      .filter({ hasText: prompt });
+    await expect(failedRow).toHaveCount(1);
+    await expect(failedRow).toContainText("Failed");
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("real mode reconciles a working session when completion event is missed", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-reconcile-"));
   const projectCwd = path.join(root, "project");
@@ -6708,7 +6877,7 @@ test.describe("Unified Work", () => {
         userDataDir,
         fakePiArgs: [
           "--prompt-scenario",
-          "extension-ui",
+          "tool-error-extension-ui",
           "--extension-ui-auto-complete-timeout-ms",
           "120000",
         ],
@@ -6730,7 +6899,20 @@ test.describe("Unified Work", () => {
       await expect(
         page.getByText("Fake confirm", { exact: true }),
       ).toBeVisible();
+      await expect(
+        page
+          .locator(".agent-activity-group")
+          .first()
+          .locator(":scope > summary"),
+      ).toContainText("failed");
+      await expect(
+        page
+          .getByRole("button", { name: `Session: ${prompt}` })
+          .getByRole("img", { name: "Needs input" }),
+      ).toBeVisible();
 
+      // The failed tool remains in detail, but only the pending extension
+      // request places this row in Needs attention.
       // All Work retains its Needs attention filter and restores the opened row.
       await page.getByRole("button", { name: /^All Work/ }).click();
       await expectAllWorkLaunch(page);

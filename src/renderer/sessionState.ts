@@ -49,6 +49,10 @@ export interface ReducedSessionState extends SidebarSessionState {
   pendingExtensionUiQueue: PendingExtensionUiRequestState[];
   toolCards: Record<string, ToolExecutionCardState>;
   diagnostics: string[];
+  /** A provider error was observed and has not been superseded by a retry. */
+  terminalProviderErrorObserved: boolean;
+  /** Main has detached the worker, so extension UI responses cannot be delivered. */
+  runtimeDetached: boolean;
 }
 
 export type SidebarIndicatorKind =
@@ -90,6 +94,8 @@ export function createInitialReducedSessionState(
     pendingExtensionUiQueue: patch.pendingExtensionUiQueue ?? [],
     toolCards: patch.toolCards ?? {},
     diagnostics: patch.diagnostics ?? [],
+    terminalProviderErrorObserved: patch.terminalProviderErrorObserved ?? false,
+    runtimeDetached: patch.runtimeDetached ?? false,
   };
 }
 
@@ -105,11 +111,24 @@ export function reduceSessionRuntimeEvent(
   state: ReducedSessionState,
   event: RuntimeEventLike,
 ): ReducedSessionState {
+  // Pending extension dialogs are the source of truth for actionable input.
+  // Project every event through this priority so tool/retry/end events can
+  // update their own overlays without hiding the request.
+  return prioritizePendingExtensionUi(
+    reduceSessionRuntimeEventUnprioritized(state, event),
+  );
+}
+
+function reduceSessionRuntimeEventUnprioritized(
+  state: ReducedSessionState,
+  event: RuntimeEventLike,
+): ReducedSessionState {
   switch (event.type) {
     case "agent_start":
       return {
         ...state,
         baseState: "working",
+        terminalProviderErrorObserved: false,
         overlays: { ...state.overlays, streaming: false },
       };
     case "message_update":
@@ -141,26 +160,48 @@ export function reduceSessionRuntimeEvent(
     case "compaction_end":
       return { ...state, overlays: { ...state.overlays, compacting: false } };
     case "auto_retry_start":
-      return { ...state, overlays: { ...state.overlays, retrying: true } };
-    case "auto_retry_end": {
-      const status = getString(event, "status");
       return {
         ...state,
-        baseState:
-          status === "failed" || status === "error" ? "error" : state.baseState,
-        overlays: { ...state.overlays, retrying: false },
+        baseState: "working",
+        terminalProviderErrorObserved: false,
+        overlays: { ...state.overlays, streaming: false, retrying: true },
+      };
+    case "auto_retry_end": {
+      // Pi sends { success, finalError }; status remains a compatibility
+      // fallback for older fixtures and recorded event logs.
+      const retryFailed =
+        getBoolean(event, "success") === false ||
+        getString(event, "status") === "failed" ||
+        getString(event, "status") === "error";
+      const retryError = getRuntimeEventErrorMessage(event);
+      return {
+        ...state,
+        baseState: retryFailed ? "error" : "working",
+        terminalProviderErrorObserved: retryFailed,
+        overlays: { ...state.overlays, streaming: false, retrying: false },
+        diagnostics: retryFailed
+          ? appendDiagnostic(
+              state.diagnostics,
+              retryError ?? "Pi automatic retry failed.",
+            )
+          : state.diagnostics,
       };
     }
     case "extension_ui_request":
-      return reduceExtensionUiRequestEvent(state, event);
+      return state.runtimeDetached
+        ? state
+        : reduceExtensionUiRequestEvent(state, event);
     case "extension_ui_response_sent":
     case "extension_ui_request_timeout":
-      return clearPendingExtensionUiRequest(
-        state,
-        getString(event, "requestId"),
-      );
+      return state.runtimeDetached
+        ? state
+        : clearPendingExtensionUiRequest(state, getExtensionUiRequestId(event));
+    case "extension_ui_response_failed":
+      return state.runtimeDetached
+        ? state
+        : reduceExtensionUiResponseFailedEvent(state, event);
     case "agent_end":
-      return reduceAgentEndEvent(state);
+      return reduceAgentEndEvent(state, event);
     case "diagnostic": {
       const message = getString(event, "message");
       return message
@@ -168,10 +209,33 @@ export function reduceSessionRuntimeEvent(
         : state;
     }
     case "worker_exit":
-      return { ...state, baseState: "error" };
+      // Main detaches response ownership for every terminal worker exit.
+      // Record that terminal boundary independently of the queue: a late
+      // response acknowledgement must not revive this detached state.
+      return {
+        ...state,
+        baseState: "error",
+        runtimeDetached: true,
+        pendingExtensionUiQueue: [],
+        overlays: { ...state.overlays, needsUserInput: false },
+      };
     default:
       return state;
   }
+}
+
+function prioritizePendingExtensionUi(
+  state: ReducedSessionState,
+): ReducedSessionState {
+  if (state.pendingExtensionUiQueue.length === 0) {
+    return state;
+  }
+
+  return {
+    ...state,
+    baseState: "waitingForInput",
+    overlays: { ...state.overlays, needsUserInput: true },
+  };
 }
 
 function reduceMessageUpdateEvent(
@@ -183,11 +247,34 @@ function reduceMessageUpdateEvent(
     "type",
   );
   const done = getBoolean(event, "done") ?? assistantEventType === "done";
+  const providerErrorObserved = hasRuntimeEventError(event);
+  // An extension dialog stays actionable until its response is acknowledged.
+  // Its queue is therefore the source of truth even when Pi reports the
+  // provider error that will subsequently end the agent turn.
+  const stillWaitingForInput = state.pendingExtensionUiQueue.length > 0;
 
   return {
     ...state,
-    baseState: done ? state.baseState : "working",
-    overlays: { ...state.overlays, streaming: !done },
+    baseState: stillWaitingForInput
+      ? "waitingForInput"
+      : providerErrorObserved
+        ? "error"
+        : done
+          ? state.baseState
+          : "working",
+    terminalProviderErrorObserved:
+      providerErrorObserved || state.terminalProviderErrorObserved,
+    overlays: {
+      ...state.overlays,
+      streaming: !done && !providerErrorObserved,
+      needsUserInput: stillWaitingForInput,
+    },
+    diagnostics: providerErrorObserved
+      ? appendDiagnostic(
+          state.diagnostics,
+          getRuntimeEventErrorMessage(event) ?? "Pi message update failed.",
+        )
+      : state.diagnostics,
   };
 }
 
@@ -267,7 +354,7 @@ function reduceToolEndEvent(
 
   const activeTools = state.activeTools.filter((id) => id !== toolCallId);
   const existing = state.toolCards[toolCallId];
-  const isError = getBoolean(event, "isError") ?? false;
+  const isError = isToolExecutionFailure(event);
 
   return {
     ...state,
@@ -288,6 +375,61 @@ function reduceToolEndEvent(
       }),
     },
   };
+}
+
+/**
+ * A tool failure is a diagnostic on the tool card, not a request for user
+ * input. Session attention is derived only from explicit pending input state.
+ */
+export function isToolExecutionFailure(event: RuntimeEventLike): boolean {
+  if (event.type !== "tool_execution_end") {
+    return false;
+  }
+
+  // Keep failure classification aligned with the locations rendered in the
+  // tool detail card: Pi adapters may place command status, errors, and exit
+  // codes directly on the event, in output, in result, or in result.output.
+  const result = getRecord(event, "result");
+  const partialResult = getRecord(event, "partialResult");
+  const output = getRecord(event, "output");
+  const resultOutput = getRecord(result, "output");
+  const partialResultOutput = getRecord(partialResult, "output");
+  return [
+    event,
+    output,
+    result,
+    partialResult,
+    resultOutput,
+    partialResultOutput,
+  ].some(
+    (record) => record !== undefined && isFailedToolExecutionRecord(record),
+  );
+}
+
+function isFailedToolExecutionRecord(record: RuntimeEventLike): boolean {
+  const status = getString(record, "status");
+  return (
+    getBoolean(record, "isError") === true ||
+    status === "error" ||
+    status === "failed" ||
+    hasNonZeroToolExitCode(record) ||
+    hasToolError(record)
+  );
+}
+
+function hasNonZeroToolExitCode(record: RuntimeEventLike): boolean {
+  return ["exitCode", "exit_code", "code"].some((key) => {
+    const value = getNumber(record, key);
+    return value !== undefined && value !== 0;
+  });
+}
+
+function hasToolError(record: RuntimeEventLike): boolean {
+  if (getString(record, "errorMessage")?.trim()) return true;
+  const error = record.error;
+  return (
+    error !== undefined && error !== null && error !== false && error !== ""
+  );
 }
 
 function createToolCard(input: {
@@ -315,18 +457,37 @@ function reduceExtensionUiRequestEvent(
     return state;
   }
 
-  const requestId = getString(event, "requestId") ?? `extension-${Date.now()}`;
+  // Pi sends request ids as `id`; main-process acknowledgements use
+  // `requestId`. Never invent an id, because that queue entry could not be
+  // cleared by Pi's acknowledgement.
+  const requestId = getExtensionUiRequestId(event);
+  if (requestId === undefined) {
+    return {
+      ...state,
+      diagnostics: appendDiagnostic(
+        state.diagnostics,
+        "Pi sent an extension UI dialog without an id, so Pi Deck cannot safely answer it.",
+      ),
+    };
+  }
   const timeout = getNumber(event, "timeout");
   const pendingRequest: PendingExtensionUiRequestState = {
     requestId,
     method,
     ...(timeout !== undefined ? { timeout } : {}),
   };
+  const pendingExtensionUiQueue = state.pendingExtensionUiQueue.some(
+    (request) => request.requestId === requestId,
+  )
+    ? state.pendingExtensionUiQueue.map((request) =>
+        request.requestId === requestId ? pendingRequest : request,
+      )
+    : [...state.pendingExtensionUiQueue, pendingRequest];
 
   return {
     ...state,
     baseState: "waitingForInput",
-    pendingExtensionUiQueue: [...state.pendingExtensionUiQueue, pendingRequest],
+    pendingExtensionUiQueue,
     overlays: { ...state.overlays, needsUserInput: true },
   };
 }
@@ -341,37 +502,209 @@ function clearPendingExtensionUiRequest(
       )
     : state.pendingExtensionUiQueue.slice(1);
 
+  const stillWaitingForInput = pendingExtensionUiQueue.length > 0;
   return {
     ...state,
-    baseState:
-      pendingExtensionUiQueue.length > 0 ? "waitingForInput" : "working",
+    baseState: stillWaitingForInput
+      ? "waitingForInput"
+      : state.terminalProviderErrorObserved
+        ? "error"
+        : "working",
     pendingExtensionUiQueue,
     overlays: {
       ...state.overlays,
-      needsUserInput: pendingExtensionUiQueue.length > 0,
+      needsUserInput: stillWaitingForInput,
     },
   };
 }
 
-function reduceAgentEndEvent(state: ReducedSessionState): ReducedSessionState {
+function reduceExtensionUiResponseFailedEvent(
+  state: ReducedSessionState,
+  event: RuntimeEventLike,
+): ReducedSessionState {
   const hasPendingExtensionUi = state.pendingExtensionUiQueue.length > 0;
+  const message =
+    getString(event, "message") ??
+    "Pi Deck could not write the extension UI response to Pi.";
   return {
     ...state,
-    baseState: hasPendingExtensionUi ? "waitingForInput" : "idle",
+    baseState: hasPendingExtensionUi ? "waitingForInput" : "error",
+    overlays: {
+      ...state.overlays,
+      needsUserInput: hasPendingExtensionUi,
+    },
+    diagnostics: [...state.diagnostics, message],
+  };
+}
+
+function reduceAgentEndEvent(
+  state: ReducedSessionState,
+  event: RuntimeEventLike,
+): ReducedSessionState {
+  // Pi emits this between retry attempts. It is not a terminal provider
+  // failure, even when the preceding message_update reported the retryable
+  // error. Keep this aligned with the production reducer's busy/retrying
+  // state and clear the transient terminal-error marker.
+  if (getBoolean(event, "willRetry") === true) {
+    return {
+      ...state,
+      baseState: "working",
+      terminalProviderErrorObserved: false,
+      activeTools: [],
+      overlays: {
+        ...state.overlays,
+        streaming: false,
+        toolRunning: false,
+        retrying: true,
+        needsUserInput: false,
+      },
+    };
+  }
+
+  const hasPendingExtensionUi = state.pendingExtensionUiQueue.length > 0;
+  const reportedProviderError = hasRuntimeEventError(event);
+  const terminalProviderErrorObserved =
+    reportedProviderError || state.terminalProviderErrorObserved;
+  let diagnostics = state.diagnostics;
+  if (reportedProviderError) {
+    diagnostics = appendDiagnostic(
+      diagnostics,
+      getRuntimeEventErrorMessage(event) ?? "Pi agent failed.",
+    );
+  }
+  if (hasPendingExtensionUi) {
+    diagnostics = appendDiagnostic(
+      diagnostics,
+      "agent_end while extension UI request is pending",
+    );
+  }
+
+  return {
+    ...state,
+    baseState: hasPendingExtensionUi
+      ? "waitingForInput"
+      : terminalProviderErrorObserved
+        ? "error"
+        : "idle",
+    terminalProviderErrorObserved,
     activeTools: [],
     overlays: {
       ...state.overlays,
       streaming: false,
       toolRunning: false,
+      retrying: false,
       needsUserInput: hasPendingExtensionUi,
     },
-    diagnostics: hasPendingExtensionUi
-      ? [
-          ...state.diagnostics,
-          "agent_end while extension UI request is pending",
-        ]
-      : state.diagnostics,
+    diagnostics,
   };
+}
+
+/** Keeps lightweight reducer error classification aligned with App's Pi events. */
+function hasRuntimeEventError(event: RuntimeEventLike): boolean {
+  const status = getString(event, "status");
+  const assistantEvent = getRecord(event, "assistantMessageEvent");
+  return (
+    status === "error" ||
+    status === "failed" ||
+    hasDirectRuntimeEventError(event) ||
+    isAssistantMessageEventFailure(assistantEvent) ||
+    isErrorAssistantMessage(getRecord(event, "message")) ||
+    isErrorAssistantMessage(getRecord(assistantEvent, "error")) ||
+    isErrorAssistantMessage(getFinalAssistantMessage(event))
+  );
+}
+
+function hasDirectRuntimeEventError(event: RuntimeEventLike): boolean {
+  return (
+    getString(event, "error") !== undefined ||
+    getString(event, "errorMessage") !== undefined ||
+    getString(event, "finalError") !== undefined ||
+    getString(event, "message") !== undefined ||
+    getErrorMessage(getRecord(event, "error")) !== undefined
+  );
+}
+
+function isAssistantMessageEventFailure(
+  assistantEvent: RuntimeEventLike | undefined,
+): boolean {
+  if (getString(assistantEvent, "type") !== "error") {
+    return false;
+  }
+  return (
+    getString(assistantEvent, "reason") !== "aborted" &&
+    getString(getRecord(assistantEvent, "error"), "stopReason") !== "aborted"
+  );
+}
+
+function isErrorAssistantMessage(
+  message: RuntimeEventLike | undefined,
+): boolean {
+  const stopReason = getString(message, "stopReason");
+  return (
+    stopReason !== "aborted" &&
+    (stopReason === "error" || getErrorMessage(message) !== undefined)
+  );
+}
+
+function getRuntimeEventErrorMessage(
+  event: RuntimeEventLike,
+): string | undefined {
+  return (
+    getString(event, "error") ??
+    getString(event, "errorMessage") ??
+    getString(event, "finalError") ??
+    getString(event, "message") ??
+    getErrorMessage(getRecord(event, "error")) ??
+    getErrorMessage(getRecord(event, "assistantMessageEvent")) ??
+    getErrorMessage(getRecord(event, "message")) ??
+    getErrorMessage(getFinalAssistantMessage(event))
+  );
+}
+
+function getErrorMessage(
+  record: RuntimeEventLike | undefined,
+): string | undefined {
+  return (
+    getString(record, "errorMessage") ??
+    getString(record, "error") ??
+    getString(getRecord(record, "error"), "errorMessage") ??
+    getString(getRecord(record, "error"), "message")
+  );
+}
+
+function getFinalAssistantMessage(
+  event: RuntimeEventLike,
+): RuntimeEventLike | undefined {
+  const messages = getArray(event, "messages");
+  if (messages === undefined) {
+    return undefined;
+  }
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (
+      message === null ||
+      typeof message !== "object" ||
+      Array.isArray(message)
+    ) {
+      continue;
+    }
+    const record = message as RuntimeEventLike;
+    if (getString(record, "role") === "assistant") {
+      return record;
+    }
+  }
+  return undefined;
+}
+
+function appendDiagnostic(diagnostics: string[], message: string): string[] {
+  return diagnostics.at(-1) === message
+    ? diagnostics
+    : [...diagnostics, message];
+}
+
+function getExtensionUiRequestId(event: RuntimeEventLike): string | undefined {
+  return getString(event, "id") ?? getString(event, "requestId");
 }
 
 function getToolCallId(event: RuntimeEventLike): string | undefined {

@@ -17,6 +17,8 @@ type PromptScenario =
   | "tool-heavy"
   | "tool-stream-scroll"
   | "tool-error"
+  | "tool-error-extension-ui"
+  | "extension-ui-error"
   | "queue"
   | "compaction"
   | "retry"
@@ -30,6 +32,7 @@ type PromptScenario =
 interface FakeOptions {
   malformedOnStart: boolean;
   exitAfterFirstCommand: boolean;
+  exitAfterExtensionUiRequest: boolean;
   stderrOnStart: boolean;
   streamDelayMs: number;
   ignoredCommands: Set<string>;
@@ -75,6 +78,7 @@ function parseOptions(argv: string[]): FakeOptions {
   const options: FakeOptions = {
     malformedOnStart: false,
     exitAfterFirstCommand: false,
+    exitAfterExtensionUiRequest: false,
     stderrOnStart: false,
     streamDelayMs: 5,
     ignoredCommands: new Set<string>(),
@@ -98,6 +102,8 @@ function parseOptions(argv: string[]): FakeOptions {
       options.malformedOnStart = true;
     } else if (arg === "--exit-after-first-command") {
       options.exitAfterFirstCommand = true;
+    } else if (arg === "--exit-after-extension-ui-request") {
+      options.exitAfterExtensionUiRequest = true;
     } else if (arg === "--stderr-on-start") {
       options.stderrOnStart = true;
     } else if (arg === "--stream-delay-ms") {
@@ -205,6 +211,8 @@ function isPromptScenario(value: string): value is PromptScenario {
     "tool-heavy",
     "tool-stream-scroll",
     "tool-error",
+    "tool-error-extension-ui",
+    "extension-ui-error",
     "queue",
     "compaction",
     "retry",
@@ -883,8 +891,61 @@ class FakeRpcServer {
 
     const isExtensionUiScenario =
       this.options.promptScenario === "extension-ui" ||
+      this.options.promptScenario === "tool-error-extension-ui" ||
+      this.options.promptScenario === "extension-ui-error" ||
       this.options.promptScenario === "all";
     const promptScenarioDelayMs = this.emitPromptScenarioEvents(assistantId);
+    if (this.options.promptScenario === "extension-ui-error") {
+      const id = "ext_fake_dialog_1";
+      // Retain the pending request after the terminal event so an E2E response
+      // exercises Pi Deck's acknowledgement path instead of being rejected by
+      // the fixture as no longer pending.
+      const timer = setTimeout(() => {
+        if (this.pendingExtensionUi?.id === id) {
+          this.pendingExtensionUi = undefined;
+        }
+      }, this.options.extensionUiAutoCompleteTimeoutMs);
+      this.pendingExtensionUi = { id, assistantId, promptText: text, timer };
+      const errorMessage =
+        "Fake provider failed after requesting extension input.";
+      const failedAssistant = {
+        role: "assistant",
+        content: [],
+        api: "openai-completions",
+        provider: this.currentProvider,
+        model: this.currentModel,
+        responseId: assistantId,
+        stopReason: "error",
+        errorMessage,
+        timestamp: Date.now(),
+      };
+      // Mirror Pi's provider-failure sequence: the assistant error update
+      // precedes its fieldless terminal agent_end while the dialog overlaps it.
+      this.currentTimers.push(
+        setTimeout(
+          () => {
+            this.agentActive = false;
+            this.write({
+              type: "message_update",
+              message: failedAssistant,
+              assistantMessageEvent: {
+                type: "error",
+                reason: "error",
+                error: failedAssistant,
+              },
+            });
+            this.write({
+              type: "agent_end",
+              messages: [failedAssistant],
+              willRetry: false,
+            });
+            this.write({ type: "agent_settled" });
+          },
+          Math.max(1, this.options.streamDelayMs),
+        ),
+      );
+      return;
+    }
     if (isExtensionUiScenario) {
       const id = "ext_fake_dialog_1";
       const timer = setTimeout(() => {
@@ -1091,7 +1152,11 @@ class FakeRpcServer {
   private emitPromptScenarioEvents(assistantId: string): number {
     const scenario = this.options.promptScenario;
     const shouldEmit = (target: PromptScenario): boolean =>
-      scenario === target || scenario === "all";
+      scenario === target ||
+      scenario === "all" ||
+      (scenario === "tool-error-extension-ui" &&
+        (target === "tool-error" || target === "extension-ui")) ||
+      (scenario === "extension-ui-error" && target === "extension-ui");
 
     if (shouldEmit("queue")) {
       this.steering.splice(0, this.steering.length, "Queued steering fixture");
@@ -1182,8 +1247,9 @@ class FakeRpcServer {
       return this.emitToolStreamScrollScenarioEvents(assistantId);
     }
 
-    if (shouldEmit("tool") || scenario === "tool-error") {
-      const toolFailed = scenario === "tool-error";
+    const toolFailed =
+      scenario === "tool-error" || scenario === "tool-error-extension-ui";
+    if (shouldEmit("tool") || toolFailed) {
       const fixtureToolName = toolFailed ? "bash" : "read";
       const fixtureToolArgs = toolFailed
         ? { command: "npm test -- --run fake-failure.test.ts" }
@@ -1239,6 +1305,13 @@ class FakeRpcServer {
         ...(method === "editor" ? { prefill: "Fake editable text" } : {}),
         timeout: this.options.extensionUiAutoCompleteTimeoutMs,
       });
+      if (this.options.exitAfterExtensionUiRequest) {
+        // Let the request flush before simulating a backend that dies while
+        // its extension input is still pending.
+        this.currentTimers.push(
+          setTimeout(() => process.exit(42), this.options.streamDelayMs),
+        );
+      }
     }
 
     return 0;
@@ -1332,6 +1405,9 @@ class FakeRpcServer {
     }
     clearTimeout(pending.timer);
     this.pendingExtensionUi = undefined;
+    // This fixture has already emitted its terminal provider error. Accepting
+    // the late dialog response must not manufacture a successful completion.
+    if (this.options.promptScenario === "extension-ui-error") return;
     this.completePrompt(pending.assistantId, pending.promptText);
   }
 
