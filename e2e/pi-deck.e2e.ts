@@ -7116,6 +7116,209 @@ test("a successful fork consumes capacity and releases it when closed", async ()
   }
 });
 
+test("fork crash phases retain source-only/target reservations through restart", async () => {
+  for (const phase of [
+    "before-spawn",
+    "after-spawn-before-child-record",
+    "after-target-discovery",
+  ] as const) {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), `pi-deck-e2e-fork-crash-${phase}-`),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    const userDataDir = path.join(root, "user-data");
+    const targetFile = path.join(
+      agentDir,
+      "sessions",
+      "--fake-rpc--",
+      "fork-crash-target.jsonl",
+    );
+    const crashSignalFile = path.join(root, "fork-crash-phase");
+    fs.mkdirSync(projectCwd, { recursive: true });
+    let crashedApp: ElectronApplication | undefined;
+    let recoveredApp: ElectronApplication | undefined;
+    try {
+      const crashEnv = {
+        ...fakeRealModeEnv({
+          root,
+          projectCwd,
+          agentDir,
+          userDataDir,
+          fakePiArgs: ["--fork-target", targetFile],
+        }),
+        PI_DECK_TEST_CRASH_FORK_PHASE: phase,
+        PI_DECK_TEST_CRASH_FORK_SIGNAL_FILE: crashSignalFile,
+      };
+      const launched = await launchPiDeck(crashEnv);
+      crashedApp = launched.app;
+      await expectHealthyPreload(launched.page);
+      await sidebarNewSessionButton(launched.page).click();
+      await launched.page.getByLabel("Prompt text").fill(`crash ${phase}`);
+      await launched.page.getByRole("button", { name: "Send" }).click();
+      await expect(
+        launched.page.getByText(`Fake response to: crash ${phase}`),
+      ).toBeVisible({ timeout: 20_000 });
+      const source = await launched.page.evaluate(async () => {
+        const snapshot = await window.piDeck.chat.getSnapshot();
+        return {
+          workspaceId: snapshot.workspaceId!,
+          sessionFile: snapshot.state.sessionFile!,
+        };
+      });
+      await launched.page.evaluate((source) => {
+        void window.piDeck.chat.forkSession(source);
+      }, source);
+      await expect
+        .poll(() =>
+          fs.existsSync(crashSignalFile)
+            ? fs.readFileSync(crashSignalFile, "utf8").trim()
+            : "",
+        )
+        .toBe(phase);
+      await crashedApp.close().catch(() => undefined);
+      crashedApp = undefined;
+
+      const recovered = await launchPiDeck(
+        fakeRealModeEnv({
+          root,
+          projectCwd,
+          agentDir,
+          userDataDir,
+          fakePiArgs: ["--fork-target", targetFile],
+        }),
+      );
+      recoveredApp = recovered.app;
+      await expectHealthyPreload(recovered.page);
+      const result = await recovered.page.evaluate(async (source) => {
+        const errorOf = async (operation: () => Promise<unknown>) => {
+          try {
+            await operation();
+            return "";
+          } catch (error) {
+            return error instanceof Error ? error.message : String(error);
+          }
+        };
+        await window.piDeck.workspaces.create({ name: "blocked destination" });
+        const destination = await window.piDeck.workspaces.getActive();
+        const sessions = await window.piDeck.chat.listSessions({
+          workspaceId: source.workspaceId,
+        });
+        return {
+          resumeError: await errorOf(() =>
+            window.piDeck.chat.resumeSession(source),
+          ),
+          forkError: await errorOf(() =>
+            window.piDeck.chat.forkSession(source),
+          ),
+          deleteError: await errorOf(() =>
+            window.piDeck.chat.deleteSession(source),
+          ),
+          moveError: await errorOf(() =>
+            window.piDeck.workspaces.moveSession({
+              sessionFile: source.sessionFile,
+              toWorkspaceId: destination.activeWorkspaceId!,
+            }),
+          ),
+          sessionFiles: sessions.sessions.map((session) => session.sessionFile),
+        };
+      }, source);
+      expect(result.resumeError).toMatch(/awaiting durable cleanup/i);
+      expect(result.forkError).toMatch(/awaiting durable cleanup/i);
+      expect(result.deleteError).toMatch(/awaiting durable cleanup/i);
+      expect(result.moveError).toMatch(/awaiting durable cleanup/i);
+      expect(result.sessionFiles).not.toContain(targetFile);
+      const journal = JSON.parse(
+        fs.readFileSync(
+          path.join(root, "pideck-home", "failed-fork-cleanup.json"),
+          "utf8",
+        ),
+      ) as {
+        version: number;
+        entries: Array<{ kind: string; phase?: string; sessionFile?: string }>;
+      };
+      expect(journal.version).toBe(2);
+      expect(journal.entries).toHaveLength(1);
+      if (phase === "after-target-discovery") {
+        expect(journal.entries[0]).toMatchObject({
+          kind: "target",
+          sessionFile: fs.realpathSync(targetFile),
+        });
+      } else {
+        // The crash hook is before target discovery. Depending on whether the
+        // OS processes the exit just before or just after the identity write,
+        // this is either an unknown pre-spawn gap or a PID-bearing source
+        // record; both must remain source-only and fail closed on restart.
+        expect(journal.entries[0]).toMatchObject({ kind: "source" });
+      }
+      const workspaceStore = fs.readFileSync(
+        path.join(root, "pideck-home", "workspaces.json"),
+        "utf8",
+      );
+      expect(workspaceStore).not.toContain(path.resolve(targetFile));
+    } finally {
+      await crashedApp?.close().catch(() => undefined);
+      await recoveredApp?.close().catch(() => undefined);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("normal fork success clears its durable reservation after registration commit", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-fork-ok-"));
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  const targetFile = path.join(
+    agentDir,
+    "sessions",
+    "--fake-rpc--",
+    "fork-success-target.jsonl",
+  );
+  fs.mkdirSync(projectCwd, { recursive: true });
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      userDataDir,
+      fakePiArgs: ["--fork-target", targetFile],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await sidebarNewSessionButton(page).click();
+    await page.getByLabel("Prompt text").fill("durable fork success");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Fake response to: durable fork success"),
+    ).toBeVisible({
+      timeout: 20_000,
+    });
+    const forked = await page.evaluate(async () => {
+      const source = await window.piDeck.chat.getSnapshot();
+      return window.piDeck.chat.forkSession({
+        workspaceId: source.workspaceId!,
+        sessionFile: source.state.sessionFile!,
+      });
+    });
+    expect(forked.state.sessionFile).toBe(fs.realpathSync(targetFile));
+    const journalFile = path.join(
+      root,
+      "pideck-home",
+      "failed-fork-cleanup.json",
+    );
+    const journal = JSON.parse(fs.readFileSync(journalFile, "utf8")) as {
+      version: number;
+      entries: unknown[];
+    };
+    expect(journal).toEqual({ version: 2, entries: [] });
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("journal-blocked targets reject resume, import, and fork source before worker allocation", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-e2e-fork-journal-block-"),

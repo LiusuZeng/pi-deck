@@ -120,6 +120,104 @@ test("source reservations remain blocked through a journal restart", async () =>
   }
 });
 
+test("source-only reservation survives crash/restart until a durable child exit proof", async () => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "pi-deck-fork-journal-pre-spawn-"),
+  );
+  try {
+    const sourceSessionFile = path.join(root, "fork-source.jsonl");
+    const transactionId = "9f9b3c42-841c-4ef5-8a9b-9a229924ad1e";
+    const journal = new ForkCleanupJournal(path.join(root, "home"));
+    await journal.reserveSource({ sourceSessionFile, transactionId });
+
+    // This models a process crash before createWorker publishes a PID. A new
+    // process has no safe evidence with which to release the source.
+    const restarted = new ForkCleanupJournal(path.join(root, "home"));
+    assert.equal(await restarted.blocks(sourceSessionFile), true);
+    assert.equal(
+      await restarted.completeSourceAfterConfirmedExit({
+        sourceSessionFile,
+        transactionId,
+        childRuntimeId: "runtime-never-recorded",
+      }),
+      false,
+    );
+    assert.equal(await restarted.blocks(sourceSessionFile), true);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("spawn identity promotion atomically replaces source-only recovery with target cleanup", async () => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "pi-deck-fork-journal-promote-"),
+  );
+  try {
+    const home = path.join(root, "home");
+    const sourceSessionFile = path.join(root, "fork-source.jsonl");
+    const targetSessionFile = path.join(root, "fork-target.jsonl");
+    const transactionId = "9f9b3c42-841c-4ef5-8a9b-9a229924ad1e";
+    const journal = new ForkCleanupJournal(home);
+    await journal.reserveSource({ sourceSessionFile, transactionId });
+    await journal.recordSpawnedSource({
+      sourceSessionFile,
+      transactionId,
+      childRuntimeId: "runtime-child",
+      childPid: 1234,
+    });
+    await journal.promoteSourceToTarget({
+      sourceSessionFile,
+      sessionFile: targetSessionFile,
+      transactionId,
+      workspaceId: "3f8a3c42-841c-4ef5-8a9b-9a229924ad1e",
+    });
+
+    const recovered = new ForkCleanupJournal(home);
+    assert.equal(await recovered.blocks(sourceSessionFile), true);
+    assert.equal(await recovered.blocks(targetSessionFile), true);
+    const persisted = JSON.parse(
+      await fs.readFile(path.join(home, "failed-fork-cleanup.json"), "utf8"),
+    ) as {
+      version: number;
+      entries: Array<{ kind: string; sessionFile?: string }>;
+    };
+    assert.equal(persisted.version, 2);
+    assert.equal(persisted.entries.length, 1);
+    assert.equal(persisted.entries[0]?.kind, "target");
+    assert.equal(persisted.entries[0]?.sessionFile, targetSessionFile);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("confirmed child exit releases a known source-only reservation", async () => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "pi-deck-fork-journal-known-child-"),
+  );
+  try {
+    const sourceSessionFile = path.join(root, "fork-source.jsonl");
+    const transactionId = "9f9b3c42-841c-4ef5-8a9b-9a229924ad1e";
+    const journal = new ForkCleanupJournal(path.join(root, "home"));
+    await journal.reserveSource({ sourceSessionFile, transactionId });
+    await journal.recordSpawnedSource({
+      sourceSessionFile,
+      transactionId,
+      childRuntimeId: "runtime-child",
+    });
+    assert.equal(
+      await journal.completeSourceAfterConfirmedExit({
+        sourceSessionFile,
+        transactionId,
+        childRuntimeId: "runtime-child",
+      }),
+      true,
+    );
+    assert.equal(await journal.blocks(sourceSessionFile), false);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("confirmed-exit retry retains a target moved outside its reserved workspace", async () => {
   const root = await fs.mkdtemp(
     path.join(os.tmpdir(), "pi-deck-fork-journal-moved-"),
