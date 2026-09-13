@@ -1980,25 +1980,41 @@ test("a cancellation race leaves no persisted runtime or late completion", async
         message: `Workflow run changed before retry: expected revision ${retryRequest.revision}, found ${retryRequest.revision + 1}.`,
       },
     ]);
-    await page.waitForTimeout(2_200);
-    const run = await page.evaluate(
-      async (runId) => window.piDeck.workflows.canonicalGetRun({ runId }),
-      runId,
-    );
-    expect(run.status).toBe("stopped");
-    expect(run.occurrences).toEqual([
-      expect.objectContaining({
-        id: retryRequest.occurrenceId,
-        attempt: 1,
-        status: "cancelled",
-      }),
-    ]);
-    expect(run.occurrences.some((item) => item.status === "completed")).toBe(
-      false,
-    );
-    expect(run.occurrences.every((item) => item.runtimeId === undefined)).toBe(
-      true,
-    );
+    await expect
+      .poll(
+        () =>
+          page.evaluate(
+            async ({ runId, occurrenceId }) => {
+              const run = await window.piDeck.workflows.canonicalGetRun({
+                runId,
+              });
+              const cancelledOriginalCount = run.occurrences.filter(
+                (item) =>
+                  item.id === occurrenceId &&
+                  item.attempt === 1 &&
+                  item.status === "cancelled",
+              ).length;
+              const replacementOrRuntimeIdCount = run.occurrences.filter(
+                (item) =>
+                  item.id !== occurrenceId || item.runtimeId !== undefined,
+              ).length;
+              return {
+                status: run.status,
+                occurrenceCount: run.occurrences.length,
+                cancelledOriginalCount,
+                replacementOrRuntimeIdCount,
+              };
+            },
+            { runId, occurrenceId: retryRequest.occurrenceId },
+          ),
+        { timeout: 10_000 },
+      )
+      .toEqual({
+        status: "stopped",
+        occurrenceCount: 1,
+        cancelledOriginalCount: 1,
+        replacementOrRuntimeIdCount: 0,
+      });
   } finally {
     await app?.close().catch(() => undefined);
     fs.rmSync(root, { recursive: true, force: true });

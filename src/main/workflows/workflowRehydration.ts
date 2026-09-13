@@ -164,15 +164,15 @@ export async function rehydrateCanonicalWorkflowRuns(
                     updatedAtMs: now,
                   }
                 : item.status === "queued" &&
-                      workspaceResolved &&
-                      (!item.parentOrchestratorRunId ||
-                        resumableFanoutQueued.has(item.id))
-                    ? {
-                        ...withoutRuntimeId,
-                        status: "ready" as const,
-                        updatedAtMs: now,
-                      }
-                    : withoutRuntimeId;
+                    workspaceResolved &&
+                    (!item.parentOrchestratorRunId ||
+                      resumableFanoutQueued.has(item.id))
+                  ? {
+                      ...withoutRuntimeId,
+                      status: "ready" as const,
+                      updatedAtMs: now,
+                    }
+                  : withoutRuntimeId;
             }),
           })
         : persisted;
