@@ -13,6 +13,31 @@ function elapsedLabel(elapsedMs: number): string {
   return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
 
+function tokenLabel(tokens: number): string {
+  return tokens >= 1_000
+    ? `${(tokens / 1_000).toFixed(tokens >= 10_000 ? 0 : 1)}k tokens`
+    : `${tokens} tokens`;
+}
+
+function phaseLabel(phase: MultitaskTaskSummary["phase"]): string | undefined {
+  switch (phase) {
+    case "model":
+      return "Model";
+    case "tool":
+      return "Running tool";
+    case "retrying":
+      return "Retrying";
+    case "waiting":
+      return "Waiting";
+    default:
+      return undefined;
+  }
+}
+
+function recencyLabel(atMs: number, nowMs: number): string {
+  return `${Math.floor(Math.max(0, nowMs - atMs) / 1_000)}s ago`;
+}
+
 function hasLiveElapsedClock(task: MultitaskTaskSummary): boolean {
   return (
     task.startedAtMs !== undefined &&
@@ -67,11 +92,24 @@ export function TaskSessionPanel({
               {task.brief}
             </p>
             <small>
-              {`Attempt ${task.attempt}`}
-              <span aria-hidden="true">
-                {` · ${elapsedLabel(displayedElapsedMs(task, nowMs))}`}
-              </span>
+              {`Attempt ${task.attempt} · ${elapsedLabel(displayedElapsedMs(task, nowMs))}`}
+              {task.modelCallCount !== undefined
+                ? ` · ${task.modelCallCount} model ${task.modelCallCount === 1 ? "call" : "calls"}`
+                : " · model calls pending"}
+              {` · ${task.totalTokens === undefined ? "tokens pending" : tokenLabel(task.totalTokens)}`}
             </small>
+            {phaseLabel(task.phase) ? (
+              <small>{`Phase: ${phaseLabel(task.phase)}`}</small>
+            ) : null}
+            {task.latestActivity ? (
+              <small>
+                {`${hasLiveElapsedClock(task) ? "Latest" : "Last"} activity: ${task.latestActivity}`}
+                {hasLiveElapsedClock(task) &&
+                task.latestActivityAtMs !== undefined
+                  ? ` · ${recencyLabel(task.latestActivityAtMs, nowMs)}`
+                  : ""}
+              </small>
+            ) : null}
             {task.progress ? <small>{task.progress}</small> : null}
             {task.queueReason ? <small>{task.queueReason}</small> : null}
           </article>

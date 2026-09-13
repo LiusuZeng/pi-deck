@@ -462,6 +462,11 @@ describe("IPC schemas", () => {
             elapsedMs: 500,
             startedAtMs: 1_700_000_000_000,
             progress: "Waiting for plan context",
+            phase: "waiting",
+            modelCallCount: 2,
+            totalTokens: 1_500,
+            latestActivity: "Waiting for parent",
+            latestActivityAtMs: 1_700_000_000_500,
           },
         ],
       }),
@@ -515,6 +520,18 @@ describe("IPC schemas", () => {
             prompt: "private child prompt",
           },
         ],
+      }),
+    ).toThrow();
+    expect(() =>
+      multitaskTaskSummarySchema.parse({
+        taskNumber: 8,
+        generatedName: "Task 8",
+        brief: "Private work",
+        lifecycle: "running",
+        attempt: 1,
+        elapsedMs: 0,
+        latestActivity: "safe summary",
+        reasoning: "private chain of thought must never cross IPC",
       }),
     ).toThrow();
   });

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   TaskSessionOrchestrator,
   taskSessionProgressForWorkerEventType,
+  taskSessionTelemetryForWorkerEventType,
   type PersistedTaskSessionState,
   type TaskSessionLaunch,
   type TaskSessionLifecycle,
@@ -454,6 +455,105 @@ describe("TaskSessionOrchestrator", () => {
     });
   });
 
+  it("reduces independent, payload-free telemetry without inventing usage", async () => {
+    const launches: TaskSessionLaunch<string>[] = [];
+    let now = 1_000;
+    const orchestrator = new TaskSessionOrchestrator<string, Worker>({
+      plan: () => ({
+        contextSummary: "context",
+        tasks: [
+          { generatedName: "one", brief: "brief one" },
+          { generatedName: "two", brief: "brief two" },
+        ],
+      }),
+      resolveWorkerSettings: () => ({}),
+      createWorker: (launch) => {
+        launches.push(launch);
+        return { close: () => undefined };
+      },
+      hasGlobalCapacity: () => true,
+      synthesize: () => {
+        throw new Error("retain terminal rows");
+      },
+      scheduleSynthesisRetry: () => undefined,
+      onState: () => undefined,
+      now: () => now,
+    });
+    orchestrator.addParent("parent", { mode: "parallel" });
+    await orchestrator.submit("parent", "private prompt");
+    await tick();
+
+    launches[0].callbacks.telemetry({
+      phase: "model",
+      activity: "Started model call",
+      modelCallIncrement: 1,
+    });
+    now = 2_000;
+    launches[0].callbacks.telemetry({
+      phase: "tool",
+      activity: "Running a tool",
+    });
+    launches[1].callbacks.telemetry({
+      phase: "retrying",
+      activity: "Retrying model call",
+      modelCallIncrement: 1,
+      reportedTotalTokens: 40,
+    });
+    const [first, second] = orchestrator.state("parent").tasks;
+    expect(first).toMatchObject({
+      phase: "tool",
+      modelCallCount: 1,
+      latestActivity: "Running a tool",
+      latestActivityAtMs: 2_000,
+    });
+    // No stats report means pending/unknown, never a fabricated zero.
+    expect(first?.totalTokens).toBeUndefined();
+    expect(second).toMatchObject({
+      phase: "retrying",
+      modelCallCount: 1,
+      totalTokens: 40,
+    });
+    // An explicit Pi zero is still authoritative; only missing stats are pending.
+    launches[0].callbacks.telemetry({ reportedTotalTokens: 0 });
+    expect(orchestrator.state("parent").tasks[0]?.totalTokens).toBe(0);
+
+    // A stale stats response cannot reduce the cumulative per-attempt total.
+    launches[1].callbacks.telemetry({ reportedTotalTokens: 10 });
+    expect(orchestrator.state("parent").tasks[1]?.totalTokens).toBe(40);
+    launches[0].callbacks.completed();
+    await tick();
+    const terminal = orchestrator.state("parent").tasks[0];
+    expect(terminal).toMatchObject({
+      lifecycle: "completed",
+      modelCallCount: 1,
+      latestActivity: "Running a tool",
+    });
+    expect(terminal?.totalTokens).toBe(0);
+    // A delayed stats continuation belongs to a closed attempt and must not
+    // mutate its terminal accounting.
+    launches[0].callbacks.telemetry({ reportedTotalTokens: 99 });
+    expect(orchestrator.state("parent").tasks[0]?.totalTokens).toBe(0);
+    // Terminal safe telemetry survives a relaunch, while nonterminal private
+    // counters are deliberately not reconstructed as live state.
+    const saved = orchestrator.exportState("parent");
+    expect(saved.plans[0]?.tasks[0]).toMatchObject({
+      phase: "tool",
+      modelCallCount: 1,
+      latestActivity: "Running a tool",
+    });
+    expect(saved.plans[0]?.tasks[1]).not.toHaveProperty("modelCallCount");
+    const restored = setup();
+    restored.orchestrator.restore("parent", saved);
+    expect(restored.orchestrator.state("parent").tasks[0]).toMatchObject({
+      lifecycle: "completed",
+      modelCallCount: 1,
+      latestActivity: "Running a tool",
+    });
+    expect(restored.orchestrator.state("parent").tasks[1]).not.toHaveProperty(
+      "modelCallCount",
+    );
+  });
+
   it("maps child event types to allowlisted generic progress without event payloads", () => {
     expect(taskSessionProgressForWorkerEventType("agent_start")).toBe(
       "Started",
@@ -472,6 +572,31 @@ describe("TaskSessionOrchestrator", () => {
     );
     expect(
       taskSessionProgressForWorkerEventType("worker_exit"),
+    ).toBeUndefined();
+    expect(taskSessionTelemetryForWorkerEventType("agent_start")).toEqual({
+      phase: "model",
+      activity: "Started model call",
+      modelCallIncrement: 1,
+    });
+    expect(
+      taskSessionTelemetryForWorkerEventType("tool_execution_start"),
+    ).toEqual({
+      phase: "tool",
+      activity: "Running a tool",
+    });
+    expect(taskSessionTelemetryForWorkerEventType("auto_retry_start")).toEqual({
+      phase: "retrying",
+      activity: "Retrying model call",
+      modelCallIncrement: 1,
+    });
+    expect(
+      taskSessionTelemetryForWorkerEventType("extension_ui_request"),
+    ).toEqual({
+      phase: "waiting",
+      activity: "Waiting for parent",
+    });
+    expect(
+      taskSessionTelemetryForWorkerEventType("thinking_delta"),
     ).toBeUndefined();
   });
 

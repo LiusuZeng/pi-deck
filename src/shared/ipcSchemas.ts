@@ -866,6 +866,24 @@ export const multitaskTaskSummarySchema = z
     startedAtMs: z.number().finite().nonnegative().optional(),
     progress: oneLineTaskTextSchema.optional(),
     queueReason: oneLineTaskTextSchema.optional(),
+    // Payload-free live telemetry; all fields are reconstructed from a
+    // child-event type or Pi's authoritative cumulative session stats.
+    phase: z.enum(["model", "tool", "retrying", "waiting"]).optional(),
+    modelCallCount: z.number().int().positive().optional(),
+    totalTokens: z.number().int().nonnegative().optional(),
+    latestActivity: z
+      .enum([
+        "Started model call",
+        "Model response received",
+        "Running a tool",
+        "Tool step completed",
+        "Retrying model call",
+        "Retry completed",
+        "Waiting for parent",
+        "Model call completed",
+      ])
+      .optional(),
+    latestActivityAtMs: z.number().finite().nonnegative().optional(),
   })
   .strict()
   .refine(

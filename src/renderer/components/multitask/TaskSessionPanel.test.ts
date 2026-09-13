@@ -55,6 +55,11 @@ describe("TaskSessionPanel", () => {
               elapsedMs: 65_000,
               progress: "Waiting",
               queueReason: "Capacity reached",
+              phase: "tool",
+              modelCallCount: 3,
+              totalTokens: 18_400,
+              latestActivity: "Running a tool",
+              latestActivityAtMs: Date.now() - 8_000,
             },
           ],
         }),
@@ -64,6 +69,9 @@ describe("TaskSessionPanel", () => {
     expect(container.textContent).toContain("1 active of 2");
     expect(container.textContent).toContain("#2 Renderer");
     expect(container.textContent).toContain("Attempt 2 · 1m 5s");
+    expect(container.textContent).toContain("3 model calls · 18k tokens");
+    expect(container.textContent).toContain("Phase: Running tool");
+    expect(container.textContent).toContain("Last activity: Running a tool");
     expect(container.textContent).toContain("Capacity reached");
     expect(container.textContent).toContain("Waiting");
     expect(
@@ -112,6 +120,9 @@ describe("TaskSessionPanel", () => {
 
     const rows = container.querySelectorAll('[role="listitem"]');
     expect(rows[0].textContent).toContain("Attempt 1 · 5s");
+    expect(rows[0].textContent).toContain(
+      "model calls pending · tokens pending",
+    );
     expect(rows[1].textContent).toContain("Attempt 1 · 7s");
     act(() => vi.advanceTimersByTime(1_000));
     expect(rows[0].textContent).toContain("Attempt 1 · 6s");
