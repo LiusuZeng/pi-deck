@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  legacySynthesisDeliveryPayload,
   matchesSynthesisDeliveryReceipt,
   normalizedSynthesisDeliveryContent,
   synthesisDeliveryPayload,
@@ -33,6 +34,28 @@ describe("matchesSynthesisDeliveryReceipt", () => {
     ];
     expect(normalizedSynthesisDeliveryContent(split)).toBe(delivery.payload);
     expect(matchesSynthesisDeliveryReceipt(split, delivery)).toBe(true);
+  });
+
+  it("preserves the exact pre-outbox payload for legacy receipt reconciliation", () => {
+    const legacy = legacySynthesisDeliveryPayload({
+      attempt: 1,
+      originalPrompt: "Reconcile the terminal task.",
+      tasks: [
+        {
+          taskNumber: 1,
+          generatedName: "terminal task",
+          brief: "finish",
+          lifecycle: "completed",
+          attempt: 1,
+          transitions: [{ lifecycle: "completed", attempt: 1 }],
+          handoffSummary: "authoritative handoff",
+        },
+      ],
+    });
+    expect(legacy.payload).toBe(
+      "Task-session synthesis for: Reconcile the terminal task.\n\n#1 terminal task: authoritative handoff",
+    );
+    expect(matchesSynthesisDeliveryReceipt(legacy.payload, legacy)).toBe(true);
   });
 
   it("rejects marker-only, copied-marker, and altered payload receipts", () => {

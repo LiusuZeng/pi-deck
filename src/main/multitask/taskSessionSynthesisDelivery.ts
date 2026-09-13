@@ -18,6 +18,8 @@ export interface SynthesisDelivery {
   payload: string;
   payloadFingerprint: string;
   state: "dispatching" | "delivered";
+  /** Markerless exact payload retained only while migrating pre-outbox state. */
+  legacy?: true;
 }
 
 export function synthesisDeliveryMarker(id: string): string {
@@ -34,20 +36,46 @@ export function synthesisDeliveryPayload(input: {
   originalPrompt: string;
   tasks: readonly PersistedTaskSessionTask[];
 }): SynthesisDelivery {
-  const id = input.id ?? randomUUID();
+  return deliveryPayload({ ...input, id: input.id ?? randomUUID() });
+}
+
+/**
+ * Pre-outbox state recorded an attempt count but no receipt marker. Preserve
+ * that exact historical payload during upgrade so an already-appended report
+ * can be acknowledged rather than duplicated.
+ */
+export function legacySynthesisDeliveryPayload(input: {
+  attempt: number;
+  originalPrompt: string;
+  tasks: readonly PersistedTaskSessionTask[];
+}): SynthesisDelivery {
+  return deliveryPayload({ ...input, id: randomUUID(), legacy: true });
+}
+
+function deliveryPayload(input: {
+  id: string;
+  attempt: number;
+  originalPrompt: string;
+  tasks: readonly PersistedTaskSessionTask[];
+  legacy?: boolean;
+}): SynthesisDelivery {
   const report = input.tasks
     .map(
       (task) =>
         `#${task.taskNumber} ${task.generatedName}: ${task.handoffSummary ?? task.lifecycle}`,
     )
     .join("\n");
-  const payload = `${synthesisDeliveryMarker(id)}\nTask-session synthesis for: ${input.originalPrompt}\n\n${report}`;
+  const reportPayload = `Task-session synthesis for: ${input.originalPrompt}\n\n${report}`;
+  const payload = input.legacy
+    ? reportPayload
+    : `${synthesisDeliveryMarker(input.id)}\n${reportPayload}`;
   return {
-    id,
+    id: input.id,
     attempt: input.attempt,
     payload,
     payloadFingerprint: synthesisDeliveryFingerprint(payload),
     state: "dispatching",
+    ...(input.legacy ? { legacy: true as const } : {}),
   };
 }
 

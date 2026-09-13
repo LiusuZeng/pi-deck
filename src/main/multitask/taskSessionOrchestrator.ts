@@ -1,5 +1,6 @@
 import type { MultitaskMode } from "./types.js";
 import {
+  legacySynthesisDeliveryPayload,
   synthesisDeliveryFingerprint,
   synthesisDeliveryMarker,
   synthesisDeliveryPayload,
@@ -765,11 +766,18 @@ export class TaskSessionOrchestrator<
         // the persisted marker and SHA-256 fingerprint are the recovery
         // contract, not a rendering convenience.
         if (!plan.synthesisDelivery) {
-          plan.synthesisDelivery = synthesisDeliveryPayload({
-            attempt: plan.synthesisAttempts ?? 0,
-            originalPrompt: plan.originalPrompt,
-            tasks: plan.tasks.map(persistTask),
-          });
+          plan.synthesisDelivery =
+            plan.synthesisAttempts === undefined
+              ? synthesisDeliveryPayload({
+                  attempt: 0,
+                  originalPrompt: plan.originalPrompt,
+                  tasks: plan.tasks.map(persistTask),
+                })
+              : legacySynthesisDeliveryPayload({
+                  attempt: plan.synthesisAttempts,
+                  originalPrompt: plan.originalPrompt,
+                  tasks: plan.tasks.map(persistTask),
+                });
           this.publish(parent);
           await this.persistSynthesisDelivery(parent);
         }
@@ -870,7 +878,10 @@ export class TaskSessionOrchestrator<
         } catch {
           // The scheduled reconciliation below retains the in-memory trace.
         }
-        retrySynthesis = !parent.removed && !plan.synthesisCapped;
+        // Receipt reconciliation is always retryable, even after the bounded
+        // send cap. A failed probe is not evidence that the durable parent
+        // turn is absent, and retries of a capped plan remain receipt-only.
+        retrySynthesis = !parent.removed;
       } finally {
         plan.synthesizing = false;
       }
@@ -894,13 +905,16 @@ export class TaskSessionOrchestrator<
     plan.synthesisDelivery = { ...delivery, state: "delivered" };
     this.publish(parent);
     await this.persistSynthesisDelivery(parent);
-    plan.synthesized = true;
     plan.synthesisReported = true;
     delete plan.runtimeContext;
     delete plan.synthesisFailureTrace;
     delete plan.synthesisReconciliationFailures;
     this.publish(parent);
     await this.persistSynthesisDelivery(parent);
+    // Keep the live completion latch behind the final persistence barrier.
+    // Otherwise a double write failure could suppress reconciliation while the
+    // durable state still says this terminal plan has not been reported.
+    plan.synthesized = true;
   }
   private async persistSynthesisDelivery(
     parent: Parent<ParentId>,
@@ -1320,7 +1334,7 @@ function validatePersisted(
           plan.synthesisAttempts < 0 ||
           plan.synthesisAttempts > maxSynthesisAttempts)) ||
       (plan.synthesisDelivery !== undefined &&
-        !isSynthesisDelivery(plan.synthesisDelivery)) ||
+        !isSynthesisDelivery(plan.synthesisDelivery, plan)) ||
       (plan.synthesisFailureTrace !== undefined &&
         typeof plan.synthesisFailureTrace !== "string") ||
       (plan.synthesisCapped !== undefined && plan.synthesisCapped !== true) ||
@@ -1383,24 +1397,39 @@ function validatePersisted(
     }
   }
 }
-function isSynthesisDelivery(value: unknown): value is SynthesisDelivery {
+function isSynthesisDelivery(
+  value: unknown,
+  plan: PersistedTaskSessionPlan,
+): value is SynthesisDelivery {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    typeof (value as SynthesisDelivery).id !== "string" ||
+    (value as SynthesisDelivery).id.length < 8 ||
+    !Number.isSafeInteger((value as SynthesisDelivery).attempt) ||
+    (value as SynthesisDelivery).attempt < 0 ||
+    typeof (value as SynthesisDelivery).payload !== "string" ||
+    typeof (value as SynthesisDelivery).payloadFingerprint !== "string" ||
+    !/^[a-f0-9]{64}$/.test((value as SynthesisDelivery).payloadFingerprint) ||
+    synthesisDeliveryFingerprint((value as SynthesisDelivery).payload) !==
+      (value as SynthesisDelivery).payloadFingerprint ||
+    ((value as SynthesisDelivery).state !== "dispatching" &&
+      (value as SynthesisDelivery).state !== "delivered")
+  )
+    return false;
+  const delivery = value as SynthesisDelivery;
+  if (delivery.legacy === true)
+    return (
+      delivery.payload ===
+      legacySynthesisDeliveryPayload({
+        attempt: delivery.attempt,
+        originalPrompt: plan.originalPrompt,
+        tasks: plan.tasks,
+      }).payload
+    );
   return (
-    !!value &&
-    typeof value === "object" &&
-    typeof (value as SynthesisDelivery).id === "string" &&
-    (value as SynthesisDelivery).id.length >= 8 &&
-    Number.isSafeInteger((value as SynthesisDelivery).attempt) &&
-    (value as SynthesisDelivery).attempt >= 0 &&
-    typeof (value as SynthesisDelivery).payload === "string" &&
-    typeof (value as SynthesisDelivery).payloadFingerprint === "string" &&
-    /^[a-f0-9]{64}$/.test((value as SynthesisDelivery).payloadFingerprint) &&
-    (value as SynthesisDelivery).payload.includes(
-      synthesisDeliveryMarker((value as SynthesisDelivery).id),
-    ) &&
-    synthesisDeliveryFingerprint((value as SynthesisDelivery).payload) ===
-      (value as SynthesisDelivery).payloadFingerprint &&
-    ((value as SynthesisDelivery).state === "dispatching" ||
-      (value as SynthesisDelivery).state === "delivered")
+    delivery.legacy === undefined &&
+    delivery.payload.includes(synthesisDeliveryMarker(delivery.id))
   );
 }
 function isLifecycle(value: unknown): value is TaskSessionLifecycle {
