@@ -1,0 +1,51 @@
+Pi Deck v0.6.4 exact-candidate focused scroll validation
+Candidate: ea44454a2393a682431b7da25e8d495b9118635f
+Started: 2026-09-13T01:25:16Z
+
+Running 40 tests using 1 worker
+
+  ✓   1 e2e/pi-deck.e2e.ts:2292:5 › streaming Agent activity follows bottom without bouncing (2.7s)
+  ✓   2 e2e/pi-deck.e2e.ts:2408:5 › streaming Agent activity respects manual scroll intent (4.6s)
+  ✓   3 e2e/pi-deck.e2e.ts:2292:5 › streaming Agent activity follows bottom without bouncing (2.8s)
+  ✓   4 e2e/pi-deck.e2e.ts:2408:5 › streaming Agent activity respects manual scroll intent (4.6s)
+  ✓   5 e2e/pi-deck.e2e.ts:2292:5 › streaming Agent activity follows bottom without bouncing (2.7s)
+  ✓   6 e2e/pi-deck.e2e.ts:2408:5 › streaming Agent activity respects manual scroll intent (4.6s)
+  ✓   7 e2e/pi-deck.e2e.ts:2292:5 › streaming Agent activity follows bottom without bouncing (2.7s)
+  ✓   8 e2e/pi-deck.e2e.ts:2408:5 › streaming Agent activity respects manual scroll intent (4.7s)
+  ✓   9 e2e/pi-deck.e2e.ts:2292:5 › streaming Agent activity follows bottom without bouncing (2.8s)
+  ✓  10 e2e/pi-deck.e2e.ts:2408:5 › streaming Agent activity respects manual scroll intent (4.6s)
+  ✓  11 e2e/pi-deck.e2e.ts:2292:5 › streaming Agent activity follows bottom without bouncing (2.8s)
+  ✓  12 e2e/pi-deck.e2e.ts:2408:5 › streaming Agent activity respects manual scroll intent (4.6s)
+  ✓  13 e2e/pi-deck.e2e.ts:2292:5 › streaming Agent activity follows bottom without bouncing (2.7s)
+  ✓  14 e2e/pi-deck.e2e.ts:2408:5 › streaming Agent activity respects manual scroll intent (4.6s)
+  ✓  15 e2e/pi-deck.e2e.ts:2292:5 › streaming Agent activity follows bottom without bouncing (2.7s)
+  ✓  16 e2e/pi-deck.e2e.ts:2408:5 › streaming Agent activity respects manual scroll intent (4.6s)
+  ✓  17 e2e/pi-deck.e2e.ts:2292:5 › streaming Agent activity follows bottom without bouncing (2.8s)
+  ✓  18 e2e/pi-deck.e2e.ts:2408:5 › streaming Agent activity respects manual scroll intent (4.6s)
+  ✓  19 e2e/pi-deck.e2e.ts:2292:5 › streaming Agent activity follows bottom without bouncing (2.8s)
+  ✓  20 e2e/pi-deck.e2e.ts:2408:5 › streaming Agent activity respects manual scroll intent (4.7s)
+  ✓  21 e2e/pi-deck.e2e.ts:2292:5 › streaming Agent activity follows bottom without bouncing (2.7s)
+  ✓  22 e2e/pi-deck.e2e.ts:2408:5 › streaming Agent activity respects manual scroll intent (4.6s)
+  ✓  23 e2e/pi-deck.e2e.ts:2292:5 › streaming Agent activity follows bottom without bouncing (2.8s)
+  ✓  24 e2e/pi-deck.e2e.ts:2408:5 › streaming Agent activity respects manual scroll intent (4.6s)
+  ✓  25 e2e/pi-deck.e2e.ts:2292:5 › streaming Agent activity follows bottom without bouncing (2.7s)
+  ✓  26 e2e/pi-deck.e2e.ts:2408:5 › streaming Agent activity respects manual scroll intent (4.5s)
+  ✓  27 e2e/pi-deck.e2e.ts:2292:5 › streaming Agent activity follows bottom without bouncing (2.7s)
+  ✓  28 e2e/pi-deck.e2e.ts:2408:5 › streaming Agent activity respects manual scroll intent (4.6s)
+  ✓  29 e2e/pi-deck.e2e.ts:2292:5 › streaming Agent activity follows bottom without bouncing (2.7s)
+  ✓  30 e2e/pi-deck.e2e.ts:2408:5 › streaming Agent activity respects manual scroll intent (4.5s)
+  ✓  31 e2e/pi-deck.e2e.ts:2292:5 › streaming Agent activity follows bottom without bouncing (2.7s)
+  ✓  32 e2e/pi-deck.e2e.ts:2408:5 › streaming Agent activity respects manual scroll intent (4.5s)
+  ✓  33 e2e/pi-deck.e2e.ts:2292:5 › streaming Agent activity follows bottom without bouncing (2.7s)
+  ✓  34 e2e/pi-deck.e2e.ts:2408:5 › streaming Agent activity respects manual scroll intent (4.5s)
+  ✓  35 e2e/pi-deck.e2e.ts:2292:5 › streaming Agent activity follows bottom without bouncing (2.7s)
+  ✓  36 e2e/pi-deck.e2e.ts:2408:5 › streaming Agent activity respects manual scroll intent (4.6s)
+  ✓  37 e2e/pi-deck.e2e.ts:2292:5 › streaming Agent activity follows bottom without bouncing (2.7s)
+  ✓  38 e2e/pi-deck.e2e.ts:2408:5 › streaming Agent activity respects manual scroll intent (4.5s)
+  ✓  39 e2e/pi-deck.e2e.ts:2292:5 › streaming Agent activity follows bottom without bouncing (2.7s)
+  ✓  40 e2e/pi-deck.e2e.ts:2408:5 › streaming Agent activity respects manual scroll intent (4.5s)
+
+  40 passed (2.7m)
+Finished: 2026-09-13T01:27:57Z
+Exit status: 0
+Working tree after validation:
