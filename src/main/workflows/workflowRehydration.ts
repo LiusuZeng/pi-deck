@@ -50,12 +50,14 @@ export async function rehydrateCanonicalWorkflowRuns(
       (item) => item.status === "queued",
     );
     // Before retry resumed stopped envelopes atomically, a Stop could persist a
-    // stopped run with a dormant ready replacement. It must never launch after
-    // restart. Cancel that replacement instead: it remains an explicit,
-    // actionable retry target while the envelope stays stopped.
-    const hasLegacyStoppedReady =
+    // stopped run with a dormant ready or queued replacement. It must never
+    // launch after restart. Cancel that replacement instead: it remains an
+    // explicit, actionable retry target while the envelope stays stopped.
+    const hasLegacyStoppedDormant =
       persisted.status === "stopped" &&
-      persisted.occurrences.some((item) => item.status === "ready");
+      persisted.occurrences.some((item) =>
+        ["ready", "queued"].includes(item.status),
+      );
     // runtimeId is process-local. Normalize old terminal records too, while
     // retaining sessionFile as the durable Pi transcript reopen reference.
     const hasRuntimeId = persisted.occurrences.some(
@@ -93,14 +95,14 @@ export async function rehydrateCanonicalWorkflowRuns(
         .slice(0, available)
         .forEach((item) => resumableFanoutQueued.add(item.id));
     }
-    if (hasLegacyStoppedReady) {
+    if (hasLegacyStoppedDormant) {
       const recovered = workflowRunEnvelopeSchema.parse({
         ...persisted,
         status: "stopped",
         updatedAtMs: now,
         occurrences: persisted.occurrences.map((item) => {
           const { runtimeId: _runtimeId, ...withoutRuntimeId } = item;
-          return item.status === "ready"
+          return ["ready", "queued"].includes(item.status)
             ? {
                 ...withoutRuntimeId,
                 status: "cancelled" as const,

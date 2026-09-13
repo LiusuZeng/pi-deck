@@ -848,7 +848,7 @@ describe("workflow rehydration", () => {
     expect(updated[0]?.occurrences[0]).not.toHaveProperty("runtimeId");
   });
 
-  it("repairs a legacy stopped ready retry before workspace gating without scheduling it", async () => {
+  it("repairs legacy stopped ready and queued retries before workspace gating", async () => {
     for (const workspaceCase of ["resolved", "archived"] as const) {
       const root = await fs.mkdtemp(
         path.join(os.tmpdir(), "pi-deck-rehydrate-"),
@@ -960,7 +960,7 @@ describe("workflow rehydration", () => {
           }),
           expect.objectContaining({
             id: queuedReplacement.id,
-            status: "queued",
+            status: "cancelled",
           }),
         ]),
       );
@@ -971,7 +971,7 @@ describe("workflow rehydration", () => {
 
       // The repaired envelope survives a process restart and remains manually
       // resumable through its cancelled replacement rather than a dormant ready
-      // attempt that a new scheduler could launch automatically.
+      // or queued attempt that a new scheduler could launch automatically.
       const restarted = new WorkflowStore(root);
       const afterRestart = await restarted.getWorkflowRun(legacy.id);
       expect(afterRestart).toEqual(repaired);
@@ -985,6 +985,9 @@ describe("workflow rehydration", () => {
         status: "ready",
         attempt: 3,
       });
+      expect(
+        resumed.occurrences.filter((item) => item.status === "queued"),
+      ).toEqual([]);
     }
   });
 
