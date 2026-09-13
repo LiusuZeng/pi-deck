@@ -252,8 +252,27 @@ export function retryWorkflowOccurrence(
     workflowNode.role === "human"
       ? undefined
       : workflowNode.execution?.maxAttempts;
-  if (maxAttempts !== undefined && prior.attempt >= maxAttempts)
+  const logicalAttempts = run.occurrences.filter((item) =>
+    sameLogicalOccurrence(item, prior),
+  );
+  const highestAttempt = Math.max(
+    ...logicalAttempts.map((item) => item.attempt),
+  );
+  if (maxAttempts !== undefined && highestAttempt >= maxAttempts)
     throw new Error(`Retry budget exhausted after ${maxAttempts} attempts.`);
+  // A malformed legacy envelope may retain more than one non-historical
+  // attempt for a logical occurrence. Never make another replacement from an
+  // older record; repair/retry must have one current owner and monotonically
+  // unique attempt numbers.
+  if (
+    logicalAttempts.some(
+      (item) =>
+        item.id !== prior.id &&
+        item.status !== "skipped" &&
+        item.attempt > prior.attempt,
+    )
+  )
+    throw new Error("Only the latest workflow occurrence attempt may retry.");
   const retryStatus = retryAdmissionStatus(run, prior);
   const parentBeforeRetry = prior.parentOrchestratorRunId
     ? occurrenceOf(run, prior.parentOrchestratorRunId)
@@ -270,15 +289,27 @@ export function retryWorkflowOccurrence(
       prior.parentOrchestratorRunId,
       prior.iteration,
       now,
-      prior.attempt + 1,
+      highestAttempt + 1,
       prior.context,
       prior.resolvedInputBindings,
     ),
-    status: retryStatus,
+    // Human checkpoints never enter scheduler admission. Retain the
+    // checkpoint status so an explicit Stop -> Retry remains answerable.
+    ...(workflowNode.role === "human" ? {} : { status: retryStatus }),
   };
   let next = add(
     {
       ...run,
+      // A retry explicitly resumes a manually stopped envelope. This must be
+      // part of the same durable transition as creating the replacement, so a
+      // stopped run can never retain a dormant ready occurrence.
+      ...(run.status === "stopped"
+        ? {
+            status: "waiting" as const,
+            terminalOutcome: undefined,
+            completedAtMs: undefined,
+          }
+        : {}),
       // A retry supersedes the failed attempt; historical output/error remains
       // preserved but no longer participates in terminal derivation.
       occurrences: run.occurrences.map((item) =>
@@ -331,6 +362,17 @@ export function stopWorkflowRoleRun(
 
 /** A retry replaces its skipped predecessor in the orchestrator's logical child set.
  * Fan-out slots belong to those current children, never historical attempts. */
+function sameLogicalOccurrence(
+  left: WorkflowOccurrence,
+  right: WorkflowOccurrence,
+): boolean {
+  return (
+    left.nodeId === right.nodeId &&
+    left.parentOrchestratorRunId === right.parentOrchestratorRunId &&
+    left.iteration === right.iteration
+  );
+}
+
 function currentManagedWorkers(
   run: WorkflowRoleRun,
   orchestratorId: string,

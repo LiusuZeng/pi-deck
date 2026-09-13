@@ -1,4 +1,4 @@
-import { useState, type ReactElement } from "react";
+import { useRef, useState, type ReactElement } from "react";
 import type {
   CanonicalNodeOccurrence,
   WorkflowNode,
@@ -79,6 +79,7 @@ function executionPath(run: WorkflowRunEnvelope) {
 function NodeDetails(props: {
   node: WorkflowNode;
   occurrences: CanonicalNodeOccurrence[];
+  mutationLocked: boolean;
   onRetry(occurrenceId: string): Promise<void> | void;
   onOpenSession: ((occurrence: CanonicalNodeOccurrence) => void) | undefined;
 }): ReactElement {
@@ -146,6 +147,7 @@ function NodeDetails(props: {
                     <button
                       type="button"
                       className="workflow-secondary-button"
+                      disabled={props.mutationLocked}
                       onClick={() => void props.onRetry(occurrence.id)}
                     >
                       Retry attempt {occurrence.attempt}
@@ -163,7 +165,7 @@ function NodeDetails(props: {
 function HumanControl(props: {
   occurrence: CanonicalNodeOccurrence;
   node: Extract<WorkflowNode, { role: "human" }>;
-  busy: string | undefined;
+  mutationLocked: boolean;
   answer: string | undefined;
   onAnswer(value: string | boolean): void;
   onChange(value: string): void;
@@ -173,7 +175,7 @@ function HumanControl(props: {
   return (
     <fieldset
       className="workflow-human-control"
-      aria-busy={props.busy === occurrence.id}
+      aria-busy={props.mutationLocked}
     >
       <legend>
         {node.name}: {node.config.prompt}
@@ -181,7 +183,7 @@ function HumanControl(props: {
       {node.config.interaction === "approval" ? (
         <div className="workflow-card-actions">
           <button
-            disabled={props.busy === occurrence.id}
+            disabled={props.mutationLocked}
             type="button"
             className="workflow-primary-button"
             onClick={() => props.onAnswer(true)}
@@ -189,7 +191,7 @@ function HumanControl(props: {
             Approve
           </button>
           <button
-            disabled={props.busy === occurrence.id}
+            disabled={props.mutationLocked}
             type="button"
             className="workflow-secondary-button"
             onClick={() => props.onAnswer(false)}
@@ -204,6 +206,7 @@ function HumanControl(props: {
             id={inputId}
             className="workflow-human-input"
             value={props.answer ?? ""}
+            disabled={props.mutationLocked}
             onChange={(event) => props.onChange(event.target.value)}
           >
             <option value="">Choose…</option>
@@ -221,6 +224,7 @@ function HumanControl(props: {
             id={inputId}
             className="workflow-human-input"
             value={props.answer ?? ""}
+            disabled={props.mutationLocked}
             onChange={(event) => props.onChange(event.target.value)}
           />
         </>
@@ -229,9 +233,7 @@ function HumanControl(props: {
         <button
           type="button"
           className="workflow-primary-button"
-          disabled={
-            props.busy === occurrence.id || !(props.answer ?? "").trim()
-          }
+          disabled={props.mutationLocked || !(props.answer ?? "").trim()}
           onClick={() => props.onAnswer(props.answer ?? "")}
         >
           Continue
@@ -246,6 +248,10 @@ export function WorkflowOccurrenceRunView(
 ): ReactElement {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string>();
+  // State updates do not synchronously disable controls. One run-scoped latch
+  // admits exactly one destructive mutation, so every request uses the same
+  // rendered revision and Stop cannot race an in-flight Human Answer.
+  const mutationInFlight = useRef(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string>();
   const nodes = props.run.definition.nodes;
   const groups = nodes
@@ -275,14 +281,25 @@ export function WorkflowOccurrenceRunView(
           .map((occurrence) => ({ node, occurrence }))
       : [],
   );
-  const submit = async (id: string, value: string | boolean) => {
-    setBusy(id);
+  const performMutation = async (
+    busyId: string,
+    action: () => Promise<void> | void,
+  ) => {
+    if (mutationInFlight.current) return;
+    mutationInFlight.current = true;
+    setBusy(busyId);
     try {
-      await props.onAnswer(id, value);
+      await action();
     } finally {
+      mutationInFlight.current = false;
       setBusy(undefined);
     }
   };
+  const submit = (id: string, value: string | boolean) =>
+    performMutation(id, () => props.onAnswer(id, value));
+  const stop = () => performMutation("__stop__", props.onStop);
+  const retry = (occurrenceId: string) =>
+    performMutation(occurrenceId, () => props.onRetry(occurrenceId));
 
   return (
     <section className="workflow-run-view" aria-label="Workflow run">
@@ -309,7 +326,8 @@ export function WorkflowOccurrenceRunView(
             <button
               type="button"
               className="workflow-danger-button"
-              onClick={() => void props.onStop()}
+              disabled={busy !== undefined}
+              onClick={() => void stop()}
             >
               Stop run
             </button>
@@ -347,7 +365,7 @@ export function WorkflowOccurrenceRunView(
               key={occurrence.id}
               occurrence={occurrence}
               node={node}
-              busy={busy}
+              mutationLocked={busy !== undefined}
               answer={answers[occurrence.id]}
               onChange={(value) =>
                 setAnswers({ ...answers, [occurrence.id]: value })
@@ -379,7 +397,8 @@ export function WorkflowOccurrenceRunView(
                 <NodeDetails
                   node={node}
                   occurrences={occurrences}
-                  onRetry={props.onRetry}
+                  mutationLocked={busy !== undefined}
+                  onRetry={retry}
                   onOpenSession={props.onOpenSession}
                 />
               ) : null;

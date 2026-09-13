@@ -775,6 +775,389 @@ describe("WorkflowScheduler", () => {
   });
 });
 
+describe("WorkflowOccurrenceScheduler retry after Stop", () => {
+  it("resumes a stopped retry, launches its replacement, and completes it", async () => {
+    let persisted = createWorkflowRoleRun(
+      lifecycleDefinition,
+      "workspace",
+      {},
+      1,
+    );
+    let created = 0;
+    const closed: string[] = [];
+    const scheduler = new WorkflowOccurrenceScheduler({
+      createSession: async () => {
+        const runtimeId = `runtime-${++created}`;
+        return {
+          runtimeId,
+          state: {
+            sessionId: `session-${created}`,
+            sessionFile: `/tmp/${runtimeId}.jsonl`,
+          },
+          messages: [],
+        };
+      },
+      prompt: async () => undefined,
+      getSnapshot: async (runtimeId) => ({
+        runtimeId,
+        state: {},
+        messages: [{ role: "assistant", content: "replacement complete" }],
+      }),
+      closeSession: async (runtimeId) => {
+        closed.push(runtimeId);
+      },
+      getRun: async () => structuredClone(persisted),
+      persist: async (run) => {
+        expect(run.revision).toBe(persisted.revision);
+        persisted = { ...run, revision: persisted.revision + 1 };
+        return persisted;
+      },
+      emit: () => undefined,
+      now: () => 10,
+    });
+
+    const running = await scheduler.schedule(persisted);
+    const original = running.occurrences[0]!;
+    const stopped = await scheduler.stop(running.id, running.revision);
+    expect(stopped).toMatchObject({ status: "stopped" });
+    expect(stopped.occurrences).not.toContainEqual(
+      expect.objectContaining({ status: "ready" }),
+    );
+
+    const resumed = await scheduler.retry(
+      running.id,
+      original.id,
+      stopped.revision,
+    );
+    const replacement = resumed.occurrences.find((item) => item.attempt === 2)!;
+    expect(resumed).toMatchObject({ status: "running" });
+    expect(replacement).toMatchObject({
+      status: "running",
+      runtimeId: "runtime-2",
+    });
+    expect(closed).toEqual(["runtime-1"]);
+
+    await scheduler.handleRuntimeEvent({
+      type: "agent_end",
+      runtimeId: "runtime-2",
+      status: "completed",
+    });
+    expect(persisted).toMatchObject({ status: "completed" });
+    expect(persisted.occurrences).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: original.id, status: "skipped" }),
+        expect.objectContaining({
+          id: replacement.id,
+          status: "completed",
+          output: "replacement complete",
+        }),
+      ]),
+    );
+  });
+
+  it("rejects a retry queued behind Stop's durable revision", async () => {
+    let persisted = createWorkflowRoleRun(
+      lifecycleDefinition,
+      "workspace",
+      {},
+      1,
+    );
+    let created = 0;
+    const closed: string[] = [];
+    let releaseClose!: () => void;
+    const closeGate = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    let closing!: () => void;
+    const closingStarted = new Promise<void>((resolve) => {
+      closing = resolve;
+    });
+    const scheduler = new WorkflowOccurrenceScheduler({
+      createSession: async () => {
+        const runtimeId = `runtime-${++created}`;
+        return {
+          runtimeId,
+          state: {
+            sessionId: runtimeId,
+            sessionFile: `/tmp/${runtimeId}.jsonl`,
+          },
+          messages: [],
+        };
+      },
+      prompt: async () => undefined,
+      getSnapshot: async () => ({
+        runtimeId: "unused",
+        state: {},
+        messages: [],
+      }),
+      closeSession: async (runtimeId) => {
+        closed.push(runtimeId);
+        closing();
+        await closeGate;
+      },
+      getRun: async () => structuredClone(persisted),
+      persist: async (run) => {
+        expect(run.revision).toBe(persisted.revision);
+        persisted = { ...run, revision: persisted.revision + 1 };
+        return persisted;
+      },
+      emit: () => undefined,
+      now: () => 10,
+    });
+
+    const running = await scheduler.schedule(persisted);
+    const original = running.occurrences[0]!;
+    const stop = scheduler.stop(running.id, running.revision);
+    await closingStarted;
+    // This request observed the pre-stop revision but cannot enter the
+    // serialized transition until Stop has committed.
+    const staleRetry = scheduler.retry(
+      running.id,
+      original.id,
+      running.revision,
+    );
+    releaseClose();
+    const stopped = await stop;
+    await expect(staleRetry).rejects.toThrow(
+      `Workflow run changed before retry: expected revision ${running.revision}, found ${stopped.revision}.`,
+    );
+
+    // The serialized CAS rejects before retry creates or owns any replacement
+    // session; Stop's original worker is the only session close.
+    expect(created).toBe(1);
+    expect(closed).toEqual(["runtime-1"]);
+    expect(persisted).toMatchObject({ status: "stopped" });
+    expect(persisted.occurrences).toEqual([
+      expect.objectContaining({
+        id: original.id,
+        status: "cancelled",
+        attempt: 1,
+      }),
+    ]);
+    expect(persisted.occurrences).not.toContainEqual(
+      expect.objectContaining({ status: "ready" }),
+    );
+  });
+});
+
+const humanAnswerDefinition: AgentWorkflowDefinition = {
+  format: "pi-deck.agent-workflow",
+  schemaVersion: 2,
+  id: "00000000-0000-4000-8000-000000000401",
+  revision: 1,
+  name: "Human answer race",
+  inputs: [],
+  entryNodeId: "00000000-0000-4000-8000-000000000402",
+  nodes: [
+    {
+      id: "00000000-0000-4000-8000-000000000402",
+      name: "Confirm",
+      role: "human",
+      config: { interaction: "approval", prompt: "Continue?" },
+    },
+  ],
+  relationships: [
+    {
+      id: "00000000-0000-4000-8000-000000000403",
+      from: "00000000-0000-4000-8000-000000000402",
+      when: { equals: true },
+      to: { end: "approved" },
+    },
+    {
+      id: "00000000-0000-4000-8000-000000000404",
+      from: "00000000-0000-4000-8000-000000000402",
+      when: { equals: false },
+      to: { end: "rejected" },
+    },
+  ],
+};
+
+function setupHumanAnswerRace(
+  options: {
+    beforePersist?: () => Promise<void> | void;
+  } = {},
+) {
+  let persisted = createWorkflowRoleRun(
+    humanAnswerDefinition,
+    "workspace",
+    {},
+    1,
+  );
+  const initial = structuredClone(persisted);
+  const saves: WorkflowRoleRun[] = [];
+  const scheduler = new WorkflowOccurrenceScheduler({
+    createSession: async () => {
+      throw new Error("Human answers route directly to an end state.");
+    },
+    prompt: async () => undefined,
+    getSnapshot: async () => ({ runtimeId: "unused", state: {}, messages: [] }),
+    closeSession: async () => undefined,
+    getRun: async () => structuredClone(persisted),
+    persist: async (run) => {
+      await options.beforePersist?.();
+      expect(run.revision).toBe(persisted.revision);
+      saves.push(structuredClone(run));
+      persisted = { ...run, revision: persisted.revision + 1 };
+      return structuredClone(persisted);
+    },
+    emit: () => undefined,
+    now: () => 10,
+  });
+  return { scheduler, initial, saves, current: () => persisted };
+}
+
+describe("WorkflowOccurrenceScheduler Stop and Human Answer races", () => {
+  it("makes a Stop queued after Answer win before Answer reaches the durable boundary", async () => {
+    const fixture = setupHumanAnswerRace();
+    const human = fixture.initial.occurrences[0]!;
+    const answer = fixture.scheduler.answerHuman(
+      fixture.initial.id,
+      human.id,
+      true,
+      fixture.initial.revision,
+    );
+    const stop = fixture.scheduler.stop(
+      fixture.initial.id,
+      fixture.initial.revision,
+    );
+
+    await expect(answer).rejects.toThrow(
+      "Workflow run changed before answer: Stop was requested for this run.",
+    );
+    const stopped = await stop;
+
+    expect(stopped).toMatchObject({ status: "stopped", revision: 2 });
+    expect(stopped.occurrences).toContainEqual(
+      expect.objectContaining({ id: human.id, status: "cancelled" }),
+    );
+    expect(fixture.saves).toHaveLength(1);
+    expect(fixture.saves[0]?.occurrences).not.toContainEqual(
+      expect.objectContaining({ id: human.id, output: true }),
+    );
+    expect(fixture.current().occurrences).not.toContainEqual(
+      expect.objectContaining({ status: "ready" }),
+    );
+  });
+
+  it("rejects an Answer queued behind Stop and leaves no work to resurrect", async () => {
+    const fixture = setupHumanAnswerRace();
+    const human = fixture.initial.occurrences[0]!;
+    const stop = fixture.scheduler.stop(
+      fixture.initial.id,
+      fixture.initial.revision,
+    );
+    const answer = fixture.scheduler.answerHuman(
+      fixture.initial.id,
+      human.id,
+      true,
+      fixture.initial.revision,
+    );
+
+    const stopped = await stop;
+    await expect(answer).rejects.toThrow(
+      `Workflow run changed before answer: expected revision ${fixture.initial.revision}, found ${stopped.revision}.`,
+    );
+    expect(fixture.current()).toMatchObject({ status: "stopped" });
+    expect(fixture.current().occurrences).toContainEqual(
+      expect.objectContaining({ id: human.id, status: "cancelled" }),
+    );
+    expect(fixture.saves).toHaveLength(1);
+  });
+
+  it("applies a Stop queued while Answer is at its durable boundary instead of silently losing it", async () => {
+    let releasePersist!: () => void;
+    const persistGate = new Promise<void>((resolve) => {
+      releasePersist = resolve;
+    });
+    let persistStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      persistStarted = resolve;
+    });
+    const fixture = setupHumanAnswerRace({
+      beforePersist: async () => {
+        persistStarted();
+        await persistGate;
+      },
+    });
+    const human = fixture.initial.occurrences[0]!;
+    const answer = fixture.scheduler.answerHuman(
+      fixture.initial.id,
+      human.id,
+      true,
+      fixture.initial.revision,
+    );
+    await started;
+    const stop = fixture.scheduler.stop(
+      fixture.initial.id,
+      fixture.initial.revision,
+    );
+    releasePersist();
+    const [answered, stopped] = await Promise.all([answer, stop]);
+
+    expect(answered).toMatchObject({ status: "completed", revision: 2 });
+    expect(stopped).toMatchObject({ status: "stopped", revision: 3 });
+    expect(fixture.saves).toHaveLength(2);
+    expect(
+      fixture.saves.filter(
+        (run) =>
+          run.status !== "stopped" &&
+          run.occurrences.some(
+            (item) => item.id === human.id && item.output === true,
+          ),
+      ),
+    ).toHaveLength(1);
+    expect(fixture.current().occurrences).not.toContainEqual(
+      expect.objectContaining({ status: "ready" }),
+    );
+  });
+
+  it("rejects a Stop from a future revision without persisting", async () => {
+    const fixture = setupHumanAnswerRace();
+
+    await expect(
+      fixture.scheduler.stop(fixture.initial.id, fixture.initial.revision + 1),
+    ).rejects.toThrow(
+      `Workflow run changed before stop: expected revision ${fixture.initial.revision + 1}, found ${fixture.initial.revision}.`,
+    );
+    expect(fixture.saves).toHaveLength(0);
+    expect(fixture.current()).toEqual(fixture.initial);
+  });
+
+  it("commits exactly one of two concurrent Answers", async () => {
+    const fixture = setupHumanAnswerRace();
+    const human = fixture.initial.occurrences[0]!;
+    const answers = await Promise.allSettled([
+      fixture.scheduler.answerHuman(
+        fixture.initial.id,
+        human.id,
+        true,
+        fixture.initial.revision,
+      ),
+      fixture.scheduler.answerHuman(
+        fixture.initial.id,
+        human.id,
+        false,
+        fixture.initial.revision,
+      ),
+    ]);
+
+    expect(
+      answers.filter((result) => result.status === "fulfilled"),
+    ).toHaveLength(1);
+    expect(
+      answers.filter((result) => result.status === "rejected"),
+    ).toHaveLength(1);
+    expect(fixture.saves).toHaveLength(1);
+    expect(fixture.current().occurrences).toContainEqual(
+      expect.objectContaining({
+        id: human.id,
+        status: "completed",
+        output: true,
+      }),
+    );
+  });
+});
+
 describe("WorkflowOccurrenceScheduler lifecycle conflicts", () => {
   it("persists snapshot failures, closes internally, and releases workflow ownership", async () => {
     let releases = 0;

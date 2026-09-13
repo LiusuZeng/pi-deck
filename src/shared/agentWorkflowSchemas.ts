@@ -219,9 +219,29 @@ export const canonicalWorkflowOccurrenceRequestSchema = z
     occurrenceId: z.string().uuid(),
   })
   .strict();
+/**
+ * Retry is conditional on the rendered run revision. This prevents a retry
+ * requested before/concurrently with Stop from reviving the stopped envelope.
+ */
+export const canonicalWorkflowRetryOccurrenceRequestSchema =
+  canonicalWorkflowOccurrenceRequestSchema
+    .extend({ expectedRevision: z.number().int().positive() })
+    .strict();
+/**
+ * Stop is an idempotent cancellation intent: its revision records the client's
+ * observation and may be stale, while a future revision is rejected. Answer
+ * remains an exact durable revision fence.
+ */
+export const canonicalWorkflowStopRunRequestSchema =
+  canonicalWorkflowGetRunRequestSchema
+    .extend({ expectedRevision: z.number().int().positive() })
+    .strict();
 export const canonicalWorkflowHumanAnswerRequestSchema =
   canonicalWorkflowOccurrenceRequestSchema
-    .extend({ value: z.union([z.string().max(32_000), z.boolean()]) })
+    .extend({
+      value: z.union([z.string().max(32_000), z.boolean()]),
+      expectedRevision: z.number().int().positive(),
+    })
     .strict();
 
 /** A static execution of a node. Repetition creates separate occurrences. */

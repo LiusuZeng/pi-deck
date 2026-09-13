@@ -90,4 +90,41 @@ describe("LegacyWorkflowRunCompatibility", () => {
       "Known safe route",
     );
   });
+
+  it("synchronously admits only one destructive action", async () => {
+    let releaseStop!: () => void;
+    const onStop = vi.fn(
+      () => new Promise<void>((resolve) => (releaseStop = resolve)),
+    );
+    const onRetryStep = vi.fn();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () =>
+      root?.render(
+        createElement(LegacyWorkflowRunCompatibility, {
+          run,
+          onBack: vi.fn(),
+          onStop,
+          onRetryStep,
+          onRetryCondition: vi.fn(),
+          onOverrideCondition: vi.fn(),
+          onApproveGate: vi.fn(),
+          onOpenSession: vi.fn(),
+        }),
+      ),
+    );
+    const button = (label: string) =>
+      [...container!.querySelectorAll("button")].find(
+        (item) => item.textContent === label,
+      )!;
+    await act(async () => {
+      button("Stop run").click();
+      button("Retry agent").click();
+    });
+    expect(onStop).toHaveBeenCalledTimes(1);
+    expect(onRetryStep).not.toHaveBeenCalled();
+    expect(button("Retry agent").disabled).toBe(true);
+    await act(async () => releaseStop());
+  });
 });

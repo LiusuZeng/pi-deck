@@ -241,6 +241,31 @@ describe("WorkflowStore agentWorkflow migration foundation", () => {
     expect(await reloaded.listRuns("workspace")).toEqual([]);
   });
 
+  it("rejects stale canonical run writes with a durable revision precondition", async () => {
+    const store = await fresh();
+    const definition = agentWorkflowDefinition();
+    const run = await store.createWorkflowRun(
+      createWorkflowRoleRun(definition, "workspace"),
+    );
+    const stopped = await store.updateWorkflowRun({
+      ...run,
+      status: "stopped",
+      occurrences: run.occurrences.map((occurrence) => ({
+        ...occurrence,
+        status: "cancelled" as const,
+      })),
+      completedAtMs: 2,
+      updatedAtMs: 2,
+    });
+
+    await expect(
+      store.updateWorkflowRun({ ...run, updatedAtMs: 3 }),
+    ).rejects.toThrow(
+      `Workflow run revision conflict: expected ${run.revision}, found ${stopped.revision}.`,
+    );
+    expect(await store.getWorkflowRun(run.id)).toEqual(stopped);
+  });
+
   it("persists resolved explicit handoffs for restart recovery", async () => {
     const store = await fresh();
     const definition = agentWorkflowDefinition();

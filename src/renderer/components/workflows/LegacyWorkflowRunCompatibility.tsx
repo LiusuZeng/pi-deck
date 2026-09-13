@@ -1,4 +1,4 @@
-import { useState, type ReactElement } from "react";
+import { useRef, useState, type ReactElement } from "react";
 import type {
   WorkflowRun,
   WorkflowStepRun,
@@ -29,9 +29,12 @@ export function LegacyWorkflowRunCompatibility(props: {
   onOpenSession(step: WorkflowStepRun): void;
 }): ReactElement {
   const [busy, setBusy] = useState<string>();
+  const mutationInFlight = useRef(false);
   const [error, setError] = useState<string>();
   const [rationales, setRationales] = useState<Record<string, string>>({});
   const perform = async (id: string, action: () => Promise<void> | void) => {
+    if (mutationInFlight.current) return;
+    mutationInFlight.current = true;
     setBusy(id);
     setError(undefined);
     try {
@@ -39,6 +42,7 @@ export function LegacyWorkflowRunCompatibility(props: {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
+      mutationInFlight.current = false;
       setBusy(undefined);
     }
   };
