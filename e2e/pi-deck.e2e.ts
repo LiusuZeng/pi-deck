@@ -5430,6 +5430,90 @@ test("real mode rejects and prunes a missing saved session deterministically", a
   }
 });
 
+test("OpenAI Codex auth expiry preserves the durable session and resumes explicitly", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-codex-auth-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+  const env = fakeRealModeEnv({
+    root,
+    projectCwd,
+    agentDir,
+    fakePiArgs: ["--production-shaped", "--openai-codex-auth-expired"],
+  });
+  const firstLaunch = await launchPiDeck(env);
+  let sessionFile = "";
+  try {
+    await expectHealthyPreload(firstLaunch.page);
+    await enterSessionDetail(firstLaunch.page);
+    await firstLaunch.page
+      .getByLabel("Prompt text")
+      .fill("keep this durable work");
+    await firstLaunch.page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      firstLaunch.page.getByText("OpenAI authentication required"),
+    ).toBeVisible();
+    await expect(
+      firstLaunch.page.getByRole("button", { name: "Re-authenticate with Pi" }),
+    ).toBeVisible();
+    await expect(
+      firstLaunch.page.getByRole("button", { name: "Check again / Resume" }),
+    ).toBeVisible();
+
+    const before = await firstLaunch.page.evaluate(() =>
+      window.piDeck.chat.getSnapshot(),
+    );
+    await firstLaunch.page
+      .getByRole("button", { name: "Check again / Resume" })
+      .click();
+    await expect(
+      firstLaunch.page.getByText("Resumed saved Pi session."),
+    ).toBeVisible();
+    const resumed = await firstLaunch.page.evaluate(() =>
+      window.piDeck.chat.getSnapshot(),
+    );
+    const recovery = {
+      beforeRuntimeId: before.runtimeId,
+      resumedRuntimeId: resumed.runtimeId,
+      beforeSessionFile: before.state.sessionFile,
+      resumedSessionFile: resumed.state.sessionFile,
+      messages: resumed.messages.map((message) => message.content),
+    };
+    sessionFile = recovery.beforeSessionFile;
+    expect(recovery.resumedRuntimeId).not.toBe(recovery.beforeRuntimeId);
+    expect(recovery.resumedSessionFile).toBe(recovery.beforeSessionFile);
+    expect(recovery.messages).toContain("keep this durable work");
+  } finally {
+    await firstLaunch.app.close();
+  }
+
+  const secondLaunch = await launchPiDeck(env);
+  try {
+    await expectHealthyPreload(secondLaunch.page);
+    const persisted = await secondLaunch.page.evaluate(async (file) => {
+      const resumed = await window.piDeck.chat.resumeSession({
+        sessionFile: file,
+      });
+      return {
+        sessionFile: resumed.state.sessionFile,
+        messages: resumed.messages,
+      };
+    }, sessionFile);
+    expect(persisted.sessionFile).toBe(sessionFile);
+    expect(
+      persisted.messages.filter(
+        (message) => message.content === "keep this durable work",
+      ),
+    ).toHaveLength(1);
+  } finally {
+    await secondLaunch.app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("real mode lists a newly prompted session after restart with fake Pi", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-persist-"));
   const projectCwd = path.join(root, "project");

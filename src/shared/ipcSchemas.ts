@@ -303,6 +303,10 @@ export const chatListSessionsResultSchema = z
   })
   .strict();
 
+export const openPiCodexLoginResultSchema = z
+  .object({ opened: z.literal(true) })
+  .strict();
+
 export const chatResumeSessionRequestSchema = z
   .object({
     workspaceId: z.string().min(1).optional(),
@@ -922,6 +926,7 @@ export const ipcChannels = {
   appGetVersion: "app:getVersion",
   appGetDiagnosticsSummary: "app:getDiagnosticsSummary",
   appGetBootstrapState: "app:getBootstrapState",
+  appOpenPiCodexLogin: "app:openPiCodexLogin",
   settingsGet: "settings:get",
   settingsUpdate: "settings:update",
   chatGetSnapshot: "chat:getSnapshot",

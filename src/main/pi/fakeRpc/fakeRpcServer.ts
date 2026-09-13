@@ -42,6 +42,8 @@ interface FakeOptions {
   promptErrorPrefix?: string;
   /** Fails the matching prompt only once across fake Pi processes. */
   promptErrorOnceFile?: string;
+  /** Emits Pi's observed OpenAI Codex expired-token terminal failure. */
+  openAiCodexAuthExpired: boolean;
   dropCompletionEvents: boolean;
   extensionUiMethod: "select" | "confirm" | "input" | "editor";
   extensionUiAutoCompleteTimeoutMs: number;
@@ -86,6 +88,7 @@ function parseOptions(argv: string[]): FakeOptions {
     ignoredCommands: new Set<string>(),
     failedCommands: new Set<string>(),
     promptScenario: "basic",
+    openAiCodexAuthExpired: false,
     dropCompletionEvents: false,
     extensionUiMethod: "confirm",
     extensionUiAutoCompleteTimeoutMs: 5_000,
@@ -132,6 +135,8 @@ function parseOptions(argv: string[]): FakeOptions {
       const file = argv[index + 1];
       if (file) options.promptErrorOnceFile = file;
       index += 1;
+    } else if (arg === "--openai-codex-auth-expired") {
+      options.openAiCodexAuthExpired = true;
     } else if (arg === "--drop-completion-events") {
       options.dropCompletionEvents = true;
     } else if (arg === "--extension-ui-method") {
@@ -280,9 +285,11 @@ class FakeRpcServer {
     : "fake-model";
   private currentProvider = this.options.collidingModels
     ? "anthropic"
-    : this.options.productionShaped
-      ? "anthropic"
-      : "fake-provider";
+    : this.options.openAiCodexAuthExpired
+      ? "openai-codex"
+      : this.options.productionShaped
+        ? "anthropic"
+        : "fake-provider";
   private currentThinkingLevel = "medium";
   private pendingExtensionUi:
     | {
@@ -840,8 +847,10 @@ class FakeRpcServer {
       this.exerciseDelegationBridge(text);
     }
 
-    if (this.shouldFailPrompt(text)) {
-      const errorMessage = "Usage limit reached for fake provider.";
+    if (this.shouldFailPrompt(text) || this.options.openAiCodexAuthExpired) {
+      const errorMessage = this.options.openAiCodexAuthExpired
+        ? "Provided authentication token is expired."
+        : "Usage limit reached for fake provider.";
       const timestamp = Date.now();
       const failedAssistant = {
         id: assistantId,

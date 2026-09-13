@@ -67,6 +67,10 @@ import {
   type SessionOverlays,
 } from "./sessionState.js";
 import {
+  classifyOpenAiCodexAuthFailure,
+  type FailureKind,
+} from "./openaiCodexAuth.js";
+import {
   canNavigatePromptHistoryDown,
   canNavigatePromptHistoryUp,
   initialPromptHistoryState,
@@ -748,6 +752,8 @@ interface SessionViewModel {
   awaitingAgentEnd?: boolean;
   /** A provider failure observed in a Pi runtime event, not a local UI error. */
   providerErrorObserved?: boolean;
+  /** Narrow Pi-managed OpenAI Codex recovery classification. */
+  failureKind?: FailureKind | undefined;
   archivedAtMs?: number;
   /** Timestamp of the latest durable or live successful/usable aborted turn. */
   completedAtMs?: number | undefined;
@@ -807,6 +813,9 @@ function activitySourceSessions(
     ...(session.lastError !== undefined
       ? { lastError: session.lastError }
       : {}),
+    ...(session.failureKind === undefined
+      ? {}
+      : { failureKind: session.failureKind }),
     ...(session.archivedAtMs !== undefined
       ? { archivedAtMs: session.archivedAtMs }
       : {}),
@@ -2145,6 +2154,15 @@ export function App(): ReactElement {
   );
   const activityTotalCount = useMemo(
     () => countActivityInboxItems(activitySources),
+    [activitySources],
+  );
+  const openAiCodexAuthRequiredCount = useMemo(
+    () =>
+      new Set(
+        activitySources
+          .filter((source) => source.failureKind === "auth-required")
+          .map((source) => source.sessionFile ?? source.id),
+      ).size,
     [activitySources],
   );
   const sessionSoundSettings =
@@ -4206,6 +4224,71 @@ export function App(): ReactElement {
       const message = error instanceof Error ? error.message : String(error);
       setComposerError(message);
       throw error;
+    }
+  }
+
+  async function handleOpenPiCodexLogin(): Promise<void> {
+    try {
+      await window.piDeck.app.openPiCodexLogin();
+      setUiMessage(
+        "Pi opened in Terminal. Run /login openai-codex, finish the ChatGPT subscription login, then Check again / Resume this session.",
+      );
+    } catch (error) {
+      setUiMessage(
+        `Could not open Pi login: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  async function handleResumeAfterOpenAiCodexRepair(): Promise<void> {
+    if (selectedSession.sessionFile === undefined) {
+      setUiMessage(
+        "This session does not have a saved Pi session file to reopen.",
+      );
+      return;
+    }
+    const generation = beginNavigation();
+    const origin = workOriginForPrimaryView(
+      primaryView,
+      currentWorkspaceRef.current.id,
+    );
+    try {
+      if (selectedSession.runtimeBacked) {
+        intentionallyClosingRuntimeIds.current.add(selectedSession.id);
+        await window.piDeck.chat.closeSession({
+          runtimeId: selectedSession.id,
+        });
+        // Main has now released the runtime lock. Commit the local detached
+        // state before the next async boundary so a failed spawn remains
+        // recoverable rather than leaving a stale runtime id in the row.
+        setSessions((items) =>
+          items.map((session) =>
+            session.id === selectedSession.id
+              ? {
+                  ...session,
+                  runtimeBacked: false,
+                  resumeBacked: true,
+                  status: "idle",
+                  baseState: "idle",
+                  subtitle: "Saved · ready to resume after Pi login",
+                }
+              : session,
+          ),
+        );
+      }
+      // Resume only recreates the worker against the canonical saved file. It
+      // never resends retryPrompt, so partially completed tool work is not
+      // replayed automatically after credential repair.
+      await resumeSession(
+        { ...selectedSession, runtimeBacked: false, resumeBacked: true },
+        generation,
+        origin,
+      );
+    } catch (error) {
+      intentionallyClosingRuntimeIds.current.delete(selectedSession.id);
+      setUiMessage(
+        `Could not reopen this Pi session: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
@@ -6336,6 +6419,8 @@ export function App(): ReactElement {
               onScopeChange={handleActivityScopeChange}
               onOpenActivityItem={handleOpenActivityItem}
               onNewSession={() => void handleNewSession()}
+              openAiCodexAuthRequiredCount={openAiCodexAuthRequiredCount}
+              onRepairOpenAiCodexAuth={() => void handleOpenPiCodexLogin()}
             />
           )
         ) : (
@@ -6368,6 +6453,12 @@ export function App(): ReactElement {
                       pendingTaskSubmissions[selectedSession.id] !== undefined
                     }
                     onRecoverSession={onRecoverChatTimelineSession}
+                    onRepairOpenAiCodexAuth={() =>
+                      void handleOpenPiCodexLogin()
+                    }
+                    onResumeAfterOpenAiCodexRepair={() =>
+                      void handleResumeAfterOpenAiCodexRepair()
+                    }
                     onRespondToExtensionUi={onRespondToChatTimelineExtensionUi}
                     onRetrySession={onRetryChatTimelineSession}
                     onCopyDiagnostics={onCopyChatTimelineDiagnostics}
@@ -7923,6 +8014,7 @@ function reduceRuntimeEventUnprioritized(
         lastRuntimeEventLabel: "Pi agent started",
         retryPrompt: undefined,
         providerErrorObserved: false,
+        failureKind: undefined,
         lastError: undefined,
         updatedAt: "Now",
         updatedAtMs: Date.now(),
@@ -7984,6 +8076,7 @@ function reduceRuntimeEventUnprioritized(
         workingStartedAtMs: session.workingStartedAtMs ?? Date.now(),
         lastRuntimeEventLabel: "Pi scheduled an automatic retry",
         providerErrorObserved: false,
+        failureKind: undefined,
         updatedAt: "Now",
         updatedAtMs: Date.now(),
       };
@@ -8050,7 +8143,9 @@ function reduceRuntimeEventUnprioritized(
           ? "Pi reported a final retry error"
           : "Pi finished an automatic retry",
         providerErrorObserved: retryFailed,
-        ...(retryFailed ? {} : { lastError: undefined }),
+        ...(retryFailed
+          ? { failureKind: classifyOpenAiCodexAuthFailure(event) }
+          : { failureKind: undefined, lastError: undefined }),
         updatedAt: "Now",
         updatedAtMs: Date.now(),
       };
@@ -8151,6 +8246,7 @@ function reduceRuntimeEventUnprioritized(
           status: "working",
           baseState: "working",
           providerErrorObserved: false,
+          failureKind: undefined,
           lastError: undefined,
           overlays: {
             ...session.overlays,
@@ -8196,7 +8292,12 @@ function reduceRuntimeEventUnprioritized(
         // Preserve a terminal provider failure behind an actionable dialog so
         // clearing the final request restores Failed rather than working/idle.
         providerErrorObserved: endedWithError,
-        ...(endedWithError ? {} : { lastError: undefined }),
+        ...(endedWithError
+          ? {
+              failureKind:
+                classifyOpenAiCodexAuthFailure(event) ?? session.failureKind,
+            }
+          : { failureKind: undefined, lastError: undefined }),
         overlays: {
           ...session.overlays,
           streaming: false,
@@ -8875,6 +8976,12 @@ function reduceMessageUpdate(
     ...(usageStats !== undefined ? { usageStats } : {}),
     providerErrorObserved:
       isErrorUpdate || session.providerErrorObserved === true,
+    ...(isErrorUpdate
+      ? {
+          failureKind:
+            classifyOpenAiCodexAuthFailure(event) ?? session.failureKind,
+        }
+      : {}),
     // An assistant message's `done` only completes that message. The agent
     // may still be running tools or emit an authoritative agent_end next.
     status: stillWaitingForInput
@@ -11408,6 +11515,8 @@ const ChatTimeline = memo(function ChatTimeline(props: {
   multitaskState: MultitaskStateEvent | undefined;
   taskPlanning: boolean;
   onRecoverSession(): void;
+  onRepairOpenAiCodexAuth(): void;
+  onResumeAfterOpenAiCodexRepair(): void;
   onRespondToExtensionUi(
     requestId: string,
     response: { confirmed: boolean } | { value: string } | { cancelled: true },
@@ -11809,23 +11918,49 @@ const ChatTimeline = memo(function ChatTimeline(props: {
         ) : null}
         {props.session.status === "error" ? (
           <div className="state-banner error">
-            <span>This session is in an error state.</span>
+            {props.session.failureKind === "auth-required" ? (
+              <span>
+                OpenAI authentication required. Pi&apos;s OpenAI Codex (ChatGPT
+                subscription) login is no longer valid.
+              </span>
+            ) : (
+              <span>This session is in an error state.</span>
+            )}
             <div className="recovery-actions">
-              {props.session.retryPrompt !== undefined &&
-              props.session.runtimeBacked ? (
-                <IconButton
-                  icon={RotateCcw}
-                  label="Retry prompt"
-                  onClick={props.onRetrySession}
-                />
-              ) : null}
-              {props.session.sessionFile !== undefined ? (
-                <IconButton
-                  icon={History}
-                  label="Reopen saved session"
-                  onClick={props.onRecoverSession}
-                />
-              ) : null}
+              {props.session.failureKind === "auth-required" ? (
+                <>
+                  <IconButton
+                    icon={History}
+                    label="Re-authenticate with Pi"
+                    onClick={props.onRepairOpenAiCodexAuth}
+                  />
+                  {props.session.sessionFile !== undefined ? (
+                    <IconButton
+                      icon={RotateCcw}
+                      label="Check again / Resume"
+                      onClick={props.onResumeAfterOpenAiCodexRepair}
+                    />
+                  ) : null}
+                </>
+              ) : (
+                <>
+                  {props.session.retryPrompt !== undefined &&
+                  props.session.runtimeBacked ? (
+                    <IconButton
+                      icon={RotateCcw}
+                      label="Retry prompt"
+                      onClick={props.onRetrySession}
+                    />
+                  ) : null}
+                  {props.session.sessionFile !== undefined ? (
+                    <IconButton
+                      icon={History}
+                      label="Reopen saved session"
+                      onClick={props.onRecoverSession}
+                    />
+                  ) : null}
+                </>
+              )}
               <IconButton
                 icon={Copy}
                 label="Copy diagnostics"

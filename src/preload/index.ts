@@ -38,6 +38,7 @@ import {
   diagnosticsSummarySchema,
   ipcChannels,
   multitaskModeRequestSchema,
+  openPiCodexLoginResultSchema,
   multitaskModeUpdateRequestSchema,
   multitaskSettingsRequestSchema,
   multitaskSettingsSchema,
@@ -181,6 +182,12 @@ const api: PiDeckApi = Object.freeze({
         channel: ipcChannels.appGetBootstrapState,
         request: undefined,
         responseSchema: appBootstrapStateSchema,
+      }),
+    openPiCodexLogin: () =>
+      invokeValidated({
+        channel: ipcChannels.appOpenPiCodexLogin,
+        request: undefined,
+        responseSchema: openPiCodexLoginResultSchema,
       }),
   }),
   settings: Object.freeze({

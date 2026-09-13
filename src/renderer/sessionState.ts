@@ -1,3 +1,8 @@
+import {
+  classifyOpenAiCodexAuthFailure,
+  type FailureKind,
+} from "./openaiCodexAuth.js";
+
 export type BaseSessionState =
   | "unloaded"
   | "attaching"
@@ -51,6 +56,8 @@ export interface ReducedSessionState extends SidebarSessionState {
   diagnostics: string[];
   /** A provider error was observed and has not been superseded by a retry. */
   terminalProviderErrorObserved: boolean;
+  /** Narrow recoverable provider failure classification; raw diagnostics stay verbatim. */
+  failureKind?: FailureKind | undefined;
   /** Main has detached the worker, so extension UI responses cannot be delivered. */
   runtimeDetached: boolean;
 }
@@ -95,6 +102,9 @@ export function createInitialReducedSessionState(
     toolCards: patch.toolCards ?? {},
     diagnostics: patch.diagnostics ?? [],
     terminalProviderErrorObserved: patch.terminalProviderErrorObserved ?? false,
+    ...(patch.failureKind === undefined
+      ? {}
+      : { failureKind: patch.failureKind }),
     runtimeDetached: patch.runtimeDetached ?? false,
   };
 }
@@ -129,6 +139,7 @@ function reduceSessionRuntimeEventUnprioritized(
         ...state,
         baseState: "working",
         terminalProviderErrorObserved: false,
+        failureKind: undefined,
         overlays: { ...state.overlays, streaming: false },
       };
     case "message_update":
@@ -164,6 +175,7 @@ function reduceSessionRuntimeEventUnprioritized(
         ...state,
         baseState: "working",
         terminalProviderErrorObserved: false,
+        failureKind: undefined,
         overlays: { ...state.overlays, streaming: false, retrying: true },
       };
     case "auto_retry_end": {
@@ -179,6 +191,9 @@ function reduceSessionRuntimeEventUnprioritized(
         baseState: retryFailed ? "error" : "working",
         terminalProviderErrorObserved: retryFailed,
         overlays: { ...state.overlays, streaming: false, retrying: false },
+        ...(retryFailed
+          ? { failureKind: classifyOpenAiCodexAuthFailure(event) }
+          : { failureKind: undefined }),
         diagnostics: retryFailed
           ? appendDiagnostic(
               state.diagnostics,
@@ -264,6 +279,9 @@ function reduceMessageUpdateEvent(
           : "working",
     terminalProviderErrorObserved:
       providerErrorObserved || state.terminalProviderErrorObserved,
+    ...(providerErrorObserved
+      ? { failureKind: classifyOpenAiCodexAuthFailure(event) }
+      : {}),
     overlays: {
       ...state.overlays,
       streaming: !done && !providerErrorObserved,
@@ -550,6 +568,7 @@ function reduceAgentEndEvent(
       ...state,
       baseState: "working",
       terminalProviderErrorObserved: false,
+      failureKind: undefined,
       activeTools: [],
       overlays: {
         ...state.overlays,
@@ -587,6 +606,12 @@ function reduceAgentEndEvent(
         ? "error"
         : "idle",
     terminalProviderErrorObserved,
+    ...(terminalProviderErrorObserved
+      ? {
+          failureKind:
+            classifyOpenAiCodexAuthFailure(event) ?? state.failureKind,
+        }
+      : { failureKind: undefined }),
     activeTools: [],
     overlays: {
       ...state.overlays,

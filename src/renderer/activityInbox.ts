@@ -3,6 +3,7 @@ import {
   type BaseSessionState,
   type SessionOverlays,
 } from "./sessionState.js";
+import type { FailureKind } from "./openaiCodexAuth.js";
 
 export type ActivityStatus =
   | "needsAttention"
@@ -55,6 +56,7 @@ export interface ActivitySourceSession {
   status?: string;
   completedAtMs?: number;
   lastError?: string;
+  failureKind?: FailureKind;
   /** Unsaved composer/session draft; drafts are not activity items. */
   draftSession?: boolean;
   /** Present for either an archived session or archived workspace membership. */
@@ -78,6 +80,7 @@ export interface ActivityItem {
   updatedAtMs: number;
   completedAtMs?: number;
   actionLabel: string;
+  failureKind?: FailureKind;
 }
 
 export interface ActivityInboxModel {
@@ -297,7 +300,13 @@ function normalizeActivity(source: ActivitySourceSession): ActivityItem[] {
       detail: activityDetail(source, status),
       updatedAtMs: source.updatedAtMs,
       ...(completedAtMs === undefined ? {} : { completedAtMs }),
-      actionLabel: actionLabels[status],
+      actionLabel:
+        source.failureKind === "auth-required"
+          ? "OpenAI authentication required"
+          : actionLabels[status],
+      ...(source.failureKind === undefined
+        ? {}
+        : { failureKind: source.failureKind }),
     },
   ];
 }
