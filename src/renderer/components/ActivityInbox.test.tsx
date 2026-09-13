@@ -250,6 +250,26 @@ describe("ActivityInbox", () => {
     expect(view.textContent).not.toContain("Idle");
   });
 
+  it("marks only in-progress session row icons as active", () => {
+    const { view } = renderInbox(modelWithEveryKind());
+
+    expect(
+      view.querySelectorAll(
+        ".activity-inbox-row--inProgress .activity-inbox-status-icon--active",
+      ),
+    ).toHaveLength(1);
+    expect(
+      view.querySelectorAll(
+        ".activity-inbox-row:not(.activity-inbox-row--inProgress) .activity-inbox-status-icon--active",
+      ),
+    ).toHaveLength(0);
+    expect(
+      view.querySelector(
+        ".activity-inbox-section h2 .activity-inbox-status-icon--active",
+      ),
+    ).toBeNull();
+  });
+
   it("uses total Work, not actionable Work, for All Work-labeled counts", () => {
     const model = modelWithEveryKind();
     expect(model.actionableCount).toBe(3);
@@ -467,6 +487,11 @@ describe("ActivityInbox", () => {
         ?.closest(".activity-inbox-section")
         ?.querySelector("h2")?.textContent,
     ).toContain("In progress");
+    expect(
+      rowForTitle(view, "Alpha")?.querySelector(
+        ".activity-inbox-status-icon--active",
+      ),
+    ).not.toBeNull();
 
     act(() => {
       root?.render(
@@ -492,6 +517,16 @@ describe("ActivityInbox", () => {
         ?.closest(".activity-inbox-section")
         ?.querySelector("h2")?.textContent,
     ).toContain("In progress");
+    expect(
+      rowForTitle(view, "Alpha")?.querySelector(
+        ".activity-inbox-status-icon--active",
+      ),
+    ).toBeNull();
+    expect(
+      rowForTitle(view, "Beta")?.querySelector(
+        ".activity-inbox-status-icon--active",
+      ),
+    ).not.toBeNull();
   });
 
   it("changes workspace scope through the selector and uses scoped status counts", () => {

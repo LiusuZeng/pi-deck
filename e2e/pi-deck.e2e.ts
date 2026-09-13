@@ -5893,7 +5893,7 @@ test.describe("Unified Work", () => {
     }
   });
 
-  test("Unified Work All Work counts use the same total across sidebar, scope, and filter", async () => {
+  test("Unified Work All Work counts and status motion remain consistent", async () => {
     const root = fs.mkdtempSync(
       path.join(os.tmpdir(), "pi-deck-e2e-work-count-consistency-"),
     );
@@ -5988,6 +5988,40 @@ test.describe("Unified Work", () => {
       await expect(
         route.locator(".activity-inbox-row--inProgress"),
       ).toHaveCount(2);
+
+      const activeStatusIcon = route
+        .getByRole("button", {
+          name: /^In progress: count consistency running 1,/,
+        })
+        .locator(".activity-inbox-status-icon--active");
+      const staticStatusIcon = route
+        .getByRole("button", {
+          name: /^Failed: count consistency failed 1,/,
+        })
+        .locator(".activity-inbox-status svg");
+      const inProgressHeadingIcon = route
+        .getByRole("heading", { name: /^In progress\s+2$/ })
+        .locator("svg");
+
+      // These inspect the built renderer's computed styles, rather than
+      // coupling the test to stylesheet source or animation frame timing.
+      // Force the positive case so host accessibility settings cannot make
+      // this assertion environment-dependent.
+      await page.emulateMedia({ reducedMotion: "no-preference" });
+      await expect(activeStatusIcon).toHaveCSS(
+        "animation-name",
+        "ui-control-spin",
+      );
+      await expect(activeStatusIcon).toHaveCSS("animation-duration", "1.2s");
+      await expect(activeStatusIcon).toHaveCSS(
+        "animation-iteration-count",
+        "infinite",
+      );
+      await expect(staticStatusIcon).toHaveCSS("animation-name", "none");
+      await expect(inProgressHeadingIcon).toHaveCSS("animation-name", "none");
+
+      await page.emulateMedia({ reducedMotion: "reduce" });
+      await expect(activeStatusIcon).toHaveCSS("animation-name", "none");
     } finally {
       await app.close();
       fs.rmSync(root, { recursive: true, force: true });

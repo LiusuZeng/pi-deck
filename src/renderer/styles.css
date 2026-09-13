@@ -2704,6 +2704,10 @@ h3 {
   height: var(--icon-size-sm);
 }
 
+.activity-inbox-row--inProgress .activity-inbox-status-icon--active {
+  animation: ui-control-spin 1.2s linear infinite;
+}
+
 .activity-inbox-row--needsAttention .activity-inbox-status {
   color: var(--color-warning);
 }
@@ -3482,7 +3486,8 @@ summary::marker {
     transition: none;
   }
 
-  .ui-icon-button[data-loading="true"] svg {
+  .ui-icon-button[data-loading="true"] svg,
+  .activity-inbox-row--inProgress .activity-inbox-status-icon--active {
     animation: none;
   }
 }
