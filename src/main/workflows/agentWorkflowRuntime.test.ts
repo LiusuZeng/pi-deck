@@ -838,6 +838,32 @@ describe("agentWorkflow occurrence runtime", () => {
     ]);
   });
 
+  it("does not reopen a completed any-fan-out owner for a late sibling retry", () => {
+    const definition = fanoutDefinition("any");
+    let run = createWorkflowRoleRun(definition, "workspace", {}, 1);
+    const fan = run.occurrences[0]!;
+    run = startWorkflowOrchestrator(run, fan.id, 2);
+    const [a, b] = readyWorkflowOccurrences(run);
+    run = startWorkflowOccurrence(run, a!.id, "a", undefined, 3);
+    run = startWorkflowOccurrence(run, b!.id, "b", undefined, 4);
+    run = completeWorkflowOccurrence(run, a!.id, "A", 5);
+    run = failWorkflowOccurrence(run, b!.id, "b failed", 6);
+
+    expect(run.occurrences.find((item) => item.id === fan.id)).toMatchObject({
+      status: "completed",
+      output: ["A"],
+    });
+    const occurrenceCount = run.occurrences.length;
+    expect(() => retryWorkflowOccurrence(run, b!.id, 7)).toThrow(
+      "Cannot retry a child after its fan-out owner completed.",
+    );
+    expect(run.occurrences).toHaveLength(occurrenceCount);
+    expect(run.occurrences.find((item) => item.id === fan.id)).toMatchObject({
+      status: "completed",
+      output: ["A"],
+    });
+  });
+
   it("fails fan-out any when its retried logical worker also fails", () => {
     let run = createWorkflowRoleRun(
       fanoutDefinition("any"),

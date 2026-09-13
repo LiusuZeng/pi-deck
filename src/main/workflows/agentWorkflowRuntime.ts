@@ -258,6 +258,11 @@ export function retryWorkflowOccurrence(
   const parentBeforeRetry = prior.parentOrchestratorRunId
     ? occurrenceOf(run, prior.parentOrchestratorRunId)
     : undefined;
+  const parentNode = parentBeforeRetry
+    ? node(run.definition, parentBeforeRetry.nodeId)
+    : undefined;
+  if (isCompletedFanoutAny(parentBeforeRetry, parentNode))
+    throw new Error("Cannot retry a child after its fan-out owner completed.");
   const retry = {
     ...newOccurrence(
       node(run.definition, prior.nodeId),
@@ -295,17 +300,10 @@ export function retryWorkflowOccurrence(
       completedAtMs: undefined,
       updatedAtMs: now,
     });
-    const parentNode = node(next.definition, parentBeforeRetry.nodeId);
-    // Restoring a failed `all` fan-out leaves its capacity queue dormant.
-    // Reconcile it after appending the retry, so FIFO promotion chooses the
-    // older queued logical child before that retry.
-    if (
-      parentBeforeRetry.status === "failed" &&
-      retryStatus === "queued" &&
-      parentNode.role === "orchestrator" &&
-      parentNode.config.mode === "fanout" &&
-      parentNode.config.completion === "all"
-    )
+    // Recovery leaves a constrained fan-out queue dormant while its owner
+    // remains running. Reconcile after appending the retry so the oldest
+    // queued logical child, rather than the retry, receives free capacity.
+    if (shouldReconcileFanoutRetry(parentBeforeRetry, parentNode, retryStatus))
       next = advanceOrchestrator(next, parentBeforeRetry.id, retry.id, now);
   }
   return derive(next, now);
@@ -380,6 +378,32 @@ function retryAdmissionStatus(
   return active < orchestratorNode.config.maxConcurrency && !hasQueuedSibling
     ? "ready"
     : "queued";
+}
+
+function isCompletedFanoutAny(
+  parent: WorkflowOccurrence | undefined,
+  parentNode: AgentWorkflowNode | undefined,
+): boolean {
+  return (
+    parent?.status === "completed" &&
+    parentNode?.role === "orchestrator" &&
+    parentNode.config.mode === "fanout" &&
+    parentNode.config.completion === "any"
+  );
+}
+
+/** Only a live or recoverable fan-out owner may release a dormant capacity queue. */
+function shouldReconcileFanoutRetry(
+  parent: WorkflowOccurrence,
+  parentNode: AgentWorkflowNode | undefined,
+  retryStatus: "ready" | "queued",
+): boolean {
+  return (
+    retryStatus === "queued" &&
+    ["running", "failed"].includes(parent.status) &&
+    parentNode?.role === "orchestrator" &&
+    parentNode.config.mode === "fanout"
+  );
 }
 
 function advanceOrchestrator(
