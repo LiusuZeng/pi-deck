@@ -349,6 +349,53 @@ describe("workflow rehydration", () => {
     persisted = retryWorkflowOccurrence(persisted, first.id, 5);
     const retry = persisted.occurrences.at(-1)!;
 
+    // A scheduler-capacity failure can leave every child queued. Persisted
+    // occurrence order, not random IDs assigned in the same millisecond, must
+    // decide which logical child gets the recovered slot.
+    const olderSiblingId = "00000000-0000-4000-8000-000000000149";
+    const retryId = "00000000-0000-4000-8000-000000000148";
+    const stalledQueue = {
+      ...persisted,
+      occurrences: persisted.occurrences.map((item) =>
+        item.id === second.id
+          ? {
+              ...item,
+              id: olderSiblingId,
+              status: "queued" as const,
+              createdAtMs: 2,
+            }
+          : item.id === retry.id
+            ? {
+                ...item,
+                id: retryId,
+                status: "queued" as const,
+                createdAtMs: 2,
+              }
+            : item,
+      ),
+    };
+    let fifoRecovered: typeof persisted | undefined;
+    await rehydrateCanonicalWorkflowRuns(
+      [JSON.parse(JSON.stringify(stalledQueue))],
+      {
+        resolveWorkspace: async () => undefined,
+        updateRun: async (run) => {
+          fifoRecovered = run;
+          return run;
+        },
+        schedule: async (run) => run,
+        emit: () => undefined,
+        recordError: () => undefined,
+      },
+      6,
+    );
+    expect(
+      fifoRecovered?.occurrences.find((item) => item.id === olderSiblingId),
+    ).toMatchObject({ status: "ready" });
+    expect(
+      fifoRecovered?.occurrences.find((item) => item.id === retryId),
+    ).toMatchObject({ status: "queued" });
+
     let recovered: typeof persisted | undefined;
     const scheduled: (typeof persisted)[] = [];
     await rehydrateCanonicalWorkflowRuns(
@@ -382,37 +429,46 @@ describe("workflow rehydration", () => {
         expect.objectContaining({
           id: retry.id,
           attempt: 2,
-          status: "ready",
+          status: "queued",
           parentOrchestratorRunId: owner.id,
         }),
-        expect.objectContaining({ id: second.id, status: "queued" }),
+        expect.objectContaining({ id: second.id, status: "ready" }),
       ]),
     );
     expect(
       recovered?.occurrences.filter((item) => item.status === "ready"),
     ).toHaveLength(1);
 
+    expect(() =>
+      startWorkflowOccurrence(
+        recovered!,
+        retry.id,
+        "retry-too-early",
+        undefined,
+        7,
+      ),
+    ).toThrow("Only ready Worker or Decider occurrences may own Pi sessions.");
     let completed = startWorkflowOccurrence(
       recovered!,
-      retry.id,
-      "retry",
+      second.id,
+      "second",
       undefined,
       7,
     );
-    completed = completeWorkflowOccurrence(completed, retry.id, "A retry", 8);
+    completed = completeWorkflowOccurrence(completed, second.id, "B", 8);
     expect(
-      completed.occurrences.find((item) => item.id === second.id),
+      completed.occurrences.find((item) => item.id === retry.id),
     ).toMatchObject({
       status: "ready",
     });
     completed = startWorkflowOccurrence(
       completed,
-      second.id,
-      "second",
+      retry.id,
+      "retry",
       undefined,
       9,
     );
-    completed = completeWorkflowOccurrence(completed, second.id, "B", 10);
+    completed = completeWorkflowOccurrence(completed, retry.id, "A retry", 10);
 
     expect(
       completed.occurrences.find((item) => item.id === owner.id),

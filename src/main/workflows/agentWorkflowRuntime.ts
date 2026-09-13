@@ -255,6 +255,22 @@ export function retryWorkflowOccurrence(
   if (maxAttempts !== undefined && prior.attempt >= maxAttempts)
     throw new Error(`Retry budget exhausted after ${maxAttempts} attempts.`);
   const retryStatus = retryAdmissionStatus(run, prior);
+  const parentBeforeRetry = prior.parentOrchestratorRunId
+    ? occurrenceOf(run, prior.parentOrchestratorRunId)
+    : undefined;
+  const retry = {
+    ...newOccurrence(
+      node(run.definition, prior.nodeId),
+      prior.parentOccurrenceIds,
+      prior.parentOrchestratorRunId,
+      prior.iteration,
+      now,
+      prior.attempt + 1,
+      prior.context,
+      prior.resolvedInputBindings,
+    ),
+    status: retryStatus,
+  };
   let next = add(
     {
       ...run,
@@ -270,29 +286,27 @@ export function retryWorkflowOccurrence(
           : item,
       ),
     },
-    [
-      {
-        ...newOccurrence(
-          node(run.definition, prior.nodeId),
-          prior.parentOccurrenceIds,
-          prior.parentOrchestratorRunId,
-          prior.iteration,
-          now,
-          prior.attempt + 1,
-          prior.context,
-          prior.resolvedInputBindings,
-        ),
-        status: retryStatus,
-      },
-    ],
+    [retry],
   );
-  if (prior.parentOrchestratorRunId) {
-    next = patch(next, prior.parentOrchestratorRunId, {
+  if (parentBeforeRetry) {
+    next = patch(next, parentBeforeRetry.id, {
       status: "running",
       error: undefined,
       completedAtMs: undefined,
       updatedAtMs: now,
     });
+    const parentNode = node(next.definition, parentBeforeRetry.nodeId);
+    // Restoring a failed `all` fan-out leaves its capacity queue dormant.
+    // Reconcile it after appending the retry, so FIFO promotion chooses the
+    // older queued logical child before that retry.
+    if (
+      parentBeforeRetry.status === "failed" &&
+      retryStatus === "queued" &&
+      parentNode.role === "orchestrator" &&
+      parentNode.config.mode === "fanout" &&
+      parentNode.config.completion === "all"
+    )
+      next = advanceOrchestrator(next, parentBeforeRetry.id, retry.id, now);
   }
   return derive(next, now);
 }
@@ -333,8 +347,8 @@ function currentManagedWorkers(
   );
 }
 
-/** Keep a retried fan-out child behind already admitted logical children.
- * The usual terminal transition promotes queued children as capacity frees. */
+/** A retry is appended behind every current queued fan-out child.
+ * Queue promotion preserves occurrence order, so retries cannot leapfrog it. */
 function retryAdmissionStatus(
   run: WorkflowRoleRun,
   prior: WorkflowOccurrence,
@@ -358,7 +372,14 @@ function retryAdmissionStatus(
     (item) =>
       item.id !== prior.id && ["ready", "running"].includes(item.status),
   ).length;
-  return active < orchestratorNode.config.maxConcurrency ? "ready" : "queued";
+  const hasQueuedSibling = currentManagedWorkers(
+    run,
+    orchestrator.id,
+    prior.iteration,
+  ).some((item) => item.id !== prior.id && item.status === "queued");
+  return active < orchestratorNode.config.maxConcurrency && !hasQueuedSibling
+    ? "ready"
+    : "queued";
 }
 
 function advanceOrchestrator(

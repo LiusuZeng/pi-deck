@@ -633,6 +633,65 @@ describe("agentWorkflow occurrence runtime", () => {
     expect(run).toMatchObject({ status: "completed", terminalOutcome: "done" });
   });
 
+  it("promotes an older queued all-fan-out sibling before its retry", () => {
+    const definition = fanoutDefinition("all", 1);
+    definition.nodes = definition.nodes.filter((item) => item.id !== ids.after);
+    definition.relationships = [
+      { id: ids.end, from: ids.fan, to: { end: "done" } },
+    ];
+    let run = createWorkflowRoleRun(definition, "workspace", {}, 1);
+    const fan = run.occurrences[0]!;
+    run = startWorkflowOrchestrator(run, fan.id, 2);
+    const a = readyWorkflowOccurrences(run)[0]!;
+    const b = run.occurrences.find((item) => item.nodeId === ids.b)!;
+    expect(b.status).toBe("queued");
+
+    run = startWorkflowOccurrence(run, a.id, "a", undefined, 3);
+    run = failWorkflowOccurrence(run, a.id, "a failed", 4);
+    expect(run.occurrences.find((item) => item.id === fan.id)).toMatchObject({
+      status: "failed",
+    });
+    expect(run.occurrences.find((item) => item.id === b.id)).toMatchObject({
+      status: "queued",
+    });
+
+    run = retryWorkflowOccurrence(run, a.id, 5);
+    const retry = run.occurrences.at(-1)!;
+    expect(run.occurrences.find((item) => item.id === fan.id)).toMatchObject({
+      status: "running",
+    });
+    expect(run.occurrences.find((item) => item.id === b.id)).toMatchObject({
+      status: "ready",
+    });
+    expect(retry).toMatchObject({ attempt: 2, status: "queued" });
+    expect(() =>
+      startWorkflowOccurrence(run, retry.id, "retry-too-early", undefined, 6),
+    ).toThrow("Only ready Worker or Decider occurrences may own Pi sessions.");
+
+    run = startWorkflowOccurrence(run, b.id, "b", undefined, 6);
+    run = completeWorkflowOccurrence(run, b.id, "B", 7);
+    expect(run.occurrences.find((item) => item.id === retry.id)).toMatchObject({
+      status: "ready",
+    });
+    run = startWorkflowOccurrence(run, retry.id, "a-retry", undefined, 8);
+    run = completeWorkflowOccurrence(run, retry.id, "A retry", 9);
+
+    expect(run.occurrences.find((item) => item.id === fan.id)).toMatchObject({
+      status: "completed",
+      output: ["B", "A retry"],
+    });
+    expect(run).toMatchObject({ status: "completed", terminalOutcome: "done" });
+    expect(
+      run.occurrences
+        .filter((item) => item.parentOrchestratorRunId === fan.id)
+        .map((item) => [item.attempt, item.status, item.output, item.error]),
+    ).toEqual([
+      [1, "skipped", undefined, "a failed"],
+      [1, "completed", "B", undefined],
+      [2, "completed", "A retry", undefined],
+    ]);
+  });
+
   it("keeps a retried fan-out any child outstanding beside a failed sibling", () => {
     let run = createWorkflowRoleRun(
       fanoutDefinition("any"),
@@ -662,7 +721,7 @@ describe("agentWorkflow occurrence runtime", () => {
     expect(run.status).toBe("waiting");
   });
 
-  it("queues a fan-out any retry behind its admitted sibling and promotes it when capacity frees", () => {
+  it("keeps an older queued any-fan-out sibling ahead of its retry", () => {
     const definition = fanoutDefinition("any", 1);
     definition.nodes = definition.nodes.filter((item) => item.id !== ids.after);
     definition.relationships = [
@@ -686,20 +745,17 @@ describe("agentWorkflow occurrence runtime", () => {
       expect.objectContaining({ id: b.id, status: "ready" }),
     ]);
 
-    run = startWorkflowOccurrence(run, b.id, "b", undefined, 5);
-    run = retryWorkflowOccurrence(run, a.id, 6);
+    run = retryWorkflowOccurrence(run, a.id, 5);
     const retry = run.occurrences.at(-1)!;
     expect(retry).toMatchObject({ attempt: 2, status: "queued" });
     expect(activeChildren()).toEqual([
-      expect.objectContaining({ id: b.id, status: "running" }),
+      expect.objectContaining({ id: b.id, status: "ready" }),
     ]);
     expect(() =>
-      startWorkflowOccurrence(run, retry.id, "retry-too-early", undefined, 7),
+      startWorkflowOccurrence(run, retry.id, "retry-too-early", undefined, 6),
     ).toThrow("Only ready Worker or Decider occurrences may own Pi sessions.");
-    expect(activeChildren()).toEqual([
-      expect.objectContaining({ id: b.id, status: "running" }),
-    ]);
 
+    run = startWorkflowOccurrence(run, b.id, "b", undefined, 6);
     run = failWorkflowOccurrence(run, b.id, "b failed", 7);
     expect(activeChildren()).toEqual([
       expect.objectContaining({ id: retry.id, status: "ready" }),
@@ -712,6 +768,15 @@ describe("agentWorkflow occurrence runtime", () => {
       output: ["A retry"],
     });
     expect(run).toMatchObject({ status: "completed", terminalOutcome: "done" });
+    expect(
+      run.occurrences
+        .filter((item) => item.parentOrchestratorRunId === fan.id)
+        .map((item) => [item.attempt, item.status, item.output, item.error]),
+    ).toEqual([
+      [1, "skipped", undefined, "a failed"],
+      [1, "failed", undefined, "b failed"],
+      [2, "completed", "A retry", undefined],
+    ]);
   });
 
   it("fails fan-out any when its retried logical worker also fails", () => {
