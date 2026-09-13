@@ -2104,6 +2104,24 @@ function ensureWorkspaceUsageStore(): WorkspaceUsageStore {
   return workspaceUsageStore;
 }
 
+function ensureForkCleanupJournal(): ForkCleanupJournal {
+  if (forkCleanupJournal === undefined) {
+    throw new Error("Failed fork cleanup journal is unavailable.");
+  }
+  return forkCleanupJournal;
+}
+
+async function assertForkCleanupTargetAvailable(
+  sessionFile: string,
+  action: "attached" | "imported" | "forked",
+): Promise<void> {
+  if (await ensureForkCleanupJournal().blocks(sessionFile)) {
+    throw new Error(
+      `This fork target is awaiting durable cleanup and cannot be ${action} yet.`,
+    );
+  }
+}
+
 function ensureWorkflowStore(): WorkflowStore {
   return requireAgentWorkflows(workflowInitialization);
 }
@@ -2672,6 +2690,10 @@ async function addSessionToWorkspace(
           `Session is not eligible for workspace import: ${validation.reason}.`,
         );
       }
+      await assertForkCleanupTargetAvailable(
+        validation.sessionFile,
+        "imported",
+      );
       const stat = await fs.stat(validation.sessionFile);
       const refreshed = await readPiSessionSummary({
         sessionFile: validation.sessionFile,
@@ -6245,6 +6267,12 @@ async function forkChatSession(
     }
     assertChatSessionAttachmentActive(attachmentGeneration);
     const canonicalSourceSessionFile = validation.sessionFile;
+    // Do this before entering the attachment gate or allocating a worker. A
+    // target left by failed compensation is not a safe source for another fork.
+    await assertForkCleanupTargetAvailable(
+      canonicalSourceSessionFile,
+      "forked",
+    );
     // Every revalidation of the child must retain the same project rule as
     // initial preflight, not merely prove repository containment.
     const validateForkTarget = (candidate: string) =>
@@ -6367,6 +6395,8 @@ async function forkChatSession(
           const runtimeId = workerSpec.worker.runtimeId;
           let forkSessionFile: string | undefined;
           let forkTargetReserved = false;
+          let forkCleanupReservationOwned = false;
+          let forkCleanupReserveFailed = false;
           // Set as soon as this fork atomically claims its new target. Failure
           // cleanup must remove only that claim, never a path merely reported
           // by a faulty worker before it passed freshness validation.
@@ -6398,6 +6428,7 @@ async function forkChatSession(
               );
             }
             forkSessionFile = targetValidation.sessionFile;
+            await assertForkCleanupTargetAvailable(forkSessionFile, "attached");
             if (forkSessionFile === canonicalSourceSessionFile) {
               throw new Error("Pi fork reused the source session file.");
             }
@@ -6460,13 +6491,19 @@ async function forkChatSession(
             if (cleanupJournal === undefined) {
               throw new Error("Failed fork cleanup journal is unavailable.");
             }
-            await cleanupJournal.reserve({
-              sessionFile: forkSessionFile,
-              workspaceId,
-              ...(project.id !== managedRuntimeProjectId
-                ? { projectId: project.id }
-                : {}),
-            });
+            try {
+              await cleanupJournal.reserve({
+                sessionFile: forkSessionFile,
+                workspaceId,
+                ...(project.id !== managedRuntimeProjectId
+                  ? { projectId: project.id }
+                  : {}),
+              });
+              forkCleanupReservationOwned = true;
+            } catch (error) {
+              forkCleanupReserveFailed = true;
+              throw error;
+            }
             assertChatSessionAttachmentActive(attachmentGeneration);
             // Claim first, then register the worker. This single ownership
             // seam and reservation prevent default-workspace discovery, import,
@@ -6667,23 +6704,11 @@ async function forkChatSession(
                 });
               }
             }
+            // reserve() either wrote its entry or retained the target in the
+            // journal's process-lifetime block set. Do not retry here: a
+            // second failed reserve used to become an error-only path whose
+            // finally block released the target for resume/import.
             let durableCleanupError: unknown;
-            if (persistedForkFile !== undefined) {
-              try {
-                await forkCleanupJournal?.reserve({
-                  sessionFile: persistedForkFile,
-                  workspaceId,
-                  ...(project.id !== managedRuntimeProjectId
-                    ? { projectId: project.id }
-                    : {}),
-                });
-              } catch (cleanupError) {
-                durableCleanupError = cleanupError;
-                diagnosticsService.recordError(
-                  `Failed to retain failed fork cleanup for ${persistedForkFile}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
-                );
-              }
-            }
             if (
               forkReferencePersisted &&
               persistedForkFile !== undefined &&
@@ -6716,8 +6741,31 @@ async function forkChatSession(
             }
             if (persistedForkFile !== undefined) {
               try {
-                if (durableCleanupError === undefined) {
-                  await forkCleanupJournal?.complete(persistedForkFile);
+                if (
+                  forkCleanupReserveFailed &&
+                  durableCleanupError === undefined
+                ) {
+                  // A reserve that could not reach disk has an ephemeral entry.
+                  // Make an actual compensation pass before releasing it; a
+                  // no-op complete would otherwise fail open after finally
+                  // drops the mutation reservation.
+                  await ensureForkCleanupJournal().retry(
+                    ensureWorkspaceStore(),
+                    projectStore,
+                  );
+                  if (
+                    await ensureForkCleanupJournal().blocks(persistedForkFile)
+                  ) {
+                    throw new Error(
+                      "Failed fork cleanup remains blocked for retry.",
+                    );
+                  }
+                } else if (
+                  forkCleanupReservationOwned &&
+                  !forkCleanupReserveFailed &&
+                  durableCleanupError === undefined
+                ) {
+                  await ensureForkCleanupJournal().complete(persistedForkFile);
                 }
               } catch (cleanupError) {
                 durableCleanupError ??= cleanupError;
@@ -6794,11 +6842,7 @@ async function resumeChatSession(
   }
   const canonicalSessionFile = validation.sessionFile;
   assertChatLifecycleOperationActive(lifecycleOperation);
-  if (await forkCleanupJournal?.blocks(canonicalSessionFile)) {
-    throw new Error(
-      "This fork target is awaiting durable cleanup and cannot be attached yet.",
-    );
-  }
+  await assertForkCleanupTargetAvailable(canonicalSessionFile, "attached");
   assertChatLifecycleOperationActive(lifecycleOperation);
 
   const mode = chatBackendMode ?? "real";

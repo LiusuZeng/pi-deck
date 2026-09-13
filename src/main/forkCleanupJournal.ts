@@ -31,6 +31,10 @@ export class ForkCleanupJournal {
   // A corrupt journal has unknowable outstanding targets. Fail closed for
   // attach/fork operations rather than silently making them available.
   private corrupt = false;
+  // A reserve write can fail after Pi has created the target. Keep the exact
+  // cleanup entry in this process even when it cannot be made durable: callers
+  // must not attach it until compensation has actually succeeded.
+  private readonly ephemeralEntries = new Map<string, ForkCleanupEntry>();
   private persistTail: Promise<void> = Promise.resolve();
 
   constructor(
@@ -68,7 +72,7 @@ export class ForkCleanupJournal {
       throw new Error("Failed fork cleanup journal requires repair.");
     }
     const parsed = entrySchema.parse(entry);
-    await this.transact(() => {
+    const operation = (): ForkCleanupFile => {
       if (
         this.state.entries.some(
           (item) => item.sessionFile === parsed.sessionFile,
@@ -77,23 +81,40 @@ export class ForkCleanupJournal {
         return this.state;
       }
       return { ...this.state, entries: [...this.state.entries, parsed] };
-    });
+    };
+    try {
+      // A transient filesystem error must not turn a fresh target into an
+      // attachable session. Retry once before retaining the process-only entry.
+      await this.transact(operation);
+    } catch {
+      try {
+        await this.transact(operation);
+      } catch (retryError) {
+        this.ephemeralEntries.set(parsed.sessionFile, parsed);
+        throw retryError;
+      }
+    }
   }
 
   async complete(sessionFile: string): Promise<void> {
     await this.loadIfNeeded();
+    // Do not release a process-only reservation until the durable entry (if
+    // any) is also gone. For an entry whose reserve never persisted, reaching
+    // this method is the caller's proof that cleanup completed.
     await this.transact(() => ({
       ...this.state,
       entries: this.state.entries.filter(
         (entry) => entry.sessionFile !== sessionFile,
       ),
     }));
+    this.ephemeralEntries.delete(sessionFile);
   }
 
   async blocks(sessionFile: string): Promise<boolean> {
     await this.loadIfNeeded();
     return (
       this.corrupt ||
+      this.ephemeralEntries.has(sessionFile) ||
       this.state.entries.some((entry) => entry.sessionFile === sessionFile)
     );
   }
@@ -104,7 +125,13 @@ export class ForkCleanupJournal {
   ): Promise<void> {
     await this.loadIfNeeded();
     if (this.corrupt) return;
-    for (const entry of [...this.state.entries]) {
+    const entries = new Map<string, ForkCleanupEntry>(
+      this.state.entries.map((entry) => [entry.sessionFile, entry]),
+    );
+    for (const entry of this.ephemeralEntries.values()) {
+      entries.set(entry.sessionFile, entry);
+    }
+    for (const entry of entries.values()) {
       try {
         await workspaceStore.removeSession(
           entry.workspaceId,

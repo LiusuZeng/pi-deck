@@ -49,4 +49,43 @@ test("failed fork cleanup remains blocked through restart until both stores pers
     (await new ProjectStore(home).getSessionRefs(projectId)).length,
     0,
   );
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test("persistent reserve failure remains process-blocked until cleanup succeeds", async () => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "pi-deck-fork-journal-ephemeral-"),
+  );
+  const sessionFile = path.join(root, "fork-target.jsonl");
+  const entry = {
+    sessionFile,
+    workspaceId: "9f9b3c42-841c-4ef5-8a9b-9a229924ad1e",
+  };
+  const journal = new ForkCleanupJournal(path.join(root, "home"));
+  const writeFile = vi
+    .spyOn(fs, "writeFile")
+    .mockRejectedValue(new Error("persistent journal write failure"));
+  try {
+    await assert.rejects(
+      journal.reserve(entry),
+      /persistent journal write failure/,
+    );
+    assert.equal(await journal.blocks(sessionFile), true);
+
+    let cleanupFails = true;
+    const workspaces = {
+      removeSession: async () => {
+        if (cleanupFails) throw new Error("cleanup still fails");
+      },
+    } as unknown as WorkspaceStore;
+    await journal.retry(workspaces, undefined);
+    assert.equal(await journal.blocks(sessionFile), true);
+
+    cleanupFails = false;
+    await journal.retry(workspaces, undefined);
+    assert.equal(await journal.blocks(sessionFile), false);
+  } finally {
+    writeFile.mockRestore();
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });
