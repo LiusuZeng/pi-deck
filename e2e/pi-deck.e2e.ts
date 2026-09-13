@@ -7235,6 +7235,124 @@ test.describe("Unified Work", () => {
 
 /** Deterministic fake-RPC coverage of the production task-session route. */
 test.describe("task-session routing acceptance", () => {
+  test("projects two live private-worker telemetry transitions before completion", async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "pi-deck-task-telemetry-"),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    const userDataDir = path.join(root, "user-data");
+    const fixture = path.join(root, "telemetry-plan.json");
+    for (const directory of [projectCwd, agentDir, userDataDir])
+      fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(
+      path.join(userDataDir, "settings.json"),
+      JSON.stringify({ maxRunningSessions: 4 }),
+    );
+    fs.writeFileSync(
+      fixture,
+      JSON.stringify({ tasks: [{ name: "Observe private worker progress" }] }),
+    );
+    const fakePiBinary = createFakePiBinary(root, [
+      "--prompt-scenario",
+      "routing",
+      "--task-routing-fixture",
+      fixture,
+      "--task-session-progress-fixture",
+      "--include-usage",
+      "--stream-delay-ms",
+      "150",
+    ]);
+    const { app, page } = await launchPiDeck({
+      PI_DECK_BACKEND: "real",
+      PI_DECK_PI_BINARY: fakePiBinary,
+      PI_DECK_PROJECT_CWD: projectCwd,
+      PI_CODING_AGENT_DIR: agentDir,
+      PI_DECK_HOME: path.join(root, "pideck-home"),
+      PI_DECK_USER_DATA_DIR: userDataDir,
+      NODE_ENV: "test",
+      PI_DECK_E2E_TASK_SESSION_ACCEPTANCE: "1",
+      PI_DECK_TEST_TASK_ROUTING_FIXTURE: fixture,
+    });
+    try {
+      await expectHealthyPreload(page);
+      await enterSessionDetail(page);
+      await page
+        .getByRole("button", { name: "Parallel multitasking: Off" })
+        .click();
+      await page.evaluate(() => {
+        const w = window as typeof window & {
+          __telemetryStates?: Array<{
+            tasks: Array<{
+              lifecycle: string;
+              phase?: string;
+              modelCallCount?: number;
+              totalTokens?: number;
+              latestActivity?: string;
+            }>;
+          }>;
+          __stopTelemetryStates?: () => void;
+        };
+        w.__stopTelemetryStates?.();
+        w.__telemetryStates = [];
+        w.__stopTelemetryStates = window.piDeck.multitask.onState((state) =>
+          w.__telemetryStates?.push(state),
+        );
+      });
+      await page
+        .getByLabel("Prompt text")
+        .fill("Plan a task with observable private worker progress.");
+      await page.getByRole("button", { name: "Send" }).click();
+      const panel = page.getByRole("region", {
+        name: "Parallel task sessions",
+      });
+      const row = panel.getByRole("listitem").first();
+      await expect(row).toContainText("1 model call");
+      await expect(row).toContainText("tokens pending");
+      await expect(row).toContainText("Phase: Running tool");
+      await expect(row).toContainText("Latest activity: Running a tool");
+      await expect(row).not.toContainText(
+        "private tool output never forwarded",
+      );
+      await expect(row).toContainText("115 tokens");
+      await expect(row.locator("[data-lifecycle='completed']")).toBeVisible();
+      await expect
+        .poll(() =>
+          page.evaluate(() => {
+            const states =
+              (
+                window as typeof window & {
+                  __telemetryStates?: Array<{
+                    tasks: Array<{
+                      phase?: string;
+                      modelCallCount?: number;
+                      totalTokens?: number;
+                    }>;
+                  }>;
+                }
+              ).__telemetryStates ?? [];
+            return states.map((state) => state.tasks[0]).filter(Boolean);
+          }),
+        )
+        .toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ phase: "model", modelCallCount: 1 }),
+            expect.objectContaining({ phase: "tool" }),
+            expect.objectContaining({ totalTokens: 115 }),
+          ]),
+        );
+    } finally {
+      await page.evaluate(() => {
+        const w = window as typeof window & {
+          __stopTelemetryStates?: () => void;
+        };
+        w.__stopTelemetryStates?.();
+      });
+      await app.close().catch(() => undefined);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("starts and advances a private task session while the parent turn is active", async () => {
     const root = fs.mkdtempSync(
       path.join(os.tmpdir(), "pi-deck-task-parent-active-"),

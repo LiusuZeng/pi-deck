@@ -51,6 +51,8 @@ interface FakeOptions {
   includeUsage: boolean;
   noSession: boolean;
   failTaskPromptRecordWhileActive: boolean;
+  /** Emits spaced, payload-free worker progress for Electron telemetry E2E. */
+  taskSessionProgressFixture: boolean;
   sessionFile?: string;
   /** Test-only override for the cwd reported by get_state. */
   getStateCwd?: string;
@@ -93,6 +95,7 @@ function parseOptions(argv: string[]): FakeOptions {
     includeUsage: false,
     noSession: false,
     failTaskPromptRecordWhileActive: false,
+    taskSessionProgressFixture: false,
     workflowDecisions: [],
   };
 
@@ -164,6 +167,8 @@ function parseOptions(argv: string[]): FakeOptions {
       options.noSession = true;
     } else if (arg === "--fail-task-prompt-record-while-active") {
       options.failTaskPromptRecordWhileActive = true;
+    } else if (arg === "--task-session-progress-fixture") {
+      options.taskSessionProgressFixture = true;
     } else if (arg === "--session") {
       const sessionFile = argv[index + 1];
       if (sessionFile) {
@@ -722,6 +727,8 @@ class FakeRpcServer {
         (usage): usage is Record<string, unknown> =>
           Boolean(usage) && typeof usage === "object" && !Array.isArray(usage),
       );
+    // An omitted provider usage block is unknown, not an authoritative zero.
+    if (usageMessages.length === 0) return {};
     const number = (usage: Record<string, unknown>, keys: string[]): number => {
       for (const key of keys) {
         const value = usage[key];
@@ -1157,6 +1164,44 @@ class FakeRpcServer {
       (scenario === "tool-error-extension-ui" &&
         (target === "tool-error" || target === "extension-ui")) ||
       (scenario === "extension-ui-error" && target === "extension-ui");
+
+    if (this.options.taskSessionProgressFixture) {
+      const delayMs = Math.max(1, this.options.streamDelayMs);
+      this.currentTimers.push(
+        setTimeout(
+          () =>
+            this.write({
+              type: "tool_execution_start",
+              toolCallId: "task_progress_tool",
+              toolName: "read",
+              args: { path: "private/never-forwarded" },
+            }),
+          delayMs,
+        ),
+        setTimeout(
+          () =>
+            this.write({
+              type: "tool_execution_update",
+              toolCallId: "task_progress_tool",
+              toolName: "read",
+              output: "private tool output never forwarded",
+            }),
+          delayMs * 2,
+        ),
+        setTimeout(
+          () =>
+            this.write({
+              type: "tool_execution_end",
+              toolCallId: "task_progress_tool",
+              toolName: "read",
+              status: "completed",
+              output: "private tool output never forwarded",
+            }),
+          delayMs * 3,
+        ),
+      );
+      return delayMs * 3;
+    }
 
     if (shouldEmit("queue")) {
       this.steering.splice(0, this.steering.length, "Queued steering fixture");

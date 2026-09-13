@@ -13,6 +13,30 @@ export type TaskSessionLifecycle =
   | "failed"
   | "interrupted";
 
+export type TaskSessionPhase = "model" | "tool" | "retrying" | "waiting";
+export const taskSessionActivityLabels = [
+  "Started model call",
+  "Model response received",
+  "Running a tool",
+  "Tool step completed",
+  "Retrying model call",
+  "Retry completed",
+  "Waiting for parent",
+  "Model call completed",
+] as const;
+export type TaskSessionActivity = (typeof taskSessionActivityLabels)[number];
+
+/** A payload-free update derived only from a private worker event type. */
+export interface TaskSessionTelemetryUpdate {
+  phase?: TaskSessionPhase;
+  activity?: TaskSessionActivity;
+  progress?: TaskSessionProgress;
+  /** Present only when a model request lifecycle event makes it reliable. */
+  modelCallIncrement?: 1;
+  /** An authoritative cumulative total reported by Pi for this worker attempt. */
+  reportedTotalTokens?: number;
+}
+
 export interface TaskSessionSummary {
   taskNumber: number;
   generatedName: string;
@@ -24,6 +48,11 @@ export interface TaskSessionSummary {
   startedAtMs?: number;
   progress?: string;
   queueReason?: string;
+  phase?: TaskSessionPhase;
+  modelCallCount?: number;
+  totalTokens?: number;
+  latestActivity?: TaskSessionActivity;
+  latestActivityAtMs?: number;
 }
 export const taskSessionProgressLabels = [
   "Started",
@@ -61,6 +90,7 @@ export interface TaskSessionLaunch<ParentId> {
     completed(handoff?: { summary?: string }): void;
     failed(error?: unknown): void;
     progress(message: TaskSessionProgress): void;
+    telemetry(update: TaskSessionTelemetryUpdate): void;
     waitingForParent(): void;
   };
 }
@@ -101,6 +131,12 @@ export interface PersistedTaskSessionTask {
   handoffSummary?: string | undefined;
   /** Safe frozen duration retained for terminal rows across app restart. */
   terminalElapsedMs?: number;
+  /** Safe final telemetry is retained, but never a live worker identity. */
+  phase?: TaskSessionPhase;
+  modelCallCount?: number;
+  totalTokens?: number;
+  latestActivity?: TaskSessionActivity;
+  latestActivityAtMs?: number;
 }
 export interface TaskSessionOrchestratorOptions<
   ParentId,
@@ -151,6 +187,14 @@ type Task = PersistedTaskSessionTask & {
   worker?: TaskSessionWorker;
   progress?: string;
   queueReason?: string;
+  phase?: TaskSessionPhase;
+  modelCallCount?: number;
+  latestActivity?: TaskSessionActivity;
+  latestActivityAt?: number;
+  /** Per-attempt Pi totals prevent retry reconciliation from double counting. */
+  reportedTokensByAttempt?: Map<number, number>;
+  /** Safe terminal/reloaded total when the private worker is no longer present. */
+  totalTokens?: number;
   capacityClaimed?: boolean;
 };
 type Plan = Omit<PersistedTaskSessionPlan, "tasks"> & {
@@ -387,7 +431,12 @@ export class TaskSessionOrchestrator<
                 ],
                 handoffSummary: "Task session interrupted after restart.",
               }
-            : { ...saved },
+            : {
+                ...saved,
+                ...(saved.latestActivityAtMs !== undefined
+                  ? { latestActivityAt: saved.latestActivityAtMs }
+                  : {}),
+              },
         ),
       };
     });
@@ -503,6 +552,53 @@ export class TaskSessionOrchestrator<
                   entry.progress = message;
                   this.publish(parent);
                 }
+              }),
+            telemetry: (update) =>
+              afterReady(() => {
+                if (
+                  entry.attempt !== attempt ||
+                  !isTaskSessionTelemetryUpdate(update)
+                )
+                  return;
+                let changed = false;
+                if (update.progress && entry.progress !== update.progress) {
+                  entry.progress = update.progress;
+                  changed = true;
+                }
+                if (update.phase && entry.phase !== update.phase) {
+                  entry.phase = update.phase;
+                  changed = true;
+                }
+                const now = this.now();
+                if (
+                  update.activity &&
+                  (entry.latestActivity !== update.activity ||
+                    entry.latestActivityAt === undefined ||
+                    now - entry.latestActivityAt >= 1_000)
+                ) {
+                  entry.latestActivity = update.activity;
+                  entry.latestActivityAt = now;
+                  changed = true;
+                }
+                if (update.modelCallIncrement) {
+                  entry.modelCallCount =
+                    (entry.modelCallCount ?? 0) + update.modelCallIncrement;
+                  changed = true;
+                }
+                if (update.reportedTotalTokens !== undefined) {
+                  const totals = (entry.reportedTokensByAttempt ??= new Map());
+                  const previous = totals.get(attempt) ?? 0;
+                  // Pi stats are cumulative per worker; retain only monotonic reports.
+                  if (update.reportedTotalTokens >= previous) {
+                    totals.set(attempt, update.reportedTotalTokens);
+                    entry.totalTokens = [...totals.values()].reduce(
+                      (total, value) => total + value,
+                      0,
+                    );
+                    changed = true;
+                  }
+                }
+                if (changed) this.publish(parent);
               }),
             waitingForParent: () =>
               afterReady(() => {
@@ -744,6 +840,7 @@ function summary(
         ? `Queued: this parent has reached its ${activeLimit} active task-session limit.`
         : "Queued: waiting for worker capacity."
       : undefined);
+  const totalTokens = totalReportedTokens(entry) ?? entry.totalTokens;
   return {
     taskNumber: entry.taskNumber,
     generatedName: entry.generatedName,
@@ -756,6 +853,17 @@ function summary(
       : {}),
     ...(entry.progress ? { progress: entry.progress } : {}),
     ...(queueReason ? { queueReason } : {}),
+    ...(entry.phase ? { phase: entry.phase } : {}),
+    ...(entry.modelCallCount !== undefined
+      ? { modelCallCount: entry.modelCallCount }
+      : {}),
+    ...(totalTokens !== undefined ? { totalTokens } : {}),
+    ...(entry.latestActivity
+      ? {
+          latestActivity: entry.latestActivity,
+          latestActivityAtMs: entry.latestActivityAt ?? now,
+        }
+      : {}),
   };
 }
 function persistTask(task: Task): PersistedTaskSessionTask {
@@ -764,6 +872,13 @@ function persistTask(task: Task): PersistedTaskSessionTask {
     worker: _worker,
     progress: _progress,
     queueReason: _queueReason,
+    phase: _phase,
+    modelCallCount: _modelCallCount,
+    latestActivity: _latestActivity,
+    latestActivityAt: _latestActivityAt,
+    latestActivityAtMs: _latestActivityAtMs,
+    reportedTokensByAttempt: _reportedTokensByAttempt,
+    totalTokens: _totalTokens,
     capacityClaimed: _capacityClaimed,
     ...safe
   } = task;
@@ -773,6 +888,19 @@ function persistTask(task: Task): PersistedTaskSessionTask {
     brief: safeLine(safe.brief),
     ...(safe.handoffSummary
       ? { handoffSummary: safeLine(safe.handoffSummary) }
+      : {}),
+    ...(isTerminal(task) && task.phase ? { phase: task.phase } : {}),
+    ...(isTerminal(task) && task.modelCallCount !== undefined
+      ? { modelCallCount: task.modelCallCount }
+      : {}),
+    ...(isTerminal(task) && task.totalTokens !== undefined
+      ? { totalTokens: task.totalTokens }
+      : {}),
+    ...(isTerminal(task) && task.latestActivity
+      ? { latestActivity: task.latestActivity }
+      : {}),
+    ...(isTerminal(task) && task.latestActivityAt !== undefined
+      ? { latestActivityAtMs: task.latestActivityAt }
       : {}),
   });
 }
@@ -788,6 +916,53 @@ function elapsedSinceStart(
  * Never pass event data through this boundary: it can include transcript,
  * tool arguments/output, runtime IDs, or session details.
  */
+function totalReportedTokens(entry: Task): number | undefined {
+  const values = [...(entry.reportedTokensByAttempt?.values() ?? [])];
+  return values.length > 0
+    ? values.reduce((total, value) => total + value, 0)
+    : undefined;
+}
+
+/**
+ * This reducer intentionally receives an event type, never its private payload.
+ * Its activity labels are a fixed allowlist so reasoning, tool arguments and
+ * tool output cannot cross the child-worker boundary.
+ */
+export function taskSessionTelemetryForWorkerEventType(
+  eventType: string,
+): TaskSessionTelemetryUpdate | undefined {
+  switch (eventType) {
+    case "agent_start":
+      return {
+        phase: "model",
+        activity: "Started model call",
+        modelCallIncrement: 1,
+      };
+    case "message_update":
+      return { phase: "model", activity: "Model response received" };
+    case "tool_execution_start":
+    case "tool_execution_update":
+      return { phase: "tool", activity: "Running a tool" };
+    case "tool_execution_end":
+      return { phase: "tool", activity: "Tool step completed" };
+    case "auto_retry_start":
+      return {
+        phase: "retrying",
+        activity: "Retrying model call",
+        modelCallIncrement: 1,
+      };
+    case "auto_retry_end":
+      return { phase: "model", activity: "Retry completed" };
+    case "extension_ui_request":
+      return { phase: "waiting", activity: "Waiting for parent" };
+    case "agent_settled":
+    case "agent_end":
+      return { phase: "model", activity: "Model call completed" };
+    default:
+      return undefined;
+  }
+}
+
 export function taskSessionProgressForWorkerEventType(
   eventType: string,
 ): TaskSessionProgress | undefined {
@@ -812,6 +987,22 @@ export function taskSessionProgressForWorkerEventType(
 
 function isTaskSessionProgress(value: unknown): value is TaskSessionProgress {
   return taskSessionProgressLabels.includes(value as TaskSessionProgress);
+}
+function isTaskSessionTelemetryUpdate(
+  value: TaskSessionTelemetryUpdate,
+): boolean {
+  return (
+    (value.phase === undefined ||
+      ["model", "tool", "retrying", "waiting"].includes(value.phase)) &&
+    (value.activity === undefined ||
+      taskSessionActivityLabels.includes(value.activity)) &&
+    (value.progress === undefined || isTaskSessionProgress(value.progress)) &&
+    (value.modelCallIncrement === undefined ||
+      value.modelCallIncrement === 1) &&
+    (value.reportedTotalTokens === undefined ||
+      (Number.isSafeInteger(value.reportedTotalTokens) &&
+        value.reportedTotalTokens >= 0))
+  );
 }
 
 function safeText(value: string, max: number): string {
@@ -946,6 +1137,19 @@ function validatePersisted(
         (entry.terminalElapsedMs !== undefined &&
           (!Number.isSafeInteger(entry.terminalElapsedMs) ||
             entry.terminalElapsedMs < 0)) ||
+        (entry.phase !== undefined &&
+          !["model", "tool", "retrying", "waiting"].includes(entry.phase)) ||
+        (entry.modelCallCount !== undefined &&
+          (!Number.isSafeInteger(entry.modelCallCount) ||
+            entry.modelCallCount < 1)) ||
+        (entry.totalTokens !== undefined &&
+          (!Number.isSafeInteger(entry.totalTokens) ||
+            entry.totalTokens < 0)) ||
+        (entry.latestActivity !== undefined &&
+          !taskSessionActivityLabels.includes(entry.latestActivity)) ||
+        (entry.latestActivityAtMs !== undefined &&
+          (!Number.isSafeInteger(entry.latestActivityAtMs) ||
+            entry.latestActivityAtMs < 0)) ||
         !Array.isArray(entry.transitions) ||
         entry.transitions.some(
           (item: {

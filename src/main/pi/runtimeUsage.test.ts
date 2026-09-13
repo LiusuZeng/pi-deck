@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { it as test } from "vitest";
 import {
+  runtimeTotalTokensFromSessionStats,
   runtimeUsageFromSessionStats,
   runtimeUsageFromState,
 } from "./runtimeUsage.js";
@@ -35,6 +36,23 @@ test("treats missing session stats as unavailable instead of zero usage", () => 
   assert.equal(
     runtimeUsageFromSessionStats({ contextUsage: { contextWindow: 200000 } }),
     undefined,
+  );
+});
+
+test("uses only explicit Pi token counters for delegated telemetry", () => {
+  assert.equal(
+    runtimeTotalTokensFromSessionStats({
+      contextUsage: { tokens: 500, contextWindow: 200000 },
+    }),
+    undefined,
+  );
+  assert.equal(
+    runtimeTotalTokensFromSessionStats({ tokens: { input: 0, output: 0 } }),
+    0,
+  );
+  assert.equal(
+    runtimeTotalTokensFromSessionStats({ tokens: { input: 100, output: 10 } }),
+    110,
   );
 });
 

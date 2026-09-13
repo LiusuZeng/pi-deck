@@ -13,6 +13,58 @@ export function runtimeUsageFromState(
   return runtimeUsageFromFlatRecord(usage as Record<string, unknown>);
 }
 
+/**
+ * Returns a total only when Pi's stats actually contains a token counter.
+ * Context-window metadata alone is not evidence of zero consumed tokens.
+ */
+export function runtimeTotalTokensFromSessionStats(
+  stats: unknown,
+): number | undefined {
+  if (!stats || typeof stats !== "object" || Array.isArray(stats)) {
+    return undefined;
+  }
+  const record = stats as Record<string, unknown>;
+  const tokens = objectRecord(record.tokens);
+  const source = tokens ?? record;
+  const totalTokens = readNonnegativeNumber(source, [
+    "total",
+    "totalTokens",
+    "total_tokens",
+  ]);
+  if (totalTokens !== undefined) return totalTokens;
+  const values = [
+    readNonnegativeNumber(source, [
+      "input",
+      "inputTokens",
+      "input_tokens",
+      "promptTokens",
+      "prompt_tokens",
+    ]),
+    readNonnegativeNumber(source, [
+      "output",
+      "outputTokens",
+      "output_tokens",
+      "completionTokens",
+      "completion_tokens",
+    ]),
+    readNonnegativeNumber(source, [
+      "cacheRead",
+      "cacheReadTokens",
+      "cache_read",
+      "cache_read_tokens",
+    ]),
+    readNonnegativeNumber(source, [
+      "cacheWrite",
+      "cacheWriteTokens",
+      "cache_write",
+      "cache_write_tokens",
+    ]),
+  ];
+  return values.some((value) => value !== undefined)
+    ? values.reduce<number>((total, value) => total + (value ?? 0), 0)
+    : undefined;
+}
+
 export function runtimeUsageFromSessionStats(
   stats: unknown,
 ): ChatRuntimeStatus["usage"] | undefined {
