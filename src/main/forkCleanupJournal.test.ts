@@ -190,6 +190,233 @@ test("spawn identity promotion atomically replaces source-only recovery with tar
   }
 });
 
+test("promotion write failures retain source and ephemeral target, then restart discovery blocks and safely cleans the unique child", async () => {
+  for (const [method, failure] of [
+    ["writeFile", "write"],
+    ["rename", "rename"],
+  ] as const) {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), `pi-deck-fork-journal-recover-${failure}-`),
+    );
+    try {
+      const home = path.join(root, "home");
+      const sessionDir = path.join(root, "sessions");
+      const projectDir = path.join(root, "project");
+      const sourceSessionFile = path.join(sessionDir, "source.jsonl");
+      const targetSessionFile = path.join(sessionDir, "target.jsonl");
+      const transactionId = "9f9b3c42-841c-4ef5-8a9b-9a229924ad1e";
+      await fs.mkdir(projectDir, { recursive: true });
+      await fs.mkdir(sessionDir, { recursive: true });
+      await fs.writeFile(
+        sourceSessionFile,
+        `${JSON.stringify({
+          type: "session",
+          version: 3,
+          id: "source",
+          timestamp: new Date().toISOString(),
+          cwd: projectDir,
+        })}\n`,
+      );
+      const canonicalSource = await fs.realpath(sourceSessionFile);
+      const canonicalSessionDir = await fs.realpath(sessionDir);
+      const workspaces = new WorkspaceStore(home);
+      const workspace = await workspaces.create({ name: "Forks" });
+      const journal = new ForkCleanupJournal(home);
+      await journal.reserveSource({
+        sourceSessionFile: canonicalSource,
+        transactionId,
+        sessionDir: canonicalSessionDir,
+        workspaceId: workspace.id,
+      });
+      await journal.recordSpawnedSource({
+        sourceSessionFile: canonicalSource,
+        transactionId,
+        childRuntimeId: "runtime-child",
+        childPid: process.pid,
+      });
+      await journal.recordTargetDiscovery({
+        sourceSessionFile: canonicalSource,
+        transactionId,
+      });
+      await fs.writeFile(
+        targetSessionFile,
+        `${JSON.stringify({
+          type: "session",
+          version: 3,
+          id: "target",
+          timestamp: new Date().toISOString(),
+          cwd: projectDir,
+          parentSession: canonicalSource,
+        })}\n`,
+      );
+      const canonicalTarget = await fs.realpath(targetSessionFile);
+      await journal.blockDiscoveredTarget({
+        sessionFile: canonicalTarget,
+        sourceSessionFile: canonicalSource,
+        transactionId,
+        discoveredSessionId: "target",
+        workspaceId: workspace.id,
+      });
+      const failureSpy = vi.spyOn(fs, method);
+      failureSpy.mockRejectedValueOnce(
+        new Error(`injected ${failure} failure`),
+      );
+      await assert.rejects(
+        journal.promoteSourceToTarget({
+          sessionFile: canonicalTarget,
+          sourceSessionFile: canonicalSource,
+          transactionId,
+          discoveredSessionId: "target",
+          workspaceId: workspace.id,
+        }),
+        new RegExp(`injected ${failure} failure`),
+      );
+      failureSpy.mockRestore();
+      assert.equal(await journal.blocks(canonicalSource), true);
+      assert.equal(await journal.blocks(canonicalTarget), true);
+
+      // The durable file remains source-only, but its fallback checkpoint
+      // binds the exact validated Pi target ID for safe restart recovery.
+      const blockedAfterRestart = new ForkCleanupJournal(home);
+      await blockedAfterRestart.recoverSourceTargetsAfterRestart(
+        new WorkspaceStore(home),
+        undefined,
+      );
+      assert.equal(await blockedAfterRestart.blocks(canonicalSource), true);
+      assert.equal(await blockedAfterRestart.blocks(canonicalTarget), true);
+
+      // A later PID probe that proves the child absent may safely promote the
+      // unique candidate, remove its unclaimed refs, and release both blocks.
+      const journalFile = path.join(home, "failed-fork-cleanup.json");
+      const persisted = JSON.parse(await fs.readFile(journalFile, "utf8")) as {
+        version: number;
+        entries: Array<Record<string, unknown>>;
+      };
+      persisted.entries[0]!.childPid = 999_999_999;
+      delete persisted.entries[0]!.discoveredTargetSessionFile;
+      delete persisted.entries[0]!.discoveredTargetSessionId;
+      await fs.writeFile(journalFile, `${JSON.stringify(persisted)}\n`);
+      await workspaces.upsertSessionRefFromSnapshot({
+        workspaceId: workspace.id,
+        sessionFile: canonicalTarget,
+      });
+      // A lone provenance match remains blocked, not claimed, without the
+      // exact checkpoint written after target promotion first failed.
+      const inferredOnlyAfterRestart = new ForkCleanupJournal(home);
+      await inferredOnlyAfterRestart.recoverSourceTargetsAfterRestart(
+        new WorkspaceStore(home),
+        undefined,
+      );
+      assert.equal(
+        await inferredOnlyAfterRestart.blocks(canonicalSource),
+        true,
+      );
+      assert.equal(
+        await inferredOnlyAfterRestart.blocks(canonicalTarget),
+        true,
+      );
+      assert.equal(
+        (await new WorkspaceStore(home).getSessionRefs(workspace.id)).length,
+        1,
+      );
+
+      persisted.entries[0]!.discoveredTargetSessionFile = canonicalTarget;
+      persisted.entries[0]!.discoveredTargetSessionId = "target";
+      await fs.writeFile(journalFile, `${JSON.stringify(persisted)}\n`);
+      const cleanedAfterRestart = new ForkCleanupJournal(home);
+      await cleanedAfterRestart.recoverSourceTargetsAfterRestart(
+        new WorkspaceStore(home),
+        undefined,
+      );
+      assert.equal(await cleanedAfterRestart.blocks(canonicalSource), false);
+      assert.equal(await cleanedAfterRestart.blocks(canonicalTarget), false);
+      assert.equal(
+        (await new WorkspaceStore(home).getSessionRefs(workspace.id)).length,
+        0,
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("restart recovery blocks every plausible child and never claims an ambiguous fork", async () => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "pi-deck-fork-journal-ambiguous-"),
+  );
+  try {
+    const home = path.join(root, "home");
+    const sessionDir = path.join(root, "sessions");
+    const projectDir = path.join(root, "project");
+    const sourceSessionFile = path.join(sessionDir, "source.jsonl");
+    await fs.mkdir(projectDir, { recursive: true });
+    await fs.mkdir(sessionDir, { recursive: true });
+    await fs.writeFile(
+      sourceSessionFile,
+      `${JSON.stringify({
+        type: "session",
+        version: 3,
+        id: "source",
+        timestamp: new Date().toISOString(),
+        cwd: projectDir,
+      })}\n`,
+    );
+    const source = await fs.realpath(sourceSessionFile);
+    const workspaces = new WorkspaceStore(home);
+    const workspace = await workspaces.create({ name: "Forks" });
+    const journal = new ForkCleanupJournal(home);
+    await journal.reserveSource({
+      sourceSessionFile: source,
+      transactionId: "9f9b3c42-841c-4ef5-8a9b-9a229924ad1e",
+      sessionDir: await fs.realpath(sessionDir),
+      workspaceId: workspace.id,
+    });
+    await journal.recordSpawnedSource({
+      sourceSessionFile: source,
+      transactionId: "9f9b3c42-841c-4ef5-8a9b-9a229924ad1e",
+      childRuntimeId: "runtime-child",
+      childPid: 999_999_999,
+    });
+    await journal.recordTargetDiscovery({
+      sourceSessionFile: source,
+      transactionId: "9f9b3c42-841c-4ef5-8a9b-9a229924ad1e",
+    });
+    const children = await Promise.all(
+      ["first", "second"].map(async (name) => {
+        const child = path.join(sessionDir, `${name}.jsonl`);
+        await fs.writeFile(
+          child,
+          `${JSON.stringify({
+            type: "session",
+            version: 3,
+            id: name,
+            timestamp: new Date().toISOString(),
+            cwd: projectDir,
+            parentSession: source,
+          })}\n`,
+        );
+        return fs.realpath(child);
+      }),
+    );
+    await Promise.all(
+      children.map((sessionFile) =>
+        workspaces.upsertSessionRefFromSnapshot({
+          workspaceId: workspace.id,
+          sessionFile,
+        }),
+      ),
+    );
+    await journal.recoverSourceTargetsAfterRestart(workspaces, undefined);
+    assert.equal(await journal.blocks(source), true);
+    for (const child of children) {
+      assert.equal(await journal.blocks(child), true);
+    }
+    assert.equal((await workspaces.getSessionRefs(workspace.id)).length, 2);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("confirmed child exit releases a known source-only reservation", async () => {
   const root = await fs.mkdtemp(
     path.join(os.tmpdir(), "pi-deck-fork-journal-known-child-"),

@@ -383,7 +383,12 @@ const retainedForkReservationFiles = new Set<string>();
 type PendingFailedForkCleanup = {
   sourceSessionFile: string;
   transactionId: string;
-  targetSessionFile?: string;
+  target?: {
+    sessionFile: string;
+    workspaceId: string;
+    projectId?: string;
+    promoted: boolean;
+  };
   exitConfirmed?: boolean;
   retryPromise?: Promise<void> | undefined;
   retryTimer?: NodeJS.Timeout | undefined;
@@ -583,8 +588,13 @@ async function bootstrap(): Promise<void> {
       await workspacesStore.ensureDefaultWorkspace({
         activate: !hadWorkspaceMetadata || resolveChatBackendMode() === "fake",
       });
-      // A recovered journal has no proof that a child from a crashed parent
-      // died; leave it fail-closed until a confirmed worker_exit can retry it.
+      // Reconstruct target blocks from source-only reservations before any
+      // session operation can attach an orphaned native child. Recovery only
+      // compensates after the recorded child PID is proved absent.
+      await failedForkCleanup.recoverSourceTargetsAfterRestart(
+        workspacesStore,
+        projects,
+      );
       await startDelegationBridge();
       await ensureChatAdapter(settings, diagnosticsService);
       await rehydrateWorkflowRuns();
@@ -2177,16 +2187,16 @@ function retainFailedForkReservations(
   runtimeId: string,
   sourceSessionFile: string,
   transactionId: string,
-  targetSessionFile?: string,
+  target?: PendingFailedForkCleanup["target"],
 ): void {
   retainedForkReservationFiles.add(sourceSessionFile);
-  if (targetSessionFile !== undefined) {
-    retainedForkReservationFiles.add(targetSessionFile);
+  if (target !== undefined) {
+    retainedForkReservationFiles.add(target.sessionFile);
   }
   pendingFailedForkCleanups.set(runtimeId, {
     sourceSessionFile,
     transactionId,
-    ...(targetSessionFile !== undefined ? { targetSessionFile } : {}),
+    ...(target !== undefined ? { target } : {}),
   });
   if (confirmedPendingChatAttachmentExits.has(runtimeId)) {
     void retryFailedForkCleanupAfterExit(runtimeId);
@@ -2215,13 +2225,25 @@ async function retryFailedForkCleanupAfterExit(
   }
   const retry = (async () => {
     const journal = ensureForkCleanupJournal();
-    if (pending.targetSessionFile !== undefined) {
+    if (pending.target !== undefined) {
+      if (!pending.target.promoted) {
+        await journal.promoteSourceToTarget({
+          sessionFile: pending.target.sessionFile,
+          sourceSessionFile: pending.sourceSessionFile,
+          transactionId: pending.transactionId,
+          workspaceId: pending.target.workspaceId,
+          ...(pending.target.projectId !== undefined
+            ? { projectId: pending.target.projectId }
+            : {}),
+        });
+        pending.target.promoted = true;
+      }
       await journal.retryAfterConfirmedExit(
-        pending.targetSessionFile,
+        pending.target.sessionFile,
         ensureWorkspaceStore(),
         projectStore,
       );
-      if (await journal.blocks(pending.targetSessionFile)) {
+      if (await journal.blocks(pending.target.sessionFile)) {
         // A confirmed exit makes retry safe, not infallible. Keep every
         // reservation while a transient store/journal failure is retried.
         pending.retryTimer ??= setTimeout(() => {
@@ -2231,8 +2253,8 @@ async function retryFailedForkCleanupAfterExit(
         pending.retryTimer.unref();
         return;
       }
-      retainedForkReservationFiles.delete(pending.targetSessionFile);
-      chatSessionMutationReservations.delete(pending.targetSessionFile);
+      retainedForkReservationFiles.delete(pending.target.sessionFile);
+      chatSessionMutationReservations.delete(pending.target.sessionFile);
     } else {
       const released = await journal.completeSourceAfterConfirmedExit({
         sourceSessionFile: pending.sourceSessionFile,
@@ -6602,6 +6624,11 @@ async function forkChatSession(
           await cleanupJournal.reserveSource({
             sourceSessionFile: canonicalSourceSessionFile,
             transactionId: forkTransactionId,
+            sessionDir,
+            workspaceId,
+            ...(project.id !== managedRuntimeProjectId
+              ? { projectId: project.id }
+              : {}),
           });
           let spawnAttempted = false;
           let spawnedRuntimeId: string | undefined;
@@ -6665,6 +6692,7 @@ async function forkChatSession(
           }
           const runtimeId = workerSpec.worker.runtimeId;
           let forkSessionFile: string | undefined;
+          let forkTargetDiscovered = false;
           let forkTargetReserved = false;
           let forkTargetPromoted = false;
           try {
@@ -6672,6 +6700,10 @@ async function forkChatSession(
             // register its session lock. A fork worker is untrusted at this
             // boundary: it must name a new valid, currently-unlocked target.
             assertChatSessionAttachmentActive(attachmentGeneration);
+            await cleanupJournal.recordTargetDiscovery({
+              sourceSessionFile: canonicalSourceSessionFile,
+              transactionId: forkTransactionId,
+            });
             const forkState = await adapter.getState(runtimeId);
             assertChatSessionAttachmentActive(attachmentGeneration);
             const preflightSessionFile = forkState.sessionFile;
@@ -6744,24 +6776,31 @@ async function forkChatSession(
             if (preflightSessionId === sourceSessionId) {
               throw new Error("Pi fork reused the source session identity.");
             }
+            // Only a fresh, provenance-validated target is recoverable. A
+            // worker can name an existing or foreign file before this point;
+            // never turn that untrusted spelling into cleanup ownership.
+            forkTargetDiscovered = true;
 
-            // Reserve synchronously before the journal write can yield. This
-            // closes the interval in which another resume could otherwise
-            // attach a fresh target that has not yet been journaled.
+            // Reserve synchronously before journal persistence can yield.
+            // The journal's matching ephemeral target block survives a failed
+            // promotion write, closing the attach/mutation gap in this process.
             chatSessionMutationReservations.add(forkSessionFile);
             forkTargetReserved = true;
-            // Atomically replace the source-only entry with source+target
-            // compensation. Separate complete/reserve writes would recreate
-            // the crash window this transaction is designed to close.
-            await cleanupJournal.promoteSourceToTarget({
+            const targetPromotion = {
               sessionFile: forkSessionFile,
               sourceSessionFile: canonicalSourceSessionFile,
               transactionId: forkTransactionId,
+              discoveredSessionId: durableTargetSessionId,
               workspaceId,
               ...(project.id !== managedRuntimeProjectId
                 ? { projectId: project.id }
                 : {}),
-            });
+            };
+            await cleanupJournal.blockDiscoveredTarget(targetPromotion);
+            // Atomically replace the source-only entry with source+target
+            // compensation. Separate complete/reserve writes would recreate
+            // the crash window this transaction is designed to close.
+            await cleanupJournal.promoteSourceToTarget(targetPromotion);
             forkTargetPromoted = true;
             await crashForkAtTestPhase("after-target-discovery");
             assertChatSessionAttachmentActive(attachmentGeneration);
@@ -6937,14 +6976,22 @@ async function forkChatSession(
             // Reserve both sides before asking the child to close. worker_exit
             // can race closeAndWait's continuation; this publication gives the
             // event callback the exact durable target to compensate.
-            const persistedForkFile = forkTargetPromoted
-              ? (forkSessionFile ?? chatRuntimeSessionFiles.get(runtimeId))
-              : undefined;
+            const discoveredForkTarget =
+              !forkTargetDiscovered || forkSessionFile === undefined
+                ? undefined
+                : {
+                    sessionFile: forkSessionFile,
+                    workspaceId,
+                    ...(project.id !== managedRuntimeProjectId
+                      ? { projectId: project.id }
+                      : {}),
+                    promoted: forkTargetPromoted,
+                  };
             retainFailedForkReservations(
               runtimeId,
               canonicalSourceSessionFile,
               forkTransactionId,
-              persistedForkFile,
+              discoveredForkTarget,
             );
             try {
               await closeAttachedChatRuntime(adapter, runtimeId);
@@ -6968,8 +7015,10 @@ async function forkChatSession(
               }
             }
             if (
-              persistedForkFile !== undefined &&
-              (await ensureForkCleanupJournal().blocks(persistedForkFile))
+              discoveredForkTarget !== undefined &&
+              (await ensureForkCleanupJournal().blocks(
+                discoveredForkTarget.sessionFile,
+              ))
             ) {
               throw new Error("Failed fork cleanup is retained for retry.");
             }

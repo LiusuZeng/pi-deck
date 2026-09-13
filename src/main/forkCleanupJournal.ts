@@ -5,6 +5,11 @@ import { z } from "zod";
 import type { DiagnosticsRecorder } from "./diagnostics/diagnostics.js";
 import type { ProjectStore } from "./projects/projectStore.js";
 import type { WorkspaceStore } from "./workspaces/workspaceStore.js";
+import {
+  readPiSessionSummary,
+  scanSessionRepository,
+  validatePiSessionFile,
+} from "./pi/sessionRepository.js";
 
 const legacyTargetEntrySchema = z
   .object({
@@ -27,13 +32,23 @@ const sourceReservationEntrySchema = z
     // A pre-spawn reservation deliberately has no process identity. It must
     // never be guessed clear after a crash because the parent cannot prove
     // whether native process creation had begun.
-    phase: z.enum(["pre-spawn", "spawned"]),
+    phase: z.enum(["pre-spawn", "spawned", "target-discovery"]),
     childRuntimeId: z.string().min(1).optional(),
     childPid: z.number().int().positive().optional(),
+    // New source reservations retain enough provenance to find a target that
+    // was discovered after a promotion write failed. Optional for v2 records
+    // written before this recovery protocol.
+    sessionDir: z.string().min(1).optional(),
+    workspaceId: z.string().uuid().optional(),
+    projectId: z.string().min(1).optional(),
+    // If target promotion fails, only a separately persisted exact observation
+    // can authorize restart compensation. Inventory matches alone are blocked.
+    discoveredTargetSessionFile: z.string().min(1).optional(),
+    discoveredTargetSessionId: z.string().min(1).optional(),
   })
   .strict()
   .superRefine((entry, context) => {
-    if (entry.phase === "spawned" && entry.childRuntimeId === undefined) {
+    if (entry.phase !== "pre-spawn" && entry.childRuntimeId === undefined) {
       context.addIssue({
         code: "custom",
         message: "Spawned source reservations require a child runtime ID.",
@@ -71,6 +86,7 @@ const entrySchema = z.union([
 const fileSchema = z
   .object({ version: z.literal(2), entries: z.array(entrySchema) })
   .strict();
+const forkRecoveryTestHooksEnabled = process.env.PI_DECK_E2E_TEST === "1";
 
 type SourceReservationEntry = z.infer<typeof sourceReservationEntrySchema>;
 type TargetReservationEntry = z.infer<typeof targetReservationEntrySchema>;
@@ -83,6 +99,11 @@ type ForkTargetEntryInput = Omit<
   sourceSessionFile: string;
   transactionId?: string;
   createdAtMs?: number;
+};
+type ForkTargetPromotionInput = ForkTargetEntryInput & {
+  transactionId: string;
+  /** Persisted Pi identity; it is never copied into target compensation. */
+  discoveredSessionId?: string;
 };
 
 function entryKey(entry: ForkCleanupEntry): string {
@@ -172,6 +193,9 @@ export class ForkCleanupJournal {
   async reserveSource(input: {
     sourceSessionFile: string;
     transactionId: string;
+    sessionDir?: string;
+    workspaceId?: string;
+    projectId?: string;
   }): Promise<void> {
     await this.loadIfNeeded();
     if (this.corrupt) {
@@ -249,10 +273,69 @@ export class ForkCleanupJournal {
     await this.transact(operation);
   }
 
+  /**
+   * Durable boundary before asking the child to report its target. A crash in
+   * the earlier spawned phase has no app-observed target and must not infer
+   * one during restart recovery.
+   */
+  async recordTargetDiscovery(input: {
+    sourceSessionFile: string;
+    transactionId: string;
+  }): Promise<void> {
+    await this.loadIfNeeded();
+    const source = this.findSource(
+      input.sourceSessionFile,
+      input.transactionId,
+    );
+    if (source === undefined || source.phase === "pre-spawn") {
+      throw new Error(
+        "Fork source reservation was lost before target discovery.",
+      );
+    }
+    await this.transact(() => ({
+      ...this.state,
+      entries: this.state.entries.map((entry) =>
+        entry.kind === "source" &&
+        entry.sourceSessionFile === input.sourceSessionFile &&
+        entry.transactionId === input.transactionId
+          ? sourceReservationEntrySchema.parse({
+              ...entry,
+              phase: "target-discovery",
+            })
+          : entry,
+      ),
+    }));
+  }
+
+  /**
+   * Establish the in-process target lock before promotion persistence can
+   * yield. A failed write deliberately leaves the durable source record in
+   * place and this target lock prevents any attach/mutation race until retry.
+   */
+  async blockDiscoveredTarget(input: ForkTargetPromotionInput): Promise<void> {
+    await this.loadIfNeeded();
+    const source = this.findSource(
+      input.sourceSessionFile,
+      input.transactionId,
+    );
+    if (source === undefined || source.phase === "pre-spawn") {
+      throw new Error(
+        "Fork source reservation was lost before target discovery.",
+      );
+    }
+    const { discoveredSessionId: _discoveredSessionId, ...targetInput } = input;
+    const target = targetReservationEntrySchema.parse({
+      kind: "target",
+      ...targetInput,
+      createdAtMs: input.createdAtMs ?? source.createdAtMs,
+      childRuntimeId: source.childRuntimeId,
+      ...(source.childPid !== undefined ? { childPid: source.childPid } : {}),
+    });
+    this.ephemeralEntries.set(entryKey(target), target);
+  }
+
   /** Atomically replace source-only ownership with source+target cleanup. */
-  async promoteSourceToTarget(
-    input: ForkTargetEntryInput & { transactionId: string },
-  ): Promise<void> {
+  async promoteSourceToTarget(input: ForkTargetPromotionInput): Promise<void> {
     await this.loadIfNeeded();
     const source = this.findSource(
       input.sourceSessionFile,
@@ -263,47 +346,163 @@ export class ForkCleanupJournal {
         "Fork source reservation was lost before target discovery.",
       );
     }
-    if (source.phase !== "spawned") {
+    if (source.phase === "pre-spawn") {
       throw new Error("Fork target cannot be recorded before child identity.");
     }
+    const { discoveredSessionId: _discoveredSessionId, ...targetInput } = input;
     const target = targetReservationEntrySchema.parse({
       kind: "target",
-      ...input,
+      ...targetInput,
       createdAtMs: input.createdAtMs ?? source.createdAtMs,
       childRuntimeId: source.childRuntimeId,
       ...(source.childPid !== undefined ? { childPid: source.childPid } : {}),
     });
-    await this.transact(() => {
-      const existingTarget = this.state.entries.find(
-        (entry) =>
-          entry.kind === "target" && entry.sessionFile === target.sessionFile,
-      );
-      if (existingTarget !== undefined) {
-        if (existingTarget.transactionId === target.transactionId) {
-          return this.state;
+    try {
+      await this.transact(() => {
+        const existingTarget = this.state.entries.find(
+          (entry) =>
+            entry.kind === "target" && entry.sessionFile === target.sessionFile,
+        );
+        if (existingTarget !== undefined) {
+          if (existingTarget.transactionId === target.transactionId) {
+            return this.state;
+          }
+          throw new Error("Fork target already has a cleanup reservation.");
         }
-        throw new Error("Fork target already has a cleanup reservation.");
-      }
-      let replaced = false;
-      const entries = this.state.entries.map((entry) => {
-        if (
-          entry.kind === "source" &&
-          entry.sourceSessionFile === target.sourceSessionFile &&
-          entry.transactionId === target.transactionId
-        ) {
-          replaced = true;
-          return target;
+        let replaced = false;
+        const entries = this.state.entries.map((entry) => {
+          if (
+            entry.kind === "source" &&
+            entry.sourceSessionFile === target.sourceSessionFile &&
+            entry.transactionId === target.transactionId
+          ) {
+            replaced = true;
+            return target;
+          }
+          return entry;
+        });
+        if (!replaced) {
+          throw new Error(
+            "Fork source reservation was lost before target promotion.",
+          );
         }
-        return entry;
+        return { ...this.state, entries };
       });
-      if (!replaced) {
-        throw new Error(
-          "Fork source reservation was lost before target promotion.",
+    } catch (error) {
+      // If this checkpoint also fails, restart only blocks provenance matches;
+      // it never turns an inferred filename into cleanup ownership.
+      await this.recordDiscoveredTarget(input).catch(() => undefined);
+      throw error;
+    }
+    this.ephemeralEntries.delete(entryKey(source));
+  }
+
+  private async recordDiscoveredTarget(
+    input: ForkTargetPromotionInput,
+  ): Promise<void> {
+    if (input.discoveredSessionId === undefined) return;
+    await this.transact(() => ({
+      ...this.state,
+      entries: this.state.entries.map((entry) =>
+        entry.kind === "source" &&
+        entry.sourceSessionFile === input.sourceSessionFile &&
+        entry.transactionId === input.transactionId
+          ? sourceReservationEntrySchema.parse({
+              ...entry,
+              discoveredTargetSessionFile: input.sessionFile,
+              discoveredTargetSessionId: input.discoveredSessionId,
+            })
+          : entry,
+      ),
+    }));
+  }
+
+  /**
+   * Restart recovery blocks every canonical parentSession match created after
+   * the reservation. Inventory is never cleanup authority: promotion requires
+   * a separately persisted, exact target path and Pi session ID checkpoint.
+   */
+  async recoverSourceTargetsAfterRestart(
+    workspaceStore: WorkspaceStore,
+    projectStore: ProjectStore | undefined,
+  ): Promise<void> {
+    await this.loadIfNeeded();
+    if (this.corrupt) return;
+    for (const source of this.state.entries) {
+      if (
+        source.kind !== "source" ||
+        source.phase !== "target-discovery" ||
+        source.sessionDir === undefined ||
+        source.workspaceId === undefined
+      ) {
+        continue;
+      }
+      const candidates = await this.findPlausibleTargets(source);
+      for (const sessionFile of candidates) {
+        await this.blockDiscoveredTarget({
+          sessionFile,
+          sourceSessionFile: source.sourceSessionFile,
+          transactionId: source.transactionId,
+          workspaceId: source.workspaceId,
+          ...(source.projectId !== undefined
+            ? { projectId: source.projectId }
+            : {}),
+        });
+      }
+      if (candidates.length !== 1) {
+        if (candidates.length > 1) {
+          this.diagnostics?.recordError(
+            `Fork reservation ${source.transactionId} has ${candidates.length} plausible children after restart; all remain blocked and none will be claimed.`,
+          );
+        }
+        continue;
+      }
+      // A restarted app only compensates after a PID probe proves that its
+      // recorded child no longer exists. Any uncertain probe fails closed.
+      // The opt-in defer hook lets the desktop regression assert the rebuilt
+      // blocks before a later restart performs the same safe retry.
+      if (
+        (forkRecoveryTestHooksEnabled &&
+          process.env.PI_DECK_TEST_DEFER_FORK_RECOVERY_CLEANUP === "1") ||
+        source.childPid === undefined ||
+        !(await hasExited(source.childPid))
+      ) {
+        continue;
+      }
+      const target = candidates[0]!;
+      if (
+        source.discoveredTargetSessionFile !== target ||
+        source.discoveredTargetSessionId === undefined ||
+        !(await this.targetHasSessionId(
+          target,
+          source.sessionDir,
+          source.discoveredTargetSessionId,
+        ))
+      ) {
+        continue;
+      }
+      try {
+        await this.promoteSourceToTarget({
+          sessionFile: target,
+          discoveredSessionId: source.discoveredTargetSessionId,
+          sourceSessionFile: source.sourceSessionFile,
+          transactionId: source.transactionId,
+          workspaceId: source.workspaceId,
+          ...(source.projectId !== undefined
+            ? { projectId: source.projectId }
+            : {}),
+        });
+        await this.retryAfterConfirmedExit(
+          target,
+          workspaceStore,
+          projectStore,
+        );
+      } catch (error) {
+        this.diagnostics?.recordError(
+          `Failed to recover discovered fork target ${target}: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
-      return { ...this.state, entries };
-    });
-    this.ephemeralEntries.delete(entryKey(source));
+    }
   }
 
   /**
@@ -479,6 +678,51 @@ export class ForkCleanupJournal {
     }
   }
 
+  private async findPlausibleTargets(
+    source: SourceReservationEntry,
+  ): Promise<string[]> {
+    try {
+      const inventory = await scanSessionRepository({
+        sessionDir: source.sessionDir!,
+      });
+      const candidates: string[] = [];
+      for (const summary of inventory.sessions) {
+        if (
+          summary.sessionFile === source.sourceSessionFile ||
+          summary.createdAtMs === undefined ||
+          summary.createdAtMs < source.createdAtMs
+        ) {
+          continue;
+        }
+        const validation = await validatePiSessionFile({
+          sessionFile: summary.sessionFile,
+          sessionDir: source.sessionDir!,
+        });
+        if (
+          validation.ok &&
+          validation.parentSession === source.sourceSessionFile
+        ) {
+          candidates.push(validation.sessionFile);
+        }
+      }
+      return [...new Set(candidates)].sort();
+    } catch (error) {
+      this.diagnostics?.recordError(
+        `Failed to inventory fork recovery candidates for ${source.sourceSessionFile}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return [];
+    }
+  }
+
+  private async targetHasSessionId(
+    sessionFile: string,
+    sessionDir: string,
+    sessionId: string,
+  ): Promise<boolean> {
+    const summary = await readPiSessionSummary({ sessionFile, sessionDir });
+    return summary.summary?.sessionId === sessionId;
+  }
+
   private findSource(
     sourceSessionFile: string,
     transactionId: string,
@@ -530,10 +774,42 @@ export class ForkCleanupJournal {
       await fs.writeFile(temp, `${JSON.stringify(candidate, null, 2)}\n`, {
         mode: 0o600,
       });
+      await failTargetPromotionPersistenceForTest(candidate, "write");
+      await failTargetPromotionPersistenceForTest(candidate, "rename");
       await fs.rename(temp, this.storeFile);
     } catch (error) {
       await fs.rm(temp, { force: true }).catch(() => undefined);
       throw error;
     }
   }
+}
+
+async function hasExited(pid: number): Promise<boolean> {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    // ESRCH is an OS proof that this exact PID currently has no process. EPERM
+    // and every other result are deliberately uncertain and stay blocked.
+    return (error as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
+async function failTargetPromotionPersistenceForTest(
+  candidate: ForkCleanupFile,
+  phase: "write" | "rename",
+): Promise<void> {
+  if (
+    !forkRecoveryTestHooksEnabled ||
+    process.env.PI_DECK_TEST_FAIL_FORK_PROMOTION_PERSISTENCE !== phase ||
+    !candidate.entries.some((entry) => entry.kind === "target")
+  ) {
+    return;
+  }
+  const signalFile = process.env.PI_DECK_TEST_FORK_PROMOTION_FAILURE_SIGNAL;
+  if (signalFile !== undefined) {
+    await fs.mkdir(path.dirname(signalFile), { recursive: true });
+    await fs.writeFile(signalFile, `${phase}\n`);
+  }
+  throw new Error(`Injected fork target promotion ${phase} failure.`);
 }
