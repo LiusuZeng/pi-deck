@@ -6904,6 +6904,193 @@ test.describe("task-session routing acceptance", () => {
     }
   });
 
+  test("restores terminal task handoffs with one automatic parent synthesis", async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "pi-deck-task-restored-synthesis-"),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    const userDataDir = path.join(root, "user-data");
+    const traceFile = path.join(root, "restored-synthesis-trace.log");
+    const bootstrapPrompt = `Bootstrap restored synthesis ${path.basename(root)}.`;
+    for (const directory of [projectCwd, agentDir, userDataDir])
+      fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(traceFile, "");
+
+    const env = {
+      ...fakeRealModeEnv({
+        root,
+        projectCwd,
+        agentDir,
+        userDataDir,
+        fakePiArgs: [
+          "--prompt-scenario",
+          "routing",
+          "--fixture-trace-file",
+          traceFile,
+          "--stream-delay-ms",
+          "50",
+        ],
+      }),
+      NODE_ENV: "test",
+      PI_DECK_E2E_TASK_SESSION_ACCEPTANCE: "1",
+    };
+    const statePath = path.join(userDataDir, "task-session-state.json");
+    const ordinaryPromptCount = () =>
+      fs.existsSync(traceFile)
+        ? (fs.readFileSync(traceFile, "utf8").match(/^ordinary_prompt$/gm)
+            ?.length ?? 0)
+        : 0;
+
+    let first: Awaited<ReturnType<typeof launchPiDeck>> | undefined;
+    let second: Awaited<ReturnType<typeof launchPiDeck>> | undefined;
+    try {
+      first = await launchPiDeck(env);
+      await expectHealthyPreload(first.page);
+      await enterSessionDetail(first.page);
+      await first.page.getByLabel("Prompt text").fill(bootstrapPrompt);
+      await first.page.getByRole("button", { name: "Send" }).click();
+      await expect(
+        first.page.getByText(/Ordinary routing fixture accepted/),
+      ).toBeVisible();
+      const sessionFile = await first.page.evaluate(async () => {
+        const snapshot = await window.piDeck.chat.getSnapshot();
+        return snapshot.state.sessionFile;
+      });
+      if (typeof sessionFile !== "string")
+        throw new Error("Fake Pi did not report a parent session file.");
+      await first.app.close().catch(() => undefined);
+      first = undefined;
+
+      const canonicalSessionFile = fs.realpathSync(sessionFile);
+      fs.writeFileSync(
+        statePath,
+        JSON.stringify({
+          [canonicalSessionFile]: {
+            state: {
+              version: 1,
+              mode: "parallel",
+              nextTaskNumber: 3,
+              plans: [
+                {
+                  planId: 1,
+                  contextSummary: "Restored all-terminal task context.",
+                  originalPrompt: "Report restored terminal task handoffs.",
+                  tasks: [
+                    {
+                      taskNumber: 1,
+                      generatedName: "Restored completed task",
+                      brief: "Complete the restored task.",
+                      lifecycle: "completed",
+                      attempt: 1,
+                      transitions: [
+                        { lifecycle: "queued", attempt: 0 },
+                        { lifecycle: "starting", attempt: 1 },
+                        { lifecycle: "running", attempt: 1 },
+                        { lifecycle: "completed", attempt: 1 },
+                      ],
+                      handoffSummary: "Completed handoff restored.",
+                    },
+                    {
+                      taskNumber: 2,
+                      generatedName: "Restored failed task",
+                      brief: "Fail the restored task after retries.",
+                      lifecycle: "failed",
+                      attempt: 4,
+                      transitions: [
+                        { lifecycle: "queued", attempt: 0 },
+                        { lifecycle: "starting", attempt: 1 },
+                        { lifecycle: "running", attempt: 1 },
+                        { lifecycle: "retrying", attempt: 1 },
+                        { lifecycle: "starting", attempt: 2 },
+                        { lifecycle: "running", attempt: 2 },
+                        { lifecycle: "retrying", attempt: 2 },
+                        { lifecycle: "starting", attempt: 3 },
+                        { lifecycle: "running", attempt: 3 },
+                        { lifecycle: "retrying", attempt: 3 },
+                        { lifecycle: "starting", attempt: 4 },
+                        { lifecycle: "running", attempt: 4 },
+                        { lifecycle: "failed", attempt: 4 },
+                      ],
+                      handoffSummary: "Failed handoff restored.",
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        }),
+      );
+
+      second = await launchPiDeck(env);
+      await expectHealthyPreload(second.page);
+      await expectAllWorkLaunch(second.page);
+      const savedSession = second.page.getByRole("button", {
+        name: `Session: ${bootstrapPrompt}`,
+        exact: true,
+      });
+      await expect(savedSession).toBeVisible();
+      await savedSession.click();
+
+      const synthesisReports = second.page
+        .getByLabel("Chat / Agent Timeline")
+        .locator(".assistant-message")
+        .filter({ hasText: "Synthesis observed:" });
+      await expect(synthesisReports).toHaveCount(1, { timeout: 30_000 });
+      await expect(synthesisReports).toContainText(
+        "#1 Restored completed task: Completed handoff restored.",
+      );
+      await expect(synthesisReports).toContainText(
+        "#2 Restored failed task: Failed handoff restored.",
+      );
+
+      const snapshot = await second.page.evaluate(() =>
+        window.piDeck.chat.getSnapshot(),
+      );
+      await expect
+        .poll(
+          () =>
+            second!.page.evaluate(
+              async (runtimeId) =>
+                (await window.piDeck.multitask.getMode({ runtimeId })).tasks,
+              snapshot.runtimeId,
+            ),
+          { timeout: 30_000 },
+        )
+        .toEqual([]);
+      await expect(
+        second.page.getByRole("region", { name: "Parallel task sessions" }),
+      ).toHaveCount(0, { timeout: 30_000 });
+      await expect
+        .poll(
+          () => {
+            const persisted = JSON.parse(
+              fs.readFileSync(statePath, "utf8"),
+            ) as {
+              [sessionFile: string]: {
+                state: {
+                  plans: Array<{
+                    synthesisAttempts?: number;
+                    synthesisReported?: boolean;
+                  }>;
+                };
+              };
+            };
+            return persisted[canonicalSessionFile]?.state.plans[0];
+          },
+          { timeout: 30_000 },
+        )
+        .toMatchObject({ synthesisAttempts: 1, synthesisReported: true });
+      await expect.poll(ordinaryPromptCount, { timeout: 30_000 }).toBe(2);
+      await expect(synthesisReports).toHaveCount(1);
+    } finally {
+      await first?.app.close().catch(() => undefined);
+      await second?.app.close().catch(() => undefined);
+      if (process.env.PI_DECK_E2E_KEEP_REAL_SMOKE_ARTIFACTS !== "1")
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("restart preserves interrupted trace without resuming private work", async () => {
     const root = fs.mkdtempSync(
       path.join(os.tmpdir(), "pi-deck-task-restart-"),
