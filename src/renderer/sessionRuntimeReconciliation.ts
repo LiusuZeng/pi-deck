@@ -19,6 +19,16 @@ export type ReconciliationSessionStatus =
   | "waiting"
   | "error";
 
+/** The only session fields the status-polling eligibility decision needs. */
+export interface SessionForRuntimeReconciliationEligibility {
+  runtimeBacked: boolean;
+  status: ReconciliationSessionStatus;
+  overlays: Pick<
+    SessionOverlays,
+    "streaming" | "toolRunning" | "compacting" | "retrying"
+  >;
+}
+
 /**
  * The lifecycle projection reconciliation changes. Timeline construction and
  * other view-model fields deliberately remain owned by App.
@@ -46,6 +56,34 @@ export interface SessionRuntimeReconciliationDependencies<
   backendLabel(session: TSession): string;
   appendInfoDiagnostic(session: TSession, content: string): TSession;
   now(): number;
+}
+
+/**
+ * Runtime events remain authoritative, but a bounded status fallback must
+ * include active and waiting turns so dropping lifecycle events cannot leave
+ * the UI permanently out of sync with Pi.
+ */
+export function shouldReconcileSession(
+  session: SessionForRuntimeReconciliationEligibility,
+): boolean {
+  return session.runtimeBacked && isReconciliationBusy(session);
+}
+
+function isReconciliationBusy(
+  session: Pick<
+    SessionForRuntimeReconciliationEligibility,
+    "status" | "overlays"
+  >,
+): boolean {
+  return (
+    session.status === "starting" ||
+    session.status === "sending" ||
+    session.status === "aborting" ||
+    session.status === "reconnecting" ||
+    session.status === "working" ||
+    session.status === "waiting" ||
+    session.overlays.retrying
+  );
 }
 
 export function reconcileSessionWithRuntimeStatus<

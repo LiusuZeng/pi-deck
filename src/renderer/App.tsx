@@ -73,7 +73,10 @@ import {
   isSuccessfulTerminalStatus,
   type FailureKind,
 } from "./openaiCodexAuth.js";
-import { reconcileSessionWithRuntimeStatus as reconcileSessionWithRuntimeStatusInDomain } from "./sessionRuntimeReconciliation.js";
+import {
+  reconcileSessionWithRuntimeStatus as reconcileSessionWithRuntimeStatusInDomain,
+  shouldReconcileSession as shouldReconcileSessionInDomain,
+} from "./sessionRuntimeReconciliation.js";
 import {
   canNavigatePromptHistoryDown,
   canNavigatePromptHistoryUp,
@@ -13685,10 +13688,7 @@ function canSubmitTaskPrompt(
 }
 
 function shouldReconcileSession(session: SessionViewModel): boolean {
-  // Runtime events remain authoritative, but a bounded status fallback must
-  // include active and waiting turns so dropping lifecycle events cannot leave
-  // the UI permanently out of sync with Pi.
-  return session.runtimeBacked && isSessionBusy(session);
+  return shouldReconcileSessionInDomain(session);
 }
 
 function reconcileSessionWithRuntimeStatus(

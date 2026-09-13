@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import { emptyOverlays, type BaseSessionState } from "./sessionState.js";
 import {
   reconcileSessionWithRuntimeStatus,
+  shouldReconcileSession,
   type ReconciliationSessionStatus,
   type SessionForRuntimeReconciliation,
+  type SessionForRuntimeReconciliationEligibility,
   type SessionRuntimeReconciliationDependencies,
 } from "./sessionRuntimeReconciliation.js";
 
@@ -42,6 +44,107 @@ function dependencies(
     now: () => now,
   };
 }
+
+function eligibilitySession(
+  patch: Partial<SessionForRuntimeReconciliationEligibility> = {},
+): SessionForRuntimeReconciliationEligibility {
+  return {
+    runtimeBacked: true,
+    status: "idle",
+    overlays: {
+      streaming: false,
+      toolRunning: false,
+      compacting: false,
+      retrying: false,
+    },
+    ...patch,
+    overlays: {
+      streaming: false,
+      toolRunning: false,
+      compacting: false,
+      retrying: false,
+      ...patch.overlays,
+    },
+  };
+}
+
+describe("shouldReconcileSession", () => {
+  it("requires a runtime-backed session", () => {
+    expect(
+      shouldReconcileSession(
+        eligibilitySession({
+          runtimeBacked: false,
+          status: "working",
+          overlays: {
+            streaming: false,
+            toolRunning: false,
+            compacting: false,
+            retrying: true,
+          },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it.each<ReconciliationSessionStatus>([
+    "starting",
+    "sending",
+    "working",
+    "aborting",
+    "reconnecting",
+  ])("reconciles a %s lifecycle", (status) => {
+    expect(shouldReconcileSession(eligibilitySession({ status }))).toBe(true);
+  });
+
+  it("reconciles pending extension input", () => {
+    expect(
+      shouldReconcileSession(
+        eligibilitySession({
+          status: "waiting",
+          overlays: {
+            streaming: false,
+            toolRunning: false,
+            compacting: false,
+            retrying: false,
+          },
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it.each([
+    ["streaming", { streaming: true }, false],
+    ["running tool", { toolRunning: true }, false],
+    ["compacting", { compacting: true }, false],
+    ["retrying", { retrying: true }, true],
+  ] as const)(
+    "is %s for an idle session with its overlay",
+    (_overlay, overlays, expected) => {
+      expect(
+        shouldReconcileSession(
+          eligibilitySession({
+            overlays: {
+              streaming: false,
+              toolRunning: false,
+              compacting: false,
+              retrying: false,
+              ...overlays,
+            },
+          }),
+        ),
+      ).toBe(expected);
+    },
+  );
+
+  it.each<ReconciliationSessionStatus>(["idle", "error"])(
+    "does not reconcile a settled %s session",
+    (status) => {
+      expect(shouldReconcileSession(eligibilitySession({ status }))).toBe(
+        false,
+      );
+    },
+  );
+});
 
 describe("reconcileSessionWithRuntimeStatus", () => {
   it.each<[ReconciliationSessionStatus, BaseSessionState]>([
