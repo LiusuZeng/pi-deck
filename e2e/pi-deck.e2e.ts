@@ -346,6 +346,71 @@ function writePiSessionFixture(options: {
   );
 }
 
+async function sidebarHoverBackgroundColor(action: Locator): Promise<string> {
+  return action.evaluate((button) => {
+    const probe = document.createElement("span");
+    probe.style.backgroundColor = "var(--color-surface-hover)";
+    button.append(probe);
+    const color = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return color;
+  });
+}
+
+async function expectSidebarSecondaryActionsAligned(page: Page): Promise<void> {
+  const sidebar = page.getByLabel("Sessions", { exact: true });
+  const actions = [
+    sidebar.getByRole("button", { name: "New workspace…", exact: true }),
+    sidebar.getByRole("button", {
+      name: "Add existing session…",
+      exact: true,
+    }),
+    sidebar.getByRole("button", { name: /^Archived/ }),
+  ];
+  await expect(sidebar).toBeVisible();
+  for (const action of actions) {
+    await expect(action).toBeVisible();
+    await expect(action).toBeEnabled();
+    await expect(action).toHaveCSS("justify-content", "flex-start");
+  }
+
+  const sidebarBounds = await sidebar.boundingBox();
+  const actionGeometry = await Promise.all(
+    actions.map((action) =>
+      action.evaluate((button) => {
+        const buttonBounds = button.getBoundingClientRect();
+        const iconBounds = button.querySelector("svg")?.getBoundingClientRect();
+        const label = Array.from(button.childNodes).find(
+          (node) =>
+            node.nodeType === Node.TEXT_NODE && node.textContent?.trim() !== "",
+        );
+        if (iconBounds === undefined || label === undefined) {
+          throw new Error("Sidebar action is missing its icon or label.");
+        }
+        const labelRange = document.createRange();
+        labelRange.selectNode(label);
+        const labelBounds = labelRange.getBoundingClientRect();
+        return {
+          buttonLeft: Math.round(buttonBounds.left),
+          buttonWidth: Math.round(buttonBounds.width),
+          iconInset: Math.round(iconBounds.left - buttonBounds.left),
+          labelInset: Math.round(labelBounds.left - buttonBounds.left),
+        };
+      }),
+    ),
+  );
+  if (sidebarBounds === null) {
+    throw new Error("Sessions sidebar has no bounding box.");
+  }
+
+  for (const geometry of actionGeometry) {
+    expect(geometry.buttonLeft).toBe(Math.round(sidebarBounds.x + 8));
+    expect(geometry.buttonWidth).toBe(Math.round(sidebarBounds.width - 16));
+    expect(geometry.iconInset).toBe(actionGeometry[0]!.iconInset);
+    expect(geometry.labelInset).toBe(actionGeometry[0]!.labelInset);
+  }
+}
+
 async function createWorkspaceInUi(page: Page, name: string): Promise<void> {
   await page.getByRole("button", { name: "New workspace…" }).click();
   const dialog = page.getByTestId("workspace-create-dialog");
@@ -697,6 +762,83 @@ test("workspace overflow menu remains compact and vertical with a long workspace
     await page.setViewportSize({ width: 1280, height: 900 });
     await openWorkspaceActions(page, longWorkspaceName);
     await expectWorkspaceActionsMenuLayout(page, longWorkspaceName);
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Add existing session remains a peer sidebar action across themes and narrow layouts", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-sidebar-action-alignment-"),
+  );
+  const projectCwd = path.join(root, "authorized-project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+  fs.mkdirSync(userDataDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(userDataDir, "settings.json"),
+    `${JSON.stringify({ theme: "light" })}\n`,
+  );
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({ root, projectCwd, agentDir, userDataDir }),
+  );
+  try {
+    await page.setViewportSize({ width: 800, height: 700 });
+    await expectHealthyPreload(page);
+    await expect(page.locator("html")).toHaveCSS("color-scheme", "light");
+    await expectSidebarSecondaryActionsAligned(page);
+
+    const newWorkspace = page.getByRole("button", {
+      name: "New workspace…",
+      exact: true,
+    });
+    await newWorkspace.focus();
+    await expect(newWorkspace).toBeFocused();
+    await page.keyboard.press("Enter");
+    const workspaceDialog = page.getByTestId("workspace-create-dialog");
+    await expect(workspaceDialog).toBeVisible();
+    await workspaceDialog.getByLabel("Close dialog").click();
+
+    const addExisting = page.getByRole("button", {
+      name: "Add existing session…",
+      exact: true,
+    });
+    const lightHoverColor = await sidebarHoverBackgroundColor(newWorkspace);
+    await newWorkspace.hover();
+    await expect(newWorkspace).toHaveCSS("background-color", lightHoverColor);
+    await addExisting.hover();
+    await expect(addExisting).toHaveCSS("background-color", lightHoverColor);
+    await addExisting.focus();
+    await expect(addExisting).toBeFocused();
+    await page.keyboard.press("Enter");
+    const unassignedDialog = page.getByTestId("unassigned-sessions");
+    await expect(unassignedDialog).toBeVisible();
+    await unassignedDialog.getByLabel("Close dialog").click();
+
+    await page.setViewportSize({ width: 320, height: 600 });
+    await page.getByRole("button", { name: "Show sessions" }).click();
+    await expectSidebarSecondaryActionsAligned(page);
+
+    await page.setViewportSize({ width: 800, height: 700 });
+    await page.getByRole("button", { name: "Appearance: Light" }).click();
+    await page
+      .getByRole("menuitemradio", { name: "Dark", exact: true })
+      .click();
+    await expect(page.locator("html")).toHaveCSS("color-scheme", "dark");
+    await expectSidebarSecondaryActionsAligned(page);
+    const darkAddExisting = page.getByRole("button", {
+      name: "Add existing session…",
+      exact: true,
+    });
+    const darkHoverColor = await sidebarHoverBackgroundColor(darkAddExisting);
+    await darkAddExisting.hover();
+    await expect(darkAddExisting).toHaveCSS("background-color", darkHoverColor);
+    await darkAddExisting.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("unassigned-sessions")).toBeVisible();
   } finally {
     await app.close().catch(() => undefined);
     fs.rmSync(root, { recursive: true, force: true });

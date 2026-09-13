@@ -875,11 +875,12 @@ h1 {
   white-space: nowrap;
 }
 
-.sidebar-add-existing {
+.sidebar-add-existing.ui-button {
   display: flex;
   width: 100%;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 6px;
+  border: 0;
 }
 
 .sidebar-archived-toggle.ui-button {
