@@ -983,6 +983,134 @@ describe("agentWorkflow occurrence runtime", () => {
     expect(retry.sessionFile).toBeUndefined();
   });
 
+  it("resumes every stopped all-fan-out child and completes from current retries", () => {
+    const definition = fanoutDefinition("all");
+    definition.nodes = definition.nodes.filter((item) => item.id !== ids.after);
+    definition.relationships = [
+      { id: ids.end, from: ids.fan, to: { end: "done" } },
+    ];
+    let run = createWorkflowRoleRun(definition, "workspace", {}, 1);
+    const fan = run.occurrences[0]!;
+    run = startWorkflowOrchestrator(run, fan.id, 2);
+    const [a, b] = readyWorkflowOccurrences(run);
+    run = startWorkflowOccurrence(run, a!.id, "a", undefined, 3);
+    run = stopWorkflowRoleRun(run, 4);
+    expect(run).toMatchObject({ status: "stopped", completedAtMs: 4 });
+    expect(
+      run.occurrences
+        .filter((item) => item.parentOrchestratorRunId === fan.id)
+        .map((item) => [item.id, item.attempt, item.status]),
+    ).toEqual([
+      [a!.id, 1, "cancelled"],
+      [b!.id, 1, "cancelled"],
+    ]);
+
+    run = retryWorkflowOccurrence(run, a!.id, 5);
+    run = retryWorkflowOccurrence(run, b!.id, 6);
+    const aRetry = run.occurrences.find(
+      (item) => item.nodeId === ids.a && item.attempt === 2,
+    )!;
+    const bRetry = run.occurrences.find(
+      (item) => item.nodeId === ids.b && item.attempt === 2,
+    )!;
+    expect(run).toMatchObject({ status: "running", completedAtMs: undefined });
+    expect(readyWorkflowOccurrences(run)).toEqual([aRetry, bRetry]);
+
+    run = startWorkflowOccurrence(run, aRetry.id, "a-retry", undefined, 7);
+    run = completeWorkflowOccurrence(run, aRetry.id, "A retry", 8);
+    run = startWorkflowOccurrence(run, bRetry.id, "b-retry", undefined, 9);
+    run = completeWorkflowOccurrence(run, bRetry.id, "B retry", 10);
+
+    expect(run.occurrences.find((item) => item.id === fan.id)).toMatchObject({
+      status: "completed",
+      output: ["A retry", "B retry"],
+    });
+    expect(
+      run.occurrences
+        .filter((item) => item.parentOrchestratorRunId === fan.id)
+        .map((item) => [item.attempt, item.status, item.output]),
+    ).toEqual([
+      [1, "skipped", undefined],
+      [1, "skipped", undefined],
+      [2, "completed", "A retry"],
+      [2, "completed", "B retry"],
+    ]);
+    expect(run).toMatchObject({ status: "completed", terminalOutcome: "done" });
+  });
+
+  it("advances a stopped loop exactly once from its current worker retry", () => {
+    const definition: WorkflowRoleDefinition = {
+      ...base,
+      entryNodeId: ids.loop,
+      nodes: [
+        {
+          id: ids.loop,
+          name: "Loop",
+          role: "orchestrator",
+          config: {
+            mode: "loop",
+            agents: [ids.work],
+            decider: ids.ready,
+            maxIterations: 1,
+          },
+        },
+        {
+          id: ids.work,
+          name: "Work",
+          role: "worker",
+          managedBy: ids.loop,
+          config: { instructions: "work" },
+        },
+        {
+          id: ids.ready,
+          name: "Ready",
+          role: "decider",
+          managedBy: ids.loop,
+          config: { question: "ready?" },
+        },
+      ],
+      relationships: [{ id: ids.end, from: ids.loop, to: { end: "done" } }],
+    };
+    let run = createWorkflowRoleRun(definition, "workspace", {}, 1);
+    const loop = run.occurrences[0]!;
+    run = startWorkflowOrchestrator(run, loop.id, 2);
+    const first = readyWorkflowOccurrences(run)[0]!;
+    run = startWorkflowOccurrence(run, first.id, "work", undefined, 3);
+    run = stopWorkflowRoleRun(run, 4);
+    expect(run.occurrences.find((item) => item.id === first.id)).toMatchObject({
+      status: "cancelled",
+      attempt: 1,
+    });
+
+    run = retryWorkflowOccurrence(run, first.id, 5);
+    const retry = run.occurrences.at(-1)!;
+    run = startWorkflowOccurrence(run, retry.id, "work-retry", undefined, 6);
+    run = completeWorkflowOccurrence(run, retry.id, "retry output", 7);
+
+    const deciders = readyWorkflowOccurrences(run).filter(
+      (item) => item.role === "decider",
+    );
+    expect(deciders).toHaveLength(1);
+    const decider = deciders[0]!;
+    run = startWorkflowOccurrence(run, decider.id, "decider", undefined, 8);
+    run = completeWorkflowOccurrence(run, decider.id, true, 9);
+
+    expect(run.occurrences.find((item) => item.id === loop.id)).toMatchObject({
+      status: "completed",
+      output: ["retry output"],
+    });
+    expect(
+      run.occurrences
+        .filter((item) => item.parentOrchestratorRunId === loop.id)
+        .filter((item) => item.role === "worker")
+        .map((item) => [item.attempt, item.status, item.output]),
+    ).toEqual([
+      [1, "skipped", undefined],
+      [2, "completed", "retry output"],
+    ]);
+    expect(run).toMatchObject({ status: "completed", terminalOutcome: "done" });
+  });
+
   it("enforces persisted maxAttempts while retaining the failed attempt for projection", () => {
     const definition: WorkflowRoleDefinition = {
       ...base,
