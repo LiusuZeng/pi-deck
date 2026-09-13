@@ -45,6 +45,54 @@ Thus this environment cannot establish launch identity, Electron `42.5.0`, or
 Pi Deck session sounds as the native-error cause. It only establishes that the
 error did not occur under this HDMI route and short first-gesture probe.
 
+## 2026-09-13 built-app follow-up matrix
+
+Environment and commands:
+
+- Commit `08f4db0710b1`; macOS `26.5.2` (`25F84`), `x86_64`; Node `v26.0.0`;
+  repository-pinned Electron `42.5.0`.
+- Default output was `DELL S2721D`, HDMI, two channels at 48 kHz.
+- `npm run build`, then an ad-hoc Playwright driver launched
+  `node_modules/electron/dist/Pi Deck.app/Contents/MacOS/Electron` with the
+  built `dist/main/main.js`, `PI_DECK_BACKEND=fake`, a fresh profile, and
+  `PI_DECK_E2E_HIDE_WINDOWS=1`.
+- For each profile, the driver wrapped the renderer `AudioContext` constructor
+  before the first real mouse click and `Tab` key press, then captured the
+  Electron child-process stderr without filtering until exit. For the enabled
+  profile it also clicked both in-app Play buttons. This is automation evidence
+  that the cue requests were issued, **not** a human audibility result.
+
+| Runtime | Preferences before first gesture | Result | Unfiltered captured stderr |
+| --- | --- | --- | --- |
+| rebranded `Pi Deck.app` | both disabled | 0 `AudioContext` constructions after mouse + key; no cue requested | `<empty>` |
+| rebranded `Pi Deck.app` | both enabled | 1 `AudioContext` construction after mouse + key; Needs attention and Completed Play buttons clicked | `<empty>` |
+
+This is a source-run branded Electron bundle, not a signed/notarized packaged
+application. The selected HDMI device was not changed during the run; no
+Bluetooth device was available. The driver cannot establish behavior on
+built-in, Bluetooth, or other external routes, nor behavior during a live
+output-device switch.
+
+## Diagnostics boundary
+
+`SessionSoundPlayerOptions.onDiagnostic` is an optional, non-logging callback
+for tests and diagnostic-build injection only. It reports bounded lifecycle
+state (context creation/resume, cue scheduling/failure, invalidation, and
+retirement); callback failures are ignored. Pi Deck currently has no bounded
+production diagnostics surface for these events, so this branch intentionally
+does not wire it to production logging or add console/stderr noise. A future
+production integration must first define retention, redaction, rate bounds, and
+an operator-visible consumer.
+
+## Scope verification
+
+The task-fanout prompt-sizing concern is pre-existing and out of scope for
+#98. On this branch, `git diff --exit-code main --
+src/main/multitask/taskSessionPlanner.ts
+src/main/multitask/taskSessionPlanner.test.ts` exits `0`; both planner blobs
+are `8c5adbc4f895b761a5e7c4bf7a2dcd4196b7438e`. The #98 range changes only
+this investigation, session-sound renderer code/tests, and the audio E2E.
+
 ## Remaining manual matrix
 
 Repeat against the issue reporter's terminal built-app launch on the final commit:
