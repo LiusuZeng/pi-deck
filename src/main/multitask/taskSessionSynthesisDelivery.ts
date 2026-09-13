@@ -12,7 +12,7 @@ const synthesisDeliveryMarkerSuffix = " -->";
 
 export interface SynthesisDelivery {
   id: string;
-  /** External-dispatch attempt number, persisted before that dispatch. */
+  /** Parent-boundary sends that have actually started; zero before the first. */
   attempt: number;
   /** Exact parent-turn content, including the receipt marker. */
   payload: string;
@@ -22,6 +22,10 @@ export interface SynthesisDelivery {
 
 export function synthesisDeliveryMarker(id: string): string {
   return `${synthesisDeliveryMarkerPrefix}${id}${synthesisDeliveryMarkerSuffix}`;
+}
+
+export function synthesisDeliveryFingerprint(payload: string): string {
+  return createHash("sha256").update(payload).digest("hex");
 }
 
 export function synthesisDeliveryPayload(input: {
@@ -42,7 +46,7 @@ export function synthesisDeliveryPayload(input: {
     id,
     attempt: input.attempt,
     payload,
-    payloadFingerprint: createHash("sha256").update(payload).digest("hex"),
+    payloadFingerprint: synthesisDeliveryFingerprint(payload),
     state: "dispatching",
   };
 }

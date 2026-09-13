@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { it as test } from "vitest";
+import { expect, it as test } from "vitest";
 import { runMinimalRpcSmokeTest } from "../platform/rpcSmokeTest.js";
 import type { JsonObject, RpcEventRecord } from "./types.js";
 import { spawnFakeRpc, writeFakePiShim } from "../../test/fakeRpcHarness.js";
@@ -431,6 +431,53 @@ test("fake RPC accepts exact steer and follow_up commands and emits full queues"
     assert.deepEqual(queue.followUp, ["do this afterwards"]);
   } finally {
     client.close();
+  }
+});
+
+test("fake RPC consumes queued follow_up as a durable user turn", async () => {
+  const directory = tempDir("pi-deck-fake-follow-up-receipt-");
+  const session = path.join(directory, "parent.jsonl");
+  const marker =
+    "<!-- pi-deck-synthesis-delivery:v1:12345678-1234-1234-1234-123456789abc -->";
+  const client = spawnFakeRpc([
+    "--session",
+    session,
+    "--stream-delay-ms",
+    "20",
+  ]);
+  try {
+    const settled = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "agent_settled"),
+    );
+    await client.request("prompt", { message: "active parent turn" });
+    await client.request("follow_up", { message: `${marker}\nqueued receipt` });
+    await settled;
+    const live = (await client.request("get_messages")) as {
+      messages: Array<{ role?: string; content?: string }>;
+    };
+    expect(live.messages).toContainEqual(
+      expect.objectContaining({
+        role: "user",
+        content: expect.stringContaining(marker),
+      }),
+    );
+  } finally {
+    client.close();
+  }
+  const reloaded = spawnFakeRpc(["--session", session]);
+  try {
+    const history = (await reloaded.request("get_messages")) as {
+      messages: Array<{ role?: string; content?: string }>;
+    };
+    assert.ok(
+      history.messages.some(
+        (message) =>
+          message.role === "user" && message.content?.includes(marker),
+      ),
+    );
+  } finally {
+    reloaded.close();
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 

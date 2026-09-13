@@ -55,6 +55,11 @@ interface FakeOptions {
   includeUsage: boolean;
   noSession: boolean;
   failTaskPromptRecordWhileActive: boolean;
+  /** Signal after a prompt user turn is durable but before its RPC response. */
+  promptReceiptSignalFile?: string;
+  /** Signal/exit after a queued follow-up becomes a durable user turn. */
+  followUpReceiptSignalFile?: string;
+  exitAfterFollowUpReceipt: boolean;
   /** Emits spaced, payload-free worker progress for Electron telemetry E2E. */
   taskSessionProgressFixture: boolean;
   sessionFile?: string;
@@ -137,6 +142,7 @@ function parseOptions(argv: string[]): FakeOptions {
     includeUsage: false,
     noSession: false,
     failTaskPromptRecordWhileActive: false,
+    exitAfterFollowUpReceipt: false,
     taskSessionProgressFixture: false,
     forkOmitsParentSession: false,
     forkGetStateDelayMs: 0,
@@ -222,6 +228,16 @@ function parseOptions(argv: string[]): FakeOptions {
       options.noSession = true;
     } else if (arg === "--fail-task-prompt-record-while-active") {
       options.failTaskPromptRecordWhileActive = true;
+    } else if (arg === "--prompt-receipt-signal-file") {
+      const file = argv[index + 1];
+      if (file) options.promptReceiptSignalFile = file;
+      index += 1;
+    } else if (arg === "--follow-up-receipt-signal-file") {
+      const file = argv[index + 1];
+      if (file) options.followUpReceiptSignalFile = file;
+      index += 1;
+    } else if (arg === "--exit-after-follow-up-receipt") {
+      options.exitAfterFollowUpReceipt = true;
     } else if (arg === "--task-session-progress-fixture") {
       options.taskSessionProgressFixture = true;
     } else if (arg === "--session") {
@@ -1120,6 +1136,7 @@ class FakeRpcServer {
     };
     this.messages.push(userMessage);
     this.appendPersistedMessage(userMessage);
+    this.signalReceipt(this.options.promptReceiptSignalFile, "prompt");
     if (recordedTaskPrompt !== undefined) {
       this.promptCounter += 1;
       this.respond(command.id, "prompt");
@@ -1451,6 +1468,10 @@ class FakeRpcServer {
                   }
                 : {}),
             });
+            // Pi consumes queued follow-ups as new user turns only after the
+            // active turn ends. Persist that turn before the next settlement so
+            // history probes exercise the real receipt boundary.
+            if (this.consumeQueuedFollowUp()) return;
             this.write({ type: "agent_settled" });
           }
         },
@@ -1793,6 +1814,44 @@ class FakeRpcServer {
     // the late dialog response must not manufacture a successful completion.
     if (this.options.promptScenario === "extension-ui-error") return;
     this.completePrompt(pending.assistantId, pending.promptText);
+  }
+
+  private signalReceipt(file: string | undefined, kind: string): void {
+    if (!file) return;
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.appendFileSync(file, `${kind}\n`);
+  }
+
+  /** Consume exactly one queued follow-up as Pi's next durable user turn. */
+  private consumeQueuedFollowUp(): boolean {
+    const text = this.followUp.shift();
+    if (text === undefined) return false;
+    const userMessage: PiMessage = {
+      id: `msg_user_${this.promptCounter + 1}`,
+      role: "user",
+      content: text,
+      createdAt: Date.now(),
+    };
+    this.messages.push(userMessage);
+    this.appendPersistedMessage(userMessage);
+    const synthesisMarker = text.match(
+      /<!-- pi-deck-synthesis-delivery:v1:([0-9a-f-]+) -->/i,
+    )?.[1];
+    if (synthesisMarker)
+      this.traceFixture(`synthesis_dispatch:${synthesisMarker}`);
+    this.signalReceipt(this.options.followUpReceiptSignalFile, "follow_up");
+    if (this.options.exitAfterFollowUpReceipt) process.exit(42);
+    this.emitQueueUpdate();
+    this.promptCounter += 1;
+    const assistantId = `msg_assistant_${this.promptCounter}`;
+    this.agentActive = true;
+    this.write({
+      type: "agent_start",
+      runId: `run_${this.promptCounter}`,
+      messageId: assistantId,
+    });
+    this.completePrompt(assistantId, text);
+    return true;
   }
 
   private handleIntervention(

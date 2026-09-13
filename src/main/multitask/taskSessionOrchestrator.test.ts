@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { synthesisDeliveryPayload } from "./taskSessionSynthesisDelivery.js";
 import {
   TaskSessionOrchestrator,
   taskSessionProgressForWorkerEventType,
@@ -14,6 +15,7 @@ function setup(capacity = 20) {
   const states: ReturnType<TaskSessionOrchestrator<string, Worker>["state"]>[] =
     [];
   let workers = 0;
+  const receipts = new Set<string>();
   const orchestrator = new TaskSessionOrchestrator<string, Worker>({
     plan: () => ({
       contextSummary: "relevant parent history",
@@ -36,7 +38,11 @@ function setup(capacity = 20) {
       };
     },
     hasGlobalCapacity: () => workers < capacity,
-    synthesize: () => undefined,
+    synthesize: async ({ delivery, markDispatched }) => {
+      await markDispatched();
+      receipts.add(delivery.id);
+    },
+    hasSynthesisDelivery: ({ delivery }) => receipts.has(delivery.id),
     onState: (_parent, state) => states.push(state),
   });
   orchestrator.addParent("parent", {
@@ -86,6 +92,7 @@ function setupRestore(
   onState: () => void = () => undefined,
 ) {
   const launches: TaskSessionLaunch<string>[] = [];
+  const receipts = new Set<string>();
   const orchestrator = new TaskSessionOrchestrator<string, Worker>({
     plan: () => ({
       contextSummary: "context",
@@ -97,7 +104,12 @@ function setupRestore(
       return { close: () => undefined };
     },
     hasGlobalCapacity: () => true,
-    synthesize,
+    synthesize: async (input) => {
+      await input.markDispatched();
+      await synthesize();
+      receipts.add(input.delivery.id);
+    },
+    hasSynthesisDelivery: ({ delivery }) => receipts.has(delivery.id),
     scheduleSynthesisRetry: () => undefined,
     onState,
   });
@@ -167,6 +179,7 @@ describe("TaskSessionOrchestrator", () => {
   it("makes exactly three retries after the initial attempt then synthesizes once", async () => {
     const { launches } = setup();
     let reports = 0;
+    let receipt = false;
     const reporter = new TaskSessionOrchestrator<string, Worker>({
       plan: () => ({
         contextSummary: "context",
@@ -178,9 +191,12 @@ describe("TaskSessionOrchestrator", () => {
         return { close: () => undefined };
       },
       hasGlobalCapacity: () => true,
-      synthesize: () => {
+      synthesize: async ({ markDispatched }) => {
+        await markDispatched();
         reports++;
+        receipt = true;
       },
+      hasSynthesisDelivery: () => receipt,
       onState: () => undefined,
     });
     reporter.addParent("parent", { mode: "parallel" });
@@ -280,6 +296,7 @@ describe("TaskSessionOrchestrator", () => {
     // It must retain the in-flight plan instead of launching a second report.
     restored.orchestrator.restore("parent", saved);
 
+    await tick();
     const reservation = publications.find(
       ({ state }) => state.plans[0]?.synthesisAttempts === 1,
     );
@@ -694,7 +711,9 @@ describe("TaskSessionOrchestrator", () => {
         return { close: () => undefined };
       },
       hasGlobalCapacity: () => true,
-      synthesize: () => {
+      hasSynthesisDelivery: () => false,
+      synthesize: async ({ markDispatched }) => {
+        await markDispatched();
         reports++;
         throw new Error("delivery unavailable");
       },
@@ -711,16 +730,27 @@ describe("TaskSessionOrchestrator", () => {
     launches[0].callbacks.completed();
     for (let index = 0; index < 3; index++) {
       await tick();
+      await tick();
       expect(retries).toHaveLength(1);
       retries.shift()!();
     }
+    await tick();
+    await tick();
+    await tick();
+    await tick();
+    expect(reports).toBe(4);
+    // The cap decision gets one receipt-only reconciliation; it must not send.
+    expect(retries).toHaveLength(1);
+    retries.shift()!();
     await tick();
     expect(reports).toBe(4);
     expect(retries).toHaveLength(0);
     expect(orchestrator.state("parent").tasks).toHaveLength(1);
     expect(orchestrator.exportState("parent").plans[0]).toMatchObject({
       synthesisAttempts: 4,
-      synthesisFailureTrace: "delivery unavailable",
+      synthesisCapped: true,
+      synthesisFailureTrace:
+        "Synthesis send-attempt cap reached without a durable parent receipt.",
     });
   });
 
@@ -728,6 +758,7 @@ describe("TaskSessionOrchestrator", () => {
     const launches: TaskSessionLaunch<string>[] = [];
     let failDelivery = true;
     let reports = 0;
+    let receipt = false;
     const orchestrator = new TaskSessionOrchestrator<string, Worker>({
       plan: () => ({
         contextSummary: "context",
@@ -739,10 +770,13 @@ describe("TaskSessionOrchestrator", () => {
         return { close: () => undefined };
       },
       hasGlobalCapacity: () => true,
-      synthesize: () => {
+      synthesize: async ({ markDispatched }) => {
+        await markDispatched();
         reports++;
         if (failDelivery) throw new Error("offline");
+        receipt = true;
       },
+      hasSynthesisDelivery: () => receipt,
       scheduleSynthesisRetry: () => undefined,
       onState: () => undefined,
     });
@@ -762,6 +796,7 @@ describe("TaskSessionOrchestrator", () => {
   it("uses a durable write-ahead record before it dispatches a parent synthesis", async () => {
     const events: string[] = [];
     const persisted: PersistedTaskSessionState[] = [];
+    let receipt = false;
     const reporter = new TaskSessionOrchestrator<string, Worker>({
       plan: () => ({
         contextSummary: "context",
@@ -774,8 +809,10 @@ describe("TaskSessionOrchestrator", () => {
         events.push("persist");
         persisted.push(state);
       },
-      synthesize: ({ delivery }) => {
+      synthesize: async ({ delivery, markDispatched }) => {
+        await markDispatched();
         events.push("dispatch");
+        receipt = true;
         expect(delivery).toMatchObject({
           attempt: 1,
           state: "dispatching",
@@ -786,6 +823,7 @@ describe("TaskSessionOrchestrator", () => {
         });
         expect(events).toContain("persist");
       },
+      hasSynthesisDelivery: () => receipt,
       onState: () => undefined,
     });
     reporter.addParent("parent", { mode: "parallel" });
@@ -794,9 +832,14 @@ describe("TaskSessionOrchestrator", () => {
     await tick();
     expect(events.indexOf("persist")).toBeLessThan(events.indexOf("dispatch"));
     expect(persisted[0]?.plans[0]?.synthesisDelivery).toMatchObject({
-      attempt: 1,
+      attempt: 0,
       state: "dispatching",
     });
+    expect(
+      persisted.some(
+        (state) => state.plans[0]?.synthesisDelivery?.attempt === 1,
+      ),
+    ).toBe(true);
   });
 
   it("does not dispatch when the write-ahead persistence barrier fails", async () => {
@@ -826,10 +869,12 @@ describe("TaskSessionOrchestrator", () => {
     expect(dispatches).toBe(0);
     expect(retries).toHaveLength(1);
     expect(reporter.exportState("parent").plans[0]).toMatchObject({
-      synthesisAttempts: 1,
-      synthesisDelivery: { state: "dispatching" },
+      synthesisDelivery: { state: "dispatching", attempt: 0 },
       synthesisFailureTrace: "disk full",
     });
+    expect(
+      reporter.exportState("parent").plans[0]?.synthesisAttempts,
+    ).toBeUndefined();
   });
 
   it("fails closed when receipt history cannot be inspected", async () => {
@@ -860,7 +905,7 @@ describe("TaskSessionOrchestrator", () => {
     const delivery = reporter.exportState("parent").plans[0]?.synthesisDelivery;
     expect(dispatches).toBe(0);
     expect(retries).toHaveLength(1);
-    expect(delivery).toMatchObject({ state: "dispatching", attempt: 1 });
+    expect(delivery).toMatchObject({ state: "dispatching", attempt: 0 });
     retries[0]!();
     await tick();
     expect(
@@ -869,7 +914,7 @@ describe("TaskSessionOrchestrator", () => {
       id: delivery?.id,
       payload: delivery?.payload,
       payloadFingerprint: delivery?.payloadFingerprint,
-      attempt: 2,
+      attempt: 0,
     });
     expect(dispatches).toBe(0);
   });
@@ -888,7 +933,11 @@ describe("TaskSessionOrchestrator", () => {
       persistSynthesisDelivery: (_parent, state) => {
         saved = state;
       },
-      synthesize: () => new Promise<void>(() => undefined),
+      synthesize: async ({ markDispatched }) => {
+        await markDispatched();
+        return new Promise<void>(() => undefined);
+      },
+      hasSynthesisDelivery: () => false,
       onState: () => undefined,
     });
     first.addParent("parent", { mode: "parallel" });
@@ -923,8 +972,97 @@ describe("TaskSessionOrchestrator", () => {
     expect(dispatches).toBe(0);
     expect(recovered.exportState("parent").plans[0]).toMatchObject({
       synthesisReported: true,
-      synthesisDelivery: { state: "delivered", attempt: 2 },
+      synthesisDelivery: { state: "delivered", attempt: 1 },
     });
+  });
+
+  it("does not consume sends for preflight failures and reuses the exact outbox payload", async () => {
+    const retries: (() => void)[] = [];
+    const deliveries: string[] = [];
+    const reporter = new TaskSessionOrchestrator<string, Worker>({
+      plan: () => ({
+        contextSummary: "context",
+        tasks: [{ generatedName: "one", brief: "brief" }],
+      }),
+      resolveWorkerSettings: () => ({}),
+      createWorker: () => ({ close: () => undefined }),
+      hasGlobalCapacity: () => true,
+      hasSynthesisDelivery: () => false,
+      synthesize: ({ delivery }) => {
+        deliveries.push(delivery.payload);
+        throw new Error("parent unavailable during preflight");
+      },
+      scheduleSynthesisRetry: (retry) => retries.push(retry),
+      synthesisRetryDelayMs: 0,
+      onState: () => undefined,
+    });
+    reporter.addParent("parent", { mode: "parallel" });
+    reporter.restore("parent", persistedState("completed"));
+    await tick();
+    retries.shift()!();
+    await tick();
+    expect(deliveries).toHaveLength(2);
+    expect(new Set(deliveries).size).toBe(1);
+    const plan = reporter.exportState("parent").plans[0]!;
+    expect(plan.synthesisAttempts).toBeUndefined();
+    expect(plan.synthesisDelivery).toMatchObject({
+      attempt: 0,
+      state: "dispatching",
+    });
+  });
+
+  it("probes an exhausted cap before failing it and accepts its durable receipt", async () => {
+    let sends = 0;
+    let probes = 0;
+    const delivery = synthesisDeliveryPayload({
+      id: "12345678-1234-1234-1234-123456789abc",
+      attempt: 4,
+      originalPrompt: "restored prompt",
+      tasks: persistedState("completed").plans[0]!.tasks,
+    });
+    const saved = persistedState("completed", { synthesisAttempts: 4 });
+    saved.plans[0]!.synthesisDelivery = delivery;
+    const receiptAware = new TaskSessionOrchestrator<string, Worker>({
+      plan: () => ({
+        contextSummary: "context",
+        tasks: [{ generatedName: "one", brief: "brief" }],
+      }),
+      resolveWorkerSettings: () => ({}),
+      createWorker: () => ({ close: () => undefined }),
+      hasGlobalCapacity: () => true,
+      hasSynthesisDelivery: () => (probes++, true),
+      synthesize: () => {
+        sends++;
+      },
+      onState: () => undefined,
+    });
+    receiptAware.addParent("parent", { mode: "parallel" });
+    receiptAware.restore("parent", saved);
+    await tick();
+    expect(probes).toBe(1);
+    expect(sends).toBe(0);
+    expect(receiptAware.exportState("parent").plans[0]).toMatchObject({
+      synthesisReported: true,
+      synthesisDelivery: { state: "delivered", attempt: 4 },
+    });
+  });
+
+  it("fails closed with a fingerprint diagnostic instead of regenerating corrupt payload", () => {
+    const saved = persistedState("completed");
+    saved.plans[0]!.synthesisDelivery = {
+      ...synthesisDeliveryPayload({
+        id: "12345678-1234-1234-1234-123456789abc",
+        attempt: 0,
+        originalPrompt: "restored prompt",
+        tasks: saved.plans[0]!.tasks,
+      }),
+      payloadFingerprint: "0".repeat(64),
+    };
+    const restored = setupRestore(() => undefined);
+    expect(() => restored.orchestrator.restore("parent", saved)).toThrow(
+      /fingerprint mismatch/,
+    );
+    expect(restored.launches).toHaveLength(0);
   });
 
   it("requires releasable capacity claims and releases a failed worker creation", async () => {

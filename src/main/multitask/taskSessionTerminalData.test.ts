@@ -36,6 +36,7 @@ function setup(
   const synthesized: Array<{
     tasks: readonly { taskNumber: number; totalTokens?: number }[];
   }> = [];
+  const receipts = new Set<string>();
   const orchestrator = new TaskSessionOrchestrator<string, Worker>({
     plan: () => ({
       contextSummary: "context",
@@ -57,7 +58,12 @@ function setup(
       };
     },
     hasGlobalCapacity: () => liveWorkers < 1,
-    synthesize: ({ tasks }) => synthesized.push({ tasks }),
+    synthesize: async ({ tasks, delivery, markDispatched }) => {
+      await markDispatched();
+      synthesized.push({ tasks });
+      receipts.add(delivery.id);
+    },
+    hasSynthesisDelivery: ({ delivery }) => receipts.has(delivery.id),
     onState: () => undefined,
   });
   orchestrator.addParent("parent", { mode: "parallel" });

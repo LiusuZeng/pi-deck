@@ -11116,7 +11116,7 @@ test.describe("task-session routing acceptance", () => {
           { timeout: 30_000 },
         )
         .toMatchObject({
-          synthesisAttempts: 2,
+          synthesisAttempts: 1,
           synthesisReported: true,
           synthesisDelivery: { id: deliveryId, state: "delivered" },
         });

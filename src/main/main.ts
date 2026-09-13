@@ -4866,6 +4866,7 @@ async function synthesizeTaskSession(
     contextSummary: string;
     tasks: readonly PersistedTaskSessionTask[];
     delivery: SynthesisDelivery;
+    markDispatched(): Promise<void>;
   },
 ): Promise<void> {
   // A fork reserves its source before any asynchronous preflight. Reject here
@@ -4879,7 +4880,7 @@ async function synthesizeTaskSession(
     !chatRuntimeIds.has(input.parentId) ||
     !adapter.hasRuntime(input.parentId)
   )
-    return;
+    throw new Error("Parent is unavailable for task-session synthesis.");
   const synthesis = async (): Promise<void> => {
     // A turn can have been queued before the fork reservation. It must check
     // at dispatch time, not only when it was initially enqueued.
@@ -4887,7 +4888,8 @@ async function synthesizeTaskSession(
       input.parentId,
       "synthesizing task results into it",
     );
-    if (!adapter.hasRuntime(input.parentId)) return;
+    if (!adapter.hasRuntime(input.parentId))
+      throw new Error("Parent is unavailable for task-session synthesis.");
     // The final probe is serialized with every other parent turn. It closes
     // the crash/restart window between recovery's first probe and dispatch.
     if (
@@ -4942,9 +4944,23 @@ async function synthesizeTaskSession(
       });
     });
     try {
+      // This is the sole parent-boundary crossing. All availability/status/
+      // receipt work above is preflight and must not consume bounded sends.
+      await input.markDispatched();
       if (active) await adapter.followUp(input.parentId, { text });
       else await adapter.prompt(input.parentId, { text });
       await settled;
+      // A successful RPC and terminal event are not an acknowledgement. Pi's
+      // durable transcript must contain this exact marker before outbox state
+      // can be advanced to delivered.
+      if (
+        !(await parentHasSynthesisDelivery(
+          adapter,
+          input.parentId,
+          input.delivery,
+        ))
+      )
+        throw new Error("Parent synthesis settled without a durable receipt.");
     } catch (error) {
       cancelSettledWait();
       throw error;

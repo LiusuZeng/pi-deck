@@ -1,5 +1,7 @@
 import type { MultitaskMode } from "./types.js";
 import {
+  synthesisDeliveryFingerprint,
+  synthesisDeliveryMarker,
   synthesisDeliveryPayload,
   type SynthesisDelivery,
 } from "./taskSessionSynthesisDelivery.js";
@@ -121,6 +123,8 @@ export interface PersistedTaskSessionPlan {
   /** Number of attempted synthesis deliveries, including the initial attempt. */
   synthesisAttempts?: number;
   synthesisFailureTrace?: string;
+  /** The send cap was reached after a negative authoritative receipt probe. */
+  synthesisCapped?: boolean;
   tasks: readonly PersistedTaskSessionTask[];
 }
 export interface PersistedTaskSessionTask {
@@ -175,9 +179,11 @@ export interface TaskSessionOrchestratorOptions<
     contextSummary: string;
     tasks: readonly PersistedTaskSessionTask[];
     delivery: SynthesisDelivery;
+    /** Durably reserve a bounded send immediately before the parent boundary. */
+    markDispatched(): Promise<void>;
   }): Promise<void> | void;
   /** Pi transcript history is the acknowledgement authority, never an RPC ack. */
-  hasSynthesisDelivery?(input: {
+  hasSynthesisDelivery(input: {
     parentId: ParentId;
     delivery: SynthesisDelivery;
   }): Promise<boolean> | boolean;
@@ -189,6 +195,8 @@ export interface TaskSessionOrchestratorOptions<
   /** Injectable timer hook for bounded terminal synthesis retries. */
   scheduleSynthesisRetry?(callback: () => void, delayMs: number): void;
   synthesisRetryDelayMs?: number;
+  /** Maximum exponential reconciliation delay; retries never consume send quota. */
+  synthesisRetryMaxDelayMs?: number;
   onState(parentId: ParentId, state: TaskSessionState): void;
   now?(): number;
   activeLimit?: number;
@@ -225,6 +233,8 @@ type Plan = Omit<PersistedTaskSessionPlan, "tasks"> & {
   synthesized?: boolean;
   synthesisEligible?: boolean;
   synthesisRetryScheduled?: boolean;
+  /** Runtime-only reconciliation failures, used solely for bounded backoff. */
+  synthesisReconciliationFailures?: number;
 };
 
 /** Restore has three mutually-exclusive outcomes. Only terminal pending plans
@@ -262,14 +272,12 @@ export class TaskSessionOrchestrator<
     this.now = options.now ?? Date.now;
     this.maxPlanTasks = options.maxPlanTasks ?? 100;
     this.maxContextSummaryLength = options.maxContextSummaryLength ?? 16_000;
-    if (
-      options.synthesisRetryDelayMs !== undefined &&
-      (!Number.isSafeInteger(options.synthesisRetryDelayMs) ||
-        options.synthesisRetryDelayMs < 0)
-    )
-      throw new Error(
-        "Synthesis retry delay must be a non-negative safe integer.",
-      );
+    for (const [name, value] of [
+      ["Synthesis retry delay", options.synthesisRetryDelayMs],
+      ["Synthesis retry maximum delay", options.synthesisRetryMaxDelayMs],
+    ] as const)
+      if (value !== undefined && (!Number.isSafeInteger(value) || value < 0))
+        throw new Error(`${name} must be a non-negative safe integer.`);
     if (
       !Number.isSafeInteger(this.activeLimit) ||
       this.activeLimit < 1 ||
@@ -416,6 +424,7 @@ export class TaskSessionOrchestrator<
         ...(plan.synthesisFailureTrace
           ? { synthesisFailureTrace: safeLine(plan.synthesisFailureTrace) }
           : {}),
+        ...(plan.synthesisCapped ? { synthesisCapped: true } : {}),
         tasks: plan.tasks.map(persistTask),
       })),
     };
@@ -746,77 +755,152 @@ export class TaskSessionOrchestrator<
         plan.synthesizing ||
         plan.synthesized ||
         plan.synthesisEligible === false ||
-        !plan.tasks.every(isTerminal) ||
-        (plan.synthesisAttempts ?? 0) >= maxSynthesisAttempts
+        !plan.tasks.every(isTerminal)
       )
         continue;
       plan.synthesizing = true;
-      plan.synthesisAttempts = (plan.synthesisAttempts ?? 0) + 1;
-      // This is the durable outbox write-ahead record. Reuse its stable id and
-      // exact content on every retry so a restart can probe Pi history.
-      plan.synthesisDelivery = synthesisDeliveryPayload({
-        ...(plan.synthesisDelivery ? { id: plan.synthesisDelivery.id } : {}),
-        attempt: plan.synthesisAttempts,
-        originalPrompt: plan.originalPrompt,
-        tasks: plan.tasks.map(persistTask),
-      });
-      this.publish(parent);
       let retrySynthesis = false;
       try {
-        // Do not cross the external parent-turn boundary until the full stable
-        // delivery record (id, attempt, payload, fingerprint, dispatching) is
-        // on disk. A failed write is retried without sending a turn.
-        if (this.options.persistSynthesisDelivery)
+        // The immutable payload is written once. Never regenerate it on retry:
+        // the persisted marker and SHA-256 fingerprint are the recovery
+        // contract, not a rendering convenience.
+        if (!plan.synthesisDelivery) {
+          plan.synthesisDelivery = synthesisDeliveryPayload({
+            attempt: plan.synthesisAttempts ?? 0,
+            originalPrompt: plan.originalPrompt,
+            tasks: plan.tasks.map(persistTask),
+          });
+          this.publish(parent);
           await this.persistSynthesisDelivery(parent);
+        }
         if (parent.removed || this.parents.get(parent.parentId) !== parent)
           return;
         const delivery = plan.synthesisDelivery;
         if (!delivery) throw new Error("Synthesis delivery record was lost.");
-        const alreadyReported = this.options.hasSynthesisDelivery
-          ? await this.options.hasSynthesisDelivery({
-              parentId: parent.parentId,
-              delivery,
-            })
-          : false;
-        if (!alreadyReported) {
-          await this.options.synthesize({
-            parentId: parent.parentId,
-            originalPrompt: plan.originalPrompt,
-            contextSummary: plan.contextSummary,
-            tasks: plan.tasks.map(persistTask),
-            delivery,
-          });
+
+        // Receipt is always checked first, including when the send cap is
+        // already exhausted. Missing/unavailable history is deliberately a
+        // retriable failure, never an acknowledgement.
+        if (await this.hasSynthesisReceipt(parent, delivery)) {
+          await this.markSynthesisDelivered(parent, plan, delivery);
+          continue;
         }
-        // Persist Pi's durable receipt before clearing the terminal rows. If
-        // that write fails, retry recovery only probes the marker; it never
-        // sends a second parent turn.
-        plan.synthesisDelivery = { ...delivery, state: "delivered" };
-        this.publish(parent);
-        if (this.options.persistSynthesisDelivery)
-          await this.persistSynthesisDelivery(parent);
-        plan.synthesized = true;
-        plan.synthesisReported = true;
-        delete plan.runtimeContext;
-        delete plan.synthesisFailureTrace;
-        this.publish(parent);
-        if (this.options.persistSynthesisDelivery)
-          await this.persistSynthesisDelivery(parent);
+        if (
+          plan.synthesisCapped ||
+          (plan.synthesisAttempts ?? 0) >= maxSynthesisAttempts
+        ) {
+          plan.synthesisCapped = true;
+          plan.synthesisFailureTrace =
+            "Synthesis send-attempt cap reached without a durable parent receipt.";
+          this.publish(parent);
+          // Await this final trace/state. A failed final write must reconcile
+          // again; clear the runtime latch so it cannot strand terminal rows.
+          try {
+            await this.persistSynthesisDelivery(parent);
+          } catch (error) {
+            delete plan.synthesisCapped;
+            throw error;
+          }
+          continue;
+        }
+
+        let dispatched = false;
+        const markDispatched = async () => {
+          if (dispatched) return;
+          dispatched = true;
+          const previousAttempts = plan.synthesisAttempts;
+          const previousDeliveryAttempt = delivery.attempt;
+          const attempts = (previousAttempts ?? 0) + 1;
+          plan.synthesisAttempts = attempts;
+          delivery.attempt = attempts;
+          plan.synthesisDelivery = delivery;
+          this.publish(parent);
+          // A process death after the parent boundary must still recover the
+          // exact capped-send reservation and probe its receipt before retry.
+          // If this pre-boundary write fails, undo it: persistence failures do
+          // not consume a send that never reached the parent.
+          try {
+            await this.persistSynthesisDelivery(parent);
+          } catch (error) {
+            if (previousAttempts === undefined) delete plan.synthesisAttempts;
+            else plan.synthesisAttempts = previousAttempts;
+            delivery.attempt = previousDeliveryAttempt;
+            this.publish(parent);
+            throw error;
+          }
+        };
+        await this.options.synthesize({
+          parentId: parent.parentId,
+          originalPrompt: plan.originalPrompt,
+          contextSummary: plan.contextSummary,
+          tasks: plan.tasks.map(persistTask),
+          delivery,
+          markDispatched,
+        });
+        if (!dispatched)
+          throw new Error(
+            "Synthesis completed without crossing the parent dispatch boundary.",
+          );
+
+        // RPC acceptance and agent completion are not receipts. The exact
+        // durable marker must be visible after prompt/follow_up settlement.
+        if (!(await this.hasSynthesisReceipt(parent, delivery)))
+          throw new Error(
+            "Parent synthesis settled without a durable receipt.",
+          );
+        await this.markSynthesisDelivered(
+          parent,
+          plan,
+          plan.synthesisDelivery ?? delivery,
+        );
       } catch (error) {
         plan.synthesisFailureTrace = safeLine(
           error instanceof Error
             ? error.message
             : "Task-session synthesis delivery failed.",
         );
+        plan.synthesisReconciliationFailures =
+          (plan.synthesisReconciliationFailures ?? 0) + 1;
         this.publish(parent);
-        // A timer, rather than a drain loop, prevents a failing synthesizer from
-        // spinning the event loop.
-        retrySynthesis =
-          plan.synthesisAttempts < maxSynthesisAttempts && !parent.removed;
+        // Preserve failure diagnostics whenever storage is available. A failed
+        // persistence barrier is itself retried with bounded backoff and never
+        // licenses a send.
+        try {
+          await this.persistSynthesisDelivery(parent);
+        } catch {
+          // The scheduled reconciliation below retains the in-memory trace.
+        }
+        retrySynthesis = !parent.removed && !plan.synthesisCapped;
       } finally {
         plan.synthesizing = false;
       }
       if (retrySynthesis) this.scheduleSynthesisRetry(parent, plan);
     }
+  }
+  private async hasSynthesisReceipt(
+    parent: Parent<ParentId>,
+    delivery: SynthesisDelivery,
+  ): Promise<boolean> {
+    return this.options.hasSynthesisDelivery({
+      parentId: parent.parentId,
+      delivery,
+    });
+  }
+  private async markSynthesisDelivered(
+    parent: Parent<ParentId>,
+    plan: Plan,
+    delivery: SynthesisDelivery,
+  ): Promise<void> {
+    plan.synthesisDelivery = { ...delivery, state: "delivered" };
+    this.publish(parent);
+    await this.persistSynthesisDelivery(parent);
+    plan.synthesized = true;
+    plan.synthesisReported = true;
+    delete plan.runtimeContext;
+    delete plan.synthesisFailureTrace;
+    delete plan.synthesisReconciliationFailures;
+    this.publish(parent);
+    await this.persistSynthesisDelivery(parent);
   }
   private async persistSynthesisDelivery(
     parent: Parent<ParentId>,
@@ -834,7 +918,12 @@ export class TaskSessionOrchestrator<
       if (!parent.removed && this.parents.get(parent.parentId) === parent)
         void this.synthesizeTerminalPlans(parent, plan);
     };
-    const delayMs = this.options.synthesisRetryDelayMs ?? 1_000;
+    const baseDelayMs = this.options.synthesisRetryDelayMs ?? 1_000;
+    const exponent = Math.min(plan.synthesisReconciliationFailures ?? 0, 16);
+    const delayMs = Math.min(
+      baseDelayMs * 2 ** exponent,
+      this.options.synthesisRetryMaxDelayMs ?? 30_000,
+    );
     if (this.options.scheduleSynthesisRetry)
       this.options.scheduleSynthesisRetry(retry, delayMs);
     else setTimeout(retry, delayMs);
@@ -1212,6 +1301,16 @@ function validatePersisted(
   const taskNumbers = new Set<number>();
   for (const plan of state.plans) {
     if (
+      plan.synthesisDelivery &&
+      typeof plan.synthesisDelivery.payload === "string" &&
+      typeof plan.synthesisDelivery.payloadFingerprint === "string" &&
+      synthesisDeliveryFingerprint(plan.synthesisDelivery.payload) !==
+        plan.synthesisDelivery.payloadFingerprint
+    )
+      throw new Error(
+        "Invalid persisted task-session state: synthesis delivery fingerprint mismatch.",
+      );
+    if (
       !Number.isSafeInteger(plan.planId) ||
       plan.planId < 1 ||
       planIds.has(plan.planId) ||
@@ -1223,7 +1322,10 @@ function validatePersisted(
       (plan.synthesisDelivery !== undefined &&
         !isSynthesisDelivery(plan.synthesisDelivery)) ||
       (plan.synthesisFailureTrace !== undefined &&
-        typeof plan.synthesisFailureTrace !== "string")
+        typeof plan.synthesisFailureTrace !== "string") ||
+      (plan.synthesisCapped !== undefined && plan.synthesisCapped !== true) ||
+      (plan.synthesisCapped === true &&
+        (plan.synthesisAttempts ?? 0) < maxSynthesisAttempts)
     )
       throw new Error("Invalid persisted task-session state.");
     planIds.add(plan.planId);
@@ -1288,10 +1390,15 @@ function isSynthesisDelivery(value: unknown): value is SynthesisDelivery {
     typeof (value as SynthesisDelivery).id === "string" &&
     (value as SynthesisDelivery).id.length >= 8 &&
     Number.isSafeInteger((value as SynthesisDelivery).attempt) &&
-    (value as SynthesisDelivery).attempt >= 1 &&
+    (value as SynthesisDelivery).attempt >= 0 &&
     typeof (value as SynthesisDelivery).payload === "string" &&
     typeof (value as SynthesisDelivery).payloadFingerprint === "string" &&
     /^[a-f0-9]{64}$/.test((value as SynthesisDelivery).payloadFingerprint) &&
+    (value as SynthesisDelivery).payload.includes(
+      synthesisDeliveryMarker((value as SynthesisDelivery).id),
+    ) &&
+    synthesisDeliveryFingerprint((value as SynthesisDelivery).payload) ===
+      (value as SynthesisDelivery).payloadFingerprint &&
     ((value as SynthesisDelivery).state === "dispatching" ||
       (value as SynthesisDelivery).state === "delivered")
   );
