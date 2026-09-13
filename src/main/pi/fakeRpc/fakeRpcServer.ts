@@ -47,6 +47,8 @@ interface FakeOptions {
   noSession: boolean;
   failTaskPromptRecordWhileActive: boolean;
   sessionFile?: string;
+  /** Test-only override for the cwd reported by get_state. */
+  getStateCwd?: string;
   workflowDecisions: boolean[];
   workflowDecisionStateFile?: string;
   /**
@@ -155,6 +157,10 @@ function parseOptions(argv: string[]): FakeOptions {
       if (sessionFile) {
         options.sessionFile = sessionFile;
       }
+      index += 1;
+    } else if (arg === "--get-state-cwd") {
+      const cwd = argv[index + 1];
+      if (cwd) options.getStateCwd = cwd;
       index += 1;
     } else if (arg === "--workflow-decisions") {
       const decisions = (argv[index + 1] ?? "").split(",");
@@ -687,7 +693,7 @@ class FakeRpcServer {
         ? path.basename(this.sessionFile, ".jsonl")
         : "fake-session-1",
       sessionFile: this.sessionFile,
-      cwd: process.cwd(),
+      cwd: this.options.getStateCwd ?? process.cwd(),
       model: this.currentModel,
       provider: this.currentProvider,
       thinkingLevel: this.currentThinkingLevel,
