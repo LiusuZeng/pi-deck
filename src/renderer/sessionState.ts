@@ -49,7 +49,7 @@ export interface ReducedSessionState extends SidebarSessionState {
   pendingExtensionUiQueue: PendingExtensionUiRequestState[];
   toolCards: Record<string, ToolExecutionCardState>;
   diagnostics: string[];
-  /** A provider error ended this turn while an extension dialog was pending. */
+  /** A provider error was observed and has not been superseded by a retry. */
   terminalProviderErrorObserved: boolean;
 }
 
@@ -189,11 +189,34 @@ function reduceMessageUpdateEvent(
     "type",
   );
   const done = getBoolean(event, "done") ?? assistantEventType === "done";
+  const providerErrorObserved = hasRuntimeEventError(event);
+  // An extension dialog stays actionable until its response is acknowledged.
+  // Its queue is therefore the source of truth even when Pi reports the
+  // provider error that will subsequently end the agent turn.
+  const stillWaitingForInput = state.pendingExtensionUiQueue.length > 0;
 
   return {
     ...state,
-    baseState: done ? state.baseState : "working",
-    overlays: { ...state.overlays, streaming: !done },
+    baseState: stillWaitingForInput
+      ? "waitingForInput"
+      : providerErrorObserved
+        ? "error"
+        : done
+          ? state.baseState
+          : "working",
+    terminalProviderErrorObserved:
+      providerErrorObserved || state.terminalProviderErrorObserved,
+    overlays: {
+      ...state.overlays,
+      streaming: !done && !providerErrorObserved,
+      needsUserInput: stillWaitingForInput,
+    },
+    diagnostics: providerErrorObserved
+      ? appendDiagnostic(
+          state.diagnostics,
+          getRuntimeEventErrorMessage(event) ?? "Pi message update failed.",
+        )
+      : state.diagnostics,
   };
 }
 
@@ -441,9 +464,44 @@ function reduceAgentEndEvent(
   state: ReducedSessionState,
   event: RuntimeEventLike,
 ): ReducedSessionState {
+  // Pi emits this between retry attempts. It is not a terminal provider
+  // failure, even when the preceding message_update reported the retryable
+  // error. Keep this aligned with the production reducer's busy/retrying
+  // state and clear the transient terminal-error marker.
+  if (getBoolean(event, "willRetry") === true) {
+    return {
+      ...state,
+      baseState: "working",
+      terminalProviderErrorObserved: false,
+      activeTools: [],
+      overlays: {
+        ...state.overlays,
+        streaming: false,
+        toolRunning: false,
+        retrying: true,
+        needsUserInput: false,
+      },
+    };
+  }
+
   const hasPendingExtensionUi = state.pendingExtensionUiQueue.length > 0;
-  const terminalError = getTerminalProviderError(event);
-  const terminalProviderErrorObserved = terminalError !== undefined;
+  const reportedProviderError = hasRuntimeEventError(event);
+  const terminalProviderErrorObserved =
+    reportedProviderError || state.terminalProviderErrorObserved;
+  let diagnostics = state.diagnostics;
+  if (reportedProviderError) {
+    diagnostics = appendDiagnostic(
+      diagnostics,
+      getRuntimeEventErrorMessage(event) ?? "Pi agent failed.",
+    );
+  }
+  if (hasPendingExtensionUi) {
+    diagnostics = appendDiagnostic(
+      diagnostics,
+      "agent_end while extension UI request is pending",
+    );
+  }
+
   return {
     ...state,
     baseState: hasPendingExtensionUi
@@ -457,37 +515,73 @@ function reduceAgentEndEvent(
       ...state.overlays,
       streaming: false,
       toolRunning: false,
+      retrying: false,
       needsUserInput: hasPendingExtensionUi,
     },
-    diagnostics: [
-      ...state.diagnostics,
-      ...(hasPendingExtensionUi
-        ? ["agent_end while extension UI request is pending"]
-        : []),
-      ...(terminalError === undefined ? [] : [terminalError]),
-    ],
+    diagnostics,
   };
 }
 
-function getTerminalProviderError(event: RuntimeEventLike): string | undefined {
+/** Keeps lightweight reducer error classification aligned with App's Pi events. */
+function hasRuntimeEventError(event: RuntimeEventLike): boolean {
   const status = getString(event, "status");
-  const directError = getErrorMessage(event);
-  if (status === "error" || status === "failed" || directError !== undefined) {
-    return directError ?? "Pi agent failed.";
-  }
+  const assistantEvent = getRecord(event, "assistantMessageEvent");
+  return (
+    status === "error" ||
+    status === "failed" ||
+    hasDirectRuntimeEventError(event) ||
+    isAssistantMessageEventFailure(assistantEvent) ||
+    isErrorAssistantMessage(getRecord(event, "message")) ||
+    isErrorAssistantMessage(getRecord(assistantEvent, "error")) ||
+    isErrorAssistantMessage(getFinalAssistantMessage(event))
+  );
+}
 
-  const messages = getArray(event, "messages")
-    ?.map((message) =>
-      message !== null && typeof message === "object" && !Array.isArray(message)
-        ? (message as RuntimeEventLike)
-        : undefined,
-    )
-    .filter((message): message is RuntimeEventLike => message !== undefined);
-  const finalMessage = messages?.at(-1);
-  if (getString(finalMessage, "stopReason") === "error") {
-    return getErrorMessage(finalMessage) ?? "Pi agent failed.";
+function hasDirectRuntimeEventError(event: RuntimeEventLike): boolean {
+  return (
+    getString(event, "error") !== undefined ||
+    getString(event, "errorMessage") !== undefined ||
+    getString(event, "finalError") !== undefined ||
+    getString(event, "message") !== undefined ||
+    getErrorMessage(getRecord(event, "error")) !== undefined
+  );
+}
+
+function isAssistantMessageEventFailure(
+  assistantEvent: RuntimeEventLike | undefined,
+): boolean {
+  if (getString(assistantEvent, "type") !== "error") {
+    return false;
   }
-  return undefined;
+  return (
+    getString(assistantEvent, "reason") !== "aborted" &&
+    getString(getRecord(assistantEvent, "error"), "stopReason") !== "aborted"
+  );
+}
+
+function isErrorAssistantMessage(
+  message: RuntimeEventLike | undefined,
+): boolean {
+  const stopReason = getString(message, "stopReason");
+  return (
+    stopReason !== "aborted" &&
+    (stopReason === "error" || getErrorMessage(message) !== undefined)
+  );
+}
+
+function getRuntimeEventErrorMessage(
+  event: RuntimeEventLike,
+): string | undefined {
+  return (
+    getString(event, "error") ??
+    getString(event, "errorMessage") ??
+    getString(event, "finalError") ??
+    getString(event, "message") ??
+    getErrorMessage(getRecord(event, "error")) ??
+    getErrorMessage(getRecord(event, "assistantMessageEvent")) ??
+    getErrorMessage(getRecord(event, "message")) ??
+    getErrorMessage(getFinalAssistantMessage(event))
+  );
 }
 
 function getErrorMessage(
@@ -499,6 +593,37 @@ function getErrorMessage(
     getString(getRecord(record, "error"), "errorMessage") ??
     getString(getRecord(record, "error"), "message")
   );
+}
+
+function getFinalAssistantMessage(
+  event: RuntimeEventLike,
+): RuntimeEventLike | undefined {
+  const messages = getArray(event, "messages");
+  if (messages === undefined) {
+    return undefined;
+  }
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (
+      message === null ||
+      typeof message !== "object" ||
+      Array.isArray(message)
+    ) {
+      continue;
+    }
+    const record = message as RuntimeEventLike;
+    if (getString(record, "role") === "assistant") {
+      return record;
+    }
+  }
+  return undefined;
+}
+
+function appendDiagnostic(diagnostics: string[], message: string): string[] {
+  return diagnostics.at(-1) === message
+    ? diagnostics
+    : [...diagnostics, message];
 }
 
 function getToolCallId(event: RuntimeEventLike): string | undefined {

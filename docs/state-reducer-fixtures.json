@@ -231,6 +231,130 @@
         "pendingExtensionUiQueue": [],
         "diagnosticsIncludes": "Provider quota exhausted."
       }
+    },
+    {
+      "id": "production-message-error-keeps-pending-dialog-actionable",
+      "events": [
+        { "type": "agent_start", "runId": "run_1" },
+        {
+          "type": "extension_ui_request",
+          "requestId": "ext_1",
+          "method": "confirm"
+        },
+        {
+          "type": "message_update",
+          "message": {
+            "role": "assistant",
+            "stopReason": "error",
+            "errorMessage": "Provider quota exhausted."
+          },
+          "assistantMessageEvent": {
+            "type": "error",
+            "reason": "error",
+            "error": {
+              "role": "assistant",
+              "stopReason": "error",
+              "errorMessage": "Provider quota exhausted."
+            }
+          }
+        }
+      ],
+      "expect": {
+        "baseState": "waitingForInput",
+        "terminalProviderErrorObserved": true,
+        "overlays": { "streaming": false, "needsUserInput": true },
+        "sidebarPriority": "waitingForInput",
+        "pendingExtensionUiQueue": [
+          { "requestId": "ext_1", "method": "confirm" }
+        ],
+        "diagnosticsIncludes": "Provider quota exhausted."
+      }
+    },
+    {
+      "id": "production-message-error-restores-terminal-failure-after-response",
+      "events": [
+        { "type": "agent_start", "runId": "run_1" },
+        {
+          "type": "extension_ui_request",
+          "requestId": "ext_1",
+          "method": "confirm"
+        },
+        {
+          "type": "message_update",
+          "message": {
+            "role": "assistant",
+            "stopReason": "error",
+            "errorMessage": "Provider quota exhausted."
+          },
+          "assistantMessageEvent": {
+            "type": "error",
+            "reason": "error",
+            "error": {
+              "role": "assistant",
+              "stopReason": "error",
+              "errorMessage": "Provider quota exhausted."
+            }
+          }
+        },
+        {
+          "type": "agent_end",
+          "messages": [
+            {
+              "role": "assistant",
+              "stopReason": "error",
+              "errorMessage": "Provider quota exhausted."
+            }
+          ],
+          "willRetry": false
+        },
+        {
+          "type": "extension_ui_response_sent",
+          "requestId": "ext_1"
+        }
+      ],
+      "expect": {
+        "baseState": "error",
+        "terminalProviderErrorObserved": true,
+        "overlays": { "streaming": false, "needsUserInput": false },
+        "sidebarPriority": "error",
+        "pendingExtensionUiQueue": [],
+        "diagnosticsIncludes": "Provider quota exhausted."
+      }
+    },
+    {
+      "id": "retrying-agent-end-clears-transient-provider-error",
+      "events": [
+        { "type": "agent_start", "runId": "run_1" },
+        {
+          "type": "message_update",
+          "message": {
+            "role": "assistant",
+            "stopReason": "error",
+            "errorMessage": "Retryable provider failure."
+          },
+          "assistantMessageEvent": {
+            "type": "error",
+            "reason": "error",
+            "error": {
+              "role": "assistant",
+              "stopReason": "error",
+              "errorMessage": "Retryable provider failure."
+            }
+          }
+        },
+        { "type": "agent_end", "willRetry": true }
+      ],
+      "expect": {
+        "baseState": "working",
+        "terminalProviderErrorObserved": false,
+        "overlays": {
+          "streaming": false,
+          "toolRunning": false,
+          "retrying": true,
+          "needsUserInput": false
+        },
+        "sidebarPriority": "retrying"
+      }
     }
   ]
 }

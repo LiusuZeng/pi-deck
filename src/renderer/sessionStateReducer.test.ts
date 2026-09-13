@@ -44,6 +44,12 @@ describe("reduceSessionRuntimeEvent", () => {
         );
       }
 
+      if (expected.terminalProviderErrorObserved !== undefined) {
+        expect(state.terminalProviderErrorObserved, testCase.id).toBe(
+          expected.terminalProviderErrorObserved,
+        );
+      }
+
       if (expected.sidebarPriority !== undefined) {
         expect(selectSidebarIndicator(state).kind, testCase.id).toBe(
           expected.sidebarPriority === "waitingForInput"
@@ -140,28 +146,42 @@ describe("reduceSessionRuntimeEvent", () => {
     expect(cleared.overlays.needsUserInput).toBe(false);
   });
 
-  it("restores terminal provider failure when the final extension request clears", () => {
+  it("restores a production message_update provider failure after its final extension response", () => {
+    const failedAssistant = {
+      role: "assistant",
+      stopReason: "error",
+      errorMessage: "Provider quota exhausted.",
+    };
     const failedWhileWaiting = applyEvents([
+      { type: "agent_start" },
       {
         type: "extension_ui_request",
         requestId: "ext-1",
         method: "confirm",
       },
       {
+        type: "message_update",
+        message: failedAssistant,
+        assistantMessageEvent: {
+          type: "error",
+          reason: "error",
+          error: failedAssistant,
+        },
+      },
+      {
         type: "agent_end",
-        messages: [
-          {
-            role: "assistant",
-            stopReason: "error",
-            errorMessage: "Provider quota exhausted.",
-          },
-        ],
+        messages: [failedAssistant],
         willRetry: false,
       },
     ]);
 
     expect(failedWhileWaiting.baseState).toBe("waitingForInput");
+    expect(failedWhileWaiting.overlays).toMatchObject({
+      streaming: false,
+      needsUserInput: true,
+    });
     expect(failedWhileWaiting.terminalProviderErrorObserved).toBe(true);
+    expect(selectSidebarIndicator(failedWhileWaiting).kind).toBe("needsInput");
     expect(failedWhileWaiting.diagnostics).toContain(
       "Provider quota exhausted.",
     );
@@ -174,6 +194,11 @@ describe("reduceSessionRuntimeEvent", () => {
     expect(cleared.overlays.needsUserInput).toBe(false);
     expect(selectSidebarIndicator(cleared).kind).toBe("error");
     expect(cleared.diagnostics).toContain("Provider quota exhausted.");
+    expect(
+      cleared.diagnostics.filter(
+        (message) => message === "Provider quota exhausted.",
+      ),
+    ).toHaveLength(1);
   });
 
   it("keeps a failed extension response actionable while its request is pending", () => {
@@ -223,6 +248,34 @@ describe("reduceSessionRuntimeEvent", () => {
       piQueuedFollowUpCount: 2,
       streaming: true,
     });
+  });
+
+  it("keeps retryable agent_end errors working rather than terminal", () => {
+    const retrying = applyEvents([
+      { type: "agent_start" },
+      {
+        type: "message_update",
+        assistantMessageEvent: { type: "error", reason: "error" },
+      },
+      { type: "agent_end", willRetry: true },
+    ]);
+
+    expect(retrying.baseState).toBe("working");
+    expect(retrying.terminalProviderErrorObserved).toBe(false);
+    expect(retrying.overlays).toMatchObject({
+      streaming: false,
+      toolRunning: false,
+      retrying: true,
+      needsUserInput: false,
+    });
+    expect(selectSidebarIndicator(retrying).kind).toBe("retrying");
+
+    const completed = reduceSessionRuntimeEvent(retrying, {
+      type: "agent_end",
+      willRetry: false,
+    });
+    expect(completed.baseState).toBe("idle");
+    expect(completed.overlays.retrying).toBe(false);
   });
 
   it("marks final auto-retry failure as an error", () => {

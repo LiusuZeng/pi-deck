@@ -172,7 +172,12 @@ describe("session sound transitions", () => {
     expect(result.requests).toEqual([]);
   });
 
-  it("plays attention when pending extension input survives an error agent_end", () => {
+  it("plays attention when pending extension input survives a production provider error update", () => {
+    const failedAssistant = {
+      role: "assistant",
+      stopReason: "error",
+      errorMessage: "Provider quota exhausted.",
+    };
     let reduced = createInitialReducedSessionState();
     reduced = reduceSessionRuntimeEvent(reduced, { type: "agent_start" });
     reduced = reduceSessionRuntimeEvent(reduced, {
@@ -181,8 +186,13 @@ describe("session sound transitions", () => {
       method: "confirm",
     });
     reduced = reduceSessionRuntimeEvent(reduced, {
-      type: "agent_end",
-      status: "error",
+      type: "message_update",
+      message: failedAssistant,
+      assistantMessageEvent: {
+        type: "error",
+        reason: "error",
+        error: failedAssistant,
+      },
     });
 
     const result = collect(
