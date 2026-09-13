@@ -80,7 +80,7 @@ export function startWorkflowOccurrence(
   const occurrence = occurrenceOf(run, occurrenceId);
   if (
     !["worker", "decider"].includes(occurrence.role) ||
-    !["ready", "queued"].includes(occurrence.status)
+    occurrence.status !== "ready"
   )
     throw new Error(
       "Only ready Worker or Decider occurrences may own Pi sessions.",
@@ -254,6 +254,7 @@ export function retryWorkflowOccurrence(
       : workflowNode.execution?.maxAttempts;
   if (maxAttempts !== undefined && prior.attempt >= maxAttempts)
     throw new Error(`Retry budget exhausted after ${maxAttempts} attempts.`);
+  const retryStatus = retryAdmissionStatus(run, prior);
   let next = add(
     {
       ...run,
@@ -270,16 +271,19 @@ export function retryWorkflowOccurrence(
       ),
     },
     [
-      newOccurrence(
-        node(run.definition, prior.nodeId),
-        prior.parentOccurrenceIds,
-        prior.parentOrchestratorRunId,
-        prior.iteration,
-        now,
-        prior.attempt + 1,
-        prior.context,
-        prior.resolvedInputBindings,
-      ),
+      {
+        ...newOccurrence(
+          node(run.definition, prior.nodeId),
+          prior.parentOccurrenceIds,
+          prior.parentOrchestratorRunId,
+          prior.iteration,
+          now,
+          prior.attempt + 1,
+          prior.context,
+          prior.resolvedInputBindings,
+        ),
+        status: retryStatus,
+      },
     ],
   );
   if (prior.parentOrchestratorRunId) {
@@ -313,6 +317,50 @@ export function stopWorkflowRoleRun(
   };
 }
 
+/** A retry replaces its skipped predecessor in the orchestrator's logical child set.
+ * Fan-out slots belong to those current children, never historical attempts. */
+function currentManagedWorkers(
+  run: WorkflowRoleRun,
+  orchestratorId: string,
+  iteration: number,
+): WorkflowOccurrence[] {
+  return run.occurrences.filter(
+    (item) =>
+      item.parentOrchestratorRunId === orchestratorId &&
+      item.iteration === iteration &&
+      item.role === "worker" &&
+      item.status !== "skipped",
+  );
+}
+
+/** Keep a retried fan-out child behind already admitted logical children.
+ * The usual terminal transition promotes queued children as capacity frees. */
+function retryAdmissionStatus(
+  run: WorkflowRoleRun,
+  prior: WorkflowOccurrence,
+): "ready" | "queued" {
+  if (!prior.parentOrchestratorRunId) return "ready";
+  const orchestrator = run.occurrences.find(
+    (item) => item.id === prior.parentOrchestratorRunId,
+  );
+  if (!orchestrator) return "ready";
+  const orchestratorNode = node(run.definition, orchestrator.nodeId);
+  if (
+    orchestratorNode.role !== "orchestrator" ||
+    orchestratorNode.config.mode !== "fanout"
+  )
+    return "ready";
+  const active = currentManagedWorkers(
+    run,
+    orchestrator.id,
+    prior.iteration,
+  ).filter(
+    (item) =>
+      item.id !== prior.id && ["ready", "running"].includes(item.status),
+  ).length;
+  return active < orchestratorNode.config.maxConcurrency ? "ready" : "queued";
+}
+
 function advanceOrchestrator(
   run: WorkflowRoleRun,
   orchestratorId: string,
@@ -329,11 +377,7 @@ function advanceOrchestrator(
     { role: "orchestrator" }
   >["config"];
   const child = occurrenceOf(run, childId);
-  const current = run.occurrences.filter(
-    (item) =>
-      item.parentOrchestratorRunId === orchestratorId &&
-      item.iteration === child.iteration,
-  );
+  const current = currentManagedWorkers(run, orchestratorId, child.iteration);
   if (
     child.status === "failed" &&
     !(config.mode === "fanout" && config.completion === "any")
@@ -348,11 +392,9 @@ function advanceOrchestrator(
     const done = current.filter(
       (item) => item.role === "worker" && item.status === "completed",
     );
-    const allDone = current
-      .filter((item) => item.role === "worker")
-      .every((item) =>
-        ["completed", "failed", "cancelled", "skipped"].includes(item.status),
-      );
+    const allDone = current.every((item) =>
+      ["completed", "failed", "cancelled"].includes(item.status),
+    );
     if (config.completion === "any" && allDone && done.length === 0)
       return failWorkflowOccurrence(
         run,
@@ -382,9 +424,8 @@ function advanceOrchestrator(
       };
       return route(next, orchestratorId, now);
     }
-    const active = current.filter(
-      (item) =>
-        item.role === "worker" && ["ready", "running"].includes(item.status),
+    const active = current.filter((item) =>
+      ["ready", "running"].includes(item.status),
     ).length;
     if (active < config.maxConcurrency) {
       const queued = current.find(
@@ -397,9 +438,7 @@ function advanceOrchestrator(
   }
   // Retries retain their skipped predecessor for history. The replacement is
   // the logical worker for this iteration, so only it can satisfy the loop.
-  const workers = current.filter(
-    (item) => item.role === "worker" && item.status !== "skipped",
-  );
+  const workers = current;
   if (
     child.role === "worker" &&
     workers.length === config.agents.length &&

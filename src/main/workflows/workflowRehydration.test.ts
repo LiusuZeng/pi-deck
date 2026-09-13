@@ -435,6 +435,115 @@ describe("workflow rehydration", () => {
     ]);
   });
 
+  it("keeps a constrained fan-out any retry queued across restart", async () => {
+    const fanout = "00000000-0000-4000-8000-000000000151";
+    const firstWorker = "00000000-0000-4000-8000-000000000152";
+    const secondWorker = "00000000-0000-4000-8000-000000000153";
+    const definition = {
+      format: "pi-deck.agent-workflow" as const,
+      schemaVersion: 2 as const,
+      id: "00000000-0000-4000-8000-000000000150",
+      revision: 1,
+      name: "Constrained retry fan-out restart",
+      inputs: [],
+      entryNodeId: fanout,
+      nodes: [
+        {
+          id: fanout,
+          name: "Fan",
+          role: "orchestrator" as const,
+          config: {
+            mode: "fanout" as const,
+            agents: [firstWorker, secondWorker],
+            maxConcurrency: 1,
+            completion: "any" as const,
+          },
+        },
+        {
+          id: firstWorker,
+          name: "First",
+          role: "worker" as const,
+          managedBy: fanout,
+          config: { instructions: "first" },
+        },
+        {
+          id: secondWorker,
+          name: "Second",
+          role: "worker" as const,
+          managedBy: fanout,
+          config: { instructions: "second" },
+        },
+      ],
+      relationships: [],
+    };
+    let persisted = createWorkflowRoleRun(definition, "workspace", {}, 1);
+    const owner = persisted.occurrences[0]!;
+    persisted = startWorkflowOrchestrator(persisted, owner.id, 2);
+    const first = persisted.occurrences.find(
+      (item) => item.nodeId === firstWorker,
+    )!;
+    const second = persisted.occurrences.find(
+      (item) => item.nodeId === secondWorker,
+    )!;
+    persisted = startWorkflowOccurrence(
+      persisted,
+      first.id,
+      "first",
+      undefined,
+      3,
+    );
+    persisted = failWorkflowOccurrence(persisted, first.id, "first failed", 4);
+    persisted = startWorkflowOccurrence(
+      persisted,
+      second.id,
+      "second",
+      undefined,
+      5,
+    );
+    persisted = retryWorkflowOccurrence(persisted, first.id, 6);
+    const retry = persisted.occurrences.at(-1)!;
+    expect(retry.status).toBe("queued");
+
+    let recovered: typeof persisted | undefined;
+    const scheduled: (typeof persisted)[] = [];
+    await rehydrateCanonicalWorkflowRuns(
+      [JSON.parse(JSON.stringify(persisted))],
+      {
+        resolveWorkspace: async () => undefined,
+        updateRun: async (run) => {
+          recovered = run;
+          return run;
+        },
+        schedule: async (run) => {
+          scheduled.push(run);
+          return run;
+        },
+        emit: () => undefined,
+        recordError: () => undefined,
+      },
+      7,
+    );
+
+    // The running sibling lost its session and needs attention, but recovery
+    // must not promote the retry merely because that conversion frees a slot.
+    expect(recovered).toMatchObject({ status: "needsAttention" });
+    expect(recovered?.occurrences).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: first.id, status: "skipped" }),
+        expect.objectContaining({ id: second.id, status: "failed" }),
+        expect.objectContaining({ id: retry.id, status: "queued", attempt: 2 }),
+      ]),
+    );
+    expect(
+      recovered?.occurrences.filter(
+        (item) =>
+          item.parentOrchestratorRunId === owner.id &&
+          ["ready", "running"].includes(item.status),
+      ),
+    ).toHaveLength(0);
+    expect(scheduled).toHaveLength(0);
+  });
+
   it("marks genuinely lost canonical running ownership as attention without scheduling", async () => {
     const definition = {
       format: "pi-deck.agent-workflow" as const,
