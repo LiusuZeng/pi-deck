@@ -167,6 +167,7 @@ import {
   validatePiSessionFile,
 } from "./pi/sessionRepository.js";
 import type { PiMessage, PiState, PromptInput } from "./pi/types.js";
+import { deriveChatSnapshotMetadata } from "./chatSnapshotMetadata.js";
 import { readChatSnapshotInputs } from "./chatSnapshotRead.js";
 import { captureLoginShellEnv } from "./platform/piEnvironment.js";
 import { openPiCodexLoginTerminal } from "./platform/openPiCodexLogin.js";
@@ -7694,19 +7695,17 @@ async function getChatSnapshotForRuntime(
     chatRuntimeSessionFiles.set(runtimeId, canonicalSessionFile);
     chatSessionFileLocks.set(canonicalSessionFile, runtimeId);
     options.assertLifecycleActive?.();
-    // Model/thinking updates intentionally omit get_messages. Merge their
-    // state-only data only when Pi supplies a real sessionName; never turn an
-    // empty metadata read into a filename title or a zero-message transcript.
-    const title =
-      titleFromSessionName(state) ??
-      (options.skipMessages ? undefined : titleFromMessages(messages));
-    const hasTranscript = !options.skipMessages && messages.length > 0;
+    // Model/thinking updates intentionally omit get_messages. Keep their
+    // state-only writes sparse, while treating a fetched empty transcript as
+    // authoritative metadata with an exact zero count.
+    const metadata = deriveChatSnapshotMetadata({
+      state,
+      messages,
+      ...(options.skipMessages ? { skipMessages: true } : {}),
+    });
+    const hasTranscript = metadata.kind !== "skipped";
     if (workspaceId !== undefined) {
       options.assertLifecycleActive?.();
-      const preview = hasTranscript ? previewFromMessages(messages) : undefined;
-      const completedAtMs = hasTranscript
-        ? completedAtFromMessages(messages)
-        : undefined;
       await workspaceStore?.upsertSessionRefFromSnapshot({
         workspaceId,
         sessionFile: canonicalSessionFile,
@@ -7714,12 +7713,16 @@ async function getChatSnapshotForRuntime(
           ? { sessionId: state.sessionId }
           : {}),
         ...(typeof state.cwd === "string" ? { cwd: state.cwd } : {}),
-        ...(title !== undefined ? { title } : {}),
+        ...(metadata.title !== undefined ? { title: metadata.title } : {}),
         ...(hasTranscript
-          ? { updatedAtMs: Date.now(), messageCount: messages.length }
+          ? { updatedAtMs: Date.now(), messageCount: metadata.messageCount }
           : {}),
-        ...(completedAtMs !== undefined ? { completedAtMs } : {}),
-        ...(preview !== undefined ? { preview } : {}),
+        ...(metadata.kind === "messages" && metadata.completedAtMs !== undefined
+          ? { completedAtMs: metadata.completedAtMs }
+          : {}),
+        ...(metadata.kind === "messages" && metadata.preview !== undefined
+          ? { preview: metadata.preview }
+          : {}),
       });
       options.onSessionPersisted?.(canonicalSessionFile);
       options.assertLifecycleActive?.();
@@ -7727,13 +7730,9 @@ async function getChatSnapshotForRuntime(
     if (
       projectId !== undefined &&
       projectId !== managedRuntimeProjectId &&
-      (hasTranscript || title !== undefined)
+      (hasTranscript || metadata.title !== undefined)
     ) {
       options.assertLifecycleActive?.();
-      const preview = hasTranscript ? previewFromMessages(messages) : undefined;
-      const completedAtMs = hasTranscript
-        ? completedAtFromMessages(messages)
-        : undefined;
       await projectStore?.upsertSessionRefFromSnapshot({
         projectId,
         sessionFile: canonicalSessionFile,
@@ -7741,12 +7740,16 @@ async function getChatSnapshotForRuntime(
           ? { sessionId: state.sessionId }
           : {}),
         ...(typeof state.cwd === "string" ? { cwd: state.cwd } : {}),
-        ...(title !== undefined ? { title } : {}),
+        ...(metadata.title !== undefined ? { title: metadata.title } : {}),
         ...(hasTranscript
-          ? { updatedAtMs: Date.now(), messageCount: messages.length }
+          ? { updatedAtMs: Date.now(), messageCount: metadata.messageCount }
           : {}),
-        ...(completedAtMs !== undefined ? { completedAtMs } : {}),
-        ...(preview !== undefined ? { preview } : {}),
+        ...(metadata.kind === "messages" && metadata.completedAtMs !== undefined
+          ? { completedAtMs: metadata.completedAtMs }
+          : {}),
+        ...(metadata.kind === "messages" && metadata.preview !== undefined
+          ? { preview: metadata.preview }
+          : {}),
       });
       options.assertLifecycleActive?.();
     }
@@ -7783,64 +7786,6 @@ async function getChatSnapshotForRuntime(
     },
     messages,
   };
-}
-
-function titleFromSessionName(state: PiState): string | undefined {
-  if (typeof state.sessionName !== "string") {
-    return undefined;
-  }
-  const normalized = state.sessionName.trim().replace(/\s+/g, " ");
-  return normalized.length > 0 ? normalized.slice(0, 64) : undefined;
-}
-
-function titleFromMessages(messages: PiMessage[]): string | undefined {
-  const firstUser = messages.find((message) => message.role === "user");
-  const content =
-    typeof firstUser?.content === "string" ? firstUser.content : undefined;
-  if (content === undefined || content.trim().length === 0) {
-    return undefined;
-  }
-  return content.trim().replace(/\s+/g, " ").slice(0, 64);
-}
-
-function previewFromMessages(messages: PiMessage[]): string | undefined {
-  const lastMessage = [...messages]
-    .reverse()
-    .find((message) => typeof message.content === "string");
-  const content =
-    typeof lastMessage?.content === "string" ? lastMessage.content : undefined;
-  if (content === undefined || content.trim().length === 0) {
-    return undefined;
-  }
-  return content.trim().replace(/\s+/g, " ").slice(0, 160);
-}
-
-function completedAtFromMessages(messages: PiMessage[]): number | undefined {
-  const latestMessage = [...messages]
-    .reverse()
-    .find((message) => ["user", "assistant"].includes(message.role));
-  if (latestMessage?.role !== "assistant") {
-    return undefined;
-  }
-  const content =
-    typeof latestMessage.content === "string" ? latestMessage.content : "";
-  if (content.trim().length === 0 || isAssistantFailureMessage(latestMessage)) {
-    return undefined;
-  }
-  return typeof latestMessage.createdAt === "number" &&
-    Number.isFinite(latestMessage.createdAt)
-    ? latestMessage.createdAt
-    : undefined;
-}
-
-function isAssistantFailureMessage(message: PiMessage): boolean {
-  return (
-    message.status === "error" ||
-    message.stopReason === "error" ||
-    message.reason === "error" ||
-    typeof message.errorMessage === "string" ||
-    message.error !== undefined
-  );
 }
 
 async function safeRealpath(filePath: string): Promise<string | undefined> {

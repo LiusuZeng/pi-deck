@@ -43,6 +43,7 @@ describe("runtime message classification", () => {
           },
           "partial-response",
         ],
+        ["empty event", {}, undefined],
         [
           "malformed identity candidates",
           {
@@ -78,6 +79,7 @@ describe("runtime message classification", () => {
     const cases: Array<
       [string, Record<string, unknown>, RuntimeMessageStreamKind]
     > = [
+      ["empty event remains legacy text", {}, "text"],
       ["legacy direct event", { delta: "text" }, "text"],
       [
         "legacy untyped assistant event",
