@@ -1,4 +1,8 @@
 import type { MultitaskMode } from "./types.js";
+import {
+  synthesisDeliveryPayload,
+  type SynthesisDelivery,
+} from "./taskSessionSynthesisDelivery.js";
 
 /** Initial terminal delivery attempt plus three retries. */
 const maxSynthesisAttempts = 4;
@@ -112,6 +116,8 @@ export interface PersistedTaskSessionPlan {
   /** Per-prompt safe settings, retained so resolution precedence is reproducible. */
   promptSettings?: TaskSessionWorkerSettings;
   synthesisReported?: boolean;
+  /** Write-ahead parent-delivery outbox. It is retained after acknowledgement. */
+  synthesisDelivery?: SynthesisDelivery;
   /** Number of attempted synthesis deliveries, including the initial attempt. */
   synthesisAttempts?: number;
   synthesisFailureTrace?: string;
@@ -159,12 +165,27 @@ export interface TaskSessionOrchestratorOptions<
   /** Atomic claim. Supplying this requires `releaseGlobalCapacity`; the orchestrator releases every claim it owns. */
   claimGlobalCapacity?(): boolean;
   releaseGlobalCapacity?(): void;
+  /**
+   * Dispatch the exact write-ahead payload. This is called only after persist
+   * has durably recorded its `dispatching` state.
+   */
   synthesize(input: {
     parentId: ParentId;
     originalPrompt: string;
     contextSummary: string;
     tasks: readonly PersistedTaskSessionTask[];
+    delivery: SynthesisDelivery;
   }): Promise<void> | void;
+  /** Pi transcript history is the acknowledgement authority, never an RPC ack. */
+  hasSynthesisDelivery?(input: {
+    parentId: ParentId;
+    delivery: SynthesisDelivery;
+  }): Promise<boolean> | boolean;
+  /** Must durably save this snapshot before a parent turn may be dispatched. */
+  persistSynthesisDelivery?(
+    parentId: ParentId,
+    state: PersistedTaskSessionState,
+  ): Promise<void> | void;
   /** Injectable timer hook for bounded terminal synthesis retries. */
   scheduleSynthesisRetry?(callback: () => void, delayMs: number): void;
   synthesisRetryDelayMs?: number;
@@ -386,6 +407,9 @@ export class TaskSessionOrchestrator<
           ? { promptSettings: safeSettings(plan.promptSettings) }
           : {}),
         ...(plan.synthesisReported ? { synthesisReported: true } : {}),
+        ...(plan.synthesisDelivery
+          ? { synthesisDelivery: structuredClone(plan.synthesisDelivery) }
+          : {}),
         ...(plan.synthesisAttempts
           ? { synthesisAttempts: plan.synthesisAttempts }
           : {}),
@@ -728,23 +752,55 @@ export class TaskSessionOrchestrator<
         continue;
       plan.synthesizing = true;
       plan.synthesisAttempts = (plan.synthesisAttempts ?? 0) + 1;
-      // Persist the delivery reservation before crossing the external boundary.
+      // This is the durable outbox write-ahead record. Reuse its stable id and
+      // exact content on every retry so a restart can probe Pi history.
+      plan.synthesisDelivery = synthesisDeliveryPayload({
+        ...(plan.synthesisDelivery ? { id: plan.synthesisDelivery.id } : {}),
+        attempt: plan.synthesisAttempts,
+        originalPrompt: plan.originalPrompt,
+        tasks: plan.tasks.map(persistTask),
+      });
       this.publish(parent);
       let retrySynthesis = false;
       try {
+        // Do not cross the external parent-turn boundary until the full stable
+        // delivery record (id, attempt, payload, fingerprint, dispatching) is
+        // on disk. A failed write is retried without sending a turn.
+        if (this.options.persistSynthesisDelivery)
+          await this.persistSynthesisDelivery(parent);
         if (parent.removed || this.parents.get(parent.parentId) !== parent)
           return;
-        await this.options.synthesize({
-          parentId: parent.parentId,
-          originalPrompt: plan.originalPrompt,
-          contextSummary: plan.contextSummary,
-          tasks: plan.tasks.map(persistTask),
-        });
+        const delivery = plan.synthesisDelivery;
+        if (!delivery) throw new Error("Synthesis delivery record was lost.");
+        const alreadyReported = this.options.hasSynthesisDelivery
+          ? await this.options.hasSynthesisDelivery({
+              parentId: parent.parentId,
+              delivery,
+            })
+          : false;
+        if (!alreadyReported) {
+          await this.options.synthesize({
+            parentId: parent.parentId,
+            originalPrompt: plan.originalPrompt,
+            contextSummary: plan.contextSummary,
+            tasks: plan.tasks.map(persistTask),
+            delivery,
+          });
+        }
+        // Persist Pi's durable receipt before clearing the terminal rows. If
+        // that write fails, retry recovery only probes the marker; it never
+        // sends a second parent turn.
+        plan.synthesisDelivery = { ...delivery, state: "delivered" };
+        this.publish(parent);
+        if (this.options.persistSynthesisDelivery)
+          await this.persistSynthesisDelivery(parent);
         plan.synthesized = true;
         plan.synthesisReported = true;
         delete plan.runtimeContext;
         delete plan.synthesisFailureTrace;
         this.publish(parent);
+        if (this.options.persistSynthesisDelivery)
+          await this.persistSynthesisDelivery(parent);
       } catch (error) {
         plan.synthesisFailureTrace = safeLine(
           error instanceof Error
@@ -761,6 +817,14 @@ export class TaskSessionOrchestrator<
       }
       if (retrySynthesis) this.scheduleSynthesisRetry(parent, plan);
     }
+  }
+  private async persistSynthesisDelivery(
+    parent: Parent<ParentId>,
+  ): Promise<void> {
+    await this.options.persistSynthesisDelivery?.(
+      parent.parentId,
+      this.exportState(parent.parentId),
+    );
   }
   private scheduleSynthesisRetry(parent: Parent<ParentId>, plan: Plan): void {
     if (plan.synthesisRetryScheduled) return;
@@ -1154,7 +1218,10 @@ function validatePersisted(
       typeof plan.originalPrompt !== "string" ||
       (plan.synthesisAttempts !== undefined &&
         (!Number.isSafeInteger(plan.synthesisAttempts) ||
-          plan.synthesisAttempts < 0)) ||
+          plan.synthesisAttempts < 0 ||
+          plan.synthesisAttempts > maxSynthesisAttempts)) ||
+      (plan.synthesisDelivery !== undefined &&
+        !isSynthesisDelivery(plan.synthesisDelivery)) ||
       (plan.synthesisFailureTrace !== undefined &&
         typeof plan.synthesisFailureTrace !== "string")
     )
@@ -1213,6 +1280,21 @@ function validatePersisted(
       taskNumbers.add(entry.taskNumber);
     }
   }
+}
+function isSynthesisDelivery(value: unknown): value is SynthesisDelivery {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    typeof (value as SynthesisDelivery).id === "string" &&
+    (value as SynthesisDelivery).id.length >= 8 &&
+    Number.isSafeInteger((value as SynthesisDelivery).attempt) &&
+    (value as SynthesisDelivery).attempt >= 1 &&
+    typeof (value as SynthesisDelivery).payload === "string" &&
+    typeof (value as SynthesisDelivery).payloadFingerprint === "string" &&
+    /^[a-f0-9]{64}$/.test((value as SynthesisDelivery).payloadFingerprint) &&
+    ((value as SynthesisDelivery).state === "dispatching" ||
+      (value as SynthesisDelivery).state === "delivered")
+  );
 }
 function isLifecycle(value: unknown): value is TaskSessionLifecycle {
   return (

@@ -1128,6 +1128,11 @@ class FakeRpcServer {
     }
     if (this.options.promptScenario === "routing") {
       this.traceFixture("ordinary_prompt");
+      const synthesisMarker = text.match(
+        /<!-- pi-deck-synthesis-delivery:v1:([^\s]+) -->/,
+      )?.[1];
+      if (synthesisMarker)
+        this.traceFixture(`synthesis_dispatch:${synthesisMarker}`);
       const images = params.images;
       if (Array.isArray(images) && images.length > 0)
         this.traceFixture(`prompt_images:${images.length}`);
@@ -1362,7 +1367,7 @@ class FakeRpcServer {
     const chunks =
       decision !== undefined
         ? [String(decision)]
-        : text.startsWith("Task-session synthesis for:")
+        : text.includes("Task-session synthesis for:")
           ? ["Synthesis observed:\n", text]
           : this.options.promptScenario === "routing"
             ? [

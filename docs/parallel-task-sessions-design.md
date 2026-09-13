@@ -208,6 +208,32 @@ workers can run simultaneously; excess task sessions remain visibly queued.
   dialog names the blocking reason, and the archive action rechecks eligibility
   before mutating workspace state.
 
+### Synthesis delivery outbox and exactly-once boundary
+
+A terminal plan has a durable parent-delivery outbox record before Pi Deck asks
+Pi to create the synthesis turn. The record contains a stable opaque delivery
+ID, the bounded dispatch attempt, exact parent payload, SHA-256 payload
+fingerprint, and `dispatching` state. The payload begins with the exact HTML
+comment receipt marker `<!-- pi-deck-synthesis-delivery:v1:<id> -->`; it is
+transport metadata and is removed from Pi Deck's user-turn presentation.
+
+On every recovery (and immediately before dispatch while serialized with parent
+turns), Pi Deck queries Pi's authoritative parent `get_messages` session
+history for that exact marker. A matching marker is the receipt: Pi Deck marks
+the outbox delivered/reported and never sends it again. With no marker, it may
+send the already persisted exact payload, at most four times (initial attempt
+plus three retries). A failure to persist the write-ahead record or to inspect
+history fails closed and schedules a bounded retry without sending a turn.
+
+This gives exactly-once **parent user/report turn creation relative to a Pi
+session history that durably retains the marker and returns it accurately**.
+It cannot make an unavailable/corrupt Pi transcript durable, nor can it undo a
+turn written by another Pi client that strips or edits the marker. Pi RPC
+acknowledgement and agent completion are deliberately not receipts: a crash
+between Pi's append and either signal is resolved only by the durable marker.
+At the bounded-attempt cap the terminal plan remains persisted with its failure
+trace rather than being silently cleared or stranded.
+
 ## 8. Architecture boundary
 
 The renderer addresses only the parent runtime. It may request a prompt

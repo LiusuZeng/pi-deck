@@ -241,6 +241,10 @@ import {
   type TaskSessionWorkerSettings,
 } from "./multitask/taskSessionOrchestrator.js";
 import {
+  containsSynthesisDeliveryMarker,
+  type SynthesisDelivery,
+} from "./multitask/taskSessionSynthesisDelivery.js";
+import {
   boundedBestEffort,
   collectTaskSessionTerminalData,
 } from "./multitask/taskSessionTerminalData.js";
@@ -3558,6 +3562,17 @@ async function initializeChatAdapter(
       capacityAvailable() && legacyNonterminalTaskCount(parentId) === 0,
     isCapacityUnavailable: (error) => error instanceof WorkerCapacityError,
     synthesize: (input) => synthesizeTaskSession(adapter, input),
+    hasSynthesisDelivery: ({ parentId, delivery }) =>
+      parentHasSynthesisDelivery(adapter, parentId, delivery),
+    // This awaitable path is the synthesis outbox write-ahead barrier. Normal
+    // state projection remains best-effort, but no parent report crosses the
+    // external Pi boundary until this durable snapshot succeeds.
+    persistSynthesisDelivery: async (parentId, state) => {
+      const sessionFile = chatRuntimeSessionFiles.get(parentId);
+      if (!sessionFile || !taskSessionStateStore)
+        throw new Error("Parent synthesis state has no durable session store.");
+      await taskSessionStateStore.set(sessionFile, state);
+    },
     onState: (parentId) => {
       emitTaskSessionState(parentId);
       void persistTaskSession(parentId);
@@ -4823,6 +4838,26 @@ function conciseTaskHandoff(value: string) {
   return singleLine.slice(0, 1_024) || "Task completed.";
 }
 
+/**
+ * Pi's session-history RPC is the acknowledgement authority for the outbox.
+ * RPC success/agent completion are deliberately not receipts: Pi may have
+ * durably appended the marked user turn before either reaches this process.
+ */
+async function parentHasSynthesisDelivery(
+  adapter: SinglePiAdapter,
+  parentId: string,
+  delivery: SynthesisDelivery,
+): Promise<boolean> {
+  if (!chatRuntimeIds.has(parentId) || !adapter.hasRuntime(parentId))
+    throw new Error("Parent is unavailable for synthesis receipt inspection.");
+  const messages = await adapter.getMessages(parentId);
+  return messages.some((message) =>
+    message.role === "user"
+      ? containsSynthesisDeliveryMarker(message.content, delivery.id)
+      : false,
+  );
+}
+
 async function synthesizeTaskSession(
   adapter: SinglePiAdapter,
   input: {
@@ -4830,6 +4865,7 @@ async function synthesizeTaskSession(
     originalPrompt: string;
     contextSummary: string;
     tasks: readonly PersistedTaskSessionTask[];
+    delivery: SynthesisDelivery;
   },
 ): Promise<void> {
   // A fork reserves its source before any asynchronous preflight. Reject here
@@ -4844,12 +4880,6 @@ async function synthesizeTaskSession(
     !adapter.hasRuntime(input.parentId)
   )
     return;
-  const report = input.tasks
-    .map(
-      (task) =>
-        `#${task.taskNumber} ${task.generatedName}: ${task.handoffSummary ?? task.lifecycle}`,
-    )
-    .join("\n");
   const synthesis = async (): Promise<void> => {
     // A turn can have been queued before the fork reservation. It must check
     // at dispatch time, not only when it was initially enqueued.
@@ -4858,8 +4888,14 @@ async function synthesizeTaskSession(
       "synthesizing task results into it",
     );
     if (!adapter.hasRuntime(input.parentId)) return;
+    // The final probe is serialized with every other parent turn. It closes
+    // the crash/restart window between recovery's first probe and dispatch.
+    if (
+      await parentHasSynthesisDelivery(adapter, input.parentId, input.delivery)
+    )
+      return;
     const worker = adapter.getWorker(input.parentId);
-    const text = `Task-session synthesis for: ${input.originalPrompt}\n\n${report}`;
+    const text = input.delivery.payload;
     const status = await adapter.getRuntimeStatus(input.parentId);
     const active = status.isAgentActive === true || status.isStreaming === true;
     let cancelSettledWait: () => void = () => undefined;

@@ -59,6 +59,35 @@ describe("chat snapshot metadata", () => {
     ).toMatchObject({ kind: "messages", messageCount: 3 });
   });
 
+  it("does not expose synthesis delivery markers in titles or previews", () => {
+    expect(
+      metadata([
+        message({
+          role: "user",
+          content:
+            "<!-- pi-deck-synthesis-delivery:v1:receipt -->\nSynthesized title",
+        }),
+        message({
+          role: "assistant",
+          content:
+            "<!-- pi-deck-synthesis-delivery:v1:receipt -->\nSynthesized preview",
+        }),
+      ]),
+    ).toMatchObject({
+      kind: "messages",
+      title: "Synthesized title",
+      preview: "Synthesized preview",
+    });
+    expect(
+      metadata([
+        message({
+          role: "user",
+          content: "<!-- pi-deck-synthesis-delivery:v1:receipt -->",
+        }),
+      ]),
+    ).not.toHaveProperty("title");
+  });
+
   it("uses the last string preview and does not fall back from a blank string", () => {
     expect(
       metadata([
