@@ -249,6 +249,10 @@ function sidebarNewSessionButton(page: Page) {
     .getByRole("button", { name: "New session", exact: true });
 }
 
+function workspaceWorkNewSessionButton(page: Page) {
+  return page.getByTestId("workspace-work-new-session");
+}
+
 async function enterSessionDetail(page: Page): Promise<void> {
   const newSession = sidebarNewSessionButton(page);
   await expect(newSession).toBeVisible();
@@ -590,6 +594,7 @@ test("New Session draft shows and commits inline workspace ownership", async () 
     expect(workspaceIds.default).toEqual(expect.any(String));
     await page.getByRole("button", { name: "All Work" }).click();
     await expectAllWorkLaunch(page);
+    await expect(workspaceWorkNewSessionButton(page)).toHaveCount(0);
 
     await sidebarNewSessionButton(page).click();
     await expect(
@@ -679,7 +684,12 @@ test("New Session draft shows and commits inline workspace ownership", async () 
     await page.getByTestId("session-origin-back").click();
     await expectAllWorkLaunch(page);
     await selectWorkspaceInUi(page, "Inline Beta");
-    await sidebarNewSessionButton(page).click();
+    await expect(workspaceWorkNewSessionButton(page)).toBeVisible();
+    await workspaceWorkNewSessionButton(page).click();
+    await expect(
+      page.locator('.workspace[data-primary-view="session"]'),
+    ).toBeVisible();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
     const scopedWorkspace = page.getByLabel("New session workspace");
     await expect(scopedWorkspace).toHaveValue(workspaceIds["Inline Beta"]!);
     await page
@@ -728,6 +738,46 @@ test("New Session draft shows and commits inline workspace ownership", async () 
           "scoped draft can switch before first prompt",
         ],
         betaCount: 0,
+      });
+    await page.getByTestId("session-origin-back").click();
+    await expectWorkRoute(page, workspaceIds["Inline Beta"]!);
+
+    // The workspace-header path must create in the stable scoped workspace,
+    // even after a prior draft changed the active workspace before sending.
+    await workspaceWorkNewSessionButton(page).click();
+    const headerScopedWorkspace = page.getByLabel("New session workspace");
+    await expect(headerScopedWorkspace).toHaveValue(
+      workspaceIds["Inline Beta"]!,
+    );
+    await expect(page.getByTestId("session-origin-back")).toHaveAttribute(
+      "aria-label",
+      "Back to Inline Beta Work",
+    );
+    await page
+      .getByLabel("Prompt text")
+      .fill("workspace header creates in its current workspace");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText(
+        /Fake response to: workspace header creates in its current workspace/,
+      ),
+    ).toBeVisible({ timeout: 20_000 });
+    await expect
+      .poll(async () =>
+        page.evaluate(async (workspaceId) => {
+          const snapshot = await window.piDeck.chat.getSnapshot();
+          const sessions = await window.piDeck.chat.listSessions({
+            workspaceId,
+          });
+          return {
+            activeWorkspaceId: snapshot.workspaceId,
+            titles: sessions.sessions.map((session) => session.title),
+          };
+        }, workspaceIds["Inline Beta"]!),
+      )
+      .toEqual({
+        activeWorkspaceId: workspaceIds["Inline Beta"],
+        titles: ["workspace header creates in its current workspace"],
       });
     await page.getByTestId("session-origin-back").click();
     await expectWorkRoute(page, workspaceIds["Inline Beta"]!);

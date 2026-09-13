@@ -225,7 +225,7 @@ export function ActivityInbox({
       className="activity-inbox"
     >
       <header className="activity-inbox-header">
-        <div>
+        <div className="activity-inbox-header-copy">
           <p className="activity-inbox-eyebrow">
             {scope.type === "all" ? ALL_WORK_LABEL : "Workspace Work"}
           </p>
@@ -274,6 +274,17 @@ export function ActivityInbox({
             </details>
           ) : null}
         </div>
+        {scope.type === "workspace" && onNewSession !== undefined ? (
+          <button
+            aria-describedby="activity-inbox-description"
+            className="activity-inbox-header-action"
+            data-testid="workspace-work-new-session"
+            onClick={onNewSession}
+            type="button"
+          >
+            New session
+          </button>
+        ) : null}
       </header>
 
       {showWorkspaceControls ? (
