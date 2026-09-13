@@ -905,6 +905,56 @@ function runtimeErrorDiagnostics(session: any): any[] {
   );
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+type CanonicalMutationAction = "Retry" | "Stop" | "Answer";
+
+function canonicalWorkflowRun(id: string, revision: number): any {
+  return { id, revision };
+}
+
+function canonicalMutationHarness(initialError = "stale workflow error") {
+  const state: { runs: any[]; error: string | undefined } = {
+    runs: [],
+    error: initialError,
+  };
+  const requestRef = { current: 0 };
+  return {
+    state,
+    requestRef,
+    setRuns(update: (current: any[]) => any[]) {
+      state.runs = update(state.runs);
+    },
+    setError(update: (current: string | undefined) => string | undefined) {
+      state.error = update(state.error);
+    },
+  };
+}
+
+function startCanonicalMutation(
+  harness: ReturnType<typeof canonicalMutationHarness>,
+  action: CanonicalMutationAction,
+  response: { promise: Promise<any> },
+  refresh?: { promise: Promise<any> },
+): Promise<void> {
+  return __rendererTestHooks.executeCanonicalWorkflowMutation({
+    requestRef: harness.requestRef,
+    action,
+    mutate: () => response.promise,
+    ...(refresh === undefined ? {} : { refresh: () => refresh.promise }),
+    setRuns: harness.setRuns,
+    setError: harness.setError,
+  });
+}
+
 describe("worker exit lifecycle", () => {
   it("keeps a deliberately closed durable session resumable when SIGTERM is reported as 143", () => {
     const next = __rendererTestHooks.reduceRuntimeEvent(
@@ -1365,6 +1415,179 @@ describe("actionable session attention", () => {
     expect(selectSidebarIndicator(failed).kind).toBe("error");
     expect(buildActivityInbox([source]).groups.failed).toHaveLength(1);
     expect(buildActivityInbox([source]).groups.needsAttention).toHaveLength(0);
+  });
+});
+
+describe("renderer canonical workflow mutation ordering", () => {
+  const actions: CanonicalMutationAction[] = ["Retry", "Stop", "Answer"];
+
+  it("clears a stale error after every latest mutation succeeds", async () => {
+    for (const action of actions) {
+      const harness = canonicalMutationHarness();
+      const response = deferred<any>();
+      const mutation = startCanonicalMutation(harness, action, response);
+
+      response.resolve(canonicalWorkflowRun(`${action.toLowerCase()}-run`, 2));
+      await mutation;
+
+      expect(harness.state.error).toBeUndefined();
+      expect(harness.state.runs).toEqual([
+        canonicalWorkflowRun(`${action.toLowerCase()}-run`, 2),
+      ]);
+    }
+  });
+
+  it("surfaces the latest failure and preserves retry refresh recovery", async () => {
+    for (const action of actions) {
+      const harness = canonicalMutationHarness(undefined);
+      const response = deferred<any>();
+      const refresh = action === "Retry" ? deferred<any>() : undefined;
+      const mutation = startCanonicalMutation(
+        harness,
+        action,
+        response,
+        refresh,
+      );
+      const message = `${action.toLowerCase()} backend failure`;
+
+      response.reject(new Error(message));
+      if (refresh !== undefined) {
+        refresh.resolve(canonicalWorkflowRun("refreshed-run", 3));
+      }
+      await mutation;
+
+      expect(harness.state.error).toBe(
+        action === "Retry"
+          ? `Retry failed: ${message}`
+          : `${action} failed: ${message}`,
+      );
+      expect(harness.state.runs).toEqual(
+        action === "Retry" ? [canonicalWorkflowRun("refreshed-run", 3)] : [],
+      );
+    }
+  });
+
+  it("surfaces a retry failure when refreshing the latest run also fails", async () => {
+    const harness = canonicalMutationHarness(undefined);
+    const response = deferred<any>();
+    const refresh = deferred<any>();
+    const mutation = startCanonicalMutation(
+      harness,
+      "Retry",
+      response,
+      refresh,
+    );
+
+    response.reject(new Error("retry backend failure"));
+    refresh.reject(new Error("run refresh failure"));
+    await mutation;
+
+    expect(harness.state.error).toBe(
+      "Retry failed: retry backend failure. Could not refresh the latest run: run refresh failure",
+    );
+    expect(harness.state.runs).toEqual([]);
+  });
+
+  it("suppresses a delayed retry refresh failure after a newer success", async () => {
+    const harness = canonicalMutationHarness();
+    const olderResponse = deferred<any>();
+    const olderRefresh = deferred<any>();
+    const newerResponse = deferred<any>();
+    const olderMutation = startCanonicalMutation(
+      harness,
+      "Retry",
+      olderResponse,
+      olderRefresh,
+    );
+    const newerMutation = startCanonicalMutation(
+      harness,
+      "Stop",
+      newerResponse,
+    );
+
+    newerResponse.resolve(canonicalWorkflowRun("newer-run", 2));
+    await newerMutation;
+    olderResponse.reject(new Error("older retry failure"));
+    olderRefresh.reject(new Error("older refresh failure"));
+    await olderMutation;
+
+    expect(harness.state.error).toBeUndefined();
+    expect(harness.state.runs).toEqual([canonicalWorkflowRun("newer-run", 2)]);
+  });
+
+  it("ignores every delayed older failure after a newer success", async () => {
+    for (const olderAction of actions) {
+      for (const newerAction of actions) {
+        const harness = canonicalMutationHarness();
+        const olderResponse = deferred<any>();
+        const olderRefresh =
+          olderAction === "Retry" ? deferred<any>() : undefined;
+        const newerResponse = deferred<any>();
+        const olderMutation = startCanonicalMutation(
+          harness,
+          olderAction,
+          olderResponse,
+          olderRefresh,
+        );
+        const newerMutation = startCanonicalMutation(
+          harness,
+          newerAction,
+          newerResponse,
+        );
+
+        newerResponse.resolve(canonicalWorkflowRun("newer-run", 2));
+        await newerMutation;
+        olderResponse.reject(new Error("older failure"));
+        olderRefresh?.resolve(canonicalWorkflowRun("stale-run", 99));
+        await olderMutation;
+
+        expect(harness.state.error).toBeUndefined();
+        expect(harness.state.runs).toEqual([
+          canonicalWorkflowRun("newer-run", 2),
+        ]);
+      }
+    }
+  });
+
+  it("ignores every delayed older success after a newer failure", async () => {
+    for (const olderAction of actions) {
+      for (const newerAction of actions) {
+        const harness = canonicalMutationHarness();
+        const olderResponse = deferred<any>();
+        const newerResponse = deferred<any>();
+        const newerRefresh =
+          newerAction === "Retry" ? deferred<any>() : undefined;
+        const olderMutation = startCanonicalMutation(
+          harness,
+          olderAction,
+          olderResponse,
+        );
+        const newerMutation = startCanonicalMutation(
+          harness,
+          newerAction,
+          newerResponse,
+          newerRefresh,
+        );
+        const message = `${newerAction.toLowerCase()} latest failure`;
+
+        newerResponse.reject(new Error(message));
+        newerRefresh?.resolve(canonicalWorkflowRun("latest-run", 4));
+        await newerMutation;
+        olderResponse.resolve(canonicalWorkflowRun("older-run", 99));
+        await olderMutation;
+
+        expect(harness.state.error).toBe(
+          newerAction === "Retry"
+            ? `Retry failed: ${message}`
+            : `${newerAction} failed: ${message}`,
+        );
+        expect(harness.state.runs).toEqual(
+          newerAction === "Retry"
+            ? [canonicalWorkflowRun("latest-run", 4)]
+            : [],
+        );
+      }
+    }
   });
 });
 

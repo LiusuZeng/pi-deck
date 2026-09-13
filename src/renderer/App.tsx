@@ -197,6 +197,75 @@ function upsertCanonicalWorkflowRun(
   return [run, ...current.filter((item) => item.id !== run.id)];
 }
 
+type CanonicalWorkflowMutationAction = "Retry" | "Stop" | "Answer";
+type WorkflowMutationStateUpdater<T> = (update: (current: T) => T) => void;
+
+interface CanonicalWorkflowMutationOptions {
+  requestRef: { current: number };
+  action: CanonicalWorkflowMutationAction;
+  mutate(): Promise<WorkflowRunEnvelope>;
+  refresh?(): Promise<WorkflowRunEnvelope>;
+  setRuns: WorkflowMutationStateUpdater<WorkflowRunEnvelope[]>;
+  setError: WorkflowMutationStateUpdater<string | undefined>;
+}
+
+/**
+ * Serialize renderer ownership of canonical mutation completions. Main still
+ * serializes the persisted run, but IPC calls can resolve in any order here;
+ * only the latest renderer request may publish its run or error.
+ */
+async function executeCanonicalWorkflowMutation(
+  options: CanonicalWorkflowMutationOptions,
+): Promise<void> {
+  const request = ++options.requestRef.current;
+  try {
+    const run = await options.mutate();
+    options.setRuns((current) =>
+      options.requestRef.current === request
+        ? upsertCanonicalWorkflowRun(current, run)
+        : current,
+    );
+    options.setError((current) =>
+      options.requestRef.current === request ? undefined : current,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (options.refresh !== undefined) {
+      try {
+        const refreshed = await options.refresh();
+        options.setRuns((current) =>
+          options.requestRef.current === request
+            ? upsertCanonicalWorkflowRun(current, refreshed)
+            : current,
+        );
+      } catch (refreshError) {
+        options.setError((current) =>
+          options.requestRef.current === request
+            ? `Retry failed: ${message}. Could not refresh the latest run: ${refreshError instanceof Error ? refreshError.message : String(refreshError)}`
+            : current,
+        );
+        return;
+      }
+      const stale =
+        message.includes("Workflow run changed before retry") ||
+        message.includes("Workflow run revision conflict");
+      options.setError((current) =>
+        options.requestRef.current === request
+          ? stale
+            ? "Run changed before retry. Review its latest status and retry again."
+            : `Retry failed: ${message}`
+          : current,
+      );
+      return;
+    }
+    options.setError((current) =>
+      options.requestRef.current === request
+        ? `${options.action} failed: ${message}`
+        : current,
+    );
+  }
+}
+
 type LoadState =
   | { state: "loading" }
   | {
@@ -1377,8 +1446,8 @@ export function App(): ReactElement {
   const [legacyWorkflowRunId, setLegacyWorkflowRunId] = useState<string>();
   const [workflowLoading, setWorkflowLoading] = useState(false);
   const [workflowError, setWorkflowError] = useState<string | undefined>();
-  // A failed stale retry must not surface after a newer workflow mutation
-  // succeeds while its refresh request is still in flight.
+  // A failed stale canonical mutation must not surface after a newer
+  // workflow mutation succeeds while its refresh request is still in flight.
   const workflowMutationRequest = useRef(0);
   const [usageStatsVisible, setUsageStatsVisible] = useState(() =>
     loadUsageStatsVisiblePreference(),
@@ -6141,71 +6210,51 @@ export function App(): ReactElement {
                     setWorkflowOccurrenceRunId(undefined);
                     showWorkflowSurface("runs");
                   }}
-                  onStop={async () => {
-                    workflowMutationRequest.current += 1;
-                    const run = await window.piDeck.workflows.canonicalStopRun({
-                      runId: selectedWorkflowOccurrenceRun.id,
-                    });
-                    setWorkflowOccurrenceRuns((current) =>
-                      upsertCanonicalWorkflowRun(current, run),
-                    );
-                  }}
-                  onRetry={async (occurrenceId) => {
-                    const request = ++workflowMutationRequest.current;
-                    try {
-                      const run =
-                        await window.piDeck.workflows.canonicalRetryOccurrence({
+                  onStop={() =>
+                    executeCanonicalWorkflowMutation({
+                      requestRef: workflowMutationRequest,
+                      action: "Stop",
+                      mutate: () =>
+                        window.piDeck.workflows.canonicalStopRun({
+                          runId: selectedWorkflowOccurrenceRun.id,
+                        }),
+                      setRuns: setWorkflowOccurrenceRuns,
+                      setError: setWorkflowError,
+                    })
+                  }
+                  onRetry={(occurrenceId) =>
+                    executeCanonicalWorkflowMutation({
+                      requestRef: workflowMutationRequest,
+                      action: "Retry",
+                      mutate: () =>
+                        window.piDeck.workflows.canonicalRetryOccurrence({
                           runId: selectedWorkflowOccurrenceRun.id,
                           occurrenceId,
                           expectedRevision:
                             selectedWorkflowOccurrenceRun.revision,
-                        });
-                      setWorkflowOccurrenceRuns((current) =>
-                        upsertCanonicalWorkflowRun(current, run),
-                      );
-                      if (workflowMutationRequest.current === request)
-                        setWorkflowError(undefined);
-                    } catch (error) {
-                      const message =
-                        error instanceof Error ? error.message : String(error);
-                      const stale =
-                        message.includes("Workflow run changed before retry") ||
-                        message.includes("Workflow run revision conflict");
-                      try {
-                        const refreshed =
-                          await window.piDeck.workflows.canonicalGetRun({
-                            runId: selectedWorkflowOccurrenceRun.id,
-                          });
-                        setWorkflowOccurrenceRuns((current) =>
-                          upsertCanonicalWorkflowRun(current, refreshed),
-                        );
-                      } catch (refreshError) {
-                        if (workflowMutationRequest.current === request)
-                          setWorkflowError(
-                            `Retry failed: ${message}. Could not refresh the latest run: ${refreshError instanceof Error ? refreshError.message : String(refreshError)}`,
-                          );
-                        return;
-                      }
-                      if (workflowMutationRequest.current === request)
-                        setWorkflowError(
-                          stale
-                            ? "Run changed before retry. Review its latest status and retry again."
-                            : `Retry failed: ${message}`,
-                        );
-                    }
-                  }}
-                  onAnswer={async (occurrenceId, value) => {
-                    workflowMutationRequest.current += 1;
-                    const run =
-                      await window.piDeck.workflows.canonicalAnswerHuman({
-                        runId: selectedWorkflowOccurrenceRun.id,
-                        occurrenceId,
-                        value,
-                      });
-                    setWorkflowOccurrenceRuns((current) =>
-                      upsertCanonicalWorkflowRun(current, run),
-                    );
-                  }}
+                        }),
+                      refresh: () =>
+                        window.piDeck.workflows.canonicalGetRun({
+                          runId: selectedWorkflowOccurrenceRun.id,
+                        }),
+                      setRuns: setWorkflowOccurrenceRuns,
+                      setError: setWorkflowError,
+                    })
+                  }
+                  onAnswer={(occurrenceId, value) =>
+                    executeCanonicalWorkflowMutation({
+                      requestRef: workflowMutationRequest,
+                      action: "Answer",
+                      mutate: () =>
+                        window.piDeck.workflows.canonicalAnswerHuman({
+                          runId: selectedWorkflowOccurrenceRun.id,
+                          occurrenceId,
+                          value,
+                        }),
+                      setRuns: setWorkflowOccurrenceRuns,
+                      setError: setWorkflowError,
+                    })
+                  }
                   onOpenSession={(occurrence) =>
                     void handleOpenWorkflowOccurrence(occurrence)
                   }
@@ -13917,6 +13966,7 @@ export const __rendererTestHooks = {
   sessionFromSummary,
   fakeSessionsForWorkspace,
   workflowOccurrenceSessionReference,
+  executeCanonicalWorkflowMutation,
   upsertRuntimeSession,
   mergeSessionUsageFromSnapshot,
   composerDraftForSession,
