@@ -17,6 +17,7 @@ type PromptScenario =
   | "tool-heavy"
   | "tool-stream-scroll"
   | "tool-error"
+  | "tool-error-extension-ui"
   | "queue"
   | "compaction"
   | "retry"
@@ -205,6 +206,7 @@ function isPromptScenario(value: string): value is PromptScenario {
     "tool-heavy",
     "tool-stream-scroll",
     "tool-error",
+    "tool-error-extension-ui",
     "queue",
     "compaction",
     "retry",
@@ -883,6 +885,7 @@ class FakeRpcServer {
 
     const isExtensionUiScenario =
       this.options.promptScenario === "extension-ui" ||
+      this.options.promptScenario === "tool-error-extension-ui" ||
       this.options.promptScenario === "all";
     const promptScenarioDelayMs = this.emitPromptScenarioEvents(assistantId);
     if (isExtensionUiScenario) {
@@ -1091,7 +1094,10 @@ class FakeRpcServer {
   private emitPromptScenarioEvents(assistantId: string): number {
     const scenario = this.options.promptScenario;
     const shouldEmit = (target: PromptScenario): boolean =>
-      scenario === target || scenario === "all";
+      scenario === target ||
+      scenario === "all" ||
+      (scenario === "tool-error-extension-ui" &&
+        (target === "tool-error" || target === "extension-ui"));
 
     if (shouldEmit("queue")) {
       this.steering.splice(0, this.steering.length, "Queued steering fixture");
@@ -1182,8 +1188,9 @@ class FakeRpcServer {
       return this.emitToolStreamScrollScenarioEvents(assistantId);
     }
 
-    if (shouldEmit("tool") || scenario === "tool-error") {
-      const toolFailed = scenario === "tool-error";
+    const toolFailed =
+      scenario === "tool-error" || scenario === "tool-error-extension-ui";
+    if (shouldEmit("tool") || toolFailed) {
       const fixtureToolName = toolFailed ? "bash" : "read";
       const fixtureToolArgs = toolFailed
         ? { command: "npm test -- --run fake-failure.test.ts" }

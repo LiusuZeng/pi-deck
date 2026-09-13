@@ -267,7 +267,7 @@ function reduceToolEndEvent(
 
   const activeTools = state.activeTools.filter((id) => id !== toolCallId);
   const existing = state.toolCards[toolCallId];
-  const isError = getBoolean(event, "isError") ?? false;
+  const isError = isToolExecutionFailure(event);
 
   return {
     ...state,
@@ -288,6 +288,30 @@ function reduceToolEndEvent(
       }),
     },
   };
+}
+
+/**
+ * A tool failure is a diagnostic on the tool card, not a request for user
+ * input. Session attention is derived only from explicit pending input state.
+ */
+export function isToolExecutionFailure(event: RuntimeEventLike): boolean {
+  if (event.type !== "tool_execution_end") {
+    return false;
+  }
+  const status = getString(event, "status");
+  return (
+    getBoolean(event, "isError") === true ||
+    status === "error" ||
+    status === "failed" ||
+    hasNonZeroToolExitCode(event)
+  );
+}
+
+function hasNonZeroToolExitCode(event: RuntimeEventLike): boolean {
+  return ["exitCode", "exit_code", "code"].some((key) => {
+    const value = getNumber(event, key);
+    return value !== undefined && value !== 0;
+  });
 }
 
 function createToolCard(input: {

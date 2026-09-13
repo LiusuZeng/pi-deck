@@ -3021,7 +3021,7 @@ test("failed tool activity remains conspicuous and inspectable", async () => {
 
     const activityGroup = page.locator(".agent-activity-group").first();
     await expect(activityGroup.locator(":scope > summary")).toContainText(
-      "needs attention",
+      "failed",
     );
     await expect(activityGroup).toHaveAttribute("open", "");
     const failedMilestone = activityGroup
@@ -3058,6 +3058,20 @@ test("failed tool activity remains conspicuous and inspectable", async () => {
         .locator(".tool-card pre")
         .filter({ hasText: "fake tool failed" }),
     ).toBeVisible();
+    await expect(page.locator(".assistant-message").last()).toContainText(
+      "Fake response to: show a failed tool",
+    );
+
+    await page.getByRole("button", { name: /^All Work/ }).click();
+    const completedRow = page
+      .locator(".activity-inbox-row")
+      .filter({ hasText: "show a failed tool" });
+    await expect(completedRow).toHaveClass(/activity-inbox-row--completed/);
+    await expect(
+      page
+        .locator(".activity-inbox-row--needsAttention")
+        .filter({ hasText: "show a failed tool" }),
+    ).toHaveCount(0);
   } finally {
     await app.close();
     fs.rmSync(root, { recursive: true, force: true });
@@ -6708,7 +6722,7 @@ test.describe("Unified Work", () => {
         userDataDir,
         fakePiArgs: [
           "--prompt-scenario",
-          "extension-ui",
+          "tool-error-extension-ui",
           "--extension-ui-auto-complete-timeout-ms",
           "120000",
         ],
@@ -6730,7 +6744,20 @@ test.describe("Unified Work", () => {
       await expect(
         page.getByText("Fake confirm", { exact: true }),
       ).toBeVisible();
+      await expect(
+        page
+          .locator(".agent-activity-group")
+          .first()
+          .locator(":scope > summary"),
+      ).toContainText("failed");
+      await expect(
+        page
+          .getByRole("button", { name: `Session: ${prompt}` })
+          .getByRole("img", { name: "Needs input" }),
+      ).toBeVisible();
 
+      // The failed tool remains in detail, but only the pending extension
+      // request places this row in Needs attention.
       // All Work retains its Needs attention filter and restores the opened row.
       await page.getByRole("button", { name: /^All Work/ }).click();
       await expectAllWorkLaunch(page);

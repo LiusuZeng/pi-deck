@@ -496,6 +496,41 @@ test("fake RPC command failure fixture exposes stderr and exit code", async () =
   }
 });
 
+test("fake RPC can emit a failed tool before a pending extension request", async () => {
+  const client = spawnFakeRpc([
+    "--stream-delay-ms",
+    "1",
+    "--prompt-scenario",
+    "tool-error-extension-ui",
+  ]);
+  try {
+    const promptEvents = waitForEvents(
+      client,
+      (events) =>
+        events.some(
+          (event) =>
+            event.type === "tool_execution_end" &&
+            (event as JsonObject).status === "error",
+        ) && events.some((event) => event.type === "extension_ui_request"),
+    );
+    await client.request("prompt", { text: "request approval after failure" });
+    const events = await promptEvents;
+    const failedToolIndex = events.findIndex(
+      (event) =>
+        event.type === "tool_execution_end" &&
+        (event as JsonObject).status === "error",
+    );
+    const requestIndex = events.findIndex(
+      (event) => event.type === "extension_ui_request",
+    );
+
+    assert.ok(failedToolIndex >= 0);
+    assert.ok(requestIndex > failedToolIndex);
+  } finally {
+    client.close();
+  }
+});
+
 test("fake RPC malformed JSON and pending-exit fixtures exercise transport failure paths", async () => {
   const malformed = spawnFakeRpc(["--malformed-on-start"]);
   try {

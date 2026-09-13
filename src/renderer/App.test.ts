@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { buildActivityInbox } from "./activityInbox.js";
-import { emptyOverlays } from "./sessionState.js";
+import { emptyOverlays, selectSidebarIndicator } from "./sessionState.js";
 import { defaultAgentWorkflowDefinition } from "./workflows/agentWorkflowDefinition.js";
 import { __rendererTestHooks, AutolinkedText, MarkdownView } from "./App.js";
 
@@ -957,6 +957,111 @@ describe("canonical occurrence Pi-session navigation", () => {
         sessionFile: "/tmp/completed-session.jsonl",
       } as any),
     ).toEqual({ sessionFile: "/tmp/completed-session.jsonl" });
+  });
+});
+
+describe("actionable session attention", () => {
+  it("keeps failed tool activity visible without promoting the session to Needs attention", () => {
+    let session = __rendererTestHooks.reduceRuntimeEvent(
+      baseSession() as any,
+      { type: "agent_start", runtimeId: "session-1" } as any,
+    );
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "tool_execution_start",
+      runtimeId: "session-1",
+      toolCallId: "tool-failed",
+      toolName: "bash",
+      args: { command: "exit 1" },
+    } as any);
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "tool_execution_end",
+      runtimeId: "session-1",
+      toolCallId: "tool-failed",
+      toolName: "bash",
+      status: "completed",
+      exitCode: 1,
+      output: "command failed",
+    } as any);
+
+    expect(session).toMatchObject({
+      status: "working",
+      baseState: "working",
+      overlays: { needsUserInput: false },
+    });
+    expect(selectSidebarIndicator(session).kind).toBe("working");
+    expect(
+      __rendererTestHooks.timelinePresentationItems(session.timeline)[0],
+    ).toMatchObject({ state: "error" });
+    expect(__rendererTestHooks.formatAgentActivityState("error")).toBe(
+      "failed",
+    );
+
+    const source = __rendererTestHooks.activitySourceSessions([session], {
+      "workspace-a": "Workspace A",
+    })[0]!;
+    expect(buildActivityInbox([source]).groups.inProgress).toHaveLength(1);
+    expect(buildActivityInbox([source]).groups.needsAttention).toHaveLength(0);
+
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "extension_ui_request",
+      runtimeId: "session-1",
+      id: "approval-1",
+      method: "confirm",
+      title: "Approve command retry",
+    } as any);
+    const waitingSource = __rendererTestHooks.activitySourceSessions(
+      [session],
+      {
+        "workspace-a": "Workspace A",
+      },
+    )[0]!;
+    expect(selectSidebarIndicator(session).kind).toBe("needsInput");
+    expect(
+      buildActivityInbox([waitingSource]).groups.needsAttention,
+    ).toHaveLength(1);
+
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "extension_ui_response_sent",
+      runtimeId: "session-1",
+      requestId: "approval-1",
+    } as any);
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "agent_end",
+      runtimeId: "session-1",
+      messages: [productionAssistantMessage("stop")],
+      willRetry: false,
+    } as any);
+    const resolvedSource = __rendererTestHooks.activitySourceSessions(
+      [session],
+      {
+        "workspace-a": "Workspace A",
+      },
+    )[0]!;
+    const resolvedInbox = buildActivityInbox([resolvedSource]);
+    expect(resolvedInbox.groups.needsAttention).toHaveLength(0);
+    expect(resolvedInbox.groups.completed).toHaveLength(1);
+    expect(
+      __rendererTestHooks.timelinePresentationItems(session.timeline)[0],
+    ).toMatchObject({ state: "error" });
+  });
+
+  it("keeps a terminal provider failure Failed without an actionable request", () => {
+    const failed = __rendererTestHooks.reduceRuntimeEvent(
+      baseSession() as any,
+      {
+        type: "agent_end",
+        runtimeId: "session-1",
+        messages: [productionAssistantMessage("error", "Provider failed.")],
+        willRetry: false,
+      } as any,
+    );
+    const source = __rendererTestHooks.activitySourceSessions([failed], {
+      "workspace-a": "Workspace A",
+    })[0]!;
+
+    expect(selectSidebarIndicator(failed).kind).toBe("error");
+    expect(buildActivityInbox([source]).groups.failed).toHaveLength(1);
+    expect(buildActivityInbox([source]).groups.needsAttention).toHaveLength(0);
   });
 });
 

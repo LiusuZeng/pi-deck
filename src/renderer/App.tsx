@@ -61,6 +61,7 @@ import {
 } from "./markdown.js";
 import {
   emptyOverlays,
+  isToolExecutionFailure,
   selectSidebarIndicator,
   type BaseSessionState,
   type SessionOverlays,
@@ -8266,7 +8267,7 @@ function reduceToolExecutionEvent(
 ): SessionViewModel {
   const status =
     event.type === "tool_execution_end"
-      ? getBoolean(event, "isError") || getString(event, "status") === "error"
+      ? isToolExecutionFailure(event)
         ? "error"
         : "success"
       : "running";
@@ -12136,7 +12137,7 @@ function formatAgentActivityState(state: AgentActivityState): string {
     case "running":
       return "working";
     case "error":
-      return "needs attention";
+      return "failed";
     case "completed":
       return "completed";
   }
@@ -13854,6 +13855,7 @@ export const __rendererTestHooks = {
   getTimelineScrollMarker,
   activityMilestones,
   activityMilestoneLabel,
+  formatAgentActivityState,
   shouldDefaultOpenActivityGroup,
   activitySemanticLabel,
   activityStepLabel,

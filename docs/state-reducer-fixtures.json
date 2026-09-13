@@ -64,6 +64,28 @@
       }
     },
     {
+      "id": "failed-tool-stays-working-without-user-input",
+      "events": [
+        { "type": "agent_start", "runId": "run_1" },
+        { "type": "tool_execution_start", "toolCallId": "tool_2", "name": "bash" },
+        {
+          "type": "tool_execution_end",
+          "toolCallId": "tool_2",
+          "status": "error",
+          "exitCode": 1,
+          "output": "command failed"
+        }
+      ],
+      "expect": {
+        "baseState": "working",
+        "overlays": { "needsUserInput": false, "toolRunning": false },
+        "toolCards": {
+          "tool_2": { "status": "error", "isError": true, "output": "command failed" }
+        },
+        "sidebarPriority": "working"
+      }
+    },
+    {
       "id": "queue-counts",
       "events": [{ "type": "queue_update", "steeringCount": 1, "followUpCount": 2 }],
       "expect": {

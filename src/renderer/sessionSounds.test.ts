@@ -135,6 +135,22 @@ describe("session sound transitions", () => {
     expect(cue).toBe("needsAttention");
   });
 
+  it("does not request an attention sound for tool-error-only work", () => {
+    const result = collect(
+      { "runtime:runtime-1": projection({ status: "inProgress" }) },
+      [
+        source({
+          baseState: "working",
+          lastError: "Shell command exited 1",
+          overlays: { toolRunning: false },
+        }),
+      ],
+    );
+
+    expect(result.next["runtime:runtime-1"]?.status).toBe("inProgress");
+    expect(result.requests).toEqual([]);
+  });
+
   it("does not play attention for first observed or non-working needs-attention state", () => {
     const cue = sessionSoundCueForTransition(
       projection({ status: "none" }),

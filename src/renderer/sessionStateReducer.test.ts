@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import fixture from "../../docs/state-reducer-fixtures.json" with { type: "json" };
 import {
   createInitialReducedSessionState,
+  isToolExecutionFailure,
   reduceSessionRuntimeEvent,
   selectSidebarIndicator,
   type ReducedSessionState,
@@ -51,6 +52,40 @@ describe("reduceSessionRuntimeEvent", () => {
         );
       }
     }
+  });
+
+  it("keeps isError tool failures on the tool card without requesting input", () => {
+    const state = applyEvents([
+      { type: "agent_start" },
+      { type: "tool_execution_start", toolCallId: "tool-1", name: "bash" },
+      {
+        type: "tool_execution_end",
+        toolCallId: "tool-1",
+        isError: true,
+        output: "command failed",
+      },
+    ]);
+
+    expect(state.baseState).toBe("working");
+    expect(state.overlays.needsUserInput).toBe(false);
+    expect(state.toolCards["tool-1"]).toMatchObject({
+      status: "error",
+      isError: true,
+      output: "command failed",
+    });
+    expect(selectSidebarIndicator(state).kind).toBe("working");
+  });
+
+  it("recognizes failed status and non-zero shell exits as tool-card failures", () => {
+    expect(
+      isToolExecutionFailure({ type: "tool_execution_end", status: "failed" }),
+    ).toBe(true);
+    expect(
+      isToolExecutionFailure({ type: "tool_execution_end", exit_code: 1 }),
+    ).toBe(true);
+    expect(
+      isToolExecutionFailure({ type: "tool_execution_end", exitCode: 0 }),
+    ).toBe(false);
   });
 
   it("clears extension UI waiting only after a response/write success event", () => {
