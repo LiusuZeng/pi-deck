@@ -3814,6 +3814,36 @@ describe("renderer message_update reduction", () => {
     ]);
   });
 
+  it("keeps response-id text and thinking updates in separate timeline items", () => {
+    const text = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {
+      type: "message_update",
+      runtimeId: "session-1",
+      message: {
+        responseId: "response-1",
+        role: "assistant",
+        content: [{ type: "text", text: "Answer" }],
+      },
+    } as any);
+    const next = __rendererTestHooks.reduceRuntimeEvent(text, {
+      type: "message_update",
+      runtimeId: "session-1",
+      assistantMessageEvent: {
+        type: "thinking_delta",
+        responseId: "response-1",
+        delta: "Reasoning",
+      },
+    } as any);
+
+    expect(next.timeline).toMatchObject([
+      { id: "response-1", kind: "assistant", content: "Answer" },
+      {
+        id: "thinking-response-1",
+        kind: "thinking",
+        content: "Reasoning",
+      },
+    ]);
+  });
+
   it("surfaces asynchronous message update errors instead of returning to idle", () => {
     const next = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {
       type: "message_update",

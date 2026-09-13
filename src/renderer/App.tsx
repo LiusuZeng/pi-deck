@@ -81,7 +81,6 @@ import {
   clampThinkingLevel,
   eventHasUsageMetadata,
   extractTextContent,
-  extractThinkingContent,
   getContextWindowTokens,
   getMessageUsageFromEvent,
   mergeSessionUsageFromRuntimeStatus,
@@ -149,6 +148,13 @@ import {
   transferAttachmentOwnership,
 } from "./attachmentLifecycle.js";
 import { RuntimeEventBuffer } from "./runtimeEventBuffer.js";
+import {
+  getAssistantMessageEventType,
+  getMessageTextUpdate,
+  getMessageUpdateId,
+  getMessageUpdateRole,
+  getThinkingUpdateContent,
+} from "./runtimeMessageProjection.js";
 import {
   buildActivityInbox,
   countActivityInboxItems,
@@ -13360,149 +13366,6 @@ function updateSessionByRuntimeId(
   const next = sessions.slice();
   next[index] = updated;
   return next;
-}
-
-function getMessageUpdateId(event: ChatRuntimeEvent): string | undefined {
-  const direct = getString(event, "messageId");
-  if (direct !== undefined) {
-    return direct;
-  }
-
-  const message = getRecord(event, "message");
-  const messageId = getStringFromRecord(message, "id");
-  if (messageId !== undefined) {
-    return messageId;
-  }
-  const responseId = getStringFromRecord(message, "responseId");
-  if (responseId !== undefined) {
-    return responseId;
-  }
-
-  const assistantEvent = getRecord(event, "assistantMessageEvent");
-  const assistantResponseId = getStringFromRecord(assistantEvent, "responseId");
-  if (assistantResponseId !== undefined) {
-    return assistantResponseId;
-  }
-  const partial = getRecordFromRecord(assistantEvent, "partial");
-  return getStringFromRecord(partial, "responseId");
-}
-
-function getMessageUpdateRole(event: ChatRuntimeEvent): string | undefined {
-  const message = getRecord(event, "message");
-  return getString(event, "role") ?? getStringFromRecord(message, "role");
-}
-
-type MessageTextUpdate = {
-  content: string;
-  mode: "replace" | "append";
-};
-
-function getMessageTextUpdate(
-  event: ChatRuntimeEvent,
-): MessageTextUpdate | undefined {
-  const directDelta = getString(event, "delta");
-  const assistantDelta = getAssistantMessageDelta(event);
-  if (directDelta !== undefined) {
-    return { content: directDelta, mode: "append" };
-  }
-  if (assistantDelta !== undefined) {
-    return { content: assistantDelta, mode: "append" };
-  }
-
-  const directContent = getString(event, "content");
-  if (directContent !== undefined) {
-    return { content: directContent, mode: "replace" };
-  }
-
-  const messageContent = getMessageUpdateContent(event);
-  if (messageContent !== undefined) {
-    return { content: messageContent, mode: "replace" };
-  }
-
-  const assistantContent = getAssistantMessageContent(event);
-  if (assistantContent !== undefined) {
-    return { content: assistantContent, mode: "replace" };
-  }
-
-  return undefined;
-}
-
-function getMessageUpdateContent(event: ChatRuntimeEvent): string | undefined {
-  const message = getUnknown(event, "message");
-  if (!message || typeof message !== "object" || Array.isArray(message)) {
-    return undefined;
-  }
-  return extractTextContent((message as Record<string, unknown>).content);
-}
-
-function getAssistantMessageEventType(
-  event: ChatRuntimeEvent,
-): string | undefined {
-  const assistantEvent = getUnknown(event, "assistantMessageEvent");
-  if (
-    !assistantEvent ||
-    typeof assistantEvent !== "object" ||
-    Array.isArray(assistantEvent)
-  ) {
-    return undefined;
-  }
-  const type = (assistantEvent as Record<string, unknown>).type;
-  return typeof type === "string" ? type : undefined;
-}
-
-function getAssistantMessageDelta(event: ChatRuntimeEvent): string | undefined {
-  const assistantEvent = getUnknown(event, "assistantMessageEvent");
-  if (
-    !assistantEvent ||
-    typeof assistantEvent !== "object" ||
-    Array.isArray(assistantEvent)
-  ) {
-    return undefined;
-  }
-  const record = assistantEvent as Record<string, unknown>;
-  const type = typeof record.type === "string" ? record.type : "";
-  if (type !== "" && type !== "text_delta") {
-    return undefined;
-  }
-  return typeof record.delta === "string" ? record.delta : undefined;
-}
-
-function getAssistantMessageContent(
-  event: ChatRuntimeEvent,
-): string | undefined {
-  const assistantEvent = getUnknown(event, "assistantMessageEvent");
-  if (
-    !assistantEvent ||
-    typeof assistantEvent !== "object" ||
-    Array.isArray(assistantEvent)
-  ) {
-    return undefined;
-  }
-  const record = assistantEvent as Record<string, unknown>;
-  const type = typeof record.type === "string" ? record.type : "";
-  if (type !== "" && !type.startsWith("text_") && type !== "done") {
-    return undefined;
-  }
-  if (type === "done") {
-    return extractTextContent(record.partial);
-  }
-  if (typeof record.content === "string") {
-    return record.content;
-  }
-  return extractTextContent(record.partial);
-}
-
-function getThinkingUpdateContent(event: ChatRuntimeEvent): string | undefined {
-  const assistantEvent = getRecord(event, "assistantMessageEvent");
-  const type = getStringFromRecord(assistantEvent, "type") ?? "";
-  if (type.includes("thinking")) {
-    return (
-      getStringFromRecord(assistantEvent, "delta") ??
-      getStringFromRecord(assistantEvent, "content") ??
-      extractThinkingContent(assistantEvent?.partial)
-    );
-  }
-  return extractThinkingContent(getRecord(event, "message")?.content);
 }
 
 function getRuntimeEventErrorMessage(
