@@ -202,7 +202,7 @@ describe("session sound playback", () => {
     }
   });
 
-  it("never constructs another context while a failed context is retiring", async () => {
+  it("lets one replacement play while a failed context is closing", async () => {
     let finishClose: (() => void) | undefined;
     const close = vi.fn(
       () =>
@@ -266,29 +266,184 @@ describe("session sound playback", () => {
       player.play("needsAttention");
       await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
       player.play("completed");
-      expect(AudioContext).toHaveBeenCalledOnce();
+      await vi.waitFor(() => expect(AudioContext).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(createOscillator).toHaveBeenCalledTimes(4));
 
       finishClose?.();
       await vi.waitFor(() => expect(events).toContain("context-retired"));
       player.play("needsAttention");
-      await vi.waitFor(() => expect(AudioContext).toHaveBeenCalledTimes(2));
-      await vi.waitFor(() => expect(createOscillator).toHaveBeenCalledTimes(3));
+      await vi.waitFor(() => expect(createOscillator).toHaveBeenCalledTimes(6));
+      expect(AudioContext).toHaveBeenCalledTimes(2);
     } finally {
       vi.unstubAllGlobals();
     }
   });
 
-  it("quarantines a context whose close fails instead of accumulating contexts", async () => {
-    const close = vi.fn().mockRejectedValue(new Error("close failed"));
+  it("defers close until overlapping nodes end, then lets a replacement serve the next cue", async () => {
+    type FakeNode = OscillatorNode & { end(): void; ended: boolean };
+    const firstNodes: FakeNode[] = [];
+    const firstCloseSawOnlyEndedNodes: boolean[] = [];
+    const createFirstNode = vi.fn(() => {
+      const node = {
+        type: "sine",
+        ended: false,
+        frequency: { setValueAtTime: vi.fn() },
+        connect: vi.fn(),
+        start: vi.fn(),
+        stop: vi.fn(),
+        onended: null as (() => void) | null,
+        end() {
+          node.ended = true;
+          node.onended?.();
+        },
+      } as unknown as FakeNode;
+      firstNodes.push(node);
+      return node;
+    });
+    const createGain = vi.fn(
+      () =>
+        ({
+          gain: {
+            setValueAtTime: vi.fn(),
+            exponentialRampToValueAtTime: vi.fn(),
+          },
+          connect: vi.fn(),
+        }) as unknown as GainNode,
+    );
+    const firstClose = vi.fn(() => {
+      firstCloseSawOnlyEndedNodes.push(firstNodes.every((node) => node.ended));
+      return Promise.resolve();
+    });
+    const contexts = [
+      {
+        currentTime: 0,
+        destination: {} as AudioNode,
+        resume: vi
+          .fn()
+          .mockResolvedValueOnce(undefined)
+          .mockRejectedValueOnce(new Error("later resume failed")),
+        close: firstClose,
+        createGain,
+        createOscillator: createFirstNode,
+      },
+      {
+        currentTime: 0,
+        destination: {} as AudioNode,
+        resume: vi.fn().mockResolvedValue(undefined),
+        close: vi.fn().mockResolvedValue(undefined),
+        createGain,
+        createOscillator: vi.fn(
+          () =>
+            ({
+              type: "sine",
+              frequency: { setValueAtTime: vi.fn() },
+              connect: vi.fn(),
+              start: vi.fn(),
+              stop: vi.fn(),
+            }) as unknown as OscillatorNode,
+        ),
+      },
+    ];
+    const AudioContext = vi.fn(function () {
+      return contexts.shift();
+    });
+    vi.stubGlobal("window", { AudioContext });
+
+    try {
+      const player = createDefaultSessionSoundPlayer();
+      player.play("completed");
+      await vi.waitFor(() => expect(firstNodes).toHaveLength(3));
+
+      player.play("needsAttention");
+      await vi.waitFor(() => expect(firstClose).not.toHaveBeenCalled());
+      player.play("needsAttention");
+      await vi.waitFor(() => expect(AudioContext).toHaveBeenCalledTimes(2));
+      expect(firstClose).not.toHaveBeenCalled();
+
+      for (const node of firstNodes) {
+        node.end();
+      }
+      await vi.waitFor(() => expect(firstClose).toHaveBeenCalledOnce());
+      expect(firstCloseSawOnlyEndedNodes).toEqual([true]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not close a quarantined context when a stalled source misses its deadline", async () => {
+    type FakeNode = OscillatorNode & { end(): void };
+    const nodes: FakeNode[] = [];
+    const close = vi.fn().mockResolvedValue(undefined);
     const AudioContext = vi.fn(function () {
       return {
         currentTime: 0,
         destination: {} as AudioNode,
-        resume: vi.fn().mockRejectedValue(new Error("resume failed")),
+        resume: vi
+          .fn()
+          .mockResolvedValueOnce(undefined)
+          .mockRejectedValueOnce(new Error("later resume failed")),
         close,
-        createGain: vi.fn(),
-        createOscillator: vi.fn(),
+        createGain: vi.fn(
+          () =>
+            ({
+              gain: {
+                setValueAtTime: vi.fn(),
+                exponentialRampToValueAtTime: vi.fn(),
+              },
+              connect: vi.fn(),
+            }) as unknown as GainNode,
+        ),
+        createOscillator: vi.fn(() => {
+          const node = {
+            type: "sine",
+            frequency: { setValueAtTime: vi.fn() },
+            connect: vi.fn(),
+            start: vi.fn(),
+            stop: vi.fn(),
+            onended: null as (() => void) | null,
+            end() {
+              node.onended?.();
+            },
+          } as unknown as FakeNode;
+          nodes.push(node);
+          return node;
+        }),
       } as unknown as AudioContext;
+    });
+    vi.stubGlobal("window", { AudioContext });
+
+    try {
+      const player = createDefaultSessionSoundPlayer();
+      player.play("needsAttention");
+      await vi.waitFor(() => expect(nodes).toHaveLength(2));
+      player.play("completed");
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      expect(
+        nodes.every((node) => vi.mocked(node.stop).mock.calls.length >= 2),
+      ).toBe(true);
+      expect(close).not.toHaveBeenCalled();
+
+      for (const node of nodes) {
+        node.end();
+      }
+      await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("quarantines failed closes without accumulating beyond two contexts", async () => {
+    const close = vi.fn().mockRejectedValue(new Error("close failed"));
+    const contexts = Array.from({ length: 2 }, () => ({
+      currentTime: 0,
+      destination: {} as AudioNode,
+      resume: vi.fn().mockRejectedValue(new Error("resume failed")),
+      close,
+      createGain: vi.fn(),
+      createOscillator: vi.fn(),
+    }));
+    const AudioContext = vi.fn(function () {
+      return contexts.shift();
     });
     vi.stubGlobal("window", { AudioContext });
 
@@ -302,13 +457,15 @@ describe("session sound playback", () => {
         expect(events).toContain("context-retirement-failed"),
       );
       player.play("needsAttention");
-      expect(AudioContext).toHaveBeenCalledOnce();
+      await vi.waitFor(() => expect(AudioContext).toHaveBeenCalledTimes(2));
+      player.play("completed");
+      expect(AudioContext).toHaveBeenCalledTimes(2);
     } finally {
       vi.unstubAllGlobals();
     }
   });
 
-  it("reuses a suspended fallback context instead of constructing another one", async () => {
+  it("quarantines an uncloseable fallback instead of reusing it", async () => {
     const suspend = vi.fn().mockResolvedValue(undefined);
     const createOscillator = vi.fn(
       () =>
@@ -349,7 +506,74 @@ describe("session sound playback", () => {
       await vi.waitFor(() => expect(suspend).toHaveBeenCalledOnce());
       player.play("needsAttention");
       await vi.waitFor(() => expect(createOscillator).toHaveBeenCalledTimes(2));
-      expect(AudioContext).toHaveBeenCalledOnce();
+      expect(AudioContext).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("hard cleanup stops sources and closes only after they end", async () => {
+    type FakeNode = OscillatorNode & { end(): void; ended: boolean };
+    const nodes: FakeNode[] = [];
+    const closeSawOnlyEndedNodes: boolean[] = [];
+    const close = vi.fn(() => {
+      closeSawOnlyEndedNodes.push(nodes.every((node) => node.ended));
+      return Promise.resolve();
+    });
+    const AudioContext = vi.fn(function () {
+      return {
+        currentTime: 0,
+        destination: {} as AudioNode,
+        resume: vi.fn().mockResolvedValue(undefined),
+        close,
+        createGain: vi.fn(
+          () =>
+            ({
+              gain: {
+                setValueAtTime: vi.fn(),
+                exponentialRampToValueAtTime: vi.fn(),
+              },
+              connect: vi.fn(),
+            }) as unknown as GainNode,
+        ),
+        createOscillator: vi.fn(() => {
+          const node = {
+            type: "sine",
+            ended: false,
+            frequency: { setValueAtTime: vi.fn() },
+            connect: vi.fn(),
+            start: vi.fn(),
+            stop: vi.fn(),
+            onended: null as (() => void) | null,
+            end() {
+              node.ended = true;
+              node.onended?.();
+            },
+          } as unknown as FakeNode;
+          nodes.push(node);
+          return node;
+        }),
+      } as unknown as AudioContext;
+    });
+    vi.stubGlobal("window", { AudioContext });
+
+    try {
+      const player = createDefaultSessionSoundPlayer();
+      player.play("needsAttention");
+      await vi.waitFor(() => expect(nodes).toHaveLength(2));
+      player.deactivate();
+      expect(close).not.toHaveBeenCalled();
+      expect(
+        nodes.every((node) =>
+          vi.mocked(node.stop).mock.calls.some(([at]) => at === 0),
+        ),
+      ).toBe(true);
+
+      for (const node of nodes) {
+        node.end();
+      }
+      await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+      expect(closeSawOnlyEndedNodes).toEqual([true]);
     } finally {
       vi.unstubAllGlobals();
     }

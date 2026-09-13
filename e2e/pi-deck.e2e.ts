@@ -3814,11 +3814,20 @@ test("session sounds avoid disabled gestures, recover safely, and leave Work usa
         maxLiveContexts: 0,
         resumes: 0,
         oscillators: 0,
+        activeNodes: 0,
         closes: 0,
+        closesBeforeNodesEnded: 0,
         failNextResume: false,
         holdClose: false,
         releaseClose: undefined as (() => void) | undefined,
+        endActiveNodes: undefined as (() => void) | undefined,
+        endOnStop: false,
       };
+      const nodes = new Set<{
+        ended: boolean;
+        end(): void;
+        onended: (() => void) | null;
+      }>();
       class InstrumentedAudioContext {
         readonly currentTime = 0;
         readonly destination = {} as AudioNode;
@@ -3843,6 +3852,9 @@ test("session sounds avoid disabled gestures, recover safely, and leave Work usa
 
         close(): Promise<void> {
           metrics.closes += 1;
+          if (metrics.activeNodes !== 0) {
+            metrics.closesBeforeNodesEnded += 1;
+          }
           const finish = () => {
             metrics.liveContexts -= 1;
           };
@@ -3870,15 +3882,45 @@ test("session sounds avoid disabled gestures, recover safely, and leave Work usa
 
         createOscillator(): OscillatorNode {
           metrics.oscillators += 1;
+          const node = {
+            ended: false,
+            onended: null as (() => void) | null,
+            end() {
+              if (node.ended) {
+                return;
+              }
+              node.ended = true;
+              metrics.activeNodes -= 1;
+              node.onended?.();
+            },
+          };
+          nodes.add(node);
           return {
             type: "sine",
             frequency: { setValueAtTime() {} },
             connect() {},
-            start() {},
-            stop() {},
+            start() {
+              metrics.activeNodes += 1;
+            },
+            stop: () => {
+              if (metrics.endOnStop) {
+                node.end();
+              }
+            },
+            get onended() {
+              return node.onended;
+            },
+            set onended(listener) {
+              node.onended = listener as (() => void) | null;
+            },
           } as unknown as OscillatorNode;
         }
       }
+      metrics.endActiveNodes = () => {
+        for (const node of nodes) {
+          node.end();
+        }
+      };
       Object.defineProperty(window, "AudioContext", {
         configurable: true,
         value: InstrumentedAudioContext,
@@ -3900,10 +3942,13 @@ test("session sounds avoid disabled gestures, recover safely, and leave Work usa
                 maxLiveContexts: number;
                 resumes: number;
                 oscillators: number;
+                activeNodes: number;
                 closes: number;
+                closesBeforeNodesEnded: number;
                 failNextResume: boolean;
                 holdClose: boolean;
                 releaseClose?: () => void;
+                endActiveNodes?: () => void;
               };
             }
           ).__sessionSoundMetrics,
@@ -3957,11 +4002,23 @@ test("session sounds avoid disabled gestures, recover safely, and leave Work usa
       ).__sessionSoundMetrics.holdClose = true;
     });
     await gesture();
-    await expect.poll(soundMetrics).toMatchObject({ contexts: 1, closes: 1 });
+    await expect
+      .poll(soundMetrics)
+      .toMatchObject({ contexts: 1, closes: 0, activeNodes: 2 });
     await gesture();
     await expect
       .poll(soundMetrics)
-      .toMatchObject({ contexts: 1, maxLiveContexts: 1 });
+      .toMatchObject({ contexts: 2, maxLiveContexts: 2, activeNodes: 2 });
+    await page.evaluate(() => {
+      (
+        window as typeof window & {
+          __sessionSoundMetrics: { endActiveNodes?: () => void };
+        }
+      ).__sessionSoundMetrics.endActiveNodes?.();
+    });
+    await expect
+      .poll(soundMetrics)
+      .toMatchObject({ closes: 1, closesBeforeNodesEnded: 0 });
     await page.evaluate(() => {
       (
         window as typeof window & {
@@ -3980,11 +4037,13 @@ test("session sounds avoid disabled gestures, recover safely, and leave Work usa
         }
       ).__sessionSoundMetrics.holdClose = false;
     });
-    await expect.poll(soundMetrics).toMatchObject({ liveContexts: 0 });
-    await gesture();
-    await expect
-      .poll(soundMetrics)
-      .toMatchObject({ contexts: 2, maxLiveContexts: 1 });
+    await expect.poll(soundMetrics).toMatchObject({ liveContexts: 1 });
+
+    await page.getByRole("button", { name: "Appearance: System" }).click();
+    await page
+      .getByRole("button", { name: "Test needs attention sound" })
+      .click();
+    await expect.poll(soundMetrics).toMatchObject({ oscillators: 4 });
 
     await enterSessionDetail(page);
     await page.getByLabel("Prompt text").fill("sound errors stay supplemental");
@@ -3994,6 +4053,14 @@ test("session sounds avoid disabled gestures, recover safely, and leave Work usa
         exact: true,
       }),
     ).toBeVisible();
+    await expect.poll(soundMetrics).toMatchObject({ activeNodes: 2 });
+    await page.evaluate(() => {
+      (
+        window as typeof window & {
+          __sessionSoundMetrics: { endOnStop: boolean };
+        }
+      ).__sessionSoundMetrics.endOnStop = true;
+    });
 
     await page.getByRole("button", { name: "Appearance: System" }).click();
     await page
@@ -4005,7 +4072,9 @@ test("session sounds avoid disabled gestures, recover safely, and leave Work usa
         needsAttention: false,
         completed: false,
       });
-    await expect.poll(soundMetrics).toMatchObject({ closes: 2 });
+    await expect
+      .poll(soundMetrics)
+      .toMatchObject({ closes: 2, closesBeforeNodesEnded: 0, liveContexts: 0 });
     const beforeDisabledGesture = await soundMetrics();
     await gesture();
     await expect.poll(soundMetrics).toMatchObject({
