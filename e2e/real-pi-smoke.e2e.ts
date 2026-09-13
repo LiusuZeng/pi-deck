@@ -439,6 +439,38 @@ test("real Pi bridge transport: default workspace prompt, resume, and explicit d
           .first(),
       ).toBeVisible();
 
+      // Exercise native `pi --fork` against an attached source. Pi Deck must
+      // launch a second worker rather than issue RPC clone/fork on this one.
+      const forked = await firstLaunch.page.evaluate(async () => {
+        const source = await window.piDeck.chat.getSnapshot();
+        const fork = await window.piDeck.chat.forkSession({
+          workspaceId: source.workspaceId!,
+          sessionFile: source.state.sessionFile!,
+        });
+        return {
+          source: {
+            runtimeId: source.runtimeId,
+            sessionFile: source.state.sessionFile,
+            sessionId: source.state.sessionId,
+          },
+          fork: {
+            runtimeId: fork.runtimeId,
+            sessionFile: fork.state.sessionFile,
+            sessionId: fork.state.sessionId,
+          },
+          copiedUserText: fork.messages.some(
+            (message) =>
+              message.role === "user" &&
+              typeof message.content === "string" &&
+              message.content.includes(token),
+          ),
+        };
+      });
+      expect(forked.fork.runtimeId).not.toBe(forked.source.runtimeId);
+      expect(forked.fork.sessionFile).not.toBe(forked.source.sessionFile);
+      expect(forked.fork.sessionId).not.toBe(forked.source.sessionId);
+      expect(forked.copiedUserText).toBe(true);
+
       // The parent exists before enabling its parent-scoped mode. The explicit
       // instruction is also the deterministic harness trigger; that harness
       // calls the real generated deck_delegate tool, not a fake RPC endpoint.

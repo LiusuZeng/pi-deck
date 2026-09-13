@@ -58,6 +58,8 @@ interface FakeOptions {
   /** Emits spaced, payload-free worker progress for Electron telemetry E2E. */
   taskSessionProgressFixture: boolean;
   sessionFile?: string;
+  /** Native Pi-compatible source path for a new independent fake session. */
+  forkSourceFile?: string;
   /** Test-only override for the cwd reported by get_state. */
   getStateCwd?: string;
   workflowDecisions: boolean[];
@@ -186,6 +188,12 @@ function parseOptions(argv: string[]): FakeOptions {
         options.sessionFile = sessionFile;
       }
       index += 1;
+    } else if (arg === "--fork") {
+      const sourceFile = argv[index + 1];
+      if (sourceFile) {
+        options.forkSourceFile = sourceFile;
+      }
+      index += 1;
     } else if (arg === "--get-state-cwd") {
       const cwd = argv[index + 1];
       if (cwd) options.getStateCwd = cwd;
@@ -279,7 +287,11 @@ class FakeRpcServer {
   private readonly sessionFile = this.resolveSessionFile();
   private readonly shouldPersistSessionFile =
     !this.options.noSession &&
-    Boolean(this.options.sessionFile || process.env.PI_CODING_AGENT_DIR);
+    Boolean(
+      this.options.sessionFile ||
+      this.options.forkSourceFile ||
+      process.env.PI_CODING_AGENT_DIR,
+    );
   private buffer = "";
   private firstCommandSeen = false;
   private promptCounter = 0;
@@ -403,8 +415,8 @@ class FakeRpcServer {
   }
 
   start(): void {
-    this.rehydratePersistedMessages();
     this.ensurePersistedSessionRecord();
+    this.rehydratePersistedMessages();
     if (this.options.stderrOnStart) {
       process.stderr.write("fake-rpc: deterministic stderr diagnostic\n");
     }
@@ -435,7 +447,12 @@ class FakeRpcServer {
         `fake-session-${Date.now()}-${process.pid}.jsonl`,
       );
     }
-    return path.join(process.cwd(), "fake-session.jsonl");
+    return this.options.forkSourceFile
+      ? path.join(
+          process.cwd(),
+          `fake-session-${Date.now()}-${process.pid}.jsonl`,
+        )
+      : path.join(process.cwd(), "fake-session.jsonl");
   }
 
   private ensurePersistedSessionRecord(): void {
@@ -444,20 +461,55 @@ class FakeRpcServer {
     }
     try {
       fs.mkdirSync(path.dirname(this.sessionFile), { recursive: true });
-      if (!fs.existsSync(this.sessionFile)) {
+      if (fs.existsSync(this.sessionFile)) return;
+      const sourceFile = this.options.forkSourceFile;
+      if (sourceFile) {
+        // This fixture models Pi's CLI --fork boundary: a fresh target header
+        // plus every non-header source record. Pi Deck itself never copies
+        // JSONL; this is only the deterministic fake Pi implementation.
+        const sourceLines = fs
+          .readFileSync(path.resolve(sourceFile), "utf8")
+          .split(/\r?\n/)
+          .filter((line) => line.trim().length > 0);
+        const copiedRecords = sourceLines.filter((line) => {
+          try {
+            const record = JSON.parse(line) as { type?: unknown };
+            return record.type !== "session";
+          } catch {
+            return false;
+          }
+        });
         fs.writeFileSync(
           this.sessionFile,
-          `${JSON.stringify({
-            type: "session",
-            version: 3,
-            id: path.basename(this.sessionFile, ".jsonl"),
-            timestamp: new Date().toISOString(),
-            cwd: process.cwd(),
-          })}\n`,
+          [
+            JSON.stringify({
+              type: "session",
+              version: 3,
+              id: path.basename(this.sessionFile, ".jsonl"),
+              timestamp: new Date().toISOString(),
+              cwd: process.cwd(),
+              parentSession: path.resolve(sourceFile),
+            }),
+            ...copiedRecords,
+          ].join("\n") + "\n",
         );
+        return;
       }
-    } catch {
-      // Fake persistence is best-effort and should not break RPC tests.
+      fs.writeFileSync(
+        this.sessionFile,
+        `${JSON.stringify({
+          type: "session",
+          version: 3,
+          id: path.basename(this.sessionFile, ".jsonl"),
+          timestamp: new Date().toISOString(),
+          cwd: process.cwd(),
+        })}\n`,
+      );
+    } catch (error) {
+      // A requested native fork has no meaningful state without its source.
+      // Let the process fail like Pi does rather than silently reusing an
+      // unrelated target/history. Ordinary fake persistence stays best-effort.
+      if (this.options.forkSourceFile) throw error;
     }
   }
 
@@ -467,7 +519,10 @@ class FakeRpcServer {
    * after the worker (and app) have restarted.
    */
   private rehydratePersistedMessages(): void {
-    if (!this.options.sessionFile || !fs.existsSync(this.sessionFile)) {
+    if (
+      (!this.options.sessionFile && !this.options.forkSourceFile) ||
+      !fs.existsSync(this.sessionFile)
+    ) {
       return;
     }
     try {

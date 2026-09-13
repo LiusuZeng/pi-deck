@@ -6577,6 +6577,118 @@ test("real mode does not fall back to fake/local UI and can send from active run
   }
 });
 
+test("real-mode session fork creates an independent Pi history and survives relaunch", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-fork-"));
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  const env = fakeRealModeEnv({ root, projectCwd, agentDir, userDataDir });
+  const sourceToken = `fork-source-${Date.now()}`;
+  const forkToken = `fork-child-${Date.now()}`;
+  let source: {
+    runtimeId: string;
+    workspaceId: string;
+    sessionFile: string;
+    sessionId: string;
+  };
+  let fork: { runtimeId: string; sessionFile: string; sessionId: string };
+  const first = await launchPiDeck(env);
+  try {
+    await expectHealthyPreload(first.page);
+    await sidebarNewSessionButton(first.page).click();
+    await first.page.getByLabel("Prompt text").fill(sourceToken);
+    await first.page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      first.page.getByText(`Fake response to: ${sourceToken}`),
+    ).toBeVisible({
+      timeout: 20_000,
+    });
+    source = await first.page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      return {
+        runtimeId: snapshot.runtimeId,
+        workspaceId: snapshot.workspaceId!,
+        sessionFile: snapshot.state.sessionFile!,
+        sessionId: snapshot.state.sessionId!,
+      };
+    });
+    const actionMenu = first.page.getByTestId(
+      `session-actions-${source.runtimeId}`,
+    );
+    await actionMenu.getByRole("button").click();
+    const forkItem = first.page.getByRole("menuitem", {
+      name: "Fork session…",
+    });
+    await expect(forkItem).toBeEnabled();
+    await forkItem.click();
+    const forkDialog = first.page.getByTestId("session-fork-dialog");
+    await expect(forkDialog).toContainText("original session stays unchanged");
+    await forkDialog.getByRole("button", { name: "Fork session" }).click();
+    await expect(forkDialog).toHaveCount(0);
+    await expect(first.page.getByLabel("Chat / Agent Timeline")).toContainText(
+      sourceToken,
+    );
+    fork = await first.page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      return {
+        runtimeId: snapshot.runtimeId,
+        sessionFile: snapshot.state.sessionFile!,
+        sessionId: snapshot.state.sessionId!,
+      };
+    });
+    expect(fork.runtimeId).not.toBe(source.runtimeId);
+    expect(fork.sessionFile).not.toBe(source.sessionFile);
+    expect(fork.sessionId).not.toBe(source.sessionId);
+    await first.page.getByLabel("Prompt text").fill(forkToken);
+    await first.page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      first.page.getByText(`Fake response to: ${forkToken}`),
+    ).toBeVisible({
+      timeout: 20_000,
+    });
+    await first.page
+      .getByTestId(`session-actions-${source.runtimeId}`)
+      .locator("..")
+      .getByRole("button", { name: `Session: ${sourceToken}` })
+      .click();
+    await expect(first.page.getByLabel("Chat / Agent Timeline")).toContainText(
+      sourceToken,
+    );
+    await expect(
+      first.page.getByLabel("Chat / Agent Timeline"),
+    ).not.toContainText(forkToken);
+  } finally {
+    await first.app.close().catch(() => undefined);
+  }
+  const second = await launchPiDeck(env);
+  try {
+    await expectHealthyPreload(second.page);
+    const sessions = await second.page.evaluate(async (workspaceId) => {
+      const listed = await window.piDeck.chat.listSessions({ workspaceId });
+      return listed.sessions.map((session) => ({
+        sessionFile: session.sessionFile,
+        sessionId: session.sessionId,
+      }));
+    }, source!.workspaceId);
+    expect(sessions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sessionFile: source!.sessionFile,
+          sessionId: source!.sessionId,
+        }),
+        expect.objectContaining({
+          sessionFile: fork!.sessionFile,
+          sessionId: fork!.sessionId,
+        }),
+      ]),
+    );
+  } finally {
+    await second.app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test.describe("Unified Work", () => {
   test("Unified Work routes launch, scopes, origins, ownership, and runtimes", async () => {
     const root = fs.mkdtempSync(

@@ -14,6 +14,7 @@ import {
   chatCreateSessionRequestSchema,
   chatDeleteAllSessionsResultSchema,
   chatDeleteSessionRequestSchema,
+  chatForkSessionRequestSchema,
   chatInterventionRequestSchema,
   chatMessageSchema,
   chatPromptRequestSchema,
@@ -129,6 +130,25 @@ describe("IPC schemas", () => {
             attachedRuntimeId: "must-not-be-in-bootstrap",
           },
         ],
+      }),
+    ).toThrow();
+  });
+
+  it("accepts only a workspace-scoped persisted session fork request", () => {
+    expect(
+      chatForkSessionRequestSchema.parse({
+        workspaceId: "workspace-1",
+        sessionFile: "/sessions/source.jsonl",
+      }),
+    ).toEqual({
+      workspaceId: "workspace-1",
+      sessionFile: "/sessions/source.jsonl",
+    });
+    expect(() =>
+      chatForkSessionRequestSchema.parse({
+        workspaceId: "workspace-1",
+        sessionFile: "/sessions/source.jsonl",
+        command: "clone",
       }),
     ).toThrow();
   });

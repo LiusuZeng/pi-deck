@@ -2838,6 +2838,46 @@ describe("renderer session actions", () => {
     ).toBe(true);
   });
 
+  it("only forks idle persisted sessions and explains every blocked state", () => {
+    const saved = {
+      ...baseSession(),
+      backendMode: "real",
+      sessionFile: "/sessions/source.jsonl",
+      runtimeBacked: true,
+      resumeBacked: false,
+    } as any;
+    expect(
+      __rendererTestHooks.forkSessionEligibility(saved, true, false),
+    ).toEqual({ eligible: true, reason: "" });
+    expect(
+      __rendererTestHooks.forkSessionEligibility(saved, true, true).reason,
+    ).toMatch(/unsent draft/i);
+    expect(
+      __rendererTestHooks.forkSessionEligibility(
+        { ...saved, draftSession: true },
+        true,
+        false,
+      ).reason,
+    ).toMatch(/save/i);
+    expect(
+      __rendererTestHooks.forkSessionEligibility(
+        { ...saved, status: "working" },
+        true,
+        false,
+      ).reason,
+    ).toMatch(/finish/i);
+    expect(
+      __rendererTestHooks.forkSessionEligibility(
+        {
+          ...saved,
+          overlays: { ...emptyOverlays, piQueuedFollowUpCount: 1 },
+        },
+        true,
+        false,
+      ).reason,
+    ).toMatch(/queued/i);
+  });
+
   it("allows move/remove for an idle saved session before automatic runtime close", () => {
     const saved = {
       ...baseSession(),

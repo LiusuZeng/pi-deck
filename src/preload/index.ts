@@ -18,6 +18,7 @@ import {
   chatDeleteAllSessionsResultSchema,
   chatDeleteSessionRequestSchema,
   chatDeleteSessionResultSchema,
+  chatForkSessionRequestSchema,
   chatListCommandsRequestSchema,
   chatListCommandsResultSchema,
   chatListModelsRequestSchema,
@@ -231,6 +232,12 @@ const api: PiDeckApi = Object.freeze({
       invokeValidated({
         channel: ipcChannels.chatResumeSession,
         request: chatResumeSessionRequestSchema.parse(request),
+        responseSchema: chatSnapshotSchema,
+      }),
+    forkSession: (request: { workspaceId: string; sessionFile: string }) =>
+      invokeValidated({
+        channel: ipcChannels.chatForkSession,
+        request: chatForkSessionRequestSchema.parse(request),
         responseSchema: chatSnapshotSchema,
       }),
     deleteSession: (request: {

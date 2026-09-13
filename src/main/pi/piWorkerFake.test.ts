@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -129,6 +135,61 @@ test("PiWorker rehydrates persisted fake real-mode messages for --session", asyn
     assert.equal(
       JSON.stringify(messages[1]?.usage),
       JSON.stringify({ input: 3, output: 5, total: 8 }),
+    );
+  } finally {
+    await worker.closeSession();
+    rmSync(sessionDir, { recursive: true, force: true });
+  }
+});
+
+test("PiWorker --fork creates an independent persisted history and identity", async () => {
+  const sessionDir = mkdtempSync(path.join(tmpdir(), "pi-deck-fake-fork-"));
+  const sourceFile = path.join(sessionDir, "source.jsonl");
+  const token = "fork-history-token";
+  writeFileSync(
+    sourceFile,
+    [
+      JSON.stringify({
+        type: "session",
+        version: 3,
+        id: "source",
+        timestamp: "2026-01-01T00:00:00.000Z",
+        cwd: process.cwd(),
+      }),
+      JSON.stringify({
+        type: "message",
+        message: {
+          id: "user-1",
+          role: "user",
+          content: token,
+          createdAt: 10,
+        },
+      }),
+    ].join("\n") + "\n",
+  );
+  const worker = new PiWorker({
+    command: process.execPath,
+    args: [fakePath(), "--fork", sourceFile],
+    cwd: process.cwd(),
+    env: { ...process.env, PI_CODING_AGENT_DIR: sessionDir },
+    requestTimeoutMs: 5_000,
+    killGraceMs: 100,
+  });
+  try {
+    const state = await worker.getState();
+    assert.notEqual(state.sessionFile, sourceFile);
+    assert.notEqual(state.sessionId, "source");
+    assert.equal(state.cwd, process.cwd());
+    const messages = await worker.getMessages();
+    assert.equal(
+      messages.some((message) => message.content === token),
+      true,
+    );
+    await worker.prompt({ text: "fork-only prompt" });
+    await waitForWorkerEvent(worker, (event) => event.type === "agent_end");
+    assert.equal(
+      readFileSync(sourceFile, "utf8").includes("fork-only prompt"),
+      false,
     );
   } finally {
     await worker.closeSession();
