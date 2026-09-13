@@ -827,7 +827,9 @@ class FakeRpcServer {
 
     if (this.shouldFailPrompt(text)) {
       const errorMessage = "Usage limit reached for fake provider.";
+      const timestamp = Date.now();
       const failedAssistant = {
+        id: assistantId,
         role: "assistant",
         content: [],
         api: "openai-completions",
@@ -850,8 +852,14 @@ class FakeRpcServer {
         },
         stopReason: "error",
         errorMessage,
-        timestamp: Date.now(),
+        createdAt: timestamp,
+        timestamp,
       };
+      // A terminal provider failure is a real assistant turn. Keep the fake
+      // RPC's live and durable session views aligned with its terminal event.
+      const persistedFailedAssistant = failedAssistant as unknown as PiMessage;
+      this.messages.push(persistedFailedAssistant);
+      this.appendPersistedMessage(persistedFailedAssistant);
       this.agentActive = false;
       // Mirror Pi 0.81's assistant-stream failure and terminal event shapes,
       // rather than the legacy fixture-only status/error fields.

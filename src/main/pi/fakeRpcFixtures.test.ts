@@ -257,8 +257,20 @@ test("fake RPC abort clears a pending extension UI request and timer", async () 
   }
 });
 
-test("fake RPC error fixture mirrors Pi 0.81 terminal error events", async () => {
-  const client = spawnFakeRpc(["--prompt-scenario", "error"]);
+test("fake RPC persists a one-shot terminal error in live and reloaded sessions", async () => {
+  const directory = tempDir("pi-deck-fake-rpc-error-");
+  const sessionFile = path.join(directory, "error.jsonl");
+  const onceFile = path.join(directory, "failed-once");
+  const args = [
+    "--session",
+    sessionFile,
+    "--prompt-error-prefix",
+    "trigger provider error",
+    "--prompt-error-once-file",
+    onceFile,
+  ];
+  let liveMessages: JsonObject[];
+  const client = spawnFakeRpc(args);
   try {
     const terminal = waitForEvents(client, (events) =>
       events.some((event) => event.type === "agent_end"),
@@ -277,6 +289,7 @@ test("fake RPC error fixture mirrors Pi 0.81 terminal error events", async () =>
     const terminalMessages = agentEnd.messages as JsonObject[];
 
     assert.equal(assistantEvent.type, "error");
+    assert.equal(assistantMessage.id, "msg_assistant_1");
     assert.equal(assistantMessage.stopReason, "error");
     assert.equal(
       nestedError.errorMessage,
@@ -284,12 +297,36 @@ test("fake RPC error fixture mirrors Pi 0.81 terminal error events", async () =>
     );
     assert.equal(agentEnd.willRetry, false);
     assert.equal("status" in agentEnd, false);
-    assert.equal(
-      terminalMessages.at(-1)?.errorMessage,
-      nestedError.errorMessage,
-    );
+    assert.deepEqual(terminalMessages.at(-1), assistantMessage);
+
+    const messages = (await client.request("get_messages")) as JsonObject;
+    liveMessages = messages.messages as JsonObject[];
+    assert.equal(liveMessages.length, 3);
+    assert.deepEqual(liveMessages.at(-1), assistantMessage);
+
+    const persisted = fs
+      .readFileSync(sessionFile, "utf8")
+      .split(/\r?\n/)
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line) as { message?: JsonObject })
+      .find((record) => record.message?.id === "msg_assistant_1")?.message;
+    assert.deepEqual(persisted, assistantMessage);
   } finally {
     client.close();
+  }
+
+  const reloaded = spawnFakeRpc(args);
+  try {
+    const messages = (await reloaded.request("get_messages")) as JsonObject;
+    const reloadedMessages = messages.messages as JsonObject[];
+    assert.deepEqual(
+      reloadedMessages.map((message) => message.id),
+      ["msg_user_1", "msg_assistant_1"],
+    );
+    assert.deepEqual(reloadedMessages.at(-1), liveMessages!.at(-1));
+  } finally {
+    reloaded.close();
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 

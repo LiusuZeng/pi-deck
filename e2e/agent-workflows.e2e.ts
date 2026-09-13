@@ -835,6 +835,30 @@ test("a successful managed fan-out retry completes its orchestrator and run", as
       )
       .toBe("completed");
 
+    const graph = page.locator('[aria-label="Live workflow execution graph"]');
+    const managedCard = graph.locator(
+      `article.agent-workflow-graph-node:has(button[data-workflow-node-id="${ids.managed}"])`,
+    );
+    await expect(managedCard).toHaveClass(/is-completed/);
+    const counts = managedCard.locator(".agent-workflow-graph-counts");
+    await expect(counts).toContainText("1 completed");
+    await expect(counts).toContainText("1 skipped");
+    await expect(counts).toContainText("1 retry");
+    await expect(
+      page
+        .getByRole("region", { name: "Workflow run" })
+        .locator('p[aria-live="polite"]'),
+    ).toHaveText("Status: Completed · Outcome: done");
+    const history = page
+      .locator(`#workflow-node-${ids.managed}`)
+      .getByRole("list", { name: "Managed child attempt history" });
+    await expect(
+      history.locator("li").nth(0).locator(".workflow-step-status"),
+    ).toHaveText("Skipped");
+    await expect(
+      history.locator("li").nth(1).locator(".workflow-step-status"),
+    ).toHaveText("Completed");
+
     const retried = await page.evaluate(
       async ({ runId, ids }) => {
         const run = await window.piDeck.workflows.canonicalGetRun({ runId });
