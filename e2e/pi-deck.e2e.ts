@@ -374,40 +374,44 @@ async function expectSidebarSecondaryActionsAligned(page: Page): Promise<void> {
     await expect(action).toHaveCSS("justify-content", "flex-start");
   }
 
-  const sidebarBounds = await sidebar.boundingBox();
   const actionGeometry = await Promise.all(
     actions.map((action) =>
       action.evaluate((button) => {
         const buttonBounds = button.getBoundingClientRect();
         const iconBounds = button.querySelector("svg")?.getBoundingClientRect();
-        const label = Array.from(button.childNodes).find(
-          (node) =>
-            node.nodeType === Node.TEXT_NODE && node.textContent?.trim() !== "",
-        );
-        if (iconBounds === undefined || label === undefined) {
-          throw new Error("Sidebar action is missing its icon or label.");
+        if (iconBounds === undefined) {
+          throw new Error("Sidebar action is missing its icon.");
         }
-        const labelRange = document.createRange();
-        labelRange.selectNode(label);
-        const labelBounds = labelRange.getBoundingClientRect();
+        const styles = getComputedStyle(button);
         return {
           buttonLeft: Math.round(buttonBounds.left),
           buttonWidth: Math.round(buttonBounds.width),
+          buttonHeight: Math.round(buttonBounds.height),
           iconInset: Math.round(iconBounds.left - buttonBounds.left),
-          labelInset: Math.round(labelBounds.left - buttonBounds.left),
+          fontSize: styles.fontSize,
+          fontWeight: styles.fontWeight,
+          lineHeight: styles.lineHeight,
+          paddingInlineStart: styles.paddingInlineStart,
         };
       }),
     ),
   );
-  if (sidebarBounds === null) {
-    throw new Error("Sessions sidebar has no bounding box.");
+  const [newWorkspaceGeometry] = actionGeometry;
+  if (newWorkspaceGeometry === undefined) {
+    throw new Error("Sidebar actions are missing.");
   }
 
   for (const geometry of actionGeometry) {
-    expect(geometry.buttonLeft).toBe(Math.round(sidebarBounds.x + 8));
-    expect(geometry.buttonWidth).toBe(Math.round(sidebarBounds.width - 16));
-    expect(geometry.iconInset).toBe(actionGeometry[0]!.iconInset);
-    expect(geometry.labelInset).toBe(actionGeometry[0]!.labelInset);
+    expect(geometry.buttonLeft).toBe(newWorkspaceGeometry.buttonLeft);
+    expect(geometry.buttonWidth).toBe(newWorkspaceGeometry.buttonWidth);
+    expect(geometry.buttonHeight).toBe(newWorkspaceGeometry.buttonHeight);
+    expect(geometry.iconInset).toBe(newWorkspaceGeometry.iconInset);
+    expect(geometry.fontSize).toBe(newWorkspaceGeometry.fontSize);
+    expect(geometry.fontWeight).toBe(newWorkspaceGeometry.fontWeight);
+    expect(geometry.lineHeight).toBe(newWorkspaceGeometry.lineHeight);
+    expect(geometry.paddingInlineStart).toBe(
+      newWorkspaceGeometry.paddingInlineStart,
+    );
   }
 }
 
@@ -775,6 +779,12 @@ test("Add existing session remains a peer sidebar action across themes and narro
   const projectCwd = path.join(root, "authorized-project");
   const agentDir = path.join(root, "agent");
   const userDataDir = path.join(root, "user-data");
+  const sessionFile = path.join(
+    agentDir,
+    "sessions",
+    "--sidebar-action--",
+    "sidebar-action-unassigned.jsonl",
+  );
   fs.mkdirSync(projectCwd, { recursive: true });
   fs.mkdirSync(agentDir, { recursive: true });
   fs.mkdirSync(userDataDir, { recursive: true });
@@ -795,13 +805,6 @@ test("Add existing session remains a peer sidebar action across themes and narro
       name: "New workspace…",
       exact: true,
     });
-    await newWorkspace.focus();
-    await expect(newWorkspace).toBeFocused();
-    await page.keyboard.press("Enter");
-    const workspaceDialog = page.getByTestId("workspace-create-dialog");
-    await expect(workspaceDialog).toBeVisible();
-    await workspaceDialog.getByLabel("Close dialog").click();
-
     const addExisting = page.getByRole("button", {
       name: "Add existing session…",
       exact: true,
@@ -811,32 +814,73 @@ test("Add existing session remains a peer sidebar action across themes and narro
     await expect(newWorkspace).toHaveCSS("background-color", lightHoverColor);
     await addExisting.hover();
     await expect(addExisting).toHaveCSS("background-color", lightHoverColor);
-    await addExisting.focus();
+
+    await newWorkspace.focus();
+    await page.keyboard.press("Tab");
     await expect(addExisting).toBeFocused();
+    expect(
+      await addExisting.evaluate((button) => button.matches(":focus-visible")),
+    ).toBe(true);
+    await expect(addExisting).toHaveCSS("outline-width", "2px");
     await page.keyboard.press("Enter");
     const unassignedDialog = page.getByTestId("unassigned-sessions");
+    const addSelected = unassignedDialog.getByRole("button", {
+      name: "Add selected sessions",
+    });
     await expect(unassignedDialog).toBeVisible();
+    // Opening this dialog is valid when no sessions are available, so its
+    // trigger intentionally has no disabled state. The confirmation action
+    // is the reachable disabled control until a session is selected.
+    await expect(addSelected).toBeDisabled();
     await unassignedDialog.getByLabel("Close dialog").click();
+
+    writePiSessionFixture({
+      sessionFile,
+      sessionId: "sidebar-action-unassigned",
+      projectCwd,
+    });
+    await addExisting.click();
+    await expect(
+      unassignedDialog.getByText("sidebar-action-unassigned"),
+    ).toBeVisible();
+    await unassignedDialog.getByRole("checkbox").check();
+    await expect(addSelected).toBeEnabled();
+    await addSelected.click();
+    await expect(unassignedDialog).toHaveCount(0);
 
     await page.setViewportSize({ width: 320, height: 600 });
     await page.getByRole("button", { name: "Show sessions" }).click();
     await expectSidebarSecondaryActionsAligned(page);
+    await page
+      .getByLabel("Sessions", { exact: true })
+      .getByRole("button", { name: "Hide sessions" })
+      .click();
 
-    await page.setViewportSize({ width: 800, height: 700 });
     await page.getByRole("button", { name: "Appearance: Light" }).click();
     await page
       .getByRole("menuitemradio", { name: "Dark", exact: true })
       .click();
     await expect(page.locator("html")).toHaveCSS("color-scheme", "dark");
+    await page.getByRole("button", { name: "Show sessions" }).click();
     await expectSidebarSecondaryActionsAligned(page);
     const darkAddExisting = page.getByRole("button", {
       name: "Add existing session…",
       exact: true,
     });
-    const darkHoverColor = await sidebarHoverBackgroundColor(darkAddExisting);
+    const darkHoverColor = await sidebarHoverBackgroundColor(newWorkspace);
+    await newWorkspace.hover();
+    await expect(newWorkspace).toHaveCSS("background-color", darkHoverColor);
     await darkAddExisting.hover();
     await expect(darkAddExisting).toHaveCSS("background-color", darkHoverColor);
-    await darkAddExisting.focus();
+    await newWorkspace.focus();
+    await page.keyboard.press("Tab");
+    await expect(darkAddExisting).toBeFocused();
+    expect(
+      await darkAddExisting.evaluate((button) =>
+        button.matches(":focus-visible"),
+      ),
+    ).toBe(true);
+    await expect(darkAddExisting).toHaveCSS("outline-width", "2px");
     await page.keyboard.press("Enter");
     await expect(page.getByTestId("unassigned-sessions")).toBeVisible();
   } finally {
