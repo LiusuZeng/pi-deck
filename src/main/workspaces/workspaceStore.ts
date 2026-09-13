@@ -860,36 +860,43 @@ export class WorkspaceStore {
       z.string().min(1).parse(sessionFile),
     );
     await this.loadIfNeeded();
-    const workspaceIndex = this.state.workspaces.findIndex(
-      (workspace) => workspace.id === id,
-    );
-    const workspace =
-      workspaceIndex < 0 ? undefined : this.state.workspaces[workspaceIndex];
-    const nextRefs = this.state.sessionRefs.filter(
-      (ref) => !(ref.workspaceId === id && ref.sessionFile === canonical),
-    );
-    if (nextRefs.length === this.state.sessionRefs.length) {
-      await this.persistIfDirty();
-      return false;
-    }
-    const nextWorkspace =
-      workspace?.legacyProjectId === undefined
-        ? workspace
-        : addLegacySessionExclusion(workspace, canonical, Date.now());
-    await this.commit({
-      ...this.state,
-      sessionRefs: nextRefs,
-      ...(nextWorkspace !== undefined && nextWorkspace !== workspace
-        ? {
-            workspaces: replaceAt(
-              this.state.workspaces,
-              workspaceIndex,
-              nextWorkspace,
-            ),
-          }
-        : {}),
+    // Removal is used as failed-fork compensation. Publish it only after the
+    // replacement file is durable, otherwise the old reference remains both
+    // in memory and on disk for a later retry.
+    return this.transact(() => {
+      const workspaceIndex = this.state.workspaces.findIndex(
+        (workspace) => workspace.id === id,
+      );
+      const workspace =
+        workspaceIndex < 0 ? undefined : this.state.workspaces[workspaceIndex];
+      const nextRefs = this.state.sessionRefs.filter(
+        (ref) => !(ref.workspaceId === id && ref.sessionFile === canonical),
+      );
+      if (nextRefs.length === this.state.sessionRefs.length) {
+        return { next: this.state, result: false, changed: false };
+      }
+      const nextWorkspace =
+        workspace?.legacyProjectId === undefined
+          ? workspace
+          : addLegacySessionExclusion(workspace, canonical, Date.now());
+      return {
+        next: {
+          ...this.state,
+          sessionRefs: nextRefs,
+          ...(nextWorkspace !== undefined && nextWorkspace !== workspace
+            ? {
+                workspaces: replaceAt(
+                  this.state.workspaces,
+                  workspaceIndex,
+                  nextWorkspace,
+                ),
+              }
+            : {}),
+        },
+        result: true,
+        changed: true,
+      };
     });
-    return true;
   }
 
   async renameSession(
@@ -1283,14 +1290,21 @@ export class WorkspaceStore {
     const transaction = this.persistQueue
       .catch(() => undefined)
       .then(async () => {
-        const { next, result, changed } = operation();
-        if (!changed) return result;
-        const candidate = workspaceStoreFileV1Schema.parse(next);
-        await this.writeStoreFile(candidate);
-        this.state = candidate;
-        this.generation += 1;
-        this.persistedGeneration = this.generation;
-        return result;
+        // Most legacy mutations publish eagerly before queueing their write.
+        // Rebuild and write again when one races this durable transaction so
+        // we never replace that newer state with a stale candidate.
+        for (;;) {
+          const stateBeforeTransaction = JSON.stringify(this.state);
+          const { next, result, changed } = operation();
+          if (!changed) return result;
+          const candidate = workspaceStoreFileV1Schema.parse(next);
+          await this.writeStoreFile(candidate);
+          if (JSON.stringify(this.state) !== stateBeforeTransaction) continue;
+          this.state = candidate;
+          this.generation += 1;
+          this.persistedGeneration = this.generation;
+          return result;
+        }
       });
     // Keep the queue usable after a rejected caller-visible transaction.
     this.persistQueue = transaction.then(

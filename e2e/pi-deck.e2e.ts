@@ -6915,6 +6915,49 @@ test("real-mode session fork creates an independent Pi history and survives rela
   }
 });
 
+test("fork directly enforces the live worker capacity", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-fork-capacity-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(userDataDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(userDataDir, "settings.json"),
+    `${JSON.stringify({ maxRunningSessions: 1 })}\n`,
+  );
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({ root, projectCwd, agentDir, userDataDir }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await sidebarNewSessionButton(page).click();
+    await page.getByLabel("Prompt text").fill("capacity fork source");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Fake response to: capacity fork source"),
+    ).toBeVisible({ timeout: 20_000 });
+    const error = await page.evaluate(async () => {
+      const source = await window.piDeck.chat.getSnapshot();
+      try {
+        await window.piDeck.chat.forkSession({
+          workspaceId: source.workspaceId!,
+          sessionFile: source.state.sessionFile!,
+        });
+        return "";
+      } catch (reason) {
+        return reason instanceof Error ? reason.message : String(reason);
+      }
+    });
+    expect(error).toMatch(/maximum running session capacity \(1\) reached/i);
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("fork rejects fresh children with missing or mismatched native parentSession", async () => {
   for (const fixture of [
     {
@@ -7094,7 +7137,96 @@ test("reset cancels a spawned pre-registration fork without late ownership or wo
   }
 });
 
-test("quit cancels a spawned pre-registration fork without persisting its target", async () => {
+test("reset cancels a fork held at its final snapshot persistence boundary", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-fork-final-snapshot-reset-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  const targetFile = path.join(
+    agentDir,
+    "sessions",
+    "--fake-rpc--",
+    "fork-final-snapshot-target.jsonl",
+  );
+  const snapshotSignalFile = path.join(root, "fork-final-snapshot-started");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      userDataDir,
+      fakePiArgs: [
+        "--fork-target",
+        targetFile,
+        "--fork-delay-get-messages-ms",
+        "10000",
+        "--get-messages-signal-file",
+        snapshotSignalFile,
+      ],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await sidebarNewSessionButton(page).click();
+    await page.getByLabel("Prompt text").fill("final snapshot fork source");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Fake response to: final snapshot fork source"),
+    ).toBeVisible({ timeout: 20_000 });
+    fs.rmSync(snapshotSignalFile, { force: true });
+    const source = await page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      return {
+        workspaceId: snapshot.workspaceId!,
+        sessionFile: snapshot.state.sessionFile!,
+      };
+    });
+    await page.evaluate(({ workspaceId, sessionFile }) => {
+      (
+        window as Window & { finalSnapshotFork?: Promise<unknown> }
+      ).finalSnapshotFork = window.piDeck.chat.forkSession({
+        workspaceId,
+        sessionFile,
+      });
+    }, source);
+    await expect
+      .poll(() =>
+        fs.existsSync(snapshotSignalFile)
+          ? fs.readFileSync(snapshotSignalFile, "utf8").trim()
+          : "",
+      )
+      .toBe(targetFile);
+    const result = await page.evaluate(async (source) => {
+      await window.piDeck.chat.reset();
+      let forkError = "";
+      try {
+        await (window as Window & { finalSnapshotFork: Promise<unknown> })
+          .finalSnapshotFork;
+      } catch (error) {
+        forkError = error instanceof Error ? error.message : String(error);
+      }
+      const sessions = await window.piDeck.chat.listSessions({
+        workspaceId: source.workspaceId,
+      });
+      return {
+        forkError,
+        sessionFiles: sessions.sessions.map((session) => session.sessionFile),
+      };
+    }, source);
+    expect(result.forkError).toMatch(
+      /cancelled by reset or application shutdown/i,
+    );
+    expect(result.sessionFiles).not.toContain(fs.realpathSync(targetFile));
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("quit cancels a fork held at its final snapshot persistence boundary", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-fork-quit-"));
   const projectCwd = path.join(root, "project");
   const agentDir = path.join(root, "agent");
@@ -7105,7 +7237,7 @@ test("quit cancels a spawned pre-registration fork without persisting its target
     "--fake-rpc--",
     "fork-quit-target.jsonl",
   );
-  const getStateSignalFile = path.join(root, "fork-get-state-started");
+  const snapshotSignalFile = path.join(root, "fork-final-snapshot-started");
   const exitSignalFile = path.join(root, "fork-exited");
   fs.mkdirSync(projectCwd, { recursive: true });
   const { app, page } = await launchPiDeck(
@@ -7117,10 +7249,10 @@ test("quit cancels a spawned pre-registration fork without persisting its target
       fakePiArgs: [
         "--fork-target",
         targetFile,
-        "--fork-delay-get-state-ms",
+        "--fork-delay-get-messages-ms",
         "10000",
-        "--fork-get-state-signal-file",
-        getStateSignalFile,
+        "--get-messages-signal-file",
+        snapshotSignalFile,
         "--fork-exit-signal-file",
         exitSignalFile,
       ],
@@ -7136,6 +7268,7 @@ test("quit cancels a spawned pre-registration fork without persisting its target
     ).toBeVisible({
       timeout: 20_000,
     });
+    fs.rmSync(snapshotSignalFile, { force: true });
     await page.evaluate(async () => {
       const source = await window.piDeck.chat.getSnapshot();
       void window.piDeck.chat.forkSession({
@@ -7145,8 +7278,8 @@ test("quit cancels a spawned pre-registration fork without persisting its target
     });
     await expect
       .poll(() =>
-        fs.existsSync(getStateSignalFile)
-          ? fs.readFileSync(getStateSignalFile, "utf8").trim()
+        fs.existsSync(snapshotSignalFile)
+          ? fs.readFileSync(snapshotSignalFile, "utf8").trim()
           : "",
       )
       .toBe(targetFile);
@@ -7249,7 +7382,9 @@ test("fork reserves its fresh target against default-workspace resume and unwind
         return error instanceof Error ? error.message : String(error);
       }
     }, targetFile);
-    expect(resumeError).toMatch(/already being changed/i);
+    expect(resumeError).toMatch(
+      /already being changed|awaiting durable cleanup/i,
+    );
     // Change the durable header after the claim but before delayed snapshot
     // registration. The worker still reports the original ID, so fork must
     // fail and remove its reservation/claimed workspace metadata.

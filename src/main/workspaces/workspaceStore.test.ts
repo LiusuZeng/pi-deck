@@ -343,6 +343,36 @@ test("WorkspaceStore rolls back a failed target claim and never replays it", asy
   );
 });
 
+test("WorkspaceStore keeps failed fork compensation durable across restart", async () => {
+  const { root, home } = await temporaryHome();
+  const store = new WorkspaceStore(home);
+  const workspace = await store.create({ name: "Compensation" });
+  const sessionFile = path.join(root, "failed-fork.jsonl");
+  await store.upsertSessionRefFromSnapshot({
+    workspaceId: workspace.id,
+    sessionFile,
+  });
+
+  const writeFile = vi.spyOn(fs, "writeFile");
+  writeFile.mockRejectedValueOnce(new Error("injected remove write failure"));
+  await assert.rejects(
+    store.removeSession(workspace.id, sessionFile),
+    /injected remove write failure/,
+  );
+  assert.equal((await store.getSessionRefs(workspace.id)).length, 1);
+  assert.equal(
+    (await new WorkspaceStore(home).getSessionRefs(workspace.id)).length,
+    1,
+  );
+
+  await store.removeSession(workspace.id, sessionFile);
+  writeFile.mockRestore();
+  assert.equal(
+    (await new WorkspaceStore(home).getSessionRefs(workspace.id)).length,
+    0,
+  );
+});
+
 test("WorkspaceStore does not publish a claim when atomic rename fails", async () => {
   const { root, home } = await temporaryHome();
   const store = new WorkspaceStore(home);

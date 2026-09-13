@@ -87,6 +87,8 @@ interface FakeOptions {
   sigtermExitDelayMs: number;
   /** Hold snapshot history after fork ownership has been claimed. */
   getMessagesDelayMs: number;
+  /** Hold only a native fork's final snapshot history. */
+  forkGetMessagesDelayMs: number;
   /** Write when get_messages begins, for deterministic E2E interleaving. */
   getMessagesSignalFile?: string;
   /** Test-only override for the cwd reported by get_state. */
@@ -138,6 +140,7 @@ function parseOptions(argv: string[]): FakeOptions {
     ignoreSigterm: false,
     sigtermExitDelayMs: 0,
     getMessagesDelayMs: 0,
+    forkGetMessagesDelayMs: 0,
     workflowDecisions: [],
   };
 
@@ -287,6 +290,12 @@ function parseOptions(argv: string[]): FakeOptions {
       const delay = Number(argv[index + 1]);
       if (Number.isSafeInteger(delay) && delay >= 0) {
         options.getMessagesDelayMs = delay;
+      }
+      index += 1;
+    } else if (arg === "--fork-delay-get-messages-ms") {
+      const delay = Number(argv[index + 1]);
+      if (Number.isSafeInteger(delay) && delay >= 0) {
+        options.forkGetMessagesDelayMs = delay;
       }
       index += 1;
     } else if (arg === "--get-messages-signal-file") {
@@ -831,8 +840,13 @@ class FakeRpcServer {
         }
         const respond = () =>
           this.respond(command.id, name, { messages: this.messages });
-        if (this.options.getMessagesDelayMs > 0) {
-          setTimeout(respond, this.options.getMessagesDelayMs);
+        const delay =
+          this.options.forkSourceFile !== undefined &&
+          this.options.forkGetMessagesDelayMs > 0
+            ? this.options.forkGetMessagesDelayMs
+            : this.options.getMessagesDelayMs;
+        if (delay > 0) {
+          setTimeout(respond, delay);
         } else {
           respond();
         }

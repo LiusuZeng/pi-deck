@@ -513,10 +513,19 @@ export class ProjectStore {
   ): Promise<void> {
     await this.loadIfNeeded();
     const canonical = await canonicalOrResolved(sessionFile);
-    this.state.sessionRefs = this.state.sessionRefs.filter(
-      (ref) => !(ref.projectId === projectId && ref.sessionFile === canonical),
-    );
-    await this.persist();
+    // Failed-fork compensation must not erase this reference from memory
+    // until its removal is durable. Otherwise a later write can silently
+    // resurrect it after callers have released their target reservation.
+    await this.transact(() => {
+      const sessionRefs = this.state.sessionRefs.filter(
+        (ref) =>
+          !(ref.projectId === projectId && ref.sessionFile === canonical),
+      );
+      return {
+        next: { ...this.state, sessionRefs },
+        changed: sessionRefs.length !== this.state.sessionRefs.length,
+      };
+    });
   }
 
   private async setProjectInvalidReason(
@@ -537,12 +546,43 @@ export class ProjectStore {
       : undefined;
   }
 
+  private async transact(
+    operation: () => { next: ProjectStoreFile; changed: boolean },
+  ): Promise<void> {
+    const transaction = this.persistQueue
+      .catch(() => undefined)
+      .then(async () => {
+        // Other project mutations still publish eagerly. Rebuild after a
+        // racing update so a durable remove cannot discard it.
+        for (;;) {
+          const stateBeforeTransaction = JSON.stringify(this.state);
+          const { next, changed } = operation();
+          if (!changed) return;
+          const candidate = projectStoreFileSchema.parse(next);
+          await this.writeStoreFile(candidate);
+          if (JSON.stringify(this.state) !== stateBeforeTransaction) continue;
+          this.state = candidate;
+          this.sessionRefsGeneration += 1;
+          this.persistedSessionRefsGeneration = Math.max(
+            this.persistedSessionRefsGeneration,
+            this.sessionRefsGeneration,
+          );
+          return;
+        }
+      });
+    this.persistQueue = transaction.then(
+      () => undefined,
+      () => undefined,
+    );
+    return transaction;
+  }
+
   private async persist(): Promise<void> {
     this.persistQueue = this.persistQueue
       .catch(() => undefined)
       .then(async () => {
         const sessionRefsGeneration = this.sessionRefsGeneration;
-        await this.writeStoreFile();
+        await this.writeStoreFile(this.state);
         this.persistedSessionRefsGeneration = Math.max(
           this.persistedSessionRefsGeneration,
           sessionRefsGeneration,
@@ -551,13 +591,18 @@ export class ProjectStore {
     return this.persistQueue;
   }
 
-  private async writeStoreFile(): Promise<void> {
+  private async writeStoreFile(candidate: ProjectStoreFile): Promise<void> {
     await fs.mkdir(this.piDeckHome, { recursive: true, mode: 0o700 });
     const tempFile = `${this.storeFile}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    await fs.writeFile(tempFile, `${JSON.stringify(this.state, null, 2)}\n`, {
-      mode: 0o600,
-    });
-    await fs.rename(tempFile, this.storeFile);
+    try {
+      await fs.writeFile(tempFile, `${JSON.stringify(candidate, null, 2)}\n`, {
+        mode: 0o600,
+      });
+      await fs.rename(tempFile, this.storeFile);
+    } catch (error) {
+      await fs.rm(tempFile, { force: true }).catch(() => undefined);
+      throw error;
+    }
   }
 }
 

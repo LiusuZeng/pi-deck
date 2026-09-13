@@ -145,6 +145,7 @@ import type {
   WorkflowRun,
 } from "../shared/types.js";
 import { DiagnosticsService } from "./diagnostics/diagnostics.js";
+import { ForkCleanupJournal } from "./forkCleanupJournal.js";
 import { registerValidatedIpc } from "./ipc/registerIpc.js";
 import {
   discoverPiModels,
@@ -313,6 +314,7 @@ let settingsStore: SettingsStore | undefined;
 let projectStore: ProjectStore | undefined;
 let workspaceStore: WorkspaceStore | undefined;
 let workspaceUsageStore: WorkspaceUsageStore | undefined;
+let forkCleanupJournal: ForkCleanupJournal | undefined;
 let workflowInitialization: WorkflowInitialization<WorkflowStore> | undefined;
 const realChatLaunchConfigCache = new RealChatLaunchConfigCache();
 let loginShellEnvCaptureCache:
@@ -508,6 +510,11 @@ async function bootstrap(): Promise<void> {
   workspaceStore = workspacesStore;
   const usageStore = new WorkspaceUsageStore(resolvePiDeckHome(process.env));
   workspaceUsageStore = usageStore;
+  const failedForkCleanup = new ForkCleanupJournal(
+    resolvePiDeckHome(process.env),
+    diagnosticsService,
+  );
+  forkCleanupJournal = failedForkCleanup;
 
   const startup = startProgressiveStartup({
     startedAtMs: processStartedAtMs,
@@ -531,6 +538,7 @@ async function bootstrap(): Promise<void> {
         projects.loadIfNeeded(),
         workspacesStore.loadIfNeeded(),
         usageStore.loadIfNeeded(),
+        failedForkCleanup.loadIfNeeded(),
       ]);
 
       workflowInitialization = await initializeWorkflows(async () => {
@@ -560,6 +568,7 @@ async function bootstrap(): Promise<void> {
       await workspacesStore.ensureDefaultWorkspace({
         activate: !hadWorkspaceMetadata || resolveChatBackendMode() === "fake",
       });
+      await failedForkCleanup.retry(workspacesStore, projects);
       await startDelegationBridge();
       await ensureChatAdapter(settings, diagnosticsService);
       await rehydrateWorkflowRuns();
@@ -6228,6 +6237,7 @@ async function forkChatSession(
           sessionDir,
           projectCwd: launch.projectCwd,
         });
+    assertChatSessionAttachmentActive(attachmentGeneration);
     if (!validation.ok) {
       throw new Error(
         `Session is not eligible for fork: ${validation.reason}.`,
@@ -6269,17 +6279,20 @@ async function forkChatSession(
             workspaceId,
             canonicalSourceSessionFile,
           );
+          assertChatSessionAttachmentActive(attachmentGeneration);
           assertSessionFileNotWorkflowOwned(
             canonicalSourceSessionFile,
             "forking this session",
           );
           const adapter = await ensureChatAdapter(store, diagnosticsService);
+          assertChatSessionAttachmentActive(attachmentGeneration);
           const sourceRuntimeId = chatSessionFileLocks.get(
             canonicalSourceSessionFile,
           );
           let sourceSessionId: string | undefined;
           if (sourceRuntimeId !== undefined) {
             const sourceStatus = await getChatRuntimeStatus(sourceRuntimeId);
+            assertChatSessionAttachmentActive(attachmentGeneration);
             if (sourceStatus.state.isAgentActive) {
               throw new Error("Finish the active session before forking it.");
             }
@@ -6307,6 +6320,7 @@ async function forkChatSession(
               sessionDir,
             })
           ).summary?.sessionId;
+          assertChatSessionAttachmentActive(attachmentGeneration);
           if (
             durableSourceSessionId === undefined ||
             durableSourceSessionId.length === 0
@@ -6377,6 +6391,7 @@ async function forkChatSession(
             }
             const targetValidation =
               await validateForkTarget(preflightSessionFile);
+            assertChatSessionAttachmentActive(attachmentGeneration);
             if (!targetValidation.ok) {
               throw new Error(
                 `Pi fork returned an ineligible target session: ${targetValidation.reason}.`,
@@ -6406,6 +6421,7 @@ async function forkChatSession(
               })
             ).summary;
             const durableTargetSessionId = durableTargetSummary?.sessionId;
+            assertChatSessionAttachmentActive(attachmentGeneration);
             if (
               durableTargetSessionId === undefined ||
               durableTargetSessionId.length === 0 ||
@@ -6432,13 +6448,31 @@ async function forkChatSession(
               throw new Error("Pi fork reused the source session identity.");
             }
 
+            // Reserve synchronously before the journal write can yield. This
+            // closes the interval in which another resume could otherwise
+            // attach a fresh target that has not yet been journaled.
+            chatSessionMutationReservations.add(forkSessionFile);
+            forkTargetReserved = true;
+            // Write ahead of the claim: a failed remove or process restart
+            // must keep this unreturned target unavailable until compensation
+            // is durable.
+            const cleanupJournal = forkCleanupJournal;
+            if (cleanupJournal === undefined) {
+              throw new Error("Failed fork cleanup journal is unavailable.");
+            }
+            await cleanupJournal.reserve({
+              sessionFile: forkSessionFile,
+              workspaceId,
+              ...(project.id !== managedRuntimeProjectId
+                ? { projectId: project.id }
+                : {}),
+            });
+            assertChatSessionAttachmentActive(attachmentGeneration);
             // Claim first, then register the worker. This single ownership
             // seam and reservation prevent default-workspace discovery, import,
             // or resume from attaching/assigning the just-created target while
             // its initial snapshot is still asynchronous.
             assertChatSessionAttachmentActive(attachmentGeneration);
-            chatSessionMutationReservations.add(forkSessionFile);
-            forkTargetReserved = true;
             await ensureWorkspaceStore().claimUnassignedSessionRefFromSnapshot(
               {
                 workspaceId,
@@ -6468,11 +6502,13 @@ async function forkChatSession(
               { requireUnassigned: true },
             );
             forkReferencePersisted = true;
+            assertChatSessionAttachmentActive(attachmentGeneration);
             // The claim may itself yield. Re-read the first header immediately
             // before registration so a newly-created but unrelated child can
             // never cross the durable ownership boundary.
             const claimedTargetValidation =
               await validateForkTarget(forkSessionFile);
+            assertChatSessionAttachmentActive(attachmentGeneration);
             if (
               !claimedTargetValidation.ok ||
               claimedTargetValidation.sessionFile !== forkSessionFile ||
@@ -6487,6 +6523,7 @@ async function forkChatSession(
             // only now may this worker enter runtime registration maps.
             assertChatSessionAttachmentActive(attachmentGeneration);
             registerChatWorker(workerSpec, "real");
+            assertChatSessionAttachmentActive(attachmentGeneration);
 
             const snapshot = await getChatSnapshotForRuntime(
               adapter,
@@ -6511,6 +6548,7 @@ async function forkChatSession(
                     sessionFile,
                     sessionDir,
                   });
+                  assertChatSessionAttachmentActive(attachmentGeneration);
                   if (
                     currentTarget.summary?.sessionId !== durableTargetSessionId
                   ) {
@@ -6520,6 +6558,7 @@ async function forkChatSession(
                   }
                   const currentTargetValidation =
                     await validateForkTarget(sessionFile);
+                  assertChatSessionAttachmentActive(attachmentGeneration);
                   if (
                     !currentTargetValidation.ok ||
                     currentTargetValidation.sessionFile !== forkSessionFile ||
@@ -6532,6 +6571,7 @@ async function forkChatSession(
                   }
                   const owner =
                     await ensureWorkspaceStore().getSessionOwner(sessionFile);
+                  assertChatSessionAttachmentActive(attachmentGeneration);
                   if (owner?.workspaceId !== workspaceId) {
                     throw new Error(
                       "Pi fork target ownership changed while starting.",
@@ -6541,6 +6581,8 @@ async function forkChatSession(
                     throw new Error("Pi fork target reservation was lost.");
                   }
                 },
+                assertLifecycleActive: () =>
+                  assertChatSessionAttachmentActive(attachmentGeneration),
                 onSessionPersisted: (sessionFile) => {
                   // This runs immediately after workspace persistence, so a
                   // later project/usage reconciliation failure still unwinds
@@ -6549,6 +6591,7 @@ async function forkChatSession(
                 },
               },
             );
+            assertChatSessionAttachmentActive(attachmentGeneration);
             const returnedSessionFile = snapshot.state.sessionFile;
             const returnedSessionId = snapshot.state.sessionId;
             if (
@@ -6565,6 +6608,7 @@ async function forkChatSession(
                 ? ((await safeRealpath(returnedSessionFile)) ??
                   path.resolve(returnedSessionFile))
                 : undefined;
+            assertChatSessionAttachmentActive(attachmentGeneration);
             if (
               returnedCanonical !== forkSessionFile ||
               returnedSessionId !== durableTargetSessionId
@@ -6595,6 +6639,9 @@ async function forkChatSession(
             }
             // getChatSnapshotForRuntime has already registered this canonical
             // target and persisted its normal workspace/project reference.
+            assertChatSessionAttachmentActive(attachmentGeneration);
+            await cleanupJournal.complete(forkSessionFile);
+            assertChatSessionAttachmentActive(attachmentGeneration);
             return snapshot;
           } catch (error) {
             // Snapshot persistence is intentionally normal on success. Undo
@@ -6620,27 +6667,69 @@ async function forkChatSession(
                 });
               }
             }
+            let durableCleanupError: unknown;
+            if (persistedForkFile !== undefined) {
+              try {
+                await forkCleanupJournal?.reserve({
+                  sessionFile: persistedForkFile,
+                  workspaceId,
+                  ...(project.id !== managedRuntimeProjectId
+                    ? { projectId: project.id }
+                    : {}),
+                });
+              } catch (cleanupError) {
+                durableCleanupError = cleanupError;
+                diagnosticsService.recordError(
+                  `Failed to retain failed fork cleanup for ${persistedForkFile}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+                );
+              }
+            }
             if (
               forkReferencePersisted &&
               persistedForkFile !== undefined &&
               persistedForkFile !== canonicalSourceSessionFile
             ) {
-              await workspaceStore
-                ?.removeSession(workspaceId, persistedForkFile)
-                .catch((cleanupError) =>
-                  diagnosticsService.recordError(
-                    `Failed to remove failed fork workspace reference ${persistedForkFile}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
-                  ),
+              try {
+                await ensureWorkspaceStore().removeSession(
+                  workspaceId,
+                  persistedForkFile,
                 );
-              if (project.id !== managedRuntimeProjectId) {
-                await projectStore
-                  ?.removeSessionRef(project.id, persistedForkFile)
-                  .catch((cleanupError) =>
-                    diagnosticsService.recordError(
-                      `Failed to remove failed fork project reference ${persistedForkFile}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
-                    ),
-                  );
+              } catch (cleanupError) {
+                durableCleanupError = cleanupError;
+                diagnosticsService.recordError(
+                  `Failed to remove failed fork workspace reference ${persistedForkFile}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+                );
               }
+              if (project.id !== managedRuntimeProjectId) {
+                try {
+                  await projectStore?.removeSessionRef(
+                    project.id,
+                    persistedForkFile,
+                  );
+                } catch (cleanupError) {
+                  durableCleanupError ??= cleanupError;
+                  diagnosticsService.recordError(
+                    `Failed to remove failed fork project reference ${persistedForkFile}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+                  );
+                }
+              }
+            }
+            if (persistedForkFile !== undefined) {
+              try {
+                if (durableCleanupError === undefined) {
+                  await forkCleanupJournal?.complete(persistedForkFile);
+                }
+              } catch (cleanupError) {
+                durableCleanupError ??= cleanupError;
+                diagnosticsService.recordError(
+                  `Failed to complete failed fork cleanup for ${persistedForkFile}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+                );
+              }
+            }
+            if (durableCleanupError !== undefined) {
+              throw new Error(
+                `Failed fork cleanup is retained for retry: ${durableCleanupError instanceof Error ? durableCleanupError.message : String(durableCleanupError)}`,
+              );
             }
             if (attachmentGeneration !== chatSessionAttachmentGeneration) {
               throw new Error(
@@ -6704,6 +6793,12 @@ async function resumeChatSession(
     );
   }
   const canonicalSessionFile = validation.sessionFile;
+  assertChatLifecycleOperationActive(lifecycleOperation);
+  if (await forkCleanupJournal?.blocks(canonicalSessionFile)) {
+    throw new Error(
+      "This fork target is awaiting durable cleanup and cannot be attached yet.",
+    );
+  }
   assertChatLifecycleOperationActive(lifecycleOperation);
 
   const mode = chatBackendMode ?? "real";
@@ -7147,13 +7242,16 @@ async function getChatSnapshotForRuntime(
   let canonicalSessionFile: string | undefined;
   if (typeof state.sessionFile === "string") {
     const resolvedSessionFile = await safeRealpath(state.sessionFile);
+    options.assertLifecycleActive?.();
     canonicalSessionFile =
       resolvedSessionFile ??
       (await canonicalSessionPathForMissingFile(state.sessionFile));
+    options.assertLifecycleActive?.();
     await options.beforeSessionRegistration?.({
       sessionFile: canonicalSessionFile,
       state,
     });
+    options.assertLifecycleActive?.();
     const lockedRuntimeId = chatSessionFileLocks.get(canonicalSessionFile);
     if (lockedRuntimeId !== undefined && lockedRuntimeId !== runtimeId) {
       throw new Error(
@@ -7163,6 +7261,7 @@ async function getChatSnapshotForRuntime(
     options.assertLifecycleActive?.();
     chatRuntimeSessionFiles.set(runtimeId, canonicalSessionFile);
     chatSessionFileLocks.set(canonicalSessionFile, runtimeId);
+    options.assertLifecycleActive?.();
     // Model/thinking updates intentionally omit get_messages. Merge their
     // state-only data only when Pi supplies a real sessionName; never turn an
     // empty metadata read into a filename title or a zero-message transcript.
@@ -7191,12 +7290,14 @@ async function getChatSnapshotForRuntime(
         ...(preview !== undefined ? { preview } : {}),
       });
       options.onSessionPersisted?.(canonicalSessionFile);
+      options.assertLifecycleActive?.();
     }
     if (
       projectId !== undefined &&
       projectId !== managedRuntimeProjectId &&
       (hasTranscript || title !== undefined)
     ) {
+      options.assertLifecycleActive?.();
       const preview = hasTranscript ? previewFromMessages(messages) : undefined;
       const completedAtMs = hasTranscript
         ? completedAtFromMessages(messages)
@@ -7215,6 +7316,7 @@ async function getChatSnapshotForRuntime(
         ...(completedAtMs !== undefined ? { completedAtMs } : {}),
         ...(preview !== undefined ? { preview } : {}),
       });
+      options.assertLifecycleActive?.();
     }
   }
 
@@ -7234,6 +7336,7 @@ async function getChatSnapshotForRuntime(
   }
 
   await reconcileMultitaskRuntime(runtimeId, state.sessionFile);
+  options.assertLifecycleActive?.();
   return {
     runtimeId,
     backendMode: mode,
