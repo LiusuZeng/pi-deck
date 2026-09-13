@@ -1,5 +1,7 @@
 import {
   classifyOpenAiCodexAuthFailure,
+  isSuccessfulTerminalAssistantCompletion,
+  isSuccessfulTerminalStatus,
   type FailureKind,
 } from "./openaiCodexAuth.js";
 
@@ -588,6 +590,8 @@ function reduceAgentEndEvent(
     reportedProviderError || state.terminalProviderErrorObserved;
   const authenticatedCompletion =
     !terminalProviderErrorObserved && isAuthenticatedModelCompletion(event);
+  const authStillPending =
+    state.failureKind === "auth-required" && !authenticatedCompletion;
   let diagnostics = state.diagnostics;
   if (reportedProviderError) {
     diagnostics = appendDiagnostic(
@@ -606,7 +610,7 @@ function reduceAgentEndEvent(
     ...state,
     baseState: hasPendingExtensionUi
       ? "waitingForInput"
-      : terminalProviderErrorObserved
+      : terminalProviderErrorObserved || authStillPending
         ? "error"
         : "idle",
     terminalProviderErrorObserved,
@@ -636,13 +640,9 @@ function isAuthenticatedModelCompletion(event: RuntimeEventLike): boolean {
     return false;
   }
   const assistant = getFinalAssistantMessage(event);
-  if (assistant !== undefined) {
-    return (
-      !isErrorAssistantMessage(assistant) &&
-      getString(assistant, "stopReason") !== "aborted"
-    );
-  }
-  return status === "completed" || status === "success";
+  return assistant !== undefined
+    ? isSuccessfulTerminalAssistantCompletion(assistant)
+    : isSuccessfulTerminalStatus(status);
 }
 
 /** Keeps lightweight reducer error classification aligned with App's Pi events. */

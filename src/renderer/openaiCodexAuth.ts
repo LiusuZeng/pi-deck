@@ -2,6 +2,23 @@ import type { RuntimeEventLike } from "./sessionState.js";
 
 export type FailureKind = "auth-required";
 
+/**
+ * Pi persists an assistant turn's authoritative terminal outcome here. A
+ * tool-use turn is only an intermediate agent-loop step, while a missing
+ * reason can be a streamed partial; neither proves repaired credentials.
+ */
+export function isSuccessfulTerminalAssistantCompletion(
+  message: Record<string, unknown> | undefined,
+): boolean {
+  const stopReason = message?.stopReason;
+  return stopReason === "stop" || stopReason === "length";
+}
+
+/** Legacy terminal events without a final assistant payload carry this proof. */
+export function isSuccessfulTerminalStatus(status: unknown): boolean {
+  return status === "completed" || status === "success";
+}
+
 const AUTH_MESSAGE =
   /\bprovided authentication token is (?:expired|revoked|invalid)\b/i;
 const AUTH_FAILURE =

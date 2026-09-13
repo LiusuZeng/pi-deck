@@ -382,7 +382,7 @@ describe("reduceSessionRuntimeEvent", () => {
     expect(state.diagnostics).toContain(finalError);
   });
 
-  it("keeps auth recovery pending through an aborted turn until an assistant succeeds", () => {
+  it("keeps auth recovery pending through nonterminal assistant results until explicit success", () => {
     const expiredAssistant = {
       role: "assistant",
       provider: "openai-codex",
@@ -401,15 +401,37 @@ describe("reduceSessionRuntimeEvent", () => {
         },
       },
       { type: "agent_end", messages: [expiredAssistant], willRetry: false },
-      { type: "agent_start" },
-      { type: "agent_end", status: "aborted", willRetry: false },
     ]);
     expect(state.failureKind).toBe("auth-required");
+
+    for (const assistant of [
+      { role: "assistant", content: "Partial response" },
+      { role: "assistant", stopReason: "toolUse", content: "Use a tool" },
+      { role: "assistant", content: "No terminal reason" },
+    ]) {
+      state = reduceSessionRuntimeEvent(state, { type: "agent_start" });
+      state = reduceSessionRuntimeEvent(state, {
+        type: "agent_end",
+        status: "completed",
+        messages: [assistant],
+        willRetry: false,
+      });
+      expect(state).toMatchObject({
+        baseState: "error",
+        failureKind: "auth-required",
+      });
+    }
 
     state = reduceSessionRuntimeEvent(state, { type: "agent_start" });
     state = reduceSessionRuntimeEvent(state, {
       type: "agent_end",
-      messages: [{ role: "assistant", content: "Verified response" }],
+      messages: [
+        {
+          role: "assistant",
+          stopReason: "stop",
+          content: "Verified response",
+        },
+      ],
       willRetry: false,
     });
     expect(state.failureKind).toBeUndefined();

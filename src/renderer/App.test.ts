@@ -1634,7 +1634,7 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
     });
   });
 
-  it("keeps an auth diagnosis through worker activity until a new assistant turn succeeds", () => {
+  it("keeps an auth diagnosis through nonterminal assistant results until explicit success", () => {
     const expiredAssistant = {
       ...productionAssistantMessage(
         "error",
@@ -1662,19 +1662,27 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
     expect(session.failureKind).toBe("auth-required");
     expect(session.lastError).toBe("Provided authentication token is expired.");
 
-    session = __rendererTestHooks.reduceRuntimeEvent(session, {
-      type: "agent_start",
-    } as any);
-    expect(session.failureKind).toBe("auth-required");
-    expect(session.lastError).toBe("Provided authentication token is expired.");
-
-    session = __rendererTestHooks.reduceRuntimeEvent(session, {
-      type: "agent_end",
-      status: "aborted",
-      messages: [productionAssistantMessage("aborted")],
-      willRetry: false,
-    } as any);
-    expect(session.failureKind).toBe("auth-required");
+    for (const assistant of [
+      { role: "assistant", content: "Partial response" },
+      { role: "assistant", stopReason: "toolUse", content: "Use a tool" },
+      { role: "assistant", content: "No terminal reason" },
+    ]) {
+      session = __rendererTestHooks.reduceRuntimeEvent(session, {
+        type: "agent_start",
+      } as any);
+      session = __rendererTestHooks.reduceRuntimeEvent(session, {
+        type: "agent_end",
+        status: "completed",
+        messages: [assistant],
+        willRetry: false,
+      } as any);
+      expect(session).toMatchObject({
+        status: "error",
+        baseState: "error",
+        failureKind: "auth-required",
+        lastError: "Provided authentication token is expired.",
+      });
+    }
 
     session = __rendererTestHooks.reduceRuntimeEvent(session, {
       type: "agent_start",
@@ -3922,7 +3930,7 @@ describe("renderer message_update reduction", () => {
     expect(session.sessionId).toBe("parent-session-id");
   });
 
-  it("rehydrates a durable auth error and clears it only after a later assistant completion", () => {
+  it("rehydrates auth recovery through partial and tool-use turns until explicit terminal success", () => {
     const expired = {
       ...productionAssistantMessage(
         "error",
@@ -3930,11 +3938,16 @@ describe("renderer message_update reduction", () => {
       ),
       provider: "openai-codex",
     };
+    const incompleteTurns = [
+      { role: "assistant", content: "Partial response" },
+      { role: "assistant", stopReason: "toolUse", content: "Use a tool" },
+      { role: "assistant", content: "No terminal reason" },
+    ];
     const pending = __rendererTestHooks.sessionFromSnapshot({
       runtimeId: "runtime-1",
       backendMode: "real",
       state: { cwd: "/tmp/project", isAgentActive: false },
-      messages: [expired],
+      messages: [expired, ...incompleteTurns],
     } as any);
     expect(pending).toMatchObject({
       status: "error",
@@ -3954,7 +3967,11 @@ describe("renderer message_update reduction", () => {
       runtimeId: "runtime-2",
       backendMode: "real",
       state: { cwd: "/tmp/project", isAgentActive: false },
-      messages: [expired, { role: "assistant", content: "Now authenticated" }],
+      messages: [
+        expired,
+        ...incompleteTurns,
+        { role: "assistant", stopReason: "stop", content: "Now authenticated" },
+      ],
     } as any);
     expect(verified.failureKind).toBeUndefined();
     expect(verified.authVerified).toBe(true);
@@ -4157,6 +4174,32 @@ describe("renderer message_update reduction", () => {
       pendingExtensionUiRequests: [
         expect.objectContaining({ id: "request-1" }),
       ],
+    });
+  });
+
+  it("keeps pending auth recovery through inactive status reconciliation", () => {
+    const pending = {
+      ...baseSession(),
+      status: "working",
+      baseState: "working",
+      providerErrorObserved: true,
+      failureKind: "auth-required",
+      lastError: "Provided authentication token is expired.",
+    } as any;
+    const reconciled = __rendererTestHooks.reconcileSessionWithRuntimeStatus(
+      pending,
+      {
+        runtimeId: "session-1",
+        backendMode: "real",
+        state: { isAgentActive: false },
+      } as any,
+    );
+
+    expect(reconciled).toMatchObject({
+      status: "error",
+      baseState: "error",
+      failureKind: "auth-required",
+      lastError: "Provided authentication token is expired.",
     });
   });
 

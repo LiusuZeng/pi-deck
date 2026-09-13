@@ -5543,6 +5543,13 @@ test("OpenAI Codex auth repair stays pending across relaunch until an explicit p
         (message) => message.content === "keep this durable work",
       ),
     ).toHaveLength(1);
+    expect(
+      verified.messages.find(
+        (message) =>
+          message.content ===
+          "I’ll review the workspace and summarize the next steps.",
+      )?.stopReason,
+    ).toBe("stop");
   } finally {
     await secondLaunch.app.close();
   }
@@ -5559,6 +5566,9 @@ test("OpenAI Codex auth repair stays pending across relaunch until an explicit p
         "I’ll review the workspace and summarize the next steps.",
       ),
     ).toBeVisible();
+    await expect(
+      thirdLaunch.page.getByText("OpenAI authentication required"),
+    ).toHaveCount(0);
     const persisted = await thirdLaunch.page.evaluate(() =>
       window.piDeck.chat.getSnapshot(),
     );

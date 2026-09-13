@@ -1107,6 +1107,9 @@ class FakeRpcServer {
             id: assistantId,
             role: "assistant",
             content: accumulated,
+            // Persist Pi's authoritative terminal result so snapshot recovery
+            // cannot mistake this completed turn for a streamed partial.
+            stopReason: "stop",
             createdAt: Date.now(),
             ...(this.options.includeUsage
               ? {

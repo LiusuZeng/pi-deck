@@ -68,6 +68,8 @@ import {
 } from "./sessionState.js";
 import {
   classifyOpenAiCodexAuthFailure,
+  isSuccessfulTerminalAssistantCompletion,
+  isSuccessfulTerminalStatus,
   type FailureKind,
 } from "./openaiCodexAuth.js";
 import {
@@ -7651,7 +7653,7 @@ function authRecoveryFromSnapshotMessages(messages: readonly ChatMessage[]): {
       // an unresolved earlier auth failure remains visible until success.
       continue;
     }
-    if (getStringFromRecord(record, "stopReason") !== "aborted") {
+    if (isSuccessfulTerminalAssistantCompletion(record)) {
       return { authenticated: true };
     }
   }
@@ -8320,6 +8322,8 @@ function reduceRuntimeEventUnprioritized(
         (hasRuntimeEventError(event) || session.providerErrorObserved === true);
       const authenticatedCompletion =
         !endedWithError && isAuthenticatedModelCompletion(event);
+      const authStillPending =
+        session.failureKind === "auth-required" && !authenticatedCompletion;
       // A dialog is still actionable until Pi acknowledges its response or it
       // times out. Its queue, rather than a potentially stale overlay, is the
       // source of truth and takes precedence over a terminal error so every
@@ -8383,7 +8387,8 @@ function reduceRuntimeEventUnprioritized(
         ...session,
         // A live authoritative, non-error terminal event supersedes any
         // reconstructed durable completion timestamp for this session.
-        completedAtMs: endedWithError ? undefined : Date.now(),
+        completedAtMs:
+          endedWithError || authStillPending ? undefined : Date.now(),
         awaitingAgentEnd: false,
         ...(usageByMessageId !== undefined ? { usageByMessageId } : {}),
         ...(usageByMessageId !== undefined
@@ -8396,17 +8401,17 @@ function reduceRuntimeEventUnprioritized(
           : {}),
         status: stillWaitingForInput
           ? "waiting"
-          : endedWithError
+          : endedWithError || authStillPending
             ? "error"
             : "idle",
         baseState: stillWaitingForInput
           ? "waitingForInput"
-          : endedWithError
+          : endedWithError || authStillPending
             ? "error"
             : "idle",
         // Preserve a terminal provider failure behind an actionable dialog so
         // clearing the final request restores Failed rather than working/idle.
-        providerErrorObserved: endedWithError,
+        providerErrorObserved: endedWithError || authStillPending,
         ...(endedWithError
           ? {
               failureKind:
@@ -8431,9 +8436,11 @@ function reduceRuntimeEventUnprioritized(
           ? "Waiting · extension input required"
           : endedWithError
             ? "Error · backend stream failed"
-            : status === "aborted"
-              ? "Idle · backend stream aborted"
-              : "Idle · backend stream complete",
+            : authStillPending
+              ? "Error · OpenAI authentication verification pending"
+              : status === "aborted"
+                ? "Idle · backend stream aborted"
+                : "Idle · backend stream complete",
         workingStartedAtMs: undefined,
         retryPrompt: endedWithError ? session.retryPrompt : undefined,
         lastRuntimeEventLabel: endedWithError
@@ -13550,14 +13557,17 @@ function reconcileSessionWithRuntimeStatus(
     };
   }
 
+  const authStillPending = session.failureKind === "auth-required";
   return appendDiagnostic(
     {
       ...session,
-      status: "idle",
-      baseState: "idle",
+      status: authStillPending ? "error" : "idle",
+      baseState: authStillPending ? "error" : "idle",
       awaitingAgentEnd: false,
-      providerErrorObserved: false,
-      lastError: undefined,
+      providerErrorObserved: authStillPending
+        ? session.providerErrorObserved === true
+        : false,
+      ...(authStillPending ? {} : { lastError: undefined }),
       overlays: {
         ...session.overlays,
         streaming: false,
@@ -13565,7 +13575,9 @@ function reconcileSessionWithRuntimeStatus(
         retrying: false,
       },
       workingStartedAtMs: undefined,
-      subtitle: `Idle · ${backendLabel(session)} reconciled`,
+      subtitle: authStillPending
+        ? "Error · OpenAI authentication verification pending"
+        : `Idle · ${backendLabel(session)} reconciled`,
       lastRuntimeEventLabel: "Pi reconciliation confirmed completion",
       updatedAt: "Now",
       updatedAtMs: Date.now(),
@@ -13814,15 +13826,9 @@ function isAuthenticatedModelCompletion(event: ChatRuntimeEvent): boolean {
     return false;
   }
   const assistant = getFinalAssistantMessage(event);
-  if (assistant !== undefined) {
-    return (
-      !isErrorAssistantMessage(assistant) &&
-      getStringFromRecord(assistant, "stopReason") !== "aborted"
-    );
-  }
-  // Legacy Pi terminal events do not always include messages, but their
-  // explicit completed/success status is still an authenticated model result.
-  return status === "completed" || status === "success";
+  return assistant !== undefined
+    ? isSuccessfulTerminalAssistantCompletion(assistant)
+    : isSuccessfulTerminalStatus(status);
 }
 
 function hasRuntimeEventError(event: ChatRuntimeEvent): boolean {

@@ -400,6 +400,7 @@ test("fake RPC auth expiry is one-shot across replacement workers", async () => 
       messages.at(-1)?.content,
       "I’ll review the workspace and summarize the next steps.",
     );
+    assert.equal(messages.at(-1)?.stopReason, "stop");
   } finally {
     recovered.close();
     fs.rmSync(directory, { recursive: true, force: true });

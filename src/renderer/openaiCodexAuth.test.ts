@@ -1,5 +1,40 @@
 import { describe, expect, it } from "vitest";
-import { classifyOpenAiCodexAuthFailure } from "./openaiCodexAuth.js";
+import {
+  classifyOpenAiCodexAuthFailure,
+  isSuccessfulTerminalAssistantCompletion,
+  isSuccessfulTerminalStatus,
+} from "./openaiCodexAuth.js";
+
+describe("isSuccessfulTerminalAssistantCompletion", () => {
+  it.each(["stop", "length"])("accepts terminal %s results", (stopReason) => {
+    expect(
+      isSuccessfulTerminalAssistantCompletion({
+        role: "assistant",
+        stopReason,
+      }),
+    ).toBe(true);
+  });
+
+  it.each([undefined, "toolUse", "error", "aborted"])(
+    "rejects unverified %s results",
+    (stopReason) => {
+      expect(
+        isSuccessfulTerminalAssistantCompletion(
+          stopReason === undefined
+            ? { role: "assistant", content: "partial" }
+            : { role: "assistant", stopReason },
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it("accepts only explicit legacy terminal statuses", () => {
+    expect(isSuccessfulTerminalStatus("completed")).toBe(true);
+    expect(isSuccessfulTerminalStatus("success")).toBe(true);
+    expect(isSuccessfulTerminalStatus(undefined)).toBe(false);
+    expect(isSuccessfulTerminalStatus("working")).toBe(false);
+  });
+});
 
 describe("classifyOpenAiCodexAuthFailure", () => {
   it.each([
