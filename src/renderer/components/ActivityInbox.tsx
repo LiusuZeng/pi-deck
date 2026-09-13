@@ -483,7 +483,14 @@ function ActivityRow({
       type="button"
     >
       <span className="activity-inbox-status" aria-hidden="true">
-        <Icon focusable="false" />
+        <Icon
+          className={
+            kind === "inProgress"
+              ? "activity-inbox-status-icon--active"
+              : undefined
+          }
+          focusable="false"
+        />
         <span>{label}</span>
       </span>
       <span className="activity-inbox-row-copy">
