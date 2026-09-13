@@ -7313,6 +7313,17 @@ test.describe("task-session routing acceptance", () => {
       );
       await expect(row).toContainText("115 tokens");
       await expect(row.locator("[data-lifecycle='completed']")).toBeVisible();
+      expect(
+        await page.evaluate(() =>
+          JSON.stringify(
+            (
+              window as typeof window & {
+                __telemetryStates?: unknown[];
+              }
+            ).__telemetryStates ?? [],
+          ).includes("private tool output never forwarded"),
+        ),
+      ).toBe(false);
       await expect
         .poll(() =>
           page.evaluate(() => {
