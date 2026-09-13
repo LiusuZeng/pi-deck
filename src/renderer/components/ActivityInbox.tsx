@@ -63,17 +63,18 @@ function formatTimestamp(timestamp: number): string {
   }).format(new Date(timestamp));
 }
 
-function finiteTimestamp(timestamp: number | undefined): number | undefined {
-  return timestamp !== undefined && Number.isFinite(timestamp)
-    ? timestamp
-    : undefined;
+function finiteTimestamp(timestamp: unknown): number | undefined {
+  if (typeof timestamp !== "number" || !Number.isFinite(timestamp)) {
+    return undefined;
+  }
+  return Number.isNaN(new Date(timestamp).getTime()) ? undefined : timestamp;
 }
 
-function activityRowTimestamp(item: ActivityItem): number {
+function activityRowTimestamp(item: ActivityItem): number | undefined {
   const completedAtMs = finiteTimestamp(item.completedAtMs);
   return item.status === "completed" && completedAtMs !== undefined
     ? completedAtMs
-    : item.updatedAtMs;
+    : finiteTimestamp(item.updatedAtMs);
 }
 
 function activityRowTimestampLabel(
@@ -95,6 +96,21 @@ function workScopeLabel(
   return workspaceName === undefined
     ? "Workspace Work"
     : `${workspaceName} Work`;
+}
+
+function activityResultSummary(
+  count: number,
+  filter: ActivityInboxFilter,
+  scopeLabel: string,
+  searchQuery: string | undefined,
+): string {
+  const resultKind =
+    filter === "all"
+      ? "result"
+      : `${ACTIVITY_META[filter].label.toLowerCase()} result`;
+  const queryContext =
+    searchQuery === undefined ? "" : ` for “${searchQuery.trim()}”`;
+  return `${count} ${resultKind}${count === 1 ? "" : "s"}${queryContext} in ${scopeLabel}.`;
 }
 
 function formatCompactTokens(tokens: number): string {
@@ -236,6 +252,12 @@ export function ActivityInbox({
   const visibleKinds =
     selectedFilter === "all" ? ACTIVITY_STATUSES : [selectedFilter];
   const visibleItems = visibleKinds.flatMap((kind) => groups[kind]);
+  const resultSummary = activityResultSummary(
+    visibleItems.length,
+    selectedFilter,
+    scopeLabel,
+    searchActive ? searchQuery : undefined,
+  );
   const showWorkspaceControls = workspaces.length > 0;
   const showWorkspaceContext = scope.type === "all" && workspaces.length > 0;
 
@@ -365,7 +387,6 @@ export function ActivityInbox({
         </label>
       ) : null}
       <span
-        aria-live="polite"
         className="activity-inbox-scope-status sr-only"
         id="activity-inbox-scope-status"
       >
@@ -429,6 +450,14 @@ export function ActivityInbox({
         })}
       </div>
 
+      <p
+        aria-live="polite"
+        className="activity-inbox-result-summary sr-only"
+        role="status"
+      >
+        {resultSummary}
+      </p>
+
       <div className="activity-inbox-content" id="activity-inbox-content">
         {visibleItems.length === 0 ? (
           <EmptyState
@@ -475,7 +504,7 @@ function EmptyState({
       : `No ${ACTIVITY_META[filter].emptyLabel.toLowerCase()} work in ${scopeLabel}.`;
 
   return (
-    <div className="activity-inbox-empty" role="status">
+    <div className="activity-inbox-empty">
       <h2>
         {searching
           ? "No search matches"
@@ -545,7 +574,12 @@ function ActivityRow({
   const { Icon, label } = ACTIVITY_META[kind];
   const timestampMs = activityRowTimestamp(item);
   const timestampLabel = activityRowTimestampLabel(item);
-  const relativeTime = formatRelativeTime(timestampMs);
+  const relativeTime =
+    timestampMs === undefined ? undefined : formatRelativeTime(timestampMs);
+  const timestampDescription =
+    relativeTime === undefined
+      ? "Updated time unavailable"
+      : `${timestampLabel} ${relativeTime}`;
   const workspaceContext = showWorkspaceContext
     ? `, ${item.workspaceName}`
     : "";
@@ -559,7 +593,7 @@ function ActivityRow({
 
   return (
     <button
-      aria-label={`${label}: ${item.title}${workspaceContext}. ${item.detail}. ${timestampLabel} ${relativeTime}. ${item.actionLabel}.`}
+      aria-label={`${label}: ${item.title}${workspaceContext}. ${item.detail}. ${timestampDescription}. ${item.actionLabel}.`}
       className={`activity-inbox-row activity-inbox-row--${kind}`}
       data-activity-item-id={item.id}
       onClick={activate}
@@ -587,12 +621,16 @@ function ActivityRow({
         <span className="activity-inbox-row-detail">{item.detail}</span>
       </span>
       <span className="activity-inbox-row-meta">
-        <time
-          dateTime={new Date(timestampMs).toISOString()}
-          title={formatTimestamp(timestampMs)}
-        >
-          {relativeTime}
-        </time>
+        {timestampMs === undefined ? (
+          <time title={timestampDescription}>{timestampDescription}</time>
+        ) : (
+          <time
+            dateTime={new Date(timestampMs).toISOString()}
+            title={formatTimestamp(timestampMs)}
+          >
+            {relativeTime}
+          </time>
+        )}
         <span className="activity-inbox-row-action">{item.actionLabel}</span>
       </span>
     </button>

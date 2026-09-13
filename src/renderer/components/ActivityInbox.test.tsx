@@ -329,7 +329,7 @@ describe("ActivityInbox", () => {
         />,
       );
     });
-    expect(view.querySelector('[role="status"]')?.textContent).toContain(
+    expect(view.querySelector(".activity-inbox-empty")?.textContent).toContain(
       "No failed matches “project borealis” in Project Atlas Work.",
     );
   });
@@ -400,7 +400,7 @@ describe("ActivityInbox", () => {
     });
 
     expect(rowTitles(view)).toEqual([]);
-    expect(view.querySelector('[role="status"]')?.textContent).toContain(
+    expect(view.querySelector(".activity-inbox-empty")?.textContent).toContain(
       "No Work matches “diagnostic phrase”",
     );
     const clearButton = Array.from(view.querySelectorAll("button")).find(
@@ -408,6 +408,67 @@ describe("ActivityInbox", () => {
     );
     act(() => clearButton?.click());
     expect(clear).toHaveBeenCalledWith("");
+  });
+
+  it("announces query counts, clear results, and composed status filters", () => {
+    const onSearchQueryChange = vi.fn();
+    const model = modelWithEveryKind();
+    const { view } = renderInbox(model);
+    const renderWith = (
+      searchQuery: string,
+      selectedFilter: ActivityInboxFilter,
+    ) => {
+      act(() => {
+        root?.render(
+          <ActivityInbox
+            model={model}
+            onOpenActivityItem={vi.fn()}
+            onScopeChange={vi.fn()}
+            onSearchQueryChange={onSearchQueryChange}
+            onSelectedFilterChange={vi.fn()}
+            searchQuery={searchQuery}
+            selectedFilter={selectedFilter}
+            scope={{ type: "all" }}
+            workspaces={workspaces}
+          />,
+        );
+      });
+    };
+
+    renderWith("project borealis", "all");
+    expect(
+      view.querySelector(".activity-inbox-result-summary")?.textContent,
+    ).toBe("1 result for “project borealis” in All Work.");
+    expect(view.querySelectorAll('[role="status"]')).toHaveLength(1);
+    expect(
+      view
+        .querySelector(".activity-inbox-result-summary")
+        ?.getAttribute("aria-live"),
+    ).toBe("polite");
+
+    const clearButton = Array.from(view.querySelectorAll("button")).find(
+      (button) => button.textContent === "Clear search",
+    );
+    act(() => clearButton?.click());
+    expect(onSearchQueryChange).toHaveBeenCalledWith("");
+    renderWith("", "all");
+    expect(
+      view.querySelector(".activity-inbox-result-summary")?.textContent,
+    ).toBe("5 results in All Work.");
+
+    renderWith("project borealis", "failed");
+    expect(
+      view.querySelector(".activity-inbox-result-summary")?.textContent,
+    ).toBe("1 failed result for “project borealis” in All Work.");
+
+    renderWith("project borealis", "needsAttention");
+    expect(
+      view.querySelector(".activity-inbox-result-summary")?.textContent,
+    ).toBe("0 needs attention results for “project borealis” in All Work.");
+    expect(view.querySelectorAll('[role="status"]')).toHaveLength(1);
+    expect(view.querySelector(".activity-inbox-empty")?.textContent).toContain(
+      "No needs attention matches “project borealis” in All Work.",
+    );
   });
 
   it("marks only in-progress session row icons as active", () => {
@@ -733,7 +794,7 @@ describe("ActivityInbox", () => {
     );
 
     expect(view.querySelector("h1")?.textContent).toBe("Project Cygnus Work");
-    expect(view.querySelector('[role="status"]')?.textContent).toContain(
+    expect(view.querySelector(".activity-inbox-empty")?.textContent).toContain(
       "No work in Project Cygnus Work.",
     );
     expect(view.querySelector('option[value="all"]')?.textContent).toBe(
@@ -758,7 +819,7 @@ describe("ActivityInbox", () => {
     );
 
     expect(failedFilter?.getAttribute("aria-pressed")).toBe("true");
-    expect(view.querySelector('[role="status"]')?.textContent).toContain(
+    expect(view.querySelector(".activity-inbox-empty")?.textContent).toContain(
       "No failed work in Project Atlas Work.",
     );
     act(() => failedFilter?.click());
@@ -890,6 +951,68 @@ describe("ActivityInbox", () => {
     expect(time?.dateTime).toBe(new Date(completedAtMs).toISOString());
     expect(time?.dateTime).not.toBe(new Date(updatedAtMs).toISOString());
     nowSpy.mockRestore();
+  });
+
+  it.each([
+    ["NaN", Number.NaN],
+    ["Infinity", Number.POSITIVE_INFINITY],
+    ["string", "not a timestamp"],
+    ["undefined", undefined],
+    ["out-of-range number", 8.64e15 + 1],
+  ])(
+    "renders a safe timestamp fallback for malformed %s values",
+    (_fixture, updatedAtMs) => {
+      const model = modelWithEveryKind();
+      const item = model.items.find(
+        (candidate) => candidate.status === "inProgress",
+      );
+      item!.updatedAtMs = updatedAtMs as number;
+
+      const { view } = renderInbox(
+        model,
+        { type: "all" },
+        vi.fn(),
+        vi.fn(),
+        workspaces,
+        vi.fn(),
+        "inProgress",
+      );
+      const row = rowForTitle(view, "inProgress session progress");
+      const time = row?.querySelector("time");
+
+      expect(time?.textContent).toBe("Updated time unavailable");
+      expect(time?.getAttribute("datetime")).toBeNull();
+      expect(row?.getAttribute("aria-label")).toContain(
+        "Updated time unavailable",
+      );
+    },
+  );
+
+  it("falls back to a valid update time when a Completed timestamp is malformed", () => {
+    const updatedAtMs = 1_700_000_000_000;
+    const model = modelWithEveryKind();
+    const item = model.items.find(
+      (candidate) => candidate.status === "completed",
+    );
+    item!.completedAtMs = Number.NaN;
+    item!.updatedAtMs = updatedAtMs;
+
+    const { view } = renderInbox(
+      model,
+      { type: "all" },
+      vi.fn(),
+      vi.fn(),
+      workspaces,
+      vi.fn(),
+      "completed",
+    );
+    const row = rowForTitle(view, "completed session complete");
+    const time = row?.querySelector("time");
+
+    expect(time?.dateTime).toBe(new Date(updatedAtMs).toISOString());
+    expect(row?.getAttribute("aria-label")).toMatch(
+      /Detail for completed\. Updated .+ ago\./,
+    );
   });
 
   it("activates a full row once by click, Enter, or Space with its canonical item", () => {

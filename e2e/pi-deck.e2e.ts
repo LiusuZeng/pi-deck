@@ -7065,9 +7065,9 @@ test.describe("Unified Work", () => {
       await expect(atlasRow).toBeFocused();
 
       await search.fill("no such Work item");
-      await expect(
-        page.locator('.activity-inbox-empty[role="status"]'),
-      ).toContainText("No search matches");
+      await expect(page.locator(".activity-inbox-empty")).toContainText(
+        "No search matches",
+      );
       await expect(
         page.getByRole("button", { name: "Clear search" }),
       ).toBeVisible();
