@@ -108,6 +108,7 @@ import {
   canonicalWorkflowOccurrenceRequestSchema,
   canonicalWorkflowRetryOccurrenceRequestSchema,
   canonicalWorkflowStartRunRequestSchema,
+  canonicalWorkflowStopRunRequestSchema,
   workflowCreateRequestSchema,
   workflowDefinitionSchema,
   workflowGraphSnapshotRequestSchema,
@@ -1680,13 +1681,13 @@ function registerIpcHandlers(
   });
   registerValidatedIpc({
     channel: ipcChannels.canonicalWorkflowStopRun,
-    requestSchema: canonicalWorkflowGetRunRequestSchema,
+    requestSchema: canonicalWorkflowStopRunRequestSchema,
     responseSchema: workflowRunEnvelopeSchema,
     diagnostics: diagnosticsService,
-    handler: async ({ runId }) => {
+    handler: async ({ runId, expectedRevision }) => {
       const run = await ensureWorkflowStore().getWorkflowRun(runId);
       await requireOpenWorkspace(run.workspaceId);
-      return ensureWorkflowOccurrenceScheduler().stop(runId);
+      return ensureWorkflowOccurrenceScheduler().stop(runId, expectedRevision);
     },
   });
   registerValidatedIpc({
@@ -1709,13 +1710,14 @@ function registerIpcHandlers(
     requestSchema: canonicalWorkflowHumanAnswerRequestSchema,
     responseSchema: workflowRunEnvelopeSchema,
     diagnostics: diagnosticsService,
-    handler: async ({ runId, occurrenceId, value }) => {
+    handler: async ({ runId, occurrenceId, value, expectedRevision }) => {
       const run = await ensureWorkflowStore().getWorkflowRun(runId);
       await requireOpenWorkspace(run.workspaceId);
       return ensureWorkflowOccurrenceScheduler().answerHuman(
         runId,
         occurrenceId,
         value,
+        expectedRevision,
       );
     },
   });

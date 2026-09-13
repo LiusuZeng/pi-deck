@@ -211,6 +211,95 @@ describe("WorkflowOccurrenceRunView", () => {
     expect(onAnswer).toHaveBeenCalledWith(run.occurrences[0].id, true);
   });
 
+  it("submits Answer and Stop exactly once when their controls are double-clicked", async () => {
+    const definition = {
+      format: "pi-deck.agent-workflow" as const,
+      schemaVersion: 2 as const,
+      id: "00000000-0000-4000-8000-000000000309",
+      revision: 1,
+      name: "Destructive latch flow",
+      inputs: [],
+      entryNodeId: "00000000-0000-4000-8000-00000000030a",
+      nodes: [
+        {
+          id: "00000000-0000-4000-8000-00000000030a",
+          name: "Approve",
+          role: "human" as const,
+          config: { interaction: "approval" as const, prompt: "Approve?" },
+        },
+      ],
+      relationships: [
+        {
+          id: "00000000-0000-4000-8000-00000000030b",
+          from: "00000000-0000-4000-8000-00000000030a",
+          when: { equals: true },
+          to: { end: "approved" },
+        },
+        {
+          id: "00000000-0000-4000-8000-00000000030c",
+          from: "00000000-0000-4000-8000-00000000030a",
+          when: { equals: false },
+          to: { end: "rejected" },
+        },
+      ],
+    };
+    const run = createWorkflowRoleRun(definition, "workspace");
+    let releaseAnswer!: () => void;
+    const onAnswer = vi.fn(
+      () => new Promise<void>((resolve) => (releaseAnswer = resolve)),
+    );
+    const answerContainer = document.createElement("div");
+    await act(async () =>
+      createRoot(answerContainer).render(
+        createElement(WorkflowOccurrenceRunView, {
+          run,
+          onBack: vi.fn(),
+          onStop: vi.fn(),
+          onRetry: vi.fn(),
+          onAnswer,
+        }),
+      ),
+    );
+    const approve = [...answerContainer.querySelectorAll("button")].find(
+      (button) => button.textContent === "Approve",
+    )!;
+    await act(async () => {
+      approve.click();
+      approve.click();
+    });
+    expect(onAnswer).toHaveBeenCalledTimes(1);
+    expect(approve.disabled).toBe(true);
+    await act(async () => releaseAnswer());
+
+    let releaseStop!: () => void;
+    const onStop = vi.fn(
+      () => new Promise<void>((resolve) => (releaseStop = resolve)),
+    );
+    const stopContainer = document.createElement("div");
+    await act(async () =>
+      createRoot(stopContainer).render(
+        createElement(WorkflowOccurrenceRunView, {
+          run,
+          onBack: vi.fn(),
+          onStop,
+          onRetry: vi.fn(),
+          onAnswer: vi.fn(),
+        }),
+      ),
+    );
+    const stop = [...stopContainer.querySelectorAll("button")].find(
+      (button) => button.textContent === "Stop run",
+    )!;
+    await act(async () => {
+      stop.click();
+      stop.click();
+    });
+    expect(onStop).toHaveBeenCalledTimes(1);
+    expect(stop.disabled).toBe(true);
+    await act(async () => releaseStop());
+    expect(stop.disabled).toBe(false);
+  });
+
   it("submits exactly one replacement when retry is double-clicked", async () => {
     const definition = {
       format: "pi-deck.agent-workflow" as const,

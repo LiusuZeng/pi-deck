@@ -662,6 +662,57 @@ test("live graph shows cancellation from a waiting human gate", async () => {
   }
 });
 
+test("Stop then Retry keeps a Human checkpoint answerable and completes exactly once", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-stop-retry-human-"),
+  );
+  let app: ElectronApplication | undefined;
+  try {
+    ({ app } = await launch(graphEnvironment(root)));
+    const page = await app.firstWindow();
+    await createGraphWorkflow(page, "human");
+    const runId = await openAndStartOnlyWorkflow(page);
+    await expect(page.getByText("Waiting for your input")).toBeVisible();
+    await page.getByRole("button", { name: "Stop run" }).click();
+    await expect(page.getByText("Status: Stopped")).toBeVisible();
+    await page
+      .locator(`[data-workflow-node-id="${graphWorkflowIds.human}"]`)
+      .click();
+    await page.getByRole("button", { name: "Retry attempt 1" }).click();
+    await expect(
+      page.getByRole("heading", { name: "Waiting for your input" }),
+    ).toBeVisible();
+    const approve = page.getByRole("button", { name: "Approve" });
+    await approve.evaluate((button) => {
+      button.click();
+      button.click();
+    });
+    await expect(
+      page.locator(".workflow-page-heading").getByText("Status: Completed"),
+    ).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(async (id) => {
+          const run = await window.piDeck.workflows.canonicalGetRun({
+            runId: id,
+          });
+          return run.occurrences.map((item) => ({
+            attempt: item.attempt,
+            status: item.status,
+            output: item.output,
+          }));
+        }, runId),
+      )
+      .toEqual([
+        { attempt: 1, status: "skipped", output: undefined },
+        { attempt: 2, status: "completed", output: true },
+      ]);
+  } finally {
+    await app?.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function sessionUserMessages(sessionFile: string | undefined): string[] {
   if (sessionFile === undefined) return [];
   return fs
@@ -1169,10 +1220,15 @@ test("retrying a cancelled managed child resumes it with its context snapshot", 
   } finally {
     if (page && runId) {
       await page
-        .evaluate(
-          (id) => window.piDeck.workflows.canonicalStopRun({ runId: id }),
-          runId,
-        )
+        .evaluate(async (id) => {
+          const run = await window.piDeck.workflows.canonicalGetRun({
+            runId: id,
+          });
+          return window.piDeck.workflows.canonicalStopRun({
+            runId: id,
+            expectedRevision: run.revision,
+          });
+        }, runId)
         .catch(() => undefined);
     }
     await app?.close().catch(() => undefined);
@@ -1949,7 +2005,10 @@ test("a cancellation race leaves no persisted runtime or late completion", async
       async ({ runId, occurrenceId, expectedRevision }) =>
         (
           await Promise.allSettled([
-            window.piDeck.workflows.canonicalStopRun({ runId }),
+            window.piDeck.workflows.canonicalStopRun({
+              runId,
+              expectedRevision,
+            }),
             window.piDeck.workflows.canonicalRetryOccurrence({
               runId,
               occurrenceId,
@@ -2203,7 +2262,11 @@ test("workflow-owned runtime rejects renderer destructive IPC while running", as
     expect(results.occurrenceRuntimeId).toBe(owned.runtimeId);
 
     await page.evaluate(async ({ runId }) => {
-      await window.piDeck.workflows.canonicalStopRun({ runId });
+      const run = await window.piDeck.workflows.canonicalGetRun({ runId });
+      await window.piDeck.workflows.canonicalStopRun({
+        runId,
+        expectedRevision: run.revision,
+      });
     }, created);
   } finally {
     await app?.close().catch(() => undefined);

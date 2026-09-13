@@ -241,19 +241,19 @@ async function executeCanonicalWorkflowMutation(
       } catch (refreshError) {
         options.setError((current) =>
           options.requestRef.current === request
-            ? `Retry failed: ${message}. Could not refresh the latest run: ${refreshError instanceof Error ? refreshError.message : String(refreshError)}`
+            ? `${options.action} failed: ${message}. Could not refresh the latest run: ${refreshError instanceof Error ? refreshError.message : String(refreshError)}`
             : current,
         );
         return;
       }
       const stale =
-        message.includes("Workflow run changed before retry") ||
+        message.includes("Workflow run changed before") ||
         message.includes("Workflow run revision conflict");
       options.setError((current) =>
         options.requestRef.current === request
           ? stale
-            ? "Run changed before retry. Review its latest status and retry again."
-            : `Retry failed: ${message}`
+            ? `Run changed before ${options.action.toLowerCase()}. Review its latest status and try again.`
+            : `${options.action} failed: ${message}`
           : current,
       );
       return;
@@ -6217,6 +6217,12 @@ export function App(): ReactElement {
                       mutate: () =>
                         window.piDeck.workflows.canonicalStopRun({
                           runId: selectedWorkflowOccurrenceRun.id,
+                          expectedRevision:
+                            selectedWorkflowOccurrenceRun.revision,
+                        }),
+                      refresh: () =>
+                        window.piDeck.workflows.canonicalGetRun({
+                          runId: selectedWorkflowOccurrenceRun.id,
                         }),
                       setRuns: setWorkflowOccurrenceRuns,
                       setError: setWorkflowError,
@@ -6250,6 +6256,12 @@ export function App(): ReactElement {
                           runId: selectedWorkflowOccurrenceRun.id,
                           occurrenceId,
                           value,
+                          expectedRevision:
+                            selectedWorkflowOccurrenceRun.revision,
+                        }),
+                      refresh: () =>
+                        window.piDeck.workflows.canonicalGetRun({
+                          runId: selectedWorkflowOccurrenceRun.id,
                         }),
                       setRuns: setWorkflowOccurrenceRuns,
                       setError: setWorkflowError,

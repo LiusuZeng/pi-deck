@@ -818,7 +818,7 @@ describe("WorkflowOccurrenceScheduler retry after Stop", () => {
 
     const running = await scheduler.schedule(persisted);
     const original = running.occurrences[0]!;
-    const stopped = await scheduler.stop(running.id);
+    const stopped = await scheduler.stop(running.id, running.revision);
     expect(stopped).toMatchObject({ status: "stopped" });
     expect(stopped.occurrences).not.toContainEqual(
       expect.objectContaining({ status: "ready" }),
@@ -907,7 +907,7 @@ describe("WorkflowOccurrenceScheduler retry after Stop", () => {
 
     const running = await scheduler.schedule(persisted);
     const original = running.occurrences[0]!;
-    const stop = scheduler.stop(running.id);
+    const stop = scheduler.stop(running.id, running.revision);
     await closingStarted;
     // This request observed the pre-stop revision but cannot enter the
     // serialized transition until Stop has committed.

@@ -248,9 +248,12 @@ export function WorkflowOccurrenceRunView(
 ): ReactElement {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string>();
-  // State updates do not synchronously disable a button. Keep a per-attempt
-  // latch so two clicks in one render cannot submit two replacement requests.
+  // State updates do not synchronously disable a button. Keep synchronous
+  // latches for every destructive mutation so a double-click never produces a
+  // second IPC request or a misleading stale-revision error.
   const retryingOccurrenceIds = useRef(new Set<string>());
+  const answeringOccurrenceIds = useRef(new Set<string>());
+  const stopping = useRef(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string>();
   const nodes = props.run.definition.nodes;
   const groups = nodes
@@ -281,10 +284,24 @@ export function WorkflowOccurrenceRunView(
       : [],
   );
   const submit = async (id: string, value: string | boolean) => {
+    if (answeringOccurrenceIds.current.has(id)) return;
+    answeringOccurrenceIds.current.add(id);
     setBusy(id);
     try {
       await props.onAnswer(id, value);
     } finally {
+      answeringOccurrenceIds.current.delete(id);
+      setBusy(undefined);
+    }
+  };
+  const stop = async () => {
+    if (stopping.current) return;
+    stopping.current = true;
+    setBusy("__stop__");
+    try {
+      await props.onStop();
+    } finally {
+      stopping.current = false;
       setBusy(undefined);
     }
   };
@@ -325,7 +342,8 @@ export function WorkflowOccurrenceRunView(
             <button
               type="button"
               className="workflow-danger-button"
-              onClick={() => void props.onStop()}
+              disabled={busy === "__stop__"}
+              onClick={() => void stop()}
             >
               Stop run
             </button>

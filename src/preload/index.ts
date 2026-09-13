@@ -92,6 +92,7 @@ import {
   canonicalWorkflowOccurrenceRequestSchema,
   canonicalWorkflowRetryOccurrenceRequestSchema,
   canonicalWorkflowStartRunRequestSchema,
+  canonicalWorkflowStopRunRequestSchema,
   workflowGraphEventSchema,
   workflowGraphSnapshotRequestSchema,
   workflowGraphSnapshotSchema,
@@ -574,10 +575,10 @@ const api: PiDeckApi = Object.freeze({
         request: canonicalWorkflowStartRunRequestSchema.parse(request),
         responseSchema: workflowRunEnvelopeSchema,
       }),
-    canonicalStopRun: (request: { runId: string }) =>
+    canonicalStopRun: (request: { runId: string; expectedRevision: number }) =>
       invokeValidated({
         channel: ipcChannels.canonicalWorkflowStopRun,
-        request: canonicalWorkflowGetRunRequestSchema.parse(request),
+        request: canonicalWorkflowStopRunRequestSchema.parse(request),
         responseSchema: workflowRunEnvelopeSchema,
       }),
     canonicalRetryOccurrence: (request: {
@@ -594,6 +595,7 @@ const api: PiDeckApi = Object.freeze({
       runId: string;
       occurrenceId: string;
       value: string | boolean;
+      expectedRevision: number;
     }) =>
       invokeValidated({
         channel: ipcChannels.canonicalWorkflowAnswerHuman,

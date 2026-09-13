@@ -28,6 +28,72 @@ export interface CanonicalWorkflowRehydrationDependencies {
   recordError(message: string): void;
 }
 
+const stoppedDormantStatuses = new Set([
+  "ready",
+  "queued",
+  "running",
+  "waitingHuman",
+]);
+
+/**
+ * Legacy builds could persist a stopped envelope while an old retry was still
+ * ready. Keep exactly one latest retry target per logical node lineage, mark
+ * superseded retry records historical, and never let restart schedule it.
+ */
+function repairStoppedCanonicalRun(
+  persisted: WorkflowRunEnvelope,
+  now: number,
+): WorkflowRunEnvelope {
+  const candidates = new Map<
+    string,
+    WorkflowRunEnvelope["occurrences"][number]
+  >();
+  const keyOf = (item: WorkflowRunEnvelope["occurrences"][number]) =>
+    `${item.nodeId}:${item.parentOrchestratorRunId ?? "root"}:${item.iteration}`;
+  const retryable = (item: WorkflowRunEnvelope["occurrences"][number]) =>
+    stoppedDormantStatuses.has(item.status) ||
+    item.status === "failed" ||
+    item.status === "cancelled";
+  for (const item of persisted.occurrences) {
+    if (!retryable(item)) continue;
+    const key = keyOf(item);
+    const prior = candidates.get(key);
+    if (
+      !prior ||
+      item.attempt > prior.attempt ||
+      (item.attempt === prior.attempt &&
+        (item.createdAtMs > prior.createdAtMs ||
+          (item.createdAtMs === prior.createdAtMs && item.id > prior.id)))
+    )
+      candidates.set(key, item);
+  }
+  return workflowRunEnvelopeSchema.parse({
+    ...persisted,
+    status: "stopped",
+    updatedAtMs: now,
+    occurrences: persisted.occurrences.map((item) => {
+      const { runtimeId: _runtimeId, ...withoutRuntimeId } = item;
+      const winner = candidates.get(keyOf(item));
+      if (retryable(item) && winner && winner.id !== item.id)
+        return {
+          ...withoutRuntimeId,
+          status: "skipped" as const,
+          updatedAtMs: now,
+        };
+      if (stoppedDormantStatuses.has(item.status))
+        return {
+          ...withoutRuntimeId,
+          status: "cancelled" as const,
+          error:
+            item.error ??
+            "Cancelled because this workflow run was stopped before restart.",
+          updatedAtMs: now,
+        };
+      return withoutRuntimeId;
+    }),
+  });
+}
+
 /** A Pi runtime cannot survive restart: mark only in-flight session owners failed.
  * Ready/queued work is resumable, Human remains waiting, and terminal work is untouched. */
 export async function rehydrateCanonicalWorkflowRuns(
@@ -49,14 +115,15 @@ export async function rehydrateCanonicalWorkflowRuns(
     const hasQueued = persisted.occurrences.some(
       (item) => item.status === "queued",
     );
-    // Before retry resumed stopped envelopes atomically, a Stop could persist a
-    // stopped run with a dormant ready or queued replacement. It must never
-    // launch after restart. Cancel that replacement instead: it remains an
-    // explicit, actionable retry target while the envelope stays stopped.
+    // A stopped envelope is never executable on restart. Older versions could
+    // leave ready/queued replacements, session-owning work, or Human gates in
+    // it; normalize every such record before any workspace/scheduler access.
     const hasLegacyStoppedDormant =
       persisted.status === "stopped" &&
-      persisted.occurrences.some((item) =>
-        ["ready", "queued"].includes(item.status),
+      persisted.occurrences.some(
+        (item) =>
+          stoppedDormantStatuses.has(item.status) ||
+          item.runtimeId !== undefined,
       );
     // runtimeId is process-local. Normalize old terminal records too, while
     // retaining sessionFile as the durable Pi transcript reopen reference.
@@ -96,24 +163,7 @@ export async function rehydrateCanonicalWorkflowRuns(
         .forEach((item) => resumableFanoutQueued.add(item.id));
     }
     if (hasLegacyStoppedDormant) {
-      const recovered = workflowRunEnvelopeSchema.parse({
-        ...persisted,
-        status: "stopped",
-        updatedAtMs: now,
-        occurrences: persisted.occurrences.map((item) => {
-          const { runtimeId: _runtimeId, ...withoutRuntimeId } = item;
-          return ["ready", "queued"].includes(item.status)
-            ? {
-                ...withoutRuntimeId,
-                status: "cancelled" as const,
-                error:
-                  item.error ??
-                  "Cancelled because this workflow run was stopped before restart.",
-                updatedAtMs: now,
-              }
-            : withoutRuntimeId;
-        }),
-      });
+      const recovered = repairStoppedCanonicalRun(persisted, now);
       const run = await dependencies.updateRun(recovered);
       dependencies.emit(run);
       continue;

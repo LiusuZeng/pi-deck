@@ -949,14 +949,14 @@ describe("workflow rehydration", () => {
       });
       expect(repaired.occurrences).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ id: original.id, status: "cancelled" }),
+          expect.objectContaining({ id: original.id, status: "skipped" }),
           expect.objectContaining({
             id: dormantReplacement.id,
-            status: "cancelled",
+            status: "skipped",
           }),
           expect.objectContaining({
             id: secondDormantReplacement.id,
-            status: "cancelled",
+            status: "skipped",
           }),
           expect.objectContaining({
             id: queuedReplacement.id,
@@ -977,13 +977,13 @@ describe("workflow rehydration", () => {
       expect(afterRestart).toEqual(repaired);
       const resumed = retryWorkflowOccurrence(
         afterRestart,
-        dormantReplacement.id,
+        queuedReplacement.id,
         4,
       );
       expect(resumed).toMatchObject({ status: "waiting" });
       expect(resumed.occurrences.at(-1)).toMatchObject({
         status: "ready",
-        attempt: 3,
+        attempt: 5,
       });
       expect(
         resumed.occurrences.filter((item) => item.status === "queued"),

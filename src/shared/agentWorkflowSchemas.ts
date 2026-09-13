@@ -227,9 +227,17 @@ export const canonicalWorkflowRetryOccurrenceRequestSchema =
   canonicalWorkflowOccurrenceRequestSchema
     .extend({ expectedRevision: z.number().int().positive() })
     .strict();
+/** Stop and Answer share Retry's durable revision fence. */
+export const canonicalWorkflowStopRunRequestSchema =
+  canonicalWorkflowGetRunRequestSchema
+    .extend({ expectedRevision: z.number().int().positive() })
+    .strict();
 export const canonicalWorkflowHumanAnswerRequestSchema =
   canonicalWorkflowOccurrenceRequestSchema
-    .extend({ value: z.union([z.string().max(32_000), z.boolean()]) })
+    .extend({
+      value: z.union([z.string().max(32_000), z.boolean()]),
+      expectedRevision: z.number().int().positive(),
+    })
     .strict();
 
 /** A static execution of a node. Repetition creates separate occurrences. */

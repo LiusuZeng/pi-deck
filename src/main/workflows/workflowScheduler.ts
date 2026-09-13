@@ -999,10 +999,14 @@ export class WorkflowOccurrenceScheduler {
     return this.pump(resumable.id);
   }
   /** Stops owned sessions before persisting cancellation, so late completions lose ownership. */
-  async stop(runId: string): Promise<WorkflowRoleRun> {
+  async stop(
+    runId: string,
+    expectedRevision: number,
+  ): Promise<WorkflowRoleRun> {
     return this.serialize(runId, async () => {
       const run = await this.current(runId);
       if (!run) throw new Error(`Unknown workflow run: ${runId}`);
+      this.requireRevision(run, expectedRevision, "stop");
       const owned = [...this.active.entries()].filter(
         ([, owner]) => owner.runId === runId,
       );
@@ -1043,10 +1047,12 @@ export class WorkflowOccurrenceScheduler {
     runId: string,
     occurrenceId: string,
     value: string | boolean,
+    expectedRevision: number,
   ): Promise<WorkflowRoleRun> {
     return this.serialize(runId, async () => {
       const run = await this.current(runId);
       if (!run) throw new Error(`Unknown workflow run: ${runId}`);
+      this.requireRevision(run, expectedRevision, "answer");
       const next = await this.save(
         answerWorkflowHumanOccurrence(run, occurrenceId, value, this.now()),
       );
@@ -1154,6 +1160,16 @@ export class WorkflowOccurrenceScheduler {
       }
     });
     this.cleanupLifecycleWake(owner.runId);
+  }
+  private requireRevision(
+    run: WorkflowRoleRun,
+    expectedRevision: number,
+    action: "stop" | "answer",
+  ): void {
+    if (run.revision !== expectedRevision)
+      throw new Error(
+        `Workflow run changed before ${action}: expected revision ${expectedRevision}, found ${run.revision}.`,
+      );
   }
   private serialize<T>(runId: string, operation: () => Promise<T>): Promise<T> {
     const previous = this.mutationTails.get(runId) ?? Promise.resolve();

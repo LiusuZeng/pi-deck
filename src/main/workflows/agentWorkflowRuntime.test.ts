@@ -1138,6 +1138,50 @@ describe("agentWorkflow occurrence runtime", () => {
     );
   });
 
+  it("uses the highest persisted logical attempt for malformed legacy retry history", () => {
+    const definition: WorkflowRoleDefinition = {
+      ...base,
+      entryNodeId: ids.worker,
+      nodes: [
+        {
+          id: ids.worker,
+          name: "Worker",
+          role: "worker",
+          config: { instructions: "do" },
+          execution: { maxAttempts: 3 },
+        },
+      ],
+      relationships: [],
+    };
+    const initial = createWorkflowRoleRun(definition, "workspace", {}, 1);
+    const first = { ...initial.occurrences[0]!, status: "failed" as const };
+    const legacySecond = {
+      ...first,
+      id: "00000000-0000-4000-8000-000000000099",
+      attempt: 2,
+      status: "cancelled" as const,
+      createdAtMs: 2,
+    };
+    const malformed = { ...initial, occurrences: [first, legacySecond] };
+    expect(() => retryWorkflowOccurrence(malformed, first.id)).toThrow(
+      "Only the latest workflow occurrence attempt may retry.",
+    );
+    const retried = retryWorkflowOccurrence(malformed, legacySecond.id, 3);
+    expect(retried.occurrences.at(-1)).toMatchObject({
+      attempt: 3,
+      status: "ready",
+    });
+    const exhausted = {
+      ...retried,
+      occurrences: retried.occurrences.map((item) =>
+        item.attempt === 3 ? { ...item, status: "failed" as const } : item,
+      ),
+    };
+    expect(() =>
+      retryWorkflowOccurrence(exhausted, exhausted.occurrences.at(-1)!.id),
+    ).toThrow("Retry budget exhausted after 3 attempts.");
+  });
+
   it("records named terminal outcomes without treating rejection as a failure", () => {
     const definition: WorkflowRoleDefinition = {
       ...base,
@@ -1350,6 +1394,58 @@ describe("agentWorkflow occurrence runtime", () => {
     run = answerWorkflowHumanOccurrence(run, human.id, "a", 2);
     expect(run.occurrences[0]?.output).toBe("a");
     expect(run.status).toBe("completed");
+  });
+
+  it("keeps a stopped Human retry answerable and routes it to completion", () => {
+    const definition: WorkflowRoleDefinition = {
+      ...base,
+      entryNodeId: ids.pick,
+      nodes: [
+        {
+          id: ids.pick,
+          name: "Pick",
+          role: "human",
+          config: { interaction: "approval", prompt: "Approve?" },
+        },
+      ],
+      relationships: [
+        {
+          id: ids.end,
+          from: ids.pick,
+          when: { equals: true },
+          to: { end: "approved" },
+        },
+        {
+          id: ids.fanAfter,
+          from: ids.pick,
+          when: { equals: false },
+          to: { end: "rejected" },
+        },
+      ],
+    };
+    let run = createWorkflowRoleRun(definition, "workspace", {}, 1);
+    const original = run.occurrences[0]!;
+    run = stopWorkflowRoleRun(run, 2);
+    run = retryWorkflowOccurrence(run, original.id, 3);
+    const retry = run.occurrences.at(-1)!;
+    expect(run.status).toBe("needsAttention");
+    expect(retry).toMatchObject({ attempt: 2, status: "waitingHuman" });
+    expect(readyWorkflowOccurrences(run)).toEqual([]);
+    run = answerWorkflowHumanOccurrence(run, retry.id, true, 4);
+    expect(run).toMatchObject({
+      status: "completed",
+      terminalOutcome: "approved",
+    });
+    expect(run.occurrences).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: original.id, status: "skipped" }),
+        expect.objectContaining({
+          id: retry.id,
+          status: "completed",
+          output: true,
+        }),
+      ]),
+    );
   });
 
   it("completes all fan-out children within bounded concurrency and routes once", () => {
