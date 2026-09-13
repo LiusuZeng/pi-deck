@@ -245,6 +245,85 @@ describe("agentWorkflow occurrence runtime", () => {
     );
   });
 
+  it("captures an unbound Plan output for a Fan child and preserves it on retry", () => {
+    const planOutput = "unique unbound Plan output for Fan context";
+    const definition: WorkflowRoleDefinition = {
+      ...base,
+      entryNodeId: ids.plan,
+      nodes: [
+        {
+          id: ids.plan,
+          name: "Plan",
+          role: "worker",
+          config: { instructions: "plan" },
+        },
+        {
+          id: ids.fan,
+          name: "Fan",
+          role: "orchestrator",
+          // Intentionally no inputBindings: managedContext must capture the
+          // routed Plan output from the Fan's parent occurrence instead.
+          config: {
+            mode: "fanout",
+            agents: [ids.work],
+            maxConcurrency: 1,
+            completion: "all",
+          },
+        },
+        {
+          id: ids.work,
+          name: "Work",
+          role: "worker",
+          managedBy: ids.fan,
+          config: { instructions: "work" },
+        },
+      ],
+      relationships: [
+        { id: ids.planReview, from: ids.plan, to: { nodeId: ids.fan } },
+      ],
+    };
+    let run = createWorkflowRoleRun(definition, "workspace", {}, 1);
+    const plan = run.occurrences[0]!;
+    run = startWorkflowOccurrence(run, plan.id, "plan", undefined, 2);
+    run = completeWorkflowOccurrence(run, plan.id, planOutput, 3);
+    const fan = readyWorkflowOccurrences(run)[0]!;
+    expect(
+      definition.nodes.find((item) => item.id === ids.fan),
+    ).not.toHaveProperty("inputBindings");
+    expect(fan.resolvedInputBindings).toBeUndefined();
+    run = startWorkflowOrchestrator(run, fan.id, 4);
+    const child = readyWorkflowOccurrences(run)[0]!;
+    // The child's sole direct parent is the still-running Fan. If this test
+    // passed via prompt-renderer fallback, Fan would need an output, which it
+    // deliberately does not have.
+    expect(
+      run.occurrences.find((item) => item.id === fan.id)?.output,
+    ).toBeUndefined();
+    expect(child.parentOccurrenceIds).toEqual([fan.id]);
+    expect(child.context).toEqual([planOutput]);
+    expect(renderWorkflowOccurrencePrompt(run, child)).toContain(
+      `Context:\n${planOutput}`,
+    );
+
+    run = startWorkflowOccurrence(run, child.id, "work", undefined, 5);
+    run = failWorkflowOccurrence(run, child.id, "retry managed child", 6);
+    run = retryWorkflowOccurrence(run, child.id, 7);
+    const retry = run.occurrences.at(-1)!;
+    expect(run.occurrences.find((item) => item.id === child.id)).toMatchObject({
+      status: "skipped",
+    });
+    expect(retry).toMatchObject({
+      attempt: 2,
+      context: child.context,
+      parentOccurrenceIds: child.parentOccurrenceIds,
+      parentOrchestratorRunId: child.parentOrchestratorRunId,
+      iteration: child.iteration,
+    });
+    expect(renderWorkflowOccurrencePrompt(run, retry)).toContain(
+      `Context:\n${planOutput}`,
+    );
+  });
+
   it("passes an immutable bound source to fan-out and loop managed children", () => {
     const exercise = (mode: "fanout" | "loop") => {
       const orchestratorId = mode === "fanout" ? ids.fan : ids.loop;
@@ -516,6 +595,42 @@ describe("agentWorkflow occurrence runtime", () => {
     run = completeWorkflowOccurrence(run, retry.id, "done");
     expect(run.status).toBe("completed");
     expect(run.occurrences[0].status).toBe("skipped");
+  });
+
+  it("preserves a cancelled managed child snapshot while the run remains stopped", () => {
+    const context = "stopped managed child context";
+    const definition = fanoutDefinition("all");
+    const fanNode = definition.nodes.find((item) => item.id === ids.fan);
+    if (!fanNode || fanNode.role !== "orchestrator") throw new Error("fixture");
+    fanNode.config.input = context;
+    let run = createWorkflowRoleRun(definition, "workspace", {}, 1);
+    const fan = run.occurrences[0]!;
+    run = startWorkflowOrchestrator(run, fan.id, 2);
+    const child = readyWorkflowOccurrences(run)[0]!;
+    run = startWorkflowOccurrence(run, child.id, "work", undefined, 3);
+    run = stopWorkflowRoleRun(run, 4);
+    expect(run).toMatchObject({ status: "stopped", completedAtMs: 4 });
+
+    run = retryWorkflowOccurrence(run, child.id, 5);
+    const original = run.occurrences.find((item) => item.id === child.id)!;
+    const retry = run.occurrences.at(-1)!;
+    expect(original).toMatchObject({ status: "skipped", attempt: 1 });
+    expect(retry).toMatchObject({
+      status: "ready",
+      attempt: 2,
+      context: [context],
+      parentOccurrenceIds: child.parentOccurrenceIds,
+      parentOrchestratorRunId: child.parentOrchestratorRunId,
+      iteration: child.iteration,
+    });
+    expect(renderWorkflowOccurrencePrompt(run, retry)).toContain(
+      `Context:\n${context}`,
+    );
+    expect(run).toMatchObject({ status: "stopped", completedAtMs: 4 });
+    expect(readyWorkflowOccurrences(run)).toEqual([]);
+    expect(retry.runtimeId).toBeUndefined();
+    expect(retry.sessionId).toBeUndefined();
+    expect(retry.sessionFile).toBeUndefined();
   });
 
   it("enforces persisted maxAttempts while retaining the failed attempt for projection", () => {

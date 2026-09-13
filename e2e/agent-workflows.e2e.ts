@@ -876,6 +876,193 @@ test("retrying a failed managed fan-out child keeps orchestrator context in the 
   }
 });
 
+test("retrying a cancelled managed child preserves its context snapshot while stopped", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-stopped-managed-retry-"),
+  );
+  const ids = {
+    workflow: "60000000-0000-4000-8000-000000000001",
+    fanout: "60000000-0000-4000-8000-000000000002",
+    managed: "60000000-0000-4000-8000-000000000003",
+  };
+  const orchestrationInput = "stopped managed context token issue-74";
+  let app: ElectronApplication | undefined;
+  let page: Page | undefined;
+  let runId: string | undefined;
+  try {
+    ({ app, page } = await launch(
+      graphEnvironment(root, undefined, ["--stream-delay-ms", "30000"]),
+    ));
+    runId = await page.evaluate(
+      async ({ ids, orchestrationInput }) => {
+        const active = await window.piDeck.workspaces.getActive();
+        if (!active.activeWorkspace) throw new Error("No active workspace");
+        const workflow = {
+          format: "pi-deck.agent-workflow" as const,
+          schemaVersion: 2 as const,
+          id: ids.workflow,
+          revision: 1,
+          name: "Stopped managed retry context",
+          inputs: [],
+          entryNodeId: ids.fanout,
+          nodes: [
+            {
+              id: ids.fanout,
+              name: "Context fanout",
+              role: "orchestrator" as const,
+              config: {
+                mode: "fanout" as const,
+                agents: [ids.managed],
+                maxConcurrency: 1,
+                completion: "all" as const,
+                input: orchestrationInput,
+              },
+            },
+            {
+              id: ids.managed,
+              name: "Managed child",
+              role: "worker" as const,
+              managedBy: ids.fanout,
+              config: { instructions: "Keep streaming until stopped." },
+              execution: { maxAttempts: 2 },
+            },
+          ],
+          relationships: [
+            {
+              id: "60000000-0000-4000-8000-000000000004",
+              from: ids.fanout,
+              to: { end: "done" },
+            },
+          ],
+        };
+        await window.piDeck.workflows.createWorkflow({
+          workspaceId: active.activeWorkspace.id,
+          scopeWorkspaceId: null,
+          workflow,
+        });
+        return (
+          await window.piDeck.workflows.canonicalStartRun({
+            workflowId: workflow.id,
+            workspaceId: active.activeWorkspace.id,
+            inputs: {},
+          })
+        ).id;
+      },
+      { ids, orchestrationInput },
+    );
+
+    await page.getByRole("button", { name: "Agent Workflows" }).click();
+    await page.getByRole("button", { name: "View all runs" }).click();
+    await page.locator(`button[aria-label$="ID ${runId}"]`).click();
+    await expect
+      .poll(
+        () =>
+          page!.evaluate(
+            async ({ runId, managed }) => {
+              const run = await window.piDeck.workflows.canonicalGetRun({
+                runId,
+              });
+              const child = run.occurrences.find(
+                (item) => item.nodeId === managed && item.attempt === 1,
+              );
+              return child?.status === "running" && Boolean(child.sessionFile);
+            },
+            { runId, managed: ids.managed },
+          ),
+        { timeout: 20_000 },
+      )
+      .toBe(true);
+
+    await page.getByRole("button", { name: "Stop run" }).click();
+    await expect
+      .poll(
+        () =>
+          page!.evaluate(
+            async ({ runId, managed }) => {
+              const run = await window.piDeck.workflows.canonicalGetRun({
+                runId,
+              });
+              return {
+                status: run.status,
+                child: run.occurrences.find(
+                  (item) => item.nodeId === managed && item.attempt === 1,
+                )?.status,
+              };
+            },
+            { runId, managed: ids.managed },
+          ),
+        { timeout: 20_000 },
+      )
+      .toEqual({ status: "stopped", child: "cancelled" });
+
+    await page.locator(`[data-workflow-node-id="${ids.managed}"]`).click();
+    const childHistory = page.locator(`#workflow-node-${ids.managed}`);
+    await childHistory.getByRole("button", { name: "Retry attempt 1" }).click();
+    await expect
+      .poll(
+        () =>
+          page!.evaluate(
+            async ({ runId, managed }) => {
+              const run = await window.piDeck.workflows.canonicalGetRun({
+                runId,
+              });
+              return run.occurrences.find(
+                (item) => item.nodeId === managed && item.attempt === 2,
+              )?.status;
+            },
+            { runId, managed: ids.managed },
+          ),
+        { timeout: 20_000 },
+      )
+      .toBe("ready");
+
+    const retried = await page.evaluate(
+      async ({ runId, ids }) => {
+        const run = await window.piDeck.workflows.canonicalGetRun({ runId });
+        const owner = run.occurrences.find(
+          (item) => item.nodeId === ids.fanout,
+        );
+        const attempts = run.occurrences
+          .filter((item) => item.nodeId === ids.managed)
+          .sort((left, right) => left.attempt - right.attempt);
+        return { status: run.status, ownerId: owner?.id, attempts };
+      },
+      { runId, ids },
+    );
+    expect(retried.status).toBe("stopped");
+    expect(retried.attempts).toEqual([
+      expect.objectContaining({
+        attempt: 1,
+        status: "skipped",
+        context: [orchestrationInput],
+        parentOccurrenceIds: [retried.ownerId],
+        parentOrchestratorRunId: retried.ownerId,
+      }),
+      expect.objectContaining({
+        attempt: 2,
+        status: "ready",
+        context: [orchestrationInput],
+        parentOccurrenceIds: [retried.ownerId],
+        parentOrchestratorRunId: retried.ownerId,
+      }),
+    ]);
+    expect(retried.attempts[1]?.runtimeId).toBeUndefined();
+    expect(retried.attempts[1]?.sessionId).toBeUndefined();
+    expect(retried.attempts[1]?.sessionFile).toBeUndefined();
+  } finally {
+    if (page && runId) {
+      await page
+        .evaluate(
+          (id) => window.piDeck.workflows.canonicalStopRun({ runId: id }),
+          runId,
+        )
+        .catch(() => undefined);
+    }
+    await app?.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("duplicate node names retain ID relationships, fanout ownership, bindings, and historical run routing after rename", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-e2e-node-identity-"),
