@@ -5430,6 +5430,166 @@ test("real mode rejects and prunes a missing saved session deterministically", a
   }
 });
 
+test("OpenAI Codex auth repair stays pending across relaunch until an explicit prompt succeeds", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-codex-auth-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const authMarker = path.join(root, "openai-codex-auth-expired.marker");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+  const env = fakeRealModeEnv({
+    root,
+    projectCwd,
+    agentDir,
+    fakePiArgs: [
+      "--production-shaped",
+      "--openai-codex-auth-expired",
+      "--openai-codex-auth-expired-once-file",
+      authMarker,
+      "--stream-delay-ms",
+      "1",
+    ],
+  });
+  let sessionFile = "";
+  let workspaceId = "";
+
+  const firstLaunch = await launchPiDeck(env);
+  try {
+    await expectHealthyPreload(firstLaunch.page);
+    await enterSessionDetail(firstLaunch.page);
+    await firstLaunch.page
+      .getByLabel("Prompt text")
+      .fill("keep this durable work");
+    await firstLaunch.page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      firstLaunch.page.getByText("OpenAI authentication required"),
+    ).toBeVisible();
+    await expect(
+      firstLaunch.page.getByRole("button", { name: "Re-authenticate with Pi" }),
+    ).toBeVisible();
+    await expect(
+      firstLaunch.page.getByRole("button", { name: "Check again / Resume" }),
+    ).toBeVisible();
+    const snapshot = await firstLaunch.page.evaluate(() =>
+      window.piDeck.chat.getSnapshot(),
+    );
+    sessionFile = snapshot.state.sessionFile ?? "";
+    workspaceId = snapshot.workspaceId ?? "";
+    expect(fs.existsSync(authMarker)).toBe(true);
+  } finally {
+    await firstLaunch.app.close();
+  }
+
+  const secondLaunch = await launchPiDeck(env);
+  try {
+    await expectHealthyPreload(secondLaunch.page);
+    await selectWorkspaceInUi(secondLaunch.page, path.basename(projectCwd));
+    await secondLaunch.page
+      .getByRole("button", { name: "Session: keep this durable work" })
+      .click();
+    await expect(
+      secondLaunch.page.getByText("OpenAI authentication required"),
+    ).toBeVisible();
+    await expect(
+      secondLaunch.page.getByText("Provided authentication token is expired."),
+    ).toBeVisible();
+
+    const beforeRepair = await secondLaunch.page.evaluate(() =>
+      window.piDeck.chat.getSnapshot(),
+    );
+    await secondLaunch.page
+      .getByRole("button", { name: "Check again / Resume" })
+      .click();
+    await expect(
+      secondLaunch.page
+        .getByText("Authentication verification is pending")
+        .first(),
+    ).toBeVisible();
+    await expect(
+      secondLaunch.page.getByRole("button", { name: "Check again / Resume" }),
+    ).toBeVisible();
+    await expect(
+      secondLaunch.page.getByText("Provided authentication token is expired."),
+    ).toBeVisible();
+    const reopened = await secondLaunch.page.evaluate(
+      (file) => window.piDeck.chat.resumeSession({ sessionFile: file }),
+      sessionFile,
+    );
+    expect(reopened.runtimeId).not.toBe(beforeRepair.runtimeId);
+    expect(reopened.state.sessionFile).toBe(sessionFile);
+    expect(reopened.workspaceId).toBe(workspaceId);
+
+    await secondLaunch.page
+      .getByLabel("Prompt text")
+      .fill("verify repaired credentials");
+    await secondLaunch.page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      secondLaunch.page.getByText(
+        "I’ll review the workspace and summarize the next steps.",
+      ),
+    ).toBeVisible();
+    await expect(
+      secondLaunch.page.getByText("OpenAI authentication required"),
+    ).toHaveCount(0);
+    const verified = await secondLaunch.page.evaluate(() =>
+      window.piDeck.chat.getSnapshot(),
+    );
+    expect(verified.state.sessionFile).toBe(sessionFile);
+    expect(verified.workspaceId).toBe(workspaceId);
+    expect(
+      verified.messages.filter(
+        (message) => message.content === "keep this durable work",
+      ),
+    ).toHaveLength(1);
+    expect(
+      verified.messages.find(
+        (message) =>
+          message.content ===
+          "I’ll review the workspace and summarize the next steps.",
+      )?.stopReason,
+    ).toBe("stop");
+  } finally {
+    await secondLaunch.app.close();
+  }
+
+  const thirdLaunch = await launchPiDeck(env);
+  try {
+    await expectHealthyPreload(thirdLaunch.page);
+    await selectWorkspaceInUi(thirdLaunch.page, path.basename(projectCwd));
+    await thirdLaunch.page
+      .getByRole("button", { name: "Session: keep this durable work" })
+      .click();
+    await expect(
+      thirdLaunch.page.getByText(
+        "I’ll review the workspace and summarize the next steps.",
+      ),
+    ).toBeVisible();
+    await expect(
+      thirdLaunch.page.getByText("OpenAI authentication required"),
+    ).toHaveCount(0);
+    const persisted = await thirdLaunch.page.evaluate(() =>
+      window.piDeck.chat.getSnapshot(),
+    );
+    expect(persisted.state.sessionFile).toBe(sessionFile);
+    expect(persisted.workspaceId).toBe(workspaceId);
+    expect(
+      persisted.messages.filter(
+        (message) => message.content === "keep this durable work",
+      ),
+    ).toHaveLength(1);
+    expect(
+      persisted.messages.filter(
+        (message) => message.content === "verify repaired credentials",
+      ),
+    ).toHaveLength(1);
+  } finally {
+    await thirdLaunch.app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("real mode lists a newly prompted session after restart with fake Pi", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-persist-"));
   const projectCwd = path.join(root, "project");

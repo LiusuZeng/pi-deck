@@ -85,6 +85,33 @@ describe("buildActivityInbox", () => {
     );
   });
 
+  it("keeps OpenAI Codex auth failures failed while exposing their repair action and diagnostics", () => {
+    const diagnostic = "Provided authentication token is expired.";
+    const inbox = buildActivityInbox([
+      source("codex-a", {
+        baseState: "error",
+        sessionFile: "/sessions/codex-a.jsonl",
+        failureKind: "auth-required",
+        lastError: diagnostic,
+      }),
+      source("codex-b", {
+        baseState: "error",
+        sessionFile: "/sessions/codex-b.jsonl",
+        failureKind: "auth-required",
+        lastError: diagnostic,
+      }),
+    ]);
+
+    expect(inbox.groups.failed).toHaveLength(2);
+    expect(inbox.groups.failed.map((item) => item.actionLabel)).toEqual([
+      "OpenAI authentication required",
+      "OpenAI authentication required",
+    ]);
+    expect(
+      inbox.groups.failed.every((item) => item.detail === diagnostic),
+    ).toBe(true);
+  });
+
   it("preserves source order within active statuses instead of sorting by recency", () => {
     const inbox = buildActivityInbox([
       source("older-working", { baseState: "working", updatedAtMs: 100 }),

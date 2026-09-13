@@ -42,6 +42,10 @@ interface FakeOptions {
   promptErrorPrefix?: string;
   /** Fails the matching prompt only once across fake Pi processes. */
   promptErrorOnceFile?: string;
+  /** Emits Pi's observed OpenAI Codex expired-token terminal failure. */
+  openAiCodexAuthExpired: boolean;
+  /** Shared marker makes fake auth expiry deterministic and recoverable. */
+  openAiCodexAuthExpiredOnceFile?: string;
   dropCompletionEvents: boolean;
   extensionUiMethod: "select" | "confirm" | "input" | "editor";
   extensionUiAutoCompleteTimeoutMs: number;
@@ -86,6 +90,7 @@ function parseOptions(argv: string[]): FakeOptions {
     ignoredCommands: new Set<string>(),
     failedCommands: new Set<string>(),
     promptScenario: "basic",
+    openAiCodexAuthExpired: false,
     dropCompletionEvents: false,
     extensionUiMethod: "confirm",
     extensionUiAutoCompleteTimeoutMs: 5_000,
@@ -131,6 +136,12 @@ function parseOptions(argv: string[]): FakeOptions {
     } else if (arg === "--prompt-error-once-file") {
       const file = argv[index + 1];
       if (file) options.promptErrorOnceFile = file;
+      index += 1;
+    } else if (arg === "--openai-codex-auth-expired") {
+      options.openAiCodexAuthExpired = true;
+    } else if (arg === "--openai-codex-auth-expired-once-file") {
+      const file = argv[index + 1];
+      if (file) options.openAiCodexAuthExpiredOnceFile = file;
       index += 1;
     } else if (arg === "--drop-completion-events") {
       options.dropCompletionEvents = true;
@@ -280,9 +291,11 @@ class FakeRpcServer {
     : "fake-model";
   private currentProvider = this.options.collidingModels
     ? "anthropic"
-    : this.options.productionShaped
-      ? "anthropic"
-      : "fake-provider";
+    : this.options.openAiCodexAuthExpired
+      ? "openai-codex"
+      : this.options.productionShaped
+        ? "anthropic"
+        : "fake-provider";
   private currentThinkingLevel = "medium";
   private pendingExtensionUi:
     | {
@@ -840,8 +853,11 @@ class FakeRpcServer {
       this.exerciseDelegationBridge(text);
     }
 
-    if (this.shouldFailPrompt(text)) {
-      const errorMessage = "Usage limit reached for fake provider.";
+    const authExpired = this.shouldEmitOpenAiCodexAuthExpiry();
+    if (this.shouldFailPrompt(text) || authExpired) {
+      const errorMessage = authExpired
+        ? "Provided authentication token is expired."
+        : "Usage limit reached for fake provider.";
       const timestamp = Date.now();
       const failedAssistant = {
         id: assistantId,
@@ -967,6 +983,20 @@ class FakeRpcServer {
     this.completePrompt(assistantId, text, promptScenarioDelayMs);
   }
 
+  private shouldEmitOpenAiCodexAuthExpiry(): boolean {
+    if (!this.options.openAiCodexAuthExpired) return false;
+    const marker = this.options.openAiCodexAuthExpiredOnceFile;
+    if (!marker) return true;
+    try {
+      fs.mkdirSync(path.dirname(marker), { recursive: true });
+      fs.writeFileSync(marker, "expired\\n", { flag: "wx" });
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw error;
+    }
+  }
+
   private shouldFailPrompt(text: string): boolean {
     if (this.options.promptScenario === "error") return true;
     if (
@@ -1077,6 +1107,13 @@ class FakeRpcServer {
             id: assistantId,
             role: "assistant",
             content: accumulated,
+            // Provider attribution is required to verify an OpenAI Codex
+            // credential repair; another provider's success must not clear it.
+            provider: this.currentProvider,
+            model: this.currentModel,
+            // Persist Pi's authoritative terminal result so snapshot recovery
+            // cannot mistake this completed turn for a streamed partial.
+            stopReason: "stop",
             createdAt: Date.now(),
             ...(this.options.includeUsage
               ? {

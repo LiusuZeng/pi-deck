@@ -53,6 +53,7 @@ import {
   diagnosticsSummarySchema,
   ipcChannels,
   noPayloadSchema,
+  openPiCodexLoginResultSchema,
   pickAttachmentsResultSchema,
   pickProjectResultSchema,
   projectListResultSchema,
@@ -166,6 +167,7 @@ import {
 import type { PiMessage, PiState, PromptInput } from "./pi/types.js";
 import { readChatSnapshotInputs } from "./chatSnapshotRead.js";
 import { captureLoginShellEnv } from "./platform/piEnvironment.js";
+import { openPiCodexLoginTerminal } from "./platform/openPiCodexLogin.js";
 import type {
   AppPiSettings,
   EffectivePiConfigResult,
@@ -659,6 +661,26 @@ function registerIpcHandlers(
       }
       await backendReady;
       return getAppBootstrapState(store, diagnosticsService);
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.appOpenPiCodexLogin,
+    requestSchema: noPayloadSchema,
+    responseSchema: openPiCodexLoginResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async () => {
+      if (resolveChatBackendMode() !== "real") {
+        throw new Error(
+          "Pi OpenAI Codex login is available when using real Pi.",
+        );
+      }
+      const launch = await resolveRealChatLaunchConfig(store);
+      await openPiCodexLoginTerminal({
+        piBinary: launch.effective.config.piBinary,
+        agentDir: launch.effective.config.agentDir,
+      });
+      return { opened: true };
     },
   });
 

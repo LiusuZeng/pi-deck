@@ -154,6 +154,8 @@ export interface ActivityInboxProps {
   onSelectedFilterChange: (filter: ActivityInboxFilter) => void;
   /** Optional for compatibility with pre-CTA embedders. */
   onNewSession?: () => void;
+  openAiCodexAuthRequiredCount?: number;
+  onRepairOpenAiCodexAuth?: () => void;
 }
 
 /** A scoped, presentational Work overview. Classification and tags remain domain-owned. */
@@ -167,6 +169,8 @@ export function ActivityInbox({
   selectedFilter,
   onSelectedFilterChange,
   onNewSession,
+  openAiCodexAuthRequiredCount = 0,
+  onRepairOpenAiCodexAuth,
 }: ActivityInboxProps) {
   const workspaceName =
     scope.type === "workspace"
@@ -286,6 +290,27 @@ export function ActivityInbox({
           </button>
         ) : null}
       </header>
+
+      {openAiCodexAuthRequiredCount > 0 ? (
+        <section className="openai-codex-auth-repair" role="alert">
+          <div>
+            <strong>OpenAI authentication required</strong>
+            <p>
+              Pi&apos;s OpenAI Codex (ChatGPT subscription) login needs repair.{" "}
+              {openAiCodexAuthRequiredCount}{" "}
+              {openAiCodexAuthRequiredCount === 1
+                ? "session is"
+                : "sessions are"}{" "}
+              affected.
+            </p>
+          </div>
+          {onRepairOpenAiCodexAuth !== undefined ? (
+            <button onClick={onRepairOpenAiCodexAuth} type="button">
+              Re-authenticate with Pi
+            </button>
+          ) : null}
+        </section>
+      ) : null}
 
       {showWorkspaceControls ? (
         <label

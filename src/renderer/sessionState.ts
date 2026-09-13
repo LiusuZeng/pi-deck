@@ -1,3 +1,9 @@
+import {
+  classifyOpenAiCodexAuthFailure,
+  isSuccessfulOpenAiCodexTerminalCompletion,
+  type FailureKind,
+} from "./openaiCodexAuth.js";
+
 export type BaseSessionState =
   | "unloaded"
   | "attaching"
@@ -51,6 +57,8 @@ export interface ReducedSessionState extends SidebarSessionState {
   diagnostics: string[];
   /** A provider error was observed and has not been superseded by a retry. */
   terminalProviderErrorObserved: boolean;
+  /** Narrow recoverable provider failure classification; raw diagnostics stay verbatim. */
+  failureKind?: FailureKind | undefined;
   /** Main has detached the worker, so extension UI responses cannot be delivered. */
   runtimeDetached: boolean;
 }
@@ -95,6 +103,9 @@ export function createInitialReducedSessionState(
     toolCards: patch.toolCards ?? {},
     diagnostics: patch.diagnostics ?? [],
     terminalProviderErrorObserved: patch.terminalProviderErrorObserved ?? false,
+    ...(patch.failureKind === undefined
+      ? {}
+      : { failureKind: patch.failureKind }),
     runtimeDetached: patch.runtimeDetached ?? false,
   };
 }
@@ -128,6 +139,8 @@ function reduceSessionRuntimeEventUnprioritized(
       return {
         ...state,
         baseState: "working",
+        // Starting a worker cannot verify repaired credentials; only the next
+        // successful terminal assistant completion clears failureKind.
         terminalProviderErrorObserved: false,
         overlays: { ...state.overlays, streaming: false },
       };
@@ -179,6 +192,12 @@ function reduceSessionRuntimeEventUnprioritized(
         baseState: retryFailed ? "error" : "working",
         terminalProviderErrorObserved: retryFailed,
         overlays: { ...state.overlays, streaming: false, retrying: false },
+        ...(retryFailed
+          ? {
+              failureKind:
+                classifyOpenAiCodexAuthFailure(event) ?? state.failureKind,
+            }
+          : {}),
         diagnostics: retryFailed
           ? appendDiagnostic(
               state.diagnostics,
@@ -264,6 +283,9 @@ function reduceMessageUpdateEvent(
           : "working",
     terminalProviderErrorObserved:
       providerErrorObserved || state.terminalProviderErrorObserved,
+    ...(providerErrorObserved
+      ? { failureKind: classifyOpenAiCodexAuthFailure(event) }
+      : {}),
     overlays: {
       ...state.overlays,
       streaming: !done && !providerErrorObserved,
@@ -565,6 +587,10 @@ function reduceAgentEndEvent(
   const reportedProviderError = hasRuntimeEventError(event);
   const terminalProviderErrorObserved =
     reportedProviderError || state.terminalProviderErrorObserved;
+  const authenticatedCompletion =
+    !terminalProviderErrorObserved && isAuthenticatedModelCompletion(event);
+  const authStillPending =
+    state.failureKind === "auth-required" && !authenticatedCompletion;
   let diagnostics = state.diagnostics;
   if (reportedProviderError) {
     diagnostics = appendDiagnostic(
@@ -583,10 +609,18 @@ function reduceAgentEndEvent(
     ...state,
     baseState: hasPendingExtensionUi
       ? "waitingForInput"
-      : terminalProviderErrorObserved
+      : terminalProviderErrorObserved || authStillPending
         ? "error"
         : "idle",
     terminalProviderErrorObserved,
+    ...(terminalProviderErrorObserved
+      ? {
+          failureKind:
+            classifyOpenAiCodexAuthFailure(event) ?? state.failureKind,
+        }
+      : authenticatedCompletion
+        ? { failureKind: undefined }
+        : {}),
     activeTools: [],
     overlays: {
       ...state.overlays,
@@ -597,6 +631,16 @@ function reduceAgentEndEvent(
     },
     diagnostics,
   };
+}
+
+function isAuthenticatedModelCompletion(event: RuntimeEventLike): boolean {
+  const status = getString(event, "status");
+  if (status === "aborted" || status === "error" || status === "failed") {
+    return false;
+  }
+  return isSuccessfulOpenAiCodexTerminalCompletion(
+    getFinalAssistantMessage(event),
+  );
 }
 
 /** Keeps lightweight reducer error classification aligned with App's Pi events. */

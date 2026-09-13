@@ -35,6 +35,7 @@ import type {
   diagnosticsSummarySchema,
   ipcErrorSchema,
   multitaskModeRequestSchema,
+  openPiCodexLoginResultSchema,
   multitaskModeStateSchema,
   multitaskModeUpdateRequestSchema,
   multitaskSettingsRequestSchema,
@@ -136,6 +137,9 @@ export type AppSettings = z.infer<typeof appSettingsSchema>;
 export type AppSettingsPatch = z.infer<typeof appSettingsPatchSchema>;
 export type AppBootstrapState = z.infer<typeof appBootstrapStateSchema>;
 export type DiagnosticsSummary = z.infer<typeof diagnosticsSummarySchema>;
+export type OpenPiCodexLoginResult = z.infer<
+  typeof openPiCodexLoginResultSchema
+>;
 export type IpcErrorPayload = z.infer<typeof ipcErrorSchema>;
 export type MultitaskModeRequest = z.infer<typeof multitaskModeRequestSchema>;
 export type MultitaskModeUpdateRequest = z.infer<
@@ -320,6 +324,7 @@ export interface PiDeckApi {
     getVersion(): Promise<string>;
     getDiagnosticsSummary(): Promise<DiagnosticsSummary>;
     getBootstrapState(): Promise<AppBootstrapState>;
+    openPiCodexLogin(): Promise<OpenPiCodexLoginResult>;
   };
   settings: {
     get(): Promise<AppSettings>;

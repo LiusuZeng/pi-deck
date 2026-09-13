@@ -155,6 +155,38 @@ afterEach(() => {
 });
 
 describe("ActivityInbox", () => {
+  it("shows one shared Pi/OpenAI Codex repair affordance for affected sessions", () => {
+    const repair = vi.fn();
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    act(() => {
+      root?.render(
+        <ActivityInbox
+          model={modelWithEveryKind()}
+          onOpenActivityItem={vi.fn()}
+          onRepairOpenAiCodexAuth={repair}
+          onScopeChange={vi.fn()}
+          onSelectedFilterChange={vi.fn()}
+          openAiCodexAuthRequiredCount={2}
+          selectedFilter="all"
+          scope={{ type: "all" }}
+          workspaces={workspaces}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Pi's OpenAI Codex");
+    expect(container.textContent).toContain("2 sessions are affected");
+    const action = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent === "Re-authenticate with Pi",
+    );
+    act(() =>
+      action?.dispatchEvent(new MouseEvent("click", { bubbles: true })),
+    );
+    expect(repair).toHaveBeenCalledTimes(1);
+  });
+
   it("removes the legacy close action while preserving heading focus", () => {
     const { view } = renderInbox(modelWithEveryKind());
 

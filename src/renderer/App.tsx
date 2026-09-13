@@ -67,6 +67,13 @@ import {
   type SessionOverlays,
 } from "./sessionState.js";
 import {
+  classifyOpenAiCodexAuthFailure,
+  isSuccessfulOpenAiCodexTerminalCompletion,
+  isSuccessfulTerminalAssistantCompletion,
+  isSuccessfulTerminalStatus,
+  type FailureKind,
+} from "./openaiCodexAuth.js";
+import {
   canNavigatePromptHistoryDown,
   canNavigatePromptHistoryUp,
   initialPromptHistoryState,
@@ -748,6 +755,10 @@ interface SessionViewModel {
   awaitingAgentEnd?: boolean;
   /** A provider failure observed in a Pi runtime event, not a local UI error. */
   providerErrorObserved?: boolean;
+  /** Narrow Pi-managed OpenAI Codex recovery classification. */
+  failureKind?: FailureKind | undefined;
+  /** Only a completed assistant turn may verify a prior auth repair. */
+  authVerified?: boolean | undefined;
   archivedAtMs?: number;
   /** Timestamp of the latest durable or live successful/usable aborted turn. */
   completedAtMs?: number | undefined;
@@ -807,6 +818,9 @@ function activitySourceSessions(
     ...(session.lastError !== undefined
       ? { lastError: session.lastError }
       : {}),
+    ...(session.failureKind === undefined
+      ? {}
+      : { failureKind: session.failureKind }),
     ...(session.archivedAtMs !== undefined
       ? { archivedAtMs: session.archivedAtMs }
       : {}),
@@ -1466,6 +1480,10 @@ export function App(): ReactElement {
   const [uiMessage, setUiMessage] = useState(
     "Starting Pi Deck and resolving the active backend session.",
   );
+  const [openAiCodexResumeInFlight, setOpenAiCodexResumeInFlight] = useState<
+    string | undefined
+  >();
+  const openAiCodexResumeInFlightRef = useRef(false);
   // closeSession intentionally terminates its child process. Ignore that
   // expected worker_exit while converting the row to a resumable saved session.
   const intentionallyClosingRuntimeIds = useRef(new Set<string>());
@@ -2145,6 +2163,15 @@ export function App(): ReactElement {
   );
   const activityTotalCount = useMemo(
     () => countActivityInboxItems(activitySources),
+    [activitySources],
+  );
+  const openAiCodexAuthRequiredCount = useMemo(
+    () =>
+      new Set(
+        activitySources
+          .filter((source) => source.failureKind === "auth-required")
+          .map((source) => source.sessionFile ?? source.id),
+      ).size,
     [activitySources],
   );
   const sessionSoundSettings =
@@ -3403,10 +3430,13 @@ export function App(): ReactElement {
           : {}),
         sessionFile: session.sessionFile,
       });
-      const resumed = {
-        ...sessionFromSnapshot(snapshot),
-        workspaceId: session.workspaceId,
-      };
+      const resumed = resumedSessionForCurrentSavedRow(
+        {
+          ...sessionFromSnapshot(snapshot),
+          workspaceId: session.workspaceId,
+        },
+        currentSessionForSavedResume(sessionsRef.current, session),
+      );
       const draftToMove = composerDraftForSession(
         composerDraftsRef.current,
         session.id,
@@ -3469,9 +3499,11 @@ export function App(): ReactElement {
       loadRealCapabilities(resumed.id);
       if (isNavigationCurrent(generation)) {
         setUiMessage(
-          transferred
-            ? "Resumed saved Pi session."
-            : "Resumed saved Pi session; reselect expired attachments before sending.",
+          resumed.failureKind === "auth-required"
+            ? "Reopened saved Pi session. Authentication verification is pending; send an explicit new prompt after repairing Pi login."
+            : transferred
+              ? "Resumed saved Pi session."
+              : "Resumed saved Pi session; reselect expired attachments before sending.",
         );
       }
       return transferred ? resumed : undefined;
@@ -4206,6 +4238,82 @@ export function App(): ReactElement {
       const message = error instanceof Error ? error.message : String(error);
       setComposerError(message);
       throw error;
+    }
+  }
+
+  async function handleOpenPiCodexLogin(): Promise<void> {
+    try {
+      await window.piDeck.app.openPiCodexLogin();
+      setUiMessage(
+        "Pi opened in Terminal. Run /login openai-codex, finish the ChatGPT subscription login, then Check again / Resume this session.",
+      );
+    } catch (error) {
+      setUiMessage(
+        `Could not open Pi login: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  async function handleResumeAfterOpenAiCodexRepair(): Promise<void> {
+    // The ref closes the gap before React can render the disabled control.
+    if (openAiCodexResumeInFlightRef.current) return;
+    const session = selectedSession;
+    if (session.sessionFile === undefined) {
+      setUiMessage(
+        "This session does not have a saved Pi session file to reopen.",
+      );
+      return;
+    }
+    openAiCodexResumeInFlightRef.current = true;
+    setOpenAiCodexResumeInFlight(session.id);
+    const generation = beginNavigation();
+    const origin = workOriginForPrimaryView(
+      primaryView,
+      currentWorkspaceRef.current.id,
+    );
+    try {
+      if (session.runtimeBacked) {
+        intentionallyClosingRuntimeIds.current.add(session.id);
+        await window.piDeck.chat.closeSession({ runtimeId: session.id });
+        // Main has now released the runtime lock. Commit the local detached
+        // state before the next async boundary so a failed spawn remains
+        // recoverable rather than leaving a stale runtime id in the row.
+        setSessions((items) =>
+          items.map((item) =>
+            item.id === session.id
+              ? {
+                  ...item,
+                  runtimeBacked: false,
+                  resumeBacked: true,
+                  status:
+                    item.failureKind === "auth-required" ? "error" : "idle",
+                  baseState:
+                    item.failureKind === "auth-required" ? "error" : "idle",
+                  subtitle:
+                    item.failureKind === "auth-required"
+                      ? "Authentication verification pending · reopen after Pi login"
+                      : "Saved · ready to resume after Pi login",
+                }
+              : item,
+          ),
+        );
+      }
+      // Resume only recreates the worker against the canonical saved file. It
+      // never resends retryPrompt, so partially completed tool work is not
+      // replayed automatically after credential repair.
+      await resumeSession(
+        { ...session, runtimeBacked: false, resumeBacked: true },
+        generation,
+        origin,
+      );
+    } catch (error) {
+      intentionallyClosingRuntimeIds.current.delete(session.id);
+      setUiMessage(
+        `Could not reopen this Pi session: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      openAiCodexResumeInFlightRef.current = false;
+      setOpenAiCodexResumeInFlight(undefined);
     }
   }
 
@@ -6336,6 +6444,8 @@ export function App(): ReactElement {
               onScopeChange={handleActivityScopeChange}
               onOpenActivityItem={handleOpenActivityItem}
               onNewSession={() => void handleNewSession()}
+              openAiCodexAuthRequiredCount={openAiCodexAuthRequiredCount}
+              onRepairOpenAiCodexAuth={() => void handleOpenPiCodexLogin()}
             />
           )
         ) : (
@@ -6368,6 +6478,15 @@ export function App(): ReactElement {
                       pendingTaskSubmissions[selectedSession.id] !== undefined
                     }
                     onRecoverSession={onRecoverChatTimelineSession}
+                    onRepairOpenAiCodexAuth={() =>
+                      void handleOpenPiCodexLogin()
+                    }
+                    onResumeAfterOpenAiCodexRepair={() =>
+                      void handleResumeAfterOpenAiCodexRepair()
+                    }
+                    openAiCodexResumeInFlight={
+                      openAiCodexResumeInFlight === selectedSession.id
+                    }
                     onRespondToExtensionUi={onRespondToChatTimelineExtensionUi}
                     onRetrySession={onRetryChatTimelineSession}
                     onCopyDiagnostics={onCopyChatTimelineDiagnostics}
@@ -6780,6 +6899,29 @@ function resumedSessionForCurrentSavedRow(
   currentSession: SessionViewModel,
 ): SessionViewModel {
   const titleOverride = currentSession.titleOverride;
+  const authStillPending =
+    currentSession.failureKind === "auth-required" &&
+    resumed.failureKind !== "auth-required" &&
+    resumed.authVerified !== true;
+  const originalDiagnostic = currentSession.lastError;
+  const timeline =
+    authStillPending &&
+    originalDiagnostic !== undefined &&
+    !resumed.timeline.some(
+      (item) =>
+        item.kind === "diagnostic" && item.content === originalDiagnostic,
+    )
+      ? [
+          ...resumed.timeline,
+          {
+            id: createId("auth-diagnostic"),
+            kind: "diagnostic" as const,
+            tone: "error" as const,
+            content: originalDiagnostic,
+            createdAt: formatTime(),
+          },
+        ]
+      : resumed.timeline;
   return {
     ...resumed,
     // Pi snapshots carry the generated title. Preserve the latest local
@@ -6789,6 +6931,19 @@ function resumedSessionForCurrentSavedRow(
       ? {
           title: titleOverride,
           titleOverride,
+        }
+      : {}),
+    ...(authStillPending
+      ? {
+          status: "error" as const,
+          baseState: "error" as const,
+          subtitle: "Error · OpenAI authentication verification pending",
+          providerErrorObserved: true,
+          failureKind: "auth-required" as const,
+          ...(originalDiagnostic !== undefined
+            ? { lastError: originalDiagnostic }
+            : {}),
+          timeline,
         }
       : {}),
     workspaceId: currentSession.workspaceId,
@@ -7400,6 +7555,18 @@ function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
   const completedAtMs = isAgentActive
     ? undefined
     : completedAtFromSnapshotMessages(snapshot.messages);
+  const authRecovery = authRecoveryFromSnapshotMessages(snapshot.messages);
+  const authRequired = authRecovery.failure !== undefined;
+  const timeline = timelineFromMessages(snapshot.messages);
+  if (authRecovery.failure !== undefined) {
+    timeline.push({
+      id: `auth-diagnostic-${snapshot.runtimeId}`,
+      kind: "diagnostic",
+      tone: "error",
+      content: authRecovery.failure.diagnostic,
+      createdAt: formatTime(),
+    });
+  }
 
   const session: SessionViewModel = {
     id: snapshot.runtimeId,
@@ -7413,11 +7580,13 @@ function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
       snapshot.state.cwd ?? processCwdPlaceholder(snapshot.backendMode),
     subtitle: isAgentActive
       ? `Working · ${backendLabelFromMode(snapshot.backendMode)}`
-      : `Idle · ${backendLabelFromMode(snapshot.backendMode)} ready`,
-    status: isAgentActive ? "working" : "idle",
+      : authRequired
+        ? "Error · OpenAI authentication verification pending"
+        : `Idle · ${backendLabelFromMode(snapshot.backendMode)} ready`,
+    status: isAgentActive ? "working" : authRequired ? "error" : "idle",
     updatedAt: "Now",
     updatedAtMs: Date.now(),
-    baseState: isAgentActive ? "working" : "idle",
+    baseState: isAgentActive ? "working" : authRequired ? "error" : "idle",
     overlays: {
       ...emptyOverlays,
       streaming: isAgentActive,
@@ -7432,12 +7601,20 @@ function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
     resumeBacked: false,
     backendMode: snapshot.backendMode,
     ...(completedAtMs !== undefined ? { completedAtMs } : {}),
+    ...(authRecovery.failure !== undefined
+      ? {
+          providerErrorObserved: true,
+          failureKind: "auth-required" as const,
+          lastError: authRecovery.failure.diagnostic,
+        }
+      : {}),
+    ...(authRecovery.authenticated ? { authVerified: true } : {}),
     ...(snapshot.projectId !== undefined
       ? { projectId: snapshot.projectId }
       : snapshot.state.cwd
         ? { projectId: snapshot.state.cwd }
         : {}),
-    timeline: timelineFromMessages(snapshot.messages),
+    timeline,
   };
   if (usageStats !== undefined) {
     session.usageStats = usageStats;
@@ -7458,6 +7635,43 @@ function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
     session.thinkingLevel = snapshot.state.thinkingLevel;
   }
   return session;
+}
+
+function authRecoveryFromSnapshotMessages(messages: readonly ChatMessage[]): {
+  failure?: { diagnostic: string };
+  authenticated: boolean;
+} {
+  // A worker spawn/get_state proves only transport availability. Walk backward
+  // through terminal assistant turns: an explicit successful completion is the
+  // only durable proof that repaired credentials actually worked.
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== "assistant") continue;
+    const record = message as Record<string, unknown>;
+    if (isErrorAssistantMessage(record)) {
+      if (
+        classifyOpenAiCodexAuthFailure({
+          type: "agent_end",
+          messages: [record],
+        }) === "auth-required"
+      ) {
+        return {
+          failure: {
+            diagnostic:
+              getAssistantMessageErrorMessage(record) ?? "Pi agent failed.",
+          },
+          authenticated: false,
+        };
+      }
+      // A later non-auth failure did not authenticate the model. Continue so
+      // an unresolved earlier auth failure remains visible until success.
+      continue;
+    }
+    if (isSuccessfulOpenAiCodexTerminalCompletion(record)) {
+      return { authenticated: true };
+    }
+  }
+  return { authenticated: false };
 }
 
 function isSnapshotAgentActive(snapshot: ChatSnapshot): boolean {
@@ -7922,8 +8136,9 @@ function reduceRuntimeEventUnprioritized(
         workingStartedAtMs: session.workingStartedAtMs ?? Date.now(),
         lastRuntimeEventLabel: "Pi agent started",
         retryPrompt: undefined,
+        // Starting/replacing a worker and get_state only prove transport
+        // availability. Keep auth repair pending until a model turn ends.
         providerErrorObserved: false,
-        lastError: undefined,
         updatedAt: "Now",
         updatedAtMs: Date.now(),
       };
@@ -7983,7 +8198,6 @@ function reduceRuntimeEventUnprioritized(
         subtitle: `Retrying · ${backendLabel(session)} will retry this turn`,
         workingStartedAtMs: session.workingStartedAtMs ?? Date.now(),
         lastRuntimeEventLabel: "Pi scheduled an automatic retry",
-        providerErrorObserved: false,
         updatedAt: "Now",
         updatedAtMs: Date.now(),
       };
@@ -8005,9 +8219,12 @@ function reduceRuntimeEventUnprioritized(
         return {
           ...session,
           awaitingAgentEnd: false,
-          providerErrorObserved: false,
-          status: "idle",
-          baseState: "idle",
+          providerErrorObserved:
+            session.failureKind === "auth-required"
+              ? session.providerErrorObserved === true
+              : false,
+          status: session.failureKind === "auth-required" ? "error" : "idle",
+          baseState: session.failureKind === "auth-required" ? "error" : "idle",
           overlays: {
             ...session.overlays,
             streaming: false,
@@ -8018,7 +8235,9 @@ function reduceRuntimeEventUnprioritized(
           subtitle: "Idle · backend stream aborted",
           workingStartedAtMs: undefined,
           retryPrompt: undefined,
-          lastError: undefined,
+          ...(session.failureKind === "auth-required"
+            ? {}
+            : { lastError: undefined }),
           lastRuntimeEventLabel: "Pi cancelled the automatic retry after abort",
           updatedAt: "Now",
           updatedAtMs: Date.now(),
@@ -8049,8 +8268,15 @@ function reduceRuntimeEventUnprioritized(
         lastRuntimeEventLabel: retryFailed
           ? "Pi reported a final retry error"
           : "Pi finished an automatic retry",
-        providerErrorObserved: retryFailed,
-        ...(retryFailed ? {} : { lastError: undefined }),
+        providerErrorObserved:
+          retryFailed || session.providerErrorObserved === true,
+        ...(retryFailed
+          ? {
+              failureKind:
+                classifyOpenAiCodexAuthFailure(event) ?? session.failureKind,
+              authVerified: undefined,
+            }
+          : {}),
         updatedAt: "Now",
         updatedAtMs: Date.now(),
       };
@@ -8108,6 +8334,12 @@ function reduceRuntimeEventUnprioritized(
       const endedWithError =
         !willRetry &&
         (hasRuntimeEventError(event) || session.providerErrorObserved === true);
+      const authenticatedCompletion =
+        !endedWithError && isAuthenticatedModelCompletion(event);
+      const successfulCompletion =
+        !endedWithError && isSuccessfulModelCompletion(event);
+      const authStillPending =
+        session.failureKind === "auth-required" && !authenticatedCompletion;
       // A dialog is still actionable until Pi acknowledges its response or it
       // times out. Its queue, rather than a potentially stale overlay, is the
       // source of truth and takes precedence over a terminal error so every
@@ -8151,7 +8383,6 @@ function reduceRuntimeEventUnprioritized(
           status: "working",
           baseState: "working",
           providerErrorObserved: false,
-          lastError: undefined,
           overlays: {
             ...session.overlays,
             streaming: false,
@@ -8172,7 +8403,8 @@ function reduceRuntimeEventUnprioritized(
         ...session,
         // A live authoritative, non-error terminal event supersedes any
         // reconstructed durable completion timestamp for this session.
-        completedAtMs: endedWithError ? undefined : Date.now(),
+        completedAtMs:
+          endedWithError || authStillPending ? undefined : Date.now(),
         awaitingAgentEnd: false,
         ...(usageByMessageId !== undefined ? { usageByMessageId } : {}),
         ...(usageByMessageId !== undefined
@@ -8185,18 +8417,32 @@ function reduceRuntimeEventUnprioritized(
           : {}),
         status: stillWaitingForInput
           ? "waiting"
-          : endedWithError
+          : endedWithError || authStillPending
             ? "error"
             : "idle",
         baseState: stillWaitingForInput
           ? "waitingForInput"
-          : endedWithError
+          : endedWithError || authStillPending
             ? "error"
             : "idle",
         // Preserve a terminal provider failure behind an actionable dialog so
         // clearing the final request restores Failed rather than working/idle.
-        providerErrorObserved: endedWithError,
-        ...(endedWithError ? {} : { lastError: undefined }),
+        providerErrorObserved: endedWithError || authStillPending,
+        ...(endedWithError
+          ? {
+              failureKind:
+                classifyOpenAiCodexAuthFailure(event) ?? session.failureKind,
+              authVerified: undefined,
+            }
+          : authenticatedCompletion
+            ? {
+                failureKind: undefined,
+                authVerified: true,
+                lastError: undefined,
+              }
+            : successfulCompletion && !authStillPending
+              ? { lastError: undefined }
+              : {}),
         overlays: {
           ...session.overlays,
           streaming: false,
@@ -8208,9 +8454,11 @@ function reduceRuntimeEventUnprioritized(
           ? "Waiting · extension input required"
           : endedWithError
             ? "Error · backend stream failed"
-            : status === "aborted"
-              ? "Idle · backend stream aborted"
-              : "Idle · backend stream complete",
+            : authStillPending
+              ? "Error · OpenAI authentication verification pending"
+              : status === "aborted"
+                ? "Idle · backend stream aborted"
+                : "Idle · backend stream complete",
         workingStartedAtMs: undefined,
         retryPrompt: endedWithError ? session.retryPrompt : undefined,
         lastRuntimeEventLabel: endedWithError
@@ -8243,12 +8491,17 @@ function reduceRuntimeEventUnprioritized(
       if (intentional && session.sessionFile !== undefined) {
         return {
           ...detachedSession,
-          status: "idle",
-          baseState: "idle",
+          status:
+            detachedSession.failureKind === "auth-required" ? "error" : "idle",
+          baseState:
+            detachedSession.failureKind === "auth-required" ? "error" : "idle",
           awaitingAgentEnd: false,
           runtimeBacked: false,
           resumeBacked: true,
-          subtitle: "Saved · click to resume",
+          subtitle:
+            detachedSession.failureKind === "auth-required"
+              ? "Authentication verification pending · reopen saved session"
+              : "Saved · click to resume",
         };
       }
       // An intentional close already detached this runtime and preserved the
@@ -8875,6 +9128,12 @@ function reduceMessageUpdate(
     ...(usageStats !== undefined ? { usageStats } : {}),
     providerErrorObserved:
       isErrorUpdate || session.providerErrorObserved === true,
+    ...(isErrorUpdate
+      ? {
+          failureKind:
+            classifyOpenAiCodexAuthFailure(event) ?? session.failureKind,
+        }
+      : {}),
     // An assistant message's `done` only completes that message. The agent
     // may still be running tools or emit an authoritative agent_end next.
     status: stillWaitingForInput
@@ -11408,6 +11667,9 @@ const ChatTimeline = memo(function ChatTimeline(props: {
   multitaskState: MultitaskStateEvent | undefined;
   taskPlanning: boolean;
   onRecoverSession(): void;
+  onRepairOpenAiCodexAuth(): void;
+  onResumeAfterOpenAiCodexRepair(): void;
+  openAiCodexResumeInFlight: boolean;
   onRespondToExtensionUi(
     requestId: string,
     response: { confirmed: boolean } | { value: string } | { cancelled: true },
@@ -11807,25 +12069,55 @@ const ChatTimeline = memo(function ChatTimeline(props: {
             backendMode={props.session.backendMode ?? "fake"}
           />
         ) : null}
-        {props.session.status === "error" ? (
+        {props.session.status === "error" ||
+        props.session.failureKind === "auth-required" ? (
           <div className="state-banner error">
-            <span>This session is in an error state.</span>
+            {props.session.failureKind === "auth-required" ? (
+              <span>
+                OpenAI authentication required. Pi&apos;s OpenAI Codex (ChatGPT
+                subscription) login is no longer valid. Authentication
+                verification is pending until an explicit new model prompt
+                completes.
+              </span>
+            ) : (
+              <span>This session is in an error state.</span>
+            )}
             <div className="recovery-actions">
-              {props.session.retryPrompt !== undefined &&
-              props.session.runtimeBacked ? (
-                <IconButton
-                  icon={RotateCcw}
-                  label="Retry prompt"
-                  onClick={props.onRetrySession}
-                />
-              ) : null}
-              {props.session.sessionFile !== undefined ? (
-                <IconButton
-                  icon={History}
-                  label="Reopen saved session"
-                  onClick={props.onRecoverSession}
-                />
-              ) : null}
+              {props.session.failureKind === "auth-required" ? (
+                <>
+                  <IconButton
+                    icon={History}
+                    label="Re-authenticate with Pi"
+                    onClick={props.onRepairOpenAiCodexAuth}
+                  />
+                  {props.session.sessionFile !== undefined ? (
+                    <IconButton
+                      icon={RotateCcw}
+                      label="Check again / Resume"
+                      loading={props.openAiCodexResumeInFlight}
+                      onClick={props.onResumeAfterOpenAiCodexRepair}
+                    />
+                  ) : null}
+                </>
+              ) : (
+                <>
+                  {props.session.retryPrompt !== undefined &&
+                  props.session.runtimeBacked ? (
+                    <IconButton
+                      icon={RotateCcw}
+                      label="Retry prompt"
+                      onClick={props.onRetrySession}
+                    />
+                  ) : null}
+                  {props.session.sessionFile !== undefined ? (
+                    <IconButton
+                      icon={History}
+                      label="Reopen saved session"
+                      onClick={props.onRecoverSession}
+                    />
+                  ) : null}
+                </>
+              )}
               <IconButton
                 icon={Copy}
                 label="Copy diagnostics"
@@ -13285,14 +13577,17 @@ function reconcileSessionWithRuntimeStatus(
     };
   }
 
+  const authStillPending = session.failureKind === "auth-required";
   return appendDiagnostic(
     {
       ...session,
-      status: "idle",
-      baseState: "idle",
+      status: authStillPending ? "error" : "idle",
+      baseState: authStillPending ? "error" : "idle",
       awaitingAgentEnd: false,
-      providerErrorObserved: false,
-      lastError: undefined,
+      providerErrorObserved: authStillPending
+        ? session.providerErrorObserved === true
+        : false,
+      ...(authStillPending ? {} : { lastError: undefined }),
       overlays: {
         ...session.overlays,
         streaming: false,
@@ -13300,7 +13595,9 @@ function reconcileSessionWithRuntimeStatus(
         retrying: false,
       },
       workingStartedAtMs: undefined,
-      subtitle: `Idle · ${backendLabel(session)} reconciled`,
+      subtitle: authStillPending
+        ? "Error · OpenAI authentication verification pending"
+        : `Idle · ${backendLabel(session)} reconciled`,
       lastRuntimeEventLabel: "Pi reconciliation confirmed completion",
       updatedAt: "Now",
       updatedAtMs: Date.now(),
@@ -13541,6 +13838,23 @@ function getRuntimeEventErrorMessage(
     getAssistantMessageErrorMessage(getRecord(event, "message")) ??
     getAssistantMessageErrorMessage(getFinalAssistantMessage(event))
   );
+}
+
+function isAuthenticatedModelCompletion(event: ChatRuntimeEvent): boolean {
+  const status = getString(event, "status");
+  if (status === "aborted" || status === "error" || status === "failed") {
+    return false;
+  }
+  return isSuccessfulOpenAiCodexTerminalCompletion(
+    getFinalAssistantMessage(event),
+  );
+}
+
+function isSuccessfulModelCompletion(event: ChatRuntimeEvent): boolean {
+  const assistant = getFinalAssistantMessage(event);
+  return assistant !== undefined
+    ? isSuccessfulTerminalAssistantCompletion(assistant)
+    : isSuccessfulTerminalStatus(getString(event, "status"));
 }
 
 function hasRuntimeEventError(event: ChatRuntimeEvent): boolean {
