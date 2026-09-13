@@ -1604,6 +1604,168 @@ test("real-mode workspace membership lifecycle stays explicit and reversible", a
   }
 });
 
+test("workspace session authorization canonicalizes symlink cwd aliases", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-workspace-symlink-cwd-"),
+  );
+  const projectCwd = path.join(root, "registered-project");
+  const projectAlias = path.join(root, "registered-project-alias");
+  const unregisteredCwd = path.join(root, "unregistered-project");
+  const agentDir = path.join(root, "agent");
+  const sessionDir = path.join(agentDir, "sessions", "--symlink-cwd--");
+  const authorizedSessionFile = path.join(sessionDir, "authorized.jsonl");
+  const unregisteredSessionFile = path.join(sessionDir, "unregistered.jsonl");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(unregisteredCwd, { recursive: true });
+  fs.mkdirSync(sessionDir, { recursive: true });
+  fs.symlinkSync(projectCwd, projectAlias, "dir");
+  const canonicalProjectCwd = fs.realpathSync(projectCwd);
+  writePiSessionFixture({
+    sessionFile: authorizedSessionFile,
+    sessionId: "symlink-authorized",
+    projectCwd: canonicalProjectCwd,
+  });
+  writePiSessionFixture({
+    sessionFile: unregisteredSessionFile,
+    sessionId: "unregistered",
+    projectCwd: unregisteredCwd,
+  });
+  const canonicalAuthorizedSessionFile = fs.realpathSync(authorizedSessionFile);
+  const canonicalUnregisteredSessionFile = fs.realpathSync(
+    unregisteredSessionFile,
+  );
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      // The persisted JSONL header stays canonical. Only the live fake Pi
+      // snapshot reports the raw symlink spelling that triggers this path.
+      fakePiArgs: ["--get-state-cwd", projectAlias],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    const setup = await page.evaluate(
+      async ({ authorizedSessionFile, unregisteredSessionFile }) => {
+        const api = window.piDeck;
+        const project = await api.projects.getActive();
+        const defaultProjectId = project.activeProject?.id;
+        if (defaultProjectId === undefined) {
+          throw new Error("Expected an authorized default project.");
+        }
+        const created = await api.workspaces.create({
+          name: "Symlink authorization",
+          defaultProjectId,
+        });
+        const workspace = created.activeWorkspace;
+        if (workspace === undefined) {
+          throw new Error("Expected created workspace to be active.");
+        }
+        await api.workspaces.addSession({
+          workspaceId: workspace.id,
+          sessionFile: authorizedSessionFile,
+        });
+        await api.workspaces.addSession({
+          workspaceId: workspace.id,
+          sessionFile: unregisteredSessionFile,
+        });
+        const firstResume = await api.chat.resumeSession({
+          workspaceId: workspace.id,
+          sessionFile: authorizedSessionFile,
+        });
+        await api.chat.closeSession({ runtimeId: firstResume.runtimeId });
+        return {
+          workspaceId: workspace.id,
+          firstResumeCwd: firstResume.state.cwd,
+        };
+      },
+      {
+        authorizedSessionFile: canonicalAuthorizedSessionFile,
+        unregisteredSessionFile: canonicalUnregisteredSessionFile,
+      },
+    );
+
+    expect(setup.firstResumeCwd).toBe(projectAlias);
+    const workspaceStore = JSON.parse(
+      fs.readFileSync(
+        path.join(root, "pideck-home", "workspaces.json"),
+        "utf8",
+      ),
+    ) as {
+      sessionRefs?: Array<{ sessionFile: string; cwd?: string }>;
+    };
+    const authorizedRef = workspaceStore.sessionRefs?.find(
+      (ref) => ref.sessionFile === canonicalAuthorizedSessionFile,
+    );
+    expect(authorizedRef?.cwd).toBe(projectAlias);
+
+    const outcome = await page.evaluate(
+      async ({
+        workspaceId,
+        authorizedSessionFile,
+        unregisteredSessionFile,
+      }) => {
+        const api = window.piDeck;
+        const reject = async (operation: Promise<unknown>) => {
+          try {
+            await operation;
+            return "unexpected success";
+          } catch (error) {
+            return error instanceof Error ? error.message : String(error);
+          }
+        };
+        const resumed = await api.chat.resumeSession({
+          workspaceId,
+          sessionFile: authorizedSessionFile,
+        });
+        const deleted = await api.chat.deleteSession({
+          workspaceId,
+          sessionFile: authorizedSessionFile,
+        });
+        return {
+          resumedCwd: resumed.state.cwd,
+          deleted,
+          unregisteredResume: await reject(
+            api.chat.resumeSession({
+              workspaceId,
+              sessionFile: unregisteredSessionFile,
+            }),
+          ),
+          unregisteredDelete: await reject(
+            api.chat.deleteSession({
+              workspaceId,
+              sessionFile: unregisteredSessionFile,
+            }),
+          ),
+        };
+      },
+      {
+        workspaceId: setup.workspaceId,
+        authorizedSessionFile: canonicalAuthorizedSessionFile,
+        unregisteredSessionFile: canonicalUnregisteredSessionFile,
+      },
+    );
+
+    expect(outcome.resumedCwd).toBe(projectAlias);
+    expect(outcome.deleted).toMatchObject({
+      deleted: true,
+      sessionFile: canonicalAuthorizedSessionFile,
+    });
+    expect(outcome.unregisteredResume).toMatch(
+      /working folder is not registered/i,
+    );
+    expect(outcome.unregisteredDelete).toMatch(
+      /working folder is not registered/i,
+    );
+    expect(fs.existsSync(canonicalAuthorizedSessionFile)).toBe(false);
+    expect(fs.existsSync(canonicalUnregisteredSessionFile)).toBe(true);
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("workspace and session archive state persists across relaunch", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-e2e-workspace-archive-relaunch-"),

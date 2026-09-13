@@ -5396,8 +5396,8 @@ async function projectForWorkspaceSession(
     return managedProject;
   }
   const projects = await ensureProjectStore().list();
-  const project = ref.cwd
-    ? projects.projects.find((candidate) => candidate.canonicalPath === ref.cwd)
+  const project = refCwd
+    ? projects.projects.find((candidate) => candidate.canonicalPath === refCwd)
     : workspace.defaultProjectId
       ? projects.projects.find(
           (candidate) => candidate.id === workspace.defaultProjectId,
