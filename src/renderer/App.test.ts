@@ -1162,6 +1162,99 @@ describe("actionable session attention", () => {
     ]);
   });
 
+  it("keeps production extension input actionable through tool and retry failure until acknowledgement", () => {
+    const finalError = "Retry failed after approval was requested.";
+    let session = baseSession() as any;
+    const events = [
+      {
+        type: "extension_ui_request",
+        runtimeId: "session-1",
+        id: "approval-1",
+        method: "confirm",
+        title: "Approve retry",
+      },
+      {
+        type: "tool_execution_start",
+        runtimeId: "session-1",
+        toolCallId: "tool-1",
+        toolName: "bash",
+      },
+      {
+        type: "tool_execution_update",
+        runtimeId: "session-1",
+        toolCallId: "tool-1",
+        output: "checking",
+      },
+      {
+        type: "tool_execution_end",
+        runtimeId: "session-1",
+        toolCallId: "tool-1",
+        output: "done",
+      },
+      { type: "agent_end", runtimeId: "session-1", willRetry: true },
+      {
+        type: "auto_retry_start",
+        runtimeId: "session-1",
+        attempt: 1,
+        maxAttempts: 1,
+      },
+      {
+        type: "auto_retry_end",
+        runtimeId: "session-1",
+        success: false,
+        attempt: 1,
+        finalError,
+      },
+    ];
+
+    for (const event of events) {
+      session = __rendererTestHooks.reduceRuntimeEvent(session, event as any);
+      expect(session).toMatchObject({
+        status: "waiting",
+        baseState: "waitingForInput",
+        overlays: { needsUserInput: true },
+        pendingExtensionUiRequests: [{ id: "approval-1" }],
+      });
+    }
+
+    expect(session.overlays).toMatchObject({
+      toolRunning: false,
+      retrying: false,
+    });
+    expect(session.providerErrorObserved).toBe(true);
+    expect(runtimeErrorDiagnostics(session)).toMatchObject([
+      { content: finalError },
+    ]);
+    expect(selectSidebarIndicator(session).kind).toBe("needsInput");
+    const waitingSource = __rendererTestHooks.activitySourceSessions(
+      [session],
+      {
+        "workspace-a": "Workspace A",
+      },
+    )[0]!;
+    expect(
+      buildActivityInbox([waitingSource]).groups.needsAttention,
+    ).toHaveLength(1);
+
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "extension_ui_response_sent",
+      runtimeId: "session-1",
+      requestId: "approval-1",
+    } as any);
+
+    expect(session).toMatchObject({
+      status: "error",
+      baseState: "error",
+      overlays: { needsUserInput: false },
+      pendingExtensionUiRequests: [],
+    });
+    expect(selectSidebarIndicator(session).kind).toBe("error");
+    const failedSource = __rendererTestHooks.activitySourceSessions([session], {
+      "workspace-a": "Workspace A",
+    })[0]!;
+    expect(buildActivityInbox([failedSource]).groups.failed).toHaveLength(1);
+  });
+
   it("keeps a terminal provider failure Failed without an actionable request", () => {
     const failed = __rendererTestHooks.reduceRuntimeEvent(
       baseSession() as any,

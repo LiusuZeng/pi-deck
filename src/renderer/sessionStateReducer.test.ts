@@ -278,6 +278,62 @@ describe("reduceSessionRuntimeEvent", () => {
     expect(completed.overlays.retrying).toBe(false);
   });
 
+  it("keeps a production-id extension request actionable through tools and retry failure until acknowledgement", () => {
+    const finalError = "Retry exhausted while extension input was pending.";
+    let state = createInitialReducedSessionState();
+    const events: RuntimeEventLike[] = [
+      {
+        type: "extension_ui_request",
+        id: "ext-production-1",
+        method: "confirm",
+      },
+      { type: "tool_execution_start", toolCallId: "tool-1", name: "bash" },
+      {
+        type: "tool_execution_update",
+        toolCallId: "tool-1",
+        output: "checking",
+      },
+      { type: "tool_execution_end", toolCallId: "tool-1", output: "done" },
+      { type: "agent_end", willRetry: true },
+      { type: "auto_retry_start", attempt: 1, maxAttempts: 1 },
+      {
+        type: "auto_retry_end",
+        success: false,
+        attempt: 1,
+        finalError,
+      },
+    ];
+
+    for (const event of events) {
+      state = reduceSessionRuntimeEvent(state, event);
+      expect(state).toMatchObject({
+        baseState: "waitingForInput",
+        overlays: { needsUserInput: true },
+        pendingExtensionUiQueue: [{ requestId: "ext-production-1" }],
+      });
+    }
+
+    expect(state.overlays).toMatchObject({
+      toolRunning: false,
+      retrying: false,
+    });
+    expect(state.terminalProviderErrorObserved).toBe(true);
+    expect(state.diagnostics).toContain(finalError);
+    expect(selectSidebarIndicator(state).kind).toBe("needsInput");
+
+    state = reduceSessionRuntimeEvent(state, {
+      type: "extension_ui_response_sent",
+      requestId: "ext-production-1",
+    });
+    expect(state).toMatchObject({
+      baseState: "error",
+      overlays: { needsUserInput: false },
+      pendingExtensionUiQueue: [],
+    });
+    expect(selectSidebarIndicator(state).kind).toBe("error");
+    expect(state.diagnostics).toContain(finalError);
+  });
+
   it("marks final auto-retry failure as an error", () => {
     const state = applyEvents([
       { type: "auto_retry_start", attempt: 2, maxAttempts: 2 },

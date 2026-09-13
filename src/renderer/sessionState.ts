@@ -108,6 +108,18 @@ export function reduceSessionRuntimeEvent(
   state: ReducedSessionState,
   event: RuntimeEventLike,
 ): ReducedSessionState {
+  // Pending extension dialogs are the source of truth for actionable input.
+  // Project every event through this priority so tool/retry/end events can
+  // update their own overlays without hiding the request.
+  return prioritizePendingExtensionUi(
+    reduceSessionRuntimeEventUnprioritized(state, event),
+  );
+}
+
+function reduceSessionRuntimeEventUnprioritized(
+  state: ReducedSessionState,
+  event: RuntimeEventLike,
+): ReducedSessionState {
   switch (event.type) {
     case "agent_start":
       return {
@@ -145,14 +157,31 @@ export function reduceSessionRuntimeEvent(
     case "compaction_end":
       return { ...state, overlays: { ...state.overlays, compacting: false } };
     case "auto_retry_start":
-      return { ...state, overlays: { ...state.overlays, retrying: true } };
-    case "auto_retry_end": {
-      const status = getString(event, "status");
       return {
         ...state,
-        baseState:
-          status === "failed" || status === "error" ? "error" : state.baseState,
-        overlays: { ...state.overlays, retrying: false },
+        baseState: "working",
+        terminalProviderErrorObserved: false,
+        overlays: { ...state.overlays, streaming: false, retrying: true },
+      };
+    case "auto_retry_end": {
+      // Pi sends { success, finalError }; status remains a compatibility
+      // fallback for older fixtures and recorded event logs.
+      const retryFailed =
+        getBoolean(event, "success") === false ||
+        getString(event, "status") === "failed" ||
+        getString(event, "status") === "error";
+      const retryError = getRuntimeEventErrorMessage(event);
+      return {
+        ...state,
+        baseState: retryFailed ? "error" : "working",
+        terminalProviderErrorObserved: retryFailed,
+        overlays: { ...state.overlays, streaming: false, retrying: false },
+        diagnostics: retryFailed
+          ? appendDiagnostic(
+              state.diagnostics,
+              retryError ?? "Pi automatic retry failed.",
+            )
+          : state.diagnostics,
       };
     }
     case "extension_ui_request":
@@ -161,7 +190,7 @@ export function reduceSessionRuntimeEvent(
     case "extension_ui_request_timeout":
       return clearPendingExtensionUiRequest(
         state,
-        getString(event, "requestId"),
+        getExtensionUiRequestId(event),
       );
     case "extension_ui_response_failed":
       return reduceExtensionUiResponseFailedEvent(state, event);
@@ -178,6 +207,20 @@ export function reduceSessionRuntimeEvent(
     default:
       return state;
   }
+}
+
+function prioritizePendingExtensionUi(
+  state: ReducedSessionState,
+): ReducedSessionState {
+  if (state.pendingExtensionUiQueue.length === 0) {
+    return state;
+  }
+
+  return {
+    ...state,
+    baseState: "waitingForInput",
+    overlays: { ...state.overlays, needsUserInput: true },
+  };
 }
 
 function reduceMessageUpdateEvent(
@@ -399,18 +442,37 @@ function reduceExtensionUiRequestEvent(
     return state;
   }
 
-  const requestId = getString(event, "requestId") ?? `extension-${Date.now()}`;
+  // Pi sends request ids as `id`; main-process acknowledgements use
+  // `requestId`. Never invent an id, because that queue entry could not be
+  // cleared by Pi's acknowledgement.
+  const requestId = getExtensionUiRequestId(event);
+  if (requestId === undefined) {
+    return {
+      ...state,
+      diagnostics: appendDiagnostic(
+        state.diagnostics,
+        "Pi sent an extension UI dialog without an id, so Pi Deck cannot safely answer it.",
+      ),
+    };
+  }
   const timeout = getNumber(event, "timeout");
   const pendingRequest: PendingExtensionUiRequestState = {
     requestId,
     method,
     ...(timeout !== undefined ? { timeout } : {}),
   };
+  const pendingExtensionUiQueue = state.pendingExtensionUiQueue.some(
+    (request) => request.requestId === requestId,
+  )
+    ? state.pendingExtensionUiQueue.map((request) =>
+        request.requestId === requestId ? pendingRequest : request,
+      )
+    : [...state.pendingExtensionUiQueue, pendingRequest];
 
   return {
     ...state,
     baseState: "waitingForInput",
-    pendingExtensionUiQueue: [...state.pendingExtensionUiQueue, pendingRequest],
+    pendingExtensionUiQueue,
     overlays: { ...state.overlays, needsUserInput: true },
   };
 }
@@ -624,6 +686,10 @@ function appendDiagnostic(diagnostics: string[], message: string): string[] {
   return diagnostics.at(-1) === message
     ? diagnostics
     : [...diagnostics, message];
+}
+
+function getExtensionUiRequestId(event: RuntimeEventLike): string | undefined {
+  return getString(event, "id") ?? getString(event, "requestId");
 }
 
 function getToolCallId(event: RuntimeEventLike): string | undefined {

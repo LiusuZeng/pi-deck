@@ -211,6 +211,58 @@ describe("session sound transitions", () => {
     ]);
   });
 
+  it("keeps production extension input and sound attention aligned through retry failure", () => {
+    const finalError = "Retry exhausted while approval is pending.";
+    let reduced = createInitialReducedSessionState();
+    const events = [
+      { type: "agent_start" },
+      { type: "extension_ui_request", id: "approval-1", method: "confirm" },
+      { type: "tool_execution_start", toolCallId: "tool-1", name: "bash" },
+      {
+        type: "tool_execution_update",
+        toolCallId: "tool-1",
+        output: "checking",
+      },
+      { type: "tool_execution_end", toolCallId: "tool-1", output: "done" },
+      { type: "agent_end", willRetry: true },
+      { type: "auto_retry_start", attempt: 1, maxAttempts: 1 },
+      {
+        type: "auto_retry_end",
+        success: false,
+        attempt: 1,
+        finalError,
+      },
+    ];
+    for (const event of events) {
+      reduced = reduceSessionRuntimeEvent(reduced, event);
+    }
+
+    const waiting = collect(
+      { "runtime:runtime-1": projection({ status: "inProgress" }) },
+      [
+        source({
+          baseState: reduced.baseState,
+          overlays: reduced.overlays,
+        }),
+      ],
+    );
+    expect(waiting.next["runtime:runtime-1"]?.status).toBe("needsAttention");
+    expect(waiting.requests).toEqual([
+      { key: "runtime:runtime-1", cue: "needsAttention" },
+    ]);
+
+    reduced = reduceSessionRuntimeEvent(reduced, {
+      type: "extension_ui_response_sent",
+      requestId: "approval-1",
+    });
+    const resolved = collect(waiting.next, [
+      source({ baseState: reduced.baseState, overlays: reduced.overlays }),
+    ]);
+    expect(reduced.diagnostics).toContain(finalError);
+    expect(resolved.next["runtime:runtime-1"]?.status).toBe("failed");
+    expect(resolved.requests).toEqual([]);
+  });
+
   it("does not play attention for first observed or non-working needs-attention state", () => {
     const cue = sessionSoundCueForTransition(
       projection({ status: "none" }),

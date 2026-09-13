@@ -7787,6 +7787,18 @@ function reduceRuntimeEvent(
   session: SessionViewModel,
   event: ChatRuntimeEvent,
 ): SessionViewModel {
+  // A dialog remains actionable until Pi acknowledges its response or the
+  // request times out. Apply this projection after every event reduction so
+  // concurrent tool/retry/terminal events cannot mask pending input.
+  return prioritizePendingExtensionUiRequest(
+    reduceRuntimeEventUnprioritized(session, event),
+  );
+}
+
+function reduceRuntimeEventUnprioritized(
+  session: SessionViewModel,
+  event: ChatRuntimeEvent,
+): SessionViewModel {
   switch (event.type) {
     case "agent_start":
       return {
@@ -8146,6 +8158,22 @@ function reduceRuntimeEvent(
     default:
       return session;
   }
+}
+
+function prioritizePendingExtensionUiRequest(
+  session: SessionViewModel,
+): SessionViewModel {
+  if ((session.pendingExtensionUiRequests?.length ?? 0) === 0) {
+    return session;
+  }
+
+  return {
+    ...session,
+    status: "waiting",
+    baseState: "waitingForInput",
+    overlays: { ...session.overlays, needsUserInput: true },
+    subtitle: "Waiting · extension input required",
+  };
 }
 
 function reduceExtensionUiRequestEvent(
