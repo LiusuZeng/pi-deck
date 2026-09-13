@@ -1,5 +1,8 @@
 import type { MultitaskMode } from "./types.js";
 
+/** Initial terminal delivery attempt plus three retries. */
+const maxSynthesisAttempts = 4;
+
 export type TaskSessionLifecycle =
   | "queued"
   | "starting"
@@ -341,7 +344,7 @@ export class TaskSessionOrchestrator<
       })),
     };
   }
-  /** Restore is deliberately passive: unfinished work is recorded as interrupted, never synthesized or relaunched. */
+  /** Production's resume guard invokes restore once per attached parent; restore never plans, drains queues, or relaunches workers. */
   restore(parentId: ParentId, state: PersistedTaskSessionState): void {
     validatePersisted(state, this.maxPlanTasks, this.maxContextSummaryLength);
     const parent = this.parent(parentId);
@@ -353,7 +356,11 @@ export class TaskSessionOrchestrator<
       ...state.plans.map((plan) => plan.planId + 1),
     );
     parent.plans = state.plans.map((plan) => {
-      const hadInterruptedWork = plan.tasks.some((saved) => !isTerminal(saved));
+      // Interrupted rows may have been persisted by an earlier restore and must
+      // remain ineligible for parent synthesis.
+      const hadUnfinishedWork = plan.tasks.some(
+        (saved) => !isTerminal(saved) || saved.lifecycle === "interrupted",
+      );
       return {
         ...plan,
         originalPrompt: safeText(
@@ -368,7 +375,7 @@ export class TaskSessionOrchestrator<
           ? { promptSettings: safeSettings(plan.promptSettings) }
           : {}),
         ...(plan.synthesisReported ? { synthesized: true } : {}),
-        synthesisEligible: !hadInterruptedWork,
+        synthesisEligible: !hadUnfinishedWork,
         tasks: plan.tasks.map((saved) =>
           !isTerminal(saved)
             ? {
@@ -385,6 +392,7 @@ export class TaskSessionOrchestrator<
       };
     });
     this.publish(parent);
+    void this.synthesizeTerminalPlans(parent);
   }
   async removeParent(parentId: ParentId): Promise<void> {
     const parent = this.parents.get(parentId);
@@ -623,7 +631,8 @@ export class TaskSessionOrchestrator<
         plan.synthesizing ||
         plan.synthesized ||
         plan.synthesisEligible === false ||
-        !plan.tasks.every(isTerminal)
+        !plan.tasks.every(isTerminal) ||
+        (plan.synthesisAttempts ?? 0) >= maxSynthesisAttempts
       )
         continue;
       plan.synthesizing = true;
@@ -650,9 +659,10 @@ export class TaskSessionOrchestrator<
             : "Task-session synthesis delivery failed.",
         );
         this.publish(parent);
-        // Three retries after the initial delivery attempt. A timer, rather than a
-        // drain loop, prevents a failing synthesizer from spinning the event loop.
-        retrySynthesis = plan.synthesisAttempts <= 3 && !parent.removed;
+        // A timer, rather than a drain loop, prevents a failing synthesizer from
+        // spinning the event loop.
+        retrySynthesis =
+          plan.synthesisAttempts < maxSynthesisAttempts && !parent.removed;
       } finally {
         plan.synthesizing = false;
       }
