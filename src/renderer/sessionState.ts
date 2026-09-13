@@ -203,7 +203,17 @@ function reduceSessionRuntimeEventUnprioritized(
         : state;
     }
     case "worker_exit":
-      return { ...state, baseState: "error" };
+      // An unplanned exit detaches the runtime in main, which clears its
+      // response map. Do not leave the renderer advertising an unanswerable
+      // extension dialog after the pending-input priority projection runs.
+      return getBoolean(event, "intentional") === true
+        ? { ...state, baseState: "error" }
+        : {
+            ...state,
+            baseState: "error",
+            pendingExtensionUiQueue: [],
+            overlays: { ...state.overlays, needsUserInput: false },
+          };
     default:
       return state;
   }

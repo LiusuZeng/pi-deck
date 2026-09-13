@@ -8140,11 +8140,19 @@ function reduceRuntimeEventUnprioritized(
       return appendDiagnostic(
         {
           ...session,
+          // Main detaches this runtime immediately after forwarding an
+          // unplanned exit, so no queued extension request can be answered.
+          // Clear them before the pending-input priority projection runs, but
+          // preserve the existing planned-exit behavior.
+          ...(intentional ? {} : { pendingExtensionUiRequests: [] }),
           status: "error",
           baseState: "error",
           awaitingAgentEnd: false,
           runtimeBacked: false,
           resumeBacked: session.sessionFile !== undefined,
+          overlays: intentional
+            ? session.overlays
+            : { ...session.overlays, needsUserInput: false },
           subtitle: session.sessionFile
             ? "Error · worker exited; click to resume saved session"
             : "Error · backend worker exited",

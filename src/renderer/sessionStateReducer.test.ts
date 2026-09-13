@@ -146,6 +146,41 @@ describe("reduceSessionRuntimeEvent", () => {
     expect(cleared.overlays.needsUserInput).toBe(false);
   });
 
+  it("clears pending extension input for an unplanned worker exit", () => {
+    const exited = applyEvents([
+      {
+        type: "extension_ui_request",
+        requestId: "ext-1",
+        method: "confirm",
+      },
+      { type: "worker_exit", intentional: false },
+    ]);
+
+    expect(exited).toMatchObject({
+      baseState: "error",
+      overlays: { needsUserInput: false },
+      pendingExtensionUiQueue: [],
+    });
+    expect(selectSidebarIndicator(exited).kind).toBe("error");
+  });
+
+  it("preserves pending extension input for a planned worker exit", () => {
+    const exited = applyEvents([
+      {
+        type: "extension_ui_request",
+        requestId: "ext-1",
+        method: "confirm",
+      },
+      { type: "worker_exit", intentional: true },
+    ]);
+
+    expect(exited.pendingExtensionUiQueue).toMatchObject([
+      { requestId: "ext-1" },
+    ]);
+    expect(exited.overlays.needsUserInput).toBe(true);
+    expect(selectSidebarIndicator(exited).kind).toBe("needsInput");
+  });
+
   it("restores a production message_update provider failure after its final extension response", () => {
     const failedAssistant = {
       role: "assistant",

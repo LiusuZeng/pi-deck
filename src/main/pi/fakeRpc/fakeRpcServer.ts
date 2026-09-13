@@ -32,6 +32,7 @@ type PromptScenario =
 interface FakeOptions {
   malformedOnStart: boolean;
   exitAfterFirstCommand: boolean;
+  exitAfterExtensionUiRequest: boolean;
   stderrOnStart: boolean;
   streamDelayMs: number;
   ignoredCommands: Set<string>;
@@ -77,6 +78,7 @@ function parseOptions(argv: string[]): FakeOptions {
   const options: FakeOptions = {
     malformedOnStart: false,
     exitAfterFirstCommand: false,
+    exitAfterExtensionUiRequest: false,
     stderrOnStart: false,
     streamDelayMs: 5,
     ignoredCommands: new Set<string>(),
@@ -100,6 +102,8 @@ function parseOptions(argv: string[]): FakeOptions {
       options.malformedOnStart = true;
     } else if (arg === "--exit-after-first-command") {
       options.exitAfterFirstCommand = true;
+    } else if (arg === "--exit-after-extension-ui-request") {
+      options.exitAfterExtensionUiRequest = true;
     } else if (arg === "--stderr-on-start") {
       options.stderrOnStart = true;
     } else if (arg === "--stream-delay-ms") {
@@ -1301,6 +1305,13 @@ class FakeRpcServer {
         ...(method === "editor" ? { prefill: "Fake editable text" } : {}),
         timeout: this.options.extensionUiAutoCompleteTimeoutMs,
       });
+      if (this.options.exitAfterExtensionUiRequest) {
+        // Let the request flush before simulating a backend that dies while
+        // its extension input is still pending.
+        this.currentTimers.push(
+          setTimeout(() => process.exit(42), this.options.streamDelayMs),
+        );
+      }
     }
 
     return 0;

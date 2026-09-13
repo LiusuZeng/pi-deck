@@ -939,6 +939,76 @@ describe("worker exit lifecycle", () => {
     expect(next.baseState).toBe("error");
     expect(runtimeErrorDiagnostics(next)).toHaveLength(1);
   });
+
+  it("removes unanswerable extension input after an unplanned worker exit across surfaces", () => {
+    let session = __rendererTestHooks.reduceRuntimeEvent(
+      baseSession() as any,
+      {
+        type: "extension_ui_request",
+        runtimeId: "session-1",
+        id: "approval-1",
+        method: "confirm",
+        title: "Approve worker action",
+      } as any,
+    );
+    expect(session.pendingExtensionUiRequests).toMatchObject([
+      { id: "approval-1" },
+    ]);
+    expect(selectSidebarIndicator(session).kind).toBe("needsInput");
+
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "worker_exit",
+      runtimeId: "session-1",
+      code: 42,
+      signal: null,
+      intentional: false,
+    } as any);
+    const source = __rendererTestHooks.activitySourceSessions([session], {
+      "workspace-a": "Workspace A",
+    })[0]!;
+    const inbox = buildActivityInbox([source]);
+
+    expect(session).toMatchObject({
+      status: "error",
+      baseState: "error",
+      overlays: { needsUserInput: false },
+      pendingExtensionUiRequests: [],
+    });
+    expect(selectSidebarIndicator(session).kind).toBe("error");
+    expect(inbox.groups.needsAttention).toHaveLength(0);
+    expect(inbox.groups.failed).toHaveLength(1);
+    expect(runtimeErrorDiagnostics(session)).toHaveLength(1);
+  });
+
+  it("preserves pending extension input for a planned worker exit", () => {
+    let session = __rendererTestHooks.reduceRuntimeEvent(
+      baseSession() as any,
+      {
+        type: "extension_ui_request",
+        runtimeId: "session-1",
+        id: "approval-1",
+        method: "confirm",
+        title: "Approve planned worker action",
+      } as any,
+    );
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "worker_exit",
+      runtimeId: "session-1",
+      code: 0,
+      signal: null,
+      intentional: true,
+    } as any);
+    const source = __rendererTestHooks.activitySourceSessions([session], {
+      "workspace-a": "Workspace A",
+    })[0]!;
+
+    expect(session.pendingExtensionUiRequests).toMatchObject([
+      { id: "approval-1" },
+    ]);
+    expect(session.overlays.needsUserInput).toBe(true);
+    expect(selectSidebarIndicator(session).kind).toBe("needsInput");
+    expect(buildActivityInbox([source]).groups.needsAttention).toHaveLength(1);
+  });
 });
 
 describe("canonical occurrence Pi-session navigation", () => {

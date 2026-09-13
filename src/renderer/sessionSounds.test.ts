@@ -211,6 +211,34 @@ describe("session sound transitions", () => {
     ]);
   });
 
+  it("transitions pending extension input to Failed without an attention cue on unplanned worker exit", () => {
+    let reduced = createInitialReducedSessionState();
+    reduced = reduceSessionRuntimeEvent(reduced, { type: "agent_start" });
+    reduced = reduceSessionRuntimeEvent(reduced, {
+      type: "extension_ui_request",
+      requestId: "approval-1",
+      method: "confirm",
+    });
+    reduced = reduceSessionRuntimeEvent(reduced, {
+      type: "worker_exit",
+      intentional: false,
+    });
+
+    const result = collect(
+      { "runtime:runtime-1": projection({ status: "inProgress" }) },
+      [
+        source({
+          baseState: reduced.baseState,
+          overlays: reduced.overlays,
+        }),
+      ],
+    );
+
+    expect(reduced.pendingExtensionUiQueue).toEqual([]);
+    expect(result.next["runtime:runtime-1"]?.status).toBe("failed");
+    expect(result.requests).toEqual([]);
+  });
+
   it("keeps production extension input and sound attention aligned through retry failure", () => {
     const finalError = "Retry exhausted while approval is pending.";
     let reduced = createInitialReducedSessionState();

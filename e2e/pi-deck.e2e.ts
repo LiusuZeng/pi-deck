@@ -3934,6 +3934,67 @@ test("extension UI confirm request completes through renderer, IPC, and fake Pi"
   }
 });
 
+test("unplanned worker exit clears stale extension UI and marks the session Failed", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-extension-ui-exit-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+  const prompt = "request extension input then exit";
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: [
+        "--prompt-scenario",
+        "extension-ui",
+        "--exit-after-extension-ui-request",
+        "--stream-delay-ms",
+        "500",
+      ],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await enterSessionDetail(page);
+    await page.getByLabel("Prompt text").fill(prompt);
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(page.getByText("Fake confirm", { exact: true })).toBeVisible();
+
+    // Main detaches the worker after forwarding worker_exit. The renderer must
+    // not keep an extension card whose response would now be rejected.
+    await expect(page.getByText("Fake confirm", { exact: true })).toHaveCount(
+      0,
+    );
+    await expect(page.locator(".state-banner.error")).toContainText(
+      "error state",
+    );
+    await expect(
+      page
+        .getByRole("button", { name: `Session: ${prompt}` })
+        .getByRole("img", { name: "Error" }),
+    ).toBeVisible();
+
+    await page.getByRole("button", { name: /^All Work/ }).click();
+    await expectAllWorkLaunch(page);
+    const failedRow = page
+      .locator(".activity-inbox-row--failed")
+      .filter({ hasText: prompt });
+    await expect(failedRow).toContainText("Failed");
+    await expect(
+      page
+        .locator(".activity-inbox-row--needsAttention")
+        .filter({ hasText: prompt }),
+    ).toHaveCount(0);
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("real mode renders a draft shell before an unavailable backend is touched", async () => {
   const piBinary = process.env.PI_DECK_PI_BINARY || "/usr/local/bin/pi";
   test.skip(!fs.existsSync(piBinary), `Pi binary not found at ${piBinary}`);

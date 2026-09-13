@@ -297,6 +297,40 @@ test("PiWorker intentional close does not create error diagnostic", async () => 
   );
 });
 
+test("PiWorker rejects an extension response after exiting with a pending request", async () => {
+  const worker = createWorker([
+    "--prompt-scenario",
+    "extension-ui",
+    "--exit-after-extension-ui-request",
+    "--stream-delay-ms",
+    "25",
+  ]);
+  try {
+    const extensionRequest = waitForWorkerEvent(
+      worker,
+      (event) => event.type === "extension_ui_request",
+    );
+    const workerExit = waitForWorkerEvent(
+      worker,
+      (event) => event.type === "worker_exit",
+    );
+    await worker.prompt({ text: "request then exit" });
+    const request = await extensionRequest;
+    const exited = await workerExit;
+
+    assert.equal((exited as { intentional?: boolean }).intentional, false);
+    await assert.rejects(
+      worker.respondToExtensionUi({
+        id: (request as { id: string }).id,
+        confirmed: true,
+      }),
+      /exited|closed|subprocess/i,
+    );
+  } finally {
+    await worker.closeSession();
+  }
+});
+
 test("PiWorker unexpected exit rejects pending request and emits error diagnostic", async () => {
   const worker = createWorker(["--exit-after-first-command"]);
   const errorDiagnostic = waitForWorkerEvent(
