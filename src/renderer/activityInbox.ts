@@ -247,20 +247,16 @@ export function compareActivityItemsForStatus(
   if (status === "needsAttention" || status === "failed") {
     const leftUpdatedAtMs = finiteTimestamp(left.updatedAtMs);
     const rightUpdatedAtMs = finiteTimestamp(right.updatedAtMs);
-    if (
-      leftUpdatedAtMs !== undefined &&
-      rightUpdatedAtMs !== undefined &&
-      leftUpdatedAtMs !== rightUpdatedAtMs
-    ) {
-      return rightUpdatedAtMs - leftUpdatedAtMs;
-    }
-    if (leftUpdatedAtMs !== undefined && rightUpdatedAtMs === undefined) {
+    if (leftUpdatedAtMs !== undefined && rightUpdatedAtMs !== undefined) {
+      if (leftUpdatedAtMs !== rightUpdatedAtMs) {
+        return leftUpdatedAtMs > rightUpdatedAtMs ? -1 : 1;
+      }
+    } else if (leftUpdatedAtMs !== undefined) {
       return -1;
-    }
-    if (leftUpdatedAtMs === undefined && rightUpdatedAtMs !== undefined) {
+    } else if (rightUpdatedAtMs !== undefined) {
       return 1;
     }
-    return left.id.localeCompare(right.id);
+    return compareCodeUnitLexically(left.id, right.id);
   }
   if (status !== "completed") return 0;
   const leftCompletedAtMs = finiteTimestamp(left.completedAtMs);
@@ -396,8 +392,18 @@ function hasCompletionTimestamp(value: number | undefined): boolean {
   return finiteTimestamp(value) !== undefined;
 }
 
-function finiteTimestamp(value: number | undefined): number | undefined {
-  return value !== undefined && Number.isFinite(value) ? value : undefined;
+/** Locale-independent UTF-16 code-unit order for persistent identifiers. */
+function compareCodeUnitLexically(left: string, right: string): number {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
+}
+
+/** Reject malformed runtime data rather than coercing it into a timestamp. */
+function finiteTimestamp(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
 }
 
 function activityDetail(

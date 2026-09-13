@@ -152,29 +152,73 @@ describe("buildActivityInbox", () => {
     ]);
   });
 
-  it("uses stable ids to break triage recency ties", () => {
+  it("uses code-unit stable IDs to break equal triage timestamps", () => {
     const inbox = buildActivityInbox([
-      source("failed-zeta", { baseState: "error", updatedAtMs: 200 }),
-      source("failed-alpha", { baseState: "error", updatedAtMs: 200 }),
-      source("attention-zeta", {
+      source("failed-ä", { baseState: "error", updatedAtMs: 200 }),
+      source("failed-z", { baseState: "error", updatedAtMs: 200 }),
+      source("attention-ä", {
         baseState: "waitingForInput",
         updatedAtMs: 200,
       }),
-      source("attention-alpha", {
+      source("attention-z", {
         baseState: "waitingForInput",
         updatedAtMs: 200,
       }),
-      source("older", { baseState: "error", updatedAtMs: 100 }),
     ]);
 
+    // UTF-16 code-unit order is deterministic: `z` precedes `ä`, regardless
+    // of the host locale's collation rules.
     expect(inbox.groups.failed.map((item) => item.sessionKey)).toEqual([
-      "failed-alpha",
-      "failed-zeta",
-      "older",
+      "failed-z",
+      "failed-ä",
     ]);
     expect(inbox.groups.needsAttention.map((item) => item.sessionKey)).toEqual([
-      "attention-alpha",
-      "attention-zeta",
+      "attention-z",
+      "attention-ä",
+    ]);
+  });
+
+  it("orders malformed triage timestamps after valid timestamps by stable ID", () => {
+    const malformedTimestamp = (value: unknown): number => value as number;
+    const buildInbox = () =>
+      buildActivityInbox([
+        source("failed-z-string", {
+          baseState: "error",
+          updatedAtMs: malformedTimestamp("not a timestamp"),
+        }),
+        source("failed-a-nan", {
+          baseState: "error",
+          updatedAtMs: malformedTimestamp(Number.NaN),
+        }),
+        source("failed-m-infinity", {
+          baseState: "error",
+          updatedAtMs: malformedTimestamp(Number.POSITIVE_INFINITY),
+        }),
+        source("failed-oldest-valid", { baseState: "error", updatedAtMs: 100 }),
+        source("failed-newest-valid", { baseState: "error", updatedAtMs: 200 }),
+        source("attention-z-malformed", {
+          baseState: "waitingForInput",
+          updatedAtMs: malformedTimestamp(undefined),
+        }),
+        source("attention-a-valid", {
+          baseState: "waitingForInput",
+          updatedAtMs: 200,
+        }),
+      ]);
+
+    expect(buildInbox).not.toThrow();
+    const inbox = buildInbox();
+
+    expect(inbox.groups.failed.map((item) => item.sessionKey)).toEqual([
+      "failed-newest-valid",
+      "failed-oldest-valid",
+      "failed-a-nan",
+      "failed-m-infinity",
+      "failed-z-string",
+    ]);
+    expect(inbox.groups.needsAttention.map((item) => item.sessionKey)).toEqual([
+      "attention-a-valid",
+      "attention-z-malformed",
     ]);
   });
 
