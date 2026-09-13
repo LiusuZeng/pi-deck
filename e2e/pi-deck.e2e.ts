@@ -3782,6 +3782,242 @@ test("session sound preferences toggle independently and persist across relaunch
   }
 });
 
+test("session sounds avoid disabled gestures, recover safely, and leave Work usable", async () => {
+  const userDataDir = createThemeUserData("system");
+  fs.writeFileSync(
+    path.join(userDataDir, "settings.json"),
+    `${JSON.stringify(
+      {
+        theme: "system",
+        maxRunningSessions: 4,
+        warmWorkerLimit: 1,
+        enableLoginShellEnvCapture: false,
+        sessionSounds: { needsAttention: false, completed: false },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  const env = {
+    PI_DECK_BACKEND: "fake",
+    PI_DECK_USER_DATA_DIR: userDataDir,
+  };
+  const { app, page } = await launchPiDeck(env);
+
+  try {
+    await expectHealthyPreload(page);
+    await expectAllWorkLaunch(page);
+    await page.evaluate(() => {
+      const metrics = {
+        contexts: 0,
+        liveContexts: 0,
+        maxLiveContexts: 0,
+        resumes: 0,
+        oscillators: 0,
+        closes: 0,
+        failNextResume: false,
+        holdClose: false,
+        releaseClose: undefined as (() => void) | undefined,
+      };
+      class InstrumentedAudioContext {
+        readonly currentTime = 0;
+        readonly destination = {} as AudioNode;
+
+        constructor() {
+          metrics.contexts += 1;
+          metrics.liveContexts += 1;
+          metrics.maxLiveContexts = Math.max(
+            metrics.maxLiveContexts,
+            metrics.liveContexts,
+          );
+        }
+
+        resume(): Promise<void> {
+          metrics.resumes += 1;
+          if (metrics.failNextResume) {
+            metrics.failNextResume = false;
+            return Promise.reject(new Error("test audio failure"));
+          }
+          return Promise.resolve();
+        }
+
+        close(): Promise<void> {
+          metrics.closes += 1;
+          const finish = () => {
+            metrics.liveContexts -= 1;
+          };
+          if (!metrics.holdClose) {
+            finish();
+            return Promise.resolve();
+          }
+          return new Promise((resolve) => {
+            metrics.releaseClose = () => {
+              finish();
+              resolve();
+            };
+          });
+        }
+
+        createGain(): GainNode {
+          return {
+            gain: {
+              setValueAtTime() {},
+              exponentialRampToValueAtTime() {},
+            },
+            connect() {},
+          } as unknown as GainNode;
+        }
+
+        createOscillator(): OscillatorNode {
+          metrics.oscillators += 1;
+          return {
+            type: "sine",
+            frequency: { setValueAtTime() {} },
+            connect() {},
+            start() {},
+            stop() {},
+          } as unknown as OscillatorNode;
+        }
+      }
+      Object.defineProperty(window, "AudioContext", {
+        configurable: true,
+        value: InstrumentedAudioContext,
+      });
+      (
+        window as typeof window & {
+          __sessionSoundMetrics?: typeof metrics;
+        }
+      ).__sessionSoundMetrics = metrics;
+    });
+    const soundMetrics = () =>
+      page.evaluate(
+        () =>
+          (
+            window as typeof window & {
+              __sessionSoundMetrics: {
+                contexts: number;
+                liveContexts: number;
+                maxLiveContexts: number;
+                resumes: number;
+                oscillators: number;
+                closes: number;
+                failNextResume: boolean;
+                holdClose: boolean;
+                releaseClose?: () => void;
+              };
+            }
+          ).__sessionSoundMetrics,
+      );
+    const gesture = () =>
+      page.evaluate(() => {
+        document.dispatchEvent(
+          new PointerEvent("pointerdown", { bubbles: true }),
+        );
+        document.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true }));
+      });
+
+    await gesture();
+    await expect.poll(soundMetrics).toMatchObject({ contexts: 0, resumes: 0 });
+
+    await page.getByRole("button", { name: "Appearance: System" }).click();
+    await page
+      .getByRole("button", { name: "Needs attention", exact: true })
+      .click();
+    await expect
+      .poll(() => persistedSessionSounds(userDataDir))
+      .toEqual({
+        needsAttention: true,
+        completed: false,
+      });
+
+    await gesture();
+    await expect.poll(soundMetrics).toMatchObject({ contexts: 1, resumes: 1 });
+    await page.getByRole("button", { name: "Appearance: System" }).click();
+    await page
+      .getByRole("button", { name: "Test needs attention sound" })
+      .click();
+    await expect.poll(soundMetrics).toMatchObject({ oscillators: 2 });
+
+    await page.evaluate(() => {
+      (
+        window as typeof window & {
+          __sessionSoundMetrics: {
+            failNextResume: boolean;
+            holdClose: boolean;
+          };
+        }
+      ).__sessionSoundMetrics.failNextResume = true;
+      (
+        window as typeof window & {
+          __sessionSoundMetrics: {
+            failNextResume: boolean;
+            holdClose: boolean;
+          };
+        }
+      ).__sessionSoundMetrics.holdClose = true;
+    });
+    await gesture();
+    await expect.poll(soundMetrics).toMatchObject({ contexts: 1, closes: 1 });
+    await gesture();
+    await expect
+      .poll(soundMetrics)
+      .toMatchObject({ contexts: 1, maxLiveContexts: 1 });
+    await page.evaluate(() => {
+      (
+        window as typeof window & {
+          __sessionSoundMetrics: {
+            releaseClose?: () => void;
+            holdClose: boolean;
+          };
+        }
+      ).__sessionSoundMetrics.releaseClose?.();
+      (
+        window as typeof window & {
+          __sessionSoundMetrics: {
+            releaseClose?: () => void;
+            holdClose: boolean;
+          };
+        }
+      ).__sessionSoundMetrics.holdClose = false;
+    });
+    await expect.poll(soundMetrics).toMatchObject({ liveContexts: 0 });
+    await gesture();
+    await expect
+      .poll(soundMetrics)
+      .toMatchObject({ contexts: 2, maxLiveContexts: 1 });
+
+    await enterSessionDetail(page);
+    await page.getByLabel("Prompt text").fill("sound errors stay supplemental");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Fake response to: sound errors stay supplemental", {
+        exact: true,
+      }),
+    ).toBeVisible();
+
+    await page.getByRole("button", { name: "Appearance: System" }).click();
+    await page
+      .getByRole("button", { name: "Needs attention", exact: true })
+      .click();
+    await expect
+      .poll(() => persistedSessionSounds(userDataDir))
+      .toEqual({
+        needsAttention: false,
+        completed: false,
+      });
+    await expect.poll(soundMetrics).toMatchObject({ closes: 2 });
+    const beforeDisabledGesture = await soundMetrics();
+    await gesture();
+    await expect.poll(soundMetrics).toMatchObject({
+      contexts: beforeDisabledGesture.contexts,
+      resumes: beforeDisabledGesture.resumes,
+    });
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(userDataDir, { recursive: true, force: true });
+  }
+});
+
 test("working sessions expose steer, follow-up, extension, and abort interventions", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-e2e-intervention-"),

@@ -236,14 +236,43 @@ function finiteCompletedTurnKey(value: number | undefined): string | undefined {
 export interface SessionSoundPlayer {
   unlock(): void;
   play(cue: SessionSoundCue): void;
+  deactivate(): void;
+}
+
+export type SessionSoundDiagnosticEvent =
+  | { type: "context-created" }
+  | { type: "context-create-failed" }
+  | { type: "resume-requested" }
+  | { type: "resume-succeeded" }
+  | { type: "resume-failed" }
+  | { type: "cue-scheduled"; cue: SessionSoundCue }
+  | { type: "cue-failed"; cue: SessionSoundCue }
+  | {
+      type: "context-invalidated";
+      reason: "deactivated" | "resume-failed" | "cue-failed";
+    }
+  | { type: "context-retired" }
+  | { type: "context-retirement-failed" }
+  | { type: "context-suspended" }
+  | { type: "context-suspend-failed" };
+
+export interface SessionSoundPlayerOptions {
+  /**
+   * Optional, non-logging lifecycle telemetry for diagnostics and tests. A
+   * listener failure is ignored so sound diagnostics remain supplemental.
+   */
+  onDiagnostic?(event: SessionSoundDiagnosticEvent): void;
 }
 
 interface AudioContextLike {
   readonly currentTime: number;
   readonly destination: AudioNode;
+  readonly state?: AudioContextState;
   createGain(): GainNode;
   createOscillator(): OscillatorNode;
   resume?(): Promise<void>;
+  close?(): Promise<void>;
+  suspend?(): Promise<void>;
 }
 
 type AudioContextConstructor = new () => AudioContextLike;
@@ -252,15 +281,41 @@ type WindowWithAudioContext = Window & {
   webkitAudioContext?: AudioContextConstructor;
 };
 
-export function createDefaultSessionSoundPlayer(): SessionSoundPlayer {
+export function hasEnabledSessionSound(
+  settings: Partial<SessionSoundSettings> | undefined,
+): boolean {
+  const normalized = normalizeSessionSoundSettings(settings);
+  return normalized.needsAttention || normalized.completed;
+}
+
+/**
+ * Keeps at most one live Web Audio context. Failed resume/scheduling retires
+ * that context; a later cue can construct a replacement once retirement has
+ * settled. Sound failures are deliberately contained in this player.
+ */
+export function createDefaultSessionSoundPlayer(
+  options: SessionSoundPlayerOptions = {},
+): SessionSoundPlayer {
   let audioContext: AudioContextLike | undefined;
-  let resumePromise: Promise<boolean> | undefined;
+  let retiringContext: AudioContextLike | undefined;
+  let resumePromise:
+    | { context: AudioContextLike; promise: Promise<boolean> }
+    | undefined;
+
+  function diagnose(event: SessionSoundDiagnosticEvent): void {
+    try {
+      options.onDiagnostic?.(event);
+    } catch {
+      // Diagnostics must never change player or Work behavior.
+    }
+  }
 
   function getAudioContext(): AudioContextLike | undefined {
     if (audioContext !== undefined) {
       return audioContext;
     }
-    if (typeof window === "undefined") {
+    // Do not pile up contexts while a bad one is closing.
+    if (retiringContext !== undefined || typeof window === "undefined") {
       return undefined;
     }
     const contextWindow = window as WindowWithAudioContext;
@@ -273,27 +328,85 @@ export function createDefaultSessionSoundPlayer(): SessionSoundPlayer {
     }
     try {
       audioContext = new AudioContextCtor();
+      diagnose({ type: "context-created" });
       return audioContext;
     } catch {
+      diagnose({ type: "context-create-failed" });
       return undefined;
     }
   }
 
-  function resume(context: AudioContextLike): Promise<boolean> {
-    if (resumePromise !== undefined) {
-      return resumePromise;
+  function retire(
+    context: AudioContextLike,
+    reason: "deactivated" | "resume-failed" | "cue-failed",
+  ): void {
+    if (audioContext !== context) {
+      return;
     }
-    resumePromise = (async () => {
+    if (context.close === undefined) {
+      // Do not replace a context that cannot close: a suspended context is
+      // reusable, while replacing it could accumulate live device resources.
+      if (context.suspend !== undefined) {
+        void Promise.resolve()
+          .then(() => context.suspend?.())
+          .then(() => diagnose({ type: "context-suspended" }))
+          .catch(() => diagnose({ type: "context-suspend-failed" }));
+      }
+      return;
+    }
+
+    audioContext = undefined;
+    retiringContext = context;
+    diagnose({ type: "context-invalidated", reason });
+    void Promise.resolve()
+      .then(() => context.close?.())
+      .then(() => {
+        if (retiringContext === context) {
+          retiringContext = undefined;
+          diagnose({ type: "context-retired" });
+        }
+      })
+      .catch(() => {
+        // A failed close leaves this context quarantined so it cannot be
+        // replaced by an unbounded series of potentially live contexts.
+        diagnose({ type: "context-retirement-failed" });
+      });
+  }
+
+  function resume(context: AudioContextLike): Promise<boolean> {
+    if (resumePromise?.context === context) {
+      return resumePromise.promise;
+    }
+    diagnose({ type: "resume-requested" });
+    let pending:
+      | { context: AudioContextLike; promise: Promise<boolean> }
+      | undefined;
+    const promise = (async () => {
       try {
         await context.resume?.();
+        if (context.state === "closed") {
+          diagnose({ type: "resume-failed" });
+          retire(context, "resume-failed");
+          return false;
+        }
+        if (audioContext !== context) {
+          return false;
+        }
+        diagnose({ type: "resume-succeeded" });
         return true;
       } catch {
+        diagnose({ type: "resume-failed" });
+        retire(context, "resume-failed");
         return false;
       } finally {
-        resumePromise = undefined;
+        if (resumePromise === pending) {
+          resumePromise = undefined;
+        }
       }
     })();
-    return resumePromise;
+    pending = { context, promise };
+    resumePromise = pending;
+    return promise;
   }
 
   return {
@@ -309,15 +422,22 @@ export function createDefaultSessionSoundPlayer(): SessionSoundPlayer {
         return;
       }
       void resume(context).then((resumed) => {
-        if (!resumed) {
+        if (!resumed || audioContext !== context) {
           return;
         }
         try {
           playCue(context, cue);
+          diagnose({ type: "cue-scheduled", cue });
         } catch {
-          // Sound is supplemental; playback failures must never affect Work state.
+          diagnose({ type: "cue-failed", cue });
+          retire(context, "cue-failed");
         }
       });
+    },
+    deactivate() {
+      if (audioContext !== undefined) {
+        retire(audioContext, "deactivated");
+      }
     },
   };
 }

@@ -136,6 +136,7 @@ import {
 import {
   collectSessionSoundRequests,
   createDefaultSessionSoundPlayer,
+  hasEnabledSessionSound,
   normalizeSessionSoundSettings,
   type SessionSoundCue,
   type SessionSoundMemoryByKey,
@@ -2193,6 +2194,15 @@ export function App(): ReactElement {
   }, [activitySources, loadState.state, sessionSoundSettings]);
 
   useEffect(() => {
+    if (
+      sessionSoundSettings === undefined ||
+      !hasEnabledSessionSound(sessionSoundSettings)
+    ) {
+      // Do not touch Web Audio when every cue is disabled, including while
+      // settings are loading. Retiring an existing context stops device use.
+      sessionSoundPlayerRef.current?.deactivate();
+      return;
+    }
     const unlock = () => getSessionSoundPlayer().unlock();
     document.addEventListener("pointerdown", unlock, { capture: true });
     document.addEventListener("keydown", unlock, { capture: true });
@@ -2200,7 +2210,9 @@ export function App(): ReactElement {
       document.removeEventListener("pointerdown", unlock, { capture: true });
       document.removeEventListener("keydown", unlock, { capture: true });
     };
-  }, []);
+  }, [sessionSoundSettings]);
+
+  useEffect(() => () => sessionSoundPlayerRef.current?.deactivate(), []);
 
   const scopedWorkspaceUsage =
     activityScope.type === "workspace"
@@ -10749,7 +10761,7 @@ function SessionSoundMenuItem(props: {
       </Button>
       <Button
         aria-label={`Test ${props.label.toLowerCase()} sound`}
-        disabled={props.disabled}
+        disabled={props.disabled || !props.checked}
         size="sm"
         variant="subtle"
         onClick={() => props.onTest(props.cue)}

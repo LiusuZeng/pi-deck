@@ -126,6 +126,318 @@ describe("session sound playback", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it("retires a failed context and recovers a later cue with lifecycle diagnostics", async () => {
+    const events: string[] = [];
+    const createOscillator = vi.fn(
+      () =>
+        ({
+          type: "sine",
+          frequency: { setValueAtTime: vi.fn() },
+          connect: vi.fn(),
+          start: vi.fn(),
+          stop: vi.fn(),
+        }) as unknown as OscillatorNode,
+    );
+    const createGain = vi.fn(
+      () =>
+        ({
+          gain: {
+            setValueAtTime: vi.fn(),
+            exponentialRampToValueAtTime: vi.fn(),
+          },
+          connect: vi.fn(),
+        }) as unknown as GainNode,
+    );
+    const firstClose = vi.fn().mockResolvedValue(undefined);
+    const contexts = [
+      {
+        currentTime: 0,
+        destination: {} as AudioNode,
+        resume: vi
+          .fn()
+          .mockRejectedValue(new Error("audio device unavailable")),
+        close: firstClose,
+        createGain,
+        createOscillator,
+      },
+      {
+        currentTime: 0,
+        destination: {} as AudioNode,
+        resume: vi.fn().mockResolvedValue(undefined),
+        close: vi.fn().mockResolvedValue(undefined),
+        createGain,
+        createOscillator,
+      },
+    ];
+    const AudioContext = vi.fn(function () {
+      return contexts.shift();
+    });
+    vi.stubGlobal("window", { AudioContext });
+
+    try {
+      const player = createDefaultSessionSoundPlayer({
+        onDiagnostic: (event) => events.push(event.type),
+      });
+      player.play("completed");
+      await vi.waitFor(() => expect(firstClose).toHaveBeenCalledOnce());
+      expect(createOscillator).not.toHaveBeenCalled();
+
+      player.play("needsAttention");
+      await vi.waitFor(() => expect(createOscillator).toHaveBeenCalledTimes(2));
+      expect(AudioContext).toHaveBeenCalledTimes(2);
+      expect(events).toEqual(
+        expect.arrayContaining([
+          "context-created",
+          "resume-requested",
+          "resume-failed",
+          "context-invalidated",
+          "context-retired",
+          "resume-succeeded",
+          "cue-scheduled",
+        ]),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("never constructs another context while a failed context is retiring", async () => {
+    let finishClose: (() => void) | undefined;
+    const close = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishClose = resolve;
+        }),
+    );
+    const createOscillator = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        throw new Error("schedule failed");
+      })
+      .mockImplementation(
+        () =>
+          ({
+            type: "sine",
+            frequency: { setValueAtTime: vi.fn() },
+            connect: vi.fn(),
+            start: vi.fn(),
+            stop: vi.fn(),
+          }) as unknown as OscillatorNode,
+      );
+    const createGain = vi.fn(
+      () =>
+        ({
+          gain: {
+            setValueAtTime: vi.fn(),
+            exponentialRampToValueAtTime: vi.fn(),
+          },
+          connect: vi.fn(),
+        }) as unknown as GainNode,
+    );
+    const contexts = [
+      {
+        currentTime: 0,
+        destination: {} as AudioNode,
+        resume: vi.fn().mockResolvedValue(undefined),
+        close,
+        createGain,
+        createOscillator,
+      },
+      {
+        currentTime: 0,
+        destination: {} as AudioNode,
+        resume: vi.fn().mockResolvedValue(undefined),
+        close: vi.fn().mockResolvedValue(undefined),
+        createGain,
+        createOscillator,
+      },
+    ];
+    const AudioContext = vi.fn(function () {
+      return contexts.shift();
+    });
+    vi.stubGlobal("window", { AudioContext });
+
+    try {
+      const events: string[] = [];
+      const player = createDefaultSessionSoundPlayer({
+        onDiagnostic: (event) => events.push(event.type),
+      });
+      player.play("needsAttention");
+      await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+      player.play("completed");
+      expect(AudioContext).toHaveBeenCalledOnce();
+
+      finishClose?.();
+      await vi.waitFor(() => expect(events).toContain("context-retired"));
+      player.play("needsAttention");
+      await vi.waitFor(() => expect(AudioContext).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(createOscillator).toHaveBeenCalledTimes(3));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("quarantines a context whose close fails instead of accumulating contexts", async () => {
+    const close = vi.fn().mockRejectedValue(new Error("close failed"));
+    const AudioContext = vi.fn(function () {
+      return {
+        currentTime: 0,
+        destination: {} as AudioNode,
+        resume: vi.fn().mockRejectedValue(new Error("resume failed")),
+        close,
+        createGain: vi.fn(),
+        createOscillator: vi.fn(),
+      } as unknown as AudioContext;
+    });
+    vi.stubGlobal("window", { AudioContext });
+
+    try {
+      const events: string[] = [];
+      const player = createDefaultSessionSoundPlayer({
+        onDiagnostic: (event) => events.push(event.type),
+      });
+      player.play("completed");
+      await vi.waitFor(() =>
+        expect(events).toContain("context-retirement-failed"),
+      );
+      player.play("needsAttention");
+      expect(AudioContext).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reuses a suspended fallback context instead of constructing another one", async () => {
+    const suspend = vi.fn().mockResolvedValue(undefined);
+    const createOscillator = vi.fn(
+      () =>
+        ({
+          type: "sine",
+          frequency: { setValueAtTime: vi.fn() },
+          connect: vi.fn(),
+          start: vi.fn(),
+          stop: vi.fn(),
+        }) as unknown as OscillatorNode,
+    );
+    const AudioContext = vi.fn(function () {
+      return {
+        currentTime: 0,
+        destination: {} as AudioNode,
+        resume: vi.fn().mockResolvedValue(undefined),
+        suspend,
+        createGain: vi.fn(
+          () =>
+            ({
+              gain: {
+                setValueAtTime: vi.fn(),
+                exponentialRampToValueAtTime: vi.fn(),
+              },
+              connect: vi.fn(),
+            }) as unknown as GainNode,
+        ),
+        createOscillator,
+      } as unknown as AudioContext;
+    });
+    vi.stubGlobal("window", { AudioContext });
+
+    try {
+      const player = createDefaultSessionSoundPlayer();
+      player.unlock();
+      await vi.waitFor(() => expect(AudioContext).toHaveBeenCalledOnce());
+      player.deactivate();
+      await vi.waitFor(() => expect(suspend).toHaveBeenCalledOnce());
+      player.play("needsAttention");
+      await vi.waitFor(() => expect(createOscillator).toHaveBeenCalledTimes(2));
+      expect(AudioContext).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps a replacement resume pending when an old context settles", async () => {
+    let resolveFirst: (() => void) | undefined;
+    let resolveSecond: (() => void) | undefined;
+    const firstResume = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveFirst = resolve;
+        }),
+    );
+    const secondResume = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSecond = resolve;
+        }),
+    );
+    const firstClose = vi.fn().mockResolvedValue(undefined);
+    const contexts = [
+      {
+        currentTime: 0,
+        destination: {} as AudioNode,
+        resume: firstResume,
+        close: firstClose,
+        createGain: vi.fn(),
+        createOscillator: vi.fn(),
+      },
+      {
+        currentTime: 0,
+        destination: {} as AudioNode,
+        resume: secondResume,
+        close: vi.fn().mockResolvedValue(undefined),
+        createGain: vi.fn(),
+        createOscillator: vi.fn(),
+      },
+    ];
+    const AudioContext = vi.fn(function () {
+      return contexts.shift();
+    });
+    vi.stubGlobal("window", { AudioContext });
+
+    try {
+      const events: string[] = [];
+      const player = createDefaultSessionSoundPlayer({
+        onDiagnostic: (event) => events.push(event.type),
+      });
+      player.unlock();
+      player.deactivate();
+      await vi.waitFor(() => expect(events).toContain("context-retired"));
+      player.unlock();
+      await vi.waitFor(() => expect(secondResume).toHaveBeenCalledOnce());
+      resolveFirst?.();
+      await vi.waitFor(() => expect(resolveFirst).toBeDefined());
+      player.unlock();
+      expect(secondResume).toHaveBeenCalledOnce();
+      resolveSecond?.();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("contains sound failures without changing Work transition requests", async () => {
+    vi.stubGlobal("window", {
+      AudioContext: class {
+        readonly currentTime = 0;
+        readonly destination = {} as AudioNode;
+        readonly resume = vi.fn().mockRejectedValue(new Error("unavailable"));
+        readonly createGain = vi.fn();
+        readonly createOscillator = vi.fn();
+      },
+    });
+
+    try {
+      createDefaultSessionSoundPlayer().play("completed");
+      const result = collect(
+        { "runtime:runtime-1": projection({ status: "inProgress" }) },
+        [source({ completedAtMs: 100 })],
+      );
+      expect(result.requests).toEqual([
+        { key: "runtime:runtime-1", cue: "completed" },
+      ]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe("session sound transitions", () => {
