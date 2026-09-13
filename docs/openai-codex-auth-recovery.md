@@ -8,7 +8,10 @@ ChatGPT subscription login.
 
 Return to Pi Deck and choose **Check again / Resume** for each affected session.
 That closes an unusable runtime and creates a new one against the same canonical
-Pi session file and workspace. It does not replay the failed turn or tool calls.
+Pi session file and workspace. Reopening verifies only that Pi can start, so Pi
+Deck keeps the original authentication diagnostic and recovery actions visible
+until an explicit new model prompt completes successfully. It does not replay
+the failed turn or tool calls.
 
 The real-Pi re-login smoke remains release-only: automated CI and local test
 runs must not modify a developer's ChatGPT/Pi credentials. Deterministic fake

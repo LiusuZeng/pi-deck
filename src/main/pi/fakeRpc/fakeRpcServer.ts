@@ -44,6 +44,8 @@ interface FakeOptions {
   promptErrorOnceFile?: string;
   /** Emits Pi's observed OpenAI Codex expired-token terminal failure. */
   openAiCodexAuthExpired: boolean;
+  /** Shared marker makes fake auth expiry deterministic and recoverable. */
+  openAiCodexAuthExpiredOnceFile?: string;
   dropCompletionEvents: boolean;
   extensionUiMethod: "select" | "confirm" | "input" | "editor";
   extensionUiAutoCompleteTimeoutMs: number;
@@ -137,6 +139,10 @@ function parseOptions(argv: string[]): FakeOptions {
       index += 1;
     } else if (arg === "--openai-codex-auth-expired") {
       options.openAiCodexAuthExpired = true;
+    } else if (arg === "--openai-codex-auth-expired-once-file") {
+      const file = argv[index + 1];
+      if (file) options.openAiCodexAuthExpiredOnceFile = file;
+      index += 1;
     } else if (arg === "--drop-completion-events") {
       options.dropCompletionEvents = true;
     } else if (arg === "--extension-ui-method") {
@@ -847,8 +853,9 @@ class FakeRpcServer {
       this.exerciseDelegationBridge(text);
     }
 
-    if (this.shouldFailPrompt(text) || this.options.openAiCodexAuthExpired) {
-      const errorMessage = this.options.openAiCodexAuthExpired
+    const authExpired = this.shouldEmitOpenAiCodexAuthExpiry();
+    if (this.shouldFailPrompt(text) || authExpired) {
+      const errorMessage = authExpired
         ? "Provided authentication token is expired."
         : "Usage limit reached for fake provider.";
       const timestamp = Date.now();
@@ -974,6 +981,20 @@ class FakeRpcServer {
       return;
     }
     this.completePrompt(assistantId, text, promptScenarioDelayMs);
+  }
+
+  private shouldEmitOpenAiCodexAuthExpiry(): boolean {
+    if (!this.options.openAiCodexAuthExpired) return false;
+    const marker = this.options.openAiCodexAuthExpiredOnceFile;
+    if (!marker) return true;
+    try {
+      fs.mkdirSync(path.dirname(marker), { recursive: true });
+      fs.writeFileSync(marker, "expired\\n", { flag: "wx" });
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw error;
+    }
   }
 
   private shouldFailPrompt(text: string): boolean {

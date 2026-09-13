@@ -382,6 +382,39 @@ describe("reduceSessionRuntimeEvent", () => {
     expect(state.diagnostics).toContain(finalError);
   });
 
+  it("keeps auth recovery pending through an aborted turn until an assistant succeeds", () => {
+    const expiredAssistant = {
+      role: "assistant",
+      provider: "openai-codex",
+      stopReason: "error",
+      errorMessage: "Provided authentication token is expired.",
+    };
+    let state = applyEvents([
+      { type: "agent_start" },
+      {
+        type: "message_update",
+        message: expiredAssistant,
+        assistantMessageEvent: {
+          type: "error",
+          reason: "error",
+          error: expiredAssistant,
+        },
+      },
+      { type: "agent_end", messages: [expiredAssistant], willRetry: false },
+      { type: "agent_start" },
+      { type: "agent_end", status: "aborted", willRetry: false },
+    ]);
+    expect(state.failureKind).toBe("auth-required");
+
+    state = reduceSessionRuntimeEvent(state, { type: "agent_start" });
+    state = reduceSessionRuntimeEvent(state, {
+      type: "agent_end",
+      messages: [{ role: "assistant", content: "Verified response" }],
+      willRetry: false,
+    });
+    expect(state.failureKind).toBeUndefined();
+  });
+
   it("marks final auto-retry failure as an error", () => {
     const state = applyEvents([
       { type: "auto_retry_start", attempt: 2, maxAttempts: 2 },

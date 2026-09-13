@@ -1634,6 +1634,63 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
     });
   });
 
+  it("keeps an auth diagnosis through worker activity until a new assistant turn succeeds", () => {
+    const expiredAssistant = {
+      ...productionAssistantMessage(
+        "error",
+        "Provided authentication token is expired.",
+      ),
+      provider: "openai-codex",
+    };
+    let session = __rendererTestHooks.reduceRuntimeEvent(
+      { ...baseSession(), status: "working", baseState: "working" } as any,
+      {
+        type: "message_update",
+        message: expiredAssistant,
+        assistantMessageEvent: {
+          type: "error",
+          reason: "error",
+          error: expiredAssistant,
+        },
+      } as any,
+    );
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "agent_end",
+      messages: [expiredAssistant],
+      willRetry: false,
+    } as any);
+    expect(session.failureKind).toBe("auth-required");
+    expect(session.lastError).toBe("Provided authentication token is expired.");
+
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "agent_start",
+    } as any);
+    expect(session.failureKind).toBe("auth-required");
+    expect(session.lastError).toBe("Provided authentication token is expired.");
+
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "agent_end",
+      status: "aborted",
+      messages: [productionAssistantMessage("aborted")],
+      willRetry: false,
+    } as any);
+    expect(session.failureKind).toBe("auth-required");
+
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "agent_start",
+    } as any);
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "agent_end",
+      messages: [productionAssistantMessage("stop")],
+      willRetry: false,
+    } as any);
+    expect(session.failureKind).toBeUndefined();
+    expect(session.lastError).toBeUndefined();
+    expect(runtimeErrorDiagnostics(session)).toMatchObject([
+      { content: "Provided authentication token is expired." },
+    ]);
+  });
+
   it("does not turn a production abort terminal event into a provider error", () => {
     const abortedAssistant = productionAssistantMessage(
       "aborted",
@@ -3863,6 +3920,44 @@ describe("renderer message_update reduction", () => {
     expect(session.title).toBe("Named by Pi");
     expect(session.sessionFile).toBe("/canonical/sessions/parent.jsonl");
     expect(session.sessionId).toBe("parent-session-id");
+  });
+
+  it("rehydrates a durable auth error and clears it only after a later assistant completion", () => {
+    const expired = {
+      ...productionAssistantMessage(
+        "error",
+        "Provided authentication token is expired.",
+      ),
+      provider: "openai-codex",
+    };
+    const pending = __rendererTestHooks.sessionFromSnapshot({
+      runtimeId: "runtime-1",
+      backendMode: "real",
+      state: { cwd: "/tmp/project", isAgentActive: false },
+      messages: [expired],
+    } as any);
+    expect(pending).toMatchObject({
+      status: "error",
+      failureKind: "auth-required",
+      lastError: "Provided authentication token is expired.",
+    });
+    expect(pending.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "diagnostic",
+          content: "Provided authentication token is expired.",
+        }),
+      ]),
+    );
+
+    const verified = __rendererTestHooks.sessionFromSnapshot({
+      runtimeId: "runtime-2",
+      backendMode: "real",
+      state: { cwd: "/tmp/project", isAgentActive: false },
+      messages: [expired, { role: "assistant", content: "Now authenticated" }],
+    } as any);
+    expect(verified.failureKind).toBeUndefined();
+    expect(verified.authVerified).toBe(true);
   });
 
   it("reconstructs completed activity when resuming a saved snapshot", () => {

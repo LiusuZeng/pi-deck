@@ -68,4 +68,71 @@ describe("classifyOpenAiCodexAuthFailure", () => {
       }),
     ).toBeUndefined();
   });
+
+  it("does not combine a Codex provider with a sibling structured auth code", () => {
+    expect(
+      classifyOpenAiCodexAuthFailure({
+        type: "agent_end",
+        messages: [
+          { role: "assistant", provider: "openai-codex", content: "normal" },
+          {
+            role: "assistant",
+            provider: "anthropic",
+            error: { code: "invalid_grant" },
+          },
+        ],
+      }),
+    ).toBeUndefined();
+  });
+
+  it("does not combine a Codex provider with another record's OAuth message", () => {
+    expect(
+      classifyOpenAiCodexAuthFailure({
+        type: "message_update",
+        message: { provider: "openai-codex", content: "normal" },
+        assistantMessageEvent: {
+          type: "error",
+          error: {
+            provider: "anthropic",
+            errorMessage: "OAuth refresh token is expired.",
+          },
+        },
+      }),
+    ).toBeUndefined();
+  });
+
+  it("does not let an unrelated rate-limit record suppress a Codex expiry", () => {
+    expect(
+      classifyOpenAiCodexAuthFailure({
+        type: "message_update",
+        message: {
+          provider: "openai-codex",
+          stopReason: "error",
+          errorMessage: "Provided authentication token is expired.",
+        },
+        assistantMessageEvent: {
+          type: "error",
+          error: {
+            provider: "anthropic",
+            errorMessage: "Rate limit exceeded.",
+          },
+        },
+      }),
+    ).toBe("auth-required");
+  });
+
+  it("does not use an old provider-less expiry from terminal history", () => {
+    expect(
+      classifyOpenAiCodexAuthFailure({
+        type: "agent_end",
+        messages: [
+          {
+            role: "assistant",
+            errorMessage: "Provided authentication token is expired.",
+          },
+          { role: "assistant", content: "new terminal message" },
+        ],
+      }),
+    ).toBeUndefined();
+  });
 });

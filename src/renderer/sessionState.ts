@@ -138,8 +138,9 @@ function reduceSessionRuntimeEventUnprioritized(
       return {
         ...state,
         baseState: "working",
+        // Starting a worker cannot verify repaired credentials; only the next
+        // successful terminal assistant completion clears failureKind.
         terminalProviderErrorObserved: false,
-        failureKind: undefined,
         overlays: { ...state.overlays, streaming: false },
       };
     case "message_update":
@@ -175,7 +176,6 @@ function reduceSessionRuntimeEventUnprioritized(
         ...state,
         baseState: "working",
         terminalProviderErrorObserved: false,
-        failureKind: undefined,
         overlays: { ...state.overlays, streaming: false, retrying: true },
       };
     case "auto_retry_end": {
@@ -192,8 +192,11 @@ function reduceSessionRuntimeEventUnprioritized(
         terminalProviderErrorObserved: retryFailed,
         overlays: { ...state.overlays, streaming: false, retrying: false },
         ...(retryFailed
-          ? { failureKind: classifyOpenAiCodexAuthFailure(event) }
-          : { failureKind: undefined }),
+          ? {
+              failureKind:
+                classifyOpenAiCodexAuthFailure(event) ?? state.failureKind,
+            }
+          : {}),
         diagnostics: retryFailed
           ? appendDiagnostic(
               state.diagnostics,
@@ -568,7 +571,6 @@ function reduceAgentEndEvent(
       ...state,
       baseState: "working",
       terminalProviderErrorObserved: false,
-      failureKind: undefined,
       activeTools: [],
       overlays: {
         ...state.overlays,
@@ -584,6 +586,8 @@ function reduceAgentEndEvent(
   const reportedProviderError = hasRuntimeEventError(event);
   const terminalProviderErrorObserved =
     reportedProviderError || state.terminalProviderErrorObserved;
+  const authenticatedCompletion =
+    !terminalProviderErrorObserved && isAuthenticatedModelCompletion(event);
   let diagnostics = state.diagnostics;
   if (reportedProviderError) {
     diagnostics = appendDiagnostic(
@@ -611,7 +615,9 @@ function reduceAgentEndEvent(
           failureKind:
             classifyOpenAiCodexAuthFailure(event) ?? state.failureKind,
         }
-      : { failureKind: undefined }),
+      : authenticatedCompletion
+        ? { failureKind: undefined }
+        : {}),
     activeTools: [],
     overlays: {
       ...state.overlays,
@@ -622,6 +628,21 @@ function reduceAgentEndEvent(
     },
     diagnostics,
   };
+}
+
+function isAuthenticatedModelCompletion(event: RuntimeEventLike): boolean {
+  const status = getString(event, "status");
+  if (status === "aborted" || status === "error" || status === "failed") {
+    return false;
+  }
+  const assistant = getFinalAssistantMessage(event);
+  if (assistant !== undefined) {
+    return (
+      !isErrorAssistantMessage(assistant) &&
+      getString(assistant, "stopReason") !== "aborted"
+    );
+  }
+  return status === "completed" || status === "success";
 }
 
 /** Keeps lightweight reducer error classification aligned with App's Pi events. */
