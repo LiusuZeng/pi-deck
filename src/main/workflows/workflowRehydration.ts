@@ -93,6 +93,30 @@ export async function rehydrateCanonicalWorkflowRuns(
         .slice(0, available)
         .forEach((item) => resumableFanoutQueued.add(item.id));
     }
+    if (hasLegacyStoppedReady) {
+      const recovered = workflowRunEnvelopeSchema.parse({
+        ...persisted,
+        status: "stopped",
+        updatedAtMs: now,
+        occurrences: persisted.occurrences.map((item) => {
+          const { runtimeId: _runtimeId, ...withoutRuntimeId } = item;
+          return item.status === "ready"
+            ? {
+                ...withoutRuntimeId,
+                status: "cancelled" as const,
+                error:
+                  item.error ??
+                  "Cancelled because this workflow run was stopped before restart.",
+                updatedAtMs: now,
+              }
+            : withoutRuntimeId;
+        }),
+      });
+      const run = await dependencies.updateRun(recovered);
+      dependencies.emit(run);
+      continue;
+    }
+
     // A queued occurrence may have been retained because allocation raced an
     // archive claim. Do not promote it to ready until the workspace resolves;
     // an actually archived workspace must keep the durable queue until restore
@@ -116,7 +140,7 @@ export async function rehydrateCanonicalWorkflowRuns(
       }
     }
     const recovered =
-      lostRunning || hasQueued || hasRuntimeId || hasLegacyStoppedReady
+      lostRunning || hasQueued || hasRuntimeId
         ? workflowRunEnvelopeSchema.parse({
             ...persisted,
             status: lostRunning
@@ -139,16 +163,7 @@ export async function rehydrateCanonicalWorkflowRuns(
                       "Pi session was interrupted by restart; retry this occurrence.",
                     updatedAtMs: now,
                   }
-                : item.status === "ready" && persisted.status === "stopped"
-                  ? {
-                      ...withoutRuntimeId,
-                      status: "cancelled" as const,
-                      error:
-                        item.error ??
-                        "Cancelled because this workflow run was stopped before restart.",
-                      updatedAtMs: now,
-                    }
-                  : item.status === "queued" &&
+                : item.status === "queued" &&
                       workspaceResolved &&
                       (!item.parentOrchestratorRunId ||
                         resumableFanoutQueued.has(item.id))

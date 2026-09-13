@@ -848,102 +848,144 @@ describe("workflow rehydration", () => {
     expect(updated[0]?.occurrences[0]).not.toHaveProperty("runtimeId");
   });
 
-  it("repairs a legacy stopped ready retry durably without scheduling it", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-deck-rehydrate-"));
-    tempDirs.push(root);
-    const definition = {
-      format: "pi-deck.agent-workflow" as const,
-      schemaVersion: 2 as const,
-      id: "00000000-0000-4000-8000-000000000110",
-      revision: 1,
-      name: "Stopped legacy retry",
-      inputs: [],
-      entryNodeId: "00000000-0000-4000-8000-000000000111",
-      nodes: [
+  it("repairs a legacy stopped ready retry before workspace gating without scheduling it", async () => {
+    for (const workspaceCase of ["resolved", "archived"] as const) {
+      const root = await fs.mkdtemp(
+        path.join(os.tmpdir(), "pi-deck-rehydrate-"),
+      );
+      tempDirs.push(root);
+      const definition = {
+        format: "pi-deck.agent-workflow" as const,
+        schemaVersion: 2 as const,
+        id: "00000000-0000-4000-8000-000000000110",
+        revision: 1,
+        name: `Stopped legacy retry ${workspaceCase}`,
+        inputs: [],
+        entryNodeId: "00000000-0000-4000-8000-000000000111",
+        nodes: [
+          {
+            id: "00000000-0000-4000-8000-000000000111",
+            name: "Work",
+            role: "worker" as const,
+            config: { instructions: "work" },
+          },
+        ],
+        relationships: [],
+      };
+      const store = new WorkflowStore(root);
+      const initial = createWorkflowRoleRun(
+        definition,
+        `${workspaceCase}-workspace`,
+        {},
+        1,
+      );
+      const original = {
+        ...initial.occurrences[0]!,
+        status: "cancelled" as const,
+        error: "Stopped by user",
+        updatedAtMs: 2,
+      };
+      const dormantReplacement = {
+        ...original,
+        id: "00000000-0000-4000-8000-000000000112",
+        status: "ready" as const,
+        attempt: 2,
+        error: undefined,
+        createdAtMs: 2,
+        updatedAtMs: 2,
+      };
+      const secondDormantReplacement = {
+        ...dormantReplacement,
+        id: "00000000-0000-4000-8000-000000000113",
+        attempt: 3,
+      };
+      const queuedReplacement = {
+        ...dormantReplacement,
+        id: "00000000-0000-4000-8000-000000000114",
+        status: "queued" as const,
+        attempt: 4,
+      };
+      const legacy = await store.createWorkflowRun({
+        ...initial,
+        status: "stopped",
+        occurrences: [
+          original,
+          dormantReplacement,
+          secondDormantReplacement,
+          queuedReplacement,
+        ],
+        updatedAtMs: 2,
+        completedAtMs: 2,
+      });
+      const emitted: string[] = [];
+      const scheduled: string[] = [];
+      const errors: string[] = [];
+      let resolveCalls = 0;
+
+      await rehydrateCanonicalWorkflowRuns(
+        await store.listWorkflowRuns(),
         {
-          id: "00000000-0000-4000-8000-000000000111",
-          name: "Work",
-          role: "worker" as const,
-          config: { instructions: "work" },
+          resolveWorkspace: async () => {
+            resolveCalls += 1;
+            if (workspaceCase === "archived") {
+              throw new Error("Workspace is archived");
+            }
+          },
+          updateRun: (run) => store.updateWorkflowRun(run),
+          schedule: async (run) => {
+            scheduled.push(run.id);
+            return run;
+          },
+          emit: (run) => emitted.push(run.id),
+          recordError: (message) => errors.push(message),
         },
-      ],
-      relationships: [],
-    };
-    const store = new WorkflowStore(root);
-    const initial = createWorkflowRoleRun(definition, "workspace", {}, 1);
-    const original = {
-      ...initial.occurrences[0]!,
-      status: "cancelled" as const,
-      error: "Stopped by user",
-      updatedAtMs: 2,
-    };
-    const dormantReplacement = {
-      ...original,
-      id: "00000000-0000-4000-8000-000000000112",
-      status: "ready" as const,
-      attempt: 2,
-      error: undefined,
-      createdAtMs: 2,
-      updatedAtMs: 2,
-    };
-    const legacy = await store.createWorkflowRun({
-      ...initial,
-      status: "stopped",
-      occurrences: [original, dormantReplacement],
-      updatedAtMs: 2,
-      completedAtMs: 2,
-    });
-    const emitted: string[] = [];
-    const scheduled: string[] = [];
+        3,
+      );
 
-    await rehydrateCanonicalWorkflowRuns(
-      await store.listWorkflowRuns(),
-      {
-        resolveWorkspace: async () => undefined,
-        updateRun: (run) => store.updateWorkflowRun(run),
-        schedule: async (run) => {
-          scheduled.push(run.id);
-          return run;
-        },
-        emit: (run) => emitted.push(run.id),
-        recordError: () => undefined,
-      },
-      3,
-    );
+      const repaired = await store.getWorkflowRun(legacy.id);
+      expect(repaired).toMatchObject({
+        status: "stopped",
+        revision: legacy.revision + 1,
+      });
+      expect(repaired.occurrences).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: original.id, status: "cancelled" }),
+          expect.objectContaining({
+            id: dormantReplacement.id,
+            status: "cancelled",
+          }),
+          expect.objectContaining({
+            id: secondDormantReplacement.id,
+            status: "cancelled",
+          }),
+          expect.objectContaining({
+            id: queuedReplacement.id,
+            status: "queued",
+          }),
+        ]),
+      );
+      expect(resolveCalls).toBe(0);
+      expect(scheduled).toEqual([]);
+      expect(errors).toEqual([]);
+      expect(emitted).toEqual([legacy.id]);
 
-    const repaired = await store.getWorkflowRun(legacy.id);
-    expect(repaired).toMatchObject({
-      status: "stopped",
-      revision: legacy.revision + 1,
-    });
-    expect(repaired.occurrences).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ id: original.id, status: "cancelled" }),
-        expect.objectContaining({
-          id: dormantReplacement.id,
-          status: "cancelled",
-        }),
-      ]),
-    );
-    expect(scheduled).toEqual([]);
-    expect(emitted).toEqual([legacy.id]);
-
-    // The repaired envelope survives a process restart and remains manually
-    // resumable through its cancelled replacement rather than a dormant ready
-    // attempt that a new scheduler could launch automatically.
-    const restarted = new WorkflowStore(root);
-    const afterRestart = await restarted.getWorkflowRun(legacy.id);
-    expect(afterRestart).toEqual(repaired);
-    const resumed = retryWorkflowOccurrence(
-      afterRestart,
-      dormantReplacement.id,
-      4,
-    );
-    expect(resumed).toMatchObject({ status: "waiting" });
-    expect(resumed.occurrences.at(-1)).toMatchObject({
-      status: "ready",
-      attempt: 3,
-    });
+      // The repaired envelope survives a process restart and remains manually
+      // resumable through its cancelled replacement rather than a dormant ready
+      // attempt that a new scheduler could launch automatically.
+      const restarted = new WorkflowStore(root);
+      const afterRestart = await restarted.getWorkflowRun(legacy.id);
+      expect(afterRestart).toEqual(repaired);
+      const resumed = retryWorkflowOccurrence(
+        afterRestart,
+        dormantReplacement.id,
+        4,
+      );
+      expect(resumed).toMatchObject({ status: "waiting" });
+      expect(resumed.occurrences.at(-1)).toMatchObject({
+        status: "ready",
+        attempt: 3,
+      });
+    }
   });
 
   it("recovers a bound attempt from persisted state and retries its immutable handoff", async () => {
