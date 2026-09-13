@@ -23,23 +23,33 @@ describe("chat snapshot metadata", () => {
     ).toMatchObject({ kind: "messages", title: "Named session" });
   });
 
-  it("uses the first nonblank string user message as its title fallback", () => {
+  it("uses only the first user message for its title fallback", () => {
     expect(
       metadata([
-        message({ role: "user", content: " \n " }),
-        message({ role: "user" }),
-        message({ role: "assistant", content: "Answer" }),
         message({ role: "user", content: "  First\n prompt  " }),
         message({ role: "user", content: "Later prompt" }),
       ]),
     ).toMatchObject({ kind: "messages", title: "First prompt" });
+
+    for (const firstUser of [
+      message({ role: "user", content: " \n " }),
+      message({ role: "user" }),
+    ]) {
+      expect(
+        metadata([
+          firstUser,
+          message({ role: "assistant", content: "Answer" }),
+          message({ role: "user", content: "Later prompt" }),
+        ]),
+      ).not.toHaveProperty("title");
+    }
   });
 
-  it("keeps skipped and empty transcripts distinct with exact counts", () => {
+  it("keeps skipped and empty transcripts sparse", () => {
     expect(
       metadata([message({ role: "user", content: "Ignored" })], {}, true),
     ).toEqual({ kind: "skipped" });
-    expect(metadata()).toEqual({ kind: "empty", messageCount: 0 });
+    expect(metadata()).toEqual({ kind: "empty" });
     expect(
       metadata([
         message({ role: "system" }),
@@ -64,27 +74,23 @@ describe("chat snapshot metadata", () => {
     expect(blankTerminalPreview).not.toHaveProperty("preview");
   });
 
-  it("only completes on a valid non-error terminal assistant", () => {
+  it("uses the latest user or assistant as the completion candidate", () => {
     expect(
       metadata([
         message({ role: "user", content: "Prompt" }),
         message({
           role: "assistant",
           content: "Answer",
-          createdAt: 123,
+          createdAt: 8.64e15 + 1,
         }),
       ]),
-    ).toMatchObject({ kind: "messages", completedAtMs: 123 });
+    ).toMatchObject({ kind: "messages", completedAtMs: 8.64e15 + 1 });
 
-    for (const terminalAssistant of [
+    for (const terminalMessage of [
+      message({ role: "user", content: "Follow-up" }),
       message({ role: "assistant", content: "", createdAt: 123 }),
       message({ role: "assistant", content: "Answer", createdAt: NaN }),
       message({ role: "assistant", content: "Answer", createdAt: Infinity }),
-      message({
-        role: "assistant",
-        content: "Answer",
-        createdAt: 8.64e15 + 1,
-      }),
       message({
         role: "assistant",
         content: "Answer",
@@ -92,11 +98,16 @@ describe("chat snapshot metadata", () => {
         status: "error",
       }),
     ]) {
-      expect(metadata([terminalAssistant])).not.toHaveProperty("completedAtMs");
+      expect(
+        metadata([
+          message({ role: "assistant", content: "Answer", createdAt: 123 }),
+          terminalMessage,
+        ]),
+      ).not.toHaveProperty("completedAtMs");
     }
   });
 
-  it("invalidates completion after later user or error messages", () => {
+  it("ignores later tool and non-user errors when finding completion", () => {
     const completedAssistant = message({
       role: "assistant",
       content: "Answer",
@@ -104,13 +115,14 @@ describe("chat snapshot metadata", () => {
     });
 
     for (const laterMessage of [
-      message({ role: "user", content: "Follow-up" }),
       message({ role: "tool", error: { message: "Failed" } }),
-      message({ role: "assistant", errorMessage: "Failed" }),
+      message({ role: "system", status: "error" }),
+      message({ role: "other", errorMessage: "Failed" }),
     ]) {
-      expect(metadata([completedAssistant, laterMessage])).not.toHaveProperty(
-        "completedAtMs",
-      );
+      expect(metadata([completedAssistant, laterMessage])).toMatchObject({
+        kind: "messages",
+        completedAtMs: 123,
+      });
     }
   });
 });

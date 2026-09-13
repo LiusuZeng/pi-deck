@@ -2,7 +2,7 @@ import type { PiMessage, PiState } from "./pi/types.js";
 
 export type ChatSnapshotMetadata =
   | { kind: "skipped"; title?: string }
-  | { kind: "empty"; title?: string; messageCount: 0 }
+  | { kind: "empty"; title?: string }
   | {
       kind: "messages";
       title?: string;
@@ -13,8 +13,8 @@ export type ChatSnapshotMetadata =
 
 /**
  * Derives persistence metadata from a Pi snapshot without performing I/O or
- * making lifecycle decisions. A skipped transcript deliberately remains
- * distinct from an authoritative, empty transcript.
+ * making lifecycle decisions. Skipped and empty transcripts remain distinct
+ * read results, but both keep transcript persistence fields sparse.
  */
 export function deriveChatSnapshotMetadata(input: {
   state: PiState;
@@ -31,9 +31,7 @@ export function deriveChatSnapshotMetadata(input: {
       : { kind: "skipped", title };
   }
   if (input.messages.length === 0) {
-    return title === undefined
-      ? { kind: "empty", messageCount: 0 }
-      : { kind: "empty", title, messageCount: 0 };
+    return title === undefined ? { kind: "empty" } : { kind: "empty", title };
   }
 
   const preview = previewFromMessages(input.messages);
@@ -47,6 +45,28 @@ export function deriveChatSnapshotMetadata(input: {
   };
 }
 
+/** Maps derived metadata to the exact optional fields accepted by both stores. */
+export function chatSnapshotPersistenceFields(metadata: ChatSnapshotMetadata): {
+  title?: string;
+  updatedAtMs?: number;
+  completedAtMs?: number;
+  messageCount?: number;
+  preview?: string;
+} {
+  if (metadata.kind !== "messages") {
+    return metadata.title === undefined ? {} : { title: metadata.title };
+  }
+  return {
+    ...(metadata.title === undefined ? {} : { title: metadata.title }),
+    updatedAtMs: Date.now(),
+    messageCount: metadata.messageCount,
+    ...(metadata.completedAtMs === undefined
+      ? {}
+      : { completedAtMs: metadata.completedAtMs }),
+    ...(metadata.preview === undefined ? {} : { preview: metadata.preview }),
+  };
+}
+
 function titleFromSessionName(state: PiState): string | undefined {
   return typeof state.sessionName === "string"
     ? normalizedText(state.sessionName, 64)
@@ -54,14 +74,10 @@ function titleFromSessionName(state: PiState): string | undefined {
 }
 
 function titleFromMessages(messages: readonly PiMessage[]): string | undefined {
-  for (const message of messages) {
-    if (message.role !== "user" || typeof message.content !== "string") {
-      continue;
-    }
-    const title = normalizedText(message.content, 64);
-    if (title !== undefined) return title;
-  }
-  return undefined;
+  const firstUser = messages.find((message) => message.role === "user");
+  return typeof firstUser?.content === "string"
+    ? normalizedText(firstUser.content, 64)
+    : undefined;
 }
 
 function previewFromMessages(
@@ -79,24 +95,20 @@ function previewFromMessages(
 function completedAtFromMessages(
   messages: readonly PiMessage[],
 ): number | undefined {
-  let completedAtMs: number | undefined;
-  for (const message of messages) {
-    if (message.role === "user" || isFailureMessage(message)) {
-      completedAtMs = undefined;
-      continue;
-    }
-    if (message.role !== "assistant") continue;
+  const latestMessage = [...messages]
+    .reverse()
+    .find((message) => ["user", "assistant"].includes(message.role));
+  if (latestMessage?.role !== "assistant") return undefined;
 
-    completedAtMs = undefined;
-    if (
-      typeof message.content === "string" &&
-      message.content.trim().length > 0 &&
-      isDateTimestamp(message.createdAt)
-    ) {
-      completedAtMs = message.createdAt;
-    }
+  const content =
+    typeof latestMessage.content === "string" ? latestMessage.content : "";
+  if (content.trim().length === 0 || isAssistantFailureMessage(latestMessage)) {
+    return undefined;
   }
-  return completedAtMs;
+  return typeof latestMessage.createdAt === "number" &&
+    Number.isFinite(latestMessage.createdAt)
+    ? latestMessage.createdAt
+    : undefined;
 }
 
 function normalizedText(value: string, maxLength: number): string | undefined {
@@ -104,15 +116,7 @@ function normalizedText(value: string, maxLength: number): string | undefined {
   return normalized.length > 0 ? normalized.slice(0, maxLength) : undefined;
 }
 
-function isDateTimestamp(value: unknown): value is number {
-  return (
-    typeof value === "number" &&
-    Number.isFinite(value) &&
-    Number.isFinite(new Date(value).getTime())
-  );
-}
-
-function isFailureMessage(message: PiMessage): boolean {
+function isAssistantFailureMessage(message: PiMessage): boolean {
   return (
     message.status === "error" ||
     message.stopReason === "error" ||

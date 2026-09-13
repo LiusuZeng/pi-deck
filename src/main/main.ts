@@ -167,7 +167,10 @@ import {
   validatePiSessionFile,
 } from "./pi/sessionRepository.js";
 import type { PiMessage, PiState, PromptInput } from "./pi/types.js";
-import { deriveChatSnapshotMetadata } from "./chatSnapshotMetadata.js";
+import {
+  chatSnapshotPersistenceFields,
+  deriveChatSnapshotMetadata,
+} from "./chatSnapshotMetadata.js";
 import { readChatSnapshotInputs } from "./chatSnapshotRead.js";
 import { captureLoginShellEnv } from "./platform/piEnvironment.js";
 import { openPiCodexLoginTerminal } from "./platform/openPiCodexLogin.js";
@@ -7695,15 +7698,15 @@ async function getChatSnapshotForRuntime(
     chatRuntimeSessionFiles.set(runtimeId, canonicalSessionFile);
     chatSessionFileLocks.set(canonicalSessionFile, runtimeId);
     options.assertLifecycleActive?.();
-    // Model/thinking updates intentionally omit get_messages. Keep their
-    // state-only writes sparse, while treating a fetched empty transcript as
-    // authoritative metadata with an exact zero count.
+    // Model/thinking updates intentionally omit get_messages. Merge their
+    // state-only data only when Pi supplies a real sessionName; never turn an
+    // empty metadata read into a filename title or a zero-message transcript.
     const metadata = deriveChatSnapshotMetadata({
       state,
       messages,
       ...(options.skipMessages ? { skipMessages: true } : {}),
     });
-    const hasTranscript = metadata.kind !== "skipped";
+    const hasTranscript = metadata.kind === "messages";
     if (workspaceId !== undefined) {
       options.assertLifecycleActive?.();
       await workspaceStore?.upsertSessionRefFromSnapshot({
@@ -7713,16 +7716,7 @@ async function getChatSnapshotForRuntime(
           ? { sessionId: state.sessionId }
           : {}),
         ...(typeof state.cwd === "string" ? { cwd: state.cwd } : {}),
-        ...(metadata.title !== undefined ? { title: metadata.title } : {}),
-        ...(hasTranscript
-          ? { updatedAtMs: Date.now(), messageCount: metadata.messageCount }
-          : {}),
-        ...(metadata.kind === "messages" && metadata.completedAtMs !== undefined
-          ? { completedAtMs: metadata.completedAtMs }
-          : {}),
-        ...(metadata.kind === "messages" && metadata.preview !== undefined
-          ? { preview: metadata.preview }
-          : {}),
+        ...chatSnapshotPersistenceFields(metadata),
       });
       options.onSessionPersisted?.(canonicalSessionFile);
       options.assertLifecycleActive?.();
@@ -7740,16 +7734,7 @@ async function getChatSnapshotForRuntime(
           ? { sessionId: state.sessionId }
           : {}),
         ...(typeof state.cwd === "string" ? { cwd: state.cwd } : {}),
-        ...(metadata.title !== undefined ? { title: metadata.title } : {}),
-        ...(hasTranscript
-          ? { updatedAtMs: Date.now(), messageCount: metadata.messageCount }
-          : {}),
-        ...(metadata.kind === "messages" && metadata.completedAtMs !== undefined
-          ? { completedAtMs: metadata.completedAtMs }
-          : {}),
-        ...(metadata.kind === "messages" && metadata.preview !== undefined
-          ? { preview: metadata.preview }
-          : {}),
+        ...chatSnapshotPersistenceFields(metadata),
       });
       options.assertLifecycleActive?.();
     }
