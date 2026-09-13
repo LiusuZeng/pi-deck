@@ -946,7 +946,7 @@ describe("agentWorkflow occurrence runtime", () => {
     expect(run).toMatchObject({ status: "completed", terminalOutcome: "done" });
   });
 
-  it("preserves a cancelled managed child snapshot while the run remains stopped", () => {
+  it("resumes a stopped run with a cancelled managed child retry", () => {
     const context = "stopped managed child context";
     const definition = fanoutDefinition("all");
     const fanNode = definition.nodes.find((item) => item.id === ids.fan);
@@ -975,8 +975,9 @@ describe("agentWorkflow occurrence runtime", () => {
     expect(renderWorkflowOccurrencePrompt(run, retry)).toContain(
       `Context:\n${context}`,
     );
-    expect(run).toMatchObject({ status: "stopped", completedAtMs: 4 });
-    expect(readyWorkflowOccurrences(run)).toEqual([]);
+    expect(run).toMatchObject({ status: "running" });
+    expect(run.completedAtMs).toBeUndefined();
+    expect(readyWorkflowOccurrences(run)).toEqual([retry]);
     expect(retry.runtimeId).toBeUndefined();
     expect(retry.sessionId).toBeUndefined();
     expect(retry.sessionFile).toBeUndefined();

@@ -234,9 +234,17 @@ export class WorkflowStore {
     const index = this.state.runs.findIndex((item) => item.id === parsed.id);
     if (index < 0)
       throw new Error(`Unknown canonical workflow run: ${parsed.id}`);
-    // This is the single persistence boundary for scheduler transitions.  Assign
-    // the sequence here so state is durable before the scheduler publishes it.
-    const saved = { ...parsed, revision: this.state.runs[index]!.revision + 1 };
+    // This is the single persistence boundary for scheduler transitions. The
+    // caller's revision is a durable compare-and-swap precondition: a stale
+    // retry must never overwrite a Stop that committed while it was queued.
+    const current = this.state.runs[index]!;
+    if (parsed.revision !== current.revision) {
+      throw new Error(
+        `Workflow run revision conflict: expected ${parsed.revision}, found ${current.revision}.`,
+      );
+    }
+    // Assign the next sequence before the scheduler publishes the mutation.
+    const saved = { ...parsed, revision: current.revision + 1 };
     const runs = [...this.state.runs];
     runs[index] = saved;
     await this.commit({ ...this.state, runs });

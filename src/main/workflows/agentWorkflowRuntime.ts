@@ -279,6 +279,16 @@ export function retryWorkflowOccurrence(
   let next = add(
     {
       ...run,
+      // A retry explicitly resumes a manually stopped envelope. This must be
+      // part of the same durable transition as creating the replacement, so a
+      // stopped run can never retain a dormant ready occurrence.
+      ...(run.status === "stopped"
+        ? {
+            status: "waiting" as const,
+            terminalOutcome: undefined,
+            completedAtMs: undefined,
+          }
+        : {}),
       // A retry supersedes the failed attempt; historical output/error remains
       // preserved but no longer participates in terminal derivation.
       occurrences: run.occurrences.map((item) =>

@@ -775,6 +775,161 @@ describe("WorkflowScheduler", () => {
   });
 });
 
+describe("WorkflowOccurrenceScheduler retry after Stop", () => {
+  it("resumes a stopped retry, launches its replacement, and completes it", async () => {
+    let persisted = createWorkflowRoleRun(
+      lifecycleDefinition,
+      "workspace",
+      {},
+      1,
+    );
+    let created = 0;
+    const closed: string[] = [];
+    const scheduler = new WorkflowOccurrenceScheduler({
+      createSession: async () => {
+        const runtimeId = `runtime-${++created}`;
+        return {
+          runtimeId,
+          state: {
+            sessionId: `session-${created}`,
+            sessionFile: `/tmp/${runtimeId}.jsonl`,
+          },
+          messages: [],
+        };
+      },
+      prompt: async () => undefined,
+      getSnapshot: async (runtimeId) => ({
+        runtimeId,
+        state: {},
+        messages: [{ role: "assistant", content: "replacement complete" }],
+      }),
+      closeSession: async (runtimeId) => {
+        closed.push(runtimeId);
+      },
+      getRun: async () => structuredClone(persisted),
+      persist: async (run) => {
+        expect(run.revision).toBe(persisted.revision);
+        persisted = { ...run, revision: persisted.revision + 1 };
+        return persisted;
+      },
+      emit: () => undefined,
+      now: () => 10,
+    });
+
+    const running = await scheduler.schedule(persisted);
+    const original = running.occurrences[0]!;
+    const stopped = await scheduler.stop(running.id);
+    expect(stopped).toMatchObject({ status: "stopped" });
+    expect(stopped.occurrences).not.toContainEqual(
+      expect.objectContaining({ status: "ready" }),
+    );
+
+    const resumed = await scheduler.retry(
+      running.id,
+      original.id,
+      stopped.revision,
+    );
+    const replacement = resumed.occurrences.find((item) => item.attempt === 2)!;
+    expect(resumed).toMatchObject({ status: "running" });
+    expect(replacement).toMatchObject({
+      status: "running",
+      runtimeId: "runtime-2",
+    });
+    expect(closed).toEqual(["runtime-1"]);
+
+    await scheduler.handleRuntimeEvent({
+      type: "agent_end",
+      runtimeId: "runtime-2",
+      status: "completed",
+    });
+    expect(persisted).toMatchObject({ status: "completed" });
+    expect(persisted.occurrences).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: original.id, status: "skipped" }),
+        expect.objectContaining({
+          id: replacement.id,
+          status: "completed",
+          output: "replacement complete",
+        }),
+      ]),
+    );
+  });
+
+  it("rejects a retry queued behind Stop's durable revision", async () => {
+    let persisted = createWorkflowRoleRun(
+      lifecycleDefinition,
+      "workspace",
+      {},
+      1,
+    );
+    let created = 0;
+    let releaseClose!: () => void;
+    const closeGate = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    let closing!: () => void;
+    const closingStarted = new Promise<void>((resolve) => {
+      closing = resolve;
+    });
+    const scheduler = new WorkflowOccurrenceScheduler({
+      createSession: async () => {
+        const runtimeId = `runtime-${++created}`;
+        return {
+          runtimeId,
+          state: {
+            sessionId: runtimeId,
+            sessionFile: `/tmp/${runtimeId}.jsonl`,
+          },
+          messages: [],
+        };
+      },
+      prompt: async () => undefined,
+      getSnapshot: async () => ({
+        runtimeId: "unused",
+        state: {},
+        messages: [],
+      }),
+      closeSession: async () => {
+        closing();
+        await closeGate;
+      },
+      getRun: async () => structuredClone(persisted),
+      persist: async (run) => {
+        expect(run.revision).toBe(persisted.revision);
+        persisted = { ...run, revision: persisted.revision + 1 };
+        return persisted;
+      },
+      emit: () => undefined,
+      now: () => 10,
+    });
+
+    const running = await scheduler.schedule(persisted);
+    const original = running.occurrences[0]!;
+    const stop = scheduler.stop(running.id);
+    await closingStarted;
+    // This request observed the pre-stop revision but cannot enter the
+    // serialized transition until Stop has committed.
+    const staleRetry = scheduler.retry(
+      running.id,
+      original.id,
+      running.revision,
+    );
+    releaseClose();
+    await stop;
+    await expect(staleRetry).rejects.toThrow(
+      "Workflow run changed before retry",
+    );
+
+    expect(persisted).toMatchObject({ status: "stopped" });
+    expect(persisted.occurrences).toEqual([
+      expect.objectContaining({ id: original.id, status: "cancelled" }),
+    ]);
+    expect(persisted.occurrences).not.toContainEqual(
+      expect.objectContaining({ status: "ready" }),
+    );
+  });
+});
+
 describe("WorkflowOccurrenceScheduler lifecycle conflicts", () => {
   it("persists snapshot failures, closes internally, and releases workflow ownership", async () => {
     let releases = 0;

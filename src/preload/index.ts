@@ -90,6 +90,7 @@ import {
   canonicalWorkflowHumanAnswerRequestSchema,
   canonicalWorkflowListRunsRequestSchema,
   canonicalWorkflowOccurrenceRequestSchema,
+  canonicalWorkflowRetryOccurrenceRequestSchema,
   canonicalWorkflowStartRunRequestSchema,
   workflowGraphEventSchema,
   workflowGraphSnapshotRequestSchema,
@@ -582,10 +583,11 @@ const api: PiDeckApi = Object.freeze({
     canonicalRetryOccurrence: (request: {
       runId: string;
       occurrenceId: string;
+      expectedRevision: number;
     }) =>
       invokeValidated({
         channel: ipcChannels.canonicalWorkflowRetryOccurrence,
-        request: canonicalWorkflowOccurrenceRequestSchema.parse(request),
+        request: canonicalWorkflowRetryOccurrenceRequestSchema.parse(request),
         responseSchema: workflowRunEnvelopeSchema,
       }),
     canonicalAnswerHuman: (request: {

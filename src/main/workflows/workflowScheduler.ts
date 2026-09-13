@@ -1015,10 +1015,24 @@ export class WorkflowOccurrenceScheduler {
       return stopped;
     });
   }
-  async retry(runId: string, occurrenceId: string): Promise<WorkflowRoleRun> {
+  /**
+   * Resume a stopped run only when the caller observed its current durable
+   * revision. The check sits inside per-run serialization, after Stop has
+   * committed, so stale/concurrent retries cannot resurrect cancelled work.
+   */
+  async retry(
+    runId: string,
+    occurrenceId: string,
+    expectedRevision: number,
+  ): Promise<WorkflowRoleRun> {
     return this.serialize(runId, async () => {
       const run = await this.current(runId);
       if (!run) throw new Error(`Unknown workflow run: ${runId}`);
+      if (run.revision !== expectedRevision) {
+        throw new Error(
+          `Workflow run changed before retry: expected revision ${expectedRevision}, found ${run.revision}.`,
+        );
+      }
       const next = await this.save(
         retryWorkflowOccurrence(run, occurrenceId, this.now()),
       );

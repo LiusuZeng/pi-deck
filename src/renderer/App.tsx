@@ -6139,14 +6139,47 @@ export function App(): ReactElement {
                     );
                   }}
                   onRetry={async (occurrenceId) => {
-                    const run =
-                      await window.piDeck.workflows.canonicalRetryOccurrence({
-                        runId: selectedWorkflowOccurrenceRun.id,
-                        occurrenceId,
-                      });
-                    setWorkflowOccurrenceRuns((current) =>
-                      current.map((item) => (item.id === run.id ? run : item)),
-                    );
+                    try {
+                      const run =
+                        await window.piDeck.workflows.canonicalRetryOccurrence({
+                          runId: selectedWorkflowOccurrenceRun.id,
+                          occurrenceId,
+                          expectedRevision:
+                            selectedWorkflowOccurrenceRun.revision,
+                        });
+                      setWorkflowOccurrenceRuns((current) =>
+                        current.map((item) =>
+                          item.id === run.id ? run : item,
+                        ),
+                      );
+                    } catch (error) {
+                      const message =
+                        error instanceof Error ? error.message : String(error);
+                      const stale =
+                        message.includes("Workflow run changed before retry") ||
+                        message.includes("Workflow run revision conflict");
+                      try {
+                        const refreshed =
+                          await window.piDeck.workflows.canonicalGetRun({
+                            runId: selectedWorkflowOccurrenceRun.id,
+                          });
+                        setWorkflowOccurrenceRuns((current) =>
+                          current.map((item) =>
+                            item.id === refreshed.id ? refreshed : item,
+                          ),
+                        );
+                      } catch (refreshError) {
+                        setWorkflowError(
+                          `Retry failed: ${message}. Could not refresh the latest run: ${refreshError instanceof Error ? refreshError.message : String(refreshError)}`,
+                        );
+                        return;
+                      }
+                      setWorkflowError(
+                        stale
+                          ? "Run changed before retry. Review its latest status and retry again."
+                          : `Retry failed: ${message}`,
+                      );
+                    }
                   }}
                   onAnswer={async (occurrenceId, value) => {
                     const run =

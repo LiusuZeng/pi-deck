@@ -219,6 +219,14 @@ export const canonicalWorkflowOccurrenceRequestSchema = z
     occurrenceId: z.string().uuid(),
   })
   .strict();
+/**
+ * Retry is conditional on the rendered run revision. This prevents a retry
+ * requested before/concurrently with Stop from reviving the stopped envelope.
+ */
+export const canonicalWorkflowRetryOccurrenceRequestSchema =
+  canonicalWorkflowOccurrenceRequestSchema
+    .extend({ expectedRevision: z.number().int().positive() })
+    .strict();
 export const canonicalWorkflowHumanAnswerRequestSchema =
   canonicalWorkflowOccurrenceRequestSchema
     .extend({ value: z.union([z.string().max(32_000), z.boolean()]) })

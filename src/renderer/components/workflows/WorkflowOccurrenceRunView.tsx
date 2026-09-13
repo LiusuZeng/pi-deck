@@ -79,6 +79,7 @@ function executionPath(run: WorkflowRunEnvelope) {
 function NodeDetails(props: {
   node: WorkflowNode;
   occurrences: CanonicalNodeOccurrence[];
+  busy: string | undefined;
   onRetry(occurrenceId: string): Promise<void> | void;
   onOpenSession: ((occurrence: CanonicalNodeOccurrence) => void) | undefined;
 }): ReactElement {
@@ -146,6 +147,7 @@ function NodeDetails(props: {
                     <button
                       type="button"
                       className="workflow-secondary-button"
+                      disabled={props.busy === occurrence.id}
                       onClick={() => void props.onRetry(occurrence.id)}
                     >
                       Retry attempt {occurrence.attempt}
@@ -283,6 +285,14 @@ export function WorkflowOccurrenceRunView(
       setBusy(undefined);
     }
   };
+  const retry = async (occurrenceId: string) => {
+    setBusy(occurrenceId);
+    try {
+      await props.onRetry(occurrenceId);
+    } finally {
+      setBusy(undefined);
+    }
+  };
 
   return (
     <section className="workflow-run-view" aria-label="Workflow run">
@@ -379,7 +389,8 @@ export function WorkflowOccurrenceRunView(
                 <NodeDetails
                   node={node}
                   occurrences={occurrences}
-                  onRetry={props.onRetry}
+                  busy={busy}
+                  onRetry={retry}
                   onOpenSession={props.onOpenSession}
                 />
               ) : null;

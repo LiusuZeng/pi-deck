@@ -676,6 +676,76 @@ function sessionUserMessages(sessionFile: string | undefined): string[] {
     .map((record) => String(record.message?.content ?? ""));
 }
 
+test("Stop then Retry resumes a cancelled worker and completes its replacement", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-stop-retry-resume-"),
+  );
+  let app: ElectronApplication | undefined;
+  try {
+    ({ app } = await launch(
+      graphEnvironment(root, undefined, ["--stream-delay-ms", "3000"]),
+    ));
+    const page = await app.firstWindow();
+    await createGraphWorkflow(page, "worker");
+    const runId = await openAndStartOnlyWorkflow(page);
+    await expect
+      .poll(
+        () =>
+          page.evaluate(
+            async (id) =>
+              (await window.piDeck.workflows.canonicalGetRun({ runId: id }))
+                .occurrences[0]?.status,
+            runId,
+          ),
+        { timeout: 20_000 },
+      )
+      .toBe("running");
+
+    await page.getByRole("button", { name: "Stop run" }).click();
+    await expect(page.getByText("Status: Stopped")).toBeVisible();
+    await page
+      .locator(`[data-workflow-node-id="${graphWorkflowIds.worker}"]`)
+      .click();
+    const history = page.locator(`#workflow-node-${graphWorkflowIds.worker}`);
+    await history.getByRole("button", { name: "Retry attempt 1" }).click();
+    await expect(
+      history.getByText("Iteration 1 · Attempt 2", { exact: true }),
+    ).toBeVisible();
+    await expect(page.getByText("Status: Running")).toBeVisible();
+
+    await expect
+      .poll(
+        () =>
+          page.evaluate(async (id) => {
+            const run = await window.piDeck.workflows.canonicalGetRun({
+              runId: id,
+            });
+            return {
+              status: run.status,
+              attempts: run.occurrences.map((item) => ({
+                attempt: item.attempt,
+                status: item.status,
+              })),
+            };
+          }, runId),
+        { timeout: 20_000 },
+      )
+      .toEqual({
+        status: "completed",
+        attempts: [
+          { attempt: 1, status: "skipped" },
+          { attempt: 2, status: "completed" },
+        ],
+      });
+    await expect(
+      page.locator(".workflow-page-heading").getByText("Status: Completed"),
+    ).toBeVisible();
+  } finally {
+    await app?.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("failed fake worker exposes retry and preserves its graph identity across attempts", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-e2e-retry-graph-"),
@@ -923,7 +993,7 @@ test("a successful managed fan-out retry completes its orchestrator and run", as
   }
 });
 
-test("retrying a cancelled managed child preserves its context snapshot while stopped", async () => {
+test("retrying a cancelled managed child resumes it with its context snapshot", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-e2e-stopped-managed-retry-"),
   );
@@ -1061,7 +1131,7 @@ test("retrying a cancelled managed child preserves its context snapshot while st
           ),
         { timeout: 20_000 },
       )
-      .toBe("ready");
+      .toBe("running");
 
     const retried = await page.evaluate(
       async ({ runId, ids }) => {
@@ -1076,7 +1146,7 @@ test("retrying a cancelled managed child preserves its context snapshot while st
       },
       { runId, ids },
     );
-    expect(retried.status).toBe("stopped");
+    expect(retried.status).toBe("running");
     expect(retried.attempts).toEqual([
       expect.objectContaining({
         attempt: 1,
@@ -1087,15 +1157,15 @@ test("retrying a cancelled managed child preserves its context snapshot while st
       }),
       expect.objectContaining({
         attempt: 2,
-        status: "ready",
+        status: "running",
         context: [orchestrationInput],
         parentOccurrenceIds: [retried.ownerId],
         parentOrchestratorRunId: retried.ownerId,
       }),
     ]);
-    expect(retried.attempts[1]?.runtimeId).toBeUndefined();
-    expect(retried.attempts[1]?.sessionId).toBeUndefined();
-    expect(retried.attempts[1]?.sessionFile).toBeUndefined();
+    expect(retried.attempts[1]?.runtimeId).toBeTruthy();
+    expect(retried.attempts[1]?.sessionId).toBeTruthy();
+    expect(retried.attempts[1]?.sessionFile).toBeTruthy();
   } finally {
     if (page && runId) {
       await page
@@ -1802,6 +1872,7 @@ test("restart recovery never resurrects a fake in-flight canonical occurrence", 
         const run = await window.piDeck.workflows.canonicalGetRun({ runId });
         return {
           status: run.status,
+          revision: run.revision,
           occurrence: run.occurrences.find((item) => item.nodeId === target),
         };
       },
@@ -1816,12 +1887,17 @@ test("restart recovery never resurrects a fake in-flight canonical occurrence", 
     });
     expect(recovered.occurrence?.runtimeId).toBeUndefined();
     await page.evaluate(
-      async ({ runId, occurrenceId }) =>
+      async ({ runId, occurrenceId, expectedRevision }) =>
         window.piDeck.workflows.canonicalRetryOccurrence({
           runId,
           occurrenceId,
+          expectedRevision,
         }),
-      { runId, occurrenceId: recovered.occurrence?.id },
+      {
+        runId,
+        occurrenceId: recovered.occurrence?.id,
+        expectedRevision: recovered.revision,
+      },
     );
     await expect
       .poll(
@@ -1862,26 +1938,32 @@ test("a cancellation race leaves no persisted runtime or late completion", async
         ),
       )
       .toBe("running");
-    const occurrenceId = await page.evaluate(
-      async (runId) =>
-        (await window.piDeck.workflows.canonicalGetRun({ runId }))
-          .occurrences[0]?.id,
-      runId,
-    );
+    const retryRequest = await page.evaluate(async (runId) => {
+      const run = await window.piDeck.workflows.canonicalGetRun({ runId });
+      return { occurrenceId: run.occurrences[0]?.id, revision: run.revision };
+    }, runId);
     // Both IPC requests enter the scheduler while the fake Pi is still
     // streaming. Regardless of serialization order, stop must win over any
     // replacement attempt and a late terminal event must have no owner.
-    await page.evaluate(
-      async ({ runId, occurrenceId }) =>
-        Promise.allSettled([
-          window.piDeck.workflows.canonicalStopRun({ runId }),
-          window.piDeck.workflows.canonicalRetryOccurrence({
-            runId,
-            occurrenceId,
-          }),
-        ]),
-      { runId, occurrenceId },
+    const outcomes = await page.evaluate(
+      async ({ runId, occurrenceId, expectedRevision }) =>
+        (
+          await Promise.allSettled([
+            window.piDeck.workflows.canonicalStopRun({ runId }),
+            window.piDeck.workflows.canonicalRetryOccurrence({
+              runId,
+              occurrenceId,
+              expectedRevision,
+            }),
+          ])
+        ).map((outcome) => outcome.status),
+      {
+        runId,
+        occurrenceId: retryRequest.occurrenceId,
+        expectedRevision: retryRequest.revision,
+      },
     );
+    expect(outcomes).toEqual(["fulfilled", "rejected"]);
     await page.waitForTimeout(2_200);
     const run = await page.evaluate(
       async (runId) => window.piDeck.workflows.canonicalGetRun({ runId }),

@@ -93,6 +93,7 @@ import type {
   canonicalWorkflowHumanAnswerRequestSchema,
   canonicalWorkflowListRunsRequestSchema,
   canonicalWorkflowOccurrenceRequestSchema,
+  canonicalWorkflowRetryOccurrenceRequestSchema,
   canonicalWorkflowStartRunRequestSchema,
   workflowGraphEventSchema,
   workflowGraphSnapshotRequestSchema,
@@ -114,6 +115,9 @@ export type CanonicalWorkflowGetRunRequest = z.infer<
 >;
 export type CanonicalWorkflowOccurrenceRequest = z.infer<
   typeof canonicalWorkflowOccurrenceRequestSchema
+>;
+export type CanonicalWorkflowRetryOccurrenceRequest = z.infer<
+  typeof canonicalWorkflowRetryOccurrenceRequestSchema
 >;
 export type CanonicalWorkflowHumanAnswerRequest = z.infer<
   typeof canonicalWorkflowHumanAnswerRequestSchema
@@ -428,7 +432,7 @@ export interface PiDeckApi {
       request: CanonicalWorkflowGetRunRequest,
     ): Promise<CanonicalWorkflowRun>;
     canonicalRetryOccurrence(
-      request: CanonicalWorkflowOccurrenceRequest,
+      request: CanonicalWorkflowRetryOccurrenceRequest,
     ): Promise<CanonicalWorkflowRun>;
     canonicalAnswerHuman(
       request: CanonicalWorkflowHumanAnswerRequest,
