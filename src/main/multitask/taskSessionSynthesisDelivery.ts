@@ -51,20 +51,43 @@ export function synthesisDeliveryPayload(input: {
   };
 }
 
-/** Exact marker matching avoids treating model prose as a delivery receipt. */
-export function containsSynthesisDeliveryMarker(
+/**
+ * Normalize Pi's textual multipart representation without discarding any
+ * content. A non-text part cannot be an exact receipt for this text payload.
+ */
+export function normalizedSynthesisDeliveryContent(
   content: unknown,
-  deliveryId: string,
+): string | undefined {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return undefined;
+  const parts: string[] = [];
+  for (const part of content) {
+    if (typeof part === "string") parts.push(part);
+    else if (
+      part &&
+      typeof part === "object" &&
+      (part as { type?: unknown }).type === "text" &&
+      typeof (part as { text?: unknown }).text === "string"
+    )
+      parts.push((part as { text: string }).text);
+    else return undefined;
+  }
+  return parts.join("");
+}
+
+/**
+ * Pi's durable user turn is a receipt only when it contains the entire
+ * write-ahead payload. The marker identifies an outbox record but is never an
+ * acknowledgement on its own.
+ */
+export function matchesSynthesisDeliveryReceipt(
+  content: unknown,
+  delivery: Pick<SynthesisDelivery, "payload" | "payloadFingerprint">,
 ): boolean {
-  const marker = synthesisDeliveryMarker(deliveryId);
-  if (typeof content === "string") return content.includes(marker);
-  if (!Array.isArray(content)) return false;
-  return content.some((part) =>
-    typeof part === "string"
-      ? part.includes(marker)
-      : !!part &&
-        typeof part === "object" &&
-        typeof (part as { text?: unknown }).text === "string" &&
-        (part as { text: string }).text.includes(marker),
+  const normalized = normalizedSynthesisDeliveryContent(content);
+  return (
+    normalized !== undefined &&
+    (normalized === delivery.payload ||
+      synthesisDeliveryFingerprint(normalized) === delivery.payloadFingerprint)
   );
 }

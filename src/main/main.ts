@@ -241,7 +241,7 @@ import {
   type TaskSessionWorkerSettings,
 } from "./multitask/taskSessionOrchestrator.js";
 import {
-  containsSynthesisDeliveryMarker,
+  matchesSynthesisDeliveryReceipt,
   type SynthesisDelivery,
 } from "./multitask/taskSessionSynthesisDelivery.js";
 import {
@@ -4853,7 +4853,7 @@ async function parentHasSynthesisDelivery(
   const messages = await adapter.getMessages(parentId);
   return messages.some((message) =>
     message.role === "user"
-      ? containsSynthesisDeliveryMarker(message.content, delivery.id)
+      ? matchesSynthesisDeliveryReceipt(message.content, delivery)
       : false,
   );
 }

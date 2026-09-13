@@ -60,6 +60,9 @@ interface FakeOptions {
   /** Signal/exit after a queued follow-up becomes a durable user turn. */
   followUpReceiptSignalFile?: string;
   exitAfterFollowUpReceipt: boolean;
+  /** Model an already-active parent when this test barrier file exists. */
+  activeOnStartMs: number;
+  activeOnStartEnabledFile?: string;
   /** Emits spaced, payload-free worker progress for Electron telemetry E2E. */
   taskSessionProgressFixture: boolean;
   sessionFile?: string;
@@ -143,6 +146,7 @@ function parseOptions(argv: string[]): FakeOptions {
     noSession: false,
     failTaskPromptRecordWhileActive: false,
     exitAfterFollowUpReceipt: false,
+    activeOnStartMs: 0,
     taskSessionProgressFixture: false,
     forkOmitsParentSession: false,
     forkGetStateDelayMs: 0,
@@ -238,6 +242,19 @@ function parseOptions(argv: string[]): FakeOptions {
       index += 1;
     } else if (arg === "--exit-after-follow-up-receipt") {
       options.exitAfterFollowUpReceipt = true;
+    } else if (arg === "--active-on-start-ms") {
+      const delay = Number(argv[index + 1]);
+      if (
+        Number.isSafeInteger(delay) &&
+        delay >= 0 &&
+        delay <= MAX_NODE_TIMEOUT_MS
+      )
+        options.activeOnStartMs = delay;
+      index += 1;
+    } else if (arg === "--active-on-start-enabled-file") {
+      const file = argv[index + 1];
+      if (file) options.activeOnStartEnabledFile = file;
+      index += 1;
     } else if (arg === "--task-session-progress-fixture") {
       options.taskSessionProgressFixture = true;
     } else if (arg === "--session") {
@@ -619,6 +636,27 @@ class FakeRpcServer {
       }
     });
     process.stdin.resume();
+    this.startActiveParentIfEnabled();
+  }
+
+  private startActiveParentIfEnabled(): void {
+    if (
+      this.options.activeOnStartMs <= 0 ||
+      (this.options.activeOnStartEnabledFile !== undefined &&
+        !fs.existsSync(this.options.activeOnStartEnabledFile))
+    )
+      return;
+    this.agentActive = true;
+    this.currentTimers.push(
+      setTimeout(() => {
+        // A queued follow-up becomes the next durable user turn only when the
+        // pre-existing active parent settles, matching Pi's queue boundary.
+        if (this.consumeQueuedFollowUp()) return;
+        this.agentActive = false;
+        this.write({ type: "agent_end", runId: "run_preexisting_parent" });
+        this.write({ type: "agent_settled" });
+      }, this.options.activeOnStartMs),
+    );
   }
 
   private resolveSessionFile(): string {
