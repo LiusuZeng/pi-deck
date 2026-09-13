@@ -73,6 +73,7 @@ import {
   isSuccessfulTerminalStatus,
   type FailureKind,
 } from "./openaiCodexAuth.js";
+import { reconcileSessionWithRuntimeStatus as reconcileSessionWithRuntimeStatusInDomain } from "./sessionRuntimeReconciliation.js";
 import {
   canNavigatePromptHistoryDown,
   canNavigatePromptHistoryUp,
@@ -13694,63 +13695,12 @@ function reconcileSessionWithRuntimeStatus(
   session: SessionViewModel,
   status: ChatRuntimeStatus,
 ): SessionViewModel {
-  // A response for another runtime must never mutate the selected/session row.
-  if (status.runtimeId !== session.id) {
-    return session;
-  }
-  // Extension UI input remains pending until its response is delivered or the
-  // request times out, regardless of the compact runtime's active flag.
-  if (session.status === "waiting") {
-    return session;
-  }
-
-  if (status.state.isAgentActive) {
-    // Abort remains pending until Pi reports a terminal completion event or an
-    // authoritative inactive status; a still-active status is not success.
-    if (session.status === "aborting" || session.status === "working") {
-      return session;
-    }
-    return {
-      ...session,
-      status: "working",
-      baseState: "working",
-      overlays: { ...session.overlays, streaming: true },
-      subtitle: `Working · ${backendLabel(session)} confirmed by Pi`,
-      lastRuntimeEventLabel: "Pi reconciliation confirmed active work",
-    };
-  }
-
-  const authStillPending = session.failureKind === "auth-required";
-  return appendDiagnostic(
-    {
-      ...session,
-      status: authStillPending ? "error" : "idle",
-      baseState: authStillPending ? "error" : "idle",
-      awaitingAgentEnd: false,
-      providerErrorObserved: authStillPending
-        ? session.providerErrorObserved === true
-        : false,
-      ...(authStillPending ? {} : { lastError: undefined }),
-      overlays: {
-        ...session.overlays,
-        streaming: false,
-        toolRunning: false,
-        retrying: false,
-      },
-      workingStartedAtMs: undefined,
-      subtitle: authStillPending
-        ? "Error · OpenAI authentication verification pending"
-        : `Idle · ${backendLabel(session)} reconciled`,
-      lastRuntimeEventLabel: "Pi reconciliation confirmed completion",
-      updatedAt: "Now",
-      updatedAtMs: Date.now(),
-    },
-    {
-      tone: "info",
-      content:
-        "Reconciled from Pi runtime status because the live completion event was not observed.",
-    },
-  );
+  return reconcileSessionWithRuntimeStatusInDomain(session, status, {
+    backendLabel,
+    appendInfoDiagnostic: (reconciled, content) =>
+      appendDiagnostic(reconciled, { tone: "info", content }),
+    now: Date.now,
+  });
 }
 
 function updateSessionByRuntimeId(
