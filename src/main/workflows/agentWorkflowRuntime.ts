@@ -416,6 +416,7 @@ function advanceOrchestrator(
     const allDone = current.every((item) =>
       ["completed", "failed", "cancelled"].includes(item.status),
     );
+    const allCompleted = current.every((item) => item.status === "completed");
     if (config.completion === "any" && allDone && done.length === 0)
       return failWorkflowOccurrence(
         run,
@@ -425,7 +426,7 @@ function advanceOrchestrator(
       );
     if (
       (config.completion === "any" && done.length) ||
-      (config.completion === "all" && allDone)
+      (config.completion === "all" && allCompleted)
     ) {
       let next = patch(run, orchestratorId, {
         status: "completed",

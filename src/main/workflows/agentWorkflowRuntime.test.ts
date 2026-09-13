@@ -633,6 +633,65 @@ describe("agentWorkflow occurrence runtime", () => {
     expect(run).toMatchObject({ status: "completed", terminalOutcome: "done" });
   });
 
+  it("requires every current all-fan-out child to succeed after retry", () => {
+    const definition = fanoutDefinition("all");
+    definition.nodes = definition.nodes.filter((item) => item.id !== ids.after);
+    definition.relationships = [
+      { id: ids.end, from: ids.fan, to: { end: "done" } },
+    ];
+    let run = createWorkflowRoleRun(definition, "workspace", {}, 1);
+    const fan = run.occurrences[0]!;
+    run = startWorkflowOrchestrator(run, fan.id, 2);
+    const [a, b] = readyWorkflowOccurrences(run);
+    run = startWorkflowOccurrence(run, a!.id, "a", undefined, 3);
+    run = startWorkflowOccurrence(run, b!.id, "b", undefined, 4);
+    run = failWorkflowOccurrence(run, a!.id, "a failed", 5);
+    run = failWorkflowOccurrence(run, b!.id, "b failed", 6);
+    expect(run).toMatchObject({ status: "needsAttention" });
+
+    run = retryWorkflowOccurrence(run, a!.id, 7);
+    const aRetry = run.occurrences.at(-1)!;
+    run = startWorkflowOccurrence(run, aRetry.id, "a-retry", undefined, 8);
+    run = completeWorkflowOccurrence(run, aRetry.id, "A retry", 9);
+
+    expect(run.occurrences.find((item) => item.id === fan.id)).toMatchObject({
+      status: "running",
+    });
+    expect(run).toMatchObject({ status: "needsAttention" });
+    expect(run.terminalOutcome).toBeUndefined();
+    expect(run.occurrences.find((item) => item.id === b!.id)).toMatchObject({
+      status: "failed",
+      error: "b failed",
+    });
+
+    run = retryWorkflowOccurrence(run, b!.id, 10);
+    const bRetry = run.occurrences.at(-1)!;
+    run = startWorkflowOccurrence(run, bRetry.id, "b-retry", undefined, 11);
+    run = completeWorkflowOccurrence(run, bRetry.id, "B retry", 12);
+
+    expect(run.occurrences.find((item) => item.id === fan.id)).toMatchObject({
+      status: "completed",
+      output: ["A retry", "B retry"],
+    });
+    expect(run).toMatchObject({ status: "completed", terminalOutcome: "done" });
+    expect(
+      run.occurrences
+        .filter((item) => item.parentOrchestratorRunId === fan.id)
+        .map((item) => [
+          item.nodeId,
+          item.attempt,
+          item.status,
+          item.output,
+          item.error,
+        ]),
+    ).toEqual([
+      [ids.a, 1, "skipped", undefined, "a failed"],
+      [ids.b, 1, "skipped", undefined, "b failed"],
+      [ids.a, 2, "completed", "A retry", undefined],
+      [ids.b, 2, "completed", "B retry", undefined],
+    ]);
+  });
+
   it("promotes an older queued all-fan-out sibling before its retry", () => {
     const definition = fanoutDefinition("all", 1);
     definition.nodes = definition.nodes.filter((item) => item.id !== ids.after);
