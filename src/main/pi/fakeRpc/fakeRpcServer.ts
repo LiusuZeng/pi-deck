@@ -73,6 +73,14 @@ interface FakeOptions {
   forkExitSignalFile?: string;
   /** Hold get_state replies so E2E can interleave ownership operations. */
   getStateDelayMs: number;
+  /** Delay only the first generic get_state request across fake workers. */
+  getStateDelayOnceFile?: string;
+  /** Delay generic get_state only while this test-controlled marker exists. */
+  getStateDelayEnabledFile?: string;
+  /** Write when a generic get_state request begins. */
+  getStateSignalFile?: string;
+  /** Append every fake worker's session path when it exits. */
+  exitSignalFile?: string;
   /** Ignore SIGTERM so lifecycle tests exercise SIGKILL escalation. */
   ignoreSigterm: boolean;
   /** Delay a cooperative SIGTERM exit for cleanup-ordering tests. */
@@ -258,6 +266,22 @@ function parseOptions(argv: string[]): FakeOptions {
       if (Number.isSafeInteger(delay) && delay >= 0) {
         options.getStateDelayMs = delay;
       }
+      index += 1;
+    } else if (arg === "--delay-get-state-once-file") {
+      const markerFile = argv[index + 1];
+      if (markerFile) options.getStateDelayOnceFile = markerFile;
+      index += 1;
+    } else if (arg === "--delay-get-state-enabled-file") {
+      const markerFile = argv[index + 1];
+      if (markerFile) options.getStateDelayEnabledFile = markerFile;
+      index += 1;
+    } else if (arg === "--get-state-signal-file") {
+      const signalFile = argv[index + 1];
+      if (signalFile) options.getStateSignalFile = signalFile;
+      index += 1;
+    } else if (arg === "--exit-signal-file") {
+      const signalFile = argv[index + 1];
+      if (signalFile) options.exitSignalFile = signalFile;
       index += 1;
     } else if (arg === "--delay-get-messages-ms") {
       const delay = Number(argv[index + 1]);
@@ -491,14 +515,13 @@ class FakeRpcServer {
 
   start(): void {
     const recordForkExit = (): void => {
-      if (!this.options.forkSourceFile || !this.options.forkExitSignalFile) {
-        return;
-      }
+      const signalFile =
+        this.options.forkSourceFile && this.options.forkExitSignalFile
+          ? this.options.forkExitSignalFile
+          : this.options.exitSignalFile;
+      if (!signalFile) return;
       try {
-        fs.appendFileSync(
-          this.options.forkExitSignalFile,
-          `${this.sessionFile}\n`,
-        );
+        fs.appendFileSync(signalFile, `${this.sessionFile}\n`);
       } catch {
         // Exit diagnostics must never hold a fake worker open.
       }
@@ -508,8 +531,7 @@ class FakeRpcServer {
     // listeners through every Electron-spawned wrapper. The normal fake fork
     // fixture has no custom SIGTERM behavior, so record then terminate here.
     if (
-      this.options.forkSourceFile &&
-      this.options.forkExitSignalFile &&
+      (this.options.forkExitSignalFile || this.options.exitSignalFile) &&
       !this.options.ignoreSigterm &&
       this.options.sigtermExitDelayMs === 0
     ) {
@@ -761,9 +783,35 @@ class FakeRpcServer {
             `${this.sessionFile}\n`,
           );
         }
+        if (!forkGetState && this.options.getStateSignalFile) {
+          fs.writeFileSync(
+            this.options.getStateSignalFile,
+            `${this.sessionFile}\n`,
+          );
+        }
+        const delayOnce =
+          !forkGetState && this.options.getStateDelayOnceFile !== undefined
+            ? (() => {
+                try {
+                  const descriptor = fs.openSync(
+                    this.options.getStateDelayOnceFile,
+                    "wx",
+                  );
+                  fs.closeSync(descriptor);
+                  return true;
+                } catch {
+                  return false;
+                }
+              })()
+            : false;
+        const genericDelayEnabled =
+          this.options.getStateDelayEnabledFile !== undefined &&
+          fs.existsSync(this.options.getStateDelayEnabledFile);
         const delay = forkGetState
           ? this.options.forkGetStateDelayMs
-          : this.options.getStateDelayMs;
+          : delayOnce || genericDelayEnabled
+            ? this.options.getStateDelayMs
+            : 0;
         if (delay > 0) {
           setTimeout(
             () => this.respond(command.id, name, this.getState()),

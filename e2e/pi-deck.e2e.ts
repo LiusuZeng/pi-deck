@@ -5686,6 +5686,184 @@ test("real mode concurrent duplicate resume reuses one runtime with fake Pi", as
   }
 });
 
+test("reset is an exclusive lifecycle transaction for delayed ordinary create, queued resume, and overlapping resets", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-reset-life-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const delayedStateMarker = path.join(root, "ordinary-create-delay-enabled");
+  const getStateSignalFile = path.join(root, "ordinary-create-get-state");
+  const exitSignalFile = path.join(root, "ordinary-create-exited");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: [
+        "--delay-get-state-ms",
+        "10000",
+        "--delay-get-state-enabled-file",
+        delayedStateMarker,
+        "--get-state-signal-file",
+        getStateSignalFile,
+        "--exit-signal-file",
+        exitSignalFile,
+      ],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    const workspaceId = await page.evaluate(async () => {
+      const active = await window.piDeck.workspaces.getActive();
+      return active.activeWorkspace!.id;
+    });
+    fs.rmSync(getStateSignalFile, { force: true });
+    fs.writeFileSync(delayedStateMarker, "enabled");
+    await page.evaluate((id) => {
+      (window as Window & { delayedCreate?: Promise<unknown> }).delayedCreate =
+        window.piDeck.chat.createSession({ workspaceId: id });
+    }, workspaceId);
+    await expect
+      .poll(() =>
+        fs.existsSync(getStateSignalFile)
+          ? fs.readFileSync(getStateSignalFile, "utf8").trim()
+          : "",
+      )
+      .not.toBe("");
+    const delayedSessionFile = fs
+      .readFileSync(getStateSignalFile, "utf8")
+      .trim();
+    fs.rmSync(delayedStateMarker, { force: true });
+
+    const result = await page.evaluate(
+      async ({ workspaceId, sessionFile }) => {
+        const firstReset = window.piDeck.chat.reset();
+        const secondReset = window.piDeck.chat.reset();
+        const queuedResume = window.piDeck.chat.resumeSession({
+          workspaceId,
+          sessionFile,
+        });
+        let createError = "";
+        let queuedResumeError = "";
+        try {
+          await (window as Window & { delayedCreate: Promise<unknown> })
+            .delayedCreate;
+        } catch (error) {
+          createError = error instanceof Error ? error.message : String(error);
+        }
+        try {
+          await queuedResume;
+        } catch (error) {
+          queuedResumeError =
+            error instanceof Error ? error.message : String(error);
+        }
+        const [first, second] = await Promise.all([firstReset, secondReset]);
+        const current = await window.piDeck.chat.getSnapshot();
+        const sessions = await window.piDeck.chat.listSessions({ workspaceId });
+        return {
+          createError,
+          queuedResumeError,
+          firstRuntimeId: first.runtimeId,
+          secondRuntimeId: second.runtimeId,
+          currentRuntimeId: current.runtimeId,
+          sessionFiles: sessions.sessions.map((session) => session.sessionFile),
+        };
+      },
+      { workspaceId, sessionFile: delayedSessionFile },
+    );
+    expect(result.createError).toMatch(
+      /cancelled by reset or application shutdown/i,
+    );
+    // Both IPC calls joined one reset transaction and therefore one replacement.
+    expect(result.firstRuntimeId).toBe(result.secondRuntimeId);
+    expect(result.currentRuntimeId).toBe(result.firstRuntimeId);
+    // The old worker has exited before reset returned and never acquired a
+    // workspace reference or returned as a late runtime/event source.
+    await expect
+      .poll(() =>
+        fs.existsSync(exitSignalFile)
+          ? fs.readFileSync(exitSignalFile, "utf8")
+          : "",
+      )
+      .toContain(delayedSessionFile);
+    expect(result.sessionFiles).not.toContain(delayedSessionFile);
+    expect(result.queuedResumeError).toMatch(
+      /cancelled by reset or application shutdown/i,
+    );
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("quit awaits a delayed ordinary create without an orphaned workspace reference", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-quit-life-"));
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const delayedStateMarker = path.join(root, "ordinary-create-delay-enabled");
+  const getStateSignalFile = path.join(root, "ordinary-create-get-state");
+  const exitSignalFile = path.join(root, "ordinary-create-exited");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: [
+        "--delay-get-state-ms",
+        "10000",
+        "--delay-get-state-enabled-file",
+        delayedStateMarker,
+        "--get-state-signal-file",
+        getStateSignalFile,
+        "--exit-signal-file",
+        exitSignalFile,
+      ],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    const workspaceId = await page.evaluate(async () => {
+      const active = await window.piDeck.workspaces.getActive();
+      return active.activeWorkspace!.id;
+    });
+    fs.rmSync(getStateSignalFile, { force: true });
+    fs.writeFileSync(delayedStateMarker, "enabled");
+    await page.evaluate((id) => {
+      void window.piDeck.chat.createSession({ workspaceId: id });
+    }, workspaceId);
+    await expect
+      .poll(() =>
+        fs.existsSync(getStateSignalFile)
+          ? fs.readFileSync(getStateSignalFile, "utf8").trim()
+          : "",
+      )
+      .not.toBe("");
+    const delayedSessionFile = fs
+      .readFileSync(getStateSignalFile, "utf8")
+      .trim();
+    fs.rmSync(delayedStateMarker, { force: true });
+    await page.evaluate(() => window.close());
+    await expect
+      .poll(() =>
+        fs.existsSync(exitSignalFile)
+          ? fs.readFileSync(exitSignalFile, "utf8")
+          : "",
+      )
+      .toContain(delayedSessionFile);
+    const workspaces = fs.readFileSync(
+      path.join(root, "pideck-home", "workspaces.json"),
+      "utf8",
+    );
+    expect(workspaces).not.toContain(delayedSessionFile);
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("real mode rejects and prunes a missing saved session deterministically", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-missing-"));
   const projectCwd = path.join(root, "project");
