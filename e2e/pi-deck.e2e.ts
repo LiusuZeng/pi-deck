@@ -7462,6 +7462,234 @@ test("failed target promotion write/rename rebuilds both blocks after restart an
   }
 });
 
+test("same-process failed-fork cleanup revalidates its exact target before worker exit compensation", async () => {
+  for (const fixture of [
+    { name: "changed identity", mutation: "id" },
+    { name: "changed parent", mutation: "parent" },
+    { name: "unchanged target", mutation: undefined },
+  ] as const) {
+    const root = fs.mkdtempSync(
+      path.join(
+        os.tmpdir(),
+        `pi-deck-e2e-fork-live-revalidate-${fixture.name.replaceAll(" ", "-")}-`,
+      ),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    const userDataDir = path.join(root, "user-data");
+    const targetFile = path.join(
+      agentDir,
+      "sessions",
+      "--fake-rpc--",
+      "live-revalidate-target.jsonl",
+    );
+    const promotionFailureSignal = path.join(root, "promotion-failed");
+    const sigtermReceivedSignal = path.join(root, "sigterm-received");
+    const allowExitSignal = path.join(root, "allow-worker-exit");
+    const exitSignal = path.join(root, "fork-exited");
+    fs.mkdirSync(projectCwd, { recursive: true });
+    let app: ElectronApplication | undefined;
+    try {
+      const launched = await launchPiDeck({
+        ...fakeRealModeEnv({
+          root,
+          projectCwd,
+          agentDir,
+          userDataDir,
+          fakePiArgs: [
+            "--fork-target",
+            targetFile,
+            "--sigterm-received-signal-file",
+            sigtermReceivedSignal,
+            "--sigterm-exit-wait-file",
+            allowExitSignal,
+            "--fork-exit-signal-file",
+            exitSignal,
+          ],
+        }),
+        // Fail only the initial promotion. worker_exit must either retain an
+        // altered target or promote/compensate the original target in-process.
+        PI_DECK_TEST_FAIL_FORK_PROMOTION_PERSISTENCE: "write-once",
+        PI_DECK_TEST_FORK_PROMOTION_FAILURE_SIGNAL: promotionFailureSignal,
+      });
+      app = launched.app;
+      await expectHealthyPreload(launched.page);
+      await sidebarNewSessionButton(launched.page).click();
+      await launched.page.getByLabel("Prompt text").fill(fixture.name);
+      await launched.page.getByRole("button", { name: "Send" }).click();
+      await expect(
+        launched.page.getByText(`Fake response to: ${fixture.name}`),
+      ).toBeVisible({ timeout: 20_000 });
+      const source = await launched.page.evaluate(async () => {
+        const snapshot = await window.piDeck.chat.getSnapshot();
+        return {
+          workspaceId: snapshot.workspaceId!,
+          sessionFile: snapshot.state.sessionFile!,
+        };
+      });
+      await launched.page.evaluate((source) => {
+        (window as Window & { pendingFork?: Promise<unknown> }).pendingFork =
+          window.piDeck.chat.forkSession(source);
+      }, source);
+      await expect
+        .poll(() =>
+          fs.existsSync(promotionFailureSignal)
+            ? fs.readFileSync(promotionFailureSignal, "utf8").trim()
+            : "",
+        )
+        .toBe("write");
+      await expect
+        .poll(() =>
+          fs.existsSync(sigtermReceivedSignal)
+            ? fs.readFileSync(sigtermReceivedSignal, "utf8").trim()
+            : "",
+        )
+        .toBe("received");
+
+      const canonicalTarget = fs.realpathSync(targetFile);
+      const workspaceFile = path.join(root, "pideck-home", "workspaces.json");
+      if (fixture.mutation !== undefined) {
+        // Promotion fails before normal target claiming. Seed an external
+        // stale ref while the child is deliberately held before worker_exit,
+        // so invalid target validation proves no store mutation occurred.
+        const workspaceState = JSON.parse(
+          fs.readFileSync(workspaceFile, "utf8"),
+        ) as { sessionRefs: Array<Record<string, unknown>> };
+        const sourceRef = workspaceState.sessionRefs.find(
+          (ref) => ref.sessionFile === source.sessionFile,
+        );
+        expect(sourceRef).toBeDefined();
+        workspaceState.sessionRefs.push({
+          ...sourceRef,
+          sessionFile: canonicalTarget,
+          sessionId: "live-revalidate-target",
+          addedAtMs: Date.now(),
+          lastSeenAtMs: Date.now(),
+        });
+        fs.writeFileSync(workspaceFile, `${JSON.stringify(workspaceState)}\n`);
+        fs.writeFileSync(
+          targetFile,
+          `${JSON.stringify({
+            type: "session",
+            version: 3,
+            id:
+              fixture.mutation === "id"
+                ? "live-revalidate-mutated-id"
+                : "live-revalidate-target",
+            timestamp: new Date().toISOString(),
+            cwd: projectCwd,
+            parentSession:
+              fixture.mutation === "parent"
+                ? path.join(root, "different-parent.jsonl")
+                : source.sessionFile,
+          })}\n`,
+        );
+      }
+
+      // This releases the fake only after the mutation above, making the
+      // target revalidation unambiguously precede the worker_exit callback.
+      fs.writeFileSync(allowExitSignal, "continue\n");
+      const forkError = await launched.page.evaluate(async () => {
+        try {
+          await (window as Window & { pendingFork: Promise<unknown> })
+            .pendingFork;
+          return "";
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      });
+      await expect
+        .poll(() =>
+          fs.existsSync(exitSignal) ? fs.readFileSync(exitSignal, "utf8") : "",
+        )
+        .toContain(targetFile);
+
+      const journalFile = path.join(
+        root,
+        "pideck-home",
+        "failed-fork-cleanup.json",
+      );
+      const journal = JSON.parse(fs.readFileSync(journalFile, "utf8")) as {
+        entries: Array<{ kind: string }>;
+      };
+      const persistedRefs = fs.readFileSync(workspaceFile, "utf8");
+      if (fixture.mutation !== undefined) {
+        expect(forkError).toMatch(/failed fork cleanup is retained/i);
+        // The failed live revalidation performs neither promotion nor ref
+        // removal, and it leaves both the source/target blocks in force.
+        expect(journal.entries).toHaveLength(1);
+        expect(journal.entries[0]?.kind).toBe("source");
+        expect(persistedRefs).toContain(canonicalTarget);
+        const cleanupDiagnostics = await launched.page.evaluate(async () =>
+          window.piDeck.app.getDiagnosticsSummary(),
+        );
+        expect(
+          cleanupDiagnostics.recentErrors.filter((diagnostic) =>
+            diagnostic.includes("remains retained after worker exit"),
+          ),
+        ).toHaveLength(1);
+        const blocked = await launched.page.evaluate(
+          async (sourceAndTarget) => {
+            const errorOf = async (operation: () => Promise<unknown>) => {
+              try {
+                await operation();
+                return "";
+              } catch (error) {
+                return error instanceof Error ? error.message : String(error);
+              }
+            };
+            return {
+              sourceFork: await errorOf(() =>
+                window.piDeck.chat.forkSession({
+                  workspaceId: sourceAndTarget.workspaceId,
+                  sessionFile: sourceAndTarget.sourceFile,
+                }),
+              ),
+              targetResume: await errorOf(() =>
+                window.piDeck.chat.resumeSession({
+                  workspaceId: sourceAndTarget.workspaceId,
+                  sessionFile: sourceAndTarget.targetFile,
+                }),
+              ),
+              targetRemove: await errorOf(() =>
+                window.piDeck.workspaces.removeSession({
+                  workspaceId: sourceAndTarget.workspaceId,
+                  sessionFile: sourceAndTarget.targetFile,
+                }),
+              ),
+            };
+          },
+          {
+            workspaceId: source.workspaceId,
+            sourceFile: source.sessionFile,
+            targetFile: canonicalTarget,
+          },
+        );
+        expect(blocked.sourceFork).toMatch(
+          /awaiting durable cleanup|active or changing/i,
+        );
+        // Resume cannot attach the stale target, while remove proves the
+        // live ephemeral target reservation remains active in this process.
+        expect(blocked.targetResume).not.toBe("");
+        expect(blocked.targetRemove).toMatch(/awaiting durable cleanup/i);
+      } else {
+        expect(forkError).toMatch(
+          /injected fork target promotion write failure/i,
+        );
+        expect(journal.entries).toEqual([]);
+        expect(persistedRefs).not.toContain(canonicalTarget);
+        const resumed = await launched.page.evaluate(async (source) => {
+          return window.piDeck.chat.resumeSession(source);
+        }, source);
+        expect(resumed.state.sessionFile).toBe(source.sessionFile);
+      }
+    } finally {
+      await app?.close().catch(() => undefined);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("normal fork success clears its durable reservation after registration commit", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-fork-ok-"));
   const projectCwd = path.join(root, "project");
@@ -8178,7 +8406,7 @@ test("fork reserves its fresh target against default-workspace resume and unwind
         return error instanceof Error ? error.message : String(error);
       }
     });
-    expect(forkError).toMatch(/persisted target identity/i);
+    expect(forkError).toMatch(/failed fork cleanup is retained/i);
     await expect
       .poll(() =>
         fs.existsSync(forkExitSignalFile)
@@ -8186,21 +8414,51 @@ test("fork reserves its fresh target against default-workspace resume and unwind
           : "",
       )
       .toContain(targetFile);
-    const cleanup = await page.evaluate(async (source) => {
-      const sessions = await window.piDeck.chat.listSessions({
+    // A target that changed after durable claiming is no safer to compensate
+    // in this process: its ref and both reservations remain retained.
+    const retained = await page.evaluate(
+      async (sourceAndTarget) => {
+        const errorOf = async (operation: () => Promise<unknown>) => {
+          try {
+            await operation();
+            return "";
+          } catch (error) {
+            return error instanceof Error ? error.message : String(error);
+          }
+        };
+        return {
+          sourceResume: await errorOf(() =>
+            window.piDeck.chat.resumeSession({
+              workspaceId: sourceAndTarget.workspaceId,
+              sessionFile: sourceAndTarget.sourceFile,
+            }),
+          ),
+          targetResume: await errorOf(() =>
+            window.piDeck.chat.resumeSession({
+              workspaceId: sourceAndTarget.workspaceId,
+              sessionFile: sourceAndTarget.targetFile,
+            }),
+          ),
+        };
+      },
+      {
         workspaceId: source.workspaceId,
-      });
-      const resumed = await window.piDeck.chat.resumeSession({
-        workspaceId: source.workspaceId,
-        sessionFile: source.sessionFile,
-      });
-      return {
-        sessionFiles: sessions.sessions.map((session) => session.sessionFile),
-        resumedFile: resumed.state.sessionFile,
-      };
-    }, source);
-    expect(cleanup.sessionFiles).not.toContain(fs.realpathSync(targetFile));
-    expect(cleanup.resumedFile).toBe(source.sessionFile);
+        sourceFile: source.sessionFile,
+        targetFile: fs.realpathSync(targetFile),
+      },
+    );
+    expect(retained.sourceResume).toMatch(/awaiting durable cleanup/i);
+    expect(retained.targetResume).toMatch(/awaiting durable cleanup/i);
+    const journal = fs.readFileSync(
+      path.join(root, "pideck-home", "failed-fork-cleanup.json"),
+      "utf8",
+    );
+    const workspaceRefs = fs.readFileSync(
+      path.join(root, "pideck-home", "workspaces.json"),
+      "utf8",
+    );
+    expect(journal).toContain("target");
+    expect(workspaceRefs).toContain(fs.realpathSync(targetFile));
   } finally {
     await app.close().catch(() => undefined);
     fs.rmSync(root, { recursive: true, force: true });

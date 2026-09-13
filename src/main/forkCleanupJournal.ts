@@ -87,6 +87,7 @@ const fileSchema = z
   .object({ version: z.literal(2), entries: z.array(entrySchema) })
   .strict();
 const forkRecoveryTestHooksEnabled = process.env.PI_DECK_E2E_TEST === "1";
+const consumedForkPromotionPersistenceFailures = new Set<string>();
 
 type SourceReservationEntry = z.infer<typeof sourceReservationEntrySchema>;
 type TargetReservationEntry = z.infer<typeof targetReservationEntrySchema>;
@@ -196,6 +197,8 @@ export class ForkCleanupJournal {
     sessionDir?: string;
     workspaceId?: string;
     projectId?: string;
+    /** Caller-captured boundary used to match live and restart recovery. */
+    createdAtMs?: number;
   }): Promise<void> {
     await this.loadIfNeeded();
     if (this.corrupt) {
@@ -204,7 +207,7 @@ export class ForkCleanupJournal {
     const parsed = sourceReservationEntrySchema.parse({
       kind: "source",
       ...input,
-      createdAtMs: Date.now(),
+      createdAtMs: input.createdAtMs ?? Date.now(),
       phase: "pre-spawn",
     });
     const operation = (): ForkCleanupFile => {
@@ -799,13 +802,18 @@ async function failTargetPromotionPersistenceForTest(
   candidate: ForkCleanupFile,
   phase: "write" | "rename",
 ): Promise<void> {
+  const configuredFailure =
+    process.env.PI_DECK_TEST_FAIL_FORK_PROMOTION_PERSISTENCE;
+  const failOnce = configuredFailure === `${phase}-once`;
   if (
     !forkRecoveryTestHooksEnabled ||
-    process.env.PI_DECK_TEST_FAIL_FORK_PROMOTION_PERSISTENCE !== phase ||
-    !candidate.entries.some((entry) => entry.kind === "target")
+    (configuredFailure !== phase && !failOnce) ||
+    !candidate.entries.some((entry) => entry.kind === "target") ||
+    (failOnce && consumedForkPromotionPersistenceFailures.has(phase))
   ) {
     return;
   }
+  if (failOnce) consumedForkPromotionPersistenceFailures.add(phase);
   const signalFile = process.env.PI_DECK_TEST_FORK_PROMOTION_FAILURE_SIGNAL;
   if (signalFile !== undefined) {
     await fs.mkdir(path.dirname(signalFile), { recursive: true });

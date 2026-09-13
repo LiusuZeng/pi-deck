@@ -384,10 +384,20 @@ type PendingFailedForkCleanup = {
   sourceSessionFile: string;
   transactionId: string;
   target?: {
+    /** Canonical target path validated while the fork worker was still live. */
     sessionFile: string;
+    /** Exact durable Pi identity observed for that canonical target. */
+    sessionId: string;
+    /** Canonical source path recorded in the target's native Pi header. */
+    parentSession: string;
+    /** Canonical repository directory used for live/restart-equivalent scans. */
+    sessionDir: string;
+    /** Same boundary persisted with the source reservation. */
+    sourceReservationCreatedAtMs: number;
     workspaceId: string;
     projectId?: string;
     promoted: boolean;
+    validationDiagnosticRecorded?: boolean;
   };
   exitConfirmed?: boolean;
   retryPromise?: Promise<void> | undefined;
@@ -2213,6 +2223,84 @@ async function waitForConfirmedForkCleanups(): Promise<void> {
   );
 }
 
+/**
+ * Live worker-exit cleanup has the same authority boundary as restart
+ * recovery: only the one, still-canonical child observed at fork time may be
+ * promoted or have refs removed. A worker-exit proof does not authorize a
+ * changed or ambiguous file.
+ */
+async function validatePendingFailedForkCleanupTarget(
+  pending: PendingFailedForkCleanup,
+): Promise<string | undefined> {
+  const target = pending.target;
+  if (target === undefined) return undefined;
+  try {
+    const inventory = await scanSessionRepository({
+      sessionDir: target.sessionDir,
+    });
+    const candidates = new Set<string>();
+    for (const summary of inventory.sessions) {
+      if (
+        summary.sessionFile === target.parentSession ||
+        summary.createdAtMs === undefined ||
+        summary.createdAtMs < target.sourceReservationCreatedAtMs
+      ) {
+        continue;
+      }
+      const validation = await validatePiSessionFile({
+        sessionFile: summary.sessionFile,
+        sessionDir: target.sessionDir,
+      });
+      if (validation.ok && validation.parentSession === target.parentSession) {
+        candidates.add(validation.sessionFile);
+      }
+    }
+    const uniqueCandidates = [...candidates].sort();
+    if (uniqueCandidates.length !== 1) {
+      return "repository no longer has exactly one plausible child";
+    }
+    if (uniqueCandidates[0] !== target.sessionFile) {
+      return "repository's unique child no longer matches the validated target";
+    }
+    const validation = await validatePiSessionFile({
+      sessionFile: target.sessionFile,
+      sessionDir: target.sessionDir,
+    });
+    if (
+      !validation.ok ||
+      validation.sessionFile !== target.sessionFile ||
+      validation.parentSession !== target.parentSession
+    ) {
+      return "target path or native parent provenance changed";
+    }
+    const summary = await readPiSessionSummary({
+      sessionFile: target.sessionFile,
+      sessionDir: target.sessionDir,
+    });
+    if (summary.summary?.sessionId !== target.sessionId) {
+      return "target durable identity changed";
+    }
+    return undefined;
+  } catch {
+    return "target repository validation could not complete";
+  }
+}
+
+function retainFailedForkCleanupAfterInvalidExitTarget(
+  pending: PendingFailedForkCleanup,
+  reason: string,
+): void {
+  if (pending.target?.validationDiagnosticRecorded === true) return;
+  if (pending.target !== undefined) {
+    pending.target.validationDiagnosticRecorded = true;
+  }
+  // One fixed-size diagnostic per retained transaction avoids unbounded error
+  // growth if an integration emits duplicate worker_exit events.
+  diagnostics?.recordError(
+    `Fork cleanup ${pending.transactionId} remains retained after worker exit: ${reason}.`,
+  );
+}
+
 async function retryFailedForkCleanupAfterExit(
   runtimeId: string,
 ): Promise<void> {
@@ -2226,11 +2314,24 @@ async function retryFailedForkCleanupAfterExit(
   const retry = (async () => {
     const journal = ensureForkCleanupJournal();
     if (pending.target !== undefined) {
+      const invalidTargetReason =
+        await validatePendingFailedForkCleanupTarget(pending);
+      if (invalidTargetReason !== undefined) {
+        // Do not promote, remove refs, complete the journal, or release either
+        // reservation. This is deliberately terminal for this observed exit;
+        // restart recovery retains the same fail-closed authority boundary.
+        retainFailedForkCleanupAfterInvalidExitTarget(
+          pending,
+          invalidTargetReason,
+        );
+        return;
+      }
       if (!pending.target.promoted) {
         await journal.promoteSourceToTarget({
           sessionFile: pending.target.sessionFile,
           sourceSessionFile: pending.sourceSessionFile,
           transactionId: pending.transactionId,
+          discoveredSessionId: pending.target.sessionId,
           workspaceId: pending.target.workspaceId,
           ...(pending.target.projectId !== undefined
             ? { projectId: pending.target.projectId }
@@ -6621,10 +6722,13 @@ async function forkChatSession(
           // before Pi names its child must still block every source mutation.
           const cleanupJournal = ensureForkCleanupJournal();
           const forkTransactionId = randomUUID();
+          const forkReservationCreatedAtMs = Date.now();
+          const canonicalSessionDir = await fs.realpath(sessionDir);
           await cleanupJournal.reserveSource({
             sourceSessionFile: canonicalSourceSessionFile,
             transactionId: forkTransactionId,
-            sessionDir,
+            sessionDir: canonicalSessionDir,
+            createdAtMs: forkReservationCreatedAtMs,
             workspaceId,
             ...(project.id !== managedRuntimeProjectId
               ? { projectId: project.id }
@@ -6692,6 +6796,7 @@ async function forkChatSession(
           }
           const runtimeId = workerSpec.worker.runtimeId;
           let forkSessionFile: string | undefined;
+          let durableForkTargetSessionId: string | undefined;
           let forkTargetDiscovered = false;
           let forkTargetReserved = false;
           let forkTargetPromoted = false;
@@ -6763,6 +6868,7 @@ async function forkChatSession(
             if (durableTargetSessionId === sourceSessionId) {
               throw new Error("Pi fork reused the source session identity.");
             }
+            durableForkTargetSessionId = durableTargetSessionId;
             const existingTargetRuntimeId =
               chatSessionFileLocks.get(forkSessionFile);
             if (
@@ -6977,10 +7083,16 @@ async function forkChatSession(
             // can race closeAndWait's continuation; this publication gives the
             // event callback the exact durable target to compensate.
             const discoveredForkTarget =
-              !forkTargetDiscovered || forkSessionFile === undefined
+              !forkTargetDiscovered ||
+              forkSessionFile === undefined ||
+              durableForkTargetSessionId === undefined
                 ? undefined
                 : {
                     sessionFile: forkSessionFile,
+                    sessionId: durableForkTargetSessionId,
+                    parentSession: canonicalSourceSessionFile,
+                    sessionDir: canonicalSessionDir,
+                    sourceReservationCreatedAtMs: forkReservationCreatedAtMs,
                     workspaceId,
                     ...(project.id !== managedRuntimeProjectId
                       ? { projectId: project.id }

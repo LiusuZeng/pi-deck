@@ -85,6 +85,10 @@ interface FakeOptions {
   ignoreSigterm: boolean;
   /** Delay a cooperative SIGTERM exit for cleanup-ordering tests. */
   sigtermExitDelayMs: number;
+  /** Signal that SIGTERM was received before a test-controlled exit barrier. */
+  sigtermReceivedSignalFile?: string;
+  /** Hold a cooperative SIGTERM exit until this test-controlled file exists. */
+  sigtermExitWaitFile?: string;
   /** Hold snapshot history after fork ownership has been claimed. */
   getMessagesDelayMs: number;
   /** Hold only a native fork's final snapshot history. */
@@ -263,6 +267,14 @@ function parseOptions(argv: string[]): FakeOptions {
       if (Number.isSafeInteger(delay) && delay >= 0) {
         options.sigtermExitDelayMs = delay;
       }
+      index += 1;
+    } else if (arg === "--sigterm-received-signal-file") {
+      const signalFile = argv[index + 1];
+      if (signalFile) options.sigtermReceivedSignalFile = signalFile;
+      index += 1;
+    } else if (arg === "--sigterm-exit-wait-file") {
+      const waitFile = argv[index + 1];
+      if (waitFile) options.sigtermExitWaitFile = waitFile;
       index += 1;
     } else if (arg === "--delay-get-state-ms") {
       const delay = Number(argv[index + 1]);
@@ -537,25 +549,41 @@ class FakeRpcServer {
     };
     process.once("exit", recordForkExit);
     // Node's default SIGTERM termination does not reliably run userland exit
-    // listeners through every Electron-spawned wrapper. The normal fake fork
-    // fixture has no custom SIGTERM behavior, so record then terminate here.
-    if (
-      (this.options.forkExitSignalFile || this.options.exitSignalFile) &&
-      !this.options.ignoreSigterm &&
-      this.options.sigtermExitDelayMs === 0
+    // listeners through every Electron-spawned wrapper. Test barriers can
+    // prove mutation occurred after close requested exit but before worker_exit.
+    if (this.options.ignoreSigterm) {
+      process.on("SIGTERM", () => {
+        // Intentionally empty; PiWorker must not mistake signal delivery for exit.
+      });
+    } else if (
+      this.options.forkExitSignalFile ||
+      this.options.exitSignalFile ||
+      this.options.sigtermExitDelayMs > 0 ||
+      this.options.sigtermReceivedSignalFile !== undefined ||
+      this.options.sigtermExitWaitFile !== undefined
     ) {
       process.once("SIGTERM", () => {
-        recordForkExit();
-        process.exit(0);
-      });
-    }
-    if (this.options.ignoreSigterm || this.options.sigtermExitDelayMs > 0) {
-      process.on("SIGTERM", () => {
-        if (this.options.ignoreSigterm) {
-          // Intentionally empty; PiWorker must not mistake signal delivery for exit.
+        if (this.options.sigtermReceivedSignalFile !== undefined) {
+          try {
+            fs.writeFileSync(
+              this.options.sigtermReceivedSignalFile,
+              "received\n",
+            );
+          } catch {
+            // Test diagnostics must never prevent worker shutdown.
+          }
+        }
+        const exit = () => process.exit(0);
+        if (this.options.sigtermExitWaitFile !== undefined) {
+          const wait = setInterval(() => {
+            if (fs.existsSync(this.options.sigtermExitWaitFile!)) {
+              clearInterval(wait);
+              exit();
+            }
+          }, 5);
           return;
         }
-        setTimeout(() => process.exit(0), this.options.sigtermExitDelayMs);
+        setTimeout(exit, this.options.sigtermExitDelayMs);
       });
     }
     this.ensurePersistedSessionRecord();
