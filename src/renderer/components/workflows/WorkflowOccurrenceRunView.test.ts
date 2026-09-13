@@ -248,13 +248,14 @@ describe("WorkflowOccurrenceRunView", () => {
     const onAnswer = vi.fn(
       () => new Promise<void>((resolve) => (releaseAnswer = resolve)),
     );
+    const onStopWhileAnswering = vi.fn();
     const answerContainer = document.createElement("div");
     await act(async () =>
       createRoot(answerContainer).render(
         createElement(WorkflowOccurrenceRunView, {
           run,
           onBack: vi.fn(),
-          onStop: vi.fn(),
+          onStop: onStopWhileAnswering,
           onRetry: vi.fn(),
           onAnswer,
         }),
@@ -263,18 +264,29 @@ describe("WorkflowOccurrenceRunView", () => {
     const approve = [...answerContainer.querySelectorAll("button")].find(
       (button) => button.textContent === "Approve",
     )!;
+    const stopWhileAnswering = [
+      ...answerContainer.querySelectorAll("button"),
+    ].find((button) => button.textContent === "Stop run")!;
     await act(async () => {
       approve.click();
+      stopWhileAnswering.click();
       approve.click();
     });
     expect(onAnswer).toHaveBeenCalledTimes(1);
+    expect(onStopWhileAnswering).not.toHaveBeenCalled();
     expect(approve.disabled).toBe(true);
+    expect(
+      [...answerContainer.querySelectorAll("button")].find(
+        (button) => button.textContent === "Stop run",
+      )!.disabled,
+    ).toBe(true);
     await act(async () => releaseAnswer());
 
     let releaseStop!: () => void;
     const onStop = vi.fn(
       () => new Promise<void>((resolve) => (releaseStop = resolve)),
     );
+    const onAnswerWhileStopping = vi.fn();
     const stopContainer = document.createElement("div");
     await act(async () =>
       createRoot(stopContainer).render(
@@ -283,19 +295,29 @@ describe("WorkflowOccurrenceRunView", () => {
           onBack: vi.fn(),
           onStop,
           onRetry: vi.fn(),
-          onAnswer: vi.fn(),
+          onAnswer: onAnswerWhileStopping,
         }),
       ),
     );
     const stop = [...stopContainer.querySelectorAll("button")].find(
       (button) => button.textContent === "Stop run",
     )!;
+    const approveWhileStopping = [
+      ...stopContainer.querySelectorAll("button"),
+    ].find((button) => button.textContent === "Approve")!;
     await act(async () => {
       stop.click();
+      approveWhileStopping.click();
       stop.click();
     });
     expect(onStop).toHaveBeenCalledTimes(1);
+    expect(onAnswerWhileStopping).not.toHaveBeenCalled();
     expect(stop.disabled).toBe(true);
+    expect(
+      [...stopContainer.querySelectorAll("button")].find(
+        (button) => button.textContent === "Approve",
+      )!.disabled,
+    ).toBe(true);
     await act(async () => releaseStop());
     expect(stop.disabled).toBe(false);
   });
@@ -333,13 +355,14 @@ describe("WorkflowOccurrenceRunView", () => {
     const onRetry = vi.fn(
       () => new Promise<void>((resolve) => (resolveRetry = resolve)),
     );
+    const onStopWhileRetrying = vi.fn();
     const container = document.createElement("div");
     await act(async () =>
       createRoot(container).render(
         createElement(WorkflowOccurrenceRunView, {
           run,
           onBack: vi.fn(),
-          onStop: vi.fn(),
+          onStop: onStopWhileRetrying,
           onRetry,
           onAnswer: vi.fn(),
         }),
@@ -353,12 +376,22 @@ describe("WorkflowOccurrenceRunView", () => {
       (button) => button.textContent === "Retry attempt 1",
     )!;
 
+    const stopWhileRetrying = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Stop run",
+    )!;
     await act(async () => {
       retry.click();
+      stopWhileRetrying.click();
       retry.click();
     });
     expect(onRetry).toHaveBeenCalledTimes(1);
+    expect(onStopWhileRetrying).not.toHaveBeenCalled();
     expect(retry.disabled).toBe(true);
+    expect(
+      [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === "Stop run",
+      )!.disabled,
+    ).toBe(true);
 
     await act(async () => resolveRetry());
     expect(retry.disabled).toBe(false);

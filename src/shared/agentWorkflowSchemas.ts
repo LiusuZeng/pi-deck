@@ -227,7 +227,11 @@ export const canonicalWorkflowRetryOccurrenceRequestSchema =
   canonicalWorkflowOccurrenceRequestSchema
     .extend({ expectedRevision: z.number().int().positive() })
     .strict();
-/** Stop and Answer share Retry's durable revision fence. */
+/**
+ * Stop is an idempotent cancellation intent: its revision records the client's
+ * observation and may be stale, while a future revision is rejected. Answer
+ * remains an exact durable revision fence.
+ */
 export const canonicalWorkflowStopRunRequestSchema =
   canonicalWorkflowGetRunRequestSchema
     .extend({ expectedRevision: z.number().int().positive() })

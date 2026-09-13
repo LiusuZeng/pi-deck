@@ -905,6 +905,15 @@ export class WorkflowOccurrenceScheduler {
   private readonly now: () => number;
   /** Serialize read-modify-write transitions for each canonical run. */
   private readonly mutationTails = new Map<string, Promise<unknown>>();
+  /**
+   * Stop is a cancellation intent, not an ordinary revision-fenced edit. Record
+   * it synchronously so an Answer queued at the same revision that has not
+   * begun its durable save loses to the queued Stop.
+   */
+  private readonly pendingStopRevisions = new Map<
+    string,
+    Map<number, number>
+  >();
   /** Lifecycle-conflict queues are distinct from fan-out capacity queues in memory. */
   private readonly lifecycleQueued = new Map<string, Set<string>>();
   /** One bounded wake listener per workspace with queued allocation work. */
@@ -1003,21 +1012,34 @@ export class WorkflowOccurrenceScheduler {
     runId: string,
     expectedRevision: number,
   ): Promise<WorkflowRoleRun> {
-    return this.serialize(runId, async () => {
-      const run = await this.current(runId);
-      if (!run) throw new Error(`Unknown workflow run: ${runId}`);
-      this.requireRevision(run, expectedRevision, "stop");
-      const owned = [...this.active.entries()].filter(
-        ([, owner]) => owner.runId === runId,
-      );
-      for (const [runtimeId, owner] of owned) {
-        this.active.delete(runtimeId);
-        await this.closeAndReleaseQuietly(runtimeId, owner);
-      }
-      const stopped = await this.save(stopWorkflowRoleRun(run, this.now()));
-      this.cleanupLifecycleWake(runId, stopped);
-      return stopped;
-    });
+    const releaseStop = this.reserveStop(runId, expectedRevision);
+    try {
+      return await this.serialize(runId, async () => {
+        const run = await this.current(runId);
+        if (!run) throw new Error(`Unknown workflow run: ${runId}`);
+        // A Stop observed at an older revision is intentionally still applied.
+        // An Answer may have linearized immediately before this Stop reached the
+        // durable boundary; rejecting Stop in that case would silently lose the
+        // user's cancellation request and allow newly routed work to continue.
+        if (run.revision < expectedRevision)
+          throw new Error(
+            `Workflow run changed before stop: expected revision ${expectedRevision}, found ${run.revision}.`,
+          );
+        if (run.status === "stopped") return run;
+        const owned = [...this.active.entries()].filter(
+          ([, owner]) => owner.runId === runId,
+        );
+        for (const [runtimeId, owner] of owned) {
+          this.active.delete(runtimeId);
+          await this.closeAndReleaseQuietly(runtimeId, owner);
+        }
+        const stopped = await this.save(stopWorkflowRoleRun(run, this.now()));
+        this.cleanupLifecycleWake(runId, stopped);
+        return stopped;
+      });
+    } finally {
+      releaseStop();
+    }
   }
   /**
    * Resume a stopped run only when the caller observed its current durable
@@ -1037,6 +1059,10 @@ export class WorkflowOccurrenceScheduler {
           `Workflow run changed before retry: expected revision ${expectedRevision}, found ${run.revision}.`,
         );
       }
+      if (this.hasPendingStopAtOrBefore(runId, expectedRevision))
+        throw new Error(
+          "Workflow run changed before retry: Stop was requested for this run.",
+        );
       const next = await this.save(
         retryWorkflowOccurrence(run, occurrenceId, this.now()),
       );
@@ -1053,6 +1079,10 @@ export class WorkflowOccurrenceScheduler {
       const run = await this.current(runId);
       if (!run) throw new Error(`Unknown workflow run: ${runId}`);
       this.requireRevision(run, expectedRevision, "answer");
+      if (this.hasPendingStopAtOrBefore(runId, expectedRevision))
+        throw new Error(
+          `Workflow run changed before answer: Stop was requested for this run.`,
+        );
       const next = await this.save(
         answerWorkflowHumanOccurrence(run, occurrenceId, value, this.now()),
       );
@@ -1170,6 +1200,23 @@ export class WorkflowOccurrenceScheduler {
       throw new Error(
         `Workflow run changed before ${action}: expected revision ${expectedRevision}, found ${run.revision}.`,
       );
+  }
+  private reserveStop(runId: string, revision: number): () => void {
+    const revisions = this.pendingStopRevisions.get(runId) ?? new Map();
+    revisions.set(revision, (revisions.get(revision) ?? 0) + 1);
+    this.pendingStopRevisions.set(runId, revisions);
+    return () => {
+      const count = revisions.get(revision);
+      if (count === undefined) return;
+      if (count === 1) revisions.delete(revision);
+      else revisions.set(revision, count - 1);
+      if (revisions.size === 0) this.pendingStopRevisions.delete(runId);
+    };
+  }
+  private hasPendingStopAtOrBefore(runId: string, revision: number): boolean {
+    return [...(this.pendingStopRevisions.get(runId)?.keys() ?? [])].some(
+      (stopRevision) => stopRevision <= revision,
+    );
   }
   private serialize<T>(runId: string, operation: () => Promise<T>): Promise<T> {
     const previous = this.mutationTails.get(runId) ?? Promise.resolve();
