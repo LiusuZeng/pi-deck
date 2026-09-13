@@ -54,7 +54,7 @@ export function Menu(props: {
   useEffect(() => {
     if (!isOpen) return;
     const selector = isMenu
-      ? '[role^="menuitem"]'
+      ? '[role^="menuitem"]:not([disabled]):not([aria-disabled="true"])'
       : 'select, input, button, textarea, [tabindex]:not([tabindex="-1"])';
     popoverRef.current?.querySelector<HTMLElement>(selector)?.focus();
   }, [isMenu, isOpen]);

@@ -60,6 +60,14 @@ interface FakeOptions {
   sessionFile?: string;
   /** Native Pi-compatible source path for a new independent fake session. */
   forkSourceFile?: string;
+  /** Test-only faulty-Pi override for the path reported by a native fork. */
+  forkTargetFile?: string;
+  /** Hold get_state replies so E2E can interleave ownership operations. */
+  getStateDelayMs: number;
+  /** Hold snapshot history after fork ownership has been claimed. */
+  getMessagesDelayMs: number;
+  /** Write when get_messages begins, for deterministic E2E interleaving. */
+  getMessagesSignalFile?: string;
   /** Test-only override for the cwd reported by get_state. */
   getStateCwd?: string;
   workflowDecisions: boolean[];
@@ -103,6 +111,8 @@ function parseOptions(argv: string[]): FakeOptions {
     noSession: false,
     failTaskPromptRecordWhileActive: false,
     taskSessionProgressFixture: false,
+    getStateDelayMs: 0,
+    getMessagesDelayMs: 0,
     workflowDecisions: [],
   };
 
@@ -193,6 +203,26 @@ function parseOptions(argv: string[]): FakeOptions {
       if (sourceFile) {
         options.forkSourceFile = sourceFile;
       }
+      index += 1;
+    } else if (arg === "--fork-target") {
+      const targetFile = argv[index + 1];
+      if (targetFile) options.forkTargetFile = targetFile;
+      index += 1;
+    } else if (arg === "--delay-get-state-ms") {
+      const delay = Number(argv[index + 1]);
+      if (Number.isSafeInteger(delay) && delay >= 0) {
+        options.getStateDelayMs = delay;
+      }
+      index += 1;
+    } else if (arg === "--delay-get-messages-ms") {
+      const delay = Number(argv[index + 1]);
+      if (Number.isSafeInteger(delay) && delay >= 0) {
+        options.getMessagesDelayMs = delay;
+      }
+      index += 1;
+    } else if (arg === "--get-messages-signal-file") {
+      const signalFile = argv[index + 1];
+      if (signalFile) options.getMessagesSignalFile = signalFile;
       index += 1;
     } else if (arg === "--get-state-cwd") {
       const cwd = argv[index + 1];
@@ -438,6 +468,9 @@ class FakeRpcServer {
     if (this.options.sessionFile) {
       return path.resolve(this.options.sessionFile);
     }
+    if (this.options.forkSourceFile && this.options.forkTargetFile) {
+      return path.resolve(this.options.forkTargetFile);
+    }
     const agentDir = process.env.PI_CODING_AGENT_DIR;
     if (agentDir) {
       return path.join(
@@ -633,11 +666,31 @@ class FakeRpcServer {
 
     switch (name) {
       case "get_state":
-        this.respond(command.id, name, this.getState());
+        if (this.options.getStateDelayMs > 0) {
+          setTimeout(
+            () => this.respond(command.id, name, this.getState()),
+            this.options.getStateDelayMs,
+          );
+        } else {
+          this.respond(command.id, name, this.getState());
+        }
         break;
-      case "get_messages":
-        this.respond(command.id, name, { messages: this.messages });
+      case "get_messages": {
+        if (this.options.getMessagesSignalFile) {
+          fs.writeFileSync(
+            this.options.getMessagesSignalFile,
+            `${this.sessionFile}\n`,
+          );
+        }
+        const respond = () =>
+          this.respond(command.id, name, { messages: this.messages });
+        if (this.options.getMessagesDelayMs > 0) {
+          setTimeout(respond, this.options.getMessagesDelayMs);
+        } else {
+          respond();
+        }
         break;
+      }
       case "get_session_stats":
         this.respond(command.id, name, this.getSessionStats());
         break;

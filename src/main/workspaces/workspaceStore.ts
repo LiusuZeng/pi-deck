@@ -710,17 +710,20 @@ export class WorkspaceStore {
    * concurrent explicit move. The owner check and in-memory state update are
    * synchronous within this mutation seam.
    */
-  async claimUnassignedSessionRefFromSnapshot(options: {
-    workspaceId: string;
-    sessionFile: string;
-    sessionId?: string;
-    cwd?: string;
-    title?: string;
-    updatedAtMs?: number;
-    completedAtMs?: number;
-    messageCount?: number;
-    preview?: string;
-  }): Promise<WorkspaceSessionMutationResult> {
+  async claimUnassignedSessionRefFromSnapshot(
+    options: {
+      workspaceId: string;
+      sessionFile: string;
+      sessionId?: string;
+      cwd?: string;
+      title?: string;
+      updatedAtMs?: number;
+      completedAtMs?: number;
+      messageCount?: number;
+      preview?: string;
+    },
+    claimOptions: { requireUnassigned?: boolean } = {},
+  ): Promise<WorkspaceSessionMutationResult> {
     const workspaceId = z.string().uuid().parse(options.workspaceId);
     const sessionFile = await canonicalOrResolved(
       z.string().min(1).parse(options.sessionFile),
@@ -732,6 +735,11 @@ export class WorkspaceStore {
       (ref) => ref.sessionFile === sessionFile,
     );
     if (existing !== undefined) {
+      if (claimOptions.requireUnassigned === true) {
+        throw new Error(
+          `Session is already assigned to a workspace: ${sessionFile}`,
+        );
+      }
       return {
         workspaceId: existing.workspaceId,
         sessionFile,

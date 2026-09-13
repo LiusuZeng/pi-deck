@@ -6586,6 +6586,7 @@ test("real-mode session fork creates an independent Pi history and survives rela
   const env = fakeRealModeEnv({ root, projectCwd, agentDir, userDataDir });
   const sourceToken = `fork-source-${Date.now()}`;
   const forkToken = `fork-child-${Date.now()}`;
+  const forkResumeToken = `fork-child-relaunch-${Date.now()}`;
   let source: {
     runtimeId: string;
     workspaceId: string;
@@ -6683,8 +6684,251 @@ test("real-mode session fork creates an independent Pi history and survives rela
         }),
       ]),
     );
+    // Listing proves persistence; actually reopen each side after relaunch to
+    // prove their live Pi histories remain independent.
+    const histories = await second.page.evaluate(
+      async ({ source, fork, forkResumeToken }) => {
+        const sourceRuntime = await window.piDeck.chat.resumeSession({
+          workspaceId: source.workspaceId,
+          sessionFile: source.sessionFile,
+        });
+        const sourceBefore = await window.piDeck.chat.getSnapshot({
+          runtimeId: sourceRuntime.runtimeId,
+        });
+        const forkRuntime = await window.piDeck.chat.resumeSession({
+          workspaceId: source.workspaceId,
+          sessionFile: fork.sessionFile,
+        });
+        await window.piDeck.chat.prompt({
+          runtimeId: forkRuntime.runtimeId,
+          text: forkResumeToken,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        const forkAfter = await window.piDeck.chat.getSnapshot({
+          runtimeId: forkRuntime.runtimeId,
+        });
+        const sourceAfter = await window.piDeck.chat.getSnapshot({
+          runtimeId: sourceRuntime.runtimeId,
+        });
+        const text = (messages: typeof sourceAfter.messages) =>
+          messages.map((message) =>
+            typeof message.content === "string"
+              ? message.content
+              : JSON.stringify(message.content),
+          );
+        return {
+          sourceBefore: text(sourceBefore.messages),
+          sourceAfter: text(sourceAfter.messages),
+          forkAfter: text(forkAfter.messages),
+        };
+      },
+      { source, fork, forkResumeToken },
+    );
+    expect(histories.sourceBefore).toContain(sourceToken);
+    expect(histories.sourceAfter).toContain(sourceToken);
+    expect(histories.sourceAfter).not.toContain(forkToken);
+    expect(histories.sourceAfter).not.toContain(forkResumeToken);
+    expect(histories.forkAfter).toEqual(
+      expect.arrayContaining([sourceToken, forkToken, forkResumeToken]),
+    );
   } finally {
     await second.app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("fork reserves its fresh target against default-workspace resume and unwinds late failure", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-fork-race-"));
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  const targetFile = path.join(
+    agentDir,
+    "sessions",
+    "--fake-rpc--",
+    "fork-race-target.jsonl",
+  );
+  const snapshotSignalFile = path.join(root, "fork-snapshot-started");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  const sourceToken = `fork-race-source-${Date.now()}`;
+  const env = fakeRealModeEnv({
+    root,
+    projectCwd,
+    agentDir,
+    userDataDir,
+    fakePiArgs: [
+      "--fork-target",
+      targetFile,
+      "--delay-get-messages-ms",
+      "1500",
+      "--get-messages-signal-file",
+      snapshotSignalFile,
+    ],
+  });
+  const { app, page } = await launchPiDeck(env);
+  try {
+    await expectHealthyPreload(page);
+    await sidebarNewSessionButton(page).click();
+    await page.getByLabel("Prompt text").fill(sourceToken);
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText(`Fake response to: ${sourceToken}`),
+    ).toBeVisible({
+      timeout: 20_000,
+    });
+    fs.rmSync(snapshotSignalFile, { force: true });
+    const source = await page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      return {
+        workspaceId: snapshot.workspaceId!,
+        sessionFile: snapshot.state.sessionFile!,
+      };
+    });
+    await page.evaluate(({ workspaceId, sessionFile }) => {
+      (window as Window & { forkRace?: Promise<unknown> }).forkRace =
+        window.piDeck.chat.forkSession({ workspaceId, sessionFile });
+    }, source);
+    await expect
+      .poll(() =>
+        fs.existsSync(snapshotSignalFile)
+          ? fs.readFileSync(snapshotSignalFile, "utf8").trim()
+          : "",
+      )
+      .toBe(targetFile);
+
+    // No workspaceId deliberately exercises the default-workspace fallback.
+    // The target is already atomically claimed/reserved, so this cannot attach
+    // it or move it before the fork's delayed first snapshot completes.
+    const resumeError = await page.evaluate(async (sessionFile) => {
+      try {
+        await window.piDeck.chat.resumeSession({ sessionFile });
+        return "";
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    }, targetFile);
+    expect(resumeError).toMatch(/already being changed/i);
+    // Change the durable header after the claim but before delayed snapshot
+    // registration. The worker still reports the original ID, so fork must
+    // fail and remove its reservation/claimed workspace metadata.
+    fs.writeFileSync(
+      targetFile,
+      `${JSON.stringify({
+        type: "session",
+        version: 3,
+        id: "fork-race-mutated-target",
+        timestamp: new Date().toISOString(),
+        cwd: projectCwd,
+      })}\n`,
+    );
+    const forkError = await page.evaluate(async () => {
+      try {
+        await (
+          window as Window & {
+            forkRace: Promise<unknown>;
+          }
+        ).forkRace;
+        return "";
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    });
+    expect(forkError).toMatch(/persisted target identity/i);
+    const cleanup = await page.evaluate(async (source) => {
+      const sessions = await window.piDeck.chat.listSessions({
+        workspaceId: source.workspaceId,
+      });
+      const resumed = await window.piDeck.chat.resumeSession({
+        workspaceId: source.workspaceId,
+        sessionFile: source.sessionFile,
+      });
+      return {
+        sessionFiles: sessions.sessions.map((session) => session.sessionFile),
+        resumedFile: resumed.state.sessionFile,
+      };
+    }, source);
+    expect(cleanup.sessionFiles).not.toContain(fs.realpathSync(targetFile));
+    expect(cleanup.resumedFile).toBe(source.sessionFile);
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("fork rejects a pre-existing unassigned target and cleans its worker metadata", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-fork-fault-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  const staleTarget = path.join(
+    agentDir,
+    "sessions",
+    "--fake-rpc--",
+    "preexisting-fork-target.jsonl",
+  );
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(path.dirname(staleTarget), { recursive: true });
+  fs.writeFileSync(
+    staleTarget,
+    `${JSON.stringify({
+      type: "session",
+      version: 3,
+      id: "preexisting-fork-target",
+      timestamp: new Date().toISOString(),
+      cwd: projectCwd,
+    })}\n`,
+  );
+  const env = fakeRealModeEnv({
+    root,
+    projectCwd,
+    agentDir,
+    userDataDir,
+    fakePiArgs: ["--fork-target", staleTarget],
+  });
+  const { app, page } = await launchPiDeck(env);
+  try {
+    await expectHealthyPreload(page);
+    await sidebarNewSessionButton(page).click();
+    await page.getByLabel("Prompt text").fill("faulty fork source");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Fake response to: faulty fork source"),
+    ).toBeVisible({
+      timeout: 20_000,
+    });
+    const result = await page.evaluate(async () => {
+      const source = await window.piDeck.chat.getSnapshot();
+      let error = "";
+      try {
+        await window.piDeck.chat.forkSession({
+          workspaceId: source.workspaceId!,
+          sessionFile: source.state.sessionFile!,
+        });
+      } catch (reason) {
+        error = reason instanceof Error ? reason.message : String(reason);
+      }
+      const sessions = await window.piDeck.chat.listSessions({
+        workspaceId: source.workspaceId!,
+      });
+      const resumed = await window.piDeck.chat.resumeSession({
+        workspaceId: source.workspaceId!,
+        sessionFile: source.state.sessionFile!,
+      });
+      return {
+        error,
+        sourceFile: source.state.sessionFile,
+        sessionFiles: sessions.sessions.map((session) => session.sessionFile),
+        resumedFile: resumed.state.sessionFile,
+      };
+    });
+    expect(result.error).toMatch(/existed before the fork began/i);
+    expect(result.sessionFiles).toContain(result.sourceFile);
+    expect(result.sessionFiles).not.toContain(staleTarget);
+    expect(result.resumedFile).toBe(result.sourceFile);
+  } finally {
+    await app.close().catch(() => undefined);
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

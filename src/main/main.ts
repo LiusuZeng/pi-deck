@@ -10,7 +10,7 @@ import {
   type OpenDialogOptions,
 } from "electron";
 import { randomUUID } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, realpathSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
@@ -4292,6 +4292,13 @@ async function synthesizeTaskSession(
     tasks: readonly PersistedTaskSessionTask[];
   },
 ): Promise<void> {
+  // A fork reserves its source before any asynchronous preflight. Reject here
+  // as well as inside the serialized turn so a completed child can neither
+  // enqueue nor later begin a parent synthesis while Pi reads --fork input.
+  assertChatRuntimeSessionNotMutating(
+    input.parentId,
+    "synthesizing task results into it",
+  );
   if (
     !chatRuntimeIds.has(input.parentId) ||
     !adapter.hasRuntime(input.parentId)
@@ -4304,6 +4311,12 @@ async function synthesizeTaskSession(
     )
     .join("\n");
   const synthesis = async (): Promise<void> => {
+    // A turn can have been queued before the fork reservation. It must check
+    // at dispatch time, not only when it was initially enqueued.
+    assertChatRuntimeSessionNotMutating(
+      input.parentId,
+      "synthesizing task results into it",
+    );
     if (!adapter.hasRuntime(input.parentId)) return;
     const worker = adapter.getWorker(input.parentId);
     const text = `Task-session synthesis for: ${input.originalPrompt}\n\n${report}`;
@@ -5869,16 +5882,28 @@ async function forkChatSession(
     throw new Error("Session fork is only available in real Pi mode.");
   }
 
-  // Reserve synchronously, before authorization/configuration awaits. Normal
-  // parent turns check this same reservation before dispatching to Pi.
+  // Reserve synchronously, before authorization/configuration awaits. Cover
+  // both a renderer spelling and its local canonical target: runtime maps use
+  // the latter, while validation deliberately accepts only a real Pi path.
   const requestedSourceSessionFile = path.resolve(sessionFile);
+  const initialCanonicalSourceSessionFile =
+    canonicalSessionPathSync(sessionFile);
+  const sourceReservationKeys = new Set([
+    requestedSourceSessionFile,
+    initialCanonicalSourceSessionFile,
+  ]);
   if (
-    chatSessionMutationReservations.has(requestedSourceSessionFile) ||
-    chatSessionResumePromises.has(requestedSourceSessionFile)
+    [...sourceReservationKeys].some(
+      (file) =>
+        chatSessionMutationReservations.has(file) ||
+        chatSessionResumePromises.has(file),
+    )
   ) {
     throw new Error("Finish the active or changing session before forking it.");
   }
-  chatSessionMutationReservations.add(requestedSourceSessionFile);
+  for (const file of sourceReservationKeys) {
+    chatSessionMutationReservations.add(file);
+  }
   try {
     const project = await projectForWorkspaceSession(workspaceId, sessionFile);
     const launch = await resolveRealChatLaunchConfig(store, project);
@@ -5899,6 +5924,19 @@ async function forkChatSession(
       );
     }
     const canonicalSourceSessionFile = validation.sessionFile;
+    // A parent runtime is keyed by the validator's canonical path. Add that
+    // key before any more awaits even if the initial spelling traversed an
+    // alias, and retain every key until the native fork worker is done.
+    if (
+      !sourceReservationKeys.has(canonicalSourceSessionFile) &&
+      chatSessionMutationReservations.has(canonicalSourceSessionFile)
+    ) {
+      throw new Error(
+        "Finish the active or changing session before forking it.",
+      );
+    }
+    sourceReservationKeys.add(canonicalSourceSessionFile);
+    chatSessionMutationReservations.add(canonicalSourceSessionFile);
 
     return withChatWorkspaceCreation(workspaceId, () =>
       withChatSessionMutation(
@@ -5965,6 +6003,11 @@ async function forkChatSession(
             );
           }
           sourceSessionId = durableSourceSessionId;
+          // Native Pi chooses the target filename. Record the complete
+          // pre-fork inventory so a faulty worker cannot return an unowned,
+          // pre-existing JSONL as though it had just created it.
+          const preForkSessionFiles =
+            await capturePiSessionFileInventory(sessionDir);
 
           const workerSpec = await serializeChatWorkerCreation(() =>
             createRealForkWorker(
@@ -5978,12 +6021,12 @@ async function forkChatSession(
           );
           const runtimeId = workerSpec.worker.runtimeId;
           let forkSessionFile: string | undefined;
-          // Set only after the generic snapshot completes. Failure cleanup must
-          // never remove an existing session reference merely reported by a
-          // faulty worker before this fork actually persisted one.
+          let forkTargetReserved = false;
+          // Set as soon as this fork atomically claims its new target. Failure
+          // cleanup must remove only that claim, never a path merely reported
+          // by a faulty worker before it passed freshness validation.
           let forkReferencePersisted = false;
           try {
-            registerChatWorker(workerSpec, "real");
             // Read and validate state before the normal snapshot path can
             // register its session lock. A fork worker is untrusted at this
             // boundary: it must name a new valid, currently-unlocked target.
@@ -6018,12 +6061,18 @@ async function forkChatSession(
             if (forkSessionFile === canonicalSourceSessionFile) {
               throw new Error("Pi fork reused the source session file.");
             }
-            const durableTargetSessionId = (
+            if (preForkSessionFiles.has(forkSessionFile)) {
+              throw new Error(
+                "Pi fork returned a target session that existed before the fork began.",
+              );
+            }
+            const durableTargetSummary = (
               await readPiSessionSummary({
                 sessionFile: forkSessionFile,
                 sessionDir,
               })
-            ).summary?.sessionId;
+            ).summary;
+            const durableTargetSessionId = durableTargetSummary?.sessionId;
             if (
               durableTargetSessionId === undefined ||
               durableTargetSessionId.length === 0 ||
@@ -6036,27 +6085,58 @@ async function forkChatSession(
             if (durableTargetSessionId === sourceSessionId) {
               throw new Error("Pi fork reused the source session identity.");
             }
-            // A native fork target is new. Never claim an existing persisted
-            // session from this or another workspace merely because a worker
-            // reports its path with a distinct ID.
-            const existingTargetOwner =
-              await ensureWorkspaceStore().getSessionOwner(forkSessionFile);
-            if (existingTargetOwner !== undefined) {
-              throw new Error(
-                "Pi fork returned an existing workspace session.",
-              );
-            }
             const existingTargetRuntimeId =
               chatSessionFileLocks.get(forkSessionFile);
             if (
-              existingTargetRuntimeId !== undefined &&
-              existingTargetRuntimeId !== runtimeId
+              chatSessionMutationReservations.has(forkSessionFile) ||
+              chatSessionResumePromises.has(forkSessionFile) ||
+              (existingTargetRuntimeId !== undefined &&
+                existingTargetRuntimeId !== runtimeId)
             ) {
-              throw new Error("Pi fork returned an already attached session.");
+              throw new Error("Pi fork returned a target already being used.");
             }
             if (preflightSessionId === sourceSessionId) {
               throw new Error("Pi fork reused the source session identity.");
             }
+
+            // Claim first, then register the worker. This single ownership
+            // seam and reservation prevent default-workspace discovery, import,
+            // or resume from attaching/assigning the just-created target while
+            // its initial snapshot is still asynchronous.
+            chatSessionMutationReservations.add(forkSessionFile);
+            forkTargetReserved = true;
+            await ensureWorkspaceStore().claimUnassignedSessionRefFromSnapshot(
+              {
+                workspaceId,
+                sessionFile: forkSessionFile,
+                sessionId: durableTargetSessionId,
+                ...(durableTargetSummary?.cwd
+                  ? { cwd: durableTargetSummary.cwd }
+                  : typeof forkState.cwd === "string"
+                    ? { cwd: forkState.cwd }
+                    : {}),
+                ...(durableTargetSummary?.title
+                  ? { title: durableTargetSummary.title }
+                  : {}),
+                ...(durableTargetSummary?.updatedAtMs !== undefined
+                  ? { updatedAtMs: durableTargetSummary.updatedAtMs }
+                  : {}),
+                ...(durableTargetSummary?.completedAtMs !== undefined
+                  ? { completedAtMs: durableTargetSummary.completedAtMs }
+                  : {}),
+                ...(durableTargetSummary?.messageCount !== undefined
+                  ? { messageCount: durableTargetSummary.messageCount }
+                  : {}),
+                ...(durableTargetSummary?.preview
+                  ? { preview: durableTargetSummary.preview }
+                  : {}),
+              },
+              { requireUnassigned: true },
+            );
+            forkReferencePersisted = true;
+            // Ownership is now durable and the target reservation is held;
+            // only now may this worker enter runtime registration maps.
+            registerChatWorker(workerSpec, "real");
 
             const snapshot = await getChatSnapshotForRuntime(
               adapter,
@@ -6076,14 +6156,26 @@ async function forkChatSession(
                       "Pi fork changed its target identity while starting.",
                     );
                   }
+                  const currentTarget = await readPiSessionSummary({
+                    sessionFile,
+                    sessionDir,
+                  });
                   if (
-                    (await ensureWorkspaceStore().getSessionOwner(
-                      sessionFile,
-                    )) !== undefined
+                    currentTarget.summary?.sessionId !== durableTargetSessionId
                   ) {
                     throw new Error(
-                      "Pi fork returned an existing workspace session.",
+                      "Pi fork changed its persisted target identity while starting.",
                     );
+                  }
+                  const owner =
+                    await ensureWorkspaceStore().getSessionOwner(sessionFile);
+                  if (owner?.workspaceId !== workspaceId) {
+                    throw new Error(
+                      "Pi fork target ownership changed while starting.",
+                    );
+                  }
+                  if (!chatSessionMutationReservations.has(sessionFile)) {
+                    throw new Error("Pi fork target reservation was lost.");
                   }
                 },
                 onSessionPersisted: (sessionFile) => {
@@ -6149,12 +6241,22 @@ async function forkChatSession(
             // an unassigned Pi file and no source identity is touched.
             const persistedForkFile =
               forkSessionFile ?? chatRuntimeSessionFiles.get(runtimeId);
-            await closeAttachedChatRuntime(adapter, runtimeId).catch(
-              (cleanupError) =>
-                diagnosticsService.recordError(
-                  `Failed to clean up fork worker ${runtimeId}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
-                ),
-            );
+            try {
+              await closeAttachedChatRuntime(adapter, runtimeId);
+            } catch (cleanupError) {
+              diagnosticsService.recordError(
+                `Failed to clean up fork worker ${runtimeId}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+              );
+            } finally {
+              // SinglePiAdapter releases its worker/capacity entry even when
+              // shutdown reports an error. Fork failure cannot retain stale
+              // runtime maps or a lock that would hide the source/target.
+              if (chatRuntimeIds.has(runtimeId)) {
+                forgetChatRuntime(runtimeId, {
+                  shutdownConfirmed: !adapter.hasRuntime(runtimeId),
+                });
+              }
+            }
             if (
               forkReferencePersisted &&
               persistedForkFile !== undefined &&
@@ -6178,17 +6280,22 @@ async function forkChatSession(
               }
             }
             throw error;
+          } finally {
+            if (forkTargetReserved && forkSessionFile !== undefined) {
+              chatSessionMutationReservations.delete(forkSessionFile);
+            }
           }
         },
         {
           allowAttached: true,
-          reservationAlreadyHeld:
-            canonicalSourceSessionFile === requestedSourceSessionFile,
+          reservationAlreadyHeld: true,
         },
       ),
     );
   } finally {
-    chatSessionMutationReservations.delete(requestedSourceSessionFile);
+    for (const file of sourceReservationKeys) {
+      chatSessionMutationReservations.delete(file);
+    }
   }
 }
 
@@ -6773,6 +6880,46 @@ async function safeRealpath(filePath: string): Promise<string | undefined> {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Fork source reservations must cover an attached runtime before any await.
+ * `realpathSync` is limited to this local, already user-selected session path;
+ * invalid paths retain their resolved key and are rejected by normal validation.
+ */
+function canonicalSessionPathSync(filePath: string): string {
+  const resolved = path.resolve(filePath);
+  try {
+    return realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+/** Capture every existing JSONL path before native Pi creates a fork target. */
+async function capturePiSessionFileInventory(
+  sessionDir: string,
+): Promise<Set<string>> {
+  const root = await fs.realpath(sessionDir);
+  const files = new Set<string>();
+  const visit = async (directory: string): Promise<void> => {
+    const entries = await fs.readdir(directory, { withFileTypes: true });
+    await Promise.all(
+      entries.map(async (entry) => {
+        const candidate = path.join(directory, entry.name);
+        if (entry.isDirectory()) {
+          await visit(candidate);
+        } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+          // A regular path can disappear while scanning; it cannot be a
+          // pre-existing target unless it remains canonical at preflight.
+          const canonical = await safeRealpath(candidate);
+          if (canonical !== undefined) files.add(canonical);
+        }
+      }),
+    );
+  };
+  await visit(root);
+  return files;
 }
 
 /** Canonicalize a Pi destination even while Pi has not created its JSONL yet. */
