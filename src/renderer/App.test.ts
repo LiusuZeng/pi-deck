@@ -1780,16 +1780,33 @@ describe("renderer resume recovery", () => {
     });
   });
 
-  it("does not allow renaming while a saved session is reconnecting", () => {
+  it("allows renaming a working saved session without permitting membership changes", () => {
+    const workingSavedSession = {
+      ...baseSession(),
+      sessionFile: "/sessions/saved.jsonl",
+      status: "working",
+      baseState: "working",
+      runtimeBacked: true,
+      resumeBacked: false,
+    } as any;
+
     expect(
-      __rendererTestHooks.canRenameSavedSession(
-        {
-          ...baseSession(),
-          sessionFile: "/sessions/saved.jsonl",
-          status: "reconnecting",
-          isResuming: true,
-        } as any,
-        true,
+      __rendererTestHooks.canRenameSavedSession(workingSavedSession, true),
+    ).toBe(true);
+    expect(
+      __rendererTestHooks.canManageWorkspaceMembership(workingSavedSession),
+    ).toBe(false);
+    const reconnectingSavedSession = {
+      ...workingSavedSession,
+      status: "reconnecting",
+      isResuming: true,
+    };
+    expect(
+      __rendererTestHooks.canRenameSavedSession(reconnectingSavedSession, true),
+    ).toBe(true);
+    expect(
+      __rendererTestHooks.canManageWorkspaceMembership(
+        reconnectingSavedSession,
       ),
     ).toBe(false);
   });
