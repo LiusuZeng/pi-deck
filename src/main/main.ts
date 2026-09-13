@@ -232,6 +232,10 @@ import {
   type TaskSessionLaunch,
   type TaskSessionWorkerSettings,
 } from "./multitask/taskSessionOrchestrator.js";
+import {
+  boundedBestEffort,
+  collectTaskSessionTerminalData,
+} from "./multitask/taskSessionTerminalData.js";
 import { TaskSessionMainStateStore } from "./multitask/taskSessionMainStateStore.js";
 import {
   boundedParentContext,
@@ -4022,11 +4026,11 @@ async function createTaskSessionWorker(
         // restart recovery can prove that no private worker is resumed.
         return;
       }
-      void Promise.all([
-        worker.getMessages(),
-        worker.getSessionStats().catch(() => undefined),
-      ])
-        .then(([messages, sessionStats]) => {
+      void collectTaskSessionTerminalData({
+        getMessages: () => worker.getMessages(),
+        getSessionStats: () => worker.getSessionStats(),
+      })
+        .then(({ messages, sessionStats }) => {
           const totalTokens = runtimeTotalTokensFromSessionStats(sessionStats);
           // Only Pi's explicit token counters are authoritative; context-window
           // metadata or absent stats remains pending, while an explicit zero is zero.
@@ -4638,42 +4642,6 @@ async function resolveCachedLoginShellEnvCapture(
   });
   loginShellEnvCaptureCache = { key, result };
   return result;
-}
-
-function withTimeoutOrUndefined<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-): Promise<T | undefined> {
-  const safeTimeoutMs =
-    Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 1500;
-  return new Promise((resolve) => {
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      resolve(undefined);
-    }, safeTimeoutMs);
-    promise.then(
-      (value) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        clearTimeout(timer);
-        resolve(value);
-      },
-      () => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        clearTimeout(timer);
-        resolve(undefined);
-      },
-    );
-  });
 }
 
 function applyRealBackendEnvOverrides(settings: AppSettings): AppPiSettings {
@@ -6028,7 +5996,7 @@ async function getChatRuntimeStatus(
   // transfer get_messages/history across RPC or Electron IPC.
   const [state, sessionStats] = await Promise.all([
     adapter.getRuntimeStatus(runtimeId),
-    withTimeoutOrUndefined(
+    boundedBestEffort(
       adapter.getSessionStats(runtimeId),
       Number(process.env.PI_DECK_SESSION_STATS_TIMEOUT_MS ?? 1500),
     ),

@@ -557,6 +557,7 @@ export class TaskSessionOrchestrator<
               afterReady(() => {
                 if (
                   entry.attempt !== attempt ||
+                  isTerminal(entry) ||
                   !isTaskSessionTelemetryUpdate(update)
                 )
                   return;

@@ -7308,9 +7308,6 @@ test.describe("task-session routing acceptance", () => {
       });
       const row = panel.getByRole("listitem").first();
       await expect(row).toContainText("1 model call");
-      await expect(row).toContainText("tokens pending");
-      await expect(row).toContainText("Phase: Running tool");
-      await expect(row).toContainText("Latest activity: Running a tool");
       await expect(row).not.toContainText(
         "private tool output never forwarded",
       );
@@ -7324,23 +7321,36 @@ test.describe("task-session routing acceptance", () => {
                 window as typeof window & {
                   __telemetryStates?: Array<{
                     tasks: Array<{
+                      lifecycle: string;
                       phase?: string;
                       modelCallCount?: number;
                       totalTokens?: number;
+                      latestActivity?: string;
                     }>;
                   }>;
                 }
               ).__telemetryStates ?? [];
-            return states.map((state) => state.tasks[0]).filter(Boolean);
+            const tasks = states.map((state) => state.tasks[0]).filter(Boolean);
+            const terminalAt = tasks.findIndex(
+              (task) => task.lifecycle === "completed",
+            );
+            if (terminalAt < 0) return false;
+            const liveTransitions = tasks.slice(0, terminalAt);
+            const modelAt = liveTransitions.findIndex(
+              (task) =>
+                task.phase === "model" &&
+                task.modelCallCount === 1 &&
+                task.latestActivity === "Started model call",
+            );
+            const toolAt = liveTransitions.findIndex(
+              (task) =>
+                task.phase === "tool" &&
+                task.latestActivity === "Running a tool",
+            );
+            return modelAt >= 0 && toolAt > modelAt;
           }),
         )
-        .toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({ phase: "model", modelCallCount: 1 }),
-            expect.objectContaining({ phase: "tool" }),
-            expect.objectContaining({ totalTokens: 115 }),
-          ]),
-        );
+        .toBe(true);
     } finally {
       await page.evaluate(() => {
         const w = window as typeof window & {

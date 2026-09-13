@@ -529,6 +529,10 @@ describe("TaskSessionOrchestrator", () => {
       latestActivity: "Running a tool",
     });
     expect(terminal?.totalTokens).toBe(0);
+    // A delayed stats continuation belongs to a closed attempt and must not
+    // mutate its terminal accounting.
+    launches[0].callbacks.telemetry({ reportedTotalTokens: 99 });
+    expect(orchestrator.state("parent").tasks[0]?.totalTokens).toBe(0);
     // Terminal safe telemetry survives a relaunch, while nonterminal private
     // counters are deliberately not reconstructed as live state.
     const saved = orchestrator.exportState("parent");
