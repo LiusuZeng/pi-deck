@@ -68,6 +68,7 @@ import {
 } from "./sessionState.js";
 import {
   classifyOpenAiCodexAuthFailure,
+  isSuccessfulOpenAiCodexTerminalCompletion,
   isSuccessfulTerminalAssistantCompletion,
   isSuccessfulTerminalStatus,
   type FailureKind,
@@ -1479,6 +1480,10 @@ export function App(): ReactElement {
   const [uiMessage, setUiMessage] = useState(
     "Starting Pi Deck and resolving the active backend session.",
   );
+  const [openAiCodexResumeInFlight, setOpenAiCodexResumeInFlight] = useState<
+    string | undefined
+  >();
+  const openAiCodexResumeInFlightRef = useRef(false);
   // closeSession intentionally terminates its child process. Ignore that
   // expected worker_exit while converting the row to a resumable saved session.
   const intentionallyClosingRuntimeIds = useRef(new Set<string>());
@@ -4250,43 +4255,46 @@ export function App(): ReactElement {
   }
 
   async function handleResumeAfterOpenAiCodexRepair(): Promise<void> {
-    if (selectedSession.sessionFile === undefined) {
+    // The ref closes the gap before React can render the disabled control.
+    if (openAiCodexResumeInFlightRef.current) return;
+    const session = selectedSession;
+    if (session.sessionFile === undefined) {
       setUiMessage(
         "This session does not have a saved Pi session file to reopen.",
       );
       return;
     }
+    openAiCodexResumeInFlightRef.current = true;
+    setOpenAiCodexResumeInFlight(session.id);
     const generation = beginNavigation();
     const origin = workOriginForPrimaryView(
       primaryView,
       currentWorkspaceRef.current.id,
     );
     try {
-      if (selectedSession.runtimeBacked) {
-        intentionallyClosingRuntimeIds.current.add(selectedSession.id);
-        await window.piDeck.chat.closeSession({
-          runtimeId: selectedSession.id,
-        });
+      if (session.runtimeBacked) {
+        intentionallyClosingRuntimeIds.current.add(session.id);
+        await window.piDeck.chat.closeSession({ runtimeId: session.id });
         // Main has now released the runtime lock. Commit the local detached
         // state before the next async boundary so a failed spawn remains
         // recoverable rather than leaving a stale runtime id in the row.
         setSessions((items) =>
-          items.map((session) =>
-            session.id === selectedSession.id
+          items.map((item) =>
+            item.id === session.id
               ? {
-                  ...session,
+                  ...item,
                   runtimeBacked: false,
                   resumeBacked: true,
                   status:
-                    session.failureKind === "auth-required" ? "error" : "idle",
+                    item.failureKind === "auth-required" ? "error" : "idle",
                   baseState:
-                    session.failureKind === "auth-required" ? "error" : "idle",
+                    item.failureKind === "auth-required" ? "error" : "idle",
                   subtitle:
-                    session.failureKind === "auth-required"
+                    item.failureKind === "auth-required"
                       ? "Authentication verification pending · reopen after Pi login"
                       : "Saved · ready to resume after Pi login",
                 }
-              : session,
+              : item,
           ),
         );
       }
@@ -4294,15 +4302,18 @@ export function App(): ReactElement {
       // never resends retryPrompt, so partially completed tool work is not
       // replayed automatically after credential repair.
       await resumeSession(
-        { ...selectedSession, runtimeBacked: false, resumeBacked: true },
+        { ...session, runtimeBacked: false, resumeBacked: true },
         generation,
         origin,
       );
     } catch (error) {
-      intentionallyClosingRuntimeIds.current.delete(selectedSession.id);
+      intentionallyClosingRuntimeIds.current.delete(session.id);
       setUiMessage(
         `Could not reopen this Pi session: ${error instanceof Error ? error.message : String(error)}`,
       );
+    } finally {
+      openAiCodexResumeInFlightRef.current = false;
+      setOpenAiCodexResumeInFlight(undefined);
     }
   }
 
@@ -6473,6 +6484,9 @@ export function App(): ReactElement {
                     onResumeAfterOpenAiCodexRepair={() =>
                       void handleResumeAfterOpenAiCodexRepair()
                     }
+                    openAiCodexResumeInFlight={
+                      openAiCodexResumeInFlight === selectedSession.id
+                    }
                     onRespondToExtensionUi={onRespondToChatTimelineExtensionUi}
                     onRetrySession={onRetryChatTimelineSession}
                     onCopyDiagnostics={onCopyChatTimelineDiagnostics}
@@ -7653,7 +7667,7 @@ function authRecoveryFromSnapshotMessages(messages: readonly ChatMessage[]): {
       // an unresolved earlier auth failure remains visible until success.
       continue;
     }
-    if (isSuccessfulTerminalAssistantCompletion(record)) {
+    if (isSuccessfulOpenAiCodexTerminalCompletion(record)) {
       return { authenticated: true };
     }
   }
@@ -8322,6 +8336,8 @@ function reduceRuntimeEventUnprioritized(
         (hasRuntimeEventError(event) || session.providerErrorObserved === true);
       const authenticatedCompletion =
         !endedWithError && isAuthenticatedModelCompletion(event);
+      const successfulCompletion =
+        !endedWithError && isSuccessfulModelCompletion(event);
       const authStillPending =
         session.failureKind === "auth-required" && !authenticatedCompletion;
       // A dialog is still actionable until Pi acknowledges its response or it
@@ -8424,7 +8440,9 @@ function reduceRuntimeEventUnprioritized(
                 authVerified: true,
                 lastError: undefined,
               }
-            : {}),
+            : successfulCompletion && !authStillPending
+              ? { lastError: undefined }
+              : {}),
         overlays: {
           ...session.overlays,
           streaming: false,
@@ -11651,6 +11669,7 @@ const ChatTimeline = memo(function ChatTimeline(props: {
   onRecoverSession(): void;
   onRepairOpenAiCodexAuth(): void;
   onResumeAfterOpenAiCodexRepair(): void;
+  openAiCodexResumeInFlight: boolean;
   onRespondToExtensionUi(
     requestId: string,
     response: { confirmed: boolean } | { value: string } | { cancelled: true },
@@ -12075,6 +12094,7 @@ const ChatTimeline = memo(function ChatTimeline(props: {
                     <IconButton
                       icon={RotateCcw}
                       label="Check again / Resume"
+                      loading={props.openAiCodexResumeInFlight}
                       onClick={props.onResumeAfterOpenAiCodexRepair}
                     />
                   ) : null}
@@ -13825,10 +13845,16 @@ function isAuthenticatedModelCompletion(event: ChatRuntimeEvent): boolean {
   if (status === "aborted" || status === "error" || status === "failed") {
     return false;
   }
+  return isSuccessfulOpenAiCodexTerminalCompletion(
+    getFinalAssistantMessage(event),
+  );
+}
+
+function isSuccessfulModelCompletion(event: ChatRuntimeEvent): boolean {
   const assistant = getFinalAssistantMessage(event);
   return assistant !== undefined
     ? isSuccessfulTerminalAssistantCompletion(assistant)
-    : isSuccessfulTerminalStatus(status);
+    : isSuccessfulTerminalStatus(getString(event, "status"));
 }
 
 function hasRuntimeEventError(event: ChatRuntimeEvent): boolean {

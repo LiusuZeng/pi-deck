@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyOpenAiCodexAuthFailure,
+  isSuccessfulOpenAiCodexTerminalCompletion,
   isSuccessfulTerminalAssistantCompletion,
-  isSuccessfulTerminalStatus,
 } from "./openaiCodexAuth.js";
 
 describe("isSuccessfulTerminalAssistantCompletion", () => {
@@ -28,11 +28,27 @@ describe("isSuccessfulTerminalAssistantCompletion", () => {
     },
   );
 
-  it("accepts only explicit legacy terminal statuses", () => {
-    expect(isSuccessfulTerminalStatus("completed")).toBe(true);
-    expect(isSuccessfulTerminalStatus("success")).toBe(true);
-    expect(isSuccessfulTerminalStatus(undefined)).toBe(false);
-    expect(isSuccessfulTerminalStatus("working")).toBe(false);
+  it("requires an explicit OpenAI Codex provider to verify repaired credentials", () => {
+    expect(
+      isSuccessfulOpenAiCodexTerminalCompletion({
+        role: "assistant",
+        provider: "openai-codex",
+        stopReason: "stop",
+      }),
+    ).toBe(true);
+    expect(
+      isSuccessfulOpenAiCodexTerminalCompletion({
+        role: "assistant",
+        provider: "anthropic",
+        stopReason: "stop",
+      }),
+    ).toBe(false);
+    expect(
+      isSuccessfulOpenAiCodexTerminalCompletion({
+        role: "assistant",
+        stopReason: "stop",
+      }),
+    ).toBe(false);
   });
 });
 

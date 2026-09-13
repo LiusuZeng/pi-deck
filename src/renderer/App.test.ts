@@ -1692,6 +1692,21 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
       messages: [productionAssistantMessage("stop")],
       willRetry: false,
     } as any);
+    expect(session).toMatchObject({
+      failureKind: "auth-required",
+      lastError: "Provided authentication token is expired.",
+    });
+
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "agent_start",
+    } as any);
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "agent_end",
+      messages: [
+        { ...productionAssistantMessage("stop"), provider: "openai-codex" },
+      ],
+      willRetry: false,
+    } as any);
     expect(session.failureKind).toBeUndefined();
     expect(session.lastError).toBeUndefined();
     expect(runtimeErrorDiagnostics(session)).toMatchObject([
@@ -3970,7 +3985,12 @@ describe("renderer message_update reduction", () => {
       messages: [
         expired,
         ...incompleteTurns,
-        { role: "assistant", stopReason: "stop", content: "Now authenticated" },
+        {
+          role: "assistant",
+          provider: "openai-codex",
+          stopReason: "stop",
+          content: "Now authenticated",
+        },
       ],
     } as any);
     expect(verified.failureKind).toBeUndefined();

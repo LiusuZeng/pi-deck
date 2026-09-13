@@ -428,6 +428,7 @@ describe("reduceSessionRuntimeEvent", () => {
       messages: [
         {
           role: "assistant",
+          provider: "openai-codex",
           stopReason: "stop",
           content: "Verified response",
         },

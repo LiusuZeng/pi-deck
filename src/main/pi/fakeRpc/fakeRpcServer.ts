@@ -1107,6 +1107,10 @@ class FakeRpcServer {
             id: assistantId,
             role: "assistant",
             content: accumulated,
+            // Provider attribution is required to verify an OpenAI Codex
+            // credential repair; another provider's success must not clear it.
+            provider: this.currentProvider,
+            model: this.currentModel,
             // Persist Pi's authoritative terminal result so snapshot recovery
             // cannot mistake this completed turn for a streamed partial.
             stopReason: "stop",

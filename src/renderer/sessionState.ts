@@ -1,7 +1,6 @@
 import {
   classifyOpenAiCodexAuthFailure,
-  isSuccessfulTerminalAssistantCompletion,
-  isSuccessfulTerminalStatus,
+  isSuccessfulOpenAiCodexTerminalCompletion,
   type FailureKind,
 } from "./openaiCodexAuth.js";
 
@@ -639,10 +638,9 @@ function isAuthenticatedModelCompletion(event: RuntimeEventLike): boolean {
   if (status === "aborted" || status === "error" || status === "failed") {
     return false;
   }
-  const assistant = getFinalAssistantMessage(event);
-  return assistant !== undefined
-    ? isSuccessfulTerminalAssistantCompletion(assistant)
-    : isSuccessfulTerminalStatus(status);
+  return isSuccessfulOpenAiCodexTerminalCompletion(
+    getFinalAssistantMessage(event),
+  );
 }
 
 /** Keeps lightweight reducer error classification aligned with App's Pi events. */

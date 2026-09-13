@@ -14,7 +14,21 @@ export function isSuccessfulTerminalAssistantCompletion(
   return stopReason === "stop" || stopReason === "length";
 }
 
-/** Legacy terminal events without a final assistant payload carry this proof. */
+/**
+ * Only a terminal assistant turn attributed to OpenAI Codex can prove that
+ * the Pi-managed Codex login was repaired. A terminal status, another
+ * provider's response, or a provider-less payload must leave recovery visible.
+ */
+export function isSuccessfulOpenAiCodexTerminalCompletion(
+  message: Record<string, unknown> | undefined,
+): boolean {
+  return (
+    message?.provider === "openai-codex" &&
+    isSuccessfulTerminalAssistantCompletion(message)
+  );
+}
+
+/** Legacy terminal events use this generic completion proof only. */
 export function isSuccessfulTerminalStatus(status: unknown): boolean {
   return status === "completed" || status === "success";
 }
