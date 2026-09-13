@@ -9823,11 +9823,7 @@ function canRenameSavedSession(
   session: SessionViewModel | undefined,
   realMode: boolean,
 ): session is SessionViewModel & { sessionFile: string } {
-  return (
-    session !== undefined &&
-    isSessionDeletable(session, realMode) &&
-    !isSessionBusy(session)
-  );
+  return session !== undefined && isSessionDeletable(session, realMode);
 }
 
 function canManageWorkspaceMembership(

@@ -3358,6 +3358,130 @@ test("working sessions expose steer, follow-up, extension, and abort interventio
   }
 });
 
+test("renaming an active session survives natural completion and app relaunch", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-active-rename-relaunch-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+  // The basic fake response has three chunks plus its terminal event. This
+  // leaves a deterministic sixteen-second active window for the rename assertions.
+  const env = fakeRealModeEnv({
+    root,
+    projectCwd,
+    agentDir,
+    fakePiArgs: ["--stream-delay-ms", "4000"],
+  });
+  let firstLaunch: { app: ElectronApplication; page: Page } | undefined;
+  let secondLaunch: { app: ElectronApplication; page: Page } | undefined;
+
+  try {
+    firstLaunch = await launchPiDeck(env);
+    const { page } = firstLaunch;
+    await expectHealthyPreload(page);
+    await enterSessionDetail(page);
+    await page.getByLabel("Prompt text").fill("active rename fixture");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(page.getByRole("button", { name: "Abort" })).toBeVisible();
+
+    const activeRuntime = await page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      const status = await window.piDeck.chat.getRuntimeStatus({
+        runtimeId: snapshot.runtimeId,
+      });
+      return {
+        runtimeId: snapshot.runtimeId,
+        isAgentActive: status.state.isAgentActive,
+      };
+    });
+    expect(activeRuntime.isAgentActive).toBe(true);
+
+    const sessionActions = page.getByRole("button", {
+      name: "Session actions for active rename fixture",
+    });
+    await sessionActions.click();
+    const sessionActionsMenu = page.getByRole("menu", {
+      name: "Session actions for active rename fixture",
+    });
+    await expect(
+      sessionActionsMenu.getByRole("menuitem", { name: "Rename session…" }),
+    ).toBeEnabled();
+    for (const name of [
+      "Move to workspace…",
+      "Archive session",
+      "Remove from workspace",
+    ]) {
+      await expect(
+        sessionActionsMenu.getByRole("menuitem", { name }),
+      ).toBeDisabled();
+    }
+    await sessionActionsMenu
+      .getByRole("menuitem", { name: "Rename session…" })
+      .click();
+    const renamedTitle = "Renamed active session";
+    const renameDialog = page.getByTestId("session-rename-dialog");
+    await renameDialog.getByLabel("Session title").fill(renamedTitle);
+    await renameDialog.getByRole("button", { name: "Save name" }).click();
+    await expect(
+      page.getByRole("heading", { name: renamedTitle, exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: `Session: ${renamedTitle}` }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", {
+        name: `Session actions for ${renamedTitle}`,
+      }),
+    ).toBeVisible();
+    expect(
+      await page.evaluate(async () => {
+        const snapshot = await window.piDeck.chat.getSnapshot();
+        const status = await window.piDeck.chat.getRuntimeStatus({
+          runtimeId: snapshot.runtimeId,
+        });
+        return {
+          runtimeId: snapshot.runtimeId,
+          isAgentActive: status.state.isAgentActive,
+        };
+      }),
+    ).toEqual(activeRuntime);
+
+    await expect(
+      page.getByText(/Fake response to: active rename fixture/),
+    ).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(async (runtimeId) => {
+          const status = await window.piDeck.chat.getRuntimeStatus({
+            runtimeId,
+          });
+          return status.state.isAgentActive;
+        }, activeRuntime.runtimeId),
+      )
+      .toBe(false);
+    await expect(page.getByRole("button", { name: "Abort" })).toHaveCount(0);
+    await expect(
+      page.getByRole("heading", { name: renamedTitle, exact: true }),
+    ).toBeVisible();
+
+    await firstLaunch.app.close();
+    firstLaunch = undefined;
+    secondLaunch = await launchPiDeck(env);
+    await expectHealthyPreload(secondLaunch.page);
+    await expect(
+      secondLaunch.page.getByRole("button", {
+        name: `Session: ${renamedTitle}`,
+      }),
+    ).toBeVisible();
+  } finally {
+    await secondLaunch?.app.close().catch(() => undefined);
+    await firstLaunch?.app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("extension UI confirm request completes through renderer, IPC, and fake Pi", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-e2e-extension-ui-"),
