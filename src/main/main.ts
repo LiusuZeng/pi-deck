@@ -304,6 +304,15 @@ import {
   resolveChatCreationWorkspaceId,
   resolveChatResumeWorkspace,
 } from "./chatWorkspaceOwnership.js";
+import {
+  authorizeRendererChatProject as authorizeChatSessionProject,
+  projectForWorkspaceSession as projectForWorkspaceChatSession,
+  requireOpenChatWorkspace,
+  resolveChatCreationContext as resolveChatSessionCreationContext,
+  resolveWorkspaceProject as resolveChatWorkspaceProject,
+  resolveWorkspaceRepositoryProject as resolveChatWorkspaceRepositoryProject,
+  type ChatSessionAccessPorts,
+} from "./chatSessionAccess.js";
 
 export { resolveChatCreationWorkspaceId } from "./chatWorkspaceOwnership.js";
 
@@ -2846,80 +2855,52 @@ async function projectWorkspaceListResult(): Promise<WorkspaceListResult> {
   };
 }
 
+function chatSessionAccessPorts(): ChatSessionAccessPorts {
+  return {
+    workspace: ensureWorkspaceStore(),
+    project: ensureProjectStore(),
+    canonicalPath: async (filePath) =>
+      (await safeRealpath(filePath)) ?? path.resolve(filePath),
+    resolveManagedProject: resolveManagedRuntimeProject,
+    isRealBackend: () => resolveChatBackendMode() === "real",
+  };
+}
+
 async function requireOpenWorkspace(
   workspaceId: string,
 ): Promise<WorkspaceRecord> {
-  const workspace = await ensureWorkspaceStore().getWorkspace(workspaceId);
-  if (workspace === undefined) {
-    throw new Error(`Unknown workspace: ${workspaceId}`);
-  }
-  if (workspace.archivedAtMs !== undefined) {
-    throw new Error(`Workspace is archived: ${workspaceId}`);
-  }
-  return workspace;
+  return requireOpenChatWorkspace(chatSessionAccessPorts(), workspaceId);
 }
 
 async function resolveChatCreationContext(
   requestedWorkspaceId: string | undefined,
   requestedProjectId: string | undefined,
 ): Promise<{ workspaceId: string; project?: ProjectRef }> {
-  if (requestedWorkspaceId !== undefined) {
-    const workspaceId = resolveChatCreationWorkspaceId(
-      requestedWorkspaceId,
-      undefined,
-    );
-    return {
-      workspaceId,
-      project: await resolveWorkspaceProject(workspaceId, requestedProjectId),
-    };
-  }
-
-  // Compatibility callers without a workspace must use the persisted default,
-  // not whichever named workspace happens to be active. Do not activate it:
-  // fallback ownership must not change migration/relaunch selection state.
-  const requestedProject =
-    await authorizeRendererChatProject(requestedProjectId);
-  const defaultWorkspace =
-    await ensureWorkspaceStore().ensureDefaultWorkspace();
-  const workspaceId = resolveChatCreationWorkspaceId(
-    undefined,
-    defaultWorkspace.id,
+  return resolveChatSessionCreationContext(
+    chatSessionAccessPorts(),
+    requestedWorkspaceId,
+    requestedProjectId,
   );
-  return {
-    workspaceId,
-    ...(requestedProject !== undefined
-      ? { project: requestedProject }
-      : resolveChatBackendMode() === "real"
-        ? { project: await resolveWorkspaceProject(workspaceId) }
-        : {}),
-  };
 }
 
 async function resolveWorkspaceProject(
   workspaceId: string,
   requestedProjectId?: string,
 ): Promise<ProjectRef> {
-  const workspace = await requireOpenWorkspace(workspaceId);
-  const projectId = requestedProjectId ?? workspace.defaultProjectId;
-  if (projectId === undefined) {
-    return resolveManagedRuntimeProject();
-  }
-  return ensureProjectStore().resolveAuthorizedProject(projectId);
+  return resolveChatWorkspaceProject(
+    chatSessionAccessPorts(),
+    workspaceId,
+    requestedProjectId,
+  );
 }
 
 async function resolveWorkspaceRepositoryProject(
   workspaceId: string,
 ): Promise<ProjectRef> {
-  const workspace = await requireOpenWorkspace(workspaceId);
-  if (workspace.defaultProjectId !== undefined) {
-    const defaultProject = await ensureProjectStore()
-      .resolveAuthorizedProject(workspace.defaultProjectId)
-      .catch(() => undefined);
-    if (defaultProject !== undefined) {
-      return defaultProject;
-    }
-  }
-  return resolveManagedRuntimeProject();
+  return resolveChatWorkspaceRepositoryProject(
+    chatSessionAccessPorts(),
+    workspaceId,
+  );
 }
 
 async function resolveManagedRuntimeProject(): Promise<ManagedRuntimeProjectRef> {
@@ -3091,10 +3072,7 @@ async function listUnassignedWorkspaceSessions(
 async function authorizeRendererChatProject(
   projectId?: string,
 ): Promise<ProjectRef | undefined> {
-  if (projectId === undefined || resolveChatBackendMode() !== "real") {
-    return undefined;
-  }
-  return ensureProjectStore().resolveAuthorizedProject(projectId);
+  return authorizeChatSessionProject(chatSessionAccessPorts(), projectId);
 }
 
 /**
@@ -6233,46 +6211,11 @@ async function projectForWorkspaceSession(
   workspaceId: string,
   sessionFile: string,
 ): Promise<ProjectRef> {
-  const workspace = await requireOpenWorkspace(workspaceId);
-  const canonical =
-    (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
-  const ref = (await ensureWorkspaceStore().getSessionRefs(workspace.id)).find(
-    (item) => item.sessionFile === canonical,
+  return projectForWorkspaceChatSession(
+    chatSessionAccessPorts(),
+    workspaceId,
+    sessionFile,
   );
-  if (ref === undefined) {
-    throw new Error("Session does not belong to this workspace.");
-  }
-  const managedProject = await resolveManagedRuntimeProject();
-  // A workspace without a default project is intentionally directory
-  // independent. Imported/legacy sessions can retain an old cwd in their Pi
-  // header even after their former project record is gone; requiring the user
-  // to reopen that folder would make the folderless workspace unusable. Run
-  // those sessions in Pi Deck's managed context instead. Directory-backed
-  // workspaces continue through the registered-project authorization path
-  // below.
-  if (workspace.defaultProjectId === undefined) {
-    return managedProject;
-  }
-  const refCwd = ref.cwd
-    ? ((await safeRealpath(ref.cwd)) ?? path.resolve(ref.cwd))
-    : undefined;
-  if (refCwd === managedProject.canonicalPath) {
-    return managedProject;
-  }
-  const projects = await ensureProjectStore().list();
-  const project = refCwd
-    ? projects.projects.find((candidate) => candidate.canonicalPath === refCwd)
-    : workspace.defaultProjectId
-      ? projects.projects.find(
-          (candidate) => candidate.id === workspace.defaultProjectId,
-        )
-      : undefined;
-  if (project === undefined) {
-    throw new Error(
-      "The session working folder is not registered. Reopen that folder before resuming this session.",
-    );
-  }
-  return ensureProjectStore().resolveAuthorizedProject(project.id);
 }
 
 async function mergeProjectSessionRefs(
