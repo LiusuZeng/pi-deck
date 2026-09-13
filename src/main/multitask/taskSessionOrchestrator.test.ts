@@ -50,13 +50,14 @@ function setup(capacity = 20) {
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 function persistedState(
-  lifecycle: TaskSessionLifecycle,
+  lifecycle: TaskSessionLifecycle | readonly TaskSessionLifecycle[],
   options: { synthesisAttempts?: number; synthesisReported?: boolean } = {},
 ): PersistedTaskSessionState {
+  const lifecycles = typeof lifecycle === "string" ? [lifecycle] : lifecycle;
   return {
     version: 1,
     mode: "parallel",
-    nextTaskNumber: 2,
+    nextTaskNumber: lifecycles.length + 1,
     plans: [
       {
         planId: 1,
@@ -66,22 +67,23 @@ function persistedState(
           ? { synthesisAttempts: options.synthesisAttempts }
           : {}),
         ...(options.synthesisReported ? { synthesisReported: true } : {}),
-        tasks: [
-          {
-            taskNumber: 1,
-            generatedName: "one",
-            brief: "first task",
-            lifecycle,
-            attempt: 1,
-            transitions: [{ lifecycle, attempt: 1 }],
-            ...(lifecycle === "completed" ? { handoffSummary: "done" } : {}),
-          },
-        ],
+        tasks: lifecycles.map((savedLifecycle, index) => ({
+          taskNumber: index + 1,
+          generatedName: `task ${index + 1}`,
+          brief: `brief ${index + 1}`,
+          lifecycle: savedLifecycle,
+          attempt: 1,
+          transitions: [{ lifecycle: savedLifecycle, attempt: 1 }],
+          ...(savedLifecycle === "completed" ? { handoffSummary: "done" } : {}),
+        })),
       },
     ],
   };
 }
-function setupRestore(synthesize: () => void) {
+function setupRestore(
+  synthesize: () => void | Promise<void>,
+  onState: () => void = () => undefined,
+) {
   const launches: TaskSessionLaunch<string>[] = [];
   const orchestrator = new TaskSessionOrchestrator<string, Worker>({
     plan: () => ({
@@ -96,7 +98,7 @@ function setupRestore(synthesize: () => void) {
     hasGlobalCapacity: () => true,
     synthesize,
     scheduleSynthesisRetry: () => undefined,
-    onState: () => undefined,
+    onState,
   });
   orchestrator.addParent("parent", { mode: "parallel" });
   return { orchestrator, launches };
@@ -243,14 +245,60 @@ describe("TaskSessionOrchestrator", () => {
     expect(JSON.stringify(saved)).not.toContain("SECRET_BASE64");
   });
 
-  it("synthesizes restored all-terminal plans without relaunching workers", async () => {
+  it("publishes a persistable restored synthesis attempt before deferred delivery settles", async () => {
+    let resolveDelivery!: () => void;
+    const delivery = new Promise<void>((resolve) => {
+      resolveDelivery = resolve;
+    });
+    let deliveryStarted = false;
+    let current: ReturnType<typeof setupRestore> | undefined;
+    const publications: {
+      state: PersistedTaskSessionState;
+      deliveryStarted: boolean;
+    }[] = [];
+    const restored = setupRestore(
+      () => {
+        deliveryStarted = true;
+        return delivery;
+      },
+      () => {
+        if (current)
+          publications.push({
+            state: current.orchestrator.exportState("parent"),
+            deliveryStarted,
+          });
+      },
+    );
+    current = restored;
+
+    restored.orchestrator.restore("parent", persistedState("completed"));
+
+    const reservation = publications.find(
+      ({ state }) => state.plans[0]?.synthesisAttempts === 1,
+    );
+    expect(reservation).toMatchObject({
+      deliveryStarted: false,
+      state: { plans: [{ synthesisAttempts: 1 }] },
+    });
+    expect(reservation?.state.plans[0]?.synthesisReported).toBeUndefined();
+    expect(restored.orchestrator.state("parent").tasks).toHaveLength(1);
+
+    resolveDelivery();
+    await tick();
+    expect(restored.orchestrator.exportState("parent").plans[0]).toMatchObject({
+      synthesisAttempts: 1,
+      synthesisReported: true,
+    });
+  });
+
+  it("synthesizes restored all-failed terminal plans without relaunching workers", async () => {
     let reports = 0;
     const restored = setupRestore(() => {
       reports++;
     });
     restored.orchestrator.restore(
       "parent",
-      persistedState("completed", { synthesisAttempts: 1 }),
+      persistedState(["failed", "failed"], { synthesisAttempts: 1 }),
     );
     await tick();
     expect(restored.launches).toHaveLength(0);
@@ -262,15 +310,21 @@ describe("TaskSessionOrchestrator", () => {
     });
   });
 
-  it("marks restored unfinished work interrupted without synthesizing or relaunching it", async () => {
+  it("marks mixed restored work interrupted without synthesizing or relaunching", async () => {
     let reports = 0;
     const restored = setupRestore(() => {
       reports++;
     });
-    restored.orchestrator.restore("parent", persistedState("running"));
+    restored.orchestrator.restore(
+      "parent",
+      persistedState(["completed", "running"]),
+    );
+    await tick();
+    restored.orchestrator.scheduleAll();
     await tick();
     expect(restored.launches).toHaveLength(0);
     expect(restored.orchestrator.state("parent").tasks).toMatchObject([
+      { lifecycle: "completed" },
       { lifecycle: "interrupted" },
     ]);
     expect(reports).toBe(0);
@@ -285,6 +339,7 @@ describe("TaskSessionOrchestrator", () => {
     await tick();
     expect(rerestored.launches).toHaveLength(0);
     expect(rerestored.orchestrator.state("parent").tasks).toMatchObject([
+      { lifecycle: "completed" },
       { lifecycle: "interrupted" },
     ]);
     expect(reports).toBe(0);

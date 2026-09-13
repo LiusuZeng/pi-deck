@@ -637,6 +637,8 @@ export class TaskSessionOrchestrator<
         continue;
       plan.synthesizing = true;
       plan.synthesisAttempts = (plan.synthesisAttempts ?? 0) + 1;
+      // Persist the delivery reservation before crossing the external boundary.
+      this.publish(parent);
       let retrySynthesis = false;
       try {
         if (parent.removed || this.parents.get(parent.parentId) !== parent)
