@@ -597,6 +597,150 @@ describe("agentWorkflow occurrence runtime", () => {
     expect(run.occurrences[0].status).toBe("skipped");
   });
 
+  it("completes a fan-out after a failed child succeeds on retry", () => {
+    const definition = fanoutDefinition("all");
+    definition.nodes = definition.nodes.filter((item) => item.id !== ids.after);
+    definition.relationships = [
+      { id: ids.end, from: ids.fan, to: { end: "done" } },
+    ];
+    let run = createWorkflowRoleRun(definition, "workspace", {}, 1);
+    const fan = run.occurrences[0]!;
+    run = startWorkflowOrchestrator(run, fan.id, 2);
+    const [a, b] = readyWorkflowOccurrences(run);
+    run = startWorkflowOccurrence(run, a!.id, "a", undefined, 3);
+    run = startWorkflowOccurrence(run, b!.id, "b", undefined, 4);
+    run = failWorkflowOccurrence(run, a!.id, "first attempt failed", 5);
+    expect(run).toMatchObject({ status: "needsAttention" });
+
+    run = retryWorkflowOccurrence(run, a!.id, 6);
+    const retry = run.occurrences.at(-1)!;
+    expect(run.occurrences.find((item) => item.id === a!.id)).toMatchObject({
+      attempt: 1,
+      status: "skipped",
+      error: "first attempt failed",
+    });
+    run = completeWorkflowOccurrence(run, b!.id, "B", 7);
+    run = startWorkflowOccurrence(run, retry.id, "a-retry", undefined, 8);
+    run = completeWorkflowOccurrence(run, retry.id, "A retry", 9);
+
+    expect(run.occurrences.find((item) => item.id === fan.id)).toMatchObject({
+      status: "completed",
+      output: ["B", "A retry"],
+    });
+    expect(run).toMatchObject({ status: "completed", terminalOutcome: "done" });
+  });
+
+  it("keeps a retried fan-out any child outstanding beside a failed sibling", () => {
+    let run = createWorkflowRoleRun(
+      fanoutDefinition("any"),
+      "workspace",
+      {},
+      1,
+    );
+    run = startWorkflowOrchestrator(run, run.occurrences[0]!.id, 2);
+    const [a, b] = readyWorkflowOccurrences(run);
+    run = startWorkflowOccurrence(run, a!.id, "a", undefined, 3);
+    run = startWorkflowOccurrence(run, b!.id, "b", undefined, 4);
+    run = failWorkflowOccurrence(run, a!.id, "a failed", 5);
+    run = retryWorkflowOccurrence(run, a!.id, 6);
+    const retry = run.occurrences.at(-1)!;
+    run = failWorkflowOccurrence(run, b!.id, "b failed", 7);
+
+    expect(
+      run.occurrences.find((item) => item.nodeId === ids.fan),
+    ).toMatchObject({ status: "running" });
+    expect(run.status).toBe("running");
+    run = startWorkflowOccurrence(run, retry.id, "a-retry", undefined, 8);
+    run = completeWorkflowOccurrence(run, retry.id, "A retry", 9);
+
+    expect(
+      run.occurrences.find((item) => item.nodeId === ids.fan),
+    ).toMatchObject({ status: "completed", output: ["A retry"] });
+    expect(run.status).toBe("waiting");
+  });
+
+  it("fails fan-out any when its retried logical worker also fails", () => {
+    let run = createWorkflowRoleRun(
+      fanoutDefinition("any"),
+      "workspace",
+      {},
+      1,
+    );
+    run = startWorkflowOrchestrator(run, run.occurrences[0]!.id, 2);
+    const [a, b] = readyWorkflowOccurrences(run);
+    run = startWorkflowOccurrence(run, a!.id, "a", undefined, 3);
+    run = startWorkflowOccurrence(run, b!.id, "b", undefined, 4);
+    run = failWorkflowOccurrence(run, a!.id, "a failed", 5);
+    run = retryWorkflowOccurrence(run, a!.id, 6);
+    const retry = run.occurrences.at(-1)!;
+    run = failWorkflowOccurrence(run, b!.id, "b failed", 7);
+    run = startWorkflowOccurrence(run, retry.id, "a-retry", undefined, 8);
+    run = failWorkflowOccurrence(run, retry.id, "retry failed", 9);
+
+    expect(
+      run.occurrences.find((item) => item.nodeId === ids.fan),
+    ).toMatchObject({ status: "failed" });
+    expect(run.status).toBe("needsAttention");
+  });
+
+  it("uses only a successful retry to advance a loop worker", () => {
+    const definition: WorkflowRoleDefinition = {
+      ...base,
+      entryNodeId: ids.loop,
+      nodes: [
+        {
+          id: ids.loop,
+          name: "Loop",
+          role: "orchestrator",
+          config: {
+            mode: "loop",
+            agents: [ids.work],
+            decider: ids.ready,
+            maxIterations: 1,
+          },
+        },
+        {
+          id: ids.work,
+          name: "Work",
+          role: "worker",
+          managedBy: ids.loop,
+          config: { instructions: "work" },
+        },
+        {
+          id: ids.ready,
+          name: "Ready",
+          role: "decider",
+          managedBy: ids.loop,
+          config: { question: "ready?" },
+        },
+      ],
+      relationships: [{ id: ids.end, from: ids.loop, to: { end: "done" } }],
+    };
+    let run = createWorkflowRoleRun(definition, "workspace", {}, 1);
+    const loop = run.occurrences[0]!;
+    run = startWorkflowOrchestrator(run, loop.id, 2);
+    const first = readyWorkflowOccurrences(run)[0]!;
+    run = startWorkflowOccurrence(run, first.id, "work", undefined, 3);
+    run = failWorkflowOccurrence(run, first.id, "first attempt failed", 4);
+    run = retryWorkflowOccurrence(run, first.id, 5);
+    const retry = run.occurrences.at(-1)!;
+    run = startWorkflowOccurrence(run, retry.id, "work-retry", undefined, 6);
+    run = completeWorkflowOccurrence(run, retry.id, "retry output", 7);
+
+    expect(run.occurrences.find((item) => item.id === first.id)?.status).toBe(
+      "skipped",
+    );
+    const decider = readyWorkflowOccurrences(run)[0]!;
+    expect(decider).toMatchObject({ role: "decider", iteration: 1 });
+    run = startWorkflowOccurrence(run, decider.id, "decider", undefined, 8);
+    run = completeWorkflowOccurrence(run, decider.id, true, 9);
+    expect(run.occurrences.find((item) => item.id === loop.id)).toMatchObject({
+      status: "completed",
+      output: ["retry output"],
+    });
+    expect(run).toMatchObject({ status: "completed", terminalOutcome: "done" });
+  });
+
   it("preserves a cancelled managed child snapshot while the run remains stopped", () => {
     const context = "stopped managed child context";
     const definition = fanoutDefinition("all");

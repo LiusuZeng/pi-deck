@@ -351,7 +351,7 @@ function advanceOrchestrator(
     const allDone = current
       .filter((item) => item.role === "worker")
       .every((item) =>
-        ["completed", "failed", "cancelled"].includes(item.status),
+        ["completed", "failed", "cancelled", "skipped"].includes(item.status),
       );
     if (config.completion === "any" && allDone && done.length === 0)
       return failWorkflowOccurrence(
@@ -395,7 +395,11 @@ function advanceOrchestrator(
     }
     return run;
   }
-  const workers = current.filter((item) => item.role === "worker");
+  // Retries retain their skipped predecessor for history. The replacement is
+  // the logical worker for this iteration, so only it can satisfy the loop.
+  const workers = current.filter(
+    (item) => item.role === "worker" && item.status !== "skipped",
+  );
   if (
     child.role === "worker" &&
     workers.length === config.agents.length &&
