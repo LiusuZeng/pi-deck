@@ -875,11 +875,23 @@ h1 {
   white-space: nowrap;
 }
 
-.sidebar-add-existing {
+.sidebar-add-existing.ui-button {
   display: flex;
   width: 100%;
-  justify-content: center;
+  height: 30px;
+  justify-content: flex-start;
   gap: 6px;
+  border: 0;
+  border-radius: 8px;
+  padding: 0 10px;
+  color: var(--color-text-muted);
+  background: transparent;
+  font-weight: 500;
+}
+
+.sidebar-add-existing.ui-button:hover {
+  color: var(--color-text);
+  background: var(--color-surface-hover);
 }
 
 .sidebar-archived-toggle.ui-button {

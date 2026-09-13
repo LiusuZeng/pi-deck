@@ -346,6 +346,75 @@ function writePiSessionFixture(options: {
   );
 }
 
+async function sidebarHoverBackgroundColor(action: Locator): Promise<string> {
+  return action.evaluate((button) => {
+    const probe = document.createElement("span");
+    probe.style.backgroundColor = "var(--color-surface-hover)";
+    button.append(probe);
+    const color = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return color;
+  });
+}
+
+async function expectSidebarSecondaryActionsAligned(page: Page): Promise<void> {
+  const sidebar = page.getByLabel("Sessions", { exact: true });
+  const actions = [
+    sidebar.getByRole("button", { name: "New workspace…", exact: true }),
+    sidebar.getByRole("button", {
+      name: "Add existing session…",
+      exact: true,
+    }),
+    sidebar.getByRole("button", { name: /^Archived/ }),
+  ];
+  await expect(sidebar).toBeVisible();
+  for (const action of actions) {
+    await expect(action).toBeVisible();
+    await expect(action).toBeEnabled();
+    await expect(action).toHaveCSS("justify-content", "flex-start");
+  }
+
+  const actionGeometry = await Promise.all(
+    actions.map((action) =>
+      action.evaluate((button) => {
+        const buttonBounds = button.getBoundingClientRect();
+        const iconBounds = button.querySelector("svg")?.getBoundingClientRect();
+        if (iconBounds === undefined) {
+          throw new Error("Sidebar action is missing its icon.");
+        }
+        const styles = getComputedStyle(button);
+        return {
+          buttonLeft: Math.round(buttonBounds.left),
+          buttonWidth: Math.round(buttonBounds.width),
+          buttonHeight: Math.round(buttonBounds.height),
+          iconInset: Math.round(iconBounds.left - buttonBounds.left),
+          fontSize: styles.fontSize,
+          fontWeight: styles.fontWeight,
+          lineHeight: styles.lineHeight,
+          paddingInlineStart: styles.paddingInlineStart,
+        };
+      }),
+    ),
+  );
+  const [newWorkspaceGeometry] = actionGeometry;
+  if (newWorkspaceGeometry === undefined) {
+    throw new Error("Sidebar actions are missing.");
+  }
+
+  for (const geometry of actionGeometry) {
+    expect(geometry.buttonLeft).toBe(newWorkspaceGeometry.buttonLeft);
+    expect(geometry.buttonWidth).toBe(newWorkspaceGeometry.buttonWidth);
+    expect(geometry.buttonHeight).toBe(newWorkspaceGeometry.buttonHeight);
+    expect(geometry.iconInset).toBe(newWorkspaceGeometry.iconInset);
+    expect(geometry.fontSize).toBe(newWorkspaceGeometry.fontSize);
+    expect(geometry.fontWeight).toBe(newWorkspaceGeometry.fontWeight);
+    expect(geometry.lineHeight).toBe(newWorkspaceGeometry.lineHeight);
+    expect(geometry.paddingInlineStart).toBe(
+      newWorkspaceGeometry.paddingInlineStart,
+    );
+  }
+}
+
 async function createWorkspaceInUi(page: Page, name: string): Promise<void> {
   await page.getByRole("button", { name: "New workspace…" }).click();
   const dialog = page.getByTestId("workspace-create-dialog");
@@ -697,6 +766,123 @@ test("workspace overflow menu remains compact and vertical with a long workspace
     await page.setViewportSize({ width: 1280, height: 900 });
     await openWorkspaceActions(page, longWorkspaceName);
     await expectWorkspaceActionsMenuLayout(page, longWorkspaceName);
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Add existing session remains a peer sidebar action across themes and narrow layouts", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-sidebar-action-alignment-"),
+  );
+  const projectCwd = path.join(root, "authorized-project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  const sessionFile = path.join(
+    agentDir,
+    "sessions",
+    "--sidebar-action--",
+    "sidebar-action-unassigned.jsonl",
+  );
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+  fs.mkdirSync(userDataDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(userDataDir, "settings.json"),
+    `${JSON.stringify({ theme: "light" })}\n`,
+  );
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({ root, projectCwd, agentDir, userDataDir }),
+  );
+  try {
+    await page.setViewportSize({ width: 800, height: 700 });
+    await expectHealthyPreload(page);
+    await expect(page.locator("html")).toHaveCSS("color-scheme", "light");
+    await expectSidebarSecondaryActionsAligned(page);
+
+    const newWorkspace = page.getByRole("button", {
+      name: "New workspace…",
+      exact: true,
+    });
+    const addExisting = page.getByRole("button", {
+      name: "Add existing session…",
+      exact: true,
+    });
+    const lightHoverColor = await sidebarHoverBackgroundColor(newWorkspace);
+    await newWorkspace.hover();
+    await expect(newWorkspace).toHaveCSS("background-color", lightHoverColor);
+    await addExisting.hover();
+    await expect(addExisting).toHaveCSS("background-color", lightHoverColor);
+
+    await newWorkspace.focus();
+    await page.keyboard.press("Tab");
+    await expect(addExisting).toBeFocused();
+    expect(
+      await addExisting.evaluate((button) => button.matches(":focus-visible")),
+    ).toBe(true);
+    await expect(addExisting).toHaveCSS("outline-width", "2px");
+    await page.keyboard.press("Enter");
+    const unassignedDialog = page.getByTestId("unassigned-sessions");
+    const addSelected = unassignedDialog.getByRole("button", {
+      name: "Add selected sessions",
+    });
+    await expect(unassignedDialog).toBeVisible();
+    // Opening this dialog is valid when no sessions are available, so its
+    // trigger intentionally has no disabled state. The confirmation action
+    // is the reachable disabled control until a session is selected.
+    await expect(addSelected).toBeDisabled();
+    await unassignedDialog.getByLabel("Close dialog").click();
+
+    writePiSessionFixture({
+      sessionFile,
+      sessionId: "sidebar-action-unassigned",
+      projectCwd,
+    });
+    await addExisting.click();
+    await expect(
+      unassignedDialog.getByText("sidebar-action-unassigned"),
+    ).toBeVisible();
+    await unassignedDialog.getByRole("checkbox").check();
+    await expect(addSelected).toBeEnabled();
+    await addSelected.click();
+    await expect(unassignedDialog).toHaveCount(0);
+
+    await page.setViewportSize({ width: 320, height: 600 });
+    await page.getByRole("button", { name: "Show sessions" }).click();
+    await expectSidebarSecondaryActionsAligned(page);
+    await page
+      .getByLabel("Sessions", { exact: true })
+      .getByRole("button", { name: "Hide sessions" })
+      .click();
+
+    await page.getByRole("button", { name: "Appearance: Light" }).click();
+    await page
+      .getByRole("menuitemradio", { name: "Dark", exact: true })
+      .click();
+    await expect(page.locator("html")).toHaveCSS("color-scheme", "dark");
+    await page.getByRole("button", { name: "Show sessions" }).click();
+    await expectSidebarSecondaryActionsAligned(page);
+    const darkAddExisting = page.getByRole("button", {
+      name: "Add existing session…",
+      exact: true,
+    });
+    const darkHoverColor = await sidebarHoverBackgroundColor(newWorkspace);
+    await newWorkspace.hover();
+    await expect(newWorkspace).toHaveCSS("background-color", darkHoverColor);
+    await darkAddExisting.hover();
+    await expect(darkAddExisting).toHaveCSS("background-color", darkHoverColor);
+    await newWorkspace.focus();
+    await page.keyboard.press("Tab");
+    await expect(darkAddExisting).toBeFocused();
+    expect(
+      await darkAddExisting.evaluate((button) =>
+        button.matches(":focus-visible"),
+      ),
+    ).toBe(true);
+    await expect(darkAddExisting).toHaveCSS("outline-width", "2px");
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("unassigned-sessions")).toBeVisible();
   } finally {
     await app.close().catch(() => undefined);
     fs.rmSync(root, { recursive: true, force: true });
