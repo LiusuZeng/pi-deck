@@ -222,6 +222,60 @@ describe("RuntimeEventBuffer", () => {
     ]);
   });
 
+  it("preserves pre-classifier merge and event-shape behavior", () => {
+    const scheduler = new ManualScheduler();
+    const delivered: ChatRuntimeEvent[] = [];
+    const buffer = new RuntimeEventBuffer({
+      deliver: (current) => delivered.push(current),
+      isRuntimeVisible: () => true,
+      scheduler,
+    });
+    const untypedFirst = event("message_update", "runtime-untyped", {
+      messageId: "untyped",
+      assistantMessageEvent: { delta: "first" },
+    });
+    const untypedLast = event("message_update", "runtime-untyped", {
+      messageId: "untyped",
+      assistantMessageEvent: { delta: "last" },
+    });
+    const textThenThinking = event("message_update", "runtime-interleaved", {
+      messageId: "interleaved",
+      delta: "reply",
+    });
+    const thinkingLast = event("message_update", "runtime-interleaved", {
+      messageId: "interleaved",
+      assistantMessageEvent: { type: "thinking_delta", delta: "reasoning" },
+    });
+    const typedFirst = event("message_update", "runtime-typed", {
+      messageId: "typed",
+      assistantMessageEvent: { type: "text_delta", delta: "a" },
+    });
+    const typedLast = event("message_update", "runtime-typed", {
+      messageId: "typed",
+      assistantMessageEvent: { type: "text_delta", delta: "b" },
+    });
+
+    [
+      untypedFirst,
+      untypedLast,
+      textThenThinking,
+      thinkingLast,
+      typedFirst,
+      typedLast,
+    ].forEach((current) => buffer.handle(current));
+    scheduler.runFrame();
+
+    expect(delivered).toEqual([
+      untypedLast,
+      thinkingLast,
+      {
+        ...typedLast,
+        delta: "ab",
+        assistantMessageEvent: { type: "text_delta", delta: undefined },
+      },
+    ]);
+  });
+
   it("bounds pending state by synchronously draining instead of dropping updates", () => {
     const scheduler = new ManualScheduler();
     const delivered: ChatRuntimeEvent[] = [];

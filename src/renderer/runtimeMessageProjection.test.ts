@@ -214,6 +214,66 @@ describe("runtime message projection", () => {
     }
   });
 
+  it("preserves pre-classifier projection outputs for legacy and malformed streams", () => {
+    const cases: Array<
+      [
+        string,
+        Record<string, unknown>,
+        {
+          text: { content: string; mode: "append" | "replace" } | undefined;
+          thinking: string | undefined;
+        },
+      ]
+    > = [
+      [
+        "untyped assistant delta",
+        { assistantMessageEvent: { type: 1, delta: "legacy" } },
+        { text: { content: "legacy", mode: "append" }, thinking: undefined },
+      ],
+      [
+        "direct text beside thinking stream",
+        {
+          delta: "reply",
+          assistantMessageEvent: { type: "thinking_delta", delta: "reasoning" },
+        },
+        {
+          text: { content: "reply", mode: "append" },
+          thinking: "reasoning",
+        },
+      ],
+      [
+        "ambiguous text-thinking snapshot retains both legacy projections",
+        {
+          assistantMessageEvent: {
+            type: "text_thinking_delta",
+            content: "reply",
+            delta: "reasoning",
+          },
+        },
+        {
+          text: { content: "reply", mode: "replace" },
+          thinking: "reasoning",
+        },
+      ],
+      [
+        "other assistant stream remains non-text",
+        { assistantMessageEvent: { type: "toolcall_delta", content: "tool" } },
+        { text: undefined, thinking: undefined },
+      ],
+    ];
+
+    for (const [name, fields, expected] of cases) {
+      const event = messageUpdate(fields);
+      expect(
+        {
+          text: getMessageTextUpdate(event),
+          thinking: getThinkingUpdateContent(event),
+        },
+        name,
+      ).toEqual(expected);
+    }
+  });
+
   it("reads role and assistant event type only from string records", () => {
     expect(getMessageUpdateRole(messageUpdate({ role: "assistant" }))).toBe(
       "assistant",

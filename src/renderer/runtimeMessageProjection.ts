@@ -1,5 +1,9 @@
 import type { ChatRuntimeEvent } from "../shared/types.js";
 import {
+  getRuntimeMessageIdentity,
+  getRuntimeMessageStreamKind,
+} from "./runtimeMessageClassification.js";
+import {
   extractTextContent,
   extractThinkingContent,
 } from "./sessionUsageProjection.js";
@@ -12,27 +16,7 @@ export type MessageTextUpdate = {
 export function getMessageUpdateId(
   event: ChatRuntimeEvent,
 ): string | undefined {
-  const direct = getString(event, "messageId");
-  if (direct !== undefined) {
-    return direct;
-  }
-
-  const message = getRecord(event, "message");
-  const messageId = getString(message, "id");
-  if (messageId !== undefined) {
-    return messageId;
-  }
-  const responseId = getString(message, "responseId");
-  if (responseId !== undefined) {
-    return responseId;
-  }
-
-  const assistantEvent = getRecord(event, "assistantMessageEvent");
-  const assistantResponseId = getString(assistantEvent, "responseId");
-  if (assistantResponseId !== undefined) {
-    return assistantResponseId;
-  }
-  return getString(getRecord(assistantEvent, "partial"), "responseId");
+  return getRuntimeMessageIdentity(event);
 }
 
 export function getMessageUpdateRole(
@@ -83,8 +67,7 @@ export function getThinkingUpdateContent(
   event: ChatRuntimeEvent,
 ): string | undefined {
   const assistantEvent = getRecord(event, "assistantMessageEvent");
-  const type = getString(assistantEvent, "type") ?? "";
-  if (type.includes("thinking")) {
+  if (getRuntimeMessageStreamKind(event) === "thinking") {
     return (
       getString(assistantEvent, "delta") ??
       getString(assistantEvent, "content") ??
@@ -101,7 +84,10 @@ function getMessageUpdateContent(event: ChatRuntimeEvent): string | undefined {
 function getAssistantMessageDelta(event: ChatRuntimeEvent): string | undefined {
   const assistantEvent = getRecord(event, "assistantMessageEvent");
   const type = getString(assistantEvent, "type") ?? "";
-  if (type !== "" && type !== "text_delta") {
+  if (
+    getRuntimeMessageStreamKind(event) !== "text" ||
+    (type !== "" && type !== "text_delta")
+  ) {
     return undefined;
   }
   return getString(assistantEvent, "delta");
@@ -112,7 +98,10 @@ function getAssistantMessageContent(
 ): string | undefined {
   const assistantEvent = getRecord(event, "assistantMessageEvent");
   const type = getString(assistantEvent, "type") ?? "";
-  if (type !== "" && !type.startsWith("text_") && type !== "done") {
+  if (
+    getRuntimeMessageStreamKind(event) === "other" ||
+    (type !== "" && !type.startsWith("text_") && type !== "done")
+  ) {
     return undefined;
   }
   if (type === "done") {

@@ -1,4 +1,8 @@
 import type { ChatRuntimeEvent } from "../shared/types.js";
+import {
+  getRuntimeMessageIdentity,
+  getRuntimeMessageStreamKind,
+} from "./runtimeMessageClassification.js";
 
 export interface RuntimeEventBufferScheduler {
   requestAnimationFrame(callback: FrameRequestCallback): number;
@@ -195,7 +199,7 @@ interface PendingEvent {
 
 function coalescingKey(event: ChatRuntimeEvent): string | undefined {
   if (event.type === "message_update" && !isTerminalMessageUpdate(event)) {
-    const messageId = getMessageId(event);
+    const messageId = getRuntimeMessageIdentity(event);
     return messageId === undefined ? undefined : `message:${messageId}`;
   }
   if (event.type === "tool_execution_update" && !isTerminalToolUpdate(event)) {
@@ -262,26 +266,14 @@ function mergeCoalescibleEvent(
     : withReplacementContent(next, previousContent + nextDelta);
 }
 
-function getMessageId(event: ChatRuntimeEvent): string | undefined {
-  return (
-    getString(event, "messageId") ??
-    getString(getRecord(event, "message"), "id") ??
-    getString(getRecord(event, "message"), "responseId") ??
-    getString(getRecord(event, "assistantMessageEvent"), "responseId") ??
-    getString(
-      getRecord(getRecord(event, "assistantMessageEvent"), "partial"),
-      "responseId",
-    )
-  );
-}
-
 function getAppendDelta(event: ChatRuntimeEvent): string | undefined {
   const direct = getString(event, "delta");
   if (direct !== undefined) {
     return direct;
   }
   const assistantEvent = getRecord(event, "assistantMessageEvent");
-  return getString(assistantEvent, "type") === "text_delta"
+  return getRuntimeMessageStreamKind(event) === "text" &&
+    getString(assistantEvent, "type") === "text_delta"
     ? getString(assistantEvent, "delta")
     : undefined;
 }
