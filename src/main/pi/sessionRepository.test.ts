@@ -158,6 +158,36 @@ test("refreshes one explicit session summary without scanning the repository", a
   assert.equal(clearedName.sessions[0]?.messageCount, 1);
 });
 
+test("summarizes text history when a Pi message also carries an image attachment", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-deck-images-"));
+  const project = path.join(root, "project");
+  const sessionDir = path.join(root, "sessions");
+  const sessionFile = path.join(sessionDir, "image-history.jsonl");
+  await fs.mkdir(project, { recursive: true });
+  await fs.mkdir(sessionDir, { recursive: true });
+  await fs.writeFile(
+    sessionFile,
+    [
+      JSON.stringify({ type: "session", id: "image-history", cwd: project }),
+      JSON.stringify({
+        type: "message",
+        message: {
+          role: "user",
+          content: [
+            { type: "text", text: "Describe this attached image" },
+            { type: "image", mimeType: "image/png", data: "cGl4ZWxz" },
+          ],
+        },
+      }),
+    ].join("\n"),
+  );
+
+  const result = await readPiSessionSummary({ sessionFile, sessionDir });
+  assert.equal(result.summary?.messageCount, 1);
+  assert.equal(result.summary?.title, "Describe this attached image");
+  assert.equal(result.summary?.preview, "Describe this attached image");
+});
+
 test("reconstructs Completed metadata from the latest durable assistant turn", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-deck-completed-"));
   const project = path.join(root, "project");
@@ -506,6 +536,38 @@ describe("Pi session eligibility validation", () => {
     assert.deepEqual(result, {
       ok: true,
       sessionFile: await fs.realpath(sessionFile),
+    });
+  });
+
+  test("canonicalizes native fork parentSession from the first Pi header", async () => {
+    const { project, sessionDir } = await createSessionFixture();
+    const source = path.join(sessionDir, "source.jsonl");
+    const sourceAlias = path.join(sessionDir, "source-alias.jsonl");
+    const child = path.join(sessionDir, "child.jsonl");
+    await fs.writeFile(source, piHeader(project));
+    await fs.symlink(source, sourceAlias);
+    await fs.writeFile(
+      child,
+      `${JSON.stringify({
+        type: "session",
+        version: 3,
+        id: "fork-child",
+        timestamp: "2026-06-29T10:00:01.000Z",
+        cwd: project,
+        parentSession: sourceAlias,
+      })}\n`,
+    );
+
+    const result = await validatePiSessionFile({
+      sessionFile: child,
+      sessionDir,
+    });
+
+    assert.deepEqual(result, {
+      ok: true,
+      sessionFile: await fs.realpath(child),
+      cwd: await fs.realpath(project),
+      parentSession: await fs.realpath(source),
     });
   });
 

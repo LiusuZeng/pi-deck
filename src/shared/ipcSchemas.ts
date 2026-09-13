@@ -315,6 +315,16 @@ export const chatResumeSessionRequestSchema = z
   })
   .strict();
 
+// Forking is deliberately a first-class, narrowly-scoped lifecycle action.
+// The renderer may name only a workspace-owned persisted session, never an RPC
+// command or target path.
+export const chatForkSessionRequestSchema = z
+  .object({
+    workspaceId: z.string().min(1),
+    sessionFile: z.string().min(1),
+  })
+  .strict();
+
 export const chatDeleteSessionRequestSchema = z
   .object({
     workspaceId: z.string().min(1).optional(),
@@ -933,6 +943,7 @@ export const ipcChannels = {
   chatGetRuntimeStatus: "chat:getRuntimeStatus",
   chatListSessions: "chat:listSessions",
   chatResumeSession: "chat:resumeSession",
+  chatForkSession: "chat:forkSession",
   chatDeleteSession: "chat:deleteSession",
   chatDeleteAllSessions: "chat:deleteAllSessions",
   chatPrompt: "chat:prompt",

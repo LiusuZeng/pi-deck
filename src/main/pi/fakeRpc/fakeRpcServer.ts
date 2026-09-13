@@ -58,6 +58,43 @@ interface FakeOptions {
   /** Emits spaced, payload-free worker progress for Electron telemetry E2E. */
   taskSessionProgressFixture: boolean;
   sessionFile?: string;
+  /** Native Pi-compatible source path for a new independent fake session. */
+  forkSourceFile?: string;
+  /** Test-only faulty-Pi override for the path reported by a native fork. */
+  forkTargetFile?: string;
+  /** Test-only override for native fork header provenance. */
+  forkParentSession?: string;
+  forkOmitsParentSession: boolean;
+  /** Hold only native-fork get_state replies before registration. */
+  forkGetStateDelayMs: number;
+  /** Write when a native fork begins its pre-registration get_state call. */
+  forkGetStateSignalFile?: string;
+  /** Append the native-fork target path when that fake worker exits. */
+  forkExitSignalFile?: string;
+  /** Hold get_state replies so E2E can interleave ownership operations. */
+  getStateDelayMs: number;
+  /** Delay only the first generic get_state request across fake workers. */
+  getStateDelayOnceFile?: string;
+  /** Delay generic get_state only while this test-controlled marker exists. */
+  getStateDelayEnabledFile?: string;
+  /** Write when a generic get_state request begins. */
+  getStateSignalFile?: string;
+  /** Append every fake worker's session path when it exits. */
+  exitSignalFile?: string;
+  /** Ignore SIGTERM so lifecycle tests exercise SIGKILL escalation. */
+  ignoreSigterm: boolean;
+  /** Delay a cooperative SIGTERM exit for cleanup-ordering tests. */
+  sigtermExitDelayMs: number;
+  /** Signal that SIGTERM was received before a test-controlled exit barrier. */
+  sigtermReceivedSignalFile?: string;
+  /** Hold a cooperative SIGTERM exit until this test-controlled file exists. */
+  sigtermExitWaitFile?: string;
+  /** Hold snapshot history after fork ownership has been claimed. */
+  getMessagesDelayMs: number;
+  /** Hold only a native fork's final snapshot history. */
+  forkGetMessagesDelayMs: number;
+  /** Write when get_messages begins, for deterministic E2E interleaving. */
+  getMessagesSignalFile?: string;
   /** Test-only override for the cwd reported by get_state. */
   getStateCwd?: string;
   workflowDecisions: boolean[];
@@ -101,6 +138,13 @@ function parseOptions(argv: string[]): FakeOptions {
     noSession: false,
     failTaskPromptRecordWhileActive: false,
     taskSessionProgressFixture: false,
+    forkOmitsParentSession: false,
+    forkGetStateDelayMs: 0,
+    getStateDelayMs: 0,
+    ignoreSigterm: false,
+    sigtermExitDelayMs: 0,
+    getMessagesDelayMs: 0,
+    forkGetMessagesDelayMs: 0,
     workflowDecisions: [],
   };
 
@@ -185,6 +229,90 @@ function parseOptions(argv: string[]): FakeOptions {
       if (sessionFile) {
         options.sessionFile = sessionFile;
       }
+      index += 1;
+    } else if (arg === "--fork") {
+      const sourceFile = argv[index + 1];
+      if (sourceFile) {
+        options.forkSourceFile = sourceFile;
+      }
+      index += 1;
+    } else if (arg === "--fork-target") {
+      const targetFile = argv[index + 1];
+      if (targetFile) options.forkTargetFile = targetFile;
+      index += 1;
+    } else if (arg === "--fork-parent-session") {
+      const parentSession = argv[index + 1];
+      if (parentSession) options.forkParentSession = parentSession;
+      index += 1;
+    } else if (arg === "--fork-omit-parent-session") {
+      options.forkOmitsParentSession = true;
+    } else if (arg === "--fork-delay-get-state-ms") {
+      const delay = Number(argv[index + 1]);
+      if (Number.isSafeInteger(delay) && delay >= 0) {
+        options.forkGetStateDelayMs = delay;
+      }
+      index += 1;
+    } else if (arg === "--fork-get-state-signal-file") {
+      const signalFile = argv[index + 1];
+      if (signalFile) options.forkGetStateSignalFile = signalFile;
+      index += 1;
+    } else if (arg === "--fork-exit-signal-file") {
+      const signalFile = argv[index + 1];
+      if (signalFile) options.forkExitSignalFile = signalFile;
+      index += 1;
+    } else if (arg === "--ignore-sigterm") {
+      options.ignoreSigterm = true;
+    } else if (arg === "--sigterm-exit-delay-ms") {
+      const delay = Number(argv[index + 1]);
+      if (Number.isSafeInteger(delay) && delay >= 0) {
+        options.sigtermExitDelayMs = delay;
+      }
+      index += 1;
+    } else if (arg === "--sigterm-received-signal-file") {
+      const signalFile = argv[index + 1];
+      if (signalFile) options.sigtermReceivedSignalFile = signalFile;
+      index += 1;
+    } else if (arg === "--sigterm-exit-wait-file") {
+      const waitFile = argv[index + 1];
+      if (waitFile) options.sigtermExitWaitFile = waitFile;
+      index += 1;
+    } else if (arg === "--delay-get-state-ms") {
+      const delay = Number(argv[index + 1]);
+      if (Number.isSafeInteger(delay) && delay >= 0) {
+        options.getStateDelayMs = delay;
+      }
+      index += 1;
+    } else if (arg === "--delay-get-state-once-file") {
+      const markerFile = argv[index + 1];
+      if (markerFile) options.getStateDelayOnceFile = markerFile;
+      index += 1;
+    } else if (arg === "--delay-get-state-enabled-file") {
+      const markerFile = argv[index + 1];
+      if (markerFile) options.getStateDelayEnabledFile = markerFile;
+      index += 1;
+    } else if (arg === "--get-state-signal-file") {
+      const signalFile = argv[index + 1];
+      if (signalFile) options.getStateSignalFile = signalFile;
+      index += 1;
+    } else if (arg === "--exit-signal-file") {
+      const signalFile = argv[index + 1];
+      if (signalFile) options.exitSignalFile = signalFile;
+      index += 1;
+    } else if (arg === "--delay-get-messages-ms") {
+      const delay = Number(argv[index + 1]);
+      if (Number.isSafeInteger(delay) && delay >= 0) {
+        options.getMessagesDelayMs = delay;
+      }
+      index += 1;
+    } else if (arg === "--fork-delay-get-messages-ms") {
+      const delay = Number(argv[index + 1]);
+      if (Number.isSafeInteger(delay) && delay >= 0) {
+        options.forkGetMessagesDelayMs = delay;
+      }
+      index += 1;
+    } else if (arg === "--get-messages-signal-file") {
+      const signalFile = argv[index + 1];
+      if (signalFile) options.getMessagesSignalFile = signalFile;
       index += 1;
     } else if (arg === "--get-state-cwd") {
       const cwd = argv[index + 1];
@@ -279,7 +407,11 @@ class FakeRpcServer {
   private readonly sessionFile = this.resolveSessionFile();
   private readonly shouldPersistSessionFile =
     !this.options.noSession &&
-    Boolean(this.options.sessionFile || process.env.PI_CODING_AGENT_DIR);
+    Boolean(
+      this.options.sessionFile ||
+      this.options.forkSourceFile ||
+      process.env.PI_CODING_AGENT_DIR,
+    );
   private buffer = "";
   private firstCommandSeen = false;
   private promptCounter = 0;
@@ -403,8 +535,59 @@ class FakeRpcServer {
   }
 
   start(): void {
-    this.rehydratePersistedMessages();
+    const recordForkExit = (): void => {
+      const signalFile =
+        this.options.forkSourceFile && this.options.forkExitSignalFile
+          ? this.options.forkExitSignalFile
+          : this.options.exitSignalFile;
+      if (!signalFile) return;
+      try {
+        fs.appendFileSync(signalFile, `${this.sessionFile}\n`);
+      } catch {
+        // Exit diagnostics must never hold a fake worker open.
+      }
+    };
+    process.once("exit", recordForkExit);
+    // Node's default SIGTERM termination does not reliably run userland exit
+    // listeners through every Electron-spawned wrapper. Test barriers can
+    // prove mutation occurred after close requested exit but before worker_exit.
+    if (this.options.ignoreSigterm) {
+      process.on("SIGTERM", () => {
+        // Intentionally empty; PiWorker must not mistake signal delivery for exit.
+      });
+    } else if (
+      this.options.forkExitSignalFile ||
+      this.options.exitSignalFile ||
+      this.options.sigtermExitDelayMs > 0 ||
+      this.options.sigtermReceivedSignalFile !== undefined ||
+      this.options.sigtermExitWaitFile !== undefined
+    ) {
+      process.once("SIGTERM", () => {
+        if (this.options.sigtermReceivedSignalFile !== undefined) {
+          try {
+            fs.writeFileSync(
+              this.options.sigtermReceivedSignalFile,
+              "received\n",
+            );
+          } catch {
+            // Test diagnostics must never prevent worker shutdown.
+          }
+        }
+        const exit = () => process.exit(0);
+        if (this.options.sigtermExitWaitFile !== undefined) {
+          const wait = setInterval(() => {
+            if (fs.existsSync(this.options.sigtermExitWaitFile!)) {
+              clearInterval(wait);
+              exit();
+            }
+          }, 5);
+          return;
+        }
+        setTimeout(exit, this.options.sigtermExitDelayMs);
+      });
+    }
     this.ensurePersistedSessionRecord();
+    this.rehydratePersistedMessages();
     if (this.options.stderrOnStart) {
       process.stderr.write("fake-rpc: deterministic stderr diagnostic\n");
     }
@@ -426,6 +609,9 @@ class FakeRpcServer {
     if (this.options.sessionFile) {
       return path.resolve(this.options.sessionFile);
     }
+    if (this.options.forkSourceFile && this.options.forkTargetFile) {
+      return path.resolve(this.options.forkTargetFile);
+    }
     const agentDir = process.env.PI_CODING_AGENT_DIR;
     if (agentDir) {
       return path.join(
@@ -435,7 +621,12 @@ class FakeRpcServer {
         `fake-session-${Date.now()}-${process.pid}.jsonl`,
       );
     }
-    return path.join(process.cwd(), "fake-session.jsonl");
+    return this.options.forkSourceFile
+      ? path.join(
+          process.cwd(),
+          `fake-session-${Date.now()}-${process.pid}.jsonl`,
+        )
+      : path.join(process.cwd(), "fake-session.jsonl");
   }
 
   private ensurePersistedSessionRecord(): void {
@@ -444,20 +635,61 @@ class FakeRpcServer {
     }
     try {
       fs.mkdirSync(path.dirname(this.sessionFile), { recursive: true });
-      if (!fs.existsSync(this.sessionFile)) {
+      if (fs.existsSync(this.sessionFile)) return;
+      const sourceFile = this.options.forkSourceFile;
+      if (sourceFile) {
+        // This fixture models Pi's CLI --fork boundary: a fresh target header
+        // plus every non-header source record. Pi Deck itself never copies
+        // JSONL; this is only the deterministic fake Pi implementation.
+        const sourceLines = fs
+          .readFileSync(path.resolve(sourceFile), "utf8")
+          .split(/\r?\n/)
+          .filter((line) => line.trim().length > 0);
+        const copiedRecords = sourceLines.filter((line) => {
+          try {
+            const record = JSON.parse(line) as { type?: unknown };
+            return record.type !== "session";
+          } catch {
+            return false;
+          }
+        });
         fs.writeFileSync(
           this.sessionFile,
-          `${JSON.stringify({
-            type: "session",
-            version: 3,
-            id: path.basename(this.sessionFile, ".jsonl"),
-            timestamp: new Date().toISOString(),
-            cwd: process.cwd(),
-          })}\n`,
+          [
+            JSON.stringify({
+              type: "session",
+              version: 3,
+              id: path.basename(this.sessionFile, ".jsonl"),
+              timestamp: new Date().toISOString(),
+              cwd: process.cwd(),
+              ...(this.options.forkOmitsParentSession
+                ? {}
+                : {
+                    parentSession: path.resolve(
+                      this.options.forkParentSession ?? sourceFile,
+                    ),
+                  }),
+            }),
+            ...copiedRecords,
+          ].join("\n") + "\n",
         );
+        return;
       }
-    } catch {
-      // Fake persistence is best-effort and should not break RPC tests.
+      fs.writeFileSync(
+        this.sessionFile,
+        `${JSON.stringify({
+          type: "session",
+          version: 3,
+          id: path.basename(this.sessionFile, ".jsonl"),
+          timestamp: new Date().toISOString(),
+          cwd: process.cwd(),
+        })}\n`,
+      );
+    } catch (error) {
+      // A requested native fork has no meaningful state without its source.
+      // Let the process fail like Pi does rather than silently reusing an
+      // unrelated target/history. Ordinary fake persistence stays best-effort.
+      if (this.options.forkSourceFile) throw error;
     }
   }
 
@@ -467,7 +699,10 @@ class FakeRpcServer {
    * after the worker (and app) have restarted.
    */
   private rehydratePersistedMessages(): void {
-    if (!this.options.sessionFile || !fs.existsSync(this.sessionFile)) {
+    if (
+      (!this.options.sessionFile && !this.options.forkSourceFile) ||
+      !fs.existsSync(this.sessionFile)
+    ) {
       return;
     }
     try {
@@ -577,12 +812,74 @@ class FakeRpcServer {
     }
 
     switch (name) {
-      case "get_state":
-        this.respond(command.id, name, this.getState());
+      case "get_state": {
+        const forkGetState = this.options.forkSourceFile !== undefined;
+        if (forkGetState && this.options.forkGetStateSignalFile) {
+          fs.writeFileSync(
+            this.options.forkGetStateSignalFile,
+            `${this.sessionFile}\n`,
+          );
+        }
+        if (!forkGetState && this.options.getStateSignalFile) {
+          fs.writeFileSync(
+            this.options.getStateSignalFile,
+            `${this.sessionFile}\n`,
+          );
+        }
+        const delayOnce =
+          !forkGetState && this.options.getStateDelayOnceFile !== undefined
+            ? (() => {
+                try {
+                  const descriptor = fs.openSync(
+                    this.options.getStateDelayOnceFile,
+                    "wx",
+                  );
+                  fs.closeSync(descriptor);
+                  return true;
+                } catch {
+                  return false;
+                }
+              })()
+            : false;
+        const genericDelayEnabled =
+          this.options.getStateDelayEnabledFile !== undefined &&
+          fs.existsSync(this.options.getStateDelayEnabledFile);
+        const delay = forkGetState
+          ? this.options.forkGetStateDelayMs
+          : delayOnce || genericDelayEnabled
+            ? this.options.getStateDelayMs
+            : 0;
+        if (delay > 0) {
+          setTimeout(
+            () => this.respond(command.id, name, this.getState()),
+            delay,
+          );
+        } else {
+          this.respond(command.id, name, this.getState());
+        }
         break;
-      case "get_messages":
-        this.respond(command.id, name, { messages: this.messages });
+      }
+      case "get_messages": {
+        if (this.options.getMessagesSignalFile) {
+          fs.writeFileSync(
+            this.options.getMessagesSignalFile,
+            `${this.sessionFile}\n`,
+          );
+        }
+        const respond = () =>
+          this.respond(command.id, name, { messages: this.messages });
+        const delay =
+          this.options.forkSourceFile !== undefined &&
+          this.options.forkGetMessagesDelayMs > 0
+            ? this.options.forkGetMessagesDelayMs
+            : this.options.getMessagesDelayMs;
+        if (delay > 0) {
+          setTimeout(respond, delay);
+        } else {
+          respond();
+        }
         break;
+      }
       case "get_session_stats":
         this.respond(command.id, name, this.getSessionStats());
         break;

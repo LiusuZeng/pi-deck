@@ -26,7 +26,7 @@ export interface ValidatePiSessionOptions {
 }
 
 export type PiSessionValidationResult =
-  | { ok: true; sessionFile: string }
+  | { ok: true; sessionFile: string; parentSession?: string }
   | { ok: false; reason: string };
 
 export interface ValidatePiSessionFileOptions {
@@ -35,7 +35,13 @@ export interface ValidatePiSessionFileOptions {
 }
 
 export type PiSessionFileValidationResult =
-  | { ok: true; sessionFile: string; cwd: string }
+  | {
+      ok: true;
+      sessionFile: string;
+      cwd: string;
+      /** Canonical native Pi fork parent, when this JSONL is a fork child. */
+      parentSession?: string;
+    }
   | { ok: false; reason: string };
 
 export interface ReadPiSessionSummaryOptions {
@@ -151,6 +157,9 @@ export async function validatePiSessionFile(
     ok: true,
     sessionFile,
     cwd: await canonicalOrResolved(header.cwd),
+    ...(header.parentSession !== undefined
+      ? { parentSession: await canonicalOrResolved(header.parentSession) }
+      : {}),
   };
 }
 
@@ -204,7 +213,13 @@ export async function validatePiSession(
   if (validation.cwd !== projectCwd) {
     return { ok: false, reason: "session belongs to a different project" };
   }
-  return { ok: true, sessionFile: validation.sessionFile };
+  return {
+    ok: true,
+    sessionFile: validation.sessionFile,
+    ...(validation.parentSession !== undefined
+      ? { parentSession: validation.parentSession }
+      : {}),
+  };
 }
 
 export async function scanSessionRepository(
@@ -411,6 +426,8 @@ async function summarizeSessionFile(
 interface PiSessionHeader {
   id: string;
   cwd: string;
+  /** Pi v3 native `--fork` records its source JSONL in the first header. */
+  parentSession?: string;
 }
 
 async function readPiSessionHeader(
@@ -452,7 +469,14 @@ function parsePiSessionHeader(value: string): PiSessionHeader | undefined {
       header.id.length > 0 &&
       typeof header.cwd === "string" &&
       header.cwd.length > 0
-      ? { id: header.id, cwd: header.cwd }
+      ? {
+          id: header.id,
+          cwd: header.cwd,
+          ...(typeof header.parentSession === "string" &&
+          header.parentSession.length > 0
+            ? { parentSession: header.parentSession }
+            : {}),
+        }
       : undefined;
   } catch {
     return undefined;

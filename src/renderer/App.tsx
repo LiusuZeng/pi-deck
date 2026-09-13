@@ -1055,6 +1055,7 @@ type WorkspaceDialogState =
   | { kind: "renameSession"; sessionId: string }
   | { kind: "remove"; sessionId: string }
   | { kind: "delete"; sessionId: string }
+  | { kind: "fork"; sessionId: string }
   | { kind: "deleteAll" }
   | undefined;
 
@@ -5463,6 +5464,47 @@ export function App(): ReactElement {
     );
   }
 
+  async function handleForkSession(
+    sessionId: string,
+    confirmed = false,
+  ): Promise<void> {
+    const session = sessions.find((item) => item.id === sessionId);
+    const eligibility = forkSessionEligibility(
+      session,
+      isRealBackendMode,
+      session !== undefined && hasComposerDraft(composerDrafts, session.id),
+    );
+    if (!eligibility.eligible || session === undefined) {
+      setUiMessage(eligibility.reason);
+      return;
+    }
+    if (!confirmed) {
+      setWorkspaceDialog({ kind: "fork", sessionId });
+      return;
+    }
+    await runBusyDialogTransaction(
+      workspaceDialogBusyRef,
+      setWorkspaceDialogBusy,
+      async () => {
+        try {
+          const snapshot = await window.piDeck.chat.forkSession({
+            workspaceId: session.workspaceId,
+            sessionFile: session.sessionFile!,
+          });
+          setSessions((items) => upsertRuntimeSession(items, snapshot));
+          setWorkspaceDialog(undefined);
+          setComposerError(null);
+          showSessionDetail(snapshot.runtimeId);
+          setUiMessage("Forked Pi session opened independently.");
+        } catch (error) {
+          setUiMessage(
+            `Could not fork session: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      },
+    );
+  }
+
   async function handleDeleteSession(
     sessionId: string,
     confirmed = false,
@@ -6185,6 +6227,7 @@ export function App(): ReactElement {
           onHideSidebar={() => handleSidebarVisibleChange(false)}
           onNewSession={() => void handleNewSession()}
           onNewWorkspace={() => void handleNewWorkspace()}
+          onForkSession={(sessionId) => void handleForkSession(sessionId)}
           onDeleteSession={(sessionId) => void handleDeleteSession(sessionId)}
           onMoveSession={(sessionId) =>
             setWorkspaceDialog({ kind: "move", sessionId })
@@ -6549,6 +6592,7 @@ export function App(): ReactElement {
             }}
             onCreate={(name) => void createWorkspace(name)}
             onDelete={(sessionId) => void handleDeleteSession(sessionId, true)}
+            onFork={(sessionId) => void handleForkSession(sessionId, true)}
             onDeleteAll={() => void handleDeleteAllSessions(true)}
             onMove={(sessionId, workspaceId) =>
               void moveSavedSession(sessionId, workspaceId)
@@ -9699,6 +9743,7 @@ function SessionSidebar(props: {
   onHideSidebar(): void;
   onNewSession(): void;
   onNewWorkspace(): void;
+  onForkSession(sessionId: string): void;
   onDeleteSession(sessionId: string): void;
   onMoveSession(sessionId: string): void;
   onRenameSession(sessionId: string): void;
@@ -9802,6 +9847,11 @@ function SessionSidebar(props: {
 
   function renderSession(session: SessionViewModel): ReactElement {
     const canDelete = isSessionDeletable(session, props.realMode);
+    const forkEligibility = forkSessionEligibility(
+      session,
+      props.realMode,
+      hasComposerDraft(props.composerDrafts, session.id),
+    );
     const canRename = canRenameSavedSession(session, props.realMode);
     const canManageMembership =
       props.realMode &&
@@ -9849,6 +9899,18 @@ function SessionSidebar(props: {
               label={`Session actions for ${session.title}`}
               menuLabel={`Session actions for ${session.title}`}
             >
+              <Button
+                disabled={!forkEligibility.eligible}
+                role="menuitem"
+                size="sm"
+                title={
+                  forkEligibility.eligible ? undefined : forkEligibility.reason
+                }
+                variant="menuItem"
+                onClick={() => props.onForkSession(session.id)}
+              >
+                Fork session…
+              </Button>
               <Button
                 disabled={!canRename}
                 role="menuitem"
@@ -10318,6 +10380,47 @@ function isSessionDeletable(
     typeof session.sessionFile === "string" &&
     session.sessionFile.length > 0
   );
+}
+
+function forkSessionEligibility(
+  session: SessionViewModel | undefined,
+  realMode: boolean,
+  hasUnsentDraft: boolean,
+): { eligible: true; reason: "" } | { eligible: false; reason: string } {
+  if (!realMode || session?.backendMode !== "real") {
+    return {
+      eligible: false,
+      reason: "Fork is available only for saved Pi sessions.",
+    };
+  }
+  if (session.draftSession === true || !session.sessionFile) {
+    return {
+      eligible: false,
+      reason: "Send a prompt and save this session before forking.",
+    };
+  }
+  if (hasUnsentDraft) {
+    return {
+      eligible: false,
+      reason: "Send or clear the unsent draft before forking this session.",
+    };
+  }
+  if (
+    isSessionBusy(session) ||
+    session.overlays.toolRunning ||
+    session.overlays.compacting ||
+    session.overlays.needsUserInput ||
+    session.overlays.localQueuedStartCount > 0 ||
+    session.overlays.piQueuedSteeringCount > 0 ||
+    session.overlays.piQueuedFollowUpCount > 0
+  ) {
+    return {
+      eligible: false,
+      reason:
+        "Finish active, queued, tool, compaction, or extension input work before forking.",
+    };
+  }
+  return { eligible: true, reason: "" };
 }
 
 function canRenameSavedSession(
@@ -10854,6 +10957,7 @@ function WorkspaceManagementDialog(props: {
   onClose(): void;
   onCreate(name: string): void;
   onDelete(sessionId: string): void;
+  onFork(sessionId: string): void;
   onDeleteAll(): void;
   onMove(sessionId: string, workspaceId: string): void;
   onRemove(sessionId: string): void;
@@ -10883,7 +10987,8 @@ function WorkspaceManagementDialog(props: {
     props.dialog.kind === "move" ||
     props.dialog.kind === "renameSession" ||
     props.dialog.kind === "remove" ||
-    props.dialog.kind === "delete"
+    props.dialog.kind === "delete" ||
+    props.dialog.kind === "fork"
       ? props.dialog.sessionId
       : undefined;
   const session =
@@ -10919,7 +11024,9 @@ function WorkspaceManagementDialog(props: {
                   ? "session-remove-dialog"
                   : props.dialog.kind === "delete"
                     ? "session-delete-dialog"
-                    : "session-delete-all-dialog";
+                    : props.dialog.kind === "fork"
+                      ? "session-fork-dialog"
+                      : "session-delete-all-dialog";
   const title =
     props.dialog.kind === "create"
       ? "New workspace"
@@ -10937,7 +11044,9 @@ function WorkspaceManagementDialog(props: {
                   ? "Remove session from workspace"
                   : props.dialog.kind === "delete"
                     ? "Delete session"
-                    : "Delete saved sessions";
+                    : props.dialog.kind === "fork"
+                      ? "Fork session"
+                      : "Delete saved sessions";
 
   useLayoutEffect(() => {
     returnFocusRef.current =
@@ -11234,6 +11343,15 @@ function WorkspaceManagementDialog(props: {
               : {})}
             onClose={props.onClose}
             onConfirm={props.onArchive}
+          />
+        ) : null}
+        {props.dialog.kind === "fork" ? (
+          <DialogConfirmation
+            busy={props.busy}
+            confirmLabel="Fork session"
+            note="Pi will create a new independent session with this session's saved history. The original session stays unchanged."
+            onClose={props.onClose}
+            onConfirm={() => session && props.onFork(session.id)}
           />
         ) : null}
         {props.dialog.kind === "delete" ? (
@@ -14343,6 +14461,7 @@ export const __rendererTestHooks = {
   isMissingSessionFileError,
   isDetachedRuntimeError,
   isSessionDeletable,
+  forkSessionEligibility,
   canRenameSavedSession,
   canManageWorkspaceMembership,
   listProjectsIfAvailable,

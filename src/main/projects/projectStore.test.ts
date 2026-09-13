@@ -336,6 +336,40 @@ test("ProjectStore retries a failed bulk persist on an unchanged refresh", async
   assert.equal(refs[0]?.title, "Retry session");
 });
 
+test("ProjectStore keeps failed fork compensation durable across restart", async () => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "pi-deck-project-store-remove-retry-"),
+  );
+  const home = path.join(root, "home");
+  const projectDir = path.join(root, "project");
+  const sessionFile = path.join(root, "failed-fork.jsonl");
+  await fs.mkdir(projectDir, { recursive: true });
+  await fs.writeFile(sessionFile, "");
+  const project = await fs.realpath(projectDir);
+  const store = new ProjectStore(home);
+  await store.upsertAndActivateProject(project);
+  await store.upsertSessionRefFromSnapshot({ projectId: project, sessionFile });
+
+  const writeFile = vi.spyOn(fs, "writeFile");
+  writeFile.mockRejectedValueOnce(new Error("injected remove write failure"));
+  await assert.rejects(
+    store.removeSessionRef(project, sessionFile),
+    /injected remove write failure/,
+  );
+  assert.equal((await store.getSessionRefs(project)).length, 1);
+  assert.equal(
+    (await new ProjectStore(home).getSessionRefs(project)).length,
+    1,
+  );
+
+  await store.removeSessionRef(project, sessionFile);
+  writeFile.mockRestore();
+  assert.equal(
+    (await new ProjectStore(home).getSessionRefs(project)).length,
+    0,
+  );
+});
+
 test("ProjectStore bulk session upserts validate the entire batch before changing state", async () => {
   const root = await fs.mkdtemp(
     path.join(os.tmpdir(), "pi-deck-project-store-"),

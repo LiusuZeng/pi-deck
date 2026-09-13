@@ -14,6 +14,7 @@ import type {
   chatDeleteAllSessionsRequestSchema,
   chatDeleteAllSessionsResultSchema,
   chatDeleteSessionResultSchema,
+  chatForkSessionRequestSchema,
   chatListCommandsRequestSchema,
   chatListCommandsResultSchema,
   chatListModelsResultSchema,
@@ -175,6 +176,9 @@ export type ChatRespondToExtensionUiRequest = z.infer<
 >;
 export type ChatSnapshotRequest = z.infer<typeof chatSnapshotRequestSchema>;
 export type ChatSnapshot = z.infer<typeof chatSnapshotSchema>;
+export type ChatForkSessionRequest = z.infer<
+  typeof chatForkSessionRequestSchema
+>;
 export type ChatRuntimeStatusRequest = z.infer<
   typeof chatRuntimeStatusRequestSchema
 >;
@@ -343,6 +347,7 @@ export interface PiDeckApi {
       projectId?: string;
       sessionFile: string;
     }): Promise<ChatSnapshot>;
+    forkSession(request: ChatForkSessionRequest): Promise<ChatSnapshot>;
     deleteSession(request: {
       workspaceId?: string;
       projectId?: string;

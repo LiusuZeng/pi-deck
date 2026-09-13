@@ -439,6 +439,92 @@ test("real Pi bridge transport: default workspace prompt, resume, and explicit d
           .first(),
       ).toBeVisible();
 
+      // Pi can report its planned session path before it flushes the JSONL
+      // header. Fork preflight correctly fails closed until the source is a
+      // valid repository session, so wait for that real-Pi persistence boundary.
+      await expect
+        .poll(
+          async () => {
+            const source = await firstLaunch.page.evaluate(() =>
+              window.piDeck.chat.getSnapshot(),
+            );
+            const sessionFile = source.state.sessionFile;
+            if (!sessionFile) return false;
+            try {
+              const [canonicalSessionDir, canonicalSessionFile] = [
+                fs.realpathSync(sessionDir),
+                fs.realpathSync(sessionFile),
+              ];
+              const relative = path.relative(
+                canonicalSessionDir,
+                canonicalSessionFile,
+              );
+              if (
+                relative.length === 0 ||
+                relative === ".." ||
+                relative.startsWith(`..${path.sep}`) ||
+                path.isAbsolute(relative)
+              ) {
+                return false;
+              }
+              const stat = fs.lstatSync(sessionFile);
+              if (!stat.isFile() || stat.isSymbolicLink()) return false;
+              const firstLine = fs
+                .readFileSync(canonicalSessionFile, "utf8")
+                .split(/\r?\n/, 1)[0];
+              const header = firstLine ? JSON.parse(firstLine) : undefined;
+              return (
+                header !== undefined &&
+                header.type === "session" &&
+                typeof header.id === "string" &&
+                header.id.length > 0 &&
+                typeof header.cwd === "string" &&
+                header.cwd.length > 0
+              );
+            } catch {
+              return false;
+            }
+          },
+          {
+            message:
+              "Real Pi must persist a valid fork source before fork preflight",
+            timeout: 30_000,
+          },
+        )
+        .toBe(true);
+
+      // Exercise native `pi --fork` against an attached source. Pi Deck must
+      // launch a second worker rather than issue RPC clone/fork on this one.
+      const forked = await firstLaunch.page.evaluate(async (token) => {
+        const source = await window.piDeck.chat.getSnapshot();
+        const fork = await window.piDeck.chat.forkSession({
+          workspaceId: source.workspaceId!,
+          sessionFile: source.state.sessionFile!,
+        });
+        return {
+          source: {
+            runtimeId: source.runtimeId,
+            sessionFile: source.state.sessionFile,
+            sessionId: source.state.sessionId,
+          },
+          fork: {
+            runtimeId: fork.runtimeId,
+            sessionFile: fork.state.sessionFile,
+            sessionId: fork.state.sessionId,
+          },
+          copiedUserText: fork.messages.some(
+            (message) =>
+              message.role === "user" &&
+              typeof message.content === "string" &&
+              message.content.includes(token),
+          ),
+        };
+      }, token);
+      expect(forked.fork.runtimeId).not.toBe(forked.source.runtimeId);
+      expect(forked.fork.sessionFile).not.toBe(forked.source.sessionFile);
+      expect(forked.fork.sessionId).not.toBe(forked.source.sessionId);
+      expect(forked.copiedUserText).toBe(true);
+
       // The parent exists before enabling its parent-scoped mode. The explicit
       // instruction is also the deterministic harness trigger; that harness
       // calls the real generated deck_delegate tool, not a fake RPC endpoint.

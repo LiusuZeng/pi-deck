@@ -146,6 +146,39 @@ describe("preload PiDeck API validation", () => {
     ).toThrow();
   });
 
+  it("exposes a strict workspace-scoped fork IPC method", async () => {
+    electronMock.ipcRenderer.invoke.mockResolvedValue({
+      ok: true,
+      data: {
+        runtimeId: "fork-runtime",
+        backendMode: "real",
+        workspaceId: "workspace-1",
+        state: {
+          sessionId: "fork-session",
+          sessionFile: "/sessions/fork.jsonl",
+        },
+        messages: [],
+      },
+    });
+    await expect(
+      api.chat.forkSession({
+        workspaceId: "workspace-1",
+        sessionFile: "/sessions/source.jsonl",
+      }),
+    ).resolves.toMatchObject({ runtimeId: "fork-runtime" });
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenCalledWith(
+      "chat:forkSession",
+      { workspaceId: "workspace-1", sessionFile: "/sessions/source.jsonl" },
+    );
+    expect(() =>
+      api.chat.forkSession({
+        workspaceId: "workspace-1",
+        sessionFile: "/sessions/source.jsonl",
+        target: "/sessions/not-authorized.jsonl",
+      } as never),
+    ).toThrow();
+  });
+
   it("exposes strict steer and follow-up IPC methods", async () => {
     electronMock.ipcRenderer.invoke.mockResolvedValue({
       ok: true,

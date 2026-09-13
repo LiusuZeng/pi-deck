@@ -10,7 +10,7 @@ import {
   type OpenDialogOptions,
 } from "electron";
 import { randomUUID } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, realpathSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
@@ -34,6 +34,7 @@ import {
   chatDeleteAllSessionsResultSchema,
   chatDeleteSessionRequestSchema,
   chatDeleteSessionResultSchema,
+  chatForkSessionRequestSchema,
   chatListCommandsRequestSchema,
   chatListCommandsResultSchema,
   chatListModelsRequestSchema,
@@ -144,6 +145,7 @@ import type {
   WorkflowRun,
 } from "../shared/types.js";
 import { DiagnosticsService } from "./diagnostics/diagnostics.js";
+import { ForkCleanupJournal } from "./forkCleanupJournal.js";
 import { registerValidatedIpc } from "./ipc/registerIpc.js";
 import {
   discoverPiModels,
@@ -312,6 +314,7 @@ let settingsStore: SettingsStore | undefined;
 let projectStore: ProjectStore | undefined;
 let workspaceStore: WorkspaceStore | undefined;
 let workspaceUsageStore: WorkspaceUsageStore | undefined;
+let forkCleanupJournal: ForkCleanupJournal | undefined;
 let workflowInitialization: WorkflowInitialization<WorkflowStore> | undefined;
 const realChatLaunchConfigCache = new RealChatLaunchConfigCache();
 let loginShellEnvCaptureCache:
@@ -374,6 +377,36 @@ const chatSessionFileLocks = new Map<string, string>();
 const chatSessionResumePromises = new Map<string, Promise<ChatSnapshot>>();
 const chatSessionResumeWorkspaceIds = new Map<string, string>();
 const chatSessionMutationReservations = new Set<string>();
+// A failed fork keeps both source and target serialized until the child exit
+// event has proved it cannot write either session any longer.
+const retainedForkReservationFiles = new Set<string>();
+type PendingFailedForkCleanup = {
+  sourceSessionFile: string;
+  transactionId: string;
+  target?: {
+    /** Canonical target path validated while the fork worker was still live. */
+    sessionFile: string;
+    /** Exact durable Pi identity observed for that canonical target. */
+    sessionId: string;
+    /** Canonical source path recorded in the target's native Pi header. */
+    parentSession: string;
+    /** Canonical repository directory used for live/restart-equivalent scans. */
+    sessionDir: string;
+    /** Same boundary persisted with the source reservation. */
+    sourceReservationCreatedAtMs: number;
+    workspaceId: string;
+    projectId?: string;
+    promoted: boolean;
+    validationDiagnosticRecorded?: boolean;
+  };
+  exitConfirmed?: boolean;
+  retryPromise?: Promise<void> | undefined;
+  retryTimer?: NodeJS.Timeout | undefined;
+};
+const pendingFailedForkCleanups = new Map<string, PendingFailedForkCleanup>();
+// worker_exit can precede a cancelled fork's catch continuation. Preserve that
+// proof while its spawned-but-unregistered worker is still pending.
+const confirmedPendingChatAttachmentExits = new Set<string>();
 const chatWorkspaceMutationReservations = new Set<string>();
 const workspaceRuntimeLifecycle = new WorkspaceRuntimeLifecycleGate();
 const workflowRuntimeOwnership = new WorkflowRuntimeOwnershipRegistry();
@@ -392,6 +425,41 @@ const pendingExtensionUiRequests = new Map<
 >();
 const extensionUiTimeoutGraceMs = 1_000;
 let chatWorkerCreationTail: Promise<void> = Promise.resolve();
+// Serializes every Pi session discovery/attach/fork registration transaction.
+// The lock begins before native fork inventory and ends only after durable
+// ownership plus runtime identity registration, eliminating inventory TOCTOU.
+let chatSessionAttachmentTail: Promise<void> = Promise.resolve();
+// Reset/quit increment this before queueing their own attachment barrier. An
+// operation that began before that boundary may unwind, but can never publish
+// a runtime or durable target claim after it.
+let chatSessionAttachmentGeneration = 0;
+type ChatLifecyclePhase = "running" | "draining" | "replacing" | "stopped";
+type ChatLifecycleOperation = {
+  generation: number;
+  cancelled: boolean;
+  completion: Promise<void>;
+  complete: () => void;
+};
+// This is the single lifecycle transaction shared by ordinary creation,
+// resume, fork, and reset replacement creation. A destructive boundary first
+// cancels every operation in the current generation, then waits for each one
+// and every spawned-but-unregistered worker before releasing the old adapter.
+let chatLifecyclePhase: ChatLifecyclePhase = "running";
+const chatLifecycleOperations = new Set<ChatLifecycleOperation>();
+let chatLifecycleTeardownPromise: Promise<void> | undefined;
+let activeChatReset: Promise<ChatSnapshot> | undefined;
+let chatLifecycleStopRequested = false;
+type PendingChatAttachmentWorker = {
+  adapter: SinglePiAdapter;
+  closePromise?: Promise<void>;
+};
+// A worker exists in its adapter immediately after spawn, before it is safe to
+// put it in runtime maps. Keep that otherwise invisible interval owned so a
+// destructive boundary can close and await it rather than orphaning Pi.
+const pendingChatAttachmentWorkers = new Map<
+  string,
+  PendingChatAttachmentWorker
+>();
 let chatEventUnsubscribe: (() => void) | undefined;
 let selectedRealProjectCwd: string | undefined;
 let isQuittingAfterChatWorkerCleanup = false;
@@ -472,6 +540,11 @@ async function bootstrap(): Promise<void> {
   workspaceStore = workspacesStore;
   const usageStore = new WorkspaceUsageStore(resolvePiDeckHome(process.env));
   workspaceUsageStore = usageStore;
+  const failedForkCleanup = new ForkCleanupJournal(
+    resolvePiDeckHome(process.env),
+    diagnosticsService,
+  );
+  forkCleanupJournal = failedForkCleanup;
 
   const startup = startProgressiveStartup({
     startedAtMs: processStartedAtMs,
@@ -495,6 +568,7 @@ async function bootstrap(): Promise<void> {
         projects.loadIfNeeded(),
         workspacesStore.loadIfNeeded(),
         usageStore.loadIfNeeded(),
+        failedForkCleanup.loadIfNeeded(),
       ]);
 
       workflowInitialization = await initializeWorkflows(async () => {
@@ -524,6 +598,13 @@ async function bootstrap(): Promise<void> {
       await workspacesStore.ensureDefaultWorkspace({
         activate: !hadWorkspaceMetadata || resolveChatBackendMode() === "fake",
       });
+      // Reconstruct target blocks from source-only reservations before any
+      // session operation can attach an orphaned native child. Recovery only
+      // compensates after the recorded child PID is proved absent.
+      await failedForkCleanup.recoverSourceTargetsAfterRestart(
+        workspacesStore,
+        projects,
+      );
       await startDelegationBridge();
       await ensureChatAdapter(settings, diagnosticsService);
       await rehydrateWorkflowRuns();
@@ -747,49 +828,67 @@ function registerIpcHandlers(
     requestSchema: chatResumeSessionRequestSchema,
     responseSchema: chatSnapshotSchema,
     diagnostics: diagnosticsService,
-    handler: async ({ workspaceId, projectId, sessionFile }) => {
-      if (workspaceId !== undefined) {
-        // Explicit workspace requests retain their membership and archived /
-        // unknown-workspace validation. A project hint must not bypass it.
-        const project = await projectForWorkspaceSession(
-          workspaceId,
+    handler: async ({ workspaceId, projectId, sessionFile }) =>
+      withChatLifecycleOperation(async (lifecycleOperation) => {
+        if (workspaceId !== undefined) {
+          // Explicit workspace requests retain their membership and archived /
+          // unknown-workspace validation. A project hint must not bypass it.
+          const project = await projectForWorkspaceSession(
+            workspaceId,
+            sessionFile,
+          );
+          assertChatLifecycleOperationActive(lifecycleOperation);
+          return resumeChatSession(
+            store,
+            diagnosticsService,
+            sessionFile,
+            project,
+            workspaceId,
+            undefined,
+            lifecycleOperation,
+          );
+        }
+
+        // Legacy callers may omit workspaceId. Authorize their project hint as
+        // before, but let durable canonical membership choose the workspace when
+        // one exists. Only a genuinely unassigned file falls back to Default.
+        const requestedProject = await authorizeRendererChatProject(projectId);
+        const ownership = await resolveChatResumeWorkspace(
+          ensureWorkspaceStore(),
           sessionFile,
         );
+        const project =
+          ownership.source === "existing"
+            ? await projectForWorkspaceSession(
+                ownership.workspaceId,
+                sessionFile,
+              )
+            : (requestedProject ??
+              (resolveChatBackendMode() === "real"
+                ? await resolveWorkspaceProject(ownership.workspaceId)
+                : undefined));
+        assertChatLifecycleOperationActive(lifecycleOperation);
         return resumeChatSession(
           store,
           diagnosticsService,
           sessionFile,
           project,
-          workspaceId,
+          ownership.workspaceId,
+          ownership.source === "default"
+            ? { claimUnassignedWorkspace: true }
+            : undefined,
+          lifecycleOperation,
         );
-      }
+      }),
+  });
 
-      // Legacy callers may omit workspaceId. Authorize their project hint as
-      // before, but let durable canonical membership choose the workspace when
-      // one exists. Only a genuinely unassigned file falls back to Default.
-      const requestedProject = await authorizeRendererChatProject(projectId);
-      const ownership = await resolveChatResumeWorkspace(
-        ensureWorkspaceStore(),
-        sessionFile,
-      );
-      const project =
-        ownership.source === "existing"
-          ? await projectForWorkspaceSession(ownership.workspaceId, sessionFile)
-          : (requestedProject ??
-            (resolveChatBackendMode() === "real"
-              ? await resolveWorkspaceProject(ownership.workspaceId)
-              : undefined));
-      return resumeChatSession(
-        store,
-        diagnosticsService,
-        sessionFile,
-        project,
-        ownership.workspaceId,
-        ownership.source === "default"
-          ? { claimUnassignedWorkspace: true }
-          : undefined,
-      );
-    },
+  registerValidatedIpc({
+    channel: ipcChannels.chatForkSession,
+    requestSchema: chatForkSessionRequestSchema,
+    responseSchema: chatSnapshotSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ workspaceId, sessionFile }) =>
+      forkChatSession(store, diagnosticsService, sessionFile, workspaceId),
   });
 
   registerValidatedIpc({
@@ -923,6 +1022,10 @@ function registerIpcHandlers(
         return undefined;
       }
       const promptAttachments = attachments ?? [];
+      assertChatRuntimeSessionNotMutating(
+        activeRuntimeId,
+        "sending a prompt to it",
+      );
       await deliverWithAttachmentConsumption({
         store: attachmentSelections,
         ownerId: attachmentOwnerId,
@@ -930,8 +1033,15 @@ function registerIpcHandlers(
           (attachment) => attachment.selectedPathToken,
         ),
         deliver: async () =>
-          queueTaskSessionParentTurn(activeRuntimeId, async () =>
-            adapter.prompt(
+          queueTaskSessionParentTurn(activeRuntimeId, async () => {
+            // Check again when the serialized parent turn actually runs. A
+            // prompt queued before a fork must not append while Pi reads the
+            // source JSONL for its native --fork worker.
+            assertChatRuntimeSessionNotMutating(
+              activeRuntimeId,
+              "sending a prompt to it",
+            );
+            await adapter.prompt(
               activeRuntimeId,
               await buildPromptInputWithImagePolicy(
                 store,
@@ -941,8 +1051,8 @@ function registerIpcHandlers(
                 promptAttachments,
                 attachmentOwnerId,
               ),
-            ),
-          ),
+            );
+          }),
       });
       return undefined;
     },
@@ -956,6 +1066,7 @@ function registerIpcHandlers(
     handler: async ({ runtimeId, text, attachments, attachmentOwnerId }) => {
       const adapter = await ensureChatAdapter(store, diagnosticsService);
       const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
+      assertChatRuntimeSessionNotMutating(activeRuntimeId, "steering it");
       const promptAttachments = attachments ?? [];
       await deliverWithAttachmentConsumption({
         store: attachmentSelections,
@@ -963,18 +1074,18 @@ function registerIpcHandlers(
         selectedPathTokens: promptAttachments.map(
           (attachment) => attachment.selectedPathToken,
         ),
-        deliver: async () =>
-          adapter.steer(
+        deliver: async () => {
+          const input = await buildPromptInputWithImagePolicy(
+            store,
+            adapter,
             activeRuntimeId,
-            await buildPromptInputWithImagePolicy(
-              store,
-              adapter,
-              activeRuntimeId,
-              text,
-              promptAttachments,
-              attachmentOwnerId,
-            ),
-          ),
+            text,
+            promptAttachments,
+            attachmentOwnerId,
+          );
+          assertChatRuntimeSessionNotMutating(activeRuntimeId, "steering it");
+          await adapter.steer(activeRuntimeId, input);
+        },
       });
       return undefined;
     },
@@ -988,6 +1099,10 @@ function registerIpcHandlers(
     handler: async ({ runtimeId, text, attachments, attachmentOwnerId }) => {
       const adapter = await ensureChatAdapter(store, diagnosticsService);
       const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
+      assertChatRuntimeSessionNotMutating(
+        activeRuntimeId,
+        "queuing follow-up work",
+      );
       const promptAttachments = attachments ?? [];
       await deliverWithAttachmentConsumption({
         store: attachmentSelections,
@@ -998,8 +1113,12 @@ function registerIpcHandlers(
         deliver: async () =>
           // Follow-ups share the parent turn queue with synthesis. Steer is
           // intentionally not queued: it is an intervention in the live turn.
-          queueTaskSessionParentTurn(activeRuntimeId, async () =>
-            adapter.followUp(
+          queueTaskSessionParentTurn(activeRuntimeId, async () => {
+            assertChatRuntimeSessionNotMutating(
+              activeRuntimeId,
+              "queuing follow-up work",
+            );
+            await adapter.followUp(
               activeRuntimeId,
               await buildPromptInputWithImagePolicy(
                 store,
@@ -1009,8 +1128,8 @@ function registerIpcHandlers(
                 promptAttachments,
                 attachmentOwnerId,
               ),
-            ),
-          ),
+            );
+          }),
       });
       return undefined;
     },
@@ -1024,6 +1143,7 @@ function registerIpcHandlers(
     handler: async ({ runtimeId }) => {
       const adapter = await ensureChatAdapter(store, diagnosticsService);
       const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
+      assertChatRuntimeSessionNotMutating(activeRuntimeId, "aborting it");
       await adapter.abort(activeRuntimeId);
       return undefined;
     },
@@ -1049,6 +1169,7 @@ function registerIpcHandlers(
       const adapter = await ensureChatAdapter(store, diagnosticsService);
       const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
       assertRuntimeNotWorkflowOwned(activeRuntimeId, "closing this session");
+      assertChatRuntimeSessionNotMutating(activeRuntimeId, "closing it");
       const status = await getChatRuntimeStatus(activeRuntimeId);
       if (status.state.isAgentActive) {
         throw new Error("Finish the active turn before closing this session.");
@@ -1077,19 +1198,23 @@ function registerIpcHandlers(
     requestSchema: chatCreateSessionRequestSchema,
     responseSchema: chatSnapshotSchema,
     diagnostics: diagnosticsService,
-    handler: async (request) => {
-      const { project, workspaceId } = await resolveChatCreationContext(
-        request?.workspaceId,
-        request?.projectId,
-      );
-      return createChatSessionSnapshot(
-        store,
-        diagnosticsService,
-        project,
-        workspaceId,
-        request?.multitaskMode,
-      );
-    },
+    handler: async (request) =>
+      withChatLifecycleOperation(async (lifecycleOperation) => {
+        const { project, workspaceId } = await resolveChatCreationContext(
+          request?.workspaceId,
+          request?.projectId,
+        );
+        assertChatLifecycleOperationActive(lifecycleOperation);
+        return createChatSessionSnapshot(
+          store,
+          diagnosticsService,
+          project,
+          workspaceId,
+          request?.multitaskMode,
+          undefined,
+          lifecycleOperation,
+        );
+      }),
   });
 
   registerValidatedIpc({
@@ -1097,23 +1222,7 @@ function registerIpcHandlers(
     requestSchema: noPayloadSchema,
     responseSchema: chatSnapshotSchema,
     diagnostics: diagnosticsService,
-    handler: async () => {
-      assertNoWorkflowRuntimesForReset(workflowRuntimeOwnership);
-      await chatWorkerCreationTail;
-      assertNoWorkflowRuntimesForReset(workflowRuntimeOwnership);
-      await closeChatWorker();
-      // Reset is an explicit new-session action, unlike application bootstrap.
-      const { project, workspaceId } = await resolveChatCreationContext(
-        undefined,
-        undefined,
-      );
-      return createChatSessionSnapshot(
-        store,
-        diagnosticsService,
-        project,
-        workspaceId,
-      );
-    },
+    handler: async () => resetChatSession(store, diagnosticsService),
   });
 
   registerValidatedIpc({
@@ -1312,6 +1421,10 @@ function registerIpcHandlers(
     diagnostics: diagnosticsService,
     handler: async ({ workspaceId }) =>
       withChatWorkspaceMutation(workspaceId, async () => {
+        await assertWorkspaceForkCleanupTargetsAvailable(
+          workspaceId,
+          "archived",
+        );
         assertWorkspaceNotWorkflowOwned(
           workflowRuntimeOwnership,
           workspaceId,
@@ -1342,6 +1455,7 @@ function registerIpcHandlers(
     responseSchema: workspaceListResultSchema,
     diagnostics: diagnosticsService,
     handler: async ({ workspaceId }) => {
+      await assertWorkspaceForkCleanupTargetsAvailable(workspaceId, "restored");
       await ensureWorkspaceStore().restore(workspaceId);
       // Workspace restoration is also a workflow lifecycle boundary. Runs
       // retained while the workspace was archived may be waiting or queued;
@@ -1369,6 +1483,7 @@ function registerIpcHandlers(
     handler: async ({ sessionFile, toWorkspaceId }) => {
       const canonical =
         (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
+      await assertForkCleanupTargetAvailable(canonical, "moved");
       assertSessionFileNotWorkflowOwned(canonical, "moving this session");
       return withChatSessionMutation(
         canonical,
@@ -1396,6 +1511,7 @@ function registerIpcHandlers(
     handler: async ({ workspaceId, sessionFile }) => {
       const canonical =
         (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
+      await assertForkCleanupTargetAvailable(canonical, "removed");
       assertSessionFileNotWorkflowOwned(canonical, "removing this session");
       return withChatSessionMutation(
         canonical,
@@ -1420,6 +1536,7 @@ function registerIpcHandlers(
     handler: async ({ workspaceId, sessionFile }) => {
       const canonical =
         (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
+      await assertForkCleanupTargetAvailable(canonical, "archived");
       assertSessionFileNotWorkflowOwned(canonical, "archiving this session");
       return withChatSessionMutation(
         canonical,
@@ -1434,8 +1551,12 @@ function registerIpcHandlers(
     requestSchema: workspaceRestoreSessionRequestSchema,
     responseSchema: workspaceSessionMutationResultSchema,
     diagnostics: diagnosticsService,
-    handler: async ({ workspaceId, sessionFile }) =>
-      ensureWorkspaceStore().restoreSession(workspaceId, sessionFile),
+    handler: async ({ workspaceId, sessionFile }) => {
+      const canonical =
+        (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
+      await assertForkCleanupTargetAvailable(canonical, "restored");
+      return ensureWorkspaceStore().restoreSession(workspaceId, canonical);
+    },
   });
 
   registerValidatedIpc({
@@ -1443,8 +1564,12 @@ function registerIpcHandlers(
     requestSchema: workspaceRenameSessionRequestSchema,
     responseSchema: workspaceSessionMutationResultSchema,
     diagnostics: diagnosticsService,
-    handler: async ({ sessionFile, title }) =>
-      ensureWorkspaceStore().renameSession(sessionFile, title),
+    handler: async ({ sessionFile, title }) => {
+      const canonical =
+        (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
+      await assertForkCleanupTargetAvailable(canonical, "renamed");
+      return ensureWorkspaceStore().renameSession(canonical, title);
+    },
   });
 
   registerValidatedIpc({
@@ -2032,6 +2157,270 @@ function ensureWorkspaceUsageStore(): WorkspaceUsageStore {
   return workspaceUsageStore;
 }
 
+function ensureForkCleanupJournal(): ForkCleanupJournal {
+  if (forkCleanupJournal === undefined) {
+    throw new Error("Failed fork cleanup journal is unavailable.");
+  }
+  return forkCleanupJournal;
+}
+
+async function assertForkCleanupTargetAvailable(
+  sessionFile: string,
+  action:
+    | "attached"
+    | "imported"
+    | "forked"
+    | "moved"
+    | "removed"
+    | "archived"
+    | "restored"
+    | "renamed"
+    | "deleted",
+): Promise<void> {
+  if (await ensureForkCleanupJournal().blocks(sessionFile)) {
+    throw new Error(
+      `This fork target is awaiting durable cleanup and cannot be ${action} yet.`,
+    );
+  }
+}
+
+async function assertWorkspaceForkCleanupTargetsAvailable(
+  workspaceId: string,
+  action: "archived" | "restored",
+): Promise<void> {
+  for (const ref of await ensureWorkspaceStore().getSessionRefs(workspaceId)) {
+    await assertForkCleanupTargetAvailable(ref.sessionFile, action);
+  }
+}
+
+function retainFailedForkReservations(
+  runtimeId: string,
+  sourceSessionFile: string,
+  transactionId: string,
+  target?: PendingFailedForkCleanup["target"],
+): void {
+  retainedForkReservationFiles.add(sourceSessionFile);
+  if (target !== undefined) {
+    retainedForkReservationFiles.add(target.sessionFile);
+  }
+  pendingFailedForkCleanups.set(runtimeId, {
+    sourceSessionFile,
+    transactionId,
+    ...(target !== undefined ? { target } : {}),
+  });
+  if (confirmedPendingChatAttachmentExits.has(runtimeId)) {
+    void retryFailedForkCleanupAfterExit(runtimeId);
+  }
+}
+
+async function waitForConfirmedForkCleanups(): Promise<void> {
+  await Promise.all(
+    [...pendingFailedForkCleanups.values()].flatMap((pending) =>
+      pending.exitConfirmed === true && pending.retryPromise !== undefined
+        ? [pending.retryPromise]
+        : [],
+    ),
+  );
+}
+
+/**
+ * Live worker-exit cleanup has the same authority boundary as restart
+ * recovery: only the one, still-canonical child observed at fork time may be
+ * promoted or have refs removed. A worker-exit proof does not authorize a
+ * changed or ambiguous file.
+ */
+async function validatePendingFailedForkCleanupTarget(
+  pending: PendingFailedForkCleanup,
+): Promise<string | undefined> {
+  const target = pending.target;
+  if (target === undefined) return undefined;
+  try {
+    const inventory = await scanSessionRepository({
+      sessionDir: target.sessionDir,
+    });
+    const candidates = new Set<string>();
+    for (const summary of inventory.sessions) {
+      if (
+        summary.sessionFile === target.parentSession ||
+        summary.createdAtMs === undefined ||
+        summary.createdAtMs < target.sourceReservationCreatedAtMs
+      ) {
+        continue;
+      }
+      const validation = await validatePiSessionFile({
+        sessionFile: summary.sessionFile,
+        sessionDir: target.sessionDir,
+      });
+      if (validation.ok && validation.parentSession === target.parentSession) {
+        candidates.add(validation.sessionFile);
+      }
+    }
+    const uniqueCandidates = [...candidates].sort();
+    if (
+      uniqueCandidates.length !== 1 ||
+      uniqueCandidates[0] !== target.sessionFile
+    ) {
+      // Restart recovery blocks every provenance match before declining an
+      // ambiguous claim. Do the same before retaining this live transaction:
+      // otherwise a replacement child (or the extra ambiguous children) can
+      // attach or mutate until this process exits and recovery runs.
+      const journal = ensureForkCleanupJournal();
+      for (const sessionFile of uniqueCandidates) {
+        await journal.blockDiscoveredTarget({
+          sessionFile,
+          sourceSessionFile: pending.sourceSessionFile,
+          transactionId: pending.transactionId,
+          workspaceId: target.workspaceId,
+          ...(target.projectId !== undefined
+            ? { projectId: target.projectId }
+            : {}),
+        });
+        // Journal blocks are the authoritative cross-operation guard; retain
+        // the mutation reservations too, so a concurrent in-process request
+        // cannot pass a pre-existing attachment/mutation gate while this
+        // terminal failed transaction remains alive.
+        retainedForkReservationFiles.add(sessionFile);
+        chatSessionMutationReservations.add(sessionFile);
+      }
+      if (uniqueCandidates.length !== 1) {
+        return "repository no longer has exactly one plausible child";
+      }
+      return "repository's unique child no longer matches the validated target";
+    }
+    const validation = await validatePiSessionFile({
+      sessionFile: target.sessionFile,
+      sessionDir: target.sessionDir,
+    });
+    if (
+      !validation.ok ||
+      validation.sessionFile !== target.sessionFile ||
+      validation.parentSession !== target.parentSession
+    ) {
+      return "target path or native parent provenance changed";
+    }
+    const summary = await readPiSessionSummary({
+      sessionFile: target.sessionFile,
+      sessionDir: target.sessionDir,
+    });
+    if (summary.summary?.sessionId !== target.sessionId) {
+      return "target durable identity changed";
+    }
+    return undefined;
+  } catch {
+    return "target repository validation could not complete";
+  }
+}
+
+function retainFailedForkCleanupAfterInvalidExitTarget(
+  pending: PendingFailedForkCleanup,
+  reason: string,
+): void {
+  if (pending.target?.validationDiagnosticRecorded === true) return;
+  if (pending.target !== undefined) {
+    pending.target.validationDiagnosticRecorded = true;
+  }
+  // One fixed-size diagnostic per retained transaction avoids unbounded error
+  // growth if an integration emits duplicate worker_exit events.
+  diagnostics?.recordError(
+    `Fork cleanup ${pending.transactionId} remains retained after worker exit: ${reason}.`,
+  );
+}
+
+async function retryFailedForkCleanupAfterExit(
+  runtimeId: string,
+): Promise<void> {
+  const pending = pendingFailedForkCleanups.get(runtimeId);
+  if (pending === undefined) return;
+  pending.exitConfirmed = true;
+  if (pending.retryPromise !== undefined) {
+    await pending.retryPromise;
+    return;
+  }
+  const retry = (async () => {
+    const journal = ensureForkCleanupJournal();
+    if (pending.target !== undefined) {
+      const invalidTargetReason =
+        await validatePendingFailedForkCleanupTarget(pending);
+      if (invalidTargetReason !== undefined) {
+        // Do not promote, remove refs, complete the journal, or release either
+        // reservation. This is deliberately terminal for this observed exit;
+        // restart recovery retains the same fail-closed authority boundary.
+        retainFailedForkCleanupAfterInvalidExitTarget(
+          pending,
+          invalidTargetReason,
+        );
+        return;
+      }
+      if (!pending.target.promoted) {
+        await journal.promoteSourceToTarget({
+          sessionFile: pending.target.sessionFile,
+          sourceSessionFile: pending.sourceSessionFile,
+          transactionId: pending.transactionId,
+          discoveredSessionId: pending.target.sessionId,
+          workspaceId: pending.target.workspaceId,
+          ...(pending.target.projectId !== undefined
+            ? { projectId: pending.target.projectId }
+            : {}),
+        });
+        pending.target.promoted = true;
+      }
+      await journal.retryAfterConfirmedExit(
+        pending.target.sessionFile,
+        ensureWorkspaceStore(),
+        projectStore,
+      );
+      if (await journal.blocks(pending.target.sessionFile)) {
+        // A confirmed exit makes retry safe, not infallible. Keep every
+        // reservation while a transient store/journal failure is retried.
+        pending.retryTimer ??= setTimeout(() => {
+          pending.retryTimer = undefined;
+          void retryFailedForkCleanupAfterExit(runtimeId);
+        }, 250);
+        pending.retryTimer.unref();
+        return;
+      }
+      retainedForkReservationFiles.delete(pending.target.sessionFile);
+      chatSessionMutationReservations.delete(pending.target.sessionFile);
+    } else {
+      const released = await journal.completeSourceAfterConfirmedExit({
+        sourceSessionFile: pending.sourceSessionFile,
+        transactionId: pending.transactionId,
+        childRuntimeId: runtimeId,
+        confirmedByOwningProcess: true,
+      });
+      if (!released && (await journal.blocks(pending.sourceSessionFile))) {
+        // The only remaining form is an unknown pre-spawn/spawn gap. Do not
+        // retry or silently clear it: restart-safe repair requires an operator
+        // to prove there was no surviving native child.
+        diagnostics?.recordError(
+          `Fork reservation ${pending.transactionId} remains blocked because child identity was not durably recorded before failure. Explicit safe journal repair is required for ${pending.sourceSessionFile}.`,
+        );
+        return;
+      }
+    }
+    retainedForkReservationFiles.delete(pending.sourceSessionFile);
+    chatSessionMutationReservations.delete(pending.sourceSessionFile);
+    pendingFailedForkCleanups.delete(runtimeId);
+    confirmedPendingChatAttachmentExits.delete(runtimeId);
+    untrackPendingChatAttachmentWorker(runtimeId);
+  })().catch((error) => {
+    diagnostics?.recordError(
+      `Failed to retry confirmed fork cleanup for ${runtimeId}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    pending.retryTimer ??= setTimeout(() => {
+      pending.retryTimer = undefined;
+      void retryFailedForkCleanupAfterExit(runtimeId);
+    }, 250);
+    pending.retryTimer.unref();
+  });
+  pending.retryPromise = retry;
+  try {
+    await retry;
+  } finally {
+    if (pending.retryPromise === retry) pending.retryPromise = undefined;
+  }
+}
+
 function ensureWorkflowStore(): WorkflowStore {
   return requireAgentWorkflows(workflowInitialization);
 }
@@ -2600,6 +2989,10 @@ async function addSessionToWorkspace(
           `Session is not eligible for workspace import: ${validation.reason}.`,
         );
       }
+      await assertForkCleanupTargetAvailable(
+        validation.sessionFile,
+        "imported",
+      );
       const stat = await fs.stat(validation.sessionFile);
       const refreshed = await readPiSessionSummary({
         sessionFile: validation.sessionFile,
@@ -3119,10 +3512,17 @@ async function initializeChatAdapter(
         );
       });
     if (parsed.data.type === "worker_exit") {
+      // Fork compensation may only run after this terminal event. Preserve an
+      // early proof for a cancelled pre-registration fork whose catch has not
+      // yet installed its compensation record.
+      if (pendingChatAttachmentWorkers.has(parsed.data.runtimeId)) {
+        confirmedPendingChatAttachmentExits.add(parsed.data.runtimeId);
+      }
+      void retryFailedForkCleanupAfterExit(parsed.data.runtimeId);
       chatRuntimeShutdownFailures.confirmExit(parsed.data.runtimeId);
-      // A child exit does not go through closeSession(), so remove it from the
-      // adapter as well as the UI/runtime maps or it would consume capacity.
-      adapter.forgetExitedWorker(parsed.data.runtimeId);
+      // PiWorker's adapter listener removes the exact exited worker after
+      // forwarding this event. Do not delete by runtime id here: an old exit
+      // must never erase a replacement that reused that id.
       const preserveAttachments = attachmentPreservingRuntimeClosures.has(
         parsed.data.runtimeId,
       );
@@ -3182,38 +3582,191 @@ async function createChatWorker(
   capacity: WorkerCapacity,
   project: ProjectRef | undefined,
   workspaceId: string,
+  lifecycleOperation: ChatLifecycleOperation,
   initialMultitaskMode: "sequential" | "parallel" = "sequential",
   onRegistered?: (runtimeId: string) => void,
 ): Promise<ChatWorkerSpec> {
+  const workerSpec = await spawnChatAttachmentWorker(
+    lifecycleOperation,
+    adapter,
+    async () =>
+      mode === "real"
+        ? createRealChatWorker(adapter, store, capacity, project, workspaceId)
+        : createFakeChatWorker(adapter, store, capacity, workspaceId),
+  );
+  const runtimeId = workerSpec.worker.runtimeId;
+  try {
+    assertChatLifecycleOperationActive(lifecycleOperation);
+    registerChatWorker(workerSpec, mode, initialMultitaskMode);
+    onRegistered?.(runtimeId);
+    return workerSpec;
+  } catch (error) {
+    try {
+      await closeAttachedChatRuntime(adapter, runtimeId);
+    } catch (cleanupError) {
+      diagnostics?.recordError(
+        `Failed to clean up chat worker ${runtimeId} after registration failure: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+      );
+    }
+    throw error;
+  } finally {
+    untrackPendingChatAttachmentWorker(runtimeId);
+  }
+}
+
+type ChatSessionAttachmentLease = {
+  generation: number;
+  release: () => void;
+};
+
+async function enterChatSessionAttachment(
+  generation = chatSessionAttachmentGeneration,
+): Promise<ChatSessionAttachmentLease> {
+  const previous = chatSessionAttachmentTail;
+  let release: (() => void) | undefined;
+  chatSessionAttachmentTail = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await previous;
+  return { generation, release: (): void => release?.() };
+}
+
+function chatLifecycleCancelledError(): Error {
+  return new Error(
+    "Chat session attachment was cancelled by reset or application shutdown.",
+  );
+}
+
+function beginChatLifecycleOperation(
+  options: { replacement?: boolean } = {},
+): ChatLifecycleOperation {
+  if (
+    chatLifecyclePhase !== "running" &&
+    !(options.replacement === true && chatLifecyclePhase === "replacing")
+  ) {
+    throw chatLifecycleCancelledError();
+  }
+  let complete: (() => void) | undefined;
+  const operation: ChatLifecycleOperation = {
+    generation: chatSessionAttachmentGeneration,
+    cancelled: false,
+    completion: new Promise<void>((resolve) => {
+      complete = resolve;
+    }),
+    complete: (): void => complete?.(),
+  };
+  chatLifecycleOperations.add(operation);
+  return operation;
+}
+
+function finishChatLifecycleOperation(operation: ChatLifecycleOperation): void {
+  chatLifecycleOperations.delete(operation);
+  operation.complete();
+}
+
+function assertChatLifecycleOperationActive(
+  operation: ChatLifecycleOperation,
+): void {
+  if (
+    operation.cancelled ||
+    operation.generation !== chatSessionAttachmentGeneration ||
+    (chatLifecyclePhase !== "running" && chatLifecyclePhase !== "replacing")
+  ) {
+    throw chatLifecycleCancelledError();
+  }
+}
+
+async function withChatLifecycleOperation<T>(
+  operation: (lifecycleOperation: ChatLifecycleOperation) => Promise<T>,
+  options: { replacement?: boolean } = {},
+): Promise<T> {
+  const lifecycleOperation = beginChatLifecycleOperation(options);
+  try {
+    return await operation(lifecycleOperation);
+  } finally {
+    finishChatLifecycleOperation(lifecycleOperation);
+  }
+}
+
+function assertChatSessionAttachmentActive(generation: number): void {
+  if (generation !== chatSessionAttachmentGeneration) {
+    throw chatLifecycleCancelledError();
+  }
+}
+
+function trackPendingChatAttachmentWorker(
+  adapter: SinglePiAdapter,
+  runtimeId: string,
+): void {
+  pendingChatAttachmentWorkers.set(runtimeId, { adapter });
+}
+
+async function spawnChatAttachmentWorker(
+  lifecycleOperation: ChatLifecycleOperation,
+  adapter: SinglePiAdapter,
+  create: () => Promise<ChatWorkerSpec>,
+  afterSpawned?: (workerSpec: ChatWorkerSpec) => Promise<void>,
+): Promise<ChatWorkerSpec> {
   return serializeChatWorkerCreation(async () => {
+    assertChatLifecycleOperationActive(lifecycleOperation);
     let workerSpec: ChatWorkerSpec | undefined;
     try {
-      workerSpec =
-        mode === "real"
-          ? await createRealChatWorker(
-              adapter,
-              store,
-              capacity,
-              project,
-              workspaceId,
-            )
-          : await createFakeChatWorker(adapter, store, capacity, workspaceId);
-      registerChatWorker(workerSpec, mode, initialMultitaskMode);
-      onRegistered?.(workerSpec.worker.runtimeId);
+      workerSpec = await create();
+      // This synchronous publication closes the post-spawn/pre-registration
+      // hole: reset/quit can now await this worker even before the caller gets
+      // its promise continuation.
+      trackPendingChatAttachmentWorker(adapter, workerSpec.worker.runtimeId);
+      // Fork transactions need child identity durable before a reset/quit can
+      // observe cancellation and close this just-spawned worker.
+      await afterSpawned?.(workerSpec);
+      assertChatLifecycleOperationActive(lifecycleOperation);
       return workerSpec;
     } catch (error) {
       if (workerSpec !== undefined) {
         try {
-          await closeAttachedChatRuntime(adapter, workerSpec.worker.runtimeId);
-        } catch (cleanupError) {
-          diagnostics?.recordError(
-            `Failed to clean up chat worker ${workerSpec.worker.runtimeId} after registration failure: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+          await closePendingChatAttachmentWorker(
+            workerSpec.worker.runtimeId,
+            pendingChatAttachmentWorkers.get(workerSpec.worker.runtimeId) ?? {
+              adapter,
+            },
           );
+        } finally {
+          untrackPendingChatAttachmentWorker(workerSpec.worker.runtimeId);
         }
       }
       throw error;
     }
   });
+}
+
+function untrackPendingChatAttachmentWorker(runtimeId: string): void {
+  pendingChatAttachmentWorkers.delete(runtimeId);
+}
+
+async function closePendingChatAttachmentWorker(
+  runtimeId: string,
+  pending: PendingChatAttachmentWorker,
+): Promise<void> {
+  pending.closePromise ??= (async () => {
+    try {
+      if (pending.adapter.hasRuntime(runtimeId)) {
+        await pending.adapter.closeSession(runtimeId);
+      }
+    } catch (error) {
+      diagnostics?.recordError(
+        `Failed to close pending chat attachment worker ${runtimeId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  })();
+  await pending.closePromise;
+}
+
+async function closePendingChatAttachmentWorkers(): Promise<void> {
+  await Promise.all(
+    [...pendingChatAttachmentWorkers.entries()].map(([runtimeId, pending]) =>
+      closePendingChatAttachmentWorker(runtimeId, pending),
+    ),
+  );
 }
 
 async function serializeChatWorkerCreation<T>(
@@ -3362,6 +3915,10 @@ async function respondToExtensionUi(
   }
 
   try {
+    assertChatRuntimeSessionNotMutating(
+      request.runtimeId,
+      "responding to its extension request",
+    );
     await adapter.respondToExtensionUi(request.runtimeId, {
       id: request.requestId,
       ...request.response,
@@ -3455,6 +4012,19 @@ function resolveChatBackendMode(): ChatBackendMode {
   return process.env.PI_DECK_BACKEND === "real" ? "real" : "fake";
 }
 
+function assertChatRuntimeSessionNotMutating(
+  runtimeId: string,
+  action: string,
+): void {
+  const sessionFile = chatRuntimeSessionFiles.get(runtimeId);
+  if (
+    sessionFile !== undefined &&
+    chatSessionMutationReservations.has(sessionFile)
+  ) {
+    throw new Error(`Finish changing this session before ${action}.`);
+  }
+}
+
 function chatSessionIsBusy(canonicalSessionFile: string): boolean {
   return chatSessionIsBusyForMutation({
     canonicalSessionFile,
@@ -3505,21 +4075,26 @@ async function withChatSessionMutation<T>(
   canonicalSessionFile: string,
   message: string,
   operation: () => Promise<T>,
-  options: { allowAttached?: boolean } = {},
+  options: { allowAttached?: boolean; reservationAlreadyHeld?: boolean } = {},
 ): Promise<T> {
   if (
-    chatSessionMutationReservations.has(canonicalSessionFile) ||
+    (!options.reservationAlreadyHeld &&
+      chatSessionMutationReservations.has(canonicalSessionFile)) ||
     chatSessionResumePromises.has(canonicalSessionFile) ||
     (options.allowAttached !== true &&
       chatSessionFileLocks.has(canonicalSessionFile))
   ) {
     throw new Error(message);
   }
-  chatSessionMutationReservations.add(canonicalSessionFile);
+  if (!options.reservationAlreadyHeld) {
+    chatSessionMutationReservations.add(canonicalSessionFile);
+  }
   try {
     return await operation();
   } finally {
-    chatSessionMutationReservations.delete(canonicalSessionFile);
+    if (!options.reservationAlreadyHeld) {
+      chatSessionMutationReservations.delete(canonicalSessionFile);
+    }
   }
 }
 
@@ -3591,31 +4166,40 @@ async function closeAttachedChatRuntime(
   if (workspaceId !== undefined) {
     chatRuntimeShutdownFailures.beginClose(runtimeId, workspaceId);
   }
-  let closed = false;
-  try {
+  let cleanupError: unknown;
+  const attempt = async (operation: () => Promise<void>): Promise<void> => {
+    try {
+      await operation();
+    } catch (error) {
+      cleanupError ??= error;
+    }
+  };
+  // Ancillary scheduler/bridge cleanup is best-effort, but it must never
+  // prevent the authoritative child close from being attempted.
+  await attempt(async () => {
     delegationBridge?.removeParent(runtimeId);
     cancelTaskSessionPlanners(runtimeId);
     await taskSessionOrchestrator?.removeParent(runtimeId);
     await multitaskSupervisor?.removeParent(runtimeId);
-    if (adapter.hasRuntime(runtimeId)) {
-      await adapter.closeSession(runtimeId);
-    }
-    closed = true;
-  } finally {
-    // Map cleanup must not depend on a cooperative child process. If shutdown
-    // itself fails, retain workspace ownership so archive remains blocked until
-    // the worker's eventual worker_exit event proves it is gone.
-    if (!closed && workspaceId !== undefined) {
-      chatRuntimeShutdownFailures.markCloseFailed(runtimeId, workspaceId);
-    }
-    chatRuntimeShutdownFailures.finishClose(runtimeId, closed);
-    if (closed) {
-      forgetChatRuntime(runtimeId, {
-        ...options,
-        shutdownConfirmed: true,
-      });
-    }
+  });
+  await attempt(async () => {
+    if (adapter.hasRuntime(runtimeId)) await adapter.closeSession(runtimeId);
+  });
+  const closed = !adapter.hasRuntime(runtimeId);
+  // Map cleanup must not depend on a cooperative child process. If shutdown
+  // itself fails, retain workspace ownership so archive remains blocked until
+  // the worker's eventual worker_exit event proves it is gone.
+  if (!closed && workspaceId !== undefined) {
+    chatRuntimeShutdownFailures.markCloseFailed(runtimeId, workspaceId);
   }
+  chatRuntimeShutdownFailures.finishClose(runtimeId, closed);
+  if (closed) {
+    forgetChatRuntime(runtimeId, {
+      ...options,
+      shutdownConfirmed: true,
+    });
+  }
+  if (cleanupError !== undefined) throw cleanupError;
 }
 
 function forgetChatRuntime(
@@ -3806,11 +4390,16 @@ function enqueueTaskSessionPromptRecord(
   parentId: string,
   prompt: string,
 ): void {
-  void queueTaskSessionParentTurn(parentId, () =>
-    recordTaskSessionPromptAfterParentIdle(adapter, parentId, prompt, {
+  assertChatRuntimeSessionNotMutating(parentId, "recording task-session work");
+  void queueTaskSessionParentTurn(parentId, () => {
+    assertChatRuntimeSessionNotMutating(
+      parentId,
+      "recording task-session work",
+    );
+    return recordTaskSessionPromptAfterParentIdle(adapter, parentId, prompt, {
       timeoutMs: resolveTaskSessionPromptRecordTimeoutMs(),
-    }),
-  ).catch((error) => {
+    });
+  }).catch((error) => {
     diagnostics?.recordError(
       `Failed to record task-session prompt for parent ${parentId}: ${error instanceof Error ? error.message : String(error)}`,
     );
@@ -4239,6 +4828,13 @@ async function synthesizeTaskSession(
     tasks: readonly PersistedTaskSessionTask[];
   },
 ): Promise<void> {
+  // A fork reserves its source before any asynchronous preflight. Reject here
+  // as well as inside the serialized turn so a completed child can neither
+  // enqueue nor later begin a parent synthesis while Pi reads --fork input.
+  assertChatRuntimeSessionNotMutating(
+    input.parentId,
+    "synthesizing task results into it",
+  );
   if (
     !chatRuntimeIds.has(input.parentId) ||
     !adapter.hasRuntime(input.parentId)
@@ -4251,6 +4847,12 @@ async function synthesizeTaskSession(
     )
     .join("\n");
   const synthesis = async (): Promise<void> => {
+    // A turn can have been queued before the fork reservation. It must check
+    // at dispatch time, not only when it was initially enqueued.
+    assertChatRuntimeSessionNotMutating(
+      input.parentId,
+      "synthesizing task results into it",
+    );
     if (!adapter.hasRuntime(input.parentId)) return;
     const worker = adapter.getWorker(input.parentId);
     const text = `Task-session synthesis for: ${input.originalPrompt}\n\n${report}`;
@@ -4557,6 +5159,52 @@ async function realParentWorkerArgs(
   ];
 }
 
+async function createRealForkWorker(
+  adapter: SinglePiAdapter,
+  store: SettingsStore,
+  capacity: WorkerCapacity,
+  canonicalSourceSessionFile: string,
+  project: ProjectRef | undefined,
+  workspaceId: string,
+  beforeNativeSpawn?: () => Promise<void>,
+): Promise<ChatWorkerSpec> {
+  const launch = await resolveRealChatLaunchConfig(store, project);
+  const runtimeId = randomUUID();
+  return capacity.allocate(
+    async () => (await store.get()).maxRunningSessions,
+    async () => {
+      // The caller records durable source-only ownership before this callback
+      // can run. Mark the launch boundary immediately before ChildProcess
+      // creation so a thrown spawn can never be mistaken for no spawn.
+      await beforeNativeSpawn?.();
+      const worker = adapter.createWorker({
+        runtimeId,
+        command: launch.effective.config.piBinary,
+        // Pi's native CLI fork creates and owns the new JSONL. Never copy or
+        // rewrite history in Pi Deck, and never issue RPC clone/fork against
+        // the source runtime because those commands rebind it in place.
+        args: [
+          ...(await realParentWorkerArgs(launch.effective.workerArgs)),
+          "--fork",
+          canonicalSourceSessionFile,
+        ],
+        cwd: launch.projectCwd,
+        env: delegateEnvironment(launch.effective.config.env, runtimeId),
+        requestTimeoutMs: Number(
+          process.env.PI_DECK_REAL_RPC_TIMEOUT_MS ?? 30_000,
+        ),
+        commandProtocol: "type-field",
+      });
+      return {
+        worker,
+        cwd: launch.projectCwd,
+        projectId: launch.projectId,
+        workspaceId,
+      };
+    },
+  );
+}
+
 async function createRealResumeWorker(
   adapter: SinglePiAdapter,
   store: SettingsStore,
@@ -4735,122 +5383,240 @@ async function resolveRealChatProject(
   return projects.resolveAuthorizedProject(project.id);
 }
 
+async function resetChatSession(
+  store: SettingsStore,
+  diagnosticsService: DiagnosticsService,
+): Promise<ChatSnapshot> {
+  // Reset is a single transaction, including its replacement. Coalescing
+  // overlapping IPC calls prevents a second reset from tearing down the only
+  // replacement worker the first reset is permitted to create.
+  if (activeChatReset !== undefined) return activeChatReset;
+  const reset = (async (): Promise<ChatSnapshot> => {
+    assertNoWorkflowRuntimesForReset(workflowRuntimeOwnership);
+    await closeChatWorker();
+    if (chatLifecycleStopRequested) throw chatLifecycleCancelledError();
+    assertNoWorkflowRuntimesForReset(workflowRuntimeOwnership);
+    chatLifecyclePhase = "replacing";
+    try {
+      return await withChatLifecycleOperation(
+        async (lifecycleOperation) => {
+          const { project, workspaceId } = await resolveChatCreationContext(
+            undefined,
+            undefined,
+          );
+          assertChatLifecycleOperationActive(lifecycleOperation);
+          return createChatSessionSnapshot(
+            store,
+            diagnosticsService,
+            project,
+            workspaceId,
+            "sequential",
+            undefined,
+            lifecycleOperation,
+          );
+        },
+        { replacement: true },
+      );
+    } finally {
+      // A failed replacement is retryable; quit keeps the lifecycle stopped.
+      if (!chatLifecycleStopRequested) chatLifecyclePhase = "running";
+    }
+  })();
+  activeChatReset = reset;
+  try {
+    return await reset;
+  } finally {
+    if (activeChatReset === reset) activeChatReset = undefined;
+  }
+}
+
 async function closeChatWorker(
   options: { shutdownWorkflowRuntimes?: boolean } = {},
 ): Promise<void> {
-  await chatWorkerCreationTail;
-  if (options.shutdownWorkflowRuntimes === true) {
-    await shutdownWorkflowSchedulers("appQuit");
+  // A concurrent quit/reset joins the same boundary. In particular, it must
+  // not open a second attachment lease behind an operation the first boundary
+  // is waiting to cancel.
+  chatLifecycleStopRequested ||= options.shutdownWorkflowRuntimes === true;
+  if (chatLifecycleTeardownPromise !== undefined) {
+    return chatLifecycleTeardownPromise;
   }
-  const adapter = chatAdapter;
-  const runtimeIds = [...chatRuntimeIds];
-  const runtimeWorkspaceIds = new Map(chatRuntimeWorkspaceIds);
-  const trackedRuntimeIds = new Set(
-    [...runtimeWorkspaceIds.keys()].filter((runtimeId) =>
-      runtimeIds.includes(runtimeId),
-    ),
-  );
-  for (const runtimeId of trackedRuntimeIds) {
-    const workspaceId = runtimeWorkspaceIds.get(runtimeId);
-    if (workspaceId !== undefined) {
-      // Provision the tombstone before the normal listener and runtime maps are
-      // detached. A late exit can then be proven by a watcher on this adapter.
-      chatRuntimeShutdownFailures.beginClose(runtimeId, workspaceId);
+  chatLifecyclePhase = "draining";
+  const teardownGeneration = ++chatSessionAttachmentGeneration;
+  for (const operation of chatLifecycleOperations) operation.cancelled = true;
+  const teardown = closeChatWorkerGeneration(options, teardownGeneration);
+  chatLifecycleTeardownPromise = teardown;
+  try {
+    await teardown;
+  } finally {
+    if (chatLifecycleTeardownPromise === teardown) {
+      chatLifecycleTeardownPromise = undefined;
     }
   }
+}
 
-  let shutdownWatcher: (() => void) | undefined;
-  const disposeShutdownWatcherIfSettled = (): void => {
+async function closeChatWorkerGeneration(
+  options: { shutdownWorkflowRuntimes?: boolean },
+  teardownGeneration: number,
+): Promise<void> {
+  // Queue the destructive barrier synchronously before yielding to worker
+  // shutdown. New attachments are rejected while draining; old attachments
+  // are cancelled and every pending worker is closed to unwind in-flight RPC.
+  const attachmentLeasePromise = enterChatSessionAttachment(teardownGeneration);
+  await closePendingChatAttachmentWorkers();
+  const attachmentLease = await attachmentLeasePromise;
+  try {
+    // Registered workers may be holding an initial snapshot RPC. Close them
+    // before waiting for lifecycle operations, otherwise reset can deadlock
+    // waiting for a snapshot that only worker exit can interrupt.
+    const activeAdapter = chatAdapter;
+    if (activeAdapter !== undefined) {
+      await Promise.all(
+        [...chatRuntimeIds].map((runtimeId) =>
+          activeAdapter.closeSession(runtimeId).catch((error) => {
+            diagnostics?.recordError(
+              `Failed to close chat worker ${runtimeId} at lifecycle boundary: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }),
+        ),
+      );
+    }
+    // No operation can be added while draining. Keep rechecking pending
+    // workers because a pre-boundary spawn may publish just as teardown starts.
+    await Promise.all([...chatLifecycleOperations].map((op) => op.completion));
+    await closePendingChatAttachmentWorkers();
+    await chatWorkerCreationTail;
     if (
-      shutdownWatcher !== undefined &&
-      [...trackedRuntimeIds].every(
-        (runtimeId) => !chatRuntimeShutdownFailures.has(runtimeId),
-      )
+      options.shutdownWorkflowRuntimes === true ||
+      chatLifecycleStopRequested
     ) {
-      const dispose = shutdownWatcher;
-      shutdownWatcher = undefined;
-      dispose();
+      await shutdownWorkflowSchedulers("appQuit");
     }
-  };
-  if (adapter !== undefined && trackedRuntimeIds.size > 0) {
-    shutdownWatcher = chatRuntimeShutdownFailures.watchAdapter(
-      (listener) => adapter.onEvent(listener),
-      trackedRuntimeIds,
-      disposeShutdownWatcherIfSettled,
+    const adapter = chatAdapter;
+    const runtimeIds = [...chatRuntimeIds];
+    const runtimeWorkspaceIds = new Map(chatRuntimeWorkspaceIds);
+    const trackedRuntimeIds = new Set(
+      [...runtimeWorkspaceIds.keys()].filter((runtimeId) =>
+        runtimeIds.includes(runtimeId),
+      ),
     );
-  }
-
-  // Reset/quit has no parent left to mediate child work: retire bridge calls
-  // and await private child shutdown before releasing parent bookkeeping.
-  await Promise.all(
-    runtimeIds.map(async (runtimeId) => {
-      delegationBridge?.removeParent(runtimeId);
-      cancelTaskSessionPlanners(runtimeId);
-      await taskSessionOrchestrator?.removeParent(runtimeId);
-      await multitaskSupervisor?.removeParent(runtimeId);
-    }),
-  );
-  delegateCalls.clear();
-  chatEventUnsubscribe?.();
-  chatEventUnsubscribe = undefined;
-  chatAdapter = undefined;
-  chatWorkerCapacity = undefined;
-  chatRuntimeId = undefined;
-  chatBackendMode = undefined;
-  chatRuntimeIds.clear();
-  chatRuntimeModes.clear();
-  chatWorkerCwds.clear();
-  chatRuntimeSessionFiles.clear();
-  chatRuntimeProjectIds.clear();
-  chatRuntimeWorkspaceIds.clear();
-  // Failed shutdown tombstones intentionally survive reset/adapter teardown so
-  // an unconfirmed worker can never make its workspace appear archivable.
-  chatSessionFileLocks.clear();
-  chatSessionResumePromises.clear();
-  chatSessionResumeWorkspaceIds.clear();
-  chatSessionMutationReservations.clear();
-  chatWorkspaceMutationReservations.clear();
-  attachmentPreservingRuntimeClosures.clear();
-  for (const runtimeId of runtimeIds) {
-    attachmentSelections.releaseSession(runtimeId);
-  }
-  // chat:reset and application shutdown discard every renderer draft as well
-  // as attached runtimes; no selection payload may survive that boundary.
-  attachmentSelections.clear();
-  for (const runtimeId of [...pendingExtensionUiRequests.keys()]) {
-    clearPendingExtensionUiRequests(runtimeId);
-  }
-
-  if (adapter === undefined) {
     for (const runtimeId of trackedRuntimeIds) {
-      chatRuntimeShutdownFailures.finishClose(runtimeId, false);
-    }
-    return;
-  }
-  if (runtimeIds.length === 0) return;
-
-  await Promise.all(
-    runtimeIds.map(async (runtimeId) => {
-      let closed = false;
-      try {
-        await adapter.closeSession(runtimeId);
-        closed = true;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        diagnostics?.recordError(
-          `Failed to close chat worker ${runtimeId}: ${message}`,
-        );
-        const workspaceId = runtimeWorkspaceIds.get(runtimeId);
-        if (workspaceId !== undefined) {
-          chatRuntimeShutdownFailures.markCloseFailed(runtimeId, workspaceId);
-        }
-      } finally {
-        chatRuntimeShutdownFailures.finishClose(runtimeId, closed);
-        disposeShutdownWatcherIfSettled();
+      const workspaceId = runtimeWorkspaceIds.get(runtimeId);
+      if (workspaceId !== undefined) {
+        // Provision the tombstone before the normal listener and runtime maps are
+        // detached. A late exit can then be proven by a watcher on this adapter.
+        chatRuntimeShutdownFailures.beginClose(runtimeId, workspaceId);
       }
-    }),
-  );
-  disposeShutdownWatcherIfSettled();
+    }
+
+    let shutdownWatcher: (() => void) | undefined;
+    const disposeShutdownWatcherIfSettled = (): void => {
+      if (
+        shutdownWatcher !== undefined &&
+        [...trackedRuntimeIds].every(
+          (runtimeId) => !chatRuntimeShutdownFailures.has(runtimeId),
+        )
+      ) {
+        const dispose = shutdownWatcher;
+        shutdownWatcher = undefined;
+        dispose();
+      }
+    };
+    if (adapter !== undefined && trackedRuntimeIds.size > 0) {
+      shutdownWatcher = chatRuntimeShutdownFailures.watchAdapter(
+        (listener) => adapter.onEvent(listener),
+        trackedRuntimeIds,
+        disposeShutdownWatcherIfSettled,
+      );
+    }
+
+    // Reset/quit has no parent left to mediate child work: retire bridge calls
+    // and await private child shutdown before releasing parent bookkeeping.
+    await Promise.all(
+      runtimeIds.map(async (runtimeId) => {
+        delegationBridge?.removeParent(runtimeId);
+        cancelTaskSessionPlanners(runtimeId);
+        await taskSessionOrchestrator?.removeParent(runtimeId);
+        await multitaskSupervisor?.removeParent(runtimeId);
+      }),
+    );
+    delegateCalls.clear();
+    chatEventUnsubscribe?.();
+    chatEventUnsubscribe = undefined;
+    chatAdapter = undefined;
+    chatWorkerCapacity = undefined;
+    chatRuntimeId = undefined;
+    chatBackendMode = undefined;
+    chatRuntimeIds.clear();
+    chatRuntimeModes.clear();
+    chatWorkerCwds.clear();
+    chatRuntimeSessionFiles.clear();
+    chatRuntimeProjectIds.clear();
+    chatRuntimeWorkspaceIds.clear();
+    // Failed shutdown tombstones intentionally survive reset/adapter teardown so
+    // an unconfirmed worker can never make its workspace appear archivable.
+    // Keep file locks too until every child has actually exited below.
+    chatSessionResumePromises.clear();
+    chatSessionResumeWorkspaceIds.clear();
+    // Failed-fork source/target reservations outlive reset until worker_exit
+    // drives their confirmed compensation.
+    for (const sessionFile of [...chatSessionMutationReservations]) {
+      if (!retainedForkReservationFiles.has(sessionFile)) {
+        chatSessionMutationReservations.delete(sessionFile);
+      }
+    }
+    chatWorkspaceMutationReservations.clear();
+    attachmentPreservingRuntimeClosures.clear();
+    for (const runtimeId of runtimeIds) {
+      attachmentSelections.releaseSession(runtimeId);
+    }
+    // chat:reset and application shutdown discard every renderer draft as well
+    // as attached runtimes; no selection payload may survive that boundary.
+    attachmentSelections.clear();
+    for (const runtimeId of [...pendingExtensionUiRequests.keys()]) {
+      clearPendingExtensionUiRequests(runtimeId);
+    }
+
+    if (adapter === undefined) {
+      for (const runtimeId of trackedRuntimeIds) {
+        chatRuntimeShutdownFailures.finishClose(runtimeId, false);
+      }
+      return;
+    }
+    if (runtimeIds.length === 0) return;
+
+    await Promise.all(
+      runtimeIds.map(async (runtimeId) => {
+        let closed = false;
+        try {
+          await adapter.closeSession(runtimeId);
+          closed = true;
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          diagnostics?.recordError(
+            `Failed to close chat worker ${runtimeId}: ${message}`,
+          );
+          const workspaceId = runtimeWorkspaceIds.get(runtimeId);
+          if (workspaceId !== undefined) {
+            chatRuntimeShutdownFailures.markCloseFailed(runtimeId, workspaceId);
+          }
+        } finally {
+          chatRuntimeShutdownFailures.finishClose(runtimeId, closed);
+          disposeShutdownWatcherIfSettled();
+        }
+      }),
+    );
+    disposeShutdownWatcherIfSettled();
+    // worker_exit starts compensation before closeSession resolves; do not let
+    // quit cross its final persistence boundary before that callback finishes.
+    await waitForConfirmedForkCleanups();
+    // closeSession resolves only after PiWorker observed terminal child exit.
+    // It is now safe to release target attachment locks during reset.
+    chatSessionFileLocks.clear();
+  } finally {
+    chatLifecyclePhase = "stopped";
+    attachmentLease.release();
+  }
 }
 
 async function listChatModels(
@@ -5015,6 +5781,7 @@ async function setChatModel(
 ): Promise<ChatSnapshot> {
   const adapter = await ensureChatAdapter(store, diagnosticsService);
   const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
+  assertChatRuntimeSessionNotMutating(activeRuntimeId, "changing its model");
   await adapter.request(activeRuntimeId, "set_model", { provider, modelId });
   return getChatSnapshotForRuntime(
     adapter,
@@ -5032,6 +5799,10 @@ async function setChatThinking(
 ): Promise<ChatSnapshot> {
   const adapter = await ensureChatAdapter(store, diagnosticsService);
   const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
+  assertChatRuntimeSessionNotMutating(
+    activeRuntimeId,
+    "changing its thinking level",
+  );
   await adapter.request(activeRuntimeId, "set_thinking_level", { level });
   return getChatSnapshotForRuntime(
     adapter,
@@ -5175,13 +5946,25 @@ async function listWorkspaceChatSessions(
       );
       const legacy = await listChatSessions(settings, project);
       diagnostics.push(...legacy.diagnostics);
-      if (legacy.sessions.length > 0) {
+      const attachableLegacySessions = [];
+      for (const legacySession of legacy.sessions) {
+        if (
+          await ensureForkCleanupJournal().blocks(legacySession.sessionFile)
+        ) {
+          diagnostics.push(
+            `Fork cleanup blocks legacy session discovery: ${legacySession.sessionFile}`,
+          );
+        } else {
+          attachableLegacySessions.push(legacySession);
+        }
+      }
+      if (attachableLegacySessions.length > 0) {
         // The store applies discovery atomically: refresh current membership,
         // claim only unassigned files, preserve legacy-removal exclusions, and
         // never transfer a ref already owned by another workspace.
         await ensureWorkspaceStore().upsertSessionRefs(
           workspace.id,
-          legacy.sessions,
+          attachableLegacySessions,
         );
         refs = await ensureWorkspaceStore().getCachedSessionSummaries(
           workspace.id,
@@ -5501,6 +6284,7 @@ async function deleteChatSession(
     );
   }
   const canonicalSessionFile = validation.sessionFile;
+  await assertForkCleanupTargetAvailable(canonicalSessionFile, "deleted");
 
   return withChatSessionMutation(
     canonicalSessionFile,
@@ -5596,6 +6380,7 @@ async function deleteAllChatSessions(
         continue;
       }
       const canonicalSessionFile = validation.sessionFile;
+      await assertForkCleanupTargetAvailable(canonicalSessionFile, "deleted");
       if (chatSessionIsBusy(canonicalSessionFile)) {
         skippedCount += 1;
         continue;
@@ -5750,6 +6535,23 @@ async function isSessionFileMissing(sessionFile: string): Promise<boolean> {
   }
 }
 
+async function crashForkAtTestPhase(
+  phase:
+    | "before-spawn"
+    | "after-spawn-before-child-record"
+    | "after-target-discovery",
+): Promise<void> {
+  if (process.env.PI_DECK_TEST_CRASH_FORK_PHASE !== phase) return;
+  const signalFile = process.env.PI_DECK_TEST_CRASH_FORK_SIGNAL_FILE;
+  if (signalFile !== undefined) {
+    await fs.mkdir(path.dirname(signalFile), { recursive: true });
+    await fs.writeFile(signalFile, `${phase}\n`);
+  }
+  // This is deliberately opt-in and exists only for deterministic
+  // crash/restart coverage of the durable fork journal phases.
+  process.exit(86);
+}
+
 async function trashOrRemoveFile(filePath: string): Promise<void> {
   const forcedFailurePath = process.env.PI_DECK_TEST_FAIL_SESSION_DELETE_PATH;
   if (
@@ -5765,6 +6567,634 @@ async function trashOrRemoveFile(filePath: string): Promise<void> {
   }
 }
 
+async function forkChatSession(
+  store: SettingsStore,
+  diagnosticsService: DiagnosticsService,
+  sessionFile: string,
+  workspaceId: string,
+): Promise<ChatSnapshot> {
+  // Capture before any authorization/configuration await. Reset/quit can then
+  // invalidate a request that was submitted first but had not yet queued its
+  // attachment lease.
+  const attachmentGeneration = chatSessionAttachmentGeneration;
+  const lifecycleOperation = beginChatLifecycleOperation();
+  if (resolveChatBackendMode() !== "real") {
+    finishChatLifecycleOperation(lifecycleOperation);
+    throw new Error("Session fork is only available in real Pi mode.");
+  }
+
+  // Reserve synchronously, before authorization/configuration awaits. Cover
+  // both a renderer spelling and its local canonical target: runtime maps use
+  // the latter, while validation deliberately accepts only a real Pi path.
+  const requestedSourceSessionFile = path.resolve(sessionFile);
+  const initialCanonicalSourceSessionFile =
+    canonicalSessionPathSync(sessionFile);
+  const sourceReservationKeys = new Set([
+    requestedSourceSessionFile,
+    initialCanonicalSourceSessionFile,
+  ]);
+  if (
+    [...sourceReservationKeys].some(
+      (file) =>
+        chatSessionMutationReservations.has(file) ||
+        chatSessionResumePromises.has(file),
+    )
+  ) {
+    finishChatLifecycleOperation(lifecycleOperation);
+    throw new Error("Finish the active or changing session before forking it.");
+  }
+  for (const file of sourceReservationKeys) {
+    chatSessionMutationReservations.add(file);
+  }
+  let sessionAttachmentLease: ChatSessionAttachmentLease | undefined;
+  try {
+    const project = await projectForWorkspaceSession(workspaceId, sessionFile);
+    assertChatSessionAttachmentActive(attachmentGeneration);
+    const launch = await resolveRealChatLaunchConfig(store, project);
+    assertChatSessionAttachmentActive(attachmentGeneration);
+    const sessionDir = launch.effective.config.sessionDir;
+    if (sessionDir === undefined) {
+      throw new Error("No Pi session directory is configured.");
+    }
+    const validation = isManagedRuntimeProject(project)
+      ? await validatePiSessionFile({ sessionFile, sessionDir })
+      : await validatePiSession({
+          sessionFile,
+          sessionDir,
+          projectCwd: launch.projectCwd,
+        });
+    assertChatSessionAttachmentActive(attachmentGeneration);
+    if (!validation.ok) {
+      throw new Error(
+        `Session is not eligible for fork: ${validation.reason}.`,
+      );
+    }
+    assertChatSessionAttachmentActive(attachmentGeneration);
+    const canonicalSourceSessionFile = validation.sessionFile;
+    // Do this before entering the attachment gate or allocating a worker. A
+    // target left by failed compensation is not a safe source for another fork.
+    await assertForkCleanupTargetAvailable(
+      canonicalSourceSessionFile,
+      "forked",
+    );
+    // Every revalidation of the child must retain the same project rule as
+    // initial preflight, not merely prove repository containment.
+    const validateForkTarget = (candidate: string) =>
+      isManagedRuntimeProject(project)
+        ? validatePiSessionFile({ sessionFile: candidate, sessionDir })
+        : validatePiSession({
+            sessionFile: candidate,
+            sessionDir,
+            projectCwd: launch.projectCwd,
+          });
+    // A parent runtime is keyed by the validator's canonical path. Add that
+    // key before any more awaits even if the initial spelling traversed an
+    // alias, and retain every key until the native fork worker is done.
+    if (
+      !sourceReservationKeys.has(canonicalSourceSessionFile) &&
+      chatSessionMutationReservations.has(canonicalSourceSessionFile)
+    ) {
+      throw new Error(
+        "Finish the active or changing session before forking it.",
+      );
+    }
+    sourceReservationKeys.add(canonicalSourceSessionFile);
+    chatSessionMutationReservations.add(canonicalSourceSessionFile);
+
+    return await withChatWorkspaceCreation(workspaceId, () =>
+      withChatSessionMutation(
+        canonicalSourceSessionFile,
+        "Finish the active or changing session before forking it.",
+        async () => {
+          await assertChatResumeWorkspaceOwnership(
+            ensureWorkspaceStore(),
+            workspaceId,
+            canonicalSourceSessionFile,
+          );
+          assertChatSessionAttachmentActive(attachmentGeneration);
+          assertSessionFileNotWorkflowOwned(
+            canonicalSourceSessionFile,
+            "forking this session",
+          );
+          const adapter = await ensureChatAdapter(store, diagnosticsService);
+          assertChatSessionAttachmentActive(attachmentGeneration);
+          const sourceRuntimeId = chatSessionFileLocks.get(
+            canonicalSourceSessionFile,
+          );
+          let sourceSessionId: string | undefined;
+          if (sourceRuntimeId !== undefined) {
+            const sourceStatus = await getChatRuntimeStatus(sourceRuntimeId);
+            assertChatSessionAttachmentActive(attachmentGeneration);
+            if (sourceStatus.state.isAgentActive) {
+              throw new Error("Finish the active session before forking it.");
+            }
+            if (pendingExtensionUiRequests.has(sourceRuntimeId)) {
+              throw new Error(
+                "Respond to the pending extension request before forking this session.",
+              );
+            }
+            if (
+              legacyNonterminalTaskCount(sourceRuntimeId) > 0 ||
+              taskSessionSynthesisTails.has(sourceRuntimeId)
+            ) {
+              throw new Error(
+                "Finish queued task work before forking this session.",
+              );
+            }
+            sourceSessionId = sourceStatus.state.sessionId;
+          }
+          // The validated Pi header is the durable source identity. Runtime
+          // state is only a freshness check and must agree when it provides an
+          // ID, otherwise a stale worker could bypass target-ID validation.
+          const durableSourceSessionId = (
+            await readPiSessionSummary({
+              sessionFile: canonicalSourceSessionFile,
+              sessionDir,
+            })
+          ).summary?.sessionId;
+          assertChatSessionAttachmentActive(attachmentGeneration);
+          if (
+            durableSourceSessionId === undefined ||
+            durableSourceSessionId.length === 0
+          ) {
+            throw new Error(
+              "The source Pi session does not expose a durable identity and cannot be forked safely.",
+            );
+          }
+          if (
+            sourceSessionId !== undefined &&
+            sourceSessionId !== durableSourceSessionId
+          ) {
+            throw new Error(
+              "The attached Pi runtime does not match the persisted source session identity.",
+            );
+          }
+          sourceSessionId = durableSourceSessionId;
+          // Registration is globally exclusive from target inventory through
+          // durable claim and runtime lock publication. Discovery and resume
+          // paths use the same gate before attaching a session.
+          sessionAttachmentLease =
+            await enterChatSessionAttachment(attachmentGeneration);
+          assertChatSessionAttachmentActive(attachmentGeneration);
+          // Native Pi chooses the target filename. Record the complete
+          // pre-fork inventory so a faulty worker cannot return an unowned,
+          // pre-existing JSONL as though it had just created it.
+          const preForkSessionFiles =
+            await capturePiSessionFileInventory(sessionDir);
+          assertChatSessionAttachmentActive(attachmentGeneration);
+
+          // This write is the native-fork point of no return: a parent crash
+          // before Pi names its child must still block every source mutation.
+          const cleanupJournal = ensureForkCleanupJournal();
+          const forkTransactionId = randomUUID();
+          const forkReservationCreatedAtMs = Date.now();
+          const canonicalSessionDir = await fs.realpath(sessionDir);
+          await cleanupJournal.reserveSource({
+            sourceSessionFile: canonicalSourceSessionFile,
+            transactionId: forkTransactionId,
+            sessionDir: canonicalSessionDir,
+            createdAtMs: forkReservationCreatedAtMs,
+            workspaceId,
+            ...(project.id !== managedRuntimeProjectId
+              ? { projectId: project.id }
+              : {}),
+          });
+          let spawnAttempted = false;
+          let spawnedRuntimeId: string | undefined;
+          let workerSpec: ChatWorkerSpec;
+          try {
+            await crashForkAtTestPhase("before-spawn");
+            workerSpec = await spawnChatAttachmentWorker(
+              lifecycleOperation,
+              adapter,
+              () =>
+                createRealForkWorker(
+                  adapter,
+                  store,
+                  getChatWorkerCapacity(),
+                  canonicalSourceSessionFile,
+                  project,
+                  workspaceId,
+                  async () => {
+                    spawnAttempted = true;
+                  },
+                ),
+              async (spawned) => {
+                spawnedRuntimeId = spawned.worker.runtimeId;
+                // A crash in this deliberate gap has no durable PID and must
+                // stay source-blocked. Otherwise persist child identity before
+                // lifecycle cancellation can close this worker.
+                await crashForkAtTestPhase("after-spawn-before-child-record");
+                await cleanupJournal.recordSpawnedSource({
+                  sourceSessionFile: canonicalSourceSessionFile,
+                  transactionId: forkTransactionId,
+                  childRuntimeId: spawnedRuntimeId,
+                  ...(spawned.worker.pid !== undefined
+                    ? { childPid: spawned.worker.pid }
+                    : {}),
+                });
+              },
+            );
+          } catch (error) {
+            // Capacity/configuration rejection before createWorker is proven
+            // pre-spawn and can release this transaction. Any attempted spawn
+            // remains durable because its child identity may be unknowable.
+            if (!spawnAttempted) {
+              await cleanupJournal
+                .releaseUnspawnedSource(
+                  canonicalSourceSessionFile,
+                  forkTransactionId,
+                )
+                .catch((releaseError) => {
+                  diagnosticsService.recordError(
+                    `Failed to release unspawned fork reservation ${forkTransactionId}: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`,
+                  );
+                });
+            } else if (spawnedRuntimeId !== undefined) {
+              retainFailedForkReservations(
+                spawnedRuntimeId,
+                canonicalSourceSessionFile,
+                forkTransactionId,
+              );
+            }
+            throw error;
+          }
+          const runtimeId = workerSpec.worker.runtimeId;
+          let forkSessionFile: string | undefined;
+          let durableForkTargetSessionId: string | undefined;
+          let forkTargetDiscovered = false;
+          let forkTargetReserved = false;
+          let forkTargetPromoted = false;
+          try {
+            // Read and validate state before the normal snapshot path can
+            // register its session lock. A fork worker is untrusted at this
+            // boundary: it must name a new valid, currently-unlocked target.
+            assertChatSessionAttachmentActive(attachmentGeneration);
+            await cleanupJournal.recordTargetDiscovery({
+              sourceSessionFile: canonicalSourceSessionFile,
+              transactionId: forkTransactionId,
+            });
+            const forkState = await adapter.getState(runtimeId);
+            assertChatSessionAttachmentActive(attachmentGeneration);
+            const preflightSessionFile = forkState.sessionFile;
+            const preflightSessionId = forkState.sessionId;
+            if (
+              typeof preflightSessionFile !== "string" ||
+              typeof preflightSessionId !== "string" ||
+              preflightSessionId.length === 0
+            ) {
+              throw new Error(
+                "This Pi version did not report a canonical fork session identity. Update Pi and try again.",
+              );
+            }
+            const targetValidation =
+              await validateForkTarget(preflightSessionFile);
+            assertChatSessionAttachmentActive(attachmentGeneration);
+            if (!targetValidation.ok) {
+              throw new Error(
+                `Pi fork returned an ineligible target session: ${targetValidation.reason}.`,
+              );
+            }
+            forkSessionFile = targetValidation.sessionFile;
+            await assertForkCleanupTargetAvailable(forkSessionFile, "attached");
+            if (forkSessionFile === canonicalSourceSessionFile) {
+              throw new Error("Pi fork reused the source session file.");
+            }
+            if (preForkSessionFiles.has(forkSessionFile)) {
+              throw new Error(
+                "Pi fork returned a target session that existed before the fork began.",
+              );
+            }
+            // Native Pi v3 records the exact fork source in the first JSONL
+            // header. Canonicalize it in the repository boundary and require
+            // it to name this source before claiming the fresh target.
+            if (targetValidation.parentSession !== canonicalSourceSessionFile) {
+              throw new Error(
+                "Pi fork target does not identify the requested source session.",
+              );
+            }
+            const durableTargetSummary = (
+              await readPiSessionSummary({
+                sessionFile: forkSessionFile,
+                sessionDir,
+              })
+            ).summary;
+            const durableTargetSessionId = durableTargetSummary?.sessionId;
+            assertChatSessionAttachmentActive(attachmentGeneration);
+            if (
+              durableTargetSessionId === undefined ||
+              durableTargetSessionId.length === 0 ||
+              durableTargetSessionId !== preflightSessionId
+            ) {
+              throw new Error(
+                "Pi fork returned a target whose runtime and persisted identities do not match.",
+              );
+            }
+            if (durableTargetSessionId === sourceSessionId) {
+              throw new Error("Pi fork reused the source session identity.");
+            }
+            durableForkTargetSessionId = durableTargetSessionId;
+            const existingTargetRuntimeId =
+              chatSessionFileLocks.get(forkSessionFile);
+            if (
+              chatSessionMutationReservations.has(forkSessionFile) ||
+              chatSessionResumePromises.has(forkSessionFile) ||
+              (existingTargetRuntimeId !== undefined &&
+                existingTargetRuntimeId !== runtimeId)
+            ) {
+              throw new Error("Pi fork returned a target already being used.");
+            }
+            if (preflightSessionId === sourceSessionId) {
+              throw new Error("Pi fork reused the source session identity.");
+            }
+            // Only a fresh, provenance-validated target is recoverable. A
+            // worker can name an existing or foreign file before this point;
+            // never turn that untrusted spelling into cleanup ownership.
+            forkTargetDiscovered = true;
+
+            // Reserve synchronously before journal persistence can yield.
+            // The journal's matching ephemeral target block survives a failed
+            // promotion write, closing the attach/mutation gap in this process.
+            chatSessionMutationReservations.add(forkSessionFile);
+            forkTargetReserved = true;
+            const targetPromotion = {
+              sessionFile: forkSessionFile,
+              sourceSessionFile: canonicalSourceSessionFile,
+              transactionId: forkTransactionId,
+              discoveredSessionId: durableTargetSessionId,
+              workspaceId,
+              ...(project.id !== managedRuntimeProjectId
+                ? { projectId: project.id }
+                : {}),
+            };
+            await cleanupJournal.blockDiscoveredTarget(targetPromotion);
+            // Atomically replace the source-only entry with source+target
+            // compensation. Separate complete/reserve writes would recreate
+            // the crash window this transaction is designed to close.
+            await cleanupJournal.promoteSourceToTarget(targetPromotion);
+            forkTargetPromoted = true;
+            await crashForkAtTestPhase("after-target-discovery");
+            assertChatSessionAttachmentActive(attachmentGeneration);
+            // Claim first, then register the worker. This single ownership
+            // seam and reservation prevent default-workspace discovery, import,
+            // or resume from attaching/assigning the just-created target while
+            // its initial snapshot is still asynchronous.
+            assertChatSessionAttachmentActive(attachmentGeneration);
+            await ensureWorkspaceStore().claimUnassignedSessionRefFromSnapshot(
+              {
+                workspaceId,
+                sessionFile: forkSessionFile,
+                sessionId: durableTargetSessionId,
+                ...(durableTargetSummary?.cwd
+                  ? { cwd: durableTargetSummary.cwd }
+                  : typeof forkState.cwd === "string"
+                    ? { cwd: forkState.cwd }
+                    : {}),
+                ...(durableTargetSummary?.title
+                  ? { title: durableTargetSummary.title }
+                  : {}),
+                ...(durableTargetSummary?.updatedAtMs !== undefined
+                  ? { updatedAtMs: durableTargetSummary.updatedAtMs }
+                  : {}),
+                ...(durableTargetSummary?.completedAtMs !== undefined
+                  ? { completedAtMs: durableTargetSummary.completedAtMs }
+                  : {}),
+                ...(durableTargetSummary?.messageCount !== undefined
+                  ? { messageCount: durableTargetSummary.messageCount }
+                  : {}),
+                ...(durableTargetSummary?.preview
+                  ? { preview: durableTargetSummary.preview }
+                  : {}),
+              },
+              { requireUnassigned: true },
+            );
+            assertChatSessionAttachmentActive(attachmentGeneration);
+            // The claim may itself yield. Re-read the first header immediately
+            // before registration so a newly-created but unrelated child can
+            // never cross the durable ownership boundary.
+            const claimedTargetValidation =
+              await validateForkTarget(forkSessionFile);
+            assertChatSessionAttachmentActive(attachmentGeneration);
+            if (
+              !claimedTargetValidation.ok ||
+              claimedTargetValidation.sessionFile !== forkSessionFile ||
+              claimedTargetValidation.parentSession !==
+                canonicalSourceSessionFile
+            ) {
+              throw new Error(
+                "Pi fork target changed its native source provenance while starting.",
+              );
+            }
+            // Ownership is now durable and the target reservation is held;
+            // only now may this worker enter runtime registration maps.
+            assertChatSessionAttachmentActive(attachmentGeneration);
+            registerChatWorker(workerSpec, "real");
+            assertChatSessionAttachmentActive(attachmentGeneration);
+
+            const snapshot = await getChatSnapshotForRuntime(
+              adapter,
+              runtimeId,
+              "real",
+              {
+                // Revalidate the same target immediately before generic
+                // snapshot registration/persistence. A worker that changes
+                // state between preflight and get_messages must not claim a
+                // different workspace-owned session.
+                beforeSessionRegistration: async ({ sessionFile, state }) => {
+                  assertChatSessionAttachmentActive(attachmentGeneration);
+                  if (
+                    sessionFile !== forkSessionFile ||
+                    state.sessionId !== durableTargetSessionId
+                  ) {
+                    throw new Error(
+                      "Pi fork changed its target identity while starting.",
+                    );
+                  }
+                  const currentTarget = await readPiSessionSummary({
+                    sessionFile,
+                    sessionDir,
+                  });
+                  assertChatSessionAttachmentActive(attachmentGeneration);
+                  if (
+                    currentTarget.summary?.sessionId !== durableTargetSessionId
+                  ) {
+                    throw new Error(
+                      "Pi fork changed its persisted target identity while starting.",
+                    );
+                  }
+                  const currentTargetValidation =
+                    await validateForkTarget(sessionFile);
+                  assertChatSessionAttachmentActive(attachmentGeneration);
+                  if (
+                    !currentTargetValidation.ok ||
+                    currentTargetValidation.sessionFile !== forkSessionFile ||
+                    currentTargetValidation.parentSession !==
+                      canonicalSourceSessionFile
+                  ) {
+                    throw new Error(
+                      "Pi fork changed its native source provenance while starting.",
+                    );
+                  }
+                  const owner =
+                    await ensureWorkspaceStore().getSessionOwner(sessionFile);
+                  assertChatSessionAttachmentActive(attachmentGeneration);
+                  if (owner?.workspaceId !== workspaceId) {
+                    throw new Error(
+                      "Pi fork target ownership changed while starting.",
+                    );
+                  }
+                  if (!chatSessionMutationReservations.has(sessionFile)) {
+                    throw new Error("Pi fork target reservation was lost.");
+                  }
+                },
+                assertLifecycleActive: () =>
+                  assertChatSessionAttachmentActive(attachmentGeneration),
+              },
+            );
+            assertChatSessionAttachmentActive(attachmentGeneration);
+            const returnedSessionFile = snapshot.state.sessionFile;
+            const returnedSessionId = snapshot.state.sessionId;
+            if (
+              typeof returnedSessionFile !== "string" ||
+              typeof returnedSessionId !== "string" ||
+              returnedSessionId.length === 0
+            ) {
+              throw new Error(
+                "This Pi version did not report a canonical fork session identity. Update Pi and try again.",
+              );
+            }
+            const returnedCanonical =
+              typeof returnedSessionFile === "string"
+                ? ((await safeRealpath(returnedSessionFile)) ??
+                  path.resolve(returnedSessionFile))
+                : undefined;
+            assertChatSessionAttachmentActive(attachmentGeneration);
+            if (
+              returnedCanonical !== forkSessionFile ||
+              returnedSessionId !== durableTargetSessionId
+            ) {
+              throw new Error(
+                "Pi fork changed its target identity while starting.",
+              );
+            }
+            if (returnedCanonical === canonicalSourceSessionFile) {
+              // getChatSnapshotForRuntime registers the returned file before
+              // we can reject it. Restore the source lock so closing this
+              // faulty fork cannot leave an attached source unlocked.
+              if (sourceRuntimeId !== undefined) {
+                chatSessionFileLocks.set(
+                  canonicalSourceSessionFile,
+                  sourceRuntimeId,
+                );
+              } else if (
+                chatSessionFileLocks.get(canonicalSourceSessionFile) ===
+                runtimeId
+              ) {
+                chatSessionFileLocks.delete(canonicalSourceSessionFile);
+              }
+              throw new Error("Pi fork reused the source session file.");
+            }
+            if (returnedSessionId === sourceSessionId) {
+              throw new Error("Pi fork reused the source session identity.");
+            }
+            // getChatSnapshotForRuntime has already registered this canonical
+            // target and persisted its normal workspace/project reference.
+            assertChatSessionAttachmentActive(attachmentGeneration);
+            await cleanupJournal.complete(forkSessionFile);
+            assertChatSessionAttachmentActive(attachmentGeneration);
+            return snapshot;
+          } catch (error) {
+            // Reserve both sides before asking the child to close. worker_exit
+            // can race closeAndWait's continuation; this publication gives the
+            // event callback the exact durable target to compensate.
+            const discoveredForkTarget =
+              !forkTargetDiscovered ||
+              forkSessionFile === undefined ||
+              durableForkTargetSessionId === undefined
+                ? undefined
+                : {
+                    sessionFile: forkSessionFile,
+                    sessionId: durableForkTargetSessionId,
+                    parentSession: canonicalSourceSessionFile,
+                    sessionDir: canonicalSessionDir,
+                    sourceReservationCreatedAtMs: forkReservationCreatedAtMs,
+                    workspaceId,
+                    ...(project.id !== managedRuntimeProjectId
+                      ? { projectId: project.id }
+                      : {}),
+                    promoted: forkTargetPromoted,
+                  };
+            retainFailedForkReservations(
+              runtimeId,
+              canonicalSourceSessionFile,
+              forkTransactionId,
+              discoveredForkTarget,
+            );
+            try {
+              await closeAttachedChatRuntime(adapter, runtimeId);
+            } catch (cleanupError) {
+              diagnosticsService.recordError(
+                `Failed to clean up fork worker ${runtimeId}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+              );
+            }
+            const pendingCleanup = pendingFailedForkCleanups.get(runtimeId);
+            if (pendingCleanup !== undefined) {
+              // closeAndWait can observe OS exit before its RPC transport
+              // publishes worker_exit. Await only a retry the callback itself
+              // started; never initiate compensation from this path.
+              if (pendingCleanup.exitConfirmed === true) {
+                await pendingCleanup.retryPromise;
+              }
+              if (pendingFailedForkCleanups.has(runtimeId)) {
+                throw new Error(
+                  "Failed fork cleanup is retained until the child exit is confirmed.",
+                );
+              }
+            }
+            if (
+              discoveredForkTarget !== undefined &&
+              (await ensureForkCleanupJournal().blocks(
+                discoveredForkTarget.sessionFile,
+              ))
+            ) {
+              throw new Error("Failed fork cleanup is retained for retry.");
+            }
+            if (attachmentGeneration !== chatSessionAttachmentGeneration) {
+              throw new Error(
+                "Chat session attachment was cancelled by reset or application shutdown.",
+              );
+            }
+            throw error;
+          } finally {
+            if (
+              forkTargetReserved &&
+              forkSessionFile !== undefined &&
+              !retainedForkReservationFiles.has(forkSessionFile)
+            ) {
+              chatSessionMutationReservations.delete(forkSessionFile);
+            }
+            if (!pendingFailedForkCleanups.has(runtimeId)) {
+              untrackPendingChatAttachmentWorker(runtimeId);
+            }
+          }
+        },
+        {
+          allowAttached: true,
+          reservationAlreadyHeld: true,
+        },
+      ),
+    );
+  } finally {
+    sessionAttachmentLease?.release();
+    for (const file of sourceReservationKeys) {
+      if (!retainedForkReservationFiles.has(file)) {
+        chatSessionMutationReservations.delete(file);
+      }
+    }
+    finishChatLifecycleOperation(lifecycleOperation);
+  }
+}
+
 async function resumeChatSession(
   store: SettingsStore,
   diagnosticsService: DiagnosticsService,
@@ -5772,12 +7202,16 @@ async function resumeChatSession(
   project: ProjectRef | undefined,
   workspaceId: string,
   options: { claimUnassignedWorkspace?: boolean } = {},
+  lifecycleOperation: ChatLifecycleOperation,
 ): Promise<ChatSnapshot> {
+  const attachmentGeneration = lifecycleOperation.generation;
+  assertChatLifecycleOperationActive(lifecycleOperation);
   if (resolveChatBackendMode() !== "real") {
     throw new Error("Session resume is only available in real Pi mode.");
   }
 
   const launch = await resolveRealChatLaunchConfig(store, project);
+  assertChatLifecycleOperationActive(lifecycleOperation);
   const sessionDir = launch.effective.config.sessionDir;
   if (sessionDir === undefined) {
     throw new Error("No Pi session directory is configured.");
@@ -5795,6 +7229,9 @@ async function resumeChatSession(
     );
   }
   const canonicalSessionFile = validation.sessionFile;
+  assertChatLifecycleOperationActive(lifecycleOperation);
+  await assertForkCleanupTargetAvailable(canonicalSessionFile, "attached");
+  assertChatLifecycleOperationActive(lifecycleOperation);
 
   const mode = chatBackendMode ?? "real";
   const pendingResume = chatSessionResumePromises.get(canonicalSessionFile);
@@ -5810,8 +7247,16 @@ async function resumeChatSession(
   });
   chatSessionResumePromises.set(canonicalSessionFile, resumePromise);
   chatSessionResumeWorkspaceIds.set(canonicalSessionFile, workspaceId);
+  if (chatSessionMutationReservations.has(canonicalSessionFile)) {
+    chatSessionResumePromises.delete(canonicalSessionFile);
+    chatSessionResumeWorkspaceIds.delete(canonicalSessionFile);
+    throw new Error("Session is already being changed.");
+  }
+  const sessionAttachmentLease =
+    await enterChatSessionAttachment(attachmentGeneration);
 
   try {
+    assertChatSessionAttachmentActive(attachmentGeneration);
     await withChatWorkspaceCreation(workspaceId, async () => {
       if (chatSessionMutationReservations.has(canonicalSessionFile)) {
         throw new Error("Session is already being changed.");
@@ -5848,7 +7293,10 @@ async function resumeChatSession(
               canonicalSessionFile,
               project,
               workspaceId,
+              attachmentGeneration,
+              lifecycleOperation,
             );
+      assertChatSessionAttachmentActive(attachmentGeneration);
       if (attachedRuntimeId !== undefined) {
         chatRuntimeId = attachedRuntimeId;
       }
@@ -5857,6 +7305,7 @@ async function resumeChatSession(
   } catch (error) {
     rejectPending(error);
   } finally {
+    sessionAttachmentLease.release();
     if (chatSessionResumePromises.get(canonicalSessionFile) === resumePromise) {
       chatSessionResumePromises.delete(canonicalSessionFile);
     }
@@ -5876,21 +7325,28 @@ async function attachRealResumeWorker(
   canonicalSessionFile: string,
   project: ProjectRef | undefined,
   workspaceId: string,
+  attachmentGeneration: number,
+  lifecycleOperation: ChatLifecycleOperation,
 ): Promise<ChatSnapshot> {
   return withChatWorkspaceCreation(workspaceId, async () => {
-    const workerSpec = await serializeChatWorkerCreation(() =>
-      createRealResumeWorker(
-        adapter,
-        store,
-        capacity,
-        canonicalSessionFile,
-        project,
-        workspaceId,
-      ),
+    assertChatSessionAttachmentActive(attachmentGeneration);
+    const workerSpec = await spawnChatAttachmentWorker(
+      lifecycleOperation,
+      adapter,
+      () =>
+        createRealResumeWorker(
+          adapter,
+          store,
+          capacity,
+          canonicalSessionFile,
+          project,
+          workspaceId,
+        ),
     );
     const runtimeId = workerSpec.worker.runtimeId;
 
     try {
+      assertChatSessionAttachmentActive(attachmentGeneration);
       registerChatWorker(workerSpec, "real");
       chatRuntimeSessionFiles.set(runtimeId, canonicalSessionFile);
       chatSessionFileLocks.set(canonicalSessionFile, runtimeId);
@@ -5899,6 +7355,18 @@ async function attachRealResumeWorker(
         adapter,
         runtimeId,
         "real",
+        {
+          // Validate before generic registration can replace the provisional
+          // requested-file lock or persist a different session's ownership.
+          beforeSessionRegistration: ({ sessionFile }) => {
+            assertChatSessionAttachmentActive(attachmentGeneration);
+            if (sessionFile !== canonicalSessionFile) {
+              throw new Error(
+                `Pi resume opened a different session. Requested ${canonicalSessionFile}, got ${sessionFile}.`,
+              );
+            }
+          },
+        },
       );
       const returnedSessionFile = snapshot.state.sessionFile;
       if (typeof returnedSessionFile !== "string") {
@@ -5920,6 +7388,8 @@ async function attachRealResumeWorker(
     } catch (error) {
       await closeRuntimeForDeletedSession(runtimeId);
       throw error;
+    } finally {
+      untrackPendingChatAttachmentWorker(runtimeId);
     }
   });
 }
@@ -5933,55 +7403,76 @@ async function createChatSessionSnapshot(
   claimWorkflowOwnership?: (
     runtimeId: string,
   ) => WorkflowRuntimeOwnershipClaim | undefined,
+  lifecycleOperation?: ChatLifecycleOperation,
 ): Promise<ChatSnapshot> {
-  return withChatWorkspaceCreation(workspaceId, async () => {
-    const adapter = await ensureChatAdapter(store, diagnosticsService);
-    const mode = chatBackendMode ?? resolveChatBackendMode();
-    const resolvedProject =
-      project ??
-      (mode === "real"
-        ? await resolveWorkspaceProject(workspaceId)
-        : undefined);
-    let workflowOwnershipClaim: WorkflowRuntimeOwnershipClaim | undefined;
-    const workerSpec = await createChatWorker(
-      adapter,
-      store,
-      mode,
-      getChatWorkerCapacity(),
-      resolvedProject,
-      workspaceId,
-      initialMultitaskMode,
-      (runtimeId) => {
-        workflowOwnershipClaim = claimWorkflowOwnership?.(runtimeId);
-      },
-    );
-    const runtimeId = workerSpec.worker.runtimeId;
-    try {
-      const snapshot = await getChatSnapshotForRuntime(
+  const operation = lifecycleOperation ?? beginChatLifecycleOperation();
+  const ownsOperation = lifecycleOperation === undefined;
+  try {
+    return await withChatWorkspaceCreation(workspaceId, async () => {
+      assertChatLifecycleOperationActive(operation);
+      const adapter = await ensureChatAdapter(store, diagnosticsService);
+      assertChatLifecycleOperationActive(operation);
+      const mode = chatBackendMode ?? resolveChatBackendMode();
+      const resolvedProject =
+        project ??
+        (mode === "real"
+          ? await resolveWorkspaceProject(workspaceId)
+          : undefined);
+      assertChatLifecycleOperationActive(operation);
+      let workflowOwnershipClaim: WorkflowRuntimeOwnershipClaim | undefined;
+      const workerSpec = await createChatWorker(
         adapter,
-        runtimeId,
+        store,
         mode,
-        {
-          skipMessages: true,
+        getChatWorkerCapacity(),
+        resolvedProject,
+        workspaceId,
+        operation,
+        initialMultitaskMode,
+        (runtimeId) => {
+          workflowOwnershipClaim = claimWorkflowOwnership?.(runtimeId);
         },
       );
-      await persistMultitaskSupervisor(runtimeId);
-      if (typeof snapshot.state.sessionFile === "string") {
-        workflowOwnershipClaim?.updateSessionFile(snapshot.state.sessionFile);
-      }
-      return snapshot;
-    } catch (error) {
+      const runtimeId = workerSpec.worker.runtimeId;
       try {
-        await closeAttachedChatRuntime(adapter, runtimeId);
-      } catch (cleanupError) {
-        diagnosticsService.recordError(
-          `Failed to clean up newly created chat worker ${runtimeId}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+        const snapshot = await getChatSnapshotForRuntime(
+          adapter,
+          runtimeId,
+          mode,
+          {
+            skipMessages: true,
+            assertLifecycleActive: () =>
+              assertChatLifecycleOperationActive(operation),
+          },
         );
+        assertChatLifecycleOperationActive(operation);
+        await persistMultitaskSupervisor(runtimeId);
+        assertChatLifecycleOperationActive(operation);
+        if (typeof snapshot.state.sessionFile === "string") {
+          workflowOwnershipClaim?.updateSessionFile(snapshot.state.sessionFile);
+        }
+        return snapshot;
+      } catch (error) {
+        try {
+          await closeAttachedChatRuntime(adapter, runtimeId);
+        } catch (cleanupError) {
+          diagnosticsService.recordError(
+            `Failed to clean up newly created chat worker ${runtimeId}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+          );
+        }
+        workflowOwnershipClaim?.release();
+        if (
+          operation.cancelled ||
+          operation.generation !== chatSessionAttachmentGeneration
+        ) {
+          throw chatLifecycleCancelledError();
+        }
+        throw error;
       }
-      workflowOwnershipClaim?.release();
-      throw error;
-    }
-  });
+    });
+  } finally {
+    if (ownsOperation) finishChatLifecycleOperation(operation);
+  }
 }
 
 async function getChatSnapshot(
@@ -6158,7 +7649,15 @@ async function getChatSnapshotForRuntime(
   adapter: SinglePiAdapter,
   runtimeId: string,
   fallbackMode: ChatBackendMode,
-  options: { skipMessages?: boolean } = {},
+  options: {
+    skipMessages?: boolean;
+    beforeSessionRegistration?: (input: {
+      sessionFile: string;
+      state: PiState;
+    }) => Promise<void> | void;
+    onSessionPersisted?: (sessionFile: string) => void;
+    assertLifecycleActive?: () => void;
+  } = {},
 ): Promise<ChatSnapshot> {
   const mode = chatRuntimeModes.get(runtimeId) ?? fallbackMode;
   const projectId = chatRuntimeProjectIds.get(runtimeId);
@@ -6171,14 +7670,30 @@ async function getChatSnapshotForRuntime(
     runtimeId,
     options,
   );
+  options.assertLifecycleActive?.();
   let canonicalSessionFile: string | undefined;
   if (typeof state.sessionFile === "string") {
     const resolvedSessionFile = await safeRealpath(state.sessionFile);
+    options.assertLifecycleActive?.();
     canonicalSessionFile =
       resolvedSessionFile ??
       (await canonicalSessionPathForMissingFile(state.sessionFile));
+    options.assertLifecycleActive?.();
+    await options.beforeSessionRegistration?.({
+      sessionFile: canonicalSessionFile,
+      state,
+    });
+    options.assertLifecycleActive?.();
+    const lockedRuntimeId = chatSessionFileLocks.get(canonicalSessionFile);
+    if (lockedRuntimeId !== undefined && lockedRuntimeId !== runtimeId) {
+      throw new Error(
+        `Pi runtime reported a session already attached by ${lockedRuntimeId}.`,
+      );
+    }
+    options.assertLifecycleActive?.();
     chatRuntimeSessionFiles.set(runtimeId, canonicalSessionFile);
     chatSessionFileLocks.set(canonicalSessionFile, runtimeId);
+    options.assertLifecycleActive?.();
     // Model/thinking updates intentionally omit get_messages. Merge their
     // state-only data only when Pi supplies a real sessionName; never turn an
     // empty metadata read into a filename title or a zero-message transcript.
@@ -6187,6 +7702,7 @@ async function getChatSnapshotForRuntime(
       (options.skipMessages ? undefined : titleFromMessages(messages));
     const hasTranscript = !options.skipMessages && messages.length > 0;
     if (workspaceId !== undefined) {
+      options.assertLifecycleActive?.();
       const preview = hasTranscript ? previewFromMessages(messages) : undefined;
       const completedAtMs = hasTranscript
         ? completedAtFromMessages(messages)
@@ -6205,12 +7721,15 @@ async function getChatSnapshotForRuntime(
         ...(completedAtMs !== undefined ? { completedAtMs } : {}),
         ...(preview !== undefined ? { preview } : {}),
       });
+      options.onSessionPersisted?.(canonicalSessionFile);
+      options.assertLifecycleActive?.();
     }
     if (
       projectId !== undefined &&
       projectId !== managedRuntimeProjectId &&
       (hasTranscript || title !== undefined)
     ) {
+      options.assertLifecycleActive?.();
       const preview = hasTranscript ? previewFromMessages(messages) : undefined;
       const completedAtMs = hasTranscript
         ? completedAtFromMessages(messages)
@@ -6229,6 +7748,7 @@ async function getChatSnapshotForRuntime(
         ...(completedAtMs !== undefined ? { completedAtMs } : {}),
         ...(preview !== undefined ? { preview } : {}),
       });
+      options.assertLifecycleActive?.();
     }
   }
 
@@ -6248,6 +7768,7 @@ async function getChatSnapshotForRuntime(
   }
 
   await reconcileMultitaskRuntime(runtimeId, state.sessionFile);
+  options.assertLifecycleActive?.();
   return {
     runtimeId,
     backendMode: mode,
@@ -6328,6 +7849,46 @@ async function safeRealpath(filePath: string): Promise<string | undefined> {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Fork source reservations must cover an attached runtime before any await.
+ * `realpathSync` is limited to this local, already user-selected session path;
+ * invalid paths retain their resolved key and are rejected by normal validation.
+ */
+function canonicalSessionPathSync(filePath: string): string {
+  const resolved = path.resolve(filePath);
+  try {
+    return realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+/** Capture every existing JSONL path before native Pi creates a fork target. */
+async function capturePiSessionFileInventory(
+  sessionDir: string,
+): Promise<Set<string>> {
+  const root = await fs.realpath(sessionDir);
+  const files = new Set<string>();
+  const visit = async (directory: string): Promise<void> => {
+    const entries = await fs.readdir(directory, { withFileTypes: true });
+    await Promise.all(
+      entries.map(async (entry) => {
+        const candidate = path.join(directory, entry.name);
+        if (entry.isDirectory()) {
+          await visit(candidate);
+        } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+          // A regular path can disappear while scanning; it cannot be a
+          // pre-existing target unless it remains canonical at preflight.
+          const canonical = await safeRealpath(candidate);
+          if (canonical !== undefined) files.add(canonical);
+        }
+      }),
+    );
+  };
+  await visit(root);
+  return files;
 }
 
 /** Canonicalize a Pi destination even while Pi has not created its JSONL yet. */
@@ -6834,6 +8395,9 @@ app.on("before-quit", (event) => {
   if (
     isQuittingAfterChatWorkerCleanup ||
     ((chatAdapter === undefined || chatRuntimeIds.size === 0) &&
+      pendingChatAttachmentWorkers.size === 0 &&
+      chatLifecycleOperations.size === 0 &&
+      activeChatReset === undefined &&
       !workflowRuntimeOwnership.hasOwnedRuntimes())
   ) {
     return;

@@ -145,6 +145,7 @@ function fakeRealModeEnv(options: {
     )}\n`,
   );
   return {
+    PI_DECK_E2E_TEST: "1",
     PI_DECK_BACKEND: "real",
     PI_DECK_PI_BINARY: createFakePiBinary(options.root, options.fakePiArgs),
     ...(options.projectCwd ? { PI_DECK_PROJECT_CWD: options.projectCwd } : {}),
@@ -5471,6 +5472,106 @@ test("bulk deletion reports exact removals and releases only deleted saved-sessi
   }
 });
 
+test("project bulk delete retains recovered fork-cleanup source and target", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-bulk-delete-journal-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  const sessionDir = path.join(
+    agentDir,
+    "sessions",
+    "--e2e-bulk-delete-journal--",
+  );
+  const sourceFile = path.join(sessionDir, "fork-source.jsonl");
+  const targetFile = path.join(sessionDir, "fork-target.jsonl");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(sessionDir, { recursive: true });
+  const contents = new Map([
+    [sourceFile, "fork-journal-source"],
+    [targetFile, "fork-journal-target"],
+  ]);
+  for (const [file, id] of contents) {
+    fs.writeFileSync(
+      file,
+      `${JSON.stringify({
+        type: "session",
+        version: 3,
+        id,
+        timestamp: "2026-07-02T00:00:00.000Z",
+        cwd: projectCwd,
+      })}\n`,
+    );
+  }
+  const canonicalSourceFile = fs.realpathSync(sourceFile);
+  const canonicalTargetFile = fs.realpathSync(targetFile);
+  const env = fakeRealModeEnv({
+    root,
+    projectCwd,
+    agentDir,
+    userDataDir,
+  });
+  let app: ElectronApplication | undefined;
+  try {
+    // Initialize the project once, then seed the durable entry before a fresh
+    // process reloads it. A reload has no confirmed child exit, so both sides
+    // of the recovered fork reservation must remain unavailable.
+    const initial = await launchPiDeck(env);
+    app = initial.app;
+    await expectHealthyPreload(initial.page);
+    await app.close();
+    app = undefined;
+    const home = path.join(root, "pideck-home");
+    fs.writeFileSync(
+      path.join(home, "failed-fork-cleanup.json"),
+      `${JSON.stringify({
+        version: 1,
+        entries: [
+          {
+            sessionFile: canonicalTargetFile,
+            sourceSessionFile: canonicalSourceFile,
+            workspaceId: "9f9b3c42-841c-4ef5-8a9b-9a229924ad1e",
+          },
+        ],
+      })}\n`,
+    );
+
+    const reloaded = await launchPiDeck(env);
+    app = reloaded.app;
+    await expectHealthyPreload(reloaded.page);
+    const result = await reloaded.page.evaluate(async () => {
+      const project = await window.piDeck.projects.getActive();
+      const projectId = project.activeProject?.id;
+      if (projectId === undefined) {
+        throw new Error("Expected an active project.");
+      }
+      return window.piDeck.chat.deleteAllSessions({ projectId });
+    });
+
+    expect(result).toEqual({
+      deleted: true,
+      deletedCount: 0,
+      skippedCount: 2,
+      deletedSessionFiles: [],
+    });
+    // These stable bytes prove bulk delete neither removes the recovered
+    // reservation nor races a nonexistent pre-crash child into rewriting it.
+    expect(fs.readFileSync(canonicalSourceFile, "utf8")).toContain(
+      "fork-journal-source",
+    );
+    expect(fs.readFileSync(canonicalTargetFile, "utf8")).toContain(
+      "fork-journal-target",
+    );
+    expect(
+      fs.readFileSync(path.join(home, "failed-fork-cleanup.json"), "utf8"),
+    ).toContain(canonicalTargetFile);
+  } finally {
+    await app?.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("saved session deletion control is reachable and activated with the keyboard", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-delete-"));
   const projectCwd = path.join(root, "project");
@@ -5682,6 +5783,184 @@ test("real mode concurrent duplicate resume reuses one runtime with fake Pi", as
     expect(runtimeIds[0]).toBe(runtimeIds[1]);
   } finally {
     await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("reset is an exclusive lifecycle transaction for delayed ordinary create, queued resume, and overlapping resets", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-reset-life-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const delayedStateMarker = path.join(root, "ordinary-create-delay-enabled");
+  const getStateSignalFile = path.join(root, "ordinary-create-get-state");
+  const exitSignalFile = path.join(root, "ordinary-create-exited");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: [
+        "--delay-get-state-ms",
+        "10000",
+        "--delay-get-state-enabled-file",
+        delayedStateMarker,
+        "--get-state-signal-file",
+        getStateSignalFile,
+        "--exit-signal-file",
+        exitSignalFile,
+      ],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    const workspaceId = await page.evaluate(async () => {
+      const active = await window.piDeck.workspaces.getActive();
+      return active.activeWorkspace!.id;
+    });
+    fs.rmSync(getStateSignalFile, { force: true });
+    fs.writeFileSync(delayedStateMarker, "enabled");
+    await page.evaluate((id) => {
+      (window as Window & { delayedCreate?: Promise<unknown> }).delayedCreate =
+        window.piDeck.chat.createSession({ workspaceId: id });
+    }, workspaceId);
+    await expect
+      .poll(() =>
+        fs.existsSync(getStateSignalFile)
+          ? fs.readFileSync(getStateSignalFile, "utf8").trim()
+          : "",
+      )
+      .not.toBe("");
+    const delayedSessionFile = fs
+      .readFileSync(getStateSignalFile, "utf8")
+      .trim();
+    fs.rmSync(delayedStateMarker, { force: true });
+
+    const result = await page.evaluate(
+      async ({ workspaceId, sessionFile }) => {
+        const firstReset = window.piDeck.chat.reset();
+        const secondReset = window.piDeck.chat.reset();
+        const queuedResume = window.piDeck.chat.resumeSession({
+          workspaceId,
+          sessionFile,
+        });
+        let createError = "";
+        let queuedResumeError = "";
+        try {
+          await (window as Window & { delayedCreate: Promise<unknown> })
+            .delayedCreate;
+        } catch (error) {
+          createError = error instanceof Error ? error.message : String(error);
+        }
+        try {
+          await queuedResume;
+        } catch (error) {
+          queuedResumeError =
+            error instanceof Error ? error.message : String(error);
+        }
+        const [first, second] = await Promise.all([firstReset, secondReset]);
+        const current = await window.piDeck.chat.getSnapshot();
+        const sessions = await window.piDeck.chat.listSessions({ workspaceId });
+        return {
+          createError,
+          queuedResumeError,
+          firstRuntimeId: first.runtimeId,
+          secondRuntimeId: second.runtimeId,
+          currentRuntimeId: current.runtimeId,
+          sessionFiles: sessions.sessions.map((session) => session.sessionFile),
+        };
+      },
+      { workspaceId, sessionFile: delayedSessionFile },
+    );
+    expect(result.createError).toMatch(
+      /cancelled by reset or application shutdown/i,
+    );
+    // Both IPC calls joined one reset transaction and therefore one replacement.
+    expect(result.firstRuntimeId).toBe(result.secondRuntimeId);
+    expect(result.currentRuntimeId).toBe(result.firstRuntimeId);
+    // The old worker has exited before reset returned and never acquired a
+    // workspace reference or returned as a late runtime/event source.
+    await expect
+      .poll(() =>
+        fs.existsSync(exitSignalFile)
+          ? fs.readFileSync(exitSignalFile, "utf8")
+          : "",
+      )
+      .toContain(delayedSessionFile);
+    expect(result.sessionFiles).not.toContain(delayedSessionFile);
+    expect(result.queuedResumeError).toMatch(
+      /cancelled by reset or application shutdown/i,
+    );
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("quit awaits a delayed ordinary create without an orphaned workspace reference", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-quit-life-"));
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const delayedStateMarker = path.join(root, "ordinary-create-delay-enabled");
+  const getStateSignalFile = path.join(root, "ordinary-create-get-state");
+  const exitSignalFile = path.join(root, "ordinary-create-exited");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: [
+        "--delay-get-state-ms",
+        "10000",
+        "--delay-get-state-enabled-file",
+        delayedStateMarker,
+        "--get-state-signal-file",
+        getStateSignalFile,
+        "--exit-signal-file",
+        exitSignalFile,
+      ],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    const workspaceId = await page.evaluate(async () => {
+      const active = await window.piDeck.workspaces.getActive();
+      return active.activeWorkspace!.id;
+    });
+    fs.rmSync(getStateSignalFile, { force: true });
+    fs.writeFileSync(delayedStateMarker, "enabled");
+    await page.evaluate((id) => {
+      void window.piDeck.chat.createSession({ workspaceId: id });
+    }, workspaceId);
+    await expect
+      .poll(() =>
+        fs.existsSync(getStateSignalFile)
+          ? fs.readFileSync(getStateSignalFile, "utf8").trim()
+          : "",
+      )
+      .not.toBe("");
+    const delayedSessionFile = fs
+      .readFileSync(getStateSignalFile, "utf8")
+      .trim();
+    fs.rmSync(delayedStateMarker, { force: true });
+    await page.evaluate(() => window.close());
+    await expect
+      .poll(() =>
+        fs.existsSync(exitSignalFile)
+          ? fs.readFileSync(exitSignalFile, "utf8")
+          : "",
+      )
+      .toContain(delayedSessionFile);
+    const workspaces = fs.readFileSync(
+      path.join(root, "pideck-home", "workspaces.json"),
+      "utf8",
+    );
+    expect(workspaces).not.toContain(delayedSessionFile);
+  } finally {
+    await app.close().catch(() => undefined);
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -6574,6 +6853,2005 @@ test("real mode does not fall back to fake/local UI and can send from active run
       maxRetries: 10,
       retryDelay: 100,
     });
+  }
+});
+
+test("real-mode session fork creates an independent Pi history and survives relaunch", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-fork-"));
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  const env = fakeRealModeEnv({ root, projectCwd, agentDir, userDataDir });
+  const sourceToken = `fork-source-${Date.now()}`;
+  const forkToken = `fork-child-${Date.now()}`;
+  const forkResumeToken = `fork-child-relaunch-${Date.now()}`;
+  let source: {
+    runtimeId: string;
+    workspaceId: string;
+    sessionFile: string;
+    sessionId: string;
+  };
+  let fork: { runtimeId: string; sessionFile: string; sessionId: string };
+  const first = await launchPiDeck(env);
+  try {
+    await expectHealthyPreload(first.page);
+    await sidebarNewSessionButton(first.page).click();
+    await first.page.getByLabel("Prompt text").fill(sourceToken);
+    await first.page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      first.page.getByText(`Fake response to: ${sourceToken}`),
+    ).toBeVisible({
+      timeout: 20_000,
+    });
+    source = await first.page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      return {
+        runtimeId: snapshot.runtimeId,
+        workspaceId: snapshot.workspaceId!,
+        sessionFile: snapshot.state.sessionFile!,
+        sessionId: snapshot.state.sessionId!,
+      };
+    });
+    const actionMenu = first.page.getByTestId(
+      `session-actions-${source.runtimeId}`,
+    );
+    await actionMenu.getByRole("button").click();
+    const forkItem = first.page.getByRole("menuitem", {
+      name: "Fork session…",
+    });
+    await expect(forkItem).toBeEnabled();
+    await forkItem.click();
+    const forkDialog = first.page.getByTestId("session-fork-dialog");
+    await expect(forkDialog).toContainText("original session stays unchanged");
+    await forkDialog.getByRole("button", { name: "Fork session" }).click();
+    await expect(forkDialog).toHaveCount(0);
+    await expect(first.page.getByLabel("Chat / Agent Timeline")).toContainText(
+      sourceToken,
+    );
+    fork = await first.page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      return {
+        runtimeId: snapshot.runtimeId,
+        sessionFile: snapshot.state.sessionFile!,
+        sessionId: snapshot.state.sessionId!,
+      };
+    });
+    expect(fork.runtimeId).not.toBe(source.runtimeId);
+    expect(fork.sessionFile).not.toBe(source.sessionFile);
+    expect(fork.sessionId).not.toBe(source.sessionId);
+    await first.page.getByLabel("Prompt text").fill(forkToken);
+    await first.page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      first.page.getByText(`Fake response to: ${forkToken}`),
+    ).toBeVisible({
+      timeout: 20_000,
+    });
+    await first.page
+      .getByTestId(`session-actions-${source.runtimeId}`)
+      .locator("..")
+      .getByRole("button", { name: `Session: ${sourceToken}` })
+      .click();
+    await expect(first.page.getByLabel("Chat / Agent Timeline")).toContainText(
+      sourceToken,
+    );
+    await expect(
+      first.page.getByLabel("Chat / Agent Timeline"),
+    ).not.toContainText(forkToken);
+  } finally {
+    await first.app.close().catch(() => undefined);
+  }
+  const second = await launchPiDeck(env);
+  try {
+    await expectHealthyPreload(second.page);
+    const sessions = await second.page.evaluate(async (workspaceId) => {
+      const listed = await window.piDeck.chat.listSessions({ workspaceId });
+      return listed.sessions.map((session) => ({
+        sessionFile: session.sessionFile,
+        sessionId: session.sessionId,
+      }));
+    }, source!.workspaceId);
+    expect(sessions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sessionFile: source!.sessionFile,
+          sessionId: source!.sessionId,
+        }),
+        expect.objectContaining({
+          sessionFile: fork!.sessionFile,
+          sessionId: fork!.sessionId,
+        }),
+      ]),
+    );
+    // Listing proves persistence; actually reopen each side after relaunch to
+    // prove their live Pi histories remain independent.
+    const histories = await second.page.evaluate(
+      async ({ source, fork, forkResumeToken }) => {
+        const sourceRuntime = await window.piDeck.chat.resumeSession({
+          workspaceId: source.workspaceId,
+          sessionFile: source.sessionFile,
+        });
+        const sourceBefore = await window.piDeck.chat.getSnapshot({
+          runtimeId: sourceRuntime.runtimeId,
+        });
+        const forkRuntime = await window.piDeck.chat.resumeSession({
+          workspaceId: source.workspaceId,
+          sessionFile: fork.sessionFile,
+        });
+        await window.piDeck.chat.prompt({
+          runtimeId: forkRuntime.runtimeId,
+          text: forkResumeToken,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        const forkAfter = await window.piDeck.chat.getSnapshot({
+          runtimeId: forkRuntime.runtimeId,
+        });
+        const sourceAfter = await window.piDeck.chat.getSnapshot({
+          runtimeId: sourceRuntime.runtimeId,
+        });
+        const text = (messages: typeof sourceAfter.messages) =>
+          messages.map((message) =>
+            typeof message.content === "string"
+              ? message.content
+              : JSON.stringify(message.content),
+          );
+        return {
+          sourceBefore: text(sourceBefore.messages),
+          sourceAfter: text(sourceAfter.messages),
+          forkAfter: text(forkAfter.messages),
+        };
+      },
+      { source, fork, forkResumeToken },
+    );
+    expect(histories.sourceBefore).toContain(sourceToken);
+    expect(histories.sourceAfter).toContain(sourceToken);
+    expect(histories.sourceAfter).not.toContain(forkToken);
+    expect(histories.sourceAfter).not.toContain(forkResumeToken);
+    expect(histories.forkAfter).toEqual(
+      expect.arrayContaining([sourceToken, forkToken, forkResumeToken]),
+    );
+  } finally {
+    await second.app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("fork directly enforces the live worker capacity", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-fork-capacity-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(userDataDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(userDataDir, "settings.json"),
+    `${JSON.stringify({ maxRunningSessions: 1 })}\n`,
+  );
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({ root, projectCwd, agentDir, userDataDir }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await sidebarNewSessionButton(page).click();
+    await page.getByLabel("Prompt text").fill("capacity fork source");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Fake response to: capacity fork source"),
+    ).toBeVisible({ timeout: 20_000 });
+    const error = await page.evaluate(async () => {
+      const source = await window.piDeck.chat.getSnapshot();
+      try {
+        await window.piDeck.chat.forkSession({
+          workspaceId: source.workspaceId!,
+          sessionFile: source.state.sessionFile!,
+        });
+        return "";
+      } catch (reason) {
+        return reason instanceof Error ? reason.message : String(reason);
+      }
+    });
+    expect(error).toMatch(/maximum running session capacity \(1\) reached/i);
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a successful fork consumes capacity and releases it when closed", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-fork-capacity-release-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(userDataDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(userDataDir, "settings.json"),
+    `${JSON.stringify({ maxRunningSessions: 2 })}\n`,
+  );
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({ root, projectCwd, agentDir, userDataDir }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await sidebarNewSessionButton(page).click();
+    await page.getByLabel("Prompt text").fill("capacity release source");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Fake response to: capacity release source"),
+    ).toBeVisible({ timeout: 20_000 });
+    const result = await page.evaluate(async () => {
+      const source = await window.piDeck.chat.getSnapshot();
+      const fork = await window.piDeck.chat.forkSession({
+        workspaceId: source.workspaceId!,
+        sessionFile: source.state.sessionFile!,
+      });
+      let capacityError = "";
+      try {
+        await window.piDeck.chat.createSession({
+          workspaceId: source.workspaceId!,
+        });
+      } catch (error) {
+        capacityError = error instanceof Error ? error.message : String(error);
+      }
+      await window.piDeck.chat.closeSession({ runtimeId: fork.runtimeId });
+      const replacement = await window.piDeck.chat.createSession({
+        workspaceId: source.workspaceId!,
+      });
+      return {
+        capacityError,
+        forkRuntimeId: fork.runtimeId,
+        replacementRuntimeId: replacement.runtimeId,
+      };
+    });
+    expect(result.capacityError).toMatch(
+      /maximum running session capacity \(2\) reached/i,
+    );
+    expect(result.replacementRuntimeId).not.toBe(result.forkRuntimeId);
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("fork crash phases retain source-only/target reservations through restart", async () => {
+  for (const phase of [
+    "before-spawn",
+    "after-spawn-before-child-record",
+    "after-target-discovery",
+  ] as const) {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), `pi-deck-e2e-fork-crash-${phase}-`),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    const userDataDir = path.join(root, "user-data");
+    const targetFile = path.join(
+      agentDir,
+      "sessions",
+      "--fake-rpc--",
+      "fork-crash-target.jsonl",
+    );
+    const crashSignalFile = path.join(root, "fork-crash-phase");
+    fs.mkdirSync(projectCwd, { recursive: true });
+    let crashedApp: ElectronApplication | undefined;
+    let recoveredApp: ElectronApplication | undefined;
+    try {
+      const crashEnv = {
+        ...fakeRealModeEnv({
+          root,
+          projectCwd,
+          agentDir,
+          userDataDir,
+          fakePiArgs: ["--fork-target", targetFile],
+        }),
+        PI_DECK_TEST_CRASH_FORK_PHASE: phase,
+        PI_DECK_TEST_CRASH_FORK_SIGNAL_FILE: crashSignalFile,
+      };
+      const launched = await launchPiDeck(crashEnv);
+      crashedApp = launched.app;
+      await expectHealthyPreload(launched.page);
+      await sidebarNewSessionButton(launched.page).click();
+      await launched.page.getByLabel("Prompt text").fill(`crash ${phase}`);
+      await launched.page.getByRole("button", { name: "Send" }).click();
+      await expect(
+        launched.page.getByText(`Fake response to: crash ${phase}`),
+      ).toBeVisible({ timeout: 20_000 });
+      const source = await launched.page.evaluate(async () => {
+        const snapshot = await window.piDeck.chat.getSnapshot();
+        return {
+          workspaceId: snapshot.workspaceId!,
+          sessionFile: snapshot.state.sessionFile!,
+        };
+      });
+      await launched.page.evaluate((source) => {
+        void window.piDeck.chat.forkSession(source);
+      }, source);
+      await expect
+        .poll(() =>
+          fs.existsSync(crashSignalFile)
+            ? fs.readFileSync(crashSignalFile, "utf8").trim()
+            : "",
+        )
+        .toBe(phase);
+      await crashedApp.close().catch(() => undefined);
+      crashedApp = undefined;
+
+      const recovered = await launchPiDeck(
+        fakeRealModeEnv({
+          root,
+          projectCwd,
+          agentDir,
+          userDataDir,
+          fakePiArgs: ["--fork-target", targetFile],
+        }),
+      );
+      recoveredApp = recovered.app;
+      await expectHealthyPreload(recovered.page);
+      const result = await recovered.page.evaluate(async (source) => {
+        const errorOf = async (operation: () => Promise<unknown>) => {
+          try {
+            await operation();
+            return "";
+          } catch (error) {
+            return error instanceof Error ? error.message : String(error);
+          }
+        };
+        await window.piDeck.workspaces.create({ name: "blocked destination" });
+        const destination = await window.piDeck.workspaces.getActive();
+        const sessions = await window.piDeck.chat.listSessions({
+          workspaceId: source.workspaceId,
+        });
+        return {
+          resumeError: await errorOf(() =>
+            window.piDeck.chat.resumeSession(source),
+          ),
+          forkError: await errorOf(() =>
+            window.piDeck.chat.forkSession(source),
+          ),
+          deleteError: await errorOf(() =>
+            window.piDeck.chat.deleteSession(source),
+          ),
+          moveError: await errorOf(() =>
+            window.piDeck.workspaces.moveSession({
+              sessionFile: source.sessionFile,
+              toWorkspaceId: destination.activeWorkspaceId!,
+            }),
+          ),
+          sessionFiles: sessions.sessions.map((session) => session.sessionFile),
+        };
+      }, source);
+      expect(result.resumeError).toMatch(/awaiting durable cleanup/i);
+      expect(result.forkError).toMatch(/awaiting durable cleanup/i);
+      expect(result.deleteError).toMatch(/awaiting durable cleanup/i);
+      expect(result.moveError).toMatch(/awaiting durable cleanup/i);
+      expect(result.sessionFiles).not.toContain(targetFile);
+      const journal = JSON.parse(
+        fs.readFileSync(
+          path.join(root, "pideck-home", "failed-fork-cleanup.json"),
+          "utf8",
+        ),
+      ) as {
+        version: number;
+        entries: Array<{ kind: string; phase?: string; sessionFile?: string }>;
+      };
+      expect(journal.version).toBe(2);
+      expect(journal.entries).toHaveLength(1);
+      if (phase === "after-target-discovery") {
+        expect(journal.entries[0]).toMatchObject({
+          kind: "target",
+          sessionFile: fs.realpathSync(targetFile),
+        });
+      } else {
+        // The crash hook is before target discovery. Depending on whether the
+        // OS processes the exit just before or just after the identity write,
+        // this is either an unknown pre-spawn gap or a PID-bearing source
+        // record; both must remain source-only and fail closed on restart.
+        expect(journal.entries[0]).toMatchObject({ kind: "source" });
+      }
+      const workspaceStore = fs.readFileSync(
+        path.join(root, "pideck-home", "workspaces.json"),
+        "utf8",
+      );
+      expect(workspaceStore).not.toContain(path.resolve(targetFile));
+    } finally {
+      await crashedApp?.close().catch(() => undefined);
+      await recoveredApp?.close().catch(() => undefined);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("failed target promotion write/rename rebuilds both blocks after restart and safely retries cleanup", async () => {
+  for (const persistenceFailure of ["write", "rename"] as const) {
+    const root = fs.mkdtempSync(
+      path.join(
+        os.tmpdir(),
+        `pi-deck-e2e-fork-promotion-${persistenceFailure}-`,
+      ),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    const userDataDir = path.join(root, "user-data");
+    const targetFile = path.join(
+      agentDir,
+      "sessions",
+      "--fake-rpc--",
+      "fork-promotion-target.jsonl",
+    );
+    const failureSignalFile = path.join(root, "fork-promotion-failed");
+    fs.mkdirSync(projectCwd, { recursive: true });
+    let failedApp: ElectronApplication | undefined;
+    let blockedApp: ElectronApplication | undefined;
+    let cleanedApp: ElectronApplication | undefined;
+    try {
+      const failed = await launchPiDeck({
+        ...fakeRealModeEnv({
+          root,
+          projectCwd,
+          agentDir,
+          userDataDir,
+          fakePiArgs: ["--fork-target", targetFile],
+        }),
+        PI_DECK_TEST_FAIL_FORK_PROMOTION_PERSISTENCE: persistenceFailure,
+        PI_DECK_TEST_FORK_PROMOTION_FAILURE_SIGNAL: failureSignalFile,
+      });
+      failedApp = failed.app;
+      await expectHealthyPreload(failed.page);
+      await sidebarNewSessionButton(failed.page).click();
+      await failed.page.getByLabel("Prompt text").fill("promotion recovery");
+      await failed.page.getByRole("button", { name: "Send" }).click();
+      await expect(
+        failed.page.getByText("Fake response to: promotion recovery"),
+      ).toBeVisible({ timeout: 20_000 });
+      const source = await failed.page.evaluate(async () => {
+        const snapshot = await window.piDeck.chat.getSnapshot();
+        const errorOf = async (operation: () => Promise<unknown>) => {
+          try {
+            await operation();
+            return "";
+          } catch (error) {
+            return error instanceof Error ? error.message : String(error);
+          }
+        };
+        return {
+          workspaceId: snapshot.workspaceId!,
+          sessionFile: snapshot.state.sessionFile!,
+          forkError: await errorOf(() =>
+            window.piDeck.chat.forkSession({
+              workspaceId: snapshot.workspaceId!,
+              sessionFile: snapshot.state.sessionFile!,
+            }),
+          ),
+        };
+      });
+      expect(source.forkError).toMatch(/failed fork cleanup is retained/i);
+      await expect
+        .poll(() =>
+          fs.existsSync(failureSignalFile)
+            ? fs.readFileSync(failureSignalFile, "utf8").trim()
+            : "",
+        )
+        .toBe(persistenceFailure);
+      await failedApp.close();
+      failedApp = undefined;
+
+      // The app never claimed this target before persistence failed. Seed a
+      // stale ref to prove restart cleanup removes it rather than mutating the
+      // target itself; production discovery still relies only on provenance.
+      const workspaceFile = path.join(root, "pideck-home", "workspaces.json");
+      const workspaceState = JSON.parse(
+        fs.readFileSync(workspaceFile, "utf8"),
+      ) as {
+        sessionRefs: Array<Record<string, unknown>>;
+      };
+      const sourceRef = workspaceState.sessionRefs.find(
+        (ref) => ref.sessionFile === source.sessionFile,
+      );
+      expect(sourceRef).toBeDefined();
+      workspaceState.sessionRefs.push({
+        ...sourceRef,
+        sessionFile: fs.realpathSync(targetFile),
+        sessionId: "fork-promotion-target",
+        addedAtMs: Date.now(),
+        lastSeenAtMs: Date.now(),
+      });
+      fs.writeFileSync(workspaceFile, `${JSON.stringify(workspaceState)}\n`);
+
+      const blocked = await launchPiDeck({
+        ...fakeRealModeEnv({
+          root,
+          projectCwd,
+          agentDir,
+          userDataDir,
+          fakePiArgs: ["--fork-target", targetFile],
+        }),
+        PI_DECK_TEST_DEFER_FORK_RECOVERY_CLEANUP: "1",
+      });
+      blockedApp = blocked.app;
+      await expectHealthyPreload(blocked.page);
+      const blockedResult = await blocked.page.evaluate(
+        async (sourceAndTarget) => {
+          const errorOf = async (operation: () => Promise<unknown>) => {
+            try {
+              await operation();
+              return "";
+            } catch (error) {
+              return error instanceof Error ? error.message : String(error);
+            }
+          };
+          await window.piDeck.workspaces.create({
+            name: "blocked destination",
+          });
+          const destination = await window.piDeck.workspaces.getActive();
+          const sessionActionErrors = async (sessionFile: string) => ({
+            resume: await errorOf(() =>
+              window.piDeck.chat.resumeSession({
+                workspaceId: sourceAndTarget.workspaceId,
+                sessionFile,
+              }),
+            ),
+            fork: await errorOf(() =>
+              window.piDeck.chat.forkSession({
+                workspaceId: sourceAndTarget.workspaceId,
+                sessionFile,
+              }),
+            ),
+            delete: await errorOf(() =>
+              window.piDeck.chat.deleteSession({
+                workspaceId: sourceAndTarget.workspaceId,
+                sessionFile,
+              }),
+            ),
+            move: await errorOf(() =>
+              window.piDeck.workspaces.moveSession({
+                sessionFile,
+                toWorkspaceId: destination.activeWorkspaceId!,
+              }),
+            ),
+          });
+          return {
+            source: await sessionActionErrors(sourceAndTarget.sourceFile),
+            target: await sessionActionErrors(sourceAndTarget.targetFile),
+          };
+        },
+        {
+          workspaceId: source.workspaceId,
+          sourceFile: source.sessionFile,
+          targetFile: fs.realpathSync(targetFile),
+        },
+      );
+      for (const errors of [blockedResult.source, blockedResult.target]) {
+        for (const error of Object.values(errors)) {
+          expect(error).toMatch(/awaiting durable cleanup/i);
+        }
+      }
+      await blockedApp.close();
+      blockedApp = undefined;
+
+      cleanedApp = (
+        await launchPiDeck(
+          fakeRealModeEnv({
+            root,
+            projectCwd,
+            agentDir,
+            userDataDir,
+            fakePiArgs: ["--fork-target", targetFile],
+          }),
+        )
+      ).app;
+      const journal = JSON.parse(
+        fs.readFileSync(
+          path.join(root, "pideck-home", "failed-fork-cleanup.json"),
+          "utf8",
+        ),
+      ) as { version: number; entries: unknown[] };
+      expect(journal).toEqual({ version: 2, entries: [] });
+      expect(fs.readFileSync(workspaceFile, "utf8")).not.toContain(
+        fs.realpathSync(targetFile),
+      );
+    } finally {
+      await failedApp?.close().catch(() => undefined);
+      await blockedApp?.close().catch(() => undefined);
+      await cleanedApp?.close().catch(() => undefined);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("same-process failed-fork cleanup revalidates its exact target before worker exit compensation", async () => {
+  for (const fixture of [
+    { name: "changed identity", mutation: "id" },
+    { name: "changed parent", mutation: "parent" },
+    { name: "unchanged target", mutation: undefined },
+  ] as const) {
+    const root = fs.mkdtempSync(
+      path.join(
+        os.tmpdir(),
+        `pi-deck-e2e-fork-live-revalidate-${fixture.name.replaceAll(" ", "-")}-`,
+      ),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    const userDataDir = path.join(root, "user-data");
+    const targetFile = path.join(
+      agentDir,
+      "sessions",
+      "--fake-rpc--",
+      "live-revalidate-target.jsonl",
+    );
+    const promotionFailureSignal = path.join(root, "promotion-failed");
+    const sigtermReceivedSignal = path.join(root, "sigterm-received");
+    const allowExitSignal = path.join(root, "allow-worker-exit");
+    const exitSignal = path.join(root, "fork-exited");
+    fs.mkdirSync(projectCwd, { recursive: true });
+    let app: ElectronApplication | undefined;
+    try {
+      const launched = await launchPiDeck({
+        ...fakeRealModeEnv({
+          root,
+          projectCwd,
+          agentDir,
+          userDataDir,
+          fakePiArgs: [
+            "--fork-target",
+            targetFile,
+            "--sigterm-received-signal-file",
+            sigtermReceivedSignal,
+            "--sigterm-exit-wait-file",
+            allowExitSignal,
+            "--fork-exit-signal-file",
+            exitSignal,
+          ],
+        }),
+        // Fail only the initial promotion. worker_exit must either retain an
+        // altered target or promote/compensate the original target in-process.
+        PI_DECK_TEST_FAIL_FORK_PROMOTION_PERSISTENCE: "write-once",
+        PI_DECK_TEST_FORK_PROMOTION_FAILURE_SIGNAL: promotionFailureSignal,
+      });
+      app = launched.app;
+      await expectHealthyPreload(launched.page);
+      await sidebarNewSessionButton(launched.page).click();
+      await launched.page.getByLabel("Prompt text").fill(fixture.name);
+      await launched.page.getByRole("button", { name: "Send" }).click();
+      await expect(
+        launched.page.getByText(`Fake response to: ${fixture.name}`),
+      ).toBeVisible({ timeout: 20_000 });
+      const source = await launched.page.evaluate(async () => {
+        const snapshot = await window.piDeck.chat.getSnapshot();
+        return {
+          workspaceId: snapshot.workspaceId!,
+          sessionFile: snapshot.state.sessionFile!,
+        };
+      });
+      await launched.page.evaluate((source) => {
+        (window as Window & { pendingFork?: Promise<unknown> }).pendingFork =
+          window.piDeck.chat.forkSession(source);
+      }, source);
+      await expect
+        .poll(() =>
+          fs.existsSync(promotionFailureSignal)
+            ? fs.readFileSync(promotionFailureSignal, "utf8").trim()
+            : "",
+        )
+        .toBe("write");
+      await expect
+        .poll(() =>
+          fs.existsSync(sigtermReceivedSignal)
+            ? fs.readFileSync(sigtermReceivedSignal, "utf8").trim()
+            : "",
+        )
+        .toBe("received");
+
+      const canonicalTarget = fs.realpathSync(targetFile);
+      const workspaceFile = path.join(root, "pideck-home", "workspaces.json");
+      if (fixture.mutation !== undefined) {
+        // Promotion fails before normal target claiming. Seed an external
+        // stale ref while the child is deliberately held before worker_exit,
+        // so invalid target validation proves no store mutation occurred.
+        const workspaceState = JSON.parse(
+          fs.readFileSync(workspaceFile, "utf8"),
+        ) as { sessionRefs: Array<Record<string, unknown>> };
+        const sourceRef = workspaceState.sessionRefs.find(
+          (ref) => ref.sessionFile === source.sessionFile,
+        );
+        expect(sourceRef).toBeDefined();
+        workspaceState.sessionRefs.push({
+          ...sourceRef,
+          sessionFile: canonicalTarget,
+          sessionId: "live-revalidate-target",
+          addedAtMs: Date.now(),
+          lastSeenAtMs: Date.now(),
+        });
+        fs.writeFileSync(workspaceFile, `${JSON.stringify(workspaceState)}\n`);
+        fs.writeFileSync(
+          targetFile,
+          `${JSON.stringify({
+            type: "session",
+            version: 3,
+            id:
+              fixture.mutation === "id"
+                ? "live-revalidate-mutated-id"
+                : "live-revalidate-target",
+            timestamp: new Date().toISOString(),
+            cwd: projectCwd,
+            parentSession:
+              fixture.mutation === "parent"
+                ? path.join(root, "different-parent.jsonl")
+                : source.sessionFile,
+          })}\n`,
+        );
+      }
+
+      // This releases the fake only after the mutation above, making the
+      // target revalidation unambiguously precede the worker_exit callback.
+      fs.writeFileSync(allowExitSignal, "continue\n");
+      const forkError = await launched.page.evaluate(async () => {
+        try {
+          await (window as Window & { pendingFork: Promise<unknown> })
+            .pendingFork;
+          return "";
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      });
+      await expect
+        .poll(() =>
+          fs.existsSync(exitSignal) ? fs.readFileSync(exitSignal, "utf8") : "",
+        )
+        .toContain(targetFile);
+
+      const journalFile = path.join(
+        root,
+        "pideck-home",
+        "failed-fork-cleanup.json",
+      );
+      const journal = JSON.parse(fs.readFileSync(journalFile, "utf8")) as {
+        entries: Array<{ kind: string }>;
+      };
+      const persistedRefs = fs.readFileSync(workspaceFile, "utf8");
+      if (fixture.mutation !== undefined) {
+        expect(forkError).toMatch(/failed fork cleanup is retained/i);
+        // The failed live revalidation performs neither promotion nor ref
+        // removal, and it leaves both the source/target blocks in force.
+        expect(journal.entries).toHaveLength(1);
+        expect(journal.entries[0]?.kind).toBe("source");
+        expect(persistedRefs).toContain(canonicalTarget);
+        const cleanupDiagnostics = await launched.page.evaluate(async () =>
+          window.piDeck.app.getDiagnosticsSummary(),
+        );
+        expect(
+          cleanupDiagnostics.recentErrors.filter((diagnostic) =>
+            diagnostic.includes("remains retained after worker exit"),
+          ),
+        ).toHaveLength(1);
+        const blocked = await launched.page.evaluate(
+          async (sourceAndTarget) => {
+            const errorOf = async (operation: () => Promise<unknown>) => {
+              try {
+                await operation();
+                return "";
+              } catch (error) {
+                return error instanceof Error ? error.message : String(error);
+              }
+            };
+            return {
+              sourceFork: await errorOf(() =>
+                window.piDeck.chat.forkSession({
+                  workspaceId: sourceAndTarget.workspaceId,
+                  sessionFile: sourceAndTarget.sourceFile,
+                }),
+              ),
+              targetResume: await errorOf(() =>
+                window.piDeck.chat.resumeSession({
+                  workspaceId: sourceAndTarget.workspaceId,
+                  sessionFile: sourceAndTarget.targetFile,
+                }),
+              ),
+              targetRemove: await errorOf(() =>
+                window.piDeck.workspaces.removeSession({
+                  workspaceId: sourceAndTarget.workspaceId,
+                  sessionFile: sourceAndTarget.targetFile,
+                }),
+              ),
+            };
+          },
+          {
+            workspaceId: source.workspaceId,
+            sourceFile: source.sessionFile,
+            targetFile: canonicalTarget,
+          },
+        );
+        expect(blocked.sourceFork).toMatch(
+          /awaiting durable cleanup|active or changing/i,
+        );
+        // Resume cannot attach the stale target, while remove proves the
+        // live ephemeral target reservation remains active in this process.
+        expect(blocked.targetResume).not.toBe("");
+        expect(blocked.targetRemove).toMatch(/awaiting durable cleanup/i);
+      } else {
+        expect(forkError).toMatch(
+          /injected fork target promotion write failure/i,
+        );
+        expect(journal.entries).toEqual([]);
+        expect(persistedRefs).not.toContain(canonicalTarget);
+        const resumed = await launched.page.evaluate(async (source) => {
+          return window.piDeck.chat.resumeSession(source);
+        }, source);
+        expect(resumed.state.sessionFile).toBe(source.sessionFile);
+      }
+    } finally {
+      await app?.close().catch(() => undefined);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("same-process failed-fork cleanup blocks replacement and ambiguous children through restart", async () => {
+  for (const fixture of [
+    { name: "unique-replacement", kind: "replacement" },
+    { name: "multiple-plausible", kind: "ambiguous" },
+  ] as const) {
+    const root = fs.mkdtempSync(
+      path.join(
+        os.tmpdir(),
+        `pi-deck-e2e-fork-live-candidates-${fixture.name}-`,
+      ),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    const userDataDir = path.join(root, "user-data");
+    const targetFile = path.join(
+      agentDir,
+      "sessions",
+      "--fake-rpc--",
+      "live-candidates-target.jsonl",
+    );
+    const promotionFailureSignal = path.join(root, "promotion-failed");
+    const sigtermReceivedSignal = path.join(root, "sigterm-received");
+    const allowExitSignal = path.join(root, "allow-worker-exit");
+    let app: ElectronApplication | undefined;
+    let restarted: ElectronApplication | undefined;
+    try {
+      fs.mkdirSync(projectCwd, { recursive: true });
+      const launched = await launchPiDeck({
+        ...fakeRealModeEnv({
+          root,
+          projectCwd,
+          agentDir,
+          userDataDir,
+          fakePiArgs: [
+            "--fork-target",
+            targetFile,
+            "--sigterm-received-signal-file",
+            sigtermReceivedSignal,
+            "--sigterm-exit-wait-file",
+            allowExitSignal,
+          ],
+        }),
+        PI_DECK_TEST_FAIL_FORK_PROMOTION_PERSISTENCE: "write-once",
+        PI_DECK_TEST_FORK_PROMOTION_FAILURE_SIGNAL: promotionFailureSignal,
+      });
+      app = launched.app;
+      await expectHealthyPreload(launched.page);
+      await sidebarNewSessionButton(launched.page).click();
+      await launched.page.getByLabel("Prompt text").fill(fixture.name);
+      await launched.page.getByRole("button", { name: "Send" }).click();
+      await expect(
+        launched.page.getByText(`Fake response to: ${fixture.name}`),
+      ).toBeVisible({ timeout: 20_000 });
+      const source = await launched.page.evaluate(async () => {
+        const snapshot = await window.piDeck.chat.getSnapshot();
+        return {
+          workspaceId: snapshot.workspaceId!,
+          sessionFile: snapshot.state.sessionFile!,
+        };
+      });
+      await launched.page.evaluate((source) => {
+        (window as Window & { pendingFork?: Promise<unknown> }).pendingFork =
+          window.piDeck.chat.forkSession(source);
+      }, source);
+      await expect
+        .poll(() =>
+          fs.existsSync(promotionFailureSignal)
+            ? fs.readFileSync(promotionFailureSignal, "utf8").trim()
+            : "",
+        )
+        .toBe("write");
+      await expect
+        .poll(() =>
+          fs.existsSync(sigtermReceivedSignal)
+            ? fs.readFileSync(sigtermReceivedSignal, "utf8").trim()
+            : "",
+        )
+        .toBe("received");
+
+      const canonicalTarget = fs.realpathSync(targetFile);
+      const extraChildFile = path.join(
+        path.dirname(targetFile),
+        `${fixture.name}-child.jsonl`,
+      );
+      if (fixture.kind === "replacement") {
+        // Replace the observed path with an ineligible child and leave one
+        // different, valid provenance match for live revalidation to find.
+        fs.writeFileSync(
+          targetFile,
+          `${JSON.stringify({
+            type: "session",
+            version: 3,
+            id: "replaced-observed-child",
+            timestamp: new Date().toISOString(),
+            cwd: projectCwd,
+            parentSession: path.join(root, "different-parent.jsonl"),
+          })}\n`,
+        );
+      }
+      fs.writeFileSync(
+        extraChildFile,
+        `${JSON.stringify({
+          type: "session",
+          version: 3,
+          id: `${fixture.name}-child`,
+          timestamp: new Date().toISOString(),
+          cwd: projectCwd,
+          parentSession: source.sessionFile,
+        })}\n`,
+      );
+      const candidateFiles =
+        fixture.kind === "replacement"
+          ? [fs.realpathSync(extraChildFile)]
+          : [canonicalTarget, fs.realpathSync(extraChildFile)];
+      const destinationWorkspaceId = await launched.page.evaluate(async () => {
+        await window.piDeck.workspaces.create({ name: "blocked destination" });
+        return (await window.piDeck.workspaces.getActive()).activeWorkspaceId!;
+      });
+
+      // Give every valid candidate a ref before worker_exit. A blocked error
+      // therefore proves the cleanup gate, not merely missing ownership.
+      const workspaceFile = path.join(root, "pideck-home", "workspaces.json");
+      const workspaceState = JSON.parse(
+        fs.readFileSync(workspaceFile, "utf8"),
+      ) as {
+        sessionRefs: Array<Record<string, unknown>>;
+      };
+      const sourceRef = workspaceState.sessionRefs.find(
+        (ref) => ref.sessionFile === source.sessionFile,
+      );
+      expect(sourceRef).toBeDefined();
+      for (const sessionFile of candidateFiles) {
+        workspaceState.sessionRefs.push({
+          ...sourceRef,
+          sessionFile,
+          sessionId: path.basename(sessionFile, ".jsonl"),
+          addedAtMs: Date.now(),
+          lastSeenAtMs: Date.now(),
+        });
+      }
+      fs.writeFileSync(workspaceFile, `${JSON.stringify(workspaceState)}\n`);
+
+      fs.writeFileSync(allowExitSignal, "continue\n");
+      const forkError = await launched.page.evaluate(async () => {
+        try {
+          await (window as Window & { pendingFork: Promise<unknown> })
+            .pendingFork;
+          return "";
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      });
+      expect(forkError).toMatch(/failed fork cleanup is retained/i);
+
+      const blocked = await launched.page.evaluate(
+        async ({ workspaceId, candidateFiles, destinationWorkspaceId }) => {
+          const errorOf = async (operation: () => Promise<unknown>) => {
+            try {
+              await operation();
+              return "";
+            } catch (error) {
+              return error instanceof Error ? error.message : String(error);
+            }
+          };
+          const blocked = [];
+          for (const sessionFile of candidateFiles) {
+            blocked.push({
+              resume: await errorOf(() =>
+                window.piDeck.chat.resumeSession({ workspaceId, sessionFile }),
+              ),
+              import: await errorOf(() =>
+                window.piDeck.workspaces.addSession({
+                  workspaceId,
+                  sessionFile,
+                }),
+              ),
+              remove: await errorOf(() =>
+                window.piDeck.workspaces.removeSession({
+                  workspaceId,
+                  sessionFile,
+                }),
+              ),
+              delete: await errorOf(() =>
+                window.piDeck.chat.deleteSession({ workspaceId, sessionFile }),
+              ),
+              fork: await errorOf(() =>
+                window.piDeck.chat.forkSession({ workspaceId, sessionFile }),
+              ),
+              move: await errorOf(() =>
+                window.piDeck.workspaces.moveSession({
+                  sessionFile,
+                  toWorkspaceId: destinationWorkspaceId,
+                }),
+              ),
+            });
+          }
+          return blocked;
+        },
+        {
+          workspaceId: source.workspaceId,
+          candidateFiles,
+          destinationWorkspaceId,
+        },
+      );
+      for (const candidate of blocked) {
+        for (const [operation, error] of Object.entries(candidate)) {
+          // The already-running store can reject the manually seeded ref
+          // before it reaches the journal, but it must never attach or mutate.
+          expect(error, operation).not.toBe("");
+        }
+      }
+      const journalFile = path.join(
+        root,
+        "pideck-home",
+        "failed-fork-cleanup.json",
+      );
+      const retainedJournal = JSON.parse(
+        fs.readFileSync(journalFile, "utf8"),
+      ) as {
+        entries: Array<{ kind: string }>;
+      };
+      expect(retainedJournal.entries).toHaveLength(1);
+      expect(retainedJournal.entries[0]?.kind).toBe("source");
+      const persistedRefs = fs.readFileSync(workspaceFile, "utf8");
+      for (const sessionFile of candidateFiles) {
+        expect(persistedRefs).toContain(sessionFile);
+      }
+
+      await app.close();
+      app = undefined;
+      const recovered = await launchPiDeck({
+        ...fakeRealModeEnv({
+          root,
+          projectCwd,
+          agentDir,
+          userDataDir,
+          fakePiArgs: ["--fork-target", targetFile],
+        }),
+        PI_DECK_TEST_DEFER_FORK_RECOVERY_CLEANUP: "1",
+      });
+      restarted = recovered.app;
+      await expectHealthyPreload(recovered.page);
+      const restartBlocked = await recovered.page.evaluate(
+        async ({ workspaceId, candidateFiles }) => {
+          const errorOf = async (operation: () => Promise<unknown>) => {
+            try {
+              await operation();
+              return "";
+            } catch (error) {
+              return error instanceof Error ? error.message : String(error);
+            }
+          };
+          await window.piDeck.workspaces.create({
+            name: "restart destination",
+          });
+          const destination = await window.piDeck.workspaces.getActive();
+          const blocked = [];
+          for (const sessionFile of candidateFiles) {
+            blocked.push({
+              resume: await errorOf(() =>
+                window.piDeck.chat.resumeSession({ workspaceId, sessionFile }),
+              ),
+              import: await errorOf(() =>
+                window.piDeck.workspaces.addSession({
+                  workspaceId,
+                  sessionFile,
+                }),
+              ),
+              remove: await errorOf(() =>
+                window.piDeck.workspaces.removeSession({
+                  workspaceId,
+                  sessionFile,
+                }),
+              ),
+              delete: await errorOf(() =>
+                window.piDeck.chat.deleteSession({ workspaceId, sessionFile }),
+              ),
+              fork: await errorOf(() =>
+                window.piDeck.chat.forkSession({ workspaceId, sessionFile }),
+              ),
+              move: await errorOf(() =>
+                window.piDeck.workspaces.moveSession({
+                  sessionFile,
+                  toWorkspaceId: destination.activeWorkspaceId!,
+                }),
+              ),
+            });
+          }
+          return blocked;
+        },
+        { workspaceId: source.workspaceId, candidateFiles },
+      );
+      for (const candidate of restartBlocked) {
+        for (const error of Object.values(candidate)) {
+          expect(error).toMatch(/awaiting durable cleanup/i);
+        }
+      }
+      const restartJournal = JSON.parse(
+        fs.readFileSync(journalFile, "utf8"),
+      ) as {
+        entries: Array<{ kind: string }>;
+      };
+      expect(restartJournal.entries).toHaveLength(1);
+      expect(restartJournal.entries[0]?.kind).toBe("source");
+    } finally {
+      await app?.close().catch(() => undefined);
+      await restarted?.close().catch(() => undefined);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("normal fork success clears its durable reservation after registration commit", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-fork-ok-"));
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  const targetFile = path.join(
+    agentDir,
+    "sessions",
+    "--fake-rpc--",
+    "fork-success-target.jsonl",
+  );
+  fs.mkdirSync(projectCwd, { recursive: true });
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      userDataDir,
+      fakePiArgs: ["--fork-target", targetFile],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await sidebarNewSessionButton(page).click();
+    await page.getByLabel("Prompt text").fill("durable fork success");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Fake response to: durable fork success"),
+    ).toBeVisible({
+      timeout: 20_000,
+    });
+    const forked = await page.evaluate(async () => {
+      const source = await window.piDeck.chat.getSnapshot();
+      return window.piDeck.chat.forkSession({
+        workspaceId: source.workspaceId!,
+        sessionFile: source.state.sessionFile!,
+      });
+    });
+    expect(forked.state.sessionFile).toBe(fs.realpathSync(targetFile));
+    const journalFile = path.join(
+      root,
+      "pideck-home",
+      "failed-fork-cleanup.json",
+    );
+    const journal = JSON.parse(fs.readFileSync(journalFile, "utf8")) as {
+      version: number;
+      entries: unknown[];
+    };
+    expect(journal).toEqual({ version: 2, entries: [] });
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("journal-blocked targets reject resume, import, and fork source before worker allocation", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-fork-journal-block-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  const home = path.join(root, "pideck-home");
+  const forkTarget = path.join(
+    agentDir,
+    "sessions",
+    "--fake-rpc--",
+    "must-not-spawn.jsonl",
+  );
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(home, { recursive: true });
+  // Corruption intentionally fails closed, exercising the same combined
+  // journal predicate as an in-memory reserve failure without allowing
+  // startup retry to complete a valid durable entry first.
+  fs.writeFileSync(path.join(home, "failed-fork-cleanup.json"), "not json\n");
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      userDataDir,
+      fakePiArgs: ["--fork-target", forkTarget],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await sidebarNewSessionButton(page).click();
+    await page.getByLabel("Prompt text").fill("journal blocked source");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Fake response to: journal blocked source"),
+    ).toBeVisible({ timeout: 20_000 });
+    const result = await page.evaluate(async () => {
+      const source = await window.piDeck.chat.getSnapshot();
+      const errorOf = async (operation: () => Promise<unknown>) => {
+        try {
+          await operation();
+          return "";
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      };
+      const forkError = await errorOf(() =>
+        window.piDeck.chat.forkSession({
+          workspaceId: source.workspaceId!,
+          sessionFile: source.state.sessionFile!,
+        }),
+      );
+      await window.piDeck.chat.closeSession({ runtimeId: source.runtimeId });
+      await window.piDeck.workspaces.create({
+        name: "Blocked target destination",
+      });
+      const destination = await window.piDeck.workspaces.getActive();
+      return {
+        forkError,
+        moveError: await errorOf(() =>
+          window.piDeck.workspaces.moveSession({
+            sessionFile: source.state.sessionFile!,
+            toWorkspaceId: destination.activeWorkspaceId!,
+          }),
+        ),
+        resumeError: await errorOf(() =>
+          window.piDeck.chat.resumeSession({
+            workspaceId: source.workspaceId!,
+            sessionFile: source.state.sessionFile!,
+          }),
+        ),
+        importError: await errorOf(() =>
+          window.piDeck.workspaces.addSession({
+            workspaceId: source.workspaceId!,
+            sessionFile: source.state.sessionFile!,
+          }),
+        ),
+      };
+    });
+    expect(result.forkError).toMatch(/awaiting durable cleanup/i);
+    expect(result.moveError).toMatch(/awaiting durable cleanup/i);
+    expect(result.resumeError).toMatch(/awaiting durable cleanup/i);
+    expect(result.importError).toMatch(/awaiting durable cleanup/i);
+    expect(fs.existsSync(forkTarget)).toBe(false);
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("fork rejects fresh children with missing or mismatched native parentSession", async () => {
+  for (const fixture of [
+    {
+      name: "missing",
+      args: ["--fork-omit-parent-session"],
+    },
+    {
+      name: "mismatched",
+      args: ["--fork-parent-session", "/tmp/not-the-requested-source.jsonl"],
+    },
+  ]) {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), `pi-deck-e2e-fork-parent-${fixture.name}-`),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    const userDataDir = path.join(root, "user-data");
+    const targetFile = path.join(
+      agentDir,
+      "sessions",
+      "--fake-rpc--",
+      `fork-parent-${fixture.name}.jsonl`,
+    );
+    fs.mkdirSync(projectCwd, { recursive: true });
+    const { app, page } = await launchPiDeck(
+      fakeRealModeEnv({
+        root,
+        projectCwd,
+        agentDir,
+        userDataDir,
+        fakePiArgs: ["--fork-target", targetFile, ...fixture.args],
+      }),
+    );
+    try {
+      await expectHealthyPreload(page);
+      await sidebarNewSessionButton(page).click();
+      await page.getByLabel("Prompt text").fill(`parent ${fixture.name}`);
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect(
+        page.getByText(`Fake response to: parent ${fixture.name}`),
+      ).toBeVisible({ timeout: 20_000 });
+      const result = await page.evaluate(async () => {
+        const source = await window.piDeck.chat.getSnapshot();
+        let error = "";
+        try {
+          await window.piDeck.chat.forkSession({
+            workspaceId: source.workspaceId!,
+            sessionFile: source.state.sessionFile!,
+          });
+        } catch (reason) {
+          error = reason instanceof Error ? reason.message : String(reason);
+        }
+        const sessions = await window.piDeck.chat.listSessions({
+          workspaceId: source.workspaceId!,
+        });
+        return {
+          error,
+          sessionFiles: sessions.sessions.map((session) => session.sessionFile),
+        };
+      });
+      expect(result.error).toMatch(/does not identify the requested source/i);
+      expect(result.sessionFiles).not.toContain(fs.realpathSync(targetFile));
+    } finally {
+      await app.close().catch(() => undefined);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("reset cancels a spawned pre-registration fork without late ownership or worker leaks", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-fork-reset-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  const targetFile = path.join(
+    agentDir,
+    "sessions",
+    "--fake-rpc--",
+    "fork-reset-target.jsonl",
+  );
+  const getStateSignalFile = path.join(root, "fork-get-state-started");
+  const exitSignalFile = path.join(root, "fork-exited");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      userDataDir,
+      fakePiArgs: [
+        "--fork-target",
+        targetFile,
+        "--fork-delay-get-state-ms",
+        "10000",
+        "--fork-get-state-signal-file",
+        getStateSignalFile,
+        "--fork-exit-signal-file",
+        exitSignalFile,
+      ],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await sidebarNewSessionButton(page).click();
+    await page.getByLabel("Prompt text").fill("reset fork source");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Fake response to: reset fork source"),
+    ).toBeVisible({
+      timeout: 20_000,
+    });
+    const source = await page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      return {
+        workspaceId: snapshot.workspaceId!,
+        sessionFile: snapshot.state.sessionFile!,
+      };
+    });
+    await page.evaluate(({ workspaceId, sessionFile }) => {
+      (window as Window & { pendingFork?: Promise<unknown> }).pendingFork =
+        window.piDeck.chat.forkSession({ workspaceId, sessionFile });
+    }, source);
+    await expect
+      .poll(() =>
+        fs.existsSync(getStateSignalFile)
+          ? fs.readFileSync(getStateSignalFile, "utf8").trim()
+          : "",
+      )
+      .toBe(targetFile);
+
+    const result = await page.evaluate(async (source) => {
+      const reset = await window.piDeck.chat.reset();
+      let forkError = "";
+      try {
+        await (window as Window & { pendingFork: Promise<unknown> })
+          .pendingFork;
+      } catch (error) {
+        forkError = error instanceof Error ? error.message : String(error);
+      }
+      const sessions = await window.piDeck.chat.listSessions({
+        workspaceId: source.workspaceId,
+      });
+      const current = await window.piDeck.chat.getSnapshot();
+      return {
+        forkError,
+        resetSessionFile: reset.state.sessionFile,
+        currentSessionFile: current.state.sessionFile,
+        sessionFiles: sessions.sessions.map((session) => session.sessionFile),
+      };
+    }, source);
+    const canonicalTarget = fs.realpathSync(targetFile);
+    expect(result.forkError).toMatch(
+      /cancelled by reset or application shutdown/i,
+    );
+    expect(result.resetSessionFile).not.toBe(canonicalTarget);
+    expect(result.currentSessionFile).not.toBe(canonicalTarget);
+    expect(result.sessionFiles).not.toContain(canonicalTarget);
+    await expect
+      .poll(() =>
+        fs.existsSync(exitSignalFile)
+          ? fs.readFileSync(exitSignalFile, "utf8")
+          : "",
+      )
+      .toContain(targetFile);
+    // The cancelled fork cannot register after reset has returned.
+    await page.waitForTimeout(250);
+    const lateSessionFiles = await page.evaluate(async (workspaceId) => {
+      const sessions = await window.piDeck.chat.listSessions({ workspaceId });
+      return sessions.sessions.map((session) => session.sessionFile);
+    }, source.workspaceId);
+    expect(lateSessionFiles).not.toContain(canonicalTarget);
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("reset cancels a fork held at its final snapshot persistence boundary", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-fork-final-snapshot-reset-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  const targetFile = path.join(
+    agentDir,
+    "sessions",
+    "--fake-rpc--",
+    "fork-final-snapshot-target.jsonl",
+  );
+  const snapshotSignalFile = path.join(root, "fork-final-snapshot-started");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      userDataDir,
+      fakePiArgs: [
+        "--fork-target",
+        targetFile,
+        "--fork-delay-get-messages-ms",
+        "10000",
+        "--get-messages-signal-file",
+        snapshotSignalFile,
+      ],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await sidebarNewSessionButton(page).click();
+    await page.getByLabel("Prompt text").fill("final snapshot fork source");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Fake response to: final snapshot fork source"),
+    ).toBeVisible({ timeout: 20_000 });
+    fs.rmSync(snapshotSignalFile, { force: true });
+    const source = await page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      return {
+        workspaceId: snapshot.workspaceId!,
+        sessionFile: snapshot.state.sessionFile!,
+      };
+    });
+    await page.evaluate(({ workspaceId, sessionFile }) => {
+      (
+        window as Window & { finalSnapshotFork?: Promise<unknown> }
+      ).finalSnapshotFork = window.piDeck.chat.forkSession({
+        workspaceId,
+        sessionFile,
+      });
+    }, source);
+    await expect
+      .poll(() =>
+        fs.existsSync(snapshotSignalFile)
+          ? fs.readFileSync(snapshotSignalFile, "utf8").trim()
+          : "",
+      )
+      .toBe(targetFile);
+    const result = await page.evaluate(async (source) => {
+      await window.piDeck.chat.reset();
+      let forkError = "";
+      try {
+        await (window as Window & { finalSnapshotFork: Promise<unknown> })
+          .finalSnapshotFork;
+      } catch (error) {
+        forkError = error instanceof Error ? error.message : String(error);
+      }
+      const sessions = await window.piDeck.chat.listSessions({
+        workspaceId: source.workspaceId,
+      });
+      return {
+        forkError,
+        sessionFiles: sessions.sessions.map((session) => session.sessionFile),
+      };
+    }, source);
+    expect(result.forkError).toMatch(
+      /cancelled by reset or application shutdown/i,
+    );
+    expect(result.sessionFiles).not.toContain(fs.realpathSync(targetFile));
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("quit cancels a spawned fork before runtime registration", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-fork-quit-"));
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  const targetFile = path.join(
+    agentDir,
+    "sessions",
+    "--fake-rpc--",
+    "fork-quit-target.jsonl",
+  );
+  const snapshotSignalFile = path.join(root, "fork-get-state-started");
+  const exitSignalFile = path.join(root, "fork-exited");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      userDataDir,
+      fakePiArgs: [
+        "--fork-target",
+        targetFile,
+        "--fork-delay-get-state-ms",
+        "10000",
+        "--fork-get-state-signal-file",
+        snapshotSignalFile,
+        "--fork-exit-signal-file",
+        exitSignalFile,
+      ],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await sidebarNewSessionButton(page).click();
+    await page.getByLabel("Prompt text").fill("quit fork source");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Fake response to: quit fork source"),
+    ).toBeVisible({
+      timeout: 20_000,
+    });
+    fs.rmSync(snapshotSignalFile, { force: true });
+    await page.evaluate(async () => {
+      const source = await window.piDeck.chat.getSnapshot();
+      void window.piDeck.chat.forkSession({
+        workspaceId: source.workspaceId!,
+        sessionFile: source.state.sessionFile!,
+      });
+    });
+    await expect
+      .poll(() =>
+        fs.existsSync(snapshotSignalFile)
+          ? fs.readFileSync(snapshotSignalFile, "utf8").trim()
+          : "",
+      )
+      .toBe(targetFile);
+
+    // Exercise the user-visible last-window quit path, which enters the
+    // before-quit cleanup barrier rather than Playwright's force-close helper.
+    await page.evaluate(() => window.close());
+    await expect
+      .poll(() =>
+        fs.existsSync(exitSignalFile)
+          ? fs.readFileSync(exitSignalFile, "utf8")
+          : "",
+      )
+      .toContain(targetFile);
+    const workspaceStore = fs.readFileSync(
+      path.join(root, "pideck-home", "workspaces.json"),
+      "utf8",
+    );
+    expect(workspaceStore).not.toContain(fs.realpathSync(targetFile));
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(
+      fs.readFileSync(
+        path.join(root, "pideck-home", "workspaces.json"),
+        "utf8",
+      ),
+    ).not.toContain(fs.realpathSync(targetFile));
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("quit cancels a fork at its final snapshot boundary and compensates after exit", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-fork-final-snapshot-quit-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  const targetFile = path.join(
+    agentDir,
+    "sessions",
+    "--fake-rpc--",
+    "fork-final-snapshot-quit-target.jsonl",
+  );
+  const snapshotSignalFile = path.join(root, "fork-final-snapshot-started");
+  const exitSignalFile = path.join(root, "fork-final-snapshot-exited");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      userDataDir,
+      fakePiArgs: [
+        "--fork-target",
+        targetFile,
+        "--fork-delay-get-messages-ms",
+        "10000",
+        "--get-messages-signal-file",
+        snapshotSignalFile,
+        "--fork-exit-signal-file",
+        exitSignalFile,
+      ],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await sidebarNewSessionButton(page).click();
+    await page.getByLabel("Prompt text").fill("quit final snapshot source");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Fake response to: quit final snapshot source"),
+    ).toBeVisible({ timeout: 20_000 });
+    fs.rmSync(snapshotSignalFile, { force: true });
+    await page.evaluate(async () => {
+      const source = await window.piDeck.chat.getSnapshot();
+      void window.piDeck.chat.forkSession({
+        workspaceId: source.workspaceId!,
+        sessionFile: source.state.sessionFile!,
+      });
+    });
+    await expect
+      .poll(() =>
+        fs.existsSync(snapshotSignalFile)
+          ? fs.readFileSync(snapshotSignalFile, "utf8").trim()
+          : "",
+      )
+      .toBe(targetFile);
+    await page.evaluate(() => window.close());
+    await expect
+      .poll(() =>
+        fs.existsSync(exitSignalFile)
+          ? fs.readFileSync(exitSignalFile, "utf8")
+          : "",
+      )
+      .toContain(targetFile);
+    const canonicalTarget = fs.realpathSync(targetFile);
+    const workspaceStore = fs.readFileSync(
+      path.join(root, "pideck-home", "workspaces.json"),
+      "utf8",
+    );
+    expect(workspaceStore).not.toContain(canonicalTarget);
+    const journalFile = path.join(
+      root,
+      "pideck-home",
+      "failed-fork-cleanup.json",
+    );
+    expect(
+      fs.existsSync(journalFile) ? fs.readFileSync(journalFile, "utf8") : "",
+    ).not.toContain(canonicalTarget);
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("fork reserves its fresh target against default-workspace resume and unwinds late failure", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-fork-race-"));
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  const targetFile = path.join(
+    agentDir,
+    "sessions",
+    "--fake-rpc--",
+    "fork-race-target.jsonl",
+  );
+  const snapshotSignalFile = path.join(root, "fork-snapshot-started");
+  const forkExitSignalFile = path.join(root, "fork-cleanup-exited");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  const sourceToken = `fork-race-source-${Date.now()}`;
+  const env = fakeRealModeEnv({
+    root,
+    projectCwd,
+    agentDir,
+    userDataDir,
+    fakePiArgs: [
+      "--fork-target",
+      targetFile,
+      "--delay-get-messages-ms",
+      "1500",
+      "--get-messages-signal-file",
+      snapshotSignalFile,
+      "--sigterm-exit-delay-ms",
+      "750",
+      "--fork-exit-signal-file",
+      forkExitSignalFile,
+    ],
+  });
+  const { app, page } = await launchPiDeck(env);
+  try {
+    await expectHealthyPreload(page);
+    await sidebarNewSessionButton(page).click();
+    await page.getByLabel("Prompt text").fill(sourceToken);
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText(`Fake response to: ${sourceToken}`),
+    ).toBeVisible({
+      timeout: 20_000,
+    });
+    fs.rmSync(snapshotSignalFile, { force: true });
+    const source = await page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      return {
+        workspaceId: snapshot.workspaceId!,
+        sessionFile: snapshot.state.sessionFile!,
+      };
+    });
+    await page.evaluate(({ workspaceId, sessionFile }) => {
+      (window as Window & { forkRace?: Promise<unknown> }).forkRace =
+        window.piDeck.chat.forkSession({ workspaceId, sessionFile });
+    }, source);
+    await expect
+      .poll(() =>
+        fs.existsSync(snapshotSignalFile)
+          ? fs.readFileSync(snapshotSignalFile, "utf8").trim()
+          : "",
+      )
+      .toBe(targetFile);
+
+    // No workspaceId deliberately exercises the default-workspace fallback.
+    // The target is already atomically claimed/reserved, so this cannot attach
+    // it or move it before the fork's delayed first snapshot completes.
+    const resumeError = await page.evaluate(async (sessionFile) => {
+      try {
+        await window.piDeck.chat.resumeSession({ sessionFile });
+        return "";
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    }, targetFile);
+    expect(resumeError).toMatch(
+      /already being changed|awaiting durable cleanup/i,
+    );
+    const moveError = await page.evaluate(async (sessionFile) => {
+      await window.piDeck.workspaces.create({
+        name: "Blocked fork cleanup destination",
+      });
+      const destination = await window.piDeck.workspaces.getActive();
+      try {
+        await window.piDeck.workspaces.moveSession({
+          sessionFile,
+          toWorkspaceId: destination.activeWorkspaceId!,
+        });
+        return "";
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    }, targetFile);
+    expect(moveError).toMatch(/awaiting durable cleanup/i);
+    // Change the durable header after the claim but before delayed snapshot
+    // registration. The worker still reports the original ID, so fork must
+    // fail. Its delayed SIGTERM exit keeps both reservations and the journal
+    // block in place until worker_exit drives the compensation retry.
+    fs.writeFileSync(
+      targetFile,
+      `${JSON.stringify({
+        type: "session",
+        version: 3,
+        id: "fork-race-mutated-target",
+        timestamp: new Date().toISOString(),
+        cwd: projectCwd,
+      })}\n`,
+    );
+    await page.waitForTimeout(100);
+    expect(fs.existsSync(forkExitSignalFile)).toBe(false);
+    const forkWhileClosingError = await page.evaluate(async (source) => {
+      try {
+        await window.piDeck.chat.forkSession(source);
+        return "";
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    }, source);
+    expect(forkWhileClosingError).toMatch(/active or changing session/i);
+    const forkError = await page.evaluate(async () => {
+      try {
+        await (
+          window as Window & {
+            forkRace: Promise<unknown>;
+          }
+        ).forkRace;
+        return "";
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    });
+    expect(forkError).toMatch(/failed fork cleanup is retained/i);
+    await expect
+      .poll(() =>
+        fs.existsSync(forkExitSignalFile)
+          ? fs.readFileSync(forkExitSignalFile, "utf8")
+          : "",
+      )
+      .toContain(targetFile);
+    // A target that changed after durable claiming is no safer to compensate
+    // in this process: its ref and both reservations remain retained.
+    const retained = await page.evaluate(
+      async (sourceAndTarget) => {
+        const errorOf = async (operation: () => Promise<unknown>) => {
+          try {
+            await operation();
+            return "";
+          } catch (error) {
+            return error instanceof Error ? error.message : String(error);
+          }
+        };
+        return {
+          sourceResume: await errorOf(() =>
+            window.piDeck.chat.resumeSession({
+              workspaceId: sourceAndTarget.workspaceId,
+              sessionFile: sourceAndTarget.sourceFile,
+            }),
+          ),
+          targetResume: await errorOf(() =>
+            window.piDeck.chat.resumeSession({
+              workspaceId: sourceAndTarget.workspaceId,
+              sessionFile: sourceAndTarget.targetFile,
+            }),
+          ),
+        };
+      },
+      {
+        workspaceId: source.workspaceId,
+        sourceFile: source.sessionFile,
+        targetFile: fs.realpathSync(targetFile),
+      },
+    );
+    expect(retained.sourceResume).toMatch(/awaiting durable cleanup/i);
+    expect(retained.targetResume).toMatch(/awaiting durable cleanup/i);
+    const journal = fs.readFileSync(
+      path.join(root, "pideck-home", "failed-fork-cleanup.json"),
+      "utf8",
+    );
+    const workspaceRefs = fs.readFileSync(
+      path.join(root, "pideck-home", "workspaces.json"),
+      "utf8",
+    );
+    expect(journal).toContain("target");
+    expect(workspaceRefs).toContain(fs.realpathSync(targetFile));
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("fork rejects a pre-existing unassigned target and cleans its worker metadata", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-fork-fault-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  const staleTarget = path.join(
+    agentDir,
+    "sessions",
+    "--fake-rpc--",
+    "preexisting-fork-target.jsonl",
+  );
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(path.dirname(staleTarget), { recursive: true });
+  fs.writeFileSync(
+    staleTarget,
+    `${JSON.stringify({
+      type: "session",
+      version: 3,
+      id: "preexisting-fork-target",
+      timestamp: new Date().toISOString(),
+      cwd: projectCwd,
+    })}\n`,
+  );
+  const env = fakeRealModeEnv({
+    root,
+    projectCwd,
+    agentDir,
+    userDataDir,
+    fakePiArgs: ["--fork-target", staleTarget],
+  });
+  const { app, page } = await launchPiDeck(env);
+  try {
+    await expectHealthyPreload(page);
+    await sidebarNewSessionButton(page).click();
+    await page.getByLabel("Prompt text").fill("faulty fork source");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Fake response to: faulty fork source"),
+    ).toBeVisible({
+      timeout: 20_000,
+    });
+    const result = await page.evaluate(async () => {
+      const source = await window.piDeck.chat.getSnapshot();
+      let error = "";
+      try {
+        await window.piDeck.chat.forkSession({
+          workspaceId: source.workspaceId!,
+          sessionFile: source.state.sessionFile!,
+        });
+      } catch (reason) {
+        error = reason instanceof Error ? reason.message : String(reason);
+      }
+      const sessions = await window.piDeck.chat.listSessions({
+        workspaceId: source.workspaceId!,
+      });
+      const resumed = await window.piDeck.chat.resumeSession({
+        workspaceId: source.workspaceId!,
+        sessionFile: source.state.sessionFile!,
+      });
+      return {
+        error,
+        sourceFile: source.state.sessionFile,
+        sessionFiles: sessions.sessions.map((session) => session.sessionFile),
+        resumedFile: resumed.state.sessionFile,
+      };
+    });
+    expect(result.error).toMatch(/existed before the fork began/i);
+    expect(result.sessionFiles).toContain(result.sourceFile);
+    expect(result.sessionFiles).not.toContain(staleTarget);
+    expect(result.resumedFile).toBe(result.sourceFile);
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 

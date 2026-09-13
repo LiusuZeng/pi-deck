@@ -127,6 +127,42 @@ describe("Menu", () => {
     expect(document.body.querySelector('[role="menu"]')).toBeNull();
   });
 
+  it("skips disabled menu items for initial and keyboard focus", () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    act(() => {
+      root?.render(
+        createElement(
+          Menu,
+          { label: "Session actions" },
+          createElement(
+            Button,
+            { disabled: true, role: "menuitem" },
+            "Unavailable action",
+          ),
+          createElement(Button, { role: "menuitem" }, "Available action"),
+        ),
+      );
+    });
+
+    const trigger = container.querySelector<HTMLButtonElement>("button");
+    act(() => trigger?.click());
+    const menu = document.body.querySelector('[role="menu"]');
+    const items = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
+    );
+    expect(items[0]?.disabled).toBe(true);
+    expect(document.activeElement).toBe(items[1]);
+
+    act(() => {
+      menu?.dispatchEvent(
+        new KeyboardEvent("keydown", { bubbles: true, key: "ArrowDown" }),
+      );
+    });
+    expect(document.activeElement).toBe(items[1]);
+  });
+
   it("moves between enabled menu items with arrow, Home, and End keys", () => {
     container = document.createElement("div");
     document.body.append(container);

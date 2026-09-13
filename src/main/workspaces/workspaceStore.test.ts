@@ -311,25 +311,88 @@ test("WorkspaceStore validates an entire refresh batch before changing membershi
   assert.deepEqual(await store.getSessionRefs(workspace.id), []);
 });
 
-test("WorkspaceStore retries a failed equivalent persistence mutation", async () => {
+test("WorkspaceStore rolls back a failed target claim and never replays it", async () => {
   const { root, home } = await temporaryHome();
   const store = new WorkspaceStore(home);
-  const workspace = await store.create({ name: "Retry" });
-  const sessionFile = path.join(root, "retry.jsonl");
+  const workspace = await store.create({ name: "Rollback" });
+  const failedFile = path.join(root, "failed-claim.jsonl");
+  const laterFile = path.join(root, "later-claim.jsonl");
   const writeFile = vi.spyOn(fs, "writeFile");
   writeFile.mockRejectedValueOnce(new Error("injected write failure"));
 
   await assert.rejects(
-    store.upsertSessionRef(workspace.id, summary(sessionFile)),
+    store.claimUnassignedSessionRefFromSnapshot({
+      workspaceId: workspace.id,
+      sessionFile: failedFile,
+    }),
     /injected write failure/,
   );
-  await store.upsertSessionRef(workspace.id, summary(sessionFile));
+  assert.deepEqual(await store.getSessionRefs(workspace.id), []);
+
+  await store.claimUnassignedSessionRefFromSnapshot({
+    workspaceId: workspace.id,
+    sessionFile: laterFile,
+  });
   writeFile.mockRestore();
 
   const reloaded = new WorkspaceStore(home);
+  const refs = await reloaded.getSessionRefs(workspace.id);
+  assert.deepEqual(
+    refs.map((ref) => ref.sessionFile),
+    [path.resolve(laterFile)],
+  );
+});
+
+test("WorkspaceStore keeps failed fork compensation durable across restart", async () => {
+  const { root, home } = await temporaryHome();
+  const store = new WorkspaceStore(home);
+  const workspace = await store.create({ name: "Compensation" });
+  const sessionFile = path.join(root, "failed-fork.jsonl");
+  await store.upsertSessionRefFromSnapshot({
+    workspaceId: workspace.id,
+    sessionFile,
+  });
+
+  const writeFile = vi.spyOn(fs, "writeFile");
+  writeFile.mockRejectedValueOnce(new Error("injected remove write failure"));
+  await assert.rejects(
+    store.removeSession(workspace.id, sessionFile),
+    /injected remove write failure/,
+  );
+  assert.equal((await store.getSessionRefs(workspace.id)).length, 1);
   assert.equal(
-    (await reloaded.getSessionRefs(workspace.id))[0]?.title,
-    "Cached session",
+    (await new WorkspaceStore(home).getSessionRefs(workspace.id)).length,
+    1,
+  );
+
+  await store.removeSession(workspace.id, sessionFile);
+  writeFile.mockRestore();
+  assert.equal(
+    (await new WorkspaceStore(home).getSessionRefs(workspace.id)).length,
+    0,
+  );
+});
+
+test("WorkspaceStore does not publish a claim when atomic rename fails", async () => {
+  const { root, home } = await temporaryHome();
+  const store = new WorkspaceStore(home);
+  const workspace = await store.create({ name: "Rename rollback" });
+  const sessionFile = path.join(root, "rename-failure.jsonl");
+  const rename = vi.spyOn(fs, "rename");
+  rename.mockRejectedValueOnce(new Error("injected rename failure"));
+
+  await assert.rejects(
+    store.claimUnassignedSessionRefFromSnapshot({
+      workspaceId: workspace.id,
+      sessionFile,
+    }),
+    /injected rename failure/,
+  );
+  rename.mockRestore();
+  assert.deepEqual(await store.getSessionRefs(workspace.id), []);
+  assert.deepEqual(
+    await new WorkspaceStore(home).getSessionRefs(workspace.id),
+    [],
   );
 });
 

@@ -710,43 +710,69 @@ export class WorkspaceStore {
    * concurrent explicit move. The owner check and in-memory state update are
    * synchronous within this mutation seam.
    */
-  async claimUnassignedSessionRefFromSnapshot(options: {
-    workspaceId: string;
-    sessionFile: string;
-    sessionId?: string;
-    cwd?: string;
-    title?: string;
-    updatedAtMs?: number;
-    completedAtMs?: number;
-    messageCount?: number;
-    preview?: string;
-  }): Promise<WorkspaceSessionMutationResult> {
+  async claimUnassignedSessionRefFromSnapshot(
+    options: {
+      workspaceId: string;
+      sessionFile: string;
+      sessionId?: string;
+      cwd?: string;
+      title?: string;
+      updatedAtMs?: number;
+      completedAtMs?: number;
+      messageCount?: number;
+      preview?: string;
+    },
+    claimOptions: { requireUnassigned?: boolean } = {},
+  ): Promise<WorkspaceSessionMutationResult> {
     const workspaceId = z.string().uuid().parse(options.workspaceId);
     const sessionFile = await canonicalOrResolved(
       z.string().min(1).parse(options.sessionFile),
     );
     const summary = sessionSummaryFromSnapshot(sessionFile, options);
     await this.loadIfNeeded();
-    this.requireOpenWorkspaceIndex(workspaceId);
-    const existing = this.state.sessionRefs.find(
-      (ref) => ref.sessionFile === sessionFile,
-    );
-    if (existing !== undefined) {
+    // Build, persist, and publish the claim inside one serialized transaction.
+    // A rejected write leaves both this.state and every later candidate free
+    // of this target, rather than letting a future unrelated write revive it.
+    return this.transact(() => {
+      this.requireOpenWorkspaceIndex(workspaceId);
+      const existing = this.state.sessionRefs.find(
+        (ref) => ref.sessionFile === sessionFile,
+      );
+      if (existing !== undefined) {
+        if (claimOptions.requireUnassigned === true) {
+          throw new Error(
+            `Session is already assigned to a workspace: ${sessionFile}`,
+          );
+        }
+        return {
+          next: this.state,
+          result: {
+            workspaceId: existing.workspaceId,
+            sessionFile,
+            ...(existing.workspaceId !== workspaceId
+              ? { previousWorkspaceId: existing.workspaceId }
+              : {}),
+          },
+          changed: false,
+        };
+      }
+      const now = Date.now();
+      const refs = [
+        ...this.state.sessionRefs,
+        sessionRefFromSummary(
+          workspaceId,
+          sessionFile,
+          summary,
+          undefined,
+          now,
+        ),
+      ];
       return {
-        workspaceId: existing.workspaceId,
-        sessionFile,
-        ...(existing.workspaceId !== workspaceId
-          ? { previousWorkspaceId: existing.workspaceId }
-          : {}),
+        next: { ...this.state, sessionRefs: refs },
+        result: { workspaceId, sessionFile },
+        changed: true,
       };
-    }
-    const now = Date.now();
-    const refs = [
-      ...this.state.sessionRefs,
-      sessionRefFromSummary(workspaceId, sessionFile, summary, undefined, now),
-    ];
-    await this.commit({ ...this.state, sessionRefs: refs });
-    return { workspaceId, sessionFile };
+    });
   }
 
   async moveSession(
@@ -834,36 +860,43 @@ export class WorkspaceStore {
       z.string().min(1).parse(sessionFile),
     );
     await this.loadIfNeeded();
-    const workspaceIndex = this.state.workspaces.findIndex(
-      (workspace) => workspace.id === id,
-    );
-    const workspace =
-      workspaceIndex < 0 ? undefined : this.state.workspaces[workspaceIndex];
-    const nextRefs = this.state.sessionRefs.filter(
-      (ref) => !(ref.workspaceId === id && ref.sessionFile === canonical),
-    );
-    if (nextRefs.length === this.state.sessionRefs.length) {
-      await this.persistIfDirty();
-      return false;
-    }
-    const nextWorkspace =
-      workspace?.legacyProjectId === undefined
-        ? workspace
-        : addLegacySessionExclusion(workspace, canonical, Date.now());
-    await this.commit({
-      ...this.state,
-      sessionRefs: nextRefs,
-      ...(nextWorkspace !== undefined && nextWorkspace !== workspace
-        ? {
-            workspaces: replaceAt(
-              this.state.workspaces,
-              workspaceIndex,
-              nextWorkspace,
-            ),
-          }
-        : {}),
+    // Removal is used as failed-fork compensation. Publish it only after the
+    // replacement file is durable, otherwise the old reference remains both
+    // in memory and on disk for a later retry.
+    return this.transact(() => {
+      const workspaceIndex = this.state.workspaces.findIndex(
+        (workspace) => workspace.id === id,
+      );
+      const workspace =
+        workspaceIndex < 0 ? undefined : this.state.workspaces[workspaceIndex];
+      const nextRefs = this.state.sessionRefs.filter(
+        (ref) => !(ref.workspaceId === id && ref.sessionFile === canonical),
+      );
+      if (nextRefs.length === this.state.sessionRefs.length) {
+        return { next: this.state, result: false, changed: false };
+      }
+      const nextWorkspace =
+        workspace?.legacyProjectId === undefined
+          ? workspace
+          : addLegacySessionExclusion(workspace, canonical, Date.now());
+      return {
+        next: {
+          ...this.state,
+          sessionRefs: nextRefs,
+          ...(nextWorkspace !== undefined && nextWorkspace !== workspace
+            ? {
+                workspaces: replaceAt(
+                  this.state.workspaces,
+                  workspaceIndex,
+                  nextWorkspace,
+                ),
+              }
+            : {}),
+        },
+        result: true,
+        changed: true,
+      };
     });
-    return true;
   }
 
   async renameSession(
@@ -1247,6 +1280,40 @@ export class WorkspaceStore {
     await this.persist();
   }
 
+  private async transact<T>(
+    operation: () => {
+      next: WorkspaceStoreFileV1;
+      result: T;
+      changed: boolean;
+    },
+  ): Promise<T> {
+    const transaction = this.persistQueue
+      .catch(() => undefined)
+      .then(async () => {
+        // Most legacy mutations publish eagerly before queueing their write.
+        // Rebuild and write again when one races this durable transaction so
+        // we never replace that newer state with a stale candidate.
+        for (;;) {
+          const stateBeforeTransaction = JSON.stringify(this.state);
+          const { next, result, changed } = operation();
+          if (!changed) return result;
+          const candidate = workspaceStoreFileV1Schema.parse(next);
+          await this.writeStoreFile(candidate);
+          if (JSON.stringify(this.state) !== stateBeforeTransaction) continue;
+          this.state = candidate;
+          this.generation += 1;
+          this.persistedGeneration = this.generation;
+          return result;
+        }
+      });
+    // Keep the queue usable after a rejected caller-visible transaction.
+    this.persistQueue = transaction.then(
+      () => undefined,
+      () => undefined,
+    );
+    return transaction;
+  }
+
   private async persistIfDirty(): Promise<void> {
     if (this.persistedGeneration < this.generation) await this.persist();
   }
@@ -1256,7 +1323,7 @@ export class WorkspaceStore {
       .catch(() => undefined)
       .then(async () => {
         const generation = this.generation;
-        await this.writeStoreFile();
+        await this.writeStoreFile(this.state);
         this.persistedGeneration = Math.max(
           this.persistedGeneration,
           generation,
@@ -1265,13 +1332,18 @@ export class WorkspaceStore {
     return this.persistQueue;
   }
 
-  private async writeStoreFile(): Promise<void> {
+  private async writeStoreFile(candidate: WorkspaceStoreFileV1): Promise<void> {
     await fs.mkdir(this.piDeckHome, { recursive: true, mode: 0o700 });
     const tempFile = `${this.storeFile}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    await fs.writeFile(tempFile, `${JSON.stringify(this.state, null, 2)}\n`, {
-      mode: 0o600,
-    });
-    await fs.rename(tempFile, this.storeFile);
+    try {
+      await fs.writeFile(tempFile, `${JSON.stringify(candidate, null, 2)}\n`, {
+        mode: 0o600,
+      });
+      await fs.rename(tempFile, this.storeFile);
+    } catch (error) {
+      await fs.rm(tempFile, { force: true }).catch(() => undefined);
+      throw error;
+    }
   }
 }
 
