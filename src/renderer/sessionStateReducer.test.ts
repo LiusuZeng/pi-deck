@@ -38,6 +38,12 @@ describe("reduceSessionRuntimeEvent", () => {
         expectPartialObject(state.toolCards, expected.toolCards);
       }
 
+      if (expected.pendingExtensionUiQueue !== undefined) {
+        expect(state.pendingExtensionUiQueue, testCase.id).toMatchObject(
+          expected.pendingExtensionUiQueue as Record<string, unknown>[],
+        );
+      }
+
       if (expected.sidebarPriority !== undefined) {
         expect(selectSidebarIndicator(state).kind, testCase.id).toBe(
           expected.sidebarPriority === "waitingForInput"

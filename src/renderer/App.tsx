@@ -7970,7 +7970,12 @@ function reduceRuntimeEvent(
       const endedWithError =
         !willRetry &&
         (hasRuntimeEventError(event) || session.providerErrorObserved === true);
-      const stillWaitingForInput = session.overlays.needsUserInput;
+      // A dialog is still actionable until Pi acknowledges its response or it
+      // times out. Its queue, rather than a potentially stale overlay, is the
+      // source of truth and takes precedence over a terminal error so every
+      // surface continues to route the user to the required response.
+      const stillWaitingForInput =
+        (session.pendingExtensionUiRequests?.length ?? 0) > 0;
       const finalEventUsage = getMessageUsageFromEvent(event);
       const finalUsageMessageId =
         getMessageUpdateId(event) ??
@@ -8040,15 +8045,15 @@ function reduceRuntimeEvent(
               ),
             }
           : {}),
-        status: endedWithError
-          ? "error"
-          : stillWaitingForInput
-            ? "waiting"
+        status: stillWaitingForInput
+          ? "waiting"
+          : endedWithError
+            ? "error"
             : "idle",
-        baseState: endedWithError
-          ? "error"
-          : stillWaitingForInput
-            ? "waitingForInput"
+        baseState: stillWaitingForInput
+          ? "waitingForInput"
+          : endedWithError
+            ? "error"
             : "idle",
         providerErrorObserved: false,
         ...(endedWithError ? {} : { lastError: undefined }),
@@ -8057,12 +8062,12 @@ function reduceRuntimeEvent(
           streaming: false,
           toolRunning: false,
           retrying: false,
-          needsUserInput: stillWaitingForInput && !endedWithError,
+          needsUserInput: stillWaitingForInput,
         },
-        subtitle: endedWithError
-          ? "Error · backend stream failed"
-          : stillWaitingForInput
-            ? "Waiting · extension input required"
+        subtitle: stillWaitingForInput
+          ? "Waiting · extension input required"
+          : endedWithError
+            ? "Error · backend stream failed"
             : status === "aborted"
               ? "Idle · backend stream aborted"
               : "Idle · backend stream complete",
@@ -9163,14 +9168,28 @@ function appendRuntimeErrorDiagnostic(
     mostRecentTimelineItem.tone === "error" &&
     mostRecentTimelineItem.content === content
   ) {
-    return {
-      ...session,
-      status: "error",
-      baseState: "error",
-      lastError: content,
-    };
+    return { ...session, lastError: content };
   }
-  return appendDiagnostic(session, { tone: "error", content });
+
+  // Callers have already reduced the runtime event's state. Unlike a local UI
+  // failure, recording its diagnostic must not reclassify a still-actionable
+  // extension request from waiting back to error.
+  return {
+    ...session,
+    lastError: content,
+    updatedAt: "Now",
+    updatedAtMs: Date.now(),
+    timeline: [
+      ...session.timeline,
+      {
+        id: createId("diagnostic"),
+        kind: "diagnostic",
+        tone: "error",
+        content,
+        createdAt: formatTime(),
+      },
+    ],
+  };
 }
 
 function SessionSidebar(props: {

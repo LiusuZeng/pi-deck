@@ -5670,6 +5670,69 @@ test("real mode surfaces asynchronous provider errors with fake Pi", async () =>
   }
 });
 
+test("pending extension input remains Needs attention after an error agent_end", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-extension-ui-error-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: [
+        "--prompt-scenario",
+        "extension-ui-error",
+        "--stream-delay-ms",
+        "10",
+      ],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await enterSessionDetail(page);
+    const prompt = "request approval before provider failure";
+    await page.getByLabel("Prompt text").fill(prompt);
+    await page.getByRole("button", { name: "Send" }).click();
+
+    // Detail keeps the actionable card even though the terminal event failed.
+    await expect(page.getByText("Fake confirm", { exact: true })).toBeVisible();
+    await expect(page.locator(".state-banner.waiting")).toContainText(
+      "waiting for user input",
+    );
+    await expect(
+      page.getByText("Fake provider failed after requesting extension input."),
+    ).toBeVisible();
+
+    // Sidebar and Work use the same actionable-input priority.
+    await expect(
+      page
+        .getByRole("button", { name: `Session: ${prompt}` })
+        .getByRole("img", { name: "Needs input" }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: /^All Work/ }).click();
+    await expectAllWorkLaunch(page);
+    const workRow = page
+      .locator(".activity-inbox-row--needsAttention")
+      .filter({ hasText: prompt });
+    await expect(workRow).toHaveCount(1);
+    await expect(workRow).toContainText("Needs attention");
+
+    await workRow.click();
+    await expect(page.getByText("Fake confirm", { exact: true })).toBeVisible();
+    await expect(page.locator(".state-banner.waiting")).toContainText(
+      "waiting for user input",
+    );
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("real mode reconciles a working session when completion event is missed", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-reconcile-"));
   const projectCwd = path.join(root, "project");

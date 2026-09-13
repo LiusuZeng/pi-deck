@@ -531,6 +531,41 @@ test("fake RPC can emit a failed tool before a pending extension request", async
   }
 });
 
+test("fake RPC emits an error agent_end after an extension UI request", async () => {
+  const client = spawnFakeRpc([
+    "--stream-delay-ms",
+    "1",
+    "--prompt-scenario",
+    "extension-ui-error",
+  ]);
+  try {
+    const promptEvents = waitForEvents(
+      client,
+      (events) =>
+        events.some((event) => event.type === "extension_ui_request") &&
+        events.some(
+          (event) =>
+            event.type === "agent_end" &&
+            (event as JsonObject).status === "error",
+        ),
+    );
+    await client.request("prompt", { text: "request approval then fail" });
+    const events = await promptEvents;
+    const requestIndex = events.findIndex(
+      (event) => event.type === "extension_ui_request",
+    );
+    const errorEndIndex = events.findIndex(
+      (event) =>
+        event.type === "agent_end" && (event as JsonObject).status === "error",
+    );
+
+    assert.ok(requestIndex >= 0);
+    assert.ok(errorEndIndex > requestIndex);
+  } finally {
+    client.close();
+  }
+});
+
 test("fake RPC malformed JSON and pending-exit fixtures exercise transport failure paths", async () => {
   const malformed = spawnFakeRpc(["--malformed-on-start"]);
   try {

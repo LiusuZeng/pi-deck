@@ -160,6 +160,31 @@
         "overlays": { "needsUserInput": true },
         "diagnosticsIncludes": "agent_end while extension UI request is pending"
       }
+    },
+    {
+      "id": "error-agent-end-does-not-override-pending-dialog-attention",
+      "events": [
+        { "type": "agent_start", "runId": "run_1" },
+        {
+          "type": "extension_ui_request",
+          "requestId": "ext_1",
+          "method": "confirm"
+        },
+        { "type": "agent_end", "runId": "run_1", "status": "error" }
+      ],
+      "expect": {
+        "baseState": "waitingForInput",
+        "overlays": {
+          "needsUserInput": true,
+          "streaming": false,
+          "toolRunning": false
+        },
+        "sidebarPriority": "waitingForInput",
+        "pendingExtensionUiQueue": [
+          { "requestId": "ext_1", "method": "confirm" }
+        ],
+        "diagnosticsIncludes": "agent_end while extension UI request is pending"
+      }
     }
   ]
 }

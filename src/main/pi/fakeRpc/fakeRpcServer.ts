@@ -18,6 +18,7 @@ type PromptScenario =
   | "tool-stream-scroll"
   | "tool-error"
   | "tool-error-extension-ui"
+  | "extension-ui-error"
   | "queue"
   | "compaction"
   | "retry"
@@ -207,6 +208,7 @@ function isPromptScenario(value: string): value is PromptScenario {
     "tool-stream-scroll",
     "tool-error",
     "tool-error-extension-ui",
+    "extension-ui-error",
     "queue",
     "compaction",
     "retry",
@@ -886,8 +888,30 @@ class FakeRpcServer {
     const isExtensionUiScenario =
       this.options.promptScenario === "extension-ui" ||
       this.options.promptScenario === "tool-error-extension-ui" ||
+      this.options.promptScenario === "extension-ui-error" ||
       this.options.promptScenario === "all";
     const promptScenarioDelayMs = this.emitPromptScenarioEvents(assistantId);
+    if (this.options.promptScenario === "extension-ui-error") {
+      // Leave one render turn between the actionable dialog and terminal error
+      // so this fixture verifies that agent_end cannot demote the request.
+      this.currentTimers.push(
+        setTimeout(
+          () => {
+            this.agentActive = false;
+            this.write({
+              type: "agent_end",
+              runId: `run_${this.promptCounter}`,
+              status: "error",
+              error: "Fake provider failed after requesting extension input.",
+              willRetry: false,
+            });
+            this.write({ type: "agent_settled" });
+          },
+          Math.max(1, this.options.streamDelayMs),
+        ),
+      );
+      return;
+    }
     if (isExtensionUiScenario) {
       const id = "ext_fake_dialog_1";
       const timer = setTimeout(() => {
@@ -1097,7 +1121,8 @@ class FakeRpcServer {
       scenario === target ||
       scenario === "all" ||
       (scenario === "tool-error-extension-ui" &&
-        (target === "tool-error" || target === "extension-ui"));
+        (target === "tool-error" || target === "extension-ui")) ||
+      (scenario === "extension-ui-error" && target === "extension-ui");
 
     if (shouldEmit("queue")) {
       this.steering.splice(0, this.steering.length, "Queued steering fixture");

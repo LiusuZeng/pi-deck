@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ActivitySourceSession } from "./activityInbox.js";
-import { emptyOverlays } from "./sessionState.js";
+import {
+  createInitialReducedSessionState,
+  emptyOverlays,
+  reduceSessionRuntimeEvent,
+} from "./sessionState.js";
 import {
   collectSessionSoundRequests,
   createDefaultSessionSoundPlayer,
@@ -135,20 +139,66 @@ describe("session sound transitions", () => {
     expect(cue).toBe("needsAttention");
   });
 
-  it("does not request an attention sound for tool-error-only work", () => {
+  it("does not request attention sound for a failed tool_execution_end", () => {
+    let reduced = createInitialReducedSessionState();
+    reduced = reduceSessionRuntimeEvent(reduced, { type: "agent_start" });
+    reduced = reduceSessionRuntimeEvent(reduced, {
+      type: "tool_execution_start",
+      toolCallId: "tool-1",
+      name: "bash",
+    });
+    reduced = reduceSessionRuntimeEvent(reduced, {
+      type: "tool_execution_end",
+      toolCallId: "tool-1",
+      status: "failed",
+      output: "command failed",
+    });
+
     const result = collect(
       { "runtime:runtime-1": projection({ status: "inProgress" }) },
       [
         source({
-          baseState: "working",
-          lastError: "Shell command exited 1",
-          overlays: { toolRunning: false },
+          baseState: reduced.baseState,
+          overlays: reduced.overlays,
         }),
       ],
     );
 
+    expect(reduced.toolCards["tool-1"]).toMatchObject({
+      status: "error",
+      isError: true,
+    });
     expect(result.next["runtime:runtime-1"]?.status).toBe("inProgress");
     expect(result.requests).toEqual([]);
+  });
+
+  it("plays attention when pending extension input survives an error agent_end", () => {
+    let reduced = createInitialReducedSessionState();
+    reduced = reduceSessionRuntimeEvent(reduced, { type: "agent_start" });
+    reduced = reduceSessionRuntimeEvent(reduced, {
+      type: "extension_ui_request",
+      requestId: "approval-1",
+      method: "confirm",
+    });
+    reduced = reduceSessionRuntimeEvent(reduced, {
+      type: "agent_end",
+      status: "error",
+    });
+
+    const result = collect(
+      { "runtime:runtime-1": projection({ status: "inProgress" }) },
+      [
+        source({
+          baseState: reduced.baseState,
+          overlays: reduced.overlays,
+        }),
+      ],
+    );
+
+    expect(result.next["runtime:runtime-1"]?.status).toBe("needsAttention");
+    expect(result.requests).toEqual([
+      { key: "runtime:runtime-1", cue: "needsAttention" },
+    ]);
   });
 
   it("does not play attention for first observed or non-working needs-attention state", () => {
