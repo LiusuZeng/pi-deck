@@ -10731,7 +10731,7 @@ test.describe("task-session routing acceptance", () => {
     }
   });
 
-  test("restores terminal task handoffs with one automatic parent synthesis", async () => {
+  test("restores terminal task handoffs with one automatic parent synthesis across restart", async () => {
     const root = fs.mkdtempSync(
       path.join(os.tmpdir(), "pi-deck-task-restored-synthesis-"),
     );
@@ -10771,6 +10771,7 @@ test.describe("task-session routing acceptance", () => {
 
     let first: Awaited<ReturnType<typeof launchPiDeck>> | undefined;
     let second: Awaited<ReturnType<typeof launchPiDeck>> | undefined;
+    let third: Awaited<ReturnType<typeof launchPiDeck>> | undefined;
     try {
       first = await launchPiDeck(env);
       await expectHealthyPreload(first.page);
@@ -10910,9 +10911,30 @@ test.describe("task-session routing acceptance", () => {
         .toMatchObject({ synthesisAttempts: 1, synthesisReported: true });
       await expect.poll(ordinaryPromptCount, { timeout: 30_000 }).toBe(2);
       await expect(synthesisReports).toHaveCount(1);
+
+      // A later process restart reads the durable report marker. It must not
+      // send another parent synthesis even though the terminal handoffs remain.
+      await second.app.close();
+      second = undefined;
+      third = await launchPiDeck(env);
+      await expectHealthyPreload(third.page);
+      await expectAllWorkLaunch(third.page);
+      const reopenedSession = third.page.getByRole("button", {
+        name: `Session: ${bootstrapPrompt}`,
+        exact: true,
+      });
+      await expect(reopenedSession).toBeVisible();
+      await reopenedSession.click();
+      await third.page.waitForTimeout(500);
+      await expect.poll(ordinaryPromptCount, { timeout: 30_000 }).toBe(2);
+      expect(
+        JSON.parse(fs.readFileSync(statePath, "utf8"))[canonicalSessionFile]
+          ?.state.plans[0],
+      ).toMatchObject({ synthesisAttempts: 1, synthesisReported: true });
     } finally {
       await first?.app.close().catch(() => undefined);
       await second?.app.close().catch(() => undefined);
+      await third?.app.close().catch(() => undefined);
       if (process.env.PI_DECK_E2E_KEEP_REAL_SMOKE_ARTIFACTS !== "1")
         fs.rmSync(root, { recursive: true, force: true });
     }

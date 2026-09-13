@@ -205,6 +205,14 @@ type Plan = Omit<PersistedTaskSessionPlan, "tasks"> & {
   synthesisEligible?: boolean;
   synthesisRetryScheduled?: boolean;
 };
+
+/** Restore has three mutually-exclusive outcomes. Only terminal pending plans
+ * may cross the parent reporting boundary; interrupted work is retained solely
+ * for traceability and reported plans are permanently suppressed. */
+type RestoreReconciliationState =
+  | "interrupted"
+  | "terminal-pending-synthesis"
+  | "reported";
 type Parent<ParentId> = {
   parentId: ParentId;
   mode: MultitaskMode;
@@ -388,7 +396,18 @@ export class TaskSessionOrchestrator<
       })),
     };
   }
-  /** Production's resume guard invokes restore once per attached parent; restore never plans, drains queues, or relaunches workers. */
+  /**
+   * Reconcile durable task state without ever resuming private workers.
+   *
+   * - unfinished work becomes interrupted and is never scheduled;
+   * - all-terminal, unreported plans schedule exactly their remaining parent
+   *   synthesis/report action; and
+   * - reported plans remain inert.
+   *
+   * Production calls this once per attached runtime, but retaining an in-flight
+   * reservation also makes repeated reconciliation safe before persistence
+   * observes that reservation or report marker.
+   */
   restore(parentId: ParentId, state: PersistedTaskSessionState): void {
     validatePersisted(state, this.maxPlanTasks, this.maxContextSummaryLength);
     const parent = this.parent(parentId);
@@ -399,46 +418,21 @@ export class TaskSessionOrchestrator<
       1,
       ...state.plans.map((plan) => plan.planId + 1),
     );
-    parent.plans = state.plans.map((plan) => {
-      // Interrupted rows may have been persisted by an earlier restore and must
-      // remain ineligible for parent synthesis.
-      const hadUnfinishedWork = plan.tasks.some(
-        (saved) => !isTerminal(saved) || saved.lifecycle === "interrupted",
-      );
-      return {
-        ...plan,
-        originalPrompt: safeText(
-          plan.originalPrompt,
-          this.maxContextSummaryLength,
-        ),
-        contextSummary: safeText(
-          plan.contextSummary,
-          this.maxContextSummaryLength,
-        ),
-        ...(plan.promptSettings
-          ? { promptSettings: safeSettings(plan.promptSettings) }
-          : {}),
-        ...(plan.synthesisReported ? { synthesized: true } : {}),
-        synthesisEligible: !hadUnfinishedWork,
-        tasks: plan.tasks.map((saved) =>
-          !isTerminal(saved)
-            ? {
-                ...saved,
-                lifecycle: "interrupted",
-                transitions: [
-                  ...saved.transitions,
-                  transition("interrupted", saved.attempt, this.now()),
-                ],
-                handoffSummary: "Task session interrupted after restart.",
-              }
-            : {
-                ...saved,
-                ...(saved.latestActivityAtMs !== undefined
-                  ? { latestActivityAt: saved.latestActivityAtMs }
-                  : {}),
-              },
-        ),
-      };
+    const existingPlans = new Map(
+      parent.plans.map((plan) => [plan.planId, plan]),
+    );
+    parent.plans = state.plans.map((saved) => {
+      const existing = existingPlans.get(saved.planId);
+      // A restore can be retried before the state-store observes our durable
+      // reservation. Keep the live plan object so the in-flight delivery (or
+      // its one bounded timer) cannot be orphaned and duplicated.
+      if (
+        existing?.synthesizing ||
+        existing?.synthesized ||
+        existing?.synthesisRetryScheduled
+      )
+        return existing;
+      return restoredPlan(saved, this.now(), this.maxContextSummaryLength);
     });
     this.publish(parent);
     void this.synthesizeTerminalPlans(parent);
@@ -791,6 +785,55 @@ export class TaskSessionOrchestrator<
     return parent;
   }
 }
+function restoredPlan(
+  saved: PersistedTaskSessionPlan,
+  now: number,
+  maxContextSummaryLength: number,
+): Plan {
+  const reconciliation = restoreReconciliationState(saved);
+  return {
+    ...saved,
+    originalPrompt: safeText(saved.originalPrompt, maxContextSummaryLength),
+    contextSummary: safeText(saved.contextSummary, maxContextSummaryLength),
+    ...(saved.promptSettings
+      ? { promptSettings: safeSettings(saved.promptSettings) }
+      : {}),
+    ...(reconciliation === "reported" ? { synthesized: true } : {}),
+    synthesisEligible: reconciliation === "terminal-pending-synthesis",
+    tasks: saved.tasks.map((task) => {
+      // A prior restore already made this durable transition. Do not append an
+      // identical transition every time the parent is reconciled.
+      if (reconciliation === "interrupted" && !isTerminal(task))
+        return {
+          ...task,
+          lifecycle: "interrupted",
+          transitions: [
+            ...task.transitions,
+            transition("interrupted", task.attempt, now),
+          ],
+          handoffSummary: "Task session interrupted after restart.",
+        };
+      return {
+        ...task,
+        ...(task.latestActivityAtMs !== undefined
+          ? { latestActivityAt: task.latestActivityAtMs }
+          : {}),
+      };
+    }),
+  };
+}
+
+function restoreReconciliationState(
+  plan: PersistedTaskSessionPlan,
+): RestoreReconciliationState {
+  if (plan.synthesisReported) return "reported";
+  return plan.tasks.some(
+    (task) => !isTerminal(task) || task.lifecycle === "interrupted",
+  )
+    ? "interrupted"
+    : "terminal-pending-synthesis";
+}
+
 function task(
   taskNumber: number,
   brief: { generatedName: string; brief: string },

@@ -246,12 +246,13 @@ describe("TaskSessionOrchestrator", () => {
     expect(JSON.stringify(saved)).not.toContain("SECRET_BASE64");
   });
 
-  it("publishes a persistable restored synthesis attempt before deferred delivery settles", async () => {
+  it("keeps one reserved restored synthesis across repeated reconciliation", async () => {
     let resolveDelivery!: () => void;
     const delivery = new Promise<void>((resolve) => {
       resolveDelivery = resolve;
     });
     let deliveryStarted = false;
+    let deliveries = 0;
     let current: ReturnType<typeof setupRestore> | undefined;
     const publications: {
       state: PersistedTaskSessionState;
@@ -260,6 +261,7 @@ describe("TaskSessionOrchestrator", () => {
     const restored = setupRestore(
       () => {
         deliveryStarted = true;
+        deliveries++;
         return delivery;
       },
       () => {
@@ -272,7 +274,11 @@ describe("TaskSessionOrchestrator", () => {
     );
     current = restored;
 
-    restored.orchestrator.restore("parent", persistedState("completed"));
+    const saved = persistedState("completed");
+    restored.orchestrator.restore("parent", saved);
+    // A duplicate reconciliation can see the pre-reservation store snapshot.
+    // It must retain the in-flight plan instead of launching a second report.
+    restored.orchestrator.restore("parent", saved);
 
     const reservation = publications.find(
       ({ state }) => state.plans[0]?.synthesisAttempts === 1,
@@ -283,13 +289,18 @@ describe("TaskSessionOrchestrator", () => {
     });
     expect(reservation?.state.plans[0]?.synthesisReported).toBeUndefined();
     expect(restored.orchestrator.state("parent").tasks).toHaveLength(1);
+    expect(deliveries).toBe(1);
 
     resolveDelivery();
     await tick();
-    expect(restored.orchestrator.exportState("parent").plans[0]).toMatchObject({
+    const reported = restored.orchestrator.exportState("parent");
+    expect(reported.plans[0]).toMatchObject({
       synthesisAttempts: 1,
       synthesisReported: true,
     });
+    restored.orchestrator.restore("parent", reported);
+    await tick();
+    expect(deliveries).toBe(1);
   });
 
   it("synthesizes restored all-failed terminal plans without relaunching workers", async () => {
@@ -329,6 +340,16 @@ describe("TaskSessionOrchestrator", () => {
       { lifecycle: "interrupted" },
     ]);
     expect(reports).toBe(0);
+    const reconciled = restored.orchestrator.exportState("parent");
+    const interruptedTransitions = reconciled.plans[0]!.tasks[1]!.transitions;
+    restored.orchestrator.restore("parent", reconciled);
+    await tick();
+    expect(restored.launches).toHaveLength(0);
+    expect(reports).toBe(0);
+    expect(
+      restored.orchestrator.exportState("parent").plans[0]!.tasks[1]!
+        .transitions,
+    ).toEqual(interruptedTransitions);
 
     const rerestored = setupRestore(() => {
       reports++;
