@@ -328,8 +328,23 @@ async function runNativeForkSmoke({
     if (typeof forkFile !== "string" || typeof forkId !== "string") {
       throw new Error("Native fork did not report a session file and identity");
     }
-    if (realpathSync(forkFile) === canonicalSource || forkId === sourceId) {
+    const canonicalFork = realpathSync(forkFile);
+    if (canonicalFork === canonicalSource || forkId === sourceId) {
       throw new Error("Native fork reused the source session identity");
+    }
+    // Pi v3 persists the native --fork source in the first JSONL header. The
+    // CLI may preserve a source spelling, so compare canonical filesystem
+    // identities rather than raw header text.
+    const forkHeader = JSON.parse(
+      readFileSync(canonicalFork, "utf8").split(/\r?\n/, 1)[0],
+    );
+    if (typeof forkHeader?.parentSession !== "string") {
+      throw new Error("Native fork JSONL header did not include parentSession");
+    }
+    if (realpathSync(forkHeader.parentSession) !== canonicalSource) {
+      throw new Error(
+        "Native fork JSONL parentSession did not match its source",
+      );
     }
     if (
       state.data?.isStreaming === true ||

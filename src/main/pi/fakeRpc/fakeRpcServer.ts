@@ -62,6 +62,15 @@ interface FakeOptions {
   forkSourceFile?: string;
   /** Test-only faulty-Pi override for the path reported by a native fork. */
   forkTargetFile?: string;
+  /** Test-only override for native fork header provenance. */
+  forkParentSession?: string;
+  forkOmitsParentSession: boolean;
+  /** Hold only native-fork get_state replies before registration. */
+  forkGetStateDelayMs: number;
+  /** Write when a native fork begins its pre-registration get_state call. */
+  forkGetStateSignalFile?: string;
+  /** Append the native-fork target path when that fake worker exits. */
+  forkExitSignalFile?: string;
   /** Hold get_state replies so E2E can interleave ownership operations. */
   getStateDelayMs: number;
   /** Ignore SIGTERM so lifecycle tests exercise SIGKILL escalation. */
@@ -115,6 +124,8 @@ function parseOptions(argv: string[]): FakeOptions {
     noSession: false,
     failTaskPromptRecordWhileActive: false,
     taskSessionProgressFixture: false,
+    forkOmitsParentSession: false,
+    forkGetStateDelayMs: 0,
     getStateDelayMs: 0,
     ignoreSigterm: false,
     sigtermExitDelayMs: 0,
@@ -213,6 +224,26 @@ function parseOptions(argv: string[]): FakeOptions {
     } else if (arg === "--fork-target") {
       const targetFile = argv[index + 1];
       if (targetFile) options.forkTargetFile = targetFile;
+      index += 1;
+    } else if (arg === "--fork-parent-session") {
+      const parentSession = argv[index + 1];
+      if (parentSession) options.forkParentSession = parentSession;
+      index += 1;
+    } else if (arg === "--fork-omit-parent-session") {
+      options.forkOmitsParentSession = true;
+    } else if (arg === "--fork-delay-get-state-ms") {
+      const delay = Number(argv[index + 1]);
+      if (Number.isSafeInteger(delay) && delay >= 0) {
+        options.forkGetStateDelayMs = delay;
+      }
+      index += 1;
+    } else if (arg === "--fork-get-state-signal-file") {
+      const signalFile = argv[index + 1];
+      if (signalFile) options.forkGetStateSignalFile = signalFile;
+      index += 1;
+    } else if (arg === "--fork-exit-signal-file") {
+      const signalFile = argv[index + 1];
+      if (signalFile) options.forkExitSignalFile = signalFile;
       index += 1;
     } else if (arg === "--ignore-sigterm") {
       options.ignoreSigterm = true;
@@ -459,6 +490,34 @@ class FakeRpcServer {
   }
 
   start(): void {
+    const recordForkExit = (): void => {
+      if (!this.options.forkSourceFile || !this.options.forkExitSignalFile) {
+        return;
+      }
+      try {
+        fs.appendFileSync(
+          this.options.forkExitSignalFile,
+          `${this.sessionFile}\n`,
+        );
+      } catch {
+        // Exit diagnostics must never hold a fake worker open.
+      }
+    };
+    process.once("exit", recordForkExit);
+    // Node's default SIGTERM termination does not reliably run userland exit
+    // listeners through every Electron-spawned wrapper. The normal fake fork
+    // fixture has no custom SIGTERM behavior, so record then terminate here.
+    if (
+      this.options.forkSourceFile &&
+      this.options.forkExitSignalFile &&
+      !this.options.ignoreSigterm &&
+      this.options.sigtermExitDelayMs === 0
+    ) {
+      process.once("SIGTERM", () => {
+        recordForkExit();
+        process.exit(0);
+      });
+    }
     if (this.options.ignoreSigterm || this.options.sigtermExitDelayMs > 0) {
       process.on("SIGTERM", () => {
         if (this.options.ignoreSigterm) {
@@ -544,7 +603,13 @@ class FakeRpcServer {
               id: path.basename(this.sessionFile, ".jsonl"),
               timestamp: new Date().toISOString(),
               cwd: process.cwd(),
-              parentSession: path.resolve(sourceFile),
+              ...(this.options.forkOmitsParentSession
+                ? {}
+                : {
+                    parentSession: path.resolve(
+                      this.options.forkParentSession ?? sourceFile,
+                    ),
+                  }),
             }),
             ...copiedRecords,
           ].join("\n") + "\n",
@@ -688,16 +753,27 @@ class FakeRpcServer {
     }
 
     switch (name) {
-      case "get_state":
-        if (this.options.getStateDelayMs > 0) {
+      case "get_state": {
+        const forkGetState = this.options.forkSourceFile !== undefined;
+        if (forkGetState && this.options.forkGetStateSignalFile) {
+          fs.writeFileSync(
+            this.options.forkGetStateSignalFile,
+            `${this.sessionFile}\n`,
+          );
+        }
+        const delay = forkGetState
+          ? this.options.forkGetStateDelayMs
+          : this.options.getStateDelayMs;
+        if (delay > 0) {
           setTimeout(
             () => this.respond(command.id, name, this.getState()),
-            this.options.getStateDelayMs,
+            delay,
           );
         } else {
           this.respond(command.id, name, this.getState());
         }
         break;
+      }
       case "get_messages": {
         if (this.options.getMessagesSignalFile) {
           fs.writeFileSync(

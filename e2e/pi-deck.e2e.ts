@@ -6737,6 +6737,270 @@ test("real-mode session fork creates an independent Pi history and survives rela
   }
 });
 
+test("fork rejects fresh children with missing or mismatched native parentSession", async () => {
+  for (const fixture of [
+    {
+      name: "missing",
+      args: ["--fork-omit-parent-session"],
+    },
+    {
+      name: "mismatched",
+      args: ["--fork-parent-session", "/tmp/not-the-requested-source.jsonl"],
+    },
+  ]) {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), `pi-deck-e2e-fork-parent-${fixture.name}-`),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    const userDataDir = path.join(root, "user-data");
+    const targetFile = path.join(
+      agentDir,
+      "sessions",
+      "--fake-rpc--",
+      `fork-parent-${fixture.name}.jsonl`,
+    );
+    fs.mkdirSync(projectCwd, { recursive: true });
+    const { app, page } = await launchPiDeck(
+      fakeRealModeEnv({
+        root,
+        projectCwd,
+        agentDir,
+        userDataDir,
+        fakePiArgs: ["--fork-target", targetFile, ...fixture.args],
+      }),
+    );
+    try {
+      await expectHealthyPreload(page);
+      await sidebarNewSessionButton(page).click();
+      await page.getByLabel("Prompt text").fill(`parent ${fixture.name}`);
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect(
+        page.getByText(`Fake response to: parent ${fixture.name}`),
+      ).toBeVisible({ timeout: 20_000 });
+      const result = await page.evaluate(async () => {
+        const source = await window.piDeck.chat.getSnapshot();
+        let error = "";
+        try {
+          await window.piDeck.chat.forkSession({
+            workspaceId: source.workspaceId!,
+            sessionFile: source.state.sessionFile!,
+          });
+        } catch (reason) {
+          error = reason instanceof Error ? reason.message : String(reason);
+        }
+        const sessions = await window.piDeck.chat.listSessions({
+          workspaceId: source.workspaceId!,
+        });
+        return {
+          error,
+          sessionFiles: sessions.sessions.map((session) => session.sessionFile),
+        };
+      });
+      expect(result.error).toMatch(/does not identify the requested source/i);
+      expect(result.sessionFiles).not.toContain(fs.realpathSync(targetFile));
+    } finally {
+      await app.close().catch(() => undefined);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("reset cancels a spawned pre-registration fork without late ownership or worker leaks", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-fork-reset-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  const targetFile = path.join(
+    agentDir,
+    "sessions",
+    "--fake-rpc--",
+    "fork-reset-target.jsonl",
+  );
+  const getStateSignalFile = path.join(root, "fork-get-state-started");
+  const exitSignalFile = path.join(root, "fork-exited");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      userDataDir,
+      fakePiArgs: [
+        "--fork-target",
+        targetFile,
+        "--fork-delay-get-state-ms",
+        "10000",
+        "--fork-get-state-signal-file",
+        getStateSignalFile,
+        "--fork-exit-signal-file",
+        exitSignalFile,
+      ],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await sidebarNewSessionButton(page).click();
+    await page.getByLabel("Prompt text").fill("reset fork source");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Fake response to: reset fork source"),
+    ).toBeVisible({
+      timeout: 20_000,
+    });
+    const source = await page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      return {
+        workspaceId: snapshot.workspaceId!,
+        sessionFile: snapshot.state.sessionFile!,
+      };
+    });
+    await page.evaluate(({ workspaceId, sessionFile }) => {
+      (window as Window & { pendingFork?: Promise<unknown> }).pendingFork =
+        window.piDeck.chat.forkSession({ workspaceId, sessionFile });
+    }, source);
+    await expect
+      .poll(() =>
+        fs.existsSync(getStateSignalFile)
+          ? fs.readFileSync(getStateSignalFile, "utf8").trim()
+          : "",
+      )
+      .toBe(targetFile);
+
+    const result = await page.evaluate(async (source) => {
+      const reset = await window.piDeck.chat.reset();
+      let forkError = "";
+      try {
+        await (window as Window & { pendingFork: Promise<unknown> })
+          .pendingFork;
+      } catch (error) {
+        forkError = error instanceof Error ? error.message : String(error);
+      }
+      const sessions = await window.piDeck.chat.listSessions({
+        workspaceId: source.workspaceId,
+      });
+      const current = await window.piDeck.chat.getSnapshot();
+      return {
+        forkError,
+        resetSessionFile: reset.state.sessionFile,
+        currentSessionFile: current.state.sessionFile,
+        sessionFiles: sessions.sessions.map((session) => session.sessionFile),
+      };
+    }, source);
+    const canonicalTarget = fs.realpathSync(targetFile);
+    expect(result.forkError).toMatch(
+      /cancelled by reset or application shutdown/i,
+    );
+    expect(result.resetSessionFile).not.toBe(canonicalTarget);
+    expect(result.currentSessionFile).not.toBe(canonicalTarget);
+    expect(result.sessionFiles).not.toContain(canonicalTarget);
+    await expect
+      .poll(() =>
+        fs.existsSync(exitSignalFile)
+          ? fs.readFileSync(exitSignalFile, "utf8")
+          : "",
+      )
+      .toContain(targetFile);
+    // The cancelled fork cannot register after reset has returned.
+    await page.waitForTimeout(250);
+    const lateSessionFiles = await page.evaluate(async (workspaceId) => {
+      const sessions = await window.piDeck.chat.listSessions({ workspaceId });
+      return sessions.sessions.map((session) => session.sessionFile);
+    }, source.workspaceId);
+    expect(lateSessionFiles).not.toContain(canonicalTarget);
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("quit cancels a spawned pre-registration fork without persisting its target", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-fork-quit-"));
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  const targetFile = path.join(
+    agentDir,
+    "sessions",
+    "--fake-rpc--",
+    "fork-quit-target.jsonl",
+  );
+  const getStateSignalFile = path.join(root, "fork-get-state-started");
+  const exitSignalFile = path.join(root, "fork-exited");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      userDataDir,
+      fakePiArgs: [
+        "--fork-target",
+        targetFile,
+        "--fork-delay-get-state-ms",
+        "10000",
+        "--fork-get-state-signal-file",
+        getStateSignalFile,
+        "--fork-exit-signal-file",
+        exitSignalFile,
+      ],
+    }),
+  );
+  try {
+    await expectHealthyPreload(page);
+    await sidebarNewSessionButton(page).click();
+    await page.getByLabel("Prompt text").fill("quit fork source");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Fake response to: quit fork source"),
+    ).toBeVisible({
+      timeout: 20_000,
+    });
+    await page.evaluate(async () => {
+      const source = await window.piDeck.chat.getSnapshot();
+      void window.piDeck.chat.forkSession({
+        workspaceId: source.workspaceId!,
+        sessionFile: source.state.sessionFile!,
+      });
+    });
+    await expect
+      .poll(() =>
+        fs.existsSync(getStateSignalFile)
+          ? fs.readFileSync(getStateSignalFile, "utf8").trim()
+          : "",
+      )
+      .toBe(targetFile);
+
+    // Exercise the user-visible last-window quit path, which enters the
+    // before-quit cleanup barrier rather than Playwright's force-close helper.
+    await page.evaluate(() => window.close());
+    await expect
+      .poll(() =>
+        fs.existsSync(exitSignalFile)
+          ? fs.readFileSync(exitSignalFile, "utf8")
+          : "",
+      )
+      .toContain(targetFile);
+    const workspaceStore = fs.readFileSync(
+      path.join(root, "pideck-home", "workspaces.json"),
+      "utf8",
+    );
+    expect(workspaceStore).not.toContain(fs.realpathSync(targetFile));
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(
+      fs.readFileSync(
+        path.join(root, "pideck-home", "workspaces.json"),
+        "utf8",
+      ),
+    ).not.toContain(fs.realpathSync(targetFile));
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("fork reserves its fresh target against default-workspace resume and unwinds late failure", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-fork-race-"));
   const projectCwd = path.join(root, "project");
