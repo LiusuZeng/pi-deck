@@ -146,7 +146,7 @@ describe("reduceSessionRuntimeEvent", () => {
     expect(cleared.overlays.needsUserInput).toBe(false);
   });
 
-  it("clears pending extension input for an unplanned worker exit", () => {
+  it("keeps an unplanned worker exit terminal when a raced response acknowledgement arrives", () => {
     const exited = applyEvents([
       {
         type: "extension_ui_request",
@@ -155,16 +155,22 @@ describe("reduceSessionRuntimeEvent", () => {
       },
       { type: "worker_exit", intentional: false },
     ]);
+    const afterLateAcknowledgement = reduceSessionRuntimeEvent(exited, {
+      type: "extension_ui_response_sent",
+      requestId: "ext-1",
+    });
 
-    expect(exited).toMatchObject({
+    expect(afterLateAcknowledgement).toBe(exited);
+    expect(afterLateAcknowledgement).toMatchObject({
       baseState: "error",
+      runtimeDetached: true,
       overlays: { needsUserInput: false },
       pendingExtensionUiQueue: [],
     });
-    expect(selectSidebarIndicator(exited).kind).toBe("error");
+    expect(selectSidebarIndicator(afterLateAcknowledgement).kind).toBe("error");
   });
 
-  it("preserves pending extension input for a planned worker exit", () => {
+  it("clears planned-exit extension input and ignores its late response acknowledgement", () => {
     const exited = applyEvents([
       {
         type: "extension_ui_request",
@@ -173,12 +179,19 @@ describe("reduceSessionRuntimeEvent", () => {
       },
       { type: "worker_exit", intentional: true },
     ]);
+    const afterLateAcknowledgement = reduceSessionRuntimeEvent(exited, {
+      type: "extension_ui_response_sent",
+      requestId: "ext-1",
+    });
 
-    expect(exited.pendingExtensionUiQueue).toMatchObject([
-      { requestId: "ext-1" },
-    ]);
-    expect(exited.overlays.needsUserInput).toBe(true);
-    expect(selectSidebarIndicator(exited).kind).toBe("needsInput");
+    expect(afterLateAcknowledgement).toBe(exited);
+    expect(afterLateAcknowledgement).toMatchObject({
+      baseState: "error",
+      runtimeDetached: true,
+      overlays: { needsUserInput: false },
+      pendingExtensionUiQueue: [],
+    });
+    expect(selectSidebarIndicator(afterLateAcknowledgement).kind).toBe("error");
   });
 
   it("restores a production message_update provider failure after its final extension response", () => {

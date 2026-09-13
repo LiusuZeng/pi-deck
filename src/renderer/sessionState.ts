@@ -51,6 +51,8 @@ export interface ReducedSessionState extends SidebarSessionState {
   diagnostics: string[];
   /** A provider error was observed and has not been superseded by a retry. */
   terminalProviderErrorObserved: boolean;
+  /** Main has detached the worker, so extension UI responses cannot be delivered. */
+  runtimeDetached: boolean;
 }
 
 export type SidebarIndicatorKind =
@@ -93,6 +95,7 @@ export function createInitialReducedSessionState(
     toolCards: patch.toolCards ?? {},
     diagnostics: patch.diagnostics ?? [],
     terminalProviderErrorObserved: patch.terminalProviderErrorObserved ?? false,
+    runtimeDetached: patch.runtimeDetached ?? false,
   };
 }
 
@@ -185,15 +188,18 @@ function reduceSessionRuntimeEventUnprioritized(
       };
     }
     case "extension_ui_request":
-      return reduceExtensionUiRequestEvent(state, event);
+      return state.runtimeDetached
+        ? state
+        : reduceExtensionUiRequestEvent(state, event);
     case "extension_ui_response_sent":
     case "extension_ui_request_timeout":
-      return clearPendingExtensionUiRequest(
-        state,
-        getExtensionUiRequestId(event),
-      );
+      return state.runtimeDetached
+        ? state
+        : clearPendingExtensionUiRequest(state, getExtensionUiRequestId(event));
     case "extension_ui_response_failed":
-      return reduceExtensionUiResponseFailedEvent(state, event);
+      return state.runtimeDetached
+        ? state
+        : reduceExtensionUiResponseFailedEvent(state, event);
     case "agent_end":
       return reduceAgentEndEvent(state, event);
     case "diagnostic": {
@@ -203,17 +209,16 @@ function reduceSessionRuntimeEventUnprioritized(
         : state;
     }
     case "worker_exit":
-      // An unplanned exit detaches the runtime in main, which clears its
-      // response map. Do not leave the renderer advertising an unanswerable
-      // extension dialog after the pending-input priority projection runs.
-      return getBoolean(event, "intentional") === true
-        ? { ...state, baseState: "error" }
-        : {
-            ...state,
-            baseState: "error",
-            pendingExtensionUiQueue: [],
-            overlays: { ...state.overlays, needsUserInput: false },
-          };
+      // Main detaches response ownership for every terminal worker exit.
+      // Record that terminal boundary independently of the queue: a late
+      // response acknowledgement must not revive this detached state.
+      return {
+        ...state,
+        baseState: "error",
+        runtimeDetached: true,
+        pendingExtensionUiQueue: [],
+        overlays: { ...state.overlays, needsUserInput: false },
+      };
     default:
       return state;
   }

@@ -940,7 +940,7 @@ describe("worker exit lifecycle", () => {
     expect(runtimeErrorDiagnostics(next)).toHaveLength(1);
   });
 
-  it("removes unanswerable extension input after an unplanned worker exit across surfaces", () => {
+  it("keeps an unplanned-exit response race terminal across detail, sidebar, and Work", () => {
     let session = __rendererTestHooks.reduceRuntimeEvent(
       baseSession() as any,
       {
@@ -956,18 +956,26 @@ describe("worker exit lifecycle", () => {
     ]);
     expect(selectSidebarIndicator(session).kind).toBe("needsInput");
 
-    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+    // The renderer may receive a successful response write after main has
+    // already forwarded the terminal exit and revoked response ownership.
+    const exited = __rendererTestHooks.reduceRuntimeEvent(session, {
       type: "worker_exit",
       runtimeId: "session-1",
       code: 42,
       signal: null,
       intentional: false,
     } as any);
+    session = __rendererTestHooks.reduceRuntimeEvent(exited, {
+      type: "extension_ui_response_sent",
+      runtimeId: "session-1",
+      requestId: "approval-1",
+    } as any);
     const source = __rendererTestHooks.activitySourceSessions([session], {
       "workspace-a": "Workspace A",
     })[0]!;
     const inbox = buildActivityInbox([source]);
 
+    expect(session).toBe(exited);
     expect(session).toMatchObject({
       status: "error",
       baseState: "error",
@@ -980,9 +988,12 @@ describe("worker exit lifecycle", () => {
     expect(runtimeErrorDiagnostics(session)).toHaveLength(1);
   });
 
-  it("preserves pending extension input for a planned worker exit", () => {
+  it("clears planned-exit extension input without changing its saved terminal state", () => {
     let session = __rendererTestHooks.reduceRuntimeEvent(
-      baseSession() as any,
+      {
+        ...baseSession(),
+        sessionFile: "/tmp/planned-worker-exit.jsonl",
+      } as any,
       {
         type: "extension_ui_request",
         runtimeId: "session-1",
@@ -991,23 +1002,35 @@ describe("worker exit lifecycle", () => {
         title: "Approve planned worker action",
       } as any,
     );
-    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+    const exited = __rendererTestHooks.reduceRuntimeEvent(session, {
       type: "worker_exit",
       runtimeId: "session-1",
       code: 0,
       signal: null,
       intentional: true,
     } as any);
+    session = __rendererTestHooks.reduceRuntimeEvent(exited, {
+      type: "extension_ui_response_sent",
+      runtimeId: "session-1",
+      requestId: "approval-1",
+    } as any);
     const source = __rendererTestHooks.activitySourceSessions([session], {
       "workspace-a": "Workspace A",
     })[0]!;
+    const inbox = buildActivityInbox([source]);
 
-    expect(session.pendingExtensionUiRequests).toMatchObject([
-      { id: "approval-1" },
-    ]);
-    expect(session.overlays.needsUserInput).toBe(true);
-    expect(selectSidebarIndicator(session).kind).toBe("needsInput");
-    expect(buildActivityInbox([source]).groups.needsAttention).toHaveLength(1);
+    expect(session).toBe(exited);
+    expect(session).toMatchObject({
+      status: "idle",
+      baseState: "idle",
+      subtitle: "Saved · click to resume",
+      overlays: { needsUserInput: false },
+      pendingExtensionUiRequests: [],
+    });
+    expect(selectSidebarIndicator(session).kind).toBe("idle");
+    expect(inbox.groups.needsAttention).toHaveLength(0);
+    expect(inbox.groups.failed).toHaveLength(0);
+    expect(runtimeErrorDiagnostics(session)).toEqual([]);
   });
 });
 
@@ -2635,6 +2658,10 @@ describe("renderer session actions", () => {
       id: "saved-runtime",
       projectId: "/projects/a",
       sessionFile: "/sessions/saved.jsonl",
+      pendingExtensionUiRequests: [
+        { id: "approval-1", method: "confirm", title: "Approve close" },
+      ],
+      overlays: { ...emptyOverlays, needsUserInput: true },
     };
     const savedRow = {
       ...baseSession(),
@@ -2656,7 +2683,12 @@ describe("renderer session actions", () => {
 
     expect(
       afterClose.find((session: any) => session.id === savedRuntime.id),
-    ).toMatchObject({ runtimeBacked: false, resumeBacked: true });
+    ).toMatchObject({
+      runtimeBacked: false,
+      resumeBacked: true,
+      pendingExtensionUiRequests: [],
+      overlays: { needsUserInput: false },
+    });
     expect(
       afterClose.find((session: any) => session.id === "background-runtime"),
     ).toMatchObject({ status: "working" });

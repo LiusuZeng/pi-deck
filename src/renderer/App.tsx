@@ -6732,6 +6732,8 @@ function closeRuntimeInSessionState(
         resumeBacked: true,
         status: "idle" as const,
         baseState: "idle" as const,
+        pendingExtensionUiRequests: [],
+        overlays: { ...session.overlays, needsUserInput: false },
         subtitle: "Saved · click to resume",
       },
     ];
@@ -7952,11 +7954,20 @@ function reduceRuntimeEventUnprioritized(
         : nextSession;
     }
     case "extension_ui_request":
-      return reduceExtensionUiRequestEvent(session, event);
+      return session.runtimeBacked
+        ? reduceExtensionUiRequestEvent(session, event)
+        : session;
     case "extension_ui_response_sent":
     case "extension_ui_request_timeout":
-      return clearExtensionUiRequest(session, getString(event, "requestId"));
+      // Main has already detached this terminal runtime. A late write
+      // acknowledgement is not permission to revive its prior working state.
+      return session.runtimeBacked
+        ? clearExtensionUiRequest(session, getString(event, "requestId"))
+        : session;
     case "extension_ui_response_failed": {
+      if (!session.runtimeBacked) {
+        return session;
+      }
       const stillWaitingForInput =
         (session.pendingExtensionUiRequests?.length ?? 0) > 0;
       // The response write failed, so its request remains actionable. Keep the
@@ -8120,9 +8131,10 @@ function reduceRuntimeEventUnprioritized(
       // SIGTERM is expected when Pi Deck detaches a completed session. Shell
       // launchers may expose it as code 143; preserve its durable file as a
       // resumable row rather than presenting a backend failure.
+      const detachedSession = clearPendingExtensionUiRequests(session);
       if (intentional && session.sessionFile !== undefined) {
         return {
-          ...session,
+          ...detachedSession,
           status: "idle",
           baseState: "idle",
           awaitingAgentEnd: false,
@@ -8133,26 +8145,21 @@ function reduceRuntimeEventUnprioritized(
       }
       // An intentional close already detached this runtime and preserved the
       // saved-session row. Its late process-exit event must not turn that row
-      // into an error.
+      // into an error, but it must still discard any unanswerable dialog.
       if (!session.runtimeBacked && session.resumeBacked === true) {
-        return session;
+        return detachedSession;
       }
       return appendDiagnostic(
         {
-          ...session,
-          // Main detaches this runtime immediately after forwarding an
-          // unplanned exit, so no queued extension request can be answered.
-          // Clear them before the pending-input priority projection runs, but
-          // preserve the existing planned-exit behavior.
-          ...(intentional ? {} : { pendingExtensionUiRequests: [] }),
+          ...detachedSession,
+          // Main detaches response ownership on every worker exit, so clear
+          // queued dialogs before the pending-input priority projection runs.
           status: "error",
           baseState: "error",
           awaitingAgentEnd: false,
           runtimeBacked: false,
           resumeBacked: session.sessionFile !== undefined,
-          overlays: intentional
-            ? session.overlays
-            : { ...session.overlays, needsUserInput: false },
+          overlays: detachedSession.overlays,
           subtitle: session.sessionFile
             ? "Error · worker exited; click to resume saved session"
             : "Error · backend worker exited",
@@ -8166,6 +8173,16 @@ function reduceRuntimeEventUnprioritized(
     default:
       return session;
   }
+}
+
+function clearPendingExtensionUiRequests(
+  session: SessionViewModel,
+): SessionViewModel {
+  return {
+    ...session,
+    pendingExtensionUiRequests: [],
+    overlays: { ...session.overlays, needsUserInput: false },
+  };
 }
 
 function prioritizePendingExtensionUiRequest(

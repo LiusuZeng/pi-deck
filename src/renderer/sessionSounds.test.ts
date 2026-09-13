@@ -211,7 +211,7 @@ describe("session sound transitions", () => {
     ]);
   });
 
-  it("transitions pending extension input to Failed without an attention cue on unplanned worker exit", () => {
+  it("keeps an unplanned extension-response race Failed without an attention cue", () => {
     let reduced = createInitialReducedSessionState();
     reduced = reduceSessionRuntimeEvent(reduced, { type: "agent_start" });
     reduced = reduceSessionRuntimeEvent(reduced, {
@@ -219,9 +219,13 @@ describe("session sound transitions", () => {
       requestId: "approval-1",
       method: "confirm",
     });
-    reduced = reduceSessionRuntimeEvent(reduced, {
+    const exited = reduceSessionRuntimeEvent(reduced, {
       type: "worker_exit",
       intentional: false,
+    });
+    reduced = reduceSessionRuntimeEvent(exited, {
+      type: "extension_ui_response_sent",
+      requestId: "approval-1",
     });
 
     const result = collect(
@@ -234,6 +238,7 @@ describe("session sound transitions", () => {
       ],
     );
 
+    expect(reduced).toBe(exited);
     expect(reduced.pendingExtensionUiQueue).toEqual([]);
     expect(result.next["runtime:runtime-1"]?.status).toBe("failed");
     expect(result.requests).toEqual([]);
