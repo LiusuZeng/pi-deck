@@ -1956,20 +1956,43 @@ test("a cancellation race leaves no persisted runtime or late completion", async
               expectedRevision,
             }),
           ])
-        ).map((outcome) => outcome.status),
+        ).map((outcome) =>
+          outcome.status === "fulfilled"
+            ? { status: outcome.status, revision: outcome.value.revision }
+            : {
+                status: outcome.status,
+                message:
+                  outcome.reason instanceof Error
+                    ? outcome.reason.message
+                    : String(outcome.reason),
+              },
+        ),
       {
         runId,
         occurrenceId: retryRequest.occurrenceId,
         expectedRevision: retryRequest.revision,
       },
     );
-    expect(outcomes).toEqual(["fulfilled", "rejected"]);
+    expect(outcomes).toEqual([
+      { status: "fulfilled", revision: retryRequest.revision + 1 },
+      {
+        status: "rejected",
+        message: `Workflow run changed before retry: expected revision ${retryRequest.revision}, found ${retryRequest.revision + 1}.`,
+      },
+    ]);
     await page.waitForTimeout(2_200);
     const run = await page.evaluate(
       async (runId) => window.piDeck.workflows.canonicalGetRun({ runId }),
       runId,
     );
     expect(run.status).toBe("stopped");
+    expect(run.occurrences).toEqual([
+      expect.objectContaining({
+        id: retryRequest.occurrenceId,
+        attempt: 1,
+        status: "cancelled",
+      }),
+    ]);
     expect(run.occurrences.some((item) => item.status === "completed")).toBe(
       false,
     );

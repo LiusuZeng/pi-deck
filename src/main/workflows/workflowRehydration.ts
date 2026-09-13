@@ -49,6 +49,13 @@ export async function rehydrateCanonicalWorkflowRuns(
     const hasQueued = persisted.occurrences.some(
       (item) => item.status === "queued",
     );
+    // Before retry resumed stopped envelopes atomically, a Stop could persist a
+    // stopped run with a dormant ready replacement. It must never launch after
+    // restart. Cancel that replacement instead: it remains an explicit,
+    // actionable retry target while the envelope stays stopped.
+    const hasLegacyStoppedReady =
+      persisted.status === "stopped" &&
+      persisted.occurrences.some((item) => item.status === "ready");
     // runtimeId is process-local. Normalize old terminal records too, while
     // retaining sessionFile as the durable Pi transcript reopen reference.
     const hasRuntimeId = persisted.occurrences.some(
@@ -109,7 +116,7 @@ export async function rehydrateCanonicalWorkflowRuns(
       }
     }
     const recovered =
-      lostRunning || hasQueued || hasRuntimeId
+      lostRunning || hasQueued || hasRuntimeId || hasLegacyStoppedReady
         ? workflowRunEnvelopeSchema.parse({
             ...persisted,
             status: lostRunning
@@ -132,16 +139,25 @@ export async function rehydrateCanonicalWorkflowRuns(
                       "Pi session was interrupted by restart; retry this occurrence.",
                     updatedAtMs: now,
                   }
-                : item.status === "queued" &&
-                    workspaceResolved &&
-                    (!item.parentOrchestratorRunId ||
-                      resumableFanoutQueued.has(item.id))
+                : item.status === "ready" && persisted.status === "stopped"
                   ? {
                       ...withoutRuntimeId,
-                      status: "ready" as const,
+                      status: "cancelled" as const,
+                      error:
+                        item.error ??
+                        "Cancelled because this workflow run was stopped before restart.",
                       updatedAtMs: now,
                     }
-                  : withoutRuntimeId;
+                  : item.status === "queued" &&
+                      workspaceResolved &&
+                      (!item.parentOrchestratorRunId ||
+                        resumableFanoutQueued.has(item.id))
+                    ? {
+                        ...withoutRuntimeId,
+                        status: "ready" as const,
+                        updatedAtMs: now,
+                      }
+                    : withoutRuntimeId;
             }),
           })
         : persisted;

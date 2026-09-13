@@ -1,4 +1,4 @@
-import { useState, type ReactElement } from "react";
+import { useRef, useState, type ReactElement } from "react";
 import type {
   CanonicalNodeOccurrence,
   WorkflowNode,
@@ -248,6 +248,9 @@ export function WorkflowOccurrenceRunView(
 ): ReactElement {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string>();
+  // State updates do not synchronously disable a button. Keep a per-attempt
+  // latch so two clicks in one render cannot submit two replacement requests.
+  const retryingOccurrenceIds = useRef(new Set<string>());
   const [selectedNodeId, setSelectedNodeId] = useState<string>();
   const nodes = props.run.definition.nodes;
   const groups = nodes
@@ -286,10 +289,13 @@ export function WorkflowOccurrenceRunView(
     }
   };
   const retry = async (occurrenceId: string) => {
+    if (retryingOccurrenceIds.current.has(occurrenceId)) return;
+    retryingOccurrenceIds.current.add(occurrenceId);
     setBusy(occurrenceId);
     try {
       await props.onRetry(occurrenceId);
     } finally {
+      retryingOccurrenceIds.current.delete(occurrenceId);
       setBusy(undefined);
     }
   };

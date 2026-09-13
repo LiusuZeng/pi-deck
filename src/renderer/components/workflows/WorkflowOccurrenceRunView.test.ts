@@ -211,6 +211,70 @@ describe("WorkflowOccurrenceRunView", () => {
     expect(onAnswer).toHaveBeenCalledWith(run.occurrences[0].id, true);
   });
 
+  it("submits exactly one replacement when retry is double-clicked", async () => {
+    const definition = {
+      format: "pi-deck.agent-workflow" as const,
+      schemaVersion: 2 as const,
+      id: "00000000-0000-4000-8000-000000000310",
+      revision: 1,
+      name: "Double retry",
+      inputs: [],
+      entryNodeId: "00000000-0000-4000-8000-000000000311",
+      nodes: [
+        {
+          id: "00000000-0000-4000-8000-000000000311",
+          name: "Work",
+          role: "worker" as const,
+          config: { instructions: "Work." },
+        },
+      ],
+      relationships: [],
+    };
+    const initial = createWorkflowRoleRun(definition, "workspace");
+    const run = {
+      ...initial,
+      status: "needsAttention" as const,
+      occurrences: initial.occurrences.map((occurrence) => ({
+        ...occurrence,
+        status: "failed" as const,
+        error: "Try again",
+      })),
+    };
+    let resolveRetry!: () => void;
+    const onRetry = vi.fn(
+      () => new Promise<void>((resolve) => (resolveRetry = resolve)),
+    );
+    const container = document.createElement("div");
+    await act(async () =>
+      createRoot(container).render(
+        createElement(WorkflowOccurrenceRunView, {
+          run,
+          onBack: vi.fn(),
+          onStop: vi.fn(),
+          onRetry,
+          onAnswer: vi.fn(),
+        }),
+      ),
+    );
+    const toggle = container.querySelector<HTMLButtonElement>(
+      ".workflow-run-node-toggle",
+    )!;
+    await act(async () => toggle.click());
+    const retry = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Retry attempt 1",
+    )!;
+
+    await act(async () => {
+      retry.click();
+      retry.click();
+    });
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    expect(retry.disabled).toBe(true);
+
+    await act(async () => resolveRetry());
+    expect(retry.disabled).toBe(false);
+  });
+
   it("summarizes logical nodes and reveals raw attempts on intentional selection", async () => {
     const definition = {
       format: "pi-deck.agent-workflow" as const,

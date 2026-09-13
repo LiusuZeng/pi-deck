@@ -863,6 +863,7 @@ describe("WorkflowOccurrenceScheduler retry after Stop", () => {
       1,
     );
     let created = 0;
+    const closed: string[] = [];
     let releaseClose!: () => void;
     const closeGate = new Promise<void>((resolve) => {
       releaseClose = resolve;
@@ -889,7 +890,8 @@ describe("WorkflowOccurrenceScheduler retry after Stop", () => {
         state: {},
         messages: [],
       }),
-      closeSession: async () => {
+      closeSession: async (runtimeId) => {
+        closed.push(runtimeId);
         closing();
         await closeGate;
       },
@@ -915,14 +917,22 @@ describe("WorkflowOccurrenceScheduler retry after Stop", () => {
       running.revision,
     );
     releaseClose();
-    await stop;
+    const stopped = await stop;
     await expect(staleRetry).rejects.toThrow(
-      "Workflow run changed before retry",
+      `Workflow run changed before retry: expected revision ${running.revision}, found ${stopped.revision}.`,
     );
 
+    // The serialized CAS rejects before retry creates or owns any replacement
+    // session; Stop's original worker is the only session close.
+    expect(created).toBe(1);
+    expect(closed).toEqual(["runtime-1"]);
     expect(persisted).toMatchObject({ status: "stopped" });
     expect(persisted.occurrences).toEqual([
-      expect.objectContaining({ id: original.id, status: "cancelled" }),
+      expect.objectContaining({
+        id: original.id,
+        status: "cancelled",
+        attempt: 1,
+      }),
     ]);
     expect(persisted.occurrences).not.toContainEqual(
       expect.objectContaining({ status: "ready" }),
