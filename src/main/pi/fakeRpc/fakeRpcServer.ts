@@ -892,17 +892,47 @@ class FakeRpcServer {
       this.options.promptScenario === "all";
     const promptScenarioDelayMs = this.emitPromptScenarioEvents(assistantId);
     if (this.options.promptScenario === "extension-ui-error") {
-      // Leave one render turn between the actionable dialog and terminal error
-      // so this fixture verifies that agent_end cannot demote the request.
+      const id = "ext_fake_dialog_1";
+      // Retain the pending request after the terminal event so an E2E response
+      // exercises Pi Deck's acknowledgement path instead of being rejected by
+      // the fixture as no longer pending.
+      const timer = setTimeout(() => {
+        if (this.pendingExtensionUi?.id === id) {
+          this.pendingExtensionUi = undefined;
+        }
+      }, this.options.extensionUiAutoCompleteTimeoutMs);
+      this.pendingExtensionUi = { id, assistantId, promptText: text, timer };
+      const errorMessage =
+        "Fake provider failed after requesting extension input.";
+      const failedAssistant = {
+        role: "assistant",
+        content: [],
+        api: "openai-completions",
+        provider: this.currentProvider,
+        model: this.currentModel,
+        responseId: assistantId,
+        stopReason: "error",
+        errorMessage,
+        timestamp: Date.now(),
+      };
+      // Mirror Pi's provider-failure sequence: the assistant error update
+      // precedes its fieldless terminal agent_end while the dialog overlaps it.
       this.currentTimers.push(
         setTimeout(
           () => {
             this.agentActive = false;
             this.write({
+              type: "message_update",
+              message: failedAssistant,
+              assistantMessageEvent: {
+                type: "error",
+                reason: "error",
+                error: failedAssistant,
+              },
+            });
+            this.write({
               type: "agent_end",
-              runId: `run_${this.promptCounter}`,
-              status: "error",
-              error: "Fake provider failed after requesting extension input.",
+              messages: [failedAssistant],
               willRetry: false,
             });
             this.write({ type: "agent_settled" });
@@ -1364,6 +1394,9 @@ class FakeRpcServer {
     }
     clearTimeout(pending.timer);
     this.pendingExtensionUi = undefined;
+    // This fixture has already emitted its terminal provider error. Accepting
+    // the late dialog response must not manufacture a successful completion.
+    if (this.options.promptScenario === "extension-ui-error") return;
     this.completePrompt(pending.assistantId, pending.promptText);
   }
 

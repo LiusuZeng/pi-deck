@@ -531,13 +531,18 @@ test("fake RPC can emit a failed tool before a pending extension request", async
   }
 });
 
-test("fake RPC emits an error agent_end after an extension UI request", async () => {
+test("fake RPC retains extension response handling across a production-shaped provider error", async () => {
   const client = spawnFakeRpc([
     "--stream-delay-ms",
     "1",
     "--prompt-scenario",
     "extension-ui-error",
   ]);
+  const received: RpcEventRecord[] = [];
+  const onEvent = (event: RpcEventRecord): void => {
+    received.push(event);
+  };
+  client.on("event", onEvent);
   try {
     const promptEvents = waitForEvents(
       client,
@@ -545,23 +550,53 @@ test("fake RPC emits an error agent_end after an extension UI request", async ()
         events.some((event) => event.type === "extension_ui_request") &&
         events.some(
           (event) =>
-            event.type === "agent_end" &&
-            (event as JsonObject).status === "error",
-        ),
+            event.type === "message_update" &&
+            (
+              (event as JsonObject).assistantMessageEvent as
+                | JsonObject
+                | undefined
+            )?.type === "error",
+        ) &&
+        events.some((event) => event.type === "agent_end"),
     );
     await client.request("prompt", { text: "request approval then fail" });
     const events = await promptEvents;
-    const requestIndex = events.findIndex(
+    const request = events.find(
       (event) => event.type === "extension_ui_request",
+    ) as JsonObject;
+    const requestIndex = events.indexOf(request as RpcEventRecord);
+    const updateIndex = events.findIndex(
+      (event) => event.type === "message_update",
     );
-    const errorEndIndex = events.findIndex(
-      (event) =>
-        event.type === "agent_end" && (event as JsonObject).status === "error",
+    const agentEndIndex = events.findIndex(
+      (event) => event.type === "agent_end",
     );
+    const update = events[updateIndex] as JsonObject;
+    const failedAssistant = update.message as JsonObject;
+    const agentEnd = events[agentEndIndex] as JsonObject;
 
     assert.ok(requestIndex >= 0);
-    assert.ok(errorEndIndex > requestIndex);
+    assert.ok(updateIndex > requestIndex);
+    assert.ok(agentEndIndex > updateIndex);
+    assert.equal(failedAssistant.stopReason, "error");
+    assert.equal(
+      failedAssistant.errorMessage,
+      "Fake provider failed after requesting extension input.",
+    );
+    assert.equal(agentEnd.willRetry, false);
+    assert.equal("status" in agentEnd, false);
+    assert.deepEqual(agentEnd.messages, [failedAssistant]);
+
+    // The terminal error must not make the fake reject the still-pending
+    // dialog response or fabricate a later successful agent_end.
+    await client.send({ type: "extension_ui_response", id: request.id });
+    await delay(10);
+    assert.equal(
+      received.filter((event) => event.type === "agent_end").length,
+      1,
+    );
   } finally {
+    client.off("event", onEvent);
     client.close();
   }
 });

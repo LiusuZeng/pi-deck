@@ -43,7 +43,11 @@
     {
       "id": "tool-card-lifecycle",
       "events": [
-        { "type": "tool_execution_start", "toolCallId": "tool_1", "name": "bash" },
+        {
+          "type": "tool_execution_start",
+          "toolCallId": "tool_1",
+          "name": "bash"
+        },
         {
           "type": "tool_execution_update",
           "toolCallId": "tool_1",
@@ -67,7 +71,11 @@
       "id": "failed-tool-stays-working-without-user-input",
       "events": [
         { "type": "agent_start", "runId": "run_1" },
-        { "type": "tool_execution_start", "toolCallId": "tool_2", "name": "bash" },
+        {
+          "type": "tool_execution_start",
+          "toolCallId": "tool_2",
+          "name": "bash"
+        },
         {
           "type": "tool_execution_end",
           "toolCallId": "tool_2",
@@ -80,14 +88,20 @@
         "baseState": "working",
         "overlays": { "needsUserInput": false, "toolRunning": false },
         "toolCards": {
-          "tool_2": { "status": "error", "isError": true, "output": "command failed" }
+          "tool_2": {
+            "status": "error",
+            "isError": true,
+            "output": "command failed"
+          }
         },
         "sidebarPriority": "working"
       }
     },
     {
       "id": "queue-counts",
-      "events": [{ "type": "queue_update", "steeringCount": 1, "followUpCount": 2 }],
+      "events": [
+        { "type": "queue_update", "steeringCount": 1, "followUpCount": 2 }
+      ],
       "expect": {
         "overlays": {
           "piQueuedSteeringCount": 1,
@@ -184,6 +198,38 @@
           { "requestId": "ext_1", "method": "confirm" }
         ],
         "diagnosticsIncludes": "agent_end while extension UI request is pending"
+      }
+    },
+    {
+      "id": "clearing-final-dialog-restores-terminal-provider-error",
+      "events": [
+        {
+          "type": "extension_ui_request",
+          "requestId": "ext_1",
+          "method": "confirm"
+        },
+        {
+          "type": "agent_end",
+          "messages": [
+            {
+              "role": "assistant",
+              "stopReason": "error",
+              "errorMessage": "Provider quota exhausted."
+            }
+          ],
+          "willRetry": false
+        },
+        {
+          "type": "extension_ui_response_sent",
+          "requestId": "ext_1"
+        }
+      ],
+      "expect": {
+        "baseState": "error",
+        "overlays": { "needsUserInput": false },
+        "sidebarPriority": "error",
+        "pendingExtensionUiQueue": [],
+        "diagnosticsIncludes": "Provider quota exhausted."
       }
     }
   ]

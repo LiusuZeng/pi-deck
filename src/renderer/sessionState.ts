@@ -49,6 +49,8 @@ export interface ReducedSessionState extends SidebarSessionState {
   pendingExtensionUiQueue: PendingExtensionUiRequestState[];
   toolCards: Record<string, ToolExecutionCardState>;
   diagnostics: string[];
+  /** A provider error ended this turn while an extension dialog was pending. */
+  terminalProviderErrorObserved: boolean;
 }
 
 export type SidebarIndicatorKind =
@@ -90,6 +92,7 @@ export function createInitialReducedSessionState(
     pendingExtensionUiQueue: patch.pendingExtensionUiQueue ?? [],
     toolCards: patch.toolCards ?? {},
     diagnostics: patch.diagnostics ?? [],
+    terminalProviderErrorObserved: patch.terminalProviderErrorObserved ?? false,
   };
 }
 
@@ -110,6 +113,7 @@ export function reduceSessionRuntimeEvent(
       return {
         ...state,
         baseState: "working",
+        terminalProviderErrorObserved: false,
         overlays: { ...state.overlays, streaming: false },
       };
     case "message_update":
@@ -159,8 +163,10 @@ export function reduceSessionRuntimeEvent(
         state,
         getString(event, "requestId"),
       );
+    case "extension_ui_response_failed":
+      return reduceExtensionUiResponseFailedEvent(state, event);
     case "agent_end":
-      return reduceAgentEndEvent(state);
+      return reduceAgentEndEvent(state, event);
     case "diagnostic": {
       const message = getString(event, "message");
       return message
@@ -298,20 +304,51 @@ export function isToolExecutionFailure(event: RuntimeEventLike): boolean {
   if (event.type !== "tool_execution_end") {
     return false;
   }
-  const status = getString(event, "status");
-  return (
-    getBoolean(event, "isError") === true ||
-    status === "error" ||
-    status === "failed" ||
-    hasNonZeroToolExitCode(event)
+
+  // Keep failure classification aligned with the locations rendered in the
+  // tool detail card: Pi adapters may place command status, errors, and exit
+  // codes directly on the event, in output, in result, or in result.output.
+  const result = getRecord(event, "result");
+  const partialResult = getRecord(event, "partialResult");
+  const output = getRecord(event, "output");
+  const resultOutput = getRecord(result, "output");
+  const partialResultOutput = getRecord(partialResult, "output");
+  return [
+    event,
+    output,
+    result,
+    partialResult,
+    resultOutput,
+    partialResultOutput,
+  ].some(
+    (record) => record !== undefined && isFailedToolExecutionRecord(record),
   );
 }
 
-function hasNonZeroToolExitCode(event: RuntimeEventLike): boolean {
+function isFailedToolExecutionRecord(record: RuntimeEventLike): boolean {
+  const status = getString(record, "status");
+  return (
+    getBoolean(record, "isError") === true ||
+    status === "error" ||
+    status === "failed" ||
+    hasNonZeroToolExitCode(record) ||
+    hasToolError(record)
+  );
+}
+
+function hasNonZeroToolExitCode(record: RuntimeEventLike): boolean {
   return ["exitCode", "exit_code", "code"].some((key) => {
-    const value = getNumber(event, key);
+    const value = getNumber(record, key);
     return value !== undefined && value !== 0;
   });
+}
+
+function hasToolError(record: RuntimeEventLike): boolean {
+  if (getString(record, "errorMessage")?.trim()) return true;
+  const error = record.error;
+  return (
+    error !== undefined && error !== null && error !== false && error !== ""
+  );
 }
 
 function createToolCard(input: {
@@ -365,23 +402,56 @@ function clearPendingExtensionUiRequest(
       )
     : state.pendingExtensionUiQueue.slice(1);
 
+  const stillWaitingForInput = pendingExtensionUiQueue.length > 0;
   return {
     ...state,
-    baseState:
-      pendingExtensionUiQueue.length > 0 ? "waitingForInput" : "working",
+    baseState: stillWaitingForInput
+      ? "waitingForInput"
+      : state.terminalProviderErrorObserved
+        ? "error"
+        : "working",
     pendingExtensionUiQueue,
     overlays: {
       ...state.overlays,
-      needsUserInput: pendingExtensionUiQueue.length > 0,
+      needsUserInput: stillWaitingForInput,
     },
   };
 }
 
-function reduceAgentEndEvent(state: ReducedSessionState): ReducedSessionState {
+function reduceExtensionUiResponseFailedEvent(
+  state: ReducedSessionState,
+  event: RuntimeEventLike,
+): ReducedSessionState {
   const hasPendingExtensionUi = state.pendingExtensionUiQueue.length > 0;
+  const message =
+    getString(event, "message") ??
+    "Pi Deck could not write the extension UI response to Pi.";
   return {
     ...state,
-    baseState: hasPendingExtensionUi ? "waitingForInput" : "idle",
+    baseState: hasPendingExtensionUi ? "waitingForInput" : "error",
+    overlays: {
+      ...state.overlays,
+      needsUserInput: hasPendingExtensionUi,
+    },
+    diagnostics: [...state.diagnostics, message],
+  };
+}
+
+function reduceAgentEndEvent(
+  state: ReducedSessionState,
+  event: RuntimeEventLike,
+): ReducedSessionState {
+  const hasPendingExtensionUi = state.pendingExtensionUiQueue.length > 0;
+  const terminalError = getTerminalProviderError(event);
+  const terminalProviderErrorObserved = terminalError !== undefined;
+  return {
+    ...state,
+    baseState: hasPendingExtensionUi
+      ? "waitingForInput"
+      : terminalProviderErrorObserved
+        ? "error"
+        : "idle",
+    terminalProviderErrorObserved,
     activeTools: [],
     overlays: {
       ...state.overlays,
@@ -389,13 +459,46 @@ function reduceAgentEndEvent(state: ReducedSessionState): ReducedSessionState {
       toolRunning: false,
       needsUserInput: hasPendingExtensionUi,
     },
-    diagnostics: hasPendingExtensionUi
-      ? [
-          ...state.diagnostics,
-          "agent_end while extension UI request is pending",
-        ]
-      : state.diagnostics,
+    diagnostics: [
+      ...state.diagnostics,
+      ...(hasPendingExtensionUi
+        ? ["agent_end while extension UI request is pending"]
+        : []),
+      ...(terminalError === undefined ? [] : [terminalError]),
+    ],
   };
+}
+
+function getTerminalProviderError(event: RuntimeEventLike): string | undefined {
+  const status = getString(event, "status");
+  const directError = getErrorMessage(event);
+  if (status === "error" || status === "failed" || directError !== undefined) {
+    return directError ?? "Pi agent failed.";
+  }
+
+  const messages = getArray(event, "messages")
+    ?.map((message) =>
+      message !== null && typeof message === "object" && !Array.isArray(message)
+        ? (message as RuntimeEventLike)
+        : undefined,
+    )
+    .filter((message): message is RuntimeEventLike => message !== undefined);
+  const finalMessage = messages?.at(-1);
+  if (getString(finalMessage, "stopReason") === "error") {
+    return getErrorMessage(finalMessage) ?? "Pi agent failed.";
+  }
+  return undefined;
+}
+
+function getErrorMessage(
+  record: RuntimeEventLike | undefined,
+): string | undefined {
+  return (
+    getString(record, "errorMessage") ??
+    getString(record, "error") ??
+    getString(getRecord(record, "error"), "errorMessage") ??
+    getString(getRecord(record, "error"), "message")
+  );
 }
 
 function getToolCallId(event: RuntimeEventLike): string | undefined {

@@ -5670,7 +5670,7 @@ test("real mode surfaces asynchronous provider errors with fake Pi", async () =>
   }
 });
 
-test("pending extension input remains Needs attention after an error agent_end", async () => {
+test("responding to extension input after a provider error restores Failed diagnostics", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-e2e-extension-ui-error-"),
   );
@@ -5727,6 +5727,37 @@ test("pending extension input remains Needs attention after an error agent_end",
     await expect(page.locator(".state-banner.waiting")).toContainText(
       "waiting for user input",
     );
+
+    // The fake retains its pending dialog after its production-shaped terminal
+    // error, so delivery clears the final request without manufacturing a
+    // completion. The terminal failure and its diagnostic must resurface.
+    await page.getByRole("button", { name: "Confirm", exact: true }).click();
+    await expect(
+      page.getByText("Extension UI response delivered to Pi."),
+    ).toBeVisible();
+    await expect(page.getByText("Fake confirm", { exact: true })).toHaveCount(
+      0,
+    );
+    await expect(page.locator(".state-banner.error")).toContainText(
+      "error state",
+    );
+    await expect(
+      page.getByText("Fake provider failed after requesting extension input."),
+    ).toBeVisible();
+    await expect(page.getByText("Agent is working…")).toHaveCount(0);
+    await expect(
+      page
+        .getByRole("button", { name: `Session: ${prompt}` })
+        .getByRole("img", { name: "Error" }),
+    ).toBeVisible();
+
+    await page.getByRole("button", { name: /^All Work/ }).click();
+    await expectAllWorkLaunch(page);
+    const failedRow = page
+      .locator(".activity-inbox-row--failed")
+      .filter({ hasText: prompt });
+    await expect(failedRow).toHaveCount(1);
+    await expect(failedRow).toContainText("Failed");
   } finally {
     await app.close();
     fs.rmSync(root, { recursive: true, force: true });

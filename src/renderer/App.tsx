@@ -7944,21 +7944,28 @@ function reduceRuntimeEvent(
     case "extension_ui_response_sent":
     case "extension_ui_request_timeout":
       return clearExtensionUiRequest(session, getString(event, "requestId"));
-    case "extension_ui_response_failed":
-      return appendDiagnostic(
+    case "extension_ui_response_failed": {
+      const stillWaitingForInput =
+        (session.pendingExtensionUiRequests?.length ?? 0) > 0;
+      // The response write failed, so its request remains actionable. Keep the
+      // detail banner aligned with the sidebar and Work attention state.
+      return appendRuntimeErrorDiagnostic(
         {
           ...session,
-          status: "error",
-          baseState: "error",
-          subtitle: "Error · extension UI response was not delivered",
+          status: stillWaitingForInput ? "waiting" : "error",
+          baseState: stillWaitingForInput ? "waitingForInput" : "error",
+          overlays: {
+            ...session.overlays,
+            needsUserInput: stillWaitingForInput,
+          },
+          subtitle: stillWaitingForInput
+            ? "Waiting · extension input required"
+            : "Error · extension UI response was not delivered",
         },
-        {
-          tone: "error",
-          content:
-            getString(event, "message") ??
-            "Pi Deck could not write the extension UI response to Pi.",
-        },
+        getString(event, "message") ??
+          "Pi Deck could not write the extension UI response to Pi.",
       );
+    }
     case "agent_end": {
       const status = getString(event, "status");
       const willRetry = getBoolean(event, "willRetry") === true;
@@ -8055,7 +8062,9 @@ function reduceRuntimeEvent(
           : endedWithError
             ? "error"
             : "idle",
-        providerErrorObserved: false,
+        // Preserve a terminal provider failure behind an actionable dialog so
+        // clearing the final request restores Failed rather than working/idle.
+        providerErrorObserved: endedWithError,
         ...(endedWithError ? {} : { lastError: undefined }),
         overlays: {
           ...session.overlays,
@@ -8219,15 +8228,26 @@ function clearExtensionUiRequest(
       ? pending.slice(1)
       : pending.filter((request) => request.id !== requestId);
   const stillWaiting = pendingExtensionUiRequests.length > 0;
+  const terminalProviderFailure = session.providerErrorObserved === true;
   return {
     ...session,
-    status: stillWaiting ? "waiting" : "working",
-    baseState: stillWaiting ? "waitingForInput" : "working",
+    status: stillWaiting
+      ? "waiting"
+      : terminalProviderFailure
+        ? "error"
+        : "working",
+    baseState: stillWaiting
+      ? "waitingForInput"
+      : terminalProviderFailure
+        ? "error"
+        : "working",
     pendingExtensionUiRequests,
     overlays: { ...session.overlays, needsUserInput: stillWaiting },
     subtitle: stillWaiting
       ? "Waiting · extension input required"
-      : `Working · ${backendLabel(session)} stream`,
+      : terminalProviderFailure
+        ? "Error · backend stream failed"
+        : `Working · ${backendLabel(session)} stream`,
     updatedAt: "Now",
     updatedAtMs: Date.now(),
   };
@@ -8684,6 +8704,10 @@ function reduceMessageUpdate(
 
   const errorMessage = getRuntimeEventErrorMessage(event);
   const isErrorUpdate = hasRuntimeEventError(event);
+  // An actionable dialog takes precedence over all stream updates, including
+  // the provider error update that precedes a production agent_end.
+  const stillWaitingForInput =
+    (session.pendingExtensionUiRequests?.length ?? 0) > 0;
   const nextSession: SessionViewModel = {
     ...session,
     ...(usageByMessageId !== undefined ? { usageByMessageId } : {}),
@@ -8692,20 +8716,32 @@ function reduceMessageUpdate(
       isErrorUpdate || session.providerErrorObserved === true,
     // An assistant message's `done` only completes that message. The agent
     // may still be running tools or emit an authoritative agent_end next.
-    status: isErrorUpdate
-      ? "error"
-      : session.status === "aborting"
-        ? "aborting"
+    status: stillWaitingForInput
+      ? "waiting"
+      : isErrorUpdate
+        ? "error"
+        : session.status === "aborting"
+          ? "aborting"
+          : "working",
+    baseState: stillWaitingForInput
+      ? "waitingForInput"
+      : isErrorUpdate
+        ? "error"
         : "working",
-    baseState: isErrorUpdate ? "error" : "working",
-    overlays: { ...session.overlays, streaming: !done && !isErrorUpdate },
-    subtitle: isErrorUpdate
-      ? "Error · backend stream failed"
-      : session.status === "aborting"
-        ? "Aborting · waiting for Pi confirmation"
-        : done
-          ? "Working · waiting for Pi completion"
-          : `Working · ${backendLabel(session)} stream`,
+    overlays: {
+      ...session.overlays,
+      streaming: !done && !isErrorUpdate,
+      needsUserInput: stillWaitingForInput,
+    },
+    subtitle: stillWaitingForInput
+      ? "Waiting · extension input required"
+      : isErrorUpdate
+        ? "Error · backend stream failed"
+        : session.status === "aborting"
+          ? "Aborting · waiting for Pi confirmation"
+          : done
+            ? "Working · waiting for Pi completion"
+            : `Working · ${backendLabel(session)} stream`,
     ...(isErrorUpdate ? { workingStartedAtMs: undefined } : {}),
     awaitingAgentEnd: done && !isErrorUpdate,
     lastRuntimeEventLabel: isErrorUpdate

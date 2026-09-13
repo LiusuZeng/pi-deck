@@ -1045,7 +1045,9 @@ describe("actionable session attention", () => {
     ).toMatchObject({ state: "error" });
   });
 
-  it("keeps a pending extension dialog Needs attention after terminal error", () => {
+  it("restores terminal provider failure after its pending extension dialog clears", () => {
+    const errorMessage = "Provider failed after requesting approval.";
+    const failedAssistant = productionAssistantMessage("error", errorMessage);
     let session = __rendererTestHooks.reduceRuntimeEvent(
       baseSession() as any,
       {
@@ -1060,15 +1062,35 @@ describe("actionable session attention", () => {
       { id: "approval-1", method: "confirm" },
     ]);
     session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "message_update",
+      runtimeId: "session-1",
+      message: failedAssistant,
+      assistantMessageEvent: {
+        type: "error",
+        reason: "error",
+        error: failedAssistant,
+      },
+    } as any);
+    expect(session.status).toBe("waiting");
+    expect(session.baseState).toBe("waitingForInput");
+    expect(session.overlays.needsUserInput).toBe(true);
+    expect(selectSidebarIndicator(session).kind).toBe("needsInput");
+    expect(runtimeErrorDiagnostics(session)).toMatchObject([
+      { content: errorMessage },
+    ]);
+
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
       type: "agent_end",
       runtimeId: "session-1",
-      status: "error",
-      error: "Provider failed after requesting approval.",
+      messages: [failedAssistant],
       willRetry: false,
     } as any);
-    const source = __rendererTestHooks.activitySourceSessions([session], {
-      "workspace-a": "Workspace A",
-    })[0]!;
+    const waitingSource = __rendererTestHooks.activitySourceSessions(
+      [session],
+      {
+        "workspace-a": "Workspace A",
+      },
+    )[0]!;
 
     expect(session.status).toBe("waiting");
     expect(session.baseState).toBe("waitingForInput");
@@ -1081,10 +1103,62 @@ describe("actionable session attention", () => {
       { id: "approval-1", method: "confirm" },
     ]);
     expect(selectSidebarIndicator(session).kind).toBe("needsInput");
-    expect(buildActivityInbox([source]).groups.needsAttention).toHaveLength(1);
-    expect(buildActivityInbox([source]).groups.failed).toHaveLength(0);
+    expect(
+      buildActivityInbox([waitingSource]).groups.needsAttention,
+    ).toHaveLength(1);
+    expect(buildActivityInbox([waitingSource]).groups.failed).toHaveLength(0);
     expect(runtimeErrorDiagnostics(session)).toMatchObject([
-      { content: "Provider failed after requesting approval." },
+      { content: errorMessage },
+    ]);
+
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "extension_ui_response_sent",
+      runtimeId: "session-1",
+      requestId: "approval-1",
+    } as any);
+    const failedSource = __rendererTestHooks.activitySourceSessions([session], {
+      "workspace-a": "Workspace A",
+    })[0]!;
+    expect(session.status).toBe("error");
+    expect(session.baseState).toBe("error");
+    expect(session.overlays.needsUserInput).toBe(false);
+    expect(selectSidebarIndicator(session).kind).toBe("error");
+    expect(
+      buildActivityInbox([failedSource]).groups.needsAttention,
+    ).toHaveLength(0);
+    expect(buildActivityInbox([failedSource]).groups.failed).toHaveLength(1);
+    expect(runtimeErrorDiagnostics(session)).toMatchObject([
+      { content: errorMessage },
+    ]);
+  });
+
+  it("keeps a failed extension response Needs attention while its dialog remains pending", () => {
+    let session = __rendererTestHooks.reduceRuntimeEvent(
+      baseSession() as any,
+      {
+        type: "extension_ui_request",
+        runtimeId: "session-1",
+        id: "approval-1",
+        method: "confirm",
+        title: "Approve command retry",
+      } as any,
+    );
+    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      type: "extension_ui_response_failed",
+      runtimeId: "session-1",
+      requestId: "approval-1",
+      message: "Extension response transport failed.",
+    } as any);
+    const source = __rendererTestHooks.activitySourceSessions([session], {
+      "workspace-a": "Workspace A",
+    })[0]!;
+
+    expect(session.status).toBe("waiting");
+    expect(session.baseState).toBe("waitingForInput");
+    expect(selectSidebarIndicator(session).kind).toBe("needsInput");
+    expect(buildActivityInbox([source]).groups.needsAttention).toHaveLength(1);
+    expect(runtimeErrorDiagnostics(session)).toMatchObject([
+      { content: "Extension response transport failed." },
     ]);
   });
 
