@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { synthesisDeliveryPayload } from "./taskSessionSynthesisDelivery.js";
 import {
   TaskSessionOrchestrator,
+  isPersistedTaskSessionState,
   taskSessionProgressForWorkerEventType,
   taskSessionTelemetryForWorkerEventType,
   type PersistedTaskSessionState,
@@ -14,6 +16,7 @@ function setup(capacity = 20) {
   const states: ReturnType<TaskSessionOrchestrator<string, Worker>["state"]>[] =
     [];
   let workers = 0;
+  const receipts = new Set<string>();
   const orchestrator = new TaskSessionOrchestrator<string, Worker>({
     plan: () => ({
       contextSummary: "relevant parent history",
@@ -36,7 +39,11 @@ function setup(capacity = 20) {
       };
     },
     hasGlobalCapacity: () => workers < capacity,
-    synthesize: () => undefined,
+    synthesize: async ({ delivery, markDispatched }) => {
+      await markDispatched();
+      receipts.add(delivery.id);
+    },
+    hasSynthesisDelivery: ({ delivery }) => receipts.has(delivery.id),
     onState: (_parent, state) => states.push(state),
   });
   orchestrator.addParent("parent", {
@@ -86,6 +93,7 @@ function setupRestore(
   onState: () => void = () => undefined,
 ) {
   const launches: TaskSessionLaunch<string>[] = [];
+  const receipts = new Set<string>();
   const orchestrator = new TaskSessionOrchestrator<string, Worker>({
     plan: () => ({
       contextSummary: "context",
@@ -97,7 +105,12 @@ function setupRestore(
       return { close: () => undefined };
     },
     hasGlobalCapacity: () => true,
-    synthesize,
+    synthesize: async (input) => {
+      await input.markDispatched();
+      await synthesize();
+      receipts.add(input.delivery.id);
+    },
+    hasSynthesisDelivery: ({ delivery }) => receipts.has(delivery.id),
     scheduleSynthesisRetry: () => undefined,
     onState,
   });
@@ -167,6 +180,7 @@ describe("TaskSessionOrchestrator", () => {
   it("makes exactly three retries after the initial attempt then synthesizes once", async () => {
     const { launches } = setup();
     let reports = 0;
+    let receipt = false;
     const reporter = new TaskSessionOrchestrator<string, Worker>({
       plan: () => ({
         contextSummary: "context",
@@ -178,9 +192,12 @@ describe("TaskSessionOrchestrator", () => {
         return { close: () => undefined };
       },
       hasGlobalCapacity: () => true,
-      synthesize: () => {
+      synthesize: async ({ markDispatched }) => {
+        await markDispatched();
         reports++;
+        receipt = true;
       },
+      hasSynthesisDelivery: () => receipt,
       onState: () => undefined,
     });
     reporter.addParent("parent", { mode: "parallel" });
@@ -246,12 +263,13 @@ describe("TaskSessionOrchestrator", () => {
     expect(JSON.stringify(saved)).not.toContain("SECRET_BASE64");
   });
 
-  it("publishes a persistable restored synthesis attempt before deferred delivery settles", async () => {
+  it("keeps one reserved restored synthesis across repeated reconciliation", async () => {
     let resolveDelivery!: () => void;
     const delivery = new Promise<void>((resolve) => {
       resolveDelivery = resolve;
     });
     let deliveryStarted = false;
+    let deliveries = 0;
     let current: ReturnType<typeof setupRestore> | undefined;
     const publications: {
       state: PersistedTaskSessionState;
@@ -260,6 +278,7 @@ describe("TaskSessionOrchestrator", () => {
     const restored = setupRestore(
       () => {
         deliveryStarted = true;
+        deliveries++;
         return delivery;
       },
       () => {
@@ -272,8 +291,13 @@ describe("TaskSessionOrchestrator", () => {
     );
     current = restored;
 
-    restored.orchestrator.restore("parent", persistedState("completed"));
+    const saved = persistedState("completed");
+    restored.orchestrator.restore("parent", saved);
+    // A duplicate reconciliation can see the pre-reservation store snapshot.
+    // It must retain the in-flight plan instead of launching a second report.
+    restored.orchestrator.restore("parent", saved);
 
+    await tick();
     const reservation = publications.find(
       ({ state }) => state.plans[0]?.synthesisAttempts === 1,
     );
@@ -283,13 +307,18 @@ describe("TaskSessionOrchestrator", () => {
     });
     expect(reservation?.state.plans[0]?.synthesisReported).toBeUndefined();
     expect(restored.orchestrator.state("parent").tasks).toHaveLength(1);
+    expect(deliveries).toBe(1);
 
     resolveDelivery();
     await tick();
-    expect(restored.orchestrator.exportState("parent").plans[0]).toMatchObject({
+    const reported = restored.orchestrator.exportState("parent");
+    expect(reported.plans[0]).toMatchObject({
       synthesisAttempts: 1,
       synthesisReported: true,
     });
+    restored.orchestrator.restore("parent", reported);
+    await tick();
+    expect(deliveries).toBe(1);
   });
 
   it("synthesizes restored all-failed terminal plans without relaunching workers", async () => {
@@ -329,6 +358,16 @@ describe("TaskSessionOrchestrator", () => {
       { lifecycle: "interrupted" },
     ]);
     expect(reports).toBe(0);
+    const reconciled = restored.orchestrator.exportState("parent");
+    const interruptedTransitions = reconciled.plans[0]!.tasks[1]!.transitions;
+    restored.orchestrator.restore("parent", reconciled);
+    await tick();
+    expect(restored.launches).toHaveLength(0);
+    expect(reports).toBe(0);
+    expect(
+      restored.orchestrator.exportState("parent").plans[0]!.tasks[1]!
+        .transitions,
+    ).toEqual(interruptedTransitions);
 
     const rerestored = setupRestore(() => {
       reports++;
@@ -673,7 +712,9 @@ describe("TaskSessionOrchestrator", () => {
         return { close: () => undefined };
       },
       hasGlobalCapacity: () => true,
-      synthesize: () => {
+      hasSynthesisDelivery: () => false,
+      synthesize: async ({ markDispatched }) => {
+        await markDispatched();
         reports++;
         throw new Error("delivery unavailable");
       },
@@ -690,16 +731,27 @@ describe("TaskSessionOrchestrator", () => {
     launches[0].callbacks.completed();
     for (let index = 0; index < 3; index++) {
       await tick();
+      await tick();
       expect(retries).toHaveLength(1);
       retries.shift()!();
     }
+    await tick();
+    await tick();
+    await tick();
+    await tick();
+    expect(reports).toBe(4);
+    // The cap decision gets one receipt-only reconciliation; it must not send.
+    expect(retries).toHaveLength(1);
+    retries.shift()!();
     await tick();
     expect(reports).toBe(4);
     expect(retries).toHaveLength(0);
     expect(orchestrator.state("parent").tasks).toHaveLength(1);
     expect(orchestrator.exportState("parent").plans[0]).toMatchObject({
       synthesisAttempts: 4,
-      synthesisFailureTrace: "delivery unavailable",
+      synthesisCapped: true,
+      synthesisFailureTrace:
+        "Synthesis send-attempt cap reached without a durable parent receipt.",
     });
   });
 
@@ -707,6 +759,7 @@ describe("TaskSessionOrchestrator", () => {
     const launches: TaskSessionLaunch<string>[] = [];
     let failDelivery = true;
     let reports = 0;
+    let receipt = false;
     const orchestrator = new TaskSessionOrchestrator<string, Worker>({
       plan: () => ({
         contextSummary: "context",
@@ -718,10 +771,13 @@ describe("TaskSessionOrchestrator", () => {
         return { close: () => undefined };
       },
       hasGlobalCapacity: () => true,
-      synthesize: () => {
+      synthesize: async ({ markDispatched }) => {
+        await markDispatched();
         reports++;
         if (failDelivery) throw new Error("offline");
+        receipt = true;
       },
+      hasSynthesisDelivery: () => receipt,
       scheduleSynthesisRetry: () => undefined,
       onState: () => undefined,
     });
@@ -736,6 +792,401 @@ describe("TaskSessionOrchestrator", () => {
     await tick();
     expect(reports).toBe(2);
     expect(orchestrator.state("parent").tasks).toEqual([]);
+  });
+
+  it("uses a durable write-ahead record before it dispatches a parent synthesis", async () => {
+    const events: string[] = [];
+    const persisted: PersistedTaskSessionState[] = [];
+    let receipt = false;
+    const reporter = new TaskSessionOrchestrator<string, Worker>({
+      plan: () => ({
+        contextSummary: "context",
+        tasks: [{ generatedName: "one", brief: "brief" }],
+      }),
+      resolveWorkerSettings: () => ({}),
+      createWorker: () => ({ close: () => undefined }),
+      hasGlobalCapacity: () => true,
+      persistSynthesisDelivery: (_parent, state) => {
+        events.push("persist");
+        persisted.push(state);
+      },
+      synthesize: async ({ delivery, markDispatched }) => {
+        await markDispatched();
+        events.push("dispatch");
+        receipt = true;
+        expect(delivery).toMatchObject({
+          attempt: 1,
+          state: "dispatching",
+          payload: expect.stringContaining(
+            "<!-- pi-deck-synthesis-delivery:v1:",
+          ),
+          payloadFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+        });
+        expect(events).toContain("persist");
+      },
+      hasSynthesisDelivery: () => receipt,
+      onState: () => undefined,
+    });
+    reporter.addParent("parent", { mode: "parallel" });
+    reporter.restore("parent", persistedState("completed"));
+    await tick();
+    await tick();
+    expect(events.indexOf("persist")).toBeLessThan(events.indexOf("dispatch"));
+    expect(persisted[0]?.plans[0]?.synthesisDelivery).toMatchObject({
+      attempt: 0,
+      state: "dispatching",
+    });
+    expect(
+      persisted.some(
+        (state) => state.plans[0]?.synthesisDelivery?.attempt === 1,
+      ),
+    ).toBe(true);
+  });
+
+  it("does not dispatch when the write-ahead persistence barrier fails", async () => {
+    const retries: (() => void)[] = [];
+    let dispatches = 0;
+    const reporter = new TaskSessionOrchestrator<string, Worker>({
+      plan: () => ({
+        contextSummary: "context",
+        tasks: [{ generatedName: "one", brief: "brief" }],
+      }),
+      resolveWorkerSettings: () => ({}),
+      createWorker: () => ({ close: () => undefined }),
+      hasGlobalCapacity: () => true,
+      persistSynthesisDelivery: () => {
+        throw new Error("disk full");
+      },
+      synthesize: () => {
+        dispatches++;
+      },
+      scheduleSynthesisRetry: (retry) => retries.push(retry),
+      synthesisRetryDelayMs: 0,
+      onState: () => undefined,
+    });
+    reporter.addParent("parent", { mode: "parallel" });
+    reporter.restore("parent", persistedState("completed"));
+    await tick();
+    expect(dispatches).toBe(0);
+    expect(retries).toHaveLength(1);
+    expect(reporter.exportState("parent").plans[0]).toMatchObject({
+      synthesisDelivery: { state: "dispatching", attempt: 0 },
+      synthesisFailureTrace: "disk full",
+    });
+    expect(
+      reporter.exportState("parent").plans[0]?.synthesisAttempts,
+    ).toBeUndefined();
+  });
+
+  it("fails closed when receipt history cannot be inspected", async () => {
+    const retries: (() => void)[] = [];
+    let dispatches = 0;
+    const reporter = new TaskSessionOrchestrator<string, Worker>({
+      plan: () => ({
+        contextSummary: "context",
+        tasks: [{ generatedName: "one", brief: "brief" }],
+      }),
+      resolveWorkerSettings: () => ({}),
+      createWorker: () => ({ close: () => undefined }),
+      hasGlobalCapacity: () => true,
+      persistSynthesisDelivery: () => undefined,
+      hasSynthesisDelivery: () => {
+        throw new Error("history unavailable");
+      },
+      synthesize: () => {
+        dispatches++;
+      },
+      scheduleSynthesisRetry: (retry) => retries.push(retry),
+      synthesisRetryDelayMs: 0,
+      onState: () => undefined,
+    });
+    reporter.addParent("parent", { mode: "parallel" });
+    reporter.restore("parent", persistedState("completed"));
+    await tick();
+    const delivery = reporter.exportState("parent").plans[0]?.synthesisDelivery;
+    expect(dispatches).toBe(0);
+    expect(retries).toHaveLength(1);
+    expect(delivery).toMatchObject({ state: "dispatching", attempt: 0 });
+    retries[0]!();
+    await tick();
+    expect(
+      reporter.exportState("parent").plans[0]?.synthesisDelivery,
+    ).toMatchObject({
+      id: delivery?.id,
+      payload: delivery?.payload,
+      payloadFingerprint: delivery?.payloadFingerprint,
+      attempt: 0,
+    });
+    expect(dispatches).toBe(0);
+  });
+
+  it("recovers a persisted dispatching delivery from its Pi receipt without resending", async () => {
+    let dispatches = 0;
+    let saved!: PersistedTaskSessionState;
+    const first = new TaskSessionOrchestrator<string, Worker>({
+      plan: () => ({
+        contextSummary: "context",
+        tasks: [{ generatedName: "one", brief: "brief" }],
+      }),
+      resolveWorkerSettings: () => ({}),
+      createWorker: () => ({ close: () => undefined }),
+      hasGlobalCapacity: () => true,
+      persistSynthesisDelivery: (_parent, state) => {
+        saved = state;
+      },
+      synthesize: async ({ markDispatched }) => {
+        await markDispatched();
+        return new Promise<void>(() => undefined);
+      },
+      hasSynthesisDelivery: () => false,
+      onState: () => undefined,
+    });
+    first.addParent("parent", { mode: "parallel" });
+    first.restore("parent", persistedState("completed"));
+    await tick();
+    expect(saved.plans[0]?.synthesisDelivery).toMatchObject({
+      state: "dispatching",
+      attempt: 1,
+    });
+
+    const recovered = new TaskSessionOrchestrator<string, Worker>({
+      plan: () => ({
+        contextSummary: "context",
+        tasks: [{ generatedName: "one", brief: "brief" }],
+      }),
+      resolveWorkerSettings: () => ({}),
+      createWorker: () => ({ close: () => undefined }),
+      hasGlobalCapacity: () => true,
+      hasSynthesisDelivery: () => true,
+      persistSynthesisDelivery: (_parent, state) => {
+        saved = state;
+      },
+      synthesize: () => {
+        dispatches++;
+      },
+      onState: () => undefined,
+    });
+    recovered.addParent("parent", { mode: "parallel" });
+    recovered.restore("parent", saved);
+    await tick();
+    await tick();
+    expect(dispatches).toBe(0);
+    expect(recovered.exportState("parent").plans[0]).toMatchObject({
+      synthesisReported: true,
+      synthesisDelivery: { state: "delivered", attempt: 1 },
+    });
+  });
+
+  it("does not consume sends for preflight failures and reuses the exact outbox payload", async () => {
+    const retries: (() => void)[] = [];
+    const deliveries: string[] = [];
+    const reporter = new TaskSessionOrchestrator<string, Worker>({
+      plan: () => ({
+        contextSummary: "context",
+        tasks: [{ generatedName: "one", brief: "brief" }],
+      }),
+      resolveWorkerSettings: () => ({}),
+      createWorker: () => ({ close: () => undefined }),
+      hasGlobalCapacity: () => true,
+      hasSynthesisDelivery: () => false,
+      synthesize: ({ delivery }) => {
+        deliveries.push(delivery.payload);
+        throw new Error("parent unavailable during preflight");
+      },
+      scheduleSynthesisRetry: (retry) => retries.push(retry),
+      synthesisRetryDelayMs: 0,
+      onState: () => undefined,
+    });
+    reporter.addParent("parent", { mode: "parallel" });
+    reporter.restore("parent", persistedState("completed"));
+    await tick();
+    retries.shift()!();
+    await tick();
+    expect(deliveries).toHaveLength(2);
+    expect(new Set(deliveries).size).toBe(1);
+    const plan = reporter.exportState("parent").plans[0]!;
+    expect(plan.synthesisAttempts).toBeUndefined();
+    expect(plan.synthesisDelivery).toMatchObject({
+      attempt: 0,
+      state: "dispatching",
+    });
+  });
+
+  it("probes an exhausted cap before failing it and accepts its durable receipt", async () => {
+    let sends = 0;
+    let probes = 0;
+    const delivery = synthesisDeliveryPayload({
+      id: "12345678-1234-1234-1234-123456789abc",
+      attempt: 4,
+      originalPrompt: "restored prompt",
+      tasks: persistedState("completed").plans[0]!.tasks,
+    });
+    const saved = persistedState("completed", { synthesisAttempts: 4 });
+    saved.plans[0]!.synthesisDelivery = delivery;
+    const receiptAware = new TaskSessionOrchestrator<string, Worker>({
+      plan: () => ({
+        contextSummary: "context",
+        tasks: [{ generatedName: "one", brief: "brief" }],
+      }),
+      resolveWorkerSettings: () => ({}),
+      createWorker: () => ({ close: () => undefined }),
+      hasGlobalCapacity: () => true,
+      hasSynthesisDelivery: () => (probes++, true),
+      synthesize: () => {
+        sends++;
+      },
+      onState: () => undefined,
+    });
+    receiptAware.addParent("parent", { mode: "parallel" });
+    receiptAware.restore("parent", saved);
+    await tick();
+    expect(probes).toBe(1);
+    expect(sends).toBe(0);
+    expect(receiptAware.exportState("parent").plans[0]).toMatchObject({
+      synthesisReported: true,
+      synthesisDelivery: { state: "delivered", attempt: 4 },
+    });
+  });
+
+  it("retries a capped delivery when its authoritative receipt probe is unavailable", async () => {
+    const retries: (() => void)[] = [];
+    let probes = 0;
+    let sends = 0;
+    const saved = persistedState("completed", { synthesisAttempts: 4 });
+    saved.plans[0]!.synthesisDelivery = synthesisDeliveryPayload({
+      attempt: 4,
+      originalPrompt: "restored prompt",
+      tasks: saved.plans[0]!.tasks,
+    });
+    const reporter = new TaskSessionOrchestrator<string, Worker>({
+      plan: () => ({
+        contextSummary: "context",
+        tasks: [{ generatedName: "one", brief: "brief" }],
+      }),
+      resolveWorkerSettings: () => ({}),
+      createWorker: () => ({ close: () => undefined }),
+      hasGlobalCapacity: () => true,
+      hasSynthesisDelivery: () => {
+        probes++;
+        if (probes === 1) throw new Error("history unavailable");
+        return true;
+      },
+      synthesize: () => {
+        sends++;
+      },
+      scheduleSynthesisRetry: (retry) => retries.push(retry),
+      synthesisRetryDelayMs: 0,
+      onState: () => undefined,
+    });
+    reporter.addParent("parent", { mode: "parallel" });
+    reporter.restore("parent", saved);
+    await tick();
+    expect(retries).toHaveLength(1);
+    retries.shift()!();
+    await tick();
+    await tick();
+    expect(sends).toBe(0);
+    expect(reporter.exportState("parent").plans[0]).toMatchObject({
+      synthesisReported: true,
+      synthesisDelivery: { state: "delivered", attempt: 4 },
+    });
+  });
+
+  it("reconciles after the final delivered-state persistence barrier fails", async () => {
+    const retries: (() => void)[] = [];
+    let writes = 0;
+    let persistFails = true;
+    let receipt = false;
+    let sends = 0;
+    const reporter = new TaskSessionOrchestrator<string, Worker>({
+      plan: () => ({
+        contextSummary: "context",
+        tasks: [{ generatedName: "one", brief: "brief" }],
+      }),
+      resolveWorkerSettings: () => ({}),
+      createWorker: () => ({ close: () => undefined }),
+      hasGlobalCapacity: () => true,
+      persistSynthesisDelivery: () => {
+        writes++;
+        if (persistFails && writes >= 4) throw new Error("disk full");
+      },
+      hasSynthesisDelivery: () => receipt,
+      synthesize: async ({ markDispatched }) => {
+        sends++;
+        await markDispatched();
+        receipt = true;
+      },
+      scheduleSynthesisRetry: (retry) => retries.push(retry),
+      synthesisRetryDelayMs: 0,
+      onState: () => undefined,
+    });
+    reporter.addParent("parent", { mode: "parallel" });
+    reporter.restore("parent", persistedState("completed"));
+    await tick();
+    await tick();
+    expect(retries).toHaveLength(1);
+    persistFails = false;
+    retries.shift()!();
+    await tick();
+    await tick();
+    expect(sends).toBe(1);
+    expect(reporter.state("parent").tasks).toEqual([]);
+  });
+
+  it("recognizes a pre-outbox report with its historical payload instead of resending", async () => {
+    let sends = 0;
+    const saved = persistedState("completed", { synthesisAttempts: 1 });
+    const legacyPayload =
+      "Task-session synthesis for: restored prompt\n\n#1 task 1: done";
+    const reporter = new TaskSessionOrchestrator<string, Worker>({
+      plan: () => ({
+        contextSummary: "context",
+        tasks: [{ generatedName: "one", brief: "brief" }],
+      }),
+      resolveWorkerSettings: () => ({}),
+      createWorker: () => ({ close: () => undefined }),
+      hasGlobalCapacity: () => true,
+      hasSynthesisDelivery: ({ delivery }) =>
+        delivery.payload === legacyPayload,
+      synthesize: () => {
+        sends++;
+      },
+      onState: () => undefined,
+    });
+    reporter.addParent("parent", { mode: "parallel" });
+    reporter.restore("parent", saved);
+    await tick();
+    await tick();
+    expect(sends).toBe(0);
+    const migrated = reporter.exportState("parent");
+    expect(isPersistedTaskSessionState(migrated)).toBe(true);
+    expect(migrated.plans[0]).toMatchObject({
+      synthesisReported: true,
+      synthesisDelivery: {
+        attempt: 1,
+        state: "delivered",
+        payload: legacyPayload,
+        legacy: true,
+      },
+    });
+  });
+
+  it("fails closed with a fingerprint diagnostic instead of regenerating corrupt payload", () => {
+    const saved = persistedState("completed");
+    saved.plans[0]!.synthesisDelivery = {
+      ...synthesisDeliveryPayload({
+        id: "12345678-1234-1234-1234-123456789abc",
+        attempt: 0,
+        originalPrompt: "restored prompt",
+        tasks: saved.plans[0]!.tasks,
+      }),
+      payloadFingerprint: "0".repeat(64),
+    };
+    const restored = setupRestore(() => undefined);
+    expect(() => restored.orchestrator.restore("parent", saved)).toThrow(
+      /fingerprint mismatch/,
+    );
+    expect(restored.launches).toHaveLength(0);
   });
 
   it("requires releasable capacity claims and releases a failed worker creation", async () => {

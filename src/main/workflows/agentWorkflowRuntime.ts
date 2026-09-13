@@ -9,6 +9,7 @@ import {
   type WorkflowRunEnvelope,
   type CanonicalNodeOccurrence,
   type WorkflowNodeInputBinding,
+  type WorkflowOccurrenceCreationSnapshot,
 } from "../../shared/agentWorkflowSchemas.js";
 
 export { agentWorkflowDefinitionSchema } from "../../shared/agentWorkflowSchemas.js";
@@ -54,7 +55,16 @@ export function createWorkflowRoleRun(
     definition: structuredClone(parsed),
     inputs: resolved,
     revision: 1,
-    occurrences: [newOccurrence(entry, [], undefined, 1, now)],
+    occurrences: [
+      newOccurrence(
+        creationSnapshot(entry, {
+          parentOccurrenceIds: [],
+          context: [],
+          iteration: 1,
+        }),
+        now,
+      ),
+    ],
     createdAtMs: now,
     updatedAtMs: now,
   };
@@ -116,13 +126,13 @@ export function startWorkflowOrchestrator(
   });
   let children = config.agents.map((id) =>
     newOccurrence(
-      node(next.definition, id),
-      [occurrence.id],
-      occurrence.id,
-      1,
+      creationSnapshot(node(next.definition, id), {
+        parentOccurrenceIds: [occurrence.id],
+        parentOrchestratorRunId: occurrence.id,
+        context: managedContext(next, occurrence),
+        iteration: 1,
+      }),
       now,
-      1,
-      managedContext(next, occurrence),
     ),
   );
   if (config.mode === "fanout")
@@ -283,16 +293,7 @@ export function retryWorkflowOccurrence(
   if (isCompletedFanoutAny(parentBeforeRetry, parentNode))
     throw new Error("Cannot retry a child after its fan-out owner completed.");
   const retry = {
-    ...newOccurrence(
-      node(run.definition, prior.nodeId),
-      prior.parentOccurrenceIds,
-      prior.parentOrchestratorRunId,
-      prior.iteration,
-      now,
-      highestAttempt + 1,
-      prior.context,
-      prior.resolvedInputBindings,
-    ),
+    ...newOccurrence(retryCreationSnapshot(prior), now, highestAttempt + 1),
     // Human checkpoints never enter scheduler admission. Retain the
     // checkpoint status so an explicit Stop -> Retry remains answerable.
     ...(workflowNode.role === "human" ? {} : { status: retryStatus }),
@@ -539,17 +540,17 @@ function advanceOrchestrator(
       bindingScope(orchestratorId, child.iteration),
     );
     const decider = newOccurrence(
-      deciderRole,
-      uniqueIds([
-        ...workers.map((item) => item.id),
-        ...bindingSourceOccurrenceIds(resolvedInputBindings),
-      ]),
-      orchestratorId,
-      child.iteration,
+      creationSnapshot(deciderRole, {
+        parentOccurrenceIds: uniqueIds([
+          ...workers.map((item) => item.id),
+          ...bindingSourceOccurrenceIds(resolvedInputBindings),
+        ]),
+        parentOrchestratorRunId: orchestratorId,
+        context: [],
+        resolvedInputBindings,
+        iteration: child.iteration,
+      }),
       now,
-      1,
-      [],
-      resolvedInputBindings,
     );
     return add(
       patch(run, orchestratorId, {
@@ -579,17 +580,17 @@ function advanceOrchestrator(
       );
     const workersNext = config.agents.map((id) =>
       newOccurrence(
-        node(run.definition, id),
-        [child.id],
-        orchestratorId,
-        child.iteration + 1,
+        creationSnapshot(node(run.definition, id), {
+          parentOccurrenceIds: [child.id],
+          parentOrchestratorRunId: orchestratorId,
+          context: [
+            ...orchestrator.aggregation,
+            "Decider result: false",
+            ...managedContext(run, orchestrator),
+          ],
+          iteration: child.iteration + 1,
+        }),
         now,
-        1,
-        [
-          ...orchestrator.aggregation,
-          "Decider result: false",
-          ...managedContext(run, orchestrator),
-        ],
       ),
     );
     return add(
@@ -638,17 +639,16 @@ function route(
       const resolvedInputBindings = resolveInputBindings(next, targetId, scope);
       next = add(next, [
         newOccurrence(
-          node(next.definition, targetId),
-          uniqueIds([
-            source.id,
-            ...bindingSourceOccurrenceIds(resolvedInputBindings),
-          ]),
-          undefined,
-          1,
+          creationSnapshot(node(next.definition, targetId), {
+            parentOccurrenceIds: uniqueIds([
+              source.id,
+              ...bindingSourceOccurrenceIds(resolvedInputBindings),
+            ]),
+            context: [],
+            resolvedInputBindings,
+            iteration: 1,
+          }),
           now,
-          1,
-          [],
-          resolvedInputBindings,
         ),
       ]);
     } else {
@@ -658,39 +658,65 @@ function route(
   }
   return next;
 }
-function newOccurrence(
+function creationSnapshot(
   role: AgentWorkflowNode,
-  parents: string[],
-  parentOrchestratorRunId: string | undefined,
-  iteration: number,
-  now: number,
-  attempt = 1,
-  context: string[] = [],
-  resolvedInputBindings?: Array<
-    WorkflowNodeInputBinding & {
-      value: string;
-      sourceOccurrenceId?: string | undefined;
-    }
-  >,
-): WorkflowOccurrence {
+  input: Omit<WorkflowOccurrenceCreationSnapshot, "nodeId" | "role">,
+): WorkflowOccurrenceCreationSnapshot {
   return {
-    id: randomUUID(),
     nodeId: role.id,
     role: role.role as AgentWorkflowRole,
-    ...(parentOrchestratorRunId ? { parentOrchestratorRunId } : {}),
-    parentOccurrenceIds: parents,
-    context: context.map((value) => bound(value)),
-    ...(resolvedInputBindings !== undefined
+    ...input,
+  };
+}
+
+/** Copy every creation-time input from the replaced attempt, and nothing that
+ * belongs to that attempt's execution. This is the sole retry clone boundary. */
+function retryCreationSnapshot(
+  prior: WorkflowOccurrence,
+): WorkflowOccurrenceCreationSnapshot {
+  return {
+    nodeId: prior.nodeId,
+    role: prior.role,
+    ...(prior.parentOrchestratorRunId
+      ? { parentOrchestratorRunId: prior.parentOrchestratorRunId }
+      : {}),
+    parentOccurrenceIds: [...prior.parentOccurrenceIds],
+    context: [...prior.context],
+    ...(prior.resolvedInputBindings
       ? {
-          resolvedInputBindings: resolvedInputBindings.map((binding) => ({
+          resolvedInputBindings: prior.resolvedInputBindings.map((binding) => ({
             ...binding,
-            value: bound(binding.value),
           })),
         }
       : {}),
-    iteration,
+    iteration: prior.iteration,
+  };
+}
+
+function newOccurrence(
+  snapshot: WorkflowOccurrenceCreationSnapshot,
+  now: number,
+  attempt = 1,
+): WorkflowOccurrence {
+  return {
+    id: randomUUID(),
+    nodeId: snapshot.nodeId,
+    role: snapshot.role,
+    ...(snapshot.parentOrchestratorRunId
+      ? { parentOrchestratorRunId: snapshot.parentOrchestratorRunId }
+      : {}),
+    parentOccurrenceIds: [...snapshot.parentOccurrenceIds],
+    context: snapshot.context.map((value) => bound(value)),
+    ...(snapshot.resolvedInputBindings !== undefined
+      ? {
+          resolvedInputBindings: snapshot.resolvedInputBindings.map(
+            (binding) => ({ ...binding, value: bound(binding.value) }),
+          ),
+        }
+      : {}),
+    iteration: snapshot.iteration,
     attempt,
-    status: role.role === "human" ? "waitingHuman" : "ready",
+    status: snapshot.role === "human" ? "waitingHuman" : "ready",
     managedChildren: [],
     aggregation: [],
     createdAtMs: now,

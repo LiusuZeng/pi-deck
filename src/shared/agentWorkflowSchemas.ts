@@ -419,6 +419,23 @@ export const canonicalNodeOccurrenceSchema = z
     updatedAtMs: z.number().finite(),
   })
   .strict();
+/**
+ * Inputs frozen when an occurrence is created. Retries clone this exact
+ * snapshot; they must not reconstruct it from the current run or definition.
+ * Runtime/session identity, status, output/error, orchestration progress, and
+ * timestamps are attempt-local and deliberately excluded.
+ */
+export type WorkflowOccurrenceCreationSnapshot = Pick<
+  z.infer<typeof canonicalNodeOccurrenceSchema>,
+  | "nodeId"
+  | "role"
+  | "parentOrchestratorRunId"
+  | "parentOccurrenceIds"
+  | "context"
+  | "resolvedInputBindings"
+  | "iteration"
+>;
+
 export const workflowRunEnvelopeSchema = z
   .object({
     id: z.string().uuid(),

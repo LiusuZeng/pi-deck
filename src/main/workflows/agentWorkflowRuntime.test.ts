@@ -168,15 +168,64 @@ describe("agentWorkflow occurrence runtime", () => {
     expect(prompt).toContain("Selected plan:\nchosen plan");
     expect(prompt).toContain("Selected review:\nincidental review");
 
-    run = startWorkflowOccurrence(run, deliver.id, "deliver-runtime");
-    run = failWorkflowOccurrence(run, deliver.id, "temporary failure");
-    run = retryWorkflowOccurrence(run, deliver.id);
+    run = startWorkflowOccurrence(
+      run,
+      deliver.id,
+      "deliver-runtime",
+      "deliver-session",
+      10,
+      "/tmp/deliver-session.jsonl",
+    );
+    run = failWorkflowOccurrence(run, deliver.id, "temporary failure", 11);
+    const failed = run.occurrences.find((item) => item.id === deliver.id)!;
+    run = retryWorkflowOccurrence(run, deliver.id, 12);
     const retry = run.occurrences.at(-1)!;
-    expect(retry.attempt).toBe(2);
-    expect(retry.resolvedInputBindings).toEqual(deliver.resolvedInputBindings);
+    // A standalone retry clones the complete creation snapshot, while all
+    // execution/session state remains local to the failed attempt.
+    expect({
+      nodeId: retry.nodeId,
+      role: retry.role,
+      parentOccurrenceIds: retry.parentOccurrenceIds,
+      parentOrchestratorRunId: retry.parentOrchestratorRunId,
+      context: retry.context,
+      resolvedInputBindings: retry.resolvedInputBindings,
+      iteration: retry.iteration,
+    }).toEqual({
+      nodeId: failed.nodeId,
+      role: failed.role,
+      parentOccurrenceIds: failed.parentOccurrenceIds,
+      parentOrchestratorRunId: failed.parentOrchestratorRunId,
+      context: failed.context,
+      resolvedInputBindings: failed.resolvedInputBindings,
+      iteration: failed.iteration,
+    });
+    expect(retry).toMatchObject({
+      attempt: 2,
+      status: "ready",
+      createdAtMs: 12,
+      updatedAtMs: 12,
+    });
+    expect(retry.id).not.toBe(failed.id);
     expect(renderWorkflowOccurrencePrompt(run, retry)).toContain(
       "Selected plan:\nchosen plan",
     );
+    // The retry owns a deep-cloned snapshot rather than aliases into the
+    // historical attempt retained for audit/restart.
+    expect(retry.parentOccurrenceIds).not.toBe(failed.parentOccurrenceIds);
+    expect(retry.context).not.toBe(failed.context);
+    expect(retry.resolvedInputBindings).not.toBe(failed.resolvedInputBindings);
+    retry.parentOccurrenceIds.push(ids.end);
+    expect(failed.parentOccurrenceIds).not.toContain(ids.end);
+    for (const field of [
+      "runtimeId",
+      "sessionId",
+      "sessionFile",
+      "output",
+      "error",
+      "startedAtMs",
+      "completedAtMs",
+    ])
+      expect(retry).not.toHaveProperty(field);
   });
   it("resolves fan-out Worker bindings from the routed container and persists their lineage", () => {
     const definition = fanoutDefinition("all");

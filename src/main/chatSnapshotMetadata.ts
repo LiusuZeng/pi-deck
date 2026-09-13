@@ -76,7 +76,7 @@ function titleFromSessionName(state: PiState): string | undefined {
 function titleFromMessages(messages: readonly PiMessage[]): string | undefined {
   const firstUser = messages.find((message) => message.role === "user");
   return typeof firstUser?.content === "string"
-    ? normalizedText(firstUser.content, 64)
+    ? normalizedText(stripSynthesisDeliveryMarker(firstUser.content), 64)
     : undefined;
 }
 
@@ -86,7 +86,7 @@ function previewFromMessages(
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const content = messages[index]?.content;
     if (typeof content === "string") {
-      return normalizedText(content, 160);
+      return normalizedText(stripSynthesisDeliveryMarker(content), 160);
     }
   }
   return undefined;
@@ -109,6 +109,11 @@ function completedAtFromMessages(
     Number.isFinite(latestMessage.createdAt)
     ? latestMessage.createdAt
     : undefined;
+}
+
+/** The durable synthesis receipt is transport metadata, not user-facing copy. */
+function stripSynthesisDeliveryMarker(value: string): string {
+  return value.replace(/^<!-- pi-deck-synthesis-delivery:v1:[^\s]+ -->\n?/, "");
 }
 
 function normalizedText(value: string, maxLength: number): string | undefined {

@@ -241,6 +241,10 @@ import {
   type TaskSessionWorkerSettings,
 } from "./multitask/taskSessionOrchestrator.js";
 import {
+  matchesSynthesisDeliveryReceipt,
+  type SynthesisDelivery,
+} from "./multitask/taskSessionSynthesisDelivery.js";
+import {
   boundedBestEffort,
   collectTaskSessionTerminalData,
 } from "./multitask/taskSessionTerminalData.js";
@@ -3558,6 +3562,17 @@ async function initializeChatAdapter(
       capacityAvailable() && legacyNonterminalTaskCount(parentId) === 0,
     isCapacityUnavailable: (error) => error instanceof WorkerCapacityError,
     synthesize: (input) => synthesizeTaskSession(adapter, input),
+    hasSynthesisDelivery: ({ parentId, delivery }) =>
+      parentHasSynthesisDelivery(adapter, parentId, delivery),
+    // This awaitable path is the synthesis outbox write-ahead barrier. Normal
+    // state projection remains best-effort, but no parent report crosses the
+    // external Pi boundary until this durable snapshot succeeds.
+    persistSynthesisDelivery: async (parentId, state) => {
+      const sessionFile = chatRuntimeSessionFiles.get(parentId);
+      if (!sessionFile || !taskSessionStateStore)
+        throw new Error("Parent synthesis state has no durable session store.");
+      await taskSessionStateStore.set(sessionFile, state);
+    },
     onState: (parentId) => {
       emitTaskSessionState(parentId);
       void persistTaskSession(parentId);
@@ -4823,6 +4838,26 @@ function conciseTaskHandoff(value: string) {
   return singleLine.slice(0, 1_024) || "Task completed.";
 }
 
+/**
+ * Pi's session-history RPC is the acknowledgement authority for the outbox.
+ * RPC success/agent completion are deliberately not receipts: Pi may have
+ * durably appended the marked user turn before either reaches this process.
+ */
+async function parentHasSynthesisDelivery(
+  adapter: SinglePiAdapter,
+  parentId: string,
+  delivery: SynthesisDelivery,
+): Promise<boolean> {
+  if (!chatRuntimeIds.has(parentId) || !adapter.hasRuntime(parentId))
+    throw new Error("Parent is unavailable for synthesis receipt inspection.");
+  const messages = await adapter.getMessages(parentId);
+  return messages.some((message) =>
+    message.role === "user"
+      ? matchesSynthesisDeliveryReceipt(message.content, delivery)
+      : false,
+  );
+}
+
 async function synthesizeTaskSession(
   adapter: SinglePiAdapter,
   input: {
@@ -4830,6 +4865,8 @@ async function synthesizeTaskSession(
     originalPrompt: string;
     contextSummary: string;
     tasks: readonly PersistedTaskSessionTask[];
+    delivery: SynthesisDelivery;
+    markDispatched(): Promise<void>;
   },
 ): Promise<void> {
   // A fork reserves its source before any asynchronous preflight. Reject here
@@ -4843,13 +4880,7 @@ async function synthesizeTaskSession(
     !chatRuntimeIds.has(input.parentId) ||
     !adapter.hasRuntime(input.parentId)
   )
-    return;
-  const report = input.tasks
-    .map(
-      (task) =>
-        `#${task.taskNumber} ${task.generatedName}: ${task.handoffSummary ?? task.lifecycle}`,
-    )
-    .join("\n");
+    throw new Error("Parent is unavailable for task-session synthesis.");
   const synthesis = async (): Promise<void> => {
     // A turn can have been queued before the fork reservation. It must check
     // at dispatch time, not only when it was initially enqueued.
@@ -4857,60 +4888,94 @@ async function synthesizeTaskSession(
       input.parentId,
       "synthesizing task results into it",
     );
-    if (!adapter.hasRuntime(input.parentId)) return;
+    if (!adapter.hasRuntime(input.parentId))
+      throw new Error("Parent is unavailable for task-session synthesis.");
+    // The final probe is serialized with every other parent turn. It closes
+    // the crash/restart window between recovery's first probe and dispatch.
+    if (
+      await parentHasSynthesisDelivery(adapter, input.parentId, input.delivery)
+    )
+      return;
     const worker = adapter.getWorker(input.parentId);
-    const text = `Task-session synthesis for: ${input.originalPrompt}\n\n${report}`;
+    const text = input.delivery.payload;
+    // Status remains preflight: a transient inspection failure must not spend
+    // a bounded delivery attempt. Subscribe before the persistence barrier so
+    // a settling active turn cannot leave a stale follow-up queued behind it.
     const status = await adapter.getRuntimeStatus(input.parentId);
     const active = status.isAgentActive === true || status.isStreaming === true;
-    let cancelSettledWait: () => void = () => undefined;
-    const settled = new Promise<void>((resolve, reject) => {
+    const settlementWait = (waitForSettled: boolean) => {
       let finished = false;
-      let sawAgentEnd = false;
-      let latestAgentFailure: string | undefined;
-      let unsubscribe: () => void = () => undefined;
-      const timeout = setTimeout(
-        () => {
-          finish(() => reject(new Error("Parent synthesis timed out.")));
-        },
-        Number(process.env.PI_DECK_TASK_SYNTHESIS_TIMEOUT_MS ?? 180_000),
-      );
-      const finish = (complete: () => void) => {
-        if (finished) return;
-        finished = true;
-        clearTimeout(timeout);
-        unsubscribe();
-        complete();
-      };
-      cancelSettledWait = () => finish(resolve);
-      unsubscribe = worker.onEvent((event) => {
-        if (event.type === "agent_end") {
-          sawAgentEnd = true;
-          latestAgentFailure = agentEndFailure(event);
-          if (!active) {
-            if (latestAgentFailure)
+      let cancel: () => void = () => undefined;
+      const settled = new Promise<void>((resolve, reject) => {
+        let sawAgentEnd = false;
+        let latestAgentFailure: string | undefined;
+        let unsubscribe: () => void = () => undefined;
+        const timeout = setTimeout(
+          () => {
+            finish(() => reject(new Error("Parent synthesis timed out.")));
+          },
+          Number(process.env.PI_DECK_TASK_SYNTHESIS_TIMEOUT_MS ?? 180_000),
+        );
+        const finish = (complete: () => void) => {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timeout);
+          unsubscribe();
+          complete();
+        };
+        cancel = () => finish(resolve);
+        unsubscribe = worker.onEvent((event) => {
+          if (event.type === "agent_end") {
+            sawAgentEnd = true;
+            latestAgentFailure = agentEndFailure(event);
+            if (!waitForSettled) {
+              if (latestAgentFailure)
+                finish(() => reject(new Error(latestAgentFailure)));
+              else finish(resolve);
+            }
+          } else if (event.type === "agent_settled") {
+            if (!sawAgentEnd)
+              finish(() =>
+                reject(new Error("Parent synthesis settled without a report.")),
+              );
+            else if (latestAgentFailure)
               finish(() => reject(new Error(latestAgentFailure)));
             else finish(resolve);
-          }
-        } else if (event.type === "agent_settled") {
-          if (!sawAgentEnd)
+          } else if (event.type === "worker_exit")
             finish(() =>
-              reject(new Error("Parent synthesis settled without a report.")),
+              reject(new Error("Parent closed before synthesis completed.")),
             );
-          else if (latestAgentFailure)
-            finish(() => reject(new Error(latestAgentFailure)));
-          else finish(resolve);
-        } else if (event.type === "worker_exit")
-          finish(() =>
-            reject(new Error("Parent closed before synthesis completed.")),
-          );
+        });
       });
-    });
+      return { settled, cancel, isSettled: () => finished };
+    };
+    const activeWait = active ? settlementWait(true) : undefined;
+    // The observed parent can fail while its reservation write is in flight.
+    // Its result only selects prompt vs follow-up; the new prompt owns delivery
+    // settlement, so avoid an unhandled rejection from that superseded turn.
+    void activeWait?.settled.catch(() => undefined);
+    // This is the sole parent-boundary crossing. All availability/status/
+    // receipt work above is preflight and must not consume bounded sends.
+    await input.markDispatched();
+    const followUp = active && !activeWait?.isSettled();
+    const wait = followUp ? activeWait! : settlementWait(false);
     try {
-      if (active) await adapter.followUp(input.parentId, { text });
+      if (followUp) await adapter.followUp(input.parentId, { text });
       else await adapter.prompt(input.parentId, { text });
-      await settled;
+      await wait.settled;
+      // A successful RPC and terminal event are not an acknowledgement. Pi's
+      // durable transcript must contain this exact marker before outbox state
+      // can be advanced to delivered.
+      if (
+        !(await parentHasSynthesisDelivery(
+          adapter,
+          input.parentId,
+          input.delivery,
+        ))
+      )
+        throw new Error("Parent synthesis settled without a durable receipt.");
     } catch (error) {
-      cancelSettledWait();
+      wait.cancel();
       throw error;
     }
   };

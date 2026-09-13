@@ -8021,7 +8021,9 @@ function timelineFromMessages(messages: ChatMessage[]): TimelineItem[] {
     // Real Pi persists and returns content parts (for example,
     // [{ type: "text", text: "..." }]) rather than a plain string. Snapshots
     // can reach the renderer before IPC normalization, so hydrate both forms.
-    const content = extractTextContent(message.content) ?? "";
+    const content = stripInternalSynthesisDeliveryMarker(
+      extractTextContent(message.content) ?? "",
+    );
     const timestamp =
       typeof message.createdAt === "number"
         ? message.createdAt
@@ -13366,6 +13368,11 @@ function updateSessionByRuntimeId(
   const next = sessions.slice();
   next[index] = updated;
   return next;
+}
+
+/** The durable synthesis receipt is transport metadata, not user-facing copy. */
+function stripInternalSynthesisDeliveryMarker(value: string): string {
+  return value.replace(/^<!-- pi-deck-synthesis-delivery:v1:[^\s]+ -->\n?/, "");
 }
 
 function getRuntimeEventErrorMessage(

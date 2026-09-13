@@ -4,6 +4,7 @@ import electronPath from "electron";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 
 const repoRoot = path.resolve(__dirname, "..");
 const mainEntry = path.join(repoRoot, "dist/main/main.js");
@@ -10731,7 +10732,7 @@ test.describe("task-session routing acceptance", () => {
     }
   });
 
-  test("restores terminal task handoffs with one automatic parent synthesis", async () => {
+  test("restores terminal task handoffs with one automatic parent synthesis across restart", async () => {
     const root = fs.mkdtempSync(
       path.join(os.tmpdir(), "pi-deck-task-restored-synthesis-"),
     );
@@ -10768,9 +10769,15 @@ test.describe("task-session routing acceptance", () => {
         ? (fs.readFileSync(traceFile, "utf8").match(/^ordinary_prompt$/gm)
             ?.length ?? 0)
         : 0;
+    const synthesisDispatchCount = () =>
+      fs.existsSync(traceFile)
+        ? (fs.readFileSync(traceFile, "utf8").match(/^synthesis_dispatch:/gm)
+            ?.length ?? 0)
+        : 0;
 
     let first: Awaited<ReturnType<typeof launchPiDeck>> | undefined;
     let second: Awaited<ReturnType<typeof launchPiDeck>> | undefined;
+    let third: Awaited<ReturnType<typeof launchPiDeck>> | undefined;
     try {
       first = await launchPiDeck(env);
       await expectHealthyPreload(first.page);
@@ -10909,12 +10916,395 @@ test.describe("task-session routing acceptance", () => {
         )
         .toMatchObject({ synthesisAttempts: 1, synthesisReported: true });
       await expect.poll(ordinaryPromptCount, { timeout: 30_000 }).toBe(2);
+      await expect.poll(synthesisDispatchCount, { timeout: 30_000 }).toBe(1);
       await expect(synthesisReports).toHaveCount(1);
+
+      // A later process restart reads the durable report marker. It must not
+      // send another parent synthesis even though the terminal handoffs remain.
+      await second.app.close();
+      second = undefined;
+      third = await launchPiDeck(env);
+      await expectHealthyPreload(third.page);
+      await expectAllWorkLaunch(third.page);
+      const reopenedSession = third.page.getByRole("button", {
+        name: `Session: ${bootstrapPrompt}`,
+        exact: true,
+      });
+      await expect(reopenedSession).toBeVisible();
+      await reopenedSession.click();
+      await expect
+        .poll(
+          () =>
+            third!.page.evaluate(async () => {
+              const snapshot = await window.piDeck.chat.getSnapshot();
+              const state = await window.piDeck.multitask.getMode({
+                runtimeId: snapshot.runtimeId,
+              });
+              return {
+                activeCount: state.activeCount,
+                taskCount: state.tasks.length,
+              };
+            }),
+          { timeout: 30_000 },
+        )
+        .toEqual({ activeCount: 0, taskCount: 0 });
+      await expect.poll(ordinaryPromptCount, { timeout: 30_000 }).toBe(2);
+      await expect.poll(synthesisDispatchCount, { timeout: 30_000 }).toBe(1);
+      expect(
+        JSON.parse(fs.readFileSync(statePath, "utf8"))[canonicalSessionFile]
+          ?.state.plans[0],
+      ).toMatchObject({ synthesisAttempts: 1, synthesisReported: true });
     } finally {
       await first?.app.close().catch(() => undefined);
       await second?.app.close().catch(() => undefined);
+      await third?.app.close().catch(() => undefined);
       if (process.env.PI_DECK_E2E_KEEP_REAL_SMOKE_ARTIFACTS !== "1")
         fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("recovers an active-parent follow-up receipt once across a crash and reconciliation barrier", async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "pi-deck-follow-up-receipt-crash-"),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    const userDataDir = path.join(root, "user-data");
+    const traceFile = path.join(root, "follow-up-trace.log");
+    const receiptFile = path.join(root, "follow-up-receipt.log");
+    const activeEnabledFile = path.join(root, "activate-parent");
+    const bootstrapPrompt = `Bootstrap active follow-up recovery ${path.basename(root)}.`;
+    for (const directory of [projectCwd, agentDir, userDataDir])
+      fs.mkdirSync(directory, { recursive: true });
+    const env = {
+      ...fakeRealModeEnv({
+        root,
+        projectCwd,
+        agentDir,
+        userDataDir,
+        fakePiArgs: [
+          "--prompt-scenario",
+          "routing",
+          "--fixture-trace-file",
+          traceFile,
+          "--stream-delay-ms",
+          "20",
+          "--active-on-start-ms",
+          "15000",
+          "--active-on-start-enabled-file",
+          activeEnabledFile,
+          "--follow-up-receipt-signal-file",
+          receiptFile,
+          "--exit-after-follow-up-receipt",
+        ],
+      }),
+      NODE_ENV: "test",
+      PI_DECK_E2E_TASK_SESSION_ACCEPTANCE: "1",
+    };
+    const statePath = path.join(userDataDir, "task-session-state.json");
+    const synthesisDispatchCount = () =>
+      fs.existsSync(traceFile)
+        ? (fs.readFileSync(traceFile, "utf8").match(/^synthesis_dispatch:/gm)
+            ?.length ?? 0)
+        : 0;
+    let first: Awaited<ReturnType<typeof launchPiDeck>> | undefined;
+    let recovered: Awaited<ReturnType<typeof launchPiDeck>> | undefined;
+    let quiesced: Awaited<ReturnType<typeof launchPiDeck>> | undefined;
+    try {
+      first = await launchPiDeck(env);
+      await expectHealthyPreload(first.page);
+      await enterSessionDetail(first.page);
+      await first.page.getByLabel("Prompt text").fill(bootstrapPrompt);
+      await first.page.getByRole("button", { name: "Send" }).click();
+      await expect(
+        first.page.getByText(/Ordinary routing fixture accepted/),
+      ).toBeVisible();
+      const sessionFile = await first.page.evaluate(async () => {
+        return (await window.piDeck.chat.getSnapshot()).state.sessionFile;
+      });
+      if (typeof sessionFile !== "string")
+        throw new Error("Fake Pi did not report a parent session file.");
+      await first.app.close();
+      first = undefined;
+
+      const canonicalSessionFile = fs.realpathSync(sessionFile);
+      const deliveryId = "b1a5d7b7-2f67-4b01-b084-000000000084";
+      const payload = `<!-- pi-deck-synthesis-delivery:v1:${deliveryId} -->\nTask-session synthesis for: Recover an active parent receipt.\n\n#1 terminal task: handoff`;
+      fs.writeFileSync(
+        statePath,
+        JSON.stringify({
+          [canonicalSessionFile]: {
+            state: {
+              version: 1,
+              mode: "parallel",
+              nextTaskNumber: 2,
+              plans: [
+                {
+                  planId: 1,
+                  contextSummary: "terminal context",
+                  originalPrompt: "Recover an active parent receipt.",
+                  synthesisAttempts: 0,
+                  synthesisDelivery: {
+                    id: deliveryId,
+                    attempt: 0,
+                    payload,
+                    payloadFingerprint: createHash("sha256")
+                      .update(payload)
+                      .digest("hex"),
+                    state: "dispatching",
+                  },
+                  tasks: [
+                    {
+                      taskNumber: 1,
+                      generatedName: "terminal task",
+                      brief: "finish",
+                      lifecycle: "completed",
+                      attempt: 1,
+                      transitions: [{ lifecycle: "completed", attempt: 1 }],
+                      handoffSummary: "handoff",
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        }),
+      );
+      fs.writeFileSync(activeEnabledFile, "active\n");
+
+      // The fake begins with a parent turn already active. It writes this only
+      // after Pi durably appends the queued follow_up user turn, then exits
+      // before queue/event settlement.
+      recovered = await launchPiDeck(env);
+      await expectHealthyPreload(recovered.page);
+      await expectAllWorkLaunch(recovered.page);
+      await recovered.page
+        .getByRole("button", {
+          name: `Session: ${bootstrapPrompt}`,
+          exact: true,
+        })
+        .click();
+      await expect
+        .poll(
+          () =>
+            fs.existsSync(receiptFile)
+              ? fs.readFileSync(receiptFile, "utf8")
+              : "",
+          { timeout: 30_000 },
+        )
+        .toMatch(/^follow_up$/m);
+      expect(synthesisDispatchCount()).toBe(1);
+      await recovered.app.close().catch(() => undefined);
+      recovered = undefined;
+
+      quiesced = await launchPiDeck(env);
+      // This fresh attach is the deterministic reconciliation-quiescence
+      // barrier. It performs receipt-first recovery after the crashed process,
+      // rather than relying on an immediate zero-task observation or a sleep.
+      await expectHealthyPreload(quiesced.page);
+      await expectAllWorkLaunch(quiesced.page);
+      await quiesced.page
+        .getByRole("button", {
+          name: `Session: ${bootstrapPrompt}`,
+          exact: true,
+        })
+        .click();
+      await expect
+        .poll(
+          () =>
+            quiesced!.page.evaluate(async () => {
+              const snapshot = await window.piDeck.chat.getSnapshot();
+              const state = await window.piDeck.multitask.getMode({
+                runtimeId: snapshot.runtimeId,
+              });
+              return { activeCount: state.activeCount, tasks: state.tasks };
+            }),
+          { timeout: 30_000 },
+        )
+        .toEqual({ activeCount: 0, tasks: [] });
+      await expect
+        .poll(
+          () =>
+            JSON.parse(fs.readFileSync(statePath, "utf8"))[canonicalSessionFile]
+              ?.state.plans[0],
+          { timeout: 30_000 },
+        )
+        .toMatchObject({
+          synthesisAttempts: 1,
+          synthesisReported: true,
+          synthesisDelivery: { state: "delivered", attempt: 1 },
+        });
+      await expect.poll(synthesisDispatchCount, { timeout: 30_000 }).toBe(1);
+    } finally {
+      await first?.app.close().catch(() => undefined);
+      await recovered?.app.close().catch(() => undefined);
+      await quiesced?.app.close().catch(() => undefined);
+      if (process.env.PI_DECK_E2E_KEEP_REAL_SMOKE_ARTIFACTS !== "1")
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("recovery does not acknowledge a marker-only persisted synthesis turn", async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "pi-deck-synthesis-receipt-restart-"),
+    );
+    const projectCwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    const userDataDir = path.join(root, "user-data");
+    const traceFile = path.join(root, "synthesis-receipt-trace.log");
+    const bootstrapPrompt = `Bootstrap receipt recovery ${path.basename(root)}.`;
+    for (const directory of [projectCwd, agentDir, userDataDir])
+      fs.mkdirSync(directory, { recursive: true });
+    const env = {
+      ...fakeRealModeEnv({
+        root,
+        projectCwd,
+        agentDir,
+        userDataDir,
+        fakePiArgs: [
+          "--prompt-scenario",
+          "routing",
+          "--fixture-trace-file",
+          traceFile,
+          "--stream-delay-ms",
+          "50",
+        ],
+      }),
+      NODE_ENV: "test",
+      PI_DECK_E2E_TASK_SESSION_ACCEPTANCE: "1",
+    };
+    let first: Awaited<ReturnType<typeof launchPiDeck>> | undefined;
+    let recovered: Awaited<ReturnType<typeof launchPiDeck>> | undefined;
+    try {
+      first = await launchPiDeck(env);
+      await expectHealthyPreload(first.page);
+      await enterSessionDetail(first.page);
+      await first.page.getByLabel("Prompt text").fill(bootstrapPrompt);
+      await first.page.getByRole("button", { name: "Send" }).click();
+      await expect(
+        first.page.getByText(/Ordinary routing fixture accepted/),
+      ).toBeVisible();
+      const sessionFile = await first.page.evaluate(async () => {
+        return (await window.piDeck.chat.getSnapshot()).state.sessionFile;
+      });
+      if (typeof sessionFile !== "string")
+        throw new Error("Fake Pi did not report a parent session file.");
+      await first.app.close();
+      first = undefined;
+
+      const canonicalSessionFile = fs.realpathSync(sessionFile);
+      const deliveryId = "b1a5d7b7-2f67-4b01-b084-000000000084";
+      const payload = `<!-- pi-deck-synthesis-delivery:v1:${deliveryId} -->\nTask-session synthesis for: Recover a Pi-persisted delivery.\n\n#1 terminal task: handoff`;
+      // A copied marker is not a receipt. Recovery must resend the complete
+      // write-ahead payload rather than marking this outbox delivered.
+      fs.appendFileSync(
+        canonicalSessionFile,
+        `${JSON.stringify({
+          type: "message",
+          id: "fault-persisted-synthesis",
+          message: {
+            id: "fault-persisted-synthesis",
+            role: "user",
+            content: payload.slice(0, payload.indexOf("\n")),
+            createdAt: Date.now(),
+          },
+        })}\n`,
+      );
+      fs.writeFileSync(
+        path.join(userDataDir, "task-session-state.json"),
+        JSON.stringify({
+          [canonicalSessionFile]: {
+            state: {
+              version: 1,
+              mode: "parallel",
+              nextTaskNumber: 2,
+              plans: [
+                {
+                  planId: 1,
+                  contextSummary: "terminal context",
+                  originalPrompt: "Recover a Pi-persisted delivery.",
+                  synthesisAttempts: 1,
+                  synthesisDelivery: {
+                    id: deliveryId,
+                    attempt: 1,
+                    payload,
+                    payloadFingerprint: createHash("sha256")
+                      .update(payload)
+                      .digest("hex"),
+                    state: "dispatching",
+                  },
+                  tasks: [
+                    {
+                      taskNumber: 1,
+                      generatedName: "terminal task",
+                      brief: "finish",
+                      lifecycle: "completed",
+                      attempt: 1,
+                      transitions: [{ lifecycle: "completed", attempt: 1 }],
+                      handoffSummary: "handoff",
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        }),
+      );
+
+      recovered = await launchPiDeck(env);
+      await expectHealthyPreload(recovered.page);
+      await expectAllWorkLaunch(recovered.page);
+      await recovered.page
+        .getByRole("button", {
+          name: `Session: ${bootstrapPrompt}`,
+          exact: true,
+        })
+        .click();
+      await expect
+        .poll(
+          () =>
+            recovered!.page.evaluate(async () => {
+              const snapshot = await window.piDeck.chat.getSnapshot();
+              return (
+                await window.piDeck.multitask.getMode({
+                  runtimeId: snapshot.runtimeId,
+                })
+              ).tasks.length;
+            }),
+          { timeout: 30_000 },
+        )
+        .toBe(0);
+      await expect
+        .poll(
+          () =>
+            fs.existsSync(traceFile)
+              ? (fs
+                  .readFileSync(traceFile, "utf8")
+                  .match(/^synthesis_dispatch:/gm)?.length ?? 0)
+              : 0,
+          { timeout: 30_000 },
+        )
+        .toBe(1);
+      await expect
+        .poll(
+          () =>
+            JSON.parse(
+              fs.readFileSync(
+                path.join(userDataDir, "task-session-state.json"),
+                "utf8",
+              ),
+            )[canonicalSessionFile]?.state.plans[0],
+          { timeout: 30_000 },
+        )
+        .toMatchObject({
+          synthesisAttempts: 2,
+          synthesisReported: true,
+          synthesisDelivery: { id: deliveryId, state: "delivered", attempt: 2 },
+        });
+    } finally {
+      await first?.app.close().catch(() => undefined);
+      await recovered?.app.close().catch(() => undefined);
+      fs.rmSync(root, { recursive: true, force: true });
     }
   });
 
@@ -11027,7 +11417,20 @@ test.describe("task-session routing acceptance", () => {
         }),
       ]);
       expect(runtimeState.activeCount).toBe(0);
-      await second.page.waitForTimeout(500);
+      await expect
+        .poll(
+          () =>
+            second.page.evaluate(async () => {
+              const snapshot = await window.piDeck.chat.getSnapshot();
+              return (
+                await window.piDeck.multitask.getMode({
+                  runtimeId: snapshot.runtimeId,
+                })
+              ).activeCount;
+            }),
+          { timeout: 30_000 },
+        )
+        .toBe(0);
       const privatePromptCountAfterRestart = fs.existsSync(traceFile)
         ? fs.readFileSync(traceFile, "utf8").split("ordinary_prompt").length - 1
         : 0;

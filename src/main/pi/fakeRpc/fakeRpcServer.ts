@@ -55,6 +55,14 @@ interface FakeOptions {
   includeUsage: boolean;
   noSession: boolean;
   failTaskPromptRecordWhileActive: boolean;
+  /** Signal after a prompt user turn is durable but before its RPC response. */
+  promptReceiptSignalFile?: string;
+  /** Signal/exit after a queued follow-up becomes a durable user turn. */
+  followUpReceiptSignalFile?: string;
+  exitAfterFollowUpReceipt: boolean;
+  /** Model an already-active parent when this test barrier file exists. */
+  activeOnStartMs: number;
+  activeOnStartEnabledFile?: string;
   /** Emits spaced, payload-free worker progress for Electron telemetry E2E. */
   taskSessionProgressFixture: boolean;
   sessionFile?: string;
@@ -137,6 +145,8 @@ function parseOptions(argv: string[]): FakeOptions {
     includeUsage: false,
     noSession: false,
     failTaskPromptRecordWhileActive: false,
+    exitAfterFollowUpReceipt: false,
+    activeOnStartMs: 0,
     taskSessionProgressFixture: false,
     forkOmitsParentSession: false,
     forkGetStateDelayMs: 0,
@@ -222,6 +232,29 @@ function parseOptions(argv: string[]): FakeOptions {
       options.noSession = true;
     } else if (arg === "--fail-task-prompt-record-while-active") {
       options.failTaskPromptRecordWhileActive = true;
+    } else if (arg === "--prompt-receipt-signal-file") {
+      const file = argv[index + 1];
+      if (file) options.promptReceiptSignalFile = file;
+      index += 1;
+    } else if (arg === "--follow-up-receipt-signal-file") {
+      const file = argv[index + 1];
+      if (file) options.followUpReceiptSignalFile = file;
+      index += 1;
+    } else if (arg === "--exit-after-follow-up-receipt") {
+      options.exitAfterFollowUpReceipt = true;
+    } else if (arg === "--active-on-start-ms") {
+      const delay = Number(argv[index + 1]);
+      if (
+        Number.isSafeInteger(delay) &&
+        delay >= 0 &&
+        delay <= MAX_NODE_TIMEOUT_MS
+      )
+        options.activeOnStartMs = delay;
+      index += 1;
+    } else if (arg === "--active-on-start-enabled-file") {
+      const file = argv[index + 1];
+      if (file) options.activeOnStartEnabledFile = file;
+      index += 1;
     } else if (arg === "--task-session-progress-fixture") {
       options.taskSessionProgressFixture = true;
     } else if (arg === "--session") {
@@ -603,6 +636,27 @@ class FakeRpcServer {
       }
     });
     process.stdin.resume();
+    this.startActiveParentIfEnabled();
+  }
+
+  private startActiveParentIfEnabled(): void {
+    if (
+      this.options.activeOnStartMs <= 0 ||
+      (this.options.activeOnStartEnabledFile !== undefined &&
+        !fs.existsSync(this.options.activeOnStartEnabledFile))
+    )
+      return;
+    this.agentActive = true;
+    this.currentTimers.push(
+      setTimeout(() => {
+        // A queued follow-up becomes the next durable user turn only when the
+        // pre-existing active parent settles, matching Pi's queue boundary.
+        if (this.consumeQueuedFollowUp()) return;
+        this.agentActive = false;
+        this.write({ type: "agent_end", runId: "run_preexisting_parent" });
+        this.write({ type: "agent_settled" });
+      }, this.options.activeOnStartMs),
+    );
   }
 
   private resolveSessionFile(): string {
@@ -1120,6 +1174,7 @@ class FakeRpcServer {
     };
     this.messages.push(userMessage);
     this.appendPersistedMessage(userMessage);
+    this.signalReceipt(this.options.promptReceiptSignalFile, "prompt");
     if (recordedTaskPrompt !== undefined) {
       this.promptCounter += 1;
       this.respond(command.id, "prompt");
@@ -1128,6 +1183,11 @@ class FakeRpcServer {
     }
     if (this.options.promptScenario === "routing") {
       this.traceFixture("ordinary_prompt");
+      const synthesisMarker = text.match(
+        /<!-- pi-deck-synthesis-delivery:v1:([^\s]+) -->/,
+      )?.[1];
+      if (synthesisMarker)
+        this.traceFixture(`synthesis_dispatch:${synthesisMarker}`);
       const images = params.images;
       if (Array.isArray(images) && images.length > 0)
         this.traceFixture(`prompt_images:${images.length}`);
@@ -1362,7 +1422,7 @@ class FakeRpcServer {
     const chunks =
       decision !== undefined
         ? [String(decision)]
-        : text.startsWith("Task-session synthesis for:")
+        : text.includes("Task-session synthesis for:")
           ? ["Synthesis observed:\n", text]
           : this.options.promptScenario === "routing"
             ? [
@@ -1446,6 +1506,10 @@ class FakeRpcServer {
                   }
                 : {}),
             });
+            // Pi consumes queued follow-ups as new user turns only after the
+            // active turn ends. Persist that turn before the next settlement so
+            // history probes exercise the real receipt boundary.
+            if (this.consumeQueuedFollowUp()) return;
             this.write({ type: "agent_settled" });
           }
         },
@@ -1788,6 +1852,44 @@ class FakeRpcServer {
     // the late dialog response must not manufacture a successful completion.
     if (this.options.promptScenario === "extension-ui-error") return;
     this.completePrompt(pending.assistantId, pending.promptText);
+  }
+
+  private signalReceipt(file: string | undefined, kind: string): void {
+    if (!file) return;
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.appendFileSync(file, `${kind}\n`);
+  }
+
+  /** Consume exactly one queued follow-up as Pi's next durable user turn. */
+  private consumeQueuedFollowUp(): boolean {
+    const text = this.followUp.shift();
+    if (text === undefined) return false;
+    const userMessage: PiMessage = {
+      id: `msg_user_${this.promptCounter + 1}`,
+      role: "user",
+      content: text,
+      createdAt: Date.now(),
+    };
+    this.messages.push(userMessage);
+    this.appendPersistedMessage(userMessage);
+    const synthesisMarker = text.match(
+      /<!-- pi-deck-synthesis-delivery:v1:([0-9a-f-]+) -->/i,
+    )?.[1];
+    if (synthesisMarker)
+      this.traceFixture(`synthesis_dispatch:${synthesisMarker}`);
+    this.signalReceipt(this.options.followUpReceiptSignalFile, "follow_up");
+    if (this.options.exitAfterFollowUpReceipt) process.exit(42);
+    this.emitQueueUpdate();
+    this.promptCounter += 1;
+    const assistantId = `msg_assistant_${this.promptCounter}`;
+    this.agentActive = true;
+    this.write({
+      type: "agent_start",
+      runId: `run_${this.promptCounter}`,
+      messageId: assistantId,
+    });
+    this.completePrompt(assistantId, text);
+    return true;
   }
 
   private handleIntervention(
