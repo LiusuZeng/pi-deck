@@ -1,4 +1,4 @@
-import { useMemo, type KeyboardEvent } from "react";
+import { useLayoutEffect, useMemo, useRef, type KeyboardEvent } from "react";
 import type { WorkspaceUsageTotals } from "../../shared/types.js";
 import type {
   ActivityInboxModel,
@@ -11,6 +11,7 @@ import {
   filterActivityItems,
   filterActivityItemsBySearchQuery,
   normalizeActivitySearchText,
+  normalizeActivityTimestamp,
   tagsForScope,
   tagsForStatus,
 } from "../activityInbox.js";
@@ -63,25 +64,18 @@ function formatTimestamp(timestamp: number): string {
   }).format(new Date(timestamp));
 }
 
-function finiteTimestamp(timestamp: unknown): number | undefined {
-  if (typeof timestamp !== "number" || !Number.isFinite(timestamp)) {
-    return undefined;
-  }
-  return Number.isNaN(new Date(timestamp).getTime()) ? undefined : timestamp;
-}
-
 function activityRowTimestamp(item: ActivityItem): number | undefined {
-  const completedAtMs = finiteTimestamp(item.completedAtMs);
+  const completedAtMs = normalizeActivityTimestamp(item.completedAtMs);
   return item.status === "completed" && completedAtMs !== undefined
     ? completedAtMs
-    : finiteTimestamp(item.updatedAtMs);
+    : normalizeActivityTimestamp(item.updatedAtMs);
 }
 
 function activityRowTimestampLabel(
   item: ActivityItem,
 ): "Completed" | "Updated" {
   return item.status === "completed" &&
-    finiteTimestamp(item.completedAtMs) !== undefined
+    normalizeActivityTimestamp(item.completedAtMs) !== undefined
     ? "Completed"
     : "Updated";
 }
@@ -194,6 +188,18 @@ export function ActivityInbox({
   openAiCodexAuthRequiredCount = 0,
   onRepairOpenAiCodexAuth,
 }: ActivityInboxProps) {
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const restoreSearchFocusRef = useRef(false);
+  useLayoutEffect(() => {
+    if (restoreSearchFocusRef.current && searchQuery.length === 0) {
+      restoreSearchFocusRef.current = false;
+      searchInputRef.current?.focus();
+    }
+  }, [searchQuery]);
+  const clearSearch = () => {
+    restoreSearchFocusRef.current = true;
+    onSearchQueryChange("");
+  };
   const workspaceName =
     scope.type === "workspace"
       ? workspaces.find((workspace) => workspace.id === scope.workspaceId)?.name
@@ -398,6 +404,7 @@ export function ActivityInbox({
         <div className="activity-inbox-search-control">
           <input
             aria-controls="activity-inbox-content"
+            ref={searchInputRef}
             aria-describedby="activity-inbox-scope-status"
             id="activity-inbox-search"
             onChange={(event) => onSearchQueryChange(event.target.value)}
@@ -406,7 +413,7 @@ export function ActivityInbox({
             value={searchQuery}
           />
           {searchQuery.length > 0 ? (
-            <button onClick={() => onSearchQueryChange("")} type="button">
+            <button onClick={clearSearch} type="button">
               Clear search
             </button>
           ) : null}

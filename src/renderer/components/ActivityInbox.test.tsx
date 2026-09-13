@@ -449,9 +449,14 @@ describe("ActivityInbox", () => {
     const clearButton = Array.from(view.querySelectorAll("button")).find(
       (button) => button.textContent === "Clear search",
     );
+    act(() => clearButton?.focus());
+    expect(clearButton).toBe(document.activeElement);
     act(() => clearButton?.click());
     expect(onSearchQueryChange).toHaveBeenCalledWith("");
     renderWith("", "all");
+    expect(view.querySelector<HTMLInputElement>('input[type="search"]')).toBe(
+      document.activeElement,
+    );
     expect(
       view.querySelector(".activity-inbox-result-summary")?.textContent,
     ).toBe("5 results in All Work.");
@@ -988,32 +993,38 @@ describe("ActivityInbox", () => {
     },
   );
 
-  it("falls back to a valid update time when a Completed timestamp is malformed", () => {
-    const updatedAtMs = 1_700_000_000_000;
-    const model = modelWithEveryKind();
-    const item = model.items.find(
-      (candidate) => candidate.status === "completed",
-    );
-    item!.completedAtMs = Number.NaN;
-    item!.updatedAtMs = updatedAtMs;
+  it.each([
+    ["NaN", Number.NaN],
+    ["out-of-range number", 8.64e15 + 1],
+  ])(
+    "falls back to a valid update time when a Completed timestamp is malformed: %s",
+    (_fixture, completedAtMs) => {
+      const updatedAtMs = 1_700_000_000_000;
+      const model = modelWithEveryKind();
+      const item = model.items.find(
+        (candidate) => candidate.status === "completed",
+      );
+      item!.completedAtMs = completedAtMs;
+      item!.updatedAtMs = updatedAtMs;
 
-    const { view } = renderInbox(
-      model,
-      { type: "all" },
-      vi.fn(),
-      vi.fn(),
-      workspaces,
-      vi.fn(),
-      "completed",
-    );
-    const row = rowForTitle(view, "completed session complete");
-    const time = row?.querySelector("time");
+      const { view } = renderInbox(
+        model,
+        { type: "all" },
+        vi.fn(),
+        vi.fn(),
+        workspaces,
+        vi.fn(),
+        "completed",
+      );
+      const row = rowForTitle(view, "completed session complete");
+      const time = row?.querySelector("time");
 
-    expect(time?.dateTime).toBe(new Date(updatedAtMs).toISOString());
-    expect(row?.getAttribute("aria-label")).toMatch(
-      /Detail for completed\. Updated .+ ago\./,
-    );
-  });
+      expect(time?.dateTime).toBe(new Date(updatedAtMs).toISOString());
+      expect(row?.getAttribute("aria-label")).toMatch(
+        /Detail for completed\. Updated .+ ago\./,
+      );
+    },
+  );
 
   it("activates a full row once by click, Enter, or Space with its canonical item", () => {
     const onOpenActivityItem = vi.fn();

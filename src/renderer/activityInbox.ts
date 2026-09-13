@@ -245,8 +245,8 @@ export function compareActivityItemsForStatus(
   right: ActivityItem,
 ): number {
   if (status === "needsAttention" || status === "failed") {
-    const leftUpdatedAtMs = finiteTimestamp(left.updatedAtMs);
-    const rightUpdatedAtMs = finiteTimestamp(right.updatedAtMs);
+    const leftUpdatedAtMs = normalizeActivityTimestamp(left.updatedAtMs);
+    const rightUpdatedAtMs = normalizeActivityTimestamp(right.updatedAtMs);
     if (leftUpdatedAtMs !== undefined && rightUpdatedAtMs !== undefined) {
       if (leftUpdatedAtMs !== rightUpdatedAtMs) {
         return leftUpdatedAtMs > rightUpdatedAtMs ? -1 : 1;
@@ -259,8 +259,8 @@ export function compareActivityItemsForStatus(
     return compareCodeUnitLexically(left.id, right.id);
   }
   if (status !== "completed") return 0;
-  const leftCompletedAtMs = finiteTimestamp(left.completedAtMs);
-  const rightCompletedAtMs = finiteTimestamp(right.completedAtMs);
+  const leftCompletedAtMs = normalizeActivityTimestamp(left.completedAtMs);
+  const rightCompletedAtMs = normalizeActivityTimestamp(right.completedAtMs);
   if (
     leftCompletedAtMs !== undefined &&
     rightCompletedAtMs !== undefined &&
@@ -274,7 +274,7 @@ export function compareActivityItemsForStatus(
   if (leftCompletedAtMs === undefined && rightCompletedAtMs !== undefined) {
     return 1;
   }
-  return left.id.localeCompare(right.id);
+  return compareCodeUnitLexically(left.id, right.id);
 }
 
 export function countActivityStatuses(
@@ -312,7 +312,9 @@ function normalizeActivity(source: ActivitySourceSession): ActivityItem[] {
   }
   const sessionKey = source.sessionFile ?? source.id;
   const completedAtMs =
-    status === "completed" ? finiteTimestamp(source.completedAtMs) : undefined;
+    status === "completed"
+      ? normalizeActivityTimestamp(source.completedAtMs)
+      : undefined;
   return [
     {
       id: `activity:${source.workspaceId}:${sessionKey}`,
@@ -389,7 +391,7 @@ function isInProgress(source: ActivitySourceSession): boolean {
 }
 
 function hasCompletionTimestamp(value: number | undefined): boolean {
-  return finiteTimestamp(value) !== undefined;
+  return normalizeActivityTimestamp(value) !== undefined;
 }
 
 /** Locale-independent UTF-16 code-unit order for persistent identifiers. */
@@ -399,11 +401,15 @@ function compareCodeUnitLexically(left: string, right: string): number {
   return 0;
 }
 
-/** Reject malformed runtime data rather than coercing it into a timestamp. */
-function finiteTimestamp(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value)
-    ? value
-    : undefined;
+/**
+ * Reject malformed runtime data and values outside the JavaScript Date range
+ * rather than coercing either into a timestamp.
+ */
+export function normalizeActivityTimestamp(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+  return Number.isFinite(new Date(value).getTime()) ? value : undefined;
 }
 
 function activityDetail(

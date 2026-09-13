@@ -4,6 +4,7 @@ import {
   activityTags,
   buildActivityInbox,
   classifyActivity,
+  compareActivityItemsForStatus,
   countActivityInboxItems,
   filterActivityItems,
   filterActivityItemsBySearchQuery,
@@ -196,6 +197,10 @@ describe("buildActivityInbox", () => {
         }),
         source("failed-oldest-valid", { baseState: "error", updatedAtMs: 100 }),
         source("failed-newest-valid", { baseState: "error", updatedAtMs: 200 }),
+        source("failed-out-of-range", {
+          baseState: "error",
+          updatedAtMs: malformedTimestamp(8.64e15 + 1),
+        }),
         source("attention-z-malformed", {
           baseState: "waitingForInput",
           updatedAtMs: malformedTimestamp(undefined),
@@ -214,6 +219,7 @@ describe("buildActivityInbox", () => {
       "failed-oldest-valid",
       "failed-a-nan",
       "failed-m-infinity",
+      "failed-out-of-range",
       "failed-z-string",
     ]);
     expect(inbox.groups.needsAttention.map((item) => item.sessionKey)).toEqual([
@@ -308,6 +314,30 @@ describe("buildActivityInbox", () => {
       "new-middle",
       "later",
     ]);
+  });
+
+  it("uses code-unit stable IDs for equal and malformed Completed ties", () => {
+    const inbox = buildActivityInbox([
+      source("completed-ä", { completedAtMs: 200 }),
+      source("completed-z", { completedAtMs: 200 }),
+    ]);
+
+    expect(inbox.groups.completed.map((item) => item.sessionKey)).toEqual([
+      "completed-z",
+      "completed-ä",
+    ]);
+
+    const malformedTimestamps = inbox.groups.completed.map((item) => ({
+      ...item,
+      completedAtMs: Number.NaN,
+    }));
+    expect(
+      malformedTimestamps
+        .sort((left, right) =>
+          compareActivityItemsForStatus("completed", left, right),
+        )
+        .map((item) => item.sessionKey),
+    ).toEqual(["completed-z", "completed-ä"]);
   });
 
   it("uses the same Completed queue ordering in All Work and workspace scopes", () => {
@@ -438,7 +468,7 @@ describe("buildActivityInbox", () => {
     });
   });
 
-  it("requires an explicit finite completion timestamp", () => {
+  it("requires an explicit Date-valid completion timestamp", () => {
     expect(
       classifyActivity(
         source("undefined", { baseState: "working", completedAtMs: undefined }),
@@ -447,6 +477,14 @@ describe("buildActivityInbox", () => {
     expect(
       classifyActivity(
         source("invalid", { baseState: "unloaded", completedAtMs: Number.NaN }),
+      ),
+    ).toBeUndefined();
+    expect(
+      classifyActivity(
+        source("out-of-range", {
+          baseState: "unloaded",
+          completedAtMs: 8.64e15 + 1,
+        }),
       ),
     ).toBeUndefined();
     expect(classifyActivity(source("completed", { completedAtMs: 0 }))).toBe(

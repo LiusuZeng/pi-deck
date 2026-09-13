@@ -7073,6 +7073,7 @@ test.describe("Unified Work", () => {
       ).toBeVisible();
       await page.getByRole("button", { name: "Clear search" }).click();
       await expect(search).toHaveValue("");
+      await expect(search).toBeFocused();
       await expect(atlasRow).toHaveCount(1);
 
       // The labeled control stays keyboard-focusable and visible at a narrow
