@@ -277,7 +277,7 @@ export function retryWorkflowOccurrence(
         prior.iteration,
         now,
         prior.attempt + 1,
-        [],
+        prior.context,
         prior.resolvedInputBindings,
       ),
     ],
