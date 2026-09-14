@@ -8560,6 +8560,28 @@ test("quit cancels a fork at its final snapshot boundary and compensates after e
           : "",
       )
       .toBe(targetFile);
+    const canonicalTarget = fs.realpathSync(targetFile);
+    const workspaceFile = path.join(root, "pideck-home", "workspaces.json");
+    const journalFile = path.join(
+      root,
+      "pideck-home",
+      "failed-fork-cleanup.json",
+    );
+    // The final snapshot is deliberately held after ownership was claimed.
+    // Establish that precondition before taking the last-window quit path.
+    await expect
+      .poll(() =>
+        fs.existsSync(workspaceFile)
+          ? fs.readFileSync(workspaceFile, "utf8")
+          : "",
+      )
+      .toContain(canonicalTarget);
+
+    // The fake's process-exit hook runs before Electron delivers worker_exit
+    // and the main process durably compensates the failed fork. App close is
+    // the authoritative last-window quit boundary: before-quit awaits that
+    // compensation before it calls app.quit() again.
+    const appClosed = app.waitForEvent("close");
     await page.evaluate(() => window.close());
     await expect
       .poll(() =>
@@ -8568,16 +8590,9 @@ test("quit cancels a fork at its final snapshot boundary and compensates after e
           : "",
       )
       .toContain(targetFile);
-    const canonicalTarget = fs.realpathSync(targetFile);
-    const workspaceStore = fs.readFileSync(
-      path.join(root, "pideck-home", "workspaces.json"),
-      "utf8",
-    );
-    expect(workspaceStore).not.toContain(canonicalTarget);
-    const journalFile = path.join(
-      root,
-      "pideck-home",
-      "failed-fork-cleanup.json",
+    await appClosed;
+    expect(fs.readFileSync(workspaceFile, "utf8")).not.toContain(
+      canonicalTarget,
     );
     expect(
       fs.existsSync(journalFile) ? fs.readFileSync(journalFile, "utf8") : "",
@@ -10993,6 +11008,7 @@ test.describe("task-session routing acceptance", () => {
           "15000",
           "--active-on-start-enabled-file",
           activeEnabledFile,
+          "--clear-active-on-start-enabled-file-after-follow-up-receipt",
           "--follow-up-receipt-signal-file",
           receiptFile,
           "--exit-after-follow-up-receipt",
@@ -11093,6 +11109,13 @@ test.describe("task-session routing acceptance", () => {
           { timeout: 30_000 },
         )
         .toMatch(/^follow_up$/m);
+      // The worker crash itself is authoritative evidence that this run crossed
+      // the receipt boundary. Keep its concrete failure visible rather than
+      // allowing a later attach to collapse it into an uninitialized runtime.
+      await expect(
+        recovered.page.getByText(/Pi RPC backend worker exited \(code=42\)/),
+      ).toBeVisible();
+      expect(fs.existsSync(activeEnabledFile)).toBe(false);
       expect(synthesisDispatchCount()).toBe(1);
       await recovered.app.close().catch(() => undefined);
       recovered = undefined;
@@ -11109,6 +11132,12 @@ test.describe("task-session routing acceptance", () => {
           exact: true,
         })
         .click();
+      // Sidebar selection commits its route before the resume IPC completes.
+      // Wait for that authoritative attach outcome, rather than sampling the
+      // intentionally absent default runtime during initialization.
+      await expect(
+        quiesced.page.getByText("Resumed saved Pi session."),
+      ).toBeVisible();
       await expect
         .poll(
           () =>

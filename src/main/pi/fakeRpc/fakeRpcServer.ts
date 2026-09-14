@@ -63,6 +63,8 @@ interface FakeOptions {
   /** Model an already-active parent when this test barrier file exists. */
   activeOnStartMs: number;
   activeOnStartEnabledFile?: string;
+  /** Clear the active-parent crash barrier once its follow-up is durable. */
+  clearActiveOnStartEnabledFileAfterFollowUpReceipt: boolean;
   /** Emits spaced, payload-free worker progress for Electron telemetry E2E. */
   taskSessionProgressFixture: boolean;
   sessionFile?: string;
@@ -147,6 +149,7 @@ function parseOptions(argv: string[]): FakeOptions {
     failTaskPromptRecordWhileActive: false,
     exitAfterFollowUpReceipt: false,
     activeOnStartMs: 0,
+    clearActiveOnStartEnabledFileAfterFollowUpReceipt: false,
     taskSessionProgressFixture: false,
     forkOmitsParentSession: false,
     forkGetStateDelayMs: 0,
@@ -255,6 +258,10 @@ function parseOptions(argv: string[]): FakeOptions {
       const file = argv[index + 1];
       if (file) options.activeOnStartEnabledFile = file;
       index += 1;
+    } else if (
+      arg === "--clear-active-on-start-enabled-file-after-follow-up-receipt"
+    ) {
+      options.clearActiveOnStartEnabledFileAfterFollowUpReceipt = true;
     } else if (arg === "--task-session-progress-fixture") {
       options.taskSessionProgressFixture = true;
     } else if (arg === "--session") {
@@ -793,9 +800,9 @@ class FakeRpcServer {
     }
   }
 
-  private appendPersistedMessage(message: PiMessage): void {
+  private appendPersistedMessage(message: PiMessage): boolean {
     if (!this.shouldPersistSessionFile) {
-      return;
+      return false;
     }
     try {
       this.ensurePersistedSessionRecord();
@@ -812,8 +819,10 @@ class FakeRpcServer {
           message,
         })}\n`,
       );
+      return true;
     } catch {
       // Fake persistence is best-effort and should not break RPC tests.
+      return false;
     }
   }
 
@@ -1871,13 +1880,34 @@ class FakeRpcServer {
       createdAt: Date.now(),
     };
     this.messages.push(userMessage);
-    this.appendPersistedMessage(userMessage);
+    const persisted = this.appendPersistedMessage(userMessage);
     const synthesisMarker = text.match(
       /<!-- pi-deck-synthesis-delivery:v1:([0-9a-f-]+) -->/i,
     )?.[1];
     if (synthesisMarker)
       this.traceFixture(`synthesis_dispatch:${synthesisMarker}`);
+    // A crash fixture cannot claim a receipt for a turn that never reached its
+    // session history. Fail loudly instead of weakening the receipt boundary.
+    if (
+      !persisted &&
+      (this.options.exitAfterFollowUpReceipt ||
+        this.options.clearActiveOnStartEnabledFileAfterFollowUpReceipt)
+    ) {
+      process.stderr.write(
+        "fake-rpc: queued follow_up was not durably persisted before crash injection\n",
+      );
+      process.exit(1);
+    }
     this.signalReceipt(this.options.followUpReceiptSignalFile, "follow_up");
+    // Consume this crash-only barrier at the durable receipt boundary, rather
+    // than startup: other runtime initialization can legitimately precede the
+    // parent attach that owns this queued follow-up.
+    if (
+      this.options.clearActiveOnStartEnabledFileAfterFollowUpReceipt &&
+      this.options.activeOnStartEnabledFile !== undefined
+    ) {
+      fs.rmSync(this.options.activeOnStartEnabledFile, { force: true });
+    }
     if (this.options.exitAfterFollowUpReceipt) process.exit(42);
     this.emitQueueUpdate();
     this.promptCounter += 1;
