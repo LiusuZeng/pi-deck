@@ -434,6 +434,49 @@ test("fake RPC accepts exact steer and follow_up commands and emits full queues"
   }
 });
 
+test("fake RPC clears an active-parent crash barrier after its durable follow_up", async () => {
+  const directory = tempDir("pi-deck-fake-active-parent-once-");
+  const barrier = path.join(directory, "activate-parent");
+  const session = path.join(directory, "parent.jsonl");
+  fs.writeFileSync(barrier, "active\n");
+  const args = [
+    "--session",
+    session,
+    "--active-on-start-ms",
+    "100",
+    "--active-on-start-enabled-file",
+    barrier,
+    "--clear-active-on-start-enabled-file-after-follow-up-receipt",
+  ];
+  const first = spawnFakeRpc(args);
+  try {
+    const active = (await first.request("get_state")) as {
+      isStreaming?: boolean;
+    };
+    expect(active.isStreaming).toBe(true);
+    const settled = waitForEvents(first, (events) =>
+      events.some((event) => event.type === "agent_settled"),
+    );
+    await first.request("follow_up", { message: "durable follow-up" });
+    await settled;
+    expect(fs.existsSync(barrier)).toBe(false);
+  } finally {
+    first.close();
+  }
+
+  const recovered = spawnFakeRpc(args);
+  try {
+    const state = (await recovered.request("get_state")) as {
+      isStreaming?: boolean;
+    };
+    // A quiescent recovery worker must not inherit the crash-only active turn.
+    expect(state.isStreaming).toBe(false);
+  } finally {
+    recovered.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("fake RPC consumes queued follow_up as a durable user turn", async () => {
   const directory = tempDir("pi-deck-fake-follow-up-receipt-");
   const session = path.join(directory, "parent.jsonl");
