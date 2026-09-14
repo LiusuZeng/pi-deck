@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { buildActivityInbox } from "./activityInbox.js";
 import { emptyOverlays, selectSidebarIndicator } from "./sessionState.js";
+import { reduceRuntimeEvent } from "./sessionRuntimeReducer.js";
 import { defaultAgentWorkflowDefinition } from "./workflows/agentWorkflowDefinition.js";
 import { __rendererTestHooks, AutolinkedText, MarkdownView } from "./App.js";
 
@@ -501,7 +502,7 @@ describe("tool execution activity details", () => {
       backendMode: "real",
     } as any;
 
-    const withPartial = __rendererTestHooks.reduceRuntimeEvent(session, {
+    const withPartial = reduceRuntimeEvent(session, {
       type: "tool_execution_update",
       runtimeId: "runtime-test",
       toolCallId: "tool-bash",
@@ -509,7 +510,7 @@ describe("tool execution activity details", () => {
       args: { command: "npm test" },
       output: "partial test output",
     } as any) as any;
-    const withFinal = __rendererTestHooks.reduceRuntimeEvent(withPartial, {
+    const withFinal = reduceRuntimeEvent(withPartial, {
       type: "tool_execution_end",
       runtimeId: "runtime-test",
       toolCallId: "tool-bash",
@@ -548,7 +549,7 @@ describe("tool execution activity details", () => {
       backendMode: "real",
     } as any;
 
-    const withPartial = __rendererTestHooks.reduceRuntimeEvent(session, {
+    const withPartial = reduceRuntimeEvent(session, {
       type: "tool_execution_update",
       runtimeId: "runtime-test",
       toolCallId: "tool-bash",
@@ -556,17 +557,14 @@ describe("tool execution activity details", () => {
       args: { command: "npm test" },
       output: "latest streamed test output",
     } as any) as any;
-    const withFinalStatus = __rendererTestHooks.reduceRuntimeEvent(
-      withPartial,
-      {
-        type: "tool_execution_end",
-        runtimeId: "runtime-test",
-        toolCallId: "tool-bash",
-        toolName: "bash",
-        status: "completed",
-        isError: false,
-      } as any,
-    ) as any;
+    const withFinalStatus = reduceRuntimeEvent(withPartial, {
+      type: "tool_execution_end",
+      runtimeId: "runtime-test",
+      toolCallId: "tool-bash",
+      toolName: "bash",
+      status: "completed",
+      isError: false,
+    } as any) as any;
 
     expect(withFinalStatus.timeline).toHaveLength(1);
     expect(withFinalStatus.timeline[0].summary).toBe("npm test");
@@ -957,7 +955,7 @@ function startCanonicalMutation(
 
 describe("worker exit lifecycle", () => {
   it("keeps a deliberately closed durable session resumable when SIGTERM is reported as 143", () => {
-    const next = __rendererTestHooks.reduceRuntimeEvent(
+    const next = reduceRuntimeEvent(
       { ...baseSession(), sessionFile: "/tmp/workflow-step.jsonl" } as any,
       {
         type: "worker_exit",
@@ -979,7 +977,7 @@ describe("worker exit lifecycle", () => {
   });
 
   it("continues to report an unplanned worker exit as an error", () => {
-    const next = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {
+    const next = reduceRuntimeEvent(baseSession(), {
       type: "worker_exit",
       runtimeId: "session-1",
       code: 143,
@@ -991,7 +989,7 @@ describe("worker exit lifecycle", () => {
   });
 
   it("keeps an unplanned-exit response race terminal across detail, sidebar, and Work", () => {
-    let session = __rendererTestHooks.reduceRuntimeEvent(
+    let session = reduceRuntimeEvent(
       baseSession() as any,
       {
         type: "extension_ui_request",
@@ -1008,14 +1006,14 @@ describe("worker exit lifecycle", () => {
 
     // The renderer may receive a successful response write after main has
     // already forwarded the terminal exit and revoked response ownership.
-    const exited = __rendererTestHooks.reduceRuntimeEvent(session, {
+    const exited = reduceRuntimeEvent(session, {
       type: "worker_exit",
       runtimeId: "session-1",
       code: 42,
       signal: null,
       intentional: false,
     } as any);
-    session = __rendererTestHooks.reduceRuntimeEvent(exited, {
+    session = reduceRuntimeEvent(exited, {
       type: "extension_ui_response_sent",
       runtimeId: "session-1",
       requestId: "approval-1",
@@ -1039,7 +1037,7 @@ describe("worker exit lifecycle", () => {
   });
 
   it("clears planned-exit extension input without changing its saved terminal state", () => {
-    let session = __rendererTestHooks.reduceRuntimeEvent(
+    let session = reduceRuntimeEvent(
       {
         ...baseSession(),
         sessionFile: "/tmp/planned-worker-exit.jsonl",
@@ -1052,14 +1050,14 @@ describe("worker exit lifecycle", () => {
         title: "Approve planned worker action",
       } as any,
     );
-    const exited = __rendererTestHooks.reduceRuntimeEvent(session, {
+    const exited = reduceRuntimeEvent(session, {
       type: "worker_exit",
       runtimeId: "session-1",
       code: 0,
       signal: null,
       intentional: true,
     } as any);
-    session = __rendererTestHooks.reduceRuntimeEvent(exited, {
+    session = reduceRuntimeEvent(exited, {
       type: "extension_ui_response_sent",
       runtimeId: "session-1",
       requestId: "approval-1",
@@ -1105,18 +1103,18 @@ describe("canonical occurrence Pi-session navigation", () => {
 
 describe("actionable session attention", () => {
   it("keeps failed tool activity visible without promoting the session to Needs attention", () => {
-    let session = __rendererTestHooks.reduceRuntimeEvent(
+    let session = reduceRuntimeEvent(
       baseSession() as any,
       { type: "agent_start", runtimeId: "session-1" } as any,
     );
-    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+    session = reduceRuntimeEvent(session, {
       type: "tool_execution_start",
       runtimeId: "session-1",
       toolCallId: "tool-failed",
       toolName: "bash",
       args: { command: "exit 1" },
     } as any);
-    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+    session = reduceRuntimeEvent(session, {
       type: "tool_execution_end",
       runtimeId: "session-1",
       toolCallId: "tool-failed",
@@ -1145,7 +1143,7 @@ describe("actionable session attention", () => {
     expect(buildActivityInbox([source]).groups.inProgress).toHaveLength(1);
     expect(buildActivityInbox([source]).groups.needsAttention).toHaveLength(0);
 
-    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+    session = reduceRuntimeEvent(session, {
       type: "extension_ui_request",
       runtimeId: "session-1",
       id: "approval-1",
@@ -1163,12 +1161,12 @@ describe("actionable session attention", () => {
       buildActivityInbox([waitingSource]).groups.needsAttention,
     ).toHaveLength(1);
 
-    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+    session = reduceRuntimeEvent(session, {
       type: "extension_ui_response_sent",
       runtimeId: "session-1",
       requestId: "approval-1",
     } as any);
-    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+    session = reduceRuntimeEvent(session, {
       type: "agent_end",
       runtimeId: "session-1",
       messages: [productionAssistantMessage("stop")],
@@ -1191,7 +1189,7 @@ describe("actionable session attention", () => {
   it("restores terminal provider failure after its pending extension dialog clears", () => {
     const errorMessage = "Provider failed after requesting approval.";
     const failedAssistant = productionAssistantMessage("error", errorMessage);
-    let session = __rendererTestHooks.reduceRuntimeEvent(
+    let session = reduceRuntimeEvent(
       baseSession() as any,
       {
         type: "extension_ui_request",
@@ -1204,7 +1202,7 @@ describe("actionable session attention", () => {
     expect(session.pendingExtensionUiRequests).toMatchObject([
       { id: "approval-1", method: "confirm" },
     ]);
-    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+    session = reduceRuntimeEvent(session, {
       type: "message_update",
       runtimeId: "session-1",
       message: failedAssistant,
@@ -1222,7 +1220,7 @@ describe("actionable session attention", () => {
       { content: errorMessage },
     ]);
 
-    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+    session = reduceRuntimeEvent(session, {
       type: "agent_end",
       runtimeId: "session-1",
       messages: [failedAssistant],
@@ -1254,7 +1252,7 @@ describe("actionable session attention", () => {
       { content: errorMessage },
     ]);
 
-    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+    session = reduceRuntimeEvent(session, {
       type: "extension_ui_response_sent",
       runtimeId: "session-1",
       requestId: "approval-1",
@@ -1276,7 +1274,7 @@ describe("actionable session attention", () => {
   });
 
   it("keeps a failed extension response Needs attention while its dialog remains pending", () => {
-    let session = __rendererTestHooks.reduceRuntimeEvent(
+    let session = reduceRuntimeEvent(
       baseSession() as any,
       {
         type: "extension_ui_request",
@@ -1286,7 +1284,7 @@ describe("actionable session attention", () => {
         title: "Approve command retry",
       } as any,
     );
-    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+    session = reduceRuntimeEvent(session, {
       type: "extension_ui_response_failed",
       runtimeId: "session-1",
       requestId: "approval-1",
@@ -1351,7 +1349,7 @@ describe("actionable session attention", () => {
     ];
 
     for (const event of events) {
-      session = __rendererTestHooks.reduceRuntimeEvent(session, event as any);
+      session = reduceRuntimeEvent(session, event as any);
       expect(session).toMatchObject({
         status: "waiting",
         baseState: "waitingForInput",
@@ -1379,7 +1377,7 @@ describe("actionable session attention", () => {
       buildActivityInbox([waitingSource]).groups.needsAttention,
     ).toHaveLength(1);
 
-    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+    session = reduceRuntimeEvent(session, {
       type: "extension_ui_response_sent",
       runtimeId: "session-1",
       requestId: "approval-1",
@@ -1399,7 +1397,7 @@ describe("actionable session attention", () => {
   });
 
   it("keeps a terminal provider failure Failed without an actionable request", () => {
-    const failed = __rendererTestHooks.reduceRuntimeEvent(
+    const failed = reduceRuntimeEvent(
       baseSession() as any,
       {
         type: "agent_end",
@@ -1595,7 +1593,7 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
   it("keeps a production-shaped provider error visible after agent_end", () => {
     const errorMessage = "Provider quota exhausted.";
     const failedAssistant = productionAssistantMessage("error", errorMessage);
-    const afterMessage = __rendererTestHooks.reduceRuntimeEvent(
+    const afterMessage = reduceRuntimeEvent(
       {
         ...baseSession(),
         status: "working",
@@ -1619,7 +1617,7 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
       { content: errorMessage },
     ]);
 
-    const afterEnd = __rendererTestHooks.reduceRuntimeEvent(afterMessage, {
+    const afterEnd = reduceRuntimeEvent(afterMessage, {
       type: "agent_end",
       runtimeId: "session-1",
       messages: [failedAssistant],
@@ -1642,7 +1640,7 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
       ),
       provider: "openai-codex",
     };
-    let session = __rendererTestHooks.reduceRuntimeEvent(
+    let session = reduceRuntimeEvent(
       { ...baseSession(), status: "working", baseState: "working" } as any,
       {
         type: "message_update",
@@ -1654,7 +1652,7 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
         },
       } as any,
     );
-    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+    session = reduceRuntimeEvent(session, {
       type: "agent_end",
       messages: [expiredAssistant],
       willRetry: false,
@@ -1667,10 +1665,10 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
       { role: "assistant", stopReason: "toolUse", content: "Use a tool" },
       { role: "assistant", content: "No terminal reason" },
     ]) {
-      session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      session = reduceRuntimeEvent(session, {
         type: "agent_start",
       } as any);
-      session = __rendererTestHooks.reduceRuntimeEvent(session, {
+      session = reduceRuntimeEvent(session, {
         type: "agent_end",
         status: "completed",
         messages: [assistant],
@@ -1684,10 +1682,10 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
       });
     }
 
-    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+    session = reduceRuntimeEvent(session, {
       type: "agent_start",
     } as any);
-    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+    session = reduceRuntimeEvent(session, {
       type: "agent_end",
       messages: [productionAssistantMessage("stop")],
       willRetry: false,
@@ -1697,10 +1695,10 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
       lastError: "Provided authentication token is expired.",
     });
 
-    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+    session = reduceRuntimeEvent(session, {
       type: "agent_start",
     } as any);
-    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+    session = reduceRuntimeEvent(session, {
       type: "agent_end",
       messages: [
         { ...productionAssistantMessage("stop"), provider: "openai-codex" },
@@ -1719,7 +1717,7 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
       "aborted",
       "Request aborted by user.",
     );
-    const afterMessage = __rendererTestHooks.reduceRuntimeEvent(
+    const afterMessage = reduceRuntimeEvent(
       {
         ...baseSession(),
         status: "working",
@@ -1737,7 +1735,7 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
         },
       } as any,
     );
-    const afterEnd = __rendererTestHooks.reduceRuntimeEvent(afterMessage, {
+    const afterEnd = reduceRuntimeEvent(afterMessage, {
       type: "agent_end",
       runtimeId: "session-1",
       messages: [abortedAssistant],
@@ -1749,7 +1747,7 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
   });
 
   it("records completed activity only for successful or aborted agent_end events", () => {
-    const successful = __rendererTestHooks.reduceRuntimeEvent(
+    const successful = reduceRuntimeEvent(
       {
         ...baseSession(),
         status: "working",
@@ -1766,13 +1764,13 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
 
     expect(successful.completedAtMs).toEqual(expect.any(Number));
 
-    const nextTurn = __rendererTestHooks.reduceRuntimeEvent(successful, {
+    const nextTurn = reduceRuntimeEvent(successful, {
       type: "agent_start",
       runtimeId: "session-1",
     } as any);
     expect(nextTurn.completedAtMs).toBeUndefined();
 
-    const aborted = __rendererTestHooks.reduceRuntimeEvent(
+    const aborted = reduceRuntimeEvent(
       {
         ...baseSession(),
         status: "working",
@@ -1788,7 +1786,7 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
     );
     expect(aborted.completedAtMs).toEqual(expect.any(Number));
 
-    const failed = __rendererTestHooks.reduceRuntimeEvent(
+    const failed = reduceRuntimeEvent(
       {
         ...baseSession(),
         status: "working",
@@ -1808,7 +1806,7 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
   it("derives a terminal error from the final Pi agent_end message", () => {
     const errorMessage = "Pi returned a terminal provider error.";
     const failedAssistant = productionAssistantMessage("error", errorMessage);
-    const afterEnd = __rendererTestHooks.reduceRuntimeEvent(
+    const afterEnd = reduceRuntimeEvent(
       {
         ...baseSession(),
         status: "working",
@@ -1834,7 +1832,7 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
       "error",
       "Retryable provider failure.",
     );
-    let session = __rendererTestHooks.reduceRuntimeEvent(
+    let session = reduceRuntimeEvent(
       {
         ...baseSession(),
         status: "working",
@@ -1853,7 +1851,7 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
     expect(session.overlays.retrying).toBe(true);
     expect(__rendererTestHooks.isSessionBusy(session)).toBe(true);
 
-    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+    session = reduceRuntimeEvent(session, {
       type: "auto_retry_start",
       runtimeId: "session-1",
       attempt: 1,
@@ -1863,7 +1861,7 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
     } as any);
     expect(__rendererTestHooks.isSessionBusy(session)).toBe(true);
 
-    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+    session = reduceRuntimeEvent(session, {
       type: "auto_retry_end",
       runtimeId: "session-1",
       success: true,
@@ -1873,7 +1871,7 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
     expect(session.overlays.retrying).toBe(false);
     expect(__rendererTestHooks.isSessionBusy(session)).toBe(true);
 
-    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+    session = reduceRuntimeEvent(session, {
       type: "agent_end",
       runtimeId: "session-1",
       messages: [productionAssistantMessage("stop")],
@@ -1893,7 +1891,7 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
   it("surfaces auto_retry_end finalError without duplicate diagnostics", () => {
     const finalError = "Retry failed after 2 attempts: quota exhausted.";
     const failedAssistant = productionAssistantMessage("error", finalError);
-    let session = __rendererTestHooks.reduceRuntimeEvent(
+    let session = reduceRuntimeEvent(
       {
         ...baseSession(),
         status: "working",
@@ -1908,7 +1906,7 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
       } as any,
     );
 
-    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+    session = reduceRuntimeEvent(session, {
       type: "auto_retry_end",
       runtimeId: "session-1",
       success: false,
@@ -1929,7 +1927,7 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
       "error",
       "Retryable provider failure.",
     );
-    let session = __rendererTestHooks.reduceRuntimeEvent(
+    let session = reduceRuntimeEvent(
       {
         ...baseSession(),
         status: "working",
@@ -1943,7 +1941,7 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
         willRetry: true,
       } as any,
     );
-    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+    session = reduceRuntimeEvent(session, {
       type: "auto_retry_start",
       runtimeId: "session-1",
       attempt: 1,
@@ -1955,7 +1953,7 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
     // This is the state set synchronously by the Abort control before Pi's
     // AgentSession.abort() cancels the backoff sleep.
     session = { ...session, status: "aborting", baseState: "working" };
-    session = __rendererTestHooks.reduceRuntimeEvent(session, {
+    session = reduceRuntimeEvent(session, {
       type: "auto_retry_end",
       runtimeId: "session-1",
       success: false,
@@ -1973,7 +1971,7 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
 
   it("does not treat a prior local error state as a provider terminal failure", () => {
     const localError = "Attachment picker failed locally.";
-    const afterEnd = __rendererTestHooks.reduceRuntimeEvent(
+    const afterEnd = reduceRuntimeEvent(
       {
         ...baseSession(),
         status: "error",
@@ -2966,7 +2964,7 @@ describe("renderer session actions", () => {
       runtimeBacked: false,
       resumeBacked: true,
     };
-    const backgroundAfterEvent = __rendererTestHooks.reduceRuntimeEvent(
+    const backgroundAfterEvent = reduceRuntimeEvent(
       { ...baseSession(), id: "background-runtime", projectId: "/projects/b" },
       { type: "agent_start", runtimeId: "background-runtime" } as any,
     );
@@ -2992,7 +2990,7 @@ describe("renderer session actions", () => {
   });
 
   it("preserves background updates while close or delete completion removes its target", () => {
-    const backgroundAfterEvent = __rendererTestHooks.reduceRuntimeEvent(
+    const backgroundAfterEvent = reduceRuntimeEvent(
       { ...baseSession(), id: "background-runtime", projectId: "/projects/b" },
       { type: "agent_start", runtimeId: "background-runtime" } as any,
     );
@@ -3636,7 +3634,7 @@ describe("renderer runtime-scoped capabilities", () => {
 
 describe("renderer message_update reduction", () => {
   it("does not render toolcall JSON deltas as assistant text", () => {
-    const next = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {
+    const next = reduceRuntimeEvent(baseSession(), {
       type: "message_update",
       message: {
         id: "assistant-1",
@@ -3667,7 +3665,7 @@ describe("renderer message_update reduction", () => {
   });
 
   it("renders tool execution events so active tool work does not look stuck", () => {
-    const next = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {
+    const next = reduceRuntimeEvent(baseSession(), {
       type: "tool_execution_start",
       runtimeId: "session-1",
       toolCallId: "tool-1",
@@ -3689,7 +3687,7 @@ describe("renderer message_update reduction", () => {
   });
 
   it("reduces queue, compaction, and retry events into sidebar overlays", () => {
-    const queued = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {
+    const queued = reduceRuntimeEvent(baseSession(), {
       type: "queue_update",
       runtimeId: "session-1",
       steeringCount: 1,
@@ -3700,7 +3698,7 @@ describe("renderer message_update reduction", () => {
       piQueuedFollowUpCount: 2,
     });
 
-    const exactPiQueue = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {
+    const exactPiQueue = reduceRuntimeEvent(baseSession(), {
       type: "queue_update",
       runtimeId: "session-1",
       steering: ["one"],
@@ -3711,13 +3709,13 @@ describe("renderer message_update reduction", () => {
       piQueuedFollowUpCount: 2,
     });
 
-    const compacting = __rendererTestHooks.reduceRuntimeEvent(queued, {
+    const compacting = reduceRuntimeEvent(queued, {
       type: "compaction_start",
       runtimeId: "session-1",
     } as any);
     expect(compacting.overlays.compacting).toBe(true);
 
-    const retrying = __rendererTestHooks.reduceRuntimeEvent(compacting, {
+    const retrying = reduceRuntimeEvent(compacting, {
       type: "auto_retry_start",
       runtimeId: "session-1",
     } as any);
@@ -3725,7 +3723,7 @@ describe("renderer message_update reduction", () => {
   });
 
   it("marks extension UI dialog events as waiting for input", () => {
-    const waiting = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {
+    const waiting = reduceRuntimeEvent(baseSession(), {
       type: "extension_ui_request",
       runtimeId: "session-1",
       id: "ext-1",
@@ -3756,7 +3754,7 @@ describe("renderer message_update reduction", () => {
       "set_editor_text",
     ]) {
       const original = baseSession();
-      const next = __rendererTestHooks.reduceRuntimeEvent(original, {
+      const next = reduceRuntimeEvent(original, {
         type: "extension_ui_request",
         runtimeId: "session-1",
         id: `${method}-1`,
@@ -3772,7 +3770,7 @@ describe("renderer message_update reduction", () => {
   });
 
   it("explains unknown extension UI methods instead of silently ignoring them", () => {
-    const next = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {
+    const next = reduceRuntimeEvent(baseSession(), {
       type: "extension_ui_request",
       runtimeId: "session-1",
       id: "unknown-1",
@@ -3794,7 +3792,7 @@ describe("renderer message_update reduction", () => {
   });
 
   it("still appends text deltas from assistantMessageEvent", () => {
-    const next = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {
+    const next = reduceRuntimeEvent(baseSession(), {
       type: "message_update",
       message: {
         id: "assistant-1",
@@ -3815,7 +3813,7 @@ describe("renderer message_update reduction", () => {
   });
 
   it("keeps response-id text and thinking updates in separate timeline items", () => {
-    const text = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {
+    const text = reduceRuntimeEvent(baseSession(), {
       type: "message_update",
       runtimeId: "session-1",
       message: {
@@ -3824,7 +3822,7 @@ describe("renderer message_update reduction", () => {
         content: [{ type: "text", text: "Answer" }],
       },
     } as any);
-    const next = __rendererTestHooks.reduceRuntimeEvent(text, {
+    const next = reduceRuntimeEvent(text, {
       type: "message_update",
       runtimeId: "session-1",
       assistantMessageEvent: {
@@ -3845,7 +3843,7 @@ describe("renderer message_update reduction", () => {
   });
 
   it("surfaces asynchronous message update errors instead of returning to idle", () => {
-    const next = __rendererTestHooks.reduceRuntimeEvent(baseSession(), {
+    const next = reduceRuntimeEvent(baseSession(), {
       type: "message_update",
       runtimeId: "session-1",
       messageId: "assistant-1",
@@ -3869,7 +3867,7 @@ describe("renderer message_update reduction", () => {
   });
 
   it("surfaces agent_end errors instead of swallowing provider failures", () => {
-    const next = __rendererTestHooks.reduceRuntimeEvent(
+    const next = reduceRuntimeEvent(
       {
         ...baseSession(),
         status: "working",
@@ -4170,7 +4168,7 @@ describe("renderer message_update reduction", () => {
   });
 
   it("keeps a completed assistant message working until agent_end confirms the turn", () => {
-    const next = __rendererTestHooks.reduceRuntimeEvent(
+    const next = reduceRuntimeEvent(
       {
         ...baseSession(),
         status: "sending",
@@ -4329,7 +4327,7 @@ describe("renderer message_update reduction", () => {
     } as any;
     expect(__rendererTestHooks.eventHasUsageMetadata(event)).toBe(true);
 
-    const next = __rendererTestHooks.reduceRuntimeEvent(
+    const next = reduceRuntimeEvent(
       { ...baseSession(), status: "working", baseState: "working" } as any,
       event,
     );
@@ -4352,7 +4350,7 @@ describe("renderer message_update reduction", () => {
     } as any;
     expect(__rendererTestHooks.eventHasUsageMetadata(event)).toBe(true);
 
-    const next = __rendererTestHooks.reduceRuntimeEvent(
+    const next = reduceRuntimeEvent(
       { ...baseSession(), status: "working", baseState: "working" } as any,
       event,
     );
@@ -4387,7 +4385,7 @@ describe("renderer message_update reduction", () => {
   });
 
   it("clears empty assistant placeholders when an agent turn ends", () => {
-    const next = __rendererTestHooks.reduceRuntimeEvent(
+    const next = reduceRuntimeEvent(
       {
         ...baseSession(),
         status: "working",
