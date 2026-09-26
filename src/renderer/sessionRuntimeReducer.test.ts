@@ -100,6 +100,145 @@ describe("sessionRuntimeReducer", () => {
     });
   });
 
+  it("projects cumulative subagent updates by tool call without cross-call leakage", () => {
+    const args = {
+      tasks: [
+        { agent: "worker", task: "Inspect A" },
+        { agent: "worker", task: "Inspect B" },
+      ],
+    };
+    const startedA = reduceRuntimeEvent(session(), {
+      type: "tool_execution_start",
+      runtimeId: "runtime-1",
+      toolCallId: "subagent-a",
+      toolName: "subagent",
+      args,
+    } as any);
+    const startedBoth = reduceRuntimeEvent(startedA, {
+      type: "tool_execution_start",
+      runtimeId: "runtime-1",
+      toolCallId: "subagent-b",
+      toolName: "subagent",
+      args: { agent: "reviewer", task: "Review separately" },
+    } as any);
+    const updatedA = reduceRuntimeEvent(startedBoth, {
+      type: "tool_execution_update",
+      runtimeId: "runtime-1",
+      toolCallId: "subagent-a",
+      toolName: "subagent",
+      args,
+      partialResult: {
+        details: {
+          mode: "parallel",
+          results: [
+            {
+              agent: "worker",
+              task: "Inspect A",
+              exitCode: 0,
+              messages: [
+                {
+                  role: "assistant",
+                  content: [{ type: "toolCall", name: "read", arguments: {} }],
+                },
+              ],
+              usage: { turns: 1, input: 10, output: 0 },
+            },
+            {
+              agent: "worker",
+              task: "Inspect B",
+              exitCode: -1,
+              messages: [],
+              usage: { turns: 0, input: 0, output: 0 },
+            },
+          ],
+        },
+      },
+    } as any);
+
+    const callA = updatedA.timeline.find((item) => item.id === "subagent-a");
+    const callB = updatedA.timeline.find((item) => item.id === "subagent-b");
+    expect(callA).toMatchObject({
+      kind: "tool",
+      subagentActivity: {
+        mode: "parallel",
+        children: [
+          { index: 0, state: "Activity observed", agent: "worker" },
+          { index: 1, state: "Waiting for activity", agent: "worker" },
+        ],
+      },
+    });
+    expect(callB).toMatchObject({
+      kind: "tool",
+      subagentActivity: {
+        mode: "single",
+        children: [{ index: 0, agent: "reviewer", history: [] }],
+      },
+    });
+  });
+
+  it("retains final subagent details and terminalizes only on tool end", () => {
+    const args = { agent: "worker", task: "Finish" };
+    const partial = reduceRuntimeEvent(session(), {
+      type: "tool_execution_update",
+      runtimeId: "runtime-1",
+      toolCallId: "subagent-final",
+      toolName: "subagent",
+      args,
+      partialResult: {
+        details: {
+          mode: "single",
+          results: [
+            {
+              agent: "worker",
+              task: "Finish",
+              exitCode: 0,
+              messages: [],
+              usage: { turns: 0, input: 0, output: 0 },
+            },
+          ],
+        },
+      },
+    } as any);
+    const ended = reduceRuntimeEvent(partial, {
+      type: "tool_execution_end",
+      runtimeId: "runtime-1",
+      toolCallId: "subagent-final",
+      toolName: "subagent",
+      result: {
+        content: [{ type: "text", text: "done" }],
+        details: {
+          mode: "single",
+          results: [
+            {
+              agent: "worker",
+              task: "Finish",
+              exitCode: 0,
+              messages: [
+                {
+                  role: "assistant",
+                  content: [{ type: "text", text: "Public handoff" }],
+                },
+              ],
+              usage: { turns: 1, input: 4, output: 2 },
+            },
+          ],
+        },
+      },
+      isError: false,
+    } as any);
+
+    expect(
+      (partial.timeline[0] as any).subagentActivity.children[0].state,
+    ).toBe("Waiting for activity");
+    expect(
+      (ended.timeline[0] as any).subagentActivity.children[0],
+    ).toMatchObject({
+      state: "Completed",
+      completedTurns: 1,
+      latest: "Public handoff",
+    });
+  });
+
   it("detaches an intentional worker exit into a resumable saved row", () => {
     const exited = reduceRuntimeEvent(
       {

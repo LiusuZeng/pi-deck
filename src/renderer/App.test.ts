@@ -734,6 +734,131 @@ describe("tool execution activity details", () => {
   });
 });
 
+it("restores persisted subagent activity from terminal tool-result details", () => {
+  const session = __rendererTestHooks.sessionFromSnapshot({
+    runtimeId: "runtime-subagent-snapshot",
+    backendMode: "real",
+    workspaceId: "workspace-a",
+    state: { cwd: "/tmp/project", isAgentActive: false },
+    messages: [
+      {
+        id: "assistant-tool-call",
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "persisted-subagent-call",
+            name: "subagent",
+            arguments: {
+              chain: [
+                { agent: "worker", task: "Implement" },
+                { agent: "reviewer", task: "Review" },
+              ],
+            },
+          },
+        ],
+      },
+      {
+        id: "persisted-tool-result",
+        role: "toolResult",
+        toolCallId: "persisted-subagent-call",
+        toolName: "subagent",
+        content: [{ type: "text", text: "Chain stopped" }],
+        isError: true,
+        details: {
+          mode: "chain",
+          agentScope: "user",
+          projectAgentsDir: null,
+          results: [
+            {
+              agent: "worker",
+              task: "Implement",
+              step: 1,
+              exitCode: 1,
+              stopReason: "error",
+              errorMessage: "Implementation failed",
+              messages: [
+                {
+                  role: "assistant",
+                  content: [
+                    { type: "thinking", thinking: "private analysis" },
+                    { type: "toolCall", name: "grep", arguments: {} },
+                    { type: "text", text: "Public progress" },
+                  ],
+                },
+              ],
+              usage: { turns: 1, input: 8, output: 2 },
+            },
+          ],
+        },
+      },
+    ],
+  } as any);
+
+  const tool = session.timeline.find(
+    (item: any) => item.id === "persisted-subagent-call",
+  ) as any;
+  expect(tool).toMatchObject({
+    kind: "tool",
+    title: "subagent",
+    status: "error",
+    subagentActivity: {
+      mode: "chain",
+      children: [
+        { index: 0, step: 1, state: "Failed" },
+        { index: 1, step: 2, state: "Not run" },
+      ],
+    },
+  });
+  expect(JSON.stringify(tool.subagentActivity)).toContain("Public progress");
+  expect(JSON.stringify(tool.subagentActivity)).not.toContain(
+    "private analysis",
+  );
+});
+
+it("restores details-only normalized subagent history without inventing live state", () => {
+  const session = __rendererTestHooks.sessionFromSnapshot({
+    runtimeId: "runtime-normalized-snapshot",
+    backendMode: "real",
+    workspaceId: "workspace-a",
+    state: { cwd: "/tmp/project", isAgentActive: false },
+    messages: [
+      {
+        id: "normalized-result",
+        role: "toolResult",
+        toolCallId: "normalized-call",
+        toolName: "subagent",
+        content: "Finished",
+        details: {
+          mode: "parallel",
+          results: [
+            {
+              agent: "worker",
+              task: "Persisted work",
+              exitCode: 0,
+              messages: [
+                { role: "assistant", content: "Persisted public handoff" },
+              ],
+              usage: { turns: 1, input: 3, output: 2 },
+            },
+          ],
+        },
+      },
+    ],
+  } as any);
+
+  expect((session.timeline[0] as any).subagentActivity).toMatchObject({
+    mode: "parallel",
+    children: [
+      {
+        index: 0,
+        state: "Completed",
+        history: [{ kind: "text", text: "Persisted public handoff" }],
+      },
+    ],
+  });
+});
+
 it("offers every active workflow workspace once and excludes archived workspaces", () => {
   const workspace = (id: string, name: string) => ({
     id,

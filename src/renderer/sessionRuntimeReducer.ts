@@ -25,6 +25,10 @@ import {
   type MessageUsage,
   type UsageStats,
 } from "./sessionUsageProjection.js";
+import {
+  projectSubagentActivity,
+  type SubagentActivity,
+} from "./subagentActivity.js";
 
 export type SessionStatus =
   | "idle"
@@ -107,6 +111,7 @@ export type TimelineItem =
       summary: string;
       details: string;
       detailSections?: ToolDetailSection[];
+      subagentActivity?: SubagentActivity;
       createdAt: string;
     };
 
@@ -904,7 +909,11 @@ function reduceToolExecutionEvent(
         : "success"
       : "running";
   const existingTool = existingToolTimelineItem(session.timeline, event);
-  const eventToolItem = toolTimelineItemFromRuntimeEvent(event, status);
+  const eventToolItem = toolTimelineItemFromRuntimeEvent(
+    event,
+    status,
+    existingTool,
+  );
   const toolItem = eventToolItem
     ? mergeToolTimelineItemDetails(eventToolItem, existingTool)
     : undefined;
@@ -953,6 +962,7 @@ function existingToolTimelineItem(
 export function toolTimelineItemFromRuntimeEvent(
   event: ChatRuntimeEvent,
   status: "running" | "success" | "error" | "collapsed",
+  previous?: Extract<TimelineItem, { kind: "tool" }>,
 ): Extract<TimelineItem, { kind: "tool" }> | undefined {
   const id = getString(event, "toolCallId") ?? getString(event, "id");
   if (id === undefined) {
@@ -970,6 +980,20 @@ export function toolTimelineItemFromRuntimeEvent(
       ? detailSectionsToText(detailSections)
       : rawToolEventDetails(event, title, args),
   );
+  const result = getToolEventResult(event);
+  const subagentActivity = projectSubagentActivity({
+    toolName: title === "Tool" ? previous?.title : title,
+    args,
+    details: result?.details,
+    phase: event.type === "tool_execution_end" ? "terminal" : "running",
+    parentInterrupted:
+      event.type === "tool_execution_end" &&
+      (getString(event, "status") === "aborted" ||
+        getStringFromRecord(result, "stopReason") === "aborted"),
+    ...(previous?.subagentActivity === undefined
+      ? {}
+      : { previous: previous.subagentActivity }),
+  });
 
   return {
     id,
@@ -979,6 +1003,7 @@ export function toolTimelineItemFromRuntimeEvent(
     summary,
     details,
     ...(detailSections.length > 0 ? { detailSections } : {}),
+    ...(subagentActivity === undefined ? {} : { subagentActivity }),
     createdAt: formatTime(),
   };
 }
