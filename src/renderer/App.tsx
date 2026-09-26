@@ -228,6 +228,10 @@ import {
   PiModelThinkingMenu,
   nextMenuItemIndex,
 } from "./components/PiModelThinkingMenu.js";
+import type {
+  SubagentActivity,
+  SubagentActivityChild,
+} from "./subagentActivity.js";
 
 const AgentWorkflowBuilder = lazy(() =>
   import("./components/workflows/AgentWorkflowBuilder.js").then((module) => ({
@@ -523,8 +527,10 @@ function activityMilestones(
     const previous = milestones[milestones.length - 1];
     const canAppend =
       item.kind === "tool" &&
+      item.subagentActivity === undefined &&
       previous !== undefined &&
       previous.items[0]?.kind === "tool" &&
+      previous.items[0].subagentActivity === undefined &&
       toolActivityKey(previous.items[0]) === toolActivityKey(item) &&
       previous.state === toolActivityState(item);
 
@@ -8103,6 +8109,7 @@ function normalizedSnapshotMessageId(
 }
 
 function timelineFromMessages(messages: ChatMessage[]): TimelineItem[] {
+  const subagentArgs = subagentArgsFromSnapshotMessages(messages);
   const timeline = messages.flatMap((message, index): TimelineItem[] => {
     // Real Pi persists and returns content parts (for example,
     // [{ type: "text", text: "..." }]) rather than a plain string. Snapshots
@@ -8130,6 +8137,43 @@ function timelineFromMessages(messages: ChatMessage[]): TimelineItem[] {
           ...(attachments ? { attachments } : {}),
         },
       ];
+    }
+
+    const messageRecord = message as Record<string, unknown>;
+    const toolCallId =
+      typeof messageRecord.toolCallId === "string"
+        ? messageRecord.toolCallId
+        : id;
+    const persistedToolName =
+      typeof messageRecord.toolName === "string"
+        ? messageRecord.toolName
+        : undefined;
+    if (
+      (message.role === "tool" || message.role === "toolResult") &&
+      persistedToolName !== undefined
+    ) {
+      const persistedTool = toolTimelineItemFromRuntimeEvent(
+        {
+          type: "tool_execution_end",
+          runtimeId: "snapshot",
+          toolCallId,
+          toolName: persistedToolName,
+          ...(subagentArgs[toolCallId] === undefined
+            ? {}
+            : { args: subagentArgs[toolCallId] }),
+          result: {
+            content,
+            ...(messageRecord.details === undefined
+              ? {}
+              : { details: messageRecord.details }),
+          },
+          isError: messageRecord.isError === true,
+        } as ChatRuntimeEvent,
+        messageRecord.isError === true ? "error" : "collapsed",
+      );
+      if (persistedTool !== undefined) {
+        return [{ ...persistedTool, createdAt }];
+      }
     }
 
     const toolItem = toolTimelineItemFromContent({
@@ -8165,6 +8209,40 @@ function timelineFromMessages(messages: ChatMessage[]): TimelineItem[] {
   });
 
   return timeline;
+}
+
+function subagentArgsFromSnapshotMessages(
+  messages: readonly ChatMessage[],
+): Record<string, Record<string, unknown> | undefined> {
+  const argsByToolCallId: Record<string, Record<string, unknown> | undefined> =
+    {};
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    const messageRecord = message as Record<string, unknown>;
+    const normalizedToolCalls = Array.isArray(messageRecord.toolCalls)
+      ? messageRecord.toolCalls
+      : [];
+    const rawContent = messageRecord.content;
+    const rawToolCalls = Array.isArray(rawContent)
+      ? rawContent.filter(
+          (value) =>
+            getStringFromRecord(recordFromUnknown(value), "type") ===
+            "toolCall",
+        )
+      : [];
+    // Raw structured content is a pre-normalization fallback. When both are
+    // present, the bounded schema projection is authoritative.
+    for (const value of [...rawToolCalls, ...normalizedToolCalls]) {
+      const part = recordFromUnknown(value);
+      if (getStringFromRecord(part, "name") !== "subagent") continue;
+      const toolCallId = getStringFromRecord(part, "id");
+      const args = getRecordFromRecord(part, "arguments");
+      if (toolCallId !== undefined && args !== undefined) {
+        argsByToolCallId[toolCallId] = args;
+      }
+    }
+  }
+  return argsByToolCallId;
 }
 
 function selectedSessionSupportsImages(
@@ -11292,7 +11370,7 @@ function ExtensionUiCard(props: {
   );
 }
 
-function AgentActivityGroup(props: {
+export function AgentActivityGroup(props: {
   group: Extract<TimelinePresentationItem, { kind: "activity" }>;
   open: boolean;
   onGroupFocus(): void;
@@ -11367,11 +11445,37 @@ function ActivityMilestoneRow(props: {
   onDetailsToggle(event: SyntheticEvent<HTMLDetailsElement>): void;
 }): ReactElement {
   const { milestone } = props;
+  const visibleSubagent =
+    milestone.items.length === 1 &&
+    milestone.items[0]?.kind === "tool" &&
+    milestone.items[0].subagentActivity !== undefined
+      ? milestone.items[0]
+      : undefined;
   const hasRawTrace = milestone.items.length > 0;
 
   return (
     <li className={`agent-activity-milestone ${milestone.state}`}>
-      {hasRawTrace ? (
+      {visibleSubagent !== undefined ? (
+        <>
+          <div className="agent-activity-milestone-static">
+            <ActivityMilestoneMark state={milestone.state} />
+            <span>{activityMilestoneLabel(milestone)}</span>
+            {milestone.state === "error" ? (
+              <span className="agent-activity-error-label">Failed</span>
+            ) : null}
+          </div>
+          <ol
+            className="agent-activity-raw-trace"
+            aria-label={`${activityMilestoneLabel(milestone)} activity`}
+          >
+            <AgentActivityStep
+              item={visibleSubagent}
+              onDetailsSummaryClick={props.onDetailsSummaryClick}
+              onDetailsToggle={props.onDetailsToggle}
+            />
+          </ol>
+        </>
+      ) : hasRawTrace ? (
         <details onToggle={props.onDetailsToggle}>
           <summary onClick={props.onDetailsSummaryClick}>
             <ActivityMilestoneMark state={milestone.state} />
@@ -11469,6 +11573,45 @@ function AgentActivityStep(props: {
   }
 
   const summary = activityStepSummary(props.item);
+  if (props.item.subagentActivity !== undefined) {
+    return (
+      <li className="agent-activity-step tool">
+        <article
+          className={`tool-card agent-activity-tool-card subagent-tool-card ${props.item.status}`}
+        >
+          <div className="subagent-tool-header">
+            <ActivityStepMark item={props.item} />
+            <span className="tool-copy">
+              <span className="tool-title">
+                {activityStepLabel(props.item)}
+              </span>
+              {summary !== undefined ? (
+                <span className="tool-summary">{summary}</span>
+              ) : null}
+            </span>
+            <ToolStatus status={props.item.status} />
+          </div>
+          <SubagentActivityView activity={props.item.subagentActivity} />
+          <details
+            className="subagent-raw-details"
+            onToggle={props.onDetailsToggle}
+          >
+            <summary onClick={props.onDetailsSummaryClick}>
+              Input / Output
+              <ChevronRight
+                aria-hidden="true"
+                className="disclosure-chevron"
+                size={16}
+                strokeWidth={1.75}
+              />
+            </summary>
+            <ToolDetails item={props.item} />
+          </details>
+        </article>
+      </li>
+    );
+  }
+
   return (
     <li className="agent-activity-step tool">
       <article
@@ -11498,6 +11641,148 @@ function AgentActivityStep(props: {
       </article>
     </li>
   );
+}
+
+export function SubagentActivityView(props: {
+  activity: SubagentActivity;
+}): ReactElement {
+  const hasActiveRecency = props.activity.children.some(
+    (child) =>
+      child.lastObservedAtMs !== undefined &&
+      (child.state === "Waiting for activity" ||
+        child.state === "Activity observed"),
+  );
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!hasActiveRecency) return;
+    const intervalId = window.setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => window.clearInterval(intervalId);
+  }, [hasActiveRecency]);
+
+  return (
+    <section
+      className="subagent-activity"
+      role="region"
+      aria-label="Subagent activity"
+    >
+      <header className="subagent-activity-heading">
+        <strong>
+          {formatSubagentMode(props.activity.mode)} ·{" "}
+          {formatInteger(props.activity.children.length)}{" "}
+          {props.activity.children.length === 1 ? "task" : "tasks"}
+        </strong>
+        <span>Read-only activity</span>
+      </header>
+      <ol className="subagent-list" role="list">
+        {props.activity.children.map((child) => (
+          <SubagentActivityRow child={child} key={child.index} nowMs={nowMs} />
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+function SubagentActivityRow(props: {
+  child: SubagentActivityChild;
+  nowMs: number;
+}): ReactElement {
+  const { child } = props;
+  return (
+    <li
+      className={`subagent-row ${subagentStateClass(child.state)}`}
+      role="listitem"
+      data-subagent-index={child.index}
+    >
+      <div className="subagent-row-summary">
+        <span className="subagent-identity">
+          <strong>{child.agent}</strong>
+          {child.step === undefined ? null : <small>Step {child.step}</small>}
+        </span>
+        <span className="subagent-state">{child.state}</span>
+        <span className="subagent-task">{child.task}</span>
+        {child.latest === undefined ? null : (
+          <span className="subagent-latest">Latest: {child.latest}</span>
+        )}
+        {child.lastObservedAtMs === undefined ? null : (
+          <span className="subagent-recency">
+            Last observed{" "}
+            {child.state === "Waiting for activity" ||
+            child.state === "Activity observed" ? (
+              formatSubagentRecency(child.lastObservedAtMs, props.nowMs)
+            ) : (
+              <time dateTime={new Date(child.lastObservedAtMs).toISOString()}>
+                {new Date(child.lastObservedAtMs).toLocaleTimeString()}
+              </time>
+            )}
+          </span>
+        )}
+        {subagentTelemetry(child).length === 0 ? null : (
+          <span className="subagent-telemetry">
+            {subagentTelemetry(child).join(" · ")}
+          </span>
+        )}
+      </div>
+      <details className="subagent-history">
+        <summary>View activity</summary>
+        {child.history.length === 0 ? (
+          <p>No public activity has been observed.</p>
+        ) : (
+          <ol role="list">
+            {child.history.map((item, index) => (
+              <li className={item.kind} key={`${item.kind}-${index}`}>
+                {item.kind === "tool" ? (
+                  <>
+                    <strong>Tool</strong> {item.label}
+                  </>
+                ) : item.kind === "error" ? (
+                  <>
+                    <strong>Error</strong> {item.text}
+                  </>
+                ) : (
+                  item.text
+                )}
+              </li>
+            ))}
+          </ol>
+        )}
+      </details>
+    </li>
+  );
+}
+
+function formatSubagentMode(mode: SubagentActivity["mode"]): string {
+  return mode === "single"
+    ? "Single"
+    : mode === "parallel"
+      ? "Parallel"
+      : "Chain";
+}
+
+function subagentStateClass(state: SubagentActivityChild["state"]): string {
+  return state.toLowerCase().replace(/\s+/g, "-");
+}
+
+function formatSubagentRecency(observedAtMs: number, nowMs: number): string {
+  const seconds = Math.max(0, Math.floor((nowMs - observedAtMs) / 1_000));
+  if (seconds < 5) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  return `${Math.floor(minutes / 60)}h ago`;
+}
+
+function subagentTelemetry(child: SubagentActivityChild): string[] {
+  const telemetry: string[] = [];
+  if (child.completedTurns !== undefined) {
+    telemetry.push(
+      `${formatInteger(child.completedTurns)} completed ${child.completedTurns === 1 ? "turn" : "turns"}`,
+    );
+  }
+  if (child.usage?.totalTokens !== undefined) {
+    telemetry.push(`${formatInteger(child.usage.totalTokens)} tokens`);
+  }
+  if (child.model !== undefined) telemetry.push(child.model);
+  return telemetry;
 }
 
 function ToolDetails(props: {
@@ -11661,6 +11946,37 @@ function TimelineRow(props: {
   }
 
   if (props.item.kind === "tool") {
+    if (props.item.subagentActivity !== undefined) {
+      return (
+        <article
+          className={`tool-card subagent-tool-card ${props.item.status}`}
+        >
+          <div className="subagent-tool-header">
+            <span className="tool-copy">
+              <span className="tool-title">{props.item.title}</span>
+              <span className="tool-summary">{props.item.summary}</span>
+            </span>
+            <ToolStatus status={props.item.status} />
+          </div>
+          <SubagentActivityView activity={props.item.subagentActivity} />
+          <details
+            className="subagent-raw-details"
+            onToggle={props.onDetailsToggle}
+          >
+            <summary onClick={props.onDetailsSummaryClick}>
+              Input / Output
+              <ChevronRight
+                aria-hidden="true"
+                className="disclosure-chevron"
+                size={16}
+                strokeWidth={1.75}
+              />
+            </summary>
+            <ToolDetails item={props.item} />
+          </details>
+        </article>
+      );
+    }
     return (
       <article className={`tool-card ${props.item.status}`}>
         <details onToggle={props.onDetailsToggle}>
@@ -13125,4 +13441,5 @@ export const __rendererTestHooks = {
   shouldRefreshInterventionTranscript,
   normalizedSnapshotMessageId,
   timelineFromMessages,
+  subagentArgsFromSnapshotMessages,
 };

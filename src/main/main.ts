@@ -202,6 +202,15 @@ import { WorkspaceUsageStore } from "./workspaces/workspaceUsage.js";
 import { WorkspaceRuntimeLifecycleGate } from "./workspaceRuntimeLifecycleGate.js";
 import { WorkspaceRuntimeShutdownTombstones } from "./workspaceRuntimeShutdownTombstones.js";
 import {
+  BlockedSessionCandidateTracker,
+  enterSessionAttachmentTeardown,
+  filterBlockedSessionCandidates,
+  SessionAttachmentGate,
+  SessionDiscoveryGate,
+  type SessionAttachmentLease,
+  type SessionDiscoveryKind,
+} from "./sessionDiscoveryGate.js";
+import {
   WorkflowRuntimeOwnershipRegistry,
   type WorkflowRuntimeOwnershipClaim,
   type WorkflowRuntimeOwnershipMetadata,
@@ -310,6 +319,7 @@ import {
   claimUnassignedChatResumeWorkspace,
   resolveChatCreationWorkspaceId,
   resolveChatResumeWorkspace,
+  withChatResumeOwnershipTransaction,
 } from "./chatWorkspaceOwnership.js";
 import {
   authorizeRendererChatProject as authorizeChatSessionProject,
@@ -452,7 +462,10 @@ let chatWorkerCreationTail: Promise<void> = Promise.resolve();
 // Serializes every Pi session discovery/attach/fork registration transaction.
 // The lock begins before native fork inventory and ends only after durable
 // ownership plus runtime identity registration, eliminating inventory TOCTOU.
-let chatSessionAttachmentTail: Promise<void> = Promise.resolve();
+const chatSessionAttachmentGate = new SessionAttachmentGate();
+const chatSessionDiscoveryGate = new SessionDiscoveryGate(
+  chatSessionAttachmentGate,
+);
 // Reset/quit increment this before queueing their own attachment barrier. An
 // operation that began before that boundary may unwind, but can never publish
 // a runtime or durable target claim after it.
@@ -616,19 +629,19 @@ async function bootstrap(): Promise<void> {
         diagnosticsService.recordError(workflowInitialization.diagnostic);
       }
 
+      // Reconstruct target blocks from source-only reservations before legacy
+      // migration or default-workspace bootstrap can adopt cached children.
+      // Recovery only compensates after the recorded child PID is proved absent.
+      await failedForkCleanup.recoverSourceTargetsAfterRestart(
+        workspacesStore,
+        projects,
+      );
       const hadWorkspaceMetadata =
         (await workspacesStore.list()).workspaces.length > 0;
       await migrateLegacyProjectsToWorkspaces();
       await workspacesStore.ensureDefaultWorkspace({
         activate: !hadWorkspaceMetadata || resolveChatBackendMode() === "fake",
       });
-      // Reconstruct target blocks from source-only reservations before any
-      // session operation can attach an orphaned native child. Recovery only
-      // compensates after the recorded child PID is proved absent.
-      await failedForkCleanup.recoverSourceTargetsAfterRestart(
-        workspacesStore,
-        projects,
-      );
       await startDelegationBridge();
       await ensureChatAdapter(settings, diagnosticsService);
       await rehydrateWorkflowRuns();
@@ -853,57 +866,81 @@ function registerIpcHandlers(
     responseSchema: chatSnapshotSchema,
     diagnostics: diagnosticsService,
     handler: async ({ workspaceId, projectId, sessionFile }) =>
-      withChatLifecycleOperation(async (lifecycleOperation) => {
-        if (workspaceId !== undefined) {
-          // Explicit workspace requests retain their membership and archived /
-          // unknown-workspace validation. A project hint must not bypass it.
-          const project = await projectForWorkspaceSession(
-            workspaceId,
-            sessionFile,
-          );
-          assertChatLifecycleOperationActive(lifecycleOperation);
-          return resumeChatSession(
-            store,
-            diagnosticsService,
-            sessionFile,
-            project,
-            workspaceId,
-            undefined,
-            lifecycleOperation,
-          );
-        }
-
-        // Legacy callers may omit workspaceId. Authorize their project hint as
-        // before, but let durable canonical membership choose the workspace when
-        // one exists. Only a genuinely unassigned file falls back to Default.
-        const requestedProject = await authorizeRendererChatProject(projectId);
-        const ownership = await resolveChatResumeWorkspace(
-          ensureWorkspaceStore(),
-          sessionFile,
-        );
-        const project =
-          ownership.source === "existing"
-            ? await projectForWorkspaceSession(
-                ownership.workspaceId,
+      withChatLifecycleOperation((lifecycleOperation) =>
+        withChatResumeOwnershipTransaction({
+          gate: chatSessionAttachmentGate,
+          generation: lifecycleOperation.generation,
+          assertActive: () =>
+            assertChatLifecycleOperationActive(lifecycleOperation),
+          assertAvailable: async () => {
+            const canonical =
+              (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
+            await assertForkCleanupTargetAvailable(canonical, "attached");
+            if (
+              chatSessionMutationReservations.has(canonical) ||
+              chatSessionMutationReservations.has(path.resolve(sessionFile))
+            ) {
+              throw new Error("Session is already being changed.");
+            }
+          },
+          operation: async (attachmentLease) => {
+            if (workspaceId !== undefined) {
+              // Explicit workspace requests retain their membership and
+              // archived / unknown-workspace validation. A project hint must
+              // not bypass it.
+              const project = await projectForWorkspaceSession(
+                workspaceId,
                 sessionFile,
-              )
-            : (requestedProject ??
-              (resolveChatBackendMode() === "real"
-                ? await resolveWorkspaceProject(ownership.workspaceId)
-                : undefined));
-        assertChatLifecycleOperationActive(lifecycleOperation);
-        return resumeChatSession(
-          store,
-          diagnosticsService,
-          sessionFile,
-          project,
-          ownership.workspaceId,
-          ownership.source === "default"
-            ? { claimUnassignedWorkspace: true }
-            : undefined,
-          lifecycleOperation,
-        );
-      }),
+              );
+              assertChatLifecycleOperationActive(lifecycleOperation);
+              return resumeChatSession(
+                store,
+                diagnosticsService,
+                sessionFile,
+                project,
+                workspaceId,
+                { attachmentLease },
+                lifecycleOperation,
+              );
+            }
+
+            // Legacy ownership resolution, project authorization, validation,
+            // and the eventual default claim are one transaction with startup
+            // discovery. Whichever queued first establishes the durable owner.
+            const requestedProject =
+              await authorizeRendererChatProject(projectId);
+            const ownership = await resolveChatResumeWorkspace(
+              ensureWorkspaceStore(),
+              sessionFile,
+            );
+            const project =
+              ownership.source === "existing"
+                ? await projectForWorkspaceSession(
+                    ownership.workspaceId,
+                    sessionFile,
+                  )
+                : (requestedProject ??
+                  (resolveChatBackendMode() === "real"
+                    ? await resolveWorkspaceProject(ownership.workspaceId)
+                    : undefined));
+            assertChatLifecycleOperationActive(lifecycleOperation);
+            return resumeChatSession(
+              store,
+              diagnosticsService,
+              sessionFile,
+              project,
+              ownership.workspaceId,
+              {
+                attachmentLease,
+                ...(ownership.source === "default"
+                  ? { claimUnassignedWorkspace: true }
+                  : {}),
+              },
+              lifecycleOperation,
+            );
+          },
+        }),
+      ),
   });
 
   registerValidatedIpc({
@@ -2791,12 +2828,16 @@ async function migrateLegacyProjectsToWorkspaces(): Promise<void> {
   }
   const refs = (
     await Promise.all(
-      listed.projects.map(async (project) =>
-        (await projects.getSessionRefs(project.id)).map((ref) => ({
-          ...ref,
-          projectId: project.id,
-        })),
-      ),
+      listed.projects.map(async (project) => {
+        const refs = await projects.getSessionRefs(project.id);
+        const attachable = [];
+        for (const ref of refs) {
+          if (!(await ensureForkCleanupJournal().blocks(ref.sessionFile))) {
+            attachable.push({ ...ref, projectId: project.id });
+          }
+        }
+        return attachable;
+      }),
     )
   ).flat();
   await ensureWorkspaceStore().migrateLegacyProjects({
@@ -2954,6 +2995,22 @@ async function addSessionToWorkspace(
   workspaceId: string,
   sessionFile: string,
 ): Promise<{ workspaceId: string; sessionFile: string }> {
+  return withChatSessionDiscovery(undefined, (assertActive) =>
+    addSessionToWorkspaceUnderLease(
+      settings,
+      workspaceId,
+      sessionFile,
+      assertActive,
+    ),
+  );
+}
+
+async function addSessionToWorkspaceUnderLease(
+  settings: SettingsStore,
+  workspaceId: string,
+  sessionFile: string,
+  assertActive: () => void,
+): Promise<{ workspaceId: string; sessionFile: string }> {
   const canonical = await canonicalSessionFilePath(sessionFile);
   return withChatSessionMutation(
     canonical,
@@ -2983,6 +3040,7 @@ async function addSessionToWorkspace(
         sessionFile: validation.sessionFile,
         sessionDir,
       });
+      assertActive();
       const result = await ensureWorkspaceStore().upsertSessionRef(
         workspaceId,
         refreshed.summary ?? {
@@ -3015,6 +3073,15 @@ async function addSessionToWorkspace(
 async function listUnassignedWorkspaceSessions(
   settings: SettingsStore,
 ): Promise<ChatListSessionsResult> {
+  return withChatSessionDiscovery("unassigned", (assertActive) =>
+    listUnassignedWorkspaceSessionsUnderLease(settings, assertActive),
+  );
+}
+
+async function listUnassignedWorkspaceSessionsUnderLease(
+  settings: SettingsStore,
+  assertActive: () => void,
+): Promise<ChatListSessionsResult> {
   const workspace = await ensureWorkspaceStore().getActiveWorkspace();
   if (workspace === undefined) {
     throw new Error("No active workspace is selected.");
@@ -3038,12 +3105,20 @@ async function listUnassignedWorkspaceSessions(
     maxTotalBytes: 250 * 1024 * 1024,
     maxWallTimeMs: 15_000,
   });
+  assertActive();
+  const attachableSessions = await filterForkCleanupBlockedSessions(
+    scanned.sessions,
+    scanned.diagnostics,
+    "unassigned session discovery",
+  );
+  assertActive();
   const sessionsWithOwners = await Promise.all(
-    scanned.sessions.map(async (session) => ({
+    attachableSessions.map(async (session) => ({
       session,
       owner: await ensureWorkspaceStore().getSessionOwner(session.sessionFile),
     })),
   );
+  assertActive();
   return {
     projectCwd: launch.projectCwd,
     workspaceId: workspace.id,
@@ -3081,6 +3156,16 @@ async function getAppBootstrapState(
   store: SettingsStore,
   diagnosticsService: DiagnosticsService,
 ): Promise<AppBootstrapState> {
+  return withChatSessionDiscovery(undefined, (assertActive) =>
+    getAppBootstrapStateUnderLease(store, diagnosticsService, assertActive),
+  );
+}
+
+async function getAppBootstrapStateUnderLease(
+  store: SettingsStore,
+  diagnosticsService: DiagnosticsService,
+  assertActive: () => void,
+): Promise<AppBootstrapState> {
   const settings = await store.get();
   const projects = ensureProjectStore();
   const listedProjects = await projects.list();
@@ -3105,8 +3190,10 @@ async function getAppBootstrapState(
     workspaceStateBeforeMigration.workspaces.length === 0 ||
     workspaceStateBeforeMigration.activeWorkspace?.isDefault === true;
   if (mode === "real") {
+    assertActive();
     await migrateLegacyProjectsToWorkspaces();
   }
+  assertActive();
   await ensureWorkspaceStore().ensureDefaultWorkspace({
     activate: shouldKeepDefaultWorkspaceActive,
   });
@@ -3119,10 +3206,15 @@ async function getAppBootstrapState(
   const workspaceList = await projectWorkspaceListResult();
   const cachedSessions =
     mode === "real"
-      ? await ensureWorkspaceStore().getCachedSessionSummaries(
-          activeWorkspace.id,
+      ? await filterForkCleanupBlockedSessions(
+          await ensureWorkspaceStore().getCachedSessionSummaries(
+            activeWorkspace.id,
+          ),
+          [],
+          "bootstrap workspace cache",
         )
       : [];
+  assertActive();
 
   return {
     backendMode: mode,
@@ -3606,21 +3698,34 @@ async function createChatWorker(
   }
 }
 
-type ChatSessionAttachmentLease = {
-  generation: number;
-  release: () => void;
-};
+type ChatSessionAttachmentLease = SessionAttachmentLease;
 
 async function enterChatSessionAttachment(
   generation = chatSessionAttachmentGeneration,
 ): Promise<ChatSessionAttachmentLease> {
-  const previous = chatSessionAttachmentTail;
-  let release: (() => void) | undefined;
-  chatSessionAttachmentTail = new Promise<void>((resolve) => {
-    release = resolve;
+  return chatSessionAttachmentGate.enter(generation);
+}
+
+function assertChatSessionDiscoveryActive(generation: number): void {
+  if (
+    generation !== chatSessionAttachmentGeneration ||
+    (chatLifecyclePhase !== "running" && chatLifecyclePhase !== "replacing")
+  ) {
+    throw chatLifecycleCancelledError();
+  }
+}
+
+async function withChatSessionDiscovery<T>(
+  kind: SessionDiscoveryKind | undefined,
+  operation: (assertActive: () => void) => Promise<T>,
+): Promise<T> {
+  const generation = chatSessionAttachmentGeneration;
+  return chatSessionDiscoveryGate.run({
+    ...(kind !== undefined ? { kind } : {}),
+    generation,
+    assertActive: () => assertChatSessionDiscoveryActive(generation),
+    operation,
   });
-  await previous;
-  return { generation, release: (): void => release?.() };
 }
 
 function chatLifecycleCancelledError(): Error {
@@ -5502,15 +5607,17 @@ async function closeChatWorkerGeneration(
   // Queue the destructive barrier synchronously before yielding to worker
   // shutdown. New attachments are rejected while draining; old attachments
   // are cancelled and every pending worker is closed to unwind in-flight RPC.
-  const attachmentLeasePromise = enterChatSessionAttachment(teardownGeneration);
-  await closePendingChatAttachmentWorkers();
-  const attachmentLease = await attachmentLeasePromise;
-  try {
-    // Registered workers may be holding an initial snapshot RPC. Close them
-    // before waiting for lifecycle operations, otherwise reset can deadlock
-    // waiting for a snapshot that only worker exit can interrupt.
-    const activeAdapter = chatAdapter;
-    if (activeAdapter !== undefined) {
+  const attachmentLease = await enterSessionAttachmentTeardown({
+    gate: chatSessionAttachmentGate,
+    generation: teardownGeneration,
+    closePendingWorkers: closePendingChatAttachmentWorkers,
+    closeRegisteredWorkers: async () => {
+      // A registered worker can be waiting on get_state/get_messages while its
+      // snapshot holds the old attachment lease. Its exit is the cancellation
+      // signal that lets the snapshot unwind, so close it before awaiting the
+      // queued barrier rather than deadlocking both sides of reset/quit.
+      const activeAdapter = chatAdapter;
+      if (activeAdapter === undefined) return;
       await Promise.all(
         [...chatRuntimeIds].map((runtimeId) =>
           activeAdapter.closeSession(runtimeId).catch((error) => {
@@ -5520,7 +5627,9 @@ async function closeChatWorkerGeneration(
           }),
         ),
       );
-    }
+    },
+  });
+  try {
     // No operation can be added while draining. Keep rechecking pending
     // workers because a pre-boundary spawn may publish just as teardown starts.
     await Promise.all([...chatLifecycleOperations].map((op) => op.completion));
@@ -5857,6 +5966,17 @@ async function listChatSessions(
   store: SettingsStore,
   project?: ProjectRef,
 ): Promise<ChatListSessionsResult> {
+  return withChatSessionDiscovery("project", (assertActive) =>
+    listChatSessionsUnderLease(store, project, assertActive),
+  );
+}
+
+async function listChatSessionsUnderLease(
+  store: SettingsStore,
+  project: ProjectRef | undefined,
+  assertActive: () => void,
+  blockedCandidates?: BlockedSessionCandidateTracker,
+): Promise<ChatListSessionsResult> {
   const mode = resolveChatBackendMode();
   if (mode !== "real") {
     return {
@@ -5908,17 +6028,33 @@ async function listChatSessions(
     );
   }
 
-  const sessionsByFile = new Map(
-    scanResults.flatMap((result) =>
-      result.sessions.map((session) => [session.sessionFile, session] as const),
-    ),
-  );
+  assertActive();
   const diagnostics = scanResults.flatMap((result) => result.diagnostics);
+  const sessionsByFile = new Map<
+    string,
+    ChatListSessionsResult["sessions"][number]
+  >();
+  for (const result of scanResults) {
+    for (const session of result.sessions) {
+      if (await ensureForkCleanupJournal().blocks(session.sessionFile)) {
+        await recordBlockedSessionCandidate(
+          blockedCandidates,
+          session.sessionFile,
+        );
+        diagnostics.push("Fork cleanup blocks project session discovery.");
+        continue;
+      }
+      sessionsByFile.set(session.sessionFile, session);
+    }
+  }
+  assertActive();
   await mergeProjectSessionRefs(
     launch.projectId,
     launch.projectCwd,
     sessionsByFile,
     diagnostics,
+    assertActive,
+    blockedCandidates,
   );
   const sessions = [...sessionsByFile.values()].sort(
     (a, b) => b.updatedAtMs - a.updatedAtMs,
@@ -5951,6 +6087,26 @@ async function listWorkspaceChatSessions(
     includeArchived?: boolean;
   } = {},
 ): Promise<ChatListSessionsResult> {
+  return withChatSessionDiscovery("workspace", (assertActive) =>
+    listWorkspaceChatSessionsUnderLease(
+      settings,
+      workspaceId,
+      options,
+      assertActive,
+    ),
+  );
+}
+
+async function listWorkspaceChatSessionsUnderLease(
+  settings: SettingsStore,
+  workspaceId: string,
+  options: {
+    discoverLegacySessions?: boolean;
+    includeArchived?: boolean;
+  },
+  assertActive: () => void,
+  blockedCandidates?: BlockedSessionCandidateTracker,
+): Promise<ChatListSessionsResult> {
   const storedWorkspace =
     await ensureWorkspaceStore().getWorkspace(workspaceId);
   if (storedWorkspace === undefined) {
@@ -5972,6 +6128,13 @@ async function listWorkspaceChatSessions(
     sessionListOptions,
   );
   const diagnostics: string[] = [];
+  refs = await filterForkCleanupBlockedSessions(
+    refs,
+    diagnostics,
+    "workspace cache",
+    blockedCandidates,
+  );
+  assertActive();
   // Compatibility migration: existing directory-backed projects historically
   // discovered sessions by cwd instead of persisting explicit membership. Keep
   // migrated workspaces in sync with newly discovered files, but never reclaim
@@ -5985,34 +6148,46 @@ async function listWorkspaceChatSessions(
       const project = await ensureProjectStore().resolveAuthorizedProject(
         workspace.legacyProjectId,
       );
-      const legacy = await listChatSessions(settings, project);
+      const legacy = await listChatSessionsUnderLease(
+        settings,
+        project,
+        assertActive,
+      );
       diagnostics.push(...legacy.diagnostics);
       const attachableLegacySessions = [];
       for (const legacySession of legacy.sessions) {
         if (
           await ensureForkCleanupJournal().blocks(legacySession.sessionFile)
         ) {
-          diagnostics.push(
-            `Fork cleanup blocks legacy session discovery: ${legacySession.sessionFile}`,
-          );
+          diagnostics.push("Fork cleanup blocks legacy session discovery.");
         } else {
           attachableLegacySessions.push(legacySession);
         }
       }
+      assertActive();
       if (attachableLegacySessions.length > 0) {
         // The store applies discovery atomically: refresh current membership,
         // claim only unassigned files, preserve legacy-removal exclusions, and
         // never transfer a ref already owned by another workspace.
+        assertActive();
         await ensureWorkspaceStore().upsertSessionRefs(
           workspace.id,
           attachableLegacySessions,
         );
-        refs = await ensureWorkspaceStore().getCachedSessionSummaries(
-          workspace.id,
-          sessionListOptions,
+        assertActive();
+        refs = await filterForkCleanupBlockedSessions(
+          await ensureWorkspaceStore().getCachedSessionSummaries(
+            workspace.id,
+            sessionListOptions,
+          ),
+          diagnostics,
+          "workspace cache",
         );
       }
     } catch (error) {
+      // Reset/shutdown cancellation must abort the whole transaction. Treating
+      // it as a recoverable scan error would allow later cache writes.
+      assertActive();
       diagnostics.push(
         `Legacy working-folder session discovery failed: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -6024,11 +6199,14 @@ async function listWorkspaceChatSessions(
     refs,
     options.includeArchived === true,
     diagnostics,
+    assertActive,
   );
   const sessions: ChatListSessionsResult["sessions"] = [];
   for (const ref of refs) {
+    assertActive();
     const canonical = await safeRealpath(ref.sessionFile);
     if (canonical === undefined) {
+      assertActive();
       await ensureWorkspaceStore().markSessionMissing(
         workspace.id,
         ref.sessionFile,
@@ -6046,11 +6224,13 @@ async function listWorkspaceChatSessions(
       ...(attachedRuntimeId ? { attachedRuntimeId } : {}),
     });
   }
+  assertActive();
   await recoverWorkspaceSessionUsage(
     workspace.id,
     sessions.map((session) => session.sessionFile),
     diagnostics,
   );
+  assertActive();
   const defaultProject = workspace.defaultProjectId
     ? await ensureProjectStore()
         .resolveAuthorizedProject(workspace.defaultProjectId)
@@ -6080,6 +6260,7 @@ async function refreshWorkspaceSessionSummaries(
   refs: ChatSessionSummary[],
   includeArchived: boolean,
   diagnostics: string[],
+  assertActive: () => void,
 ): Promise<ChatSessionSummary[]> {
   if (refs.length === 0 || resolveChatBackendMode() !== "real") {
     return refs;
@@ -6128,18 +6309,62 @@ async function refreshWorkspaceSessionSummaries(
   }
 
   try {
-    await ensureWorkspaceStore().upsertSessionRefs(workspace.id, refreshed, {
+    assertActive();
+    const attachable = await filterForkCleanupBlockedSessions(
+      refreshed,
+      diagnostics,
+      "workspace metadata refresh",
+    );
+    assertActive();
+    if (attachable.length === 0) return refs;
+    await ensureWorkspaceStore().upsertSessionRefs(workspace.id, attachable, {
       ...(workspace.archivedAtMs !== undefined ? { allowArchived: true } : {}),
     });
-    return ensureWorkspaceStore().getCachedSessionSummaries(workspace.id, {
-      includeArchived,
-    });
+    assertActive();
+    return filterForkCleanupBlockedSessions(
+      await ensureWorkspaceStore().getCachedSessionSummaries(workspace.id, {
+        includeArchived,
+      }),
+      diagnostics,
+      "workspace cache",
+    );
   } catch (error) {
+    assertActive();
     diagnostics.push(
       `Workspace session metadata refresh could not be saved: ${error instanceof Error ? error.message : String(error)}`,
     );
     return refs;
   }
+}
+
+async function recordBlockedSessionCandidate(
+  tracker: BlockedSessionCandidateTracker | undefined,
+  sessionFile: string,
+): Promise<void> {
+  if (tracker === undefined) return;
+  tracker.record(
+    (await safeRealpath(sessionFile)) ??
+      (await canonicalSessionPathForMissingFile(sessionFile)),
+  );
+}
+
+async function filterForkCleanupBlockedSessions<
+  T extends { sessionFile: string },
+>(
+  sessions: readonly T[],
+  diagnostics: string[],
+  context: string,
+  blockedCandidates?: BlockedSessionCandidateTracker,
+): Promise<T[]> {
+  const { attachable, blocked } = await filterBlockedSessionCandidates(
+    sessions,
+    (sessionFile) => ensureForkCleanupJournal().blocks(sessionFile),
+  );
+  for (const session of blocked) {
+    await recordBlockedSessionCandidate(blockedCandidates, session.sessionFile);
+    diagnostics.push(`Fork cleanup blocks ${context}.`);
+  }
+  return attachable;
 }
 
 async function recoverWorkspaceSessionUsage(
@@ -6217,6 +6442,8 @@ async function mergeProjectSessionRefs(
   projectCwd: string,
   sessionsByFile: Map<string, ChatListSessionsResult["sessions"][number]>,
   diagnostics: string[],
+  assertActive: () => void,
+  blockedCandidates?: BlockedSessionCandidateTracker,
 ): Promise<void> {
   const store = projectStore;
   if (store === undefined) {
@@ -6226,6 +6453,12 @@ async function mergeProjectSessionRefs(
   const refs = await store.getSessionRefs(projectId);
   const missingSessionFiles: string[] = [];
   for (const ref of refs) {
+    if (await ensureForkCleanupJournal().blocks(ref.sessionFile)) {
+      sessionsByFile.delete(ref.sessionFile);
+      await recordBlockedSessionCandidate(blockedCandidates, ref.sessionFile);
+      diagnostics.push("Fork cleanup blocks cached project session.");
+      continue;
+    }
     if (sessionsByFile.has(ref.sessionFile)) {
       continue;
     }
@@ -6253,6 +6486,7 @@ async function mergeProjectSessionRefs(
     });
   }
 
+  assertActive();
   await store.upsertSessionRefs(projectId, [...sessionsByFile.values()], {
     missingSessionFiles,
   });
@@ -6355,12 +6589,15 @@ async function deleteAllChatSessions(
   diagnosticsService: DiagnosticsService,
   project?: ProjectRef,
 ): Promise<ChatDeleteAllSessionsResult> {
-  const listed = await listChatSessions(store, project);
+  const blockedCandidates = new BlockedSessionCandidateTracker();
+  const listed = await withChatSessionDiscovery("project", (assertActive) =>
+    listChatSessionsUnderLease(store, project, assertActive, blockedCandidates),
+  );
   if (listed.sessions.length === 0) {
     return {
       deleted: true,
       deletedCount: 0,
-      skippedCount: 0,
+      skippedCount: blockedCandidates.count,
       deletedSessionFiles: [],
     };
   }
@@ -6368,7 +6605,7 @@ async function deleteAllChatSessions(
   const sessionDir = launch.effective.config.sessionDir;
   const deletedSessionFiles: string[] = [];
   let deletedCount = 0;
-  let skippedCount = 0;
+  let skippedCount = blockedCandidates.count;
 
   for (const session of listed.sessions) {
     try {
@@ -6436,11 +6673,18 @@ async function deleteAllWorkspaceChatSessions(
   // Destructive operations must use explicit membership only. A refresh may
   // discover legacy sessions, but delete-all must never adopt new files as a
   // side effect immediately before deleting them.
-  const listed = await listWorkspaceChatSessions(store, workspaceId, {
-    discoverLegacySessions: false,
-  });
+  const blockedCandidates = new BlockedSessionCandidateTracker();
+  const listed = await withChatSessionDiscovery("workspace", (assertActive) =>
+    listWorkspaceChatSessionsUnderLease(
+      store,
+      workspaceId,
+      { discoverLegacySessions: false },
+      assertActive,
+      blockedCandidates,
+    ),
+  );
   const deletedSessionFiles: string[] = [];
-  let skippedCount = 0;
+  let skippedCount = blockedCandidates.count;
   for (const session of listed.sessions) {
     if (chatSessionIsBusy(session.sessionFile)) {
       skippedCount += 1;
@@ -7002,6 +7246,7 @@ async function forkChatSession(
               runtimeId,
               "real",
               {
+                attachmentLeaseHeld: true,
                 // Revalidate the same target immediately before generic
                 // snapshot registration/persistence. A worker that changes
                 // state between preflight and get_messages must not claim a
@@ -7204,7 +7449,10 @@ async function resumeChatSession(
   sessionFile: string,
   project: ProjectRef | undefined,
   workspaceId: string,
-  options: { claimUnassignedWorkspace?: boolean } = {},
+  options: {
+    claimUnassignedWorkspace?: boolean;
+    attachmentLease?: ChatSessionAttachmentLease;
+  } = {},
   lifecycleOperation: ChatLifecycleOperation,
 ): Promise<ChatSnapshot> {
   const attachmentGeneration = lifecycleOperation.generation;
@@ -7255,10 +7503,14 @@ async function resumeChatSession(
     chatSessionResumeWorkspaceIds.delete(canonicalSessionFile);
     throw new Error("Session is already being changed.");
   }
+  const ownsAttachmentLease = options.attachmentLease === undefined;
   const sessionAttachmentLease =
-    await enterChatSessionAttachment(attachmentGeneration);
+    options.attachmentLease ??
+    (await enterChatSessionAttachment(attachmentGeneration));
 
   try {
+    assertChatSessionAttachmentActive(attachmentGeneration);
+    await assertForkCleanupTargetAvailable(canonicalSessionFile, "attached");
     assertChatSessionAttachmentActive(attachmentGeneration);
     await withChatWorkspaceCreation(workspaceId, async () => {
       if (chatSessionMutationReservations.has(canonicalSessionFile)) {
@@ -7288,7 +7540,9 @@ async function resumeChatSession(
       const attachedRuntimeId = chatSessionFileLocks.get(canonicalSessionFile);
       const snapshot =
         attachedRuntimeId !== undefined
-          ? await getChatSnapshotForRuntime(adapter, attachedRuntimeId, mode)
+          ? await getChatSnapshotForRuntime(adapter, attachedRuntimeId, mode, {
+              attachmentLeaseHeld: true,
+            })
           : await attachRealResumeWorker(
               adapter,
               store,
@@ -7308,7 +7562,9 @@ async function resumeChatSession(
   } catch (error) {
     rejectPending(error);
   } finally {
-    sessionAttachmentLease.release();
+    if (ownsAttachmentLease) {
+      sessionAttachmentLease.release();
+    }
     if (chatSessionResumePromises.get(canonicalSessionFile) === resumePromise) {
       chatSessionResumePromises.delete(canonicalSessionFile);
     }
@@ -7359,6 +7615,7 @@ async function attachRealResumeWorker(
         runtimeId,
         "real",
         {
+          attachmentLeaseHeld: true,
           // Validate before generic registration can replace the provisional
           // requested-file lock or persist a different session's ownership.
           beforeSessionRegistration: ({ sessionFile }) => {
@@ -7409,7 +7666,13 @@ async function createChatSessionSnapshot(
 ): Promise<ChatSnapshot> {
   const operation = lifecycleOperation ?? beginChatLifecycleOperation();
   const ownsOperation = lifecycleOperation === undefined;
+  let sessionAttachmentLease: ChatSessionAttachmentLease | undefined;
   try {
+    assertChatLifecycleOperationActive(operation);
+    sessionAttachmentLease = await enterChatSessionAttachment(
+      operation.generation,
+    );
+    assertChatLifecycleOperationActive(operation);
     return await withChatWorkspaceCreation(workspaceId, async () => {
       assertChatLifecycleOperationActive(operation);
       const adapter = await ensureChatAdapter(store, diagnosticsService);
@@ -7443,6 +7706,7 @@ async function createChatSessionSnapshot(
           mode,
           {
             skipMessages: true,
+            attachmentLeaseHeld: true,
             assertLifecycleActive: () =>
               assertChatLifecycleOperationActive(operation),
           },
@@ -7473,6 +7737,7 @@ async function createChatSessionSnapshot(
       }
     });
   } finally {
+    sessionAttachmentLease?.release();
     if (ownsOperation) finishChatLifecycleOperation(operation);
   }
 }
@@ -7658,8 +7923,21 @@ async function getChatSnapshotForRuntime(
     }) => Promise<void> | void;
     onSessionPersisted?: (sessionFile: string) => void;
     assertLifecycleActive?: () => void;
+    attachmentLeaseHeld?: boolean;
   } = {},
 ): Promise<ChatSnapshot> {
+  if (options.attachmentLeaseHeld !== true) {
+    return withChatSessionDiscovery(undefined, (assertActive) =>
+      getChatSnapshotForRuntime(adapter, runtimeId, fallbackMode, {
+        ...options,
+        attachmentLeaseHeld: true,
+        assertLifecycleActive: () => {
+          assertActive();
+          options.assertLifecycleActive?.();
+        },
+      }),
+    );
+  }
   const mode = chatRuntimeModes.get(runtimeId) ?? fallbackMode;
   const projectId = chatRuntimeProjectIds.get(runtimeId);
   const workspaceId = chatRuntimeWorkspaceIds.get(runtimeId);

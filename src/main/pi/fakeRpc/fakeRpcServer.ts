@@ -10,6 +10,15 @@ import type {
   PiState,
   RpcResponseRecord,
 } from "../types.js";
+import {
+  createCancellationSubagentActivityFixture,
+  createChainFailureSubagentActivityFixture,
+  createMalformedSubagentActivityFixture,
+  createOversizedSubagentActivityFixture,
+  createParallelSubagentActivityFixture,
+  createSingleSuccessSubagentActivityFixture,
+  type SubagentActivityFixture,
+} from "./subagentActivityFixture.js";
 
 type PromptScenario =
   | "basic"
@@ -28,6 +37,7 @@ type PromptScenario =
   | "delegate"
   | "routing"
   | "env-probe"
+  | "subagent"
   | "all";
 
 interface FakeOptions {
@@ -81,6 +91,8 @@ interface FakeOptions {
   taskSessionProgressFixture: boolean;
   /** Emits structured subagent phases for delegated-status renderer E2E. */
   delegatedStatusFixture: boolean;
+  /** Marker files release extension-shaped subagent updates without time races. */
+  subagentActivityBarrierDir?: string;
   sessionFile?: string;
   /** Native Pi-compatible source path for a new independent fake session. */
   forkSourceFile?: string;
@@ -93,6 +105,8 @@ interface FakeOptions {
   forkGetStateDelayMs: number;
   /** Write when a native fork begins its pre-registration get_state call. */
   forkGetStateSignalFile?: string;
+  /** Hold the first native-fork get_state until release-target exists. */
+  forkStateBarrierDir?: string;
   /** Append the native-fork target path when that fake worker exits. */
   forkExitSignalFile?: string;
   /** Hold get_state replies so E2E can interleave ownership operations. */
@@ -101,6 +115,8 @@ interface FakeOptions {
   getStateDelayOnceFile?: string;
   /** Delay generic get_state only while this test-controlled marker exists. */
   getStateDelayEnabledFile?: string;
+  /** Hold enabled generic get_state calls until release-get-state exists. */
+  getStateBarrierDir?: string;
   /** Write when a generic get_state request begins. */
   getStateSignalFile?: string;
   /** Append every fake worker's session path when it exits. */
@@ -117,6 +133,8 @@ interface FakeOptions {
   getMessagesDelayMs: number;
   /** Hold only a native fork's final snapshot history. */
   forkGetMessagesDelayMs: number;
+  /** Hold only a native fork's get_messages until release-snapshot exists. */
+  forkGetMessagesBarrierDir?: string;
   /** Write when get_messages begins, for deterministic E2E interleaving. */
   getMessagesSignalFile?: string;
   /** Test-only override for the cwd reported by get_state. */
@@ -305,6 +323,10 @@ function parseOptions(argv: string[]): FakeOptions {
       options.taskSessionProgressFixture = true;
     } else if (arg === "--delegated-status-fixture") {
       options.delegatedStatusFixture = true;
+    } else if (arg === "--subagent-activity-barrier-dir") {
+      const directory = argv[index + 1];
+      if (directory) options.subagentActivityBarrierDir = directory;
+      index += 1;
     } else if (arg === "--session") {
       const sessionFile = argv[index + 1];
       if (sessionFile) {
@@ -336,6 +358,10 @@ function parseOptions(argv: string[]): FakeOptions {
     } else if (arg === "--fork-get-state-signal-file") {
       const signalFile = argv[index + 1];
       if (signalFile) options.forkGetStateSignalFile = signalFile;
+      index += 1;
+    } else if (arg === "--fork-state-barrier-dir") {
+      const barrierDir = argv[index + 1];
+      if (barrierDir) options.forkStateBarrierDir = barrierDir;
       index += 1;
     } else if (arg === "--fork-exit-signal-file") {
       const signalFile = argv[index + 1];
@@ -371,6 +397,10 @@ function parseOptions(argv: string[]): FakeOptions {
       const markerFile = argv[index + 1];
       if (markerFile) options.getStateDelayEnabledFile = markerFile;
       index += 1;
+    } else if (arg === "--get-state-barrier-dir") {
+      const barrierDir = argv[index + 1];
+      if (barrierDir) options.getStateBarrierDir = barrierDir;
+      index += 1;
     } else if (arg === "--get-state-signal-file") {
       const signalFile = argv[index + 1];
       if (signalFile) options.getStateSignalFile = signalFile;
@@ -390,6 +420,10 @@ function parseOptions(argv: string[]): FakeOptions {
       if (Number.isSafeInteger(delay) && delay >= 0) {
         options.forkGetMessagesDelayMs = delay;
       }
+      index += 1;
+    } else if (arg === "--fork-get-messages-barrier-dir") {
+      const barrierDir = argv[index + 1];
+      if (barrierDir) options.forkGetMessagesBarrierDir = barrierDir;
       index += 1;
     } else if (arg === "--get-messages-signal-file") {
       const signalFile = argv[index + 1];
@@ -455,6 +489,7 @@ function isPromptScenario(value: string): value is PromptScenario {
     "delegate",
     "routing",
     "env-probe",
+    "subagent",
     "all",
   ].includes(value);
 }
@@ -508,6 +543,8 @@ class FakeRpcServer {
   private steeringReceiptCounter = 0;
   private workflowDecisionIndex = 0;
   private currentTimers: NodeJS.Timeout[] = [];
+  private forkStateBarrierStarted = false;
+  private forkStateBarrierTimer: NodeJS.Timeout | undefined;
   private agentActive = false;
   private currentModel = this.options.collidingModels
     ? "claude-opus-4-5"
@@ -942,6 +979,15 @@ class FakeRpcServer {
             `${this.sessionFile}\n`,
           );
         }
+        if (
+          forkGetState &&
+          this.options.forkStateBarrierDir !== undefined &&
+          !this.forkStateBarrierStarted
+        ) {
+          this.forkStateBarrierStarted = true;
+          this.holdForkStateAtBarrier(command.id, name);
+          break;
+        }
         if (!forkGetState && this.options.getStateSignalFile) {
           fs.writeFileSync(
             this.options.getStateSignalFile,
@@ -966,6 +1012,14 @@ class FakeRpcServer {
         const genericDelayEnabled =
           this.options.getStateDelayEnabledFile !== undefined &&
           fs.existsSync(this.options.getStateDelayEnabledFile);
+        if (
+          !forkGetState &&
+          genericDelayEnabled &&
+          this.options.getStateBarrierDir !== undefined
+        ) {
+          this.holdGetStateAtBarrier(command.id, name);
+          break;
+        }
         const delay = forkGetState
           ? this.options.forkGetStateDelayMs
           : delayOnce || genericDelayEnabled
@@ -988,6 +1042,14 @@ class FakeRpcServer {
             `${this.sessionFile}\n`,
           );
         }
+        const forkGetMessages = this.options.forkSourceFile !== undefined;
+        if (
+          forkGetMessages &&
+          this.options.forkGetMessagesBarrierDir !== undefined
+        ) {
+          this.holdForkMessagesAtBarrier(command.id, name);
+          break;
+        }
         // Capture history before crossing the test barrier. The intervention
         // race fixture mutates durable history immediately after writing this
         // response, matching a get_messages read that began before Pi's async
@@ -998,8 +1060,7 @@ class FakeRpcServer {
           this.advanceInterventionSnapshotRaceAfterSnapshot();
         };
         const delay =
-          this.options.forkSourceFile !== undefined &&
-          this.options.forkGetMessagesDelayMs > 0
+          forkGetMessages && this.options.forkGetMessagesDelayMs > 0
             ? this.options.forkGetMessagesDelayMs
             : this.options.getMessagesDelayMs;
         if (delay > 0) {
@@ -1354,6 +1415,11 @@ class FakeRpcServer {
         willRetry: false,
       });
       this.write({ type: "agent_settled" });
+      return;
+    }
+
+    if (this.options.promptScenario === "subagent") {
+      this.emitSubagentActivityScenarioEvents(assistantId, text);
       return;
     }
 
@@ -2151,6 +2217,209 @@ class FakeRpcServer {
     return delayMs * (tick + 1);
   }
 
+  private emitSubagentActivityScenarioEvents(
+    assistantId: string,
+    promptText: string,
+  ): void {
+    const selected = this.selectSubagentActivityFixture(promptText);
+    const { fixture, kind } = selected;
+
+    // Production Pi persists the assistant tool call and its toolResult as
+    // messages while also streaming tool_execution_* events. Keeping both
+    // paths lets E2E prove live updates and snapshot restoration independently.
+    const toolCallMessage = {
+      id: `msg_subagent_call_${this.promptCounter}`,
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id: fixture.toolCallId,
+          name: "subagent",
+          arguments: fixture.args,
+        },
+      ],
+      provider: this.currentProvider,
+      model: this.currentModel,
+      stopReason: "toolUse",
+      createdAt: Date.now(),
+    } as unknown as PiMessage;
+    this.messages.push(toolCallMessage);
+    this.appendPersistedMessage(toolCallMessage);
+
+    this.write({
+      type: "tool_execution_start",
+      toolCallId: fixture.toolCallId,
+      toolName: "subagent",
+      args: fixture.args,
+    });
+
+    const emitPartial = (index: number): void => {
+      const partialResult = fixture.partialResults[index];
+      if (partialResult === undefined) return;
+      this.write({
+        type: "tool_execution_update",
+        toolCallId: fixture.toolCallId,
+        toolName: "subagent",
+        args: fixture.args,
+        partialResult,
+      });
+    };
+    const finish = (): void => {
+      const toolResultMessage = {
+        id: `msg_subagent_result_${this.promptCounter}`,
+        role: "toolResult",
+        toolCallId: fixture.toolCallId,
+        toolName: "subagent",
+        content: fixture.result.content,
+        details: fixture.result.details,
+        isError: fixture.isError,
+        createdAt: Date.now(),
+      } as unknown as PiMessage;
+      this.messages.push(toolResultMessage);
+      this.appendPersistedMessage(toolResultMessage);
+      this.write({
+        type: "tool_execution_end",
+        toolCallId: fixture.toolCallId,
+        toolName: "subagent",
+        args: fixture.args,
+        result: fixture.result,
+        isError: fixture.isError,
+      });
+      this.completePrompt(assistantId, promptText);
+    };
+
+    if (kind === "parallel") {
+      this.afterSubagentFixtureBarrier("parallel-update-1", () => {
+        emitPartial(0);
+        this.afterSubagentFixtureBarrier("parallel-update-2", () => {
+          emitPartial(1);
+          this.afterSubagentFixtureBarrier("parallel-finish", finish);
+        });
+      });
+      return;
+    }
+    if (kind === "single") {
+      this.afterSubagentFixtureBarrier("single-update-1", () => {
+        emitPartial(0);
+        this.afterSubagentFixtureBarrier("single-update-2", () => {
+          emitPartial(1);
+          this.afterSubagentFixtureBarrier("single-finish", finish);
+        });
+      });
+      return;
+    }
+    if (kind === "cancellation") {
+      this.afterSubagentFixtureBarrier("cancellation-update", () => {
+        emitPartial(0);
+        // Deliberately remain pending. handleAbort emits only the parent
+        // terminal events, matching an interrupted tool call that never
+        // publishes tool_execution_end.
+      });
+      return;
+    }
+    if (kind === "malformed") {
+      this.afterSubagentFixtureBarrier("malformed-update", () => {
+        emitPartial(0);
+        this.afterSubagentFixtureBarrier("malformed-finish", finish);
+      });
+      return;
+    }
+    if (kind === "oversized") {
+      this.afterSubagentFixtureBarrier("oversized-update", () => {
+        emitPartial(0);
+        this.afterSubagentFixtureBarrier("oversized-finish", finish);
+      });
+      return;
+    }
+
+    this.afterSubagentFixtureBarrier("chain-update-1", () => {
+      emitPartial(0);
+      this.afterSubagentFixtureBarrier("chain-finish", finish);
+    });
+  }
+
+  private selectSubagentActivityFixture(promptText: string): {
+    fixture: SubagentActivityFixture;
+    kind:
+      | "single"
+      | "parallel"
+      | "chain"
+      | "cancellation"
+      | "malformed"
+      | "oversized";
+  } {
+    const id = this.promptCounter;
+    if (/\bcancell(?:ation|able)\b|\babort\b/i.test(promptText)) {
+      return {
+        fixture: createCancellationSubagentActivityFixture(
+          `tool_subagent_cancellation_${id}`,
+        ),
+        kind: "cancellation",
+      };
+    }
+    if (/\bmalformed\b|\bunsupported\b/i.test(promptText)) {
+      return {
+        fixture: createMalformedSubagentActivityFixture(
+          `tool_subagent_malformed_${id}`,
+        ),
+        kind: "malformed",
+      };
+    }
+    if (/\boversized\b/i.test(promptText)) {
+      return {
+        fixture: createOversizedSubagentActivityFixture(
+          `tool_subagent_oversized_${id}`,
+        ),
+        kind: "oversized",
+      };
+    }
+    if (/\bchain\b/i.test(promptText)) {
+      return {
+        fixture: createChainFailureSubagentActivityFixture(
+          `tool_subagent_chain_${id}`,
+        ),
+        kind: "chain",
+      };
+    }
+    if (/\bsingle\b/i.test(promptText)) {
+      return {
+        fixture: createSingleSuccessSubagentActivityFixture(
+          `tool_subagent_single_${id}`,
+        ),
+        kind: "single",
+      };
+    }
+    return {
+      fixture: createParallelSubagentActivityFixture(
+        `tool_subagent_parallel_${id}`,
+      ),
+      kind: "parallel",
+    };
+  }
+
+  private afterSubagentFixtureBarrier(
+    markerName: string,
+    callback: () => void,
+  ): void {
+    const directory = this.options.subagentActivityBarrierDir;
+    if (directory === undefined) {
+      this.currentTimers.push(
+        setTimeout(callback, Math.max(1, this.options.streamDelayMs)),
+      );
+      return;
+    }
+
+    const marker = path.join(directory, markerName);
+    const waitForMarker = (): void => {
+      if (fs.existsSync(marker)) {
+        callback();
+        return;
+      }
+      this.currentTimers.push(setTimeout(waitForMarker, 5));
+    };
+    waitForMarker();
+  }
+
   private handleExtensionUiResponse(command: FakeCommandRecord): void {
     const id = typeof command.id === "string" ? command.id : undefined;
     const pending = this.pendingExtensionUi;
@@ -2325,17 +2594,97 @@ class FakeRpcServer {
     this.emitQueueUpdate();
   }
 
+  private holdForkStateAtBarrier(
+    commandId: string | undefined,
+    command: string,
+  ): void {
+    const barrierDir = this.options.forkStateBarrierDir!;
+    if (!fs.existsSync(this.sessionFile)) {
+      this.respond(
+        commandId,
+        command,
+        undefined,
+        "Fake native fork target was not created before get_state",
+      );
+      return;
+    }
+    fs.mkdirSync(barrierDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(barrierDir, "target-created"),
+      `${fs.realpathSync(this.sessionFile)}\n`,
+    );
+
+    const releaseFile = path.join(barrierDir, "release-target");
+    const awaitRelease = (): void => {
+      this.forkStateBarrierTimer = undefined;
+      if (fs.existsSync(releaseFile)) {
+        this.respond(commandId, command, this.getState());
+        return;
+      }
+      this.forkStateBarrierTimer = setTimeout(awaitRelease, 5);
+    };
+    awaitRelease();
+  }
+
+  private cancelForkStateBarrier(): void {
+    if (this.forkStateBarrierTimer === undefined) return;
+    clearTimeout(this.forkStateBarrierTimer);
+    this.forkStateBarrierTimer = undefined;
+  }
+
+  private holdGetStateAtBarrier(
+    commandId: string | undefined,
+    command: string,
+  ): void {
+    const barrierDir = this.options.getStateBarrierDir!;
+    fs.mkdirSync(barrierDir, { recursive: true });
+    const releaseFile = path.join(barrierDir, "release-get-state");
+    let released = false;
+    const release = (): void => {
+      if (released || !fs.existsSync(releaseFile)) return;
+      released = true;
+      watcher.close();
+      this.respond(commandId, command, this.getState());
+    };
+    const watcher = fs.watch(barrierDir, release);
+    // Close the subscribe/check race if release was created just before watch.
+    release();
+  }
+
+  private holdForkMessagesAtBarrier(
+    commandId: string | undefined,
+    command: string,
+  ): void {
+    const barrierDir = this.options.forkGetMessagesBarrierDir!;
+    fs.mkdirSync(barrierDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(barrierDir, "snapshot-started"),
+      `${fs.realpathSync(this.sessionFile)}\n`,
+    );
+    const releaseFile = path.join(barrierDir, "release-snapshot");
+    let released = false;
+    const release = (): void => {
+      if (released || !fs.existsSync(releaseFile)) return;
+      released = true;
+      watcher.close();
+      this.respond(commandId, command, { messages: this.messages });
+    };
+    const watcher = fs.watch(barrierDir, release);
+    // Close the subscribe/check race if release was created just before watch.
+    release();
+  }
+
   private handleAbort(command: FakeCommandRecord): void {
     const pendingExtensionUi = this.pendingExtensionUi;
     if (pendingExtensionUi) {
       clearTimeout(pendingExtensionUi.timer);
       this.pendingExtensionUi = undefined;
     }
+    this.cancelForkStateBarrier();
     for (const timer of this.currentTimers) {
       clearTimeout(timer);
     }
     this.currentTimers = [];
-    const wasActive = this.agentActive;
     this.agentActive = false;
     this.respond(command.id, "abort");
     this.write({

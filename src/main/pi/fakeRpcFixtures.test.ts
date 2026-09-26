@@ -45,6 +45,25 @@ function tempDir(name: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), name));
 }
 
+function waitForPath(file: string, timeoutMs = 5_000): Promise<void> {
+  if (fs.existsSync(file)) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const directory = path.dirname(file);
+    const timer = setTimeout(() => {
+      watcher.close();
+      reject(new Error(`Timed out waiting for path: ${file}`));
+    }, timeoutMs);
+    const finish = (): void => {
+      if (!fs.existsSync(file)) return;
+      clearTimeout(timer);
+      watcher.close();
+      resolve();
+    };
+    const watcher = fs.watch(directory, finish);
+    finish();
+  });
+}
+
 test("fake RPC get_state and get_messages fixtures are deterministic", async () => {
   const client = spawnFakeRpc();
   try {
@@ -61,6 +80,199 @@ test("fake RPC get_state and get_messages fixtures are deterministic", async () 
     );
   } finally {
     client.close();
+  }
+});
+
+test("fake RPC generic state barrier latches enabled requests until explicit release", async () => {
+  const directory = tempDir("pi-deck-fake-state-barrier-");
+  const barrierDir = path.join(directory, "barrier");
+  const enabledFile = path.join(directory, "enabled");
+  const signalFile = path.join(directory, "started");
+  fs.mkdirSync(barrierDir);
+  fs.writeFileSync(enabledFile, "enabled\n");
+  const client = spawnFakeRpc([
+    "--delay-get-state-enabled-file",
+    enabledFile,
+    "--get-state-barrier-dir",
+    barrierDir,
+    "--get-state-signal-file",
+    signalFile,
+  ]);
+  try {
+    const heldState = client.request("get_state");
+    await waitForPath(signalFile);
+    assert.equal(client.pendingCount, 1);
+
+    // Marker removal affects future calls only; the request that observed it
+    // remains held until the explicit release file appears.
+    fs.rmSync(enabledFile);
+    const immediateState = (await client.request("get_state")) as JsonObject;
+    assert.equal(immediateState.sessionId, "fake-session-1");
+    assert.equal(client.pendingCount, 1);
+
+    fs.writeFileSync(path.join(barrierDir, "release-get-state"), "release\n");
+    const releasedState = (await heldState) as JsonObject;
+    assert.equal(releasedState.sessionId, "fake-session-1");
+    assert.equal(client.pendingCount, 0);
+  } finally {
+    fs.writeFileSync(path.join(barrierDir, "release-get-state"), "release\n");
+    client.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("fake RPC native-fork state barrier waits for an explicit release", async () => {
+  const directory = tempDir("pi-deck-fake-fork-state-barrier-");
+  const barrierDir = path.join(directory, "barrier");
+  const sourceFile = path.join(directory, "source.jsonl");
+  const targetFile = path.join(directory, "target.jsonl");
+  fs.mkdirSync(barrierDir);
+  fs.writeFileSync(
+    sourceFile,
+    `${JSON.stringify({
+      type: "session",
+      version: 3,
+      id: "source",
+      timestamp: "2026-09-27T00:00:00.000Z",
+      cwd: directory,
+    })}\n`,
+  );
+  const client = spawnFakeRpc([
+    "--fork",
+    sourceFile,
+    "--fork-target",
+    targetFile,
+    "--fork-state-barrier-dir",
+    barrierDir,
+  ]);
+  try {
+    const statePromise = client.request("get_state");
+    const createdMarker = path.join(barrierDir, "target-created");
+    await waitForPath(createdMarker);
+
+    assert.equal(client.pendingCount, 1);
+    assert.equal(
+      fs.realpathSync(targetFile),
+      fs.readFileSync(createdMarker, "utf8").trim(),
+    );
+    const secondState = (await client.request("get_state")) as JsonObject;
+    assert.equal(
+      fs.realpathSync(secondState.sessionFile as string),
+      fs.realpathSync(targetFile),
+    );
+    assert.equal(client.pendingCount, 1);
+    fs.writeFileSync(path.join(barrierDir, "release-target"), "release\n");
+
+    const state = (await statePromise) as JsonObject;
+    assert.equal(
+      fs.realpathSync(state.sessionFile as string),
+      fs.realpathSync(targetFile),
+    );
+    assert.equal(client.pendingCount, 0);
+  } finally {
+    client.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("fake RPC fork get_messages barrier parses and leaves native snapshots unstalled", async () => {
+  const directory = tempDir("pi-deck-fake-fork-messages-barrier-");
+  const barrierDir = path.join(directory, "barrier");
+  const sourceFile = path.join(directory, "source.jsonl");
+  const targetFile = path.join(directory, "target.jsonl");
+  fs.mkdirSync(barrierDir);
+  fs.writeFileSync(
+    sourceFile,
+    `${JSON.stringify({
+      type: "session",
+      version: 3,
+      id: "source",
+      timestamp: "2026-09-27T00:00:00.000Z",
+      cwd: directory,
+    })}\n`,
+  );
+
+  const native = spawnFakeRpc(["--fork-get-messages-barrier-dir", barrierDir]);
+  try {
+    const messages = (await native.request("get_messages")) as JsonObject;
+    assert.ok(Array.isArray(messages.messages));
+    assert.equal(
+      fs.existsSync(path.join(barrierDir, "snapshot-started")),
+      false,
+    );
+    assert.equal(native.pendingCount, 0);
+  } finally {
+    native.close();
+  }
+
+  const fork = spawnFakeRpc([
+    "--fork",
+    sourceFile,
+    "--fork-target",
+    targetFile,
+    "--fork-get-messages-barrier-dir",
+    barrierDir,
+  ]);
+  try {
+    const heldMessages = fork.request("get_messages");
+    const startedFile = path.join(barrierDir, "snapshot-started");
+    await waitForPath(startedFile);
+    assert.equal(fork.pendingCount, 1);
+    assert.equal(
+      fs.readFileSync(startedFile, "utf8").trim(),
+      fs.realpathSync(targetFile),
+    );
+
+    fs.writeFileSync(path.join(barrierDir, "release-snapshot"), "release\n");
+    const messages = (await heldMessages) as JsonObject;
+    assert.ok(Array.isArray(messages.messages));
+    assert.equal(fork.pendingCount, 0);
+  } finally {
+    fs.writeFileSync(path.join(barrierDir, "release-snapshot"), "release\n");
+    fork.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("fake RPC abort cancels a held native-fork state barrier", async () => {
+  const directory = tempDir("pi-deck-fake-fork-state-cancel-");
+  const barrierDir = path.join(directory, "barrier");
+  const sourceFile = path.join(directory, "source.jsonl");
+  const targetFile = path.join(directory, "target.jsonl");
+  fs.mkdirSync(barrierDir);
+  fs.writeFileSync(
+    sourceFile,
+    `${JSON.stringify({
+      type: "session",
+      version: 3,
+      id: "source",
+      timestamp: "2026-09-27T00:00:00.000Z",
+      cwd: directory,
+    })}\n`,
+  );
+  const client = spawnFakeRpc([
+    "--fork",
+    sourceFile,
+    "--fork-target",
+    targetFile,
+    "--fork-state-barrier-dir",
+    barrierDir,
+  ]);
+  try {
+    const statePromise = client.request("get_state");
+    await waitForPath(path.join(barrierDir, "target-created"));
+    await client.request("abort");
+
+    const closed = new Promise<void>((resolve) => {
+      client.once("close", () => resolve());
+    });
+    client.close();
+    await assert.rejects(statePromise, /exited|subprocess/i);
+    await closed;
+    assert.equal(client.pendingCount, 0);
+  } finally {
+    client.close();
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 
@@ -915,6 +1127,401 @@ test("fake RPC malformed JSON and pending-exit fixtures exercise transport failu
   const exiting = spawnFakeRpc(["--exit-after-first-command"]);
   await assert.rejects(exiting.request("get_state"), /exited|subprocess/i);
   assert.equal(exiting.pendingCount, 0);
+});
+
+test("fake RPC emits controllable extension-shaped parallel subagent snapshots", async () => {
+  const directory = tempDir("pi-deck-fake-subagent-parallel-");
+  const barriers = path.join(directory, "barriers");
+  const sessionFile = path.join(directory, "parallel.jsonl");
+  fs.mkdirSync(barriers, { recursive: true });
+  const client = spawnFakeRpc([
+    "--prompt-scenario",
+    "subagent",
+    "--subagent-activity-barrier-dir",
+    barriers,
+    "--session",
+    sessionFile,
+    "--stream-delay-ms",
+    "1",
+  ]);
+  const received: RpcEventRecord[] = [];
+  const record = (event: RpcEventRecord): void => {
+    received.push(event);
+  };
+  client.on("event", record);
+  try {
+    const started = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "tool_execution_start"),
+    );
+    await client.request("prompt", {
+      message: "parallel extension activity fixture",
+    });
+    const start = (await started).find(
+      (event) => event.type === "tool_execution_start",
+    ) as JsonObject;
+    assert.equal(start.toolName, "subagent");
+    assert.equal("partialResult" in start, false);
+    assert.deepEqual(
+      ((start.args as JsonObject).tasks as JsonObject[]).map((task) =>
+        String(task.agent),
+      ),
+      ["scout", "scout", "reviewer"],
+    );
+    assert.equal(
+      received.some((event) => event.type === "tool_execution_update"),
+      false,
+    );
+
+    const firstUpdate = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "tool_execution_update"),
+    );
+    fs.writeFileSync(path.join(barriers, "parallel-update-1"), "release\n");
+    const updateOne = (await firstUpdate).find(
+      (event) => event.type === "tool_execution_update",
+    ) as JsonObject;
+    const firstPartial = updateOne.partialResult as JsonObject;
+    const firstDetails = firstPartial.details as JsonObject;
+    const firstResults = firstDetails.results as JsonObject[];
+    assert.equal(firstDetails.mode, "parallel");
+    assert.equal(firstDetails.agentScope, "user");
+    assert.equal(firstDetails.projectAgentsDir, null);
+    assert.equal(firstResults[0]?.exitCode, 0);
+    assert.equal((firstResults[0]?.messages as unknown[]).length, 4);
+    assert.equal(firstResults[1]?.exitCode, -1);
+
+    const secondUpdate = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "tool_execution_update"),
+    );
+    fs.writeFileSync(path.join(barriers, "parallel-update-2"), "release\n");
+    const updateTwo = (await secondUpdate).find(
+      (event) => event.type === "tool_execution_update",
+    ) as JsonObject;
+    const secondResults = (
+      (updateTwo.partialResult as JsonObject).details as JsonObject
+    ).results as JsonObject[];
+    assert.equal(secondResults[0]?.exitCode, 0);
+    assert.equal(
+      (secondResults[0]?.usage as JsonObject).turns as number | undefined,
+      2,
+    );
+    assert.equal((secondResults[1]?.messages as unknown[]).length, 1);
+
+    const finished = waitForEvents(
+      client,
+      (events) =>
+        events.some((event) => event.type === "tool_execution_end") &&
+        events.some((event) => event.type === "agent_end"),
+    );
+    fs.writeFileSync(path.join(barriers, "parallel-finish"), "release\n");
+    const finalEvents = await finished;
+    const end = finalEvents.find(
+      (event) => event.type === "tool_execution_end",
+    ) as JsonObject;
+    const finalResult = end.result as JsonObject;
+    const finalDetails = finalResult.details as JsonObject;
+    const finalResults = finalDetails.results as JsonObject[];
+    assert.equal("partialResult" in end, false);
+    assert.deepEqual(
+      finalResults.map((result) => [
+        result.agent,
+        result.exitCode,
+        result.stopReason,
+      ]),
+      [
+        ["scout", 0, "stop"],
+        ["scout", 1, "error"],
+        ["reviewer", 0, "stop"],
+      ],
+    );
+    assert.equal(end.isError, false);
+
+    const messages = (await client.request("get_messages")) as JsonObject;
+    const persisted = messages.messages as JsonObject[];
+    const toolResult = persisted.find(
+      (message) => message.role === "toolResult",
+    );
+    assert.equal(toolResult?.toolName, "subagent");
+    assert.deepEqual(toolResult?.details, finalDetails);
+  } finally {
+    client.off("event", record);
+    client.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("fake RPC single subagent fixture publishes cumulative usage and completes", async () => {
+  const directory = tempDir("pi-deck-fake-subagent-single-");
+  const barriers = path.join(directory, "barriers");
+  fs.mkdirSync(barriers, { recursive: true });
+  const client = spawnFakeRpc([
+    "--prompt-scenario",
+    "subagent",
+    "--subagent-activity-barrier-dir",
+    barriers,
+    "--stream-delay-ms",
+    "1",
+  ]);
+  try {
+    const started = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "tool_execution_start"),
+    );
+    await client.request("prompt", { message: "single success fixture" });
+    const start = (await started).find(
+      (event) => event.type === "tool_execution_start",
+    ) as JsonObject;
+    assert.deepEqual(start.args, {
+      agent: "worker",
+      task: "Inspect one deterministic target",
+      agentScope: "user",
+    });
+
+    const first = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "tool_execution_update"),
+    );
+    fs.writeFileSync(path.join(barriers, "single-update-1"), "release\n");
+    const firstUpdate = (await first).find(
+      (event) => event.type === "tool_execution_update",
+    ) as JsonObject;
+    const firstResult = (
+      ((firstUpdate.partialResult as JsonObject).details as JsonObject)
+        .results as JsonObject[]
+    )[0];
+    assert.equal(firstResult?.exitCode, 0);
+    assert.deepEqual(firstResult?.usage, {
+      input: 20,
+      output: 10,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cost: 0.0002,
+      contextTokens: 30,
+      turns: 1,
+    });
+
+    const second = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "tool_execution_update"),
+    );
+    fs.writeFileSync(path.join(barriers, "single-update-2"), "release\n");
+    const secondUpdate = (await second).find(
+      (event) => event.type === "tool_execution_update",
+    ) as JsonObject;
+    const secondResult = (
+      ((secondUpdate.partialResult as JsonObject).details as JsonObject)
+        .results as JsonObject[]
+    )[0];
+    assert.deepEqual(secondResult?.usage, {
+      input: 30,
+      output: 15,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cost: 0.0003,
+      contextTokens: 45,
+      turns: 2,
+    });
+
+    const finished = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "tool_execution_end"),
+    );
+    fs.writeFileSync(path.join(barriers, "single-finish"), "release\n");
+    const end = (await finished).find(
+      (event) => event.type === "tool_execution_end",
+    ) as JsonObject;
+    const terminal = (
+      ((end.result as JsonObject).details as JsonObject).results as JsonObject[]
+    )[0];
+    assert.equal(terminal?.stopReason, "stop");
+    assert.equal(terminal?.exitCode, 0);
+  } finally {
+    client.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("fake RPC cancellation leaves the child tool unresolved through actual abort", async () => {
+  const directory = tempDir("pi-deck-fake-subagent-cancel-");
+  const barriers = path.join(directory, "barriers");
+  fs.mkdirSync(barriers, { recursive: true });
+  const client = spawnFakeRpc([
+    "--prompt-scenario",
+    "subagent",
+    "--subagent-activity-barrier-dir",
+    barriers,
+  ]);
+  const received: RpcEventRecord[] = [];
+  const record = (event: RpcEventRecord): void => {
+    received.push(event);
+  };
+  client.on("event", record);
+  try {
+    const started = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "tool_execution_start"),
+    );
+    await client.request("prompt", { message: "cancellation fixture" });
+    await started;
+
+    const updated = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "tool_execution_update"),
+    );
+    fs.writeFileSync(path.join(barriers, "cancellation-update"), "release\n");
+    await updated;
+
+    const settled = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "agent_settled"),
+    );
+    await client.request("abort");
+    const terminalEvents = await settled;
+    assert.equal(
+      terminalEvents.some(
+        (event) =>
+          event.type === "agent_end" &&
+          (event as JsonObject).status === "aborted",
+      ),
+      true,
+    );
+    assert.equal(
+      received.some((event) => event.type === "tool_execution_end"),
+      false,
+    );
+  } finally {
+    client.off("event", record);
+    client.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("fake RPC emits malformed and oversized subagent edge fixtures behind gates", async () => {
+  const directory = tempDir("pi-deck-fake-subagent-edge-");
+  const barriers = path.join(directory, "barriers");
+  fs.mkdirSync(barriers, { recursive: true });
+  const client = spawnFakeRpc([
+    "--prompt-scenario",
+    "subagent",
+    "--subagent-activity-barrier-dir",
+    barriers,
+    "--stream-delay-ms",
+    "1",
+  ]);
+  try {
+    const malformedStart = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "tool_execution_start"),
+    );
+    await client.request("prompt", { message: "malformed details fixture" });
+    const malformedStartEvent = (await malformedStart).find(
+      (event) => event.type === "tool_execution_start",
+    ) as JsonObject;
+    assert.deepEqual(malformedStartEvent.args, { agent: "malformed-only" });
+
+    const malformedUpdate = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "tool_execution_update"),
+    );
+    fs.writeFileSync(path.join(barriers, "malformed-update"), "release\n");
+    const malformed = (await malformedUpdate).find(
+      (event) => event.type === "tool_execution_update",
+    ) as JsonObject;
+    assert.deepEqual((malformed.partialResult as JsonObject).details, {
+      mode: "future-mode",
+      results: "not-an-array",
+    });
+    const malformedFinished = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "agent_end"),
+    );
+    fs.writeFileSync(path.join(barriers, "malformed-finish"), "release\n");
+    await malformedFinished;
+
+    const oversizedStart = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "tool_execution_start"),
+    );
+    await client.request("prompt", { message: "oversized details fixture" });
+    await oversizedStart;
+    const oversizedUpdate = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "tool_execution_update"),
+    );
+    fs.writeFileSync(path.join(barriers, "oversized-update"), "release\n");
+    const oversized = (await oversizedUpdate).find(
+      (event) => event.type === "tool_execution_update",
+    ) as JsonObject;
+    const oversizedResult = (
+      ((oversized.partialResult as JsonObject).details as JsonObject)
+        .results as JsonObject[]
+    )[0];
+    assert.equal((oversizedResult?.messages as unknown[]).length, 140);
+    assert.ok(String(oversizedResult?.task).length > 500);
+
+    const oversizedFinished = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "tool_execution_end"),
+    );
+    fs.writeFileSync(path.join(barriers, "oversized-finish"), "release\n");
+    await oversizedFinished;
+  } finally {
+    client.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("fake RPC chain fixture stops after failure and leaves the final step unrun", async () => {
+  const directory = tempDir("pi-deck-fake-subagent-chain-");
+  const barriers = path.join(directory, "barriers");
+  fs.mkdirSync(barriers, { recursive: true });
+  const client = spawnFakeRpc([
+    "--prompt-scenario",
+    "subagent",
+    "--subagent-activity-barrier-dir",
+    barriers,
+    "--stream-delay-ms",
+    "1",
+  ]);
+  try {
+    const started = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "tool_execution_start"),
+    );
+    await client.request("prompt", { message: "chain failure fixture" });
+    const start = (await started).find(
+      (event) => event.type === "tool_execution_start",
+    ) as JsonObject;
+    const chain = (start.args as JsonObject).chain as JsonObject[];
+    assert.deepEqual(
+      chain.map((step) => step.agent),
+      ["worker", "reviewer", "worker"],
+    );
+
+    const partial = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "tool_execution_update"),
+    );
+    fs.writeFileSync(path.join(barriers, "chain-update-1"), "release\n");
+    const update = (await partial).find(
+      (event) => event.type === "tool_execution_update",
+    ) as JsonObject;
+    const partialDetails = (update.partialResult as JsonObject)
+      .details as JsonObject;
+    assert.equal(partialDetails.mode, "chain");
+    assert.equal((partialDetails.results as unknown[]).length, 1);
+
+    const finished = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "tool_execution_end"),
+    );
+    fs.writeFileSync(path.join(barriers, "chain-finish"), "release\n");
+    const end = (await finished).find(
+      (event) => event.type === "tool_execution_end",
+    ) as JsonObject;
+    const result = end.result as JsonObject;
+    const finalDetails = result.details as JsonObject;
+    const results = finalDetails.results as JsonObject[];
+    assert.equal(end.isError, true);
+    assert.equal(finalDetails.mode, "chain");
+    assert.deepEqual(
+      results.map((item) => [item.step, item.exitCode, item.stopReason]),
+      [
+        [1, 0, "stop"],
+        [2, 1, "error"],
+      ],
+    );
+    assert.equal(
+      results.some((item) => item.step === 3),
+      false,
+    );
+  } finally {
+    client.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("platform minimal RPC smoke can run against the shared fake RPC shim", async () => {

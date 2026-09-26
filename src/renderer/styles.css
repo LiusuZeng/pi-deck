@@ -1467,9 +1467,12 @@ h1 {
   align-items: center;
   gap: 7px;
   color: var(--color-text);
-  cursor: pointer;
   font-size: 12px;
   font-weight: 700;
+}
+
+.agent-activity-milestone summary {
+  cursor: pointer;
 }
 
 .agent-activity-error-label {
@@ -1852,6 +1855,239 @@ h1 {
 .agent-activity-tool-card pre {
   max-height: min(30vh, 300px);
   font-size: 12px;
+}
+
+.subagent-tool-card {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.subagent-tool-header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+}
+
+.subagent-activity {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+  margin: 0 8px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 8px;
+  color: var(--color-text);
+  background: var(--color-surface);
+}
+
+.subagent-activity-heading {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.subagent-activity-heading strong {
+  font-size: 12px;
+}
+
+.subagent-activity-heading span {
+  color: var(--color-text-subtle);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.subagent-list,
+.subagent-history ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.subagent-list {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.subagent-row {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  border-left: 3px solid var(--color-border-strong);
+  border-radius: 6px;
+  padding: 7px 8px;
+  background: var(--color-surface-subtle);
+}
+
+.subagent-row.completed {
+  border-left-color: var(--color-success);
+}
+
+.subagent-row.failed,
+.subagent-row.interrupted {
+  border-left-color: var(--color-danger-fg);
+}
+
+.subagent-row.activity-observed {
+  border-left-color: var(--color-info);
+}
+
+.subagent-row-summary {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 8px;
+  align-items: baseline;
+}
+
+.subagent-identity {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.subagent-identity strong {
+  overflow: hidden;
+  color: var(--color-text-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-identity small,
+.subagent-latest,
+.subagent-recency,
+.subagent-telemetry {
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
+.subagent-state {
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-weight: 760;
+  white-space: nowrap;
+}
+
+.subagent-row.completed .subagent-state {
+  color: var(--color-success);
+}
+
+.subagent-row.failed .subagent-state,
+.subagent-row.interrupted .subagent-state {
+  color: var(--color-danger-fg);
+}
+
+.subagent-row.activity-observed .subagent-state {
+  color: var(--color-info);
+}
+
+.subagent-task,
+.subagent-latest,
+.subagent-recency,
+.subagent-telemetry {
+  grid-column: 1 / -1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.subagent-task {
+  color: var(--color-text);
+  font-size: 12px;
+}
+
+.subagent-latest {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-history {
+  min-width: 0;
+  padding: 0 !important;
+}
+
+.subagent-history > summary,
+.subagent-raw-details > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  justify-content: flex-start;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.subagent-history > p {
+  margin: 6px 0 0;
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
+.subagent-history ol {
+  display: grid;
+  gap: 4px;
+  max-height: min(34vh, 320px);
+  margin-top: 6px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.subagent-history li {
+  overflow-wrap: anywhere;
+  border-radius: 5px;
+  padding: 5px 6px;
+  color: var(--color-text);
+  background: var(--color-surface-muted);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
+.subagent-history li.tool strong {
+  color: var(--color-info);
+}
+
+.subagent-history li.error {
+  color: var(--color-danger-fg);
+  background: var(--color-danger-surface);
+}
+
+.subagent-raw-details {
+  border-top: 1px solid var(--color-border);
+  padding: 7px 9px !important;
+}
+
+.subagent-raw-details > summary {
+  justify-content: flex-start;
+}
+
+@media (max-width: 620px) {
+  .subagent-activity-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .subagent-row-summary {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .subagent-state,
+  .subagent-task,
+  .subagent-latest,
+  .subagent-recency,
+  .subagent-telemetry {
+    grid-column: 1;
+  }
+
+  .subagent-state {
+    white-space: normal;
+  }
 }
 
 .composer {

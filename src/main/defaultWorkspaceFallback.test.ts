@@ -8,10 +8,20 @@ import {
   resolveChatCreationWorkspaceId,
   resolveChatResumeWorkspace,
   resolveChatResumeWorkspaceId,
+  withChatResumeOwnershipTransaction,
 } from "./chatWorkspaceOwnership.js";
+import { SessionAttachmentGate } from "./sessionDiscoveryGate.js";
 import { WorkspaceStore } from "./workspaces/workspaceStore.js";
 
 const temporaryRoots: string[] = [];
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
 
 async function createWorkspaceFixture(): Promise<{
   root: string;
@@ -120,6 +130,183 @@ test("unassigned resume claims the stable default without activating it", async 
     defaultId,
   );
   assert.equal((await store.getActiveWorkspace())?.id, namedId);
+});
+
+test("a reserved fork resume rejects before waiting for its attachment lease", async () => {
+  const gate = new SessionAttachmentGate();
+  const forkLease = await gate.enter(0);
+  let ownershipResolved = false;
+  try {
+    await assert.rejects(
+      withChatResumeOwnershipTransaction({
+        gate,
+        generation: 0,
+        assertActive: () => undefined,
+        assertAvailable: async () => {
+          throw new Error("Fork target is awaiting durable cleanup.");
+        },
+        operation: async () => {
+          ownershipResolved = true;
+        },
+      }),
+      /awaiting durable cleanup/,
+    );
+    assert.equal(ownershipResolved, false);
+  } finally {
+    forkLease.release();
+  }
+  // Rejection must not leave an unconsumed queue entry behind.
+  const nextLease = await gate.enter(0);
+  nextLease.release();
+});
+
+test("discovery during resume preflight is observed before ownership resolution", async () => {
+  const fixture = await createWorkspaceFixture();
+  const sessionFile = path.join(fixture.root, "preflight-pending.jsonl");
+  await fs.writeFile(sessionFile, "session\n");
+  const gate = new SessionAttachmentGate();
+  const preflightEntered = deferred();
+  const releasePreflight = deferred();
+  let resolvedOwnership = false;
+  const resume = withChatResumeOwnershipTransaction({
+    gate,
+    generation: 0,
+    assertActive: () => undefined,
+    assertAvailable: async () => {
+      preflightEntered.resolve();
+      await releasePreflight.promise;
+    },
+    operation: async () => {
+      resolvedOwnership = true;
+      return resolveChatResumeWorkspace(fixture.store, sessionFile);
+    },
+  });
+  await preflightEntered.promise;
+  // Invocation order is not gate queue order. A read-only availability probe
+  // may yield to discovery, but must not cache a Default ownership decision.
+  const discoveryLease = await gate.enter(0);
+  try {
+    await fixture.store.upsertSessionRefs(fixture.namedId, [
+      {
+        id: sessionFile,
+        sessionFile,
+        title: "Discovered",
+        updatedAtMs: 1,
+        messageCount: 0,
+      },
+    ]);
+    assert.equal(resolvedOwnership, false);
+  } finally {
+    discoveryLease.release();
+    releasePreflight.resolve();
+  }
+  assert.deepEqual(await resume, {
+    workspaceId: fixture.namedId,
+    source: "existing",
+  });
+});
+
+test("resume and discovery queue order deterministically chooses ownership", async () => {
+  const discoveryFirst = await createWorkspaceFixture();
+  const discoveredFile = path.join(
+    discoveryFirst.root,
+    "discovered-first.jsonl",
+  );
+  await fs.writeFile(discoveredFile, "session\n");
+  const discoveryFirstGate = new SessionAttachmentGate();
+  const discoveryLease = await discoveryFirstGate.enter(0);
+  const queuedResume = withChatResumeOwnershipTransaction({
+    gate: discoveryFirstGate,
+    generation: 0,
+    assertActive: () => undefined,
+    operation: async () =>
+      resolveChatResumeWorkspace(discoveryFirst.store, discoveredFile),
+  });
+
+  await discoveryFirst.store.upsertSessionRefs(discoveryFirst.namedId, [
+    {
+      id: discoveredFile,
+      sessionFile: discoveredFile,
+      title: "Discovered session",
+      updatedAtMs: 1,
+      messageCount: 0,
+    },
+  ]);
+  discoveryLease.release();
+
+  assert.deepEqual(await queuedResume, {
+    workspaceId: discoveryFirst.namedId,
+    source: "existing",
+  });
+  assert.equal(
+    (await discoveryFirst.store.getSessionOwner(discoveredFile))?.workspaceId,
+    discoveryFirst.namedId,
+  );
+
+  const resumeFirst = await createWorkspaceFixture();
+  const resumedFile = path.join(resumeFirst.root, "resume-first.jsonl");
+  await fs.writeFile(resumedFile, "session\n");
+  const resumeFirstGate = new SessionAttachmentGate();
+  const resumeEntered = deferred();
+  const allowValidatedClaim = deferred();
+  let fallbackResolution:
+    | Awaited<ReturnType<typeof resolveChatResumeWorkspace>>
+    | undefined;
+  const resume = withChatResumeOwnershipTransaction({
+    gate: resumeFirstGate,
+    generation: 0,
+    assertActive: () => undefined,
+    operation: async () => {
+      const ownership = await resolveChatResumeWorkspace(
+        resumeFirst.store,
+        resumedFile,
+      );
+      fallbackResolution = ownership;
+      resumeEntered.resolve();
+      await allowValidatedClaim.promise;
+      await claimUnassignedChatResumeWorkspace(
+        resumeFirst.store,
+        ownership.workspaceId,
+        resumedFile,
+      );
+    },
+  });
+  await resumeEntered.promise;
+  assert.deepEqual(fallbackResolution, {
+    workspaceId: resumeFirst.defaultId,
+    source: "default",
+  });
+
+  const discovery = (async () => {
+    const lease = await resumeFirstGate.enter(0);
+    try {
+      await resumeFirst.store.upsertSessionRefs(resumeFirst.namedId, [
+        {
+          id: resumedFile,
+          sessionFile: resumedFile,
+          title: "Later discovery",
+          updatedAtMs: 2,
+          messageCount: 0,
+        },
+      ]);
+    } finally {
+      lease.release();
+    }
+  })();
+  allowValidatedClaim.resolve();
+  await resume;
+  await discovery;
+
+  assert.equal(
+    (await resumeFirst.store.getSessionOwner(resumedFile))?.workspaceId,
+    resumeFirst.defaultId,
+  );
+  assert.equal(
+    (await resumeFirst.store.getSessionRefs(resumeFirst.namedId)).some(
+      (ref) => ref.sessionFile === path.resolve(resumedFile),
+    ),
+    false,
+  );
 });
 
 test("workspace ownership resolvers prefer ownership and reject unresolved fallbacks", () => {
