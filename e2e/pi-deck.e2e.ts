@@ -8073,6 +8073,9 @@ test("fork serializes project, workspace, and unassigned discovery until its nat
   });
   try {
     await expectHealthyPreload(page);
+    // Use the migrated, directory-backed workspace rather than Default's
+    // folderless managed context, so project discovery must see this child.
+    await selectWorkspaceInUi(page, path.basename(projectCwd));
     await sidebarNewSessionButton(page).click();
     await page.getByLabel("Prompt text").fill("discovery gate source");
     await page.getByRole("button", { name: "Send" }).click();
@@ -8082,22 +8085,40 @@ test("fork serializes project, workspace, and unassigned discovery until its nat
     const source = await page.evaluate(async () => {
       const snapshot = await window.piDeck.chat.getSnapshot();
       const projects = await window.piDeck.projects.getActive();
+      const workspace = await window.piDeck.workspaces.getActive();
       if (projects.activeProjectId === undefined) {
         throw new Error("Expected an active project for discovery coverage.");
       }
       return {
         workspaceId: snapshot.workspaceId!,
         projectId: projects.activeProjectId,
+        defaultProjectId: workspace.activeWorkspace?.defaultProjectId,
+        cwd: snapshot.state.cwd!,
         sessionFile: snapshot.state.sessionFile!,
       };
     });
+    expect(source.defaultProjectId).toBe(source.projectId);
+    expect(fs.realpathSync(source.cwd)).toBe(fs.realpathSync(projectCwd));
+    const sourceHeader = JSON.parse(
+      fs.readFileSync(source.sessionFile, "utf8").split("\n")[0]!,
+    ) as { cwd: string };
+    expect(fs.realpathSync(sourceHeader.cwd)).toBe(fs.realpathSync(projectCwd));
+    expect(
+      persistedSessionRefs(projectStoreFile).filter(
+        (ref) =>
+          ref.sessionFile === canonicalSessionIdentity(source.sessionFile),
+      ),
+    ).toEqual([expect.objectContaining({ projectId: source.projectId })]);
 
-    await page.evaluate((request) => {
-      const testWindow = window as typeof window & {
-        issue140Fork?: Promise<unknown>;
-      };
-      testWindow.issue140Fork = window.piDeck.chat.forkSession(request);
-    }, source);
+    await page.evaluate(
+      (request) => {
+        const testWindow = window as typeof window & {
+          issue140Fork?: Promise<unknown>;
+        };
+        testWindow.issue140Fork = window.piDeck.chat.forkSession(request);
+      },
+      { workspaceId: source.workspaceId, sessionFile: source.sessionFile },
+    );
     const targetCreatedMarker = path.join(barrierDir, "target-created");
     await expect
       .poll(() =>
