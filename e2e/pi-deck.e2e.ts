@@ -8498,6 +8498,9 @@ test("failed target promotion write/rename rebuilds both blocks after restart an
       });
       failedApp = failed.app;
       await expectHealthyPreload(failed.page);
+      // Exercise both persisted stores: a folderless Default session has no
+      // project-cache ref to seed, so it cannot prove project-cache filtering.
+      await selectWorkspaceInUi(failed.page, path.basename(projectCwd));
       await sidebarNewSessionButton(failed.page).click();
       await failed.page.getByLabel("Prompt text").fill("promotion recovery");
       await failed.page.getByRole("button", { name: "Send" }).click();
