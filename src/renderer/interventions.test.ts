@@ -96,8 +96,7 @@ describe("intervention timeline model", () => {
     ]);
 
     const matched = matchDurableInterventionMessages({
-      interventions: afterOneLeavesQueue,
-      existingUsers: [],
+      localTimeline: afterOneLeavesQueue,
       durableUsers: [
         { id: "durable-1", content: "Repeat", createdAt: "10:01" },
       ],
@@ -110,10 +109,10 @@ describe("intervention timeline model", () => {
 
   it("reconciles durable evidence into the same item instead of a duplicate", () => {
     const matched = matchDurableInterventionMessages({
-      interventions: [
+      localTimeline: [
+        { id: "prompt-1", kind: "user", content: "Start work" },
         markInterventionQueued(intervention("steer-1", "Focus the tests")),
       ],
-      existingUsers: [{ id: "prompt-1", content: "Start work" }],
       durableUsers: [
         { id: "prompt-1", content: "Start work", createdAt: "09:59" },
         {
@@ -136,10 +135,10 @@ describe("intervention timeline model", () => {
 
   it("reserves an older ordinary user occurrence before matching identical intervention text", () => {
     const matched = matchDurableInterventionMessages({
-      interventions: [
+      localTimeline: [
+        { id: "local-prompt", kind: "user", content: "Same text" },
         markInterventionQueued(intervention("steer-1", "Same text")),
       ],
-      existingUsers: [{ id: "local-prompt", content: "Same text" }],
       durableUsers: [
         { id: "durable-prompt", content: "Same text", createdAt: "09:59" },
         { id: "durable-steer", content: "Same text", createdAt: "10:01" },
@@ -152,6 +151,104 @@ describe("intervention timeline model", () => {
     });
   });
 
+  it("matches duplicate text in combined timeline order across a snapshot race", () => {
+    const matched = matchDurableInterventionMessages({
+      localTimeline: [
+        { id: "local-old", kind: "user", content: "Same text" },
+        markInterventionQueued(intervention("steer-1", "Same text")),
+        // This optimistic prompt was appended after the snapshot request. It
+        // must not reserve evidence for the earlier intervention.
+        { id: "local-future", kind: "user", content: "Same text" },
+      ],
+      durableUsers: [
+        { id: "durable-old", content: "Same text", createdAt: "09:59" },
+        {
+          id: "durable-intervention",
+          content: "Same text",
+          createdAt: "10:01",
+        },
+      ],
+    });
+
+    expect(matched.interventions[0]).toMatchObject({
+      id: "steer-1",
+      status: "consumed",
+      durableMessageId: "durable-intervention",
+    });
+    expect(matched.unmatchedDurableMessages).toEqual([]);
+  });
+
+  it("uses normalized attachment evidence to disambiguate identical text", () => {
+    const localImage = {
+      id: "local-image",
+      fileName: " chart.png ",
+      kind: "image" as const,
+      sendMode: "imageInput" as const,
+      mimeType: "IMAGE/PNG",
+      previewDataUrl: "data:image/png;base64,local",
+    };
+    const queued = markInterventionQueued({
+      ...intervention("steer-image", "Describe this"),
+      attachments: [localImage],
+    });
+    const matched = matchDurableInterventionMessages({
+      localTimeline: [
+        {
+          id: "ordinary-other-image",
+          kind: "user",
+          content: "Describe this",
+          attachments: [
+            {
+              ...localImage,
+              fileName: "notes.txt",
+              kind: "textFile",
+              sendMode: "pathReference",
+            },
+          ],
+        },
+        queued,
+      ],
+      durableUsers: [
+        {
+          id: "durable-image",
+          content: "Describe this",
+          createdAt: "10:01",
+          attachments: [
+            {
+              ...localImage,
+              id: "durable-generated-id",
+              fileName: "chart.png",
+              mimeType: "image/png",
+              previewDataUrl: "data:image/png;base64,durable",
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(matched.interventions[0]).toMatchObject({
+      status: "consumed",
+      durableMessageId: "durable-image",
+    });
+    expect(matched.unmatchedDurableMessages).toEqual([]);
+  });
+
+  it("ignores duplicate durable rows instead of consuming duplicate locals", () => {
+    const matched = matchDurableInterventionMessages({
+      localTimeline: [
+        { id: "ordinary", kind: "user", content: "Repeat" },
+        markInterventionQueued(intervention("steer-1", "Repeat")),
+      ],
+      durableUsers: [
+        { id: "durable-1", content: "Repeat", createdAt: "10:01" },
+        { id: "durable-1", content: "Repeat", createdAt: "10:01" },
+      ],
+    });
+
+    expect(matched.interventions[0]).toMatchObject({ status: "queued" });
+    expect(matched.unmatchedDurableMessages).toEqual([]);
+  });
+
   it("keeps failed sends honest and unavailable for durable matching", () => {
     const failed = markInterventionFailed(
       intervention("steer-1", "Cannot send"),
@@ -161,8 +258,7 @@ describe("intervention timeline model", () => {
       steer: ["Cannot send"],
     });
     const matched = matchDurableInterventionMessages({
-      interventions: queuedEvidence,
-      existingUsers: [],
+      localTimeline: queuedEvidence,
       durableUsers: [
         { id: "other-user", content: "Cannot send", createdAt: "10:01" },
       ],

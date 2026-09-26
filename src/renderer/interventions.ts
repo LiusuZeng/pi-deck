@@ -38,8 +38,14 @@ export interface DurableUserMessageEvidence {
 
 export interface ExistingUserMessageEvidence {
   id: string;
+  kind: "user";
   content: string;
+  attachments?: InterventionAttachment[];
 }
+
+export type LocalUserMessageEvidence =
+  | ExistingUserMessageEvidence
+  | InterventionTimelineItem;
 
 export function createInterventionTimelineItem(options: {
   id: string;
@@ -142,75 +148,96 @@ export interface DurableInterventionMatchResult {
 }
 
 /**
- * Match durable user turns by occurrence, never by a global content set. This
- * reserves existing ordinary user turns first, then consumes one intervention
- * for each remaining durable occurrence. Identical repeated instructions are
- * therefore preserved rather than deduplicated.
+ * Match durable user turns against the combined local timeline by occurrence.
+ * Keeping ordinary turns and interventions in one sequence is important when
+ * a snapshot races a newer optimistic prompt: that future prompt must not take
+ * durable evidence that belongs to an earlier intervention with the same text.
  */
 export function matchDurableInterventionMessages(options: {
-  interventions: readonly InterventionTimelineItem[];
-  existingUsers: readonly ExistingUserMessageEvidence[];
+  localTimeline: readonly LocalUserMessageEvidence[];
   durableUsers: readonly DurableUserMessageEvidence[];
 }): DurableInterventionMatchResult {
-  const interventions = [...options.interventions];
-  const usedOrdinaryUsers = new Set<string>();
-  const usedInterventions = new Set<string>();
-  const interventionByDurableId = new Map(
-    interventions.flatMap((item) =>
-      item.durableMessageId === undefined
-        ? []
-        : ([[item.durableMessageId, item]] as const),
-    ),
+  const interventions = options.localTimeline.filter(
+    (item): item is InterventionTimelineItem => item.kind === "intervention",
   );
-  const ordinaryById = new Map(
-    options.existingUsers.map((item) => [item.id, item] as const),
+  const candidates = options.localTimeline.filter(
+    (item) => item.kind === "user" || item.status !== "failed",
   );
+  const usedCandidates = new Set<number>();
+  const seenDurableIds = new Set<string>();
   const unmatchedDurableMessages: DurableUserMessageEvidence[] = [];
 
   for (const durable of options.durableUsers) {
-    const alreadyConsumed = interventionByDurableId.get(durable.id);
-    if (alreadyConsumed !== undefined) {
-      usedInterventions.add(alreadyConsumed.id);
-      continue;
-    }
+    // A malformed/replayed snapshot row must not consume a second occurrence.
+    if (seenDurableIds.has(durable.id)) continue;
+    seenDurableIds.add(durable.id);
 
-    const exactOrdinary = ordinaryById.get(durable.id);
-    if (exactOrdinary !== undefined) {
-      usedOrdinaryUsers.add(exactOrdinary.id);
-      continue;
-    }
-
-    const ordinary = options.existingUsers.find(
-      (item) =>
-        !usedOrdinaryUsers.has(item.id) && item.content === durable.content,
+    const exactIndex = candidates.findIndex(
+      (item, index) =>
+        !usedCandidates.has(index) &&
+        (item.kind === "user"
+          ? item.id === durable.id
+          : item.durableMessageId === durable.id),
     );
-    if (ordinary !== undefined) {
-      usedOrdinaryUsers.add(ordinary.id);
+    const candidateIndex =
+      exactIndex >= 0
+        ? exactIndex
+        : candidates.findIndex(
+            (item, index) =>
+              !usedCandidates.has(index) &&
+              (item.kind === "user" || item.durableMessageId === undefined) &&
+              sameUserMessageEvidence(item, durable),
+          );
+
+    if (candidateIndex < 0) {
+      unmatchedDurableMessages.push(durable);
       continue;
     }
+
+    usedCandidates.add(candidateIndex);
+    const candidate = candidates[candidateIndex]!;
+    if (candidate.kind === "user") continue;
 
     const interventionIndex = interventions.findIndex(
-      (item) =>
-        !usedInterventions.has(item.id) &&
-        item.status !== "failed" &&
-        item.durableMessageId === undefined &&
-        item.content === durable.content,
+      (item) => item.id === candidate.id,
     );
     if (interventionIndex >= 0) {
-      const intervention = interventions[interventionIndex]!;
       interventions[interventionIndex] = {
-        ...intervention,
+        ...candidate,
         status: "consumed",
         durableMessageId: durable.id,
       };
-      usedInterventions.add(intervention.id);
-      continue;
     }
-
-    unmatchedDurableMessages.push(durable);
   }
 
   return { interventions, unmatchedDurableMessages };
+}
+
+function sameUserMessageEvidence(
+  local: LocalUserMessageEvidence,
+  durable: DurableUserMessageEvidence,
+): boolean {
+  if (local.content !== durable.content) return false;
+  // Streamed message events do not always carry attachment metadata. In that
+  // case text is the available evidence; snapshots with attachments can make
+  // the stronger comparison below.
+  if (durable.attachments === undefined) return true;
+  const localAttachments = local.attachments ?? [];
+  if (localAttachments.length !== durable.attachments.length) return false;
+  return localAttachments.every((attachment, index) => {
+    const other = durable.attachments?.[index];
+    return (
+      other !== undefined &&
+      normalizeAttachment(attachment) === normalizeAttachment(other)
+    );
+  });
+}
+
+function normalizeAttachment(attachment: InterventionAttachment): string {
+  // IDs, names, MIME types, and previews are transport/UI details. Main may
+  // resize an image before Pi persists it, and Pi may omit its original name.
+  // The stable evidence is the ordered attachment kind and delivery mode.
+  return `${attachment.kind}:${attachment.sendMode}`;
 }
 
 export function interventionTypeLabel(kind: InterventionKind): string {

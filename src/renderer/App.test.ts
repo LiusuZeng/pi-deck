@@ -484,6 +484,39 @@ describe("timeline presentation grouping", () => {
 });
 
 describe("tool execution activity details", () => {
+  it("groups a cancelled delegated result as error activity", () => {
+    const item = __rendererTestHooks.toolTimelineItemFromRuntimeEvent(
+      {
+        type: "tool_execution_end",
+        runtimeId: "runtime-test",
+        toolCallId: "delegation-cancelled",
+        toolName: "subagent",
+        status: "aborted",
+        result: {
+          details: {
+            results: [{ status: "cancelled", stopReason: "aborted" }],
+          },
+        },
+      } as any,
+      "success",
+    ) as any;
+    const grouped = __rendererTestHooks.timelinePresentationItems([
+      item,
+    ] as any) as any[];
+
+    expect(item).toMatchObject({
+      status: "error",
+      delegatedStatus: {
+        label: "Delegated work cancelled",
+        parentState: "cancelled",
+        tone: "error",
+      },
+    });
+    expect(grouped).toMatchObject([
+      { kind: "activity", state: "error", items: [{ status: "error" }] },
+    ]);
+  });
+
   it("separates command input, stdout, stderr, and exit status", () => {
     const item = __rendererTestHooks.toolTimelineItemFromRuntimeEvent(
       {

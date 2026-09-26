@@ -247,7 +247,11 @@ describe("projectDelegatedToolStatus", () => {
         status: "aborted",
         result: { details },
       }),
-    ).toMatchObject({ label: "Delegated work cancelled" });
+    ).toMatchObject({
+      label: "Delegated work cancelled",
+      parentState: "cancelled",
+      tone: "error",
+    });
   });
 
   it("does not project ordinary tools", () => {

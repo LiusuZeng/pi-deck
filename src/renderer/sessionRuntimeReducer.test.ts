@@ -155,6 +155,43 @@ describe("sessionRuntimeReducer", () => {
     ]);
   });
 
+  it("projects a cancelled delegated result as an error tool row", () => {
+    const running = reduceRuntimeEvent(session(), {
+      type: "tool_execution_start",
+      runtimeId: "runtime-1",
+      toolCallId: "delegation-cancelled",
+      toolName: "subagent",
+      args: { tasks: [{ agent: "one" }] },
+    } as any);
+    const cancelled = reduceRuntimeEvent(running, {
+      type: "tool_execution_end",
+      runtimeId: "runtime-1",
+      toolCallId: "delegation-cancelled",
+      // The generic tool failure parser intentionally does not treat aborted
+      // as a failure, but the delegated parent did not succeed.
+      status: "aborted",
+      result: {
+        details: {
+          results: [{ status: "cancelled", stopReason: "aborted" }],
+        },
+      },
+    } as any);
+
+    expect(cancelled.timeline).toMatchObject([
+      {
+        id: "delegation-cancelled",
+        kind: "tool",
+        status: "error",
+        delegatedStatus: {
+          label: "Delegated work cancelled",
+          parentState: "cancelled",
+          tone: "error",
+        },
+      },
+    ]);
+    expect(cancelled.overlays.toolRunning).toBe(false);
+  });
+
   it("keeps concurrent delegated tool calls independent", () => {
     let projected = reduceRuntimeEvent(session(), {
       type: "tool_execution_update",
@@ -616,6 +653,56 @@ describe("sessionRuntimeReducer", () => {
       status: "consumed",
       durableMessageId: "durable-steer-1",
     });
+  });
+
+  it("matches durable duplicate text in local timeline order during a snapshot race", () => {
+    const current = {
+      ...session(),
+      status: "working" as const,
+      baseState: "working" as const,
+      timeline: [
+        {
+          id: "local-old",
+          kind: "user" as const,
+          content: "Same text",
+          createdAt: "09:59",
+        },
+        markInterventionQueued(
+          createInterventionTimelineItem({
+            id: "steer-1",
+            interventionKind: "steer",
+            content: "Same text",
+            createdAt: "10:00",
+          }),
+        ),
+        {
+          id: "local-future",
+          kind: "user" as const,
+          content: "Same text",
+          createdAt: "10:02",
+        },
+      ],
+    };
+    const reconciled = reduceRuntimeEvent(current, {
+      type: "agent_end",
+      runtimeId: "runtime-1",
+      status: "success",
+      messages: [
+        { id: "durable-old", role: "user", content: "Same text" },
+        {
+          id: "durable-intervention",
+          role: "user",
+          content: "Same text",
+        },
+      ],
+    } as any);
+
+    expect(reconciled.timeline[1]).toMatchObject({
+      id: "steer-1",
+      status: "consumed",
+      durableMessageId: "durable-intervention",
+    });
+    expect(reconciled.timeline).toHaveLength(3);
   });
 
   it("uses durable agent_end messages, but not agent_end alone, as consumption evidence", () => {

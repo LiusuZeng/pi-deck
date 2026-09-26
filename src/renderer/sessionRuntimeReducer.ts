@@ -1317,7 +1317,12 @@ export function toolTimelineItemFromRuntimeEvent(
     id,
     kind: "tool",
     title,
-    status,
+    // Cancellation is not a successful tool result even when the generic
+    // failure parser does not classify statuses such as "aborted" as errors.
+    status:
+      status === "success" && delegatedStatus?.tone === "error"
+        ? "error"
+        : status,
     summary: delegatedStatus?.detail ?? summary,
     details,
     ...(detailSections.length > 0 ? { detailSections } : {}),
@@ -1784,15 +1789,11 @@ export function reconcileTimelineWithDurableUserMessages(
   durableUsers: readonly DurableUserMessageEvidence[],
 ): TimelineItem[] {
   if (durableUsers.length === 0) return [...timeline];
-  const interventions = timeline.filter(
-    (item): item is InterventionTimelineItem => item.kind === "intervention",
-  );
-  const existingUsers = timeline.flatMap((item) =>
-    item.kind === "user" ? [{ id: item.id, content: item.content }] : [],
+  const localTimeline = timeline.flatMap((item) =>
+    item.kind === "user" || item.kind === "intervention" ? [item] : [],
   );
   const matched = matchDurableInterventionMessages({
-    interventions,
-    existingUsers,
+    localTimeline,
     durableUsers,
   });
   const interventionById = new Map(
