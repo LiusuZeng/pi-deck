@@ -25,7 +25,7 @@ async function launchPiDeck(): Promise<{
   return { app, page };
 }
 
-test("long transcript rows enable offscreen rendering containment", async () => {
+test("heterogeneous contained history keeps the settled bottom reachable", async () => {
   const { app, page } = await launchPiDeck();
   try {
     await expect(
@@ -46,24 +46,96 @@ test("long transcript rows enable offscreen rendering containment", async () => 
     const result = await page
       .locator(".timeline-scroll")
       .evaluate(async (root) => {
-        const source = root.querySelector<HTMLElement>(".timeline-row");
-        if (source === null) {
-          throw new Error("Expected a timeline row fixture.");
+        const content = root.querySelector<HTMLElement>(".timeline-content");
+        if (content === null) {
+          throw new Error("Expected the observed timeline content wrapper.");
         }
 
-        for (let index = 0; index < 500; index += 1) {
-          root.append(source.cloneNode(true));
+        for (let index = 0; index < 120; index += 1) {
+          const row = document.createElement("article");
+          row.className = "timeline-row";
+          row.dataset.syntheticHistory = String(index);
+          const lineCount = [8, 36, 80, 17][index % 4] ?? 8;
+          const lines = Array.from(
+            { length: lineCount },
+            (_, line) => `history ${index}, line ${line}`,
+          ).join("<br>");
+          row.innerHTML =
+            index % 9 === 0
+              ? `<details open><summary>Expanded history ${index}</summary><div>${lines}</div></details>`
+              : `<div>${lines}</div>`;
+          content.append(row);
         }
-        root.scrollTop = root.scrollHeight;
-        await new Promise<void>((resolve) =>
-          requestAnimationFrame(() => resolve()),
+
+        const frame = (): Promise<void> =>
+          new Promise((resolve) => requestAnimationFrame(() => resolve()));
+        const sampleBottomSettling = async (): Promise<
+          Array<{ distance: number; scrollHeight: number; scrollTop: number }>
+        > => {
+          const samples = [];
+          for (let index = 0; index < 45; index += 1) {
+            await frame();
+            samples.push({
+              distance: Math.max(
+                0,
+                root.scrollHeight - root.scrollTop - root.clientHeight,
+              ),
+              scrollHeight: root.scrollHeight,
+              scrollTop: root.scrollTop,
+            });
+          }
+          return samples;
+        };
+        const navigateToBottom = (): void => {
+          root.dispatchEvent(
+            new WheelEvent("wheel", { bubbles: true, deltaY: 10_000 }),
+          );
+          root.scrollTop = root.scrollHeight;
+          root.dispatchEvent(new Event("scroll", { bubbles: true }));
+        };
+
+        // Start as a history reader, then deliberately navigate to the end in
+        // the same turn that Chromium must realize contained variable heights.
+        root.dispatchEvent(
+          new WheelEvent("wheel", { bubbles: true, deltaY: -10_000 }),
         );
-        await new Promise<void>((resolve) =>
-          requestAnimationFrame(() => resolve()),
+        root.scrollTop = 0;
+        root.dispatchEvent(new Event("scroll", { bubbles: true }));
+        navigateToBottom();
+        const firstBottomSamples = await sampleBottomSettling();
+
+        // Moving away must revoke follow ownership even when observed content
+        // changes afterward.
+        root.dispatchEvent(
+          new WheelEvent("wheel", { bubbles: true, deltaY: -2_000 }),
+        );
+        root.scrollTop = Math.max(0, root.scrollTop - root.clientHeight * 3);
+        root.dispatchEvent(new Event("scroll", { bubbles: true }));
+        const rowWhileReading = content.querySelector<HTMLElement>(
+          '[data-synthetic-history="4"] > div',
+        );
+        if (rowWhileReading === null) {
+          throw new Error("Expected a synthetic row to grow.");
+        }
+        rowWhileReading.append(
+          ...Array.from({ length: 40 }, (_, index) => {
+            const line = document.createElement("div");
+            line.textContent = `late history line ${index}`;
+            return line;
+          }),
+        );
+        for (let index = 0; index < 8; index += 1) {
+          await frame();
+        }
+        const readingDistance = Math.max(
+          0,
+          root.scrollHeight - root.scrollTop - root.clientHeight,
         );
 
+        navigateToBottom();
+        const secondBottomSamples = await sampleBottomSettling();
         const rows = Array.from(
-          root.querySelectorAll<HTMLElement>(".timeline-row"),
+          content.querySelectorAll<HTMLElement>(".timeline-row"),
         );
         const first = rows[0];
         const last = rows[rows.length - 1];
@@ -75,7 +147,6 @@ test("long transcript rows enable offscreen rendering containment", async () => 
         const rootRect = root.getBoundingClientRect();
         const firstRect = first.getBoundingClientRect();
         const lastRect = last.getBoundingClientRect();
-
         return {
           count: rows.length,
           contentVisibility: firstStyle.contentVisibility,
@@ -83,21 +154,29 @@ test("long transcript rows enable offscreen rendering containment", async () => 
           firstIsAboveViewport: firstRect.bottom < rootRect.top,
           lastIntersectsViewport:
             lastRect.bottom > rootRect.top && lastRect.top < rootRect.bottom,
-          scrollTop: root.scrollTop,
-          maxScrollTop: root.scrollHeight - root.clientHeight,
+          readingDistance,
+          firstBottomSamples,
+          secondBottomSamples,
         };
       });
 
-    expect(result.count).toBeGreaterThan(500);
+    expect(result.count).toBeGreaterThan(120);
     expect(result.contentVisibility).toBe("auto");
     expect(result.intrinsicSize).toContain("120px");
     expect(result.firstIsAboveViewport).toBe(true);
     expect(result.lastIntersectsViewport).toBe(true);
-    expect(result.scrollTop).toBeGreaterThan(0);
-    // Chromium can expose the clamped scroll offset on a fractional CSS pixel.
-    expect(
-      Math.abs(result.maxScrollTop - result.scrollTop),
-    ).toBeLessThanOrEqual(1);
+    expect(result.readingDistance).toBeGreaterThan(80);
+    for (const samples of [
+      result.firstBottomSamples,
+      result.secondBottomSamples,
+    ]) {
+      expect(samples.length).toBe(45);
+      expect(samples.some((sample) => sample.scrollTop > 0)).toBe(true);
+      // Assert sustained settled ownership, not one favorable animation frame.
+      expect(samples.slice(-12).every((sample) => sample.distance <= 1)).toBe(
+        true,
+      );
+    }
   } finally {
     await app.close();
   }
