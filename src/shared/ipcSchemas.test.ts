@@ -16,11 +16,11 @@ import {
   chatDeleteSessionRequestSchema,
   chatForkSessionRequestSchema,
   chatInterventionRequestSchema,
-  chatMessageSchema,
   chatPromptRequestSchema,
   chatRespondToExtensionUiRequestSchema,
   chatRuntimeStatusRequestSchema,
   chatRuntimeStatusSchema,
+  chatSnapshotSchema,
   multitaskModeRequestSchema,
   multitaskModeUpdateRequestSchema,
   multitaskSettingsUpdateRequestSchema,
@@ -370,33 +370,155 @@ describe("IPC schemas", () => {
     ).toThrow();
   });
 
-  it("normalizes non-text message content arrays to avoid resume validation failures", () => {
-    expect(
-      chatMessageSchema.parse({
-        id: "assistant-1",
-        role: "assistant",
-        content: [{ type: "thinking", thinking: "hidden" }],
-      }),
-    ).toMatchObject({ content: "" });
+  it("preserves assistant chain tool-call arguments across repeated snapshot parsing", () => {
+    const snapshot = chatSnapshotSchema.parse({
+      runtimeId: "runtime-1",
+      backendMode: "real",
+      state: {},
+      messages: [
+        {
+          id: "assistant-1",
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "hidden" },
+            { type: "text", text: "Delegating the chain" },
+            {
+              type: "toolCall",
+              id: "tool-call-1",
+              name: "subagent",
+              arguments: {
+                mode: "chain",
+                chain: [
+                  { agent: "scout", task: "Inspect the snapshot path" },
+                  { agent: "worker", task: "Implement the fix" },
+                  { agent: "reviewer", task: "Review the result" },
+                ],
+              },
+              privateExtensionField: "discard me",
+            },
+            { type: "toolResult", result: "not a tool call" },
+          ],
+        },
+      ],
+    });
+
+    expect(snapshot.messages[0]).toMatchObject({
+      content: "Delegating the chain",
+      toolCalls: [
+        {
+          id: "tool-call-1",
+          name: "subagent",
+          arguments: {
+            mode: "chain",
+            chain: [
+              { agent: "scout", task: "Inspect the snapshot path" },
+              { agent: "worker", task: "Implement the fix" },
+              { agent: "reviewer", task: "Review the result" },
+            ],
+          },
+        },
+      ],
+    });
+    expect(snapshot.messages[0]?.toolCalls?.[0]).toEqual({
+      id: "tool-call-1",
+      name: "subagent",
+      arguments: {
+        mode: "chain",
+        chain: [
+          { agent: "scout", task: "Inspect the snapshot path" },
+          { agent: "worker", task: "Implement the fix" },
+          { agent: "reviewer", task: "Review the result" },
+        ],
+      },
+    });
+
+    expect(chatSnapshotSchema.parse(snapshot)).toEqual(snapshot);
   });
 
-  it("normalizes persisted user image content for resumed previews", () => {
-    expect(
-      chatMessageSchema.parse({
-        id: "msg-1",
-        role: "user",
-        content: [
-          { type: "text", text: "What is this?" },
-          {
-            type: "image",
-            id: "image-1",
-            fileName: "screenshot.png",
-            mimeType: "image/png",
-            data: "abc123",
-          },
-        ],
-      }),
-    ).toMatchObject({
+  it("drops malformed assistant tool calls and bounds the normalized projection", () => {
+    const validCalls = Array.from({ length: 105 }, (_, index) => ({
+      type: "toolCall",
+      id: `call-${index}`,
+      name: "subagent",
+      arguments: { task: `Task ${index}` },
+      ignored: "extra",
+    }));
+    const snapshot = chatSnapshotSchema.parse({
+      runtimeId: "runtime-1",
+      backendMode: "real",
+      state: {},
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "hidden" },
+            { type: "toolCall", name: "missing id", arguments: {} },
+            { type: "toolCall", id: "bad-name", name: 42, arguments: {} },
+            {
+              type: "toolCall",
+              id: "bad-arguments",
+              name: "subagent",
+              arguments: [],
+            },
+            {
+              type: "text",
+              id: "not-a-tool-call",
+              name: "subagent",
+              arguments: {},
+            },
+            ...validCalls,
+          ],
+        },
+      ],
+    });
+
+    expect(snapshot.messages[0]?.content).toBe("");
+    expect(snapshot.messages[0]?.toolCalls).toHaveLength(100);
+    expect(snapshot.messages[0]?.toolCalls?.[0]).toEqual({
+      id: "call-0",
+      name: "subagent",
+      arguments: { task: "Task 0" },
+    });
+    expect(snapshot.messages[0]?.toolCalls?.[99]?.id).toBe("call-99");
+  });
+
+  it("excludes non-assistant tool calls while retaining text and images", () => {
+    const snapshot = chatSnapshotSchema.parse({
+      runtimeId: "runtime-1",
+      backendMode: "real",
+      state: {},
+      messages: [
+        {
+          id: "msg-1",
+          role: "user",
+          content: [
+            { type: "text", text: "What is this?" },
+            {
+              type: "image",
+              id: "image-1",
+              fileName: "screenshot.png",
+              mimeType: "image/png",
+              data: "abc123",
+            },
+            {
+              type: "toolCall",
+              id: "untrusted-user-call",
+              name: "subagent",
+              arguments: { task: "Do not project this" },
+            },
+          ],
+          toolCalls: [
+            {
+              id: "also-untrusted",
+              name: "subagent",
+              arguments: { task: "Do not preserve this" },
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(snapshot.messages[0]).toMatchObject({
       content: "What is this?",
       imageAttachments: [
         {
@@ -407,6 +529,7 @@ describe("IPC schemas", () => {
         },
       ],
     });
+    expect(snapshot.messages[0]).not.toHaveProperty("toolCalls");
   });
 
   it("validates compact, runtime-scoped status DTOs without messages", () => {

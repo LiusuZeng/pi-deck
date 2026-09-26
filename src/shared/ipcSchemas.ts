@@ -77,6 +77,18 @@ export const chatImageAttachmentSchema = z
   })
   .strict();
 
+const chatToolCallArgumentsSchema = z.record(z.string(), z.unknown());
+
+const chatToolCallSchema = z
+  .object({
+    id: z.string(),
+    name: z.string(),
+    arguments: chatToolCallArgumentsSchema,
+  })
+  .strict();
+
+const MAX_CHAT_TOOL_CALLS = 100;
+
 export const chatMessageSchema = z.preprocess(
   (value) => normalizeChatMessage(value),
   z
@@ -85,6 +97,10 @@ export const chatMessageSchema = z.preprocess(
       role: z.string(),
       content: z.string().optional(),
       imageAttachments: z.array(chatImageAttachmentSchema).optional(),
+      toolCalls: z
+        .array(chatToolCallSchema)
+        .max(MAX_CHAT_TOOL_CALLS)
+        .optional(),
       createdAt: z.number().optional(),
     })
     .passthrough(),
@@ -95,17 +111,73 @@ function normalizeChatMessage(value: unknown): unknown {
     return value;
   }
   const record = value as Record<string, unknown>;
+  const { toolCalls: existingToolCalls, ...message } = record;
   const content = extractTextContent(record.content);
   const imageAttachments = extractImageAttachments(record.content);
+  const hasStructuredContent = Array.isArray(record.content);
+  const toolCalls =
+    record.role === "assistant"
+      ? extractToolCalls(
+          hasStructuredContent ? record.content : existingToolCalls,
+          hasStructuredContent,
+        )
+      : [];
   return {
-    ...record,
+    ...message,
     ...(Array.isArray(record.content)
       ? { content: content ?? "" }
       : content !== undefined
         ? { content }
         : {}),
     ...(imageAttachments.length > 0 ? { imageAttachments } : {}),
+    ...(toolCalls.length > 0 ? { toolCalls } : {}),
   };
+}
+
+function extractToolCalls(
+  value: unknown,
+  requireToolCallType: boolean,
+): Array<{
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const toolCalls: Array<{
+    id: string;
+    name: string;
+    arguments: Record<string, unknown>;
+  }> = [];
+  for (const item of value) {
+    if (toolCalls.length >= MAX_CHAT_TOOL_CALLS) break;
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      continue;
+    }
+    const record = item as Record<string, unknown>;
+    if (
+      (requireToolCallType && record.type !== "toolCall") ||
+      (!requireToolCallType &&
+        record.type !== undefined &&
+        record.type !== "toolCall")
+    ) {
+      continue;
+    }
+    if (typeof record.id !== "string" || typeof record.name !== "string") {
+      continue;
+    }
+    const parsedArguments = chatToolCallArgumentsSchema.safeParse(
+      record.arguments,
+    );
+    if (!parsedArguments.success) continue;
+    toolCalls.push({
+      id: record.id,
+      name: record.name,
+      arguments: parsedArguments.data,
+    });
+  }
+  return toolCalls;
 }
 
 function extractTextContent(value: unknown): string | undefined {
