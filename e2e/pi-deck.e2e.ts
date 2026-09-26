@@ -2757,6 +2757,302 @@ test("expanded tool details stay scrollable above the composer", async () => {
   }
 });
 
+test("manual timeline navigation disarms an opened detail reveal", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-detail-scroll-owner-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: ["--prompt-scenario", "tool", "--stream-delay-ms", "1"],
+    }),
+  );
+  try {
+    await page.setViewportSize({ width: 920, height: 500 });
+    await expectHealthyPreload(page);
+    await enterSessionDetail(page);
+    await page.getByLabel("Prompt text").fill("detail scroll ownership");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Fake response to: detail scroll ownership"),
+    ).toBeVisible();
+
+    const activityGroup = page.locator(".agent-activity-group").first();
+    const summary = activityGroup.locator(":scope > summary");
+    await page.locator(".timeline-scroll").evaluate((timeline) => {
+      const content = timeline.querySelector<HTMLElement>(".timeline-content");
+      if (content === null) {
+        throw new Error("Missing timeline content wrapper.");
+      }
+      for (const row of content.querySelectorAll<HTMLElement>(
+        ".timeline-row, .agent-activity-row, .diagnostic-message",
+      )) {
+        row.style.contentVisibility = "visible";
+      }
+      for (let index = 0; index < 15; index += 1) {
+        const row = document.createElement("div");
+        row.className = "timeline-row";
+        row.style.height = "100px";
+        row.style.contentVisibility = "visible";
+        row.textContent = `Later conversation message ${index}`;
+        content.append(row);
+      }
+    });
+
+    await summary.click();
+    await expect(activityGroup).toHaveAttribute("open", "");
+    const bottomSamples = await page
+      .locator(".timeline-scroll")
+      .evaluate(async (timeline) => {
+        timeline.dispatchEvent(
+          new WheelEvent("wheel", { bubbles: true, deltaY: 10_000 }),
+        );
+        timeline.scrollTop = timeline.scrollHeight;
+        timeline.dispatchEvent(new Event("scroll", { bubbles: true }));
+        const samples: Array<{ top: number; distance: number }> = [];
+        for (let index = 0; index < 34; index += 1) {
+          samples.push({
+            top: timeline.scrollTop,
+            distance: Math.max(
+              0,
+              timeline.scrollHeight -
+                timeline.scrollTop -
+                timeline.clientHeight,
+            ),
+          });
+          await new Promise((resolve) => window.setTimeout(resolve, 100));
+        }
+        return samples;
+      });
+    expect(bottomSamples.every((sample) => sample.distance <= 1)).toBe(true);
+    expect(
+      Math.max(...bottomSamples.map((sample) => sample.top)) -
+        Math.min(...bottomSamples.map((sample) => sample.top)),
+    ).toBeLessThanOrEqual(1);
+
+    // A new explicit open owns one reveal again.
+    await summary.click();
+    await summary.click();
+    await expect(activityGroup).toHaveAttribute("open", "");
+    await expect
+      .poll(async () =>
+        page.evaluate(() => {
+          const timeline =
+            document.querySelector<HTMLElement>(".timeline-scroll");
+          const composer = document.querySelector<HTMLElement>(".composer");
+          const details = document.querySelector<HTMLElement>(
+            ".agent-activity-group",
+          );
+          if (timeline === null || composer === null || details === null) {
+            throw new Error("Missing detail reveal fixture.");
+          }
+          return (
+            details.getBoundingClientRect().bottom <=
+            Math.min(
+              timeline.getBoundingClientRect().bottom,
+              composer.getBoundingClientRect().top,
+            ) -
+              10
+          );
+        }),
+      )
+      .toBe(true);
+
+    const readingSamples = await page
+      .locator(".timeline-scroll")
+      .evaluate(async (timeline) => {
+        timeline.scrollTop = timeline.scrollHeight;
+        timeline.dispatchEvent(new Event("scroll", { bubbles: true }));
+        timeline.dispatchEvent(
+          new WheelEvent("wheel", { bubbles: true, deltaY: -1_000 }),
+        );
+        timeline.scrollTop = Math.max(
+          0,
+          timeline.scrollHeight - timeline.clientHeight - 260,
+        );
+        timeline.dispatchEvent(new Event("scroll", { bubbles: true }));
+        const details = timeline.querySelector<HTMLElement>(
+          ".agent-activity-group",
+        );
+        if (details === null) {
+          throw new Error("Missing opened detail.");
+        }
+        const growth = document.createElement("div");
+        growth.style.height = "180px";
+        growth.dataset.asyncDetailGrowth = "true";
+        details.append(growth);
+        const composer = document.querySelector<HTMLElement>(".composer");
+        if (composer === null) {
+          throw new Error("Missing composer resize fixture.");
+        }
+        composer.style.paddingBottom = "36px";
+        const samples: Array<{
+          detailsBottom: number;
+          timelineTop: number;
+          scrollTop: number;
+        }> = [];
+        for (let index = 0; index < 16; index += 1) {
+          samples.push({
+            detailsBottom: details.getBoundingClientRect().bottom,
+            timelineTop: timeline.getBoundingClientRect().top,
+            scrollTop: timeline.scrollTop,
+          });
+          await new Promise((resolve) => window.setTimeout(resolve, 100));
+        }
+        return samples;
+      });
+    await page.setViewportSize({ width: 920, height: 540 });
+    await page.waitForTimeout(300);
+    const afterResize = await page.evaluate(() => {
+      const timeline = document.querySelector<HTMLElement>(".timeline-scroll");
+      const details = document.querySelector<HTMLElement>(
+        ".agent-activity-group",
+      );
+      if (timeline === null || details === null) {
+        throw new Error("Missing resized detail fixture.");
+      }
+      return {
+        detailsBottom: details.getBoundingClientRect().bottom,
+        timelineTop: timeline.getBoundingClientRect().top,
+      };
+    });
+    expect(
+      readingSamples
+        .slice(-8)
+        .every((sample) => sample.detailsBottom < sample.timelineTop),
+    ).toBe(true);
+    expect(afterResize.detailsBottom).toBeLessThan(afterResize.timelineTop);
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("oversized detail reveal settles once through growth and resize", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-oversized-detail-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: ["--prompt-scenario", "tool", "--stream-delay-ms", "1"],
+    }),
+  );
+  try {
+    await page.setViewportSize({ width: 920, height: 500 });
+    await expectHealthyPreload(page);
+    await enterSessionDetail(page);
+    await page.getByLabel("Prompt text").fill("oversized detail stability");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Fake response to: oversized detail stability"),
+    ).toBeVisible();
+
+    const activityGroup = page.locator(".agent-activity-group").first();
+    await activityGroup.evaluate((details) => {
+      const growth = document.createElement("div");
+      growth.dataset.oversizedGrowth = "true";
+      growth.style.height = "900px";
+      details.append(growth);
+    });
+    await activityGroup.locator(":scope > summary").click();
+    await expect(activityGroup).toHaveAttribute("open", "");
+
+    async function sampleReveal(
+      count: number,
+    ): Promise<
+      Array<{ scrollTop: number; detailsBottom: number; safeBottom: number }>
+    > {
+      return page
+        .locator(".timeline-scroll")
+        .evaluate(async (timeline, sampleCount) => {
+          const details = timeline.querySelector<HTMLElement>(
+            ".agent-activity-group",
+          );
+          const composer = document.querySelector<HTMLElement>(".composer");
+          if (details === null || composer === null) {
+            throw new Error("Missing oversized detail fixture.");
+          }
+          const samples = [];
+          for (let index = 0; index < sampleCount; index += 1) {
+            samples.push({
+              scrollTop: timeline.scrollTop,
+              detailsBottom: details.getBoundingClientRect().bottom,
+              safeBottom:
+                Math.min(
+                  timeline.getBoundingClientRect().bottom,
+                  composer.getBoundingClientRect().top,
+                ) - 12,
+            });
+            await new Promise((resolve) => window.setTimeout(resolve, 100));
+          }
+          return samples;
+        }, count);
+    }
+
+    const initialSamples = await sampleReveal(16);
+    const initialSettled = initialSamples.slice(4);
+    expect(
+      Math.max(...initialSettled.map((sample) => sample.scrollTop)) -
+        Math.min(...initialSettled.map((sample) => sample.scrollTop)),
+    ).toBeLessThanOrEqual(2);
+    expect(
+      initialSettled.every(
+        (sample) => Math.abs(sample.detailsBottom - sample.safeBottom) <= 2,
+      ),
+    ).toBe(true);
+
+    await activityGroup
+      .locator('[data-oversized-growth="true"]')
+      .evaluate((growth) => {
+        (growth as HTMLElement).style.height = "1100px";
+      });
+    const growthSamples = await sampleReveal(12);
+    expect(
+      Math.max(...growthSamples.slice(3).map((sample) => sample.scrollTop)) -
+        Math.min(...growthSamples.slice(3).map((sample) => sample.scrollTop)),
+    ).toBeLessThanOrEqual(2);
+    expect(
+      growthSamples
+        .slice(3)
+        .every(
+          (sample) => Math.abs(sample.detailsBottom - sample.safeBottom) <= 2,
+        ),
+    ).toBe(true);
+
+    await page.setViewportSize({ width: 920, height: 540 });
+    const resizeSamples = await sampleReveal(12);
+    expect(
+      Math.max(...resizeSamples.slice(3).map((sample) => sample.scrollTop)) -
+        Math.min(...resizeSamples.slice(3).map((sample) => sample.scrollTop)),
+    ).toBeLessThanOrEqual(2);
+    expect(
+      resizeSamples
+        .slice(3)
+        .every(
+          (sample) => Math.abs(sample.detailsBottom - sample.safeBottom) <= 2,
+        ),
+    ).toBe(true);
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("streaming Agent activity follows bottom without bouncing", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-e2e-scroll-follow-"),

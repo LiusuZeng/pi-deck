@@ -808,13 +808,16 @@ h1 {
 }
 
 .timeline-scroll {
-  display: grid;
-  align-content: start;
-  gap: 10px;
   height: 100%;
   overflow: auto;
   padding: 12px 16px 32px;
   scroll-padding-bottom: 32px;
+}
+
+.timeline-content {
+  display: grid;
+  align-content: start;
+  gap: 10px;
 }
 
 .empty-state {
@@ -4133,11 +4136,14 @@ body {
 }
 
 .timeline-scroll {
-  gap: 16px;
   padding: 16px 20px 32px;
 }
 
-.timeline-scroll > * {
+.timeline-content {
+  gap: 16px;
+}
+
+.timeline-content > * {
   width: min(744px, 100%);
   margin-right: auto;
   margin-left: auto;
