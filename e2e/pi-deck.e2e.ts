@@ -9937,17 +9937,21 @@ test("fork reserves its fresh target against default-workspace resume and unwind
     // No workspaceId deliberately exercises the default-workspace fallback.
     // The target is already atomically claimed/reserved, so this cannot attach
     // it or move it before the fork's held first snapshot completes.
-    const resumeError = await page.evaluate(async (sessionFile) => {
-      try {
-        await window.piDeck.chat.resumeSession({ sessionFile });
-        return "";
-      } catch (error) {
-        return error instanceof Error ? error.message : String(error);
-      }
-    }, targetFile);
-    expect(resumeError).toMatch(
-      /already being changed|awaiting durable cleanup/i,
-    );
+    const targetAlias = path.join(root, "fork-target-alias.jsonl");
+    fs.symlinkSync(canonicalTarget, targetAlias);
+    for (const reservedPath of [targetFile, targetAlias]) {
+      const resumeError = await page.evaluate(async (sessionFile) => {
+        try {
+          await window.piDeck.chat.resumeSession({ sessionFile });
+          return "";
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      }, reservedPath);
+      expect(resumeError).toMatch(
+        /already being changed|awaiting durable cleanup/i,
+      );
+    }
     const moveError = await page.evaluate(async (sessionFile) => {
       await window.piDeck.workspaces.create({
         name: "Blocked fork cleanup destination",

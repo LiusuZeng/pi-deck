@@ -865,8 +865,17 @@ function registerIpcHandlers(
           generation: lifecycleOperation.generation,
           assertActive: () =>
             assertChatLifecycleOperationActive(lifecycleOperation),
-          assertAvailable: () =>
-            assertForkCleanupTargetAvailable(sessionFile, "attached"),
+          assertAvailable: async () => {
+            const canonical =
+              (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
+            await assertForkCleanupTargetAvailable(canonical, "attached");
+            if (
+              chatSessionMutationReservations.has(canonical) ||
+              chatSessionMutationReservations.has(path.resolve(sessionFile))
+            ) {
+              throw new Error("Session is already being changed.");
+            }
+          },
           operation: async (attachmentLease) => {
             if (workspaceId !== undefined) {
               // Explicit workspace requests retain their membership and
