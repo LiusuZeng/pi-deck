@@ -11431,7 +11431,14 @@ function SubagentActivityRow(props: {
         {child.lastObservedAtMs === undefined ? null : (
           <span className="subagent-recency">
             Last observed{" "}
-            {formatSubagentRecency(child.lastObservedAtMs, props.nowMs)}
+            {child.state === "Waiting for activity" ||
+            child.state === "Activity observed" ? (
+              formatSubagentRecency(child.lastObservedAtMs, props.nowMs)
+            ) : (
+              <time dateTime={new Date(child.lastObservedAtMs).toISOString()}>
+                {new Date(child.lastObservedAtMs).toLocaleTimeString()}
+              </time>
+            )}
           </span>
         )}
         {subagentTelemetry(child).length === 0 ? null : (

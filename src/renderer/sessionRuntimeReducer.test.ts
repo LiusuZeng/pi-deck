@@ -247,59 +247,64 @@ describe("sessionRuntimeReducer", () => {
     });
   });
 
-  it("finalizes unresolved children on parent abort without erasing known failures", () => {
-    const args = {
-      tasks: [
-        { agent: "failed", task: "Known failure" },
-        { agent: "active", task: "Still working" },
-      ],
-    };
-    const running = reduceRuntimeEvent(session(), {
-      type: "tool_execution_update",
-      runtimeId: "runtime-1",
-      toolCallId: "subagent-abort",
-      toolName: "subagent",
-      args,
-      partialResult: {
-        details: {
-          mode: "parallel",
-          results: [
-            {
-              agent: "failed",
-              task: "Known failure",
-              exitCode: 1,
-              errorMessage: "failed",
-              messages: [],
-              usage: zeroUsage,
-            },
-            {
-              agent: "active",
-              task: "Still working",
-              exitCode: -1,
-              messages: [],
-              usage: zeroUsage,
-            },
-          ],
+  it.each([false, true])(
+    "finalizes parent abort without erasing known failures (production event: %s)",
+    (production) => {
+      const args = {
+        tasks: [
+          { agent: "failed", task: "Known failure" },
+          { agent: "active", task: "Still working" },
+        ],
+      };
+      const running = reduceRuntimeEvent(session(), {
+        type: "tool_execution_update",
+        runtimeId: "runtime-1",
+        toolCallId: "subagent-abort",
+        toolName: "subagent",
+        args,
+        partialResult: {
+          details: {
+            mode: "parallel",
+            results: [
+              {
+                agent: "failed",
+                task: "Known failure",
+                exitCode: 1,
+                errorMessage: "failed",
+                messages: [],
+                usage: zeroUsage,
+              },
+              {
+                agent: "active",
+                task: "Still working",
+                exitCode: -1,
+                messages: [],
+                usage: zeroUsage,
+              },
+            ],
+          },
         },
-      },
-    } as any);
-    const aborted = reduceRuntimeEvent(running, {
-      type: "agent_end",
-      runtimeId: "runtime-1",
-      status: "aborted",
-    } as any);
+      } as any);
+      const aborted = reduceRuntimeEvent({ ...running, status: "aborting" }, {
+        type: "agent_end",
+        runtimeId: "runtime-1",
+        ...(production
+          ? { messages: [], willRetry: false }
+          : { status: "aborted" }),
+      } as any);
 
-    expect(
-      (aborted.timeline[0] as any).subagentActivity.children.map(
-        (child: any) => child.state,
-      ),
-    ).toEqual(["Failed", "Interrupted"]);
-    expect(aborted).toMatchObject({
-      status: "idle",
-      overlays: { toolRunning: false },
-      timeline: [{ status: "error" }],
-    });
-  });
+      expect(
+        (aborted.timeline[0] as any).subagentActivity.children.map(
+          (child: any) => child.state,
+        ),
+      ).toEqual(["Failed", "Interrupted"]);
+      expect(aborted).toMatchObject({
+        status: "idle",
+        overlays: { toolRunning: false },
+        timeline: [{ status: "error" }],
+      });
+    },
+  );
 
   it("finalizes unresolved children on worker exit and ignores stale updates", () => {
     const args = { agent: "worker", task: "In flight" };

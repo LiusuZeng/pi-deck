@@ -559,7 +559,7 @@ export function reduceRuntimeEventUnprioritized(
           : session.usageByMessageId;
       const finalizedTimeline = finalizeUnresolvedSubagentActivities(
         session.timeline,
-        status === "aborted",
+        status === "aborted" || session.status === "aborting",
       );
       const completedTimeline = removeEmptyAssistantMessages(
         finalizedTimeline.map((item) =>

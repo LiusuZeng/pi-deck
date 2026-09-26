@@ -267,6 +267,46 @@ describe("projectSubagentActivity", () => {
     ]);
   });
 
+  it("does not label observed chain work Not run when the parent is interrupted", () => {
+    const args = {
+      chain: [
+        { agent: "first", task: "Prepare" },
+        { agent: "second", task: "Review" },
+        { agent: "third", task: "Publish" },
+      ],
+    };
+    const running = projectSubagentActivity({
+      toolName: "subagent",
+      args,
+      phase: "running",
+      details: details("chain", [
+        result({
+          agent: "first",
+          task: "Prepare",
+          step: 1,
+          messages: [{ role: "assistant", content: "Prepared" }],
+        }),
+        result({
+          agent: "second",
+          task: "Review",
+          step: 2,
+          messages: [{ role: "assistant", content: "Reviewing" }],
+        }),
+      ]),
+    });
+    const interrupted = projectSubagentActivity({
+      toolName: "subagent",
+      phase: "terminal",
+      parentInterrupted: true,
+      previous: running,
+    });
+    expect(interrupted?.children.map((child) => child.state)).toEqual([
+      "Interrupted",
+      "Interrupted",
+      "Not run",
+    ]);
+  });
+
   it("retains last-observed time across identical cumulative snapshots", () => {
     const args = { agent: "worker", task: "Observe progress" };
     const liveDetails = details("single", [

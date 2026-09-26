@@ -133,7 +133,11 @@ export function projectSubagentActivity(
     for (const child of children) {
       if (
         chainStopped &&
-        resultForChild(details, mode, child.index, child.step) === undefined
+        resultForChild(details, mode, child.index, child.step) === undefined &&
+        child.history.length === 0 &&
+        child.completedTurns === undefined &&
+        (previous?.children[child.index]?.state === undefined ||
+          previous.children[child.index]?.state === "Waiting for activity")
       ) {
         child.state = "Not run";
       }

@@ -80,6 +80,21 @@ async function enterNewSession(page: Page): Promise<void> {
   await expect(page.getByLabel("Prompt text")).toBeVisible();
 }
 
+async function openFixtureSession(page: Page): Promise<void> {
+  const sidebar = page.getByLabel("Sessions", { exact: true });
+  if (!(await sidebar.isVisible())) {
+    await page
+      .getByRole("button", { name: "Show sessions", exact: true })
+      .click();
+  }
+  await sidebar
+    .getByRole("button", {
+      name: "Session: parallel extension activity fixture",
+      exact: true,
+    })
+    .click();
+}
+
 async function send(page: Page, prompt: string): Promise<void> {
   await page.getByLabel("Prompt text").fill(prompt);
   await page.getByRole("button", { name: "Send" }).click();
@@ -169,7 +184,9 @@ test("single extension subagent succeeds with cumulative telemetry while Paralle
     await expect(row).toContainText("Activity observed");
     await expect(row).toContainText("1 completed turn");
     await expect(row).toContainText("30 tokens");
-    await expect(row.getByText(/Last observed:/i)).toBeVisible();
+    await expect(
+      row.getByText(/Last observed (just now|\d+[smh] ago)/i),
+    ).toBeVisible();
     const history = await openChildActivity(row);
     await expect(history).toContainText("read");
     await expect(history).toContainText("Located the single-agent target.");
@@ -224,6 +241,7 @@ test("user Abort interrupts an unresolved extension subagent without a tool end"
     await expect(row).toContainText("Interrupted");
     await expect(row).not.toContainText("Activity observed");
     await expect(page.getByRole("button", { name: "Abort" })).toHaveCount(0);
+    await page.getByLabel("Prompt text").fill("A new parent prompt");
     await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
   } finally {
     await app?.close().catch(() => undefined);
@@ -249,8 +267,15 @@ test("malformed details fall back and oversized child activity remains bounded",
     await expect(
       malformedGroup.getByRole("region", { name: "Subagent activity" }),
     ).toHaveCount(0);
+    // Unsupported payloads intentionally retain the existing generic tool UI,
+    // including its raw-trace disclosure rather than the new child inspector.
+    await malformedGroup
+      .locator(".agent-activity-milestone > details > summary")
+      .click();
+    const genericTool = malformedGroup.locator(".tool-card");
+    await genericTool.locator(":scope > details > summary").click();
     await expect(
-      malformedGroup.getByText("Input / Output", { exact: true }),
+      genericTool.getByRole("heading", { name: "Input", exact: true }),
     ).toBeVisible();
     release(barriers, "malformed-update");
     await expect(
@@ -326,7 +351,7 @@ test("extension subagent activity streams safely and restores parallel and faile
   try {
     const launched = await launchFixture(root, barriers);
     app = launched.app;
-    const page = launched.page;
+    let page = launched.page;
     await page.setViewportSize({ width: 900, height: 680 });
     await enterNewSession(page);
     await expectParallelOff(page);
@@ -456,16 +481,16 @@ test("extension subagent activity streams safely and restores parallel and faile
     );
     await expect(child(chain, 2)).toContainText("Not run");
 
-    await page.getByRole("button", { name: /^All Work/ }).click();
+    // Restore the wide layout before exercising sidebar navigation; the
+    // responsive sidebar is intentionally hidden at the narrow test width.
+    await page.setViewportSize({ width: 900, height: 680 });
+    await page
+      .getByRole("button", { name: "Back to All Work", exact: true })
+      .click();
     await expect(
       page.locator('.workspace[data-primary-view="work"]'),
     ).toBeVisible();
-    await page
-      .getByLabel("Sessions", { exact: true })
-      .locator(".session-item", {
-        hasText: "parallel extension activity fixture",
-      })
-      .click();
+    await openFixtureSession(page);
     const navigatedGroup = await openLatestActivityGroup(page);
     await expect(
       child(
@@ -474,17 +499,16 @@ test("extension subagent activity streams safely and restores parallel and faile
       ),
     ).toContainText("Not run");
 
-    await page.reload();
-    await page.waitForLoadState("domcontentloaded");
-    await expect(
-      page.locator('.workspace[data-load-state="ready"]'),
-    ).toBeVisible();
-    await page
-      .getByLabel("Sessions", { exact: true })
-      .locator(".session-item", {
-        hasText: "parallel extension activity fixture",
-      })
-      .click();
+    // Restart the app/worker, not just the renderer, to prove restoration
+    // from durable tool results rather than the still-attached live runtime.
+    await app.close();
+    const restarted = await launchFixture(root, barriers);
+    app = restarted.app;
+    page = restarted.page;
+    await openFixtureSession(page);
+    await expect(page.locator(".ui-status-message")).toHaveText(
+      "Resumed saved Pi session.",
+    );
     const restoredGroup = await openLatestActivityGroup(page);
     const restored = restoredGroup.getByRole("region", {
       name: "Subagent activity",
