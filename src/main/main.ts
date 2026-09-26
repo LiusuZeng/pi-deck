@@ -6086,6 +6086,7 @@ async function listWorkspaceChatSessionsUnderLease(
     includeArchived?: boolean;
   },
   assertActive: () => void,
+  blockedCandidates?: BlockedSessionCandidateTracker,
 ): Promise<ChatListSessionsResult> {
   const storedWorkspace =
     await ensureWorkspaceStore().getWorkspace(workspaceId);
@@ -6112,6 +6113,7 @@ async function listWorkspaceChatSessionsUnderLease(
     refs,
     diagnostics,
     "workspace cache",
+    blockedCandidates,
   );
   assertActive();
   // Compatibility migration: existing directory-backed projects historically
@@ -6333,12 +6335,14 @@ async function filterForkCleanupBlockedSessions<
   sessions: readonly T[],
   diagnostics: string[],
   context: string,
+  blockedCandidates?: BlockedSessionCandidateTracker,
 ): Promise<T[]> {
   const { attachable, blocked } = await filterBlockedSessionCandidates(
     sessions,
     (sessionFile) => ensureForkCleanupJournal().blocks(sessionFile),
   );
-  for (const _session of blocked) {
+  for (const session of blocked) {
+    await recordBlockedSessionCandidate(blockedCandidates, session.sessionFile);
     diagnostics.push(`Fork cleanup blocks ${context}.`);
   }
   return attachable;
@@ -6650,11 +6654,18 @@ async function deleteAllWorkspaceChatSessions(
   // Destructive operations must use explicit membership only. A refresh may
   // discover legacy sessions, but delete-all must never adopt new files as a
   // side effect immediately before deleting them.
-  const listed = await listWorkspaceChatSessions(store, workspaceId, {
-    discoverLegacySessions: false,
-  });
+  const blockedCandidates = new BlockedSessionCandidateTracker();
+  const listed = await withChatSessionDiscovery("workspace", (assertActive) =>
+    listWorkspaceChatSessionsUnderLease(
+      store,
+      workspaceId,
+      { discoverLegacySessions: false },
+      assertActive,
+      blockedCandidates,
+    ),
+  );
   const deletedSessionFiles: string[] = [];
-  let skippedCount = 0;
+  let skippedCount = blockedCandidates.count;
   for (const session of listed.sessions) {
     if (chatSessionIsBusy(session.sessionFile)) {
       skippedCount += 1;

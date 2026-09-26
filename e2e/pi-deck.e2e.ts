@@ -6392,7 +6392,7 @@ test("bulk deletion reports exact removals and releases only deleted saved-sessi
   }
 });
 
-test("project bulk delete retains recovered fork-cleanup source and target", async () => {
+test("project and workspace bulk delete retain recovered fork-cleanup source and target", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-e2e-bulk-delete-journal-"),
   );
@@ -6440,6 +6440,20 @@ test("project bulk delete retains recovered fork-cleanup source and target", asy
     const initial = await launchPiDeck(env);
     app = initial.app;
     await expectHealthyPreload(initial.page);
+    const workspaceId = await initial.page.evaluate(
+      async (files) => {
+        const active = await window.piDeck.workspaces.getActive();
+        const id = active.activeWorkspace!.id;
+        for (const sessionFile of files) {
+          await window.piDeck.workspaces.addSession({
+            workspaceId: id,
+            sessionFile,
+          });
+        }
+        return id;
+      },
+      [canonicalSourceFile, canonicalTargetFile],
+    );
     await app.close();
     app = undefined;
     const home = path.join(root, "pideck-home");
@@ -6451,7 +6465,7 @@ test("project bulk delete retains recovered fork-cleanup source and target", asy
           {
             sessionFile: canonicalTargetFile,
             sourceSessionFile: canonicalSourceFile,
-            workspaceId: "9f9b3c42-841c-4ef5-8a9b-9a229924ad1e",
+            workspaceId,
           },
         ],
       })}\n`,
@@ -6460,21 +6474,28 @@ test("project bulk delete retains recovered fork-cleanup source and target", asy
     const reloaded = await launchPiDeck(env);
     app = reloaded.app;
     await expectHealthyPreload(reloaded.page);
-    const result = await reloaded.page.evaluate(async () => {
+    const result = await reloaded.page.evaluate(async (workspaceId) => {
       const project = await window.piDeck.projects.getActive();
       const projectId = project.activeProject?.id;
       if (projectId === undefined) {
         throw new Error("Expected an active project.");
       }
-      return window.piDeck.chat.deleteAllSessions({ projectId });
-    });
+      return {
+        project: await window.piDeck.chat.deleteAllSessions({ projectId }),
+        workspace: await window.piDeck.chat.deleteAllSessions({ workspaceId }),
+        listed: await window.piDeck.chat.listSessions({ workspaceId }),
+      };
+    }, workspaceId);
 
-    expect(result).toEqual({
-      deleted: true,
-      deletedCount: 0,
-      skippedCount: 2,
-      deletedSessionFiles: [],
-    });
+    for (const deletion of [result.project, result.workspace]) {
+      expect(deletion).toEqual({
+        deleted: true,
+        deletedCount: 0,
+        skippedCount: 2,
+        deletedSessionFiles: [],
+      });
+    }
+    expect(result.listed.sessions).toEqual([]);
     // These stable bytes prove bulk delete neither removes the recovered
     // reservation nor races a nonexistent pre-crash child into rewriting it.
     expect(fs.readFileSync(canonicalSourceFile, "utf8")).toContain(
