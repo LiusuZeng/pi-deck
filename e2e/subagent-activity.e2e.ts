@@ -99,6 +99,23 @@ function child(region: Locator, index: number): Locator {
   return region.locator(`[role="listitem"][data-subagent-index="${index}"]`);
 }
 
+async function openChildActivity(row: Locator): Promise<Locator> {
+  const details = row.locator("details.subagent-history");
+  if ((await details.getAttribute("open")) === null) {
+    await details.getByText("View activity", { exact: true }).click();
+  }
+  await expect(details).toHaveAttribute("open", "");
+  return details;
+}
+
+async function expectParallelOff(page: Page): Promise<void> {
+  const control = page.getByRole("button", {
+    name: "Parallel multitasking: Off",
+  });
+  await expect(control).toBeVisible();
+  await expect(control).toHaveAttribute("aria-pressed", "false");
+}
+
 function release(barriers: string, marker: string): void {
   fs.writeFileSync(path.join(barriers, marker), "release\n", { flag: "wx" });
 }
@@ -120,6 +137,185 @@ async function expectExcluded(region: Locator): Promise<void> {
   }
 }
 
+test("single extension subagent succeeds with cumulative telemetry while Parallel is off", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-subagent-single-"),
+  );
+  const barriers = path.join(root, "barriers");
+  fs.mkdirSync(barriers, { recursive: true });
+  let app: ElectronApplication | undefined;
+  try {
+    const launched = await launchFixture(root, barriers);
+    app = launched.app;
+    const page = launched.page;
+    await enterNewSession(page);
+    await expectParallelOff(page);
+
+    await send(page, "single success fixture");
+    const group = await openLatestActivityGroup(page);
+    const activity = group.getByRole("region", { name: "Subagent activity" });
+    await expect(activity).toBeVisible();
+    await expectParallelOff(page);
+    await expect(
+      activity.locator('[role="listitem"][data-subagent-index]'),
+    ).toHaveCount(1);
+    const row = child(activity, 0);
+    await expect(row).toContainText("worker");
+    await expect(row).toContainText("Inspect one deterministic target");
+    await expect(row).toContainText("Waiting for activity");
+    await expect(row.getByText("View activity", { exact: true })).toBeVisible();
+
+    release(barriers, "single-update-1");
+    await expect(row).toContainText("Activity observed");
+    await expect(row).toContainText("1 completed turn");
+    await expect(row).toContainText("30 tokens");
+    await expect(row.getByText(/Last observed:/i)).toBeVisible();
+    const history = await openChildActivity(row);
+    await expect(history).toContainText("read");
+    await expect(history).toContainText("Located the single-agent target.");
+
+    release(barriers, "single-update-2");
+    await expect(row).toContainText("2 completed turns");
+    await expect(row).toContainText("45 tokens");
+    await expect(row).not.toContainText("75 tokens");
+    await expect(history).toContainText("Verified the single-agent result.");
+
+    release(barriers, "single-finish");
+    await expect(row).toContainText("Completed");
+    await expect(row).toContainText("45 tokens");
+    await expectParallelOff(page);
+    await expect(
+      page.getByText("Fake response to: single success fixture", {
+        exact: false,
+      }),
+    ).toBeVisible();
+  } finally {
+    await app?.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("user Abort interrupts an unresolved extension subagent without a tool end", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-subagent-cancel-"),
+  );
+  const barriers = path.join(root, "barriers");
+  fs.mkdirSync(barriers, { recursive: true });
+  let app: ElectronApplication | undefined;
+  try {
+    const launched = await launchFixture(root, barriers);
+    app = launched.app;
+    const page = launched.page;
+    await enterNewSession(page);
+
+    await send(page, "cancellation fixture");
+    const group = await openLatestActivityGroup(page);
+    const activity = group.getByRole("region", { name: "Subagent activity" });
+    const row = child(activity, 0);
+    await expect(row).toContainText("Waiting for activity");
+    await expect(page.getByRole("button", { name: "Abort" })).toBeVisible();
+
+    release(barriers, "cancellation-update");
+    await expect(row).toContainText("Activity observed");
+    const history = await openChildActivity(row);
+    await expect(history).toContainText("Started cancellable child work.");
+
+    await page.getByRole("button", { name: "Abort" }).click();
+    await expect(row).toContainText("Interrupted");
+    await expect(row).not.toContainText("Activity observed");
+    await expect(page.getByRole("button", { name: "Abort" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+  } finally {
+    await app?.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("malformed details fall back and oversized child activity remains bounded", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-subagent-edge-"),
+  );
+  const barriers = path.join(root, "barriers");
+  fs.mkdirSync(barriers, { recursive: true });
+  let app: ElectronApplication | undefined;
+  try {
+    const launched = await launchFixture(root, barriers);
+    app = launched.app;
+    const page = launched.page;
+    await enterNewSession(page);
+
+    await send(page, "malformed details fixture");
+    const malformedGroup = await openLatestActivityGroup(page);
+    await expect(
+      malformedGroup.getByRole("region", { name: "Subagent activity" }),
+    ).toHaveCount(0);
+    await expect(
+      malformedGroup.getByText("Input / Output", { exact: true }),
+    ).toBeVisible();
+    release(barriers, "malformed-update");
+    await expect(
+      malformedGroup.getByRole("region", { name: "Subagent activity" }),
+    ).toHaveCount(0);
+    release(barriers, "malformed-finish");
+    await expect(
+      page.getByText("Fake response to: malformed details fixture", {
+        exact: false,
+      }),
+    ).toBeVisible();
+    await expect(
+      malformedGroup.getByRole("region", { name: "Subagent activity" }),
+    ).toHaveCount(0);
+
+    await send(page, "oversized details fixture");
+    const oversizedGroup = await openLatestActivityGroup(page);
+    const activity = oversizedGroup.getByRole("region", {
+      name: "Subagent activity",
+    });
+    const row = child(activity, 0);
+    await expect(row).toContainText("Waiting for activity");
+    release(barriers, "oversized-update");
+    await expect(row).toContainText("Activity observed");
+    const history = await openChildActivity(row);
+    await expect(history).toContainText("oversized-public-entry-139-");
+    await expect(history).not.toContainText("oversized-public-entry-0-");
+    await expect
+      .poll(() =>
+        row.evaluate((element) => {
+          const task = element.querySelector<HTMLElement>(".subagent-task");
+          const historyItems = [
+            ...element.querySelectorAll<HTMLElement>(
+              ".subagent-history ol > li",
+            ),
+          ];
+          const longestHistoryItem = Math.max(
+            0,
+            ...historyItems.map((item) => item.innerText.length),
+          );
+          return {
+            hasHistory: historyItems.length > 0,
+            historyIsBounded: historyItems.length <= 24,
+            historyTextIsBounded: longestHistoryItem <= 1_200,
+            regionIsBounded: (element as HTMLElement).innerText.length < 9_000,
+            taskIsBounded: (task?.innerText.length ?? 0) <= 500,
+          };
+        }),
+      )
+      .toEqual({
+        hasHistory: true,
+        historyIsBounded: true,
+        historyTextIsBounded: true,
+        regionIsBounded: true,
+        taskIsBounded: true,
+      });
+
+    release(barriers, "oversized-finish");
+    await expect(row).toContainText("Completed");
+  } finally {
+    await app?.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("extension subagent activity streams safely and restores parallel and failed-chain children", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-e2e-subagent-activity-"),
@@ -133,6 +329,7 @@ test("extension subagent activity streams safely and restores parallel and faile
     const page = launched.page;
     await page.setViewportSize({ width: 900, height: 680 });
     await enterNewSession(page);
+    await expectParallelOff(page);
 
     await send(page, "parallel extension activity fixture");
     const parallelGroup = await openLatestActivityGroup(page);
@@ -162,10 +359,10 @@ test("extension subagent activity streams safely and restores parallel and faile
 
     release(barriers, "parallel-update-1");
     await expect(child(parallel, 0)).toContainText("Activity observed");
-    await expect(child(parallel, 0)).toContainText("read");
     await expect(child(parallel, 0)).toContainText(
       "Located the runtime projection boundary.",
     );
+    await expect(child(parallel, 0)).toContainText("105 tokens");
     await expect(child(parallel, 0)).not.toContainText("Completed");
     await expect(child(parallel, 1)).toContainText("Waiting for activity");
     await expectExcluded(parallel);
@@ -174,6 +371,7 @@ test("extension subagent activity streams safely and restores parallel and faile
       exact: true,
     });
     await firstDisclosure.click();
+    await expect(child(parallel, 0)).toContainText("read");
     await expect(firstDisclosure).toBeFocused();
     await expect(parallel.getByRole("textbox")).toHaveCount(0);
     await expect(
@@ -184,6 +382,8 @@ test("extension subagent activity streams safely and restores parallel and faile
     await expect(child(parallel, 0)).toContainText(
       "Confirmed cumulative updates preserve child identity.",
     );
+    await expect(child(parallel, 0)).toContainText("165 tokens");
+    await expect(child(parallel, 0)).not.toContainText("270 tokens");
     await expect(child(parallel, 0)).not.toContainText("Completed");
     await expect(child(parallel, 1)).toContainText("Activity observed");
     await expect(firstDisclosure).toBeFocused();
@@ -193,7 +393,8 @@ test("extension subagent activity streams safely and restores parallel and faile
     await expect(child(parallel, 0)).toContainText("Completed");
     await expect(child(parallel, 0)).toContainText(/2 completed turns?/i);
     await expect(child(parallel, 1)).toContainText("Failed");
-    await expect(child(parallel, 1)).toContainText(
+    const failedParallelHistory = await openChildActivity(child(parallel, 1));
+    await expect(failedParallelHistory).toContainText(
       "Privacy review found a deterministic fixture failure.",
     );
     await expect(child(parallel, 2)).toContainText("Completed");
@@ -249,7 +450,8 @@ test("extension subagent activity streams safely and restores parallel and faile
     release(barriers, "chain-finish");
     await expect(child(chain, 0)).toContainText("Completed");
     await expect(child(chain, 1)).toContainText("Failed");
-    await expect(child(chain, 1)).toContainText(
+    const failedChainHistory = await openChildActivity(child(chain, 1));
+    await expect(failedChainHistory).toContainText(
       "Chain stopped on deterministic review failure.",
     );
     await expect(child(chain, 2)).toContainText("Not run");

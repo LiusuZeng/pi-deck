@@ -253,6 +253,215 @@ function parallelResults(stage: 1 | 2 | "final"): JsonObject[] {
   ];
 }
 
+function singleResult(
+  stage: 1 | 2 | "final",
+  options: { oversized?: boolean } = {},
+): JsonObject {
+  const oversized = options.oversized === true;
+  const task = oversized
+    ? `Safely inspect bounded input ${"task-segment ".repeat(100)}`
+    : "Inspect one deterministic target";
+  const messages = oversized
+    ? Array.from({ length: 140 }, (_, index) =>
+        assistantMessage([
+          {
+            type: "text",
+            text: `oversized-public-entry-${index}-${"x".repeat(1_800)}`,
+          },
+        ]),
+      )
+    : [
+        assistantMessage([
+          {
+            type: "toolCall",
+            id: "single-read-call",
+            name: "read",
+            arguments: { path: "/private/single-target.ts" },
+          },
+          { type: "text", text: "Located the single-agent target." },
+        ]),
+        ...(stage === 1
+          ? []
+          : [
+              assistantMessage([
+                {
+                  type: "text",
+                  text: "Verified the single-agent result.",
+                },
+              ]),
+            ]),
+      ];
+  return {
+    agent: oversized ? "load-tester" : "worker",
+    agentSource: "user",
+    task,
+    // A running single result uses zero before terminal completion.
+    exitCode: 0,
+    messages,
+    stderr: "",
+    usage: oversized
+      ? {
+          input: 9,
+          output: 3,
+          cacheRead: 0,
+          cacheWrite: 0,
+          cost: 0.0001,
+          contextTokens: 12,
+          turns: 140,
+        }
+      : stage === 1
+        ? {
+            input: 20,
+            output: 10,
+            cacheRead: 0,
+            cacheWrite: 0,
+            cost: 0.0002,
+            contextTokens: 30,
+            turns: 1,
+          }
+        : {
+            input: 30,
+            output: 15,
+            cacheRead: 0,
+            cacheWrite: 0,
+            cost: 0.0003,
+            contextTokens: 45,
+            turns: 2,
+          },
+    model: "fake-provider/fake-model",
+    ...(stage === "final" ? { stopReason: "stop" } : {}),
+  };
+}
+
+export function createSingleSuccessSubagentActivityFixture(
+  toolCallId: string,
+): SubagentActivityFixture {
+  const args: JsonObject = {
+    agent: "worker",
+    task: "Inspect one deterministic target",
+    agentScope: "user",
+  };
+  return {
+    toolCallId,
+    args,
+    partialResults: [
+      {
+        content: [{ type: "text", text: "Single: first activity observed" }],
+        details: details("single", [singleResult(1)]),
+      },
+      {
+        content: [{ type: "text", text: "Single: second activity observed" }],
+        details: details("single", [singleResult(2)]),
+      },
+    ],
+    result: {
+      content: [{ type: "text", text: "Single agent completed." }],
+      details: details("single", [singleResult("final")]),
+    },
+    isError: false,
+  };
+}
+
+export function createCancellationSubagentActivityFixture(
+  toolCallId: string,
+): SubagentActivityFixture {
+  const args: JsonObject = {
+    agent: "worker",
+    task: "Remain unresolved until the user aborts",
+    agentScope: "user",
+  };
+  const running = {
+    agent: "worker",
+    agentSource: "user",
+    task: "Remain unresolved until the user aborts",
+    exitCode: 0,
+    messages: [
+      assistantMessage([
+        {
+          type: "toolCall",
+          id: "cancel-read-call",
+          name: "read",
+          arguments: { path: "/private/cancellation-target.ts" },
+        },
+        { type: "text", text: "Started cancellable child work." },
+      ]),
+    ],
+    stderr: "",
+    usage: {
+      input: 12,
+      output: 4,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cost: 0.0001,
+      contextTokens: 16,
+      turns: 1,
+    },
+    model: "fake-provider/fake-model",
+  } satisfies JsonObject;
+  return {
+    toolCallId,
+    args,
+    partialResults: [
+      {
+        content: [{ type: "text", text: "Single: cancellable activity" }],
+        details: details("single", [running]),
+      },
+    ],
+    // This result is intentionally never emitted: the actual RPC abort path
+    // ends the parent without a tool_execution_end event.
+    result: {
+      content: [{ type: "text", text: "Cancelled by user." }],
+      details: details("single", [
+        { ...running, stopReason: "aborted", exitCode: 130 },
+      ]),
+    },
+    isError: true,
+  };
+}
+
+export function createMalformedSubagentActivityFixture(
+  toolCallId: string,
+): SubagentActivityFixture {
+  const unsupported = {
+    content: [{ type: "text", text: "Unsupported subagent details" }],
+    details: { mode: "future-mode", results: "not-an-array" },
+  } satisfies JsonObject;
+  return {
+    toolCallId,
+    // Missing task makes the extension arguments unrecognizable, so Deck must
+    // retain the generic tool card instead of manufacturing child activity.
+    args: { agent: "malformed-only" },
+    partialResults: [unsupported],
+    result: unsupported,
+    isError: false,
+  };
+}
+
+export function createOversizedSubagentActivityFixture(
+  toolCallId: string,
+): SubagentActivityFixture {
+  const result = singleResult("final", { oversized: true });
+  return {
+    toolCallId,
+    args: {
+      agent: "load-tester",
+      task: `Safely inspect bounded input ${"task-segment ".repeat(100)}`,
+      agentScope: "user",
+    },
+    partialResults: [
+      {
+        content: [{ type: "text", text: "Oversized activity observed" }],
+        details: details("single", [result]),
+      },
+    ],
+    result: {
+      content: [{ type: "text", text: "Oversized fixture completed." }],
+      details: details("single", [result]),
+    },
+    isError: false,
+  };
+}
+
 export function createParallelSubagentActivityFixture(
   toolCallId: string,
 ): SubagentActivityFixture {

@@ -11,8 +11,13 @@ import type {
   RpcResponseRecord,
 } from "../types.js";
 import {
+  createCancellationSubagentActivityFixture,
   createChainFailureSubagentActivityFixture,
+  createMalformedSubagentActivityFixture,
+  createOversizedSubagentActivityFixture,
   createParallelSubagentActivityFixture,
+  createSingleSuccessSubagentActivityFixture,
+  type SubagentActivityFixture,
 } from "./subagentActivityFixture.js";
 
 type PromptScenario =
@@ -1914,14 +1919,8 @@ class FakeRpcServer {
     assistantId: string,
     promptText: string,
   ): void {
-    const fixture = /\bchain\b/i.test(promptText)
-      ? createChainFailureSubagentActivityFixture(
-          `tool_subagent_chain_${this.promptCounter}`,
-        )
-      : createParallelSubagentActivityFixture(
-          `tool_subagent_parallel_${this.promptCounter}`,
-        );
-    const kind = /\bchain\b/i.test(promptText) ? "chain" : "parallel";
+    const selected = this.selectSubagentActivityFixture(promptText);
+    const { fixture, kind } = selected;
 
     // Production Pi persists the assistant tool call and its toolResult as
     // messages while also streaming tool_execution_* events. Keeping both
@@ -1997,11 +1996,103 @@ class FakeRpcServer {
       });
       return;
     }
+    if (kind === "single") {
+      this.afterSubagentFixtureBarrier("single-update-1", () => {
+        emitPartial(0);
+        this.afterSubagentFixtureBarrier("single-update-2", () => {
+          emitPartial(1);
+          this.afterSubagentFixtureBarrier("single-finish", finish);
+        });
+      });
+      return;
+    }
+    if (kind === "cancellation") {
+      this.afterSubagentFixtureBarrier("cancellation-update", () => {
+        emitPartial(0);
+        // Deliberately remain pending. handleAbort emits only the parent
+        // terminal events, matching an interrupted tool call that never
+        // publishes tool_execution_end.
+      });
+      return;
+    }
+    if (kind === "malformed") {
+      this.afterSubagentFixtureBarrier("malformed-update", () => {
+        emitPartial(0);
+        this.afterSubagentFixtureBarrier("malformed-finish", finish);
+      });
+      return;
+    }
+    if (kind === "oversized") {
+      this.afterSubagentFixtureBarrier("oversized-update", () => {
+        emitPartial(0);
+        this.afterSubagentFixtureBarrier("oversized-finish", finish);
+      });
+      return;
+    }
 
     this.afterSubagentFixtureBarrier("chain-update-1", () => {
       emitPartial(0);
       this.afterSubagentFixtureBarrier("chain-finish", finish);
     });
+  }
+
+  private selectSubagentActivityFixture(promptText: string): {
+    fixture: SubagentActivityFixture;
+    kind:
+      | "single"
+      | "parallel"
+      | "chain"
+      | "cancellation"
+      | "malformed"
+      | "oversized";
+  } {
+    const id = this.promptCounter;
+    if (/\bcancell(?:ation|able)\b|\babort\b/i.test(promptText)) {
+      return {
+        fixture: createCancellationSubagentActivityFixture(
+          `tool_subagent_cancellation_${id}`,
+        ),
+        kind: "cancellation",
+      };
+    }
+    if (/\bmalformed\b|\bunsupported\b/i.test(promptText)) {
+      return {
+        fixture: createMalformedSubagentActivityFixture(
+          `tool_subagent_malformed_${id}`,
+        ),
+        kind: "malformed",
+      };
+    }
+    if (/\boversized\b/i.test(promptText)) {
+      return {
+        fixture: createOversizedSubagentActivityFixture(
+          `tool_subagent_oversized_${id}`,
+        ),
+        kind: "oversized",
+      };
+    }
+    if (/\bchain\b/i.test(promptText)) {
+      return {
+        fixture: createChainFailureSubagentActivityFixture(
+          `tool_subagent_chain_${id}`,
+        ),
+        kind: "chain",
+      };
+    }
+    if (/\bsingle\b/i.test(promptText)) {
+      return {
+        fixture: createSingleSuccessSubagentActivityFixture(
+          `tool_subagent_single_${id}`,
+        ),
+        kind: "single",
+      };
+    }
+    return {
+      fixture: createParallelSubagentActivityFixture(
+        `tool_subagent_parallel_${id}`,
+      ),
+      kind: "parallel",
+    };
   }
 
   private afterSubagentFixtureBarrier(
@@ -2211,7 +2302,6 @@ class FakeRpcServer {
       clearTimeout(timer);
     }
     this.currentTimers = [];
-    const wasActive = this.agentActive;
     this.agentActive = false;
     this.respond(command.id, "abort");
     this.write({
