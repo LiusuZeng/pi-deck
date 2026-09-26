@@ -383,6 +383,28 @@ describe("IPC schemas", () => {
     });
   });
 
+  it("projects only transcript text while retaining legacy untyped text parts", () => {
+    const normalized = chatMessageSchema.parse({
+      id: "assistant-private-parts",
+      role: "assistant",
+      content: [
+        { type: "text", text: "Visible answer" },
+        { type: "thinking", text: "SECRET_THINKING" },
+        { type: "tool", text: "SECRET_TOOL" },
+        { text: "Legacy visible answer" },
+      ],
+    });
+
+    expect(normalized.content).toBe("Visible answer\nLegacy visible answer");
+    expect(normalized.content).not.toContain("SECRET");
+    expect(normalized.originalContent).toEqual([
+      { type: "text", text: "Visible answer" },
+      { type: "thinking", text: "SECRET_THINKING" },
+      { type: "tool", text: "SECRET_TOOL" },
+      { text: "Legacy visible answer" },
+    ]);
+  });
+
   it("normalizes persisted user image content for resumed previews", () => {
     expect(
       chatMessageSchema.parse({
@@ -465,6 +487,30 @@ describe("IPC schemas", () => {
     ).toMatchObject({
       runtimeId: "runtime-1",
       usage: { reportedFields: ["inputTokens", "totalTokens"] },
+    });
+    expect(
+      chatRuntimeStatusSchema.parse({
+        runtimeId: "runtime-1",
+        backendMode: "real",
+        state: { isAgentActive: false },
+        usage: {
+          inputTokens: 12,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          totalTokens: 12,
+          // A reported optional field with no value carries an authoritative
+          // unavailable result across IPC.
+          reportedFields: ["inputTokens", "contextUsedTokens"],
+        },
+      }).usage,
+    ).toEqual({
+      inputTokens: 12,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 12,
+      reportedFields: ["inputTokens", "contextUsedTokens"],
     });
     expect(() =>
       chatRuntimeStatusSchema.parse({

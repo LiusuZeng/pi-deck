@@ -99,7 +99,12 @@ function normalizeChatMessage(value: unknown): unknown {
     return value;
   }
   const record = value as Record<string, unknown>;
-  const content = extractPiMessageText(record.content);
+  // Snapshot content is renderer-visible transcript text. Keep compatibility
+  // with legacy untyped text parts, but never project thinking/tool text into
+  // the visible content string.
+  const content = extractPiMessageText(record.content, {
+    textPartsOnly: true,
+  });
   const imageAttachments = extractImageAttachments(record.content);
   const createdAt = piMessageTimestampMs(record);
   return {
@@ -222,7 +227,11 @@ export const chatRuntimeUsageSchema = z
     contextUsedTokens: z.number().nonnegative().optional(),
     contextWindowTokens: z.number().nonnegative().optional(),
     totalCostUsd: z.number().nonnegative().optional(),
-    /** Fields Pi actually reported; absent means a legacy all-fields payload. */
+    /**
+     * Fields Pi answered authoritatively; absent means a legacy all-fields
+     * payload. A listed optional field with no value means explicitly
+     * unavailable, while an unlisted field carries no new evidence.
+     */
     reportedFields: z.array(chatRuntimeUsageFieldSchema).optional(),
   })
   .strict();

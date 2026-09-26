@@ -71,6 +71,41 @@ test("treats missing and Pi's eager all-zero aggregate as unavailable", () => {
   );
 });
 
+test("marks null context occupancy as authoritative unavailability", () => {
+  assert.deepEqual(
+    runtimeUsageFromSessionStats({
+      tokens: { input: 120, output: 30, total: 150 },
+      contextUsage: { tokens: null, contextWindow: 200000 },
+    }),
+    {
+      inputTokens: 120,
+      outputTokens: 30,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 150,
+      contextWindowTokens: 200000,
+      reportedFields: [
+        "inputTokens",
+        "outputTokens",
+        "totalTokens",
+        "contextUsedTokens",
+        "contextWindowTokens",
+      ],
+    },
+  );
+  assert.deepEqual(
+    runtimeUsageFromSessionStats({ contextUsage: { tokens: null } }),
+    {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 0,
+      reportedFields: ["contextUsedTokens"],
+    },
+  );
+});
+
 test("keeps partial aggregates sparse for renderer honesty", () => {
   assert.deepEqual(runtimeUsageFromSessionStats({ tokens: { input: 12 } }), {
     inputTokens: 12,
@@ -146,4 +181,30 @@ test("keeps legacy get_state usage fallback compatible and merges partial stats"
       "totalCostUsd",
     ],
   });
+
+  assert.deepEqual(
+    runtimeUsageFromSources(
+      { ...state, usage: { ...state.usage, contextUsedTokens: 900 } },
+      {
+        tokens: { input: 10 },
+        contextUsage: { tokens: null },
+      },
+    ),
+    {
+      inputTokens: 10,
+      outputTokens: 4,
+      cacheReadTokens: 1,
+      cacheWriteTokens: 0,
+      totalTokens: 8,
+      totalCostUsd: 0.004,
+      reportedFields: [
+        "inputTokens",
+        "outputTokens",
+        "cacheReadTokens",
+        "totalTokens",
+        "contextUsedTokens",
+        "totalCostUsd",
+      ],
+    },
+  );
 });

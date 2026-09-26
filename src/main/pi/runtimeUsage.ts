@@ -100,12 +100,26 @@ export function runtimeUsageFromSessionStats(
       (cacheWriteTokens ?? 0)
     : undefined;
   const totalTokens = explicitTotal ?? computedTotal;
-  const contextUsedTokens = readNonnegativeNumber(contextUsage ?? record, [
+  const contextUsedTokenKeys = [
     "tokens",
     "contextUsedTokens",
     "contextUsed",
     "context_used_tokens",
-  ]);
+  ] as const;
+  const contextUsedTokens = readNonnegativeNumber(
+    contextUsage ?? record,
+    contextUsedTokenKeys,
+  );
+  // Current Pi uses null when context occupancy is unavailable. Preserve that
+  // authoritative answer as field provenance so the renderer can clear a
+  // stale occupancy without treating an entirely absent field as evidence.
+  const contextUsedTokensUnavailable =
+    contextUsage !== undefined &&
+    contextUsedTokenKeys.some(
+      (key) =>
+        Object.prototype.hasOwnProperty.call(contextUsage, key) &&
+        contextUsage[key] === null,
+    );
   const contextWindowTokens = readNonnegativeNumber(contextUsage ?? record, [
     "contextWindow",
     "contextWindowTokens",
@@ -122,17 +136,25 @@ export function runtimeUsageFromSessionStats(
     contextUsedTokens !== undefined && contextUsedTokens > 0;
   const hasCostEvidence = totalCostUsd !== undefined && totalCostUsd > 0;
   if (!hasTokenEvidence && !hasContextEvidence && !hasCostEvidence) {
-    return contextWindowTokens === undefined
-      ? undefined
-      : {
-          inputTokens: 0,
-          outputTokens: 0,
-          cacheReadTokens: 0,
-          cacheWriteTokens: 0,
-          totalTokens: 0,
-          contextWindowTokens,
-          reportedFields: ["contextWindowTokens"],
-        };
+    if (contextWindowTokens === undefined && !contextUsedTokensUnavailable) {
+      return undefined;
+    }
+    return {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 0,
+      ...(contextWindowTokens !== undefined ? { contextWindowTokens } : {}),
+      reportedFields: [
+        ...(contextUsedTokensUnavailable
+          ? (["contextUsedTokens"] as const)
+          : []),
+        ...(contextWindowTokens !== undefined
+          ? (["contextWindowTokens"] as const)
+          : []),
+      ],
+    };
   }
 
   const reportedFields: RuntimeUsageField[] = [];
@@ -144,7 +166,9 @@ export function runtimeUsageFromSessionStats(
     reportedFields.push("cacheReadTokens", "cacheWriteTokens");
   }
   if (explicitTotal !== undefined) reportedFields.push("totalTokens");
-  if (contextUsedTokens !== undefined) reportedFields.push("contextUsedTokens");
+  if (contextUsedTokens !== undefined || contextUsedTokensUnavailable) {
+    reportedFields.push("contextUsedTokens");
+  }
   if (contextWindowTokens !== undefined)
     reportedFields.push("contextWindowTokens");
   // Pi computes an always-present zero cost accumulator. Only a positive

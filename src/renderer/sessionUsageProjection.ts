@@ -356,6 +356,12 @@ export function mergeSessionUsageFromRuntimeStatus<
   const reported = status.usage.reportedFields;
   const isReported = (field: keyof UsageStats): boolean =>
     reported === undefined || reported.includes(field);
+  // For optional fields, presence in reportedFields with no numeric value is
+  // an authoritative "unavailable" result. An omitted reported field is only
+  // a sparse update and must not erase previously known data.
+  const contextUsedTokensUnavailable =
+    reported?.includes("contextUsedTokens") === true &&
+    status.usage.contextUsedTokens === undefined;
   const projected: UsageStats = {
     ...(isReported("inputTokens")
       ? { inputTokens: status.usage.inputTokens }
@@ -384,9 +390,13 @@ export function mergeSessionUsageFromRuntimeStatus<
       ? { totalCostUsd: status.usage.totalCostUsd }
       : {}),
   };
+  const mergedUsageStats = mergeKnownUsageStats(session.usageStats, projected);
+  if (contextUsedTokensUnavailable && mergedUsageStats !== undefined) {
+    delete mergedUsageStats.contextUsedTokens;
+  }
   return {
     ...session,
-    usageStats: mergeKnownUsageStats(session.usageStats, projected),
+    usageStats: mergedUsageStats,
     ...(modelLabel.length > 0 ? { modelLabel } : {}),
     ...(status.state.thinkingLevel !== undefined
       ? { thinkingLevel: status.state.thinkingLevel }
@@ -414,7 +424,11 @@ export function mergeKnownUsageStats(
   const cacheReadTokens = cumulative("cacheReadTokens");
   const cacheWriteTokens = cumulative("cacheWriteTokens");
   const totalTokens = cumulative("totalTokens");
-  const contextUsedTokens = cumulative("contextUsedTokens");
+  // Context usage is current occupancy, not a lifetime counter. A fresh
+  // authoritative value may legitimately decrease after compaction. Omission
+  // remains sparse/no-new-evidence and therefore preserves the known value.
+  const contextUsedTokens =
+    incoming.contextUsedTokens ?? current.contextUsedTokens;
   const totalCostUsd = cumulative("totalCostUsd");
   const contextWindowTokens =
     incoming.contextWindowTokens ?? current.contextWindowTokens;

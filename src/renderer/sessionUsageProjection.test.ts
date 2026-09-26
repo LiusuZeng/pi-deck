@@ -317,6 +317,93 @@ describe("usage projection", () => {
     });
   });
 
+  it("replaces current context occupancy while preserving cumulative and sparse usage", () => {
+    const known = {
+      id: "runtime-1",
+      usageStats: {
+        inputTokens: 100,
+        outputTokens: 20,
+        totalTokens: 120,
+        contextUsedTokens: 900,
+        contextWindowTokens: 2000,
+        totalCostUsd: 0.03,
+      },
+    };
+
+    const sparse = mergeSessionUsageFromRuntimeStatus(known, {
+      runtimeId: "runtime-1",
+      backendMode: "real",
+      state: { isAgentActive: false },
+      usage: {
+        inputTokens: 0,
+        outputTokens: 25,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        totalTokens: 0,
+        reportedFields: ["outputTokens"],
+      },
+    });
+    expect(sparse.usageStats).toMatchObject({
+      inputTokens: 100,
+      outputTokens: 25,
+      totalTokens: 120,
+      contextUsedTokens: 900,
+      totalCostUsd: 0.03,
+    });
+
+    const afterCompaction = mergeSessionUsageFromRuntimeStatus(sparse, {
+      runtimeId: "runtime-1",
+      backendMode: "real",
+      state: { isAgentActive: false },
+      usage: {
+        inputTokens: 80,
+        outputTokens: 10,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        totalTokens: 90,
+        contextUsedTokens: 400,
+        reportedFields: [
+          "inputTokens",
+          "outputTokens",
+          "totalTokens",
+          "contextUsedTokens",
+        ],
+      },
+    });
+    expect(afterCompaction.usageStats).toEqual({
+      inputTokens: 100,
+      outputTokens: 25,
+      totalTokens: 120,
+      contextUsedTokens: 400,
+      contextWindowTokens: 2000,
+      totalCostUsd: 0.03,
+    });
+
+    const contextUnavailable = mergeSessionUsageFromRuntimeStatus(
+      afterCompaction,
+      {
+        runtimeId: "runtime-1",
+        backendMode: "real",
+        state: { isAgentActive: false },
+        usage: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          totalTokens: 0,
+          reportedFields: ["contextUsedTokens"],
+        },
+      },
+    );
+    expect(contextUnavailable.usageStats).toEqual({
+      inputTokens: 100,
+      outputTokens: 25,
+      totalTokens: 120,
+      contextWindowTokens: 2000,
+      totalCostUsd: 0.03,
+    });
+  });
+
   it("aggregates valid multipart text and thinking content", () => {
     expect(extractTextContent("text")).toBe("text");
     expect(extractTextContent([{ text: "one" }, null, { text: "two" }])).toBe(

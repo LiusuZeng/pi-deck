@@ -318,11 +318,15 @@ test("ProjectStore returns cached bootstrap summaries without touching session f
 
   const readFile = vi.spyOn(fs, "readFile");
   const cached = await store.getCachedSessionSummaries(project);
+  const canonicalSessionFile = path.join(
+    await fs.realpath(root),
+    "session.jsonl",
+  );
 
   assert.deepEqual(cached, [
     {
-      id: sessionFile,
-      sessionFile,
+      id: canonicalSessionFile,
+      sessionFile: canonicalSessionFile,
       title: "Cached session",
       updatedAtMs: 123,
       completedAtMs: 456,

@@ -348,9 +348,13 @@ test("WorkspaceStore preserves a durable title across title-less model and think
     workspaceId: workspace.id,
     sessionFile: newFile,
   });
+  const canonicalNewFile = path.join(
+    await fs.realpath(root),
+    "new-parent.jsonl",
+  );
   assert.equal(
     (await store.getSessionRefs(workspace.id)).find(
-      (ref) => ref.sessionFile === path.resolve(newFile),
+      (ref) => ref.sessionFile === canonicalNewFile,
     )?.title,
     "new-parent",
   );
@@ -400,7 +404,7 @@ test("WorkspaceStore rolls back a failed target claim and never replays it", asy
   const refs = await reloaded.getSessionRefs(workspace.id);
   assert.deepEqual(
     refs.map((ref) => ref.sessionFile),
-    [path.resolve(laterFile)],
+    [path.join(await fs.realpath(root), "later-claim.jsonl")],
   );
 });
 
