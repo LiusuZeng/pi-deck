@@ -10415,6 +10415,8 @@ test.describe("task-session routing acceptance", () => {
     const projectCwd = path.join(root, "project");
     const agentDir = path.join(root, "agent");
     const traceFile = path.join(root, "fixture-trace.log");
+    const routingStartedFile = path.join(root, "routing-started.log");
+    const routingReleaseFile = path.join(root, "routing-release");
     const routingFixture = path.join(
       repoRoot,
       "e2e/fixtures/task-routing-contract.json",
@@ -10442,6 +10444,10 @@ test.describe("task-session routing acceptance", () => {
           routingFixture,
           "--fixture-trace-file",
           traceFile,
+          "--task-routing-started-file",
+          routingStartedFile,
+          "--task-routing-release-file",
+          routingReleaseFile,
           "--stream-delay-ms",
           "500",
         ],
@@ -10517,6 +10523,19 @@ test.describe("task-session routing acceptance", () => {
         .click();
       await expect(destination).toHaveValue("newTaskSession");
 
+      // Private routing workers report only after accepting their prompt and
+      // remain behind the fixture gate. Reaching ten proves the scheduler
+      // launched its bounded first wave while tasks 11 and 12 are still queued.
+      await expect
+        .poll(() =>
+          fs.existsSync(routingStartedFile)
+            ? fs
+                .readFileSync(routingStartedFile, "utf8")
+                .split(/\r?\n/)
+                .filter((line) => line.length > 0).length
+            : 0,
+        )
+        .toBe(10);
       await expect
         .poll(() =>
           page.evaluate(() => {
@@ -10570,6 +10589,10 @@ test.describe("task-session routing acceptance", () => {
         page.getByRole("button", { name: /^All Work/ }),
       ).toBeVisible();
 
+      // Release only after parent interaction is proven usable while the first
+      // private wave is active. Later waves and retries then run normally.
+      fs.writeFileSync(routingReleaseFile, "release\n");
+
       // The configured failure retries three times after its initial attempt.
       await expect
         .poll(
@@ -10620,6 +10643,9 @@ test.describe("task-session routing acceptance", () => {
       expect(fs.readFileSync(traceFile, "utf8")).toContain("ordinary_prompt");
       expect(fs.readFileSync(traceFile, "utf8")).not.toContain("deck_delegate");
     } finally {
+      // Never leave fixture workers held if an assertion fails before the
+      // normal release point; teardown must not depend on process termination.
+      fs.writeFileSync(routingReleaseFile, "release\n");
       await page.evaluate(() => {
         const w = window as typeof window & { __stopTaskStates?: () => void };
         w.__stopTaskStates?.();

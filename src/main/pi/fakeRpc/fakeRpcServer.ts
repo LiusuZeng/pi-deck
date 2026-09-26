@@ -129,6 +129,10 @@ interface FakeOptions {
    * planning, while this process remains a real Pi RPC transport.
    */
   taskRoutingFixture?: string;
+  /** Append each gated private routing worker's session path on prompt start. */
+  taskRoutingStartedFile?: string;
+  /** Hold gated private routing workers until this shared release file exists. */
+  taskRoutingReleaseFile?: string;
   fixtureTraceFile?: string;
 }
 
@@ -414,6 +418,14 @@ function parseOptions(argv: string[]): FakeOptions {
     } else if (arg === "--task-routing-fixture") {
       const fixture = argv[index + 1];
       if (fixture) options.taskRoutingFixture = fixture;
+      index += 1;
+    } else if (arg === "--task-routing-started-file") {
+      const startedFile = argv[index + 1];
+      if (startedFile) options.taskRoutingStartedFile = startedFile;
+      index += 1;
+    } else if (arg === "--task-routing-release-file") {
+      const releaseFile = argv[index + 1];
+      if (releaseFile) options.taskRoutingReleaseFile = releaseFile;
       index += 1;
     } else if (arg === "--fixture-trace-file") {
       const traceFile = argv[index + 1];
@@ -1456,7 +1468,51 @@ class FakeRpcServer {
     // no timer can accidentally make the parent terminal before the explicit
     // pre-persistence snapshot barrier has been crossed.
     if (this.options.interventionSnapshotRace) return;
+    if (
+      this.gateTaskRoutingCompletion(text, () =>
+        this.completePrompt(assistantId, text, promptScenarioDelayMs),
+      )
+    )
+      return;
     this.completePrompt(assistantId, text, promptScenarioDelayMs);
+  }
+
+  private gateTaskRoutingCompletion(
+    text: string,
+    complete: () => void,
+  ): boolean {
+    const startedFile = this.options.taskRoutingStartedFile;
+    const releaseFile = this.options.taskRoutingReleaseFile;
+    if (
+      this.options.promptScenario !== "routing" ||
+      !startedFile ||
+      !releaseFile ||
+      !/^Parent context:\n[\s\S]+\n\nOriginal request:\n[\s\S]+\n\nAssigned task:\n/.test(
+        text,
+      )
+    )
+      return false;
+
+    // Each private process appends once only after it has accepted the prompt
+    // and emitted agent_start. The E2E can therefore observe the scheduler's
+    // complete first wave without relying on how quickly fake streams finish.
+    fs.mkdirSync(path.dirname(startedFile), { recursive: true });
+    fs.appendFileSync(startedFile, `${this.sessionFile}\n`);
+    if (fs.existsSync(releaseFile)) {
+      complete();
+      return true;
+    }
+
+    const releasePoll = setInterval(() => {
+      if (!fs.existsSync(releaseFile)) return;
+      clearInterval(releasePoll);
+      this.currentTimers = this.currentTimers.filter(
+        (timer) => timer !== releasePoll,
+      );
+      complete();
+    }, 5);
+    this.currentTimers.push(releasePoll);
+    return true;
   }
 
   private shouldEmitOpenAiCodexAuthExpiry(): boolean {

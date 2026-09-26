@@ -846,6 +846,60 @@ test("fake RPC retains extension response handling across a production-shaped pr
   }
 });
 
+test("fake RPC routing gate holds private task completion until explicit release", async () => {
+  const directory = tempDir("pi-deck-fake-routing-gate-");
+  const startedFile = path.join(directory, "started.log");
+  const releaseFile = path.join(directory, "release");
+  const client = spawnFakeRpc([
+    "--prompt-scenario",
+    "routing",
+    "--task-routing-started-file",
+    startedFile,
+    "--task-routing-release-file",
+    releaseFile,
+    "--stream-delay-ms",
+    "1",
+  ]);
+  try {
+    // Parent and synthesis prompts remain ordinary routing fixtures and must
+    // not participate in the private-worker handshake.
+    const parentCompleted = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "agent_end"),
+    );
+    await client.request("prompt", { message: "Parent routing prompt" });
+    await parentCompleted;
+    assert.equal(fs.existsSync(startedFile), false);
+
+    const taskStarted = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "agent_start"),
+    );
+    const taskCompleted = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "agent_end"),
+    );
+    await client.request("prompt", {
+      message:
+        "Parent context:\nFixture context.\n\nOriginal request:\nPrepare release.\n\nAssigned task:\nInspect files.",
+    });
+    await taskStarted;
+
+    const active = (await client.request("get_state")) as JsonObject;
+    assert.equal(active.isStreaming, true);
+    assert.equal(fs.existsSync(releaseFile), false);
+    assert.deepEqual(
+      fs.readFileSync(startedFile, "utf8").trim().split(/\r?\n/),
+      [active.sessionFile],
+    );
+
+    fs.writeFileSync(releaseFile, "release\n");
+    await taskCompleted;
+    const completed = (await client.request("get_state")) as JsonObject;
+    assert.equal(completed.isStreaming, false);
+  } finally {
+    client.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("fake RPC malformed JSON and pending-exit fixtures exercise transport failure paths", async () => {
   const malformed = spawnFakeRpc(["--malformed-on-start"]);
   try {
