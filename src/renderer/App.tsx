@@ -15,6 +15,8 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactElement,
   type SyntheticEvent,
+  type TouchEvent as ReactTouchEvent,
+  type WheelEvent as ReactWheelEvent,
 } from "react";
 import appIconMark from "../../assets/branding/pi-deck-app-icon.svg";
 import type {
@@ -10033,30 +10035,62 @@ type TimelineRevealRect = Pick<DOMRectReadOnly, "top" | "bottom" | "height">;
 const TIMELINE_DETAILS_REVEAL_GAP_PX = 12;
 
 type TimelineScrollOwner = "bottom" | "details" | "reader";
+type TimelineScrollDirection = "away-from-end" | "toward-end" | "unknown";
+
+function timelineScrollDirectionForKey(
+  key: string,
+  shiftKey: boolean,
+): TimelineScrollDirection | undefined {
+  if (key === "ArrowUp" || key === "Home" || key === "PageUp") {
+    return "away-from-end";
+  }
+  if (key === " " && shiftKey) {
+    return "away-from-end";
+  }
+  if (
+    key === "ArrowDown" ||
+    key === "End" ||
+    key === "PageDown" ||
+    key === " "
+  ) {
+    return "toward-end";
+  }
+  return undefined;
+}
 
 function timelineScrollOwnerAfterUserIntent(
   owner: TimelineScrollOwner,
+  direction: TimelineScrollDirection,
 ): TimelineScrollOwner {
-  return owner === "details" ? "reader" : owner;
+  if (owner === "details" || direction === "away-from-end") {
+    return "reader";
+  }
+  return owner;
 }
 
 function timelineScrollOwnerAfterScroll(options: {
   owner: TimelineScrollOwner;
   nearBottom: boolean;
   userIntent: boolean;
+  userDirection: TimelineScrollDirection;
 }): TimelineScrollOwner {
   // A reveal's own scroll event must not transfer ownership to bottom-follow.
   // Explicit input disarms the reveal before this calculation.
   if (options.owner === "details") {
     return "details";
   }
-  if (options.nearBottom) {
-    return "bottom";
+  if (!options.userIntent) {
+    // Geometry changes alone never transfer ownership. In particular, a
+    // delayed scroll event near the threshold must not reclaim a reader.
+    return options.owner;
   }
-  if (options.userIntent) {
+  if (options.userDirection === "away-from-end") {
     return "reader";
   }
-  return options.owner;
+  if (options.nearBottom && options.userDirection === "toward-end") {
+    return "bottom";
+  }
+  return "reader";
 }
 
 function timelineDetailsRevealScrollDelta(options: {
@@ -10201,6 +10235,9 @@ const ChatTimeline = memo(function ChatTimeline(props: {
   const scrollOwnerRef = useRef<TimelineScrollOwner>("bottom");
   const pendingAutoFollowFrameRef = useRef<number | null>(null);
   const userScrollIntentUntilRef = useRef(0);
+  const userScrollDirectionRef = useRef<TimelineScrollDirection>("unknown");
+  const lastTimelineScrollTopRef = useRef(0);
+  const lastTimelineTouchYRef = useRef<number | null>(null);
   const previousSessionIdRef = useRef(props.session.id);
   const openedTimelineDetailsRef = useRef<HTMLDetailsElement | null>(null);
   const pendingDetailsRevealFrameRef = useRef<number | null>(null);
@@ -10235,6 +10272,8 @@ const ChatTimeline = memo(function ChatTimeline(props: {
     if (sessionChanged) {
       scrollOwnerRef.current = "bottom";
       userScrollIntentUntilRef.current = 0;
+      userScrollDirectionRef.current = "unknown";
+      lastTimelineTouchYRef.current = null;
       disarmTimelineDetailsReveal();
       cancelPendingAutoFollow();
     }
@@ -10251,6 +10290,7 @@ const ChatTimeline = memo(function ChatTimeline(props: {
     // not expose one frame at the old offset. Keep the coalesced frame follow
     // as a second pass for browser layout/anchoring that settles afterward.
     scrollContainer.scrollTop = scrollContainer.scrollHeight;
+    lastTimelineScrollTopRef.current = scrollContainer.scrollTop;
     scheduleTimelineAutoFollow(scrollContainer);
   }, [props.session.id, timelineScrollMarker]);
 
@@ -10272,6 +10312,7 @@ const ChatTimeline = memo(function ChatTimeline(props: {
         return;
       }
       scrollContainer.scrollTop = scrollContainer.scrollHeight;
+      lastTimelineScrollTopRef.current = scrollContainer.scrollTop;
     });
   }
 
@@ -10439,17 +10480,55 @@ const ChatTimeline = memo(function ChatTimeline(props: {
     return () => observer.disconnect();
   }, []);
 
-  function markTimelineUserScrollIntent(): void {
+  function markTimelineUserScrollIntent(
+    direction: TimelineScrollDirection,
+  ): void {
     userScrollIntentUntilRef.current =
       window.performance.now() + TIMELINE_USER_SCROLL_INTENT_WINDOW_MS;
+    userScrollDirectionRef.current = direction;
     cancelPendingAutoFollow();
     const nextOwner = timelineScrollOwnerAfterUserIntent(
       scrollOwnerRef.current,
+      direction,
     );
     if (scrollOwnerRef.current === "details") {
       disarmTimelineDetailsReveal();
     }
     scrollOwnerRef.current = nextOwner;
+  }
+
+  function handleTimelineWheelIntent(event: ReactWheelEvent<HTMLDivElement>) {
+    lastTimelineScrollTopRef.current = event.currentTarget.scrollTop;
+    markTimelineUserScrollIntent(
+      event.deltaY < 0
+        ? "away-from-end"
+        : event.deltaY > 0
+          ? "toward-end"
+          : "unknown",
+    );
+  }
+
+  function handleTimelineTouchStart(
+    event: ReactTouchEvent<HTMLDivElement>,
+  ): void {
+    lastTimelineScrollTopRef.current = event.currentTarget.scrollTop;
+    lastTimelineTouchYRef.current = event.touches[0]?.clientY ?? null;
+  }
+
+  function handleTimelineTouchMove(
+    event: ReactTouchEvent<HTMLDivElement>,
+  ): void {
+    const currentY = event.touches[0]?.clientY;
+    const previousY = lastTimelineTouchYRef.current;
+    lastTimelineScrollTopRef.current = event.currentTarget.scrollTop;
+    lastTimelineTouchYRef.current = currentY ?? null;
+    markTimelineUserScrollIntent(
+      currentY === undefined || previousY === null || currentY === previousY
+        ? "unknown"
+        : currentY > previousY
+          ? "away-from-end"
+          : "toward-end",
+    );
   }
 
   function handleTimelinePointerIntent(
@@ -10464,13 +10543,19 @@ const ChatTimeline = memo(function ChatTimeline(props: {
       event.clientX >=
       scrollContainer.getBoundingClientRect().right - scrollbarGutter
     ) {
-      markTimelineUserScrollIntent();
+      lastTimelineScrollTopRef.current = scrollContainer.scrollTop;
+      markTimelineUserScrollIntent("unknown");
     }
   }
 
   function handleTimelineKeyIntent(event: KeyboardEvent<HTMLDivElement>): void {
-    if (TIMELINE_SCROLL_KEYS.has(event.key)) {
-      markTimelineUserScrollIntent();
+    if (!TIMELINE_SCROLL_KEYS.has(event.key)) {
+      return;
+    }
+    const direction = timelineScrollDirectionForKey(event.key, event.shiftKey);
+    if (direction !== undefined) {
+      lastTimelineScrollTopRef.current = event.currentTarget.scrollTop;
+      markTimelineUserScrollIntent(direction);
     }
   }
 
@@ -10480,11 +10565,25 @@ const ChatTimeline = memo(function ChatTimeline(props: {
       return;
     }
 
+    const userIntent =
+      window.performance.now() <= userScrollIntentUntilRef.current;
+    let userDirection = userScrollDirectionRef.current;
+    if (userIntent && userDirection === "unknown") {
+      if (scrollContainer.scrollTop < lastTimelineScrollTopRef.current) {
+        userDirection = "away-from-end";
+      } else if (scrollContainer.scrollTop > lastTimelineScrollTopRef.current) {
+        userDirection = "toward-end";
+      }
+      userScrollDirectionRef.current = userDirection;
+    }
+    lastTimelineScrollTopRef.current = scrollContainer.scrollTop;
+
     const followingBottom = isScrolledNearBottom(scrollContainer);
     const nextOwner = timelineScrollOwnerAfterScroll({
       owner: scrollOwnerRef.current,
       nearBottom: followingBottom,
-      userIntent: window.performance.now() <= userScrollIntentUntilRef.current,
+      userIntent,
+      userDirection,
     });
     scrollOwnerRef.current = nextOwner;
 
@@ -10492,6 +10591,7 @@ const ChatTimeline = memo(function ChatTimeline(props: {
       // Reaching the end completes this gesture. A later deferred-height change
       // is layout settling, not evidence that the reader moved away.
       userScrollIntentUntilRef.current = 0;
+      userScrollDirectionRef.current = "unknown";
       scheduleTimelineAutoFollow(scrollContainer);
       return;
     }
@@ -10579,8 +10679,15 @@ const ChatTimeline = memo(function ChatTimeline(props: {
           }
         }}
         onScroll={handleTimelineScroll}
-        onTouchMoveCapture={markTimelineUserScrollIntent}
-        onWheelCapture={markTimelineUserScrollIntent}
+        onTouchStartCapture={handleTimelineTouchStart}
+        onTouchMoveCapture={handleTimelineTouchMove}
+        onTouchEndCapture={() => {
+          lastTimelineTouchYRef.current = null;
+        }}
+        onTouchCancelCapture={() => {
+          lastTimelineTouchYRef.current = null;
+        }}
+        onWheelCapture={handleTimelineWheelIntent}
       >
         <div className="timeline-content" ref={timelineContentRef}>
           {props.taskPlanning ? (
@@ -12679,6 +12786,7 @@ export const __rendererTestHooks = {
   timelineBottomDistance,
   isScrolledNearBottom,
   shouldAutoFollowTimelineUpdate,
+  timelineScrollDirectionForKey,
   timelineScrollOwnerAfterUserIntent,
   timelineScrollOwnerAfterScroll,
   timelineDetailsRevealScrollDelta,

@@ -191,15 +191,31 @@ it("keeps the bottom of oversized expanded details reachable", () => {
   ).toBe(0);
 });
 
-it("keeps timeline scroll ownership exclusive across reveal and reader intent", () => {
+it("keeps timeline scroll ownership exclusive across directional reader intent", () => {
   expect(
-    __rendererTestHooks.timelineScrollOwnerAfterUserIntent("details"),
+    __rendererTestHooks.timelineScrollOwnerAfterUserIntent(
+      "details",
+      "toward-end",
+    ),
   ).toBe("reader");
+  expect(
+    __rendererTestHooks.timelineScrollOwnerAfterUserIntent(
+      "bottom",
+      "away-from-end",
+    ),
+  ).toBe("reader");
+  expect(
+    __rendererTestHooks.timelineScrollOwnerAfterUserIntent(
+      "bottom",
+      "toward-end",
+    ),
+  ).toBe("bottom");
   expect(
     __rendererTestHooks.timelineScrollOwnerAfterScroll({
       owner: "details",
       nearBottom: true,
       userIntent: false,
+      userDirection: "unknown",
     }),
   ).toBe("details");
   expect(
@@ -207,13 +223,23 @@ it("keeps timeline scroll ownership exclusive across reveal and reader intent", 
       owner: "bottom",
       nearBottom: false,
       userIntent: false,
+      userDirection: "unknown",
     }),
   ).toBe("bottom");
   expect(
     __rendererTestHooks.timelineScrollOwnerAfterScroll({
       owner: "bottom",
-      nearBottom: false,
+      nearBottom: true,
       userIntent: true,
+      userDirection: "away-from-end",
+    }),
+  ).toBe("reader");
+  expect(
+    __rendererTestHooks.timelineScrollOwnerAfterScroll({
+      owner: "reader",
+      nearBottom: true,
+      userIntent: false,
+      userDirection: "unknown",
     }),
   ).toBe("reader");
   expect(
@@ -221,8 +247,30 @@ it("keeps timeline scroll ownership exclusive across reveal and reader intent", 
       owner: "reader",
       nearBottom: true,
       userIntent: true,
+      userDirection: "toward-end",
     }),
   ).toBe("bottom");
+});
+
+it("maps timeline scroll keys to their navigation direction", () => {
+  expect(
+    __rendererTestHooks.timelineScrollDirectionForKey("ArrowUp", false),
+  ).toBe("away-from-end");
+  expect(__rendererTestHooks.timelineScrollDirectionForKey("Home", false)).toBe(
+    "away-from-end",
+  );
+  expect(__rendererTestHooks.timelineScrollDirectionForKey(" ", true)).toBe(
+    "away-from-end",
+  );
+  expect(__rendererTestHooks.timelineScrollDirectionForKey("End", false)).toBe(
+    "toward-end",
+  );
+  expect(__rendererTestHooks.timelineScrollDirectionForKey(" ", false)).toBe(
+    "toward-end",
+  );
+  expect(
+    __rendererTestHooks.timelineScrollDirectionForKey("Enter", false),
+  ).toBe(undefined);
 });
 
 it("scrolls upward when an expanded detail starts above the timeline viewport", () => {
