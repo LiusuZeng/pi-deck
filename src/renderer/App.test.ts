@@ -1,6 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { chatSnapshotSchema } from "../shared/ipcSchemas.js";
 import { buildActivityInbox } from "./activityInbox.js";
 import { emptyOverlays, selectSidebarIndicator } from "./sessionState.js";
 import { reduceRuntimeEvent } from "./sessionRuntimeReducer.js";
@@ -731,6 +732,167 @@ describe("tool execution activity details", () => {
         expect.objectContaining({ title: "Exit status" }),
       ]),
     );
+  });
+});
+
+it("restores persisted subagent activity after real snapshot normalization", () => {
+  const snapshot = chatSnapshotSchema.parse({
+    runtimeId: "runtime-subagent-snapshot",
+    backendMode: "real",
+    workspaceId: "workspace-a",
+    state: { cwd: "/tmp/project", isAgentActive: false },
+    messages: [
+      {
+        id: "assistant-tool-call",
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "persisted-subagent-call",
+            name: "subagent",
+            arguments: {
+              chain: [
+                { agent: "worker", task: "Implement" },
+                { agent: "reviewer", task: "Review" },
+              ],
+            },
+          },
+        ],
+        // chatSnapshotSchema's normalized field is the supported restore path.
+        // The schema-specific regression owns deriving this from raw content.
+        toolCalls: [
+          {
+            id: "persisted-subagent-call",
+            name: "subagent",
+            arguments: {
+              chain: [
+                { agent: "worker", task: "Implement" },
+                { agent: "reviewer", task: "Review" },
+              ],
+            },
+          },
+        ],
+      },
+      {
+        id: "persisted-tool-result",
+        role: "toolResult",
+        toolCallId: "persisted-subagent-call",
+        toolName: "subagent",
+        content: [{ type: "text", text: "Chain stopped" }],
+        isError: true,
+        details: {
+          mode: "chain",
+          agentScope: "user",
+          projectAgentsDir: null,
+          results: [
+            {
+              agent: "worker",
+              task: "Implement",
+              step: 1,
+              exitCode: 1,
+              stopReason: "error",
+              errorMessage: "Implementation failed",
+              messages: [
+                {
+                  role: "assistant",
+                  content: [
+                    { type: "thinking", thinking: "private analysis" },
+                    { type: "toolCall", name: "grep", arguments: {} },
+                    { type: "text", text: "Public progress" },
+                  ],
+                },
+              ],
+              usage: { turns: 1, input: 8, output: 2 },
+            },
+          ],
+        },
+      },
+    ],
+  });
+  const session = __rendererTestHooks.sessionFromSnapshot(snapshot);
+
+  const tool = session.timeline.find(
+    (item: any) => item.id === "persisted-subagent-call",
+  ) as any;
+  expect(tool).toMatchObject({
+    kind: "tool",
+    title: "subagent",
+    status: "error",
+    subagentActivity: {
+      mode: "chain",
+      children: [
+        { index: 0, step: 1, state: "Failed" },
+        { index: 1, step: 2, state: "Not run" },
+      ],
+    },
+  });
+  expect(JSON.stringify(tool.subagentActivity)).toContain("Public progress");
+  expect(JSON.stringify(tool.subagentActivity)).not.toContain(
+    "private analysis",
+  );
+  expect(tool.subagentActivity.children[0].lastObservedAtMs).toBeUndefined();
+});
+
+it("keeps a defensive raw tool-call fallback before snapshot normalization", () => {
+  expect(
+    __rendererTestHooks.subagentArgsFromSnapshotMessages([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "raw-call",
+            name: "subagent",
+            arguments: { agent: "worker", task: "Raw fallback" },
+          },
+        ],
+      },
+    ] as any),
+  ).toEqual({
+    "raw-call": { agent: "worker", task: "Raw fallback" },
+  });
+});
+
+it("restores details-only normalized subagent history without inventing live state", () => {
+  const session = __rendererTestHooks.sessionFromSnapshot({
+    runtimeId: "runtime-normalized-snapshot",
+    backendMode: "real",
+    workspaceId: "workspace-a",
+    state: { cwd: "/tmp/project", isAgentActive: false },
+    messages: [
+      {
+        id: "normalized-result",
+        role: "toolResult",
+        toolCallId: "normalized-call",
+        toolName: "subagent",
+        content: "Finished",
+        details: {
+          mode: "parallel",
+          results: [
+            {
+              agent: "worker",
+              task: "Persisted work",
+              exitCode: 0,
+              messages: [
+                { role: "assistant", content: "Persisted public handoff" },
+              ],
+              usage: { turns: 1, input: 3, output: 2 },
+            },
+          ],
+        },
+      },
+    ],
+  } as any);
+
+  expect((session.timeline[0] as any).subagentActivity).toMatchObject({
+    mode: "parallel",
+    children: [
+      {
+        index: 0,
+        state: "Completed",
+        history: [{ kind: "text", text: "Persisted public handoff" }],
+      },
+    ],
   });
 });
 
