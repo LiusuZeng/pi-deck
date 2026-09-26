@@ -177,6 +177,41 @@ interface CachedSessionRef {
   preview?: string;
 }
 
+interface PersistedSessionRef extends CachedSessionRef {
+  workspaceId?: string;
+  projectId?: string;
+}
+
+function canonicalSessionIdentity(sessionFile: string): string {
+  let candidate = path.resolve(sessionFile);
+  const missingSegments: string[] = [];
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync(candidate), ...missingSegments);
+    } catch {
+      const parent = path.dirname(candidate);
+      if (parent === candidate) return path.resolve(sessionFile);
+      missingSegments.unshift(path.basename(candidate));
+      candidate = parent;
+    }
+  }
+}
+
+function persistedSessionRefs(storeFile: string): PersistedSessionRef[] {
+  if (!fs.existsSync(storeFile)) return [];
+  const store = JSON.parse(fs.readFileSync(storeFile, "utf8")) as {
+    sessionRefs?: PersistedSessionRef[];
+  };
+  return (store.sessionRefs ?? []).map((ref) => ({
+    ...ref,
+    sessionFile: canonicalSessionIdentity(ref.sessionFile),
+  }));
+}
+
+function canonicalSessionIdentities(sessionFiles: string[]): string[] {
+  return sessionFiles.map(canonicalSessionIdentity);
+}
+
 function cachedSessionRef(home: string, sessionFile: string): CachedSessionRef {
   const store = JSON.parse(
     fs.readFileSync(path.join(home, "projects.json"), "utf8"),
@@ -8002,6 +8037,237 @@ test("a successful fork consumes capacity and releases it when closed", async ()
   }
 });
 
+test("fork serializes project, workspace, and unassigned discovery until its native child is committed", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-fork-discovery-gate-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  const userDataDir = path.join(root, "user-data");
+  const barrierDir = path.join(root, "discovery-barrier");
+  const targetFile = path.join(
+    agentDir,
+    "sessions",
+    "--fake-rpc--",
+    "fork-discovery-target.jsonl",
+  );
+  const workspaceStoreFile = path.join(root, "pideck-home", "workspaces.json");
+  const projectStoreFile = path.join(root, "pideck-home", "projects.json");
+  const discoveryKinds = ["project", "workspace", "unassigned"] as const;
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(barrierDir, { recursive: true });
+  const { app, page } = await launchPiDeck({
+    ...fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      userDataDir,
+      fakePiArgs: [
+        "--fork-target",
+        targetFile,
+        "--fork-state-barrier-dir",
+        barrierDir,
+      ],
+    }),
+    PI_DECK_TEST_DISCOVERY_GATE_DIR: barrierDir,
+  });
+  try {
+    await expectHealthyPreload(page);
+    await sidebarNewSessionButton(page).click();
+    await page.getByLabel("Prompt text").fill("discovery gate source");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Fake response to: discovery gate source"),
+    ).toBeVisible({ timeout: 20_000 });
+    const source = await page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      const projects = await window.piDeck.projects.getActive();
+      if (projects.activeProjectId === undefined) {
+        throw new Error("Expected an active project for discovery coverage.");
+      }
+      return {
+        workspaceId: snapshot.workspaceId!,
+        projectId: projects.activeProjectId,
+        sessionFile: snapshot.state.sessionFile!,
+      };
+    });
+
+    await page.evaluate((request) => {
+      const testWindow = window as typeof window & {
+        issue140Fork?: Promise<unknown>;
+      };
+      testWindow.issue140Fork = window.piDeck.chat.forkSession(request);
+    }, source);
+    const targetCreatedMarker = path.join(barrierDir, "target-created");
+    await expect
+      .poll(() =>
+        fs.existsSync(targetCreatedMarker)
+          ? fs.readFileSync(targetCreatedMarker, "utf8").trim()
+          : "",
+      )
+      .toBe(canonicalSessionIdentity(targetFile));
+
+    for (const kind of discoveryKinds) {
+      fs.rmSync(path.join(barrierDir, `${kind}-queued`), { force: true });
+      fs.rmSync(path.join(barrierDir, `${kind}-entered`), { force: true });
+    }
+    await page.evaluate(({ workspaceId, projectId }) => {
+      type ListResult = { sessions: Array<{ sessionFile: string }> };
+      type ForkResult = { state: { sessionFile?: string } };
+      type PendingDiscovery = {
+        settled: string[];
+        fork: Promise<ForkResult>;
+        project: Promise<ListResult>;
+        workspace: Promise<ListResult>;
+        unassigned: Promise<ListResult>;
+      };
+      const testWindow = window as typeof window & {
+        issue140Fork?: Promise<unknown>;
+        issue140Discovery?: PendingDiscovery;
+      };
+      const settled: string[] = [];
+      const track = <T>(name: string, promise: Promise<T>): Promise<T> =>
+        promise.finally(() => settled.push(name));
+      testWindow.issue140Discovery = {
+        settled,
+        fork: track("fork", testWindow.issue140Fork as Promise<ForkResult>),
+        project: track(
+          "project",
+          window.piDeck.chat.listSessions({ projectId }),
+        ),
+        workspace: track(
+          "workspace",
+          window.piDeck.workspaces.listSessions({ workspaceId }),
+        ),
+        unassigned: track(
+          "unassigned",
+          window.piDeck.workspaces.listUnassignedSessions(),
+        ),
+      };
+    }, source);
+
+    await expect
+      .poll(() =>
+        discoveryKinds
+          .filter((kind) =>
+            fs.existsSync(path.join(barrierDir, `${kind}-queued`)),
+          )
+          .sort(),
+      )
+      .toEqual([...discoveryKinds].sort());
+    expect(
+      discoveryKinds.filter((kind) =>
+        fs.existsSync(path.join(barrierDir, `${kind}-entered`)),
+      ),
+    ).toEqual([]);
+    expect(
+      await page.evaluate(
+        () =>
+          (
+            window as typeof window & {
+              issue140Discovery?: { settled: string[] };
+            }
+          ).issue140Discovery!.settled,
+      ),
+    ).toEqual([]);
+
+    const canonicalTarget = canonicalSessionIdentity(targetFile);
+    const canonicalSource = canonicalSessionIdentity(source.sessionFile);
+    const workspaceRefsBefore = persistedSessionRefs(workspaceStoreFile);
+    const projectRefsBefore = persistedSessionRefs(projectStoreFile);
+    expect(
+      workspaceRefsBefore.filter((ref) => ref.sessionFile === canonicalSource),
+    ).toHaveLength(1);
+    expect(
+      workspaceRefsBefore.filter((ref) => ref.sessionFile === canonicalTarget),
+    ).toEqual([]);
+    expect(
+      projectRefsBefore.filter((ref) => ref.sessionFile === canonicalTarget),
+    ).toEqual([]);
+
+    fs.writeFileSync(path.join(barrierDir, "release-target"), "release\n");
+    const result = await page.evaluate(async () => {
+      type ListResult = { sessions: Array<{ sessionFile: string }> };
+      type ForkResult = { state: { sessionFile?: string } };
+      const pending = (
+        window as typeof window & {
+          issue140Discovery?: {
+            settled: string[];
+            fork: Promise<ForkResult>;
+            project: Promise<ListResult>;
+            workspace: Promise<ListResult>;
+            unassigned: Promise<ListResult>;
+          };
+        }
+      ).issue140Discovery!;
+      const [fork, project, workspace, unassigned] = await Promise.all([
+        pending.fork,
+        pending.project,
+        pending.workspace,
+        pending.unassigned,
+      ]);
+      return {
+        settled: pending.settled,
+        forkSessionFile: fork.state.sessionFile,
+        projectSessionFiles: project.sessions.map(
+          (session) => session.sessionFile,
+        ),
+        workspaceSessionFiles: workspace.sessions.map(
+          (session) => session.sessionFile,
+        ),
+        unassignedSessionFiles: unassigned.sessions.map(
+          (session) => session.sessionFile,
+        ),
+      };
+    });
+
+    expect([...result.settled].sort()).toEqual(
+      ["fork", "project", "unassigned", "workspace"].sort(),
+    );
+    expect(canonicalSessionIdentity(result.forkSessionFile!)).toBe(
+      canonicalTarget,
+    );
+    expect(
+      canonicalSessionIdentities(result.projectSessionFiles).filter(
+        (sessionFile) => sessionFile === canonicalTarget,
+      ),
+    ).toHaveLength(1);
+    expect(
+      canonicalSessionIdentities(result.workspaceSessionFiles).filter(
+        (sessionFile) => sessionFile === canonicalTarget,
+      ),
+    ).toHaveLength(1);
+    expect(
+      canonicalSessionIdentities(result.unassignedSessionFiles),
+    ).not.toContain(canonicalTarget);
+
+    const workspaceRefsAfter = persistedSessionRefs(workspaceStoreFile);
+    const projectRefsAfter = persistedSessionRefs(projectStoreFile);
+    expect(
+      workspaceRefsAfter.filter((ref) => ref.sessionFile === canonicalSource),
+    ).toHaveLength(1);
+    expect(
+      workspaceRefsAfter.filter((ref) => ref.sessionFile === canonicalTarget),
+    ).toEqual([
+      expect.objectContaining({
+        workspaceId: source.workspaceId,
+        sessionId: "fork-discovery-target",
+      }),
+    ]);
+    expect(
+      projectRefsAfter.filter((ref) => ref.sessionFile === canonicalTarget),
+    ).toEqual([
+      expect.objectContaining({
+        projectId: source.projectId,
+        sessionId: "fork-discovery-target",
+      }),
+    ]);
+  } finally {
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("fork crash phases retain source-only/target reservations through restart", async () => {
   for (const phase of [
     "before-spawn",
@@ -8113,7 +8379,10 @@ test("fork crash phases retain source-only/target reservations through restart",
       expect(result.forkError).toMatch(/awaiting durable cleanup/i);
       expect(result.deleteError).toMatch(/awaiting durable cleanup/i);
       expect(result.moveError).toMatch(/awaiting durable cleanup/i);
-      expect(result.sessionFiles).not.toContain(targetFile);
+      const canonicalTarget = canonicalSessionIdentity(targetFile);
+      expect(canonicalSessionIdentities(result.sessionFiles)).not.toContain(
+        canonicalTarget,
+      );
       const journal = JSON.parse(
         fs.readFileSync(
           path.join(root, "pideck-home", "failed-fork-cleanup.json"),
@@ -8137,11 +8406,12 @@ test("fork crash phases retain source-only/target reservations through restart",
         // record; both must remain source-only and fail closed on restart.
         expect(journal.entries[0]).toMatchObject({ kind: "source" });
       }
-      const workspaceStore = fs.readFileSync(
+      const workspaceRefs = persistedSessionRefs(
         path.join(root, "pideck-home", "workspaces.json"),
-        "utf8",
       );
-      expect(workspaceStore).not.toContain(path.resolve(targetFile));
+      expect(
+        workspaceRefs.filter((ref) => ref.sessionFile === canonicalTarget),
+      ).toEqual([]);
     } finally {
       await crashedApp?.close().catch(() => undefined);
       await recoveredApp?.close().catch(() => undefined);
@@ -8224,27 +8494,29 @@ test("failed target promotion write/rename rebuilds both blocks after restart an
       await failedApp.close();
       failedApp = undefined;
 
-      // The app never claimed this target before persistence failed. Seed a
-      // stale ref to prove restart cleanup removes it rather than mutating the
-      // target itself; production discovery still relies only on provenance.
+      // The app never claimed this target before persistence failed. Seed
+      // stale workspace-membership and legacy project-cache refs to prove all
+      // list paths hide them while restart cleanup removes membership without
+      // mutating the target itself.
       const workspaceFile = path.join(root, "pideck-home", "workspaces.json");
-      const workspaceState = JSON.parse(
-        fs.readFileSync(workspaceFile, "utf8"),
-      ) as {
-        sessionRefs: Array<Record<string, unknown>>;
-      };
-      const sourceRef = workspaceState.sessionRefs.find(
-        (ref) => ref.sessionFile === source.sessionFile,
-      );
-      expect(sourceRef).toBeDefined();
-      workspaceState.sessionRefs.push({
-        ...sourceRef,
-        sessionFile: fs.realpathSync(targetFile),
-        sessionId: "fork-promotion-target",
-        addedAtMs: Date.now(),
-        lastSeenAtMs: Date.now(),
-      });
-      fs.writeFileSync(workspaceFile, `${JSON.stringify(workspaceState)}\n`);
+      const projectFile = path.join(root, "pideck-home", "projects.json");
+      for (const storeFile of [workspaceFile, projectFile]) {
+        const storeState = JSON.parse(fs.readFileSync(storeFile, "utf8")) as {
+          sessionRefs: Array<Record<string, unknown>>;
+        };
+        const sourceRef = storeState.sessionRefs.find(
+          (ref) => ref.sessionFile === source.sessionFile,
+        );
+        expect(sourceRef).toBeDefined();
+        storeState.sessionRefs.push({
+          ...sourceRef,
+          sessionFile: fs.realpathSync(targetFile),
+          sessionId: "fork-promotion-target",
+          addedAtMs: Date.now(),
+          lastSeenAtMs: Date.now(),
+        });
+        fs.writeFileSync(storeFile, `${JSON.stringify(storeState)}\n`);
+      }
 
       const blocked = await launchPiDeck({
         ...fakeRealModeEnv({
@@ -8298,9 +8570,34 @@ test("failed target promotion write/rename rebuilds both blocks after restart an
               }),
             ),
           });
+          const activeProject = await window.piDeck.projects.getActive();
+          if (activeProject.activeProjectId === undefined) {
+            throw new Error("Expected an active project after fork recovery.");
+          }
+          const [projectSessions, workspaceSessions, unassignedSessions] =
+            await Promise.all([
+              window.piDeck.chat.listSessions({
+                projectId: activeProject.activeProjectId,
+              }),
+              window.piDeck.workspaces.listSessions({
+                workspaceId: sourceAndTarget.workspaceId,
+              }),
+              window.piDeck.workspaces.listUnassignedSessions(),
+            ]);
           return {
             source: await sessionActionErrors(sourceAndTarget.sourceFile),
             target: await sessionActionErrors(sourceAndTarget.targetFile),
+            listedSessionFiles: {
+              project: projectSessions.sessions.map(
+                (session) => session.sessionFile,
+              ),
+              workspace: workspaceSessions.sessions.map(
+                (session) => session.sessionFile,
+              ),
+              unassigned: unassignedSessions.sessions.map(
+                (session) => session.sessionFile,
+              ),
+            },
           };
         },
         {
@@ -8313,6 +8610,14 @@ test("failed target promotion write/rename rebuilds both blocks after restart an
         for (const error of Object.values(errors)) {
           expect(error).toMatch(/awaiting durable cleanup/i);
         }
+      }
+      const canonicalTarget = canonicalSessionIdentity(targetFile);
+      for (const sessionFiles of Object.values(
+        blockedResult.listedSessionFiles,
+      )) {
+        expect(canonicalSessionIdentities(sessionFiles)).not.toContain(
+          canonicalTarget,
+        );
       }
       await blockedApp.close();
       blockedApp = undefined;
@@ -8335,9 +8640,11 @@ test("failed target promotion write/rename rebuilds both blocks after restart an
         ),
       ) as { version: number; entries: unknown[] };
       expect(journal).toEqual({ version: 2, entries: [] });
-      expect(fs.readFileSync(workspaceFile, "utf8")).not.toContain(
-        fs.realpathSync(targetFile),
-      );
+      expect(
+        persistedSessionRefs(workspaceFile).filter(
+          (ref) => ref.sessionFile === canonicalSessionIdentity(targetFile),
+        ),
+      ).toEqual([]);
     } finally {
       await failedApp?.close().catch(() => undefined);
       await blockedApp?.close().catch(() => undefined);

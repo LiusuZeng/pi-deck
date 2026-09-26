@@ -79,6 +79,8 @@ interface FakeOptions {
   forkGetStateDelayMs: number;
   /** Write when a native fork begins its pre-registration get_state call. */
   forkGetStateSignalFile?: string;
+  /** Hold the first native-fork get_state until release-target exists. */
+  forkStateBarrierDir?: string;
   /** Append the native-fork target path when that fake worker exits. */
   forkExitSignalFile?: string;
   /** Hold get_state replies so E2E can interleave ownership operations. */
@@ -296,6 +298,10 @@ function parseOptions(argv: string[]): FakeOptions {
       const signalFile = argv[index + 1];
       if (signalFile) options.forkGetStateSignalFile = signalFile;
       index += 1;
+    } else if (arg === "--fork-state-barrier-dir") {
+      const barrierDir = argv[index + 1];
+      if (barrierDir) options.forkStateBarrierDir = barrierDir;
+      index += 1;
     } else if (arg === "--fork-exit-signal-file") {
       const signalFile = argv[index + 1];
       if (signalFile) options.forkExitSignalFile = signalFile;
@@ -457,6 +463,8 @@ class FakeRpcServer {
   private promptCounter = 0;
   private workflowDecisionIndex = 0;
   private currentTimers: NodeJS.Timeout[] = [];
+  private forkStateBarrierStarted = false;
+  private forkStateBarrierTimer: NodeJS.Timeout | undefined;
   private agentActive = false;
   private currentModel = this.options.collidingModels
     ? "claude-opus-4-5"
@@ -882,6 +890,15 @@ class FakeRpcServer {
             this.options.forkGetStateSignalFile,
             `${this.sessionFile}\n`,
           );
+        }
+        if (
+          forkGetState &&
+          this.options.forkStateBarrierDir !== undefined &&
+          !this.forkStateBarrierStarted
+        ) {
+          this.forkStateBarrierStarted = true;
+          this.holdForkStateAtBarrier(command.id, name);
+          break;
         }
         if (!forkGetState && this.options.getStateSignalFile) {
           fs.writeFileSync(
@@ -1942,12 +1959,51 @@ class FakeRpcServer {
     this.emitQueueUpdate();
   }
 
+  private holdForkStateAtBarrier(
+    commandId: string | undefined,
+    command: string,
+  ): void {
+    const barrierDir = this.options.forkStateBarrierDir!;
+    if (!fs.existsSync(this.sessionFile)) {
+      this.respond(
+        commandId,
+        command,
+        undefined,
+        "Fake native fork target was not created before get_state",
+      );
+      return;
+    }
+    fs.mkdirSync(barrierDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(barrierDir, "target-created"),
+      `${fs.realpathSync(this.sessionFile)}\n`,
+    );
+
+    const releaseFile = path.join(barrierDir, "release-target");
+    const awaitRelease = (): void => {
+      this.forkStateBarrierTimer = undefined;
+      if (fs.existsSync(releaseFile)) {
+        this.respond(commandId, command, this.getState());
+        return;
+      }
+      this.forkStateBarrierTimer = setTimeout(awaitRelease, 5);
+    };
+    awaitRelease();
+  }
+
+  private cancelForkStateBarrier(): void {
+    if (this.forkStateBarrierTimer === undefined) return;
+    clearTimeout(this.forkStateBarrierTimer);
+    this.forkStateBarrierTimer = undefined;
+  }
+
   private handleAbort(command: FakeCommandRecord): void {
     const pendingExtensionUi = this.pendingExtensionUi;
     if (pendingExtensionUi) {
       clearTimeout(pendingExtensionUi.timer);
       this.pendingExtensionUi = undefined;
     }
+    this.cancelForkStateBarrier();
     for (const timer of this.currentTimers) {
       clearTimeout(timer);
     }
