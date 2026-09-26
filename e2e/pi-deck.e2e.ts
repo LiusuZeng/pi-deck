@@ -3048,8 +3048,8 @@ test("scrollbar navigation releases follow and reacquires only toward the end", 
         : "macOS overlay scrollbars exposed no deterministic gutter; the test used DOM pointer intent plus asserted incremental element scrolling, not native device input.",
     });
 
-    const dragNativeScrollbarTo = async (targetRatio: number) => {
-      const current = await timeline.evaluate((element) => {
+    const readNativeScrollbarGeometry = () =>
+      timeline.evaluate((element) => {
         const rect = element.getBoundingClientRect();
         return {
           left: rect.left,
@@ -3063,6 +3063,31 @@ test("scrollbar navigation releases follow and reacquires only toward the end", 
           gutter: element.offsetWidth - element.clientWidth,
         };
       });
+
+    const waitForScrollbarPaint = () =>
+      timeline.evaluate(async () => {
+        // Native scrollbar layers update on compositor frames. In particular,
+        // scrollTop can report the new bottom before a just-shown macOS thumb
+        // has painted there. Synchronize to paint instead of sleeping.
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => resolve()),
+        );
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => resolve()),
+        );
+      });
+
+    const dragNativeScrollbarTo = async (targetRatio: number) => {
+      const initial = await readNativeScrollbarGeometry();
+      const initialX =
+        initial.left + initial.width - Math.max(initial.gutter / 2, 1);
+      // Wake an overlay/hover-sensitive native scrollbar before deriving its
+      // thumb position. Pressing in the same task as the first hover can hit
+      // the old track position while a programmatic bottom-follow is painting.
+      await page.mouse.move(initialX, initial.top + initial.height / 2);
+      await waitForScrollbarPaint();
+
+      const current = await readNativeScrollbarGeometry();
       const thumbHeight = Math.max(
         24,
         (current.clientHeight / current.scrollHeight) * current.height,
@@ -3078,9 +3103,29 @@ test("scrollbar navigation releases follow and reacquires only toward the end", 
       const targetY = current.top + targetRatio * thumbTravel + thumbHeight / 2;
       const x = current.left + current.width - current.gutter / 2;
       await page.mouse.move(x, startY);
+      await waitForScrollbarPaint();
+      const before = await timelineScrollSample(timeline);
       await page.mouse.down();
       await page.mouse.move(x, targetY, { steps: 8 });
       await page.mouse.up();
+      await waitForScrollbarPaint();
+      const after = await timelineScrollSample(timeline);
+      await test.info().attach(`native-scrollbar-drag-${targetRatio}`, {
+        body: JSON.stringify(
+          {
+            targetRatio,
+            geometry: current,
+            estimatedThumb: { height: thumbHeight, travel: thumbTravel },
+            pointer: { x, startY, targetY },
+            before,
+            after,
+          },
+          null,
+          2,
+        ),
+        contentType: "application/json",
+      });
+      return after;
     };
 
     const dragDomScrollbarIntentTo = async (targetTop: number) => {
@@ -3127,6 +3172,9 @@ test("scrollbar navigation releases follow and reacquires only toward the end", 
     } else {
       await dragDomScrollbarIntentTo(maxScrollTop * 0.55);
     }
+    await expect
+      .poll(async () => (await timelineScrollSample(timeline)).top)
+      .toBeGreaterThan(maxScrollTop * 0.35);
     await expect
       .poll(async () => (await timelineScrollSample(timeline)).top)
       .toBeLessThan(maxScrollTop * 0.7);
