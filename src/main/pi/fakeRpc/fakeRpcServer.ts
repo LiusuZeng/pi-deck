@@ -10,6 +10,10 @@ import type {
   PiState,
   RpcResponseRecord,
 } from "../types.js";
+import {
+  createChainFailureSubagentActivityFixture,
+  createParallelSubagentActivityFixture,
+} from "./subagentActivityFixture.js";
 
 type PromptScenario =
   | "basic"
@@ -27,6 +31,7 @@ type PromptScenario =
   | "delegate"
   | "routing"
   | "env-probe"
+  | "subagent"
   | "all";
 
 interface FakeOptions {
@@ -67,6 +72,8 @@ interface FakeOptions {
   clearActiveOnStartEnabledFileAfterFollowUpReceipt: boolean;
   /** Emits spaced, payload-free worker progress for Electron telemetry E2E. */
   taskSessionProgressFixture: boolean;
+  /** Marker files release extension-shaped subagent updates without time races. */
+  subagentActivityBarrierDir?: string;
   sessionFile?: string;
   /** Native Pi-compatible source path for a new independent fake session. */
   forkSourceFile?: string;
@@ -270,6 +277,10 @@ function parseOptions(argv: string[]): FakeOptions {
       options.clearActiveOnStartEnabledFileAfterFollowUpReceipt = true;
     } else if (arg === "--task-session-progress-fixture") {
       options.taskSessionProgressFixture = true;
+    } else if (arg === "--subagent-activity-barrier-dir") {
+      const directory = argv[index + 1];
+      if (directory) options.subagentActivityBarrierDir = directory;
+      index += 1;
     } else if (arg === "--session") {
       const sessionFile = argv[index + 1];
       if (sessionFile) {
@@ -423,6 +434,7 @@ function isPromptScenario(value: string): value is PromptScenario {
     "delegate",
     "routing",
     "env-probe",
+    "subagent",
     "all",
   ].includes(value);
 }
@@ -1322,6 +1334,11 @@ class FakeRpcServer {
       return;
     }
 
+    if (this.options.promptScenario === "subagent") {
+      this.emitSubagentActivityScenarioEvents(assistantId, text);
+      return;
+    }
+
     const isExtensionUiScenario =
       this.options.promptScenario === "extension-ui" ||
       this.options.promptScenario === "tool-error-extension-ui" ||
@@ -1891,6 +1908,123 @@ class FakeRpcServer {
     });
 
     return delayMs * (tick + 1);
+  }
+
+  private emitSubagentActivityScenarioEvents(
+    assistantId: string,
+    promptText: string,
+  ): void {
+    const fixture = /\bchain\b/i.test(promptText)
+      ? createChainFailureSubagentActivityFixture(
+          `tool_subagent_chain_${this.promptCounter}`,
+        )
+      : createParallelSubagentActivityFixture(
+          `tool_subagent_parallel_${this.promptCounter}`,
+        );
+    const kind = /\bchain\b/i.test(promptText) ? "chain" : "parallel";
+
+    // Production Pi persists the assistant tool call and its toolResult as
+    // messages while also streaming tool_execution_* events. Keeping both
+    // paths lets E2E prove live updates and snapshot restoration independently.
+    const toolCallMessage = {
+      id: `msg_subagent_call_${this.promptCounter}`,
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id: fixture.toolCallId,
+          name: "subagent",
+          arguments: fixture.args,
+        },
+      ],
+      provider: this.currentProvider,
+      model: this.currentModel,
+      stopReason: "toolUse",
+      createdAt: Date.now(),
+    } as unknown as PiMessage;
+    this.messages.push(toolCallMessage);
+    this.appendPersistedMessage(toolCallMessage);
+
+    this.write({
+      type: "tool_execution_start",
+      toolCallId: fixture.toolCallId,
+      toolName: "subagent",
+      args: fixture.args,
+    });
+
+    const emitPartial = (index: number): void => {
+      const partialResult = fixture.partialResults[index];
+      if (partialResult === undefined) return;
+      this.write({
+        type: "tool_execution_update",
+        toolCallId: fixture.toolCallId,
+        toolName: "subagent",
+        args: fixture.args,
+        partialResult,
+      });
+    };
+    const finish = (): void => {
+      const toolResultMessage = {
+        id: `msg_subagent_result_${this.promptCounter}`,
+        role: "toolResult",
+        toolCallId: fixture.toolCallId,
+        toolName: "subagent",
+        content: fixture.result.content,
+        details: fixture.result.details,
+        isError: fixture.isError,
+        createdAt: Date.now(),
+      } as unknown as PiMessage;
+      this.messages.push(toolResultMessage);
+      this.appendPersistedMessage(toolResultMessage);
+      this.write({
+        type: "tool_execution_end",
+        toolCallId: fixture.toolCallId,
+        toolName: "subagent",
+        args: fixture.args,
+        result: fixture.result,
+        isError: fixture.isError,
+      });
+      this.completePrompt(assistantId, promptText);
+    };
+
+    if (kind === "parallel") {
+      this.afterSubagentFixtureBarrier("parallel-update-1", () => {
+        emitPartial(0);
+        this.afterSubagentFixtureBarrier("parallel-update-2", () => {
+          emitPartial(1);
+          this.afterSubagentFixtureBarrier("parallel-finish", finish);
+        });
+      });
+      return;
+    }
+
+    this.afterSubagentFixtureBarrier("chain-update-1", () => {
+      emitPartial(0);
+      this.afterSubagentFixtureBarrier("chain-finish", finish);
+    });
+  }
+
+  private afterSubagentFixtureBarrier(
+    markerName: string,
+    callback: () => void,
+  ): void {
+    const directory = this.options.subagentActivityBarrierDir;
+    if (directory === undefined) {
+      this.currentTimers.push(
+        setTimeout(callback, Math.max(1, this.options.streamDelayMs)),
+      );
+      return;
+    }
+
+    const marker = path.join(directory, markerName);
+    const waitForMarker = (): void => {
+      if (fs.existsSync(marker)) {
+        callback();
+        return;
+      }
+      this.currentTimers.push(setTimeout(waitForMarker, 5));
+    };
+    waitForMarker();
   }
 
   private handleExtensionUiResponse(command: FakeCommandRecord): void {

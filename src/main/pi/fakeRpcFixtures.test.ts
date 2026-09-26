@@ -997,6 +997,193 @@ test("fake RPC malformed JSON and pending-exit fixtures exercise transport failu
   assert.equal(exiting.pendingCount, 0);
 });
 
+test("fake RPC emits controllable extension-shaped parallel subagent snapshots", async () => {
+  const directory = tempDir("pi-deck-fake-subagent-parallel-");
+  const barriers = path.join(directory, "barriers");
+  const sessionFile = path.join(directory, "parallel.jsonl");
+  fs.mkdirSync(barriers, { recursive: true });
+  const client = spawnFakeRpc([
+    "--prompt-scenario",
+    "subagent",
+    "--subagent-activity-barrier-dir",
+    barriers,
+    "--session",
+    sessionFile,
+    "--stream-delay-ms",
+    "1",
+  ]);
+  const received: RpcEventRecord[] = [];
+  const record = (event: RpcEventRecord): void => {
+    received.push(event);
+  };
+  client.on("event", record);
+  try {
+    const started = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "tool_execution_start"),
+    );
+    await client.request("prompt", {
+      message: "parallel extension activity fixture",
+    });
+    const start = (await started).find(
+      (event) => event.type === "tool_execution_start",
+    ) as JsonObject;
+    assert.equal(start.toolName, "subagent");
+    assert.equal("partialResult" in start, false);
+    assert.deepEqual(
+      ((start.args as JsonObject).tasks as JsonObject[]).map((task) =>
+        String(task.agent),
+      ),
+      ["scout", "scout", "reviewer"],
+    );
+    assert.equal(
+      received.some((event) => event.type === "tool_execution_update"),
+      false,
+    );
+
+    const firstUpdate = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "tool_execution_update"),
+    );
+    fs.writeFileSync(path.join(barriers, "parallel-update-1"), "release\n");
+    const updateOne = (await firstUpdate).find(
+      (event) => event.type === "tool_execution_update",
+    ) as JsonObject;
+    const firstPartial = updateOne.partialResult as JsonObject;
+    const firstDetails = firstPartial.details as JsonObject;
+    const firstResults = firstDetails.results as JsonObject[];
+    assert.equal(firstDetails.mode, "parallel");
+    assert.equal(firstDetails.agentScope, "user");
+    assert.equal(firstDetails.projectAgentsDir, null);
+    assert.equal(firstResults[0]?.exitCode, 0);
+    assert.equal((firstResults[0]?.messages as unknown[]).length, 4);
+    assert.equal(firstResults[1]?.exitCode, -1);
+
+    const secondUpdate = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "tool_execution_update"),
+    );
+    fs.writeFileSync(path.join(barriers, "parallel-update-2"), "release\n");
+    const updateTwo = (await secondUpdate).find(
+      (event) => event.type === "tool_execution_update",
+    ) as JsonObject;
+    const secondResults = (
+      (updateTwo.partialResult as JsonObject).details as JsonObject
+    ).results as JsonObject[];
+    assert.equal(secondResults[0]?.exitCode, 0);
+    assert.equal(
+      (secondResults[0]?.usage as JsonObject).turns as number | undefined,
+      2,
+    );
+    assert.equal((secondResults[1]?.messages as unknown[]).length, 1);
+
+    const finished = waitForEvents(
+      client,
+      (events) =>
+        events.some((event) => event.type === "tool_execution_end") &&
+        events.some((event) => event.type === "agent_end"),
+    );
+    fs.writeFileSync(path.join(barriers, "parallel-finish"), "release\n");
+    const finalEvents = await finished;
+    const end = finalEvents.find(
+      (event) => event.type === "tool_execution_end",
+    ) as JsonObject;
+    const finalResult = end.result as JsonObject;
+    const finalDetails = finalResult.details as JsonObject;
+    const finalResults = finalDetails.results as JsonObject[];
+    assert.equal("partialResult" in end, false);
+    assert.deepEqual(
+      finalResults.map((result) => [
+        result.agent,
+        result.exitCode,
+        result.stopReason,
+      ]),
+      [
+        ["scout", 0, "stop"],
+        ["scout", 1, "error"],
+        ["reviewer", 0, "stop"],
+      ],
+    );
+    assert.equal(end.isError, false);
+
+    const messages = (await client.request("get_messages")) as JsonObject;
+    const persisted = messages.messages as JsonObject[];
+    const toolResult = persisted.find(
+      (message) => message.role === "toolResult",
+    );
+    assert.equal(toolResult?.toolName, "subagent");
+    assert.deepEqual(toolResult?.details, finalDetails);
+  } finally {
+    client.off("event", record);
+    client.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("fake RPC chain fixture stops after failure and leaves the final step unrun", async () => {
+  const directory = tempDir("pi-deck-fake-subagent-chain-");
+  const barriers = path.join(directory, "barriers");
+  fs.mkdirSync(barriers, { recursive: true });
+  const client = spawnFakeRpc([
+    "--prompt-scenario",
+    "subagent",
+    "--subagent-activity-barrier-dir",
+    barriers,
+    "--stream-delay-ms",
+    "1",
+  ]);
+  try {
+    const started = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "tool_execution_start"),
+    );
+    await client.request("prompt", { message: "chain failure fixture" });
+    const start = (await started).find(
+      (event) => event.type === "tool_execution_start",
+    ) as JsonObject;
+    const chain = (start.args as JsonObject).chain as JsonObject[];
+    assert.deepEqual(
+      chain.map((step) => step.agent),
+      ["worker", "reviewer", "worker"],
+    );
+
+    const partial = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "tool_execution_update"),
+    );
+    fs.writeFileSync(path.join(barriers, "chain-update-1"), "release\n");
+    const update = (await partial).find(
+      (event) => event.type === "tool_execution_update",
+    ) as JsonObject;
+    const partialDetails = (update.partialResult as JsonObject)
+      .details as JsonObject;
+    assert.equal(partialDetails.mode, "chain");
+    assert.equal((partialDetails.results as unknown[]).length, 1);
+
+    const finished = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "tool_execution_end"),
+    );
+    fs.writeFileSync(path.join(barriers, "chain-finish"), "release\n");
+    const end = (await finished).find(
+      (event) => event.type === "tool_execution_end",
+    ) as JsonObject;
+    const result = end.result as JsonObject;
+    const finalDetails = result.details as JsonObject;
+    const results = finalDetails.results as JsonObject[];
+    assert.equal(end.isError, true);
+    assert.equal(finalDetails.mode, "chain");
+    assert.deepEqual(
+      results.map((item) => [item.step, item.exitCode, item.stopReason]),
+      [
+        [1, 0, "stop"],
+        [2, 1, "error"],
+      ],
+    );
+    assert.equal(
+      results.some((item) => item.step === 3),
+      false,
+    );
+  } finally {
+    client.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("platform minimal RPC smoke can run against the shared fake RPC shim", async () => {
   const root = tempDir("pi-deck-fake-rpc-smoke-");
   const piShim = path.join(root, "pi");
