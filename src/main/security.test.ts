@@ -3,6 +3,7 @@ import {
   buildContentSecurityPolicy,
   buildSecureWebPreferences,
   isAllowedExternalUrl,
+  isCanonicalPathInside,
   shouldAllowNavigation,
 } from "./security.js";
 
@@ -37,6 +38,17 @@ describe("Electron security defaults", () => {
     );
     expect(csp).toContain("worker-src 'self' blob:");
     expect(csp).not.toContain("https:");
+  });
+
+  it("compares canonical path containment by path segments", () => {
+    expect(isCanonicalPathInside("/project", "/project")).toBe(true);
+    expect(isCanonicalPathInside("/project/session.jsonl", "/project")).toBe(
+      true,
+    );
+    expect(isCanonicalPathInside("/project-two/file", "/project")).toBe(false);
+    expect(
+      isCanonicalPathInside("/project", "/project", { allowRoot: false }),
+    ).toBe(false);
   });
 
   it("restricts navigation and external link schemes", () => {

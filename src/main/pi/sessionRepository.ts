@@ -11,6 +11,12 @@ import {
   type PiMessageLike,
 } from "../../shared/piMessageNormalization.js";
 import type { ChatSessionSummary } from "../../shared/types.js";
+import {
+  canonicalFilesystemPath,
+  canonicalProjectPath,
+  canonicalSessionFilePath,
+} from "../filesystemIdentity.js";
+import { isCanonicalPathInside } from "../security.js";
 
 export interface ScanSessionRepositoryOptions {
   sessionDir: string;
@@ -167,9 +173,9 @@ export async function validatePiSessionFile(
   return {
     ok: true,
     sessionFile,
-    cwd: await canonicalOrResolved(header.cwd),
+    cwd: await canonicalProjectPath(header.cwd),
     ...(header.parentSession !== undefined
-      ? { parentSession: await canonicalOrResolved(header.parentSession) }
+      ? { parentSession: await canonicalSessionFilePath(header.parentSession) }
       : {}),
   };
 }
@@ -183,7 +189,7 @@ export async function readPiSessionSummary(
   options: ReadPiSessionSummaryOptions,
 ): Promise<ReadPiSessionSummaryResult> {
   const diagnostics: string[] = [];
-  const sessionDir = await canonicalOrResolved(options.sessionDir);
+  const sessionDir = await canonicalFilesystemPath(options.sessionDir);
   const maxBytesPerFile = options.maxBytesPerFile ?? DEFAULT_MAX_BYTES_PER_FILE;
   const maxTotalBytes = options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES;
   const maxWallTimeMs = options.maxWallTimeMs ?? DEFAULT_MAX_WALL_TIME_MS;
@@ -246,8 +252,8 @@ export async function scanSessionRepository(
   const projectCwd =
     options.projectCwd === undefined
       ? undefined
-      : await canonicalOrResolved(options.projectCwd);
-  const sessionDir = await canonicalOrResolved(options.sessionDir);
+      : await canonicalProjectPath(options.projectCwd);
+  const sessionDir = await canonicalFilesystemPath(options.sessionDir);
   const startedAt = Date.now();
   let seenFiles = 0;
   let totalBytesRead = 0;
@@ -385,7 +391,7 @@ async function summarizeSessionFile(
   if (parsed.header === undefined) {
     return { bytesRead: parsed.bytesRead };
   }
-  const cwd = await canonicalOrResolved(parsed.header.cwd);
+  const cwd = await canonicalProjectPath(parsed.header.cwd);
   if (projectCwd !== undefined && cwd !== projectCwd) {
     return { bytesRead: parsed.bytesRead };
   }
@@ -496,13 +502,7 @@ function parsePiSessionHeader(value: string): PiSessionHeader | undefined {
 }
 
 function isStrictDescendant(filePath: string, directory: string): boolean {
-  const relative = path.relative(directory, filePath);
-  return (
-    relative.length > 0 &&
-    !relative.startsWith(`..${path.sep}`) &&
-    relative !== ".." &&
-    !path.isAbsolute(relative)
-  );
+  return isCanonicalPathInside(filePath, directory, { allowRoot: false });
 }
 
 async function parseSessionFile(
@@ -833,15 +833,6 @@ function ingestRecord(
       );
       if (title !== undefined) parsed.title = title;
     }
-  }
-}
-
-async function canonicalOrResolved(filePath: string): Promise<string> {
-  const resolved = path.resolve(filePath);
-  try {
-    return await fs.realpath(resolved);
-  } catch {
-    return resolved;
   }
 }
 

@@ -10,7 +10,7 @@ import {
   type OpenDialogOptions,
 } from "electron";
 import { randomUUID } from "node:crypto";
-import { constants as fsConstants, realpathSync } from "node:fs";
+import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
@@ -183,9 +183,16 @@ import {
   buildContentSecurityPolicy,
   buildSecureWebPreferences,
   isAllowedExternalUrl,
+  isCanonicalPathInside,
   shouldAllowNavigation,
 } from "./security.js";
 import { ProjectStore, resolvePiDeckHome } from "./projects/projectStore.js";
+import {
+  canonicalFilesystemPath,
+  canonicalProjectPath,
+  canonicalSessionFilePath,
+  canonicalSessionFilePathSync,
+} from "./filesystemIdentity.js";
 import { startProgressiveStartup } from "./progressiveStartup.js";
 import {
   WorkspaceStore,
@@ -1498,8 +1505,7 @@ function registerIpcHandlers(
     responseSchema: workspaceSessionMutationResultSchema,
     diagnostics: diagnosticsService,
     handler: async ({ sessionFile, toWorkspaceId }) => {
-      const canonical =
-        (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
+      const canonical = await canonicalSessionFilePath(sessionFile);
       await assertForkCleanupTargetAvailable(canonical, "moved");
       assertSessionFileNotWorkflowOwned(canonical, "moving this session");
       return withChatSessionMutation(
@@ -1526,20 +1532,15 @@ function registerIpcHandlers(
     responseSchema: workspaceSessionMutationResultSchema,
     diagnostics: diagnosticsService,
     handler: async ({ workspaceId, sessionFile }) => {
-      const canonical =
-        (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
+      const canonical = await canonicalSessionFilePath(sessionFile);
       await assertForkCleanupTargetAvailable(canonical, "removed");
       assertSessionFileNotWorkflowOwned(canonical, "removing this session");
       return withChatSessionMutation(
         canonical,
         "Close the attached session before removing it from a workspace.",
         async () => {
-          await ensureWorkspaceStore().removeSession(workspaceId, sessionFile);
-          return {
-            workspaceId,
-            sessionFile:
-              (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile),
-          };
+          await ensureWorkspaceStore().removeSession(workspaceId, canonical);
+          return { workspaceId, sessionFile: canonical };
         },
       );
     },
@@ -1551,8 +1552,7 @@ function registerIpcHandlers(
     responseSchema: workspaceSessionMutationResultSchema,
     diagnostics: diagnosticsService,
     handler: async ({ workspaceId, sessionFile }) => {
-      const canonical =
-        (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
+      const canonical = await canonicalSessionFilePath(sessionFile);
       await assertForkCleanupTargetAvailable(canonical, "archived");
       assertSessionFileNotWorkflowOwned(canonical, "archiving this session");
       return withChatSessionMutation(
@@ -1569,8 +1569,7 @@ function registerIpcHandlers(
     responseSchema: workspaceSessionMutationResultSchema,
     diagnostics: diagnosticsService,
     handler: async ({ workspaceId, sessionFile }) => {
-      const canonical =
-        (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
+      const canonical = await canonicalSessionFilePath(sessionFile);
       await assertForkCleanupTargetAvailable(canonical, "restored");
       return ensureWorkspaceStore().restoreSession(workspaceId, canonical);
     },
@@ -1582,8 +1581,7 @@ function registerIpcHandlers(
     responseSchema: workspaceSessionMutationResultSchema,
     diagnostics: diagnosticsService,
     handler: async ({ sessionFile, title }) => {
-      const canonical =
-        (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
+      const canonical = await canonicalSessionFilePath(sessionFile);
       await assertForkCleanupTargetAvailable(canonical, "renamed");
       return ensureWorkspaceStore().renameSession(canonical, title);
     },
@@ -2750,7 +2748,7 @@ async function validateWorkflowPaths(
     const canonical = await safeRealpath(resolved);
     if (
       canonical === undefined ||
-      !isPathInside(canonical, project.canonicalPath)
+      !isCanonicalPathInside(canonical, project.canonicalPath)
     ) {
       throw new Error(
         `Workflow path is unavailable or outside its authorized workspace project: ${value}`,
@@ -2859,8 +2857,6 @@ function chatSessionAccessPorts(): ChatSessionAccessPorts {
   return {
     workspace: ensureWorkspaceStore(),
     project: ensureProjectStore(),
-    canonicalPath: async (filePath) =>
-      (await safeRealpath(filePath)) ?? path.resolve(filePath),
     resolveManagedProject: resolveManagedRuntimeProject,
     isRealBackend: () => resolveChatBackendMode() === "real",
   };
@@ -2906,7 +2902,7 @@ async function resolveWorkspaceRepositoryProject(
 async function resolveManagedRuntimeProject(): Promise<ManagedRuntimeProjectRef> {
   const piDeckHome = resolvePiDeckHome(process.env);
   await fs.mkdir(piDeckHome, { recursive: true, mode: 0o700 });
-  const canonicalHome = await fs.realpath(piDeckHome);
+  const canonicalHome = await canonicalFilesystemPath(piDeckHome);
   const runtimeDirectory = path.join(piDeckHome, managedRuntimeDirectoryName);
 
   try {
@@ -2923,8 +2919,9 @@ async function resolveManagedRuntimeProject(): Promise<ManagedRuntimeProjectRef>
       "Pi Deck's managed runtime context is not a safe directory.",
     );
   }
-  const canonicalRuntimeDirectory = await fs.realpath(runtimeDirectory);
-  if (!isPathInside(canonicalRuntimeDirectory, canonicalHome)) {
+  const canonicalRuntimeDirectory =
+    await canonicalFilesystemPath(runtimeDirectory);
+  if (!isCanonicalPathInside(canonicalRuntimeDirectory, canonicalHome)) {
     throw new Error(
       "Pi Deck's managed runtime context resolved outside its application data directory.",
     );
@@ -2957,8 +2954,7 @@ async function addSessionToWorkspace(
   workspaceId: string,
   sessionFile: string,
 ): Promise<{ workspaceId: string; sessionFile: string }> {
-  const canonical =
-    (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
+  const canonical = await canonicalSessionFilePath(sessionFile);
   return withChatSessionMutation(
     canonical,
     "Finish the attached session before changing its workspace.",
@@ -3174,8 +3170,7 @@ async function resolveBootstrapProjectCwd(
     process.env.PI_DECK_PROJECT_CWD ??
     settings.projectCwd ??
     process.cwd();
-  const resolved = path.resolve(requested);
-  return (await safeRealpath(resolved)) ?? resolved;
+  return canonicalProjectPath(requested);
 }
 
 function nextTestProjectPickPath(): string | undefined {
@@ -5421,8 +5416,7 @@ async function resolveRealChatProject(
     process.env.PI_DECK_PROJECT_CWD ??
     settings.projectCwd ??
     process.cwd();
-  const resolved = path.resolve(requested);
-  const canonical = (await safeRealpath(resolved)) ?? resolved;
+  const canonical = await canonicalProjectPath(requested);
   // Bootstrap/settings/environment are main-process configuration, not a
   // renderer grant. Register once, then still validate the canonical root
   // before any model scan or worker creation.
@@ -7076,10 +7070,7 @@ async function forkChatSession(
               );
             }
             const returnedCanonical =
-              typeof returnedSessionFile === "string"
-                ? ((await safeRealpath(returnedSessionFile)) ??
-                  path.resolve(returnedSessionFile))
-                : undefined;
+              await canonicalSessionFilePath(returnedSessionFile);
             assertChatSessionAttachmentActive(attachmentGeneration);
             if (
               returnedCanonical !== forkSessionFile ||
@@ -7387,8 +7378,7 @@ async function attachRealResumeWorker(
         );
       }
       const returnedCanonical =
-        (await safeRealpath(returnedSessionFile)) ??
-        path.resolve(returnedSessionFile);
+        await canonicalSessionFilePath(returnedSessionFile);
       if (returnedCanonical !== canonicalSessionFile) {
         throw new Error(
           `Pi resume opened a different session. Requested ${canonicalSessionFile}, got ${returnedCanonical}.`,
@@ -7794,12 +7784,7 @@ async function safeRealpath(filePath: string): Promise<string | undefined> {
  * invalid paths retain their resolved key and are rejected by normal validation.
  */
 function canonicalSessionPathSync(filePath: string): string {
-  const resolved = path.resolve(filePath);
-  try {
-    return realpathSync.native(resolved);
-  } catch {
-    return resolved;
-  }
+  return canonicalSessionFilePathSync(filePath);
 }
 
 /** Capture every existing JSONL path before native Pi creates a fork target. */
@@ -8187,7 +8172,9 @@ async function prepareAttachmentDraft(
       ? "textFile"
       : "binaryFile";
   const outsideProject = Boolean(
-    projectRoot && canonicalPath && !isPathInside(canonicalPath, projectRoot),
+    projectRoot &&
+    canonicalPath &&
+    !isCanonicalPathInside(canonicalPath, projectRoot),
   );
   const stat = canonicalPath ? await statIfReadable(canonicalPath) : undefined;
   const warning = attachmentWarning({ outsideProject, kind, stat });
@@ -8320,14 +8307,6 @@ function isLikelyTextPath(extension: string): boolean {
   ]).has(extension);
 }
 
-function isPathInside(candidate: string, root: string): boolean {
-  const relative = path.relative(root, candidate);
-  return (
-    relative === "" ||
-    (!relative.startsWith("..") && !path.isAbsolute(relative))
-  );
-}
-
 app.on("before-quit", (event) => {
   if (
     isQuittingAfterChatWorkerCleanup ||
@@ -8413,8 +8392,7 @@ async function reconcileMultitaskRuntime(
   sessionFile: unknown,
 ): Promise<void> {
   if (typeof sessionFile !== "string") return;
-  const canonical =
-    (await safeRealpath(sessionFile)) ?? path.resolve(sessionFile);
+  const canonical = await canonicalSessionFilePath(sessionFile);
   chatRuntimeSessionFiles.set(runtimeId, canonical);
   const saved = taskSessionStateStore?.get(canonical);
   const savedSettings = taskSessionStateStore?.getSettings(canonical);

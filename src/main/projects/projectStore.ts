@@ -9,6 +9,10 @@ import type {
   ProjectRef,
 } from "../../shared/types.js";
 import type { DiagnosticsRecorder } from "../diagnostics/diagnostics.js";
+import {
+  canonicalProjectPath,
+  canonicalSessionFilePath,
+} from "../filesystemIdentity.js";
 
 const projectRecordSchema = z
   .object({
@@ -30,6 +34,7 @@ const projectSessionRefSchema = z
     sessionId: z.string().optional(),
     title: z.string().optional(),
     cwd: z.string().optional(),
+    canonicalCwd: z.string().optional(),
     preview: z.string().optional(),
     addedAtMs: z.number(),
     lastSeenAtMs: z.number(),
@@ -92,7 +97,14 @@ export class ProjectStore {
     await fs.mkdir(this.piDeckHome, { recursive: true, mode: 0o700 });
     try {
       const raw = await fs.readFile(this.storeFile, "utf8");
-      this.state = projectStoreFileSchema.parse(JSON.parse(raw));
+      const parsed = projectStoreFileSchema.parse(JSON.parse(raw));
+      this.state = await normalizeProjectStoreFilesystemIdentities(parsed);
+      if (JSON.stringify(this.state) !== JSON.stringify(parsed)) {
+        // Keep migrated identities dirty so the next normal store write makes
+        // them durable without turning a migration write failure into a
+        // corrupt-file recovery.
+        this.sessionRefsGeneration += 1;
+      }
     } catch (error) {
       if (!isMissingFile(error)) {
         const backup = `${this.storeFile}.corrupt-${Date.now()}`;
@@ -167,7 +179,7 @@ export class ProjectStore {
 
   async upsertAndActivateProject(rootPath: string): Promise<ProjectRef> {
     await this.loadIfNeeded();
-    const canonical = await canonicalOrResolved(rootPath);
+    const canonical = await canonicalProjectPath(rootPath);
     const now = Date.now();
     const existingIndex = this.state.projects.findIndex(
       (project) => project.id === canonical,
@@ -303,14 +315,13 @@ export class ProjectStore {
         Promise.all(
           validSummaries.map(async (summary) => ({
             summary,
-            sessionFile: await canonicalOrResolved(summary.sessionFile),
+            sessionFile: await canonicalSessionFilePath(summary.sessionFile),
+            canonicalCwd: summary.cwd
+              ? await canonicalProjectPath(summary.cwd)
+              : undefined,
           })),
         ),
-        Promise.all(
-          missingSessionFiles.map((sessionFile) =>
-            canonicalOrResolved(sessionFile),
-          ),
-        ),
+        Promise.all(missingSessionFiles.map(canonicalSessionFilePath)),
       ]);
 
     await this.loadIfNeeded();
@@ -324,7 +335,7 @@ export class ProjectStore {
     );
     let changed = false;
 
-    for (const { summary, sessionFile } of canonicalSummaries) {
+    for (const { summary, sessionFile, canonicalCwd } of canonicalSummaries) {
       const key = sessionRefKey(validProjectId, sessionFile);
       const index = indexes.get(key);
       const existing = index === undefined ? undefined : nextRefs[index];
@@ -334,6 +345,7 @@ export class ProjectStore {
         ...(summary.sessionId ? { sessionId: summary.sessionId } : {}),
         title: summary.title,
         ...(summary.cwd ? { cwd: summary.cwd } : {}),
+        ...(canonicalCwd ? { canonicalCwd } : {}),
         ...(summary.preview ? { preview: summary.preview } : {}),
         addedAtMs: existing?.addedAtMs ?? now,
         lastSeenAtMs: existing?.lastSeenAtMs ?? now,
@@ -404,7 +416,10 @@ export class ProjectStore {
     preview?: string;
   }): Promise<void> {
     await this.loadIfNeeded();
-    const sessionFile = await canonicalOrResolved(options.sessionFile);
+    const sessionFile = await canonicalSessionFilePath(options.sessionFile);
+    const canonicalCwd = options.cwd
+      ? await canonicalProjectPath(options.cwd)
+      : undefined;
     const now = Date.now();
     const index = this.state.sessionRefs.findIndex(
       (ref) =>
@@ -424,9 +439,14 @@ export class ProjectStore {
         existing?.title ??
         path.basename(sessionFile, ".jsonl"),
       ...(options.cwd
-        ? { cwd: options.cwd }
+        ? { cwd: options.cwd, canonicalCwd }
         : existing?.cwd
-          ? { cwd: existing.cwd }
+          ? {
+              cwd: existing.cwd,
+              ...(existing.canonicalCwd
+                ? { canonicalCwd: existing.canonicalCwd }
+                : {}),
+            }
           : {}),
       ...(options.preview
         ? { preview: options.preview }
@@ -497,7 +517,7 @@ export class ProjectStore {
     sessionFile: string,
   ): Promise<void> {
     await this.loadIfNeeded();
-    const canonical = await canonicalOrResolved(sessionFile);
+    const canonical = await canonicalSessionFilePath(sessionFile);
     const ref = this.state.sessionRefs.find(
       (item) => item.projectId === projectId && item.sessionFile === canonical,
     );
@@ -512,7 +532,7 @@ export class ProjectStore {
     sessionFile: string,
   ): Promise<void> {
     await this.loadIfNeeded();
-    const canonical = await canonicalOrResolved(sessionFile);
+    const canonical = await canonicalSessionFilePath(sessionFile);
     // Failed-fork compensation must not erase this reference from memory
     // until its removal is durable. Otherwise a later write can silently
     // resurrect it after callers have released their target reservation.
@@ -620,6 +640,7 @@ function sameSessionRefData(
     existing.sessionId === candidate.sessionId &&
     existing.title === candidate.title &&
     existing.cwd === candidate.cwd &&
+    existing.canonicalCwd === candidate.canonicalCwd &&
     existing.preview === candidate.preview &&
     existing.lastKnownUpdatedAtMs === candidate.lastKnownUpdatedAtMs &&
     existing.createdAtMs === candidate.createdAtMs &&
@@ -644,13 +665,32 @@ function displayNameFromPath(rootPath: string): string {
   return path.basename(rootPath) || rootPath;
 }
 
-async function canonicalOrResolved(filePath: string): Promise<string> {
-  const resolved = path.resolve(filePath);
-  try {
-    return await fs.realpath(resolved);
-  } catch {
-    return resolved;
+async function normalizeProjectStoreFilesystemIdentities(
+  state: ProjectStoreFile,
+): Promise<ProjectStoreFile> {
+  const normalizedRefs = await Promise.all(
+    state.sessionRefs.map(async (ref) => ({
+      ...ref,
+      sessionFile: await canonicalSessionFilePath(ref.sessionFile),
+      ...(ref.cwd
+        ? { canonicalCwd: await canonicalProjectPath(ref.cwd) }
+        : ref.canonicalCwd
+          ? { canonicalCwd: await canonicalProjectPath(ref.canonicalCwd) }
+          : {}),
+    })),
+  );
+  const refsByIdentity = new Map<string, ProjectSessionRef>();
+  for (const ref of normalizedRefs) {
+    const key = sessionRefKey(ref.projectId, ref.sessionFile);
+    const existing = refsByIdentity.get(key);
+    if (existing === undefined || ref.lastSeenAtMs > existing.lastSeenAtMs) {
+      refsByIdentity.set(key, ref);
+    }
   }
+  return projectStoreFileSchema.parse({
+    ...state,
+    sessionRefs: [...refsByIdentity.values()],
+  });
 }
 
 function isMissingFile(error: unknown): boolean {
