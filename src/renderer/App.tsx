@@ -88,6 +88,13 @@ import {
   shouldReconcileSession as shouldReconcileSessionInDomain,
 } from "./sessionRuntimeReconciliation.js";
 import {
+  activeSessionLifecycle,
+  inactiveSessionLifecycle,
+  resolveSessionLifecycle,
+  settleLifecycle,
+  transitionSessionLifecycle,
+} from "./sessionLifecycle.js";
+import {
   clampThinkingLevel,
   eventHasUsageMetadata,
   extractTextContent,
@@ -692,6 +699,7 @@ function activitySourceSessions(
     baseState: session.baseState,
     overlays: session.overlays,
     status: session.status,
+    lifecycle: resolveSessionLifecycle(session),
     ...(session.completedAtMs !== undefined
       ? { completedAtMs: session.completedAtMs }
       : {}),
@@ -3316,6 +3324,7 @@ export function App(): ReactElement {
           ? {
               ...item,
               isResuming: true,
+              lifecycle: activeSessionLifecycle(),
               status: "reconnecting",
               baseState: "attaching",
               subtitle: "Reconnecting · loading previous context…",
@@ -3452,6 +3461,11 @@ export function App(): ReactElement {
             ? appendDiagnostic(
                 {
                   ...item,
+                  lifecycle: settleLifecycle(
+                    resolveSessionLifecycle(item),
+                    "failed",
+                    Date.now(),
+                  ),
                   status: "error",
                   baseState: "error",
                   isResuming: false,
@@ -3573,6 +3587,7 @@ export function App(): ReactElement {
         session.id === draftSession.id
           ? {
               ...session,
+              lifecycle: activeSessionLifecycle(),
               status: "starting",
               baseState: "attaching",
               completedAtMs: undefined,
@@ -3762,6 +3777,11 @@ export function App(): ReactElement {
             ? appendDiagnostic(
                 {
                   ...session,
+                  lifecycle: settleLifecycle(
+                    resolveSessionLifecycle(session),
+                    "failed",
+                    Date.now(),
+                  ),
                   status: "error",
                   baseState: "error",
                   subtitle: "Error · unable to start Pi worker",
@@ -3808,6 +3828,7 @@ export function App(): ReactElement {
           session.id === runtimeId
             ? {
                 ...session,
+                lifecycle: activeSessionLifecycle(),
                 title: isPlaceholderSessionTitle(session.title)
                   ? summarizeTitle(prompt, 64)
                   : session.title,
@@ -4186,6 +4207,14 @@ export function App(): ReactElement {
                   ...item,
                   runtimeBacked: false,
                   resumeBacked: true,
+                  lifecycle:
+                    item.failureKind === "auth-required"
+                      ? settleLifecycle(
+                          resolveSessionLifecycle(item),
+                          "failed",
+                          Date.now(),
+                        )
+                      : inactiveSessionLifecycle,
                   status:
                     item.failureKind === "auth-required" ? "error" : "idle",
                   baseState:
@@ -4274,6 +4303,10 @@ export function App(): ReactElement {
         session.id === runtimeId
           ? {
               ...session,
+              lifecycle: transitionSessionLifecycle(
+                resolveSessionLifecycle(session),
+                { type: "abortRequested" },
+              ),
               status: "aborting",
               baseState: "working",
               subtitle: "Aborting · waiting for Pi confirmation",
@@ -4314,6 +4347,7 @@ export function App(): ReactElement {
             appendDiagnostic(
               {
                 ...session,
+                lifecycle: activeSessionLifecycle(),
                 status: "working",
                 baseState: "working",
                 subtitle: `Working · ${backendLabel(session)} confirmed by Pi`,
@@ -6881,6 +6915,11 @@ function resumedSessionForCurrentSavedRow(
       : {}),
     ...(authStillPending
       ? {
+          lifecycle: settleLifecycle(
+            resolveSessionLifecycle(resumed),
+            "failed",
+            Date.now(),
+          ),
           status: "error" as const,
           baseState: "error" as const,
           subtitle: "Error · OpenAI authentication verification pending",
@@ -6939,6 +6978,10 @@ function closeRuntimeInSessionState(
         ...session,
         runtimeBacked: false,
         resumeBacked: true,
+        lifecycle:
+          resolveSessionLifecycle(session).phase === "terminal"
+            ? resolveSessionLifecycle(session)
+            : inactiveSessionLifecycle,
         status: "idle" as const,
         baseState: "idle" as const,
         pendingExtensionUiRequests: [],

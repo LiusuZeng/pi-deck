@@ -23,6 +23,7 @@ type PromptScenario =
   | "compaction"
   | "retry"
   | "extension-ui"
+  | "extension-ui-terminal"
   | "error"
   | "delegate"
   | "routing"
@@ -47,6 +48,8 @@ interface FakeOptions {
   /** Shared marker makes fake auth expiry deterministic and recoverable. */
   openAiCodexAuthExpiredOnceFile?: string;
   dropCompletionEvents: boolean;
+  /** Emit final message_update but omit agent_end for reconciliation E2E. */
+  dropAgentEnd: boolean;
   extensionUiMethod: "select" | "confirm" | "input" | "editor";
   extensionUiAutoCompleteTimeoutMs: number;
   extraModel: boolean;
@@ -141,6 +144,7 @@ function parseOptions(argv: string[]): FakeOptions {
     promptScenario: "basic",
     openAiCodexAuthExpired: false,
     dropCompletionEvents: false,
+    dropAgentEnd: false,
     extensionUiMethod: "confirm",
     extensionUiAutoCompleteTimeoutMs: 5_000,
     extraModel: false,
@@ -205,6 +209,8 @@ function parseOptions(argv: string[]): FakeOptions {
       index += 1;
     } else if (arg === "--drop-completion-events") {
       options.dropCompletionEvents = true;
+    } else if (arg === "--drop-agent-end") {
+      options.dropAgentEnd = true;
     } else if (arg === "--extension-ui-method") {
       const method = argv[index + 1];
       if (
@@ -406,6 +412,7 @@ function isPromptScenario(value: string): value is PromptScenario {
     "compaction",
     "retry",
     "extension-ui",
+    "extension-ui-terminal",
     "error",
     "delegate",
     "routing",
@@ -1300,6 +1307,7 @@ class FakeRpcServer {
 
     const isExtensionUiScenario =
       this.options.promptScenario === "extension-ui" ||
+      this.options.promptScenario === "extension-ui-terminal" ||
       this.options.promptScenario === "tool-error-extension-ui" ||
       this.options.promptScenario === "extension-ui-error" ||
       this.options.promptScenario === "all";
@@ -1357,13 +1365,51 @@ class FakeRpcServer {
     }
     if (isExtensionUiScenario) {
       const id = "ext_fake_dialog_1";
+      const terminalBeforeResponse =
+        this.options.promptScenario === "extension-ui-terminal";
       const timer = setTimeout(() => {
         if (this.pendingExtensionUi?.id === id) {
           this.pendingExtensionUi = undefined;
-          this.completePrompt(assistantId, text);
+          if (!terminalBeforeResponse) this.completePrompt(assistantId, text);
         }
       }, this.options.extensionUiAutoCompleteTimeoutMs);
       this.pendingExtensionUi = { id, assistantId, promptText: text, timer };
+      if (terminalBeforeResponse) {
+        this.currentTimers.push(
+          setTimeout(
+            () => {
+              const assistantMessage: PiMessage = {
+                id: assistantId,
+                role: "assistant",
+                content: "Completed before extension acknowledgement.",
+                provider: this.currentProvider,
+                model: this.currentModel,
+                stopReason: "stop",
+                createdAt: Date.now(),
+              };
+              this.messages.push(assistantMessage);
+              this.appendPersistedMessage(assistantMessage);
+              this.agentActive = false;
+              this.write({
+                type: "message_update",
+                messageId: assistantId,
+                role: "assistant",
+                content: "Completed before extension acknowledgement.",
+                done: true,
+              });
+              this.write({
+                type: "agent_end",
+                runId: `run_${this.promptCounter}`,
+                status: "completed",
+                messages: [assistantMessage as unknown as JsonObject],
+                willRetry: false,
+              });
+              this.write({ type: "agent_settled" });
+            },
+            Math.max(1, this.options.streamDelayMs),
+          ),
+        );
+      }
       return;
     }
     this.completePrompt(assistantId, text, promptScenarioDelayMs);
@@ -1533,17 +1579,19 @@ class FakeRpcServer {
               content: accumulated,
               done: true,
             });
-            this.write({
-              type: "agent_end",
-              runId: `run_${this.promptCounter}`,
-              status: "completed",
-              ...(this.options.productionShaped
-                ? {
-                    messages: [assistantMessage as unknown as JsonObject],
-                    willRetry: false,
-                  }
-                : {}),
-            });
+            if (!this.options.dropAgentEnd) {
+              this.write({
+                type: "agent_end",
+                runId: `run_${this.promptCounter}`,
+                status: "completed",
+                ...(this.options.productionShaped
+                  ? {
+                      messages: [assistantMessage as unknown as JsonObject],
+                      willRetry: false,
+                    }
+                  : {}),
+              });
+            }
             // Pi consumes queued follow-ups as new user turns only after the
             // active turn ends. Persist that turn before the next settlement so
             // history probes exercise the real receipt boundary.
@@ -1599,7 +1647,9 @@ class FakeRpcServer {
       scenario === "all" ||
       (scenario === "tool-error-extension-ui" &&
         (target === "tool-error" || target === "extension-ui")) ||
-      (scenario === "extension-ui-error" && target === "extension-ui");
+      ((scenario === "extension-ui-error" ||
+        scenario === "extension-ui-terminal") &&
+        target === "extension-ui");
 
     if (this.options.taskSessionProgressFixture) {
       const delayMs = Math.max(1, this.options.streamDelayMs);
@@ -1886,9 +1936,15 @@ class FakeRpcServer {
     }
     clearTimeout(pending.timer);
     this.pendingExtensionUi = undefined;
-    // This fixture has already emitted its terminal provider error. Accepting
-    // the late dialog response must not manufacture a successful completion.
+    // These fixtures have already emitted their terminal event. Accepting the
+    // late dialog response must not manufacture another completion. The
+    // success fixture also emits one duplicate acknowledgement so renderer
+    // idempotence is exercised through real IPC.
     if (this.options.promptScenario === "extension-ui-error") return;
+    if (this.options.promptScenario === "extension-ui-terminal") {
+      this.write({ type: "extension_ui_response_sent", requestId: id });
+      return;
+    }
     this.completePrompt(pending.assistantId, pending.promptText);
   }
 

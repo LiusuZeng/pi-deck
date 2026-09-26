@@ -4,6 +4,11 @@ import {
   type SessionOverlays,
 } from "./sessionState.js";
 import type { FailureKind } from "./openaiCodexAuth.js";
+import {
+  isLifecycleActive,
+  resolveSessionLifecycle,
+  type SessionLifecycle,
+} from "./sessionLifecycle.js";
 
 export type ActivityStatus =
   | "needsAttention"
@@ -55,6 +60,7 @@ export interface ActivitySourceSession {
   overlays: SessionOverlays;
   status?: string;
   completedAtMs?: number;
+  lifecycle?: SessionLifecycle;
   lastError?: string;
   failureKind?: FailureKind;
   /** Unsaved composer/session draft; drafts are not activity items. */
@@ -224,12 +230,20 @@ export function classifyActivity(
   ) {
     return "needsAttention";
   }
-  if (source.baseState === "error") {
+  const lifecycle = resolveSessionLifecycle(source);
+  if (lifecycle.phase === "terminal" && lifecycle.outcome === "failed") {
     return "failed";
   }
   if (getQueuedCount(source.overlays) > 0) {
     return "queued";
   }
+  if (source.lifecycle !== undefined) {
+    if (isLifecycleActive(lifecycle)) return "inProgress";
+    if (lifecycle.phase === "terminal") return "completed";
+    return undefined;
+  }
+  // Legacy saved rows are normalized at App boundaries, but retain this
+  // compatibility path for persisted/test callers that predate lifecycle.
   if (isInProgress(source)) {
     return "inProgress";
   }
@@ -311,9 +325,16 @@ function normalizeActivity(source: ActivitySourceSession): ActivityItem[] {
     return [];
   }
   const sessionKey = source.sessionFile ?? source.id;
+  const lifecycle = resolveSessionLifecycle(source);
+  const lifecycleSettledAtMs =
+    lifecycle.phase === "terminal" ? lifecycle.settledAtMs : undefined;
   const completedAtMs =
     status === "completed"
-      ? normalizeActivityTimestamp(source.completedAtMs)
+      ? normalizeActivityTimestamp(
+          source.lifecycle === undefined
+            ? source.completedAtMs
+            : lifecycleSettledAtMs,
+        )
       : undefined;
   return [
     {

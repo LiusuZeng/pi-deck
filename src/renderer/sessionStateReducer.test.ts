@@ -146,6 +146,62 @@ describe("reduceSessionRuntimeEvent", () => {
     expect(cleared.overlays.needsUserInput).toBe(false);
   });
 
+  it.each(["extension_ui_response_sent", "extension_ui_request_timeout"])(
+    "keeps successful terminal lifecycle after a late %s",
+    (clearType) => {
+      const waitingAfterEnd = applyEvents([
+        { type: "agent_start" },
+        {
+          type: "extension_ui_request",
+          requestId: "ext-1",
+          method: "confirm",
+        },
+        { type: "agent_end", status: "completed" },
+      ]);
+      const cleared = reduceSessionRuntimeEvent(waitingAfterEnd, {
+        type: clearType,
+        requestId: "ext-1",
+      });
+
+      expect(cleared).toMatchObject({
+        baseState: "idle",
+        lifecycle: { phase: "terminal", outcome: "completed" },
+        overlays: { needsUserInput: false },
+      });
+      const duplicate = reduceSessionRuntimeEvent(cleared, {
+        type: clearType,
+        requestId: "ext-1",
+      });
+      expect(duplicate).toBe(cleared);
+    },
+  );
+
+  it("ignores unknown Extension UI clears for idle, failed, and completed state", () => {
+    const states = [
+      createInitialReducedSessionState(),
+      createInitialReducedSessionState({
+        baseState: "error",
+        lifecycle: { phase: "terminal", outcome: "failed", settledAtMs: 1 },
+      }),
+      createInitialReducedSessionState({
+        baseState: "idle",
+        lifecycle: {
+          phase: "terminal",
+          outcome: "completed",
+          settledAtMs: 1,
+        },
+      }),
+    ];
+    for (const state of states) {
+      expect(
+        reduceSessionRuntimeEvent(state, {
+          type: "extension_ui_response_sent",
+          requestId: "missing",
+        }),
+      ).toBe(state);
+    }
+  });
+
   it("keeps an unplanned worker exit terminal when a raced response acknowledgement arrives", () => {
     const exited = applyEvents([
       {

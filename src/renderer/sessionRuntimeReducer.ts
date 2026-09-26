@@ -19,6 +19,17 @@ import {
   type SessionOverlays,
 } from "./sessionState.js";
 import {
+  activeSessionLifecycle,
+  inactiveSessionLifecycle,
+  lifecycleBaseState,
+  lifecycleCompletedAtMs,
+  lifecycleSessionStatus,
+  resolveSessionLifecycle,
+  settleLifecycle,
+  transitionSessionLifecycle,
+  type SessionLifecycle,
+} from "./sessionLifecycle.js";
+import {
   extractTextContent,
   getMessageUsageFromEvent,
   summarizeUsageByMessage,
@@ -148,6 +159,8 @@ export interface SessionViewModel {
   authVerified?: boolean | undefined;
   archivedAtMs?: number;
   completedAtMs?: number | undefined;
+  /** Canonical turn state; presentation fields are projections of this value. */
+  lifecycle?: SessionLifecycle | undefined;
 }
 
 function timelineToolStatus(streaming: boolean): "running" | "success" {
@@ -304,12 +317,18 @@ export function reduceRuntimeEvent(
   session: SessionViewModel,
   event: ChatRuntimeEvent,
 ): SessionViewModel {
+  // Reducer callers outside App may replay a stale event directly. Runtime
+  // identity is part of the lifecycle contract, not just an App routing aid.
+  if (typeof event.runtimeId === "string" && event.runtimeId !== session.id) {
+    return session;
+  }
+
   // A dialog remains actionable until Pi acknowledges its response or the
   // request times out. Apply this projection after every event reduction so
   // concurrent tool/retry/terminal events cannot mask pending input.
-  return prioritizePendingExtensionUiRequest(
-    reduceRuntimeEventUnprioritized(session, event),
-  );
+  const reduced = reduceRuntimeEventUnprioritized(session, event);
+  if (reduced === session) return session;
+  return projectTerminalLifecycle(prioritizePendingExtensionUiRequest(reduced));
 }
 
 export function reduceRuntimeEventUnprioritized(
@@ -320,6 +339,10 @@ export function reduceRuntimeEventUnprioritized(
     case "agent_start":
       return {
         ...session,
+        lifecycle: transitionSessionLifecycle(
+          resolveSessionLifecycle(session),
+          { type: "turnStarted" },
+        ),
         completedAtMs: undefined,
         awaitingAgentEnd: false,
         status: "working",
@@ -380,6 +403,11 @@ export function reduceRuntimeEventUnprioritized(
       // runtime busy through backoff rather than exposing idle/send controls.
       return {
         ...session,
+        lifecycle: transitionSessionLifecycle(
+          resolveSessionLifecycle(session),
+          { type: "retryStarted" },
+        ),
+        completedAtMs: undefined,
         awaitingAgentEnd: false,
         status: session.status === "aborting" ? "aborting" : "working",
         baseState: "working",
@@ -409,8 +437,15 @@ export function reduceRuntimeEventUnprioritized(
       // does not emit another successful agent_end to repair this state.
       // Handle that terminal cancellation before generic retry failures.
       if (session.status === "aborting" && retryFailed) {
+        const lifecycle = settleLifecycle(
+          resolveSessionLifecycle(session),
+          session.failureKind === "auth-required" ? "failed" : "aborted",
+          Date.now(),
+        );
         return {
           ...session,
+          lifecycle,
+          completedAtMs: lifecycleCompletedAtMs(lifecycle),
           awaitingAgentEnd: false,
           providerErrorObserved:
             session.failureKind === "auth-required"
@@ -438,8 +473,17 @@ export function reduceRuntimeEventUnprioritized(
       }
 
       const retryError = getRuntimeEventErrorMessage(event);
+      const lifecycle = retryFailed
+        ? settleLifecycle(
+            resolveSessionLifecycle(session),
+            "failed",
+            Date.now(),
+          )
+        : activeSessionLifecycle();
       const nextSession: SessionViewModel = {
         ...session,
+        lifecycle,
+        completedAtMs: lifecycleCompletedAtMs(lifecycle),
         awaitingAgentEnd: retryFailed
           ? false
           : (session.awaitingAgentEnd ?? false),
@@ -563,6 +607,11 @@ export function reduceRuntimeEventUnprioritized(
       if (willRetry) {
         return {
           ...session,
+          lifecycle: transitionSessionLifecycle(
+            resolveSessionLifecycle(session),
+            { type: "retryStarted" },
+          ),
+          completedAtMs: undefined,
           awaitingAgentEnd: false,
           ...(usageByMessageId !== undefined ? { usageByMessageId } : {}),
           ...(usageByMessageId !== undefined
@@ -592,12 +641,21 @@ export function reduceRuntimeEventUnprioritized(
         };
       }
 
+      const settledAtMs = Date.now();
+      const lifecycle = settleLifecycle(
+        resolveSessionLifecycle(session),
+        endedWithError || authStillPending
+          ? "failed"
+          : status === "aborted"
+            ? "aborted"
+            : "completed",
+        settledAtMs,
+      );
       const nextSession: SessionViewModel = {
         ...session,
-        // A live authoritative, non-error terminal event supersedes any
-        // reconstructed durable completion timestamp for this session.
-        completedAtMs:
-          endedWithError || authStillPending ? undefined : Date.now(),
+        lifecycle,
+        // Keep the durable compatibility field projected from lifecycle.
+        completedAtMs: lifecycleCompletedAtMs(lifecycle),
         awaitingAgentEnd: false,
         ...(usageByMessageId !== undefined ? { usageByMessageId } : {}),
         ...(usageByMessageId !== undefined
@@ -682,8 +740,20 @@ export function reduceRuntimeEventUnprioritized(
       // resumable row rather than presenting a backend failure.
       const detachedSession = clearPendingExtensionUiRequests(session);
       if (intentional && session.sessionFile !== undefined) {
+        const lifecycle =
+          resolveSessionLifecycle(detachedSession).phase === "terminal"
+            ? resolveSessionLifecycle(detachedSession)
+            : detachedSession.failureKind === "auth-required"
+              ? settleLifecycle(
+                  resolveSessionLifecycle(detachedSession),
+                  "failed",
+                  Date.now(),
+                )
+              : inactiveSessionLifecycle;
         return {
           ...detachedSession,
+          lifecycle,
+          completedAtMs: lifecycleCompletedAtMs(lifecycle),
           status:
             detachedSession.failureKind === "auth-required" ? "error" : "idle",
           baseState:
@@ -703,9 +773,16 @@ export function reduceRuntimeEventUnprioritized(
       if (!session.runtimeBacked && session.resumeBacked === true) {
         return detachedSession;
       }
+      const lifecycle = settleLifecycle(
+        resolveSessionLifecycle(detachedSession),
+        "failed",
+        Date.now(),
+      );
       return appendDiagnostic(
         {
           ...detachedSession,
+          lifecycle,
+          completedAtMs: undefined,
           // Main detaches response ownership on every worker exit, so clear
           // queued dialogs before the pending-input priority projection runs.
           status: "error",
@@ -727,6 +804,59 @@ export function reduceRuntimeEventUnprioritized(
     default:
       return session;
   }
+}
+
+function projectTerminalLifecycle(session: SessionViewModel): SessionViewModel {
+  if (
+    session.lifecycle?.phase !== "terminal" ||
+    (session.pendingExtensionUiRequests?.length ?? 0) > 0
+  ) {
+    return session;
+  }
+  const lifecycle = session.lifecycle;
+  const status = lifecycleSessionStatus(lifecycle, false);
+  const baseState = lifecycleBaseState(lifecycle, false);
+  const completedAtMs = lifecycleCompletedAtMs(lifecycle);
+  const subtitle =
+    lifecycle.outcome === "failed"
+      ? session.failureKind === "auth-required"
+        ? "Error · OpenAI authentication verification pending"
+        : "Error · backend stream failed"
+      : lifecycle.outcome === "aborted"
+        ? "Idle · backend stream aborted"
+        : "Idle · backend stream complete";
+  if (
+    session.status === status &&
+    session.baseState === baseState &&
+    session.completedAtMs === completedAtMs &&
+    session.awaitingAgentEnd === false &&
+    session.workingStartedAtMs === undefined &&
+    session.subtitle === subtitle &&
+    !session.overlays.streaming &&
+    !session.overlays.toolRunning &&
+    !session.overlays.compacting &&
+    !session.overlays.retrying &&
+    !session.overlays.needsUserInput
+  ) {
+    return session;
+  }
+  return {
+    ...session,
+    status,
+    baseState,
+    completedAtMs,
+    awaitingAgentEnd: false,
+    workingStartedAtMs: undefined,
+    overlays: {
+      ...session.overlays,
+      streaming: false,
+      toolRunning: false,
+      compacting: false,
+      retrying: false,
+      needsUserInput: false,
+    },
+    subtitle,
+  };
 }
 
 function clearPendingExtensionUiRequests(
@@ -812,9 +942,14 @@ function reduceExtensionUiRequestEvent(
   )
     ? pending.map((item) => (item.id === request.id ? request : item))
     : [...pending, request];
+  const currentLifecycle = resolveSessionLifecycle(session);
 
   return {
     ...session,
+    lifecycle:
+      currentLifecycle.phase === "terminal"
+        ? currentLifecycle
+        : activeSessionLifecycle(),
     status: "waiting",
     baseState: "waitingForInput",
     overlays: { ...session.overlays, needsUserInput: true },
@@ -830,31 +965,39 @@ function clearExtensionUiRequest(
   requestId: string | undefined,
 ): SessionViewModel {
   const pending = session.pendingExtensionUiRequests ?? [];
-  const pendingExtensionUiRequests =
+  const matchedIndex =
     requestId === undefined
-      ? pending.slice(1)
-      : pending.filter((request) => request.id !== requestId);
+      ? pending.length > 0
+        ? 0
+        : -1
+      : pending.findIndex((request) => request.id === requestId);
+  // Unknown and duplicate acknowledgements are lifecycle no-ops. In
+  // particular, they cannot infer that an idle/terminal runtime is working.
+  if (matchedIndex < 0) return session;
+
+  const pendingExtensionUiRequests = pending.filter(
+    (_request, index) => index !== matchedIndex,
+  );
   const stillWaiting = pendingExtensionUiRequests.length > 0;
-  const terminalProviderFailure = session.providerErrorObserved === true;
+  const lifecycle = resolveSessionLifecycle(session);
+  const status = lifecycleSessionStatus(lifecycle, stillWaiting);
+  const baseState = lifecycleBaseState(lifecycle, stillWaiting);
   return {
     ...session,
-    status: stillWaiting
-      ? "waiting"
-      : terminalProviderFailure
-        ? "error"
-        : "working",
-    baseState: stillWaiting
-      ? "waitingForInput"
-      : terminalProviderFailure
-        ? "error"
-        : "working",
+    lifecycle,
+    status,
+    baseState,
     pendingExtensionUiRequests,
     overlays: { ...session.overlays, needsUserInput: stillWaiting },
     subtitle: stillWaiting
       ? "Waiting · extension input required"
-      : terminalProviderFailure
+      : lifecycle.phase === "terminal" && lifecycle.outcome === "failed"
         ? "Error · backend stream failed"
-        : `Working · ${backendLabel(session)} stream`,
+        : lifecycle.phase === "terminal"
+          ? lifecycle.outcome === "aborted"
+            ? "Idle · backend stream aborted"
+            : "Idle · backend stream complete"
+          : `Working · ${backendLabel(session)} stream`,
     updatedAt: "Now",
     updatedAtMs: Date.now(),
   };
@@ -1315,8 +1458,16 @@ function reduceMessageUpdate(
   // the provider error update that precedes a production agent_end.
   const stillWaitingForInput =
     (session.pendingExtensionUiRequests?.length ?? 0) > 0;
+  const currentLifecycle = resolveSessionLifecycle(session);
+  const lifecycle = isErrorUpdate
+    ? settleLifecycle(currentLifecycle, "failed", Date.now())
+    : currentLifecycle.phase === "terminal"
+      ? currentLifecycle
+      : activeSessionLifecycle();
   const nextSession: SessionViewModel = {
     ...session,
+    lifecycle,
+    completedAtMs: lifecycleCompletedAtMs(lifecycle),
     ...(usageByMessageId !== undefined ? { usageByMessageId } : {}),
     ...(usageStats !== undefined ? { usageStats } : {}),
     providerErrorObserved:

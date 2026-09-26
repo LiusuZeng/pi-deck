@@ -51,6 +51,59 @@ describe("buildActivityInbox", () => {
     );
   });
 
+  it.each([
+    [{ phase: "inactive" } as const, undefined],
+    [{ phase: "active" } as const, "inProgress"],
+    [{ phase: "aborting" } as const, "inProgress"],
+    [
+      { phase: "terminal", outcome: "completed", settledAtMs: 10 } as const,
+      "completed",
+    ],
+    [
+      { phase: "terminal", outcome: "aborted", settledAtMs: 11 } as const,
+      "completed",
+    ],
+    [
+      { phase: "terminal", outcome: "failed", settledAtMs: 12 } as const,
+      "failed",
+    ],
+  ])("classifies canonical lifecycle %o as %s", (lifecycle, expected) => {
+    expect(
+      classifyActivity(
+        source("canonical", {
+          lifecycle,
+          // Deliberately contradictory legacy fields prove lifecycle wins.
+          baseState: lifecycle.phase === "terminal" ? "working" : "idle",
+          completedAtMs: lifecycle.phase === "active" ? 999 : undefined,
+        }),
+      ),
+    ).toBe(expected);
+  });
+
+  it("keeps waiting and queued overlays above the canonical base lifecycle", () => {
+    const completed = {
+      phase: "terminal",
+      outcome: "completed",
+      settledAtMs: 10,
+    } as const;
+    expect(
+      classifyActivity(
+        source("waiting", {
+          lifecycle: completed,
+          overlays: overlays({ needsUserInput: true }),
+        }),
+      ),
+    ).toBe("needsAttention");
+    expect(
+      classifyActivity(
+        source("queued", {
+          lifecycle: completed,
+          overlays: overlays({ piQueuedFollowUpCount: 1 }),
+        }),
+      ),
+    ).toBe("queued");
+  });
+
   it("classifies operational states into one tagged status with its action label", () => {
     const inbox = buildActivityInbox([
       source("attention", { baseState: "waitingForInput" }),
