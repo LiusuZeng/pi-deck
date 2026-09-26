@@ -167,8 +167,7 @@ describe("sessionRuntimeReducer", () => {
       type: "tool_execution_end",
       runtimeId: "runtime-1",
       toolCallId: "delegation-cancelled",
-      // The generic tool failure parser intentionally does not treat aborted
-      // as a failure, but the delegated parent did not succeed.
+      // A cancelled delegated parent must never render as successful work.
       status: "aborted",
       result: {
         details: {
@@ -568,17 +567,95 @@ describe("sessionRuntimeReducer", () => {
     });
 
     const aborted = reduceRuntimeEvent(
-      { ...session(), status: "aborting", lifecycle: { phase: "aborting" } },
+      {
+        ...session(),
+        status: "aborting",
+        lifecycle: { phase: "aborting" },
+        overlays: { ...emptyOverlays, streaming: true, toolRunning: true },
+        timeline: [
+          {
+            id: "assistant-aborted",
+            kind: "assistant",
+            content: "Partial response",
+            createdAt: "10:00",
+            streaming: true,
+          },
+        ],
+      },
       {
         type: "agent_end",
         runtimeId: "runtime-1",
-        status: "aborted",
+        messages: [],
+        willRetry: false,
       } as any,
     );
     expect(aborted).toMatchObject({
       status: "idle",
       lifecycle: { phase: "terminal", outcome: "aborted" },
       completedAtMs: 1_000,
+      overlays: { streaming: false, toolRunning: false, retrying: false },
+      timeline: [{ id: "assistant-aborted", streaming: false }],
+    });
+
+    const failedDespiteAbort = reduceRuntimeEvent(
+      {
+        ...session(),
+        status: "aborting",
+        lifecycle: { phase: "aborting" },
+      },
+      {
+        type: "agent_end",
+        runtimeId: "runtime-1",
+        error: "Provider failed while aborting.",
+        messages: [{ role: "assistant", stopReason: "aborted" }],
+        willRetry: false,
+      } as any,
+    );
+    expect(failedDespiteAbort).toMatchObject({
+      status: "error",
+      lifecycle: { phase: "terminal", outcome: "failed" },
+    });
+  });
+
+  it("preserves usage while a real-shaped abort leaves id-less user evidence for snapshot refresh", () => {
+    const intervention = markInterventionQueued(
+      createInterventionTimelineItem({
+        id: "steer-aborted",
+        interventionKind: "steer",
+        content: "Stop after this change",
+        createdAt: "10:00",
+      }),
+    );
+    const aborted = reduceRuntimeEvent(
+      {
+        ...session(),
+        status: "working",
+        baseState: "working",
+        overlays: { ...emptyOverlays, streaming: true },
+        timeline: [intervention],
+      },
+      {
+        type: "agent_end",
+        runtimeId: "runtime-1",
+        messages: [
+          { role: "user", content: "Stop after this change" },
+          {
+            role: "assistant",
+            stopReason: "aborted",
+            errorMessage: "Request aborted by user.",
+            usage: { input: 21, output: 3, cacheRead: 2 },
+          },
+        ],
+        willRetry: false,
+      } as any,
+    );
+
+    expect(aborted).toMatchObject({
+      lifecycle: { phase: "terminal", outcome: "aborted" },
+      status: "idle",
+      overlays: { streaming: false },
+      usageStats: { inputTokens: 21, outputTokens: 3, cacheReadTokens: 2 },
+      timeline: [{ id: "steer-aborted", status: "queued" }],
     });
   });
 

@@ -71,16 +71,17 @@ async function launch(
   return { app, page };
 }
 
-test("queued steering stays visible across navigation and becomes consumed only from durable history", async () => {
+test("terminal refresh consumes an id-less intervention after a pre-persistence queue snapshot", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-intervention-evidence-"),
   );
+  const traceFile = path.join(root, "intervention-race.log");
   const launched = await launch(
     interventionEnv(root, [
-      "--stream-delay-ms",
-      "700",
-      "--consume-steering-after-ms",
-      "2200",
+      "--intervention-snapshot-race",
+      "--fixture-trace-file",
+      traceFile,
+      "--production-shaped",
     ]),
   );
   try {
@@ -96,48 +97,37 @@ test("queued steering stays visible across navigation and becomes consumed only 
     const intervention = page.locator('[data-intervention-kind="steer"]', {
       hasText: instruction,
     });
-    await expect(intervention).toHaveAttribute(
-      "data-intervention-status",
-      "queued",
-    );
-    await expect(intervention).toHaveAccessibleName("Steering queued");
-    await expect(
-      intervention.getByText(instruction, { exact: true }),
-    ).toBeVisible();
-    await expect(
-      page
-        .getByLabel("Sessions", { exact: true })
-        .locator(".session-item", {
-          hasText: "start intervention evidence fixture",
-        })
-        .getByRole("img", { name: /Steer 1/ }),
-    ).toBeVisible();
 
-    await page
-      .getByLabel("Sessions", { exact: true })
-      .getByRole("button", { name: "New session", exact: true })
-      .click();
-    await expect(intervention).toHaveCount(0);
-    await page
-      .getByLabel("Sessions", { exact: true })
-      .locator(".session-item", {
-        hasText: "start intervention evidence fixture",
-      })
-      .click();
-    await expect(
-      intervention.getByText(instruction, { exact: true }),
-    ).toBeVisible();
-
+    // The fixture advances only when App requests get_messages: queued
+    // snapshot -> queue removal -> stale pre-persistence snapshot -> terminal.
+    // Reaching consumed therefore proves the post-terminal refresh observed
+    // the later durable id-less user row without a timing delay.
     await expect(intervention).toHaveAttribute(
       "data-intervention-status",
       "consumed",
     );
     await expect(intervention).toHaveAccessibleName("Steering consumed by Pi");
     await expect(
+      intervention.getByText(instruction, { exact: true }),
+    ).toBeVisible();
+    await expect(
       page.locator('[data-intervention-kind="steer"]', {
         hasText: instruction,
       }),
     ).toHaveCount(1);
+    await expect(page.getByRole("button", { name: "Abort" })).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Send", exact: true }),
+    ).toBeVisible();
+
+    expect(fs.readFileSync(traceFile, "utf8").trim().split("\n")).toEqual([
+      "intervention-race:queue-added",
+      "intervention-race:queued-snapshot",
+      "intervention-race:queue-removed",
+      "intervention-race:pre-persistence-snapshot",
+      "intervention-race:persisted-idless-user",
+      "intervention-race:terminal",
+    ]);
   } finally {
     await launched.app.close().catch(() => undefined);
     fs.rmSync(root, { recursive: true, force: true });

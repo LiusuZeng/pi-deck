@@ -84,7 +84,8 @@ export interface PiState {
 }
 
 export interface PiMessage {
-  id: string;
+  /** Production get_messages rows, especially queued user turns, may omit ids. */
+  id?: string;
   role: "system" | "user" | "assistant" | "tool" | string;
   /** Provider-native content is retained; consumers share text extraction. */
   content?: PiMessageContent;

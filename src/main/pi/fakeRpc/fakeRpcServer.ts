@@ -66,6 +66,11 @@ interface FakeOptions {
   followUpReceiptSignalFile?: string;
   /** Test-only delay before a steering item becomes durable history. */
   consumeSteeringAfterMs: number;
+  /**
+   * Queue removal is followed by an intentionally stale get_messages result;
+   * only the terminal refresh can observe the persisted id-less user turn.
+   */
+  interventionSnapshotRace: boolean;
   exitAfterFollowUpReceipt: boolean;
   /** Model an already-active parent when this test barrier file exists. */
   activeOnStartMs: number;
@@ -159,6 +164,7 @@ function parseOptions(argv: string[]): FakeOptions {
     noSession: false,
     failTaskPromptRecordWhileActive: false,
     consumeSteeringAfterMs: 0,
+    interventionSnapshotRace: false,
     exitAfterFollowUpReceipt: false,
     activeOnStartMs: 0,
     clearActiveOnStartEnabledFileAfterFollowUpReceipt: false,
@@ -270,6 +276,8 @@ function parseOptions(argv: string[]): FakeOptions {
         options.consumeSteeringAfterMs = delay;
       }
       index += 1;
+    } else if (arg === "--intervention-snapshot-race") {
+      options.interventionSnapshotRace = true;
     } else if (arg === "--exit-after-follow-up-receipt") {
       options.exitAfterFollowUpReceipt = true;
     } else if (arg === "--active-on-start-ms") {
@@ -510,6 +518,12 @@ class FakeRpcServer {
     | undefined;
   private readonly steering: string[] = [];
   private readonly followUp: string[] = [];
+  private interventionSnapshotRaceStage:
+    | "awaiting-queued-snapshot"
+    | "awaiting-removed-snapshot"
+    | "complete"
+    | undefined;
+  private interventionSnapshotRaceText: string | undefined;
 
   private traceFixture(event: string): void {
     const traceFile = this.options.fixtureTraceFile;
@@ -841,7 +855,7 @@ class FakeRpcServer {
         this.sessionFile,
         `${JSON.stringify({
           type: "message",
-          id: `record_${message.id}`,
+          id: `record_${message.id ?? `${message.role}_${this.messages.length}`}`,
           timestamp: new Date(
             typeof message.createdAt === "number"
               ? message.createdAt
@@ -962,8 +976,15 @@ class FakeRpcServer {
             `${this.sessionFile}\n`,
           );
         }
-        const respond = () =>
-          this.respond(command.id, name, { messages: this.messages });
+        // Capture history before crossing the test barrier. The intervention
+        // race fixture mutates durable history immediately after writing this
+        // response, matching a get_messages read that began before Pi's async
+        // message_start persistence finished.
+        const messages = [...this.messages];
+        const respond = () => {
+          this.respond(command.id, name, { messages });
+          this.advanceInterventionSnapshotRaceAfterSnapshot();
+        };
         const delay =
           this.options.forkSourceFile !== undefined &&
           this.options.forkGetMessagesDelayMs > 0
@@ -1431,6 +1452,10 @@ class FakeRpcServer {
       }
       return;
     }
+    // This fixture's progress is driven entirely by get_messages requests:
+    // no timer can accidentally make the parent terminal before the explicit
+    // pre-persistence snapshot barrier has been crossed.
+    if (this.options.interventionSnapshotRace) return;
     this.completePrompt(assistantId, text, promptScenarioDelayMs);
   }
 
@@ -2167,6 +2192,12 @@ class FakeRpcServer {
     }
     this.respond(command.id, kind);
     this.emitQueueUpdate();
+    if (kind === "steer" && this.options.interventionSnapshotRace) {
+      this.interventionSnapshotRaceText = message;
+      this.interventionSnapshotRaceStage = "awaiting-queued-snapshot";
+      this.traceFixture("intervention-race:queue-added");
+      return;
+    }
     if (kind === "steer" && this.options.consumeSteeringAfterMs > 0) {
       this.currentTimers.push(
         setTimeout(
@@ -2175,6 +2206,52 @@ class FakeRpcServer {
         ),
       );
     }
+  }
+
+  private advanceInterventionSnapshotRaceAfterSnapshot(): void {
+    if (this.interventionSnapshotRaceStage === "awaiting-queued-snapshot") {
+      this.traceFixture("intervention-race:queued-snapshot");
+      this.steering.shift();
+      this.interventionSnapshotRaceStage = "awaiting-removed-snapshot";
+      this.emitQueueUpdate();
+      this.traceFixture("intervention-race:queue-removed");
+      return;
+    }
+    if (this.interventionSnapshotRaceStage !== "awaiting-removed-snapshot") {
+      return;
+    }
+
+    this.traceFixture("intervention-race:pre-persistence-snapshot");
+    this.interventionSnapshotRaceStage = "complete";
+    const text = this.interventionSnapshotRaceText ?? "";
+    const userMessage = {
+      role: "user",
+      content: text,
+      createdAt: Date.now(),
+    } satisfies PiMessage;
+    this.messages.push(userMessage);
+    this.appendPersistedMessage(userMessage);
+    this.traceFixture("intervention-race:persisted-idless-user");
+
+    const assistantMessage: PiMessage = {
+      id: `msg_assistant_${this.promptCounter}`,
+      role: "assistant",
+      content: "Applied the steering instruction.",
+      provider: this.currentProvider,
+      model: this.currentModel,
+      stopReason: "stop",
+      createdAt: Date.now(),
+    };
+    this.messages.push(assistantMessage);
+    this.appendPersistedMessage(assistantMessage);
+    this.agentActive = false;
+    this.write({
+      type: "agent_end",
+      messages: [assistantMessage as unknown as JsonObject],
+      willRetry: false,
+    });
+    this.write({ type: "agent_settled" });
+    this.traceFixture("intervention-race:terminal");
   }
 
   private consumeQueuedSteering(): void {

@@ -1839,7 +1839,12 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
       willRetry: false,
     } as any);
 
-    expect(afterEnd.status).toBe("idle");
+    expect(afterEnd).toMatchObject({
+      status: "idle",
+      baseState: "idle",
+      lifecycle: { phase: "terminal", outcome: "aborted" },
+      overlays: { streaming: false, toolRunning: false, retrying: false },
+    });
     expect(runtimeErrorDiagnostics(afterEnd)).toEqual([]);
   });
 
@@ -4094,6 +4099,26 @@ describe("renderer message_update reduction", () => {
 
     expect(next.timeline).toEqual(current.timeline);
     expect(next.usageStats).toMatchObject({ inputTokens: 10, outputTokens: 5 });
+  });
+
+  it("assigns stable normalized ids to production snapshot messages without ids", () => {
+    const messages = [
+      { role: "system", content: "System" },
+      { role: "user", content: "Durable intervention" },
+      { role: "assistant", content: "Done", stopReason: "stop" },
+    ] as any;
+
+    const first = __rendererTestHooks.timelineFromMessages(messages);
+    const refreshed = __rendererTestHooks.timelineFromMessages(messages);
+
+    expect(first.map((item) => item.id)).toEqual([
+      "snapshot-message-0",
+      "snapshot-message-1",
+      "snapshot-message-2",
+    ]);
+    expect(refreshed.map((item) => item.id)).toEqual(
+      first.map((item) => item.id),
+    );
   });
 
   it("preserves title and transcript across metadata-only model and thinking snapshots", () => {

@@ -1736,12 +1736,19 @@ export function App(): ReactElement {
             // actually present.
             void refreshInterventionTranscript(event.runtimeId);
           }
-          // agent_end is a synchronous buffer barrier, so its preceding
+          // A queue_update snapshot can race Pi's asynchronous persistence:
+          // the queue is already empty while get_messages still lacks the user
+          // turn. Re-read durable history after the terminal persistence
+          // boundary. Stable snapshot message ids make the agent_end and
+          // agent_settled refreshes idempotent.
+          //
+          // agent_end is also a synchronous buffer barrier, so its preceding
           // message/tool updates have already reached the reducer here. Always
-          // follow it with compact runtime-status/session-stats reconciliation:
-          // current Pi reports authoritative usage via get_session_stats, not
-          // get_state or every terminal event shape.
+          // follow terminal events with compact runtime-status/session-stats
+          // reconciliation because current Pi reports authoritative usage via
+          // get_session_stats, not get_state or every terminal event shape.
           if (event.type === "agent_end" || event.type === "agent_settled") {
+            void refreshInterventionTranscript(event.runtimeId);
             void refreshRuntimeUsage(event.runtimeId);
           }
         });
@@ -8062,6 +8069,16 @@ function timelineAttachmentsFromDrafts(
   return timelineAttachments.length > 0 ? timelineAttachments : undefined;
 }
 
+function normalizedSnapshotMessageId(
+  message: ChatMessage,
+  index: number,
+): string {
+  // Production get_messages user rows commonly omit an id. Their history
+  // position is stable because Pi returns the append-only transcript in order,
+  // so this fallback remains identical across terminal refreshes.
+  return message.id?.trim() || `snapshot-message-${index}`;
+}
+
 function timelineFromMessages(messages: ChatMessage[]): TimelineItem[] {
   const timeline = messages.flatMap((message, index): TimelineItem[] => {
     // Real Pi persists and returns content parts (for example,
@@ -8077,7 +8094,7 @@ function timelineFromMessages(messages: ChatMessage[]): TimelineItem[] {
           ? message.timestamp
           : undefined;
     const createdAt = formatMessageTime(timestamp);
-    const id = message.id ?? `message-${index}`;
+    const id = normalizedSnapshotMessageId(message, index);
 
     if (message.role === "user") {
       const attachments = timelineAttachmentsFromMessage(message, id);
@@ -12922,4 +12939,6 @@ export const __rendererTestHooks = {
   activityStepSummary,
   toolTimelineItemFromRuntimeEvent,
   toolDetailSectionsFromRuntimeEvent,
+  normalizedSnapshotMessageId,
+  timelineFromMessages,
 };

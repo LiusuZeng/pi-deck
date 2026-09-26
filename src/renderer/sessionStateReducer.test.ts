@@ -91,6 +91,8 @@ describe("reduceSessionRuntimeEvent", () => {
   it("recognizes direct and rendered nested tool failure forms", () => {
     const failures: RuntimeEventLike[] = [
       { type: "tool_execution_end", status: "failed" },
+      { type: "tool_execution_end", status: "aborted" },
+      { type: "tool_execution_end", status: "cancelled" },
       { type: "tool_execution_end", exit_code: 1 },
       { type: "tool_execution_end", output: { status: "error" } },
       { type: "tool_execution_end", output: { error: "command failed" } },
@@ -351,6 +353,89 @@ describe("reduceSessionRuntimeEvent", () => {
       piQueuedSteeringCount: 1,
       piQueuedFollowUpCount: 2,
       streaming: true,
+    });
+  });
+
+  it("classifies a production-shaped nested assistant abort and clears transient work", () => {
+    const aborted = applyEvents([
+      { type: "agent_start" },
+      { type: "message_update", done: false },
+      {
+        type: "tool_execution_start",
+        toolCallId: "delegated-1",
+        name: "subagent",
+      },
+      {
+        type: "tool_execution_end",
+        toolCallId: "delegated-1",
+        name: "subagent",
+        status: "aborted",
+        result: {
+          details: {
+            results: [{ status: "cancelled", stopReason: "aborted" }],
+          },
+        },
+      },
+      {
+        type: "agent_end",
+        messages: [
+          {
+            role: "assistant",
+            stopReason: "aborted",
+            errorMessage: "Request aborted by user.",
+          },
+        ],
+        willRetry: false,
+      },
+    ]);
+
+    expect(aborted).toMatchObject({
+      baseState: "idle",
+      lifecycle: { phase: "terminal", outcome: "aborted" },
+      overlays: {
+        streaming: false,
+        toolRunning: false,
+        retrying: false,
+      },
+      toolCards: { "delegated-1": { status: "error" } },
+    });
+  });
+
+  it("honors local abort intent when a sparse agent_end has no status", () => {
+    const aborting = createInitialReducedSessionState({
+      baseState: "working",
+      lifecycle: { phase: "aborting" },
+      overlays: { streaming: true },
+    });
+    const aborted = reduceSessionRuntimeEvent(aborting, {
+      type: "agent_end",
+      messages: [],
+      willRetry: false,
+    });
+
+    expect(aborted).toMatchObject({
+      baseState: "idle",
+      lifecycle: { phase: "terminal", outcome: "aborted" },
+      overlays: { streaming: false },
+    });
+  });
+
+  it("keeps failure evidence authoritative over nested abort evidence", () => {
+    const failed = applyEvents([
+      { type: "agent_start" },
+      {
+        type: "agent_end",
+        status: "aborted",
+        error: "Provider failed while aborting.",
+        messages: [{ role: "assistant", stopReason: "aborted" }],
+        willRetry: false,
+      },
+    ]);
+
+    expect(failed).toMatchObject({
+      baseState: "error",
+      lifecycle: { phase: "terminal", outcome: "failed" },
+      terminalProviderErrorObserved: true,
     });
   });
 

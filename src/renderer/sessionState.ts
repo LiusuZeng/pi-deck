@@ -497,6 +497,8 @@ function isFailedToolExecutionRecord(record: RuntimeEventLike): boolean {
     getBoolean(record, "isError") === true ||
     status === "error" ||
     status === "failed" ||
+    status === "aborted" ||
+    status === "cancelled" ||
     hasNonZeroToolExitCode(record) ||
     hasToolError(record)
   );
@@ -677,11 +679,15 @@ function reduceAgentEndEvent(
     );
   }
 
+  const aborted = hasAgentEndAbortEvidence(
+    event,
+    state.lifecycle.phase === "aborting",
+  );
   const lifecycle = settleLifecycle(
     state.lifecycle,
     terminalProviderErrorObserved || authStillPending
       ? "failed"
-      : getString(event, "status") === "aborted"
+      : aborted
         ? "aborted"
         : "completed",
     Date.now(),
@@ -791,6 +797,23 @@ function getErrorMessage(
     getString(record, "error") ??
     getString(getRecord(record, "error"), "errorMessage") ??
     getString(getRecord(record, "error"), "message")
+  );
+}
+
+/**
+ * Production Pi reports terminal aborts on the final assistant message rather
+ * than on agent_end itself. Keep the legacy status and local abort-intent
+ * fallbacks for older recordings and turns whose terminal payload is sparse.
+ * Callers must apply provider-failure evidence before this classification.
+ */
+export function hasAgentEndAbortEvidence(
+  event: RuntimeEventLike,
+  currentTurnIsAborting = false,
+): boolean {
+  return (
+    getString(event, "status") === "aborted" ||
+    getString(getFinalAssistantMessage(event), "stopReason") === "aborted" ||
+    currentTurnIsAborting
   );
 }
 

@@ -25,6 +25,7 @@ import {
   getThinkingUpdateContent,
 } from "./runtimeMessageProjection.js";
 import {
+  hasAgentEndAbortEvidence,
   isToolExecutionFailure,
   type BaseSessionState,
   type SessionOverlays,
@@ -616,7 +617,10 @@ export function reduceRuntimeEventUnprioritized(
       if (session.lifecycle?.phase === "terminal") {
         return reduceLateTerminalAgentEnd(session, event);
       }
-      const status = getString(event, "status");
+      const currentTurnIsAborting =
+        resolveSessionLifecycle(session).phase === "aborting" ||
+        session.status === "aborting";
+      const aborted = hasAgentEndAbortEvidence(event, currentTurnIsAborting);
       const willRetry = getBoolean(event, "willRetry") === true;
       const errorMessage = getRuntimeEventErrorMessage(event);
       // Production Pi sends agent_end({ messages, willRetry }) without the
@@ -706,7 +710,7 @@ export function reduceRuntimeEventUnprioritized(
         session.lifecycle ?? activeSessionLifecycle(runtimeEventTurnId(event)),
         endedWithError || authStillPending
           ? "failed"
-          : status === "aborted"
+          : aborted
             ? "aborted"
             : "completed",
         settledAtMs,
@@ -768,14 +772,14 @@ export function reduceRuntimeEventUnprioritized(
             ? "Error · backend stream failed"
             : authStillPending
               ? "Error · OpenAI authentication verification pending"
-              : status === "aborted"
+              : aborted
                 ? "Idle · backend stream aborted"
                 : "Idle · backend stream complete",
         workingStartedAtMs: undefined,
         retryPrompt: endedWithError ? session.retryPrompt : undefined,
         lastRuntimeEventLabel: endedWithError
           ? "Pi reported an error"
-          : status === "aborted"
+          : aborted
             ? "Pi aborted the turn"
             : "Pi completed the turn",
         updatedAt: "Now",
@@ -1317,8 +1321,9 @@ export function toolTimelineItemFromRuntimeEvent(
     id,
     kind: "tool",
     title,
-    // Cancellation is not a successful tool result even when the generic
-    // failure parser does not classify statuses such as "aborted" as errors.
+    // Delegated cancellation is never a successful tool result. Keep this
+    // projection guard even though the generic parser handles known statuses,
+    // because nested delegated child evidence can also mark the parent.
     status:
       status === "success" && delegatedStatus?.tone === "error"
         ? "error"

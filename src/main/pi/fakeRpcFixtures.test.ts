@@ -434,6 +434,84 @@ test("fake RPC accepts exact steer and follow_up commands and emits full queues"
   }
 });
 
+test("fake RPC exposes the intervention persistence race through get_messages barriers", async () => {
+  const directory = tempDir("pi-deck-fake-intervention-race-");
+  const traceFile = path.join(directory, "trace.log");
+  const client = spawnFakeRpc([
+    "--intervention-snapshot-race",
+    "--fixture-trace-file",
+    traceFile,
+  ]);
+  try {
+    await client.request("prompt", { message: "active parent" });
+    const queuedEvent = waitForEvents(client, (events) =>
+      events.some(
+        (event) =>
+          event.type === "queue_update" &&
+          ((event as JsonObject).steering as unknown[])?.length === 1,
+      ),
+    );
+    await client.request("steer", { message: "durable id-less steering" });
+    await queuedEvent;
+
+    const removedEvent = waitForEvents(client, (events) =>
+      events.some(
+        (event) =>
+          event.type === "queue_update" &&
+          ((event as JsonObject).steering as unknown[])?.length === 0,
+      ),
+    );
+    const queuedSnapshot = (await client.request("get_messages")) as {
+      messages: Array<{ role?: string; content?: string; id?: string }>;
+    };
+    expect(queuedSnapshot.messages).not.toContainEqual(
+      expect.objectContaining({ content: "durable id-less steering" }),
+    );
+    await removedEvent;
+
+    const terminal = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "agent_settled"),
+    );
+    const prePersistenceSnapshot = (await client.request("get_messages")) as {
+      messages: Array<{ role?: string; content?: string; id?: string }>;
+    };
+    expect(prePersistenceSnapshot.messages).not.toContainEqual(
+      expect.objectContaining({ content: "durable id-less steering" }),
+    );
+    const terminalEvents = await terminal;
+    const agentEnd = terminalEvents.find(
+      (event) => event.type === "agent_end",
+    ) as JsonObject;
+    expect(agentEnd.status).toBeUndefined();
+    expect(agentEnd.willRetry).toBe(false);
+
+    const durableSnapshot = (await client.request("get_messages")) as {
+      messages: Array<{ role?: string; content?: string; id?: string }>;
+    };
+    expect(durableSnapshot.messages).toContainEqual({
+      role: "user",
+      content: "durable id-less steering",
+      createdAt: expect.any(Number),
+    });
+    expect(
+      durableSnapshot.messages.find(
+        (message) => message.content === "durable id-less steering",
+      )?.id,
+    ).toBeUndefined();
+    expect(fs.readFileSync(traceFile, "utf8").trim().split("\n")).toEqual([
+      "intervention-race:queue-added",
+      "intervention-race:queued-snapshot",
+      "intervention-race:queue-removed",
+      "intervention-race:pre-persistence-snapshot",
+      "intervention-race:persisted-idless-user",
+      "intervention-race:terminal",
+    ]);
+  } finally {
+    client.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("fake RPC clears an active-parent crash barrier after its durable follow_up", async () => {
   const directory = tempDir("pi-deck-fake-active-parent-once-");
   const barrier = path.join(directory, "activate-parent");
