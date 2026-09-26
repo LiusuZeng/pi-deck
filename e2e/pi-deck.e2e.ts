@@ -11391,12 +11391,17 @@ test.describe("task-session routing acceptance", () => {
       recovered = await launchPiDeck(env);
       await expectHealthyPreload(recovered.page);
       await expectAllWorkLaunch(recovered.page);
+      const resumeOutcome = recovered.page.locator(".ui-status-message");
+      // Clicking the saved row starts asynchronous attachment. Preload being
+      // ready does not prove that a runtime exists for getSnapshot yet.
+      await expect(resumeOutcome).not.toHaveText("Resumed saved Pi session.");
       await recovered.page
         .getByRole("button", {
           name: `Session: ${bootstrapPrompt}`,
           exact: true,
         })
         .click();
+      await expect(resumeOutcome).toHaveText("Resumed saved Pi session.");
       await expect
         .poll(
           () =>
