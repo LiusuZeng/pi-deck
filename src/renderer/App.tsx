@@ -583,6 +583,9 @@ function activitySemanticLabel(item: ActivityTimelineItem): string {
       ? "Reasoning about the task"
       : "Reasoned about the task";
   }
+  if (item.delegatedStatus !== undefined) {
+    return item.delegatedStatus.label;
+  }
 
   const title = item.title.trim();
   if (title.length === 0 || looksSerialized(title)) {
@@ -613,6 +616,9 @@ function activityStepLabel(item: ActivityTimelineItem): string {
   if (item.kind === "thinking") {
     return item.streaming === true ? "Thinking…" : "Thought process";
   }
+  if (item.delegatedStatus !== undefined) {
+    return item.delegatedStatus.label;
+  }
 
   const title = item.title.trim();
   if (title.length === 0 || looksSerialized(title)) {
@@ -642,6 +648,10 @@ function activityStepLabel(item: ActivityTimelineItem): string {
 function activityStepSummary(item: ActivityTimelineItem): string | undefined {
   if (item.kind === "thinking") {
     return undefined;
+  }
+
+  if (item.delegatedStatus?.detail !== undefined) {
+    return item.delegatedStatus.detail;
   }
 
   const summary = item.summary.trim();

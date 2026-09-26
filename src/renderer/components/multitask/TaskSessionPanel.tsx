@@ -1,5 +1,9 @@
 import { useEffect, useState } from "react";
 import type { MultitaskTaskSummary } from "../../../shared/types.js";
+import {
+  projectDelegatedStatus,
+  type DelegatedStatusProjection,
+} from "../../delegatedStatus.js";
 
 export interface TaskSessionPanelProps {
   activeCount: number;
@@ -51,6 +55,40 @@ function displayedElapsedMs(task: MultitaskTaskSummary, nowMs: number): number {
     : task.elapsedMs;
 }
 
+export function projectTaskSessionStatus(
+  tasks: readonly MultitaskTaskSummary[],
+): DelegatedStatusProjection {
+  const count = (lifecycle: MultitaskTaskSummary["lifecycle"]): number =>
+    tasks.filter((task) => task.lifecycle === lifecycle).length;
+  const queued = count("queued") + count("starting");
+  const running = count("running") + count("retrying");
+  const waiting = count("waiting-parent");
+  const succeeded = count("completed");
+  const failed = count("failed");
+  const cancelled = count("interrupted");
+  const parentPhase =
+    running + queued > 0
+      ? "running-children"
+      : waiting > 0
+        ? "waiting-parent"
+        : "processing";
+  return projectDelegatedStatus({
+    // Task rows clear only after the parent handoff. Their child lifecycle is
+    // never sufficient evidence that the parent operation completed.
+    parentState: "running",
+    parentPhase,
+    children: {
+      total: tasks.length,
+      queued,
+      running,
+      waiting,
+      succeeded,
+      failed,
+      cancelled,
+    },
+  });
+}
+
 /** Safe, flat status projection for child task sessions; deliberately inert. */
 export function TaskSessionPanel({
   activeCount,
@@ -59,6 +97,7 @@ export function TaskSessionPanel({
 }: TaskSessionPanelProps) {
   const [nowMs, setNowMs] = useState(Date.now);
   const hasLiveClock = tasks.some(hasLiveElapsedClock);
+  const delegatedStatus = projectTaskSessionStatus(tasks);
 
   useEffect(() => {
     if (!hasLiveClock) return;
@@ -72,7 +111,16 @@ export function TaskSessionPanel({
     <section className="task-session-panel" aria-label="Parallel task sessions">
       <header>
         <strong>Parallel tasks</strong>
-        <span aria-live="polite">{`${activeCount} active of ${activeLimit}`}</span>
+        <div
+          className="task-session-panel__operation-status"
+          aria-live="polite"
+        >
+          <span>{delegatedStatus.label}</span>
+          {delegatedStatus.detail ? (
+            <small>{delegatedStatus.detail}</small>
+          ) : null}
+          <small>{`Worker capacity: ${activeCount} active of ${activeLimit}`}</small>
+        </div>
       </header>
       <div
         aria-label="Task session status"

@@ -6,6 +6,10 @@ import {
   type InterventionTimelineItem,
 } from "./interventions.js";
 import {
+  projectDelegatedToolStatus,
+  type DelegatedStatusProjection,
+} from "./delegatedStatus.js";
+import {
   classifyOpenAiCodexAuthFailure,
   isSuccessfulOpenAiCodexTerminalCompletion,
   isSuccessfulTerminalAssistantCompletion,
@@ -125,6 +129,7 @@ export type TimelineItem =
       summary: string;
       details: string;
       detailSections?: ToolDetailSection[];
+      delegatedStatus?: DelegatedStatusProjection;
       createdAt: string;
     };
 
@@ -1071,7 +1076,16 @@ function reduceToolExecutionEvent(
         : "success"
       : "running";
   const existingTool = existingToolTimelineItem(session.timeline, event);
-  const eventToolItem = toolTimelineItemFromRuntimeEvent(event, status);
+  const projectedEvent =
+    existingTool !== undefined &&
+    getString(event, "toolName") === undefined &&
+    getString(event, "name") === undefined
+      ? ({ ...event, toolName: existingTool.title } as ChatRuntimeEvent)
+      : event;
+  const eventToolItem = toolTimelineItemFromRuntimeEvent(
+    projectedEvent,
+    status,
+  );
   const toolItem = eventToolItem
     ? mergeToolTimelineItemDetails(eventToolItem, existingTool)
     : undefined;
@@ -1131,7 +1145,31 @@ export function toolTimelineItemFromRuntimeEvent(
   const command = getCommandFromToolArgs(args) ?? getString(event, "command");
   const path = getStringFromRecord(args, "path");
   const summary = command ?? path ?? title;
-  const detailSections = toolDetailSectionsFromRuntimeEvent(event, title, args);
+  const delegatedStatus = projectDelegatedToolStatus({
+    ...(event as Record<string, unknown>),
+    toolName: title,
+  });
+  const rawDetailSections = toolDetailSectionsFromRuntimeEvent(
+    event,
+    title,
+    args,
+  );
+  const detailSections =
+    delegatedStatus === undefined
+      ? rawDetailSections
+      : rawDetailSections.map((section) =>
+          section.title === "Output" &&
+          /^Parallel:\s*\d+\s*\/\s*\d+\s*(?:done|finished),\s*\d+\s*running/i.test(
+            section.content.trim(),
+          )
+            ? {
+                ...section,
+                content: [delegatedStatus.label, delegatedStatus.detail]
+                  .filter((value): value is string => value !== undefined)
+                  .join("\n"),
+              }
+            : section,
+        );
   const details = safeToolDetails(
     detailSections.length > 0
       ? detailSectionsToText(detailSections)
@@ -1143,9 +1181,10 @@ export function toolTimelineItemFromRuntimeEvent(
     kind: "tool",
     title,
     status,
-    summary,
+    summary: delegatedStatus?.detail ?? summary,
     details,
     ...(detailSections.length > 0 ? { detailSections } : {}),
+    ...(delegatedStatus !== undefined ? { delegatedStatus } : {}),
     createdAt: formatTime(),
   };
 }
@@ -1188,6 +1227,10 @@ function mergeToolTimelineItemDetails(
     ...next,
     summary,
     createdAt: existing.createdAt,
+    ...(next.delegatedStatus === undefined &&
+    existing.delegatedStatus !== undefined
+      ? { delegatedStatus: existing.delegatedStatus }
+      : {}),
     ...(detailSections.length > 0
       ? {
           detailSections,

@@ -3602,6 +3602,16 @@ summary::marker {
   gap: 8px;
 }
 
+.task-session-panel__operation-status {
+  display: grid;
+  gap: 2px;
+  text-align: right;
+}
+
+.task-session-panel__operation-status > span {
+  font-weight: 600;
+}
+
 .task-session-panel [role="list"] {
   display: grid;
   gap: 7px;

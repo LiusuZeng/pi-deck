@@ -74,6 +74,8 @@ interface FakeOptions {
   clearActiveOnStartEnabledFileAfterFollowUpReceipt: boolean;
   /** Emits spaced, payload-free worker progress for Electron telemetry E2E. */
   taskSessionProgressFixture: boolean;
+  /** Emits structured subagent phases for delegated-status renderer E2E. */
+  delegatedStatusFixture: boolean;
   sessionFile?: string;
   /** Native Pi-compatible source path for a new independent fake session. */
   forkSourceFile?: string;
@@ -161,6 +163,7 @@ function parseOptions(argv: string[]): FakeOptions {
     activeOnStartMs: 0,
     clearActiveOnStartEnabledFileAfterFollowUpReceipt: false,
     taskSessionProgressFixture: false,
+    delegatedStatusFixture: false,
     forkOmitsParentSession: false,
     forkGetStateDelayMs: 0,
     getStateDelayMs: 0,
@@ -288,6 +291,8 @@ function parseOptions(argv: string[]): FakeOptions {
       options.clearActiveOnStartEnabledFileAfterFollowUpReceipt = true;
     } else if (arg === "--task-session-progress-fixture") {
       options.taskSessionProgressFixture = true;
+    } else if (arg === "--delegated-status-fixture") {
+      options.delegatedStatusFixture = true;
     } else if (arg === "--session") {
       const sessionFile = argv[index + 1];
       if (sessionFile) {
@@ -1664,6 +1669,129 @@ class FakeRpcServer {
       ((scenario === "extension-ui-error" ||
         scenario === "extension-ui-terminal") &&
         target === "extension-ui");
+
+    if (this.options.delegatedStatusFixture) {
+      const delayMs = Math.max(1, this.options.streamDelayMs);
+      const results = (states: string[]) =>
+        states.map((status, index) => ({
+          agent: `fixture-${index + 1}`,
+          status,
+        }));
+      const update = (
+        toolCallId: string,
+        parentPhase: string,
+        states: string[],
+      ): JsonObject => ({
+        type: "tool_execution_update",
+        toolCallId,
+        toolName: "subagent",
+        partialResult: {
+          content: [
+            {
+              type: "text",
+              text: `Delegated fixture phase: ${parentPhase}`,
+            },
+          ],
+          details: {
+            mode: "parallel",
+            parentPhase,
+            results: results(states),
+          },
+        },
+      });
+      this.currentTimers.push(
+        setTimeout(() => {
+          this.write({
+            type: "tool_execution_start",
+            toolCallId: "delegated_status_primary",
+            toolName: "subagent",
+            args: { tasks: [{}, {}, {}] },
+          });
+          this.write({
+            type: "tool_execution_start",
+            toolCallId: "delegated_status_independent",
+            toolName: "subagent",
+            args: { tasks: [{}] },
+          });
+        }, delayMs),
+        setTimeout(() => {
+          this.write(
+            update("delegated_status_primary", "running-children", [
+              "completed",
+              "running",
+              "running",
+            ]),
+          );
+          this.write(
+            update("delegated_status_independent", "running-children", [
+              "running",
+            ]),
+          );
+        }, delayMs * 2),
+        setTimeout(
+          () =>
+            this.write(
+              update("delegated_status_primary", "processing", [
+                "completed",
+                "completed",
+                "failed",
+              ]),
+            ),
+          delayMs * 3,
+        ),
+        setTimeout(
+          () =>
+            this.write(
+              update("delegated_status_primary", "synthesizing", [
+                "completed",
+                "completed",
+                "failed",
+              ]),
+            ),
+          delayMs * 4,
+        ),
+        setTimeout(
+          () =>
+            this.write({
+              type: "tool_execution_end",
+              toolCallId: "delegated_status_primary",
+              toolName: "subagent",
+              status: "completed",
+              result: {
+                content: [{ type: "text", text: "Primary handoff complete" }],
+                details: {
+                  mode: "parallel",
+                  parentPhase: "completed",
+                  results: results(["completed", "completed", "failed"]),
+                },
+              },
+            }),
+          delayMs * 5,
+        ),
+        setTimeout(
+          () =>
+            this.write({
+              type: "tool_execution_end",
+              toolCallId: "delegated_status_independent",
+              toolName: "subagent",
+              status: "error",
+              isError: true,
+              result: {
+                content: [
+                  { type: "text", text: "Independent delegation failed" },
+                ],
+                details: {
+                  mode: "parallel",
+                  parentPhase: "failed",
+                  results: results(["failed"]),
+                },
+              },
+            }),
+          delayMs * 6,
+        ),
+      );
+      return delayMs * 6;
+    }
 
     if (this.options.taskSessionProgressFixture) {
       const delayMs = Math.max(1, this.options.streamDelayMs);

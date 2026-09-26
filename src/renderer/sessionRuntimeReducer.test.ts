@@ -92,6 +92,107 @@ describe("sessionRuntimeReducer", () => {
     ).toBe("completed");
   });
 
+  it("projects delegated child outcomes separately from the parent tool phase", () => {
+    const running = reduceRuntimeEvent(session(), {
+      type: "tool_execution_start",
+      runtimeId: "runtime-1",
+      toolCallId: "delegation-1",
+      toolName: "subagent",
+      args: { tasks: [{ agent: "one" }, { agent: "two" }] },
+    } as any);
+    const synthesizing = reduceRuntimeEvent(running, {
+      type: "tool_execution_update",
+      runtimeId: "runtime-1",
+      toolCallId: "delegation-1",
+      toolName: "subagent",
+      partialResult: {
+        content: [{ type: "text", text: "Parallel: 2/2 done, 0 running..." }],
+        details: {
+          parentPhase: "synthesizing",
+          results: [{ exitCode: 0 }, { exitCode: 1 }],
+        },
+      },
+    } as any);
+    const completed = reduceRuntimeEvent(synthesizing, {
+      type: "tool_execution_end",
+      runtimeId: "runtime-1",
+      toolCallId: "delegation-1",
+      // Pi may omit the repeated name at end; retain the running card identity.
+      result: {
+        details: {
+          results: [{ exitCode: 0 }, { exitCode: 1 }],
+        },
+      },
+    } as any);
+
+    expect(synthesizing.timeline).toMatchObject([
+      {
+        kind: "tool",
+        status: "running",
+        summary: "2 delegated tasks finished · 1 succeeded · 1 failed",
+        delegatedStatus: {
+          label: "Synthesizing results",
+          tone: "working",
+        },
+      },
+    ]);
+    expect(
+      (synthesizing.timeline[0] as any).detailSections.find(
+        (section: any) => section.title === "Output",
+      ).content,
+    ).toBe(
+      "Synthesizing results\n2 delegated tasks finished · 1 succeeded · 1 failed",
+    );
+    expect(completed.timeline).toMatchObject([
+      {
+        kind: "tool",
+        status: "success",
+        delegatedStatus: {
+          label: "Completed delegated work",
+          tone: "success",
+        },
+      },
+    ]);
+  });
+
+  it("keeps concurrent delegated tool calls independent", () => {
+    let projected = reduceRuntimeEvent(session(), {
+      type: "tool_execution_update",
+      runtimeId: "runtime-1",
+      toolCallId: "delegation-a",
+      toolName: "subagent",
+      partialResult: {
+        details: {
+          parentPhase: "processing",
+          results: [{ status: "completed" }],
+        },
+      },
+    } as any);
+    projected = reduceRuntimeEvent(projected, {
+      type: "tool_execution_update",
+      runtimeId: "runtime-1",
+      toolCallId: "delegation-b",
+      toolName: "subagent",
+      partialResult: {
+        details: {
+          parentPhase: "running-children",
+          results: [{ status: "running" }, { status: "failed" }],
+        },
+      },
+    } as any);
+
+    expect(projected.timeline).toMatchObject([
+      {
+        id: "delegation-a",
+        delegatedStatus: { label: "Processing delegated results" },
+      },
+      {
+        id: "delegation-b",
+        delegatedStatus: { label: "Running delegated tasks" },
+      },
+    ]);
+  });
+
   it("prioritizes an extension dialog over terminal lifecycle events", () => {
     const waiting = reduceRuntimeEvent(session(), {
       type: "extension_ui_request",

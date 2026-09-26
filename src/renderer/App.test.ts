@@ -422,6 +422,41 @@ describe("timeline presentation grouping", () => {
     ]);
   });
 
+  it("uses delegated parent phases and child summaries in Agent activity", () => {
+    const delegated = {
+      ...tool("delegated-1", "running"),
+      title: "subagent",
+      summary: "Parallel: 3/3 done, 0 running...",
+      delegatedStatus: {
+        label: "Synthesizing results",
+        detail: "3 delegated tasks finished · 2 succeeded · 1 failed",
+        tone: "working",
+        parentState: "running",
+        parentPhase: "synthesizing",
+        children: {
+          total: 3,
+          queued: 0,
+          running: 0,
+          waiting: 0,
+          succeeded: 2,
+          failed: 1,
+          cancelled: 0,
+          finished: 0,
+        },
+      },
+    } as any;
+
+    expect(__rendererTestHooks.activitySemanticLabel(delegated)).toBe(
+      "Synthesizing results",
+    );
+    expect(__rendererTestHooks.activityStepLabel(delegated)).toBe(
+      "Synthesizing results",
+    );
+    expect(__rendererTestHooks.activityStepSummary(delegated)).toBe(
+      "3 delegated tasks finished · 2 succeeded · 1 failed",
+    );
+  });
+
   it("uses conservative activity labels instead of raw serialized summaries", () => {
     expect(__rendererTestHooks.activitySemanticLabel(tool("t1") as any)).toBe(
       "Inspected files",
