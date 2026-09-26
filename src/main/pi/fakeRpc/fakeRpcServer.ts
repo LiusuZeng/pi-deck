@@ -89,6 +89,8 @@ interface FakeOptions {
   getStateDelayOnceFile?: string;
   /** Delay generic get_state only while this test-controlled marker exists. */
   getStateDelayEnabledFile?: string;
+  /** Hold enabled generic get_state calls until release-get-state exists. */
+  getStateBarrierDir?: string;
   /** Write when a generic get_state request begins. */
   getStateSignalFile?: string;
   /** Append every fake worker's session path when it exits. */
@@ -335,6 +337,10 @@ function parseOptions(argv: string[]): FakeOptions {
     } else if (arg === "--delay-get-state-enabled-file") {
       const markerFile = argv[index + 1];
       if (markerFile) options.getStateDelayEnabledFile = markerFile;
+      index += 1;
+    } else if (arg === "--get-state-barrier-dir") {
+      const barrierDir = argv[index + 1];
+      if (barrierDir) options.getStateBarrierDir = barrierDir;
       index += 1;
     } else if (arg === "--get-state-signal-file") {
       const signalFile = argv[index + 1];
@@ -924,6 +930,14 @@ class FakeRpcServer {
         const genericDelayEnabled =
           this.options.getStateDelayEnabledFile !== undefined &&
           fs.existsSync(this.options.getStateDelayEnabledFile);
+        if (
+          !forkGetState &&
+          genericDelayEnabled &&
+          this.options.getStateBarrierDir !== undefined
+        ) {
+          this.holdGetStateAtBarrier(command.id, name);
+          break;
+        }
         const delay = forkGetState
           ? this.options.forkGetStateDelayMs
           : delayOnce || genericDelayEnabled
@@ -1995,6 +2009,25 @@ class FakeRpcServer {
     if (this.forkStateBarrierTimer === undefined) return;
     clearTimeout(this.forkStateBarrierTimer);
     this.forkStateBarrierTimer = undefined;
+  }
+
+  private holdGetStateAtBarrier(
+    commandId: string | undefined,
+    command: string,
+  ): void {
+    const barrierDir = this.options.getStateBarrierDir!;
+    fs.mkdirSync(barrierDir, { recursive: true });
+    const releaseFile = path.join(barrierDir, "release-get-state");
+    let released = false;
+    const release = (): void => {
+      if (released || !fs.existsSync(releaseFile)) return;
+      released = true;
+      watcher.close();
+      this.respond(commandId, command, this.getState());
+    };
+    const watcher = fs.watch(barrierDir, release);
+    // Close the subscribe/check race if release was created just before watch.
+    release();
   }
 
   private handleAbort(command: FakeCommandRecord): void {

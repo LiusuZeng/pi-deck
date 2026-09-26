@@ -83,6 +83,44 @@ test("fake RPC get_state and get_messages fixtures are deterministic", async () 
   }
 });
 
+test("fake RPC generic state barrier latches enabled requests until explicit release", async () => {
+  const directory = tempDir("pi-deck-fake-state-barrier-");
+  const barrierDir = path.join(directory, "barrier");
+  const enabledFile = path.join(directory, "enabled");
+  const signalFile = path.join(directory, "started");
+  fs.mkdirSync(barrierDir);
+  fs.writeFileSync(enabledFile, "enabled\n");
+  const client = spawnFakeRpc([
+    "--delay-get-state-enabled-file",
+    enabledFile,
+    "--get-state-barrier-dir",
+    barrierDir,
+    "--get-state-signal-file",
+    signalFile,
+  ]);
+  try {
+    const heldState = client.request("get_state");
+    await waitForPath(signalFile);
+    assert.equal(client.pendingCount, 1);
+
+    // Marker removal affects future calls only; the request that observed it
+    // remains held until the explicit release file appears.
+    fs.rmSync(enabledFile);
+    const immediateState = (await client.request("get_state")) as JsonObject;
+    assert.equal(immediateState.sessionId, "fake-session-1");
+    assert.equal(client.pendingCount, 1);
+
+    fs.writeFileSync(path.join(barrierDir, "release-get-state"), "release\n");
+    const releasedState = (await heldState) as JsonObject;
+    assert.equal(releasedState.sessionId, "fake-session-1");
+    assert.equal(client.pendingCount, 0);
+  } finally {
+    fs.writeFileSync(path.join(barrierDir, "release-get-state"), "release\n");
+    client.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("fake RPC native-fork state barrier waits for an explicit release", async () => {
   const directory = tempDir("pi-deck-fake-fork-state-barrier-");
   const barrierDir = path.join(directory, "barrier");
