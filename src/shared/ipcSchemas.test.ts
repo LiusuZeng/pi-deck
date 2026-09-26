@@ -377,7 +377,10 @@ describe("IPC schemas", () => {
         role: "assistant",
         content: [{ type: "thinking", thinking: "hidden" }],
       }),
-    ).toMatchObject({ content: "" });
+    ).toMatchObject({
+      content: "",
+      originalContent: [{ type: "thinking", thinking: "hidden" }],
+    });
   });
 
   it("normalizes persisted user image content for resumed previews", () => {
@@ -398,6 +401,16 @@ describe("IPC schemas", () => {
       }),
     ).toMatchObject({
       content: "What is this?",
+      originalContent: [
+        { type: "text", text: "What is this?" },
+        {
+          type: "image",
+          id: "image-1",
+          fileName: "screenshot.png",
+          mimeType: "image/png",
+          data: "abc123",
+        },
+      ],
       imageAttachments: [
         {
           id: "image-1",
@@ -406,6 +419,22 @@ describe("IPC schemas", () => {
           dataBase64: "abc123",
         },
       ],
+    });
+  });
+
+  it("normalizes supported message timestamp fallbacks", () => {
+    expect(
+      chatMessageSchema.parse({
+        id: "assistant-1",
+        role: "assistant",
+        content: [{ type: "text", text: "Done" }],
+        createdAt: "2026-09-14T10:00:00.000Z",
+        timestamp: "2026-09-14T11:00:00.000Z",
+      }),
+    ).toMatchObject({
+      content: "Done",
+      createdAt: Date.parse("2026-09-14T10:00:00.000Z"),
+      timestamp: "2026-09-14T11:00:00.000Z",
     });
   });
 
@@ -424,8 +453,19 @@ describe("IPC schemas", () => {
         runtimeId: "runtime-1",
         backendMode: "real",
         state: { cwd: "/project", isAgentActive: true },
+        usage: {
+          inputTokens: 12,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          totalTokens: 12,
+          reportedFields: ["inputTokens", "totalTokens"],
+        },
       }),
-    ).toMatchObject({ runtimeId: "runtime-1" });
+    ).toMatchObject({
+      runtimeId: "runtime-1",
+      usage: { reportedFields: ["inputTokens", "totalTokens"] },
+    });
     expect(() =>
       chatRuntimeStatusSchema.parse({
         runtimeId: "runtime-1",

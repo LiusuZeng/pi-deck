@@ -41,6 +41,7 @@ import {
   chatListModelsResultSchema,
   chatListSessionsRequestSchema,
   chatListSessionsResultSchema,
+  chatMessageSchema,
   chatPromptRequestSchema,
   chatResumeSessionRequestSchema,
   chatRespondToExtensionUiRequestSchema,
@@ -155,8 +156,7 @@ import {
 import { SinglePiAdapter } from "./pi/piAdapter.js";
 import {
   runtimeTotalTokensFromSessionStats,
-  runtimeUsageFromSessionStats,
-  runtimeUsageFromState,
+  runtimeUsageFromSources,
 } from "./pi/runtimeUsage.js";
 import { WorkerCapacity, WorkerCapacityError } from "./pi/workerCapacity.js";
 import { selectAvailableRuntime } from "./runtimeSelection.js";
@@ -7526,8 +7526,7 @@ async function getChatRuntimeStatus(
       Number(process.env.PI_DECK_SESSION_STATS_TIMEOUT_MS ?? 1500),
     ),
   ]);
-  const usage =
-    runtimeUsageFromSessionStats(sessionStats) ?? runtimeUsageFromState(state);
+  const usage = runtimeUsageFromSources(state, sessionStats);
   if (usage !== undefined) {
     void recordRuntimeCumulativeUsage(runtimeId, state, usage).catch(
       (error) => {
@@ -7777,7 +7776,7 @@ async function getChatSnapshotForRuntime(
         : {}),
       cwd: state.cwd ?? chatWorkerCwds.get(runtimeId),
     },
-    messages,
+    messages: messages.map((message) => chatMessageSchema.parse(message)),
   };
 }
 

@@ -439,6 +439,29 @@ test("real Pi bridge transport: default workspace prompt, resume, and explicit d
           .first(),
       ).toBeVisible();
 
+      await firstLaunch.page.locator(".usage-toggle").click();
+      const usagePanel = firstLaunch.page.locator(".usage-stats");
+      await expect(usagePanel).toBeVisible();
+      const readParentTokens = async (): Promise<number> => {
+        const text = (await usagePanel.textContent()) ?? "";
+        const match = text.match(
+          /Tokens:\s*([\d,]+)\s+in\s*\/\s*([\d,]+)\s+out/,
+        );
+        if (match === null) return 0;
+        return (
+          Number(match[1]?.replaceAll(",", "")) +
+          Number(match[2]?.replaceAll(",", ""))
+        );
+      };
+      await expect
+        .poll(readParentTokens, {
+          message:
+            "Authenticated real Pi must expose positive parent usage after the completed turn.",
+          timeout: 30_000,
+        })
+        .toBeGreaterThan(0);
+      const initialParentTokens = await readParentTokens();
+
       // Pi can report its planned session path before it flushes the JSONL
       // header. Fork preflight correctly fails closed until the source is a
       // valid repository session, so wait for that real-Pi persistence boundary.
@@ -591,6 +614,13 @@ test("real Pi bridge transport: default workspace prompt, resume, and explicit d
       await expect(statusList).toContainText(
         "#1 Real delegated acceptance task — completed",
       );
+      await expect
+        .poll(readParentTokens, {
+          message:
+            "Delegated work must not reset the parent's previously reported usage.",
+          timeout: 30_000,
+        })
+        .toBeGreaterThanOrEqual(initialParentTokens);
       // getMode is the authoritative recovery snapshot if status events
       // precede a renderer subscription; it must retain the visible task.
       await expect

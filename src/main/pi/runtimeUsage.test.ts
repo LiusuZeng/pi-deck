@@ -3,10 +3,13 @@ import { it as test } from "vitest";
 import {
   runtimeTotalTokensFromSessionStats,
   runtimeUsageFromSessionStats,
+  runtimeUsageFromSources,
   runtimeUsageFromState,
 } from "./runtimeUsage.js";
 
-test("maps current Pi get_session_stats usage payload", () => {
+test("maps the current Pi get_session_stats aggregate with field provenance", () => {
+  // Shape verified from installed Pi 0.87 source. Values are sanitized and are
+  // not represented as a captured authenticated-provider payload.
   const usage = runtimeUsageFromSessionStats({
     tokens: {
       input: 120,
@@ -28,14 +31,61 @@ test("maps current Pi get_session_stats usage payload", () => {
     contextUsedTokens: 127,
     contextWindowTokens: 200000,
     totalCostUsd: 0.0123,
+    reportedFields: [
+      "inputTokens",
+      "outputTokens",
+      "cacheReadTokens",
+      "cacheWriteTokens",
+      "totalTokens",
+      "contextUsedTokens",
+      "contextWindowTokens",
+      "totalCostUsd",
+    ],
   });
 });
 
-test("treats missing session stats as unavailable instead of zero usage", () => {
+test("treats missing and Pi's eager all-zero aggregate as unavailable", () => {
   assert.equal(runtimeUsageFromSessionStats(undefined), undefined);
-  assert.equal(
+  assert.deepEqual(
     runtimeUsageFromSessionStats({ contextUsage: { contextWindow: 200000 } }),
+    {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 0,
+      contextWindowTokens: 200000,
+      reportedFields: ["contextWindowTokens"],
+    },
+  );
+  // This exact no-provider shape was observed from an isolated, offline
+  // get_session_stats call. Pi initializes these counters before model usage.
+  assert.equal(
+    runtimeUsageFromSessionStats({
+      assistantMessages: 0,
+      totalMessages: 0,
+      tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      cost: 0,
+    }),
     undefined,
+  );
+});
+
+test("keeps partial aggregates sparse for renderer honesty", () => {
+  assert.deepEqual(runtimeUsageFromSessionStats({ tokens: { input: 12 } }), {
+    inputTokens: 12,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    totalTokens: 12,
+    reportedFields: ["inputTokens"],
+  });
+  assert.deepEqual(
+    runtimeUsageFromSessionStats({
+      tokens: { input: 12, output: 1, cacheRead: 0, cacheWrite: 0 },
+      cost: 0,
+    })?.reportedFields,
+    ["inputTokens", "outputTokens"],
   );
 });
 
@@ -56,44 +106,44 @@ test("uses only explicit Pi token counters for delegated telemetry", () => {
   );
 });
 
-test("preserves explicit zero token stats from Pi", () => {
-  assert.deepEqual(
-    runtimeUsageFromSessionStats({
-      tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-      cost: 0,
-      contextUsage: { tokens: 0, contextWindow: 128000 },
-    }),
-    {
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-      totalTokens: 0,
-      contextUsedTokens: 0,
-      contextWindowTokens: 128000,
-      totalCostUsd: 0,
+test("keeps legacy get_state usage fallback compatible and merges partial stats", () => {
+  const state = {
+    usage: {
+      input: 3,
+      output: 4,
+      cacheRead: 1,
+      total: 8,
+      cost: { total: 0.004 },
     },
-  );
-});
-
-test("keeps legacy get_state usage fallback compatible", () => {
-  assert.deepEqual(
-    runtimeUsageFromState({
-      usage: {
-        input: 3,
-        output: 4,
-        cacheRead: 1,
-        total: 8,
-        cost: { total: 0.004 },
-      },
-    }),
-    {
-      inputTokens: 3,
-      outputTokens: 4,
-      cacheReadTokens: 1,
-      cacheWriteTokens: 0,
-      totalTokens: 8,
-      totalCostUsd: 0.004,
-    },
-  );
+  };
+  assert.deepEqual(runtimeUsageFromState(state), {
+    inputTokens: 3,
+    outputTokens: 4,
+    cacheReadTokens: 1,
+    cacheWriteTokens: 0,
+    totalTokens: 8,
+    totalCostUsd: 0.004,
+    reportedFields: [
+      "inputTokens",
+      "outputTokens",
+      "cacheReadTokens",
+      "totalTokens",
+      "totalCostUsd",
+    ],
+  });
+  assert.deepEqual(runtimeUsageFromSources(state, { tokens: { input: 10 } }), {
+    inputTokens: 10,
+    outputTokens: 4,
+    cacheReadTokens: 1,
+    cacheWriteTokens: 0,
+    totalTokens: 8,
+    totalCostUsd: 0.004,
+    reportedFields: [
+      "inputTokens",
+      "outputTokens",
+      "cacheReadTokens",
+      "totalTokens",
+      "totalCostUsd",
+    ],
+  });
 });

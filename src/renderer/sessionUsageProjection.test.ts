@@ -41,13 +41,7 @@ describe("usage projection", () => {
     ).toBeUndefined();
     expect(
       extractMessageUsage({ usage: { output: Infinity, cost: { usd: 2 } } }),
-    ).toEqual({
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-      totalCostUsd: 2,
-    });
+    ).toEqual({ totalCostUsd: 2 });
   });
 
   it("aggregates latest message usage, peak context, and optional cost", () => {
@@ -80,7 +74,6 @@ describe("usage projection", () => {
         duplicate: {
           inputTokens: 5,
           outputTokens: 1,
-          cacheReadTokens: 0,
           cacheWriteTokens: 7,
           totalCostUsd: 0,
         },
@@ -88,7 +81,6 @@ describe("usage projection", () => {
           inputTokens: 4,
           outputTokens: 2,
           cacheReadTokens: 8,
-          cacheWriteTokens: 0,
         },
       },
       usageStats: {
@@ -112,12 +104,7 @@ describe("usage projection", () => {
       usage: { input: 0 },
       messages: [{ usage: { input: 12 } }],
     } as any;
-    expect(getMessageUsageFromEvent(event)).toEqual({
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-    });
+    expect(getMessageUsageFromEvent(event)).toEqual({ inputTokens: 0 });
     expect(eventHasUsageMetadata(event)).toBe(true);
     expect(
       getMessageUsageFromEvent({ messages: [{ usage: { output: 2 } }] } as any),
@@ -146,6 +133,24 @@ describe("usage projection", () => {
       modelId: "model",
     });
     expect(parseModelLabel("provider-only")).toBeUndefined();
+  });
+
+  it("keeps missing message fields unavailable while summing known totals", () => {
+    expect(
+      usageFromMessages(
+        [
+          { id: "one", role: "assistant", usage: { input: 10 } },
+          { id: "two", role: "assistant", usage: { output: 2, cost: 0 } },
+        ] as any,
+        272000,
+      ).usageStats,
+    ).toEqual({
+      inputTokens: 10,
+      outputTokens: 2,
+      totalTokens: 12,
+      contextUsedTokens: 10,
+      contextWindowTokens: 272000,
+    });
   });
 
   it("derives and clamps thinking levels", () => {
@@ -236,6 +241,79 @@ describe("usage projection", () => {
       modelLabel: "new / model",
       thinkingLevel: "high",
       usageStats: { totalTokens: 0, contextWindowTokens: 0, totalCostUsd: 0 },
+    });
+  });
+
+  it("preserves known cumulative usage across active parallel, terminal, and navigation refreshes", () => {
+    const known = {
+      id: "runtime-1",
+      usageStats: {
+        inputTokens: 100,
+        outputTokens: 20,
+        cacheReadTokens: 5,
+        totalTokens: 125,
+        totalCostUsd: 0.03,
+      },
+    };
+    const duringPrivateWork = mergeSessionUsageFromRuntimeStatus(known, {
+      runtimeId: "runtime-1",
+      backendMode: "real",
+      state: { isAgentActive: true },
+    } as any);
+    expect(duringPrivateWork).toBe(known);
+
+    const partialTerminal = mergeSessionUsageFromRuntimeStatus(known, {
+      runtimeId: "runtime-1",
+      backendMode: "real",
+      state: { isAgentActive: false },
+      usage: {
+        inputTokens: 0,
+        outputTokens: 25,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        totalTokens: 0,
+        reportedFields: ["outputTokens"],
+      },
+    } as any);
+    expect(partialTerminal.usageStats).toEqual({
+      inputTokens: 100,
+      outputTokens: 25,
+      cacheReadTokens: 5,
+      totalTokens: 125,
+      totalCostUsd: 0.03,
+    });
+
+    const navigationSnapshot = mergeSessionUsageFromSnapshot(partialTerminal, {
+      id: "runtime-1",
+      usageStats: { contextWindowTokens: 272000 },
+    });
+    expect(navigationSnapshot.usageStats).toEqual({
+      inputTokens: 100,
+      outputTokens: 25,
+      cacheReadTokens: 5,
+      totalTokens: 125,
+      contextWindowTokens: 272000,
+      totalCostUsd: 0.03,
+    });
+
+    const secondTurn = mergeSessionUsageFromRuntimeStatus(navigationSnapshot, {
+      runtimeId: "runtime-1",
+      backendMode: "real",
+      state: { isAgentActive: false },
+      usage: {
+        inputTokens: 180,
+        outputTokens: 40,
+        cacheReadTokens: 10,
+        cacheWriteTokens: 0,
+        totalTokens: 230,
+        totalCostUsd: 0.06,
+      },
+    } as any);
+    expect(secondTurn.usageStats).toMatchObject({
+      inputTokens: 180,
+      outputTokens: 40,
+      totalTokens: 230,
+      totalCostUsd: 0.06,
     });
   });
 

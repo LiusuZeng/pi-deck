@@ -53,6 +53,8 @@ interface FakeOptions {
   collidingModels: boolean;
   productionShaped: boolean;
   includeUsage: boolean;
+  /** Return provider-native mixed content and message-level timestamps. */
+  structuredMessages: boolean;
   noSession: boolean;
   failTaskPromptRecordWhileActive: boolean;
   /** Signal after a prompt user turn is durable but before its RPC response. */
@@ -145,6 +147,7 @@ function parseOptions(argv: string[]): FakeOptions {
     collidingModels: false,
     productionShaped: false,
     includeUsage: false,
+    structuredMessages: false,
     noSession: false,
     failTaskPromptRecordWhileActive: false,
     exitAfterFollowUpReceipt: false,
@@ -231,6 +234,8 @@ function parseOptions(argv: string[]): FakeOptions {
       options.productionShaped = true;
     } else if (arg === "--include-usage") {
       options.includeUsage = true;
+    } else if (arg === "--structured-messages") {
+      options.structuredMessages = true;
     } else if (arg === "--no-session") {
       options.noSession = true;
     } else if (arg === "--fail-task-prompt-record-while-active") {
@@ -814,7 +819,9 @@ class FakeRpcServer {
           timestamp: new Date(
             typeof message.createdAt === "number"
               ? message.createdAt
-              : Date.now(),
+              : typeof message.timestamp === "number"
+                ? message.timestamp
+                : Date.now(),
           ).toISOString(),
           message,
         })}\n`,
@@ -1086,7 +1093,14 @@ class FakeRpcServer {
         : "fake-session-1",
       sessionFile: this.sessionFile,
       cwd: this.options.getStateCwd ?? process.cwd(),
-      model: this.currentModel,
+      model: this.options.productionShaped
+        ? {
+            id: this.currentModel,
+            name: this.modelDisplayName(this.currentModel),
+            provider: this.currentProvider,
+            contextWindow: 128000,
+          }
+        : this.currentModel,
       provider: this.currentProvider,
       thinkingLevel: this.currentThinkingLevel,
       isStreaming: this.agentActive,
@@ -1175,10 +1189,16 @@ class FakeRpcServer {
       this.traceFixture("task_session_prompt_record_rejected_while_active");
       return;
     }
+    const userText = recordedTaskPrompt ?? text;
     const userMessage: PiMessage = {
       id: `msg_user_${this.promptCounter + 1}`,
       role: "user",
-      content: recordedTaskPrompt ?? text,
+      content: this.options.structuredMessages
+        ? [
+            { type: "text", text: userText },
+            { type: "fixture-metadata", value: "preserve" },
+          ]
+        : userText,
       createdAt: Date.now(),
     };
     this.messages.push(userMessage);
@@ -1469,10 +1489,17 @@ class FakeRpcServer {
       setTimeout(
         () => {
           this.agentActive = false;
+          const completedAt = Date.now();
           const assistantMessage: PiMessage = {
             id: assistantId,
             role: "assistant",
-            content: accumulated,
+            content: this.options.structuredMessages
+              ? [
+                  { type: "thinking", text: "fixture reasoning is not copy" },
+                  { type: "text", text: accumulated },
+                  { type: "fixture-metadata", value: "preserve" },
+                ]
+              : accumulated,
             // Provider attribution is required to verify an OpenAI Codex
             // credential repair; another provider's success must not clear it.
             provider: this.currentProvider,
@@ -1480,7 +1507,9 @@ class FakeRpcServer {
             // Persist Pi's authoritative terminal result so snapshot recovery
             // cannot mistake this completed turn for a streamed partial.
             stopReason: "stop",
-            createdAt: Date.now(),
+            ...(this.options.structuredMessages
+              ? { timestamp: completedAt }
+              : { createdAt: completedAt }),
             ...(this.options.includeUsage
               ? {
                   usage: {

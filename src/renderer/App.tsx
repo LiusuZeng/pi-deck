@@ -9262,17 +9262,26 @@ function UsageStatsPanel(props: { session: SessionViewModel }): ReactElement {
   }
 
   return (
-    <div className="usage-stats" aria-live="polite">
+    <div
+      className="usage-stats"
+      aria-label="Session-local usage; private task worker usage is accounted separately"
+      aria-live="polite"
+    >
       <span title="Peak prompt/context tokens compared with the model context window">
         Context: {formatContextUsage(stats)}
       </span>
-      <span title="Session token totals from Pi message usage">
-        Tokens: {formatIntegerOrUnavailable(stats.inputTokens)} in /{" "}
-        {formatIntegerOrUnavailable(stats.outputTokens)} out
+      <span title="Session-local token totals from Pi; private task workers are accounted separately">
+        Tokens:{" "}
+        {formatTokenPair(stats.inputTokens, stats.outputTokens, "in", "out")}
       </span>
       <span title="Cached token totals, when reported by the provider">
-        Cache: {formatIntegerOrUnavailable(stats.cacheReadTokens)} read /{" "}
-        {formatIntegerOrUnavailable(stats.cacheWriteTokens)} write
+        Cache:{" "}
+        {formatTokenPair(
+          stats.cacheReadTokens,
+          stats.cacheWriteTokens,
+          "read",
+          "write",
+        )}
       </span>
       <span title="Total reported provider cost for this loaded session">
         Cost: {formatCurrency(stats.totalCostUsd)}
@@ -12429,7 +12438,10 @@ function formatContextUsage(stats: UsageStats): string {
       ? "unknown"
       : `unknown / ${formatInteger(stats.contextWindowTokens)}`;
   }
-  if (stats.contextWindowTokens === undefined) {
+  if (
+    stats.contextWindowTokens === undefined ||
+    stats.contextWindowTokens <= 0
+  ) {
     return formatInteger(stats.contextUsedTokens);
   }
   const percent = Math.min(
@@ -12445,8 +12457,14 @@ function formatInteger(value: number): string {
   );
 }
 
-function formatIntegerOrUnavailable(value: number | undefined): string {
-  return value === undefined ? "unavailable" : formatInteger(value);
+function formatTokenPair(
+  first: number | undefined,
+  second: number | undefined,
+  firstLabel: string,
+  secondLabel: string,
+): string {
+  if (first === undefined && second === undefined) return "unavailable";
+  return `${first === undefined ? "unavailable" : formatInteger(first)} ${firstLabel} / ${second === undefined ? "unavailable" : formatInteger(second)} ${secondLabel}`;
 }
 
 function formatCurrency(value: number | undefined): string {

@@ -3,6 +3,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, it as test } from "vitest";
+import { deriveChatSnapshotMetadata } from "../chatSnapshotMetadata.js";
+import type { PiMessage } from "./types.js";
 import {
   readPiSessionSummary,
   scanSessionRepository,
@@ -230,6 +232,21 @@ test("reconstructs Completed metadata from the latest durable assistant turn", a
     sessionFile,
     `\n${JSON.stringify({
       type: "message",
+      timestamp: "2026-08-03T03:49:30.000Z",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "Aborted partial answer" }],
+        stopReason: "aborted",
+      },
+    })}`,
+  );
+  const aborted = await readPiSessionSummary({ sessionFile, sessionDir });
+  assert.equal(aborted.summary?.completedAtMs, undefined);
+
+  await fs.appendFile(
+    sessionFile,
+    `\n${JSON.stringify({
+      type: "message",
       timestamp: "2026-08-03T03:50:00.000Z",
       message: { role: "user", content: "Unanswered follow-up" },
     })}`,
@@ -253,6 +270,65 @@ test("reconstructs Completed metadata from the latest durable assistant turn", a
   );
   const failed = await readPiSessionSummary({ sessionFile, sessionDir });
   assert.equal(failed.summary?.completedAtMs, undefined);
+});
+
+test("keeps live and durable metadata identical for a structured transcript", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-deck-parity-"));
+  const project = path.join(root, "project");
+  const sessionDir = path.join(root, "sessions");
+  const sessionFile = path.join(sessionDir, "structured.jsonl");
+  const completedTimestamp = "2026-09-14T10:11:12.000Z";
+  const messages: PiMessage[] = [
+    {
+      id: "user-1",
+      role: "user",
+      content: [
+        { type: "text", text: "  Shared structured\n title  " },
+        { type: "image", data: "sanitized" },
+      ],
+      timestamp: "2026-09-14T10:10:00.000Z",
+    },
+    {
+      id: "assistant-1",
+      role: "assistant",
+      content: [
+        { type: "thinking", text: "not metadata" },
+        { type: "text", text: "Shared structured preview" },
+        { type: "toolCall", name: "read" },
+      ],
+      timestamp: completedTimestamp,
+    },
+  ];
+  await fs.mkdir(project, { recursive: true });
+  await fs.mkdir(sessionDir, { recursive: true });
+  await fs.writeFile(
+    sessionFile,
+    [
+      JSON.stringify({ type: "session", id: "structured", cwd: project }),
+      ...messages.map((message) =>
+        JSON.stringify({
+          type: "message",
+          timestamp: message.timestamp,
+          message,
+        }),
+      ),
+    ].join("\n"),
+  );
+
+  const live = deriveChatSnapshotMetadata({ state: {}, messages });
+  const durable = await readPiSessionSummary({ sessionFile, sessionDir });
+  assert.deepEqual(
+    {
+      title: durable.summary?.title,
+      preview: durable.summary?.preview,
+      completedAtMs: durable.summary?.completedAtMs,
+    },
+    {
+      title: live.kind === "messages" ? live.title : undefined,
+      preview: live.kind === "messages" ? live.preview : undefined,
+      completedAtMs: live.kind === "messages" ? live.completedAtMs : undefined,
+    },
+  );
 });
 
 test("discovers the latest completion timestamp beyond the capped head parse", async () => {

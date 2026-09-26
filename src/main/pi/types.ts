@@ -1,3 +1,8 @@
+import type {
+  PiMessageContent,
+  PiMessageTimestamp,
+} from "../../shared/piMessageNormalization.js";
+
 // G0 contract-review note: these are the minimal backend/RPC contracts for M2.
 // They are intentionally renderer-agnostic and can be narrowed/expanded when the
 // shared PiAdapter, IPC schemas, and normalized event model are frozen.
@@ -71,7 +76,7 @@ export interface PiState {
   sessionName?: string;
   sessionFile?: string;
   cwd?: string;
-  model?: string;
+  model?: string | Record<string, unknown>;
   provider?: string;
   thinkingLevel?: string;
   isAgentActive?: boolean;
@@ -81,8 +86,10 @@ export interface PiState {
 export interface PiMessage {
   id: string;
   role: "system" | "user" | "assistant" | "tool" | string;
-  content?: string;
-  createdAt?: number;
+  /** Provider-native content is retained; consumers share text extraction. */
+  content?: PiMessageContent;
+  createdAt?: PiMessageTimestamp;
+  timestamp?: PiMessageTimestamp;
   [key: string]: unknown;
 }
 

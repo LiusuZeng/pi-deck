@@ -86,9 +86,12 @@ test("PiWorker rehydrates persisted fake real-mode messages for --session", asyn
         message: {
           id: "assistant-1",
           role: "assistant",
-          content: [{ type: "text", text: `Answered ${token}` }],
+          content: [
+            { type: "text", text: `Answered ${token}` },
+            { type: "provider-private", payload: { retained: true } },
+          ],
           usage: { input: 3, output: 5, total: 8 },
-          createdAt: 11,
+          timestamp: "2026-09-14T10:11:12.000Z",
         },
       }),
     ].join("\n") + "\n",
@@ -102,12 +105,16 @@ test("PiWorker rehydrates persisted fake real-mode messages for --session", asyn
     );
     assert.equal(
       JSON.stringify(messages[1]?.content),
-      JSON.stringify([{ type: "text", text: `Answered ${token}` }]),
+      JSON.stringify([
+        { type: "text", text: `Answered ${token}` },
+        { type: "provider-private", payload: { retained: true } },
+      ]),
     );
     assert.equal(
       JSON.stringify(messages[1]?.usage),
       JSON.stringify({ input: 3, output: 5, total: 8 }),
     );
+    assert.equal(messages[1]?.timestamp, "2026-09-14T10:11:12.000Z");
   } finally {
     await worker.closeSession();
     rmSync(sessionDir, { recursive: true, force: true });
