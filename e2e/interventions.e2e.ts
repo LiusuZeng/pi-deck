@@ -144,16 +144,18 @@ test("queued steering stays visible across navigation and becomes consumed only 
   }
 });
 
-test("a rejected steering send remains failed and available in the composer", async () => {
+test("rejected steering and follow-up sends stay failed without failing the parent", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-intervention-failure-"),
   );
   const launched = await launch(
     interventionEnv(root, [
       "--stream-delay-ms",
-      "700",
+      "5000",
       "--fail-command",
       "steer",
+      "--fail-command",
+      "follow_up",
     ]),
   );
   try {
@@ -179,6 +181,37 @@ test("a rejected steering send remains failed and available in the composer", as
       "data-intervention-status",
       "queued",
     );
+
+    const followUpInstruction = "This follow-up send must also fail honestly";
+    await composer.fill(followUpInstruction);
+    await page.getByRole("button", { name: "Follow-up" }).click();
+    const failedFollowUp = page.locator('[data-intervention-kind="followUp"]', {
+      hasText: followUpInstruction,
+    });
+    await expect(failedFollowUp).toHaveAttribute(
+      "data-intervention-status",
+      "failed",
+    );
+    await expect(failedFollowUp).toHaveAccessibleName(
+      "Follow-up failed to send",
+    );
+    await expect(composer).toHaveValue(followUpInstruction);
+
+    // A delivery failure belongs to the instruction, not the still-running
+    // parent turn. Its abort/steer controls and Work classification remain
+    // active while the failed instruction stays visible.
+    await expect(page.getByRole("button", { name: "Abort" })).toBeVisible();
+    await page.getByRole("button", { name: /^All Work/ }).click();
+    await expect(
+      page
+        .locator(".activity-inbox-row--inProgress")
+        .filter({ hasText: "start failed intervention fixture" }),
+    ).toHaveCount(1);
+    await expect(
+      page
+        .locator(".activity-inbox-row--failed")
+        .filter({ hasText: "start failed intervention fixture" }),
+    ).toHaveCount(0);
   } finally {
     await launched.app.close().catch(() => undefined);
     fs.rmSync(root, { recursive: true, force: true });

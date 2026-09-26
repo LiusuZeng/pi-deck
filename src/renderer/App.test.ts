@@ -3617,6 +3617,83 @@ describe("renderer attention-first inbox", () => {
 });
 
 describe("renderer intervention UX", () => {
+  it("records a failed intervention without failing its still-running parent", () => {
+    const working = {
+      ...baseSession(),
+      status: "working",
+      baseState: "working",
+      lifecycle: { phase: "active", turnId: "turn-a" },
+      overlays: { ...emptyOverlays, streaming: true },
+      timeline: [
+        {
+          id: "steer-failed",
+          kind: "intervention",
+          interventionKind: "steer",
+          status: "failed",
+          content: "instruction steer-failed",
+          createdAt: "10:01",
+          error: "transport rejected",
+        },
+      ],
+    } as any;
+    const failedInstruction = __rendererTestHooks.appendNonfatalDiagnostic(
+      working,
+      { tone: "error", content: "Steer failed: transport rejected" },
+    );
+    const source = __rendererTestHooks.activitySourceSessions(
+      [failedInstruction],
+      { "workspace-a": "Workspace A" },
+    )[0]!;
+    const inbox = buildActivityInbox([source]);
+
+    expect(failedInstruction).toMatchObject({
+      status: "working",
+      baseState: "working",
+      lifecycle: { phase: "active", turnId: "turn-a" },
+      overlays: { streaming: true },
+    });
+    expect(failedInstruction.lastError).toBeUndefined();
+    expect(failedInstruction.timeline.at(-1)).toMatchObject({
+      kind: "diagnostic",
+      tone: "error",
+      content: "Steer failed: transport rejected",
+    });
+    expect(__rendererTestHooks.isSessionBusy(failedInstruction)).toBe(true);
+    expect(inbox.groups.inProgress).toHaveLength(1);
+    expect(inbox.groups.failed).toHaveLength(0);
+  });
+
+  it("settles a rejected parent prompt as failed and keeps it retryable", () => {
+    const sending = {
+      ...baseSession(),
+      status: "sending",
+      baseState: "attaching",
+      lifecycle: { phase: "active" },
+      overlays: { ...emptyOverlays, streaming: true, toolRunning: true },
+      retryPrompt: { text: "Try this", attachments: [] },
+    } as any;
+    const failed = __rendererTestHooks.markPromptDeliveryFailed(
+      sending,
+      "RPC prompt rejected",
+    );
+    const source = __rendererTestHooks.activitySourceSessions([failed], {
+      "workspace-a": "Workspace A",
+    })[0]!;
+    const inbox = buildActivityInbox([source]);
+
+    expect(failed).toMatchObject({
+      status: "error",
+      baseState: "error",
+      lifecycle: { phase: "terminal", outcome: "failed" },
+      overlays: { streaming: false, toolRunning: false },
+      retryPrompt: { text: "Try this", attachments: [] },
+      lastError: "RPC prompt rejected",
+    });
+    expect(__rendererTestHooks.isSessionBusy(failed)).toBe(false);
+    expect(inbox.groups.failed).toHaveLength(1);
+    expect(inbox.groups.inProgress).toHaveLength(0);
+  });
+
   it("identifies only known extension commands as unavailable for queues", () => {
     const commands = [
       { name: "/deploy", description: "Deploy", source: "extension" },

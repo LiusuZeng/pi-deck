@@ -60,6 +60,32 @@ export interface SessionForRuntimeReconciliation {
   lifecycle?: SessionLifecycle | undefined;
 }
 
+/**
+ * Identity captured when a compact status request starts. Lifecycle objects
+ * are replaced at every turn boundary, so object identity is a cheap local
+ * generation token even when Pi's compact get_state response has no turn id.
+ */
+export interface SessionReconciliationIdentity {
+  runtimeId: string;
+  lifecycle: SessionLifecycle | undefined;
+}
+
+export function captureSessionReconciliationIdentity(
+  session: SessionForRuntimeReconciliation,
+): SessionReconciliationIdentity {
+  return { runtimeId: session.id, lifecycle: session.lifecycle };
+}
+
+export function isSessionReconciliationIdentityCurrent(
+  session: SessionForRuntimeReconciliation,
+  identity: SessionReconciliationIdentity,
+): boolean {
+  return (
+    session.id === identity.runtimeId &&
+    session.lifecycle === identity.lifecycle
+  );
+}
+
 /** App supplies presentation and timeline construction without widening this domain. */
 export interface SessionRuntimeReconciliationDependencies<
   TSession extends SessionForRuntimeReconciliation,

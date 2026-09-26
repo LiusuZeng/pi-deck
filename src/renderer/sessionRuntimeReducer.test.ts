@@ -291,9 +291,148 @@ describe("sessionRuntimeReducer", () => {
       lifecycle: { phase: "terminal", outcome: "completed" },
       overlays: { streaming: false },
     });
+    expect(lateMessage.timeline).toMatchObject([
+      {
+        id: "late-message",
+        kind: "assistant",
+        content: "late duplicate",
+        streaming: false,
+      },
+    ]);
     expect(
       classifyActivity({ ...lateMessage, workspaceName: "Workspace" }),
     ).toBe("completed");
+  });
+
+  it("retains late tool details without showing a running delegated card after terminal", () => {
+    const completed = reduceRuntimeEvent(session(), {
+      type: "agent_end",
+      runtimeId: "runtime-1",
+      status: "completed",
+    } as any);
+    const lateTool = reduceRuntimeEvent(completed, {
+      type: "tool_execution_update",
+      runtimeId: "runtime-1",
+      toolCallId: "delegation-late",
+      toolName: "subagent",
+      partialResult: {
+        content: [{ type: "text", text: "Parallel: 1/2 done, 1 running..." }],
+        details: {
+          parentPhase: "running-children",
+          results: [{ status: "completed" }, { status: "running" }],
+        },
+      },
+    } as any);
+
+    expect(lateTool).toMatchObject({
+      status: "idle",
+      lifecycle: { phase: "terminal", outcome: "completed" },
+      overlays: { toolRunning: false },
+    });
+    expect(lateTool.timeline).toMatchObject([
+      {
+        id: "delegation-late",
+        kind: "tool",
+        status: "collapsed",
+        delegatedStatus: {
+          parentState: "completed",
+          label: "Completed delegated work",
+          tone: "success",
+          children: { queued: 0, running: 0, waiting: 0 },
+        },
+      },
+    ]);
+    expect((lateTool.timeline[0] as any).delegatedStatus.detail).not.toContain(
+      "running",
+    );
+  });
+
+  it("keeps completed terminal outcome immutable across a late error", () => {
+    const completed = reduceRuntimeEvent(session(), {
+      type: "agent_start",
+      runtimeId: "runtime-1",
+      runId: "turn-a",
+    } as any);
+    const settled = reduceRuntimeEvent(completed, {
+      type: "agent_end",
+      runtimeId: "runtime-1",
+      runId: "turn-a",
+      status: "completed",
+    } as any);
+    const lateError = reduceRuntimeEvent(settled, {
+      type: "message_update",
+      runtimeId: "runtime-1",
+      messageId: "late-error",
+      role: "assistant",
+      content: "Useful late provider detail",
+      done: true,
+      error: "stale failure",
+    } as any);
+
+    expect(lateError).toMatchObject({
+      status: "idle",
+      baseState: "idle",
+      providerErrorObserved: false,
+      lifecycle: {
+        phase: "terminal",
+        outcome: "completed",
+        turnId: "turn-a",
+      },
+    });
+    expect(lateError.lastError).toBeUndefined();
+    expect(lateError.timeline).toMatchObject([
+      {
+        id: "late-error",
+        kind: "assistant",
+        content: "Useful late provider detail",
+        streaming: false,
+      },
+    ]);
+  });
+
+  it("uses protocol turn ids to reject stale terminal events but accepts untagged completion", () => {
+    const turnA = reduceRuntimeEvent(session(), {
+      type: "agent_start",
+      runtimeId: "runtime-1",
+      runId: "turn-a",
+    } as any);
+    const turnB = reduceRuntimeEvent(
+      reduceRuntimeEvent(turnA, {
+        type: "agent_end",
+        runtimeId: "runtime-1",
+        runId: "turn-a",
+      } as any),
+      {
+        type: "agent_start",
+        runtimeId: "runtime-1",
+        runId: "turn-b",
+      } as any,
+    );
+
+    const stale = reduceRuntimeEvent(turnB, {
+      type: "agent_end",
+      runtimeId: "runtime-1",
+      runId: "turn-a",
+      status: "error",
+      error: "old failure",
+    } as any);
+    expect(stale).toBe(turnB);
+
+    // Pi versions without runId cannot be safely distinguished. Accept their
+    // valid completion rather than dropping all untagged agent_end events.
+    const untagged = reduceRuntimeEvent(turnB, {
+      type: "agent_end",
+      runtimeId: "runtime-1",
+      status: "completed",
+    } as any);
+    expect(untagged).toMatchObject({
+      status: "idle",
+      lifecycle: {
+        phase: "terminal",
+        outcome: "completed",
+        turnId: "turn-b",
+      },
+    });
   });
 
   it("keeps multiple requests waiting and resumes only a genuinely active turn", () => {

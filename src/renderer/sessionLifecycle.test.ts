@@ -4,6 +4,7 @@ import {
   inactiveSessionLifecycle,
   lifecycleBaseState,
   lifecycleSessionStatus,
+  settleLifecycle,
   terminalSessionLifecycle,
   transitionSessionLifecycle,
 } from "./sessionLifecycle.js";
@@ -28,6 +29,49 @@ describe("canonical session lifecycle", () => {
     expect(
       transitionSessionLifecycle(completed, { type: "turnStarted" }),
     ).toEqual({ phase: "active" });
+  });
+
+  it("does not rewrite a terminal outcome when delayed evidence disagrees", () => {
+    const completed = terminalSessionLifecycle("completed", 100, "turn-a");
+
+    expect(settleLifecycle(completed, "failed", 200, "turn-a")).toBe(completed);
+    expect(settleLifecycle(completed, "aborted", 300, "turn-b")).toBe(
+      completed,
+    );
+    expect(
+      transitionSessionLifecycle(completed, {
+        type: "turnStarted",
+        turnId: "turn-b",
+      }),
+    ).toEqual({ phase: "active", turnId: "turn-b" });
+  });
+
+  it("keeps the protocol turn id across retry attempts", () => {
+    expect(
+      transitionSessionLifecycle(activeSessionLifecycle("turn-a"), {
+        type: "retryStarted",
+      }),
+    ).toEqual({ phase: "active", turnId: "turn-a" });
+  });
+
+  it("carries a protocol turn id through abort and settlement", () => {
+    const active = activeSessionLifecycle("turn-a");
+    const aborting = transitionSessionLifecycle(active, {
+      type: "abortRequested",
+    });
+    expect(aborting).toEqual({ phase: "aborting", turnId: "turn-a" });
+    expect(
+      transitionSessionLifecycle(aborting, {
+        type: "turnSettled",
+        outcome: "aborted",
+        settledAtMs: 500,
+      }),
+    ).toEqual({
+      phase: "terminal",
+      outcome: "aborted",
+      settledAtMs: 500,
+      turnId: "turn-a",
+    });
   });
 
   it.each([

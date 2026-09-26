@@ -109,6 +109,45 @@ test("missed agent_end is repaired into visible Completed Work", async () => {
   }
 });
 
+test("prompt IPC rejection becomes Failed Work with retry controls", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-prompt-rejection-lifecycle-"),
+  );
+  let app: ElectronApplication | undefined;
+  try {
+    const launched = await launchLifecycleFixture(root, [
+      "--fail-command",
+      "prompt",
+    ]);
+    app = launched.app;
+    const prompt = "rejected prompt lifecycle fixture";
+    await startPrompt(launched.page, prompt);
+
+    await expect(launched.page.getByText(/Prompt failed:/)).toBeVisible();
+    await expect(
+      launched.page.getByRole("button", { name: "Retry prompt" }),
+    ).toBeVisible();
+    await expect(
+      launched.page.getByRole("button", { name: "Abort" }),
+    ).toHaveCount(0);
+
+    await launched.page.getByRole("button", { name: /^All Work/ }).click();
+    await expect(
+      launched.page
+        .locator(".activity-inbox-row--failed")
+        .filter({ hasText: prompt }),
+    ).toHaveCount(1);
+    await expect(
+      launched.page
+        .locator(".activity-inbox-row--inProgress")
+        .filter({ hasText: prompt }),
+    ).toHaveCount(0);
+  } finally {
+    await app?.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("terminal Extension UI response and duplicate clear cannot resurrect work", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-e2e-session-lifecycle-extension-"),

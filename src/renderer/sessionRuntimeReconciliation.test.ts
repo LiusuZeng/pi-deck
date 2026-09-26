@@ -6,6 +6,8 @@ import {
 } from "./sessionRuntimeReducer.js";
 import { emptyOverlays, type BaseSessionState } from "./sessionState.js";
 import {
+  captureSessionReconciliationIdentity,
+  isSessionReconciliationIdentityCurrent,
   reconcileSessionWithRuntimeStatus,
   shouldReconcileSession,
   type ReconciliationSessionStatus,
@@ -152,6 +154,58 @@ describe("shouldReconcileSession", () => {
 });
 
 describe("reconcileSessionWithRuntimeStatus", () => {
+  it("does not let deferred poll A settle a newer turn B on the same runtime", async () => {
+    let resolvePoll!: (status: ReturnType<typeof runtimeStatus>) => void;
+    const poll = new Promise<ReturnType<typeof runtimeStatus>>((resolve) => {
+      resolvePoll = resolve;
+    });
+    let current = session({
+      status: "working",
+      baseState: "working",
+      lifecycle: { phase: "active", turnId: "turn-a" },
+    });
+    const identity = captureSessionReconciliationIdentity(current);
+    const applyPoll = poll.then((status) => {
+      if (
+        isSessionReconciliationIdentityCurrent(current, identity) &&
+        shouldReconcileSession({ ...current, runtimeBacked: true })
+      ) {
+        current = reconcileSessionWithRuntimeStatus(
+          current,
+          status,
+          dependencies(),
+        );
+      }
+    });
+
+    current = {
+      ...current,
+      status: "idle",
+      baseState: "idle",
+      lifecycle: {
+        phase: "terminal",
+        outcome: "completed",
+        settledAtMs: 100,
+        turnId: "turn-a",
+      },
+    };
+    current = {
+      ...current,
+      status: "working",
+      baseState: "working",
+      lifecycle: { phase: "active", turnId: "turn-b" },
+    };
+    resolvePoll(runtimeStatus(false));
+    await applyPoll;
+
+    expect(current).toMatchObject({
+      status: "working",
+      baseState: "working",
+      lifecycle: { phase: "active", turnId: "turn-b" },
+    });
+    expect(current.diagnostics).toEqual([]);
+  });
+
   it.each<[ReconciliationSessionStatus, BaseSessionState]>([
     ["idle", "idle"],
     ["starting", "attaching"],

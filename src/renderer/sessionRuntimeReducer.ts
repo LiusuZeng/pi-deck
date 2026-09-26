@@ -6,6 +6,7 @@ import {
   type InterventionTimelineItem,
 } from "./interventions.js";
 import {
+  projectDelegatedStatus,
   projectDelegatedToolStatus,
   type DelegatedStatusProjection,
 } from "./delegatedStatus.js";
@@ -335,6 +336,31 @@ export function reduceRuntimeEvent(
     return session;
   }
 
+  const currentLifecycle = resolveSessionLifecycle(session);
+  const eventTurnId = runtimeEventTurnId(event);
+  // Pi includes runId on some lifecycle events. When both sides identify a
+  // turn, reject a delayed terminal event for an older run. Production builds
+  // that omit this identifier remain inherently ambiguous; their agent_end is
+  // still accepted rather than risking a permanently active valid turn.
+  if (
+    event.type === "agent_end" &&
+    eventTurnId !== undefined &&
+    "turnId" in currentLifecycle &&
+    currentLifecycle.turnId !== undefined &&
+    currentLifecycle.turnId !== eventTurnId
+  ) {
+    return session;
+  }
+  // A replayed start for the already-settled run is not a new turn.
+  if (
+    event.type === "agent_start" &&
+    currentLifecycle.phase === "terminal" &&
+    eventTurnId !== undefined &&
+    currentLifecycle.turnId === eventTurnId
+  ) {
+    return session;
+  }
+
   // A dialog remains actionable until Pi acknowledges its response or the
   // request times out. Apply this projection after every event reduction so
   // concurrent tool/retry/terminal events cannot mask pending input.
@@ -351,10 +377,7 @@ export function reduceRuntimeEventUnprioritized(
     case "agent_start":
       return {
         ...session,
-        lifecycle: transitionSessionLifecycle(
-          resolveSessionLifecycle(session),
-          { type: "turnStarted" },
-        ),
+        lifecycle: activeSessionLifecycle(runtimeEventTurnId(event)),
         completedAtMs: undefined,
         awaitingAgentEnd: false,
         status: "working",
@@ -423,6 +446,10 @@ export function reduceRuntimeEventUnprioritized(
         updatedAtMs: Date.now(),
       };
     case "auto_retry_start":
+      // A retry-start follows agent_end({ willRetry: true }), which already
+      // leaves this lifecycle active. A delayed retry event cannot revive a
+      // terminal turn.
+      if (resolveSessionLifecycle(session).phase === "terminal") return session;
       // Pi 0.81 emits this after agent_end({ willRetry: true }). Keep the
       // runtime busy through backoff rather than exposing idle/send controls.
       return {
@@ -447,6 +474,7 @@ export function reduceRuntimeEventUnprioritized(
         updatedAtMs: Date.now(),
       };
     case "auto_retry_end": {
+      if (resolveSessionLifecycle(session).phase === "terminal") return session;
       const retryStatus = getString(event, "status");
       // Real Pi reports success/finalError. Keep the status fallback solely
       // for older fake fixtures and manually recorded event logs.
@@ -585,6 +613,9 @@ export function reduceRuntimeEventUnprioritized(
       );
     }
     case "agent_end": {
+      if (session.lifecycle?.phase === "terminal") {
+        return reduceLateTerminalAgentEnd(session, event);
+      }
       const status = getString(event, "status");
       const willRetry = getBoolean(event, "willRetry") === true;
       const errorMessage = getRuntimeEventErrorMessage(event);
@@ -672,13 +703,14 @@ export function reduceRuntimeEventUnprioritized(
 
       const settledAtMs = Date.now();
       const lifecycle = settleLifecycle(
-        resolveSessionLifecycle(session),
+        session.lifecycle ?? activeSessionLifecycle(runtimeEventTurnId(event)),
         endedWithError || authStillPending
           ? "failed"
           : status === "aborted"
             ? "aborted"
             : "completed",
         settledAtMs,
+        runtimeEventTurnId(event),
       );
       const nextSession: SessionViewModel = {
         ...session,
@@ -835,14 +867,64 @@ export function reduceRuntimeEventUnprioritized(
   }
 }
 
-function projectTerminalLifecycle(session: SessionViewModel): SessionViewModel {
+function runtimeEventTurnId(event: ChatRuntimeEvent): string | undefined {
+  return getString(event, "runId") ?? getString(event, "turnId");
+}
+
+function reduceLateTerminalAgentEnd(
+  session: SessionViewModel,
+  event: ChatRuntimeEvent,
+): SessionViewModel {
+  const finalEventUsage = getMessageUsageFromEvent(event);
+  const finalUsageMessageId =
+    getMessageUpdateId(event) ??
+    getMostRecentAssistantMessageId(session) ??
+    runtimeEventTurnId(event) ??
+    "agent-end";
+  const usageByMessageId =
+    finalEventUsage === undefined
+      ? session.usageByMessageId
+      : {
+          ...(session.usageByMessageId ?? {}),
+          [finalUsageMessageId]: finalEventUsage,
+        };
+  const timeline = removeEmptyAssistantMessages(
+    reconcileTimelineWithDurableUserMessages(
+      session.timeline,
+      durableUserMessagesFromRuntimeEvent(event),
+    ),
+  );
   if (
-    session.lifecycle?.phase !== "terminal" ||
-    (session.pendingExtensionUiRequests?.length ?? 0) > 0
+    usageByMessageId === session.usageByMessageId &&
+    timeline === session.timeline
   ) {
     return session;
   }
+  return {
+    ...session,
+    ...(usageByMessageId === undefined
+      ? {}
+      : {
+          usageByMessageId,
+          usageStats: summarizeUsageByMessage(
+            usageByMessageId,
+            session.usageStats?.contextWindowTokens,
+          ),
+        }),
+    timeline,
+    updatedAt: "Now",
+    updatedAtMs: Date.now(),
+  };
+}
+
+function projectTerminalLifecycle(session: SessionViewModel): SessionViewModel {
+  if (session.lifecycle?.phase !== "terminal") return session;
+
   const lifecycle = session.lifecycle;
+  const timeline = settleTerminalTimeline(session.timeline, lifecycle.outcome);
+  if ((session.pendingExtensionUiRequests?.length ?? 0) > 0) {
+    return timeline === session.timeline ? session : { ...session, timeline };
+  }
   const status = lifecycleSessionStatus(lifecycle, false);
   const baseState = lifecycleBaseState(lifecycle, false);
   const completedAtMs = lifecycleCompletedAtMs(lifecycle);
@@ -865,7 +947,8 @@ function projectTerminalLifecycle(session: SessionViewModel): SessionViewModel {
     !session.overlays.toolRunning &&
     !session.overlays.compacting &&
     !session.overlays.retrying &&
-    !session.overlays.needsUserInput
+    !session.overlays.needsUserInput &&
+    timeline === session.timeline
   ) {
     return session;
   }
@@ -885,7 +968,61 @@ function projectTerminalLifecycle(session: SessionViewModel): SessionViewModel {
       needsUserInput: false,
     },
     subtitle,
+    timeline,
   };
+}
+
+function settleTerminalTimeline(
+  timeline: TimelineItem[],
+  outcome: "completed" | "failed" | "aborted",
+): TimelineItem[] {
+  let changed = false;
+  const settled = timeline.map((item): TimelineItem => {
+    if (
+      (item.kind === "assistant" || item.kind === "thinking") &&
+      item.streaming === true
+    ) {
+      changed = true;
+      return { ...item, streaming: false };
+    }
+    if (item.kind === "tool" && item.status === "running") {
+      changed = true;
+      const delegatedStatus =
+        item.delegatedStatus === undefined
+          ? undefined
+          : projectDelegatedStatus({
+              parentState:
+                outcome === "completed"
+                  ? "completed"
+                  : outcome === "aborted"
+                    ? "cancelled"
+                    : "failed",
+              ...(item.delegatedStatus.parentPhase === undefined
+                ? {}
+                : { parentPhase: item.delegatedStatus.parentPhase }),
+              children: {
+                ...item.delegatedStatus.children,
+                queued: 0,
+                running: 0,
+                waiting: 0,
+                finished:
+                  item.delegatedStatus.children.finished +
+                  item.delegatedStatus.children.queued +
+                  item.delegatedStatus.children.running +
+                  item.delegatedStatus.children.waiting,
+              },
+            });
+      return {
+        ...item,
+        // A late start/update still contributes useful details, but a settled
+        // turn must never display a live tool or delegated-parent indicator.
+        status: "collapsed",
+        ...(delegatedStatus === undefined ? {} : { delegatedStatus }),
+      };
+    }
+    return item;
+  });
+  return changed ? settled : timeline;
 }
 
 function clearPendingExtensionUiRequests(
@@ -1539,11 +1676,23 @@ function reduceMessageUpdate(
   const stillWaitingForInput =
     (session.pendingExtensionUiRequests?.length ?? 0) > 0;
   const currentLifecycle = resolveSessionLifecycle(session);
+  // Runtime delivery can lag behind agent_end. Keep late content and usage,
+  // but never turn it back into a stream or let a late error rewrite the
+  // already-settled outcome.
+  if (currentLifecycle.phase === "terminal") {
+    return {
+      ...session,
+      ...(usageByMessageId !== undefined ? { usageByMessageId } : {}),
+      ...(usageStats !== undefined ? { usageStats } : {}),
+      lastRuntimeEventLabel: "Retained a late Pi message after turn completion",
+      updatedAt: "Now",
+      updatedAtMs: Date.now(),
+      timeline: settleTerminalTimeline(timeline, currentLifecycle.outcome),
+    };
+  }
   const lifecycle = isErrorUpdate
     ? settleLifecycle(currentLifecycle, "failed", Date.now())
-    : currentLifecycle.phase === "terminal"
-      ? currentLifecycle
-      : activeSessionLifecycle();
+    : activeSessionLifecycle();
   const nextSession: SessionViewModel = {
     ...session,
     lifecycle,

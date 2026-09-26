@@ -7,22 +7,24 @@ export type SessionTerminalOutcome = "completed" | "failed" | "aborted";
  */
 export type SessionLifecycle =
   | { phase: "inactive" }
-  | { phase: "active" }
-  | { phase: "aborting" }
+  | { phase: "active"; turnId?: string }
+  | { phase: "aborting"; turnId?: string }
   | {
       phase: "terminal";
       outcome: SessionTerminalOutcome;
       settledAtMs: number;
+      turnId?: string;
     };
 
 export type SessionLifecycleTransition =
-  | { type: "turnStarted" }
+  | { type: "turnStarted"; turnId?: string }
   | { type: "abortRequested" }
-  | { type: "retryStarted" }
+  | { type: "retryStarted"; turnId?: string }
   | {
       type: "turnSettled";
       outcome: SessionTerminalOutcome;
       settledAtMs: number;
+      turnId?: string;
     }
   | { type: "runtimeInactive"; settledAtMs: number };
 
@@ -39,15 +41,20 @@ export const inactiveSessionLifecycle: SessionLifecycle = Object.freeze({
   phase: "inactive",
 });
 
-export function activeSessionLifecycle(): SessionLifecycle {
-  return { phase: "active" };
+export function activeSessionLifecycle(turnId?: string): SessionLifecycle {
+  return turnId === undefined
+    ? { phase: "active" }
+    : { phase: "active", turnId };
 }
 
 export function terminalSessionLifecycle(
   outcome: SessionTerminalOutcome,
   settledAtMs: number,
+  turnId?: string,
 ): SessionLifecycle {
-  return { phase: "terminal", outcome, settledAtMs };
+  return turnId === undefined
+    ? { phase: "terminal", outcome, settledAtMs }
+    : { phase: "terminal", outcome, settledAtMs, turnId };
 }
 
 /**
@@ -93,21 +100,30 @@ export function transitionSessionLifecycle(
 ): SessionLifecycle {
   switch (transition.type) {
     case "turnStarted":
+      return activeSessionLifecycle(transition.turnId);
     case "retryStarted":
-      return activeSessionLifecycle();
+      return activeSessionLifecycle(
+        transition.turnId ?? ("turnId" in current ? current.turnId : undefined),
+      );
     case "abortRequested":
-      return current.phase === "terminal" ? current : { phase: "aborting" };
+      return current.phase === "terminal"
+        ? current
+        : !("turnId" in current) || current.turnId === undefined
+          ? { phase: "aborting" }
+          : { phase: "aborting", turnId: current.turnId };
     case "turnSettled":
       return settleLifecycle(
         current,
         transition.outcome,
         transition.settledAtMs,
+        transition.turnId,
       );
     case "runtimeInactive":
       if (current.phase === "terminal") return current;
       return terminalSessionLifecycle(
         current.phase === "aborting" ? "aborted" : "completed",
         transition.settledAtMs,
+        "turnId" in current ? current.turnId : undefined,
       );
   }
 }
@@ -116,11 +132,18 @@ export function settleLifecycle(
   current: SessionLifecycle,
   outcome: SessionTerminalOutcome,
   settledAtMs: number,
+  turnId?: string,
 ): SessionLifecycle {
-  if (current.phase === "terminal" && current.outcome === outcome) {
-    return current;
-  }
-  return terminalSessionLifecycle(outcome, settledAtMs);
+  // Terminal evidence belongs to one turn and is immutable. Only an explicit
+  // turnStarted/retryStarted transition may create a lifecycle whose outcome
+  // can later differ. This also prevents delayed errors from rewriting a
+  // completion (and vice versa).
+  if (current.phase === "terminal") return current;
+  return terminalSessionLifecycle(
+    outcome,
+    settledAtMs,
+    turnId ?? ("turnId" in current ? current.turnId : undefined),
+  );
 }
 
 export function lifecycleCompletedAtMs(

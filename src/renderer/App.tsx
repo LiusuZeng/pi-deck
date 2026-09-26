@@ -93,6 +93,8 @@ import {
   type FailureKind,
 } from "./openaiCodexAuth.js";
 import {
+  captureSessionReconciliationIdentity,
+  isSessionReconciliationIdentityCurrent,
   reconcileSessionWithRuntimeStatus as reconcileSessionWithRuntimeStatusInDomain,
   shouldReconcileSession as shouldReconcileSessionInDomain,
 } from "./sessionRuntimeReconciliation.js";
@@ -101,6 +103,7 @@ import {
   inactiveSessionLifecycle,
   resolveSessionLifecycle,
   settleLifecycle,
+  terminalSessionLifecycle,
   transitionSessionLifecycle,
 } from "./sessionLifecycle.js";
 import {
@@ -2492,12 +2495,21 @@ export function App(): ReactElement {
       ) {
         continue;
       }
+      const requestedSession = sessionsRef.current.find(
+        (session) => session.id === runtimeId,
+      );
+      if (requestedSession === undefined) continue;
+      const reconciliationIdentity =
+        captureSessionReconciliationIdentity(requestedSession);
       reconcilingRuntimeIds.current.add(runtimeId);
       try {
         const status = await window.piDeck.chat.getRuntimeStatus({ runtimeId });
         setSessions((current) =>
           updateSessionByRuntimeId(current, runtimeId, (session) =>
-            shouldReconcileSession(session)
+            isSessionReconciliationIdentityCurrent(
+              session,
+              reconciliationIdentity,
+            ) && shouldReconcileSession(session)
               ? reconcileSessionWithRuntimeStatus(session, status)
               : session,
           ),
@@ -2505,21 +2517,33 @@ export function App(): ReactElement {
         const currentSession = sessionsRef.current.find(
           (session) => session.id === runtimeId,
         );
+        // Do not let poll A schedule or clear retries for a newer turn B. The
+        // same identity guard inside setSessions is authoritative for state.
         if (
-          status.state.isAgentActive &&
           currentSession !== undefined &&
-          shouldReconcileSession(currentSession)
+          isSessionReconciliationIdentityCurrent(
+            currentSession,
+            reconciliationIdentity,
+          )
         ) {
-          scheduleRuntimeStatusRetry(runtimeId);
-        } else {
-          clearRuntimeStatusRetry(runtimeId);
+          if (
+            status.state.isAgentActive &&
+            shouldReconcileSession(currentSession)
+          ) {
+            scheduleRuntimeStatusRetry(runtimeId);
+          } else {
+            clearRuntimeStatusRetry(runtimeId);
+          }
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         setSessions((current) =>
           updateSessionByRuntimeId(current, runtimeId, (session) =>
-            isLifecycleTransition(session.status)
-              ? appendDiagnostic(session, {
+            isSessionReconciliationIdentityCurrent(
+              session,
+              reconciliationIdentity,
+            ) && isLifecycleTransition(session.status)
+              ? appendNonfatalDiagnostic(session, {
                   tone: "error",
                   content: `Could not reconcile Pi runtime: ${message}`,
                 })
@@ -3898,6 +3922,9 @@ export function App(): ReactElement {
                 status: "sending",
                 baseState: "attaching",
                 completedAtMs: undefined,
+                // This click is an explicit new turn. Provider error evidence
+                // from the previous turn must not classify its agent_end.
+                providerErrorObserved: false,
                 overlays: { ...session.overlays, streaming: false },
                 subtitle: `Sending · waiting for ${backendLabel(session)} confirmation`,
                 workingStartedAtMs: session.workingStartedAtMs ?? Date.now(),
@@ -4056,14 +4083,17 @@ export function App(): ReactElement {
           })),
         );
       }
+      const message = error instanceof Error ? error.message : String(error);
       setSessions((current) =>
         current.map((session) =>
-          session.id === runtimeId
-            ? appendDiagnostic(session, {
-                tone: "error",
-                content: `Prompt failed: ${error instanceof Error ? error.message : String(error)}`,
-              })
-            : session,
+          session.id !== runtimeId
+            ? session
+            : destination === "parent"
+              ? markPromptDeliveryFailed(session, message)
+              : appendNonfatalDiagnostic(session, {
+                  tone: "error",
+                  content: `Task submission failed: ${message}`,
+                }),
         ),
       );
     }
@@ -4218,7 +4248,7 @@ export function App(): ReactElement {
       );
       setSessions((current) =>
         updateSessionByRuntimeId(current, selectedSession.id, (session) =>
-          appendDiagnostic(
+          appendNonfatalDiagnostic(
             {
               ...session,
               timeline: session.timeline.map((item) =>
@@ -4310,11 +4340,7 @@ export function App(): ReactElement {
                   resumeBacked: true,
                   lifecycle:
                     item.failureKind === "auth-required"
-                      ? settleLifecycle(
-                          resolveSessionLifecycle(item),
-                          "failed",
-                          Date.now(),
-                        )
+                      ? terminalSessionLifecycle("failed", Date.now())
                       : inactiveSessionLifecycle,
                   status:
                     item.failureKind === "auth-required" ? "error" : "idle",
@@ -4469,7 +4495,7 @@ export function App(): ReactElement {
       setSessions((current) =>
         current.map((session) =>
           session.id === runtimeId
-            ? appendDiagnostic(session, {
+            ? appendNonfatalDiagnostic(session, {
                 tone: "error",
                 content: `Abort failed: ${message}`,
               })
@@ -7016,11 +7042,9 @@ function resumedSessionForCurrentSavedRow(
       : {}),
     ...(authStillPending
       ? {
-          lifecycle: settleLifecycle(
-            resolveSessionLifecycle(resumed),
-            "failed",
-            Date.now(),
-          ),
+          // Durable auth evidence is an explicit snapshot correction rather
+          // than a delayed event attempting to rewrite this turn.
+          lifecycle: terminalSessionLifecycle("failed", Date.now()),
           status: "error" as const,
           baseState: "error" as const,
           subtitle: "Error · OpenAI authentication verification pending",
@@ -8165,6 +8189,66 @@ function appendDiagnostic(
       },
     ],
   };
+}
+
+function appendNonfatalDiagnostic(
+  session: SessionViewModel,
+  diagnostic: { tone: "info" | "error"; content: string },
+): SessionViewModel {
+  return {
+    ...session,
+    updatedAt: "Now",
+    updatedAtMs: Date.now(),
+    timeline: [
+      ...session.timeline,
+      {
+        id: createId("diagnostic"),
+        kind: "diagnostic",
+        tone: diagnostic.tone,
+        content: diagnostic.content,
+        createdAt: formatTime(),
+      },
+    ],
+  };
+}
+
+function markPromptDeliveryFailed(
+  session: SessionViewModel,
+  message: string,
+): SessionViewModel {
+  const currentLifecycle = resolveSessionLifecycle(session);
+  // A command response can theoretically arrive after runtime events. Never
+  // rewrite an already-terminal turn; retain the transport diagnostic only.
+  if (currentLifecycle.phase === "terminal") {
+    return appendNonfatalDiagnostic(session, {
+      tone: "error",
+      content: `Prompt failed after the turn settled: ${message}`,
+    });
+  }
+  const lifecycle = settleLifecycle(currentLifecycle, "failed", Date.now());
+  return appendNonfatalDiagnostic(
+    {
+      ...session,
+      lifecycle,
+      status: "error",
+      baseState: "error",
+      completedAtMs: undefined,
+      awaitingAgentEnd: false,
+      providerErrorObserved: false,
+      overlays: {
+        ...session.overlays,
+        streaming: false,
+        toolRunning: false,
+        compacting: false,
+        retrying: false,
+      },
+      subtitle: "Error · prompt was not accepted by Pi",
+      workingStartedAtMs: undefined,
+      lastError: message,
+      lastRuntimeEventLabel: "Pi rejected the prompt before starting the turn",
+    },
+    { tone: "error", content: `Prompt failed: ${message}` },
+  );
 }
 
 function appendRuntimeErrorDiagnostic(
@@ -12777,6 +12861,8 @@ export const __rendererTestHooks = {
   reconcileSessionWithRuntimeStatus,
   mergeSessionUsageFromRuntimeStatus,
   updateSessionByRuntimeId,
+  appendNonfatalDiagnostic,
+  markPromptDeliveryFailed,
   eventHasUsageMetadata,
   currentSessionForSavedResume,
   resumedSessionForCurrentSavedRow,
