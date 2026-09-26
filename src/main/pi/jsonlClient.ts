@@ -26,8 +26,11 @@ export interface JsonlParseError {
 // opaque main-owned tokens.
 export const DEFAULT_MAX_JSONL_LINE_BYTES = 256 * 1024 * 1024;
 
+const MAX_EXIT_SUMMARY_CHARS = 1024;
 const MAX_EXIT_COMMAND_CHARS = 2 * 1024;
 const MAX_EXIT_STDERR_CHARS = 8 * 1024;
+const MAX_EXIT_DIAGNOSTIC_CHARS = 12 * 1024;
+const EXIT_STDERR_GRACE_MS = 50;
 const SENSITIVE_OPTION =
   /^--?(?:api[-_]?key|access[-_]?token|auth(?:orization)?|bearer|cookie|credential|pass(?:word|wd)?|secret|token)$/i;
 
@@ -283,6 +286,7 @@ export class JsonlRpcClient extends EventEmitter {
   private signal: NodeJS.Signals | null = null;
   private closeEmitted = false;
   private closeRequested = false;
+  private exitFinalizationTimer: NodeJS.Timeout | undefined;
 
   constructor(
     readonly child: ChildProcess,
@@ -323,20 +327,33 @@ export class JsonlRpcClient extends EventEmitter {
         ),
       );
     });
-    // An idle child has no rejection that needs final stderr. Preserve the
-    // historical exit-time lifecycle notification so owners waiting on the OS
-    // exit can synchronously observe their close diagnostic.
     child.on("exit", (code, signal) => {
+      const summary = `RPC subprocess exited (code=${code ?? "null"}, signal=${signal ?? "null"})`;
       if (this.closeRequested || this.pending.size === 0) {
+        this.closeOnce(code, signal, summary);
+        return;
+      }
+
+      // A descendant can inherit the child's pipes and postpone "close"
+      // indefinitely. Give direct-child stderr a short opportunity to drain,
+      // but reject pending requests from the known exit instead of waiting for
+      // inherited descriptors or the request timeout.
+      const finalize = (): void => {
         this.closeOnce(
           code,
           signal,
-          `RPC subprocess exited (code=${code ?? "null"}, signal=${signal ?? "null"})`,
+          this.withUnexpectedExitDiagnostics(summary),
         );
+      };
+      if (child.stderr?.readableEnded) {
+        finalize();
+        return;
       }
+      child.stderr?.once("end", finalize);
+      this.exitFinalizationTimer = setTimeout(finalize, EXIT_STDERR_GRACE_MS);
     });
-    // ChildProcess "close" follows stdio closure, unlike "exit". Waiting for
-    // it on crashes ensures a child's final stderr is present in the rejection.
+    // Usually "close" wins and includes all final stderr. The exit fallback
+    // above only wins when inherited stdio keeps this event from arriving.
     child.on("close", (code, signal) => {
       const summary = `RPC subprocess exited (code=${code ?? "null"}, signal=${signal ?? "null"})`;
       this.closeOnce(
@@ -456,12 +473,23 @@ export class JsonlRpcClient extends EventEmitter {
   }
 
   private withUnexpectedExitDiagnostics(summary: string): string {
-    const command = this.commandDiagnostic ?? "<unavailable>";
+    const safeSummary = boundedHead(
+      redactDiagnosticText(summary),
+      MAX_EXIT_SUMMARY_CHARS,
+    );
+    const command = boundedHead(
+      redactDiagnosticText(this.commandDiagnostic ?? "<unavailable>"),
+      MAX_EXIT_COMMAND_CHARS,
+    );
     const stderr = boundedTail(
       redactDiagnosticText(this.stderr.snapshot().trimEnd()),
       MAX_EXIT_STDERR_CHARS,
     );
-    return `${summary}; command=${command}; stderr=${stderr || "<empty>"}`;
+    const diagnostic = `${safeSummary}; command=${command}; stderr=${stderr || "<empty>"}`;
+    return boundedHead(
+      redactDiagnosticText(diagnostic),
+      MAX_EXIT_DIAGNOSTIC_CHARS,
+    );
   }
 
   private closeOnce(
@@ -471,6 +499,10 @@ export class JsonlRpcClient extends EventEmitter {
   ): void {
     if (this.closeEmitted) return;
     this.closeEmitted = true;
+    if (this.exitFinalizationTimer) {
+      clearTimeout(this.exitFinalizationTimer);
+      this.exitFinalizationTimer = undefined;
+    }
     this.closed = true;
     this.exitCode = code;
     this.signal = signal;

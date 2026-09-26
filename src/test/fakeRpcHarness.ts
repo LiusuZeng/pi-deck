@@ -8,7 +8,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { build, buildSync, type BuildOptions } from "esbuild";
+import { buildSync, type BuildOptions } from "esbuild";
 import { afterAll } from "vitest";
 import {
   spawnJsonlRpcClient,
@@ -24,12 +24,6 @@ const bundleDirectoryPrefix = path.join(tmpdir(), "pi-deck-fake-rpc-");
 interface FakeRpcBundleLocation {
   directory: string;
   file: string;
-}
-
-export interface FakeRpcServerBundle {
-  readonly path: string;
-  spawn(args?: string[], options?: JsonlRpcClientOptions): JsonlRpcClient;
-  dispose(): void;
 }
 
 let cachedBundle: FakeRpcBundleLocation | undefined;
@@ -91,29 +85,6 @@ export function buildFakeRpcServer(): string {
   }
   cachedBundle = bundle;
   return bundle.file;
-}
-
-/** Build an independently owned bundle, primarily for concurrency coverage. */
-export async function createFakeRpcServerBundle(): Promise<FakeRpcServerBundle> {
-  const bundle = allocateBundle();
-  let disposed = false;
-  try {
-    await build(bundleOptions(bundle.file));
-  } catch (error) {
-    removeBundle(bundle);
-    throw error;
-  }
-
-  return {
-    path: bundle.file,
-    spawn: (args = [], options = {}) =>
-      spawnFakeRpcBundle(bundle.file, args, options),
-    dispose: () => {
-      if (disposed) return;
-      disposed = true;
-      removeBundle(bundle);
-    },
-  };
 }
 
 export function spawnFakeRpc(

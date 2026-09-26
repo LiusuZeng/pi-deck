@@ -103,6 +103,78 @@ test("unexpected-exit diagnostics are bounded and redact command and stderr secr
   });
 });
 
+test("exit rejects promptly when a descendant keeps inherited stdio open", async () => {
+  const descendantScript =
+    'require("node:net").createServer().listen(0, "127.0.0.1")';
+  const script = `
+    const { spawn } = require("node:child_process");
+    const descendant = spawn(process.execPath, ["-e", ${JSON.stringify(descendantScript)}], {
+      stdio: ["ignore", "inherit", "inherit"],
+    });
+    descendant.once("spawn", () => {
+      process.stderr.write("initial evidence\\n");
+      process.stderr.write("final inherited-pipe evidence pid=" + descendant.pid + "\\n", () => process.exit(7));
+    });
+  `;
+  const client = spawnJsonlRpcClient(
+    process.execPath,
+    ["-e", script],
+    { cwd: process.cwd(), env: process.env },
+    { requestTimeoutMs: 1_000 },
+  );
+
+  try {
+    await assert.rejects(client.request("get_state"), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /exited \(code=7, signal=null\)/);
+      assert.match(error.message, /final inherited-pipe evidence/);
+      assert.doesNotMatch(error.message, /timed out/i);
+      return true;
+    });
+    assert.equal(client.pendingCount, 0);
+    assert.equal(client.child.stderr?.closed, false);
+  } finally {
+    const pidMatch = /inherited-pipe evidence pid=(\d+)/.exec(
+      client.stderr.snapshot(),
+    );
+    assert.ok(
+      pidMatch,
+      "descendant PID must be available for deterministic cleanup",
+    );
+    const nativeClose =
+      client.child.stdout?.closed && client.child.stderr?.closed
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => {
+            client.child.once("close", () => resolve());
+          });
+    try {
+      process.kill(Number(pidMatch[1]), "SIGTERM");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
+    await nativeClose;
+  }
+});
+
+test("spawn-failure diagnostics redact secrets from the child error summary", async () => {
+  const secret = "spawn-secret-123";
+  const command = `https://user:${secret}@example.invalid/pi`;
+  const client = spawnJsonlRpcClient(command, [], {
+    cwd: process.cwd(),
+    env: process.env,
+  });
+
+  await assert.rejects(client.request("get_state"), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /RPC subprocess error/);
+    assert.match(error.message, /https:\/\/user:\[REDACTED\]@example\.invalid/);
+    assert.doesNotMatch(error.message, new RegExp(secret));
+    assert.ok(error.message.length < 12_000);
+    return true;
+  });
+  assert.equal(client.pendingCount, 0);
+});
+
 test("JSONL RPC client rejects exact Pi RPC error responses", async () => {
   const client = spawnFake();
   try {
