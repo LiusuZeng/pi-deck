@@ -9,6 +9,49 @@ export type ChatWorkspaceLookupStore = Pick<
 export type ChatWorkspaceOwnershipStore = ChatWorkspaceLookupStore &
   Pick<WorkspaceStore, "claimUnassignedSessionRefFromSnapshot">;
 
+export interface ChatResumeOwnershipLease {
+  release(): void;
+}
+
+export interface ChatResumeOwnershipGate<
+  TLease extends ChatResumeOwnershipLease = ChatResumeOwnershipLease,
+> {
+  enter(generation: number): Promise<TLease>;
+}
+
+/**
+ * Hold the discovery/attachment gate across resume ownership authorization and
+ * the eventual validated claim. Callers that already hold this lease must pass
+ * it through to worker attachment rather than trying to enter the gate again.
+ */
+export async function withChatResumeOwnershipTransaction<
+  T,
+  TLease extends ChatResumeOwnershipLease,
+>(options: {
+  gate: ChatResumeOwnershipGate<TLease>;
+  generation: number;
+  assertActive: () => void;
+  /** Read-only rejection of existing reservations; never resolves ownership. */
+  assertAvailable?: () => Promise<void>;
+  operation: (lease: TLease) => Promise<T>;
+}): Promise<T> {
+  options.assertActive();
+  // A request for an already-reserved fork must fail now, not silently wait
+  // until the fork commits and attach it. Availability is rechecked during
+  // the operation; this preflight does not authorize or claim the session.
+  await options.assertAvailable?.();
+  options.assertActive();
+  const lease = await options.gate.enter(options.generation);
+  try {
+    options.assertActive();
+    const result = await options.operation(lease);
+    options.assertActive();
+    return result;
+  } finally {
+    lease.release();
+  }
+}
+
 /**
  * Compatibility chat creation may omit ownership at the IPC boundary, but a
  * runtime must always be registered against a concrete workspace.

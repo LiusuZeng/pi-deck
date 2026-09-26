@@ -45,6 +45,25 @@ function tempDir(name: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), name));
 }
 
+function waitForPath(file: string, timeoutMs = 5_000): Promise<void> {
+  if (fs.existsSync(file)) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const directory = path.dirname(file);
+    const timer = setTimeout(() => {
+      watcher.close();
+      reject(new Error(`Timed out waiting for path: ${file}`));
+    }, timeoutMs);
+    const finish = (): void => {
+      if (!fs.existsSync(file)) return;
+      clearTimeout(timer);
+      watcher.close();
+      resolve();
+    };
+    const watcher = fs.watch(directory, finish);
+    finish();
+  });
+}
+
 test("fake RPC get_state and get_messages fixtures are deterministic", async () => {
   const client = spawnFakeRpc();
   try {
@@ -61,6 +80,199 @@ test("fake RPC get_state and get_messages fixtures are deterministic", async () 
     );
   } finally {
     client.close();
+  }
+});
+
+test("fake RPC generic state barrier latches enabled requests until explicit release", async () => {
+  const directory = tempDir("pi-deck-fake-state-barrier-");
+  const barrierDir = path.join(directory, "barrier");
+  const enabledFile = path.join(directory, "enabled");
+  const signalFile = path.join(directory, "started");
+  fs.mkdirSync(barrierDir);
+  fs.writeFileSync(enabledFile, "enabled\n");
+  const client = spawnFakeRpc([
+    "--delay-get-state-enabled-file",
+    enabledFile,
+    "--get-state-barrier-dir",
+    barrierDir,
+    "--get-state-signal-file",
+    signalFile,
+  ]);
+  try {
+    const heldState = client.request("get_state");
+    await waitForPath(signalFile);
+    assert.equal(client.pendingCount, 1);
+
+    // Marker removal affects future calls only; the request that observed it
+    // remains held until the explicit release file appears.
+    fs.rmSync(enabledFile);
+    const immediateState = (await client.request("get_state")) as JsonObject;
+    assert.equal(immediateState.sessionId, "fake-session-1");
+    assert.equal(client.pendingCount, 1);
+
+    fs.writeFileSync(path.join(barrierDir, "release-get-state"), "release\n");
+    const releasedState = (await heldState) as JsonObject;
+    assert.equal(releasedState.sessionId, "fake-session-1");
+    assert.equal(client.pendingCount, 0);
+  } finally {
+    fs.writeFileSync(path.join(barrierDir, "release-get-state"), "release\n");
+    client.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("fake RPC native-fork state barrier waits for an explicit release", async () => {
+  const directory = tempDir("pi-deck-fake-fork-state-barrier-");
+  const barrierDir = path.join(directory, "barrier");
+  const sourceFile = path.join(directory, "source.jsonl");
+  const targetFile = path.join(directory, "target.jsonl");
+  fs.mkdirSync(barrierDir);
+  fs.writeFileSync(
+    sourceFile,
+    `${JSON.stringify({
+      type: "session",
+      version: 3,
+      id: "source",
+      timestamp: "2026-09-27T00:00:00.000Z",
+      cwd: directory,
+    })}\n`,
+  );
+  const client = spawnFakeRpc([
+    "--fork",
+    sourceFile,
+    "--fork-target",
+    targetFile,
+    "--fork-state-barrier-dir",
+    barrierDir,
+  ]);
+  try {
+    const statePromise = client.request("get_state");
+    const createdMarker = path.join(barrierDir, "target-created");
+    await waitForPath(createdMarker);
+
+    assert.equal(client.pendingCount, 1);
+    assert.equal(
+      fs.realpathSync(targetFile),
+      fs.readFileSync(createdMarker, "utf8").trim(),
+    );
+    const secondState = (await client.request("get_state")) as JsonObject;
+    assert.equal(
+      fs.realpathSync(secondState.sessionFile as string),
+      fs.realpathSync(targetFile),
+    );
+    assert.equal(client.pendingCount, 1);
+    fs.writeFileSync(path.join(barrierDir, "release-target"), "release\n");
+
+    const state = (await statePromise) as JsonObject;
+    assert.equal(
+      fs.realpathSync(state.sessionFile as string),
+      fs.realpathSync(targetFile),
+    );
+    assert.equal(client.pendingCount, 0);
+  } finally {
+    client.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("fake RPC fork get_messages barrier parses and leaves native snapshots unstalled", async () => {
+  const directory = tempDir("pi-deck-fake-fork-messages-barrier-");
+  const barrierDir = path.join(directory, "barrier");
+  const sourceFile = path.join(directory, "source.jsonl");
+  const targetFile = path.join(directory, "target.jsonl");
+  fs.mkdirSync(barrierDir);
+  fs.writeFileSync(
+    sourceFile,
+    `${JSON.stringify({
+      type: "session",
+      version: 3,
+      id: "source",
+      timestamp: "2026-09-27T00:00:00.000Z",
+      cwd: directory,
+    })}\n`,
+  );
+
+  const native = spawnFakeRpc(["--fork-get-messages-barrier-dir", barrierDir]);
+  try {
+    const messages = (await native.request("get_messages")) as JsonObject;
+    assert.ok(Array.isArray(messages.messages));
+    assert.equal(
+      fs.existsSync(path.join(barrierDir, "snapshot-started")),
+      false,
+    );
+    assert.equal(native.pendingCount, 0);
+  } finally {
+    native.close();
+  }
+
+  const fork = spawnFakeRpc([
+    "--fork",
+    sourceFile,
+    "--fork-target",
+    targetFile,
+    "--fork-get-messages-barrier-dir",
+    barrierDir,
+  ]);
+  try {
+    const heldMessages = fork.request("get_messages");
+    const startedFile = path.join(barrierDir, "snapshot-started");
+    await waitForPath(startedFile);
+    assert.equal(fork.pendingCount, 1);
+    assert.equal(
+      fs.readFileSync(startedFile, "utf8").trim(),
+      fs.realpathSync(targetFile),
+    );
+
+    fs.writeFileSync(path.join(barrierDir, "release-snapshot"), "release\n");
+    const messages = (await heldMessages) as JsonObject;
+    assert.ok(Array.isArray(messages.messages));
+    assert.equal(fork.pendingCount, 0);
+  } finally {
+    fs.writeFileSync(path.join(barrierDir, "release-snapshot"), "release\n");
+    fork.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("fake RPC abort cancels a held native-fork state barrier", async () => {
+  const directory = tempDir("pi-deck-fake-fork-state-cancel-");
+  const barrierDir = path.join(directory, "barrier");
+  const sourceFile = path.join(directory, "source.jsonl");
+  const targetFile = path.join(directory, "target.jsonl");
+  fs.mkdirSync(barrierDir);
+  fs.writeFileSync(
+    sourceFile,
+    `${JSON.stringify({
+      type: "session",
+      version: 3,
+      id: "source",
+      timestamp: "2026-09-27T00:00:00.000Z",
+      cwd: directory,
+    })}\n`,
+  );
+  const client = spawnFakeRpc([
+    "--fork",
+    sourceFile,
+    "--fork-target",
+    targetFile,
+    "--fork-state-barrier-dir",
+    barrierDir,
+  ]);
+  try {
+    const statePromise = client.request("get_state");
+    await waitForPath(path.join(barrierDir, "target-created"));
+    await client.request("abort");
+
+    const closed = new Promise<void>((resolve) => {
+      client.once("close", () => resolve());
+    });
+    client.close();
+    await assert.rejects(statePromise, /exited|subprocess/i);
+    await closed;
+    assert.equal(client.pendingCount, 0);
+  } finally {
+    client.close();
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 
