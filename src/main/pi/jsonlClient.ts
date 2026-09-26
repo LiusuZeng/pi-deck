@@ -26,6 +26,59 @@ export interface JsonlParseError {
 // opaque main-owned tokens.
 export const DEFAULT_MAX_JSONL_LINE_BYTES = 256 * 1024 * 1024;
 
+const MAX_EXIT_COMMAND_CHARS = 2 * 1024;
+const MAX_EXIT_STDERR_CHARS = 8 * 1024;
+const SENSITIVE_OPTION =
+  /^--?(?:api[-_]?key|access[-_]?token|auth(?:orization)?|bearer|cookie|credential|pass(?:word|wd)?|secret|token)$/i;
+
+function boundedHead(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  const omitted = value.length - maxChars;
+  return `${value.slice(0, maxChars)}\n[...${omitted} chars omitted...]`;
+}
+
+function boundedTail(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  const omitted = value.length - maxChars;
+  return `[...${omitted} chars omitted...]\n${value.slice(-maxChars)}`;
+}
+
+function redactDiagnosticText(value: string): string {
+  return value
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "�")
+    .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]")
+    .replace(
+      /((?:api[-_]?key|access[-_]?token|auth(?:orization)?|cookie|credential|pass(?:word|wd)?|secret|token)["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)/gi,
+      "$1[REDACTED]",
+    )
+    .replace(/:\/\/([^\s/:@]+):([^\s/@]+)@/g, "://$1:[REDACTED]@");
+}
+
+function formatChildCommand(command: string, args: string[]): string {
+  let redactNext = false;
+  const values = [command, ...args].map((value, index) => {
+    if (redactNext) {
+      redactNext = false;
+      return "[REDACTED]";
+    }
+    if (index > 0) {
+      const equals = value.indexOf("=");
+      const option = equals === -1 ? value : value.slice(0, equals);
+      if (SENSITIVE_OPTION.test(option)) {
+        if (equals === -1) {
+          redactNext = true;
+          return value;
+        }
+        return `${option}=[REDACTED]`;
+      }
+    }
+    return value;
+  });
+  const rendered = values.map((value) => JSON.stringify(value)).join(" ");
+  return boundedHead(redactDiagnosticText(rendered), MAX_EXIT_COMMAND_CHARS);
+}
+
 export interface JsonlFramingParserOptions {
   onRecord: (record: JsonValue) => void;
   onMalformed: (error: JsonlParseError) => void;
@@ -229,10 +282,12 @@ export class JsonlRpcClient extends EventEmitter {
   private exitCode: number | null = null;
   private signal: NodeJS.Signals | null = null;
   private closeEmitted = false;
+  private closeRequested = false;
 
   constructor(
     readonly child: ChildProcess,
     options: JsonlRpcClientOptions = {},
+    private readonly commandDiagnostic?: string,
   ) {
     super();
     this.requestTimeoutMs = options.requestTimeoutMs ?? 10_000;
@@ -260,13 +315,36 @@ export class JsonlRpcClient extends EventEmitter {
       // A spawn failure has no process exit event to wait for. It is still a
       // terminal lifecycle event: consumers must release capacity exactly as
       // they would after a normal child exit, and only once.
-      this.closeOnce(null, null, `RPC subprocess error: ${error.message}`);
+      this.closeOnce(
+        null,
+        null,
+        this.withUnexpectedExitDiagnostics(
+          `RPC subprocess error: ${error.message}`,
+        ),
+      );
     });
+    // An idle child has no rejection that needs final stderr. Preserve the
+    // historical exit-time lifecycle notification so owners waiting on the OS
+    // exit can synchronously observe their close diagnostic.
     child.on("exit", (code, signal) => {
+      if (this.closeRequested || this.pending.size === 0) {
+        this.closeOnce(
+          code,
+          signal,
+          `RPC subprocess exited (code=${code ?? "null"}, signal=${signal ?? "null"})`,
+        );
+      }
+    });
+    // ChildProcess "close" follows stdio closure, unlike "exit". Waiting for
+    // it on crashes ensures a child's final stderr is present in the rejection.
+    child.on("close", (code, signal) => {
+      const summary = `RPC subprocess exited (code=${code ?? "null"}, signal=${signal ?? "null"})`;
       this.closeOnce(
         code,
         signal,
-        `RPC subprocess exited (code=${code ?? "null"}, signal=${signal ?? "null"})`,
+        this.closeRequested
+          ? summary
+          : this.withUnexpectedExitDiagnostics(summary),
       );
     });
   }
@@ -373,7 +451,17 @@ export class JsonlRpcClient extends EventEmitter {
     if (this.closed) {
       return;
     }
+    this.closeRequested = true;
     this.child.kill(signal);
+  }
+
+  private withUnexpectedExitDiagnostics(summary: string): string {
+    const command = this.commandDiagnostic ?? "<unavailable>";
+    const stderr = boundedTail(
+      redactDiagnosticText(this.stderr.snapshot().trimEnd()),
+      MAX_EXIT_STDERR_CHARS,
+    );
+    return `${summary}; command=${command}; stderr=${stderr || "<empty>"}`;
   }
 
   private closeOnce(
@@ -472,5 +560,9 @@ export function spawnJsonlRpcClient(
     ...spawnOptions,
     stdio: ["pipe", "pipe", "pipe"],
   });
-  return new JsonlRpcClient(child, clientOptions);
+  return new JsonlRpcClient(
+    child,
+    clientOptions,
+    formatChildCommand(command, args),
+  );
 }

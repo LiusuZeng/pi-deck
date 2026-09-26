@@ -1,40 +1,12 @@
 import assert from "node:assert/strict";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { buildSync } from "esbuild";
 import { it as test, vi } from "vitest";
+import { buildFakeRpcServer as fakePath } from "../../test/fakeRpcHarness.js";
 import { PiWorker } from "./piWorker.js";
 import { SinglePiAdapter } from "./piAdapter.js";
 import type { RuntimeEvent } from "./types.js";
-
-let builtFakePath: string | undefined;
-
-function fakePath(): string {
-  if (!builtFakePath) {
-    const outdir = path.join(tmpdir(), "pi-deck-fake-rpc-tests");
-    mkdirSync(outdir, { recursive: true });
-    builtFakePath = path.join(outdir, "fakeRpcServer.cjs");
-    buildSync({
-      entryPoints: [
-        fileURLToPath(new URL("./fakeRpc/fakeRpcServer.ts", import.meta.url)),
-      ],
-      outfile: builtFakePath,
-      bundle: true,
-      platform: "node",
-      format: "cjs",
-      target: "node26",
-    });
-  }
-  return builtFakePath;
-}
 
 function createWorker(args: string[] = []): PiWorker {
   return new PiWorker({
@@ -435,8 +407,11 @@ test("PiWorker rejects an extension response after exiting with a pending reques
   }
 });
 
-test("PiWorker unexpected exit rejects pending request and emits error diagnostic", async () => {
-  const worker = createWorker(["--exit-after-first-command"]);
+test("PiWorker unexpected exit preserves transport diagnostics", async () => {
+  const worker = createWorker([
+    "--stderr-on-start",
+    "--exit-after-first-command",
+  ]);
   const errorDiagnostic = waitForWorkerEvent(
     worker,
     (event) =>
@@ -444,10 +419,18 @@ test("PiWorker unexpected exit rejects pending request and emits error diagnosti
       (event as { level?: string }).level === "error",
   );
 
-  await assert.rejects(worker.getState(), /exited|subprocess/i);
+  await assert.rejects(worker.getState(), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /exited \(code=42, signal=null\)/);
+    assert.match(error.message, /command=.*fakeRpcServer\.cjs/);
+    assert.match(error.message, /stderr=.*deterministic stderr diagnostic/);
+    return true;
+  });
   const diagnostic = await errorDiagnostic;
   assert.match((diagnostic as { message?: string }).message ?? "", /exited/);
-  assert.equal(worker.getDiagnostics().healthy, false);
+  const diagnostics = worker.getDiagnostics();
+  assert.equal(diagnostics.healthy, false);
+  assert.match(diagnostics.stderr, /deterministic stderr diagnostic/);
 });
 
 test("session stats uses get_session_stats without transferring messages", async () => {

@@ -1,10 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { buildSync } from "esbuild";
 import { it as test } from "vitest";
+import { spawnFakeRpc } from "../../test/fakeRpcHarness.js";
 import {
   JsonlRpcClient,
   JsonlRpcError,
@@ -13,37 +9,11 @@ import {
 } from "./jsonlClient.js";
 import type { RpcEventRecord } from "./types.js";
 
-let builtFakePath: string | undefined;
-
-function fakePath(): string {
-  if (!builtFakePath) {
-    const outdir = path.join(tmpdir(), "pi-deck-fake-rpc-tests");
-    mkdirSync(outdir, { recursive: true });
-    builtFakePath = path.join(outdir, "fakeRpcServer.cjs");
-    buildSync({
-      entryPoints: [
-        fileURLToPath(new URL("./fakeRpc/fakeRpcServer.ts", import.meta.url)),
-      ],
-      outfile: builtFakePath,
-      bundle: true,
-      platform: "node",
-      format: "cjs",
-      target: "node26",
-    });
-  }
-  return builtFakePath;
-}
-
 function spawnFake(
   args: string[] = [],
   options: JsonlRpcClientOptions = {},
 ): JsonlRpcClient {
-  return spawnJsonlRpcClient(
-    process.execPath,
-    [fakePath(), ...args],
-    { cwd: process.cwd(), env: process.env },
-    { requestTimeoutMs: 5_000, ...options },
-  );
+  return spawnFakeRpc(args, options);
 }
 
 function waitForEvent(
@@ -97,13 +67,40 @@ test("JSONL RPC client routes non-response records as async events", async () =>
   }
 });
 
-test("JSONL RPC client rejects pending requests when subprocess exits", async () => {
-  const client = spawnFake(["--exit-after-first-command"]);
-  await assert.rejects(
-    client.request("get_state"),
-    /exited|not writable|subprocess/i,
-  );
+test("JSONL RPC client reports command and captured stderr on unexpected exit", async () => {
+  const client = spawnFake(["--stderr-on-start", "--exit-after-first-command"]);
+  await assert.rejects(client.request("get_state"), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /exited \(code=42, signal=null\)/);
+    assert.match(error.message, /command=.*fakeRpcServer\.cjs/);
+    assert.match(error.message, /stderr=.*deterministic stderr diagnostic/);
+    return true;
+  });
   assert.equal(client.pendingCount, 0);
+});
+
+test("unexpected-exit diagnostics are bounded and redact command and stderr secrets", async () => {
+  const secret = "never-print-this-secret";
+  const script =
+    'process.stderr.write("x".repeat(20_000) + "\\ntoken=" + process.argv.at(-1) + "\\n"); process.exit(7)';
+  const client = spawnJsonlRpcClient(
+    process.execPath,
+    ["-e", script, "--", "--api-key", secret],
+    { cwd: process.cwd(), env: process.env },
+  );
+
+  await assert.rejects(client.request("get_state"), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /exited \(code=7, signal=null\)/);
+    assert.match(error.message, /command=.*--api-key/);
+    assert.match(error.message, /stderr=.*chars omitted.*\[REDACTED\]/s);
+    assert.doesNotMatch(error.message, new RegExp(secret));
+    assert.ok(
+      error.message.length < 12_000,
+      "exit diagnostic must stay bounded",
+    );
+    return true;
+  });
 });
 
 test("JSONL RPC client rejects exact Pi RPC error responses", async () => {
