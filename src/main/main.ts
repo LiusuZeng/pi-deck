@@ -8430,8 +8430,11 @@ async function reconcileMultitaskRuntime(
       /* registered */
     }
     if (
-      legacySaved &&
-      multitaskRuntimeResumeGuard.claim(`${runtimeId}:legacy`, true)
+      multitaskRuntimeResumeGuard.claim(
+        `${runtimeId}:legacy`,
+        legacySaved !== undefined,
+      ) &&
+      legacySaved
     ) {
       await supervisor.resume(runtimeId, legacySaved);
     }

@@ -1651,6 +1651,11 @@ export function App(): ReactElement {
         async function refreshInterventionTranscript(
           runtimeId: string,
         ): Promise<void> {
+          if (
+            !shouldRefreshInterventionTranscript(sessionsRef.current, runtimeId)
+          ) {
+            return;
+          }
           try {
             const snapshot = await deckApi.chat.getSnapshot({ runtimeId });
             if (disposed || snapshot.runtimeId !== runtimeId) return;
@@ -8069,6 +8074,22 @@ function timelineAttachmentsFromDrafts(
   return timelineAttachments.length > 0 ? timelineAttachments : undefined;
 }
 
+function shouldRefreshInterventionTranscript(
+  sessions: readonly SessionViewModel[],
+  runtimeId: string,
+): boolean {
+  return Boolean(
+    sessions
+      .find((session) => session.id === runtimeId)
+      ?.timeline.some(
+        (item) =>
+          item.kind === "intervention" &&
+          item.status !== "consumed" &&
+          item.status !== "failed",
+      ),
+  );
+}
+
 function normalizedSnapshotMessageId(
   message: ChatMessage,
   index: number,
@@ -12939,6 +12960,7 @@ export const __rendererTestHooks = {
   activityStepSummary,
   toolTimelineItemFromRuntimeEvent,
   toolDetailSectionsFromRuntimeEvent,
+  shouldRefreshInterventionTranscript,
   normalizedSnapshotMessageId,
   timelineFromMessages,
 };

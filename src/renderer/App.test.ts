@@ -3655,6 +3655,49 @@ describe("renderer attention-first inbox", () => {
 });
 
 describe("renderer intervention UX", () => {
+  it("refreshes transcripts only while a runtime has unresolved interventions", () => {
+    const session = {
+      ...baseSession(),
+      timeline: [
+        {
+          id: "steer-1",
+          kind: "intervention",
+          interventionKind: "steer",
+          status: "accepted",
+          content: "Confirm me",
+          createdAt: "10:01",
+        },
+      ],
+    } as any;
+
+    expect(
+      __rendererTestHooks.shouldRefreshInterventionTranscript(
+        [session],
+        session.id,
+      ),
+    ).toBe(true);
+    expect(
+      __rendererTestHooks.shouldRefreshInterventionTranscript(
+        [
+          {
+            ...session,
+            timeline: session.timeline.map((item: any) => ({
+              ...item,
+              status: "consumed",
+            })),
+          },
+        ],
+        session.id,
+      ),
+    ).toBe(false);
+    expect(
+      __rendererTestHooks.shouldRefreshInterventionTranscript(
+        [session],
+        "another-runtime",
+      ),
+    ).toBe(false);
+  });
+
   it("records a failed intervention without failing its still-running parent", () => {
     const working = {
       ...baseSession(),

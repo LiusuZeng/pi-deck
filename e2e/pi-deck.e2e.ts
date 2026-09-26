@@ -10280,6 +10280,8 @@ test.describe("task-session routing acceptance", () => {
     const agentDir = path.join(root, "agent");
     const userDataDir = path.join(root, "user-data");
     const traceFile = path.join(root, "fixture-trace.log");
+    const routingStartedFile = path.join(root, "routing-started.log");
+    const routingReleaseFile = path.join(root, "routing-release");
     const fixture = path.join(root, "parent-active-plan.json");
     for (const directory of [projectCwd, agentDir, userDataDir])
       fs.mkdirSync(directory, { recursive: true });
@@ -10301,6 +10303,10 @@ test.describe("task-session routing acceptance", () => {
       fixture,
       "--fixture-trace-file",
       traceFile,
+      "--task-routing-started-file",
+      routingStartedFile,
+      "--task-routing-release-file",
+      routingReleaseFile,
       "--stream-delay-ms",
       "3000",
       "--fail-task-prompt-record-while-active",
@@ -10382,7 +10388,77 @@ test.describe("task-session routing acceptance", () => {
             );
           }),
         )
+        .toContain("running");
+
+      // Keep a real intervention unresolved while the parent reaches its
+      // terminal transcript refresh. Reading that transcript must not restore
+      // stale persisted task state over the live private worker.
+      const interventionText =
+        "Keep the active private worker running through transcript refresh.";
+      await page.getByLabel("Prompt text").fill(interventionText);
+      await page.getByRole("button", { name: "Steer" }).click();
+      const intervention = page.locator('[data-intervention-kind="steer"]', {
+        hasText: interventionText,
+      });
+      await expect(intervention).toHaveAttribute(
+        "data-intervention-status",
+        /queued|accepted|consumed/,
+      );
+      await expect(page.getByText(/Working in Pi RPC backend/)).toHaveCount(0, {
+        timeout: 20_000,
+      });
+      expect(
+        await page.evaluate(() => {
+          const states =
+            (
+              window as typeof window & {
+                __parentActiveTaskStates?: Array<{
+                  tasks: Array<{ lifecycle: string }>;
+                }>;
+              }
+            ).__parentActiveTaskStates ?? [];
+          return states.flatMap((state) =>
+            state.tasks.map((task) => task.lifecycle),
+          );
+        }),
+      ).not.toContain("interrupted");
+      await expect(panel.getByRole("listitem").first()).toContainText(
+        /starting|running/i,
+      );
+      fs.writeFileSync(routingReleaseFile, "release\n");
+
+      await expect
+        .poll(() =>
+          page.evaluate(() => {
+            const states =
+              (
+                window as typeof window & {
+                  __parentActiveTaskStates?: Array<{
+                    tasks: Array<{ lifecycle: string }>;
+                  }>;
+                }
+              ).__parentActiveTaskStates ?? [];
+            return states.flatMap((state) =>
+              state.tasks.map((task) => task.lifecycle),
+            );
+          }),
+        )
         .toEqual(expect.arrayContaining(["queued", "running", "completed"]));
+      expect(
+        await page.evaluate(() => {
+          const states =
+            (
+              window as typeof window & {
+                __parentActiveTaskStates?: Array<{
+                  tasks: Array<{ lifecycle: string }>;
+                }>;
+              }
+            ).__parentActiveTaskStates ?? [];
+          return states.flatMap((state) =>
+            state.tasks.map((task) => task.lifecycle),
+          );
+        }),
+      ).not.toContain("interrupted");
       await expect
         .poll(
           () =>
