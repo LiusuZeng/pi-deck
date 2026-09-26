@@ -149,13 +149,128 @@ it("computes composer-aware reveal scrolling for expanded timeline details", () 
 });
 
 it("keeps the bottom of oversized expanded details reachable", () => {
+  const scrollRect = { top: 100, bottom: 520, height: 420 };
+  const composerRect = { top: 480, bottom: 580, height: 100 };
+  const targetRect = { top: 80, bottom: 620, height: 540 };
+  const firstDelta = __rendererTestHooks.timelineDetailsRevealScrollDelta({
+    scrollRect,
+    composerRect,
+    targetRect,
+  });
+
+  expect(firstDelta).toBe(152);
   expect(
     __rendererTestHooks.timelineDetailsRevealScrollDelta({
-      scrollRect: { top: 100, bottom: 520, height: 420 },
-      composerRect: { top: 480, bottom: 580, height: 100 },
-      targetRect: { top: 80, bottom: 620, height: 540 },
+      scrollRect,
+      composerRect,
+      targetRect: {
+        top: targetRect.top - firstDelta,
+        bottom: targetRect.bottom - firstDelta,
+        height: targetRect.height,
+      },
     }),
-  ).toBe(152);
+  ).toBe(0);
+
+  const fractionalTarget = { top: 80.25, bottom: 620.25, height: 540 };
+  const fractionalDelta = __rendererTestHooks.timelineDetailsRevealScrollDelta({
+    scrollRect,
+    composerRect,
+    targetRect: fractionalTarget,
+  });
+  expect(fractionalDelta).toBe(153);
+  expect(
+    __rendererTestHooks.timelineDetailsRevealScrollDelta({
+      scrollRect,
+      composerRect,
+      targetRect: {
+        top: fractionalTarget.top - fractionalDelta,
+        bottom: fractionalTarget.bottom - fractionalDelta,
+        height: fractionalTarget.height,
+      },
+    }),
+  ).toBe(0);
+});
+
+it("keeps timeline scroll ownership exclusive across directional reader intent", () => {
+  expect(
+    __rendererTestHooks.timelineScrollOwnerAfterUserIntent(
+      "details",
+      "toward-end",
+    ),
+  ).toBe("reader");
+  expect(
+    __rendererTestHooks.timelineScrollOwnerAfterUserIntent(
+      "bottom",
+      "away-from-end",
+    ),
+  ).toBe("reader");
+  expect(
+    __rendererTestHooks.timelineScrollOwnerAfterUserIntent(
+      "bottom",
+      "toward-end",
+    ),
+  ).toBe("bottom");
+  expect(
+    __rendererTestHooks.timelineScrollOwnerAfterScroll({
+      owner: "details",
+      nearBottom: true,
+      userIntent: false,
+      userDirection: "unknown",
+    }),
+  ).toBe("details");
+  expect(
+    __rendererTestHooks.timelineScrollOwnerAfterScroll({
+      owner: "bottom",
+      nearBottom: false,
+      userIntent: false,
+      userDirection: "unknown",
+    }),
+  ).toBe("bottom");
+  expect(
+    __rendererTestHooks.timelineScrollOwnerAfterScroll({
+      owner: "bottom",
+      nearBottom: true,
+      userIntent: true,
+      userDirection: "away-from-end",
+    }),
+  ).toBe("reader");
+  expect(
+    __rendererTestHooks.timelineScrollOwnerAfterScroll({
+      owner: "reader",
+      nearBottom: true,
+      userIntent: false,
+      userDirection: "unknown",
+    }),
+  ).toBe("reader");
+  expect(
+    __rendererTestHooks.timelineScrollOwnerAfterScroll({
+      owner: "reader",
+      nearBottom: true,
+      userIntent: true,
+      userDirection: "toward-end",
+    }),
+  ).toBe("bottom");
+});
+
+it("maps timeline scroll keys to their navigation direction", () => {
+  expect(
+    __rendererTestHooks.timelineScrollDirectionForKey("ArrowUp", false),
+  ).toBe("away-from-end");
+  expect(__rendererTestHooks.timelineScrollDirectionForKey("Home", false)).toBe(
+    "away-from-end",
+  );
+  expect(__rendererTestHooks.timelineScrollDirectionForKey(" ", true)).toBe(
+    "away-from-end",
+  );
+  expect(__rendererTestHooks.timelineScrollDirectionForKey("End", false)).toBe(
+    "toward-end",
+  );
+  expect(__rendererTestHooks.timelineScrollDirectionForKey(" ", false)).toBe(
+    "toward-end",
+  );
+  expect(
+    __rendererTestHooks.timelineScrollDirectionForKey("Enter", false),
+  ).toBe(undefined);
 });
 
 it("scrolls upward when an expanded detail starts above the timeline viewport", () => {

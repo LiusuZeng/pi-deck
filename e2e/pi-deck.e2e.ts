@@ -229,6 +229,182 @@ async function setStableScrollOffset(
   return scrollTop;
 }
 
+interface TimelineNavigationFixture {
+  page: Page;
+  timeline: Locator;
+  activityGroup: Locator;
+}
+
+interface TimelineScrollSample {
+  top: number;
+  bottomDistance: number;
+}
+
+async function withTimelineNavigationFixture(
+  fixtureName: string,
+  run: (fixture: TimelineNavigationFixture) => Promise<void>,
+): Promise<void> {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), `pi-deck-e2e-${fixtureName}-`),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: ["--prompt-scenario", "tool", "--stream-delay-ms", "1"],
+    }),
+  );
+  try {
+    await page.setViewportSize({ width: 920, height: 500 });
+    await expectHealthyPreload(page);
+    await enterSessionDetail(page);
+    const prompt = `${fixtureName} timeline navigation`;
+    await page.getByLabel("Prompt text").fill(prompt);
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(page.getByText(`Fake response to: ${prompt}`)).toBeVisible();
+
+    const timeline = page.locator(".timeline-scroll");
+    const activityGroup = timeline.locator(".agent-activity-group").first();
+    await expect(activityGroup).toBeVisible();
+    await timeline.evaluate((element) => {
+      const content = element.querySelector<HTMLElement>(".timeline-content");
+      if (content === null) {
+        throw new Error("Missing timeline content wrapper.");
+      }
+      // Browser scroll anchoring would mask which application scroll owner won.
+      element.style.overflowAnchor = "none";
+      for (const row of content.querySelectorAll<HTMLElement>(
+        ".timeline-row, .agent-activity-row, .diagnostic-message",
+      )) {
+        row.style.contentVisibility = "visible";
+      }
+
+      const makeRows = (position: "earlier" | "later", count: number) => {
+        const fragment = document.createDocumentFragment();
+        for (let index = 0; index < count; index += 1) {
+          const row = document.createElement("div");
+          row.className = "timeline-row";
+          row.style.height = "96px";
+          row.style.contentVisibility = "visible";
+          row.textContent = `${position} history row ${index}`;
+          fragment.append(row);
+        }
+        return fragment;
+      };
+
+      content.prepend(makeRows("earlier", 14));
+      content.append(makeRows("later", 18));
+    });
+    await expect
+      .poll(() => timeline.evaluate((element) => element.scrollHeight))
+      .toBeGreaterThan(2_500);
+    await expectTimelineAtBottom(timeline);
+
+    await run({ page, timeline, activityGroup });
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+async function timelineScrollSample(
+  timeline: Locator,
+): Promise<TimelineScrollSample> {
+  return timeline.evaluate((element) => ({
+    top: element.scrollTop,
+    bottomDistance: Math.max(
+      0,
+      element.scrollHeight - element.scrollTop - element.clientHeight,
+    ),
+  }));
+}
+
+async function expectTimelineAtBottom(timeline: Locator): Promise<void> {
+  await expect
+    .poll(async () => (await timelineScrollSample(timeline)).bottomDistance)
+    .toBeLessThanOrEqual(1);
+}
+
+async function waitForTimelineScrollToSettle(
+  timeline: Locator,
+): Promise<number> {
+  return timeline.evaluate(async (element) => {
+    let previousTop = element.scrollTop;
+    let stableFrames = 0;
+    for (let frame = 0; frame < 120; frame += 1) {
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
+      const currentTop = element.scrollTop;
+      stableFrames =
+        Math.abs(currentTop - previousTop) <= 0.5 ? stableFrames + 1 : 0;
+      if (stableFrames >= 6) return currentTop;
+      previousTop = currentTop;
+    }
+    throw new Error("Timeline scrolling did not settle within 120 frames.");
+  });
+}
+
+async function appendTimelineGrowthAndSample(
+  timeline: Locator,
+  label: string,
+): Promise<{ before: TimelineScrollSample; samples: TimelineScrollSample[] }> {
+  return timeline.evaluate(async (element, growthLabel) => {
+    const sample = (): TimelineScrollSample => ({
+      top: element.scrollTop,
+      bottomDistance: Math.max(
+        0,
+        element.scrollHeight - element.scrollTop - element.clientHeight,
+      ),
+    });
+    const content = element.querySelector<HTMLElement>(".timeline-content");
+    if (content === null) {
+      throw new Error("Missing timeline content wrapper.");
+    }
+    const before = sample();
+    const growth = document.createElement("div");
+    growth.dataset.timelineGrowth = growthLabel;
+    growth.style.height = "180px";
+    content.append(growth);
+
+    const samples: TimelineScrollSample[] = [];
+    for (let index = 0; index < 12; index += 1) {
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
+      samples.push(sample());
+    }
+    return { before, samples };
+  }, label);
+}
+
+function expectTimelineReaderKeptPosition(
+  result: Awaited<ReturnType<typeof appendTimelineGrowthAndSample>>,
+): void {
+  expect(
+    result.samples.every(
+      (sample) => Math.abs(sample.top - result.before.top) <= 1,
+    ),
+  ).toBe(true);
+  expect(result.samples.at(-1)?.bottomDistance).toBeGreaterThan(
+    result.before.bottomDistance + 150,
+  );
+}
+
+function expectTimelineFollowedGrowth(
+  result: Awaited<ReturnType<typeof appendTimelineGrowthAndSample>>,
+): void {
+  expect(
+    result.samples.slice(-6).every((sample) => sample.bottomDistance <= 1),
+  ).toBe(true);
+}
+
 async function expectAllWorkLaunch(page: Page): Promise<void> {
   const route = page.locator(
     '.workspace[data-primary-view="work"][data-work-scope="all"]',
@@ -2751,6 +2927,714 @@ test("expanded tool details stay scrollable above the composer", async () => {
       .toBe(true);
     metrics = await expandedToolMetrics();
     expect(metrics.preBottom).toBeLessThanOrEqual(metrics.composerTop - 1);
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("focused timeline keyboard navigation releases follow, yields detail reveal, and End reacquires", async () => {
+  await withTimelineNavigationFixture("keyboard-scroll", async (fixture) => {
+    const { page, timeline, activityGroup } = fixture;
+
+    await timeline.focus();
+    await expect(timeline).toBeFocused();
+    const bottom = await timelineScrollSample(timeline);
+    await page.keyboard.press("PageUp");
+    await expect
+      .poll(async () => (await timelineScrollSample(timeline)).top)
+      .toBeLessThan(bottom.top - 50);
+    await waitForTimelineScrollToSettle(timeline);
+
+    const readerGrowth = await appendTimelineGrowthAndSample(
+      timeline,
+      "keyboard-reader",
+    );
+    expectTimelineReaderKeptPosition(readerGrowth);
+
+    // Keep the input target explicit after mutating the fixture layout.
+    // End is explicit toward-end input. Merely assigning scrollTop to the end
+    // would not exercise ownership reacquisition.
+    await timeline.focus();
+    await expect(timeline).toBeFocused();
+    await page.keyboard.press("End");
+    await expectTimelineAtBottom(timeline);
+    const followedGrowth = await appendTimelineGrowthAndSample(
+      timeline,
+      "keyboard-bottom",
+    );
+    expectTimelineFollowedGrowth(followedGrowth);
+
+    const summary = activityGroup.locator(":scope > summary");
+    await summary.click();
+    await expect(activityGroup).toHaveAttribute("open", "");
+    await expect(summary).toBeFocused();
+
+    let detailIsBelowViewport = false;
+    for (let pageIndex = 0; pageIndex < 3; pageIndex += 1) {
+      const beforePageUp = await timelineScrollSample(timeline);
+      await page.keyboard.press("PageUp");
+      await expect
+        .poll(async () => (await timelineScrollSample(timeline)).top)
+        .toBeLessThan(beforePageUp.top - 50);
+      await waitForTimelineScrollToSettle(timeline);
+      detailIsBelowViewport = await activityGroup.evaluate((details) => {
+        const timelineElement =
+          details.closest<HTMLElement>(".timeline-scroll");
+        if (timelineElement === null) {
+          throw new Error("Missing timeline for opened detail.");
+        }
+        return (
+          details.getBoundingClientRect().top >=
+          timelineElement.getBoundingClientRect().bottom + 80
+        );
+      });
+      if (detailIsBelowViewport) break;
+    }
+    expect(detailIsBelowViewport).toBe(true);
+
+    await activityGroup.evaluate((details) => {
+      const growth = document.createElement("div");
+      growth.dataset.keyboardDetailGrowth = "true";
+      growth.style.height = "160px";
+      details.append(growth);
+    });
+    await page.setViewportSize({ width: 920, height: 540 });
+    const detailSamples = await activityGroup.evaluate(async (details) => {
+      const timelineElement = details.closest<HTMLElement>(".timeline-scroll");
+      if (timelineElement === null) {
+        throw new Error("Missing timeline for opened detail.");
+      }
+      const samples: boolean[] = [];
+      for (let index = 0; index < 12; index += 1) {
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => resolve()),
+        );
+        samples.push(
+          details.getBoundingClientRect().top >
+            timelineElement.getBoundingClientRect().bottom,
+        );
+      }
+      return samples;
+    });
+    expect(detailSamples.every(Boolean)).toBe(true);
+  });
+});
+
+test("scrollbar navigation releases follow and reacquires only toward the end", async () => {
+  await withTimelineNavigationFixture("scrollbar-scroll", async (fixture) => {
+    const { page, timeline } = fixture;
+
+    // This fixture deliberately standardizes Chromium's native scrollbar.
+    // It still drives the browser scrollbar with real mouse input (and thus
+    // exercises the product's pointer/scroll ownership handlers), but does not
+    // claim coverage of OS-themed scrollbar painting or overlay behavior.
+    await timeline.evaluate((element) => {
+      const fixtureStyles = new CSSStyleSheet();
+      fixtureStyles.replaceSync(`
+        .timeline-scroll[data-e2e-standard-scrollbar="true"]::-webkit-scrollbar {
+          width: 16px;
+          height: 16px;
+        }
+        .timeline-scroll[data-e2e-standard-scrollbar="true"]::-webkit-scrollbar-track {
+          background: #e5e7eb;
+        }
+        .timeline-scroll[data-e2e-standard-scrollbar="true"]::-webkit-scrollbar-thumb {
+          min-height: 24px;
+          border: 0;
+          border-radius: 0;
+          background: #667085;
+        }
+        .timeline-scroll[data-e2e-standard-scrollbar="true"]::-webkit-scrollbar-button {
+          display: none;
+          width: 0;
+          height: 0;
+        }
+      `);
+      document.adoptedStyleSheets = [
+        ...document.adoptedStyleSheets,
+        fixtureStyles,
+      ];
+      element.dataset.e2eStandardScrollbar = "true";
+    });
+    test.info().annotations.push({
+      type: "standardized-browser-scrollbar-input",
+      description:
+        "The test uses page.mouse to drag a test-styled Chromium scrollbar; it does not gate OS-themed or overlay scrollbar rendering.",
+    });
+
+    const readScrollbarGeometry = () =>
+      timeline.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return {
+          left: rect.left,
+          top: rect.top,
+          width: rect.width,
+          height: rect.height,
+          clientHeight: element.clientHeight,
+          scrollHeight: element.scrollHeight,
+          scrollTop: element.scrollTop,
+          maxScrollTop: element.scrollHeight - element.clientHeight,
+          gutter: element.offsetWidth - element.clientWidth,
+          styledWidth: getComputedStyle(element, "::-webkit-scrollbar").width,
+          styledThumbMinHeight: getComputedStyle(
+            element,
+            "::-webkit-scrollbar-thumb",
+          ).minHeight,
+          styledButtonDisplay: getComputedStyle(
+            element,
+            "::-webkit-scrollbar-button",
+          ).display,
+        };
+      });
+
+    const geometry = await readScrollbarGeometry();
+    const maxScrollTop = geometry.maxScrollTop;
+    expect(geometry.gutter).toBe(16);
+    expect(geometry.styledWidth).toBe("16px");
+    expect(geometry.styledThumbMinHeight).toBe("24px");
+    expect(geometry.styledButtonDisplay).toBe("none");
+
+    const dragBrowserScrollbarTo = async (targetRatio: number) => {
+      const current = await readScrollbarGeometry();
+      const thumbHeight = Math.max(
+        24,
+        (current.clientHeight / current.scrollHeight) * current.height,
+      );
+      const thumbTravel = current.height - thumbHeight;
+      const startY =
+        current.top +
+        (current.maxScrollTop === 0
+          ? 0
+          : current.scrollTop / current.maxScrollTop) *
+          thumbTravel +
+        thumbHeight / 2;
+      const targetY = current.top + targetRatio * thumbTravel + thumbHeight / 2;
+      const x = current.left + current.width - current.gutter / 2;
+      const before = await timelineScrollSample(timeline);
+      await page.mouse.move(x, startY);
+      await page.mouse.down();
+      await page.mouse.move(x, targetY, { steps: 8 });
+      await page.mouse.up();
+      const after = await timelineScrollSample(timeline);
+      await test.info().attach(`browser-scrollbar-drag-${targetRatio}`, {
+        body: JSON.stringify(
+          {
+            targetRatio,
+            geometry: current,
+            estimatedThumb: { height: thumbHeight, travel: thumbTravel },
+            pointer: { x, startY, targetY },
+            before,
+            after,
+          },
+          null,
+          2,
+        ),
+        contentType: "application/json",
+      });
+    };
+
+    await dragBrowserScrollbarTo(0.55);
+    await expect
+      .poll(async () => (await timelineScrollSample(timeline)).top)
+      .toBeGreaterThan(maxScrollTop * 0.35);
+    await expect
+      .poll(async () => (await timelineScrollSample(timeline)).top)
+      .toBeLessThan(maxScrollTop * 0.7);
+    await waitForTimelineScrollToSettle(timeline);
+    const readerGrowth = await appendTimelineGrowthAndSample(
+      timeline,
+      "scrollbar-reader",
+    );
+    expectTimelineReaderKeptPosition(readerGrowth);
+
+    // Stop within the app's bottom threshold instead of aiming at the final
+    // sub-pixel of the track; bottom-follow completes the gesture.
+    await dragBrowserScrollbarTo(0.98);
+    await expectTimelineAtBottom(timeline);
+    const followedGrowth = await appendTimelineGrowthAndSample(
+      timeline,
+      "scrollbar-bottom",
+    );
+    expectTimelineFollowedGrowth(followedGrowth);
+  });
+});
+
+test("small upward wheel gestures relinquish timeline bottom follow", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-small-wheel-scroll-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: ["--stream-delay-ms", "1"],
+    }),
+  );
+  try {
+    await page.setViewportSize({ width: 920, height: 500 });
+    await expectHealthyPreload(page);
+    await enterSessionDetail(page);
+    await page.getByLabel("Prompt text").fill("small wheel navigation");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Fake response to: small wheel navigation"),
+    ).toBeVisible();
+
+    const timeline = page.locator(".timeline-scroll");
+    await timeline.evaluate((element) => {
+      const content = element.querySelector<HTMLElement>(".timeline-content");
+      if (content === null) {
+        throw new Error("Missing timeline content wrapper.");
+      }
+      for (let index = 0; index < 20; index += 1) {
+        const row = document.createElement("div");
+        row.className = "timeline-row";
+        row.style.height = "100px";
+        row.style.contentVisibility = "visible";
+        row.textContent = `Stationary history row ${index}`;
+        content.append(row);
+      }
+    });
+    await timeline.hover();
+    await page.mouse.wheel(0, 10_000);
+    await expect
+      .poll(async () =>
+        timeline.evaluate((element) =>
+          Math.max(
+            0,
+            element.scrollHeight - element.scrollTop - element.clientHeight,
+          ),
+        ),
+      )
+      .toBeLessThanOrEqual(1);
+
+    for (let index = 0; index < 4; index += 1) {
+      await page.mouse.wheel(0, -20);
+      await timeline.evaluate(
+        () =>
+          new Promise<void>((resolve) =>
+            requestAnimationFrame(() => resolve()),
+          ),
+      );
+    }
+    const readingDistance = await timeline.evaluate((element) =>
+      Math.max(
+        0,
+        element.scrollHeight - element.scrollTop - element.clientHeight,
+      ),
+    );
+    expect(readingDistance).toBeGreaterThanOrEqual(60);
+
+    // Keep the history stationary beyond the short input-correlation window so
+    // ownership, rather than a recent wheel timestamp, protects the reader.
+    const stationarySamples = await timeline.evaluate(async (element) => {
+      const samples: number[] = [];
+      for (let index = 0; index < 75; index += 1) {
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => resolve()),
+        );
+        samples.push(
+          Math.max(
+            0,
+            element.scrollHeight - element.scrollTop - element.clientHeight,
+          ),
+        );
+      }
+      return samples;
+    });
+    expect(stationarySamples.every((distance) => distance >= 60)).toBe(true);
+
+    const growthSamples = await timeline.evaluate(async (element) => {
+      const content = element.querySelector<HTMLElement>(".timeline-content");
+      if (content === null) {
+        throw new Error("Missing timeline content wrapper.");
+      }
+      const growth = document.createElement("div");
+      growth.dataset.readerLayoutGrowth = "true";
+      growth.style.height = "180px";
+      content.append(growth);
+
+      const samples: number[] = [];
+      for (let index = 0; index < 12; index += 1) {
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => resolve()),
+        );
+        samples.push(
+          Math.max(
+            0,
+            element.scrollHeight - element.scrollTop - element.clientHeight,
+          ),
+        );
+      }
+      return samples;
+    });
+    expect(growthSamples.every((distance) => distance >= 60)).toBe(true);
+
+    await page.mouse.wheel(0, 10_000);
+    await expect
+      .poll(async () =>
+        timeline.evaluate((element) =>
+          Math.max(
+            0,
+            element.scrollHeight - element.scrollTop - element.clientHeight,
+          ),
+        ),
+      )
+      .toBeLessThanOrEqual(1);
+
+    const bottomGrowthSamples = await timeline.evaluate(async (element) => {
+      const content = element.querySelector<HTMLElement>(".timeline-content");
+      if (content === null) {
+        throw new Error("Missing timeline content wrapper.");
+      }
+      const growth = document.createElement("div");
+      growth.style.height = "140px";
+      content.append(growth);
+
+      const samples: number[] = [];
+      for (let index = 0; index < 12; index += 1) {
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => resolve()),
+        );
+        samples.push(
+          Math.max(
+            0,
+            element.scrollHeight - element.scrollTop - element.clientHeight,
+          ),
+        );
+      }
+      return samples;
+    });
+    expect(
+      bottomGrowthSamples.slice(2).every((distance) => distance <= 1),
+    ).toBe(true);
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("manual timeline navigation disarms an opened detail reveal", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-detail-scroll-owner-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: ["--prompt-scenario", "tool", "--stream-delay-ms", "1"],
+    }),
+  );
+  try {
+    await page.setViewportSize({ width: 920, height: 500 });
+    await expectHealthyPreload(page);
+    await enterSessionDetail(page);
+    await page.getByLabel("Prompt text").fill("detail scroll ownership");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Fake response to: detail scroll ownership"),
+    ).toBeVisible();
+
+    const activityGroup = page.locator(".agent-activity-group").first();
+    const summary = activityGroup.locator(":scope > summary");
+    await page.locator(".timeline-scroll").evaluate((timeline) => {
+      const content = timeline.querySelector<HTMLElement>(".timeline-content");
+      if (content === null) {
+        throw new Error("Missing timeline content wrapper.");
+      }
+      for (const row of content.querySelectorAll<HTMLElement>(
+        ".timeline-row, .agent-activity-row, .diagnostic-message",
+      )) {
+        row.style.contentVisibility = "visible";
+      }
+      for (let index = 0; index < 15; index += 1) {
+        const row = document.createElement("div");
+        row.className = "timeline-row";
+        row.style.height = "100px";
+        row.style.contentVisibility = "visible";
+        row.textContent = `Later conversation message ${index}`;
+        content.append(row);
+      }
+    });
+
+    await summary.click();
+    await expect(activityGroup).toHaveAttribute("open", "");
+    const bottomSamples = await page
+      .locator(".timeline-scroll")
+      .evaluate(async (timeline) => {
+        timeline.dispatchEvent(
+          new WheelEvent("wheel", { bubbles: true, deltaY: 10_000 }),
+        );
+        timeline.scrollTop = timeline.scrollHeight;
+        timeline.dispatchEvent(new Event("scroll", { bubbles: true }));
+        const samples: Array<{ top: number; distance: number }> = [];
+        for (let index = 0; index < 34; index += 1) {
+          samples.push({
+            top: timeline.scrollTop,
+            distance: Math.max(
+              0,
+              timeline.scrollHeight -
+                timeline.scrollTop -
+                timeline.clientHeight,
+            ),
+          });
+          await new Promise((resolve) => window.setTimeout(resolve, 100));
+        }
+        return samples;
+      });
+    expect(bottomSamples.every((sample) => sample.distance <= 1)).toBe(true);
+    expect(
+      Math.max(...bottomSamples.map((sample) => sample.top)) -
+        Math.min(...bottomSamples.map((sample) => sample.top)),
+    ).toBeLessThanOrEqual(1);
+
+    // A new explicit open owns one reveal again.
+    await summary.click();
+    await summary.click();
+    await expect(activityGroup).toHaveAttribute("open", "");
+    await expect
+      .poll(async () =>
+        page.evaluate(() => {
+          const timeline =
+            document.querySelector<HTMLElement>(".timeline-scroll");
+          const composer = document.querySelector<HTMLElement>(".composer");
+          const details = document.querySelector<HTMLElement>(
+            ".agent-activity-group",
+          );
+          if (timeline === null || composer === null || details === null) {
+            throw new Error("Missing detail reveal fixture.");
+          }
+          return (
+            details.getBoundingClientRect().bottom <=
+            Math.min(
+              timeline.getBoundingClientRect().bottom,
+              composer.getBoundingClientRect().top,
+            ) -
+              10
+          );
+        }),
+      )
+      .toBe(true);
+
+    const readingSamples = await page
+      .locator(".timeline-scroll")
+      .evaluate(async (timeline) => {
+        timeline.scrollTop = timeline.scrollHeight;
+        timeline.dispatchEvent(new Event("scroll", { bubbles: true }));
+        timeline.dispatchEvent(
+          new WheelEvent("wheel", { bubbles: true, deltaY: -1_000 }),
+        );
+        timeline.scrollTop = Math.max(
+          0,
+          timeline.scrollHeight - timeline.clientHeight - 260,
+        );
+        timeline.dispatchEvent(new Event("scroll", { bubbles: true }));
+        const details = timeline.querySelector<HTMLElement>(
+          ".agent-activity-group",
+        );
+        if (details === null) {
+          throw new Error("Missing opened detail.");
+        }
+        const growth = document.createElement("div");
+        growth.style.height = "180px";
+        growth.dataset.asyncDetailGrowth = "true";
+        details.append(growth);
+        const composer = document.querySelector<HTMLElement>(".composer");
+        if (composer === null) {
+          throw new Error("Missing composer resize fixture.");
+        }
+        composer.style.paddingBottom = "36px";
+        const samples: Array<{
+          detailsBottom: number;
+          timelineTop: number;
+          scrollTop: number;
+        }> = [];
+        for (let index = 0; index < 16; index += 1) {
+          samples.push({
+            detailsBottom: details.getBoundingClientRect().bottom,
+            timelineTop: timeline.getBoundingClientRect().top,
+            scrollTop: timeline.scrollTop,
+          });
+          await new Promise((resolve) => window.setTimeout(resolve, 100));
+        }
+        return samples;
+      });
+    await page.setViewportSize({ width: 920, height: 540 });
+    await expect
+      .poll(async () =>
+        page.evaluate(() => {
+          const timeline =
+            document.querySelector<HTMLElement>(".timeline-scroll");
+          const details = document.querySelector<HTMLElement>(
+            ".agent-activity-group",
+          );
+          if (timeline === null || details === null) {
+            throw new Error("Missing resized detail fixture.");
+          }
+          return (
+            details.getBoundingClientRect().bottom <
+            timeline.getBoundingClientRect().top
+          );
+        }),
+      )
+      .toBe(true);
+    const afterResizeSamples = await page.evaluate(async () => {
+      const timeline = document.querySelector<HTMLElement>(".timeline-scroll");
+      const details = document.querySelector<HTMLElement>(
+        ".agent-activity-group",
+      );
+      if (timeline === null || details === null) {
+        throw new Error("Missing resized detail fixture.");
+      }
+      const samples: boolean[] = [];
+      for (let index = 0; index < 12; index += 1) {
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => resolve()),
+        );
+        samples.push(
+          details.getBoundingClientRect().bottom <
+            timeline.getBoundingClientRect().top,
+        );
+      }
+      return samples;
+    });
+    expect(
+      readingSamples
+        .slice(-8)
+        .every((sample) => sample.detailsBottom < sample.timelineTop),
+    ).toBe(true);
+    expect(afterResizeSamples.every(Boolean)).toBe(true);
+  } finally {
+    await app.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("oversized detail reveal settles once through growth and resize", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-oversized-detail-"),
+  );
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const { app, page } = await launchPiDeck(
+    fakeRealModeEnv({
+      root,
+      projectCwd,
+      agentDir,
+      fakePiArgs: ["--prompt-scenario", "tool", "--stream-delay-ms", "1"],
+    }),
+  );
+  try {
+    await page.setViewportSize({ width: 920, height: 500 });
+    await expectHealthyPreload(page);
+    await enterSessionDetail(page);
+    await page.getByLabel("Prompt text").fill("oversized detail stability");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      page.getByText("Fake response to: oversized detail stability"),
+    ).toBeVisible();
+
+    const activityGroup = page.locator(".agent-activity-group").first();
+    await activityGroup.evaluate((details) => {
+      const growth = document.createElement("div");
+      growth.dataset.oversizedGrowth = "true";
+      growth.style.height = "900px";
+      details.append(growth);
+    });
+    await activityGroup.locator(":scope > summary").click();
+    await expect(activityGroup).toHaveAttribute("open", "");
+
+    async function sampleReveal(
+      count: number,
+    ): Promise<
+      Array<{ scrollTop: number; detailsBottom: number; safeBottom: number }>
+    > {
+      return page
+        .locator(".timeline-scroll")
+        .evaluate(async (timeline, sampleCount) => {
+          const details = timeline.querySelector<HTMLElement>(
+            ".agent-activity-group",
+          );
+          const composer = document.querySelector<HTMLElement>(".composer");
+          if (details === null || composer === null) {
+            throw new Error("Missing oversized detail fixture.");
+          }
+          const samples = [];
+          for (let index = 0; index < sampleCount; index += 1) {
+            samples.push({
+              scrollTop: timeline.scrollTop,
+              detailsBottom: details.getBoundingClientRect().bottom,
+              safeBottom:
+                Math.min(
+                  timeline.getBoundingClientRect().bottom,
+                  composer.getBoundingClientRect().top,
+                ) - 12,
+            });
+            await new Promise((resolve) => window.setTimeout(resolve, 100));
+          }
+          return samples;
+        }, count);
+    }
+
+    const initialSamples = await sampleReveal(16);
+    const initialSettled = initialSamples.slice(4);
+    expect(
+      Math.max(...initialSettled.map((sample) => sample.scrollTop)) -
+        Math.min(...initialSettled.map((sample) => sample.scrollTop)),
+    ).toBeLessThanOrEqual(2);
+    expect(
+      initialSettled.every(
+        (sample) => Math.abs(sample.detailsBottom - sample.safeBottom) <= 2,
+      ),
+    ).toBe(true);
+
+    await activityGroup
+      .locator('[data-oversized-growth="true"]')
+      .evaluate((growth) => {
+        (growth as HTMLElement).style.height = "1100px";
+      });
+    const growthSamples = await sampleReveal(12);
+    expect(
+      Math.max(...growthSamples.slice(3).map((sample) => sample.scrollTop)) -
+        Math.min(...growthSamples.slice(3).map((sample) => sample.scrollTop)),
+    ).toBeLessThanOrEqual(2);
+    expect(
+      growthSamples
+        .slice(3)
+        .every(
+          (sample) => Math.abs(sample.detailsBottom - sample.safeBottom) <= 2,
+        ),
+    ).toBe(true);
+
+    await page.setViewportSize({ width: 920, height: 540 });
+    const resizeSamples = await sampleReveal(12);
+    expect(
+      Math.max(...resizeSamples.slice(3).map((sample) => sample.scrollTop)) -
+        Math.min(...resizeSamples.slice(3).map((sample) => sample.scrollTop)),
+    ).toBeLessThanOrEqual(2);
+    expect(
+      resizeSamples
+        .slice(3)
+        .every(
+          (sample) => Math.abs(sample.detailsBottom - sample.safeBottom) <= 2,
+        ),
+    ).toBe(true);
   } finally {
     await app.close();
     fs.rmSync(root, { recursive: true, force: true });

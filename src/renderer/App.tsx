@@ -15,6 +15,8 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactElement,
   type SyntheticEvent,
+  type TouchEvent as ReactTouchEvent,
+  type WheelEvent as ReactWheelEvent,
 } from "react";
 import appIconMark from "../../assets/branding/pi-deck-app-icon.svg";
 import type {
@@ -10031,8 +10033,65 @@ const TIMELINE_SCROLL_KEYS = new Set([
 type TimelineRevealRect = Pick<DOMRectReadOnly, "top" | "bottom" | "height">;
 
 const TIMELINE_DETAILS_REVEAL_GAP_PX = 12;
-const TIMELINE_DETAILS_REVEAL_INTERVAL_MS = 250;
-const TIMELINE_DETAILS_REVEAL_INTERVAL_TICKS = 12;
+
+type TimelineScrollOwner = "bottom" | "details" | "reader";
+type TimelineScrollDirection = "away-from-end" | "toward-end" | "unknown";
+
+function timelineScrollDirectionForKey(
+  key: string,
+  shiftKey: boolean,
+): TimelineScrollDirection | undefined {
+  if (key === "ArrowUp" || key === "Home" || key === "PageUp") {
+    return "away-from-end";
+  }
+  if (key === " " && shiftKey) {
+    return "away-from-end";
+  }
+  if (
+    key === "ArrowDown" ||
+    key === "End" ||
+    key === "PageDown" ||
+    key === " "
+  ) {
+    return "toward-end";
+  }
+  return undefined;
+}
+
+function timelineScrollOwnerAfterUserIntent(
+  owner: TimelineScrollOwner,
+  direction: TimelineScrollDirection,
+): TimelineScrollOwner {
+  if (owner === "details" || direction === "away-from-end") {
+    return "reader";
+  }
+  return owner;
+}
+
+function timelineScrollOwnerAfterScroll(options: {
+  owner: TimelineScrollOwner;
+  nearBottom: boolean;
+  userIntent: boolean;
+  userDirection: TimelineScrollDirection;
+}): TimelineScrollOwner {
+  // A reveal's own scroll event must not transfer ownership to bottom-follow.
+  // Explicit input disarms the reveal before this calculation.
+  if (options.owner === "details") {
+    return "details";
+  }
+  if (!options.userIntent) {
+    // Geometry changes alone never transfer ownership. In particular, a
+    // delayed scroll event near the threshold must not reclaim a reader.
+    return options.owner;
+  }
+  if (options.userDirection === "away-from-end") {
+    return "reader";
+  }
+  if (options.nearBottom && options.userDirection === "toward-end") {
+    return "bottom";
+  }
+  return "reader";
+}
 
 function timelineDetailsRevealScrollDelta(options: {
   scrollRect: TimelineRevealRect;
@@ -10063,14 +10122,21 @@ function timelineDetailsRevealScrollDelta(options: {
     return 0;
   }
 
-  // Very tall details cannot fit in one viewport. Prefer keeping the bottom of
-  // the opened panel reachable, because that is where native payload scrollbars
-  // appear and where the composer overlap is most disruptive.
-  if (options.targetRect.bottom > safeBottom) {
-    return Math.ceil(options.targetRect.bottom - safeBottom);
+  // Very tall details cannot fit in one viewport. Always align their bottom:
+  // switching between top and bottom alignment makes repeated layout-settling
+  // corrections oscillate forever.
+  const oversizedDelta = options.targetRect.bottom - safeBottom;
+  // scrollTop and DOMRects can quantize to different fractional CSS pixels.
+  // Treat a sub-pixel alignment as settled so rounding cannot create a ±1px
+  // correction loop.
+  if (Math.abs(oversizedDelta) <= 1) {
+    return 0;
   }
-  if (options.targetRect.top < safeTop) {
-    return Math.floor(options.targetRect.top - safeTop);
+  if (oversizedDelta > 0) {
+    return Math.ceil(oversizedDelta);
+  }
+  if (oversizedDelta < 0) {
+    return Math.floor(oversizedDelta);
   }
   return 0;
 }
@@ -10165,14 +10231,17 @@ const ChatTimeline = memo(function ChatTimeline(props: {
     props.session.status === "working" &&
     !hasActiveTimelineOutput(props.session.timeline);
   const timelineScrollRef = useRef<HTMLDivElement | null>(null);
-  const shouldStickToBottomRef = useRef(true);
+  const timelineContentRef = useRef<HTMLDivElement | null>(null);
+  const scrollOwnerRef = useRef<TimelineScrollOwner>("bottom");
   const pendingAutoFollowFrameRef = useRef<number | null>(null);
   const userScrollIntentUntilRef = useRef(0);
+  const userScrollDirectionRef = useRef<TimelineScrollDirection>("unknown");
+  const lastTimelineScrollTopRef = useRef(0);
+  const lastTimelineTouchYRef = useRef<number | null>(null);
   const previousSessionIdRef = useRef(props.session.id);
   const openedTimelineDetailsRef = useRef<HTMLDetailsElement | null>(null);
   const pendingDetailsRevealFrameRef = useRef<number | null>(null);
   const openedDetailsResizeObserverRef = useRef<ResizeObserver | null>(null);
-  const openedDetailsRevealIntervalRef = useRef<number | null>(null);
   const [activityDisclosureById, setActivityDisclosureById] = useState<
     Record<string, boolean>
   >({});
@@ -10201,18 +10270,17 @@ const ChatTimeline = memo(function ChatTimeline(props: {
     const sessionChanged = previousSessionIdRef.current !== props.session.id;
     previousSessionIdRef.current = props.session.id;
     if (sessionChanged) {
-      shouldStickToBottomRef.current = true;
+      scrollOwnerRef.current = "bottom";
       userScrollIntentUntilRef.current = 0;
-      openedTimelineDetailsRef.current = null;
+      userScrollDirectionRef.current = "unknown";
+      lastTimelineTouchYRef.current = null;
+      disarmTimelineDetailsReveal();
       cancelPendingAutoFollow();
-      cancelPendingDetailsReveal();
-      disconnectOpenedDetailsObserver();
-      clearOpenedDetailsRevealInterval();
     }
     if (
       !shouldAutoFollowTimelineUpdate({
         sessionChanged,
-        followingBottom: shouldStickToBottomRef.current,
+        followingBottom: scrollOwnerRef.current === "bottom",
       })
     ) {
       return;
@@ -10222,6 +10290,7 @@ const ChatTimeline = memo(function ChatTimeline(props: {
     // not expose one frame at the old offset. Keep the coalesced frame follow
     // as a second pass for browser layout/anchoring that settles afterward.
     scrollContainer.scrollTop = scrollContainer.scrollHeight;
+    lastTimelineScrollTopRef.current = scrollContainer.scrollTop;
     scheduleTimelineAutoFollow(scrollContainer);
   }, [props.session.id, timelineScrollMarker]);
 
@@ -10239,11 +10308,11 @@ const ChatTimeline = memo(function ChatTimeline(props: {
     }
     pendingAutoFollowFrameRef.current = window.requestAnimationFrame(() => {
       pendingAutoFollowFrameRef.current = null;
-      if (!shouldStickToBottomRef.current) {
+      if (scrollOwnerRef.current !== "bottom") {
         return;
       }
       scrollContainer.scrollTop = scrollContainer.scrollHeight;
-      shouldStickToBottomRef.current = true;
+      lastTimelineScrollTopRef.current = scrollContainer.scrollTop;
     });
   }
 
@@ -10260,21 +10329,27 @@ const ChatTimeline = memo(function ChatTimeline(props: {
     openedDetailsResizeObserverRef.current = null;
   }
 
-  function clearOpenedDetailsRevealInterval(): void {
-    if (openedDetailsRevealIntervalRef.current === null) {
+  function disarmTimelineDetailsReveal(
+    detailsElement?: HTMLDetailsElement,
+  ): void {
+    if (
+      detailsElement !== undefined &&
+      openedTimelineDetailsRef.current !== detailsElement
+    ) {
       return;
     }
-    window.clearInterval(openedDetailsRevealIntervalRef.current);
-    openedDetailsRevealIntervalRef.current = null;
+    openedTimelineDetailsRef.current = null;
+    cancelPendingDetailsReveal();
+    disconnectOpenedDetailsObserver();
+    if (scrollOwnerRef.current === "details") {
+      scrollOwnerRef.current = "reader";
+    }
   }
 
   function scheduleTimelineDetailsReveal(
     detailsElement: HTMLDetailsElement,
   ): void {
-    if (
-      pendingAutoFollowFrameRef.current !== null &&
-      shouldStickToBottomRef.current
-    ) {
+    if (scrollOwnerRef.current !== "details") {
       return;
     }
     cancelPendingDetailsReveal();
@@ -10282,15 +10357,12 @@ const ChatTimeline = memo(function ChatTimeline(props: {
       pendingDetailsRevealFrameRef.current = null;
       const scrollContainer = timelineScrollRef.current;
       if (
+        scrollOwnerRef.current !== "details" ||
         openedTimelineDetailsRef.current !== detailsElement ||
         !detailsElement.open ||
         !detailsElement.isConnected
       ) {
-        if (openedTimelineDetailsRef.current === detailsElement) {
-          openedTimelineDetailsRef.current = null;
-          disconnectOpenedDetailsObserver();
-          clearOpenedDetailsRevealInterval();
-        }
+        disarmTimelineDetailsReveal(detailsElement);
         return;
       }
       if (scrollContainer !== null) {
@@ -10306,6 +10378,7 @@ const ChatTimeline = memo(function ChatTimeline(props: {
     }
     const observer = new ResizeObserver(() => {
       if (
+        scrollOwnerRef.current === "details" &&
         openedTimelineDetailsRef.current === detailsElement &&
         detailsElement.open
       ) {
@@ -10327,23 +10400,11 @@ const ChatTimeline = memo(function ChatTimeline(props: {
   function revealOpenedTimelineDetails(
     detailsElement: HTMLDetailsElement,
   ): void {
+    disarmTimelineDetailsReveal();
+    cancelPendingAutoFollow();
+    scrollOwnerRef.current = "details";
     openedTimelineDetailsRef.current = detailsElement;
     observeOpenedDetails(detailsElement);
-    clearOpenedDetailsRevealInterval();
-    let remainingRevealTicks = TIMELINE_DETAILS_REVEAL_INTERVAL_TICKS;
-    openedDetailsRevealIntervalRef.current = window.setInterval(() => {
-      remainingRevealTicks -= 1;
-      if (
-        remainingRevealTicks <= 0 ||
-        openedTimelineDetailsRef.current !== detailsElement ||
-        !detailsElement.open ||
-        !detailsElement.isConnected
-      ) {
-        clearOpenedDetailsRevealInterval();
-        return;
-      }
-      scheduleTimelineDetailsReveal(detailsElement);
-    }, TIMELINE_DETAILS_REVEAL_INTERVAL_MS);
     scheduleTimelineDetailsReveal(detailsElement);
   }
 
@@ -10352,12 +10413,7 @@ const ChatTimeline = memo(function ChatTimeline(props: {
   ): void {
     const detailsElement = event.currentTarget;
     if (!detailsElement.open) {
-      if (openedTimelineDetailsRef.current === detailsElement) {
-        openedTimelineDetailsRef.current = null;
-        cancelPendingDetailsReveal();
-        disconnectOpenedDetailsObserver();
-        clearOpenedDetailsRevealInterval();
-      }
+      disarmTimelineDetailsReveal(detailsElement);
       return;
     }
 
@@ -10397,15 +10453,82 @@ const ChatTimeline = memo(function ChatTimeline(props: {
       window.removeEventListener("resize", handleResize);
       window.visualViewport?.removeEventListener("resize", handleResize);
       cancelPendingAutoFollow();
-      cancelPendingDetailsReveal();
-      disconnectOpenedDetailsObserver();
-      clearOpenedDetailsRevealInterval();
+      disarmTimelineDetailsReveal();
     };
   }, []);
 
-  function markTimelineUserScrollIntent(): void {
+  useLayoutEffect(() => {
+    const scrollContainer = timelineScrollRef.current;
+    const timelineContent = timelineContentRef.current;
+    if (
+      scrollContainer === null ||
+      timelineContent === null ||
+      typeof ResizeObserver === "undefined"
+    ) {
+      return;
+    }
+
+    const observer = new ResizeObserver(() => {
+      if (scrollOwnerRef.current === "bottom") {
+        scheduleTimelineAutoFollow(scrollContainer);
+      }
+    });
+    // The inner wrapper reports aggregate descendant-height changes, including
+    // content-visibility rows replacing intrinsic estimates with real heights.
+    observer.observe(timelineContent);
+    observer.observe(scrollContainer);
+    return () => observer.disconnect();
+  }, []);
+
+  function markTimelineUserScrollIntent(
+    direction: TimelineScrollDirection,
+  ): void {
     userScrollIntentUntilRef.current =
       window.performance.now() + TIMELINE_USER_SCROLL_INTENT_WINDOW_MS;
+    userScrollDirectionRef.current = direction;
+    cancelPendingAutoFollow();
+    const nextOwner = timelineScrollOwnerAfterUserIntent(
+      scrollOwnerRef.current,
+      direction,
+    );
+    if (scrollOwnerRef.current === "details") {
+      disarmTimelineDetailsReveal();
+    }
+    scrollOwnerRef.current = nextOwner;
+  }
+
+  function handleTimelineWheelIntent(event: ReactWheelEvent<HTMLDivElement>) {
+    lastTimelineScrollTopRef.current = event.currentTarget.scrollTop;
+    markTimelineUserScrollIntent(
+      event.deltaY < 0
+        ? "away-from-end"
+        : event.deltaY > 0
+          ? "toward-end"
+          : "unknown",
+    );
+  }
+
+  function handleTimelineTouchStart(
+    event: ReactTouchEvent<HTMLDivElement>,
+  ): void {
+    lastTimelineScrollTopRef.current = event.currentTarget.scrollTop;
+    lastTimelineTouchYRef.current = event.touches[0]?.clientY ?? null;
+  }
+
+  function handleTimelineTouchMove(
+    event: ReactTouchEvent<HTMLDivElement>,
+  ): void {
+    const currentY = event.touches[0]?.clientY;
+    const previousY = lastTimelineTouchYRef.current;
+    lastTimelineScrollTopRef.current = event.currentTarget.scrollTop;
+    lastTimelineTouchYRef.current = currentY ?? null;
+    markTimelineUserScrollIntent(
+      currentY === undefined || previousY === null || currentY === previousY
+        ? "unknown"
+        : currentY > previousY
+          ? "away-from-end"
+          : "toward-end",
+    );
   }
 
   function handleTimelinePointerIntent(
@@ -10420,13 +10543,19 @@ const ChatTimeline = memo(function ChatTimeline(props: {
       event.clientX >=
       scrollContainer.getBoundingClientRect().right - scrollbarGutter
     ) {
-      markTimelineUserScrollIntent();
+      lastTimelineScrollTopRef.current = scrollContainer.scrollTop;
+      markTimelineUserScrollIntent("unknown");
     }
   }
 
   function handleTimelineKeyIntent(event: KeyboardEvent<HTMLDivElement>): void {
-    if (TIMELINE_SCROLL_KEYS.has(event.key)) {
-      markTimelineUserScrollIntent();
+    if (!TIMELINE_SCROLL_KEYS.has(event.key)) {
+      return;
+    }
+    const direction = timelineScrollDirectionForKey(event.key, event.shiftKey);
+    if (direction !== undefined) {
+      lastTimelineScrollTopRef.current = event.currentTarget.scrollTop;
+      markTimelineUserScrollIntent(direction);
     }
   }
 
@@ -10436,22 +10565,41 @@ const ChatTimeline = memo(function ChatTimeline(props: {
       return;
     }
 
+    const userIntent =
+      window.performance.now() <= userScrollIntentUntilRef.current;
+    let userDirection = userScrollDirectionRef.current;
+    if (userIntent && userDirection === "unknown") {
+      if (scrollContainer.scrollTop < lastTimelineScrollTopRef.current) {
+        userDirection = "away-from-end";
+      } else if (scrollContainer.scrollTop > lastTimelineScrollTopRef.current) {
+        userDirection = "toward-end";
+      }
+      userScrollDirectionRef.current = userDirection;
+    }
+    lastTimelineScrollTopRef.current = scrollContainer.scrollTop;
+
     const followingBottom = isScrolledNearBottom(scrollContainer);
-    if (followingBottom) {
-      shouldStickToBottomRef.current = true;
+    const nextOwner = timelineScrollOwnerAfterScroll({
+      owner: scrollOwnerRef.current,
+      nearBottom: followingBottom,
+      userIntent,
+      userDirection,
+    });
+    scrollOwnerRef.current = nextOwner;
+
+    if (followingBottom && nextOwner === "bottom") {
+      // Reaching the end completes this gesture. A later deferred-height change
+      // is layout settling, not evidence that the reader moved away.
+      userScrollIntentUntilRef.current = 0;
+      userScrollDirectionRef.current = "unknown";
+      scheduleTimelineAutoFollow(scrollContainer);
       return;
     }
-
-    // Geometry alone cannot distinguish a user's scroll from a delayed native
-    // event caused by our own scrollTop write or by streaming layout changes.
-    // Only explicit user input may revoke bottom-follow ownership.
-    if (window.performance.now() <= userScrollIntentUntilRef.current) {
-      shouldStickToBottomRef.current = false;
+    if (nextOwner === "reader") {
       cancelPendingAutoFollow();
       return;
     }
-
-    if (shouldStickToBottomRef.current) {
+    if (nextOwner === "bottom") {
       scheduleTimelineAutoFollow(scrollContainer);
     }
   }
@@ -10531,139 +10679,150 @@ const ChatTimeline = memo(function ChatTimeline(props: {
           }
         }}
         onScroll={handleTimelineScroll}
-        onTouchMoveCapture={markTimelineUserScrollIntent}
-        onWheelCapture={markTimelineUserScrollIntent}
+        onTouchStartCapture={handleTimelineTouchStart}
+        onTouchMoveCapture={handleTimelineTouchMove}
+        onTouchEndCapture={() => {
+          lastTimelineTouchYRef.current = null;
+        }}
+        onTouchCancelCapture={() => {
+          lastTimelineTouchYRef.current = null;
+        }}
+        onWheelCapture={handleTimelineWheelIntent}
       >
-        {props.taskPlanning ? (
-          <div className="state-banner waiting" role="status">
-            Planning parallel tasks…
-          </div>
-        ) : null}
-        {props.multitaskState && props.multitaskState.tasks.length > 0 ? (
-          <TaskSessionPanel
-            activeCount={props.multitaskState.activeCount}
-            activeLimit={props.multitaskState.activeLimit}
-            tasks={props.multitaskState.tasks}
-          />
-        ) : null}
-        {!hasItems ? (
-          <EmptyTimelineState
-            status={props.session.status}
-            backendMode={props.session.backendMode ?? "fake"}
-          />
-        ) : null}
-        {props.session.status === "error" ||
-        props.session.failureKind === "auth-required" ? (
-          <div className="state-banner error">
-            {props.session.failureKind === "auth-required" ? (
-              <span>
-                OpenAI authentication required. Pi&apos;s OpenAI Codex (ChatGPT
-                subscription) login is no longer valid. Authentication
-                verification is pending until an explicit new model prompt
-                completes.
-              </span>
-            ) : (
-              <span>This session is in an error state.</span>
-            )}
-            <div className="recovery-actions">
+        <div className="timeline-content" ref={timelineContentRef}>
+          {props.taskPlanning ? (
+            <div className="state-banner waiting" role="status">
+              Planning parallel tasks…
+            </div>
+          ) : null}
+          {props.multitaskState && props.multitaskState.tasks.length > 0 ? (
+            <TaskSessionPanel
+              activeCount={props.multitaskState.activeCount}
+              activeLimit={props.multitaskState.activeLimit}
+              tasks={props.multitaskState.tasks}
+            />
+          ) : null}
+          {!hasItems ? (
+            <EmptyTimelineState
+              status={props.session.status}
+              backendMode={props.session.backendMode ?? "fake"}
+            />
+          ) : null}
+          {props.session.status === "error" ||
+          props.session.failureKind === "auth-required" ? (
+            <div className="state-banner error">
               {props.session.failureKind === "auth-required" ? (
-                <>
-                  <IconButton
-                    icon={History}
-                    label="Re-authenticate with Pi"
-                    onClick={props.onRepairOpenAiCodexAuth}
-                  />
-                  {props.session.sessionFile !== undefined ? (
-                    <IconButton
-                      icon={RotateCcw}
-                      label="Check again / Resume"
-                      loading={props.openAiCodexResumeInFlight}
-                      onClick={props.onResumeAfterOpenAiCodexRepair}
-                    />
-                  ) : null}
-                </>
+                <span>
+                  OpenAI authentication required. Pi&apos;s OpenAI Codex
+                  (ChatGPT subscription) login is no longer valid.
+                  Authentication verification is pending until an explicit new
+                  model prompt completes.
+                </span>
               ) : (
-                <>
-                  {props.session.retryPrompt !== undefined &&
-                  props.session.runtimeBacked ? (
-                    <IconButton
-                      icon={RotateCcw}
-                      label="Retry prompt"
-                      onClick={props.onRetrySession}
-                    />
-                  ) : null}
-                  {props.session.sessionFile !== undefined ? (
+                <span>This session is in an error state.</span>
+              )}
+              <div className="recovery-actions">
+                {props.session.failureKind === "auth-required" ? (
+                  <>
                     <IconButton
                       icon={History}
-                      label="Reopen saved session"
-                      onClick={props.onRecoverSession}
+                      label="Re-authenticate with Pi"
+                      onClick={props.onRepairOpenAiCodexAuth}
                     />
-                  ) : null}
-                </>
-              )}
-              <IconButton
-                icon={Copy}
-                label="Copy diagnostics"
-                onClick={props.onCopyDiagnostics}
-              />
+                    {props.session.sessionFile !== undefined ? (
+                      <IconButton
+                        icon={RotateCcw}
+                        label="Check again / Resume"
+                        loading={props.openAiCodexResumeInFlight}
+                        onClick={props.onResumeAfterOpenAiCodexRepair}
+                      />
+                    ) : null}
+                  </>
+                ) : (
+                  <>
+                    {props.session.retryPrompt !== undefined &&
+                    props.session.runtimeBacked ? (
+                      <IconButton
+                        icon={RotateCcw}
+                        label="Retry prompt"
+                        onClick={props.onRetrySession}
+                      />
+                    ) : null}
+                    {props.session.sessionFile !== undefined ? (
+                      <IconButton
+                        icon={History}
+                        label="Reopen saved session"
+                        onClick={props.onRecoverSession}
+                      />
+                    ) : null}
+                  </>
+                )}
+                <IconButton
+                  icon={Copy}
+                  label="Copy diagnostics"
+                  onClick={props.onCopyDiagnostics}
+                />
+              </div>
             </div>
-          </div>
-        ) : null}
-        {props.session.status === "waiting" ? (
-          <div className="state-banner waiting">
-            This session is waiting for user input.
-          </div>
-        ) : null}
+          ) : null}
+          {props.session.status === "waiting" ? (
+            <div className="state-banner waiting">
+              This session is waiting for user input.
+            </div>
+          ) : null}
 
-        {props.showAttachmentExamples ? <AttachmentExampleStrip /> : null}
+          {props.showAttachmentExamples ? <AttachmentExampleStrip /> : null}
 
-        {(props.session.pendingExtensionUiRequests ?? []).map((request) => (
-          <ExtensionUiCard
-            key={request.id}
-            request={request}
-            onRespond={props.onRespondToExtensionUi}
-          />
-        ))}
+          {(props.session.pendingExtensionUiRequests ?? []).map((request) => (
+            <ExtensionUiCard
+              key={request.id}
+              request={request}
+              onRespond={props.onRespondToExtensionUi}
+            />
+          ))}
 
-        {presentationItems.map((item) => {
-          if (item.kind === "activity") {
+          {presentationItems.map((item) => {
+            if (item.kind === "activity") {
+              return (
+                <AgentActivityGroup
+                  key={item.id}
+                  group={item}
+                  open={isActivityOpen(item)}
+                  onGroupFocus={() => handleActivityFocus(item.id)}
+                  onGroupSummaryClick={(event) =>
+                    handleActivitySummaryClick(
+                      item.id,
+                      isActivityOpen(item),
+                      event,
+                    )
+                  }
+                  onGroupSummaryKeyDown={(event) =>
+                    handleActivitySummaryKeyDown(
+                      item.id,
+                      isActivityOpen(item),
+                      event,
+                    )
+                  }
+                  onGroupToggle={handleActivityToggle}
+                  onDetailsSummaryClick={handleTimelineDetailsSummaryClick}
+                  onDetailsToggle={handleTimelineDetailsToggle}
+                />
+              );
+            }
+
             return (
-              <AgentActivityGroup
-                key={item.id}
-                group={item}
-                open={isActivityOpen(item)}
-                onGroupFocus={() => handleActivityFocus(item.id)}
-                onGroupSummaryClick={(event) =>
-                  handleActivitySummaryClick(
-                    item.id,
-                    isActivityOpen(item),
-                    event,
-                  )
-                }
-                onGroupSummaryKeyDown={(event) =>
-                  handleActivitySummaryKeyDown(
-                    item.id,
-                    isActivityOpen(item),
-                    event,
-                  )
-                }
-                onGroupToggle={handleActivityToggle}
+              <TimelineRow
+                key={item.item.id}
+                item={item.item}
                 onDetailsSummaryClick={handleTimelineDetailsSummaryClick}
                 onDetailsToggle={handleTimelineDetailsToggle}
               />
             );
-          }
-
-          return (
-            <TimelineRow
-              key={item.item.id}
-              item={item.item}
-              onDetailsSummaryClick={handleTimelineDetailsSummaryClick}
-              onDetailsToggle={handleTimelineDetailsToggle}
-            />
-          );
-        })}
-        {showPendingAgent ? <PendingAgentRow session={props.session} /> : null}
+          })}
+          {showPendingAgent ? (
+            <PendingAgentRow session={props.session} />
+          ) : null}
+        </div>
       </div>
     </section>
   );
@@ -12627,6 +12786,9 @@ export const __rendererTestHooks = {
   timelineBottomDistance,
   isScrolledNearBottom,
   shouldAutoFollowTimelineUpdate,
+  timelineScrollDirectionForKey,
+  timelineScrollOwnerAfterUserIntent,
+  timelineScrollOwnerAfterScroll,
   timelineDetailsRevealScrollDelta,
   timelinePresentationItems,
   createTimelinePresentationProjector,
