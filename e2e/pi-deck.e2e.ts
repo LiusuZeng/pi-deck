@@ -3024,31 +3024,46 @@ test("focused timeline keyboard navigation releases follow, yields detail reveal
 test("scrollbar navigation releases follow and reacquires only toward the end", async () => {
   await withTimelineNavigationFixture("scrollbar-scroll", async (fixture) => {
     const { page, timeline } = fixture;
-    const geometry = await timeline.evaluate((element) => {
-      const rect = element.getBoundingClientRect();
-      return {
-        left: rect.left,
-        top: rect.top,
-        width: rect.width,
-        height: rect.height,
-        clientHeight: element.clientHeight,
-        scrollHeight: element.scrollHeight,
-        scrollTop: element.scrollTop,
-        gutter: element.offsetWidth - element.clientWidth,
-      };
+
+    // This fixture deliberately standardizes Chromium's native scrollbar.
+    // It still drives the browser scrollbar with real mouse input (and thus
+    // exercises the product's pointer/scroll ownership handlers), but does not
+    // claim coverage of OS-themed scrollbar painting or overlay behavior.
+    await timeline.evaluate((element) => {
+      const fixtureStyles = new CSSStyleSheet();
+      fixtureStyles.replaceSync(`
+        .timeline-scroll[data-e2e-standard-scrollbar="true"]::-webkit-scrollbar {
+          width: 16px;
+          height: 16px;
+        }
+        .timeline-scroll[data-e2e-standard-scrollbar="true"]::-webkit-scrollbar-track {
+          background: #e5e7eb;
+        }
+        .timeline-scroll[data-e2e-standard-scrollbar="true"]::-webkit-scrollbar-thumb {
+          min-height: 24px;
+          border: 0;
+          border-radius: 0;
+          background: #667085;
+        }
+        .timeline-scroll[data-e2e-standard-scrollbar="true"]::-webkit-scrollbar-button {
+          display: none;
+          width: 0;
+          height: 0;
+        }
+      `);
+      document.adoptedStyleSheets = [
+        ...document.adoptedStyleSheets,
+        fixtureStyles,
+      ];
+      element.dataset.e2eStandardScrollbar = "true";
     });
-    const maxScrollTop = geometry.scrollHeight - geometry.clientHeight;
-    const hasNativeScrollbarGutter = geometry.gutter >= 8;
     test.info().annotations.push({
-      type: hasNativeScrollbarGutter
-        ? "native-scrollbar-input"
-        : "scrollbar-input-limitation",
-      description: hasNativeScrollbarGutter
-        ? "Electron exposed a native scrollbar gutter; the test dragged its thumb with page.mouse."
-        : "macOS overlay scrollbars exposed no deterministic gutter; the test used DOM pointer intent plus asserted incremental element scrolling, not native device input.",
+      type: "standardized-browser-scrollbar-input",
+      description:
+        "The test uses page.mouse to drag a test-styled Chromium scrollbar; it does not gate OS-themed or overlay scrollbar rendering.",
     });
 
-    const readNativeScrollbarGeometry = () =>
+    const readScrollbarGeometry = () =>
       timeline.evaluate((element) => {
         const rect = element.getBoundingClientRect();
         return {
@@ -3061,33 +3076,27 @@ test("scrollbar navigation releases follow and reacquires only toward the end", 
           scrollTop: element.scrollTop,
           maxScrollTop: element.scrollHeight - element.clientHeight,
           gutter: element.offsetWidth - element.clientWidth,
+          styledWidth: getComputedStyle(element, "::-webkit-scrollbar").width,
+          styledThumbMinHeight: getComputedStyle(
+            element,
+            "::-webkit-scrollbar-thumb",
+          ).minHeight,
+          styledButtonDisplay: getComputedStyle(
+            element,
+            "::-webkit-scrollbar-button",
+          ).display,
         };
       });
 
-    const waitForScrollbarPaint = () =>
-      timeline.evaluate(async () => {
-        // Native scrollbar layers update on compositor frames. In particular,
-        // scrollTop can report the new bottom before a just-shown macOS thumb
-        // has painted there. Synchronize to paint instead of sleeping.
-        await new Promise<void>((resolve) =>
-          requestAnimationFrame(() => resolve()),
-        );
-        await new Promise<void>((resolve) =>
-          requestAnimationFrame(() => resolve()),
-        );
-      });
+    const geometry = await readScrollbarGeometry();
+    const maxScrollTop = geometry.maxScrollTop;
+    expect(geometry.gutter).toBe(16);
+    expect(geometry.styledWidth).toBe("16px");
+    expect(geometry.styledThumbMinHeight).toBe("24px");
+    expect(geometry.styledButtonDisplay).toBe("none");
 
-    const dragNativeScrollbarTo = async (targetRatio: number) => {
-      const initial = await readNativeScrollbarGeometry();
-      const initialX =
-        initial.left + initial.width - Math.max(initial.gutter / 2, 1);
-      // Wake an overlay/hover-sensitive native scrollbar before deriving its
-      // thumb position. Pressing in the same task as the first hover can hit
-      // the old track position while a programmatic bottom-follow is painting.
-      await page.mouse.move(initialX, initial.top + initial.height / 2);
-      await waitForScrollbarPaint();
-
-      const current = await readNativeScrollbarGeometry();
+    const dragBrowserScrollbarTo = async (targetRatio: number) => {
+      const current = await readScrollbarGeometry();
       const thumbHeight = Math.max(
         24,
         (current.clientHeight / current.scrollHeight) * current.height,
@@ -3102,15 +3111,13 @@ test("scrollbar navigation releases follow and reacquires only toward the end", 
         thumbHeight / 2;
       const targetY = current.top + targetRatio * thumbTravel + thumbHeight / 2;
       const x = current.left + current.width - current.gutter / 2;
-      await page.mouse.move(x, startY);
-      await waitForScrollbarPaint();
       const before = await timelineScrollSample(timeline);
+      await page.mouse.move(x, startY);
       await page.mouse.down();
       await page.mouse.move(x, targetY, { steps: 8 });
       await page.mouse.up();
-      await waitForScrollbarPaint();
       const after = await timelineScrollSample(timeline);
-      await test.info().attach(`native-scrollbar-drag-${targetRatio}`, {
+      await test.info().attach(`browser-scrollbar-drag-${targetRatio}`, {
         body: JSON.stringify(
           {
             targetRatio,
@@ -3125,53 +3132,9 @@ test("scrollbar navigation releases follow and reacquires only toward the end", 
         ),
         contentType: "application/json",
       });
-      return after;
     };
 
-    const dragDomScrollbarIntentTo = async (targetTop: number) => {
-      await timeline.evaluate(async (element, requestedTop) => {
-        const rect = element.getBoundingClientRect();
-        const startTop = element.scrollTop;
-        const movingTowardEnd = requestedTop > startTop;
-        const pointerId = 31;
-        const x = rect.right - 1;
-        const startY = movingTowardEnd ? rect.top + 60 : rect.bottom - 60;
-        const endY = movingTowardEnd ? rect.bottom - 20 : rect.top + 20;
-        const pointer = (type: string, clientY: number, buttons: number) =>
-          element.dispatchEvent(
-            new PointerEvent(type, {
-              bubbles: true,
-              pointerId,
-              pointerType: "mouse",
-              isPrimary: true,
-              buttons,
-              clientX: x,
-              clientY,
-            }),
-          );
-
-        pointer("pointerdown", startY, 1);
-        for (let step = 1; step <= 8; step += 1) {
-          const progress = step / 8;
-          pointer("pointermove", startY + (endY - startY) * progress, 1);
-          element.scrollTop = startTop + (requestedTop - startTop) * progress;
-          element.dispatchEvent(new Event("scroll", { bubbles: true }));
-          await new Promise<void>((resolve) =>
-            requestAnimationFrame(() => resolve()),
-          );
-        }
-        pointer("pointerup", endY, 0);
-      }, targetTop);
-    };
-
-    if (hasNativeScrollbarGutter) {
-      // This is a real Electron/Chromium thumb drag. Native macOS overlay
-      // scrollbars report no gutter, so that platform takes the explicit DOM
-      // pointer-intent fallback below instead of pretending device coverage.
-      await dragNativeScrollbarTo(0.55);
-    } else {
-      await dragDomScrollbarIntentTo(maxScrollTop * 0.55);
-    }
+    await dragBrowserScrollbarTo(0.55);
     await expect
       .poll(async () => (await timelineScrollSample(timeline)).top)
       .toBeGreaterThan(maxScrollTop * 0.35);
@@ -3185,18 +3148,9 @@ test("scrollbar navigation releases follow and reacquires only toward the end", 
     );
     expectTimelineReaderKeptPosition(readerGrowth);
 
-    if (hasNativeScrollbarGutter) {
-      // Stop within the app's bottom threshold instead of aiming at the final
-      // sub-pixel of the native track; bottom-follow completes the gesture.
-      await dragNativeScrollbarTo(0.98);
-    } else {
-      // The downward pointer movement plus incremental scroll events are the
-      // explicit toward-end gesture; a synthetic jump alone is insufficient.
-      const currentMax = await timeline.evaluate(
-        (element) => element.scrollHeight - element.clientHeight,
-      );
-      await dragDomScrollbarIntentTo(currentMax);
-    }
+    // Stop within the app's bottom threshold instead of aiming at the final
+    // sub-pixel of the track; bottom-follow completes the gesture.
+    await dragBrowserScrollbarTo(0.98);
     await expectTimelineAtBottom(timeline);
     const followedGrowth = await appendTimelineGrowthAndSample(
       timeline,
