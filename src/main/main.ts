@@ -865,6 +865,8 @@ function registerIpcHandlers(
           generation: lifecycleOperation.generation,
           assertActive: () =>
             assertChatLifecycleOperationActive(lifecycleOperation),
+          assertAvailable: () =>
+            assertForkCleanupTargetAvailable(sessionFile, "attached"),
           operation: async (attachmentLease) => {
             if (workspaceId !== undefined) {
               // Explicit workspace requests retain their membership and

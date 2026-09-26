@@ -31,8 +31,16 @@ export async function withChatResumeOwnershipTransaction<
   gate: ChatResumeOwnershipGate<TLease>;
   generation: number;
   assertActive: () => void;
+  /** Read-only rejection of existing reservations; never resolves ownership. */
+  assertAvailable?: () => Promise<void>;
   operation: (lease: TLease) => Promise<T>;
 }): Promise<T> {
+  options.assertActive();
+  // A request for an already-reserved fork must fail now, not silently wait
+  // until the fork commits and attach it. Availability is rechecked during
+  // the operation; this preflight does not authorize or claim the session.
+  await options.assertAvailable?.();
+  options.assertActive();
   const lease = await options.gate.enter(options.generation);
   try {
     options.assertActive();

@@ -132,6 +132,34 @@ test("unassigned resume claims the stable default without activating it", async 
   assert.equal((await store.getActiveWorkspace())?.id, namedId);
 });
 
+test("a reserved fork resume rejects before waiting for its attachment lease", async () => {
+  const gate = new SessionAttachmentGate();
+  const forkLease = await gate.enter(0);
+  let ownershipResolved = false;
+  try {
+    await assert.rejects(
+      withChatResumeOwnershipTransaction({
+        gate,
+        generation: 0,
+        assertActive: () => undefined,
+        assertAvailable: async () => {
+          throw new Error("Fork target is awaiting durable cleanup.");
+        },
+        operation: async () => {
+          ownershipResolved = true;
+        },
+      }),
+      /awaiting durable cleanup/,
+    );
+    assert.equal(ownershipResolved, false);
+  } finally {
+    forkLease.release();
+  }
+  // Rejection must not leave an unconsumed queue entry behind.
+  const nextLease = await gate.enter(0);
+  nextLease.release();
+});
+
 test("resume and discovery queue order deterministically chooses ownership", async () => {
   const discoveryFirst = await createWorkspaceFixture();
   const discoveredFile = path.join(
