@@ -107,6 +107,8 @@ interface FakeOptions {
   getMessagesDelayMs: number;
   /** Hold only a native fork's final snapshot history. */
   forkGetMessagesDelayMs: number;
+  /** Hold only a native fork's get_messages until release-snapshot exists. */
+  forkGetMessagesBarrierDir?: string;
   /** Write when get_messages begins, for deterministic E2E interleaving. */
   getMessagesSignalFile?: string;
   /** Test-only override for the cwd reported by get_state. */
@@ -361,6 +363,10 @@ function parseOptions(argv: string[]): FakeOptions {
       if (Number.isSafeInteger(delay) && delay >= 0) {
         options.forkGetMessagesDelayMs = delay;
       }
+      index += 1;
+    } else if (arg === "--fork-get-messages-barrier-dir") {
+      const barrierDir = argv[index + 1];
+      if (barrierDir) options.forkGetMessagesBarrierDir = barrierDir;
       index += 1;
     } else if (arg === "--get-messages-signal-file") {
       const signalFile = argv[index + 1];
@@ -960,11 +966,18 @@ class FakeRpcServer {
             `${this.sessionFile}\n`,
           );
         }
+        const forkGetMessages = this.options.forkSourceFile !== undefined;
+        if (
+          forkGetMessages &&
+          this.options.forkGetMessagesBarrierDir !== undefined
+        ) {
+          this.holdForkMessagesAtBarrier(command.id, name);
+          break;
+        }
         const respond = () =>
           this.respond(command.id, name, { messages: this.messages });
         const delay =
-          this.options.forkSourceFile !== undefined &&
-          this.options.forkGetMessagesDelayMs > 0
+          forkGetMessages && this.options.forkGetMessagesDelayMs > 0
             ? this.options.forkGetMessagesDelayMs
             : this.options.getMessagesDelayMs;
         if (delay > 0) {
@@ -2024,6 +2037,29 @@ class FakeRpcServer {
       released = true;
       watcher.close();
       this.respond(commandId, command, this.getState());
+    };
+    const watcher = fs.watch(barrierDir, release);
+    // Close the subscribe/check race if release was created just before watch.
+    release();
+  }
+
+  private holdForkMessagesAtBarrier(
+    commandId: string | undefined,
+    command: string,
+  ): void {
+    const barrierDir = this.options.forkGetMessagesBarrierDir!;
+    fs.mkdirSync(barrierDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(barrierDir, "snapshot-started"),
+      `${fs.realpathSync(this.sessionFile)}\n`,
+    );
+    const releaseFile = path.join(barrierDir, "release-snapshot");
+    let released = false;
+    const release = (): void => {
+      if (released || !fs.existsSync(releaseFile)) return;
+      released = true;
+      watcher.close();
+      this.respond(commandId, command, { messages: this.messages });
     };
     const watcher = fs.watch(barrierDir, release);
     // Close the subscribe/check race if release was created just before watch.

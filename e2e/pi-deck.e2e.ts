@@ -9861,9 +9861,20 @@ test("fork reserves its fresh target against default-workspace resume and unwind
     "--fake-rpc--",
     "fork-race-target.jsonl",
   );
-  const snapshotSignalFile = path.join(root, "fork-snapshot-started");
+  const snapshotBarrierDir = path.join(root, "fork-snapshot-barrier");
+  const snapshotStartedFile = path.join(snapshotBarrierDir, "snapshot-started");
+  const releaseSnapshotFile = path.join(snapshotBarrierDir, "release-snapshot");
+  const sigtermReceivedSignalFile = path.join(root, "fork-sigterm-received");
+  const allowForkExitFile = path.join(root, "allow-fork-exit");
   const forkExitSignalFile = path.join(root, "fork-cleanup-exited");
+  const workspaceFile = path.join(root, "pideck-home", "workspaces.json");
+  const journalFile = path.join(
+    root,
+    "pideck-home",
+    "failed-fork-cleanup.json",
+  );
   fs.mkdirSync(projectCwd, { recursive: true });
+  fs.mkdirSync(snapshotBarrierDir, { recursive: true });
   const sourceToken = `fork-race-source-${Date.now()}`;
   const env = fakeRealModeEnv({
     root,
@@ -9873,12 +9884,12 @@ test("fork reserves its fresh target against default-workspace resume and unwind
     fakePiArgs: [
       "--fork-target",
       targetFile,
-      "--delay-get-messages-ms",
-      "1500",
-      "--get-messages-signal-file",
-      snapshotSignalFile,
-      "--sigterm-exit-delay-ms",
-      "750",
+      "--fork-get-messages-barrier-dir",
+      snapshotBarrierDir,
+      "--sigterm-received-signal-file",
+      sigtermReceivedSignalFile,
+      "--sigterm-exit-wait-file",
+      allowForkExitFile,
       "--fork-exit-signal-file",
       forkExitSignalFile,
     ],
@@ -9894,7 +9905,6 @@ test("fork reserves its fresh target against default-workspace resume and unwind
     ).toBeVisible({
       timeout: 20_000,
     });
-    fs.rmSync(snapshotSignalFile, { force: true });
     const source = await page.evaluate(async () => {
       const snapshot = await window.piDeck.chat.getSnapshot();
       return {
@@ -9908,15 +9918,25 @@ test("fork reserves its fresh target against default-workspace resume and unwind
     }, source);
     await expect
       .poll(() =>
-        fs.existsSync(snapshotSignalFile)
-          ? fs.readFileSync(snapshotSignalFile, "utf8").trim()
+        fs.existsSync(snapshotStartedFile)
+          ? fs.readFileSync(snapshotStartedFile, "utf8").trim()
           : "",
       )
-      .toBe(targetFile);
+      .toBe(canonicalSessionIdentity(targetFile));
+    const canonicalTarget = fs.realpathSync(targetFile);
+    // The fork-only snapshot barrier is reached after the target ref and both
+    // ownership reservations are durable. It does not stall the native source.
+    await expect
+      .poll(() =>
+        fs.existsSync(workspaceFile)
+          ? fs.readFileSync(workspaceFile, "utf8")
+          : "",
+      )
+      .toContain(canonicalTarget);
 
     // No workspaceId deliberately exercises the default-workspace fallback.
     // The target is already atomically claimed/reserved, so this cannot attach
-    // it or move it before the fork's delayed first snapshot completes.
+    // it or move it before the fork's held first snapshot completes.
     const resumeError = await page.evaluate(async (sessionFile) => {
       try {
         await window.piDeck.chat.resumeSession({ sessionFile });
@@ -9944,9 +9964,9 @@ test("fork reserves its fresh target against default-workspace resume and unwind
       }
     }, targetFile);
     expect(moveError).toMatch(/awaiting durable cleanup/i);
-    // Change the durable header after the claim but before delayed snapshot
+    // Change the durable header after the claim but before snapshot
     // registration. The worker still reports the original ID, so fork must
-    // fail. Its delayed SIGTERM exit keeps both reservations and the journal
+    // fail. Its SIGTERM exit barrier keeps both reservations and the journal
     // block in place until worker_exit drives the compensation retry.
     fs.writeFileSync(
       targetFile,
@@ -9958,17 +9978,55 @@ test("fork reserves its fresh target against default-workspace resume and unwind
         cwd: projectCwd,
       })}\n`,
     );
-    await page.waitForTimeout(100);
+    fs.writeFileSync(releaseSnapshotFile, "release\n");
+    await expect
+      .poll(() =>
+        fs.existsSync(sigtermReceivedSignalFile)
+          ? fs.readFileSync(sigtermReceivedSignalFile, "utf8").trim()
+          : "",
+      )
+      .toBe("received");
     expect(fs.existsSync(forkExitSignalFile)).toBe(false);
-    const forkWhileClosingError = await page.evaluate(async (source) => {
-      try {
-        await window.piDeck.chat.forkSession(source);
-        return "";
-      } catch (error) {
-        return error instanceof Error ? error.message : String(error);
-      }
-    }, source);
-    expect(forkWhileClosingError).toMatch(/active or changing session/i);
+
+    const blockedWhileClosing = await page.evaluate(
+      async (sourceAndTarget) => {
+        const errorOf = async (operation: () => Promise<unknown>) => {
+          try {
+            await operation();
+            return "";
+          } catch (error) {
+            return error instanceof Error ? error.message : String(error);
+          }
+        };
+        return {
+          sourceFork: await errorOf(() =>
+            window.piDeck.chat.forkSession({
+              workspaceId: sourceAndTarget.workspaceId,
+              sessionFile: sourceAndTarget.sourceFile,
+            }),
+          ),
+          targetResume: await errorOf(() =>
+            window.piDeck.chat.resumeSession({
+              workspaceId: sourceAndTarget.workspaceId,
+              sessionFile: sourceAndTarget.targetFile,
+            }),
+          ),
+        };
+      },
+      {
+        workspaceId: source.workspaceId,
+        sourceFile: source.sessionFile,
+        targetFile: canonicalTarget,
+      },
+    );
+    expect(blockedWhileClosing.sourceFork).toMatch(
+      /active or changing session/i,
+    );
+    expect(blockedWhileClosing.targetResume).toMatch(
+      /awaiting durable cleanup/i,
+    );
+
+    fs.writeFileSync(allowForkExitFile, "continue\n");
     const forkError = await page.evaluate(async () => {
       try {
         await (
@@ -10019,22 +10077,21 @@ test("fork reserves its fresh target against default-workspace resume and unwind
       {
         workspaceId: source.workspaceId,
         sourceFile: source.sessionFile,
-        targetFile: fs.realpathSync(targetFile),
+        targetFile: canonicalTarget,
       },
     );
     expect(retained.sourceResume).toMatch(/awaiting durable cleanup/i);
     expect(retained.targetResume).toMatch(/awaiting durable cleanup/i);
-    const journal = fs.readFileSync(
-      path.join(root, "pideck-home", "failed-fork-cleanup.json"),
-      "utf8",
-    );
-    const workspaceRefs = fs.readFileSync(
-      path.join(root, "pideck-home", "workspaces.json"),
-      "utf8",
-    );
+    const journal = fs.readFileSync(journalFile, "utf8");
+    const workspaceRefs = fs.readFileSync(workspaceFile, "utf8");
     expect(journal).toContain("target");
-    expect(workspaceRefs).toContain(fs.realpathSync(targetFile));
+    expect(workspaceRefs).toContain(canonicalTarget);
   } finally {
+    // Always open both barriers before closing Electron so a failed assertion
+    // cannot strand the fork worker or application cleanup.
+    fs.mkdirSync(snapshotBarrierDir, { recursive: true });
+    fs.writeFileSync(releaseSnapshotFile, "release\n");
+    fs.writeFileSync(allowForkExitFile, "continue\n");
     await app.close().catch(() => undefined);
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -175,6 +175,65 @@ test("fake RPC native-fork state barrier waits for an explicit release", async (
   }
 });
 
+test("fake RPC fork get_messages barrier parses and leaves native snapshots unstalled", async () => {
+  const directory = tempDir("pi-deck-fake-fork-messages-barrier-");
+  const barrierDir = path.join(directory, "barrier");
+  const sourceFile = path.join(directory, "source.jsonl");
+  const targetFile = path.join(directory, "target.jsonl");
+  fs.mkdirSync(barrierDir);
+  fs.writeFileSync(
+    sourceFile,
+    `${JSON.stringify({
+      type: "session",
+      version: 3,
+      id: "source",
+      timestamp: "2026-09-27T00:00:00.000Z",
+      cwd: directory,
+    })}\n`,
+  );
+
+  const native = spawnFakeRpc(["--fork-get-messages-barrier-dir", barrierDir]);
+  try {
+    const messages = (await native.request("get_messages")) as JsonObject;
+    assert.ok(Array.isArray(messages.messages));
+    assert.equal(
+      fs.existsSync(path.join(barrierDir, "snapshot-started")),
+      false,
+    );
+    assert.equal(native.pendingCount, 0);
+  } finally {
+    native.close();
+  }
+
+  const fork = spawnFakeRpc([
+    "--fork",
+    sourceFile,
+    "--fork-target",
+    targetFile,
+    "--fork-get-messages-barrier-dir",
+    barrierDir,
+  ]);
+  try {
+    const heldMessages = fork.request("get_messages");
+    const startedFile = path.join(barrierDir, "snapshot-started");
+    await waitForPath(startedFile);
+    assert.equal(fork.pendingCount, 1);
+    assert.equal(
+      fs.readFileSync(startedFile, "utf8").trim(),
+      fs.realpathSync(targetFile),
+    );
+
+    fs.writeFileSync(path.join(barrierDir, "release-snapshot"), "release\n");
+    const messages = (await heldMessages) as JsonObject;
+    assert.ok(Array.isArray(messages.messages));
+    assert.equal(fork.pendingCount, 0);
+  } finally {
+    fs.writeFileSync(path.join(barrierDir, "release-snapshot"), "release\n");
+    fork.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("fake RPC abort cancels a held native-fork state barrier", async () => {
   const directory = tempDir("pi-deck-fake-fork-state-cancel-");
   const barrierDir = path.join(directory, "barrier");
