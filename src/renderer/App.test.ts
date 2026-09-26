@@ -215,6 +215,14 @@ describe("timeline presentation grouping", () => {
     content: `answer ${id}`,
     createdAt: "10:01",
   });
+  const intervention = (id: string) => ({
+    id,
+    kind: "intervention",
+    interventionKind: "steer",
+    status: "queued",
+    content: `instruction ${id}`,
+    createdAt: "10:01",
+  });
   const thinking = (id: string, streaming = false) => ({
     id,
     kind: "thinking",
@@ -258,6 +266,27 @@ describe("timeline presentation grouping", () => {
       "th1",
       "t2",
     ]);
+  });
+
+  it("keeps a queued intervention visible between active agent activity", () => {
+    const grouped = __rendererTestHooks.timelinePresentationItems([
+      user("u1"),
+      tool("t1", "running"),
+      intervention("i1"),
+      tool("t2", "running"),
+    ] as any) as any[];
+
+    expect(grouped.map((item) => item.kind)).toEqual([
+      "message",
+      "activity",
+      "message",
+      "activity",
+    ]);
+    expect(grouped[2].item).toMatchObject({
+      id: "i1",
+      kind: "intervention",
+      status: "queued",
+    });
   });
 
   it("keeps separate turns and active trailing activity deterministic", () => {

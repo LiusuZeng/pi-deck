@@ -64,6 +64,8 @@ interface FakeOptions {
   promptReceiptSignalFile?: string;
   /** Signal/exit after a queued follow-up becomes a durable user turn. */
   followUpReceiptSignalFile?: string;
+  /** Test-only delay before a steering item becomes durable history. */
+  consumeSteeringAfterMs: number;
   exitAfterFollowUpReceipt: boolean;
   /** Model an already-active parent when this test barrier file exists. */
   activeOnStartMs: number;
@@ -154,6 +156,7 @@ function parseOptions(argv: string[]): FakeOptions {
     structuredMessages: false,
     noSession: false,
     failTaskPromptRecordWhileActive: false,
+    consumeSteeringAfterMs: 0,
     exitAfterFollowUpReceipt: false,
     activeOnStartMs: 0,
     clearActiveOnStartEnabledFileAfterFollowUpReceipt: false,
@@ -253,6 +256,16 @@ function parseOptions(argv: string[]): FakeOptions {
     } else if (arg === "--follow-up-receipt-signal-file") {
       const file = argv[index + 1];
       if (file) options.followUpReceiptSignalFile = file;
+      index += 1;
+    } else if (arg === "--consume-steering-after-ms") {
+      const delay = Number(argv[index + 1]);
+      if (
+        Number.isSafeInteger(delay) &&
+        delay >= 0 &&
+        delay <= MAX_NODE_TIMEOUT_MS
+      ) {
+        options.consumeSteeringAfterMs = delay;
+      }
       index += 1;
     } else if (arg === "--exit-after-follow-up-receipt") {
       options.exitAfterFollowUpReceipt = true;
@@ -467,6 +480,7 @@ class FakeRpcServer {
   private buffer = "";
   private firstCommandSeen = false;
   private promptCounter = 0;
+  private steeringReceiptCounter = 0;
   private workflowDecisionIndex = 0;
   private currentTimers: NodeJS.Timeout[] = [];
   private agentActive = false;
@@ -2024,6 +2038,29 @@ class FakeRpcServer {
       this.followUp.push(message);
     }
     this.respond(command.id, kind);
+    this.emitQueueUpdate();
+    if (kind === "steer" && this.options.consumeSteeringAfterMs > 0) {
+      this.currentTimers.push(
+        setTimeout(
+          () => this.consumeQueuedSteering(),
+          this.options.consumeSteeringAfterMs,
+        ),
+      );
+    }
+  }
+
+  private consumeQueuedSteering(): void {
+    const text = this.steering.shift();
+    if (text === undefined) return;
+    this.steeringReceiptCounter += 1;
+    const userMessage: PiMessage = {
+      id: `msg_user_steering_${this.steeringReceiptCounter}`,
+      role: "user",
+      content: text,
+      createdAt: Date.now(),
+    };
+    this.messages.push(userMessage);
+    this.appendPersistedMessage(userMessage);
     this.emitQueueUpdate();
   }
 

@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { classifyActivity } from "./activityInbox.js";
+import {
+  createInterventionTimelineItem,
+  markInterventionQueued,
+} from "./interventions.js";
 import { emptyOverlays } from "./sessionState.js";
 import {
   reduceRuntimeEvent,
@@ -298,6 +302,127 @@ describe("sessionRuntimeReducer", () => {
       status: "idle",
       lifecycle: { phase: "terminal", outcome: "aborted" },
       completedAtMs: 1_000,
+    });
+  });
+
+  it("reconciles queue content and treats a count reset as accepted, not consumed", () => {
+    const sending = {
+      ...session(),
+      status: "working" as const,
+      baseState: "working" as const,
+      timeline: [
+        createInterventionTimelineItem({
+          id: "steer-1",
+          interventionKind: "steer",
+          content: "Focus the tests",
+          createdAt: "10:00",
+        }),
+      ],
+    };
+    const queued = reduceRuntimeEvent(sending, {
+      type: "queue_update",
+      runtimeId: "runtime-1",
+      steering: ["Focus the tests"],
+      followUp: [],
+    } as any);
+    const countOnlyReset = reduceRuntimeEvent(queued, {
+      type: "queue_update",
+      runtimeId: "runtime-1",
+      steeringCount: 0,
+      followUpCount: 0,
+    } as any);
+    const explicitRemoval = reduceRuntimeEvent(queued, {
+      type: "queue_update",
+      runtimeId: "runtime-1",
+      steering: [],
+      followUp: [],
+    } as any);
+
+    expect(queued.timeline[0]).toMatchObject({ status: "queued" });
+    expect(countOnlyReset.timeline[0]).toMatchObject({ status: "accepted" });
+    expect(explicitRemoval.timeline[0]).toMatchObject({ status: "accepted" });
+    expect(explicitRemoval.overlays.piQueuedSteeringCount).toBe(0);
+  });
+
+  it("uses a durable user message to consume the same intervention item", () => {
+    const current = {
+      ...session(),
+      status: "working" as const,
+      baseState: "working" as const,
+      timeline: [
+        markInterventionQueued(
+          createInterventionTimelineItem({
+            id: "steer-1",
+            interventionKind: "steer",
+            content: "Focus the tests",
+            createdAt: "10:00",
+          }),
+        ),
+      ],
+    };
+    const consumed = reduceRuntimeEvent(current, {
+      type: "message_update",
+      runtimeId: "runtime-1",
+      messageId: "durable-steer-1",
+      role: "user",
+      content: "Focus the tests",
+      done: true,
+    } as any);
+
+    expect(consumed.timeline).toHaveLength(1);
+    expect(consumed.timeline[0]).toMatchObject({
+      id: "steer-1",
+      kind: "intervention",
+      status: "consumed",
+      durableMessageId: "durable-steer-1",
+    });
+  });
+
+  it("uses durable agent_end messages, but not agent_end alone, as consumption evidence", () => {
+    const interventionItem = markInterventionQueued(
+      createInterventionTimelineItem({
+        id: "follow-up-1",
+        interventionKind: "followUp",
+        content: "Summarize afterward",
+        createdAt: "10:00",
+      }),
+    );
+    const endedWithoutEvidence = reduceRuntimeEvent(
+      {
+        ...session(),
+        status: "working",
+        baseState: "working",
+        timeline: [interventionItem],
+      },
+      { type: "agent_end", runtimeId: "runtime-1", status: "success" } as any,
+    );
+    const endedWithEvidence = reduceRuntimeEvent(
+      {
+        ...session(),
+        status: "working",
+        baseState: "working",
+        timeline: [interventionItem],
+      },
+      {
+        type: "agent_end",
+        runtimeId: "runtime-1",
+        status: "success",
+        messages: [
+          {
+            id: "durable-follow-up-1",
+            role: "user",
+            content: "Summarize afterward",
+          },
+        ],
+      } as any,
+    );
+
+    expect(endedWithoutEvidence.timeline[0]).toMatchObject({
+      status: "queued",
+    });
+    expect(endedWithEvidence.timeline[0]).toMatchObject({
+      status: "consumed",
+      durableMessageId: "durable-follow-up-1",
     });
   });
 

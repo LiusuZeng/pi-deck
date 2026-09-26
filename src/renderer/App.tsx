@@ -66,6 +66,7 @@ import {
   type SessionOverlays,
 } from "./sessionState.js";
 import {
+  reconcileTimelineWithDurableUserMessages,
   reduceRuntimeEvent,
   toolDetailSectionsFromRuntimeEvent,
   toolTimelineItemFromRuntimeEvent,
@@ -76,6 +77,14 @@ import {
   type TimelineItem,
   type ToolDetailSection,
 } from "./sessionRuntimeReducer.js";
+import {
+  createInterventionTimelineItem,
+  interventionAccessibleLabel,
+  interventionStatusLabel,
+  interventionTypeLabel,
+  markInterventionFailed,
+  markInterventionQueued,
+} from "./interventions.js";
 import {
   classifyOpenAiCodexAuthFailure,
   isSuccessfulOpenAiCodexTerminalCompletion,
@@ -331,7 +340,7 @@ type PromptDestination = "parent" | "newTaskSession";
 
 type MessageTimelineItem = Extract<
   TimelineItem,
-  { kind: "user" | "assistant" }
+  { kind: "user" | "assistant" | "intervention" }
 >;
 type ActivityTimelineItem = Extract<
   TimelineItem,
@@ -1626,6 +1635,44 @@ export function App(): ReactElement {
           throw new Error("Preload API window.piDeck is unavailable");
         }
         const deckApi = api;
+        async function refreshInterventionTranscript(
+          runtimeId: string,
+        ): Promise<void> {
+          try {
+            const snapshot = await deckApi.chat.getSnapshot({ runtimeId });
+            if (disposed || snapshot.runtimeId !== runtimeId) return;
+            const durableUsers = timelineFromMessages(
+              snapshot.messages,
+            ).flatMap((item) =>
+              item.kind === "user"
+                ? [
+                    {
+                      id: item.id,
+                      content: item.content,
+                      createdAt: item.createdAt,
+                      ...(item.attachments === undefined
+                        ? {}
+                        : { attachments: item.attachments }),
+                    },
+                  ]
+                : [],
+            );
+            setSessions((items) =>
+              updateSessionByRuntimeId(items, runtimeId, (item) => ({
+                ...item,
+                timeline: reconcileTimelineWithDurableUserMessages(
+                  item.timeline,
+                  durableUsers,
+                ),
+              })),
+            );
+          } catch {
+            // A queue event is still authoritative for queue visibility. Leave
+            // the item accepted/queued until a later durable message proves
+            // consumption rather than inventing an applied state.
+          }
+        }
+
         async function refreshRuntimeUsage(runtimeId: string): Promise<void> {
           try {
             const status = await deckApi.chat.getRuntimeStatus({ runtimeId });
@@ -1670,6 +1717,12 @@ export function App(): ReactElement {
             return;
           }
           eventBuffer?.handle(event);
+          if (event.type === "queue_update") {
+            // Queue disappearance alone is not consumption evidence. Fetch
+            // Pi's durable history and transition only when that user turn is
+            // actually present.
+            void refreshInterventionTranscript(event.runtimeId);
+          }
           // agent_end is a synchronous buffer barrier, so its preceding
           // message/tool updates have already reached the reducer here. Always
           // follow it with compact runtime-status/session-stats reconciliation:
@@ -4081,7 +4134,27 @@ export function App(): ReactElement {
 
     const text = draft.trimEnd();
     const queuedAttachments = attachments;
+    const interventionId = createId("intervention");
+    const interventionKind = kind === "steer" ? "steer" : "followUp";
+    const sentAttachments = timelineAttachmentsFromDrafts(queuedAttachments);
     setComposerError(null);
+    setSessions((current) =>
+      updateSessionByRuntimeId(current, selectedSession.id, (session) => ({
+        ...session,
+        timeline: [
+          ...session.timeline,
+          createInterventionTimelineItem({
+            id: interventionId,
+            interventionKind,
+            content: text,
+            createdAt: formatTime(),
+            ...(sentAttachments === undefined
+              ? {}
+              : { attachments: sentAttachments }),
+          }),
+        ],
+      })),
+    );
     try {
       const attachmentOwnerId =
         queuedAttachments.length > 0
@@ -4106,6 +4179,16 @@ export function App(): ReactElement {
       } else {
         await window.piDeck.chat.followUp(request);
       }
+      setSessions((current) =>
+        updateSessionByRuntimeId(current, selectedSession.id, (session) => ({
+          ...session,
+          timeline: session.timeline.map((item) =>
+            item.kind === "intervention" && item.id === interventionId
+              ? markInterventionQueued(item)
+              : item,
+          ),
+        })),
+      );
       setComposerDrafts((items) =>
         clearComposerDraft(items, selectedSession.id),
       );
@@ -4124,13 +4207,21 @@ export function App(): ReactElement {
         })),
       );
       setSessions((current) =>
-        current.map((session) =>
-          session.id === selectedSession.id
-            ? appendDiagnostic(session, {
-                tone: "error",
-                content: `${kind === "steer" ? "Steer" : "Follow-up"} failed: ${message}`,
-              })
-            : session,
+        updateSessionByRuntimeId(current, selectedSession.id, (session) =>
+          appendDiagnostic(
+            {
+              ...session,
+              timeline: session.timeline.map((item) =>
+                item.kind === "intervention" && item.id === interventionId
+                  ? markInterventionFailed(item, message)
+                  : item,
+              ),
+            },
+            {
+              tone: "error",
+              content: `${kind === "steer" ? "Steer" : "Follow-up"} failed: ${message}`,
+            },
+          ),
         ),
       );
     }
@@ -11200,6 +11291,40 @@ function TimelineRow(props: {
           </p>
           {props.item.attachments ? (
             <TimelineAttachmentGrid attachments={props.item.attachments} />
+          ) : null}
+          <time>{props.item.createdAt}</time>
+        </div>
+      </article>
+    );
+  }
+
+  if (props.item.kind === "intervention") {
+    const accessibleLabel = interventionAccessibleLabel(props.item);
+    return (
+      <article
+        aria-label={accessibleLabel}
+        className={`timeline-row user-row intervention-row ${props.item.status}`}
+        data-intervention-kind={props.item.interventionKind}
+        data-intervention-status={props.item.status}
+      >
+        <div className="bubble user-bubble intervention-bubble">
+          <div className="intervention-meta">
+            <strong>You</strong>
+            <span>{interventionTypeLabel(props.item.interventionKind)}</span>
+            <span className="intervention-status">
+              {interventionStatusLabel(props.item.status)}
+            </span>
+          </div>
+          <p>
+            <AutolinkedText text={props.item.content} />
+          </p>
+          {props.item.attachments ? (
+            <TimelineAttachmentGrid attachments={props.item.attachments} />
+          ) : null}
+          {props.item.failureMessage ? (
+            <small className="intervention-failure">
+              {props.item.failureMessage}
+            </small>
           ) : null}
           <time>{props.item.createdAt}</time>
         </div>

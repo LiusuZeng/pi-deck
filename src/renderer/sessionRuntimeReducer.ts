@@ -1,5 +1,11 @@
 import type { AttachmentDraft, ChatRuntimeEvent } from "../shared/types.js";
 import {
+  matchDurableInterventionMessages,
+  reconcileInterventionQueueEvidence,
+  type DurableUserMessageEvidence,
+  type InterventionTimelineItem,
+} from "./interventions.js";
+import {
   classifyOpenAiCodexAuthFailure,
   isSuccessfulOpenAiCodexTerminalCompletion,
   isSuccessfulTerminalAssistantCompletion,
@@ -89,6 +95,7 @@ export type TimelineItem =
       createdAt: string;
       attachments?: TimelineAttachment[];
     }
+  | InterventionTimelineItem
   | {
       id: string;
       kind: "assistant";
@@ -365,14 +372,18 @@ export function reduceRuntimeEventUnprioritized(
     case "tool_execution_end":
       return reduceToolExecutionEvent(session, event);
     case "queue_update": {
+      const steering = getArray(event, "steering");
+      const followUp = getArray(event, "followUp");
       const steeringCount =
-        getArray(event, "steering")?.length ??
-        getNumber(event, "steeringCount") ??
-        0;
+        steering?.length ?? getNumber(event, "steeringCount") ?? 0;
       const followUpCount =
-        getArray(event, "followUp")?.length ??
-        getNumber(event, "followUpCount") ??
-        0;
+        followUp?.length ?? getNumber(event, "followUpCount") ?? 0;
+      const steeringEvidence =
+        queueTextEvidence(steering) ??
+        (steering === undefined && steeringCount === 0 ? [] : undefined);
+      const followUpEvidence =
+        queueTextEvidence(followUp) ??
+        (followUp === undefined && followUpCount === 0 ? [] : undefined);
       return {
         ...session,
         overlays: {
@@ -380,6 +391,14 @@ export function reduceRuntimeEventUnprioritized(
           piQueuedSteeringCount: steeringCount,
           piQueuedFollowUpCount: followUpCount,
         },
+        timeline: reconcileTimelineWithQueueEvidence(session.timeline, {
+          ...(steeringEvidence === undefined
+            ? {}
+            : { steer: steeringEvidence }),
+          ...(followUpEvidence === undefined
+            ? {}
+            : { followUp: followUpEvidence }),
+        }),
         updatedAt: "Now",
         updatedAtMs: Date.now(),
       };
@@ -596,8 +615,13 @@ export function reduceRuntimeEventUnprioritized(
               [finalUsageMessageId]: finalEventUsage,
             }
           : session.usageByMessageId;
+      const timelineWithDurableInterventions =
+        reconcileTimelineWithDurableUserMessages(
+          session.timeline,
+          durableUserMessagesFromRuntimeEvent(event),
+        );
       const completedTimeline = removeEmptyAssistantMessages(
-        session.timeline.map((item) =>
+        timelineWithDurableInterventions.map((item) =>
           item.kind === "assistant" && item.streaming === true
             ? { ...item, streaming: false }
             : item,
@@ -1384,6 +1408,20 @@ function reduceMessageUpdate(
   session: SessionViewModel,
   event: ChatRuntimeEvent,
 ): SessionViewModel {
+  const role = getMessageUpdateRole(event);
+  if (role === "user") {
+    const durableUser = durableUserMessageFromRuntimeEvent(event);
+    if (durableUser === undefined) return session;
+    return {
+      ...session,
+      timeline: reconcileTimelineWithDurableUserMessages(session.timeline, [
+        durableUser,
+      ]),
+      updatedAt: "Now",
+      updatedAtMs: Date.now(),
+    };
+  }
+
   const messageId =
     getMessageUpdateId(event) ??
     getActiveAssistantMessageId(session) ??
@@ -1395,7 +1433,6 @@ function reduceMessageUpdate(
   const textUpdate = getMessageTextUpdate(event);
   const content = textUpdate?.content ?? "";
   const thinking = getThinkingUpdateContent(event);
-  const role = getMessageUpdateRole(event);
   const existingAssistantContent = getAssistantContent(
     session.timeline,
     messageId,
@@ -1534,6 +1571,95 @@ function removeEmptyAssistantMessages(items: TimelineItem[]): TimelineItem[] {
   return items.filter(
     (item) => item.kind !== "assistant" || item.content.trim().length > 0,
   );
+}
+
+function reconcileTimelineWithQueueEvidence(
+  timeline: readonly TimelineItem[],
+  queues: Partial<Record<"steer" | "followUp", readonly string[]>>,
+): TimelineItem[] {
+  const interventions = timeline.filter(
+    (item): item is InterventionTimelineItem => item.kind === "intervention",
+  );
+  const reconciled = reconcileInterventionQueueEvidence(interventions, queues);
+  const byId = new Map(reconciled.map((item) => [item.id, item] as const));
+  return timeline.map((item) =>
+    item.kind === "intervention" ? (byId.get(item.id) ?? item) : item,
+  );
+}
+
+export function reconcileTimelineWithDurableUserMessages(
+  timeline: readonly TimelineItem[],
+  durableUsers: readonly DurableUserMessageEvidence[],
+): TimelineItem[] {
+  if (durableUsers.length === 0) return [...timeline];
+  const interventions = timeline.filter(
+    (item): item is InterventionTimelineItem => item.kind === "intervention",
+  );
+  const existingUsers = timeline.flatMap((item) =>
+    item.kind === "user" ? [{ id: item.id, content: item.content }] : [],
+  );
+  const matched = matchDurableInterventionMessages({
+    interventions,
+    existingUsers,
+    durableUsers,
+  });
+  const interventionById = new Map(
+    matched.interventions.map((item) => [item.id, item] as const),
+  );
+  return [
+    ...timeline.map((item) =>
+      item.kind === "intervention"
+        ? (interventionById.get(item.id) ?? item)
+        : item,
+    ),
+    ...matched.unmatchedDurableMessages.map(
+      (message): TimelineItem => ({
+        id: message.id,
+        kind: "user",
+        content: message.content,
+        createdAt: message.createdAt,
+        ...(message.attachments === undefined
+          ? {}
+          : { attachments: message.attachments }),
+      }),
+    ),
+  ];
+}
+
+function durableUserMessageFromRuntimeEvent(
+  event: ChatRuntimeEvent,
+): DurableUserMessageEvidence | undefined {
+  const id = getMessageUpdateId(event);
+  const content = getMessageTextUpdate(event)?.content;
+  if (id === undefined || content === undefined) return undefined;
+  return { id, content, createdAt: formatTime() };
+}
+
+function durableUserMessagesFromRuntimeEvent(
+  event: ChatRuntimeEvent,
+): DurableUserMessageEvidence[] {
+  const messages = getArray(event, "messages");
+  if (messages === undefined) return [];
+  return messages.flatMap((message): DurableUserMessageEvidence[] => {
+    const record = recordFromUnknown(message);
+    const id = getStringFromRecord(record, "id");
+    if (record === undefined || id === undefined || record.role !== "user") {
+      return [];
+    }
+    const content = extractTextContent(record.content);
+    if (content === undefined) return [];
+    const createdAt = firstNumber(
+      getNumberFromRecord(record, "createdAt"),
+      getNumberFromRecord(record, "timestamp"),
+    );
+    return [
+      {
+        id,
+        content: stripInternalSynthesisDeliveryMarker(content),
+        createdAt: formatMessageTime(createdAt),
+      },
+    ];
+  });
 }
 
 function getActiveAssistantMessageId(
@@ -1918,6 +2044,29 @@ function firstNumber(...values: Array<number | undefined>): number | undefined {
 function getArray(event: ChatRuntimeEvent, key: string): unknown[] | undefined {
   const value = getUnknown(event, key);
   return Array.isArray(value) ? value : undefined;
+}
+
+function queueTextEvidence(
+  values: unknown[] | undefined,
+): string[] | undefined {
+  if (values === undefined) return undefined;
+  const result: string[] = [];
+  for (const value of values) {
+    if (typeof value === "string") {
+      result.push(value);
+      continue;
+    }
+    const record = recordFromUnknown(value);
+    const text = firstString(
+      getStringFromRecord(record, "message"),
+      getStringFromRecord(record, "text"),
+    );
+    // An unfamiliar queue payload is count evidence only. Do not use a
+    // partial projection to change any instruction's lifecycle state.
+    if (text === undefined) return undefined;
+    result.push(text);
+  }
+  return result;
 }
 
 function getNumber(event: ChatRuntimeEvent, key: string): number | undefined {
