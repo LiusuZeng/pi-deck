@@ -34,6 +34,8 @@ export interface SubagentActivityChild {
   model?: string;
   completedTurns?: number;
   usage?: SubagentUsage;
+  /** Epoch time of the latest meaningful live progress observation. */
+  lastObservedAtMs?: number;
 }
 
 export interface SubagentActivity {
@@ -47,6 +49,8 @@ export interface ProjectSubagentActivityOptions {
   details?: unknown;
   phase: "running" | "terminal";
   parentInterrupted?: boolean;
+  /** Supplied only for live events; restored snapshots must omit it. */
+  observedAtMs?: number;
   previous?: SubagentActivity;
 }
 
@@ -58,6 +62,9 @@ const MAX_HISTORY_CHARACTERS = 8_000;
 const MAX_TEXT_CHARACTERS = 1_200;
 const MAX_TASK_CHARACTERS = 500;
 const MAX_LABEL_CHARACTERS = 120;
+// Bounded lookahead recognizes a credential beginning at a display boundary
+// without running regular expressions over an untrusted, unbounded string.
+const SECRET_BOUNDARY_GUARD_CHARACTERS = 256;
 
 interface SeedChild {
   agent: string;
@@ -117,6 +124,7 @@ export function projectSubagentActivity(
       prior,
       phase: options.phase,
       parentInterrupted: options.parentInterrupted === true,
+      observedAtMs: options.observedAtMs,
     });
   });
 
@@ -145,6 +153,7 @@ function projectChild(options: {
   prior: SubagentActivityChild | undefined;
   phase: "running" | "terminal";
   parentInterrupted: boolean;
+  observedAtMs: number | undefined;
 }): SubagentActivityChild {
   const { result, prior } = options;
   const agent = boundedPublicString(
@@ -183,8 +192,12 @@ function projectChild(options: {
   else if (failed) state = "Failed";
   else if (
     result === undefined &&
-    (prior?.state === "Failed" || prior?.state === "Interrupted")
+    prior !== undefined &&
+    prior.state !== "Waiting for activity" &&
+    prior.state !== "Activity observed"
   ) {
+    // Parent lifecycle finalization must not erase an outcome already known
+    // from an authoritative child result.
     state = prior.state;
   } else if (options.phase === "running") {
     // The extension initializes a running single child with exitCode 0. It is
@@ -192,8 +205,9 @@ function projectChild(options: {
     state = observed ? "Activity observed" : "Waiting for activity";
   } else if (result === undefined) {
     state = options.parentInterrupted ? "Interrupted" : "Unknown";
-  } else if (exitCode === 0) state = "Completed";
-  else state = options.parentInterrupted ? "Interrupted" : "Unknown";
+  } else if (exitCode === 0 && hasValidResultIdentity(result)) {
+    state = "Completed";
+  } else state = options.parentInterrupted ? "Interrupted" : "Unknown";
 
   const usage = usageFromResult(result, options.phase) ?? prior?.usage;
   const completedTurns =
@@ -204,6 +218,17 @@ function projectChild(options: {
       ? prior?.model
       : boundedPublicString(modelValue, MAX_LABEL_CHARACTERS, "");
   const latest = historyItemLabel(history[history.length - 1]);
+  const progressChanged =
+    observed &&
+    (prior === undefined ||
+      !historiesEqual(history, prior.history) ||
+      completedTurns !== prior.completedTurns ||
+      !usageEqual(usage, prior.usage));
+  const observedAtMs = finiteTimestamp(options.observedAtMs);
+  const lastObservedAtMs =
+    progressChanged && observedAtMs !== undefined
+      ? observedAtMs
+      : prior?.lastObservedAtMs;
 
   return {
     index: options.index,
@@ -216,6 +241,7 @@ function projectChild(options: {
     ...(model ? { model } : {}),
     ...(completedTurns === undefined ? {} : { completedTurns }),
     ...(usage === undefined ? {} : { usage }),
+    ...(lastObservedAtMs === undefined ? {} : { lastObservedAtMs }),
   };
 }
 
@@ -346,6 +372,12 @@ function resultForChild(
       (result) => positiveInteger(result?.step) === step,
     );
     if (byStep !== undefined) return byStep;
+    const positional = details.results[index];
+    // Explicit step identity wins over array position. A result for step 2
+    // must never be borrowed by a missing step 1 child.
+    return positiveInteger(positional?.step) === undefined
+      ? positional
+      : undefined;
   }
   return details.results[index];
 }
@@ -440,7 +472,7 @@ function normalizeToolName(value: unknown): string | undefined {
 
 function safeToolLabel(value: string | undefined): string {
   if (value === undefined) return "Tool";
-  const safe = value.trim().slice(0, MAX_LABEL_CHARACTERS);
+  const safe = boundedPublicString(value, MAX_LABEL_CHARACTERS, "Tool");
   return /^[\p{L}\p{N}_.:/ -]+$/u.test(safe) && safe.length > 0 ? safe : "Tool";
 }
 
@@ -449,7 +481,12 @@ function boundedPublicString(
   maximum: number,
   fallback: string,
 ): string {
-  const normalized = redactCommonSecrets(value.replace(/\u0000/g, "")).trim();
+  // Keep a small lookahead past the visible boundary so truncation cannot
+  // expose the prefix of a common credential that starts near that boundary.
+  const budgeted = value.slice(0, maximum + SECRET_BOUNDARY_GUARD_CHARACTERS);
+  const normalized = redactCommonSecrets(
+    budgeted.replace(/\u0000/g, ""),
+  ).trim();
   if (normalized.length === 0) return fallback;
   return normalized.length <= maximum
     ? normalized
@@ -470,6 +507,51 @@ export function redactCommonSecrets(value: string): string {
       (_match, label: string, separator: string) =>
         `${label}${separator}[REDACTED]`,
     );
+}
+
+function historiesEqual(
+  left: readonly SubagentHistoryItem[],
+  right: readonly SubagentHistoryItem[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((item, index) => {
+      const other = right[index];
+      if (item.kind !== other?.kind) return false;
+      return item.kind === "tool"
+        ? item.label === (other as { kind: "tool"; label: string }).label
+        : item.text ===
+            (other as { kind: "text" | "error"; text: string }).text;
+    })
+  );
+}
+
+function usageEqual(
+  left: SubagentUsage | undefined,
+  right: SubagentUsage | undefined,
+): boolean {
+  return (
+    left?.inputTokens === right?.inputTokens &&
+    left?.outputTokens === right?.outputTokens &&
+    left?.cacheReadTokens === right?.cacheReadTokens &&
+    left?.cacheWriteTokens === right?.cacheWriteTokens &&
+    left?.totalTokens === right?.totalTokens
+  );
+}
+
+function hasValidResultIdentity(
+  result: Record<string, unknown> | undefined,
+): boolean {
+  return (
+    nonemptyString(result?.agent) !== undefined &&
+    nonemptyString(result?.task) !== undefined
+  );
+}
+
+function finiteTimestamp(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
 }
 
 function historyItemLabel(

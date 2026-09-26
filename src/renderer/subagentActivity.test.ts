@@ -267,6 +267,132 @@ describe("projectSubagentActivity", () => {
     ]);
   });
 
+  it("retains last-observed time across identical cumulative snapshots", () => {
+    const args = { agent: "worker", task: "Observe progress" };
+    const liveDetails = details("single", [
+      result({
+        messages: [
+          {
+            role: "assistant",
+            content: [{ type: "toolCall", name: "read", arguments: {} }],
+          },
+        ],
+        usage: { ...zeroUsage, turns: 1, input: 4 },
+      }),
+    ]);
+    const first = projectSubagentActivity({
+      toolName: "subagent",
+      args,
+      details: liveDetails,
+      phase: "running",
+      observedAtMs: 1_000,
+    });
+    const heartbeat = projectSubagentActivity({
+      toolName: "subagent",
+      args,
+      details: liveDetails,
+      phase: "running",
+      observedAtMs: 9_000,
+      previous: first,
+    });
+    const progressed = projectSubagentActivity({
+      toolName: "subagent",
+      args,
+      details: details("single", [
+        result({
+          messages: [
+            {
+              role: "assistant",
+              content: [{ type: "toolCall", name: "read", arguments: {} }],
+            },
+            { role: "assistant", content: "A new public update" },
+          ],
+          usage: { ...zeroUsage, turns: 2, input: 7 },
+        }),
+      ]),
+      phase: "running",
+      observedAtMs: 12_000,
+      previous: heartbeat,
+    });
+
+    expect(first?.children[0]?.lastObservedAtMs).toBe(1_000);
+    expect(heartbeat?.children[0]?.lastObservedAtMs).toBe(1_000);
+    expect(progressed?.children[0]?.lastObservedAtMs).toBe(12_000);
+    expect(
+      projectSubagentActivity({
+        toolName: "subagent",
+        args,
+        details: liveDetails,
+        phase: "terminal",
+      })?.children[0]?.lastObservedAtMs,
+    ).toBeUndefined();
+  });
+
+  it("does not alias explicit chain steps or complete malformed results", () => {
+    const activity = projectSubagentActivity({
+      toolName: "subagent",
+      args: {
+        chain: [
+          { agent: "first", task: "First" },
+          { agent: "second", task: "Second" },
+        ],
+      },
+      details: details("chain", [
+        result({ agent: "second", task: "Second", step: 2, exitCode: 0 }),
+      ]),
+      phase: "terminal",
+    });
+    const malformed = projectSubagentActivity({
+      toolName: "subagent",
+      args: { agent: "worker", task: "Task" },
+      details: details("single", [{ exitCode: 0 }]),
+      phase: "terminal",
+    });
+
+    expect(activity?.children.map((child) => child.state)).toEqual([
+      "Unknown",
+      "Completed",
+    ]);
+    expect(activity?.children[0]).toMatchObject({
+      agent: "first",
+      task: "First",
+    });
+    expect(malformed?.children[0]?.state).toBe("Unknown");
+  });
+
+  it("redacts credential-shaped tool names and bounds oversized public fields", () => {
+    const boundarySecret = `${"x".repeat(1_190)} sk-abcdefghijklmnop trailing`;
+    const activity = projectSubagentActivity({
+      toolName: "subagent",
+      args: { agent: "worker", task: "Inspect" },
+      details: details("single", [
+        result({
+          agent: `${"a".repeat(100_000)} sk-abcdefghijklmnop`,
+          task: `${"t".repeat(490)} sk-abcdefghijklmnop trailing`,
+          messages: [
+            {
+              role: "assistant",
+              content: [
+                { type: "toolCall", name: "sk-abcdefghijklmnop" },
+                { type: "text", text: boundarySecret },
+              ],
+            },
+          ],
+        }),
+      ]),
+      phase: "running",
+      observedAtMs: 1,
+    });
+    const serialized = JSON.stringify(activity);
+
+    expect(activity?.children[0]?.history[0]).toEqual({
+      kind: "tool",
+      label: "Tool",
+    });
+    expect(serialized).not.toContain("sk-abcdefghijklmnop");
+    expect(serialized.length).toBeLessThan(10_000);
+  });
+
   it("isolates projections by call, handles malformed input, and bounds history", () => {
     const first = projectSubagentActivity({
       toolName: "subagent",

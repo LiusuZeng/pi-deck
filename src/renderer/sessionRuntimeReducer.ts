@@ -557,8 +557,12 @@ export function reduceRuntimeEventUnprioritized(
               [finalUsageMessageId]: finalEventUsage,
             }
           : session.usageByMessageId;
+      const finalizedTimeline = finalizeUnresolvedSubagentActivities(
+        session.timeline,
+        status === "aborted",
+      );
       const completedTimeline = removeEmptyAssistantMessages(
-        session.timeline.map((item) =>
+        finalizedTimeline.map((item) =>
           item.kind === "assistant" && item.streaming === true
             ? { ...item, streaming: false }
             : item,
@@ -675,6 +679,53 @@ export function reduceRuntimeEventUnprioritized(
           )
         : nextSession;
     }
+    case "agent_settled": {
+      const hasUnresolvedSubagent = session.timeline.some(
+        (item) =>
+          item.kind === "tool" &&
+          item.status === "running" &&
+          item.subagentActivity !== undefined,
+      );
+      if (!hasUnresolvedSubagent) return session;
+      const timeline = finalizeUnresolvedSubagentActivities(
+        session.timeline,
+        session.status === "aborting",
+      );
+      const stillWaitingForInput =
+        (session.pendingExtensionUiRequests?.length ?? 0) > 0;
+      const authRequired = session.failureKind === "auth-required";
+      return {
+        ...session,
+        status: stillWaitingForInput
+          ? "waiting"
+          : authRequired
+            ? "error"
+            : "idle",
+        baseState: stillWaitingForInput
+          ? "waitingForInput"
+          : authRequired
+            ? "error"
+            : "idle",
+        awaitingAgentEnd: false,
+        overlays: {
+          ...session.overlays,
+          streaming: false,
+          toolRunning: false,
+          retrying: false,
+          needsUserInput: stillWaitingForInput,
+        },
+        subtitle: stillWaitingForInput
+          ? "Waiting · extension input required"
+          : authRequired
+            ? "Error · OpenAI authentication verification pending"
+            : "Idle · backend stream settled",
+        workingStartedAtMs: undefined,
+        lastRuntimeEventLabel: "Pi settled the turn",
+        updatedAt: "Now",
+        updatedAtMs: Date.now(),
+        timeline,
+      };
+    }
     case "diagnostic":
       return appendDiagnostic(session, {
         tone: getString(event, "level") === "error" ? "error" : "info",
@@ -685,7 +736,10 @@ export function reduceRuntimeEventUnprioritized(
       // SIGTERM is expected when Pi Deck detaches a completed session. Shell
       // launchers may expose it as code 143; preserve its durable file as a
       // resumable row rather than presenting a backend failure.
-      const detachedSession = clearPendingExtensionUiRequests(session);
+      const detachedSession = clearPendingExtensionUiRequests({
+        ...session,
+        timeline: finalizeUnresolvedSubagentActivities(session.timeline, true),
+      });
       if (intentional && session.sessionFile !== undefined) {
         return {
           ...detachedSession,
@@ -898,6 +952,39 @@ function getStringArray(
     : undefined;
 }
 
+function finalizeUnresolvedSubagentActivities(
+  timeline: readonly TimelineItem[],
+  parentInterrupted: boolean,
+): TimelineItem[] {
+  let changed = false;
+  const finalized = timeline.map((item): TimelineItem => {
+    if (
+      item.kind !== "tool" ||
+      item.status !== "running" ||
+      item.subagentActivity === undefined
+    ) {
+      return item;
+    }
+    const subagentActivity = projectSubagentActivity({
+      toolName: item.title,
+      phase: "terminal",
+      parentInterrupted,
+      previous: item.subagentActivity,
+    });
+    if (subagentActivity === undefined) return item;
+    changed = true;
+    const hasFailedChild = subagentActivity.children.some(
+      (child) => child.state === "Failed" || child.state === "Interrupted",
+    );
+    return {
+      ...item,
+      status: hasFailedChild ? "error" : "collapsed",
+      subagentActivity,
+    };
+  });
+  return changed ? finalized : [...timeline];
+}
+
 function reduceToolExecutionEvent(
   session: SessionViewModel,
   event: ChatRuntimeEvent,
@@ -909,6 +996,14 @@ function reduceToolExecutionEvent(
         : "success"
       : "running";
   const existingTool = existingToolTimelineItem(session.timeline, event);
+  if (
+    existingTool?.subagentActivity !== undefined &&
+    existingTool.status !== "running"
+  ) {
+    // A lifecycle barrier already finalized this child view. Delayed updates,
+    // including a stale end, cannot resurrect it or overwrite known outcomes.
+    return session;
+  }
   const eventToolItem = toolTimelineItemFromRuntimeEvent(
     event,
     status,
@@ -990,6 +1085,9 @@ export function toolTimelineItemFromRuntimeEvent(
       event.type === "tool_execution_end" &&
       (getString(event, "status") === "aborted" ||
         getStringFromRecord(result, "stopReason") === "aborted"),
+    ...(getString(event, "runtimeId") === "snapshot"
+      ? {}
+      : { observedAtMs: Date.now() }),
     ...(previous?.subagentActivity === undefined
       ? {}
       : { previous: previous.subagentActivity }),

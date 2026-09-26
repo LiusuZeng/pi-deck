@@ -1429,9 +1429,12 @@ h1 {
   align-items: center;
   gap: 7px;
   color: var(--color-text);
-  cursor: pointer;
   font-size: 12px;
   font-weight: 700;
+}
+
+.agent-activity-milestone summary {
+  cursor: pointer;
 }
 
 .agent-activity-error-label {
@@ -1919,6 +1922,7 @@ h1 {
 
 .subagent-identity small,
 .subagent-latest,
+.subagent-recency,
 .subagent-telemetry {
   color: var(--color-text-muted);
   font-size: 11px;
@@ -1946,6 +1950,7 @@ h1 {
 
 .subagent-task,
 .subagent-latest,
+.subagent-recency,
 .subagent-telemetry {
   grid-column: 1 / -1;
   min-width: 0;
@@ -2037,6 +2042,7 @@ h1 {
   .subagent-state,
   .subagent-task,
   .subagent-latest,
+  .subagent-recency,
   .subagent-telemetry {
     grid-column: 1;
   }

@@ -1,6 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { chatSnapshotSchema } from "../shared/ipcSchemas.js";
 import { buildActivityInbox } from "./activityInbox.js";
 import { emptyOverlays, selectSidebarIndicator } from "./sessionState.js";
 import { reduceRuntimeEvent } from "./sessionRuntimeReducer.js";
@@ -734,8 +735,8 @@ describe("tool execution activity details", () => {
   });
 });
 
-it("restores persisted subagent activity from terminal tool-result details", () => {
-  const session = __rendererTestHooks.sessionFromSnapshot({
+it("restores persisted subagent activity after real snapshot normalization", () => {
+  const snapshot = chatSnapshotSchema.parse({
     runtimeId: "runtime-subagent-snapshot",
     backendMode: "real",
     workspaceId: "workspace-a",
@@ -747,6 +748,20 @@ it("restores persisted subagent activity from terminal tool-result details", () 
         content: [
           {
             type: "toolCall",
+            id: "persisted-subagent-call",
+            name: "subagent",
+            arguments: {
+              chain: [
+                { agent: "worker", task: "Implement" },
+                { agent: "reviewer", task: "Review" },
+              ],
+            },
+          },
+        ],
+        // chatSnapshotSchema's normalized field is the supported restore path.
+        // The schema-specific regression owns deriving this from raw content.
+        toolCalls: [
+          {
             id: "persisted-subagent-call",
             name: "subagent",
             arguments: {
@@ -793,7 +808,8 @@ it("restores persisted subagent activity from terminal tool-result details", () 
         },
       },
     ],
-  } as any);
+  });
+  const session = __rendererTestHooks.sessionFromSnapshot(snapshot);
 
   const tool = session.timeline.find(
     (item: any) => item.id === "persisted-subagent-call",
@@ -814,6 +830,27 @@ it("restores persisted subagent activity from terminal tool-result details", () 
   expect(JSON.stringify(tool.subagentActivity)).not.toContain(
     "private analysis",
   );
+  expect(tool.subagentActivity.children[0].lastObservedAtMs).toBeUndefined();
+});
+
+it("keeps a defensive raw tool-call fallback before snapshot normalization", () => {
+  expect(
+    __rendererTestHooks.subagentArgsFromSnapshotMessages([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "raw-call",
+            name: "subagent",
+            arguments: { agent: "worker", task: "Raw fallback" },
+          },
+        ],
+      },
+    ] as any),
+  ).toEqual({
+    "raw-call": { agent: "worker", task: "Raw fallback" },
+  });
 });
 
 it("restores details-only normalized subagent history without inventing live state", () => {

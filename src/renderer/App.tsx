@@ -508,8 +508,10 @@ function activityMilestones(
     const previous = milestones[milestones.length - 1];
     const canAppend =
       item.kind === "tool" &&
+      item.subagentActivity === undefined &&
       previous !== undefined &&
       previous.items[0]?.kind === "tool" &&
+      previous.items[0].subagentActivity === undefined &&
       toolActivityKey(previous.items[0]) === toolActivityKey(item) &&
       previous.state === toolActivityState(item);
 
@@ -8010,16 +8012,23 @@ function subagentArgsFromSnapshotMessages(
     {};
   for (const message of messages) {
     if (message.role !== "assistant") continue;
-    const rawContent = (message as Record<string, unknown>).content;
-    if (!Array.isArray(rawContent)) continue;
-    for (const value of rawContent) {
+    const messageRecord = message as Record<string, unknown>;
+    const normalizedToolCalls = Array.isArray(messageRecord.toolCalls)
+      ? messageRecord.toolCalls
+      : [];
+    const rawContent = messageRecord.content;
+    const rawToolCalls = Array.isArray(rawContent)
+      ? rawContent.filter(
+          (value) =>
+            getStringFromRecord(recordFromUnknown(value), "type") ===
+            "toolCall",
+        )
+      : [];
+    // Raw structured content is a pre-normalization fallback. When both are
+    // present, the bounded schema projection is authoritative.
+    for (const value of [...rawToolCalls, ...normalizedToolCalls]) {
       const part = recordFromUnknown(value);
-      if (
-        getStringFromRecord(part, "type") !== "toolCall" ||
-        getStringFromRecord(part, "name") !== "subagent"
-      ) {
-        continue;
-      }
+      if (getStringFromRecord(part, "name") !== "subagent") continue;
       const toolCallId = getStringFromRecord(part, "id");
       const args = getRecordFromRecord(part, "arguments");
       if (toolCallId !== undefined && args !== undefined) {
@@ -11086,7 +11095,7 @@ function ExtensionUiCard(props: {
   );
 }
 
-function AgentActivityGroup(props: {
+export function AgentActivityGroup(props: {
   group: Extract<TimelinePresentationItem, { kind: "activity" }>;
   open: boolean;
   onGroupFocus(): void;
@@ -11161,11 +11170,37 @@ function ActivityMilestoneRow(props: {
   onDetailsToggle(event: SyntheticEvent<HTMLDetailsElement>): void;
 }): ReactElement {
   const { milestone } = props;
+  const visibleSubagent =
+    milestone.items.length === 1 &&
+    milestone.items[0]?.kind === "tool" &&
+    milestone.items[0].subagentActivity !== undefined
+      ? milestone.items[0]
+      : undefined;
   const hasRawTrace = milestone.items.length > 0;
 
   return (
     <li className={`agent-activity-milestone ${milestone.state}`}>
-      {hasRawTrace ? (
+      {visibleSubagent !== undefined ? (
+        <>
+          <div className="agent-activity-milestone-static">
+            <ActivityMilestoneMark state={milestone.state} />
+            <span>{activityMilestoneLabel(milestone)}</span>
+            {milestone.state === "error" ? (
+              <span className="agent-activity-error-label">Failed</span>
+            ) : null}
+          </div>
+          <ol
+            className="agent-activity-raw-trace"
+            aria-label={`${activityMilestoneLabel(milestone)} activity`}
+          >
+            <AgentActivityStep
+              item={visibleSubagent}
+              onDetailsSummaryClick={props.onDetailsSummaryClick}
+              onDetailsToggle={props.onDetailsToggle}
+            />
+          </ol>
+        </>
+      ) : hasRawTrace ? (
         <details onToggle={props.onDetailsToggle}>
           <summary onClick={props.onDetailsSummaryClick}>
             <ActivityMilestoneMark state={milestone.state} />
@@ -11336,6 +11371,19 @@ function AgentActivityStep(props: {
 export function SubagentActivityView(props: {
   activity: SubagentActivity;
 }): ReactElement {
+  const hasActiveRecency = props.activity.children.some(
+    (child) =>
+      child.lastObservedAtMs !== undefined &&
+      (child.state === "Waiting for activity" ||
+        child.state === "Activity observed"),
+  );
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!hasActiveRecency) return;
+    const intervalId = window.setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => window.clearInterval(intervalId);
+  }, [hasActiveRecency]);
+
   return (
     <section
       className="subagent-activity"
@@ -11352,7 +11400,7 @@ export function SubagentActivityView(props: {
       </header>
       <ol className="subagent-list" role="list">
         {props.activity.children.map((child) => (
-          <SubagentActivityRow child={child} key={child.index} />
+          <SubagentActivityRow child={child} key={child.index} nowMs={nowMs} />
         ))}
       </ol>
     </section>
@@ -11361,6 +11409,7 @@ export function SubagentActivityView(props: {
 
 function SubagentActivityRow(props: {
   child: SubagentActivityChild;
+  nowMs: number;
 }): ReactElement {
   const { child } = props;
   return (
@@ -11378,6 +11427,12 @@ function SubagentActivityRow(props: {
         <span className="subagent-task">{child.task}</span>
         {child.latest === undefined ? null : (
           <span className="subagent-latest">Latest: {child.latest}</span>
+        )}
+        {child.lastObservedAtMs === undefined ? null : (
+          <span className="subagent-recency">
+            Last observed{" "}
+            {formatSubagentRecency(child.lastObservedAtMs, props.nowMs)}
+          </span>
         )}
         {subagentTelemetry(child).length === 0 ? null : (
           <span className="subagent-telemetry">
@@ -11423,6 +11478,15 @@ function formatSubagentMode(mode: SubagentActivity["mode"]): string {
 
 function subagentStateClass(state: SubagentActivityChild["state"]): string {
   return state.toLowerCase().replace(/\s+/g, "-");
+}
+
+function formatSubagentRecency(observedAtMs: number, nowMs: number): string {
+  const seconds = Math.max(0, Math.floor((nowMs - observedAtMs) / 1_000));
+  if (seconds < 5) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  return `${Math.floor(minutes / 60)}h ago`;
 }
 
 function subagentTelemetry(child: SubagentActivityChild): string[] {
@@ -13047,4 +13111,5 @@ export const __rendererTestHooks = {
   activityStepSummary,
   toolTimelineItemFromRuntimeEvent,
   toolDetailSectionsFromRuntimeEvent,
+  subagentArgsFromSnapshotMessages,
 };

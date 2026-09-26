@@ -5,6 +5,14 @@ import {
   type SessionViewModel,
 } from "./sessionRuntimeReducer.js";
 
+const zeroUsage = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  turns: 0,
+};
+
 function session(): SessionViewModel {
   return {
     id: "runtime-1",
@@ -236,6 +244,165 @@ describe("sessionRuntimeReducer", () => {
       state: "Completed",
       completedTurns: 1,
       latest: "Public handoff",
+    });
+  });
+
+  it("finalizes unresolved children on parent abort without erasing known failures", () => {
+    const args = {
+      tasks: [
+        { agent: "failed", task: "Known failure" },
+        { agent: "active", task: "Still working" },
+      ],
+    };
+    const running = reduceRuntimeEvent(session(), {
+      type: "tool_execution_update",
+      runtimeId: "runtime-1",
+      toolCallId: "subagent-abort",
+      toolName: "subagent",
+      args,
+      partialResult: {
+        details: {
+          mode: "parallel",
+          results: [
+            {
+              agent: "failed",
+              task: "Known failure",
+              exitCode: 1,
+              errorMessage: "failed",
+              messages: [],
+              usage: zeroUsage,
+            },
+            {
+              agent: "active",
+              task: "Still working",
+              exitCode: -1,
+              messages: [],
+              usage: zeroUsage,
+            },
+          ],
+        },
+      },
+    } as any);
+    const aborted = reduceRuntimeEvent(running, {
+      type: "agent_end",
+      runtimeId: "runtime-1",
+      status: "aborted",
+    } as any);
+
+    expect(
+      (aborted.timeline[0] as any).subagentActivity.children.map(
+        (child: any) => child.state,
+      ),
+    ).toEqual(["Failed", "Interrupted"]);
+    expect(aborted).toMatchObject({
+      status: "idle",
+      overlays: { toolRunning: false },
+      timeline: [{ status: "error" }],
+    });
+  });
+
+  it("finalizes unresolved children on worker exit and ignores stale updates", () => {
+    const args = { agent: "worker", task: "In flight" };
+    const running = reduceRuntimeEvent(session(), {
+      type: "tool_execution_start",
+      runtimeId: "runtime-1",
+      toolCallId: "subagent-exit",
+      toolName: "subagent",
+      args,
+    } as any);
+    const exited = reduceRuntimeEvent(running, {
+      type: "worker_exit",
+      runtimeId: "runtime-1",
+      intentional: false,
+      code: 1,
+    } as any);
+    const stale = reduceRuntimeEvent(exited, {
+      type: "tool_execution_update",
+      runtimeId: "runtime-1",
+      toolCallId: "subagent-exit",
+      toolName: "subagent",
+      args,
+      partialResult: {
+        details: {
+          mode: "single",
+          results: [
+            {
+              agent: "worker",
+              task: "In flight",
+              exitCode: 0,
+              messages: [{ role: "assistant", content: "late" }],
+              usage: { turns: 1, input: 1 },
+            },
+          ],
+        },
+      },
+    } as any);
+
+    expect((exited.timeline[0] as any).subagentActivity.children[0].state).toBe(
+      "Interrupted",
+    );
+    expect(stale).toBe(exited);
+    expect(
+      reduceRuntimeEvent(exited, {
+        type: "tool_execution_end",
+        runtimeId: "runtime-1",
+        toolCallId: "subagent-exit",
+        toolName: "subagent",
+        args,
+        result: {
+          details: {
+            mode: "single",
+            results: [
+              {
+                agent: "worker",
+                task: "In flight",
+                exitCode: 0,
+                messages: [{ role: "assistant", content: "too late" }],
+                usage: { turns: 1, input: 1 },
+              },
+            ],
+          },
+        },
+      } as any),
+    ).toBe(exited);
+  });
+
+  it("settles a missing tool end as unknown rather than completed", () => {
+    const running = reduceRuntimeEvent(session(), {
+      type: "tool_execution_update",
+      runtimeId: "runtime-1",
+      toolCallId: "subagent-settled",
+      toolName: "subagent",
+      args: { agent: "worker", task: "Maybe done" },
+      partialResult: {
+        details: {
+          mode: "single",
+          results: [
+            {
+              agent: "worker",
+              task: "Maybe done",
+              exitCode: 0,
+              messages: [{ role: "assistant", content: "progress" }],
+              usage: { turns: 1, input: 1 },
+            },
+          ],
+        },
+      },
+    } as any);
+    const settled = reduceRuntimeEvent(running, {
+      type: "agent_settled",
+      runtimeId: "runtime-1",
+    } as any);
+
+    expect(settled).toMatchObject({
+      status: "idle",
+      overlays: { toolRunning: false },
+      timeline: [
+        {
+          status: "collapsed",
+          subagentActivity: { children: [{ state: "Unknown" }] },
+        },
+      ],
     });
   });
 
