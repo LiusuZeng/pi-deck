@@ -328,6 +328,13 @@ export class JsonlRpcClient extends EventEmitter {
       );
     });
     child.on("exit", (code, signal) => {
+      if (this.closeEmitted) return;
+
+      // The process is no longer usable even while its final stderr is still
+      // draining. Latch that fact synchronously and disarm request deadlines so
+      // they cannot obscure the known exit status during the grace period.
+      this.markClosed(code, signal);
+
       const summary = `RPC subprocess exited (code=${code ?? "null"}, signal=${signal ?? "null"})`;
       if (this.closeRequested || this.pending.size === 0) {
         this.closeOnce(code, signal, summary);
@@ -503,11 +510,18 @@ export class JsonlRpcClient extends EventEmitter {
       clearTimeout(this.exitFinalizationTimer);
       this.exitFinalizationTimer = undefined;
     }
+    this.markClosed(code, signal);
+    this.rejectAll(new Error(reason));
+    this.emit("close", { code, signal });
+  }
+
+  private markClosed(code: number | null, signal: NodeJS.Signals | null): void {
     this.closed = true;
     this.exitCode = code;
     this.signal = signal;
-    this.rejectAll(new Error(reason));
-    this.emit("close", { code, signal });
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+    }
   }
 
   private handleRecord(record: JsonValue): void {

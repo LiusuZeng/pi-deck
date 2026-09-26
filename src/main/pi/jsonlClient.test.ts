@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { it as test } from "vitest";
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { it as test, vi } from "vitest";
 import { spawnFakeRpc } from "../../test/fakeRpcHarness.js";
 import {
   JsonlRpcClient,
@@ -101,6 +103,88 @@ test("unexpected-exit diagnostics are bounded and redact command and stderr secr
     );
     return true;
   });
+});
+
+test("exit latches status and disarms deadlines while final stderr drains", async () => {
+  vi.useFakeTimers();
+  try {
+    const stdout = new EventEmitter();
+    const stderr = Object.assign(new EventEmitter(), { readableEnded: false });
+    const stdin = {
+      destroyed: false,
+      write(
+        _payload: string,
+        _encoding: string,
+        callback: (error?: Error | null) => void,
+      ): boolean {
+        callback();
+        return true;
+      },
+    };
+    const child = Object.assign(new EventEmitter(), {
+      stdin,
+      stdout,
+      stderr,
+      killed: false,
+      kill(): boolean {
+        this.killed = true;
+        return true;
+      },
+    }) as unknown as ChildProcess;
+    const client = new JsonlRpcClient(child, { requestTimeoutMs: 10 });
+    const closes: Array<{
+      code: number | null;
+      signal: NodeJS.Signals | null;
+    }> = [];
+    client.on("close", (status) => closes.push(status));
+
+    const pending = client.request("get_state");
+    let pendingSettled = false;
+    void pending.then(
+      () => {
+        pendingSettled = true;
+      },
+      () => {
+        pendingSettled = true;
+      },
+    );
+
+    child.emit("exit", 7, null);
+
+    assert.deepEqual(client.getExitStatus(), { code: 7, signal: null });
+    assert.equal(client.pendingCount, 1);
+    assert.deepEqual(closes, []);
+    await assert.rejects(client.request("after_exit"), /not writable/i);
+    await assert.rejects(client.send({ type: "after_exit" }), /not writable/i);
+
+    await vi.advanceTimersByTimeAsync(10);
+    assert.equal(
+      pendingSettled,
+      false,
+      "the expired request deadline must be disarmed during stderr grace",
+    );
+    assert.equal(client.pendingCount, 1);
+
+    stderr.emit("data", Buffer.from("final stderr evidence\n"));
+    stderr.readableEnded = true;
+    stderr.emit("end");
+
+    await assert.rejects(pending, (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /exited \(code=7, signal=null\)/);
+      assert.match(error.message, /final stderr evidence/);
+      assert.doesNotMatch(error.message, /timed out/i);
+      return true;
+    });
+    assert.equal(client.pendingCount, 0);
+    assert.deepEqual(closes, [{ code: 7, signal: null }]);
+
+    child.emit("close", 7, null);
+    await vi.advanceTimersByTimeAsync(100);
+    assert.deepEqual(closes, [{ code: 7, signal: null }]);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test("exit rejects promptly when a descendant keeps inherited stdio open", async () => {
