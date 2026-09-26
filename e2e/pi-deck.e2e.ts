@@ -6979,6 +6979,7 @@ test("OpenAI Codex auth repair stays pending across relaunch until an explicit p
   });
   let sessionFile = "";
   let workspaceId = "";
+  let workspaceName = "";
 
   const firstLaunch = await launchPiDeck(env);
   try {
@@ -7002,6 +7003,13 @@ test("OpenAI Codex auth repair stays pending across relaunch until an explicit p
     );
     sessionFile = snapshot.state.sessionFile ?? "";
     workspaceId = snapshot.workspaceId ?? "";
+    workspaceName = await firstLaunch.page.evaluate(async (id) => {
+      const listed = await window.piDeck.workspaces.list();
+      const owner = listed.workspaces.find((workspace) => workspace.id === id);
+      if (owner === undefined)
+        throw new Error("Expected the durable session's workspace.");
+      return owner.name;
+    }, workspaceId);
     expect(fs.existsSync(authMarker)).toBe(true);
   } finally {
     await firstLaunch.app.close();
@@ -7010,7 +7018,10 @@ test("OpenAI Codex auth repair stays pending across relaunch until an explicit p
   const secondLaunch = await launchPiDeck(env);
   try {
     await expectHealthyPreload(secondLaunch.page);
-    await selectWorkspaceInUi(secondLaunch.page, path.basename(projectCwd));
+    // Creation may belong to Default rather than the directory-backed project.
+    // Navigate to the persisted owner instead of relying on another expanded
+    // sidebar section to make this row accidentally reachable.
+    await selectWorkspaceInUi(secondLaunch.page, workspaceName);
     await secondLaunch.page
       .getByRole("button", { name: "Session: keep this durable work" })
       .click();
@@ -7082,7 +7093,7 @@ test("OpenAI Codex auth repair stays pending across relaunch until an explicit p
   const thirdLaunch = await launchPiDeck(env);
   try {
     await expectHealthyPreload(thirdLaunch.page);
-    await selectWorkspaceInUi(thirdLaunch.page, path.basename(projectCwd));
+    await selectWorkspaceInUi(thirdLaunch.page, workspaceName);
     await thirdLaunch.page
       .getByRole("button", { name: "Session: keep this durable work" })
       .click();
@@ -7775,7 +7786,14 @@ test("real mode does not fall back to fake/local UI and can send from active run
     await expect(page.getByText("Local projects")).toHaveCount(0);
     await expect(page.getByText(/backend fake RPC active/i)).toHaveCount(0);
     await expect(page.getByText(/claude/i)).toHaveCount(0);
-    await expect(page.locator(".pi-configuration-trigger")).toBeVisible();
+    const configuration = page.locator(".pi-configuration-trigger");
+    await expect(configuration).toBeVisible();
+    // The draft shell renders before the bootstrap Pi model-discovery worker
+    // finishes. Its returned thinking level proves the no-session RPC probe
+    // completed (and closed its worker), even without an authenticated model.
+    await expect(configuration).toHaveAttribute("data-thinking-level", /.+/, {
+      timeout: 30_000,
+    });
     await expect(
       page.getByRole("button", { name: /New real session/i }),
     ).toHaveCount(0);
@@ -7786,14 +7804,7 @@ test("real mode does not fall back to fake/local UI and can send from active run
     await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
   } finally {
     await app.close();
-    // The real Pi child can finish a final session write just after Electron
-    // exits. Let Node retry transient ENOTEMPTY cleanup races on hosted macOS.
-    fs.rmSync(root, {
-      recursive: true,
-      force: true,
-      maxRetries: 10,
-      retryDelay: 100,
-    });
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
