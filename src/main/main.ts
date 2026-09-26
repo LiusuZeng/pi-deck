@@ -312,6 +312,7 @@ import {
   claimUnassignedChatResumeWorkspace,
   resolveChatCreationWorkspaceId,
   resolveChatResumeWorkspace,
+  withChatResumeOwnershipTransaction,
 } from "./chatWorkspaceOwnership.js";
 import {
   authorizeRendererChatProject as authorizeChatSessionProject,
@@ -858,57 +859,70 @@ function registerIpcHandlers(
     responseSchema: chatSnapshotSchema,
     diagnostics: diagnosticsService,
     handler: async ({ workspaceId, projectId, sessionFile }) =>
-      withChatLifecycleOperation(async (lifecycleOperation) => {
-        if (workspaceId !== undefined) {
-          // Explicit workspace requests retain their membership and archived /
-          // unknown-workspace validation. A project hint must not bypass it.
-          const project = await projectForWorkspaceSession(
-            workspaceId,
-            sessionFile,
-          );
-          assertChatLifecycleOperationActive(lifecycleOperation);
-          return resumeChatSession(
-            store,
-            diagnosticsService,
-            sessionFile,
-            project,
-            workspaceId,
-            undefined,
-            lifecycleOperation,
-          );
-        }
-
-        // Legacy callers may omit workspaceId. Authorize their project hint as
-        // before, but let durable canonical membership choose the workspace when
-        // one exists. Only a genuinely unassigned file falls back to Default.
-        const requestedProject = await authorizeRendererChatProject(projectId);
-        const ownership = await resolveChatResumeWorkspace(
-          ensureWorkspaceStore(),
-          sessionFile,
-        );
-        const project =
-          ownership.source === "existing"
-            ? await projectForWorkspaceSession(
-                ownership.workspaceId,
+      withChatLifecycleOperation((lifecycleOperation) =>
+        withChatResumeOwnershipTransaction({
+          gate: chatSessionAttachmentGate,
+          generation: lifecycleOperation.generation,
+          assertActive: () =>
+            assertChatLifecycleOperationActive(lifecycleOperation),
+          operation: async (attachmentLease) => {
+            if (workspaceId !== undefined) {
+              // Explicit workspace requests retain their membership and
+              // archived / unknown-workspace validation. A project hint must
+              // not bypass it.
+              const project = await projectForWorkspaceSession(
+                workspaceId,
                 sessionFile,
-              )
-            : (requestedProject ??
-              (resolveChatBackendMode() === "real"
-                ? await resolveWorkspaceProject(ownership.workspaceId)
-                : undefined));
-        assertChatLifecycleOperationActive(lifecycleOperation);
-        return resumeChatSession(
-          store,
-          diagnosticsService,
-          sessionFile,
-          project,
-          ownership.workspaceId,
-          ownership.source === "default"
-            ? { claimUnassignedWorkspace: true }
-            : undefined,
-          lifecycleOperation,
-        );
-      }),
+              );
+              assertChatLifecycleOperationActive(lifecycleOperation);
+              return resumeChatSession(
+                store,
+                diagnosticsService,
+                sessionFile,
+                project,
+                workspaceId,
+                { attachmentLease },
+                lifecycleOperation,
+              );
+            }
+
+            // Legacy ownership resolution, project authorization, validation,
+            // and the eventual default claim are one transaction with startup
+            // discovery. Whichever queued first establishes the durable owner.
+            const requestedProject =
+              await authorizeRendererChatProject(projectId);
+            const ownership = await resolveChatResumeWorkspace(
+              ensureWorkspaceStore(),
+              sessionFile,
+            );
+            const project =
+              ownership.source === "existing"
+                ? await projectForWorkspaceSession(
+                    ownership.workspaceId,
+                    sessionFile,
+                  )
+                : (requestedProject ??
+                  (resolveChatBackendMode() === "real"
+                    ? await resolveWorkspaceProject(ownership.workspaceId)
+                    : undefined));
+            assertChatLifecycleOperationActive(lifecycleOperation);
+            return resumeChatSession(
+              store,
+              diagnosticsService,
+              sessionFile,
+              project,
+              ownership.workspaceId,
+              {
+                attachmentLease,
+                ...(ownership.source === "default"
+                  ? { claimUnassignedWorkspace: true }
+                  : {}),
+              },
+              lifecycleOperation,
+            );
+          },
+        }),
+      ),
   });
 
   registerValidatedIpc({
@@ -7433,7 +7447,10 @@ async function resumeChatSession(
   sessionFile: string,
   project: ProjectRef | undefined,
   workspaceId: string,
-  options: { claimUnassignedWorkspace?: boolean } = {},
+  options: {
+    claimUnassignedWorkspace?: boolean;
+    attachmentLease?: ChatSessionAttachmentLease;
+  } = {},
   lifecycleOperation: ChatLifecycleOperation,
 ): Promise<ChatSnapshot> {
   const attachmentGeneration = lifecycleOperation.generation;
@@ -7484,8 +7501,10 @@ async function resumeChatSession(
     chatSessionResumeWorkspaceIds.delete(canonicalSessionFile);
     throw new Error("Session is already being changed.");
   }
+  const ownsAttachmentLease = options.attachmentLease === undefined;
   const sessionAttachmentLease =
-    await enterChatSessionAttachment(attachmentGeneration);
+    options.attachmentLease ??
+    (await enterChatSessionAttachment(attachmentGeneration));
 
   try {
     assertChatSessionAttachmentActive(attachmentGeneration);
@@ -7541,7 +7560,9 @@ async function resumeChatSession(
   } catch (error) {
     rejectPending(error);
   } finally {
-    sessionAttachmentLease.release();
+    if (ownsAttachmentLease) {
+      sessionAttachmentLease.release();
+    }
     if (chatSessionResumePromises.get(canonicalSessionFile) === resumePromise) {
       chatSessionResumePromises.delete(canonicalSessionFile);
     }
