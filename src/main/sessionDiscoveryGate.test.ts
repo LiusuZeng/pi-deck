@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "vitest";
 import {
+  BlockedSessionCandidateTracker,
+  enterSessionAttachmentTeardown,
   filterBlockedSessionCandidates,
   SessionAttachmentGate,
   SessionDiscoveryGate,
@@ -39,6 +41,16 @@ async function bounded<T>(promise: Promise<T>): Promise<T> {
   }
 }
 
+test("blocked candidate counts deduplicate canonical scan and cache identities", () => {
+  const tracker = new BlockedSessionCandidateTracker();
+  tracker.record("/sessions/source.jsonl");
+  tracker.record("/sessions/target.jsonl");
+  tracker.record("/sessions/source.jsonl");
+  tracker.record("/sessions/target.jsonl");
+
+  assert.equal(tracker.count, 2);
+});
+
 test("blocked cached candidates are hidden without mutation or adoption", async () => {
   const cached = [
     { sessionFile: "/sessions/committed.jsonl", title: "committed" },
@@ -62,6 +74,38 @@ test("blocked cached candidates are hidden without mutation or adoption", async 
   assert.deepEqual(persisted, ["/sessions/committed.jsonl"]);
   assert.equal(cached.length, 2);
   assert.equal(cached[1].title, "uncommitted");
+});
+
+test("teardown closes registered snapshot workers before awaiting its barrier", async () => {
+  const attachment = new SessionAttachmentGate();
+  const snapshotLease = await attachment.enter(3);
+  const registeredCloseStarted = deferred();
+  const events: string[] = [];
+
+  const teardown = enterSessionAttachmentTeardown({
+    gate: attachment,
+    generation: 4,
+    closePendingWorkers: async () => {
+      events.push("close-pending");
+    },
+    closeRegisteredWorkers: async () => {
+      events.push("close-registered");
+      registeredCloseStarted.resolve();
+      // Worker exit rejects the pending snapshot RPC, whose finally releases
+      // the old lease. If teardown awaited its barrier first, neither side
+      // could make progress.
+      snapshotLease.release();
+    },
+  });
+
+  await bounded(registeredCloseStarted.promise);
+  const teardownLease = await bounded(teardown);
+  assert.deepEqual(events, ["close-pending", "close-registered"]);
+  assert.equal(teardownLease.generation, 4);
+  teardownLease.release();
+
+  const next = await bounded(attachment.enter(5));
+  next.release();
 });
 
 test("fork-first ordering holds discovery through admission and persistence", async () => {

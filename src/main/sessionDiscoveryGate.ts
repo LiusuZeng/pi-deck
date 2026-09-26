@@ -42,6 +42,52 @@ export class SessionAttachmentGate {
   }
 }
 
+/**
+ * Queue a destructive boundary before yielding, then cancel every worker that
+ * could be keeping an earlier attachment lease alive. Registered workers must
+ * close before the barrier is awaited: snapshot RPCs use their exit as the
+ * cancellation signal that lets them release the earlier lease.
+ */
+export async function enterSessionAttachmentTeardown(options: {
+  gate: SessionAttachmentGate;
+  generation: number;
+  closePendingWorkers: () => Promise<void>;
+  closeRegisteredWorkers: () => Promise<void>;
+}): Promise<SessionAttachmentLease> {
+  const queued = options.gate.enqueue(options.generation);
+  let preparationError: unknown;
+  try {
+    await options.closePendingWorkers();
+  } catch (error) {
+    preparationError = error;
+  }
+  try {
+    await options.closeRegisteredWorkers();
+  } catch (error) {
+    preparationError ??= error;
+  }
+
+  const lease = await queued.entered;
+  if (preparationError !== undefined) {
+    lease.release();
+    throw preparationError;
+  }
+  return lease;
+}
+
+/** Private count of canonical blocked candidates; identities never cross IPC. */
+export class BlockedSessionCandidateTracker {
+  private readonly canonicalFiles = new Set<string>();
+
+  record(canonicalSessionFile: string): void {
+    this.canonicalFiles.add(canonicalSessionFile);
+  }
+
+  get count(): number {
+    return this.canonicalFiles.size;
+  }
+}
+
 export type SessionDiscoveryKind = "project" | "workspace" | "unassigned";
 
 /** Selects publishable candidates without mutating or otherwise claiming them. */

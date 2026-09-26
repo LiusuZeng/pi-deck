@@ -195,6 +195,8 @@ import { WorkspaceUsageStore } from "./workspaces/workspaceUsage.js";
 import { WorkspaceRuntimeLifecycleGate } from "./workspaceRuntimeLifecycleGate.js";
 import { WorkspaceRuntimeShutdownTombstones } from "./workspaceRuntimeShutdownTombstones.js";
 import {
+  BlockedSessionCandidateTracker,
+  enterSessionAttachmentTeardown,
   filterBlockedSessionCandidates,
   SessionAttachmentGate,
   SessionDiscoveryGate,
@@ -5586,15 +5588,17 @@ async function closeChatWorkerGeneration(
   // Queue the destructive barrier synchronously before yielding to worker
   // shutdown. New attachments are rejected while draining; old attachments
   // are cancelled and every pending worker is closed to unwind in-flight RPC.
-  const attachmentLeasePromise = enterChatSessionAttachment(teardownGeneration);
-  await closePendingChatAttachmentWorkers();
-  const attachmentLease = await attachmentLeasePromise;
-  try {
-    // Registered workers may be holding an initial snapshot RPC. Close them
-    // before waiting for lifecycle operations, otherwise reset can deadlock
-    // waiting for a snapshot that only worker exit can interrupt.
-    const activeAdapter = chatAdapter;
-    if (activeAdapter !== undefined) {
+  const attachmentLease = await enterSessionAttachmentTeardown({
+    gate: chatSessionAttachmentGate,
+    generation: teardownGeneration,
+    closePendingWorkers: closePendingChatAttachmentWorkers,
+    closeRegisteredWorkers: async () => {
+      // A registered worker can be waiting on get_state/get_messages while its
+      // snapshot holds the old attachment lease. Its exit is the cancellation
+      // signal that lets the snapshot unwind, so close it before awaiting the
+      // queued barrier rather than deadlocking both sides of reset/quit.
+      const activeAdapter = chatAdapter;
+      if (activeAdapter === undefined) return;
       await Promise.all(
         [...chatRuntimeIds].map((runtimeId) =>
           activeAdapter.closeSession(runtimeId).catch((error) => {
@@ -5604,7 +5608,9 @@ async function closeChatWorkerGeneration(
           }),
         ),
       );
-    }
+    },
+  });
+  try {
     // No operation can be added while draining. Keep rechecking pending
     // workers because a pre-boundary spawn may publish just as teardown starts.
     await Promise.all([...chatLifecycleOperations].map((op) => op.completion));
@@ -5950,6 +5956,7 @@ async function listChatSessionsUnderLease(
   store: SettingsStore,
   project: ProjectRef | undefined,
   assertActive: () => void,
+  blockedCandidates?: BlockedSessionCandidateTracker,
 ): Promise<ChatListSessionsResult> {
   const mode = resolveChatBackendMode();
   if (mode !== "real") {
@@ -6011,9 +6018,11 @@ async function listChatSessionsUnderLease(
   for (const result of scanResults) {
     for (const session of result.sessions) {
       if (await ensureForkCleanupJournal().blocks(session.sessionFile)) {
-        diagnostics.push(
-          `Fork cleanup blocks project session discovery: ${session.sessionFile}`,
+        await recordBlockedSessionCandidate(
+          blockedCandidates,
+          session.sessionFile,
         );
+        diagnostics.push("Fork cleanup blocks project session discovery.");
         continue;
       }
       sessionsByFile.set(session.sessionFile, session);
@@ -6026,6 +6035,7 @@ async function listChatSessionsUnderLease(
     sessionsByFile,
     diagnostics,
     assertActive,
+    blockedCandidates,
   );
   const sessions = [...sessionsByFile.values()].sort(
     (a, b) => b.updatedAtMs - a.updatedAtMs,
@@ -6128,9 +6138,7 @@ async function listWorkspaceChatSessionsUnderLease(
         if (
           await ensureForkCleanupJournal().blocks(legacySession.sessionFile)
         ) {
-          diagnostics.push(
-            `Fork cleanup blocks legacy session discovery: ${legacySession.sessionFile}`,
-          );
+          diagnostics.push("Fork cleanup blocks legacy session discovery.");
         } else {
           attachableLegacySessions.push(legacySession);
         }
@@ -6308,6 +6316,17 @@ async function refreshWorkspaceSessionSummaries(
   }
 }
 
+async function recordBlockedSessionCandidate(
+  tracker: BlockedSessionCandidateTracker | undefined,
+  sessionFile: string,
+): Promise<void> {
+  if (tracker === undefined) return;
+  tracker.record(
+    (await safeRealpath(sessionFile)) ??
+      (await canonicalSessionPathForMissingFile(sessionFile)),
+  );
+}
+
 async function filterForkCleanupBlockedSessions<
   T extends { sessionFile: string },
 >(
@@ -6319,8 +6338,8 @@ async function filterForkCleanupBlockedSessions<
     sessions,
     (sessionFile) => ensureForkCleanupJournal().blocks(sessionFile),
   );
-  for (const session of blocked) {
-    diagnostics.push(`Fork cleanup blocks ${context}: ${session.sessionFile}`);
+  for (const _session of blocked) {
+    diagnostics.push(`Fork cleanup blocks ${context}.`);
   }
   return attachable;
 }
@@ -6401,6 +6420,7 @@ async function mergeProjectSessionRefs(
   sessionsByFile: Map<string, ChatListSessionsResult["sessions"][number]>,
   diagnostics: string[],
   assertActive: () => void,
+  blockedCandidates?: BlockedSessionCandidateTracker,
 ): Promise<void> {
   const store = projectStore;
   if (store === undefined) {
@@ -6412,9 +6432,8 @@ async function mergeProjectSessionRefs(
   for (const ref of refs) {
     if (await ensureForkCleanupJournal().blocks(ref.sessionFile)) {
       sessionsByFile.delete(ref.sessionFile);
-      diagnostics.push(
-        `Fork cleanup blocks cached project session: ${ref.sessionFile}`,
-      );
+      await recordBlockedSessionCandidate(blockedCandidates, ref.sessionFile);
+      diagnostics.push("Fork cleanup blocks cached project session.");
       continue;
     }
     if (sessionsByFile.has(ref.sessionFile)) {
@@ -6547,12 +6566,15 @@ async function deleteAllChatSessions(
   diagnosticsService: DiagnosticsService,
   project?: ProjectRef,
 ): Promise<ChatDeleteAllSessionsResult> {
-  const listed = await listChatSessions(store, project);
+  const blockedCandidates = new BlockedSessionCandidateTracker();
+  const listed = await withChatSessionDiscovery("project", (assertActive) =>
+    listChatSessionsUnderLease(store, project, assertActive, blockedCandidates),
+  );
   if (listed.sessions.length === 0) {
     return {
       deleted: true,
       deletedCount: 0,
-      skippedCount: 0,
+      skippedCount: blockedCandidates.count,
       deletedSessionFiles: [],
     };
   }
@@ -6560,7 +6582,7 @@ async function deleteAllChatSessions(
   const sessionDir = launch.effective.config.sessionDir;
   const deletedSessionFiles: string[] = [];
   let deletedCount = 0;
-  let skippedCount = 0;
+  let skippedCount = blockedCandidates.count;
 
   for (const session of listed.sessions) {
     try {
