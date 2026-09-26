@@ -1,42 +1,109 @@
-import { mkdirSync, writeFileSync, chmodSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+  chmodSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildSync } from "esbuild";
+import { buildSync, type BuildOptions } from "esbuild";
+import { afterAll } from "vitest";
 import {
   spawnJsonlRpcClient,
   type JsonlRpcClient,
+  type JsonlRpcClientOptions,
 } from "../main/pi/jsonlClient.js";
 
-let builtFakePath: string | undefined;
+const fakeRpcEntryPoint = fileURLToPath(
+  new URL("../main/pi/fakeRpc/fakeRpcServer.ts", import.meta.url),
+);
+const bundleDirectoryPrefix = path.join(tmpdir(), "pi-deck-fake-rpc-");
 
-export function buildFakeRpcServer(): string {
-  if (!builtFakePath) {
-    const outdir = path.join(tmpdir(), "pi-deck-fake-rpc-tests");
-    mkdirSync(outdir, { recursive: true });
-    builtFakePath = path.join(outdir, "fakeRpcServer.cjs");
-    buildSync({
-      entryPoints: [
-        fileURLToPath(
-          new URL("../main/pi/fakeRpc/fakeRpcServer.ts", import.meta.url),
-        ),
-      ],
-      outfile: builtFakePath,
-      bundle: true,
-      platform: "node",
-      format: "cjs",
-      target: "node26",
-    });
-  }
-  return builtFakePath;
+interface FakeRpcBundleLocation {
+  directory: string;
+  file: string;
 }
 
-export function spawnFakeRpc(args: string[] = []): JsonlRpcClient {
+let cachedBundle: FakeRpcBundleLocation | undefined;
+const ownedBundleDirectories = new Set<string>();
+
+function allocateBundle(): FakeRpcBundleLocation {
+  // mkdtemp is atomic. Never derive this directory from a checkout path, PID,
+  // or Vitest worker id: all of those can collide across concurrent runners.
+  const directory = mkdtempSync(bundleDirectoryPrefix);
+  ownedBundleDirectories.add(directory);
+  return { directory, file: path.join(directory, "fakeRpcServer.cjs") };
+}
+
+function bundleOptions(outfile: string): BuildOptions {
+  return {
+    entryPoints: [fakeRpcEntryPoint],
+    outfile,
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    target: "node26",
+  };
+}
+
+function removeBundle(bundle: FakeRpcBundleLocation | undefined): void {
+  if (!bundle) return;
+  rmSync(bundle.directory, { recursive: true, force: true });
+  ownedBundleDirectories.delete(bundle.directory);
+}
+
+function removeOwnedBundles(): void {
+  for (const directory of ownedBundleDirectories) {
+    rmSync(directory, { recursive: true, force: true });
+  }
+  ownedBundleDirectories.clear();
+  cachedBundle = undefined;
+}
+
+// Vitest worker teardown does not necessarily emit this process's exit event
+// (notably for worker threads), so bind cleanup to the owning suite as well as
+// retaining process exit as a last-resort fallback.
+afterAll(removeOwnedBundles);
+process.once("exit", removeOwnedBundles);
+
+/**
+ * Build one immutable fake-RPC executable for this module/worker instance.
+ * The atomic temporary directory prevents writes from racing other Vitest
+ * workers, processes, or repository checkouts.
+ */
+export function buildFakeRpcServer(): string {
+  if (cachedBundle) return cachedBundle.file;
+
+  const bundle = allocateBundle();
+  try {
+    buildSync(bundleOptions(bundle.file));
+  } catch (error) {
+    removeBundle(bundle);
+    throw error;
+  }
+  cachedBundle = bundle;
+  return bundle.file;
+}
+
+export function spawnFakeRpc(
+  args: string[] = [],
+  options: JsonlRpcClientOptions = {},
+): JsonlRpcClient {
+  return spawnFakeRpcBundle(buildFakeRpcServer(), args, options);
+}
+
+function spawnFakeRpcBundle(
+  bundle: string,
+  args: string[],
+  options: JsonlRpcClientOptions,
+): JsonlRpcClient {
   return spawnJsonlRpcClient(
     process.execPath,
-    [buildFakeRpcServer(), ...args],
+    [bundle, ...args],
     { cwd: process.cwd(), env: process.env },
-    { requestTimeoutMs: 5_000 },
+    { requestTimeoutMs: 5_000, ...options },
   );
 }
 

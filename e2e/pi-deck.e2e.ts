@@ -11876,7 +11876,13 @@ test.describe("task-session routing acceptance", () => {
         exact: true,
       });
       await expect(reopenedSession).toBeVisible();
+      const resumeOutcome = third.page.locator(".ui-status-message");
+      // The success message is emitted only after resume IPC and renderer
+      // attachment complete. Prove it was not stale before using its next
+      // appearance as the boundary for runtime-backed snapshot queries.
+      await expect(resumeOutcome).not.toHaveText("Resumed saved Pi session.");
       await reopenedSession.click();
+      await expect(resumeOutcome).toHaveText("Resumed saved Pi session.");
       await expect
         .poll(
           () =>
