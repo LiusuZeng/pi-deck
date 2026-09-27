@@ -1,6 +1,6 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { chatSnapshotSchema } from "../shared/ipcSchemas.js";
 import { buildActivityInbox } from "./activityInbox.js";
 import { emptyOverlays, selectSidebarIndicator } from "./sessionState.js";
@@ -59,6 +59,29 @@ it("keeps live sidebar buckets in source order while idle saved rows use recency
       )
       .idleSaved.map((session: any) => session.id),
   ).toEqual(["newer", "older"]);
+});
+
+it("only prevents the default paste when supported images are imported", () => {
+  const textFile = { name: "notes.txt", type: "text/plain" } as File;
+  const imageFile = { name: "capture.png", type: "image/png" } as File;
+  const preventDefault = vi.fn();
+  const importImages = vi.fn();
+
+  __rendererTestHooks.importPastedImageAttachments(
+    [textFile],
+    preventDefault,
+    importImages,
+  );
+  expect(preventDefault).not.toHaveBeenCalled();
+  expect(importImages).not.toHaveBeenCalled();
+
+  __rendererTestHooks.importPastedImageAttachments(
+    [textFile, imageFile],
+    preventDefault,
+    importImages,
+  );
+  expect(preventDefault).toHaveBeenCalledOnce();
+  expect(importImages).toHaveBeenCalledWith([imageFile]);
 });
 
 it("only materializes the Work inbox model while Work is visible", () => {
