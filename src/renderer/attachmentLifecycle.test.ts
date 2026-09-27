@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AttachmentDraft, PiDeckApi } from "../shared/types.js";
 import {
+  fenceAttachmentOwnerTransfer,
   getOrCreateAttachmentOwnerGeneration,
   mergeAttachmentDrafts,
   releaseAttachmentOwner,
@@ -50,6 +51,24 @@ describe("renderer attachment lifecycle", () => {
     expect(blocked.has("saved-session")).toBe(false);
   });
 
+  it("blocks the source synchronously while a rejected transfer is pending", async () => {
+    const blocked = new Set<string>();
+    let settle!: (transferred: boolean) => void;
+    const transfer = new Promise<boolean>((resolve) => {
+      settle = resolve;
+    });
+
+    const result = fenceAttachmentOwnerTransfer(
+      blocked,
+      "cached-session",
+      () => transfer,
+    );
+    expect(blocked.has("cached-session")).toBe(true);
+
+    settle(false);
+    await expect(result).resolves.toBe(false);
+  });
+
   it("identifies imported duplicates so their main-process tokens can be revoked", () => {
     const existing = attachment();
     const duplicatePath = attachment({
@@ -89,6 +108,25 @@ describe("renderer attachment lifecycle", () => {
       ownerId: "runtime-a",
       selectedPathTokens: ["token-a", "token-b"],
     });
+  });
+
+  it("surfaces a rejected ownership transfer without treating tokens as moved", async () => {
+    const assignOwner = vi.fn().mockRejectedValue(new Error("owner expired"));
+
+    await expect(
+      transferAttachmentOwnership(
+        { assignOwner } as unknown as Pick<
+          PiDeckApi["attachments"],
+          "assignOwner"
+        >,
+        "cached-owner",
+        "cached-session",
+        "runtime-owner",
+        "runtime-session",
+        [attachment()],
+      ),
+    ).rejects.toThrow("owner expired");
+    expect(assignOwner).toHaveBeenCalledTimes(1);
   });
 
   it("transfers only ready selections and tears down discarded owners", async () => {

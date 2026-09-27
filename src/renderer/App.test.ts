@@ -5333,6 +5333,44 @@ describe("attached runtime row identity reconciliation", () => {
     } as any;
   }
 
+  it("drops invalid ready chips but keeps text when runtime ownership transfer fails", () => {
+    const cached = row("durable-session-id", false);
+    const attached = row("runtime-id", true);
+    const attachment = {
+      id: "attachment-1",
+      selectedPathToken: "expired-token",
+      fileName: "notes.txt",
+      displayPath: "notes.txt",
+      kind: "textFile",
+      sendMode: "pathReference",
+      outsideProject: false,
+      status: "ready",
+    } as const;
+    const drafts = {
+      [cached.id]: {
+        text: "keep text after rejected transfer",
+        attachments: [attachment],
+        slashOpen: false,
+      },
+    };
+    const [migration] = __rendererTestHooks.incomingRuntimeIdentityMigrations(
+      [cached],
+      [attached],
+    );
+
+    expect(
+      __rendererTestHooks.migrateComposerDraftIdentities(drafts, [
+        { ...migration!, attachmentsTransferred: false },
+      ]),
+    ).toEqual({
+      "runtime-id": {
+        text: "keep text after rejected transfer",
+        attachments: [],
+        slashOpen: false,
+      },
+    });
+  });
+
   it("upgrades a composer-retained cache row to the incoming runtime id", () => {
     const cached = row("durable-session-id", false);
     const attached = row("runtime-id", true);

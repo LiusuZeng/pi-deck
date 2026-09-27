@@ -286,6 +286,35 @@ describe("identity restoration and migration", () => {
     ).toContain("/sessions/stable.jsonl");
   });
 
+  it("rekeys and restores an attachment-only reselection marker", () => {
+    const storage = new MemoryStorage();
+    const cached = {
+      id: "cached-row",
+      workspaceId: "workspace-a",
+      sessionFile: "/sessions/reselection.jsonl",
+    };
+    const runtime = { ...cached, id: "attached-runtime" };
+    const persistence = new ComposerDraftPersistence(storage, { now: () => 9 });
+    persistence.hydrate([cached], ["workspace-a"]);
+
+    persistence.markAttachmentsNeedReselection(cached);
+    persistence.migrateSession(cached, runtime);
+
+    const reloaded = new ComposerDraftPersistence(storage);
+    expect(reloaded.hydrate([runtime], ["workspace-a"]).restored).toEqual([
+      {
+        sessionId: "attached-runtime",
+        identity: {
+          kind: "sessionFile",
+          workspaceId: "workspace-a",
+          sessionFile: "/sessions/reselection.jsonl",
+        },
+        text: "",
+        attachmentsNeedReselection: true,
+      },
+    ]);
+  });
+
   it("recreates multiple workspace draft shells and prunes deleted workspaces", () => {
     const storage = new MemoryStorage();
     storage.values.set(
@@ -413,9 +442,18 @@ describe("ordering, acceptance, and storage failures", () => {
       [nativeSession.id]: { text: "newer draft", attachmentCount: 0 },
     });
     persistence.finishSubmission(nativeSession, "rejected", false);
-    expect(readComposerDraftStore(storage).records[0]?.text).toBe(
-      "newer draft",
-    );
+    expect(readComposerDraftStore(storage).records[0]).toMatchObject({
+      text: "newer draft",
+      pendingSubmission: { text: "submitted", destination: "parent" },
+    });
+
+    // A second send cannot overwrite the older unrecovered quarantine slot.
+    persistence.beginSubmission(nativeSession, "newer draft", 0);
+    expect(readComposerDraftStore(storage).records[0]).toMatchObject({
+      text: "newer draft",
+      pendingSubmission: { text: "submitted" },
+    });
+    persistence.discardPendingSubmission(nativeSession);
 
     // Text equality is not ownership: a new generation can intentionally type
     // the exact same text while acceptance is deferred.
@@ -540,6 +578,53 @@ describe("ordering, acceptance, and storage failures", () => {
     expect(rejectedRecord).toMatchObject({ text: "definitely rejected" });
     expect(rejectedRecord?.pendingSubmission).toBeUndefined();
   });
+
+  it.each(["parent", "newTaskSession"] as const)(
+    "preserves rejected %s text beside a newer draft until explicit recovery",
+    (destination) => {
+      const storage = new MemoryStorage();
+      const persistence = new ComposerDraftPersistence(storage, {
+        now: () => 50,
+      });
+      persistence.hydrate([nativeSession], ["workspace-a"]);
+      persistence.beginSubmission(
+        nativeSession,
+        `rejected ${destination}`,
+        1,
+        destination,
+      );
+      persistence.persist([nativeSession], {
+        [nativeSession.id]: { text: "newer unsent draft", attachmentCount: 0 },
+      });
+
+      persistence.finishSubmission(nativeSession, "rejected", false);
+      expect(
+        persistence.pendingSubmissionForSession(nativeSession),
+      ).toMatchObject({
+        text: `rejected ${destination}`,
+        destination,
+        attachmentsNeedReselection: true,
+      });
+      expect(
+        persistence.recoverPendingSubmission(nativeSession),
+      ).toBeUndefined();
+
+      // Clearing the newer draft is explicit user handling. Recovery then
+      // restores the rejected text without automatically replaying it.
+      persistence.persist([nativeSession], {
+        [nativeSession.id]: { text: "", attachmentCount: 0 },
+      });
+      expect(persistence.recoverPendingSubmission(nativeSession)).toMatchObject(
+        {
+          text: `rejected ${destination}`,
+          attachmentsNeedReselection: true,
+        },
+      );
+      const recovered = readComposerDraftStore(storage).records[0];
+      expect(recovered?.text).toBe(`rejected ${destination}`);
+      expect(recovered?.pendingSubmission).toBeUndefined();
+    },
+  );
 
   it("recovers uncertain text only after an explicit action and never stores tokens", () => {
     const storage = new MemoryStorage();

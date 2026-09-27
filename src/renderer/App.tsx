@@ -182,6 +182,7 @@ import {
 import { Menu } from "./components/ui/Menu.js";
 import {
   attachmentTokens,
+  fenceAttachmentOwnerTransfer,
   getOrCreateAttachmentOwnerGeneration,
   mergeAttachmentDrafts,
   releaseAttachmentOwner,
@@ -1620,6 +1621,7 @@ export function App(): ReactElement {
         acceptedDraftIsStillCurrent,
       ),
     );
+    publishPendingComposerRecovery(session);
   }
 
   function optimisticallyClearSubmittedComposerDraft(
@@ -1660,6 +1662,35 @@ export function App(): ReactElement {
     return next !== current;
   }
 
+  function publishPendingComposerRecovery(
+    session: ComposerDraftSessionIdentitySource,
+  ): PendingComposerSubmissionRecovery | undefined {
+    const recovery =
+      composerDraftPersistenceRef.current!.pendingSubmissionForSession(session);
+    setPendingComposerRecoveries((current) => {
+      if (recovery !== undefined) {
+        return mergePendingComposerRecoveries(current, [recovery]);
+      }
+      const { [session.id]: _settled, ...remaining } = current;
+      return remaining;
+    });
+    return recovery;
+  }
+
+  function submissionBlockedByPendingRecovery(
+    session: ComposerDraftSessionIdentitySource,
+  ): boolean {
+    const recovery = publishPendingComposerRecovery(session);
+    if (recovery === undefined) return false;
+    setComposerError(
+      "Recover or discard the previous uncertain submission before sending another draft.",
+    );
+    setUiMessage(
+      "A previous submission still needs an explicit recover or discard decision.",
+    );
+    return true;
+  }
+
   function recoverPendingComposerSubmission(sessionId: string): void {
     const session = sessionsRef.current.find((item) => item.id === sessionId);
     if (session === undefined) return;
@@ -1682,13 +1713,22 @@ export function App(): ReactElement {
     composerDraftsRef.current = next;
     reviseComposer(sessionId);
     setComposerDrafts(next);
-    setPendingComposerRecoveries((current) => {
-      const { [sessionId]: _recovered, ...remaining } = current;
-      return remaining;
-    });
+    publishPendingComposerRecovery(session);
     reportRestoredAttachmentSelections([restoration]);
     setUiMessage(
       "Recovered the interrupted submission as editable text. It was not sent again automatically.",
+    );
+  }
+
+  function discardPendingComposerSubmission(sessionId: string): void {
+    const session = sessionsRef.current.find((item) => item.id === sessionId);
+    if (session === undefined) return;
+    reportComposerDraftPersistenceResult(
+      composerDraftPersistenceRef.current!.discardPendingSubmission(session),
+    );
+    publishPendingComposerRecovery(session);
+    setUiMessage(
+      "Discarded the previous submission recovery after checking session history.",
     );
   }
 
@@ -1808,16 +1848,43 @@ export function App(): ReactElement {
     );
     if (migrations.length === 0) return;
 
+    const attachmentTransferResults = new Map<string, boolean>();
     for (const { fromSessionId, toSessionId } of migrations) {
+      // Fence the cached owner before crossing IPC. A picker/import that
+      // resolves while adoption is pending must release its late tokens rather
+      // than repopulating the source composer after it has moved.
       const draft = composerDraftForSession(
         composerDraftsRef.current,
         fromSessionId,
       );
-      await transferComposerAttachmentOwnership(
+      const transferred = await fenceAttachmentOwnerTransfer(
+        blockedAttachmentOwnerIds.current,
         fromSessionId,
-        toSessionId,
-        draft.attachments,
+        () =>
+          transferComposerAttachmentOwnership(
+            fromSessionId,
+            toSessionId,
+            draft.attachments,
+          ),
       );
+      attachmentTransferResults.set(fromSessionId, transferred);
+      if (transferred) {
+        unblockAttachmentOwner(toSessionId);
+      } else {
+        // The incoming runtime is authoritative, but stale token authority is
+        // not. Revoke the old generation and keep the destination fenced until
+        // a fresh picker creates its next one-use owner.
+        blockAttachmentOwner(toSessionId);
+        const expiredOwnerId =
+          attachmentOwnersBySession.current.get(fromSessionId);
+        attachmentOwnersBySession.current.delete(fromSessionId);
+        if (expiredOwnerId !== undefined) {
+          void releaseAttachmentOwner(
+            window.piDeck.attachments,
+            expiredOwnerId,
+          ).catch(() => undefined);
+        }
+      }
     }
     // Publish row, durable identity, and composer ownership in one synchronous
     // transaction after attachment transfers. No render may persist the old
@@ -1831,8 +1898,20 @@ export function App(): ReactElement {
         composerDraftPersistenceRef.current!.migrateSession(from, to),
       );
       replacements.set(fromSessionId, to);
-      if (attachmentReselectionSessionIdsRef.current.delete(fromSessionId)) {
+      const attachmentTransferFailed =
+        attachmentTransferResults.get(fromSessionId) === false;
+      if (
+        attachmentReselectionSessionIdsRef.current.delete(fromSessionId) ||
+        attachmentTransferFailed
+      ) {
         attachmentReselectionSessionIdsRef.current.add(toSessionId);
+      }
+      if (attachmentTransferFailed) {
+        reportComposerDraftPersistenceResult(
+          composerDraftPersistenceRef.current!.markAttachmentsNeedReselection(
+            to,
+          ),
+        );
       }
       const revision = composerRevisionBySessionRef.current.get(fromSessionId);
       if (revision !== undefined) {
@@ -1864,11 +1943,26 @@ export function App(): ReactElement {
     });
     const nextDrafts = migrateComposerDraftIdentities(
       composerDraftsRef.current,
-      migrations,
+      migrations.map((migration) => ({
+        ...migration,
+        attachmentsTransferred:
+          attachmentTransferResults.get(migration.fromSessionId) !== false,
+      })),
     );
     if (nextDrafts !== composerDraftsRef.current) {
       composerDraftsRef.current = nextDrafts;
       setComposerDrafts(nextDrafts);
+    }
+    if (
+      migrations.some(
+        ({ fromSessionId, toSessionId }) =>
+          attachmentTransferResults.get(fromSessionId) === false &&
+          selectedSessionIdRef.current === toSessionId,
+      )
+    ) {
+      setComposerError(
+        "One or more attachments expired; reselect them before sending.",
+      );
     }
   }
 
@@ -4290,6 +4384,7 @@ export function App(): ReactElement {
     if (!canSend && !canSendTask) {
       return;
     }
+    if (submissionBlockedByPendingRecovery(selectedSession)) return;
     promptHistoryStateRef.current = initialPromptHistoryState();
     const prompt = draft.trimEnd();
     const promptAttachments = attachments;
@@ -4346,6 +4441,7 @@ export function App(): ReactElement {
     overrides: ParallelWorkerSettings,
   ): Promise<void> {
     const generation = navigationGeneration.current;
+    if (submissionBlockedByPendingRecovery(draftSession)) return;
     const validationError = validateComposerInput({
       attachments: promptAttachments,
       supportsImages: selectedSessionSupportsImages(
@@ -4619,6 +4715,12 @@ export function App(): ReactElement {
       durableSession ??
       sessionsRef.current.find((session) => session.id === runtimeId);
     const submissionRevision = composerRevision(runtimeId);
+    if (
+      submissionSession !== undefined &&
+      submissionBlockedByPendingRecovery(submissionSession)
+    ) {
+      return;
+    }
     setComposerError(null);
     if (destination === "parent") {
       if (submissionSession !== undefined) {
@@ -4858,6 +4960,7 @@ export function App(): ReactElement {
             submittedDraftWasRestored,
           ),
         );
+        publishPendingComposerRecovery(submissionSession);
       }
       const message = error instanceof Error ? error.message : String(error);
       setSessions((current) =>
@@ -4948,6 +5051,7 @@ export function App(): ReactElement {
       return;
     }
 
+    if (submissionBlockedByPendingRecovery(selectedSession)) return;
     const text = draft.trimEnd();
     const queuedAttachments = attachments;
     const interventionId = createId("intervention");
@@ -5064,6 +5168,7 @@ export function App(): ReactElement {
           restored,
         ),
       );
+      publishPendingComposerRecovery(selectedSession);
       setSessions((current) =>
         updateSessionByRuntimeId(current, selectedSession.id, (session) =>
           appendNonfatalDiagnostic(
@@ -7070,6 +7175,9 @@ export function App(): ReactElement {
       onRecoverPendingSubmission={() =>
         recoverPendingComposerSubmission(selectedSession.id)
       }
+      onDiscardPendingSubmission={() =>
+        discardPendingComposerSubmission(selectedSession.id)
+      }
       onAbort={handleAbort}
       onPickAttachments={() => void handlePickAttachments()}
       onImportDroppedFileAttachments={(files) =>
@@ -8096,6 +8204,8 @@ interface SessionIdentityMigration {
   fromSessionId: string;
   toSessionId: string;
   sessionFile: string;
+  /** False means identity moves but stale attachment chips must not. */
+  attachmentsTransferred?: boolean;
 }
 
 /**
@@ -8132,15 +8242,26 @@ function migrateComposerDraftIdentities(
   drafts: ComposerDraftsBySession,
   migrations: readonly SessionIdentityMigration[],
 ): ComposerDraftsBySession {
-  return migrations.reduce(
-    (current, migration) =>
-      moveComposerDraft(
-        current,
-        migration.fromSessionId,
-        migration.toSessionId,
-      ),
-    drafts,
-  );
+  return migrations.reduce((current, migration) => {
+    const moved = moveComposerDraft(
+      current,
+      migration.fromSessionId,
+      migration.toSessionId,
+    );
+    if (migration.attachmentsTransferred !== false) return moved;
+    const destination = moved[migration.toSessionId];
+    return destination === undefined
+      ? moved
+      : {
+          ...moved,
+          [migration.toSessionId]: {
+            ...destination,
+            // Text remains owned by the stable file identity, while failed
+            // token authority is represented only by the reselection marker.
+            attachments: [],
+          },
+        };
+  }, drafts);
 }
 
 function mergeSessions(
@@ -13247,6 +13368,7 @@ function Composer(props: {
   onFollowUp(): void;
   onRunExtensionCommand(): void;
   onRecoverPendingSubmission(): void;
+  onDiscardPendingSubmission(): void;
   onAbort(): void;
   onPickAttachments(): void;
   onImportDroppedFileAttachments(files: File[]): void;
@@ -13499,6 +13621,12 @@ function Composer(props: {
                 onClick={props.onRecoverPendingSubmission}
               >
                 Recover text after checking history
+              </Button>
+              <Button
+                variant="subtle"
+                onClick={props.onDiscardPendingSubmission}
+              >
+                Discard recovery after checking history
               </Button>
             </span>
           ) : props.error !== null ? (

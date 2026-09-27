@@ -205,6 +205,20 @@ test("reload hydrates active attached history and Abort without another worker",
       unsentText,
     );
     expect(sessionPids(harness)).toEqual(beforePids);
+
+    // The first reload upgrades the durable cached row to main's attached
+    // runtime identity. Reload once more to prove that transaction never
+    // transiently deleted the draft from profile storage.
+    await reloadAndOpenAttached(harness.page, prompt);
+    await expect(harness.page.getByLabel("Prompt text")).toHaveValue(
+      unsentText,
+    );
+    expect(
+      await harness.page.evaluate(
+        async () => (await window.piDeck.chat.getSnapshot()).runtimeId,
+      ),
+    ).toBe(beforeRuntime);
+    expect(sessionPids(harness)).toEqual(beforePids);
     await expect
       .poll(() =>
         harness!.page.evaluate(async (runtimeId) => {

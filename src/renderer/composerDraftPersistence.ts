@@ -284,18 +284,27 @@ export class ComposerDraftPersistence {
         // The UI may clear optimistically while IPC is pending. Keep its
         // quarantined submission until authoritative acceptance/rejection.
         const existing = this.records.get(key);
-        if (existing?.pendingSubmission === undefined) {
+        const attachmentsNeedReselection =
+          this.attachmentReselectionKeys.has(key);
+        if (
+          existing?.pendingSubmission === undefined &&
+          !attachmentsNeedReselection
+        ) {
           this.records.delete(key);
           this.attachmentReselectionKeys.delete(key);
         } else if (
+          existing === undefined ||
           existing.text.length > 0 ||
-          existing.attachmentsNeedReselection
+          existing.attachmentsNeedReselection !== attachmentsNeedReselection
         ) {
           this.records.set(key, {
-            ...existing,
+            ...identity,
             text: "",
-            attachmentsNeedReselection: false,
+            attachmentsNeedReselection,
             updatedAtMs: this.now(),
+            ...(existing?.pendingSubmission === undefined
+              ? {}
+              : { pendingSubmission: existing.pendingSubmission }),
           });
         }
         continue;
@@ -348,6 +357,12 @@ export class ComposerDraftPersistence {
       return { status: "unchanged", truncated: false, pruned: 0 };
     }
     const key = composerDraftIdentityKey(identity);
+    // One identity has one bounded quarantine slot. Never replace an older
+    // unresolved submission with a newer click; callers must make the user
+    // recover or discard the older value first.
+    if (this.records.get(key)?.pendingSubmission !== undefined) {
+      return { status: "unchanged", truncated: false, pruned: 0 };
+    }
     const boundedText = text.slice(0, MAX_COMPOSER_DRAFT_TEXT_LENGTH);
     const attachmentsNeedReselection =
       attachmentCount > 0 || this.attachmentReselectionKeys.has(key);
@@ -394,13 +409,17 @@ export class ComposerDraftPersistence {
     if (outcome === "accepted" && submittedDraftIsCurrent) {
       this.records.delete(key);
       this.attachmentReselectionKeys.delete(key);
+    } else if (outcome === "rejected" && !submittedDraftIsCurrent) {
+      // The optimistic timeline entry may be removed while the user has
+      // already typed something newer. Preserve both values: current text
+      // stays editable and the rejected submission remains quarantined for an
+      // explicit recovery after the newer draft is handled.
+      return this.write();
     } else {
       const restoredRejectedText =
-        outcome === "rejected" && submittedDraftIsCurrent
-          ? pending.text
-          : record.text;
+        outcome === "rejected" ? pending.text : record.text;
       const restoredAttachments =
-        outcome === "rejected" && submittedDraftIsCurrent
+        outcome === "rejected"
           ? pending.attachmentsNeedReselection
           : record.attachmentsNeedReselection;
       if (restoredRejectedText.length === 0 && !restoredAttachments) {
@@ -414,6 +433,46 @@ export class ComposerDraftPersistence {
           updatedAtMs: this.now(),
         });
       }
+    }
+    return this.write();
+  }
+
+  /** Return quarantined metadata even after this identity was restored once. */
+  pendingSubmissionForSession(
+    session: ComposerDraftSessionIdentitySource,
+  ): PendingComposerSubmissionRecovery | undefined {
+    const identity = this.identityForSession(session);
+    if (identity === undefined) return undefined;
+    const pending = this.records.get(
+      composerDraftIdentityKey(identity),
+    )?.pendingSubmission;
+    return pending === undefined
+      ? undefined
+      : pendingRecoveryFor(session.id, identity, pending);
+  }
+
+  /** User checked history and chose not to restore the quarantined text. */
+  discardPendingSubmission(
+    session: ComposerDraftSessionIdentitySource,
+  ): ComposerDraftPersistenceResult {
+    const identity = this.identityForSession(session);
+    if (identity === undefined) {
+      return { status: "unchanged", truncated: false, pruned: 0 };
+    }
+    const key = composerDraftIdentityKey(identity);
+    const record = this.records.get(key);
+    if (record?.pendingSubmission === undefined) {
+      return { status: "unchanged", truncated: false, pruned: 0 };
+    }
+    if (record.text.length === 0 && !record.attachmentsNeedReselection) {
+      this.records.delete(key);
+      this.attachmentReselectionKeys.delete(key);
+    } else {
+      this.records.set(key, {
+        ...record,
+        pendingSubmission: undefined,
+        updatedAtMs: this.now(),
+      });
     }
     return this.write();
   }
@@ -459,7 +518,14 @@ export class ComposerDraftPersistence {
     const key = composerDraftIdentityKey(identity);
     const record = this.records.get(key);
     const pending = record?.pendingSubmission;
-    if (record === undefined || pending === undefined) return undefined;
+    if (
+      record === undefined ||
+      pending === undefined ||
+      record.text.length > 0 ||
+      record.attachmentsNeedReselection
+    ) {
+      return undefined;
+    }
     const recovered: DurableComposerDraft = {
       ...record,
       text: pending.text,
@@ -535,10 +601,16 @@ export class ComposerDraftPersistence {
     }
     const key = composerDraftIdentityKey(identity);
     const record = this.records.get(key);
-    if (record === undefined) {
-      return { status: "unchanged", truncated: false, pruned: 0 };
-    }
     this.attachmentReselectionKeys.add(key);
+    if (record === undefined) {
+      this.records.set(key, {
+        ...identity,
+        text: "",
+        updatedAtMs: this.now(),
+        attachmentsNeedReselection: true,
+      });
+      return this.write();
+    }
     if (record.attachmentsNeedReselection) {
       return { status: "unchanged", truncated: false, pruned: 0 };
     }
@@ -640,7 +712,7 @@ export class ComposerDraftPersistence {
         claimedSessionIds.add(session.id);
         this.bindSession(session.id, identity);
         this.markRestored(key, record);
-        if (record.text.length > 0) {
+        if (record.text.length > 0 || record.attachmentsNeedReselection) {
           restored.push(restorationFor(session.id, identity, record));
         }
         if (record.pendingSubmission !== undefined) {
