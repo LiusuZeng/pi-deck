@@ -184,6 +184,14 @@ test("renderer reload restores a renderer-only draft without creating a worker",
     await expect(
       page.locator('.workspace[data-load-state="ready"]'),
     ).toBeVisible();
+    // Startup intentionally opens All Work; restore the existing draft, not a
+    // new session, to verify durable text independently of route persistence.
+    const restoredDraft = page.getByRole("button", {
+      name: "Session: Untitled new session",
+      exact: true,
+    });
+    await expect(restoredDraft).toHaveCount(1);
+    await restoredDraft.click();
     await expect(page.getByLabel("Prompt text")).toHaveValue(text);
     expect(sessionWorkerCount(fixture)).toBe(0);
   } finally {
@@ -218,6 +226,7 @@ test("orderly restart restores distinct renderer-only drafts in multiple workspa
 
     const second = await launch(fixture);
     secondApp = second.app;
+    await openWorkspaceDraft(second.page, betaWorkspace);
     await expect(second.page.getByLabel("Prompt text")).toHaveValue(betaText);
     await openWorkspaceDraft(second.page, alphaWorkspace);
     await expect(second.page.getByLabel("Prompt text")).toHaveValue(alphaText);
@@ -246,7 +255,9 @@ test("a rejected first send keeps durable text through renderer reload", async (
     await page.getByLabel("Prompt text").fill(text);
     await page.getByRole("button", { name: "Send", exact: true }).click();
     await expect(page.getByLabel("Prompt text")).toHaveValue(text);
-    await expect(page.getByRole("alert")).toContainText(/prompt/i);
+    await expect(page.locator('.composer-error[role="alert"]')).toContainText(
+      /prompt/i,
+    );
     await expectDraftStored(page, text);
 
     await page.reload({ waitUntil: "domcontentloaded" });

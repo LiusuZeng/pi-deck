@@ -138,14 +138,19 @@ async function closeAppBounded(
   app: ElectronApplication,
   appPid: number | undefined,
 ): Promise<void> {
-  const closed = await Promise.race([
-    app.close().then(
-      () => true,
-      () => true,
-    ),
-    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 5_000)),
-  ]);
-  if (closed || appPid === undefined || !isPidAlive(appPid)) return;
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      app.close().catch(() => undefined),
+      new Promise<void>((resolve) => {
+        deadline = setTimeout(resolve, 5_000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(deadline);
+  }
+  // Rejected close calls can leave the app alive, just like timed-out calls.
+  if (appPid === undefined || !isPidAlive(appPid)) return;
   try {
     process.kill(appPid, "SIGKILL");
   } catch {
@@ -396,6 +401,7 @@ test("an active renderer crash reloads the UI without replacing its main-owned r
       )
       .toBe(true);
     const recovered = await recoveredRendererState(harness.app);
+    expect(recovered.rendererPid).not.toBe(crash.beforeRendererPid);
     expect(recovered.identity).toEqual(before);
     expect(await harness.app.evaluate(() => process.pid)).toBe(mainPid);
     expect(await runtimeIdentityFromMain(harness.app)).toEqual(before);

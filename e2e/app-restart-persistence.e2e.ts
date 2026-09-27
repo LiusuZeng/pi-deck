@@ -219,7 +219,7 @@ async function expectNamedWorkspaceActive(
     return result.workspaces.map((workspace) => ({
       id: workspace.id,
       name: workspace.name,
-      isDefault: workspace.isDefault,
+      isDefault: workspace.isDefault === true,
       archivedAtMs: workspace.archivedAtMs,
     }));
   });
