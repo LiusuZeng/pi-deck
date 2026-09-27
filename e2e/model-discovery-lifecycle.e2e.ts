@@ -222,7 +222,7 @@ require(${JSON.stringify(path.join(repoRoot, "dist/main/pi/fakeRpc/fakeRpcServer
     env: {
       ...process.env,
       PI_DECK_E2E_TEST: "1",
-      PI_DECK_E2E_HIDE_WINDOWS: process.env.PI_DECK_E2E_HIDE_WINDOWS ?? "1",
+      PI_DECK_E2E_HIDE_WINDOWS: "1",
       PI_DECK_BACKEND: "real",
       PI_DECK_PI_BINARY: fakePi,
       PI_DECK_PROJECT_CWD: projectCwd,
@@ -250,6 +250,12 @@ require(${JSON.stringify(path.join(repoRoot, "dist/main/pi/fakeRpc/fakeRpcServer
   await expect(
     page.locator('.workspace[data-load-state="ready"]'),
   ).toBeVisible();
+
+  expect(
+    await app.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows().every((window) => !window.isVisible()),
+    ),
+  ).toBe(true);
 
   return {
     app,
