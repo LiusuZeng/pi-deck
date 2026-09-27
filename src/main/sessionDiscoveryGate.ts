@@ -120,6 +120,8 @@ type SessionDiscoveryEnvironment = Readonly<
  * or cache write, rather than catching cancellation and persisting stale work.
  */
 export class SessionDiscoveryGate {
+  private pendingOperations = 0;
+
   constructor(
     private readonly attachmentGate: SessionAttachmentGate,
     private readonly environment: SessionDiscoveryEnvironment = process.env,
@@ -129,32 +131,42 @@ export class SessionDiscoveryGate {
     ) => void,
   ) {}
 
+  /** Queued and entered discovery transactions that quit would cancel. */
+  get pendingCount(): number {
+    return this.pendingOperations;
+  }
+
   async run<T>(options: {
     kind?: SessionDiscoveryKind;
     generation: number;
     assertActive: () => void;
     operation: (assertActive: () => void) => Promise<T>;
   }): Promise<T> {
-    const queued = this.attachmentGate.enqueue(options.generation);
-    let markerError: unknown;
+    this.pendingOperations += 1;
     try {
-      await this.writeMarker(options.kind, "queued");
-    } catch (error) {
-      // The queue entry already exists. Acquire and release it below even when
-      // test instrumentation fails, otherwise one bad marker deadlocks the app.
-      markerError = error;
-    }
+      const queued = this.attachmentGate.enqueue(options.generation);
+      let markerError: unknown;
+      try {
+        await this.writeMarker(options.kind, "queued");
+      } catch (error) {
+        // The queue entry already exists. Acquire and release it below even when
+        // test instrumentation fails, otherwise one bad marker deadlocks the app.
+        markerError = error;
+      }
 
-    const lease = await queued.entered;
-    try {
-      if (markerError !== undefined) throw markerError;
-      await this.writeMarker(options.kind, "entered");
-      options.assertActive();
-      const result = await options.operation(options.assertActive);
-      options.assertActive();
-      return result;
+      const lease = await queued.entered;
+      try {
+        if (markerError !== undefined) throw markerError;
+        await this.writeMarker(options.kind, "entered");
+        options.assertActive();
+        const result = await options.operation(options.assertActive);
+        options.assertActive();
+        return result;
+      } finally {
+        lease.release();
+      }
     } finally {
-      lease.release();
+      this.pendingOperations -= 1;
     }
   }
 

@@ -108,6 +108,30 @@ test("teardown closes registered snapshot workers before awaiting its barrier", 
   next.release();
 });
 
+test("pending count includes queued and entered discovery work", async () => {
+  const attachment = new SessionAttachmentGate();
+  const blocker = await attachment.enter(0);
+  const discovery = new SessionDiscoveryGate(attachment, {});
+  const operationStarted = deferred();
+  const finishOperation = deferred();
+  const listing = discovery.run({
+    generation: 0,
+    assertActive: () => undefined,
+    operation: async () => {
+      operationStarted.resolve();
+      await finishOperation.promise;
+    },
+  });
+
+  assert.equal(discovery.pendingCount, 1);
+  blocker.release();
+  await bounded(operationStarted.promise);
+  assert.equal(discovery.pendingCount, 1);
+  finishOperation.resolve();
+  await bounded(listing);
+  assert.equal(discovery.pendingCount, 0);
+});
+
 test("fork-first ordering holds discovery through admission and persistence", async () => {
   const attachment = new SessionAttachmentGate();
   const discovery = new SessionDiscoveryGate(attachment, {});

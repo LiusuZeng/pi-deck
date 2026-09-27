@@ -17,6 +17,8 @@ import { z } from "zod";
 import { initializeMacOSDockIcon, resolveAppIconPath } from "./appIcon.js";
 import { initializeAppIdentity } from "./appIdentity.js";
 import {
+  chatRuntimeHasActiveWork,
+  consumeHiddenWindowDialogOutcome,
   QuitLifecycleCoordinator,
   RendererCrashRecovery,
   withTimeoutResult,
@@ -515,6 +517,7 @@ let testProjectPickQueue: string[] | undefined;
 let workflowScheduler: WorkflowScheduler | undefined;
 let workflowOccurrenceScheduler: WorkflowOccurrenceScheduler | undefined;
 let backendInitializationPromise: Promise<void> | undefined;
+let backendInitializationPending = true;
 const processStartedAtMs = Date.now();
 
 const appLifecycle = new QuitLifecycleCoordinator({
@@ -535,6 +538,7 @@ const rendererCrashRecovery = new RendererCrashRecovery({
   stopWorkAndQuit: async () => {
     await appLifecycle.requestQuit("renderer-crash", { confirmed: true });
   },
+  isStopping: () => appLifecycle.isStopping,
   recordDiagnostic: (message) => {
     diagnostics?.recordError(message);
     console.error(message);
@@ -626,7 +630,10 @@ async function bootstrap(): Promise<void> {
       registerIpcHandlers(settings, diagnosticsService);
       createMainWindow();
       app.on("activate", () => {
-        if (BrowserWindow.getAllWindows().length === 0) {
+        if (
+          !appLifecycle.isStopping &&
+          BrowserWindow.getAllWindows().length === 0
+        ) {
           createMainWindow();
         }
       });
@@ -642,7 +649,8 @@ async function bootstrap(): Promise<void> {
         failedForkCleanup.loadIfNeeded(),
       ]);
 
-      workflowInitialization = await initializeWorkflows(async () => {
+      if (chatLifecycleStopRequested) return;
+      const initializedWorkflows = await initializeWorkflows(async () => {
         const store = new WorkflowStore(
           resolvePiDeckHome(process.env),
           diagnosticsService,
@@ -650,7 +658,9 @@ async function bootstrap(): Promise<void> {
         await store.loadIfNeeded();
         return store;
       });
-      if (workflowInitialization.status === "available") {
+      if (chatLifecycleStopRequested) return;
+      workflowInitialization = initializedWorkflows;
+      if (initializedWorkflows.status === "available") {
         workflowScheduler = createWorkflowScheduler(
           settings,
           diagnosticsService,
@@ -660,7 +670,7 @@ async function bootstrap(): Promise<void> {
           diagnosticsService,
         );
       } else {
-        diagnosticsService.recordError(workflowInitialization.diagnostic);
+        diagnosticsService.recordError(initializedWorkflows.diagnostic);
       }
 
       // Reconstruct target blocks from source-only reservations before legacy
@@ -670,25 +680,35 @@ async function bootstrap(): Promise<void> {
         workspacesStore,
         projects,
       );
+      if (chatLifecycleStopRequested) return;
       const hadWorkspaceMetadata =
         (await workspacesStore.list()).workspaces.length > 0;
+      if (chatLifecycleStopRequested) return;
       await migrateLegacyProjectsToWorkspaces();
+      if (chatLifecycleStopRequested) return;
       await workspacesStore.ensureDefaultWorkspace({
         activate: !hadWorkspaceMetadata || resolveChatBackendMode() === "fake",
       });
+      if (chatLifecycleStopRequested) return;
       await startDelegationBridge();
+      if (chatLifecycleStopRequested) return;
       await ensureChatAdapter(settings, diagnosticsService);
+      if (chatLifecycleStopRequested) return;
       await rehydrateWorkflowRuns();
     },
   });
 
-  backendInitializationPromise = startup.backendReady.then((timings) => {
-    if (process.env.PI_DECK_STARTUP_METRICS === "1") {
-      console.info(
-        `[startup] shell-ready=${timings.shellReadyMs}ms backend-ready=${timings.backendReadyMs}ms`,
-      );
-    }
-  });
+  backendInitializationPromise = startup.backendReady
+    .then((timings) => {
+      if (process.env.PI_DECK_STARTUP_METRICS === "1") {
+        console.info(
+          `[startup] shell-ready=${timings.shellReadyMs}ms backend-ready=${timings.backendReadyMs}ms`,
+        );
+      }
+    })
+    .finally(() => {
+      backendInitializationPending = false;
+    });
   await backendInitializationPromise;
 }
 
@@ -8670,6 +8690,14 @@ async function inspectQuitActivity(): Promise<QuitActivitySummary> {
     chatSessionResumePromises.size +
     taskSessionSynthesisTails.size +
     pendingFailedForkCleanups.size +
+    chatSessionDiscoveryGate.pendingCount +
+    (workflowScheduler?.queuedWorkCount ?? 0) +
+    (workflowOccurrenceScheduler?.queuedWorkCount ?? 0) +
+    (backendInitializationPending ? 1 : 0) +
+    [...pendingExtensionUiRequests.values()].reduce(
+      (count, requests) => count + requests.size,
+      0,
+    ) +
     (activeChatReset === undefined ? 0 : 1);
   const adapter = chatAdapter;
 
@@ -8686,14 +8714,10 @@ async function inspectQuitActivity(): Promise<QuitActivitySummary> {
     if (status === undefined) {
       // An unresponsive owned child is conservatively treated as pending work.
       pendingOperations += 1;
-    } else {
-      const record = status as Record<string, unknown>;
-      if (
-        status.isAgentActive === true ||
-        (typeof record.isStreaming === "boolean" && record.isStreaming)
-      ) {
-        activeChats += 1;
-      }
+    } else if (chatRuntimeHasActiveWork(status)) {
+      // Merely attaching an idle saved chat is harmless and must not turn an
+      // ordinary close into a destructive-work warning.
+      activeChats += 1;
     }
 
     try {
@@ -8728,6 +8752,7 @@ async function showActiveWorkQuitDialog(
   source: QuitRequestSource,
 ): Promise<QuitDialogOutcome> {
   const testOutcome = consumeHiddenWindowDialogOutcome(
+    process.env,
     "PI_DECK_E2E_QUIT_DIALOG_RESPONSES",
     "quit",
   );
@@ -8769,6 +8794,7 @@ async function showRendererRecoveryDialog(
   details: string,
 ): Promise<CrashRecoveryOutcome> {
   const testOutcome = consumeHiddenWindowDialogOutcome(
+    process.env,
     "PI_DECK_E2E_CRASH_DIALOG_RESPONSES",
     "recover",
   );
@@ -8790,26 +8816,6 @@ async function showRendererRecoveryDialog(
       ? await dialog.showMessageBox(window, options)
       : await dialog.showMessageBox(options);
   return result.response === 1 ? "quit" : "recover";
-}
-
-/** Hidden E2E must never allocate a native dialog. Production never uses this. */
-function consumeHiddenWindowDialogOutcome(
-  environmentName: string,
-  defaultOutcome: string,
-): string | undefined {
-  if (
-    process.env.PI_DECK_E2E_TEST !== "1" ||
-    process.env.PI_DECK_E2E_HIDE_WINDOWS !== "1"
-  ) {
-    return undefined;
-  }
-  const outcomes = (process.env[environmentName] ?? "")
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean);
-  const outcome = outcomes.shift() ?? defaultOutcome;
-  process.env[environmentName] = outcomes.join(",");
-  return outcome;
 }
 
 async function reloadMainRenderer(): Promise<boolean> {
@@ -8845,6 +8851,9 @@ async function reloadMainRenderer(): Promise<boolean> {
 }
 
 async function recreateMainWindowAfterCrash(): Promise<void> {
+  // This synchronous fence and create are one event-loop turn: once cleanup is
+  // pending, no replacement BrowserWindow can be allocated behind it.
+  if (appLifecycle.isStopping) return;
   const oldWindow = mainWindow;
   const replacement = createMainWindow();
   oldWindow?.destroy();
@@ -8852,7 +8861,12 @@ async function recreateMainWindowAfterCrash(): Promise<void> {
     replacement.webContents.once("did-finish-load", () => resolve(true));
     replacement.webContents.once("render-process-gone", () => resolve(false));
   });
-  if (!(await withTimeoutResult(loaded, 10_000, false))) {
+  const ready = await withTimeoutResult(loaded, 10_000, false);
+  if (appLifecycle.isStopping) {
+    if (!replacement.isDestroyed()) replacement.destroy();
+    return;
+  }
+  if (!ready) {
     throw new Error("The replacement renderer did not become ready.");
   }
 }

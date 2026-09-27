@@ -63,8 +63,9 @@ async function launchHarness(
       XDG_CONFIG_HOME: path.join(root, "xdg-config"),
       XDG_DATA_HOME: path.join(root, "xdg-data"),
       XDG_CACHE_HOME: path.join(root, "xdg-cache"),
+      // Deliberately omit PI_DECK_E2E_TEST: hidden-window shutdown must use
+      // scripted/default responses without allocating an invisible dialog.
       PI_DECK_E2E_HIDE_WINDOWS: "1",
-      PI_DECK_E2E_TEST: "1",
       ...(options.quitResponses !== undefined
         ? { PI_DECK_E2E_QUIT_DIALOG_RESPONSES: options.quitResponses }
         : {}),
