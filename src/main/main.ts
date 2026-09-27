@@ -687,7 +687,7 @@ async function bootstrap(): Promise<void> {
       await migrateLegacyProjectsToWorkspaces();
       if (chatLifecycleStopRequested) return;
       await workspacesStore.ensureDefaultWorkspace({
-        activate: !hadWorkspaceMetadata || resolveChatBackendMode() === "fake",
+        activate: !hadWorkspaceMetadata,
       });
       if (chatLifecycleStopRequested) return;
       await startDelegationBridge();

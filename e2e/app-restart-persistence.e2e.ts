@@ -210,6 +210,28 @@ async function activeWorkspace(
   });
 }
 
+async function expectNamedWorkspaceActive(
+  page: Page,
+  expected: { id: string; name: string },
+): Promise<void> {
+  const workspaces = await page.evaluate(async () => {
+    const result = await window.piDeck.workspaces.list();
+    return result.workspaces.map((workspace) => ({
+      id: workspace.id,
+      name: workspace.name,
+      isDefault: workspace.isDefault,
+      archivedAtMs: workspace.archivedAtMs,
+    }));
+  });
+  expect(workspaces).toContainEqual({
+    id: expected.id,
+    name: expected.name,
+    isDefault: false,
+    archivedAtMs: undefined,
+  });
+  await expect(activeWorkspace(page)).resolves.toEqual(expected);
+}
+
 async function listSessions(
   page: Page,
   workspaceId: string,
@@ -381,7 +403,7 @@ test("completed ordinary chat in a named workspace survives normal quit and rela
     const secondLaunch = await launchPiDeck(fixture.env);
     secondApp = secondLaunch.app;
     const relaunched = secondLaunch.page;
-    await expect(activeWorkspace(relaunched)).resolves.toEqual({
+    await expectNamedWorkspaceActive(relaunched, {
       id: workspaceId,
       name: workspaceName,
     });
@@ -461,17 +483,10 @@ test("fake mode must preserve the selected named workspace across restart (#152)
 
     const second = await launchPiDeck(env);
     secondApp = second.app;
-    const workspaceIds = await second.page.evaluate(async () => {
-      const result = await window.piDeck.workspaces.list();
-      return result.workspaces.map((workspace) => workspace.id);
+    await expectNamedWorkspaceActive(second.page, {
+      id: created!.id,
+      name: workspaceName,
     });
-    // Only active selection is lost; missing/corrupt workspace metadata must
-    // not be mistaken for this specific expected failure.
-    expect(workspaceIds).toContain(created!.id);
-    const actual = await activeWorkspace(second.page);
-    console.info("#152 active workspace after fake-mode restart:", actual);
-    test.fail(true, "https://github.com/LiusuZeng/pi-deck/issues/152");
-    expect(actual).toEqual({ id: created!.id, name: workspaceName });
   } finally {
     await closeApp(firstApp);
     await closeApp(secondApp);

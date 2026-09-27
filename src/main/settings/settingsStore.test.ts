@@ -3,8 +3,10 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  rename as realRename,
   rm,
-  writeFile,
+  unlink,
+  writeFile as realWriteFile,
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -53,7 +55,7 @@ describe("SettingsStore", () => {
 
   it("loads settings written before the theme preference was added", async () => {
     const dir = await tempUserDataDir();
-    await writeFile(
+    await realWriteFile(
       path.join(dir, "settings.json"),
       JSON.stringify({ maxRunningSessions: 8, warmWorkerLimit: 2 }),
     );
@@ -148,9 +150,82 @@ describe("SettingsStore", () => {
     });
   });
 
+  it("preserves last-good settings on disk when the temporary write fails", async () => {
+    const dir = await tempUserDataDir();
+    const store = new SettingsStore(dir);
+    await store.update({ theme: "dark", maxRunningSessions: 6 });
+
+    let tempFile: string | undefined;
+    const faultingStore = new SettingsStore(dir, undefined, {
+      mkdir,
+      readFile,
+      rename: realRename,
+      unlink,
+      writeFile: async (file, data, options) => {
+        tempFile = String(file);
+        await realWriteFile(file, String(data).slice(0, 2), options);
+        throw new Error("injected partial temp write failure");
+      },
+    });
+
+    await expect(faultingStore.update({ warmWorkerLimit: 2 })).rejects.toThrow(
+      "injected partial temp write failure",
+    );
+    await expect(faultingStore.get()).resolves.toMatchObject({
+      theme: "dark",
+      maxRunningSessions: 6,
+      warmWorkerLimit: 1,
+    });
+    await expect(new SettingsStore(dir).get()).resolves.toMatchObject({
+      theme: "dark",
+      maxRunningSessions: 6,
+      warmWorkerLimit: 1,
+    });
+    expect(tempFile).toContain(path.join(dir, ".settings.json."));
+    await expect(readdir(dir)).resolves.not.toContain(path.basename(tempFile!));
+  });
+
+  it("preserves last-good settings on disk when atomic rename fails", async () => {
+    const dir = await tempUserDataDir();
+    const store = new SettingsStore(dir);
+    await store.update({ theme: "dark", maxRunningSessions: 6 });
+
+    let tempFile: string | undefined;
+    const faultingStore = new SettingsStore(dir, undefined, {
+      mkdir,
+      readFile,
+      rename: async (source, destination) => {
+        if (String(source).includes(`${path.sep}.settings.json.`)) {
+          tempFile = String(source);
+          expect(String(destination)).toBe(path.join(dir, "settings.json"));
+          throw new Error("injected rename failure");
+        }
+        await realRename(source, destination);
+      },
+      unlink,
+      writeFile: realWriteFile,
+    });
+
+    await expect(faultingStore.update({ warmWorkerLimit: 2 })).rejects.toThrow(
+      "injected rename failure",
+    );
+    await expect(faultingStore.get()).resolves.toMatchObject({
+      theme: "dark",
+      maxRunningSessions: 6,
+      warmWorkerLimit: 1,
+    });
+    await expect(new SettingsStore(dir).get()).resolves.toMatchObject({
+      theme: "dark",
+      maxRunningSessions: 6,
+      warmWorkerLimit: 1,
+    });
+    expect(tempFile).toContain(path.join(dir, ".settings.json."));
+    await expect(readdir(dir)).resolves.not.toContain(path.basename(tempFile!));
+  });
+
   it("backs up corrupt settings and applies defaults", async () => {
     const dir = await tempUserDataDir();
-    await writeFile(path.join(dir, "settings.json"), "{not-json");
+    await realWriteFile(path.join(dir, "settings.json"), "{not-json");
     const diagnostics = new TestDiagnostics();
     const store = new SettingsStore(dir, diagnostics);
 
