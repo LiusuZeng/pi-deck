@@ -1,6 +1,6 @@
 # Basic session lifecycle audit
 
-Code baseline: `e1bcc72`. This audit traces normal desktop lifecycle and persistence, not authenticated provider behavior. Independent read-only reviews covered main-process lifecycle, persistence/recovery, and renderer/navigation; separate worktrees supplied the E2E additions.
+Code findings were audited at `e1bcc72`; the E2E additions are in [PR #154](https://github.com/LiusuZeng/pi-deck/pull/154). This audit traces normal desktop lifecycle and persistence, not authenticated provider behavior. Independent read-only reviews covered main-process lifecycle, persistence/recovery, and renderer/navigation; separate worktrees supplied the E2E additions.
 
 ## What currently happens
 
@@ -30,11 +30,11 @@ Workspace/project/workflow stores use serialized persistence and temporary-file 
 
 | Issue | Finding | Evidence level |
 | --- | --- | --- |
-| [#148](https://github.com/LiusuZeng/pi-deck/issues/148) | Repeated quit can bypass pending worker cleanup. | `main.ts` sets the quit-bypass flag before cleanup completes; issue-linked hidden-window reproduction added. |
+| [#148](https://github.com/LiusuZeng/pi-deck/issues/148) | Repeated quit can bypass pending worker cleanup. | CI reproduced a live worker PID at final `will-quit`; `main.ts` sets the quit-bypass flag before cleanup completes. |
 | [#149](https://github.com/LiusuZeng/pi-deck/issues/149) | Unsent drafts disappear on reload/restart. | React-only draft state and fresh bootstrap path; no durable storage or discard guard. |
 | [#150](https://github.com/LiusuZeng/pi-deck/issues/150) | Last-window close silently stops active work. | Explicit close-last-window policy; shutdown E2E. UX/product-policy gap, not an accidental background-execution bug. |
 | [#151](https://github.com/LiusuZeng/pi-deck/issues/151) | Renderer crash has no app-owned recovery path. | No `render-process-gone` handling. Crash/recovery E2E remains follow-up. |
-| [#152](https://github.com/LiusuZeng/pi-deck/issues/152) | Fake/demo startup resets the saved active workspace. | Explicit unconditional default activation in fake mode; issue-linked restart reproduction added. Real mode is separately covered. |
+| [#152](https://github.com/LiusuZeng/pi-deck/issues/152) | Fake/demo startup resets the saved active workspace. | CI reproduced default activation with the named workspace still persisted. Real mode is separately covered. |
 | [#153](https://github.com/LiusuZeng/pi-deck/issues/153) | Interrupted settings writes can lose last-good preferences. | Direct overwrite plus corrupt-file fallback. Needs deterministic partial-write fault injection, not a timing-based kill test. |
 
 Existing model-discovery subprocess ownership issue #144 is not duplicated.
@@ -50,7 +50,7 @@ Existing model-discovery subprocess ownership issue #144 is not duplicated.
 1. Actual last `BrowserWindow.close()` during active work: direct workers are dead at `will-quit`.
 2. `app.quit()` with a SIGTERM-ignoring worker: escalation occurs before Electron exits.
 3. Repeated quit: desired shared shutdown barrier, linked expected failure for #148.
-4. Renderer reload during a turn: same runtime/file, no extra worker, and visible abort controls remain usable.
+4. Renderer reload during a turn: same runtime/file, no duplicate session worker, and visible abort controls remain usable. Temporary `--no-session` model-discovery workers are tracked separately from session ownership.
 
 `e2e/app-restart-persistence.e2e.ts`:
 
@@ -64,6 +64,6 @@ Known-failure annotations occur only immediately before the specific broken inva
 
 Both suites force `PI_DECK_E2E_HIDE_WINDOWS=1` regardless of inherited headed settings and assert native windows are invisible. Electron still needs its platform GUI service; these are hidden-window tests, not a claim that Electron supports Chromium's browser-headless mode. They neither open an inspector nor allocate an interactive terminal. Remaining E2E execution is in GitHub CI, not the user's desktop.
 
-Fixtures use isolated home/user-data/agent/project paths, a credential-free fake CLI behind the real adapter, and known-worker PID cleanup. Restart tests reuse the same isolated directories and never overwrite settings on the second launch. The wrapper answers discovery/version requests immediately so bootstrap discovery does not confound these cases.
+Fixtures use isolated home/user-data/agent/project paths, a credential-free fake CLI behind the real adapter, and known-worker PID cleanup. Restart tests reuse the same isolated directories and never overwrite settings on the second launch. The wrapper answers version/model-list requests immediately and keeps temporary runtime discovery free of session-specific shutdown delays. Activity assertions use normalized `chat.getRuntimeStatus()`, not the optional `isAgentActive` field of raw Pi snapshots (which can report `isStreaming` instead).
 
 The suites are automatically picked up by `npm run test:e2e`, already part of `npm run verify:ci`. The authoritative acceptance gate is **Verify desktop app** on the PR's current commit; provider-authenticated smoke tests remain release-only. Workflow quit/crash parity, renderer-crash recovery, durable draft recovery, and real tool-descendant cleanup are not covered by these new cases.

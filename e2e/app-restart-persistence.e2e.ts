@@ -122,6 +122,7 @@ async function launchPiDeck(env: NodeJS.ProcessEnv): Promise<{
     await expect(
       page.locator('.workspace[data-load-state="ready"]'),
     ).toBeVisible();
+    await expect(page.getByText("Preload error")).toHaveCount(0);
     expect(
       await app.evaluate(({ BrowserWindow }) =>
         BrowserWindow.getAllWindows().every((window) => !window.isVisible()),
@@ -273,10 +274,13 @@ async function resumeSession(
         workspaceId: targetWorkspaceId,
         sessionFile: targetSessionFile,
       });
+      const status = await window.piDeck.chat.getRuntimeStatus({
+        runtimeId: snapshot.runtimeId,
+      });
       return {
         runtimeId: snapshot.runtimeId,
         workspaceId: snapshot.workspaceId,
-        state: snapshot.state,
+        isAgentActive: status.state.isAgentActive,
         messages: snapshot.messages.map((message) => ({
           role: message.role,
           content: message.content,
@@ -400,7 +404,7 @@ test("completed ordinary chat in a named workspace survives normal quit and rela
       persistedSummary.sessionFile,
     );
     expect(resumed.workspaceId).toBe(workspaceId);
-    expect(resumed.state.isAgentActive).toBeFalsy();
+    expect(resumed.isAgentActive).toBe(false);
     expect(resumed.messages.map((message) => message.role)).toEqual([
       "user",
       "assistant",
@@ -512,8 +516,10 @@ test("interrupted active ordinary turn persists user prompt without runtime resu
     await expect
       .poll(() =>
         page.evaluate(async (runtimeId) => {
-          const snapshot = await window.piDeck.chat.getSnapshot({ runtimeId });
-          return snapshot.state.isAgentActive === true;
+          const status = await window.piDeck.chat.getRuntimeStatus({
+            runtimeId,
+          });
+          return status.state.isAgentActive;
         }, firstRuntimeId),
       )
       .toBe(true);
@@ -542,7 +548,7 @@ test("interrupted active ordinary turn persists user prompt without runtime resu
       persistedSummary.sessionFile,
     );
     expect(resumed.workspaceId).toBe(workspaceId);
-    expect(resumed.state.isAgentActive).toBeFalsy();
+    expect(resumed.isAgentActive).toBe(false);
     expect(resumed.messages.map(messageText)).toContain(interruptedPrompt);
     expect(
       resumed.messages.filter((message) => message.role === "assistant"),

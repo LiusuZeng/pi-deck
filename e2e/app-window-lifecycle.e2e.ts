@@ -15,6 +15,7 @@ interface Harness {
   root: string;
   projectCwd: string;
   pidLogFile: string;
+  sessionPidLogFile: string;
   promptReceiptFile: string;
   sigtermReceivedFile: string;
   exitSignalFile: string;
@@ -30,7 +31,7 @@ function fakePiBinary(root: string, args: readonly string[]): string {
   const pidLogFile = path.join(root, "worker-pids.log");
   fs.writeFileSync(
     binary,
-    `#!${process.execPath}\nif (process.argv.includes("--version")) { console.log("v42.5.0"); process.exit(0); }\nif (process.argv.includes("--list-models")) { console.log("provider  model       context  max-out  thinking  images"); console.log("fake-provider  fake-model  128K     32K      yes       yes"); process.exit(0); }\nrequire("node:fs").appendFileSync(${JSON.stringify(pidLogFile)}, String(process.pid) + "\\n");\nprocess.argv.push(...${JSON.stringify(args)});\nrequire(${JSON.stringify(path.join(repoRoot, "dist/main/pi/fakeRpc/fakeRpcServer.js"))});\n`,
+    `#!${process.execPath}\nif (process.argv.includes("--version")) { console.log("v42.5.0"); process.exit(0); }\nif (process.argv.includes("--list-models")) { console.log("provider  model       context  max-out  thinking  images"); console.log("fake-provider  fake-model  128K     32K      yes       yes"); process.exit(0); }\nconst fs = require("node:fs");\nfs.appendFileSync(${JSON.stringify(pidLogFile)}, String(process.pid) + "\\n");\nif (!process.argv.includes("--no-session")) {\n  fs.appendFileSync(${JSON.stringify(path.join(root, "session-pids.log"))}, String(process.pid) + "\\n");\n  process.argv.push(...${JSON.stringify(args)});\n}\nrequire(${JSON.stringify(path.join(repoRoot, "dist/main/pi/fakeRpc/fakeRpcServer.js"))});\n`,
     { mode: 0o755 },
   );
   return binary;
@@ -110,6 +111,7 @@ async function launchHarness(
       root,
       projectCwd,
       pidLogFile: path.join(root, "worker-pids.log"),
+      sessionPidLogFile: path.join(root, "session-pids.log"),
       promptReceiptFile,
       sigtermReceivedFile,
       exitSignalFile,
@@ -182,9 +184,9 @@ async function waitForPromptReceipt(harness: Harness): Promise<void> {
 
 async function workerPids(harness: Harness): Promise<number[]> {
   await expect
-    .poll(() => readWorkerPids(harness.pidLogFile), { timeout: 10_000 })
+    .poll(() => readWorkerPids(harness.sessionPidLogFile), { timeout: 10_000 })
     .not.toHaveLength(0);
-  return readWorkerPids(harness.pidLogFile);
+  return readWorkerPids(harness.sessionPidLogFile);
 }
 
 function sortedPids(pids: readonly number[]): number[] {
@@ -192,7 +194,7 @@ function sortedPids(pids: readonly number[]): number[] {
 }
 
 function liveWorkerPids(harness: Harness): number[] {
-  return readWorkerPids(harness.pidLogFile).filter(isPidAlive);
+  return readWorkerPids(harness.sessionPidLogFile).filter(isPidAlive);
 }
 
 function exitedWorkerCount(exitSignalFile: string): number {
@@ -360,7 +362,7 @@ test("repeated quit must wait for the same active-worker shutdown barrier (#148)
   }
 });
 
-test("renderer reload preserves the active prompt runtime and does not spawn an extra worker", async () => {
+test("renderer reload preserves active work without a duplicate session worker", async () => {
   let harness: Harness | undefined;
   try {
     harness = await launchHarness("reload-active-prompt", [
@@ -376,7 +378,11 @@ test("renderer reload preserves the active prompt runtime and does not spawn an 
     const before = await runtimeIdentity(harness.page);
     expect(before.sessionFile).toBeTruthy();
     await workerPids(harness);
-    const beforeWorkerPids = readWorkerPids(harness.pidLogFile);
+    // Model discovery legitimately launches a temporary --no-session worker
+    // on each renderer bootstrap. Only persistent session workers establish
+    // the no-duplicate-session invariant; all PIDs are still kept for cleanup.
+    const beforeWorkerPids = readWorkerPids(harness.sessionPidLogFile);
+    expect(beforeWorkerPids).toHaveLength(1);
 
     await harness.page.reload({ waitUntil: "domcontentloaded" });
     await expect(
@@ -391,8 +397,10 @@ test("renderer reload preserves the active prompt runtime and does not spawn an 
     ).toBeVisible();
     const after = await runtimeIdentity(harness.page);
     expect(after).toEqual(before);
-    expect(liveWorkerPids(harness).length).toBeGreaterThan(0);
-    expect(sortedPids(readWorkerPids(harness.pidLogFile))).toEqual(
+    expect(sortedPids(liveWorkerPids(harness))).toEqual(
+      sortedPids(beforeWorkerPids),
+    );
+    expect(sortedPids(readWorkerPids(harness.sessionPidLogFile))).toEqual(
       sortedPids(beforeWorkerPids),
     );
 
@@ -403,12 +411,14 @@ test("renderer reload preserves the active prompt runtime and does not spawn an 
     await expect
       .poll(() =>
         harness!.page.evaluate(async (runtimeId) => {
-          const snapshot = await window.piDeck.chat.getSnapshot({ runtimeId });
-          return snapshot.state.isAgentActive === true;
+          const status = await window.piDeck.chat.getRuntimeStatus({
+            runtimeId,
+          });
+          return status.state.isAgentActive;
         }, after.runtimeId),
       )
       .toBe(false);
-    expect(sortedPids(readWorkerPids(harness.pidLogFile))).toEqual(
+    expect(sortedPids(readWorkerPids(harness.sessionPidLogFile))).toEqual(
       sortedPids(beforeWorkerPids),
     );
   } finally {
