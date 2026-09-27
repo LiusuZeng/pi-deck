@@ -193,6 +193,8 @@ import {
   ComposerDraftPersistence,
   type ComposerDraftPersistenceResult,
   type ComposerDraftSessionIdentitySource,
+  type ComposerSubmissionDestination,
+  type PendingComposerSubmissionRecovery,
   type RestoredComposerDraft,
 } from "./composerDraftPersistence.js";
 import {
@@ -973,11 +975,17 @@ interface PendingTaskSubmission {
   text: string;
   attachments: AttachmentDraft[];
   timelineItemId: string;
+  composerRevision: number;
 }
 
 type PendingTaskSubmissionsBySession = Record<
   string,
   PendingTaskSubmission | undefined
+>;
+
+type PendingComposerRecoveriesBySession = Record<
+  string,
+  PendingComposerSubmissionRecovery | undefined
 >;
 
 type WorkspaceDialogState =
@@ -1295,6 +1303,8 @@ export function App(): ReactElement {
   // stable workspace/session identities have been reconciled after readiness.
   const [composerDraftPersistenceReady, setComposerDraftPersistenceReady] =
     useState(false);
+  const [pendingComposerRecoveries, setPendingComposerRecoveries] =
+    useState<PendingComposerRecoveriesBySession>({});
   const [composerError, setComposerError] = useState<string | null>(null);
   const [multitask, setMultitask] = useState<
     Record<string, MultitaskStateEvent>
@@ -1443,6 +1453,8 @@ export function App(): ReactElement {
   }
   const composerDraftPersistenceWarningRef = useRef(new Set<string>());
   const attachmentReselectionSessionIdsRef = useRef(new Set<string>());
+  const composerRevisionBySessionRef = useRef(new Map<string, number>());
+  const nextComposerRevisionRef = useRef(0);
   const promptHistoryStateRef = useRef<PromptHistoryState>(
     initialPromptHistoryState(),
   );
@@ -1546,21 +1558,39 @@ export function App(): ReactElement {
     }
   }
 
+  function composerRevision(sessionId: string): number {
+    return composerRevisionBySessionRef.current.get(sessionId) ?? 0;
+  }
+
+  function reviseComposer(sessionId: string): number {
+    const revision = ++nextComposerRevisionRef.current;
+    composerRevisionBySessionRef.current.set(sessionId, revision);
+    return revision;
+  }
+
   function clearAcceptedComposerDraft(
     session: ComposerDraftSessionIdentitySource,
     submittedText: string,
     submittedAttachments: readonly AttachmentDraft[],
+    submittedRevision: number,
   ): void {
     const current = composerDraftsRef.current;
-    const next = clearSubmittedTaskDraft(
-      current,
-      session.id,
-      submittedText,
-      submittedAttachments,
+    const sameComposerGeneration = shouldApplySubmissionResult(
+      submittedRevision,
+      composerRevision(session.id),
     );
+    const next = sameComposerGeneration
+      ? clearSubmittedTaskDraft(
+          current,
+          session.id,
+          submittedText,
+          submittedAttachments,
+        )
+      : current;
     const acceptedDraftIsStillCurrent =
-      next !== current ||
-      isEmptyComposerDraft(composerDraftForSession(current, session.id));
+      sameComposerGeneration &&
+      (next !== current ||
+        isEmptyComposerDraft(composerDraftForSession(current, session.id)));
     if (acceptedDraftIsStillCurrent) {
       attachmentReselectionSessionIdsRef.current.delete(session.id);
     }
@@ -1570,9 +1600,23 @@ export function App(): ReactElement {
       composerDraftsRef.current = next;
       setComposerDrafts(next);
     }
+    if (!acceptedDraftIsStillCurrent) {
+      // The user's newer edit may not have reached the React persistence effect
+      // yet. Persist its synchronous ref before removing pending metadata.
+      reportComposerDraftPersistenceResult(
+        composerDraftPersistenceRef.current!.persist(
+          [
+            ...sessionsRef.current.filter((item) => item.id !== session.id),
+            session,
+          ],
+          composerDraftPersistenceSnapshots(composerDraftsRef.current),
+        ),
+      );
+    }
     reportComposerDraftPersistenceResult(
       composerDraftPersistenceRef.current!.finishSubmission(
         session,
+        "accepted",
         acceptedDraftIsStillCurrent,
       ),
     );
@@ -1597,17 +1641,55 @@ export function App(): ReactElement {
     sessionId: string,
     submittedText: string,
     submittedAttachments: AttachmentDraft[],
+    submittedRevision: number,
   ): boolean {
     const current = composerDraftsRef.current;
-    const next = restoreFailedTaskDraft(
-      current,
-      sessionId,
-      submittedText,
-      submittedAttachments,
-    );
+    const next = shouldApplySubmissionResult(
+      submittedRevision,
+      composerRevision(sessionId),
+    )
+      ? restoreFailedTaskDraft(
+          current,
+          sessionId,
+          submittedText,
+          submittedAttachments,
+        )
+      : current;
     composerDraftsRef.current = next;
     setComposerDrafts(next);
     return next !== current;
+  }
+
+  function recoverPendingComposerSubmission(sessionId: string): void {
+    const session = sessionsRef.current.find((item) => item.id === sessionId);
+    if (session === undefined) return;
+    if (
+      !isEmptyComposerDraft(
+        composerDraftForSession(composerDraftsRef.current, sessionId),
+      )
+    ) {
+      setComposerError(
+        "The composer already has newer text. Keep or copy it, then clear the composer before recovering the previous uncertain submission.",
+      );
+      return;
+    }
+    const restoration =
+      composerDraftPersistenceRef.current!.recoverPendingSubmission(session);
+    if (restoration === undefined) return;
+    const next = restoreComposerDraftText(composerDraftsRef.current, [
+      restoration,
+    ]);
+    composerDraftsRef.current = next;
+    reviseComposer(sessionId);
+    setComposerDrafts(next);
+    setPendingComposerRecoveries((current) => {
+      const { [sessionId]: _recovered, ...remaining } = current;
+      return remaining;
+    });
+    reportRestoredAttachmentSelections([restoration]);
+    setUiMessage(
+      "Recovered the interrupted submission as editable text. It was not sent again automatically.",
+    );
   }
 
   function beginNavigation(): number {
@@ -2265,8 +2347,19 @@ export function App(): ReactElement {
     }
     const restorations = [...plan.restored, ...plan.workspaceShells];
     if (restorations.length > 0) {
-      setComposerDrafts((current) =>
-        restoreComposerDraftText(current, restorations),
+      const next = restoreComposerDraftText(
+        composerDraftsRef.current,
+        restorations,
+      );
+      // Effects from this render may persist before React commits another
+      // render. Publish restoration synchronously so no old empty snapshot can
+      // transiently remove the durable record.
+      composerDraftsRef.current = next;
+      setComposerDrafts(next);
+    }
+    if (plan.pendingSubmissions.length > 0) {
+      setPendingComposerRecoveries((current) =>
+        mergePendingComposerRecoveries(current, plan.pendingSubmissions),
       );
     }
     reportRestoredAttachmentSelections(restorations);
@@ -2299,13 +2392,22 @@ export function App(): ReactElement {
   // file and without replacing text the user has already begun typing.
   useEffect(() => {
     if (!composerDraftPersistenceReady) return;
-    const restorations =
+    const plan =
       composerDraftPersistenceRef.current!.restoreAvailableSessions(sessions);
-    if (restorations.length === 0) return;
-    setComposerDrafts((current) =>
-      restoreComposerDraftText(current, restorations),
-    );
-    reportRestoredAttachmentSelections(restorations);
+    if (plan.restored.length > 0) {
+      const next = restoreComposerDraftText(
+        composerDraftsRef.current,
+        plan.restored,
+      );
+      composerDraftsRef.current = next;
+      setComposerDrafts(next);
+      reportRestoredAttachmentSelections(plan.restored);
+    }
+    if (plan.pendingSubmissions.length > 0) {
+      setPendingComposerRecoveries((current) =>
+        mergePendingComposerRecoveries(current, plan.pendingSubmissions),
+      );
+    }
   }, [composerDraftPersistenceReady, sessions]);
 
   useEffect(() => {
@@ -2313,7 +2415,7 @@ export function App(): ReactElement {
     reportComposerDraftPersistenceResult(
       composerDraftPersistenceRef.current!.persist(
         sessions,
-        composerDraftPersistenceSnapshots(composerDrafts),
+        composerDraftPersistenceSnapshots(composerDraftsRef.current),
       ),
     );
   }, [composerDraftPersistenceReady, composerDrafts, sessions]);
@@ -3225,6 +3327,9 @@ export function App(): ReactElement {
       }
       const current = composerDraftForSession(items, sessionId);
       const merged = mergeAttachmentDrafts(current.attachments, imported);
+      if (merged.attachments !== current.attachments) {
+        reviseComposer(sessionId);
+      }
       releaseSelectedAttachmentTokens(
         ownerId,
         attachmentTokens(merged.discarded),
@@ -3345,6 +3450,7 @@ export function App(): ReactElement {
         if (navigation !== undefined) {
           event.preventDefault();
           promptHistoryStateRef.current = navigation.state;
+          reviseComposer(selectedSession.id);
           setComposerDrafts((items) =>
             updateComposerDraft(items, selectedSession.id, (current) => ({
               ...current,
@@ -3389,13 +3495,18 @@ export function App(): ReactElement {
 
   function handleDraftChange(value: string): void {
     promptHistoryStateRef.current = initialPromptHistoryState();
-    setComposerDrafts((items) =>
-      updateComposerDraft(items, selectedSession.id, (current) => ({
+    reviseComposer(selectedSession.id);
+    const next = updateComposerDraft(
+      composerDraftsRef.current,
+      selectedSession.id,
+      (current) => ({
         ...current,
         text: value,
         slashOpen: value.trimStart().startsWith("/"),
-      })),
+      }),
     );
+    composerDraftsRef.current = next;
+    setComposerDrafts(next);
   }
 
   function handleDraftWorkspaceChange(
@@ -4465,6 +4576,7 @@ export function App(): ReactElement {
     const submissionSession =
       durableSession ??
       sessionsRef.current.find((session) => session.id === runtimeId);
+    const submissionRevision = composerRevision(runtimeId);
     setComposerError(null);
     if (destination === "parent") {
       if (submissionSession !== undefined) {
@@ -4473,6 +4585,7 @@ export function App(): ReactElement {
             submissionSession,
             prompt,
             promptAttachments.length,
+            destination,
           ),
         );
       }
@@ -4534,6 +4647,7 @@ export function App(): ReactElement {
         prompt,
         promptAttachments,
         timelineItemId,
+        submissionRevision,
       );
       if (nextPending === undefined) return;
       pendingTaskSubmissionsRef.current = nextPending;
@@ -4544,6 +4658,7 @@ export function App(): ReactElement {
             submissionSession,
             prompt,
             promptAttachments.length,
+            destination,
           ),
         );
       }
@@ -4610,6 +4725,7 @@ export function App(): ReactElement {
           submissionSession,
           prompt,
           promptAttachments,
+          submissionRevision,
         );
       }
       if (destination === "newTaskSession") {
@@ -4624,14 +4740,7 @@ export function App(): ReactElement {
       setWorkInParentOnce((current) => ({ ...current, [runtimeId]: false }));
       setWorkerOverrides((current) => ({ ...current, [runtimeId]: {} }));
     } catch (error) {
-      if (submissionSession !== undefined) {
-        reportComposerDraftPersistenceResult(
-          composerDraftPersistenceRef.current!.finishSubmission(
-            submissionSession,
-            false,
-          ),
-        );
-      }
+      let submittedDraftWasRestored = false;
       if (destination === "parent") {
         unblockAttachmentOwner(runtimeId);
       } else {
@@ -4642,7 +4751,9 @@ export function App(): ReactElement {
           runtimeId,
           prompt,
           promptAttachments,
+          submissionRevision,
         );
+        submittedDraftWasRestored = shouldRestore;
         unblockAttachmentOwner(runtimeId);
         const failedSubmission = pendingTaskSubmissionsRef.current[runtimeId];
         const { [runtimeId]: _failed, ...remaining } =
@@ -4666,14 +4777,45 @@ export function App(): ReactElement {
           if (ownerId !== undefined) {
             releaseSelectedAttachmentTokens(
               ownerId,
-              attachmentTokens(promptAttachments),
+              rejectedSubmissionTokensToRelease(
+                destination,
+                shouldRestore,
+                promptAttachments,
+              ),
             );
           }
         }
       }
       setComposerError(error instanceof Error ? error.message : String(error));
       if (destination === "parent") {
-        restoreRejectedComposerDraft(runtimeId, prompt, promptAttachments);
+        submittedDraftWasRestored = restoreRejectedComposerDraft(
+          runtimeId,
+          prompt,
+          promptAttachments,
+          submissionRevision,
+        );
+        if (!submittedDraftWasRestored) {
+          const ownerId = attachmentOwnersBySession.current.get(runtimeId);
+          if (ownerId !== undefined) {
+            releaseSelectedAttachmentTokens(
+              ownerId,
+              rejectedSubmissionTokensToRelease(
+                destination,
+                submittedDraftWasRestored,
+                promptAttachments,
+              ),
+            );
+          }
+        }
+      }
+      if (submissionSession !== undefined) {
+        reportComposerDraftPersistenceResult(
+          composerDraftPersistenceRef.current!.finishSubmission(
+            submissionSession,
+            "rejected",
+            submittedDraftWasRestored,
+          ),
+        );
       }
       const message = error instanceof Error ? error.message : String(error);
       setSessions((current) =>
@@ -4769,7 +4911,22 @@ export function App(): ReactElement {
     const interventionId = createId("intervention");
     const interventionKind = kind === "steer" ? "steer" : "followUp";
     const sentAttachments = timelineAttachmentsFromDrafts(queuedAttachments);
+    const submissionRevision = composerRevision(selectedSession.id);
     setComposerError(null);
+    reportComposerDraftPersistenceResult(
+      composerDraftPersistenceRef.current!.beginSubmission(
+        selectedSession,
+        text,
+        queuedAttachments.length,
+        kind,
+      ),
+    );
+    blockAttachmentOwner(selectedSession.id);
+    optimisticallyClearSubmittedComposerDraft(
+      selectedSession.id,
+      text,
+      queuedAttachments,
+    );
     setSessions((current) =>
       updateSessionByRuntimeId(current, selectedSession.id, (session) => ({
         ...session,
@@ -4821,7 +4978,13 @@ export function App(): ReactElement {
           ),
         })),
       );
-      clearAcceptedComposerDraft(selectedSession, text, queuedAttachments);
+      clearAcceptedComposerDraft(
+        selectedSession,
+        text,
+        queuedAttachments,
+        submissionRevision,
+      );
+      unblockAttachmentOwner(selectedSession.id);
       setUiMessage(
         kind === "steer"
           ? "Steering instruction queued in Pi."
@@ -4830,11 +4993,34 @@ export function App(): ReactElement {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setComposerError(message);
-      setComposerDrafts((items) =>
-        updateComposerDraft(items, selectedSession.id, (current) => ({
-          ...current,
-          attachments: queuedAttachments,
-        })),
+      const restored = restoreRejectedComposerDraft(
+        selectedSession.id,
+        text,
+        queuedAttachments,
+        submissionRevision,
+      );
+      unblockAttachmentOwner(selectedSession.id);
+      if (!restored) {
+        const ownerId = attachmentOwnersBySession.current.get(
+          selectedSession.id,
+        );
+        if (ownerId !== undefined) {
+          releaseSelectedAttachmentTokens(
+            ownerId,
+            rejectedSubmissionTokensToRelease(
+              kind,
+              restored,
+              queuedAttachments,
+            ),
+          );
+        }
+      }
+      reportComposerDraftPersistenceResult(
+        composerDraftPersistenceRef.current!.finishSubmission(
+          selectedSession,
+          "rejected",
+          restored,
+        ),
       );
       setSessions((current) =>
         updateSessionByRuntimeId(current, selectedSession.id, (session) =>
@@ -6460,6 +6646,7 @@ export function App(): ReactElement {
     if (attachment === undefined) {
       return;
     }
+    reviseComposer(ownerId);
     setComposerDrafts((items) =>
       updateComposerDraft(items, ownerId, (current) => ({
         ...current,
@@ -6588,6 +6775,7 @@ export function App(): ReactElement {
   function handleSelectCommand(command: SlashCommand): void {
     const inserted = command.insertText ?? `${command.name} `;
     promptHistoryStateRef.current = initialPromptHistoryState();
+    reviseComposer(selectedSession.id);
     setComposerDrafts((items) =>
       updateComposerDraft(items, selectedSession.id, (current) => ({
         ...current,
@@ -6711,6 +6899,7 @@ export function App(): ReactElement {
       isPlanningTask={pendingTaskSubmissions[selectedSession.id] !== undefined}
       knownExtensionCommand={knownExtensionCommand}
       error={composerError}
+      pendingSubmissionRecovery={pendingComposerRecoveries[selectedSession.id]}
       attachments={attachments}
       slashOpen={slashOpen}
       slashCommands={filteredCommands}
@@ -6836,6 +7025,9 @@ export function App(): ReactElement {
       onSteer={handleSteer}
       onFollowUp={handleFollowUp}
       onRunExtensionCommand={handleRunExtensionCommand}
+      onRecoverPendingSubmission={() =>
+        recoverPendingComposerSubmission(selectedSession.id)
+      }
       onAbort={handleAbort}
       onPickAttachments={() => void handlePickAttachments()}
       onImportDroppedFileAttachments={(files) =>
@@ -7557,9 +7749,18 @@ function beginTaskSubmission(
   text: string,
   attachments: AttachmentDraft[],
   timelineItemId: string,
+  composerRevision = 0,
 ): PendingTaskSubmissionsBySession | undefined {
   if (pending[sessionId] !== undefined) return undefined;
-  return { ...pending, [sessionId]: { text, attachments, timelineItemId } };
+  return {
+    ...pending,
+    [sessionId]: {
+      text,
+      attachments,
+      timelineItemId,
+      composerRevision,
+    },
+  };
 }
 
 function clearSubmittedTaskDraft(
@@ -7578,6 +7779,33 @@ function clearSubmittedTaskDraft(
         submittedAttachments[index]?.selectedPathToken,
     );
   return isSubmittedDraft ? clearComposerDraft(drafts, sessionId) : drafts;
+}
+
+function shouldApplySubmissionResult(
+  submittedRevision: number,
+  currentRevision: number,
+): boolean {
+  return submittedRevision === currentRevision;
+}
+
+function rejectedSubmissionTokensToRelease(
+  _destination: ComposerSubmissionDestination,
+  submittedDraftWasRestored: boolean,
+  attachments: readonly AttachmentDraft[],
+): string[] {
+  // Destination is explicit so parent and task call sites cannot silently
+  // diverge again even though their token-release rule is intentionally equal.
+  return submittedDraftWasRestored ? [] : attachmentTokens(attachments);
+}
+
+function mergePendingComposerRecoveries(
+  current: PendingComposerRecoveriesBySession,
+  incoming: readonly PendingComposerSubmissionRecovery[],
+): PendingComposerRecoveriesBySession {
+  return {
+    ...current,
+    ...Object.fromEntries(incoming.map((item) => [item.sessionId, item])),
+  };
 }
 
 function isEmptyComposerDraft(draft: ComposerDraftState): boolean {
@@ -12950,6 +13178,7 @@ function Composer(props: {
   isPlanningTask: boolean;
   knownExtensionCommand: string | undefined;
   error: string | null;
+  pendingSubmissionRecovery: PendingComposerSubmissionRecovery | undefined;
   attachments: AttachmentDraft[];
   slashOpen: boolean;
   slashCommands: SlashCommand[];
@@ -12975,6 +13204,7 @@ function Composer(props: {
   onSteer(): void;
   onFollowUp(): void;
   onRunExtensionCommand(): void;
+  onRecoverPendingSubmission(): void;
   onAbort(): void;
   onPickAttachments(): void;
   onImportDroppedFileAttachments(files: File[]): void;
@@ -13214,7 +13444,22 @@ function Composer(props: {
               />
             ) : null}
           </div>
-          {props.error !== null ? (
+          {props.pendingSubmissionRecovery !== undefined ? (
+            <span
+              className="composer-status composer-error"
+              id={composerErrorId}
+              role="alert"
+            >
+              A previous send may have been accepted. Check session history
+              before recovering its text. It will not be resent automatically.
+              <Button
+                variant="subtle"
+                onClick={props.onRecoverPendingSubmission}
+              >
+                Recover text after checking history
+              </Button>
+            </span>
+          ) : props.error !== null ? (
             <span
               className="composer-status composer-error"
               id={composerErrorId}
@@ -14075,6 +14320,11 @@ export const __rendererTestHooks = {
   beginTaskSubmission,
   clearSubmittedTaskDraft,
   restoreFailedTaskDraft,
+  shouldApplySubmissionResult,
+  rejectedSubmissionTokensToRelease,
+  mergePendingComposerRecoveries,
+  restoreComposerDraftText,
+  composerDraftPersistenceSnapshots,
   isEmptyComposerDraft,
   clearComposerDraftsForSessions,
   moveComposerDraft,

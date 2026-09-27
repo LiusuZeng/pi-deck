@@ -1,13 +1,13 @@
 export const COMPOSER_DRAFT_STORAGE_KEY = "pi-deck:composer-drafts";
-export const COMPOSER_DRAFT_SCHEMA_VERSION = 1;
+export const COMPOSER_DRAFT_SCHEMA_VERSION = 2;
 export const MAX_COMPOSER_DRAFT_ENTRIES = 100;
 export const MAX_COMPOSER_DRAFT_TEXT_LENGTH = 200_000;
 export const MAX_COMPOSER_DRAFT_TOTAL_TEXT_LENGTH = 1_000_000;
+export const MAX_COMPOSER_DRAFT_SERIALIZED_LENGTH = 2_000_000;
 
 const MAX_WORKSPACE_ID_LENGTH = 512;
 const MAX_SESSION_FILE_LENGTH = 4_096;
 const MAX_DRAFT_ID_LENGTH = 128;
-const MAX_SERIALIZED_STORE_LENGTH = 2_000_000;
 
 export interface ComposerDraftStorage {
   getItem(key: string): string | null;
@@ -27,10 +27,31 @@ export type ComposerDraftIdentity =
       sessionFile: string;
     };
 
+export type ComposerSubmissionDestination =
+  | "parent"
+  | "newTaskSession"
+  | "steer"
+  | "followUp";
+
+/**
+ * A renderer reload can interrupt the prompt IPC after main accepted it but
+ * before the renderer observed the result. This metadata deliberately stores
+ * no attachment tokens or paths. Until authoritative receipt evidence is
+ * supplied, `text` is quarantined and must never be restored as a fresh draft.
+ */
+export interface DurablePendingComposerSubmission {
+  text: string;
+  startedAtMs: number;
+  destination: ComposerSubmissionDestination;
+  attachmentsNeedReselection: boolean;
+}
+
 export type DurableComposerDraft = ComposerDraftIdentityFields & {
+  /** Current unsent text. Pending submission text lives separately below. */
   text: string;
   updatedAtMs: number;
   attachmentsNeedReselection: boolean;
+  pendingSubmission?: DurablePendingComposerSubmission | undefined;
 };
 
 type ComposerDraftIdentityFields =
@@ -45,8 +66,8 @@ type ComposerDraftIdentityFields =
       sessionFile: string;
     };
 
-interface ComposerDraftStoreV1 {
-  version: 1;
+interface ComposerDraftStoreV2 {
+  version: 2;
   drafts: DurableComposerDraft[];
 }
 
@@ -76,9 +97,19 @@ export interface RestoredWorkspaceDraftShell {
   attachmentsNeedReselection: boolean;
 }
 
+export interface PendingComposerSubmissionRecovery {
+  sessionId: string;
+  identity: ComposerDraftIdentity;
+  text: string;
+  startedAtMs: number;
+  destination: ComposerSubmissionDestination;
+  attachmentsNeedReselection: boolean;
+}
+
 export interface ComposerDraftRestorationPlan {
   restored: RestoredComposerDraft[];
   workspaceShells: RestoredWorkspaceDraftShell[];
+  pendingSubmissions: PendingComposerSubmissionRecovery[];
   prunedStaleWorkspaceCount: number;
 }
 
@@ -112,9 +143,10 @@ interface ParsedStore {
 
 /**
  * Renderer-profile-local draft storage. The serialized contract contains only
- * bounded text, stable workspace/native-file identity, a timestamp, and a
- * boolean that says attachment selection must be repeated. Attachment tokens,
- * paths, image bytes, task IDs, and runtime IDs never enter this module.
+ * bounded text, stable workspace/native-file identity, timestamps, a delivery
+ * destination, and booleans that say attachment selection must be repeated.
+ * Attachment tokens, paths, image bytes, task IDs, and runtime IDs never enter
+ * this module.
  */
 export class ComposerDraftPersistence {
   readonly loadStatus: ComposerDraftLoadStatus;
@@ -126,11 +158,12 @@ export class ComposerDraftPersistence {
   >();
   private readonly restoredKeys = new Set<string>();
   private readonly attachmentReselectionKeys = new Set<string>();
-  private readonly pendingSubmissionKeys = new Set<string>();
   private readonly now: () => number;
   private readonly createDraftId: () => string;
   private hydrated = false;
-  private writable = true;
+  private writable = false;
+  private writeBlockedStatus: "unsupported-version" | "storage-error" =
+    "storage-error";
   private lastSerialized: string | undefined;
 
   constructor(
@@ -141,7 +174,11 @@ export class ComposerDraftPersistence {
     this.createDraftId = options.createDraftId ?? defaultDraftId;
     const loaded = readComposerDraftStore(storage);
     this.loadStatus = loaded.status;
-    this.writable = loaded.status !== "unsupported-version";
+    this.writable = loaded.status === "ok" || loaded.status === "empty";
+    this.writeBlockedStatus =
+      loaded.status === "unsupported-version"
+        ? "unsupported-version"
+        : "storage-error";
     for (const record of loaded.records) {
       this.records.set(composerDraftIdentityKey(record), record);
     }
@@ -179,9 +216,42 @@ export class ComposerDraftPersistence {
   /** Restore native session drafts that appeared in a later background scan. */
   restoreAvailableSessions(
     sessions: readonly ComposerDraftSessionIdentitySource[],
-  ): RestoredComposerDraft[] {
-    if (!this.hydrated) return [];
-    return this.planRestoration(sessions, undefined, false).restored;
+  ): Pick<ComposerDraftRestorationPlan, "restored" | "pendingSubmissions"> {
+    if (!this.hydrated) return { restored: [], pendingSubmissions: [] };
+    const plan = this.planRestoration(sessions, undefined, false);
+    return {
+      restored: plan.restored,
+      pendingSubmissions: plan.pendingSubmissions,
+    };
+  }
+
+  /**
+   * Retry a failed constructor read without risking an empty-state overwrite.
+   * A successful read is merged with newer in-memory edits before writes thaw.
+   */
+  recoverStorage(): ComposerDraftPersistenceResult {
+    const loaded = readComposerDraftStore(this.storage);
+    if (loaded.status !== "ok" && loaded.status !== "empty") {
+      this.writable = false;
+      this.writeBlockedStatus =
+        loaded.status === "unsupported-version"
+          ? "unsupported-version"
+          : "storage-error";
+      return this.blockedWriteResult();
+    }
+    for (const durable of loaded.records) {
+      const key = composerDraftIdentityKey(durable);
+      const memory = this.records.get(key);
+      // Existing memory was created after the failed constructor read, so it
+      // wins regardless of wall-clock skew. The successful retry fills only
+      // identities that were previously unknown.
+      if (memory === undefined) {
+        this.records.set(key, durable);
+      }
+    }
+    this.writable = true;
+    this.lastSerialized = serializeRecords(loaded.records);
+    return { status: "ok", truncated: false, pruned: 0 };
   }
 
   persist(
@@ -198,11 +268,7 @@ export class ComposerDraftPersistence {
       };
     }
     if (!this.writable) {
-      return {
-        status: "unsupported-version",
-        truncated: false,
-        pruned: 0,
-      };
+      return this.blockedWriteResult();
     }
 
     let truncated = false;
@@ -216,10 +282,21 @@ export class ComposerDraftPersistence {
         (draft.text.length === 0 && draft.attachmentCount === 0)
       ) {
         // The UI may clear optimistically while IPC is pending. Keep its
-        // durable record until acceptance or rejection resolves explicitly.
-        if (!this.pendingSubmissionKeys.has(key)) {
+        // quarantined submission until authoritative acceptance/rejection.
+        const existing = this.records.get(key);
+        if (existing?.pendingSubmission === undefined) {
           this.records.delete(key);
           this.attachmentReselectionKeys.delete(key);
+        } else if (
+          existing.text.length > 0 ||
+          existing.attachmentsNeedReselection
+        ) {
+          this.records.set(key, {
+            ...existing,
+            text: "",
+            attachmentsNeedReselection: false,
+            updatedAtMs: this.now(),
+          });
         }
         continue;
       }
@@ -239,6 +316,9 @@ export class ComposerDraftPersistence {
         text,
         updatedAtMs: this.now(),
         attachmentsNeedReselection,
+        ...(existing?.pendingSubmission === undefined
+          ? {}
+          : { pendingSubmission: existing.pendingSubmission }),
       });
     }
 
@@ -261,6 +341,7 @@ export class ComposerDraftPersistence {
     session: ComposerDraftSessionIdentitySource,
     text: string,
     attachmentCount: number,
+    destination: ComposerSubmissionDestination = "parent",
   ): ComposerDraftPersistenceResult {
     const identity = this.identityForSession(session);
     if (identity === undefined) {
@@ -272,11 +353,18 @@ export class ComposerDraftPersistence {
       attachmentCount > 0 || this.attachmentReselectionKeys.has(key);
     this.records.set(key, {
       ...identity,
-      text: boundedText,
+      // The visible composer is about to clear. Any later persist writes a
+      // genuinely newer draft here, independently of the uncertain receipt.
+      text: "",
       updatedAtMs: this.now(),
-      attachmentsNeedReselection,
+      attachmentsNeedReselection: false,
+      pendingSubmission: {
+        text: boundedText,
+        startedAtMs: this.now(),
+        destination,
+        attachmentsNeedReselection,
+      },
     });
-    this.pendingSubmissionKeys.add(key);
     const result = this.write();
     return {
       ...result,
@@ -284,24 +372,115 @@ export class ComposerDraftPersistence {
     };
   }
 
+  /**
+   * Resolve only from the live IPC result or another authoritative receipt.
+   * Snapshot text equality is intentionally not evidence of acceptance.
+   */
   finishSubmission(
     session: ComposerDraftSessionIdentitySource,
-    acceptedAndStillCurrent: boolean,
+    outcome: "accepted" | "rejected",
+    submittedDraftIsCurrent: boolean,
   ): ComposerDraftPersistenceResult {
     const identity = this.identityForSession(session);
     if (identity === undefined) {
       return { status: "unchanged", truncated: false, pruned: 0 };
     }
     const key = composerDraftIdentityKey(identity);
-    this.pendingSubmissionKeys.delete(key);
-    if (acceptedAndStillCurrent) {
+    const record = this.records.get(key);
+    const pending = record?.pendingSubmission;
+    if (record === undefined || pending === undefined) {
+      return { status: "unchanged", truncated: false, pruned: 0 };
+    }
+    if (outcome === "accepted" && submittedDraftIsCurrent) {
       this.records.delete(key);
       this.attachmentReselectionKeys.delete(key);
+    } else {
+      const restoredRejectedText =
+        outcome === "rejected" && submittedDraftIsCurrent
+          ? pending.text
+          : record.text;
+      const restoredAttachments =
+        outcome === "rejected" && submittedDraftIsCurrent
+          ? pending.attachmentsNeedReselection
+          : record.attachmentsNeedReselection;
+      if (restoredRejectedText.length === 0 && !restoredAttachments) {
+        this.records.delete(key);
+      } else {
+        this.records.set(key, {
+          ...record,
+          text: restoredRejectedText,
+          attachmentsNeedReselection: restoredAttachments,
+          pendingSubmission: undefined,
+          updatedAtMs: this.now(),
+        });
+      }
     }
     return this.write();
   }
 
-  /** Move a renderer-only identity to the native file returned by create. */
+  /**
+   * Reconcile an interrupted renderer only with authoritative, correlation-
+   * bearing durable receipt evidence. A pending Extension UI snapshot DTO is
+   * not a prompt receipt, and a matching transcript string is never sufficient:
+   * repeated prompts are valid. Pass `unknown` when receipt evidence is absent;
+   * the text then stays quarantined for explicit user recovery.
+   */
+  reconcilePendingSubmission(
+    session: ComposerDraftSessionIdentitySource,
+    disposition: "accepted" | "rejected" | "unknown",
+  ): ComposerDraftPersistenceResult {
+    if (disposition === "unknown") {
+      return { status: "unchanged", truncated: false, pruned: 0 };
+    }
+    const identity = this.identityForSession(session);
+    const record =
+      identity === undefined
+        ? undefined
+        : this.records.get(composerDraftIdentityKey(identity));
+    const submittedDraftIsCurrent =
+      record !== undefined &&
+      record.text.length === 0 &&
+      !record.attachmentsNeedReselection;
+    if (disposition === "rejected" && !submittedDraftIsCurrent) {
+      // A newer draft and the rejected text are both user data. Keep the latter
+      // quarantined rather than overwriting either value; explicit recovery is
+      // available after the newer composer is cleared or copied.
+      return { status: "unchanged", truncated: false, pruned: 0 };
+    }
+    return this.finishSubmission(session, disposition, submittedDraftIsCurrent);
+  }
+
+  /** User explicitly chose recovery after checking history; never auto-replay. */
+  recoverPendingSubmission(
+    session: ComposerDraftSessionIdentitySource,
+  ): RestoredComposerDraft | undefined {
+    const identity = this.identityForSession(session);
+    if (identity === undefined) return undefined;
+    const key = composerDraftIdentityKey(identity);
+    const record = this.records.get(key);
+    const pending = record?.pendingSubmission;
+    if (record === undefined || pending === undefined) return undefined;
+    const recovered: DurableComposerDraft = {
+      ...record,
+      text: pending.text,
+      attachmentsNeedReselection: pending.attachmentsNeedReselection,
+      pendingSubmission: undefined,
+      updatedAtMs: this.now(),
+    };
+    this.records.set(key, recovered);
+    if (recovered.attachmentsNeedReselection) {
+      this.attachmentReselectionKeys.add(key);
+    }
+    this.write();
+    return restorationFor(session.id, identity, recovered);
+  }
+
+  /**
+   * Transfer renderer-row ownership to its replacement. This covers both a
+   * workspace draft becoming native and a cached native row being superseded
+   * by an attached runtime row; callers must invoke it in the same transaction
+   * that moves composer state so stale non-runtime IDs cannot retain a binding.
+   */
   migrateSession(
     from: ComposerDraftSessionIdentitySource,
     to: ComposerDraftSessionIdentitySource,
@@ -323,7 +502,6 @@ export class ComposerDraftPersistence {
     const key = composerDraftIdentityKey(identity);
     const changed = this.records.delete(key);
     this.attachmentReselectionKeys.delete(key);
-    this.pendingSubmissionKeys.delete(key);
     if (!changed) {
       return { status: "unchanged", truncated: false, pruned: 0 };
     }
@@ -340,7 +518,6 @@ export class ComposerDraftPersistence {
         const key = composerDraftIdentityKey(identity);
         changed = this.records.delete(key) || changed;
         this.attachmentReselectionKeys.delete(key);
-        this.pendingSubmissionKeys.delete(key);
       }
       this.identitiesBySessionId.delete(session.id);
     }
@@ -426,6 +603,7 @@ export class ComposerDraftPersistence {
   ): Omit<ComposerDraftRestorationPlan, "prunedStaleWorkspaceCount"> {
     const restored: RestoredComposerDraft[] = [];
     const workspaceShells: RestoredWorkspaceDraftShell[] = [];
+    const pendingSubmissions: PendingComposerSubmissionRecovery[] = [];
     const claimedSessionIds = new Set<string>();
 
     for (const record of [...this.records.values()].sort(
@@ -462,7 +640,14 @@ export class ComposerDraftPersistence {
         claimedSessionIds.add(session.id);
         this.bindSession(session.id, identity);
         this.markRestored(key, record);
-        restored.push(restorationFor(session.id, identity, record));
+        if (record.text.length > 0) {
+          restored.push(restorationFor(session.id, identity, record));
+        }
+        if (record.pendingSubmission !== undefined) {
+          pendingSubmissions.push(
+            pendingRecoveryFor(session.id, identity, record.pendingSubmission),
+          );
+        }
         continue;
       }
       if (record.kind === "workspaceDraft" && includeWorkspaceShells) {
@@ -483,10 +668,19 @@ export class ComposerDraftPersistence {
           text: record.text,
           attachmentsNeedReselection: record.attachmentsNeedReselection,
         });
+        if (record.pendingSubmission !== undefined) {
+          pendingSubmissions.push(
+            pendingRecoveryFor(
+              sessionId,
+              workspaceIdentity,
+              record.pendingSubmission,
+            ),
+          );
+        }
       }
     }
 
-    return { restored, workspaceShells };
+    return { restored, workspaceShells, pendingSubmissions };
   }
 
   private markRestored(key: string, record: DurableComposerDraft): void {
@@ -520,14 +714,16 @@ export class ComposerDraftPersistence {
         attachmentsNeedReselection:
           source.attachmentsNeedReselection ||
           destination?.attachmentsNeedReselection === true,
+        ...(source.pendingSubmission !== undefined
+          ? { pendingSubmission: source.pendingSubmission }
+          : destination?.pendingSubmission !== undefined
+            ? { pendingSubmission: destination.pendingSubmission }
+            : {}),
       });
       this.records.delete(fromKey);
     }
     if (this.attachmentReselectionKeys.delete(fromKey)) {
       this.attachmentReselectionKeys.add(toKey);
-    }
-    if (this.pendingSubmissionKeys.delete(fromKey)) {
-      this.pendingSubmissionKeys.add(toKey);
     }
     if (this.restoredKeys.delete(fromKey)) this.restoredKeys.add(toKey);
   }
@@ -552,15 +748,17 @@ export class ComposerDraftPersistence {
       };
     }
     if (!this.writable) {
-      return {
-        status: "unsupported-version",
-        truncated: false,
-        pruned: 0,
-      };
+      return this.blockedWriteResult();
     }
-    const serialized = serializeRecords([...this.records.values()]);
+    const bounded = boundRecords([...this.records.values()]);
+    this.replaceRecords(bounded.records);
+    const serialized = serializeRecords(bounded.records);
     if (serialized === this.lastSerialized) {
-      return { status: "unchanged", truncated: false, pruned: 0 };
+      return {
+        status: "unchanged",
+        truncated: bounded.truncated,
+        pruned: bounded.pruned,
+      };
     }
     try {
       if (this.storage === undefined) throw new Error("Storage unavailable");
@@ -570,10 +768,30 @@ export class ComposerDraftPersistence {
         this.storage.setItem(COMPOSER_DRAFT_STORAGE_KEY, serialized);
       }
       this.lastSerialized = serialized;
-      return { status: "ok", truncated: false, pruned: 0 };
+      return {
+        status: "ok",
+        truncated: bounded.truncated,
+        pruned: bounded.pruned,
+      };
     } catch {
-      return { status: "storage-error", truncated: false, pruned: 0 };
+      // Treat any storage exception as loss of authority. Do not attempt a
+      // later remove/set until an explicit read proves storage is available.
+      this.writable = false;
+      this.writeBlockedStatus = "storage-error";
+      return {
+        status: "storage-error",
+        truncated: bounded.truncated,
+        pruned: bounded.pruned,
+      };
     }
+  }
+
+  private blockedWriteResult(): ComposerDraftPersistenceResult {
+    return {
+      status: this.writeBlockedStatus,
+      truncated: false,
+      pruned: 0,
+    };
   }
 }
 
@@ -616,7 +834,7 @@ export function readComposerDraftStore(
     return { status: "storage-error", records: [] };
   }
   if (raw === null) return { status: "empty", records: [] };
-  if (raw.length > MAX_SERIALIZED_STORE_LENGTH) {
+  if (raw.length > MAX_COMPOSER_DRAFT_SERIALIZED_LENGTH) {
     return { status: "invalid", records: [] };
   }
 
@@ -629,7 +847,7 @@ export function readComposerDraftStore(
   if (!isObject(value) || typeof value.version !== "number") {
     return { status: "invalid", records: [] };
   }
-  if (value.version !== COMPOSER_DRAFT_SCHEMA_VERSION) {
+  if (value.version !== 1 && value.version !== COMPOSER_DRAFT_SCHEMA_VERSION) {
     return { status: "unsupported-version", records: [] };
   }
   if (!Array.isArray(value.drafts)) {
@@ -645,14 +863,16 @@ export function readComposerDraftStore(
     const key = composerDraftIdentityKey(record);
     if (keys.has(key)) continue;
     if (records.length >= MAX_COMPOSER_DRAFT_ENTRIES) break;
+    const recordTextLength =
+      record.text.length + (record.pendingSubmission?.text.length ?? 0);
     if (
-      totalTextLength + record.text.length >
+      totalTextLength + recordTextLength >
       MAX_COMPOSER_DRAFT_TOTAL_TEXT_LENGTH
     ) {
       continue;
     }
     keys.add(key);
-    totalTextLength += record.text.length;
+    totalTextLength += recordTextLength;
     records.push(record);
   }
   return { status: "ok", records };
@@ -671,6 +891,13 @@ function parseRecord(value: unknown): DurableComposerDraft | undefined {
   ) {
     return undefined;
   }
+  const pendingSubmission = parsePendingSubmission(value.pendingSubmission);
+  if (
+    value.pendingSubmission !== undefined &&
+    pendingSubmission === undefined
+  ) {
+    return undefined;
+  }
   if (
     value.kind === "workspaceDraft" &&
     validBoundedString(value.draftId, MAX_DRAFT_ID_LENGTH)
@@ -682,6 +909,7 @@ function parseRecord(value: unknown): DurableComposerDraft | undefined {
       text: value.text,
       updatedAtMs: value.updatedAtMs,
       attachmentsNeedReselection: value.attachmentsNeedReselection,
+      ...(pendingSubmission === undefined ? {} : { pendingSubmission }),
     };
   }
   if (
@@ -695,9 +923,36 @@ function parseRecord(value: unknown): DurableComposerDraft | undefined {
       text: value.text,
       updatedAtMs: value.updatedAtMs,
       attachmentsNeedReselection: value.attachmentsNeedReselection,
+      ...(pendingSubmission === undefined ? {} : { pendingSubmission }),
     };
   }
   return undefined;
+}
+
+function parsePendingSubmission(
+  value: unknown,
+): DurablePendingComposerSubmission | undefined {
+  if (
+    !isObject(value) ||
+    typeof value.text !== "string" ||
+    value.text.length > MAX_COMPOSER_DRAFT_TEXT_LENGTH ||
+    typeof value.startedAtMs !== "number" ||
+    !Number.isFinite(value.startedAtMs) ||
+    value.startedAtMs < 0 ||
+    (value.destination !== "parent" &&
+      value.destination !== "newTaskSession" &&
+      value.destination !== "steer" &&
+      value.destination !== "followUp") ||
+    typeof value.attachmentsNeedReselection !== "boolean"
+  ) {
+    return undefined;
+  }
+  return {
+    text: value.text,
+    startedAtMs: value.startedAtMs,
+    destination: value.destination,
+    attachmentsNeedReselection: value.attachmentsNeedReselection,
+  };
 }
 
 function boundRecords(records: DurableComposerDraft[]): {
@@ -706,22 +961,96 @@ function boundRecords(records: DurableComposerDraft[]): {
   pruned: number;
 } {
   const sorted = [...records].sort(
-    (left, right) => right.updatedAtMs - left.updatedAtMs,
+    (left, right) =>
+      right.updatedAtMs - left.updatedAtMs ||
+      composerDraftIdentityKey(left).localeCompare(
+        composerDraftIdentityKey(right),
+      ),
   );
   const bounded: DurableComposerDraft[] = [];
   let totalTextLength = 0;
+  let serializedLength = serializeRecords([]).length;
   let truncated = false;
   for (const record of sorted) {
     if (bounded.length >= MAX_COMPOSER_DRAFT_ENTRIES) break;
-    const available = MAX_COMPOSER_DRAFT_TOTAL_TEXT_LENGTH - totalTextLength;
-    if (available <= 0) break;
-    const text = record.text.slice(
+    const availableRaw = MAX_COMPOSER_DRAFT_TOTAL_TEXT_LENGTH - totalTextLength;
+    if (availableRaw <= 0) break;
+
+    let text = record.text.slice(
       0,
-      Math.min(MAX_COMPOSER_DRAFT_TEXT_LENGTH, available),
+      Math.min(MAX_COMPOSER_DRAFT_TEXT_LENGTH, availableRaw),
     );
-    truncated ||= text.length !== record.text.length;
-    bounded.push({ ...record, text });
-    totalTextLength += text.length;
+    const remainingRaw = availableRaw - text.length;
+    let pendingText = record.pendingSubmission?.text.slice(
+      0,
+      Math.min(MAX_COMPOSER_DRAFT_TEXT_LENGTH, remainingRaw),
+    );
+    let candidate: DurableComposerDraft = {
+      ...record,
+      text,
+      ...(record.pendingSubmission === undefined
+        ? {}
+        : {
+            pendingSubmission: {
+              ...record.pendingSubmission,
+              text: pendingText ?? "",
+            },
+          }),
+    };
+
+    const separatorLength = bounded.length === 0 ? 0 : 1;
+    if (
+      serializedLength + separatorLength + JSON.stringify(candidate).length >
+      MAX_COMPOSER_DRAFT_SERIALIZED_LENGTH
+    ) {
+      const withoutText: DurableComposerDraft = {
+        ...candidate,
+        text: "",
+        ...(candidate.pendingSubmission === undefined
+          ? {}
+          : {
+              pendingSubmission: {
+                ...candidate.pendingSubmission,
+                text: "",
+              },
+            }),
+      };
+      const fixedLength =
+        serializedLength + separatorLength + JSON.stringify(withoutText).length;
+      if (fixedLength > MAX_COMPOSER_DRAFT_SERIALIZED_LENGTH) {
+        truncated = true;
+        continue;
+      }
+      let escapedBudget = MAX_COMPOSER_DRAFT_SERIALIZED_LENGTH - fixedLength;
+      text = truncateJsonStringToEscapedLength(text, escapedBudget);
+      escapedBudget -= jsonEscapedStringLength(text);
+      if (pendingText !== undefined) {
+        pendingText = truncateJsonStringToEscapedLength(
+          pendingText,
+          escapedBudget,
+        );
+      }
+      candidate = {
+        ...candidate,
+        text,
+        ...(candidate.pendingSubmission === undefined
+          ? {}
+          : {
+              pendingSubmission: {
+                ...candidate.pendingSubmission,
+                text: pendingText ?? "",
+              },
+            }),
+      };
+    }
+
+    truncated ||=
+      text.length !== record.text.length ||
+      (pendingText?.length ?? 0) !==
+        (record.pendingSubmission?.text.length ?? 0);
+    bounded.push(candidate);
+    totalTextLength += text.length + (pendingText?.length ?? 0);
+    serializedLength += separatorLength + JSON.stringify(candidate).length;
   }
   return {
     records: bounded,
@@ -731,7 +1060,7 @@ function boundRecords(records: DurableComposerDraft[]): {
 }
 
 function serializeRecords(records: DurableComposerDraft[]): string {
-  const store: ComposerDraftStoreV1 = {
+  const store: ComposerDraftStoreV2 = {
     version: COMPOSER_DRAFT_SCHEMA_VERSION,
     drafts: [...records].sort((left, right) =>
       composerDraftIdentityKey(left).localeCompare(
@@ -740,6 +1069,61 @@ function serializeRecords(records: DurableComposerDraft[]): string {
     ),
   };
   return JSON.stringify(store);
+}
+
+function jsonEscapedStringLength(value: string): number {
+  return JSON.stringify(value).length - 2;
+}
+
+/** Return the longest code-point-safe prefix whose JSON payload fits. */
+function truncateJsonStringToEscapedLength(
+  value: string,
+  maximumEscapedLength: number,
+): string {
+  let index = 0;
+  let escapedLength = 0;
+  while (index < value.length) {
+    const code = value.charCodeAt(index);
+    const isPair =
+      code >= 0xd800 &&
+      code <= 0xdbff &&
+      index + 1 < value.length &&
+      value.charCodeAt(index + 1) >= 0xdc00 &&
+      value.charCodeAt(index + 1) <= 0xdfff;
+    const width = isPair ? 2 : 1;
+    const cost = isPair
+      ? 2
+      : code === 0x22 || code === 0x5c
+        ? 2
+        : code === 0x08 ||
+            code === 0x09 ||
+            code === 0x0a ||
+            code === 0x0c ||
+            code === 0x0d
+          ? 2
+          : code < 0x20 || (code >= 0xd800 && code <= 0xdfff)
+            ? 6
+            : 1;
+    if (escapedLength + cost > maximumEscapedLength) break;
+    escapedLength += cost;
+    index += width;
+  }
+  return value.slice(0, index);
+}
+
+function pendingRecoveryFor(
+  sessionId: string,
+  identity: ComposerDraftIdentity,
+  pending: DurablePendingComposerSubmission,
+): PendingComposerSubmissionRecovery {
+  return {
+    sessionId,
+    identity,
+    text: pending.text,
+    startedAtMs: pending.startedAtMs,
+    destination: pending.destination,
+    attachmentsNeedReselection: pending.attachmentsNeedReselection,
+  };
 }
 
 function restorationFor(

@@ -7,6 +7,10 @@ import { emptyOverlays, selectSidebarIndicator } from "./sessionState.js";
 import { reduceRuntimeEvent } from "./sessionRuntimeReducer.js";
 import { defaultAgentWorkflowDefinition } from "./workflows/agentWorkflowDefinition.js";
 import { __rendererTestHooks, AutolinkedText, MarkdownView } from "./App.js";
+import {
+  COMPOSER_DRAFT_STORAGE_KEY,
+  ComposerDraftPersistence,
+} from "./composerDraftPersistence.js";
 
 it("keeps live sidebar buckets in source order while idle saved rows use recency", () => {
   const liveSession = (id: string, updatedAtMs: number) => ({
@@ -2585,6 +2589,7 @@ describe("renderer per-session composer drafts", () => {
         text: "Plan this",
         attachments: [attachment],
         timelineItemId: "user-1",
+        composerRevision: 0,
       },
     });
     expect(
@@ -2660,6 +2665,114 @@ describe("renderer per-session composer drafts", () => {
     ).toEqual({
       "session-a": { text: "New draft", attachments: [], slashOpen: false },
     });
+  });
+
+  it("does not clear newly retyped identical text after deferred acceptance", () => {
+    const submittedRevision = 7;
+    const retypedRevision = 8;
+    expect(
+      __rendererTestHooks.shouldApplySubmissionResult(
+        submittedRevision,
+        submittedRevision,
+      ),
+    ).toBe(true);
+    expect(
+      __rendererTestHooks.shouldApplySubmissionResult(
+        submittedRevision,
+        retypedRevision,
+      ),
+    ).toBe(false);
+
+    const identicalRetypedDraft = {
+      "session-a": {
+        text: "identical text",
+        attachments: [],
+        slashOpen: false,
+      },
+    };
+    const afterAcceptance = __rendererTestHooks.shouldApplySubmissionResult(
+      submittedRevision,
+      retypedRevision,
+    )
+      ? __rendererTestHooks.clearSubmittedTaskDraft(
+          identicalRetypedDraft,
+          "session-a",
+          "identical text",
+          [],
+        )
+      : identicalRetypedDraft;
+    expect(afterAcceptance).toBe(identicalRetypedDraft);
+  });
+
+  it("releases hidden attachment tokens for rejected parent and task sends", () => {
+    const attachment = {
+      id: "attachment-1",
+      selectedPathToken: "opaque-token-1",
+    } as any;
+    for (const destination of ["parent", "newTaskSession"] as const) {
+      expect(
+        __rendererTestHooks.rejectedSubmissionTokensToRelease(
+          destination,
+          false,
+          [attachment],
+        ),
+        destination,
+      ).toEqual(["opaque-token-1"]);
+      expect(
+        __rendererTestHooks.rejectedSubmissionTokensToRelease(
+          destination,
+          true,
+          [attachment],
+        ),
+        destination,
+      ).toEqual([]);
+    }
+  });
+
+  it("publishes late native restoration before persistence can clear it", () => {
+    const values = new Map<string, string>();
+    const writes: Array<string | null> = [];
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        values.set(key, value);
+        writes.push(value);
+      },
+      removeItem: (key: string) => {
+        values.delete(key);
+        writes.push(null);
+      },
+    };
+    const native = {
+      id: "runtime-late",
+      workspaceId: "workspace-a",
+      sessionFile: "/sessions/late.jsonl",
+    };
+    const first = new ComposerDraftPersistence(storage, { now: () => 1 });
+    first.hydrate([native], ["workspace-a"]);
+    first.persist([native], {
+      [native.id]: { text: "restore after scan", attachmentCount: 0 },
+    });
+
+    const reloaded = new ComposerDraftPersistence(storage, { now: () => 2 });
+    reloaded.hydrate([], ["workspace-a"]);
+    const late = reloaded.restoreAvailableSessions([native]);
+    expect(late.restored).toHaveLength(1);
+
+    // This is the exact effect ordering contract: publish to the synchronous
+    // ref first, then let the same-render persistence effect read that ref.
+    const draftsRef = {
+      current: __rendererTestHooks.restoreComposerDraftText({}, late.restored),
+    };
+    reloaded.persist(
+      [native],
+      __rendererTestHooks.composerDraftPersistenceSnapshots(draftsRef.current),
+    );
+
+    expect(writes).not.toContain(null);
+    expect(values.get(COMPOSER_DRAFT_STORAGE_KEY)).toContain(
+      "restore after scan",
+    );
   });
 
   it("reports invalid attachments or image models before work is started", () => {
