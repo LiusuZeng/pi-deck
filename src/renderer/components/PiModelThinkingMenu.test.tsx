@@ -99,6 +99,29 @@ describe("PiModelThinkingMenu", () => {
     );
   });
 
+  it("shows a known active identity without fabricating an inventory row", () => {
+    renderMenu({
+      models: [],
+      selectedModel: {
+        id: "runtime-one",
+        name: "runtime-one",
+        provider: "runtime",
+      },
+    });
+
+    const trigger = container?.querySelector<HTMLButtonElement>(
+      ".pi-configuration-trigger",
+    );
+    expect(trigger?.dataset.modelId).toBe("runtime-one");
+    expect(trigger?.dataset.modelProvider).toBe("runtime");
+
+    act(() => trigger?.click());
+    expect(
+      container?.querySelector(".pi-configuration-option.model"),
+    ).toBeNull();
+    expect(container?.querySelector(".pi-model-submenu")).toBeNull();
+  });
+
   it("renders same-named models with distinct id and provider labels", () => {
     renderMenu();
     openModelSubmenu();

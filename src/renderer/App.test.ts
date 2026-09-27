@@ -3199,6 +3199,70 @@ describe("Pi draft defaults and thinking capabilities", () => {
     expect(draft.thinkingLevel).toBe("xhigh");
   });
 
+  it("uses matching authoritative state as composer identity without inventing capabilities", () => {
+    const authoritativeModel = {
+      id: "runtime-one",
+      name: "runtime-one",
+      provider: "runtime",
+    };
+    const session = {
+      ...baseSession(),
+      modelLabel: "runtime / runtime-one",
+    } as any;
+    const resolved = __rendererTestHooks.findComposerActiveRealModel(
+      session,
+      [],
+      new Map([
+        [
+          session.workspaceId,
+          {
+            models: [],
+            activeModel: authoritativeModel,
+            thinkingLevels: [],
+          },
+        ],
+      ]),
+    );
+
+    expect(resolved).toBe(authoritativeModel);
+    expect(__rendererTestHooks.realModelSupportsImages(resolved)).toBe(false);
+    expect(__rendererTestHooks.thinkingLevelsForModel(resolved, [])).toEqual([
+      "off",
+    ]);
+  });
+
+  it("does not replace an explicit model from another model or workspace", () => {
+    const session = {
+      ...baseSession(),
+      modelLabel: "chosen-provider / chosen-model",
+    } as any;
+    const configuredModel = {
+      id: "runtime-one",
+      name: "runtime-one",
+      provider: "runtime",
+    };
+    const configuration = {
+      models: [],
+      activeModel: configuredModel,
+      thinkingLevels: ["off", "medium"],
+    };
+
+    expect(
+      __rendererTestHooks.findComposerActiveRealModel(
+        session,
+        [],
+        new Map([[session.workspaceId, configuration]]),
+      ),
+    ).toBeUndefined();
+    expect(
+      __rendererTestHooks.findComposerActiveRealModel(
+        { ...session, modelLabel: "runtime / runtime-one" },
+        [],
+        new Map([["workspace-b", configuration]]),
+      ),
+    ).toBeUndefined();
+  });
+
   it("keeps fake workspace drafts fake without Pi defaults", () => {
     const draft = __rendererTestHooks.draftSessionForWorkspace(
       {
