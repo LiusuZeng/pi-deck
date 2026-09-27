@@ -59,11 +59,67 @@ test("JSONL RPC client routes non-response records as async events", async () =>
   const events: string[] = [];
   client.on("event", (event: RpcEventRecord) => events.push(event.type));
   try {
-    await client.request("prompt", { text: "hello" });
-    await waitForEvent(client, (event) => event.type === "agent_end");
+    // The response and terminal event may arrive in the same stdout chunk.
+    // Subscribe before sending, not after the request promise resumes.
+    const ended = waitForEvent(client, (event) => event.type === "agent_end");
+    await Promise.all([client.request("prompt", { text: "hello" }), ended]);
     assert.ok(events.includes("agent_start"));
     assert.ok(events.includes("message_update"));
     assert.ok(events.includes("agent_end"));
+  } finally {
+    client.close();
+  }
+});
+
+test("JSONL RPC client routes completion coalesced with the prompt response", async () => {
+  const stdout = new EventEmitter();
+  const stderr = new EventEmitter();
+  const child = Object.assign(new EventEmitter(), {
+    stdout,
+    stderr,
+    killed: false,
+    kill(): boolean {
+      this.killed = true;
+      return true;
+    },
+    stdin: {
+      destroyed: false,
+      write(
+        payload: string,
+        _encoding: string,
+        callback: (error?: Error | null) => void,
+      ): boolean {
+        const { id } = JSON.parse(payload) as { id: string };
+        // One synchronous data event guarantees there is no promise/microtask
+        // boundary between the response and terminal event.
+        stdout.emit(
+          "data",
+          Buffer.from(
+            [
+              { id, type: "response", command: "prompt", success: true },
+              { type: "agent_start" },
+              { type: "message_update", content: "hello" },
+              { type: "agent_end" },
+            ]
+              .map((record) => JSON.stringify(record) + "\n")
+              .join(""),
+          ),
+        );
+        callback();
+        return true;
+      },
+    },
+  }) as unknown as ChildProcess;
+  const client = new JsonlRpcClient(child);
+  const events: string[] = [];
+  client.on("event", (event: RpcEventRecord) => events.push(event.type));
+  try {
+    const ended = waitForEvent(client, (event) => event.type === "agent_end");
+    const response = client.request("prompt", { text: "hello" });
+    assert.deepEqual(events, ["agent_start", "message_update", "agent_end"]);
+    await Promise.all([response, ended]);
+    assert.equal(client.pendingCount, 0);
+    assert.equal(client.listenerCount("event"), 1);
   } finally {
     client.close();
   }
