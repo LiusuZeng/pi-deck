@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
+import { classifyActivity } from "./activityInbox.js";
+import {
+  reduceRuntimeEvent,
+  type SessionViewModel,
+} from "./sessionRuntimeReducer.js";
 import { emptyOverlays, type BaseSessionState } from "./sessionState.js";
 import {
+  captureSessionReconciliationIdentity,
+  isSessionReconciliationIdentityCurrent,
   reconcileSessionWithRuntimeStatus,
   shouldReconcileSession,
   type ReconciliationSessionStatus,
@@ -147,6 +154,58 @@ describe("shouldReconcileSession", () => {
 });
 
 describe("reconcileSessionWithRuntimeStatus", () => {
+  it("does not let deferred poll A settle a newer turn B on the same runtime", async () => {
+    let resolvePoll!: (status: ReturnType<typeof runtimeStatus>) => void;
+    const poll = new Promise<ReturnType<typeof runtimeStatus>>((resolve) => {
+      resolvePoll = resolve;
+    });
+    let current = session({
+      status: "working",
+      baseState: "working",
+      lifecycle: { phase: "active", turnId: "turn-a" },
+    });
+    const identity = captureSessionReconciliationIdentity(current);
+    const applyPoll = poll.then((status) => {
+      if (
+        isSessionReconciliationIdentityCurrent(current, identity) &&
+        shouldReconcileSession({ ...current, runtimeBacked: true })
+      ) {
+        current = reconcileSessionWithRuntimeStatus(
+          current,
+          status,
+          dependencies(),
+        );
+      }
+    });
+
+    current = {
+      ...current,
+      status: "idle",
+      baseState: "idle",
+      lifecycle: {
+        phase: "terminal",
+        outcome: "completed",
+        settledAtMs: 100,
+        turnId: "turn-a",
+      },
+    };
+    current = {
+      ...current,
+      status: "working",
+      baseState: "working",
+      lifecycle: { phase: "active", turnId: "turn-b" },
+    };
+    resolvePoll(runtimeStatus(false));
+    await applyPoll;
+
+    expect(current).toMatchObject({
+      status: "working",
+      baseState: "working",
+      lifecycle: { phase: "active", turnId: "turn-b" },
+    });
+    expect(current.diagnostics).toEqual([]);
+  });
+
   it.each<[ReconciliationSessionStatus, BaseSessionState]>([
     ["idle", "idle"],
     ["starting", "attaching"],
@@ -192,7 +251,7 @@ describe("reconcileSessionWithRuntimeStatus", () => {
     ).toBe(waiting);
   });
 
-  it("clears retry and ordinary error state while recording a missed completion diagnostic", () => {
+  it("preserves authoritative provider error evidence while recording reconciliation", () => {
     const reconciled = reconcileSessionWithRuntimeStatus(
       session({
         status: "working",
@@ -214,14 +273,15 @@ describe("reconcileSessionWithRuntimeStatus", () => {
     );
 
     expect(reconciled).toMatchObject({
-      status: "idle",
-      baseState: "idle",
-      lastError: undefined,
-      providerErrorObserved: false,
+      status: "error",
+      baseState: "error",
+      lastError: "Temporary provider failure",
+      providerErrorObserved: true,
+      lifecycle: { phase: "terminal", outcome: "failed" },
       awaitingAgentEnd: false,
       workingStartedAtMs: undefined,
-      subtitle: "Idle · Pi RPC backend reconciled",
-      lastRuntimeEventLabel: "Pi reconciliation confirmed completion",
+      subtitle: "Error · backend stream failed",
+      lastRuntimeEventLabel: "Pi reconciliation preserved terminal failure",
       diagnostics: [
         "Reconciled from Pi runtime status because the live completion event was not observed.",
       ],
@@ -230,7 +290,107 @@ describe("reconcileSessionWithRuntimeStatus", () => {
       streaming: false,
       toolRunning: false,
       retrying: false,
-      compacting: true,
+      compacting: false,
+    });
+  });
+
+  it("repairs a missed agent_end from the real reducer into Completed Work", () => {
+    const view: SessionViewModel = {
+      id: "runtime-1",
+      workspaceId: "workspace-a",
+      title: "Repaired session",
+      project: "Project",
+      projectPath: "/project",
+      subtitle: "Idle",
+      status: "idle",
+      updatedAt: "Earlier",
+      updatedAtMs: 1,
+      timeline: [],
+      baseState: "idle",
+      overlays: { ...emptyOverlays },
+      runtimeBacked: true,
+      backendMode: "real",
+    };
+    const started = reduceRuntimeEvent(view, {
+      type: "agent_start",
+      runtimeId: "runtime-1",
+    } as any);
+    const messageDone = reduceRuntimeEvent(started, {
+      type: "message_update",
+      runtimeId: "runtime-1",
+      messageId: "assistant-1",
+      role: "assistant",
+      content: "Done",
+      done: true,
+    } as any);
+
+    expect(messageDone).toMatchObject({
+      status: "working",
+      awaitingAgentEnd: true,
+      lifecycle: { phase: "active" },
+    });
+    const reconciled = reconcileSessionWithRuntimeStatus(
+      { ...messageDone, diagnostics: [] },
+      runtimeStatus(false),
+      dependencies(500),
+    );
+    expect(reconciled).toMatchObject({
+      status: "idle",
+      baseState: "idle",
+      completedAtMs: 500,
+      lifecycle: {
+        phase: "terminal",
+        outcome: "completed",
+        settledAtMs: 500,
+      },
+    });
+    expect(
+      classifyActivity({ ...reconciled, workspaceName: "Workspace A" }),
+    ).toBe("completed");
+  });
+
+  it("does not let an in-flight status result overwrite a newer reducer error", () => {
+    const view: SessionViewModel = {
+      id: "runtime-1",
+      workspaceId: "workspace-a",
+      title: "Errored session",
+      project: "Project",
+      projectPath: "/project",
+      subtitle: "Working",
+      status: "working",
+      updatedAt: "Earlier",
+      updatedAtMs: 1,
+      timeline: [],
+      baseState: "working",
+      overlays: { ...emptyOverlays, streaming: true },
+      runtimeBacked: true,
+      backendMode: "real",
+      lifecycle: { phase: "active" },
+    };
+    const failed = reduceRuntimeEvent(view, {
+      type: "message_update",
+      runtimeId: "runtime-1",
+      message: {
+        role: "assistant",
+        stopReason: "error",
+        errorMessage: "provider failed",
+      },
+      assistantMessageEvent: { type: "error", reason: "error" },
+    } as any);
+
+    expect(shouldReconcileSession(failed)).toBe(false);
+    const guarded = shouldReconcileSession(failed)
+      ? reconcileSessionWithRuntimeStatus(
+          { ...failed, diagnostics: [] },
+          runtimeStatus(false),
+          dependencies(),
+        )
+      : failed;
+    expect(guarded).toBe(failed);
+    expect(guarded).toMatchObject({
+      status: "error",
+      lifecycle: { phase: "terminal", outcome: "failed" },
+      lastError: "provider failed",
     });
   });
 

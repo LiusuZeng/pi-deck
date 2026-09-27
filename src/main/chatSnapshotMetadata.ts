@@ -1,3 +1,11 @@
+import {
+  extractPiMessageText,
+  isPiAssistantFailureOrAbort,
+  normalizePiMessageDisplayText,
+  piMessageTimestampMs,
+  PI_MESSAGE_PREVIEW_MAX_LENGTH,
+  PI_MESSAGE_TITLE_MAX_LENGTH,
+} from "../shared/piMessageNormalization.js";
 import type { PiMessage, PiState } from "./pi/types.js";
 
 export type ChatSnapshotMetadata =
@@ -69,24 +77,32 @@ export function chatSnapshotPersistenceFields(metadata: ChatSnapshotMetadata): {
 
 function titleFromSessionName(state: PiState): string | undefined {
   return typeof state.sessionName === "string"
-    ? normalizedText(state.sessionName, 64)
+    ? normalizePiMessageDisplayText(
+        state.sessionName,
+        PI_MESSAGE_TITLE_MAX_LENGTH,
+      )
     : undefined;
 }
 
 function titleFromMessages(messages: readonly PiMessage[]): string | undefined {
   const firstUser = messages.find((message) => message.role === "user");
-  return typeof firstUser?.content === "string"
-    ? normalizedText(stripSynthesisDeliveryMarker(firstUser.content), 64)
-    : undefined;
+  const text = extractPiMessageText(firstUser?.content, {
+    textPartsOnly: true,
+  });
+  return text === undefined
+    ? undefined
+    : normalizePiMessageDisplayText(text, PI_MESSAGE_TITLE_MAX_LENGTH);
 }
 
 function previewFromMessages(
   messages: readonly PiMessage[],
 ): string | undefined {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const content = messages[index]?.content;
-    if (typeof content === "string") {
-      return normalizedText(stripSynthesisDeliveryMarker(content), 160);
+    const text = extractPiMessageText(messages[index]?.content, {
+      textPartsOnly: true,
+    });
+    if (text !== undefined) {
+      return normalizePiMessageDisplayText(text, PI_MESSAGE_PREVIEW_MAX_LENGTH);
     }
   }
   return undefined;
@@ -100,33 +116,15 @@ function completedAtFromMessages(
     .find((message) => ["user", "assistant"].includes(message.role));
   if (latestMessage?.role !== "assistant") return undefined;
 
-  const content =
-    typeof latestMessage.content === "string" ? latestMessage.content : "";
-  if (content.trim().length === 0 || isAssistantFailureMessage(latestMessage)) {
+  const content = extractPiMessageText(latestMessage.content, {
+    textPartsOnly: true,
+  });
+  if (
+    content === undefined ||
+    content.trim().length === 0 ||
+    isPiAssistantFailureOrAbort(latestMessage)
+  ) {
     return undefined;
   }
-  return typeof latestMessage.createdAt === "number" &&
-    Number.isFinite(latestMessage.createdAt)
-    ? latestMessage.createdAt
-    : undefined;
-}
-
-/** The durable synthesis receipt is transport metadata, not user-facing copy. */
-function stripSynthesisDeliveryMarker(value: string): string {
-  return value.replace(/^<!-- pi-deck-synthesis-delivery:v1:[^\s]+ -->\n?/, "");
-}
-
-function normalizedText(value: string, maxLength: number): string | undefined {
-  const normalized = value.trim().replace(/\s+/g, " ");
-  return normalized.length > 0 ? normalized.slice(0, maxLength) : undefined;
-}
-
-function isAssistantFailureMessage(message: PiMessage): boolean {
-  return (
-    message.status === "error" ||
-    message.stopReason === "error" ||
-    message.reason === "error" ||
-    typeof message.errorMessage === "string" ||
-    message.error !== undefined
-  );
+  return piMessageTimestampMs(latestMessage);
 }

@@ -646,6 +646,84 @@ test("fake RPC accepts exact steer and follow_up commands and emits full queues"
   }
 });
 
+test("fake RPC exposes the intervention persistence race through get_messages barriers", async () => {
+  const directory = tempDir("pi-deck-fake-intervention-race-");
+  const traceFile = path.join(directory, "trace.log");
+  const client = spawnFakeRpc([
+    "--intervention-snapshot-race",
+    "--fixture-trace-file",
+    traceFile,
+  ]);
+  try {
+    await client.request("prompt", { message: "active parent" });
+    const queuedEvent = waitForEvents(client, (events) =>
+      events.some(
+        (event) =>
+          event.type === "queue_update" &&
+          ((event as JsonObject).steering as unknown[])?.length === 1,
+      ),
+    );
+    await client.request("steer", { message: "durable id-less steering" });
+    await queuedEvent;
+
+    const removedEvent = waitForEvents(client, (events) =>
+      events.some(
+        (event) =>
+          event.type === "queue_update" &&
+          ((event as JsonObject).steering as unknown[])?.length === 0,
+      ),
+    );
+    const queuedSnapshot = (await client.request("get_messages")) as {
+      messages: Array<{ role?: string; content?: string; id?: string }>;
+    };
+    expect(queuedSnapshot.messages).not.toContainEqual(
+      expect.objectContaining({ content: "durable id-less steering" }),
+    );
+    await removedEvent;
+
+    const terminal = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "agent_settled"),
+    );
+    const prePersistenceSnapshot = (await client.request("get_messages")) as {
+      messages: Array<{ role?: string; content?: string; id?: string }>;
+    };
+    expect(prePersistenceSnapshot.messages).not.toContainEqual(
+      expect.objectContaining({ content: "durable id-less steering" }),
+    );
+    const terminalEvents = await terminal;
+    const agentEnd = terminalEvents.find(
+      (event) => event.type === "agent_end",
+    ) as JsonObject;
+    expect(agentEnd.status).toBeUndefined();
+    expect(agentEnd.willRetry).toBe(false);
+
+    const durableSnapshot = (await client.request("get_messages")) as {
+      messages: Array<{ role?: string; content?: string; id?: string }>;
+    };
+    expect(durableSnapshot.messages).toContainEqual({
+      role: "user",
+      content: "durable id-less steering",
+      createdAt: expect.any(Number),
+    });
+    expect(
+      durableSnapshot.messages.find(
+        (message) => message.content === "durable id-less steering",
+      )?.id,
+    ).toBeUndefined();
+    expect(fs.readFileSync(traceFile, "utf8").trim().split("\n")).toEqual([
+      "intervention-race:queue-added",
+      "intervention-race:queued-snapshot",
+      "intervention-race:queue-removed",
+      "intervention-race:pre-persistence-snapshot",
+      "intervention-race:persisted-idless-user",
+      "intervention-race:terminal",
+    ]);
+  } finally {
+    client.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("fake RPC clears an active-parent crash barrier after its durable follow_up", async () => {
   const directory = tempDir("pi-deck-fake-active-parent-once-");
   const barrier = path.join(directory, "activate-parent");
@@ -977,6 +1055,60 @@ test("fake RPC retains extension response handling across a production-shaped pr
   } finally {
     client.off("event", onEvent);
     client.close();
+  }
+});
+
+test("fake RPC routing gate holds private task completion until explicit release", async () => {
+  const directory = tempDir("pi-deck-fake-routing-gate-");
+  const startedFile = path.join(directory, "started.log");
+  const releaseFile = path.join(directory, "release");
+  const client = spawnFakeRpc([
+    "--prompt-scenario",
+    "routing",
+    "--task-routing-started-file",
+    startedFile,
+    "--task-routing-release-file",
+    releaseFile,
+    "--stream-delay-ms",
+    "1",
+  ]);
+  try {
+    // Parent and synthesis prompts remain ordinary routing fixtures and must
+    // not participate in the private-worker handshake.
+    const parentCompleted = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "agent_end"),
+    );
+    await client.request("prompt", { message: "Parent routing prompt" });
+    await parentCompleted;
+    assert.equal(fs.existsSync(startedFile), false);
+
+    const taskStarted = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "agent_start"),
+    );
+    const taskCompleted = waitForEvents(client, (events) =>
+      events.some((event) => event.type === "agent_end"),
+    );
+    await client.request("prompt", {
+      message:
+        "Parent context:\nFixture context.\n\nOriginal request:\nPrepare release.\n\nAssigned task:\nInspect files.",
+    });
+    await taskStarted;
+
+    const active = (await client.request("get_state")) as JsonObject;
+    assert.equal(active.isStreaming, true);
+    assert.equal(fs.existsSync(releaseFile), false);
+    assert.deepEqual(
+      fs.readFileSync(startedFile, "utf8").trim().split(/\r?\n/),
+      [active.sessionFile],
+    );
+
+    fs.writeFileSync(releaseFile, "release\n");
+    await taskCompleted;
+    const completed = (await client.request("get_state")) as JsonObject;
+    assert.equal(completed.isStreaming, false);
+  } finally {
+    client.close();
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 

@@ -331,6 +331,14 @@ describe("timeline presentation grouping", () => {
     content: `answer ${id}`,
     createdAt: "10:01",
   });
+  const intervention = (id: string) => ({
+    id,
+    kind: "intervention",
+    interventionKind: "steer",
+    status: "queued",
+    content: `instruction ${id}`,
+    createdAt: "10:01",
+  });
   const thinking = (id: string, streaming = false) => ({
     id,
     kind: "thinking",
@@ -374,6 +382,27 @@ describe("timeline presentation grouping", () => {
       "th1",
       "t2",
     ]);
+  });
+
+  it("keeps a queued intervention visible between active agent activity", () => {
+    const grouped = __rendererTestHooks.timelinePresentationItems([
+      user("u1"),
+      tool("t1", "running"),
+      intervention("i1"),
+      tool("t2", "running"),
+    ] as any) as any[];
+
+    expect(grouped.map((item) => item.kind)).toEqual([
+      "message",
+      "activity",
+      "message",
+      "activity",
+    ]);
+    expect(grouped[2].item).toMatchObject({
+      id: "i1",
+      kind: "intervention",
+      status: "queued",
+    });
   });
 
   it("keeps separate turns and active trailing activity deterministic", () => {
@@ -509,6 +538,41 @@ describe("timeline presentation grouping", () => {
     ]);
   });
 
+  it("uses delegated parent phases and child summaries in Agent activity", () => {
+    const delegated = {
+      ...tool("delegated-1", "running"),
+      title: "subagent",
+      summary: "Parallel: 3/3 done, 0 running...",
+      delegatedStatus: {
+        label: "Synthesizing results",
+        detail: "3 delegated tasks finished · 2 succeeded · 1 failed",
+        tone: "working",
+        parentState: "running",
+        parentPhase: "synthesizing",
+        children: {
+          total: 3,
+          queued: 0,
+          running: 0,
+          waiting: 0,
+          succeeded: 2,
+          failed: 1,
+          cancelled: 0,
+          finished: 0,
+        },
+      },
+    } as any;
+
+    expect(__rendererTestHooks.activitySemanticLabel(delegated)).toBe(
+      "Synthesizing results",
+    );
+    expect(__rendererTestHooks.activityStepLabel(delegated)).toBe(
+      "Synthesizing results",
+    );
+    expect(__rendererTestHooks.activityStepSummary(delegated)).toBe(
+      "3 delegated tasks finished · 2 succeeded · 1 failed",
+    );
+  });
+
   it("uses conservative activity labels instead of raw serialized summaries", () => {
     expect(__rendererTestHooks.activitySemanticLabel(tool("t1") as any)).toBe(
       "Inspected files",
@@ -536,6 +600,39 @@ describe("timeline presentation grouping", () => {
 });
 
 describe("tool execution activity details", () => {
+  it("groups a cancelled delegated result as error activity", () => {
+    const item = __rendererTestHooks.toolTimelineItemFromRuntimeEvent(
+      {
+        type: "tool_execution_end",
+        runtimeId: "runtime-test",
+        toolCallId: "delegation-cancelled",
+        toolName: "subagent",
+        status: "aborted",
+        result: {
+          details: {
+            results: [{ status: "cancelled", stopReason: "aborted" }],
+          },
+        },
+      } as any,
+      "success",
+    ) as any;
+    const grouped = __rendererTestHooks.timelinePresentationItems([
+      item,
+    ] as any) as any[];
+
+    expect(item).toMatchObject({
+      status: "error",
+      delegatedStatus: {
+        label: "Delegated work cancelled",
+        parentState: "cancelled",
+        tone: "error",
+      },
+    });
+    expect(grouped).toMatchObject([
+      { kind: "activity", state: "error", items: [{ status: "error" }] },
+    ]);
+  });
+
   it("separates command input, stdout, stderr, and exit status", () => {
     const item = __rendererTestHooks.toolTimelineItemFromRuntimeEvent(
       {
@@ -818,6 +915,11 @@ it("restores persisted subagent activity after real snapshot normalization", () 
     kind: "tool",
     title: "subagent",
     status: "error",
+    delegatedStatus: {
+      label: "Delegated work failed",
+      tone: "error",
+      parentState: "failed",
+    },
     subagentActivity: {
       mode: "chain",
       children: [
@@ -2019,7 +2121,12 @@ describe("renderer Pi 0.81 terminal and retry events", () => {
       willRetry: false,
     } as any);
 
-    expect(afterEnd.status).toBe("idle");
+    expect(afterEnd).toMatchObject({
+      status: "idle",
+      baseState: "idle",
+      lifecycle: { phase: "terminal", outcome: "aborted" },
+      overlays: { streaming: false, toolRunning: false, retrying: false },
+    });
     expect(runtimeErrorDiagnostics(afterEnd)).toEqual([]);
   });
 
@@ -3830,6 +3937,126 @@ describe("renderer attention-first inbox", () => {
 });
 
 describe("renderer intervention UX", () => {
+  it("refreshes transcripts only while a runtime has unresolved interventions", () => {
+    const session = {
+      ...baseSession(),
+      timeline: [
+        {
+          id: "steer-1",
+          kind: "intervention",
+          interventionKind: "steer",
+          status: "accepted",
+          content: "Confirm me",
+          createdAt: "10:01",
+        },
+      ],
+    } as any;
+
+    expect(
+      __rendererTestHooks.shouldRefreshInterventionTranscript(
+        [session],
+        session.id,
+      ),
+    ).toBe(true);
+    expect(
+      __rendererTestHooks.shouldRefreshInterventionTranscript(
+        [
+          {
+            ...session,
+            timeline: session.timeline.map((item: any) => ({
+              ...item,
+              status: "consumed",
+            })),
+          },
+        ],
+        session.id,
+      ),
+    ).toBe(false);
+    expect(
+      __rendererTestHooks.shouldRefreshInterventionTranscript(
+        [session],
+        "another-runtime",
+      ),
+    ).toBe(false);
+  });
+
+  it("records a failed intervention without failing its still-running parent", () => {
+    const working = {
+      ...baseSession(),
+      status: "working",
+      baseState: "working",
+      lifecycle: { phase: "active", turnId: "turn-a" },
+      overlays: { ...emptyOverlays, streaming: true },
+      timeline: [
+        {
+          id: "steer-failed",
+          kind: "intervention",
+          interventionKind: "steer",
+          status: "failed",
+          content: "instruction steer-failed",
+          createdAt: "10:01",
+          error: "transport rejected",
+        },
+      ],
+    } as any;
+    const failedInstruction = __rendererTestHooks.appendNonfatalDiagnostic(
+      working,
+      { tone: "error", content: "Steer failed: transport rejected" },
+    );
+    const source = __rendererTestHooks.activitySourceSessions(
+      [failedInstruction],
+      { "workspace-a": "Workspace A" },
+    )[0]!;
+    const inbox = buildActivityInbox([source]);
+
+    expect(failedInstruction).toMatchObject({
+      status: "working",
+      baseState: "working",
+      lifecycle: { phase: "active", turnId: "turn-a" },
+      overlays: { streaming: true },
+    });
+    expect(failedInstruction.lastError).toBeUndefined();
+    expect(failedInstruction.timeline.at(-1)).toMatchObject({
+      kind: "diagnostic",
+      tone: "error",
+      content: "Steer failed: transport rejected",
+    });
+    expect(__rendererTestHooks.isSessionBusy(failedInstruction)).toBe(true);
+    expect(inbox.groups.inProgress).toHaveLength(1);
+    expect(inbox.groups.failed).toHaveLength(0);
+  });
+
+  it("settles a rejected parent prompt as failed and keeps it retryable", () => {
+    const sending = {
+      ...baseSession(),
+      status: "sending",
+      baseState: "attaching",
+      lifecycle: { phase: "active" },
+      overlays: { ...emptyOverlays, streaming: true, toolRunning: true },
+      retryPrompt: { text: "Try this", attachments: [] },
+    } as any;
+    const failed = __rendererTestHooks.markPromptDeliveryFailed(
+      sending,
+      "RPC prompt rejected",
+    );
+    const source = __rendererTestHooks.activitySourceSessions([failed], {
+      "workspace-a": "Workspace A",
+    })[0]!;
+    const inbox = buildActivityInbox([source]);
+
+    expect(failed).toMatchObject({
+      status: "error",
+      baseState: "error",
+      lifecycle: { phase: "terminal", outcome: "failed" },
+      overlays: { streaming: false, toolRunning: false },
+      retryPrompt: { text: "Try this", attachments: [] },
+      lastError: "RPC prompt rejected",
+    });
+    expect(__rendererTestHooks.isSessionBusy(failed)).toBe(false);
+    expect(inbox.groups.failed).toHaveLength(1);
+    expect(inbox.groups.inProgress).toHaveLength(0);
+  });
+
   it("identifies only known extension commands as unavailable for queues", () => {
     const commands = [
       { name: "/deploy", description: "Deploy", source: "extension" },
@@ -4197,6 +4424,26 @@ describe("renderer message_update reduction", () => {
 
     expect(next.timeline).toEqual(current.timeline);
     expect(next.usageStats).toMatchObject({ inputTokens: 10, outputTokens: 5 });
+  });
+
+  it("assigns stable normalized ids to production snapshot messages without ids", () => {
+    const messages = [
+      { role: "system", content: "System" },
+      { role: "user", content: "Durable intervention" },
+      { role: "assistant", content: "Done", stopReason: "stop" },
+    ] as any;
+
+    const first = __rendererTestHooks.timelineFromMessages(messages);
+    const refreshed = __rendererTestHooks.timelineFromMessages(messages);
+
+    expect(first.map((item) => item.id)).toEqual([
+      "snapshot-message-0",
+      "snapshot-message-1",
+      "snapshot-message-2",
+    ]);
+    expect(refreshed.map((item) => item.id)).toEqual(
+      first.map((item) => item.id),
+    );
   });
 
   it("preserves title and transcript across metadata-only model and thinking snapshots", () => {

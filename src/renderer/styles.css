@@ -1184,6 +1184,44 @@ h1 {
   background: var(--color-surface-muted);
 }
 
+.intervention-bubble {
+  min-width: min(360px, 72vw);
+}
+
+.intervention-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 6px;
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
+.intervention-meta > :not(:first-child)::before {
+  content: "·";
+  margin-right: 5px;
+}
+
+.intervention-meta strong {
+  color: var(--color-text);
+}
+
+.intervention-status {
+  font-weight: 600;
+}
+
+.intervention-row.failed .intervention-status,
+.intervention-failure {
+  color: var(--color-danger, #b42318);
+}
+
+.intervention-failure {
+  display: block;
+  margin-top: 6px;
+  font-size: 11px;
+}
+
 .user-bubble p,
 .markdown-body p {
   margin: 0;
@@ -3801,6 +3839,16 @@ summary::marker {
   display: flex;
   justify-content: space-between;
   gap: 8px;
+}
+
+.task-session-panel__operation-status {
+  display: grid;
+  gap: 2px;
+  text-align: right;
+}
+
+.task-session-panel__operation-status > span {
+  font-weight: 600;
 }
 
 .task-session-panel [role="list"] {

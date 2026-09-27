@@ -86,6 +86,21 @@ function sidebarNewSessionButton(page: Page) {
     .getByRole("button", { name: "New session", exact: true });
 }
 
+function parentTokensFromUsageText(text: string): number | undefined {
+  const match = text.match(/Tokens:\s*([\d,]+)\s+in\s*\/\s*([\d,]+)\s+out/);
+  return match === null
+    ? undefined
+    : Number(match[1]?.replaceAll(",", "")) +
+        Number(match[2]?.replaceAll(",", ""));
+}
+
+function expectHonestOptionalUsage(text: string): void {
+  // Pi's eager zero cache/cost accumulators are not provider evidence. They
+  // must remain explicitly unavailable unless a positive value is reported.
+  expect(text).not.toMatch(/Cache:\s*0 read\s*\/\s*0 write/);
+  expect(text).not.toMatch(/Cost:\s*\$0(?:\.0+)?(?:\s|$)/);
+}
+
 function listJsonlFiles(root: string): string[] {
   if (!fs.existsSync(root)) {
     return [];
@@ -439,6 +454,26 @@ test("real Pi bridge transport: default workspace prompt, resume, and explicit d
           .first(),
       ).toBeVisible();
 
+      await firstLaunch.page.locator(".usage-toggle").click();
+      const usagePanel = firstLaunch.page.locator(".usage-stats");
+      await expect(usagePanel).toBeVisible();
+      const readParentTokens = async (): Promise<number> =>
+        parentTokensFromUsageText((await usagePanel.textContent()) ?? "") ?? 0;
+      await expect
+        .poll(readParentTokens, {
+          message:
+            "Authenticated real Pi must expose positive parent usage after the completed turn.",
+          timeout: 30_000,
+        })
+        .toBeGreaterThan(0);
+      const initialParentTokens = await readParentTokens();
+      const initialUsageText = (await usagePanel.textContent()) ?? "";
+      expectHonestOptionalUsage(initialUsageText);
+      const cacheInitiallyUnavailable =
+        initialUsageText.includes("Cache: unavailable");
+      const costInitiallyUnavailable =
+        initialUsageText.includes("Cost: unavailable");
+
       // Pi can report its planned session path before it flushes the JSONL
       // header. Fork preflight correctly fails closed until the source is a
       // valid repository session, so wait for that real-Pi persistence boundary.
@@ -546,6 +581,7 @@ test("real Pi bridge transport: default workspace prompt, resume, and explicit d
           __piDeckRealDelegateStates?: Array<{
             runtimeId: string;
             tasks: Array<{ generatedName: string; lifecycle: string }>;
+            usageText: string;
           }>;
           __piDeckRealDelegateUnsubscribe?: () => void;
         };
@@ -553,7 +589,11 @@ test("real Pi bridge transport: default workspace prompt, resume, and explicit d
         testWindow.__piDeckRealDelegateStates = [];
         testWindow.__piDeckRealDelegateUnsubscribe =
           window.piDeck.multitask.onState((state) =>
-            testWindow.__piDeckRealDelegateStates?.push(state),
+            testWindow.__piDeckRealDelegateStates?.push({
+              ...state,
+              usageText:
+                document.querySelector(".usage-stats")?.textContent ?? "",
+            }),
           );
       });
       await firstLaunch.page
@@ -584,6 +624,36 @@ test("real Pi bridge transport: default workspace prompt, resume, and explicit d
           },
         )
         .toEqual(expect.arrayContaining(["queued", "running", "completed"]));
+
+      const inFlightUsage = await firstLaunch.page.evaluate(
+        () =>
+          (
+            window as typeof window & {
+              __piDeckRealDelegateStates?: Array<{
+                tasks: Array<{ lifecycle: string }>;
+                usageText: string;
+              }>;
+            }
+          ).__piDeckRealDelegateStates
+            ?.filter((state) =>
+              state.tasks.some((task) => task.lifecycle === "running"),
+            )
+            .map((state) => state.usageText) ?? [],
+      );
+      expect(inFlightUsage.length).toBeGreaterThan(0);
+      for (const usageText of inFlightUsage) {
+        expect(parentTokensFromUsageText(usageText)).toBeGreaterThanOrEqual(
+          initialParentTokens,
+        );
+        expectHonestOptionalUsage(usageText);
+        if (cacheInitiallyUnavailable) {
+          expect(usageText).toContain("Cache: unavailable");
+        }
+        if (costInitiallyUnavailable) {
+          expect(usageText).toContain("Cost: unavailable");
+        }
+      }
+
       await multitaskControl.focus();
       const statusList = firstLaunch.page.getByRole("list", {
         name: "Task statuses",
@@ -591,6 +661,14 @@ test("real Pi bridge transport: default workspace prompt, resume, and explicit d
       await expect(statusList).toContainText(
         "#1 Real delegated acceptance task — completed",
       );
+      await expect
+        .poll(readParentTokens, {
+          message:
+            "Delegated work must not reset the parent's previously reported usage.",
+          timeout: 30_000,
+        })
+        .toBeGreaterThanOrEqual(initialParentTokens);
+      expectHonestOptionalUsage((await usagePanel.textContent()) ?? "");
       // getMode is the authoritative recovery snapshot if status events
       // precede a renderer subscription; it must retain the visible task.
       await expect

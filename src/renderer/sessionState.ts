@@ -3,6 +3,14 @@ import {
   isSuccessfulOpenAiCodexTerminalCompletion,
   type FailureKind,
 } from "./openaiCodexAuth.js";
+import {
+  activeSessionLifecycle,
+  inactiveSessionLifecycle,
+  lifecycleBaseState,
+  settleLifecycle,
+  transitionSessionLifecycle,
+  type SessionLifecycle,
+} from "./sessionLifecycle.js";
 
 export type BaseSessionState =
   | "unloaded"
@@ -61,6 +69,7 @@ export interface ReducedSessionState extends SidebarSessionState {
   failureKind?: FailureKind | undefined;
   /** Main has detached the worker, so extension UI responses cannot be delivered. */
   runtimeDetached: boolean;
+  lifecycle: SessionLifecycle;
 }
 
 export type SidebarIndicatorKind =
@@ -107,6 +116,7 @@ export function createInitialReducedSessionState(
       ? {}
       : { failureKind: patch.failureKind }),
     runtimeDetached: patch.runtimeDetached ?? false,
+    lifecycle: patch.lifecycle ?? inactiveSessionLifecycle,
   };
 }
 
@@ -125,9 +135,9 @@ export function reduceSessionRuntimeEvent(
   // Pending extension dialogs are the source of truth for actionable input.
   // Project every event through this priority so tool/retry/end events can
   // update their own overlays without hiding the request.
-  return prioritizePendingExtensionUi(
-    reduceSessionRuntimeEventUnprioritized(state, event),
-  );
+  const reduced = reduceSessionRuntimeEventUnprioritized(state, event);
+  if (reduced === state) return state;
+  return projectTerminalLifecycle(prioritizePendingExtensionUi(reduced));
 }
 
 function reduceSessionRuntimeEventUnprioritized(
@@ -138,6 +148,9 @@ function reduceSessionRuntimeEventUnprioritized(
     case "agent_start":
       return {
         ...state,
+        lifecycle: transitionSessionLifecycle(state.lifecycle, {
+          type: "turnStarted",
+        }),
         baseState: "working",
         // Starting a worker cannot verify repaired credentials; only the next
         // successful terminal assistant completion clears failureKind.
@@ -175,6 +188,9 @@ function reduceSessionRuntimeEventUnprioritized(
     case "auto_retry_start":
       return {
         ...state,
+        lifecycle: transitionSessionLifecycle(state.lifecycle, {
+          type: "retryStarted",
+        }),
         baseState: "working",
         terminalProviderErrorObserved: false,
         overlays: { ...state.overlays, streaming: false, retrying: true },
@@ -187,8 +203,12 @@ function reduceSessionRuntimeEventUnprioritized(
         getString(event, "status") === "failed" ||
         getString(event, "status") === "error";
       const retryError = getRuntimeEventErrorMessage(event);
+      const lifecycle = retryFailed
+        ? settleLifecycle(state.lifecycle, "failed", Date.now())
+        : activeSessionLifecycle();
       return {
         ...state,
+        lifecycle,
         baseState: retryFailed ? "error" : "working",
         terminalProviderErrorObserved: retryFailed,
         overlays: { ...state.overlays, streaming: false, retrying: false },
@@ -233,6 +253,7 @@ function reduceSessionRuntimeEventUnprioritized(
       // response acknowledgement must not revive this detached state.
       return {
         ...state,
+        lifecycle: settleLifecycle(state.lifecycle, "failed", Date.now()),
         baseState: "error",
         runtimeDetached: true,
         pendingExtensionUiQueue: [],
@@ -241,6 +262,42 @@ function reduceSessionRuntimeEventUnprioritized(
     default:
       return state;
   }
+}
+
+function projectTerminalLifecycle(
+  state: ReducedSessionState,
+): ReducedSessionState {
+  if (
+    state.lifecycle.phase !== "terminal" ||
+    state.pendingExtensionUiQueue.length > 0
+  ) {
+    return state;
+  }
+  const baseState = lifecycleBaseState(state.lifecycle, false);
+  if (
+    state.baseState === baseState &&
+    state.activeTools.length === 0 &&
+    !state.overlays.streaming &&
+    !state.overlays.toolRunning &&
+    !state.overlays.compacting &&
+    !state.overlays.retrying &&
+    !state.overlays.needsUserInput
+  ) {
+    return state;
+  }
+  return {
+    ...state,
+    baseState,
+    activeTools: [],
+    overlays: {
+      ...state.overlays,
+      streaming: false,
+      toolRunning: false,
+      compacting: false,
+      retrying: false,
+      needsUserInput: false,
+    },
+  };
 }
 
 function prioritizePendingExtensionUi(
@@ -271,9 +328,15 @@ function reduceMessageUpdateEvent(
   // Its queue is therefore the source of truth even when Pi reports the
   // provider error that will subsequently end the agent turn.
   const stillWaitingForInput = state.pendingExtensionUiQueue.length > 0;
+  const lifecycle = providerErrorObserved
+    ? settleLifecycle(state.lifecycle, "failed", Date.now())
+    : state.lifecycle.phase === "terminal"
+      ? state.lifecycle
+      : activeSessionLifecycle();
 
   return {
     ...state,
+    lifecycle,
     baseState: stillWaitingForInput
       ? "waitingForInput"
       : providerErrorObserved
@@ -434,6 +497,8 @@ function isFailedToolExecutionRecord(record: RuntimeEventLike): boolean {
     getBoolean(record, "isError") === true ||
     status === "error" ||
     status === "failed" ||
+    status === "aborted" ||
+    status === "cancelled" ||
     hasNonZeroToolExitCode(record) ||
     hasToolError(record)
   );
@@ -508,6 +573,10 @@ function reduceExtensionUiRequestEvent(
 
   return {
     ...state,
+    lifecycle:
+      state.lifecycle.phase === "terminal"
+        ? state.lifecycle
+        : activeSessionLifecycle(),
     baseState: "waitingForInput",
     pendingExtensionUiQueue,
     overlays: { ...state.overlays, needsUserInput: true },
@@ -518,20 +587,22 @@ function clearPendingExtensionUiRequest(
   state: ReducedSessionState,
   requestId?: string,
 ): ReducedSessionState {
-  const pendingExtensionUiQueue = requestId
-    ? state.pendingExtensionUiQueue.filter(
-        (request) => request.requestId !== requestId,
+  const matchedIndex = requestId
+    ? state.pendingExtensionUiQueue.findIndex(
+        (request) => request.requestId === requestId,
       )
-    : state.pendingExtensionUiQueue.slice(1);
+    : state.pendingExtensionUiQueue.length > 0
+      ? 0
+      : -1;
+  if (matchedIndex < 0) return state;
 
+  const pendingExtensionUiQueue = state.pendingExtensionUiQueue.filter(
+    (_request, index) => index !== matchedIndex,
+  );
   const stillWaitingForInput = pendingExtensionUiQueue.length > 0;
   return {
     ...state,
-    baseState: stillWaitingForInput
-      ? "waitingForInput"
-      : state.terminalProviderErrorObserved
-        ? "error"
-        : "working",
+    baseState: lifecycleBaseState(state.lifecycle, stillWaitingForInput),
     pendingExtensionUiQueue,
     overlays: {
       ...state.overlays,
@@ -570,6 +641,9 @@ function reduceAgentEndEvent(
   if (getBoolean(event, "willRetry") === true) {
     return {
       ...state,
+      lifecycle: transitionSessionLifecycle(state.lifecycle, {
+        type: "retryStarted",
+      }),
       baseState: "working",
       terminalProviderErrorObserved: false,
       activeTools: [],
@@ -605,13 +679,23 @@ function reduceAgentEndEvent(
     );
   }
 
+  const aborted = hasAgentEndAbortEvidence(
+    event,
+    state.lifecycle.phase === "aborting",
+  );
+  const lifecycle = settleLifecycle(
+    state.lifecycle,
+    terminalProviderErrorObserved || authStillPending
+      ? "failed"
+      : aborted
+        ? "aborted"
+        : "completed",
+    Date.now(),
+  );
   return {
     ...state,
-    baseState: hasPendingExtensionUi
-      ? "waitingForInput"
-      : terminalProviderErrorObserved || authStillPending
-        ? "error"
-        : "idle",
+    lifecycle,
+    baseState: lifecycleBaseState(lifecycle, hasPendingExtensionUi),
     terminalProviderErrorObserved,
     ...(terminalProviderErrorObserved
       ? {
@@ -713,6 +797,23 @@ function getErrorMessage(
     getString(record, "error") ??
     getString(getRecord(record, "error"), "errorMessage") ??
     getString(getRecord(record, "error"), "message")
+  );
+}
+
+/**
+ * Production Pi reports terminal aborts on the final assistant message rather
+ * than on agent_end itself. Keep the legacy status and local abort-intent
+ * fallbacks for older recordings and turns whose terminal payload is sparse.
+ * Callers must apply provider-failure evidence before this classification.
+ */
+export function hasAgentEndAbortEvidence(
+  event: RuntimeEventLike,
+  currentTurnIsAborting = false,
+): boolean {
+  return (
+    getString(event, "status") === "aborted" ||
+    getString(getFinalAssistantMessage(event), "stopReason") === "aborted" ||
+    currentTurnIsAborting
   );
 }
 

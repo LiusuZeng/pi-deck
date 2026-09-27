@@ -257,6 +257,67 @@ test("WorkspaceStore persists membership once by canonical file and projects cac
   assert.equal((await store.getSessionRefs(right.id)).length, 0);
 });
 
+test("WorkspaceStore canonicalizes aliased membership and cwd for upsert, move, and lookup", async () => {
+  const { root, home } = await temporaryHome();
+  const project = path.join(root, "project");
+  const projectAlias = path.join(root, "project-alias");
+  const sessionFile = path.join(root, "session.jsonl");
+  const sessionAlias = path.join(root, "session-alias.jsonl");
+  await fs.mkdir(project);
+  await fs.writeFile(sessionFile, "");
+  await fs.symlink(project, projectAlias, "dir");
+  await fs.symlink(sessionFile, sessionAlias);
+  const canonicalProject = await fs.realpath(project);
+  const canonicalSession = await fs.realpath(sessionFile);
+  const store = new WorkspaceStore(home);
+  const source = await store.create({ name: "Source" });
+  const target = await store.create({ name: "Target" });
+
+  await store.upsertSessionRef(source.id, {
+    ...summary(sessionAlias),
+    cwd: projectAlias,
+  });
+  const [stored] = await store.getSessionRefs(source.id);
+  assert.equal(stored?.sessionFile, canonicalSession);
+  assert.equal(stored?.cwd, projectAlias);
+  assert.equal(stored?.canonicalCwd, canonicalProject);
+  assert.equal(
+    (await store.getSessionOwner(sessionAlias))?.workspaceId,
+    source.id,
+  );
+
+  await store.moveSession(sessionAlias, target.id);
+  assert.equal(
+    (await store.getSessionOwner(sessionFile))?.workspaceId,
+    target.id,
+  );
+
+  const storeFile = path.join(home, "workspaces.json");
+  const legacy = JSON.parse(await fs.readFile(storeFile, "utf8")) as {
+    sessionRefs: Array<{
+      sessionFile: string;
+      cwd?: string;
+      canonicalCwd?: string;
+    }>;
+  };
+  legacy.sessionRefs[0]!.sessionFile = sessionAlias;
+  legacy.sessionRefs[0]!.cwd = projectAlias;
+  delete legacy.sessionRefs[0]!.canonicalCwd;
+  await fs.writeFile(storeFile, `${JSON.stringify(legacy)}\n`);
+
+  const reloaded = new WorkspaceStore(home);
+  const owner = await reloaded.getSessionOwner(sessionFile);
+  assert.equal(owner?.workspaceId, target.id);
+  assert.equal(owner?.sessionFile, canonicalSession);
+  assert.equal(owner?.canonicalCwd, canonicalProject);
+  await reloaded.moveSession(sessionFile, target.id);
+  const normalized = JSON.parse(await fs.readFile(storeFile, "utf8")) as {
+    sessionRefs: Array<{ sessionFile: string; canonicalCwd?: string }>;
+  };
+  assert.equal(normalized.sessionRefs[0]?.sessionFile, canonicalSession);
+  assert.equal(normalized.sessionRefs[0]?.canonicalCwd, canonicalProject);
+});
+
 test("WorkspaceStore preserves a durable title across title-less model and thinking snapshots", async () => {
   const { root, home } = await temporaryHome();
   const store = new WorkspaceStore(home);
@@ -287,9 +348,13 @@ test("WorkspaceStore preserves a durable title across title-less model and think
     workspaceId: workspace.id,
     sessionFile: newFile,
   });
+  const canonicalNewFile = path.join(
+    await fs.realpath(root),
+    "new-parent.jsonl",
+  );
   assert.equal(
     (await store.getSessionRefs(workspace.id)).find(
-      (ref) => ref.sessionFile === path.resolve(newFile),
+      (ref) => ref.sessionFile === canonicalNewFile,
     )?.title,
     "new-parent",
   );
@@ -339,7 +404,7 @@ test("WorkspaceStore rolls back a failed target claim and never replays it", asy
   const refs = await reloaded.getSessionRefs(workspace.id);
   assert.deepEqual(
     refs.map((ref) => ref.sessionFile),
-    [path.resolve(laterFile)],
+    [path.join(await fs.realpath(root), "later-claim.jsonl")],
   );
 });
 

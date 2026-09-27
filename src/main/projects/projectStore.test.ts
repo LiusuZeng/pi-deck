@@ -55,6 +55,39 @@ test("ProjectStore persists active canonical project and avoids duplicate upsert
   assert.equal(listed.projects.length, 1);
 });
 
+test("ProjectStore registers symlink roots and session metadata by canonical identity", async () => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "pi-deck-project-store-identity-"),
+  );
+  const projectDir = path.join(root, "project");
+  const projectAlias = path.join(root, "project-alias");
+  const sessionFile = path.join(root, "session.jsonl");
+  const sessionAlias = path.join(root, "session-alias.jsonl");
+  await fs.mkdir(projectDir);
+  await fs.writeFile(sessionFile, "");
+  await fs.symlink(projectDir, projectAlias, "dir");
+  await fs.symlink(sessionFile, sessionAlias);
+
+  const canonicalProject = await fs.realpath(projectDir);
+  const canonicalSession = await fs.realpath(sessionFile);
+  const store = new ProjectStore(path.join(root, "home"));
+  const registered = await store.upsertAndActivateProject(projectAlias);
+  await store.upsertSessionRef(registered.id, {
+    id: sessionAlias,
+    sessionFile: sessionAlias,
+    cwd: projectAlias,
+    title: "Aliased",
+    updatedAtMs: 1,
+    messageCount: 0,
+  });
+
+  assert.equal(registered.id, canonicalProject);
+  const [ref] = await store.getSessionRefs(registered.id);
+  assert.equal(ref?.sessionFile, canonicalSession);
+  assert.equal(ref?.cwd, projectAlias);
+  assert.equal(ref?.canonicalCwd, canonicalProject);
+});
+
 test("ProjectStore resolves only registered project IDs for process work", async () => {
   const root = await fs.mkdtemp(
     path.join(os.tmpdir(), "pi-deck-project-store-authorize-"),
@@ -285,11 +318,15 @@ test("ProjectStore returns cached bootstrap summaries without touching session f
 
   const readFile = vi.spyOn(fs, "readFile");
   const cached = await store.getCachedSessionSummaries(project);
+  const canonicalSessionFile = path.join(
+    await fs.realpath(root),
+    "session.jsonl",
+  );
 
   assert.deepEqual(cached, [
     {
-      id: sessionFile,
-      sessionFile,
+      id: canonicalSessionFile,
+      sessionFile: canonicalSessionFile,
       title: "Cached session",
       updatedAtMs: 123,
       completedAtMs: 456,

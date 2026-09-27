@@ -1,3 +1,4 @@
+import { extractPiMessageText } from "../shared/piMessageNormalization.js";
 import type {
   ChatMessage,
   ChatModelSummary,
@@ -18,10 +19,10 @@ export interface UsageStats {
 }
 
 export interface MessageUsage {
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   totalCostUsd?: number;
 }
 
@@ -121,11 +122,18 @@ export function summarizeUsageByMessage(
   const outputTokens = sumUsage(values, "outputTokens");
   const cacheReadTokens = sumUsage(values, "cacheReadTokens");
   const cacheWriteTokens = sumUsage(values, "cacheWriteTokens");
-  const contextUsedTokens = values.reduce((peak, usage) => {
-    const contextTokens =
-      usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
-    return Math.max(peak, contextTokens);
-  }, 0);
+  const contextValues = values.flatMap((usage) => {
+    const promptValues = [
+      usage.inputTokens,
+      usage.cacheReadTokens,
+      usage.cacheWriteTokens,
+    ];
+    return promptValues.some((value) => value !== undefined)
+      ? [promptValues.reduce<number>((total, value) => total + (value ?? 0), 0)]
+      : [];
+  });
+  const contextUsedTokens =
+    contextValues.length > 0 ? Math.max(...contextValues) : undefined;
   const costValues = values
     .map((usage) => usage.totalCostUsd)
     .filter((value): value is number => value !== undefined);
@@ -134,14 +142,28 @@ export function summarizeUsageByMessage(
       ? costValues.reduce((total, value) => total + value, 0)
       : undefined;
 
-  return {
+  const tokenValues = [
     inputTokens,
     outputTokens,
     cacheReadTokens,
     cacheWriteTokens,
-    totalTokens:
-      inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
-    ...(contextUsedTokens > 0 ? { contextUsedTokens } : {}),
+  ];
+  return {
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
+    ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
+    ...(tokenValues.some((value) => value !== undefined)
+      ? {
+          totalTokens: tokenValues.reduce<number>(
+            (total, value) => total + (value ?? 0),
+            0,
+          ),
+        }
+      : {}),
+    ...(contextUsedTokens !== undefined && contextUsedTokens > 0
+      ? { contextUsedTokens }
+      : {}),
     ...(contextWindowTokens !== undefined ? { contextWindowTokens } : {}),
     ...(totalCostUsd !== undefined ? { totalCostUsd } : {}),
   };
@@ -153,8 +175,13 @@ function sumUsage(
     MessageUsage,
     "inputTokens" | "outputTokens" | "cacheReadTokens" | "cacheWriteTokens"
   >,
-): number {
-  return values.reduce((total, usage) => total + usage[key], 0);
+): number | undefined {
+  const reported = values.flatMap((usage) =>
+    usage[key] === undefined ? [] : [usage[key]],
+  );
+  return reported.length > 0
+    ? reported.reduce((total, value) => total + value, 0)
+    : undefined;
 }
 
 export function getMessageUsageFromEvent(
@@ -227,10 +254,10 @@ export function extractMessageUsage(value: unknown): MessageUsage | undefined {
   }
 
   return {
-    inputTokens: inputTokens ?? 0,
-    outputTokens: outputTokens ?? 0,
-    cacheReadTokens: cacheReadTokens ?? 0,
-    cacheWriteTokens: cacheWriteTokens ?? 0,
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
+    ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
     ...(totalCostUsd !== undefined ? { totalCostUsd } : {}),
   };
 }
@@ -254,18 +281,21 @@ export function getContextWindowTokens(
 }
 
 function readCostUsd(record: Record<string, unknown>): number | undefined {
-  const direct = readNumber(record, [
+  const explicitlyReported = readNumber(record, [
     "costUsd",
     "totalCostUsd",
     "total_cost_usd",
   ]);
-  if (direct !== undefined) {
-    return direct;
-  }
+  if (explicitlyReported !== undefined) return explicitlyReported;
+
+  // Pi's generic cost aggregate is initialized to zero even when provider
+  // pricing is unavailable. A positive value proves a report; a generic zero
+  // does not. Explicit *CostUsd fields above may still authoritatively be zero.
   if (typeof record.cost === "number" && Number.isFinite(record.cost)) {
-    return record.cost;
+    return record.cost > 0 ? record.cost : undefined;
   }
-  return readNumber(asRecord(record.cost) ?? {}, ["total", "usd"]);
+  const aggregate = readNumber(asRecord(record.cost) ?? {}, ["total", "usd"]);
+  return aggregate !== undefined && aggregate > 0 ? aggregate : undefined;
 }
 
 function readNumber(
@@ -284,14 +314,29 @@ function readNumber(
 export function mergeSessionUsageFromSnapshot<
   TSession extends SessionUsageProjection,
 >(session: TSession, snapshotSession: SessionUsageProjection): TSession {
+  const usageByMessageId =
+    snapshotSession.usageByMessageId === undefined
+      ? session.usageByMessageId
+      : {
+          ...(session.usageByMessageId ?? {}),
+          ...snapshotSession.usageByMessageId,
+        };
+  const summarizedSnapshotUsage =
+    usageByMessageId === undefined
+      ? snapshotSession.usageStats
+      : summarizeUsageByMessage(
+          usageByMessageId,
+          snapshotSession.usageStats?.contextWindowTokens ??
+            session.usageStats?.contextWindowTokens,
+        );
+  const usageStats = mergeKnownUsageStats(
+    session.usageStats,
+    mergeKnownUsageStats(snapshotSession.usageStats, summarizedSnapshotUsage),
+  );
   return {
     ...session,
-    ...(snapshotSession.usageStats !== undefined
-      ? { usageStats: snapshotSession.usageStats }
-      : {}),
-    ...(snapshotSession.usageByMessageId !== undefined
-      ? { usageByMessageId: snapshotSession.usageByMessageId }
-      : {}),
+    ...(usageStats !== undefined ? { usageStats } : {}),
+    ...(usageByMessageId !== undefined ? { usageByMessageId } : {}),
     ...(snapshotSession.modelLabel !== undefined
       ? { modelLabel: snapshotSession.modelLabel }
       : {}),
@@ -308,28 +353,94 @@ export function mergeSessionUsageFromRuntimeStatus<
     return session;
   }
   const modelLabel = modelLabelFromState(status.state);
+  const reported = status.usage.reportedFields;
+  const isReported = (field: keyof UsageStats): boolean =>
+    reported === undefined || reported.includes(field);
+  // For optional fields, presence in reportedFields with no numeric value is
+  // an authoritative "unavailable" result. An omitted reported field is only
+  // a sparse update and must not erase previously known data.
+  const contextUsedTokensUnavailable =
+    reported?.includes("contextUsedTokens") === true &&
+    status.usage.contextUsedTokens === undefined;
+  const projected: UsageStats = {
+    ...(isReported("inputTokens")
+      ? { inputTokens: status.usage.inputTokens }
+      : {}),
+    ...(isReported("outputTokens")
+      ? { outputTokens: status.usage.outputTokens }
+      : {}),
+    ...(isReported("cacheReadTokens")
+      ? { cacheReadTokens: status.usage.cacheReadTokens }
+      : {}),
+    ...(isReported("cacheWriteTokens")
+      ? { cacheWriteTokens: status.usage.cacheWriteTokens }
+      : {}),
+    ...(isReported("totalTokens")
+      ? { totalTokens: status.usage.totalTokens }
+      : {}),
+    ...(isReported("contextUsedTokens") &&
+    status.usage.contextUsedTokens !== undefined
+      ? { contextUsedTokens: status.usage.contextUsedTokens }
+      : {}),
+    ...(isReported("contextWindowTokens") &&
+    status.usage.contextWindowTokens !== undefined
+      ? { contextWindowTokens: status.usage.contextWindowTokens }
+      : {}),
+    ...(isReported("totalCostUsd") && status.usage.totalCostUsd !== undefined
+      ? { totalCostUsd: status.usage.totalCostUsd }
+      : {}),
+  };
+  const mergedUsageStats = mergeKnownUsageStats(session.usageStats, projected);
+  if (contextUsedTokensUnavailable && mergedUsageStats !== undefined) {
+    delete mergedUsageStats.contextUsedTokens;
+  }
   return {
     ...session,
-    usageStats: {
-      inputTokens: status.usage.inputTokens,
-      outputTokens: status.usage.outputTokens,
-      cacheReadTokens: status.usage.cacheReadTokens,
-      cacheWriteTokens: status.usage.cacheWriteTokens,
-      totalTokens: status.usage.totalTokens,
-      ...(status.usage.contextUsedTokens !== undefined
-        ? { contextUsedTokens: status.usage.contextUsedTokens }
-        : {}),
-      ...(status.usage.contextWindowTokens !== undefined
-        ? { contextWindowTokens: status.usage.contextWindowTokens }
-        : {}),
-      ...(status.usage.totalCostUsd !== undefined
-        ? { totalCostUsd: status.usage.totalCostUsd }
-        : {}),
-    },
+    usageStats: mergedUsageStats,
     ...(modelLabel.length > 0 ? { modelLabel } : {}),
     ...(status.state.thinkingLevel !== undefined
       ? { thinkingLevel: status.state.thinkingLevel }
       : {}),
+  };
+}
+
+export function mergeKnownUsageStats(
+  current: UsageStats | undefined,
+  incoming: UsageStats | undefined,
+): UsageStats | undefined {
+  if (current === undefined) return incoming;
+  if (incoming === undefined) return current;
+  const cumulative = (
+    key: Exclude<keyof UsageStats, "contextWindowTokens">,
+  ): number | undefined => {
+    const previous = current[key];
+    const next = incoming[key];
+    if (previous === undefined) return next;
+    if (next === undefined) return previous;
+    return Math.max(previous, next);
+  };
+  const inputTokens = cumulative("inputTokens");
+  const outputTokens = cumulative("outputTokens");
+  const cacheReadTokens = cumulative("cacheReadTokens");
+  const cacheWriteTokens = cumulative("cacheWriteTokens");
+  const totalTokens = cumulative("totalTokens");
+  // Context usage is current occupancy, not a lifetime counter. A fresh
+  // authoritative value may legitimately decrease after compaction. Omission
+  // remains sparse/no-new-evidence and therefore preserves the known value.
+  const contextUsedTokens =
+    incoming.contextUsedTokens ?? current.contextUsedTokens;
+  const totalCostUsd = cumulative("totalCostUsd");
+  const contextWindowTokens =
+    incoming.contextWindowTokens ?? current.contextWindowTokens;
+  return {
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
+    ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
+    ...(totalTokens !== undefined ? { totalTokens } : {}),
+    ...(contextUsedTokens !== undefined ? { contextUsedTokens } : {}),
+    ...(contextWindowTokens !== undefined ? { contextWindowTokens } : {}),
+    ...(totalCostUsd !== undefined ? { totalCostUsd } : {}),
   };
 }
 
@@ -385,17 +496,7 @@ export function clampThinkingLevel(
 }
 
 export function extractTextContent(value: unknown): string | undefined {
-  if (typeof value === "string") {
-    return value;
-  }
-  if (!Array.isArray(value)) {
-    return undefined;
-  }
-  const parts = value.flatMap((item): string[] => {
-    const record = asRecord(item);
-    return typeof record?.text === "string" ? [record.text] : [];
-  });
-  return parts.length > 0 ? parts.join("\n") : undefined;
+  return extractPiMessageText(value);
 }
 
 export function extractThinkingContent(value: unknown): string | undefined {

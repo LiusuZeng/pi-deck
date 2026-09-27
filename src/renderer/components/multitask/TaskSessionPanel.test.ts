@@ -3,7 +3,10 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { TaskSessionPanel } from "./TaskSessionPanel.js";
+import {
+  projectTaskSessionStatus,
+  TaskSessionPanel,
+} from "./TaskSessionPanel.js";
 
 (
   globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -19,6 +22,61 @@ afterEach(() => {
 });
 
 describe("TaskSessionPanel", () => {
+  it("keeps terminal child outcomes distinct from parent processing", () => {
+    expect(
+      projectTaskSessionStatus([
+        {
+          taskNumber: 1,
+          generatedName: "Succeeded",
+          brief: "Safe brief",
+          lifecycle: "completed",
+          attempt: 1,
+          elapsedMs: 1,
+        },
+        {
+          taskNumber: 2,
+          generatedName: "Failed",
+          brief: "Safe brief",
+          lifecycle: "failed",
+          attempt: 4,
+          elapsedMs: 2,
+        },
+        {
+          taskNumber: 3,
+          generatedName: "Interrupted",
+          brief: "Safe brief",
+          lifecycle: "interrupted",
+          attempt: 1,
+          elapsedMs: 3,
+        },
+      ]),
+    ).toMatchObject({
+      label: "Processing delegated results",
+      detail:
+        "3 delegated tasks finished · 1 succeeded · 1 failed · 1 cancelled",
+      tone: "working",
+    });
+  });
+
+  it("shows an explicit waiting parent phase rather than implying completion", () => {
+    expect(
+      projectTaskSessionStatus([
+        {
+          taskNumber: 1,
+          generatedName: "Waiting",
+          brief: "Safe brief",
+          lifecycle: "waiting-parent",
+          attempt: 1,
+          elapsedMs: 1,
+        },
+      ]),
+    ).toMatchObject({
+      label: "Waiting to continue delegated work",
+      detail: "0 of 1 delegated task finished · 1 waiting",
+      tone: "working",
+    });
+  });
+
   it("is absent when the backend has no tasks", () => {
     container = document.createElement("div");
     document.body.append(container);
@@ -66,7 +124,9 @@ describe("TaskSessionPanel", () => {
       ),
     );
 
-    expect(container.textContent).toContain("1 active of 2");
+    expect(container.textContent).toContain("Running delegated tasks");
+    expect(container.textContent).toContain("1 queued");
+    expect(container.textContent).toContain("Worker capacity: 1 active of 2");
     expect(container.textContent).toContain("#2 Renderer");
     expect(container.textContent).toContain("Attempt 2 · 1m 5s");
     expect(container.textContent).toContain("3 model calls · 18k tokens");

@@ -1,5 +1,14 @@
 import type { FailureKind } from "./openaiCodexAuth.js";
 import type { BaseSessionState, SessionOverlays } from "./sessionState.js";
+import {
+  lifecycleBaseState,
+  lifecycleCompletedAtMs,
+  lifecycleSessionStatus,
+  resolveSessionLifecycle,
+  settleLifecycle,
+  transitionSessionLifecycle,
+  type SessionLifecycle,
+} from "./sessionLifecycle.js";
 
 /** The compact runtime fields reconciliation needs; the full IPC payload stays App-owned. */
 export interface RuntimeStatusForSessionReconciliation {
@@ -47,6 +56,34 @@ export interface SessionForRuntimeReconciliation {
   providerErrorObserved?: boolean | undefined;
   failureKind?: FailureKind | undefined;
   workingStartedAtMs?: number | undefined;
+  completedAtMs?: number | undefined;
+  lifecycle?: SessionLifecycle | undefined;
+}
+
+/**
+ * Identity captured when a compact status request starts. Lifecycle objects
+ * are replaced at every turn boundary, so object identity is a cheap local
+ * generation token even when Pi's compact get_state response has no turn id.
+ */
+export interface SessionReconciliationIdentity {
+  runtimeId: string;
+  lifecycle: SessionLifecycle | undefined;
+}
+
+export function captureSessionReconciliationIdentity(
+  session: SessionForRuntimeReconciliation,
+): SessionReconciliationIdentity {
+  return { runtimeId: session.id, lifecycle: session.lifecycle };
+}
+
+export function isSessionReconciliationIdentityCurrent(
+  session: SessionForRuntimeReconciliation,
+  identity: SessionReconciliationIdentity,
+): boolean {
+  return (
+    session.id === identity.runtimeId &&
+    session.lifecycle === identity.lifecycle
+  );
 }
 
 /** App supplies presentation and timeline construction without widening this domain. */
@@ -109,8 +146,14 @@ export function reconcileSessionWithRuntimeStatus<
     if (session.status === "aborting" || session.status === "working") {
       return session;
     }
+    const lifecycle = transitionSessionLifecycle(
+      resolveSessionLifecycle(session),
+      { type: "turnStarted" },
+    );
     return {
       ...session,
+      lifecycle,
+      completedAtMs: undefined,
       status: "working",
       baseState: "working",
       overlays: { ...session.overlays, streaming: true },
@@ -119,30 +162,53 @@ export function reconcileSessionWithRuntimeStatus<
     };
   }
 
-  const authStillPending = session.failureKind === "auth-required";
+  const now = dependencies.now();
+  const currentLifecycle = resolveSessionLifecycle(session);
+  const knownFailure =
+    currentLifecycle.phase === "terminal" &&
+    currentLifecycle.outcome === "failed";
+  const lifecycle = knownFailure
+    ? settleLifecycle(currentLifecycle, "failed", now)
+    : transitionSessionLifecycle(currentLifecycle, {
+        type: "runtimeInactive",
+        settledAtMs: now,
+      });
+  const failed =
+    lifecycle.phase === "terminal" && lifecycle.outcome === "failed";
+  const status = lifecycleSessionStatus(lifecycle, false);
+  const baseState = lifecycleBaseState(lifecycle, false);
   return dependencies.appendInfoDiagnostic(
     {
       ...session,
-      status: authStillPending ? "error" : "idle",
-      baseState: authStillPending ? "error" : "idle",
+      lifecycle,
+      completedAtMs: lifecycleCompletedAtMs(lifecycle),
+      status,
+      baseState,
       awaitingAgentEnd: false,
-      providerErrorObserved: authStillPending
+      providerErrorObserved: failed
         ? session.providerErrorObserved === true
         : false,
-      ...(authStillPending ? {} : { lastError: undefined }),
+      ...(failed ? {} : { lastError: undefined }),
       overlays: {
         ...session.overlays,
         streaming: false,
         toolRunning: false,
+        compacting: false,
         retrying: false,
       },
       workingStartedAtMs: undefined,
-      subtitle: authStillPending
-        ? "Error · OpenAI authentication verification pending"
-        : `Idle · ${dependencies.backendLabel(session)} reconciled`,
-      lastRuntimeEventLabel: "Pi reconciliation confirmed completion",
+      subtitle: failed
+        ? session.failureKind === "auth-required"
+          ? "Error · OpenAI authentication verification pending"
+          : "Error · backend stream failed"
+        : lifecycle.phase === "terminal" && lifecycle.outcome === "aborted"
+          ? "Idle · backend stream aborted"
+          : `Idle · ${dependencies.backendLabel(session)} reconciled`,
+      lastRuntimeEventLabel: failed
+        ? "Pi reconciliation preserved terminal failure"
+        : "Pi reconciliation confirmed completion",
       updatedAt: "Now",
-      updatedAtMs: dependencies.now(),
+      updatedAtMs: now,
     },
     "Reconciled from Pi runtime status because the live completion event was not observed.",
   );

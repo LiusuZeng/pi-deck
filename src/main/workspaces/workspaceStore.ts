@@ -5,6 +5,10 @@ import { z } from "zod";
 import { chatSessionSummarySchema } from "../../shared/ipcSchemas.js";
 import type { ChatSessionSummary } from "../../shared/types.js";
 import type { DiagnosticsRecorder } from "../diagnostics/diagnostics.js";
+import {
+  canonicalProjectPath,
+  canonicalSessionFilePath,
+} from "../filesystemIdentity.js";
 
 const workspaceRecordSchema = z
   .object({
@@ -33,6 +37,7 @@ const workspaceSessionRefSchema = z
     sessionFile: z.string().min(1),
     sessionId: z.string().min(1).optional(),
     cwd: z.string().min(1).optional(),
+    canonicalCwd: z.string().min(1).optional(),
     title: z.string().min(1).optional(),
     titleOverride: z.string().min(1).max(120).optional(),
     preview: z.string().min(1).optional(),
@@ -156,6 +161,7 @@ const legacyProjectSessionRefSchema = z
     sessionFile: z.string().min(1),
     sessionId: z.string().min(1).optional(),
     cwd: z.string().min(1).optional(),
+    canonicalCwd: z.string().min(1).optional(),
     title: z.string().min(1).optional(),
     titleOverride: z.string().min(1).max(120).optional(),
     preview: z.string().min(1).optional(),
@@ -534,10 +540,13 @@ export class WorkspaceStore {
       Promise.all(
         parsedSummaries.map(async (summary) => ({
           summary,
-          sessionFile: await canonicalOrResolved(summary.sessionFile),
+          sessionFile: await canonicalSessionFilePath(summary.sessionFile),
+          canonicalCwd: summary.cwd
+            ? await canonicalProjectPath(summary.cwd)
+            : undefined,
         })),
       ),
-      Promise.all(missing.map(canonicalOrResolved)),
+      Promise.all(missing.map(canonicalSessionFilePath)),
     ]);
     ensureDistinct(
       canonicalSummaries.map((item) => item.sessionFile),
@@ -559,7 +568,7 @@ export class WorkspaceStore {
     );
     const results: WorkspaceSessionMutationResult[] = [];
     let changed = false;
-    for (const { summary, sessionFile } of canonicalSummaries) {
+    for (const { summary, sessionFile, canonicalCwd } of canonicalSummaries) {
       const existingIndex = byFile.get(sessionFile);
       const existing =
         existingIndex === undefined ? undefined : refs[existingIndex];
@@ -580,6 +589,7 @@ export class WorkspaceStore {
         summary,
         existing,
         now,
+        canonicalCwd,
       );
       if (existing && sameSessionRefData(existing, candidate)) {
         results.push({
@@ -729,6 +739,9 @@ export class WorkspaceStore {
       z.string().min(1).parse(options.sessionFile),
     );
     const summary = sessionSummaryFromSnapshot(sessionFile, options);
+    const canonicalCwd = options.cwd
+      ? await canonicalProjectPath(options.cwd)
+      : undefined;
     await this.loadIfNeeded();
     // Build, persist, and publish the claim inside one serialized transaction.
     // A rejected write leaves both this.state and every later candidate free
@@ -765,6 +778,7 @@ export class WorkspaceStore {
           summary,
           undefined,
           now,
+          canonicalCwd,
         ),
       ];
       return {
@@ -1100,7 +1114,12 @@ export class WorkspaceStore {
     const canonicalRefs = await Promise.all(
       sessionRefs.map(async (ref) => ({
         ...ref,
-        sessionFile: await canonicalOrResolved(ref.sessionFile),
+        sessionFile: await canonicalSessionFilePath(ref.sessionFile),
+        ...(ref.cwd
+          ? { canonicalCwd: await canonicalProjectPath(ref.cwd) }
+          : ref.canonicalCwd
+            ? { canonicalCwd: await canonicalProjectPath(ref.canonicalCwd) }
+            : {}),
       })),
     );
     await this.loadIfNeeded();
@@ -1164,6 +1183,7 @@ export class WorkspaceStore {
           sessionFile: ref.sessionFile,
           ...(ref.sessionId ? { sessionId: ref.sessionId } : {}),
           ...(ref.cwd ? { cwd: ref.cwd } : {}),
+          ...(ref.canonicalCwd ? { canonicalCwd: ref.canonicalCwd } : {}),
           ...(ref.title ? { title: ref.title } : {}),
           ...(ref.titleOverride ? { titleOverride: ref.titleOverride } : {}),
           ...(ref.preview ? { preview: ref.preview } : {}),
@@ -1204,7 +1224,13 @@ export class WorkspaceStore {
     await fs.mkdir(this.piDeckHome, { recursive: true, mode: 0o700 });
     try {
       const raw = await fs.readFile(this.storeFile, "utf8");
-      this.state = workspaceStoreFileV1Schema.parse(JSON.parse(raw));
+      const parsed = workspaceStoreFileV1Schema.parse(JSON.parse(raw));
+      this.state = await normalizeWorkspaceStoreFilesystemIdentities(parsed);
+      if (JSON.stringify(this.state) !== JSON.stringify(parsed)) {
+        // Persist on the next normal mutation/no-op flush; a migration write
+        // failure must not classify otherwise valid metadata as corrupt.
+        this.generation += 1;
+      }
     } catch (error) {
       if (!isMissingFile(error)) {
         const backup = `${this.storeFile}.corrupt-${Date.now()}`;
@@ -1455,6 +1481,7 @@ function sessionRefFromSummary(
   summary: ChatSessionSummary,
   existing: WorkspaceSessionRef | undefined,
   now: number,
+  canonicalCwd: string | undefined,
 ): WorkspaceSessionRef {
   return {
     workspaceId,
@@ -1465,9 +1492,14 @@ function sessionRefFromSummary(
         ? { sessionId: existing.sessionId }
         : {}),
     ...(summary.cwd
-      ? { cwd: summary.cwd }
+      ? { cwd: summary.cwd, canonicalCwd }
       : existing?.cwd
-        ? { cwd: existing.cwd }
+        ? {
+            cwd: existing.cwd,
+            ...(existing.canonicalCwd
+              ? { canonicalCwd: existing.canonicalCwd }
+              : {}),
+          }
         : {}),
     title:
       summary.title || existing?.title || path.basename(sessionFile, ".jsonl"),
@@ -1535,6 +1567,7 @@ function sameSessionRefData(
     existing.sessionFile === candidate.sessionFile &&
     existing.sessionId === candidate.sessionId &&
     existing.cwd === candidate.cwd &&
+    existing.canonicalCwd === candidate.canonicalCwd &&
     existing.title === candidate.title &&
     existing.titleOverride === candidate.titleOverride &&
     existing.preview === candidate.preview &&
@@ -1573,14 +1606,65 @@ function ensureDistinct(values: readonly string[], label: string): void {
     throw new Error(`Duplicate ${label} are not allowed in one batch.`);
 }
 
-async function canonicalOrResolved(filePath: string): Promise<string> {
-  const resolved = path.resolve(filePath);
-  try {
-    return await fs.realpath(resolved);
-  } catch {
-    return resolved;
+async function normalizeWorkspaceStoreFilesystemIdentities(
+  state: WorkspaceStoreFileV1,
+): Promise<WorkspaceStoreFileV1> {
+  const normalizedRefs = await Promise.all(
+    state.sessionRefs.map(async (ref) => ({
+      ...ref,
+      sessionFile: await canonicalSessionFilePath(ref.sessionFile),
+      ...(ref.cwd
+        ? { canonicalCwd: await canonicalProjectPath(ref.cwd) }
+        : ref.canonicalCwd
+          ? { canonicalCwd: await canonicalProjectPath(ref.canonicalCwd) }
+          : {}),
+    })),
+  );
+  const refsByIdentity = new Map<string, WorkspaceSessionRef>();
+  for (const ref of normalizedRefs) {
+    const existing = refsByIdentity.get(ref.sessionFile);
+    if (existing === undefined || ref.lastSeenAtMs > existing.lastSeenAtMs) {
+      refsByIdentity.set(ref.sessionFile, ref);
+    }
   }
+  const refs = [...refsByIdentity.values()];
+  const assignedByWorkspace = new Map<string, Set<string>>();
+  for (const ref of refs) {
+    const assigned = assignedByWorkspace.get(ref.workspaceId) ?? new Set();
+    assigned.add(ref.sessionFile);
+    assignedByWorkspace.set(ref.workspaceId, assigned);
+  }
+  const workspaces = await Promise.all(
+    state.workspaces.map(async (workspace) => {
+      const exclusions = await Promise.all(
+        (workspace.legacyExcludedSessionFiles ?? []).map(
+          canonicalSessionFilePath,
+        ),
+      );
+      const assigned = assignedByWorkspace.get(workspace.id);
+      const normalizedExclusions = [...new Set(exclusions)].filter(
+        (sessionFile) => !assigned?.has(sessionFile),
+      );
+      const {
+        legacyExcludedSessionFiles: _legacyExcludedSessionFiles,
+        ...withoutExclusions
+      } = workspace;
+      return {
+        ...withoutExclusions,
+        ...(normalizedExclusions.length > 0
+          ? { legacyExcludedSessionFiles: normalizedExclusions }
+          : {}),
+      };
+    }),
+  );
+  return workspaceStoreFileV1Schema.parse({
+    ...state,
+    workspaces,
+    sessionRefs: refs,
+  });
 }
+
+const canonicalOrResolved = canonicalSessionFilePath;
 
 function isMissingFile(error: unknown): boolean {
   return (

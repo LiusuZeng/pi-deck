@@ -91,6 +91,8 @@ describe("reduceSessionRuntimeEvent", () => {
   it("recognizes direct and rendered nested tool failure forms", () => {
     const failures: RuntimeEventLike[] = [
       { type: "tool_execution_end", status: "failed" },
+      { type: "tool_execution_end", status: "aborted" },
+      { type: "tool_execution_end", status: "cancelled" },
       { type: "tool_execution_end", exit_code: 1 },
       { type: "tool_execution_end", output: { status: "error" } },
       { type: "tool_execution_end", output: { error: "command failed" } },
@@ -144,6 +146,62 @@ describe("reduceSessionRuntimeEvent", () => {
 
     expect(cleared.baseState).toBe("working");
     expect(cleared.overlays.needsUserInput).toBe(false);
+  });
+
+  it.each(["extension_ui_response_sent", "extension_ui_request_timeout"])(
+    "keeps successful terminal lifecycle after a late %s",
+    (clearType) => {
+      const waitingAfterEnd = applyEvents([
+        { type: "agent_start" },
+        {
+          type: "extension_ui_request",
+          requestId: "ext-1",
+          method: "confirm",
+        },
+        { type: "agent_end", status: "completed" },
+      ]);
+      const cleared = reduceSessionRuntimeEvent(waitingAfterEnd, {
+        type: clearType,
+        requestId: "ext-1",
+      });
+
+      expect(cleared).toMatchObject({
+        baseState: "idle",
+        lifecycle: { phase: "terminal", outcome: "completed" },
+        overlays: { needsUserInput: false },
+      });
+      const duplicate = reduceSessionRuntimeEvent(cleared, {
+        type: clearType,
+        requestId: "ext-1",
+      });
+      expect(duplicate).toBe(cleared);
+    },
+  );
+
+  it("ignores unknown Extension UI clears for idle, failed, and completed state", () => {
+    const states = [
+      createInitialReducedSessionState(),
+      createInitialReducedSessionState({
+        baseState: "error",
+        lifecycle: { phase: "terminal", outcome: "failed", settledAtMs: 1 },
+      }),
+      createInitialReducedSessionState({
+        baseState: "idle",
+        lifecycle: {
+          phase: "terminal",
+          outcome: "completed",
+          settledAtMs: 1,
+        },
+      }),
+    ];
+    for (const state of states) {
+      expect(
+        reduceSessionRuntimeEvent(state, {
+          type: "extension_ui_response_sent",
+          requestId: "missing",
+        }),
+      ).toBe(state);
+    }
   });
 
   it("keeps an unplanned worker exit terminal when a raced response acknowledgement arrives", () => {
@@ -295,6 +353,89 @@ describe("reduceSessionRuntimeEvent", () => {
       piQueuedSteeringCount: 1,
       piQueuedFollowUpCount: 2,
       streaming: true,
+    });
+  });
+
+  it("classifies a production-shaped nested assistant abort and clears transient work", () => {
+    const aborted = applyEvents([
+      { type: "agent_start" },
+      { type: "message_update", done: false },
+      {
+        type: "tool_execution_start",
+        toolCallId: "delegated-1",
+        name: "subagent",
+      },
+      {
+        type: "tool_execution_end",
+        toolCallId: "delegated-1",
+        name: "subagent",
+        status: "aborted",
+        result: {
+          details: {
+            results: [{ status: "cancelled", stopReason: "aborted" }],
+          },
+        },
+      },
+      {
+        type: "agent_end",
+        messages: [
+          {
+            role: "assistant",
+            stopReason: "aborted",
+            errorMessage: "Request aborted by user.",
+          },
+        ],
+        willRetry: false,
+      },
+    ]);
+
+    expect(aborted).toMatchObject({
+      baseState: "idle",
+      lifecycle: { phase: "terminal", outcome: "aborted" },
+      overlays: {
+        streaming: false,
+        toolRunning: false,
+        retrying: false,
+      },
+      toolCards: { "delegated-1": { status: "error" } },
+    });
+  });
+
+  it("honors local abort intent when a sparse agent_end has no status", () => {
+    const aborting = createInitialReducedSessionState({
+      baseState: "working",
+      lifecycle: { phase: "aborting" },
+      overlays: { streaming: true },
+    });
+    const aborted = reduceSessionRuntimeEvent(aborting, {
+      type: "agent_end",
+      messages: [],
+      willRetry: false,
+    });
+
+    expect(aborted).toMatchObject({
+      baseState: "idle",
+      lifecycle: { phase: "terminal", outcome: "aborted" },
+      overlays: { streaming: false },
+    });
+  });
+
+  it("keeps failure evidence authoritative over nested abort evidence", () => {
+    const failed = applyEvents([
+      { type: "agent_start" },
+      {
+        type: "agent_end",
+        status: "aborted",
+        error: "Provider failed while aborting.",
+        messages: [{ role: "assistant", stopReason: "aborted" }],
+        willRetry: false,
+      },
+    ]);
+
+    expect(failed).toMatchObject({
+      baseState: "error",
+      lifecycle: { phase: "terminal", outcome: "failed" },
+      terminalProviderErrorObserved: true,
     });
   });
 

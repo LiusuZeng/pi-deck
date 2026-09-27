@@ -16,6 +16,7 @@ import {
   chatDeleteSessionRequestSchema,
   chatForkSessionRequestSchema,
   chatInterventionRequestSchema,
+  chatMessageSchema,
   chatPromptRequestSchema,
   chatRespondToExtensionUiRequestSchema,
   chatRuntimeStatusRequestSchema,
@@ -370,6 +371,96 @@ describe("IPC schemas", () => {
     ).toThrow();
   });
 
+  it("normalizes non-text message content arrays to avoid resume validation failures", () => {
+    expect(
+      chatMessageSchema.parse({
+        id: "assistant-1",
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "hidden" }],
+      }),
+    ).toMatchObject({
+      content: "",
+      originalContent: [{ type: "thinking", thinking: "hidden" }],
+    });
+  });
+
+  it("projects only transcript text while retaining legacy untyped text parts", () => {
+    const normalized = chatMessageSchema.parse({
+      id: "assistant-private-parts",
+      role: "assistant",
+      content: [
+        { type: "text", text: "Visible answer" },
+        { type: "thinking", text: "SECRET_THINKING" },
+        { type: "tool", text: "SECRET_TOOL" },
+        { text: "Legacy visible answer" },
+      ],
+    });
+
+    expect(normalized.content).toBe("Visible answer\nLegacy visible answer");
+    expect(normalized.content).not.toContain("SECRET");
+    expect(normalized.originalContent).toEqual([
+      { type: "text", text: "Visible answer" },
+      { type: "thinking", text: "SECRET_THINKING" },
+      { type: "tool", text: "SECRET_TOOL" },
+      { text: "Legacy visible answer" },
+    ]);
+  });
+
+  it("normalizes persisted user image content for resumed previews", () => {
+    expect(
+      chatMessageSchema.parse({
+        id: "msg-1",
+        role: "user",
+        content: [
+          { type: "text", text: "What is this?" },
+          {
+            type: "image",
+            id: "image-1",
+            fileName: "screenshot.png",
+            mimeType: "image/png",
+            data: "abc123",
+          },
+        ],
+      }),
+    ).toMatchObject({
+      content: "What is this?",
+      originalContent: [
+        { type: "text", text: "What is this?" },
+        {
+          type: "image",
+          id: "image-1",
+          fileName: "screenshot.png",
+          mimeType: "image/png",
+          data: "abc123",
+        },
+      ],
+      imageAttachments: [
+        {
+          id: "image-1",
+          fileName: "screenshot.png",
+          mimeType: "image/png",
+          dataBase64: "abc123",
+        },
+      ],
+    });
+  });
+
+  it("normalizes supported message timestamp fallbacks", () => {
+    expect(
+      chatMessageSchema.parse({
+        id: "assistant-1",
+        role: "assistant",
+        content: [{ type: "text", text: "Done" }],
+        createdAt: "2026-09-14T10:00:00.000Z",
+        timestamp: "2026-09-14T11:00:00.000Z",
+      }),
+    ).toMatchObject({
+      content: "Done",
+      createdAt: Date.parse("2026-09-14T10:00:00.000Z"),
+      timestamp: "2026-09-14T11:00:00.000Z",
+    });
+  });
+
   it("preserves assistant chain tool-call arguments across repeated snapshot parsing", () => {
     const snapshot = chatSnapshotSchema.parse({
       runtimeId: "runtime-1",
@@ -431,6 +522,15 @@ describe("IPC schemas", () => {
         ],
       },
     });
+    expect((snapshot.messages[0] as any).originalContent).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "toolCall",
+          id: "tool-call-1",
+          privateExtensionField: "discard me",
+        }),
+      ]),
+    );
 
     expect(chatSnapshotSchema.parse(snapshot)).toEqual(snapshot);
   });
@@ -547,8 +647,43 @@ describe("IPC schemas", () => {
         runtimeId: "runtime-1",
         backendMode: "real",
         state: { cwd: "/project", isAgentActive: true },
+        usage: {
+          inputTokens: 12,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          totalTokens: 12,
+          reportedFields: ["inputTokens", "totalTokens"],
+        },
       }),
-    ).toMatchObject({ runtimeId: "runtime-1" });
+    ).toMatchObject({
+      runtimeId: "runtime-1",
+      usage: { reportedFields: ["inputTokens", "totalTokens"] },
+    });
+    expect(
+      chatRuntimeStatusSchema.parse({
+        runtimeId: "runtime-1",
+        backendMode: "real",
+        state: { isAgentActive: false },
+        usage: {
+          inputTokens: 12,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          totalTokens: 12,
+          // A reported optional field with no value carries an authoritative
+          // unavailable result across IPC.
+          reportedFields: ["inputTokens", "contextUsedTokens"],
+        },
+      }).usage,
+    ).toEqual({
+      inputTokens: 12,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 12,
+      reportedFields: ["inputTokens", "contextUsedTokens"],
+    });
     expect(() =>
       chatRuntimeStatusSchema.parse({
         runtimeId: "runtime-1",

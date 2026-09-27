@@ -88,7 +88,42 @@ describe("chat snapshot metadata", () => {
     ).not.toHaveProperty("title");
   });
 
-  it("uses the last string preview and does not fall back from a blank string", () => {
+  it("normalizes structured and mixed content without treating non-text parts as copy", () => {
+    expect(
+      metadata([
+        message({
+          role: "user",
+          content: [
+            { type: "text", text: "  Structured\n prompt  " },
+            { type: "image", data: "preserved elsewhere" },
+          ],
+        }),
+        message({
+          role: "assistant",
+          content: [
+            { type: "thinking", text: "hidden reasoning" },
+            { type: "text", text: "Structured answer" },
+            { type: "toolCall", text: "hidden tool payload" },
+          ],
+          timestamp: "2026-09-14T10:11:12.000Z",
+        }),
+      ]),
+    ).toEqual({
+      kind: "messages",
+      title: "Structured prompt",
+      messageCount: 2,
+      preview: "Structured answer",
+      completedAtMs: Date.parse("2026-09-14T10:11:12.000Z"),
+    });
+    expect(
+      metadata([
+        message({ role: "user", content: [{ type: "text", text: "" }] }),
+        message({ role: "user", content: "Later title" }),
+      ]),
+    ).not.toHaveProperty("title");
+  });
+
+  it("uses the last textual preview and does not fall back from blank text", () => {
     expect(
       metadata([
         message({ content: "Older preview" }),
@@ -125,6 +160,12 @@ describe("chat snapshot metadata", () => {
         content: "Answer",
         createdAt: 123,
         status: "error",
+      }),
+      message({
+        role: "assistant",
+        content: [{ type: "text", text: "Aborted answer" }],
+        timestamp: "2026-09-14T10:11:12.000Z",
+        stopReason: "aborted",
       }),
     ]) {
       expect(

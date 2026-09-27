@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { test } from "vitest";
 import type { ProjectRef } from "../shared/types.js";
 import {
@@ -54,14 +57,12 @@ function createPorts({
   refs = [],
   projects = [],
   realBackend = true,
-  canonicalPaths = {},
 }: {
   workspaces: WorkspaceRecord[];
   defaultWorkspace: WorkspaceRecord;
   refs?: WorkspaceSessionRef[];
   projects?: ProjectRef[];
   realBackend?: boolean;
-  canonicalPaths?: Record<string, string>;
 }): {
   ports: ChatSessionAccessPorts;
   authorizedProjectIds: string[];
@@ -89,8 +90,6 @@ function createPorts({
         return resolved;
       },
     },
-    canonicalPath: async (filePath: string) =>
-      canonicalPaths[filePath] ?? filePath,
     resolveManagedProject: async () => project("managed", "/managed"),
     isRealBackend: () => realBackend,
   } satisfies ChatSessionAccessPorts;
@@ -189,30 +188,59 @@ test("chat creation retains real/fake project authorization and managed fallback
   assert.deepEqual(fakeFixture.authorizedProjectIds, []);
 });
 
-test("workspace session access uses canonical membership and reauthorizes its registered project", async () => {
+test("workspace session access uses canonical membership and raw/canonical cwd identity", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-deck-access-"));
+  const projectRoot = path.join(root, "project");
+  const projectAlias = path.join(root, "project-alias");
+  const sessionFile = path.join(root, "owned.jsonl");
+  const sessionAlias = path.join(root, "owned-alias.jsonl");
+  await fs.mkdir(projectRoot);
+  await fs.writeFile(sessionFile, "");
+  await fs.symlink(projectRoot, projectAlias, "dir");
+  await fs.symlink(sessionFile, sessionAlias);
+  const canonicalProject = await fs.realpath(projectRoot);
+  const canonicalSession = await fs.realpath(sessionFile);
+
   const named = workspace("named", "default-project");
   const defaultWorkspace = workspace("default");
-  const registered = project("registered-project", "/projects/registered");
+  const registered = project("registered-project", canonicalProject);
   const fixture = createPorts({
     workspaces: [named, defaultWorkspace],
     defaultWorkspace,
-    refs: [sessionRef("named", "/sessions/owned", "/links/project")],
+    refs: [sessionRef("named", canonicalSession, projectAlias)],
     projects: [registered],
-    canonicalPaths: {
-      "/sessions/alias": "/sessions/owned",
-      "/links/project": "/projects/registered",
-    },
   });
 
   assert.deepEqual(
-    await projectForWorkspaceSession(fixture.ports, "named", "/sessions/alias"),
+    await projectForWorkspaceSession(fixture.ports, "named", sessionAlias),
     registered,
   );
   assert.deepEqual(fixture.authorizedProjectIds, ["registered-project"]);
   await assert.rejects(
-    projectForWorkspaceSession(fixture.ports, "default", "/sessions/alias"),
+    projectForWorkspaceSession(fixture.ports, "default", sessionAlias),
     /does not belong/i,
   );
+});
+
+test("registered workspace access fails closed for an unregistered canonical cwd", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-deck-access-"));
+  const sessionFile = path.join(root, "owned.jsonl");
+  const unregistered = path.join(root, "unregistered");
+  await fs.writeFile(sessionFile, "");
+  await fs.mkdir(unregistered);
+  const named = workspace("named", "default-project");
+  const fixture = createPorts({
+    workspaces: [named],
+    defaultWorkspace: named,
+    refs: [sessionRef("named", await fs.realpath(sessionFile), unregistered)],
+    projects: [project("default-project", path.join(root, "other"))],
+  });
+
+  await assert.rejects(
+    projectForWorkspaceSession(fixture.ports, "named", sessionFile),
+    /working folder is not registered/i,
+  );
+  assert.deepEqual(fixture.authorizedProjectIds, []);
 });
 
 test("folderless workspace sessions use managed context despite stale cwd", async () => {

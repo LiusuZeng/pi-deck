@@ -1,5 +1,9 @@
 import type { ProjectRef } from "../shared/types.js";
 import { resolveChatCreationWorkspaceId } from "./chatWorkspaceOwnership.js";
+import {
+  canonicalProjectPath,
+  canonicalSessionFilePath,
+} from "./filesystemIdentity.js";
 import type { ProjectStore } from "./projects/projectStore.js";
 import type {
   WorkspaceRecord,
@@ -26,7 +30,6 @@ export type ChatSessionAccessProjectPort = Pick<
 export interface ChatSessionAccessPorts {
   workspace: ChatSessionAccessWorkspacePort;
   project: ChatSessionAccessProjectPort;
-  canonicalPath(filePath: string): Promise<string>;
   resolveManagedProject(): Promise<ProjectRef>;
   isRealBackend(): boolean;
 }
@@ -133,7 +136,7 @@ export async function projectForWorkspaceSession(
   sessionFile: string,
 ): Promise<ProjectRef> {
   const workspace = await requireOpenChatWorkspace(ports, workspaceId);
-  const canonicalSessionFile = await ports.canonicalPath(sessionFile);
+  const canonicalSessionFile = await canonicalSessionFilePath(sessionFile);
   const ref = (await ports.workspace.getSessionRefs(workspace.id)).find(
     (item) => item.sessionFile === canonicalSessionFile,
   );
@@ -151,13 +154,26 @@ export async function projectForWorkspaceSession(
   if (workspace.defaultProjectId === undefined) {
     return managedProject;
   }
-  const refCwd = ref.cwd ? await ports.canonicalPath(ref.cwd) : undefined;
-  if (refCwd === managedProject.canonicalPath) {
+  const refCwd = ref.canonicalCwd
+    ? await canonicalProjectPath(ref.canonicalCwd)
+    : ref.cwd
+      ? await canonicalProjectPath(ref.cwd)
+      : undefined;
+  const managedProjectPath = await canonicalProjectPath(
+    managedProject.canonicalPath,
+  );
+  if (refCwd === managedProjectPath) {
     return managedProject;
   }
   const projects = await ports.project.list();
+  const canonicalProjects = await Promise.all(
+    projects.projects.map(async (candidate) => ({
+      candidate,
+      canonicalPath: await canonicalProjectPath(candidate.canonicalPath),
+    })),
+  );
   const project = refCwd
-    ? projects.projects.find((candidate) => candidate.canonicalPath === refCwd)
+    ? canonicalProjects.find((item) => item.canonicalPath === refCwd)?.candidate
     : projects.projects.find(
         (candidate) => candidate.id === workspace.defaultProjectId,
       );

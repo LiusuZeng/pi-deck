@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+  extractPiMessageText,
+  piMessageTimestampMs,
+} from "./piMessageNormalization.js";
 
 export const themePreferenceSchema = z.enum(["system", "light", "dark"]);
 
@@ -112,8 +116,14 @@ function normalizeChatMessage(value: unknown): unknown {
   }
   const record = value as Record<string, unknown>;
   const { toolCalls: existingToolCalls, ...message } = record;
-  const content = extractTextContent(record.content);
+  // Snapshot content is renderer-visible transcript text. Keep compatibility
+  // with legacy untyped text parts, but never project thinking/tool text into
+  // the visible content string.
+  const content = extractPiMessageText(record.content, {
+    textPartsOnly: true,
+  });
   const imageAttachments = extractImageAttachments(record.content);
+  const createdAt = piMessageTimestampMs(record);
   const hasStructuredContent = Array.isArray(record.content);
   const toolCalls =
     record.role === "assistant"
@@ -124,11 +134,14 @@ function normalizeChatMessage(value: unknown): unknown {
       : [];
   return {
     ...message,
+    // Renderer text stays normalized for existing consumers, while unknown
+    // provider parts remain available instead of being silently discarded.
     ...(Array.isArray(record.content)
-      ? { content: content ?? "" }
+      ? { originalContent: record.content, content: content ?? "" }
       : content !== undefined
         ? { content }
         : {}),
+    ...(createdAt !== undefined ? { createdAt } : {}),
     ...(imageAttachments.length > 0 ? { imageAttachments } : {}),
     ...(toolCalls.length > 0 ? { toolCalls } : {}),
   };
@@ -178,26 +191,6 @@ function extractToolCalls(
     });
   }
   return toolCalls;
-}
-
-function extractTextContent(value: unknown): string | undefined {
-  if (typeof value === "string") {
-    return value;
-  }
-  if (!Array.isArray(value)) {
-    return undefined;
-  }
-  const parts = value.flatMap((item): string[] => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
-      return [];
-    }
-    const record = item as Record<string, unknown>;
-    if (typeof record.text === "string") {
-      return [record.text];
-    }
-    return [];
-  });
-  return parts.length > 0 ? parts.join("\n") : undefined;
 }
 
 function extractImageAttachments(value: unknown): Array<{
@@ -285,6 +278,17 @@ export const chatRuntimeStatusRequestSchema = z
   })
   .strict();
 
+const chatRuntimeUsageFieldSchema = z.enum([
+  "inputTokens",
+  "outputTokens",
+  "cacheReadTokens",
+  "cacheWriteTokens",
+  "totalTokens",
+  "contextUsedTokens",
+  "contextWindowTokens",
+  "totalCostUsd",
+]);
+
 export const chatRuntimeUsageSchema = z
   .object({
     inputTokens: z.number().nonnegative(),
@@ -295,6 +299,12 @@ export const chatRuntimeUsageSchema = z
     contextUsedTokens: z.number().nonnegative().optional(),
     contextWindowTokens: z.number().nonnegative().optional(),
     totalCostUsd: z.number().nonnegative().optional(),
+    /**
+     * Fields Pi answered authoritatively; absent means a legacy all-fields
+     * payload. A listed optional field with no value means explicitly
+     * unavailable, while an unlisted field carries no new evidence.
+     */
+    reportedFields: z.array(chatRuntimeUsageFieldSchema).optional(),
   })
   .strict();
 

@@ -1,6 +1,22 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import {
+  extractPiMessageText,
+  isPiAssistantFailureOrAbort,
+  normalizePiMessageDisplayText,
+  parsePiMessageTimestamp,
+  piMessageTimestampMs,
+  PI_MESSAGE_PREVIEW_MAX_LENGTH,
+  PI_MESSAGE_TITLE_MAX_LENGTH,
+  type PiMessageLike,
+} from "../../shared/piMessageNormalization.js";
 import type { ChatSessionSummary } from "../../shared/types.js";
+import {
+  canonicalFilesystemPath,
+  canonicalProjectPath,
+  canonicalSessionFilePath,
+} from "../filesystemIdentity.js";
+import { isCanonicalPathInside } from "../security.js";
 
 export interface ScanSessionRepositoryOptions {
   sessionDir: string;
@@ -64,6 +80,7 @@ interface ParsedSessionFile {
   sessionId?: string;
   cwd?: string;
   title?: string;
+  firstUserMessageSeen?: boolean;
   /** Latest Pi `session_info.name` in JSONL record order, including empty. */
   sessionName?: string;
   preview?: string;
@@ -156,9 +173,9 @@ export async function validatePiSessionFile(
   return {
     ok: true,
     sessionFile,
-    cwd: await canonicalOrResolved(header.cwd),
+    cwd: await canonicalProjectPath(header.cwd),
     ...(header.parentSession !== undefined
-      ? { parentSession: await canonicalOrResolved(header.parentSession) }
+      ? { parentSession: await canonicalSessionFilePath(header.parentSession) }
       : {}),
   };
 }
@@ -172,7 +189,7 @@ export async function readPiSessionSummary(
   options: ReadPiSessionSummaryOptions,
 ): Promise<ReadPiSessionSummaryResult> {
   const diagnostics: string[] = [];
-  const sessionDir = await canonicalOrResolved(options.sessionDir);
+  const sessionDir = await canonicalFilesystemPath(options.sessionDir);
   const maxBytesPerFile = options.maxBytesPerFile ?? DEFAULT_MAX_BYTES_PER_FILE;
   const maxTotalBytes = options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES;
   const maxWallTimeMs = options.maxWallTimeMs ?? DEFAULT_MAX_WALL_TIME_MS;
@@ -235,8 +252,8 @@ export async function scanSessionRepository(
   const projectCwd =
     options.projectCwd === undefined
       ? undefined
-      : await canonicalOrResolved(options.projectCwd);
-  const sessionDir = await canonicalOrResolved(options.sessionDir);
+      : await canonicalProjectPath(options.projectCwd);
+  const sessionDir = await canonicalFilesystemPath(options.sessionDir);
   const startedAt = Date.now();
   let seenFiles = 0;
   let totalBytesRead = 0;
@@ -374,7 +391,7 @@ async function summarizeSessionFile(
   if (parsed.header === undefined) {
     return { bytesRead: parsed.bytesRead };
   }
-  const cwd = await canonicalOrResolved(parsed.header.cwd);
+  const cwd = await canonicalProjectPath(parsed.header.cwd);
   if (projectCwd !== undefined && cwd !== projectCwd) {
     return { bytesRead: parsed.bytesRead };
   }
@@ -389,7 +406,8 @@ async function summarizeSessionFile(
     diagnostics,
   );
   if (metadata.name.found) {
-    parsed.sessionName = metadata.name.name;
+    if (metadata.name.name === undefined) delete parsed.sessionName;
+    else parsed.sessionName = metadata.name.name;
   }
   if (metadata.latestMessage.found) {
     if (metadata.latestMessage.completedAtMs === undefined) {
@@ -484,13 +502,7 @@ function parsePiSessionHeader(value: string): PiSessionHeader | undefined {
 }
 
 function isStrictDescendant(filePath: string, directory: string): boolean {
-  const relative = path.relative(directory, filePath);
-  return (
-    relative.length > 0 &&
-    !relative.startsWith(`..${path.sep}`) &&
-    relative !== ".." &&
-    !path.isAbsolute(relative)
-  );
+  return isCanonicalPathInside(filePath, directory, { allowRoot: false });
 }
 
 async function parseSessionFile(
@@ -541,7 +553,9 @@ async function parseSessionFile(
   return parsed;
 }
 
-type SessionInfoNameResult = { found: true; name: string } | { found: false };
+type SessionInfoNameResult =
+  | { found: true; name: string | undefined }
+  | { found: false };
 
 type LatestMessageCompletionResult =
   | { found: true; completedAtMs?: number }
@@ -717,7 +731,13 @@ function sessionInfoName(
   record: Record<string, unknown>,
 ): SessionInfoNameResult {
   return record.type === "session_info" && typeof record.name === "string"
-    ? { found: true, name: summarize(record.name, 80) }
+    ? {
+        found: true,
+        name: normalizePiMessageDisplayText(
+          record.name,
+          PI_MESSAGE_TITLE_MAX_LENGTH,
+        ),
+      }
     : { found: false };
 }
 
@@ -738,40 +758,26 @@ function latestMessageCompletion(
   if (messageRecord.role !== "assistant") {
     return { found: false };
   }
-  if (isAssistantFailure(record, messageRecord)) {
+  if (isPiAssistantFailureOrAbort(messageRecord, record)) {
     return { found: true };
   }
-  const text = extractTextContent(messageRecord.content);
+  const text = extractPiMessageText(messageRecord.content, {
+    textPartsOnly: true,
+  });
   if (text === undefined || text.trim().length === 0) {
     return { found: true };
   }
-  const completedAtMs =
-    parseTimestamp(messageRecord.createdAt) ?? parseTimestamp(record.timestamp);
+  const completedAtMs = piMessageTimestampMs(messageRecord, record.timestamp);
   return completedAtMs === undefined
     ? { found: true }
     : { found: true, completedAtMs };
-}
-
-function isAssistantFailure(
-  record: Record<string, unknown>,
-  message: Record<string, unknown>,
-): boolean {
-  return (
-    record.status === "error" ||
-    record.stopReason === "error" ||
-    message.status === "error" ||
-    message.stopReason === "error" ||
-    message.reason === "error" ||
-    typeof message.errorMessage === "string" ||
-    message.error !== undefined
-  );
 }
 
 function ingestRecord(
   parsed: ParsedSessionFile,
   record: Record<string, unknown>,
 ): void {
-  const timestamp = parseTimestamp(record.timestamp);
+  const timestamp = parsePiMessageTimestamp(record.timestamp);
   if (timestamp !== undefined) {
     parsed.updatedAtMs = Math.max(parsed.updatedAtMs ?? 0, timestamp);
   }
@@ -806,64 +812,27 @@ function ingestRecord(
   if (!message || typeof message !== "object" || Array.isArray(message)) {
     return;
   }
-  const messageRecord = message as Record<string, unknown>;
-  const text = extractTextContent(messageRecord.content);
-  if (!text) {
-    return;
-  }
-  if (parsed.preview === undefined) {
-    parsed.preview = text;
-  }
-  if (messageRecord.role === "user" && parsed.title === undefined) {
-    parsed.title = summarize(text, 80);
-  }
-}
-
-function extractTextContent(value: unknown): string | undefined {
-  if (typeof value === "string") {
-    return value;
-  }
-  if (!Array.isArray(value)) {
-    return undefined;
-  }
-  const parts = value.flatMap((item): string[] => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
-      return [];
-    }
-    const record = item as Record<string, unknown>;
-    if (typeof record.text === "string") {
-      return [record.text];
-    }
-    return [];
+  const messageRecord = message as PiMessageLike;
+  const text = extractPiMessageText(messageRecord.content, {
+    textPartsOnly: true,
   });
-  return parts.length > 0 ? summarize(parts.join("\n"), 180) : undefined;
-}
-
-function parseTimestamp(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
+  if (text !== undefined) {
+    const preview = normalizePiMessageDisplayText(
+      text,
+      PI_MESSAGE_PREVIEW_MAX_LENGTH,
+    );
+    if (preview === undefined) delete parsed.preview;
+    else parsed.preview = preview;
   }
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-function summarize(value: string, maxLength: number): string {
-  const singleLine = value.replace(/\s+/g, " ").trim();
-  if (singleLine.length <= maxLength) {
-    return singleLine;
-  }
-  return `${singleLine.slice(0, maxLength - 1)}…`;
-}
-
-async function canonicalOrResolved(filePath: string): Promise<string> {
-  const resolved = path.resolve(filePath);
-  try {
-    return await fs.realpath(resolved);
-  } catch {
-    return resolved;
+  if (messageRecord.role === "user" && !parsed.firstUserMessageSeen) {
+    parsed.firstUserMessageSeen = true;
+    if (text !== undefined) {
+      const title = normalizePiMessageDisplayText(
+        text,
+        PI_MESSAGE_TITLE_MAX_LENGTH,
+      );
+      if (title !== undefined) parsed.title = title;
+    }
   }
 }
 

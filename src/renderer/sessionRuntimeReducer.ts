@@ -1,5 +1,16 @@
 import type { AttachmentDraft, ChatRuntimeEvent } from "../shared/types.js";
 import {
+  matchDurableInterventionMessages,
+  reconcileInterventionQueueEvidence,
+  type DurableUserMessageEvidence,
+  type InterventionTimelineItem,
+} from "./interventions.js";
+import {
+  projectDelegatedStatus,
+  projectDelegatedToolStatus,
+  type DelegatedStatusProjection,
+} from "./delegatedStatus.js";
+import {
   classifyOpenAiCodexAuthFailure,
   isSuccessfulOpenAiCodexTerminalCompletion,
   isSuccessfulTerminalAssistantCompletion,
@@ -14,10 +25,22 @@ import {
   getThinkingUpdateContent,
 } from "./runtimeMessageProjection.js";
 import {
+  hasAgentEndAbortEvidence,
   isToolExecutionFailure,
   type BaseSessionState,
   type SessionOverlays,
 } from "./sessionState.js";
+import {
+  activeSessionLifecycle,
+  inactiveSessionLifecycle,
+  lifecycleBaseState,
+  lifecycleCompletedAtMs,
+  lifecycleSessionStatus,
+  resolveSessionLifecycle,
+  settleLifecycle,
+  transitionSessionLifecycle,
+  type SessionLifecycle,
+} from "./sessionLifecycle.js";
 import {
   extractTextContent,
   getMessageUsageFromEvent,
@@ -82,6 +105,7 @@ export type TimelineItem =
       createdAt: string;
       attachments?: TimelineAttachment[];
     }
+  | InterventionTimelineItem
   | {
       id: string;
       kind: "assistant";
@@ -111,6 +135,7 @@ export type TimelineItem =
       summary: string;
       details: string;
       detailSections?: ToolDetailSection[];
+      delegatedStatus?: DelegatedStatusProjection;
       subagentActivity?: SubagentActivity;
       createdAt: string;
     };
@@ -153,6 +178,8 @@ export interface SessionViewModel {
   authVerified?: boolean | undefined;
   archivedAtMs?: number;
   completedAtMs?: number | undefined;
+  /** Canonical turn state; presentation fields are projections of this value. */
+  lifecycle?: SessionLifecycle | undefined;
 }
 
 function timelineToolStatus(streaming: boolean): "running" | "success" {
@@ -309,12 +336,43 @@ export function reduceRuntimeEvent(
   session: SessionViewModel,
   event: ChatRuntimeEvent,
 ): SessionViewModel {
+  // Reducer callers outside App may replay a stale event directly. Runtime
+  // identity is part of the lifecycle contract, not just an App routing aid.
+  if (typeof event.runtimeId === "string" && event.runtimeId !== session.id) {
+    return session;
+  }
+
+  const currentLifecycle = resolveSessionLifecycle(session);
+  const eventTurnId = runtimeEventTurnId(event);
+  // Pi includes runId on some lifecycle events. When both sides identify a
+  // turn, reject a delayed terminal event for an older run. Production builds
+  // that omit this identifier remain inherently ambiguous; their agent_end is
+  // still accepted rather than risking a permanently active valid turn.
+  if (
+    event.type === "agent_end" &&
+    eventTurnId !== undefined &&
+    "turnId" in currentLifecycle &&
+    currentLifecycle.turnId !== undefined &&
+    currentLifecycle.turnId !== eventTurnId
+  ) {
+    return session;
+  }
+  // A replayed start for the already-settled run is not a new turn.
+  if (
+    event.type === "agent_start" &&
+    currentLifecycle.phase === "terminal" &&
+    eventTurnId !== undefined &&
+    currentLifecycle.turnId === eventTurnId
+  ) {
+    return session;
+  }
+
   // A dialog remains actionable until Pi acknowledges its response or the
   // request times out. Apply this projection after every event reduction so
   // concurrent tool/retry/terminal events cannot mask pending input.
-  return prioritizePendingExtensionUiRequest(
-    reduceRuntimeEventUnprioritized(session, event),
-  );
+  const reduced = reduceRuntimeEventUnprioritized(session, event);
+  if (reduced === session) return session;
+  return projectTerminalLifecycle(prioritizePendingExtensionUiRequest(reduced));
 }
 
 export function reduceRuntimeEventUnprioritized(
@@ -325,6 +383,7 @@ export function reduceRuntimeEventUnprioritized(
     case "agent_start":
       return {
         ...session,
+        lifecycle: activeSessionLifecycle(runtimeEventTurnId(event)),
         completedAtMs: undefined,
         awaitingAgentEnd: false,
         status: "working",
@@ -347,14 +406,18 @@ export function reduceRuntimeEventUnprioritized(
     case "tool_execution_end":
       return reduceToolExecutionEvent(session, event);
     case "queue_update": {
+      const steering = getArray(event, "steering");
+      const followUp = getArray(event, "followUp");
       const steeringCount =
-        getArray(event, "steering")?.length ??
-        getNumber(event, "steeringCount") ??
-        0;
+        steering?.length ?? getNumber(event, "steeringCount") ?? 0;
       const followUpCount =
-        getArray(event, "followUp")?.length ??
-        getNumber(event, "followUpCount") ??
-        0;
+        followUp?.length ?? getNumber(event, "followUpCount") ?? 0;
+      const steeringEvidence =
+        queueTextEvidence(steering) ??
+        (steering === undefined && steeringCount === 0 ? [] : undefined);
+      const followUpEvidence =
+        queueTextEvidence(followUp) ??
+        (followUp === undefined && followUpCount === 0 ? [] : undefined);
       return {
         ...session,
         overlays: {
@@ -362,6 +425,14 @@ export function reduceRuntimeEventUnprioritized(
           piQueuedSteeringCount: steeringCount,
           piQueuedFollowUpCount: followUpCount,
         },
+        timeline: reconcileTimelineWithQueueEvidence(session.timeline, {
+          ...(steeringEvidence === undefined
+            ? {}
+            : { steer: steeringEvidence }),
+          ...(followUpEvidence === undefined
+            ? {}
+            : { followUp: followUpEvidence }),
+        }),
         updatedAt: "Now",
         updatedAtMs: Date.now(),
       };
@@ -381,10 +452,19 @@ export function reduceRuntimeEventUnprioritized(
         updatedAtMs: Date.now(),
       };
     case "auto_retry_start":
+      // A retry-start follows agent_end({ willRetry: true }), which already
+      // leaves this lifecycle active. A delayed retry event cannot revive a
+      // terminal turn.
+      if (resolveSessionLifecycle(session).phase === "terminal") return session;
       // Pi 0.81 emits this after agent_end({ willRetry: true }). Keep the
       // runtime busy through backoff rather than exposing idle/send controls.
       return {
         ...session,
+        lifecycle: transitionSessionLifecycle(
+          resolveSessionLifecycle(session),
+          { type: "retryStarted" },
+        ),
+        completedAtMs: undefined,
         awaitingAgentEnd: false,
         status: session.status === "aborting" ? "aborting" : "working",
         baseState: "working",
@@ -400,6 +480,7 @@ export function reduceRuntimeEventUnprioritized(
         updatedAtMs: Date.now(),
       };
     case "auto_retry_end": {
+      if (resolveSessionLifecycle(session).phase === "terminal") return session;
       const retryStatus = getString(event, "status");
       // Real Pi reports success/finalError. Keep the status fallback solely
       // for older fake fixtures and manually recorded event logs.
@@ -414,8 +495,15 @@ export function reduceRuntimeEventUnprioritized(
       // does not emit another successful agent_end to repair this state.
       // Handle that terminal cancellation before generic retry failures.
       if (session.status === "aborting" && retryFailed) {
+        const lifecycle = settleLifecycle(
+          resolveSessionLifecycle(session),
+          session.failureKind === "auth-required" ? "failed" : "aborted",
+          Date.now(),
+        );
         return {
           ...session,
+          lifecycle,
+          completedAtMs: lifecycleCompletedAtMs(lifecycle),
           awaitingAgentEnd: false,
           providerErrorObserved:
             session.failureKind === "auth-required"
@@ -443,8 +531,17 @@ export function reduceRuntimeEventUnprioritized(
       }
 
       const retryError = getRuntimeEventErrorMessage(event);
+      const lifecycle = retryFailed
+        ? settleLifecycle(
+            resolveSessionLifecycle(session),
+            "failed",
+            Date.now(),
+          )
+        : activeSessionLifecycle();
       const nextSession: SessionViewModel = {
         ...session,
+        lifecycle,
+        completedAtMs: lifecycleCompletedAtMs(lifecycle),
         awaitingAgentEnd: retryFailed
           ? false
           : (session.awaitingAgentEnd ?? false),
@@ -522,7 +619,13 @@ export function reduceRuntimeEventUnprioritized(
       );
     }
     case "agent_end": {
-      const status = getString(event, "status");
+      if (session.lifecycle?.phase === "terminal") {
+        return reduceLateTerminalAgentEnd(session, event);
+      }
+      const currentTurnIsAborting =
+        resolveSessionLifecycle(session).phase === "aborting" ||
+        session.status === "aborting";
+      const aborted = hasAgentEndAbortEvidence(event, currentTurnIsAborting);
       const willRetry = getBoolean(event, "willRetry") === true;
       const errorMessage = getRuntimeEventErrorMessage(event);
       // Production Pi sends agent_end({ messages, willRetry }) without the
@@ -557,9 +660,14 @@ export function reduceRuntimeEventUnprioritized(
               [finalUsageMessageId]: finalEventUsage,
             }
           : session.usageByMessageId;
+      const timelineWithDurableInterventions =
+        reconcileTimelineWithDurableUserMessages(
+          session.timeline,
+          durableUserMessagesFromRuntimeEvent(event),
+        );
       const finalizedTimeline = finalizeUnresolvedSubagentActivities(
-        session.timeline,
-        status === "aborted" || session.status === "aborting",
+        timelineWithDurableInterventions,
+        aborted,
       );
       const completedTimeline = removeEmptyAssistantMessages(
         finalizedTimeline.map((item) =>
@@ -572,6 +680,11 @@ export function reduceRuntimeEventUnprioritized(
       if (willRetry) {
         return {
           ...session,
+          lifecycle: transitionSessionLifecycle(
+            resolveSessionLifecycle(session),
+            { type: "retryStarted" },
+          ),
+          completedAtMs: undefined,
           awaitingAgentEnd: false,
           ...(usageByMessageId !== undefined ? { usageByMessageId } : {}),
           ...(usageByMessageId !== undefined
@@ -601,12 +714,22 @@ export function reduceRuntimeEventUnprioritized(
         };
       }
 
+      const settledAtMs = Date.now();
+      const lifecycle = settleLifecycle(
+        session.lifecycle ?? activeSessionLifecycle(runtimeEventTurnId(event)),
+        endedWithError || authStillPending
+          ? "failed"
+          : aborted
+            ? "aborted"
+            : "completed",
+        settledAtMs,
+        runtimeEventTurnId(event),
+      );
       const nextSession: SessionViewModel = {
         ...session,
-        // A live authoritative, non-error terminal event supersedes any
-        // reconstructed durable completion timestamp for this session.
-        completedAtMs:
-          endedWithError || authStillPending ? undefined : Date.now(),
+        lifecycle,
+        // Keep the durable compatibility field projected from lifecycle.
+        completedAtMs: lifecycleCompletedAtMs(lifecycle),
         awaitingAgentEnd: false,
         ...(usageByMessageId !== undefined ? { usageByMessageId } : {}),
         ...(usageByMessageId !== undefined
@@ -658,14 +781,14 @@ export function reduceRuntimeEventUnprioritized(
             ? "Error · backend stream failed"
             : authStillPending
               ? "Error · OpenAI authentication verification pending"
-              : status === "aborted"
+              : aborted
                 ? "Idle · backend stream aborted"
                 : "Idle · backend stream complete",
         workingStartedAtMs: undefined,
         retryPrompt: endedWithError ? session.retryPrompt : undefined,
         lastRuntimeEventLabel: endedWithError
           ? "Pi reported an error"
-          : status === "aborted"
+          : aborted
             ? "Pi aborted the turn"
             : "Pi completed the turn",
         updatedAt: "Now",
@@ -741,8 +864,20 @@ export function reduceRuntimeEventUnprioritized(
         timeline: finalizeUnresolvedSubagentActivities(session.timeline, true),
       });
       if (intentional && session.sessionFile !== undefined) {
+        const lifecycle =
+          resolveSessionLifecycle(detachedSession).phase === "terminal"
+            ? resolveSessionLifecycle(detachedSession)
+            : detachedSession.failureKind === "auth-required"
+              ? settleLifecycle(
+                  resolveSessionLifecycle(detachedSession),
+                  "failed",
+                  Date.now(),
+                )
+              : inactiveSessionLifecycle;
         return {
           ...detachedSession,
+          lifecycle,
+          completedAtMs: lifecycleCompletedAtMs(lifecycle),
           status:
             detachedSession.failureKind === "auth-required" ? "error" : "idle",
           baseState:
@@ -762,9 +897,16 @@ export function reduceRuntimeEventUnprioritized(
       if (!session.runtimeBacked && session.resumeBacked === true) {
         return detachedSession;
       }
+      const lifecycle = settleLifecycle(
+        resolveSessionLifecycle(detachedSession),
+        "failed",
+        Date.now(),
+      );
       return appendDiagnostic(
         {
           ...detachedSession,
+          lifecycle,
+          completedAtMs: undefined,
           // Main detaches response ownership on every worker exit, so clear
           // queued dialogs before the pending-input priority projection runs.
           status: "error",
@@ -786,6 +928,164 @@ export function reduceRuntimeEventUnprioritized(
     default:
       return session;
   }
+}
+
+function runtimeEventTurnId(event: ChatRuntimeEvent): string | undefined {
+  return getString(event, "runId") ?? getString(event, "turnId");
+}
+
+function reduceLateTerminalAgentEnd(
+  session: SessionViewModel,
+  event: ChatRuntimeEvent,
+): SessionViewModel {
+  const finalEventUsage = getMessageUsageFromEvent(event);
+  const finalUsageMessageId =
+    getMessageUpdateId(event) ??
+    getMostRecentAssistantMessageId(session) ??
+    runtimeEventTurnId(event) ??
+    "agent-end";
+  const usageByMessageId =
+    finalEventUsage === undefined
+      ? session.usageByMessageId
+      : {
+          ...(session.usageByMessageId ?? {}),
+          [finalUsageMessageId]: finalEventUsage,
+        };
+  const timeline = removeEmptyAssistantMessages(
+    reconcileTimelineWithDurableUserMessages(
+      session.timeline,
+      durableUserMessagesFromRuntimeEvent(event),
+    ),
+  );
+  if (
+    usageByMessageId === session.usageByMessageId &&
+    timeline === session.timeline
+  ) {
+    return session;
+  }
+  return {
+    ...session,
+    ...(usageByMessageId === undefined
+      ? {}
+      : {
+          usageByMessageId,
+          usageStats: summarizeUsageByMessage(
+            usageByMessageId,
+            session.usageStats?.contextWindowTokens,
+          ),
+        }),
+    timeline,
+    updatedAt: "Now",
+    updatedAtMs: Date.now(),
+  };
+}
+
+function projectTerminalLifecycle(session: SessionViewModel): SessionViewModel {
+  if (session.lifecycle?.phase !== "terminal") return session;
+
+  const lifecycle = session.lifecycle;
+  const timeline = settleTerminalTimeline(session.timeline, lifecycle.outcome);
+  if ((session.pendingExtensionUiRequests?.length ?? 0) > 0) {
+    return timeline === session.timeline ? session : { ...session, timeline };
+  }
+  const status = lifecycleSessionStatus(lifecycle, false);
+  const baseState = lifecycleBaseState(lifecycle, false);
+  const completedAtMs = lifecycleCompletedAtMs(lifecycle);
+  const subtitle =
+    lifecycle.outcome === "failed"
+      ? session.failureKind === "auth-required"
+        ? "Error · OpenAI authentication verification pending"
+        : "Error · backend stream failed"
+      : lifecycle.outcome === "aborted"
+        ? "Idle · backend stream aborted"
+        : "Idle · backend stream complete";
+  if (
+    session.status === status &&
+    session.baseState === baseState &&
+    session.completedAtMs === completedAtMs &&
+    session.awaitingAgentEnd === false &&
+    session.workingStartedAtMs === undefined &&
+    session.subtitle === subtitle &&
+    !session.overlays.streaming &&
+    !session.overlays.toolRunning &&
+    !session.overlays.compacting &&
+    !session.overlays.retrying &&
+    !session.overlays.needsUserInput &&
+    timeline === session.timeline
+  ) {
+    return session;
+  }
+  return {
+    ...session,
+    status,
+    baseState,
+    completedAtMs,
+    awaitingAgentEnd: false,
+    workingStartedAtMs: undefined,
+    overlays: {
+      ...session.overlays,
+      streaming: false,
+      toolRunning: false,
+      compacting: false,
+      retrying: false,
+      needsUserInput: false,
+    },
+    subtitle,
+    timeline,
+  };
+}
+
+function settleTerminalTimeline(
+  timeline: TimelineItem[],
+  outcome: "completed" | "failed" | "aborted",
+): TimelineItem[] {
+  let changed = false;
+  const settled = timeline.map((item): TimelineItem => {
+    if (
+      (item.kind === "assistant" || item.kind === "thinking") &&
+      item.streaming === true
+    ) {
+      changed = true;
+      return { ...item, streaming: false };
+    }
+    if (item.kind === "tool" && item.status === "running") {
+      changed = true;
+      const delegatedStatus =
+        item.delegatedStatus === undefined
+          ? undefined
+          : projectDelegatedStatus({
+              parentState:
+                outcome === "completed"
+                  ? "completed"
+                  : outcome === "aborted"
+                    ? "cancelled"
+                    : "failed",
+              ...(item.delegatedStatus.parentPhase === undefined
+                ? {}
+                : { parentPhase: item.delegatedStatus.parentPhase }),
+              children: {
+                ...item.delegatedStatus.children,
+                queued: 0,
+                running: 0,
+                waiting: 0,
+                finished:
+                  item.delegatedStatus.children.finished +
+                  item.delegatedStatus.children.queued +
+                  item.delegatedStatus.children.running +
+                  item.delegatedStatus.children.waiting,
+              },
+            });
+      return {
+        ...item,
+        // A late start/update still contributes useful details, but a settled
+        // turn must never display a live tool or delegated-parent indicator.
+        status: "collapsed",
+        ...(delegatedStatus === undefined ? {} : { delegatedStatus }),
+      };
+    }
+    return item;
+  });
+  return changed ? settled : timeline;
 }
 
 function clearPendingExtensionUiRequests(
@@ -871,9 +1171,14 @@ function reduceExtensionUiRequestEvent(
   )
     ? pending.map((item) => (item.id === request.id ? request : item))
     : [...pending, request];
+  const currentLifecycle = resolveSessionLifecycle(session);
 
   return {
     ...session,
+    lifecycle:
+      currentLifecycle.phase === "terminal"
+        ? currentLifecycle
+        : activeSessionLifecycle(),
     status: "waiting",
     baseState: "waitingForInput",
     overlays: { ...session.overlays, needsUserInput: true },
@@ -889,31 +1194,39 @@ function clearExtensionUiRequest(
   requestId: string | undefined,
 ): SessionViewModel {
   const pending = session.pendingExtensionUiRequests ?? [];
-  const pendingExtensionUiRequests =
+  const matchedIndex =
     requestId === undefined
-      ? pending.slice(1)
-      : pending.filter((request) => request.id !== requestId);
+      ? pending.length > 0
+        ? 0
+        : -1
+      : pending.findIndex((request) => request.id === requestId);
+  // Unknown and duplicate acknowledgements are lifecycle no-ops. In
+  // particular, they cannot infer that an idle/terminal runtime is working.
+  if (matchedIndex < 0) return session;
+
+  const pendingExtensionUiRequests = pending.filter(
+    (_request, index) => index !== matchedIndex,
+  );
   const stillWaiting = pendingExtensionUiRequests.length > 0;
-  const terminalProviderFailure = session.providerErrorObserved === true;
+  const lifecycle = resolveSessionLifecycle(session);
+  const status = lifecycleSessionStatus(lifecycle, stillWaiting);
+  const baseState = lifecycleBaseState(lifecycle, stillWaiting);
   return {
     ...session,
-    status: stillWaiting
-      ? "waiting"
-      : terminalProviderFailure
-        ? "error"
-        : "working",
-    baseState: stillWaiting
-      ? "waitingForInput"
-      : terminalProviderFailure
-        ? "error"
-        : "working",
+    lifecycle,
+    status,
+    baseState,
     pendingExtensionUiRequests,
     overlays: { ...session.overlays, needsUserInput: stillWaiting },
     subtitle: stillWaiting
       ? "Waiting · extension input required"
-      : terminalProviderFailure
+      : lifecycle.phase === "terminal" && lifecycle.outcome === "failed"
         ? "Error · backend stream failed"
-        : `Working · ${backendLabel(session)} stream`,
+        : lifecycle.phase === "terminal"
+          ? lifecycle.outcome === "aborted"
+            ? "Idle · backend stream aborted"
+            : "Idle · backend stream complete"
+          : `Working · ${backendLabel(session)} stream`,
     updatedAt: "Now",
     updatedAtMs: Date.now(),
   };
@@ -1004,8 +1317,14 @@ function reduceToolExecutionEvent(
     // including a stale end, cannot resurrect it or overwrite known outcomes.
     return session;
   }
+  const projectedEvent =
+    existingTool !== undefined &&
+    getString(event, "toolName") === undefined &&
+    getString(event, "name") === undefined
+      ? ({ ...event, toolName: existingTool.title } as ChatRuntimeEvent)
+      : event;
   const eventToolItem = toolTimelineItemFromRuntimeEvent(
-    event,
+    projectedEvent,
     status,
     existingTool,
   );
@@ -1069,7 +1388,31 @@ export function toolTimelineItemFromRuntimeEvent(
   const command = getCommandFromToolArgs(args) ?? getString(event, "command");
   const path = getStringFromRecord(args, "path");
   const summary = command ?? path ?? title;
-  const detailSections = toolDetailSectionsFromRuntimeEvent(event, title, args);
+  const delegatedStatus = projectDelegatedToolStatus({
+    ...(event as Record<string, unknown>),
+    toolName: title,
+  });
+  const rawDetailSections = toolDetailSectionsFromRuntimeEvent(
+    event,
+    title,
+    args,
+  );
+  const detailSections =
+    delegatedStatus === undefined
+      ? rawDetailSections
+      : rawDetailSections.map((section) =>
+          section.title === "Output" &&
+          /^Parallel:\s*\d+\s*\/\s*\d+\s*(?:done|finished),\s*\d+\s*running/i.test(
+            section.content.trim(),
+          )
+            ? {
+                ...section,
+                content: [delegatedStatus.label, delegatedStatus.detail]
+                  .filter((value): value is string => value !== undefined)
+                  .join("\n"),
+              }
+            : section,
+        );
   const details = safeToolDetails(
     detailSections.length > 0
       ? detailSectionsToText(detailSections)
@@ -1097,10 +1440,17 @@ export function toolTimelineItemFromRuntimeEvent(
     id,
     kind: "tool",
     title,
-    status,
-    summary,
+    // Delegated cancellation is never a successful tool result. Keep this
+    // projection guard even though the generic parser handles known statuses,
+    // because nested delegated child evidence can also mark the parent.
+    status:
+      status === "success" && delegatedStatus?.tone === "error"
+        ? "error"
+        : status,
+    summary: delegatedStatus?.detail ?? summary,
     details,
     ...(detailSections.length > 0 ? { detailSections } : {}),
+    ...(delegatedStatus !== undefined ? { delegatedStatus } : {}),
     ...(subagentActivity === undefined ? {} : { subagentActivity }),
     createdAt: formatTime(),
   };
@@ -1144,6 +1494,10 @@ function mergeToolTimelineItemDetails(
     ...next,
     summary,
     createdAt: existing.createdAt,
+    ...(next.delegatedStatus === undefined &&
+    existing.delegatedStatus !== undefined
+      ? { delegatedStatus: existing.delegatedStatus }
+      : {}),
     ...(detailSections.length > 0
       ? {
           detailSections,
@@ -1364,6 +1718,20 @@ function reduceMessageUpdate(
   session: SessionViewModel,
   event: ChatRuntimeEvent,
 ): SessionViewModel {
+  const role = getMessageUpdateRole(event);
+  if (role === "user") {
+    const durableUser = durableUserMessageFromRuntimeEvent(event);
+    if (durableUser === undefined) return session;
+    return {
+      ...session,
+      timeline: reconcileTimelineWithDurableUserMessages(session.timeline, [
+        durableUser,
+      ]),
+      updatedAt: "Now",
+      updatedAtMs: Date.now(),
+    };
+  }
+
   const messageId =
     getMessageUpdateId(event) ??
     getActiveAssistantMessageId(session) ??
@@ -1375,7 +1743,6 @@ function reduceMessageUpdate(
   const textUpdate = getMessageTextUpdate(event);
   const content = textUpdate?.content ?? "";
   const thinking = getThinkingUpdateContent(event);
-  const role = getMessageUpdateRole(event);
   const existingAssistantContent = getAssistantContent(
     session.timeline,
     messageId,
@@ -1438,8 +1805,28 @@ function reduceMessageUpdate(
   // the provider error update that precedes a production agent_end.
   const stillWaitingForInput =
     (session.pendingExtensionUiRequests?.length ?? 0) > 0;
+  const currentLifecycle = resolveSessionLifecycle(session);
+  // Runtime delivery can lag behind agent_end. Keep late content and usage,
+  // but never turn it back into a stream or let a late error rewrite the
+  // already-settled outcome.
+  if (currentLifecycle.phase === "terminal") {
+    return {
+      ...session,
+      ...(usageByMessageId !== undefined ? { usageByMessageId } : {}),
+      ...(usageStats !== undefined ? { usageStats } : {}),
+      lastRuntimeEventLabel: "Retained a late Pi message after turn completion",
+      updatedAt: "Now",
+      updatedAtMs: Date.now(),
+      timeline: settleTerminalTimeline(timeline, currentLifecycle.outcome),
+    };
+  }
+  const lifecycle = isErrorUpdate
+    ? settleLifecycle(currentLifecycle, "failed", Date.now())
+    : activeSessionLifecycle();
   const nextSession: SessionViewModel = {
     ...session,
+    lifecycle,
+    completedAtMs: lifecycleCompletedAtMs(lifecycle),
     ...(usageByMessageId !== undefined ? { usageByMessageId } : {}),
     ...(usageStats !== undefined ? { usageStats } : {}),
     providerErrorObserved:
@@ -1506,6 +1893,91 @@ function removeEmptyAssistantMessages(items: TimelineItem[]): TimelineItem[] {
   return items.filter(
     (item) => item.kind !== "assistant" || item.content.trim().length > 0,
   );
+}
+
+function reconcileTimelineWithQueueEvidence(
+  timeline: readonly TimelineItem[],
+  queues: Partial<Record<"steer" | "followUp", readonly string[]>>,
+): TimelineItem[] {
+  const interventions = timeline.filter(
+    (item): item is InterventionTimelineItem => item.kind === "intervention",
+  );
+  const reconciled = reconcileInterventionQueueEvidence(interventions, queues);
+  const byId = new Map(reconciled.map((item) => [item.id, item] as const));
+  return timeline.map((item) =>
+    item.kind === "intervention" ? (byId.get(item.id) ?? item) : item,
+  );
+}
+
+export function reconcileTimelineWithDurableUserMessages(
+  timeline: readonly TimelineItem[],
+  durableUsers: readonly DurableUserMessageEvidence[],
+): TimelineItem[] {
+  if (durableUsers.length === 0) return [...timeline];
+  const localTimeline = timeline.flatMap((item) =>
+    item.kind === "user" || item.kind === "intervention" ? [item] : [],
+  );
+  const matched = matchDurableInterventionMessages({
+    localTimeline,
+    durableUsers,
+  });
+  const interventionById = new Map(
+    matched.interventions.map((item) => [item.id, item] as const),
+  );
+  return [
+    ...timeline.map((item) =>
+      item.kind === "intervention"
+        ? (interventionById.get(item.id) ?? item)
+        : item,
+    ),
+    ...matched.unmatchedDurableMessages.map(
+      (message): TimelineItem => ({
+        id: message.id,
+        kind: "user",
+        content: message.content,
+        createdAt: message.createdAt,
+        ...(message.attachments === undefined
+          ? {}
+          : { attachments: message.attachments }),
+      }),
+    ),
+  ];
+}
+
+function durableUserMessageFromRuntimeEvent(
+  event: ChatRuntimeEvent,
+): DurableUserMessageEvidence | undefined {
+  const id = getMessageUpdateId(event);
+  const content = getMessageTextUpdate(event)?.content;
+  if (id === undefined || content === undefined) return undefined;
+  return { id, content, createdAt: formatTime() };
+}
+
+function durableUserMessagesFromRuntimeEvent(
+  event: ChatRuntimeEvent,
+): DurableUserMessageEvidence[] {
+  const messages = getArray(event, "messages");
+  if (messages === undefined) return [];
+  return messages.flatMap((message): DurableUserMessageEvidence[] => {
+    const record = recordFromUnknown(message);
+    const id = getStringFromRecord(record, "id");
+    if (record === undefined || id === undefined || record.role !== "user") {
+      return [];
+    }
+    const content = extractTextContent(record.content);
+    if (content === undefined) return [];
+    const createdAt = firstNumber(
+      getNumberFromRecord(record, "createdAt"),
+      getNumberFromRecord(record, "timestamp"),
+    );
+    return [
+      {
+        id,
+        content: stripInternalSynthesisDeliveryMarker(content),
+        createdAt: formatMessageTime(createdAt),
+      },
+    ];
+  });
 }
 
 function getActiveAssistantMessageId(
@@ -1890,6 +2362,29 @@ function firstNumber(...values: Array<number | undefined>): number | undefined {
 function getArray(event: ChatRuntimeEvent, key: string): unknown[] | undefined {
   const value = getUnknown(event, key);
   return Array.isArray(value) ? value : undefined;
+}
+
+function queueTextEvidence(
+  values: unknown[] | undefined,
+): string[] | undefined {
+  if (values === undefined) return undefined;
+  const result: string[] = [];
+  for (const value of values) {
+    if (typeof value === "string") {
+      result.push(value);
+      continue;
+    }
+    const record = recordFromUnknown(value);
+    const text = firstString(
+      getStringFromRecord(record, "message"),
+      getStringFromRecord(record, "text"),
+    );
+    // An unfamiliar queue payload is count evidence only. Do not use a
+    // partial projection to change any instruction's lifecycle state.
+    if (text === undefined) return undefined;
+    result.push(text);
+  }
+  return result;
 }
 
 function getNumber(event: ChatRuntimeEvent, key: string): number | undefined {

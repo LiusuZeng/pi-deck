@@ -32,6 +32,7 @@ type PromptScenario =
   | "compaction"
   | "retry"
   | "extension-ui"
+  | "extension-ui-terminal"
   | "error"
   | "delegate"
   | "routing"
@@ -57,18 +58,29 @@ interface FakeOptions {
   /** Shared marker makes fake auth expiry deterministic and recoverable. */
   openAiCodexAuthExpiredOnceFile?: string;
   dropCompletionEvents: boolean;
+  /** Emit final message_update but omit agent_end for reconciliation E2E. */
+  dropAgentEnd: boolean;
   extensionUiMethod: "select" | "confirm" | "input" | "editor";
   extensionUiAutoCompleteTimeoutMs: number;
   extraModel: boolean;
   collidingModels: boolean;
   productionShaped: boolean;
   includeUsage: boolean;
+  /** Return provider-native mixed content and message-level timestamps. */
+  structuredMessages: boolean;
   noSession: boolean;
   failTaskPromptRecordWhileActive: boolean;
   /** Signal after a prompt user turn is durable but before its RPC response. */
   promptReceiptSignalFile?: string;
   /** Signal/exit after a queued follow-up becomes a durable user turn. */
   followUpReceiptSignalFile?: string;
+  /** Test-only delay before a steering item becomes durable history. */
+  consumeSteeringAfterMs: number;
+  /**
+   * Queue removal is followed by an intentionally stale get_messages result;
+   * only the terminal refresh can observe the persisted id-less user turn.
+   */
+  interventionSnapshotRace: boolean;
   exitAfterFollowUpReceipt: boolean;
   /** Model an already-active parent when this test barrier file exists. */
   activeOnStartMs: number;
@@ -77,6 +89,8 @@ interface FakeOptions {
   clearActiveOnStartEnabledFileAfterFollowUpReceipt: boolean;
   /** Emits spaced, payload-free worker progress for Electron telemetry E2E. */
   taskSessionProgressFixture: boolean;
+  /** Emits structured subagent phases for delegated-status renderer E2E. */
+  delegatedStatusFixture: boolean;
   /** Marker files release extension-shaped subagent updates without time races. */
   subagentActivityBarrierDir?: string;
   sessionFile?: string;
@@ -133,6 +147,10 @@ interface FakeOptions {
    * planning, while this process remains a real Pi RPC transport.
    */
   taskRoutingFixture?: string;
+  /** Append each gated private routing worker's session path on prompt start. */
+  taskRoutingStartedFile?: string;
+  /** Hold gated private routing workers until this shared release file exists. */
+  taskRoutingReleaseFile?: string;
   fixtureTraceFile?: string;
 }
 
@@ -157,18 +175,23 @@ function parseOptions(argv: string[]): FakeOptions {
     promptScenario: "basic",
     openAiCodexAuthExpired: false,
     dropCompletionEvents: false,
+    dropAgentEnd: false,
     extensionUiMethod: "confirm",
     extensionUiAutoCompleteTimeoutMs: 5_000,
     extraModel: false,
     collidingModels: false,
     productionShaped: false,
     includeUsage: false,
+    structuredMessages: false,
     noSession: false,
     failTaskPromptRecordWhileActive: false,
+    consumeSteeringAfterMs: 0,
+    interventionSnapshotRace: false,
     exitAfterFollowUpReceipt: false,
     activeOnStartMs: 0,
     clearActiveOnStartEnabledFileAfterFollowUpReceipt: false,
     taskSessionProgressFixture: false,
+    delegatedStatusFixture: false,
     forkOmitsParentSession: false,
     forkGetStateDelayMs: 0,
     getStateDelayMs: 0,
@@ -220,6 +243,8 @@ function parseOptions(argv: string[]): FakeOptions {
       index += 1;
     } else if (arg === "--drop-completion-events") {
       options.dropCompletionEvents = true;
+    } else if (arg === "--drop-agent-end") {
+      options.dropAgentEnd = true;
     } else if (arg === "--extension-ui-method") {
       const method = argv[index + 1];
       if (
@@ -249,6 +274,8 @@ function parseOptions(argv: string[]): FakeOptions {
       options.productionShaped = true;
     } else if (arg === "--include-usage") {
       options.includeUsage = true;
+    } else if (arg === "--structured-messages") {
+      options.structuredMessages = true;
     } else if (arg === "--no-session") {
       options.noSession = true;
     } else if (arg === "--fail-task-prompt-record-while-active") {
@@ -261,6 +288,18 @@ function parseOptions(argv: string[]): FakeOptions {
       const file = argv[index + 1];
       if (file) options.followUpReceiptSignalFile = file;
       index += 1;
+    } else if (arg === "--consume-steering-after-ms") {
+      const delay = Number(argv[index + 1]);
+      if (
+        Number.isSafeInteger(delay) &&
+        delay >= 0 &&
+        delay <= MAX_NODE_TIMEOUT_MS
+      ) {
+        options.consumeSteeringAfterMs = delay;
+      }
+      index += 1;
+    } else if (arg === "--intervention-snapshot-race") {
+      options.interventionSnapshotRace = true;
     } else if (arg === "--exit-after-follow-up-receipt") {
       options.exitAfterFollowUpReceipt = true;
     } else if (arg === "--active-on-start-ms") {
@@ -282,6 +321,8 @@ function parseOptions(argv: string[]): FakeOptions {
       options.clearActiveOnStartEnabledFileAfterFollowUpReceipt = true;
     } else if (arg === "--task-session-progress-fixture") {
       options.taskSessionProgressFixture = true;
+    } else if (arg === "--delegated-status-fixture") {
+      options.delegatedStatusFixture = true;
     } else if (arg === "--subagent-activity-barrier-dir") {
       const directory = argv[index + 1];
       if (directory) options.subagentActivityBarrierDir = directory;
@@ -412,6 +453,14 @@ function parseOptions(argv: string[]): FakeOptions {
       const fixture = argv[index + 1];
       if (fixture) options.taskRoutingFixture = fixture;
       index += 1;
+    } else if (arg === "--task-routing-started-file") {
+      const startedFile = argv[index + 1];
+      if (startedFile) options.taskRoutingStartedFile = startedFile;
+      index += 1;
+    } else if (arg === "--task-routing-release-file") {
+      const releaseFile = argv[index + 1];
+      if (releaseFile) options.taskRoutingReleaseFile = releaseFile;
+      index += 1;
     } else if (arg === "--fixture-trace-file") {
       const traceFile = argv[index + 1];
       if (traceFile) options.fixtureTraceFile = traceFile;
@@ -435,6 +484,7 @@ function isPromptScenario(value: string): value is PromptScenario {
     "compaction",
     "retry",
     "extension-ui",
+    "extension-ui-terminal",
     "error",
     "delegate",
     "routing",
@@ -490,6 +540,7 @@ class FakeRpcServer {
   private buffer = "";
   private firstCommandSeen = false;
   private promptCounter = 0;
+  private steeringReceiptCounter = 0;
   private workflowDecisionIndex = 0;
   private currentTimers: NodeJS.Timeout[] = [];
   private forkStateBarrierStarted = false;
@@ -516,6 +567,12 @@ class FakeRpcServer {
     | undefined;
   private readonly steering: string[] = [];
   private readonly followUp: string[] = [];
+  private interventionSnapshotRaceStage:
+    | "awaiting-queued-snapshot"
+    | "awaiting-removed-snapshot"
+    | "complete"
+    | undefined;
+  private interventionSnapshotRaceText: string | undefined;
 
   private traceFixture(event: string): void {
     const traceFile = this.options.fixtureTraceFile;
@@ -847,11 +904,13 @@ class FakeRpcServer {
         this.sessionFile,
         `${JSON.stringify({
           type: "message",
-          id: `record_${message.id}`,
+          id: `record_${message.id ?? `${message.role}_${this.messages.length}`}`,
           timestamp: new Date(
             typeof message.createdAt === "number"
               ? message.createdAt
-              : Date.now(),
+              : typeof message.timestamp === "number"
+                ? message.timestamp
+                : Date.now(),
           ).toISOString(),
           message,
         })}\n`,
@@ -991,8 +1050,15 @@ class FakeRpcServer {
           this.holdForkMessagesAtBarrier(command.id, name);
           break;
         }
-        const respond = () =>
-          this.respond(command.id, name, { messages: this.messages });
+        // Capture history before crossing the test barrier. The intervention
+        // race fixture mutates durable history immediately after writing this
+        // response, matching a get_messages read that began before Pi's async
+        // message_start persistence finished.
+        const messages = [...this.messages];
+        const respond = () => {
+          this.respond(command.id, name, { messages });
+          this.advanceInterventionSnapshotRaceAfterSnapshot();
+        };
         const delay =
           forkGetMessages && this.options.forkGetMessagesDelayMs > 0
             ? this.options.forkGetMessagesDelayMs
@@ -1147,7 +1213,14 @@ class FakeRpcServer {
         : "fake-session-1",
       sessionFile: this.sessionFile,
       cwd: this.options.getStateCwd ?? process.cwd(),
-      model: this.currentModel,
+      model: this.options.productionShaped
+        ? {
+            id: this.currentModel,
+            name: this.modelDisplayName(this.currentModel),
+            provider: this.currentProvider,
+            contextWindow: 128000,
+          }
+        : this.currentModel,
       provider: this.currentProvider,
       thinkingLevel: this.currentThinkingLevel,
       isStreaming: this.agentActive,
@@ -1236,10 +1309,16 @@ class FakeRpcServer {
       this.traceFixture("task_session_prompt_record_rejected_while_active");
       return;
     }
+    const userText = recordedTaskPrompt ?? text;
     const userMessage: PiMessage = {
       id: `msg_user_${this.promptCounter + 1}`,
       role: "user",
-      content: recordedTaskPrompt ?? text,
+      content: this.options.structuredMessages
+        ? [
+            { type: "text", text: userText },
+            { type: "fixture-metadata", value: "preserve" },
+          ]
+        : userText,
       createdAt: Date.now(),
     };
     this.messages.push(userMessage);
@@ -1346,6 +1425,7 @@ class FakeRpcServer {
 
     const isExtensionUiScenario =
       this.options.promptScenario === "extension-ui" ||
+      this.options.promptScenario === "extension-ui-terminal" ||
       this.options.promptScenario === "tool-error-extension-ui" ||
       this.options.promptScenario === "extension-ui-error" ||
       this.options.promptScenario === "all";
@@ -1403,16 +1483,102 @@ class FakeRpcServer {
     }
     if (isExtensionUiScenario) {
       const id = "ext_fake_dialog_1";
+      const terminalBeforeResponse =
+        this.options.promptScenario === "extension-ui-terminal";
       const timer = setTimeout(() => {
         if (this.pendingExtensionUi?.id === id) {
           this.pendingExtensionUi = undefined;
-          this.completePrompt(assistantId, text);
+          if (!terminalBeforeResponse) this.completePrompt(assistantId, text);
         }
       }, this.options.extensionUiAutoCompleteTimeoutMs);
       this.pendingExtensionUi = { id, assistantId, promptText: text, timer };
+      if (terminalBeforeResponse) {
+        this.currentTimers.push(
+          setTimeout(
+            () => {
+              const assistantMessage: PiMessage = {
+                id: assistantId,
+                role: "assistant",
+                content: "Completed before extension acknowledgement.",
+                provider: this.currentProvider,
+                model: this.currentModel,
+                stopReason: "stop",
+                createdAt: Date.now(),
+              };
+              this.messages.push(assistantMessage);
+              this.appendPersistedMessage(assistantMessage);
+              this.agentActive = false;
+              this.write({
+                type: "message_update",
+                messageId: assistantId,
+                role: "assistant",
+                content: "Completed before extension acknowledgement.",
+                done: true,
+              });
+              this.write({
+                type: "agent_end",
+                runId: `run_${this.promptCounter}`,
+                status: "completed",
+                messages: [assistantMessage as unknown as JsonObject],
+                willRetry: false,
+              });
+              this.write({ type: "agent_settled" });
+            },
+            Math.max(1, this.options.streamDelayMs),
+          ),
+        );
+      }
       return;
     }
+    // This fixture's progress is driven entirely by get_messages requests:
+    // no timer can accidentally make the parent terminal before the explicit
+    // pre-persistence snapshot barrier has been crossed.
+    if (this.options.interventionSnapshotRace) return;
+    if (
+      this.gateTaskRoutingCompletion(text, () =>
+        this.completePrompt(assistantId, text, promptScenarioDelayMs),
+      )
+    )
+      return;
     this.completePrompt(assistantId, text, promptScenarioDelayMs);
+  }
+
+  private gateTaskRoutingCompletion(
+    text: string,
+    complete: () => void,
+  ): boolean {
+    const startedFile = this.options.taskRoutingStartedFile;
+    const releaseFile = this.options.taskRoutingReleaseFile;
+    if (
+      this.options.promptScenario !== "routing" ||
+      !startedFile ||
+      !releaseFile ||
+      !/^Parent context:\n[\s\S]+\n\nOriginal request:\n[\s\S]+\n\nAssigned task:\n/.test(
+        text,
+      )
+    )
+      return false;
+
+    // Each private process appends once only after it has accepted the prompt
+    // and emitted agent_start. The E2E can therefore observe the scheduler's
+    // complete first wave without relying on how quickly fake streams finish.
+    fs.mkdirSync(path.dirname(startedFile), { recursive: true });
+    fs.appendFileSync(startedFile, `${this.sessionFile}\n`);
+    if (fs.existsSync(releaseFile)) {
+      complete();
+      return true;
+    }
+
+    const releasePoll = setInterval(() => {
+      if (!fs.existsSync(releaseFile)) return;
+      clearInterval(releasePoll);
+      this.currentTimers = this.currentTimers.filter(
+        (timer) => timer !== releasePoll,
+      );
+      complete();
+    }, 5);
+    this.currentTimers.push(releasePoll);
+    return true;
   }
 
   private shouldEmitOpenAiCodexAuthExpiry(): boolean {
@@ -1535,10 +1701,17 @@ class FakeRpcServer {
       setTimeout(
         () => {
           this.agentActive = false;
+          const completedAt = Date.now();
           const assistantMessage: PiMessage = {
             id: assistantId,
             role: "assistant",
-            content: accumulated,
+            content: this.options.structuredMessages
+              ? [
+                  { type: "thinking", text: "fixture reasoning is not copy" },
+                  { type: "text", text: accumulated },
+                  { type: "fixture-metadata", value: "preserve" },
+                ]
+              : accumulated,
             // Provider attribution is required to verify an OpenAI Codex
             // credential repair; another provider's success must not clear it.
             provider: this.currentProvider,
@@ -1546,7 +1719,9 @@ class FakeRpcServer {
             // Persist Pi's authoritative terminal result so snapshot recovery
             // cannot mistake this completed turn for a streamed partial.
             stopReason: "stop",
-            createdAt: Date.now(),
+            ...(this.options.structuredMessages
+              ? { timestamp: completedAt }
+              : { createdAt: completedAt }),
             ...(this.options.includeUsage
               ? {
                   usage: {
@@ -1570,17 +1745,19 @@ class FakeRpcServer {
               content: accumulated,
               done: true,
             });
-            this.write({
-              type: "agent_end",
-              runId: `run_${this.promptCounter}`,
-              status: "completed",
-              ...(this.options.productionShaped
-                ? {
-                    messages: [assistantMessage as unknown as JsonObject],
-                    willRetry: false,
-                  }
-                : {}),
-            });
+            if (!this.options.dropAgentEnd) {
+              this.write({
+                type: "agent_end",
+                runId: `run_${this.promptCounter}`,
+                status: "completed",
+                ...(this.options.productionShaped
+                  ? {
+                      messages: [assistantMessage as unknown as JsonObject],
+                      willRetry: false,
+                    }
+                  : {}),
+              });
+            }
             // Pi consumes queued follow-ups as new user turns only after the
             // active turn ends. Persist that turn before the next settlement so
             // history probes exercise the real receipt boundary.
@@ -1636,7 +1813,132 @@ class FakeRpcServer {
       scenario === "all" ||
       (scenario === "tool-error-extension-ui" &&
         (target === "tool-error" || target === "extension-ui")) ||
-      (scenario === "extension-ui-error" && target === "extension-ui");
+      ((scenario === "extension-ui-error" ||
+        scenario === "extension-ui-terminal") &&
+        target === "extension-ui");
+
+    if (this.options.delegatedStatusFixture) {
+      const delayMs = Math.max(1, this.options.streamDelayMs);
+      const results = (states: string[]) =>
+        states.map((status, index) => ({
+          agent: `fixture-${index + 1}`,
+          status,
+        }));
+      const update = (
+        toolCallId: string,
+        parentPhase: string,
+        states: string[],
+      ): JsonObject => ({
+        type: "tool_execution_update",
+        toolCallId,
+        toolName: "subagent",
+        partialResult: {
+          content: [
+            {
+              type: "text",
+              text: `Delegated fixture phase: ${parentPhase}`,
+            },
+          ],
+          details: {
+            mode: "parallel",
+            parentPhase,
+            results: results(states),
+          },
+        },
+      });
+      this.currentTimers.push(
+        setTimeout(() => {
+          this.write({
+            type: "tool_execution_start",
+            toolCallId: "delegated_status_primary",
+            toolName: "subagent",
+            args: { tasks: [{}, {}, {}] },
+          });
+          this.write({
+            type: "tool_execution_start",
+            toolCallId: "delegated_status_independent",
+            toolName: "subagent",
+            args: { tasks: [{}] },
+          });
+        }, delayMs),
+        setTimeout(() => {
+          this.write(
+            update("delegated_status_primary", "running-children", [
+              "completed",
+              "running",
+              "running",
+            ]),
+          );
+          this.write(
+            update("delegated_status_independent", "running-children", [
+              "running",
+            ]),
+          );
+        }, delayMs * 2),
+        setTimeout(
+          () =>
+            this.write(
+              update("delegated_status_primary", "processing", [
+                "completed",
+                "completed",
+                "failed",
+              ]),
+            ),
+          delayMs * 3,
+        ),
+        setTimeout(
+          () =>
+            this.write(
+              update("delegated_status_primary", "synthesizing", [
+                "completed",
+                "completed",
+                "failed",
+              ]),
+            ),
+          delayMs * 4,
+        ),
+        setTimeout(
+          () =>
+            this.write({
+              type: "tool_execution_end",
+              toolCallId: "delegated_status_primary",
+              toolName: "subagent",
+              status: "completed",
+              result: {
+                content: [{ type: "text", text: "Primary handoff complete" }],
+                details: {
+                  mode: "parallel",
+                  parentPhase: "completed",
+                  results: results(["completed", "completed", "failed"]),
+                },
+              },
+            }),
+          delayMs * 5,
+        ),
+        setTimeout(
+          () =>
+            this.write({
+              type: "tool_execution_end",
+              toolCallId: "delegated_status_independent",
+              toolName: "subagent",
+              status: "error",
+              isError: true,
+              result: {
+                content: [
+                  { type: "text", text: "Independent delegation failed" },
+                ],
+                details: {
+                  mode: "parallel",
+                  parentPhase: "failed",
+                  results: results(["failed"]),
+                },
+              },
+            }),
+          delayMs * 6,
+        ),
+      );
+      return delayMs * 6;
+    }
 
     if (this.options.taskSessionProgressFixture) {
       const delayMs = Math.max(1, this.options.streamDelayMs);
@@ -2126,9 +2428,15 @@ class FakeRpcServer {
     }
     clearTimeout(pending.timer);
     this.pendingExtensionUi = undefined;
-    // This fixture has already emitted its terminal provider error. Accepting
-    // the late dialog response must not manufacture a successful completion.
+    // These fixtures have already emitted their terminal event. Accepting the
+    // late dialog response must not manufacture another completion. The
+    // success fixture also emits one duplicate acknowledgement so renderer
+    // idempotence is exercised through real IPC.
     if (this.options.promptScenario === "extension-ui-error") return;
+    if (this.options.promptScenario === "extension-ui-terminal") {
+      this.write({ type: "extension_ui_response_sent", requestId: id });
+      return;
+    }
     this.completePrompt(pending.assistantId, pending.promptText);
   }
 
@@ -2208,6 +2516,81 @@ class FakeRpcServer {
       this.followUp.push(message);
     }
     this.respond(command.id, kind);
+    this.emitQueueUpdate();
+    if (kind === "steer" && this.options.interventionSnapshotRace) {
+      this.interventionSnapshotRaceText = message;
+      this.interventionSnapshotRaceStage = "awaiting-queued-snapshot";
+      this.traceFixture("intervention-race:queue-added");
+      return;
+    }
+    if (kind === "steer" && this.options.consumeSteeringAfterMs > 0) {
+      this.currentTimers.push(
+        setTimeout(
+          () => this.consumeQueuedSteering(),
+          this.options.consumeSteeringAfterMs,
+        ),
+      );
+    }
+  }
+
+  private advanceInterventionSnapshotRaceAfterSnapshot(): void {
+    if (this.interventionSnapshotRaceStage === "awaiting-queued-snapshot") {
+      this.traceFixture("intervention-race:queued-snapshot");
+      this.steering.shift();
+      this.interventionSnapshotRaceStage = "awaiting-removed-snapshot";
+      this.emitQueueUpdate();
+      this.traceFixture("intervention-race:queue-removed");
+      return;
+    }
+    if (this.interventionSnapshotRaceStage !== "awaiting-removed-snapshot") {
+      return;
+    }
+
+    this.traceFixture("intervention-race:pre-persistence-snapshot");
+    this.interventionSnapshotRaceStage = "complete";
+    const text = this.interventionSnapshotRaceText ?? "";
+    const userMessage = {
+      role: "user",
+      content: text,
+      createdAt: Date.now(),
+    } satisfies PiMessage;
+    this.messages.push(userMessage);
+    this.appendPersistedMessage(userMessage);
+    this.traceFixture("intervention-race:persisted-idless-user");
+
+    const assistantMessage: PiMessage = {
+      id: `msg_assistant_${this.promptCounter}`,
+      role: "assistant",
+      content: "Applied the steering instruction.",
+      provider: this.currentProvider,
+      model: this.currentModel,
+      stopReason: "stop",
+      createdAt: Date.now(),
+    };
+    this.messages.push(assistantMessage);
+    this.appendPersistedMessage(assistantMessage);
+    this.agentActive = false;
+    this.write({
+      type: "agent_end",
+      messages: [assistantMessage as unknown as JsonObject],
+      willRetry: false,
+    });
+    this.write({ type: "agent_settled" });
+    this.traceFixture("intervention-race:terminal");
+  }
+
+  private consumeQueuedSteering(): void {
+    const text = this.steering.shift();
+    if (text === undefined) return;
+    this.steeringReceiptCounter += 1;
+    const userMessage: PiMessage = {
+      id: `msg_user_steering_${this.steeringReceiptCounter}`,
+      role: "user",
+      content: text,
+      createdAt: Date.now(),
+    };
+    this.messages.push(userMessage);
+    this.appendPersistedMessage(userMessage);
     this.emitQueueUpdate();
   }
 

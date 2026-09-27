@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { WebPreferences } from "electron";
 
 const allowedExternalSchemes = new Set(["http:", "https:", "mailto:"]);
@@ -44,6 +45,21 @@ export function isAllowedExternalUrl(url: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Compare already-canonical filesystem identities without prefix ambiguity. */
+export function isCanonicalPathInside(
+  candidate: string,
+  root: string,
+  options: { allowRoot?: boolean } = {},
+): boolean {
+  const relative = path.relative(root, candidate);
+  if (relative === "") return options.allowRoot !== false;
+  return (
+    relative !== ".." &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
 }
 
 export function shouldAllowNavigation(
