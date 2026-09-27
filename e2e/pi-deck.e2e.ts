@@ -303,15 +303,30 @@ async function withTimelineNavigationFixture(
     await page.getByLabel("Prompt text").fill(prompt);
     await page.getByRole("button", { name: "Send" }).click();
     await expect(page.getByText(`Fake response to: ${prompt}`)).toBeVisible();
+    // Visible response text precedes the fake backend's terminal event. Wait
+    // for the idle composer so no final React commit races fixture setup.
+    await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
 
     const timeline = page.locator(".timeline-scroll");
     const activityGroup = timeline.locator(".agent-activity-group").first();
     await expect(activityGroup).toBeVisible();
-    await timeline.evaluate((element) => {
+    await timeline.evaluate(async (element) => {
       const content = element.querySelector<HTMLElement>(".timeline-content");
       if (content === null) {
         throw new Error("Missing timeline content wrapper.");
       }
+
+      // Retire the existing scroll node and build the synthetic history before
+      // Chromium creates the one that native keyboard and scrollbar input use.
+      // Growing a rendered scroll node from non-scrollable to thousands of
+      // pixels can leave native input using its pre-fixture bounds even though
+      // DOM metrics and programmatic scrolling expose the new range.
+      const previousDisplay = element.style.display;
+      element.style.display = "none";
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
+
       // Browser scroll anchoring would mask which application scroll owner won.
       element.style.overflowAnchor = "none";
       for (const row of content.querySelectorAll<HTMLElement>(
@@ -335,6 +350,13 @@ async function withTimelineNavigationFixture(
 
       content.prepend(makeRows("earlier", 14));
       content.append(makeRows("later", 18));
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
+      element.style.display = previousDisplay;
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
     });
     await expect
       .poll(() => timeline.evaluate((element) => element.scrollHeight))

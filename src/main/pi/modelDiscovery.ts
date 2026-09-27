@@ -23,7 +23,9 @@ export async function discoverPiRuntimeModels(options: {
   cwd: string;
   env: NodeJS.ProcessEnv;
   requestTimeoutMs?: number;
+  signal?: AbortSignal;
 }): Promise<ChatListModelsResult> {
+  options.signal?.throwIfAborted();
   const worker = new PiWorker({
     command: options.command,
     args: ["--mode", "rpc", ...(options.args ?? []), "--no-session"],
@@ -33,19 +35,33 @@ export async function discoverPiRuntimeModels(options: {
     commandProtocol: "type-field",
   });
 
+  let closing: Promise<void> | undefined;
+  const close = (): Promise<void> => (closing ??= worker.closeSession());
+  const onAbort = (): void => {
+    void close();
+  };
+  options.signal?.addEventListener("abort", onAbort, { once: true });
   try {
     const [state, modelsResponse, thinkingLevelsResponse] = await Promise.all([
       worker.getState(),
       worker.request("get_available_models"),
       worker.request("get_available_thinking_levels"),
     ]);
+    options.signal?.throwIfAborted();
     return parsePiRuntimeModelDiscovery(
       state,
       modelsResponse,
       thinkingLevelsResponse,
     );
   } finally {
-    await worker.closeSession();
+    // Keep ownership until OS-confirmed exit, including cancellation while an
+    // RPC request is pending. Sending SIGTERM alone is not terminal evidence.
+    try {
+      await close();
+    } finally {
+      options.signal?.removeEventListener("abort", onAbort);
+    }
+    options.signal?.throwIfAborted();
   }
 }
 
@@ -54,12 +70,14 @@ export async function discoverPiModels(options: {
   args?: string[];
   cwd: string;
   env: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
 }): Promise<ChatModelSummary[]> {
   const stdout = await execFileStdout(
     options.command,
     [...(options.args ?? []), "--list-models"],
     options.cwd,
     options.env,
+    options.signal,
   );
   return parsePiModelList(stdout);
 }
@@ -268,13 +286,38 @@ function execFileStdout(
   args: string[],
   cwd: string,
   env: NodeJS.ProcessEnv,
+  signal?: AbortSignal,
 ): Promise<string> {
+  signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
-    execFile(
+    let escalation: ReturnType<typeof setTimeout> | undefined;
+    const onAbort = (): void => {
+      // Do not use execFile's AbortSignal option: its abort callback can settle
+      // before child exit. This operation owns the child until the close callback.
+      child.kill("SIGTERM");
+      escalation = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill("SIGKILL");
+        }
+      }, 2_000);
+    };
+    const child = execFile(
       command,
       args,
-      { cwd, env, timeout: 30_000, maxBuffer: 4 * 1024 * 1024 },
+      {
+        cwd,
+        env,
+        timeout: 30_000,
+        killSignal: "SIGKILL",
+        maxBuffer: 4 * 1024 * 1024,
+      },
       (error, stdout, stderr) => {
+        clearTimeout(escalation);
+        signal?.removeEventListener("abort", onAbort);
+        if (signal?.aborted) {
+          reject(signal.reason);
+          return;
+        }
         if (error) {
           reject(
             new Error(
@@ -286,5 +329,6 @@ function execFileStdout(
         resolve(stdout);
       },
     );
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
