@@ -13481,10 +13481,11 @@ function Composer(props: {
   }
 
   function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>): void {
-    const files = Array.from(event.clipboardData.files);
-    if (files.some(isSupportedDroppedImage)) {
-      props.onImportImageAttachments(files);
-    }
+    importPastedImageAttachments(
+      Array.from(event.clipboardData.files),
+      () => event.preventDefault(),
+      props.onImportImageAttachments,
+    );
   }
 
   return (
@@ -14253,6 +14254,17 @@ function isSupportedDroppedImage(file: File): boolean {
   );
 }
 
+function importPastedImageAttachments(
+  files: readonly File[],
+  preventDefault: () => void,
+  importImages: (files: File[]) => void,
+): void {
+  const imageFiles = files.filter(isSupportedDroppedImage);
+  if (imageFiles.length === 0) return;
+  preventDefault();
+  importImages(imageFiles);
+}
+
 async function readDroppedImageFile(file: File): Promise<{
   fileName: string;
   mimeType: string;
@@ -14524,6 +14536,7 @@ export const __rendererTestHooks = {
     existing: AttachmentDraft[],
     incoming: AttachmentDraft[],
   ) => mergeAttachmentDrafts(existing, incoming).attachments,
+  importPastedImageAttachments,
   isMissingSessionFileError,
   isDetachedRuntimeError,
   isSessionDeletable,

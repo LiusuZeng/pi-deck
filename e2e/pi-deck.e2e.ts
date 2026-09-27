@@ -798,8 +798,10 @@ async function pasteTinyImageAttachment(
   fileName = "draft-image.png",
 ): Promise<void> {
   const base64 = tinyPngBase64();
-  await page.getByLabel("Prompt text").focus();
-  await page.evaluate(
+  const prompt = page.getByLabel("Prompt text");
+  const promptValue = await prompt.inputValue();
+  await prompt.focus();
+  const paste = await page.evaluate(
     ({ base64, fileName }) => {
       const textarea = document.querySelector<HTMLTextAreaElement>(
         'textarea[aria-label="Prompt text"]',
@@ -809,16 +811,35 @@ async function pasteTinyImageAttachment(
       const file = new File([bytes], fileName, { type: "image/png" });
       const dataTransfer = new DataTransfer();
       dataTransfer.items.add(file);
-      textarea.dispatchEvent(
-        new ClipboardEvent("paste", {
-          bubbles: true,
-          cancelable: true,
-          clipboardData: dataTransfer,
-        }),
-      );
+      const pasteEvent = new ClipboardEvent("paste", {
+        bubbles: true,
+        cancelable: true,
+      });
+      // Define the fixture payload directly instead of relying on synthetic
+      // ClipboardEvent initializer or OS clipboard behavior.
+      Object.defineProperty(pasteEvent, "clipboardData", {
+        value: dataTransfer,
+      });
+      const dispatched = textarea.dispatchEvent(pasteEvent);
+      const pastedFile = dataTransfer.files.item(0);
+      return {
+        defaultPrevented: pasteEvent.defaultPrevented,
+        dispatched,
+        fileCount: dataTransfer.files.length,
+        fileName: pastedFile?.name,
+        mimeType: pastedFile?.type,
+      };
     },
     { base64, fileName },
   );
+  expect(paste).toEqual({
+    defaultPrevented: true,
+    dispatched: false,
+    fileCount: 1,
+    fileName,
+    mimeType: "image/png",
+  });
+  await expect(prompt).toHaveValue(promptValue);
   await expect(page.locator(".composer .attachment-chip")).toContainText(
     fileName,
   );
