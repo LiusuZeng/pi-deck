@@ -362,65 +362,96 @@ test("repeated quit must wait for the same active-worker shutdown barrier (#148)
   }
 });
 
-test("renderer reload preserves active work without a duplicate session worker", async () => {
+async function reloadActivePrompt(harness: Harness): Promise<RuntimeIdentity> {
+  const prompt = "reload retains active work";
+  await startPrompt(harness.page, prompt);
+  await waitForPromptReceipt(harness);
+  await expect(
+    harness.page.getByRole("button", { name: "Abort" }),
+  ).toBeVisible();
+  const before = await runtimeIdentity(harness.page);
+  expect(before.sessionFile).toBeTruthy();
+  await workerPids(harness);
+  // Model discovery legitimately launches a temporary --no-session worker
+  // on each renderer bootstrap. Only persistent session workers establish
+  // the no-duplicate-session invariant; all PIDs are still kept for cleanup.
+  const beforeWorkerPids = readWorkerPids(harness.sessionPidLogFile);
+  expect(beforeWorkerPids).toHaveLength(1);
+
+  await harness.page.reload({ waitUntil: "domcontentloaded" });
+  await expect(
+    harness.page.locator('.workspace[data-load-state="ready"]'),
+  ).toBeVisible();
+  await expect(harness.page.getByText(prompt)).toBeVisible();
+  await harness.page
+    .getByRole("button", { name: `Session: ${prompt}` })
+    .click();
+  await expect(
+    harness.page.locator('.workspace[data-primary-view="session"]'),
+  ).toBeVisible();
+  const after = await runtimeIdentity(harness.page);
+  expect(after).toEqual(before);
+  expect(sortedPids(liveWorkerPids(harness))).toEqual(
+    sortedPids(beforeWorkerPids),
+  );
+  expect(sortedPids(readWorkerPids(harness.sessionPidLogFile))).toEqual(
+    sortedPids(beforeWorkerPids),
+  );
+  expect(await isRuntimeActive(harness.page, after.runtimeId)).toBe(true);
+  return after;
+}
+
+async function isRuntimeActive(
+  page: Page,
+  runtimeId: string,
+): Promise<boolean> {
+  return page.evaluate(async (runtimeId) => {
+    const status = await window.piDeck.chat.getRuntimeStatus({ runtimeId });
+    return status.state.isAgentActive;
+  }, runtimeId);
+}
+
+test("renderer reload preserves the main-owned runtime without a duplicate session worker", async () => {
   let harness: Harness | undefined;
   try {
     harness = await launchHarness("reload-active-prompt", [
       "--stream-delay-ms",
       String(longFixtureTimeoutMs),
     ]);
-    const prompt = "reload retains active work";
-    await startPrompt(harness.page, prompt);
-    await waitForPromptReceipt(harness);
+    const after = await reloadActivePrompt(harness);
+    const pids = readWorkerPids(harness.sessionPidLogFile);
+    // Main ownership/IPC remains usable. Visible UI rehydration is separately
+    // tested below so #155 cannot hide a backend preservation regression.
+    await harness.page.evaluate(async (runtimeId) => {
+      await window.piDeck.chat.abort({ runtimeId });
+    }, after.runtimeId);
+    await expect
+      .poll(() => isRuntimeActive(harness!.page, after.runtimeId))
+      .toBe(false);
+    expect(readWorkerPids(harness.sessionPidLogFile)).toEqual(pids);
+  } finally {
+    await closeHarness(harness);
+  }
+});
+
+test("renderer reload must restore visible Abort for an already-active session (#155)", async ({}, testInfo) => {
+  let harness: Harness | undefined;
+  try {
+    harness = await launchHarness("reload-active-controls", [
+      "--stream-delay-ms",
+      String(longFixtureTimeoutMs),
+    ]);
+    await reloadActivePrompt(harness);
+    await testInfo.attach("active-session-before-cleanup.png", {
+      body: await harness.page.screenshot(),
+      contentType: "image/png",
+    });
+    // Only this verified UI invariant is expected to fail. Runtime ownership,
+    // backend activity, and setup assertions above must continue to pass.
+    test.fail(true, "https://github.com/LiusuZeng/pi-deck/issues/155");
     await expect(
       harness.page.getByRole("button", { name: "Abort" }),
-    ).toBeVisible();
-    const before = await runtimeIdentity(harness.page);
-    expect(before.sessionFile).toBeTruthy();
-    await workerPids(harness);
-    // Model discovery legitimately launches a temporary --no-session worker
-    // on each renderer bootstrap. Only persistent session workers establish
-    // the no-duplicate-session invariant; all PIDs are still kept for cleanup.
-    const beforeWorkerPids = readWorkerPids(harness.sessionPidLogFile);
-    expect(beforeWorkerPids).toHaveLength(1);
-
-    await harness.page.reload({ waitUntil: "domcontentloaded" });
-    await expect(
-      harness.page.locator('.workspace[data-load-state="ready"]'),
-    ).toBeVisible();
-    await expect(harness.page.getByText(prompt)).toBeVisible();
-    await harness.page
-      .getByRole("button", { name: `Session: ${prompt}` })
-      .click();
-    await expect(
-      harness.page.locator('.workspace[data-primary-view="session"]'),
-    ).toBeVisible();
-    const after = await runtimeIdentity(harness.page);
-    expect(after).toEqual(before);
-    expect(sortedPids(liveWorkerPids(harness))).toEqual(
-      sortedPids(beforeWorkerPids),
-    );
-    expect(sortedPids(readWorkerPids(harness.sessionPidLogFile))).toEqual(
-      sortedPids(beforeWorkerPids),
-    );
-
-    const abortButton = harness.page.getByRole("button", { name: "Abort" });
-    await expect(abortButton).toBeEnabled();
-    await abortButton.click();
-    await expect(abortButton).toHaveCount(0);
-    await expect
-      .poll(() =>
-        harness!.page.evaluate(async (runtimeId) => {
-          const status = await window.piDeck.chat.getRuntimeStatus({
-            runtimeId,
-          });
-          return status.state.isAgentActive;
-        }, after.runtimeId),
-      )
-      .toBe(false);
-    expect(sortedPids(readWorkerPids(harness.sessionPidLogFile))).toEqual(
-      sortedPids(beforeWorkerPids),
-    );
+    ).toBeEnabled();
   } finally {
     await closeHarness(harness);
   }

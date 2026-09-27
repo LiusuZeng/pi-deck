@@ -10,7 +10,7 @@ Code findings were audited at `e1bcc72`; the E2E additions are in [PR #154](http
 | Quit / Cmd+Q | Asynchronous cleanup requests direct RPC worker termination, waits for exit, and escalates SIGTERM to SIGKILL after the grace period. | Normal shutdown also retires private tasks and workflow runtimes. Repeated quit has a separate barrier defect (#148). |
 | Relaunch after normal quit | Ordinary chats start as saved, unattached sessions; reopening starts a new worker on the existing session file. | Named active workspace, membership, titles, and written transcript survive in real mode. Not a checkpoint/resume of the interrupted computation. |
 | Quit during an ordinary turn | Stops execution. | A persisted user message survives; incomplete assistant output may not. A fresh turn can be sent after reopening. No guarantee of automatically retrying the interrupted request. |
-| Renderer reload | Main-process workers remain alive. | Existing runtime identity should remain accessible without a duplicate worker. Renderer-only drafts/selection are reconstructed, not restored. |
+| Renderer reload | Main-process workers remain alive with the same runtime identity. | The UI currently rehydrates attached sessions as idle previews and loses Abort during quiet active work (#155). Renderer-only drafts/selection are reconstructed, not restored. |
 | Renderer crash | No explicit recovery handler. Main-process work can remain running behind a crashed window. | Needs a recovery/fallback policy (#151). |
 | Main-process crash / forced termination | Normal quit hooks cannot be relied upon. | Cannot reconnect to the previous RPC process. Only durable session data can be reopened; orphan-process recovery remains a limitation. |
 | Workspace switch | Changes the view; does not inherently terminate work in the previous workspace. | In-renderer drafts and attached runtimes are retained. |
@@ -37,7 +37,12 @@ Workspace/project/workflow stores use serialized persistence and temporary-file 
 | [#152](https://github.com/LiusuZeng/pi-deck/issues/152) | Fake/demo startup resets the saved active workspace. | CI reproduced default activation with the named workspace still persisted. Real mode is separately covered. |
 | [#153](https://github.com/LiusuZeng/pi-deck/issues/153) | Interrupted settings writes can lose last-good preferences. | Direct overwrite plus corrupt-file fallback. Needs deterministic partial-write fault injection, not a timing-based kill test. |
 
-Existing model-discovery subprocess ownership issue #144 is not duplicated.
+Further CI findings:
+
+- [#155](https://github.com/LiusuZeng/pi-deck/issues/155): renderer reload loses active-session status, transcript, and Abort controls. Confirmed by CI accessibility snapshot/trace after proving the same session worker remained alive. `sessionFromSummary()` creates an idle runtime-backed row, and selecting it loads capabilities rather than state/history.
+- [#156](https://github.com/LiusuZeng/pi-deck/issues/156): an existing first-draft E2E intermittently loses the current thinking default while retaining the model/provider. CI artifacts confirm the symptom, not the root cause. Added failure-only application diagnostics; did not skip, retry, or weaken its assertions. A later green run is not evidence that this issue is fixed.
+
+Existing model-discovery subprocess ownership issue #144 is not duplicated; #156 touches that subsystem but is not assumed to be fixed by #145.
 
 ### Important boundary: descendants
 
@@ -50,7 +55,8 @@ Existing model-discovery subprocess ownership issue #144 is not duplicated.
 1. Actual last `BrowserWindow.close()` during active work: direct workers are dead at `will-quit`.
 2. `app.quit()` with a SIGTERM-ignoring worker: escalation occurs before Electron exits.
 3. Repeated quit: desired shared shutdown barrier, linked expected failure for #148.
-4. Renderer reload during a turn: same runtime/file, no duplicate session worker, and visible abort controls remain usable. Temporary `--no-session` model-discovery workers are tracked separately from session ownership.
+4. Renderer reload during a turn: same runtime/file, no duplicate session worker, and main-owned abort IPC remains usable. Temporary `--no-session` model-discovery workers are tracked separately from session ownership.
+5. Renderer reload restores visible Abort: linked expected failure for #155, after independently proving backend activity/identity. A pre-cleanup screenshot avoids mistaking intentional teardown errors for the UI failure.
 
 `e2e/app-restart-persistence.e2e.ts`:
 
@@ -58,7 +64,7 @@ Existing model-discovery subprocess ownership issue #144 is not duplicated.
 2. Fake-mode selected workspace survives restart: linked expected failure for #152.
 3. Interrupted ordinary turn: durable user input survives, no automatic runtime resurrection, same-file resume and subsequent turn.
 
-Known-failure annotations occur only immediately before the specific broken invariant is asserted. Setup/transport failures still fail CI. Fixing either issue requires removing its expected-failure annotation; unexpected passes are not silently accepted.
+Known-failure annotations occur only immediately before the specific broken invariant is asserted. Setup/transport failures still fail CI. Fixing one of these three issues requires removing its expected-failure annotation; unexpected passes are not silently accepted.
 
 ### Isolation and validation
 
