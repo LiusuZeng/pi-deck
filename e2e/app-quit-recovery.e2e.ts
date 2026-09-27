@@ -12,6 +12,7 @@ const longFixtureTimeoutMs = 120_000;
 interface Harness {
   app: ElectronApplication;
   page: Page;
+  appPid: number;
   root: string;
   sessionPidLogFile: string;
   allPidLogFile: string;
@@ -21,6 +22,19 @@ interface Harness {
 interface RuntimeIdentity {
   runtimeId: string;
   sessionFile: string | undefined;
+}
+
+interface CrashSignal {
+  beforeRendererPid: number;
+  reason: string;
+  exitCode: number;
+}
+
+interface RecoveredRendererState {
+  ready: boolean;
+  visible: boolean;
+  rendererPid: number;
+  identity: RuntimeIdentity | undefined;
 }
 
 function fakePiBinary(root: string, args: readonly string[]): string {
@@ -83,6 +97,7 @@ async function launchHarness(
     },
   });
   try {
+    const appPid = await app.evaluate(() => process.pid);
     const page = await app.firstWindow();
     await expect(
       page.locator('.workspace[data-load-state="ready"]'),
@@ -95,6 +110,7 @@ async function launchHarness(
     return {
       app,
       page,
+      appPid,
       root,
       sessionPidLogFile: path.join(root, "session-pids.log"),
       allPidLogFile: path.join(root, "worker-pids.log"),
@@ -102,7 +118,10 @@ async function launchHarness(
     };
   } catch (error) {
     killKnownWorkers(path.join(root, "worker-pids.log"));
-    await app.close().catch(() => undefined);
+    await closeAppBounded(
+      app,
+      await app.evaluate(() => process.pid).catch(() => undefined),
+    );
     fs.rmSync(root, { recursive: true, force: true });
     throw error;
   }
@@ -111,8 +130,27 @@ async function launchHarness(
 async function closeHarness(harness: Harness | undefined): Promise<void> {
   if (harness === undefined) return;
   killKnownWorkers(harness.allPidLogFile);
-  await harness.app.close().catch(() => undefined);
+  await closeAppBounded(harness.app, harness.appPid);
   fs.rmSync(harness.root, { recursive: true, force: true });
+}
+
+async function closeAppBounded(
+  app: ElectronApplication,
+  appPid: number | undefined,
+): Promise<void> {
+  const closed = await Promise.race([
+    app.close().then(
+      () => true,
+      () => true,
+    ),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 5_000)),
+  ]);
+  if (closed || appPid === undefined || !isPidAlive(appPid)) return;
+  try {
+    process.kill(appPid, "SIGKILL");
+  } catch {
+    // Best-effort fixture cleanup after a crashed renderer wedges Playwright.
+  }
 }
 
 function readPids(file: string): number[] {
@@ -175,6 +213,88 @@ async function runtimeIdentity(page: Page): Promise<RuntimeIdentity> {
       runtimeId: snapshot.runtimeId,
       sessionFile: snapshot.state.sessionFile,
     };
+  });
+}
+
+async function executeInMainWindow<T>(
+  app: ElectronApplication,
+  source: string,
+): Promise<T> {
+  return app.evaluate(async ({ BrowserWindow }, script) => {
+    const window = BrowserWindow.getAllWindows()[0];
+    if (window === undefined || window.isDestroyed()) {
+      throw new Error("Expected a BrowserWindow.");
+    }
+    return (await window.webContents.executeJavaScript(script, true)) as T;
+  }, source);
+}
+
+async function runtimeIdentityFromMain(
+  app: ElectronApplication,
+): Promise<RuntimeIdentity> {
+  return executeInMainWindow<RuntimeIdentity>(
+    app,
+    `(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      return {
+        runtimeId: snapshot.runtimeId,
+        sessionFile: snapshot.state.sessionFile,
+      };
+    })()`,
+  );
+}
+
+async function recoveredRendererState(
+  app: ElectronApplication,
+): Promise<RecoveredRendererState> {
+  return app.evaluate(async ({ BrowserWindow }) => {
+    const window = BrowserWindow.getAllWindows()[0];
+    if (window === undefined || window.isDestroyed()) {
+      throw new Error("Expected a BrowserWindow.");
+    }
+    const rendererPid = window.webContents.getOSProcessId();
+    const dom = (await window.webContents.executeJavaScript(
+      `(async () => {
+        const workspace = document.querySelector('.workspace[data-load-state="ready"]');
+        if (!(workspace instanceof HTMLElement)) {
+          return { ready: false, visible: false, identity: undefined };
+        }
+        const rect = workspace.getBoundingClientRect();
+        const style = getComputedStyle(workspace);
+        const snapshot = await window.piDeck.chat.getSnapshot();
+        return {
+          ready: true,
+          visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none",
+          identity: {
+            runtimeId: snapshot.runtimeId,
+            sessionFile: snapshot.state.sessionFile,
+          },
+        };
+      })()`,
+      true,
+    )) as Omit<RecoveredRendererState, "rendererPid">;
+    return { ...dom, rendererPid };
+  });
+}
+
+async function crashMainWindowRenderer(
+  app: ElectronApplication,
+): Promise<CrashSignal> {
+  return app.evaluate(async ({ BrowserWindow }) => {
+    const window = BrowserWindow.getAllWindows()[0];
+    if (window === undefined || window.isDestroyed()) {
+      throw new Error("Expected a BrowserWindow.");
+    }
+    const beforeRendererPid = window.webContents.getOSProcessId();
+    const gone = new Promise<{ reason: string; exitCode: number }>(
+      (resolve) => {
+        window.webContents.once("render-process-gone", (_event, details) => {
+          resolve({ reason: details.reason, exitCode: details.exitCode });
+        });
+      },
+    );
+    window.webContents.forcefullyCrashRenderer();
+    return { beforeRendererPid, ...(await gone) };
   });
 }
 
@@ -253,32 +373,52 @@ test("an active renderer crash reloads the UI without replacing its main-owned r
     const beforePids = readPids(harness.sessionPidLogFile);
     const mainPid = await harness.app.evaluate(() => process.pid);
 
-    await harness.app.evaluate(({ BrowserWindow }) => {
-      const window = BrowserWindow.getAllWindows()[0];
-      if (window === undefined) throw new Error("Expected a BrowserWindow.");
-      window.webContents.forcefullyCrashRenderer();
-    });
+    const crash = await crashMainWindowRenderer(harness.app);
+    expect(crash.reason).toBeTruthy();
 
-    await expect(
-      harness.page.locator('.workspace[data-load-state="ready"]'),
-    ).toBeVisible();
+    await expect
+      .poll(
+        async () => {
+          try {
+            const state = await recoveredRendererState(harness!.app);
+            return (
+              state.ready &&
+              state.visible &&
+              state.rendererPid > 0 &&
+              state.identity?.runtimeId === before.runtimeId &&
+              state.identity.sessionFile === before.sessionFile
+            );
+          } catch {
+            return false;
+          }
+        },
+        { timeout: 15_000 },
+      )
+      .toBe(true);
+    const recovered = await recoveredRendererState(harness.app);
+    expect(recovered.identity).toEqual(before);
     expect(await harness.app.evaluate(() => process.pid)).toBe(mainPid);
-    expect(await runtimeIdentity(harness.page)).toEqual(before);
+    expect(await runtimeIdentityFromMain(harness.app)).toEqual(before);
     expect(readPids(harness.sessionPidLogFile)).toEqual(beforePids);
     expect(beforePids.every(isPidAlive)).toBe(true);
+    expect(
+      await harness.app.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows().every((window) => !window.isVisible()),
+      ),
+    ).toBe(true);
 
-    // Main-owned controls remain usable. Visible Abort rehydration is asserted
-    // by the #155 integration work rather than weakened here.
-    await harness.page.evaluate(async (runtimeId) => {
-      await window.piDeck.chat.abort({ runtimeId });
-    }, before.runtimeId);
+    // Main-owned controls remain usable after automatic renderer recovery.
+    await executeInMainWindow<void>(
+      harness.app,
+      `(async () => {
+        await window.piDeck.chat.abort({ runtimeId: ${JSON.stringify(before.runtimeId)} });
+      })()`,
+    );
     await expect
       .poll(() =>
-        harness!.page.evaluate(
-          async (runtimeId) =>
-            (await window.piDeck.chat.getRuntimeStatus({ runtimeId })).state
-              .isAgentActive,
-          before.runtimeId,
+        executeInMainWindow<boolean>(
+          harness!.app,
+          `(async () => (await window.piDeck.chat.getRuntimeStatus({ runtimeId: ${JSON.stringify(before.runtimeId)} })).state.isAgentActive)()`,
         ),
       )
       .toBe(false);
