@@ -3269,6 +3269,32 @@ describe("Pi draft defaults and thinking capabilities", () => {
     );
     expect(resolved).toBe(runtimeModel);
     expect(__rendererTestHooks.realModelSupportsImages(resolved)).toBe(true);
+    // The same ID in a workspace fallback catalog cannot shadow runtime state.
+    expect(
+      __rendererTestHooks.findComposerActiveRealModel(
+        session,
+        [workspaceModel],
+        defaults,
+        capabilities,
+      ),
+    ).toBe(runtimeModel);
+    const runtimeInventoryModel = {
+      ...runtimeModel,
+      name: "Runtime inventory",
+    };
+    expect(
+      __rendererTestHooks.findComposerActiveRealModel(
+        session,
+        [workspaceModel],
+        defaults,
+        {
+          [session.id]: {
+            models: [runtimeInventoryModel],
+            activeModel: runtimeModel,
+          },
+        },
+      ),
+    ).toBe(runtimeInventoryModel);
     expect(
       __rendererTestHooks.findComposerActiveRealModel(session, [], new Map(), {
         otherRuntime: { activeModel: runtimeModel },

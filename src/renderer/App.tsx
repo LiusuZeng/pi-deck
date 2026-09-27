@@ -9451,19 +9451,23 @@ function findComposerActiveRealModel(
   configurations: WorkspaceDraftDefaults,
   capabilities: RuntimeCapabilitiesById = {},
 ): ChatModelSummary | undefined {
-  const discovered = findActiveRealModel(session, realModels);
-  if (discovered !== undefined) return discovered;
-  const runtimeModel = runtimeCapabilitiesFor(
-    capabilities,
-    session.id,
-  )?.activeModel;
+  const runtime = runtimeCapabilitiesFor(capabilities, session.id);
+  const runtimeInventoryModel = findActiveRealModel(
+    session,
+    runtime?.models ?? [],
+  );
+  if (runtimeInventoryModel !== undefined) return runtimeInventoryModel;
+  const runtimeModel = runtime?.activeModel;
   if (
     runtimeModel !== undefined &&
     modelMatchesSessionIdentity(session, runtimeModel)
   ) {
     return runtimeModel;
   }
-  if (realModels.length > 0) return undefined;
+  // realModels can be a workspace fallback when runtime inventory is empty.
+  // Never let that less-specific catalog shadow matching runtime state.
+  const discovered = findActiveRealModel(session, realModels);
+  if (discovered !== undefined || realModels.length > 0) return discovered;
   const configured = draftDefaultsForWorkspace(
     configurations,
     session.workspaceId,
