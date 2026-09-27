@@ -437,17 +437,18 @@ test("renderer reload must restore visible Abort for an already-active session (
       "--stream-delay-ms",
       String(longFixtureTimeoutMs),
     ]);
-    await reloadActivePrompt(harness);
+    const recovered = await reloadActivePrompt(harness);
     await testInfo.attach("active-session-before-cleanup.png", {
       body: await harness.page.screenshot(),
       contentType: "image/png",
     });
-    // Only this verified UI invariant is expected to fail. Runtime ownership,
-    // backend activity, and setup assertions above must continue to pass.
-    test.fail(true, "https://github.com/LiusuZeng/pi-deck/issues/155");
-    await expect(
-      harness.page.getByRole("button", { name: "Abort" }),
-    ).toBeEnabled();
+    const abort = harness.page.getByRole("button", { name: "Abort" });
+    await expect(abort).toBeEnabled();
+    await abort.click();
+    await expect(abort).toHaveCount(0);
+    await expect
+      .poll(() => isRuntimeActive(harness!.page, recovered.runtimeId))
+      .toBe(false);
   } finally {
     await closeHarness(harness);
   }

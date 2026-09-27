@@ -427,12 +427,19 @@ Security boundaries include:
 
 ## Closing and restarting Pi Deck
 
-Closing the last window quits Pi Deck, including on macOS, and stops attached
-Pi workers; sessions do not continue in the background. There is currently no
-active-work quit confirmation. Restarting restores saved session history and
-workspace metadata, not live execution. Reopen a saved session to continue it
-with a new worker. Unsent composer drafts are not yet preserved across reload
-or restart, and incomplete streamed output may be lost.
+Closing the last window quits Pi Deck, including on macOS. If work is active,
+Pi Deck asks before stopping it; Cancel keeps the window and workers alive.
+Confirmed quit waits for owned worker cleanup. Sessions do not continue in the
+background after quitting. Restarting restores saved history and workspace
+metadata, not live execution; reopen a saved session to continue with a new worker.
+
+Unsent composer text is saved locally in the Electron profile across reload and
+restart. Selected attachments must be reselected; their authorization tokens and
+image payloads are never saved in draft storage. If reload interrupts a send and
+its acceptance is uncertain, Pi Deck preserves the text behind an explicit
+recovery action—check history before sending it again. Draft storage is bounded
+and reports storage/limit failures; incomplete streamed output may still be lost.
+Renderer crashes receive bounded UI recovery while main-owned work is retained.
 
 See the [basic session lifecycle audit](docs/basic-session-lifecycle-audit.md)
 for tested behavior, recovery boundaries, and tracked gaps.

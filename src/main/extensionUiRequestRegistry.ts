@@ -100,6 +100,13 @@ export class ExtensionUiRequestRegistry<
     );
   }
 
+  get pendingCount(): number {
+    return [...this.requests.values()].reduce(
+      (count, requests) => count + requests.size,
+      0,
+    );
+  }
+
   has(runtimeId: string): boolean {
     return (this.requests.get(runtimeId)?.size ?? 0) > 0;
   }

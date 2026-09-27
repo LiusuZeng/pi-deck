@@ -8725,10 +8725,7 @@ async function inspectQuitActivity(): Promise<QuitActivitySummary> {
     (workflowScheduler?.queuedWorkCount ?? 0) +
     (workflowOccurrenceScheduler?.queuedWorkCount ?? 0) +
     (backendInitializationPending ? 1 : 0) +
-    [...pendingExtensionUiRequests.values()].reduce(
-      (count, requests) => count + requests.size,
-      0,
-    ) +
+    pendingExtensionUiRequests.pendingCount +
     (activeChatReset === undefined ? 0 : 1);
   const adapter = chatAdapter;
 

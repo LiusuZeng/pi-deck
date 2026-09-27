@@ -2,7 +2,7 @@
 
 Code findings were audited at `e1bcc72`; the E2E additions are in [PR #154](https://github.com/LiusuZeng/pi-deck/pull/154). This audit traces normal desktop lifecycle and persistence, not authenticated provider behavior. Independent read-only reviews covered main-process lifecycle, persistence/recovery, and renderer/navigation; separate worktrees supplied the E2E additions.
 
-## What currently happens
+## Audit-baseline behavior (before the follow-up fixes)
 
 | Action | Runtime behavior | Persistence / recovery |
 | --- | --- | --- |
@@ -48,7 +48,7 @@ Existing model-discovery subprocess ownership issue #144 is not duplicated; #156
 
 `PiWorker.closeAndWait()` proves the **direct** RPC child has exited. It does not signal a process group or enumerate tool/subagent descendants. A pure Node reproduction confirms killing a parent alone can leave a grandchild alive; that is not proof that real Pi's own SIGTERM handlers leak tools. Real-Pi descendant cleanup remains an explicit validation gap, not a claimed verified production defect.
 
-## Added deterministic E2E coverage
+## Audit E2E coverage (subsequently promoted to regressions)
 
 `e2e/app-window-lifecycle.e2e.ts`:
 
@@ -64,7 +64,7 @@ Existing model-discovery subprocess ownership issue #144 is not duplicated; #156
 2. Fake-mode selected workspace survives restart: linked expected failure for #152.
 3. Interrupted ordinary turn: durable user input survives, no automatic runtime resurrection, same-file resume and subsequent turn.
 
-Known-failure annotations occur only immediately before the specific broken invariant is asserted. Setup/transport failures still fail CI. Fixing one of these three issues requires removing its expected-failure annotation; unexpected passes are not silently accepted.
+The audit originally used narrow expected-failure annotations for #148, #152, and #155. The follow-up implementation removes all three annotations and keeps their desired invariants as ordinary regression tests.
 
 ### Isolation and validation
 
@@ -72,4 +72,16 @@ Both suites force `PI_DECK_E2E_HIDE_WINDOWS=1` regardless of inherited headed se
 
 Fixtures use isolated home/user-data/agent/project paths, a credential-free fake CLI behind the real adapter, and known-worker PID cleanup. Restart tests reuse the same isolated directories and never overwrite settings on the second launch. The wrapper answers version/model-list requests immediately and keeps temporary runtime discovery free of session-specific shutdown delays. Activity assertions use normalized `chat.getRuntimeStatus()`, not the optional `isAgentActive` field of raw Pi snapshots (which can report `isStreaming` instead).
 
-The suites are automatically picked up by `npm run test:e2e`, already part of `npm run verify:ci`. The authoritative acceptance gate is **Verify desktop app** on the PR's current commit; provider-authenticated smoke tests remain release-only. Workflow quit/crash parity, renderer-crash recovery, durable draft recovery, and real tool-descendant cleanup are not covered by these new cases.
+The suites are automatically picked up by `npm run test:e2e`, already part of `npm run verify:ci`. The authoritative acceptance gate is **Verify desktop app** on the PR's current commit; provider-authenticated smoke tests remain release-only. Workflow quit/crash parity and real tool-descendant cleanup remain separate validation boundaries.
+
+## Follow-up implementation
+
+Separate worktrees implement the audit findings with independent review:
+
+- #148/#150: reentrant quit coordination, active-work confirmation, and Cancel preserving the window and workers.
+- #151/#155: one bounded automatic renderer reload, explicit recovery/quit fallback, authoritative attached-session hydration, and main-owned pending Extension UI recovery. No duplicate worker is created to restore the view.
+- #149: versioned, bounded, profile-local composer text storage using stable workspace/native-file identity. Attachment authority is never persisted; reselection is explicit. Uncertain interrupted sends remain quarantined behind an explicit text-recovery action, not automatically replayed or silently treated as unsent. This is not an exactly-once delivery or fsync durability claim.
+- #152/#153: preserve fake-mode active workspace and atomically replace settings via a same-directory temporary file. Partial-write/rename failures retain the last-good file.
+- #156: workspace-keyed model defaults are read after the asynchronous workspace-activation barrier, with a deterministic production-helper race regression. The historical CI artifact did not prove whether CLI fallback also contributed, so its failure diagnostics remain enabled.
+
+Additional hidden-window suites are `app-quit-recovery.e2e.ts`, `renderer-recovery.e2e.ts`, and `composer-draft-persistence.e2e.ts`. They cover confirmation cancellation, renderer crash/reload, active/completed transcripts, pending dialogs, durable drafts, rejected sends, and model-default timing. Native dialogs are replaced only under the explicit `PI_DECK_E2E_HIDE_WINDOWS=1` test switch; ordinary production dialogs default to the non-destructive choice.

@@ -1818,11 +1818,50 @@ export function App(): ReactElement {
         toSessionId,
         draft.attachments,
       );
+    }
+    // Publish row, durable identity, and composer ownership in one synchronous
+    // transaction after attachment transfers. No render may persist the old
+    // cached row with an empty composer while its text moves to a runtime ID.
+    const replacements = new Map<string, SessionViewModel>();
+    for (const { fromSessionId, toSessionId } of migrations) {
+      const from = sessionsRef.current.find((row) => row.id === fromSessionId);
+      const to = incoming.find((row) => row.id === toSessionId);
+      if (from === undefined || to === undefined) continue;
+      reportComposerDraftPersistenceResult(
+        composerDraftPersistenceRef.current!.migrateSession(from, to),
+      );
+      replacements.set(fromSessionId, to);
+      if (attachmentReselectionSessionIdsRef.current.delete(fromSessionId)) {
+        attachmentReselectionSessionIdsRef.current.add(toSessionId);
+      }
+      const revision = composerRevisionBySessionRef.current.get(fromSessionId);
+      if (revision !== undefined) {
+        composerRevisionBySessionRef.current.set(toSessionId, revision);
+        composerRevisionBySessionRef.current.delete(fromSessionId);
+      }
       if (selectedSessionIdRef.current === fromSessionId) {
         selectedSessionIdRef.current = toSessionId;
         setSelectedSessionId(toSessionId);
       }
+      setPrimaryView((current) =>
+        replaceSessionRouteId(current, fromSessionId, toSessionId),
+      );
     }
+    const nextSessions = sessionsRef.current.map(
+      (row) => replacements.get(row.id) ?? row,
+    );
+    sessionsRef.current = nextSessions;
+    setSessions(nextSessions);
+    setPendingComposerRecoveries((current) => {
+      const next = { ...current };
+      for (const { fromSessionId, toSessionId } of migrations) {
+        const recovery = next[fromSessionId];
+        if (recovery === undefined) continue;
+        next[toSessionId] = { ...recovery, sessionId: toSessionId };
+        delete next[fromSessionId];
+      }
+      return next;
+    });
     const nextDrafts = migrateComposerDraftIdentities(
       composerDraftsRef.current,
       migrations,
@@ -2337,7 +2376,10 @@ export function App(): ReactElement {
               restored.sessionId,
               backendModeRef.current,
               backendModeRef.current === "real"
-                ? projectModelConfiguration
+                ? draftDefaultsForWorkspace(
+                    projectModelConfigurationRef.current,
+                    workspace.id,
+                  )
                 : undefined,
             ),
           ];
