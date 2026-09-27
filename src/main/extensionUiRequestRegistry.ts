@@ -21,6 +21,10 @@ export class ExtensionUiRequestRegistry<
     string,
     Map<string, PendingRecord<TRequest>>
   >();
+  private readonly inFlightRequests = new Map<
+    string,
+    Map<string, ClaimedExtensionUiRequest<TRequest>>
+  >();
 
   constructor(
     private readonly options: {
@@ -33,6 +37,9 @@ export class ExtensionUiRequestRegistry<
   ) {}
 
   register(runtimeId: string, request: TRequest): void {
+    // Reusing an id starts a new authorization lifecycle. An older async
+    // response must not be able to restore or complete over this request.
+    this.deleteInFlight(runtimeId, request.id);
     const requests = this.requests.get(runtimeId) ?? new Map();
     const existing = requests.get(request.id);
     if (existing?.timer !== undefined) this.clearTimer(existing.timer);
@@ -64,19 +71,23 @@ export class ExtensionUiRequestRegistry<
     requests.delete(requestId);
     if (requests.size === 0) this.requests.delete(runtimeId);
     if (record.timer !== undefined) this.clearTimer(record.timer);
-    return {
+    const claimed: ClaimedExtensionUiRequest<TRequest> = {
       runtimeId,
       request: record.request,
       ...(record.expiresAtMs === undefined
         ? {}
         : { expiresAtMs: record.expiresAtMs }),
     };
+    const inFlight = this.inFlightRequests.get(runtimeId) ?? new Map();
+    inFlight.set(requestId, claimed);
+    this.inFlightRequests.set(runtimeId, inFlight);
+    return claimed;
   }
 
   restore(
     claimed: ClaimedExtensionUiRequest<TRequest>,
   ): "restored" | "expired" | "superseded" {
-    if (this.peek(claimed.runtimeId, claimed.request.id) !== undefined) {
+    if (!this.deleteInFlight(claimed.runtimeId, claimed.request.id, claimed)) {
       return "superseded";
     }
     if (
@@ -94,6 +105,14 @@ export class ExtensionUiRequestRegistry<
     return "restored";
   }
 
+  complete(claimed: ClaimedExtensionUiRequest<TRequest>): boolean {
+    return this.deleteInFlight(
+      claimed.runtimeId,
+      claimed.request.id,
+      claimed,
+    );
+  }
+
   snapshot(runtimeId: string): TRequest[] {
     return [...(this.requests.get(runtimeId)?.values() ?? [])].map(
       ({ request }) => ({ ...request }),
@@ -108,20 +127,52 @@ export class ExtensionUiRequestRegistry<
   }
 
   has(runtimeId: string): boolean {
-    return (this.requests.get(runtimeId)?.size ?? 0) > 0;
+    return (
+      (this.requests.get(runtimeId)?.size ?? 0) > 0 ||
+      (this.inFlightRequests.get(runtimeId)?.size ?? 0) > 0
+    );
+  }
+
+  get pendingCount(): number {
+    let count = 0;
+    for (const requests of this.requests.values()) count += requests.size;
+    for (const requests of this.inFlightRequests.values()) {
+      count += requests.size;
+    }
+    return count;
   }
 
   keys(): IterableIterator<string> {
-    return this.requests.keys();
+    return new Set([
+      ...this.requests.keys(),
+      ...this.inFlightRequests.keys(),
+    ]).values();
   }
 
   clearRuntime(runtimeId: string): void {
     const requests = this.requests.get(runtimeId);
-    if (requests === undefined) return;
-    for (const record of requests.values()) {
-      if (record.timer !== undefined) this.clearTimer(record.timer);
+    if (requests !== undefined) {
+      for (const record of requests.values()) {
+        if (record.timer !== undefined) this.clearTimer(record.timer);
+      }
+      this.requests.delete(runtimeId);
     }
-    this.requests.delete(runtimeId);
+    this.inFlightRequests.delete(runtimeId);
+  }
+
+  private deleteInFlight(
+    runtimeId: string,
+    requestId: string,
+    expected?: ClaimedExtensionUiRequest<TRequest>,
+  ): boolean {
+    const requests = this.inFlightRequests.get(runtimeId);
+    if (requests === undefined) return false;
+    if (expected !== undefined && requests.get(requestId) !== expected) {
+      return false;
+    }
+    const deleted = requests.delete(requestId);
+    if (requests.size === 0) this.inFlightRequests.delete(runtimeId);
+    return deleted;
   }
 
   private schedule(record: PendingRecord<TRequest>): void {

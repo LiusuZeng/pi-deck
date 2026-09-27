@@ -4150,11 +4150,15 @@ async function respondToExtensionUi(
     throw error;
   }
 
-  sendChatEventToRenderer({
-    type: "extension_ui_response_sent",
-    runtimeId: request.runtimeId,
-    requestId: request.requestId,
-  });
+  // Runtime teardown or a newer same-id request can invalidate this response
+  // while the write is in flight. Only the exact live claim may clear UI.
+  if (pendingExtensionUiRequests.complete(claimed)) {
+    sendChatEventToRenderer({
+      type: "extension_ui_response_sent",
+      runtimeId: request.runtimeId,
+      requestId: request.requestId,
+    });
+  }
 }
 
 function getExtensionUiDialogMethod(
