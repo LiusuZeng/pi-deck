@@ -535,6 +535,48 @@ describe("IPC schemas", () => {
     expect(chatSnapshotSchema.parse(snapshot)).toEqual(snapshot);
   });
 
+  it("round-trips normalized pending extension UI requests in recovery snapshots", () => {
+    const snapshot = chatSnapshotSchema.parse({
+      runtimeId: "runtime-1",
+      backendMode: "real",
+      state: { isAgentActive: true },
+      messages: [],
+      pendingExtensionUiRequests: [
+        {
+          id: "approval-1",
+          method: "select",
+          title: "Choose a target",
+          message: "Select one",
+          options: ["alpha", "beta"],
+          placeholder: "Target",
+          prefill: "alpha",
+          timeout: 30_000,
+        },
+      ],
+    });
+
+    expect(snapshot.pendingExtensionUiRequests).toEqual([
+      {
+        id: "approval-1",
+        method: "select",
+        title: "Choose a target",
+        message: "Select one",
+        options: ["alpha", "beta"],
+        placeholder: "Target",
+        prefill: "alpha",
+        timeout: 30_000,
+      },
+    ]);
+    expect(() =>
+      chatSnapshotSchema.parse({
+        ...snapshot,
+        pendingExtensionUiRequests: [
+          { id: "approval-2", method: "notify", title: "No response" },
+        ],
+      }),
+    ).toThrow();
+  });
+
   it("drops malformed assistant tool calls and bounds the normalized projection", () => {
     const validCalls = Array.from({ length: 105 }, (_, index) => ({
       type: "toolCall",

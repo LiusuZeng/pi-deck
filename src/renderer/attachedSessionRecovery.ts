@@ -1,4 +1,8 @@
-import type { ChatRuntimeStatus, ChatSnapshot } from "../shared/types.js";
+import type {
+  ChatRuntimeEvent,
+  ChatRuntimeStatus,
+  ChatSnapshot,
+} from "../shared/types.js";
 import type { SessionViewModel } from "./sessionRuntimeReducer.js";
 
 export const ATTACHED_SESSION_RECOVERY_TIMEOUT_MS = 10_000;
@@ -103,21 +107,29 @@ export function projectAttachedSessionRecovery(options: {
   snapshot: ChatSnapshot;
   status: ChatRuntimeStatus;
   current: SessionViewModel;
-  runtimeEventObserved: boolean;
+  runtimeEventObserved?: boolean;
+  observedRuntimeEvents?: readonly ChatRuntimeEvent[];
   sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel;
   reconcileRuntimeStatus(
     session: SessionViewModel,
     status: ChatRuntimeStatus,
   ): SessionViewModel;
+  reduceRuntimeEvent?(
+    session: SessionViewModel,
+    event: ChatRuntimeEvent,
+  ): SessionViewModel;
 }): SessionViewModel {
-  return mergeRecoveredAttachedSession(
+  const observedEvents = options.observedRuntimeEvents ?? [];
+  const recovered = mergeRecoveredAttachedSession(
     options.reconcileRuntimeStatus(
       options.sessionFromSnapshot(options.snapshot),
       options.status,
     ),
     options.current,
-    options.runtimeEventObserved,
+    options.runtimeEventObserved === true && observedEvents.length === 0,
   );
+  if (options.reduceRuntimeEvent === undefined) return recovered;
+  return observedEvents.reduce(options.reduceRuntimeEvent, recovered);
 }
 
 export function mergeRecoveredAttachedSession(
@@ -156,6 +168,14 @@ export function mergeRecoveredAttachedSession(
       : {
           pendingExtensionUiRequests: current.pendingExtensionUiRequests,
         }),
+    ...(current.usageStats === undefined
+      ? {}
+      : { usageStats: current.usageStats }),
+    ...(current.usageByMessageId === undefined
+      ? {}
+      : { usageByMessageId: current.usageByMessageId }),
+    retryPrompt: current.retryPrompt,
+    authVerified: current.authVerified,
     workingStartedAtMs: current.workingStartedAtMs,
     lastRuntimeEventLabel: current.lastRuntimeEventLabel,
     lastError: current.lastError,
@@ -167,5 +187,7 @@ export function mergeRecoveredAttachedSession(
       : { providerErrorObserved: current.providerErrorObserved }),
     failureKind: current.failureKind,
     completedAtMs: current.completedAtMs,
+    updatedAt: current.updatedAt,
+    updatedAtMs: current.updatedAtMs,
   };
 }

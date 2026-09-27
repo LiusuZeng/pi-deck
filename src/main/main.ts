@@ -67,6 +67,7 @@ import {
   ipcChannels,
   noPayloadSchema,
   openPiCodexLoginResultSchema,
+  pendingExtensionUiRequestSchema,
   pickAttachmentsResultSchema,
   pickProjectResultSchema,
   projectListResultSchema,
@@ -150,6 +151,7 @@ import type {
   ChatSessionSummary,
   ChatSnapshot,
   PickAttachmentsResult,
+  PendingExtensionUiRequestDto,
   ProjectRef,
   PickProjectResult,
   WorkspaceListResult,
@@ -158,6 +160,7 @@ import type {
 } from "../shared/types.js";
 import { DiagnosticsService } from "./diagnostics/diagnostics.js";
 import { ForkCleanupJournal } from "./forkCleanupJournal.js";
+import { ExtensionUiRequestRegistry } from "./extensionUiRequestRegistry.js";
 import { registerValidatedIpc } from "./ipc/registerIpc.js";
 import {
   discoverPiModels,
@@ -458,17 +461,18 @@ const workflowRuntimeOwnership = new WorkflowRuntimeOwnershipRegistry();
 // A single-delete transaction may detach Pi before filesystem removal commits.
 // Its worker-exit event must not revoke retryable composer selections.
 const attachmentPreservingRuntimeClosures = new Set<string>();
-const pendingExtensionUiRequests = new Map<
-  string,
-  Map<
-    string,
-    {
-      method: "select" | "confirm" | "input" | "editor";
-      timer?: NodeJS.Timeout;
-    }
-  >
->();
 const extensionUiTimeoutGraceMs = 1_000;
+const pendingExtensionUiRequests =
+  new ExtensionUiRequestRegistry<PendingExtensionUiRequestDto>({
+    timeoutGraceMs: extensionUiTimeoutGraceMs,
+    onTimeout: (runtimeId, requestId) => {
+      sendChatEventToRenderer({
+        type: "extension_ui_request_timeout",
+        runtimeId,
+        requestId,
+      });
+    },
+  });
 let chatWorkerCreationTail: Promise<void> = Promise.resolve();
 // Serializes every Pi session discovery/attach/fork registration transaction.
 // The lock begins before native fork inventory and ends only after durable
@@ -4027,44 +4031,56 @@ function getChatWorkerCapacity(): WorkerCapacity {
 function trackExtensionUiRuntimeEvent(
   event: z.infer<typeof chatRuntimeEventSchema>,
 ): void {
-  if (event.type !== "extension_ui_request") {
-    return;
-  }
+  if (event.type !== "extension_ui_request") return;
+  const request = normalizePendingExtensionUiRequest(event);
+  if (request === undefined) return;
+
+  pendingExtensionUiRequests.register(event.runtimeId, request);
+}
+
+function normalizePendingExtensionUiRequest(
+  event: z.infer<typeof chatRuntimeEventSchema>,
+): PendingExtensionUiRequestDto | undefined {
   const method = getExtensionUiDialogMethod(event.method);
   const requestId = typeof event.id === "string" ? event.id : undefined;
-  if (method === undefined || requestId === undefined) {
-    return;
-  }
-
-  const requests = pendingExtensionUiRequests.get(event.runtimeId) ?? new Map();
-  const existing = requests.get(requestId);
-  if (existing?.timer !== undefined) clearTimeout(existing.timer);
+  if (method === undefined || requestId === undefined) return undefined;
+  const params =
+    event.params &&
+    typeof event.params === "object" &&
+    !Array.isArray(event.params)
+      ? (event.params as Record<string, unknown>)
+      : undefined;
+  const stringField = (name: string): string | undefined => {
+    const value = event[name] ?? params?.[name];
+    return typeof value === "string" ? value : undefined;
+  };
   const timeout =
-    typeof event.timeout === "number" && event.timeout >= 0
+    typeof event.timeout === "number" &&
+    Number.isFinite(event.timeout) &&
+    event.timeout >= 0
       ? event.timeout
       : undefined;
-  const timer =
-    timeout === undefined
-      ? undefined
-      : setTimeout(() => {
-          const pending = pendingExtensionUiRequests.get(event.runtimeId);
-          if (pending === undefined || pending.get(requestId)?.timer !== timer)
-            return;
-          pending.delete(requestId);
-          if (pending.size === 0)
-            pendingExtensionUiRequests.delete(event.runtimeId);
-          sendChatEventToRenderer({
-            type: "extension_ui_request_timeout",
-            runtimeId: event.runtimeId,
-            requestId,
-          });
-        }, timeout + extensionUiTimeoutGraceMs);
-  if (timer !== undefined) timer.unref();
-  requests.set(requestId, {
+  const rawOptions = event.options ?? params?.options;
+  const options = Array.isArray(rawOptions)
+    ? rawOptions.filter((value): value is string => typeof value === "string")
+    : undefined;
+  const parsed = pendingExtensionUiRequestSchema.safeParse({
+    id: requestId,
     method,
-    ...(timer !== undefined ? { timer } : {}),
+    title: stringField("title") ?? method,
+    ...(stringField("message") !== undefined
+      ? { message: stringField("message") }
+      : {}),
+    ...(options !== undefined ? { options } : {}),
+    ...(stringField("placeholder") !== undefined
+      ? { placeholder: stringField("placeholder") }
+      : {}),
+    ...(stringField("prefill") !== undefined
+      ? { prefill: stringField("prefill") }
+      : {}),
+    ...(timeout !== undefined ? { timeout } : {}),
   });
-  pendingExtensionUiRequests.set(event.runtimeId, requests);
+  return parsed.success ? parsed.data : undefined;
 }
 
 async function respondToExtensionUi(
@@ -4081,9 +4097,10 @@ async function respondToExtensionUi(
       `Extension UI runtime is no longer attached: ${request.runtimeId}`,
     );
   }
-  const pending = pendingExtensionUiRequests
-    .get(request.runtimeId)
-    ?.get(request.requestId);
+  const pending = pendingExtensionUiRequests.peek(
+    request.runtimeId,
+    request.requestId,
+  );
   if (pending === undefined) {
     throw new Error(
       `Extension UI request ${request.requestId} is no longer pending for this runtime. It may have timed out or already been answered.`,
@@ -4095,6 +4112,17 @@ async function respondToExtensionUi(
     );
   }
 
+  // Claim before the asynchronous write. A timeout or duplicate response can
+  // no longer race this authorized response and later resurrect stale UI.
+  const claimed = pendingExtensionUiRequests.claim(
+    request.runtimeId,
+    request.requestId,
+  );
+  if (claimed === undefined) {
+    throw new Error(
+      `Extension UI request ${request.requestId} is no longer pending for this runtime. It may have timed out or already been answered.`,
+    );
+  }
   try {
     assertChatRuntimeSessionNotMutating(
       request.runtimeId,
@@ -4109,20 +4137,19 @@ async function respondToExtensionUi(
     diagnosticsService.recordError(
       `Failed to write extension UI response ${request.requestId} for ${request.runtimeId}: ${message}`,
     );
-    sendChatEventToRenderer({
-      type: "extension_ui_response_failed",
-      runtimeId: request.runtimeId,
-      requestId: request.requestId,
-      message: `Could not deliver extension UI response: ${message}`,
-    });
+    // A failed write remains actionable only while the original request is
+    // still live and no newer event reused its id.
+    if (pendingExtensionUiRequests.restore(claimed) === "restored") {
+      sendChatEventToRenderer({
+        type: "extension_ui_response_failed",
+        runtimeId: request.runtimeId,
+        requestId: request.requestId,
+        message: `Could not deliver extension UI response: ${message}`,
+      });
+    }
     throw error;
   }
 
-  if (pending.timer !== undefined) clearTimeout(pending.timer);
-  const requests = pendingExtensionUiRequests.get(request.runtimeId);
-  requests?.delete(request.requestId);
-  if (requests?.size === 0)
-    pendingExtensionUiRequests.delete(request.runtimeId);
   sendChatEventToRenderer({
     type: "extension_ui_response_sent",
     runtimeId: request.runtimeId,
@@ -4150,12 +4177,7 @@ function isValidExtensionUiResponse(
 }
 
 function clearPendingExtensionUiRequests(runtimeId: string): void {
-  const requests = pendingExtensionUiRequests.get(runtimeId);
-  if (requests === undefined) return;
-  for (const pending of requests.values()) {
-    if (pending.timer !== undefined) clearTimeout(pending.timer);
-  }
-  pendingExtensionUiRequests.delete(runtimeId);
+  pendingExtensionUiRequests.clearRuntime(runtimeId);
 }
 
 function sendChatEventToRenderer(
@@ -8141,6 +8163,15 @@ async function getChatSnapshotForRuntime(
       cwd: state.cwd ?? chatWorkerCwds.get(runtimeId),
     },
     messages: messages.map((message) => chatMessageSchema.parse(message)),
+    // Copy the main-owned authorization queue synchronously after runtime
+    // ownership has been validated. A renderer can recover the same request,
+    // but cannot add one or answer anything absent from this queue.
+    ...(pendingExtensionUiRequests.has(runtimeId)
+      ? {
+          pendingExtensionUiRequests:
+            pendingExtensionUiRequests.snapshot(runtimeId),
+        }
+      : {}),
   };
 }
 

@@ -188,6 +188,8 @@ test("reload hydrates active attached history and Abort without another worker",
     const beforeRuntime = await harness.page.evaluate(
       async () => (await window.piDeck.chat.getSnapshot()).runtimeId,
     );
+    const unsentText = "keep this unsent during renderer reload";
+    await harness.page.getByLabel("Prompt text").fill(unsentText);
 
     await reloadAndOpenAttached(harness.page, prompt);
 
@@ -199,6 +201,9 @@ test("reload hydrates active attached history and Abort without another worker",
     await expect(
       harness.page.getByRole("button", { name: "Abort" }),
     ).toBeEnabled();
+    await expect(harness.page.getByLabel("Prompt text")).toHaveValue(
+      unsentText,
+    );
     expect(sessionPids(harness)).toEqual(beforePids);
     await expect
       .poll(() =>
@@ -221,6 +226,63 @@ test("reload hydrates active attached history and Abort without another worker",
         }, beforeRuntime),
       )
       .toBe(false);
+  } finally {
+    await closeHarness(harness);
+  }
+});
+
+test("reload restores a pending extension request and answers it on the same worker", async () => {
+  let harness: Harness | undefined;
+  try {
+    harness = await launchHarness({
+      name: "extension-ui",
+      fakeArgs: ["--prompt-scenario", "extension-ui", "--stream-delay-ms", "1"],
+    });
+    const prompt = "recover pending extension input";
+    await startPrompt(harness.page, prompt);
+    await expect(
+      harness.page.getByText("Approve fake extension UI request?"),
+    ).toBeVisible();
+    await expect.poll(() => sessionPids(harness!)).toHaveLength(1);
+    const beforePids = sessionPids(harness);
+    const runtimeId = await harness.page.evaluate(
+      async () => (await window.piDeck.chat.getSnapshot()).runtimeId,
+    );
+
+    await reloadAndOpenAttached(harness.page, prompt);
+
+    await expect(
+      harness.page.getByText("Approve fake extension UI request?"),
+    ).toBeVisible();
+    const recoveredSnapshot = await harness.page.evaluate(
+      async (id) => window.piDeck.chat.getSnapshot({ runtimeId: id }),
+      runtimeId,
+    );
+    expect(recoveredSnapshot.pendingExtensionUiRequests).toMatchObject([
+      { id: expect.any(String), method: "confirm", title: "Fake confirm" },
+    ]);
+    await harness.page
+      .getByRole("button", { name: "Confirm", exact: true })
+      .click();
+    await expect(
+      harness.page.getByText("Extension UI response delivered to Pi."),
+    ).toBeVisible();
+    await expect(
+      harness.page.getByText(
+        /Fake response to: recover pending extension input/,
+      ),
+    ).toBeVisible();
+    await expect
+      .poll(() =>
+        harness!.page.evaluate(
+          async (id) =>
+            (await window.piDeck.chat.getSnapshot({ runtimeId: id }))
+              .pendingExtensionUiRequests?.length ?? 0,
+          runtimeId,
+        ),
+      )
+      .toBe(0);
+    expect(sessionPids(harness)).toEqual(beforePids);
   } finally {
     await closeHarness(harness);
   }

@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { emptyOverlays } from "./sessionState.js";
-import type { SessionViewModel } from "./sessionRuntimeReducer.js";
+import {
+  reduceRuntimeEvent,
+  type SessionViewModel,
+} from "./sessionRuntimeReducer.js";
 import {
   AttachedSessionRecoveryTimeoutError,
   loadAttachedSessionRecovery,
@@ -177,6 +180,78 @@ describe("mergeRecoveredAttachedSession", () => {
       title: "Renamed title",
       titleOverride: "Renamed title",
       timeline: [{ id: "user-1", content: "durable prompt" }],
+    });
+  });
+
+  it("replays meaningful terminal events over deferred recovery and ignores a no-op", () => {
+    const current = session("runtime-1", {
+      status: "working",
+      baseState: "working",
+      overlays: { ...emptyOverlays, streaming: true },
+      failureKind: "auth-required",
+      retryPrompt: { text: "retry me", attachments: [] },
+    });
+    const recovered = projectAttachedSessionRecovery({
+      snapshot: {
+        runtimeId: "runtime-1",
+        backendMode: "real",
+        state: { isAgentActive: true },
+        messages: [],
+      } as any,
+      status: {
+        runtimeId: "runtime-1",
+        backendMode: "real",
+        state: { isAgentActive: true },
+      } as any,
+      current,
+      observedRuntimeEvents: [
+        { type: "unsupported_future_event", runtimeId: "runtime-1" } as any,
+        {
+          type: "agent_end",
+          runtimeId: "runtime-1",
+          messages: [
+            {
+              id: "assistant-final",
+              role: "assistant",
+              provider: "openai-codex",
+              stopReason: "stop",
+              content: "Authenticated completion",
+              usage: { input: 21, output: 3, cacheRead: 2 },
+            },
+          ],
+          willRetry: false,
+        } as any,
+      ],
+      sessionFromSnapshot: () =>
+        session("runtime-1", {
+          status: "working",
+          baseState: "working",
+          overlays: { ...emptyOverlays, streaming: true },
+        }),
+      reconcileRuntimeStatus: (candidate) => candidate,
+      reduceRuntimeEvent,
+    });
+
+    expect(recovered).toMatchObject({
+      status: "idle",
+      baseState: "idle",
+      overlays: { streaming: false },
+      usageStats: {
+        inputTokens: 21,
+        outputTokens: 3,
+        cacheReadTokens: 2,
+      },
+      usageByMessageId: {
+        "agent-end": {
+          inputTokens: 21,
+          outputTokens: 3,
+          cacheReadTokens: 2,
+        },
+      },
+      authVerified: true,
+      failureKind: undefined,
+      retryPrompt: undefined,
+      lifecycle: { phase: "terminal", outcome: "completed" },
     });
   });
 

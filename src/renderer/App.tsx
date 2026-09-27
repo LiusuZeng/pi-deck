@@ -105,9 +105,10 @@ import {
   projectAttachedSessionRecovery,
 } from "./attachedSessionRecovery.js";
 import {
+  createDraftAfterWorkspaceActivation,
   draftDefaultsForWorkspace,
   emptyDraftModelConfiguration,
-  type ScopedDraftDefaults,
+  type WorkspaceDraftDefaults,
 } from "./draftDefaults.js";
 import {
   activeSessionLifecycle,
@@ -1344,10 +1345,9 @@ export function App(): ReactElement {
     useState<RuntimeCapabilitiesById>({});
   const [projectModelConfiguration, setProjectModelConfiguration] =
     useState<ChatListModelsResult>(emptyDraftModelConfiguration);
-  const projectModelConfigurationRef = useRef<ScopedDraftDefaults>({
-    workspaceId: currentWorkspace.id,
-    configuration: projectModelConfiguration,
-  });
+  const projectModelConfigurationRef = useRef<WorkspaceDraftDefaults>(
+    new Map([[currentWorkspace.id, projectModelConfiguration]]),
+  );
   const [sidebarVisible, setSidebarVisible] = useState(() =>
     loadSidebarVisiblePreference(),
   );
@@ -1417,7 +1417,7 @@ export function App(): ReactElement {
   const reconcilingRuntimeIds = useRef(new Set<string>());
   const attachedRecoveryRequests = useRef(new Map<string, Promise<void>>());
   const attachedRecoveryGenerations = useRef(new Map<string, number>());
-  const runtimeEventRevisions = useRef(new Map<string, number>());
+  const attachedRecoveryEvents = useRef(new Map<string, ChatRuntimeEvent[]>());
   const rendererDisposedRef = useRef(false);
   const sessionsRef = useRef<SessionViewModel[]>([]);
   const composerDraftsRef = useRef<ComposerDraftsBySession>({});
@@ -1471,8 +1471,12 @@ export function App(): ReactElement {
     workspaceId: string,
     configuration: ChatListModelsResult,
   ): void {
-    projectModelConfigurationRef.current = { workspaceId, configuration };
-    setProjectModelConfiguration(configuration);
+    const next = new Map(projectModelConfigurationRef.current);
+    next.set(workspaceId, configuration);
+    projectModelConfigurationRef.current = next;
+    if (currentWorkspaceRef.current.id === workspaceId) {
+      setProjectModelConfiguration(configuration);
+    }
   }
 
   function resetProjectModelConfiguration(workspaceId: string): void {
@@ -1589,6 +1593,40 @@ export function App(): ReactElement {
     );
   }
 
+  async function adoptIncomingRuntimeIdentities(
+    incoming: readonly SessionViewModel[],
+  ): Promise<void> {
+    const migrations = incomingRuntimeIdentityMigrations(
+      sessionsRef.current,
+      incoming,
+    );
+    if (migrations.length === 0) return;
+
+    for (const { fromSessionId, toSessionId } of migrations) {
+      const draft = composerDraftForSession(
+        composerDraftsRef.current,
+        fromSessionId,
+      );
+      await transferComposerAttachmentOwnership(
+        fromSessionId,
+        toSessionId,
+        draft.attachments,
+      );
+      if (selectedSessionIdRef.current === fromSessionId) {
+        selectedSessionIdRef.current = toSessionId;
+        setSelectedSessionId(toSessionId);
+      }
+    }
+    const nextDrafts = migrateComposerDraftIdentities(
+      composerDraftsRef.current,
+      migrations,
+    );
+    if (nextDrafts !== composerDraftsRef.current) {
+      composerDraftsRef.current = nextDrafts;
+      setComposerDrafts(nextDrafts);
+    }
+  }
+
   function hydrateAttachedSession(
     source: SessionViewModel,
     options: { generation?: number; showLoading?: boolean } = {},
@@ -1603,7 +1641,7 @@ export function App(): ReactElement {
     const recoveryGeneration =
       (attachedRecoveryGenerations.current.get(runtimeId) ?? 0) + 1;
     attachedRecoveryGenerations.current.set(runtimeId, recoveryGeneration);
-    const eventRevision = runtimeEventRevisions.current.get(runtimeId) ?? 0;
+    attachedRecoveryEvents.current.set(runtimeId, []);
     if (options.showLoading === true) {
       setSessions((items) =>
         updateSessionByRuntimeId(items, runtimeId, (current) =>
@@ -1631,6 +1669,9 @@ export function App(): ReactElement {
         ) {
           return;
         }
+        const observedRuntimeEvents = [
+          ...(attachedRecoveryEvents.current.get(runtimeId) ?? []),
+        ];
         setSessions((items) =>
           updateSessionByRuntimeId(items, runtimeId, (current) =>
             !current.runtimeBacked
@@ -1639,13 +1680,12 @@ export function App(): ReactElement {
                   snapshot,
                   status,
                   current,
-                  runtimeEventObserved:
-                    (runtimeEventRevisions.current.get(runtimeId) ?? 0) !==
-                    eventRevision,
+                  observedRuntimeEvents,
                   sessionFromSnapshot,
                   // getRuntimeStatus is the normalized lifecycle authority.
                   // Raw snapshots may expose isStreaming instead.
                   reconcileRuntimeStatus: reconcileSessionWithRuntimeStatus,
+                  reduceRuntimeEvent,
                 }),
           ),
         );
@@ -1671,7 +1711,7 @@ export function App(): ReactElement {
         // attached summary instead of leaving controls disabled forever.
         if (
           options.showLoading === true &&
-          (runtimeEventRevisions.current.get(runtimeId) ?? 0) === eventRevision
+          (attachedRecoveryEvents.current.get(runtimeId)?.length ?? 0) === 0
         ) {
           setSessions((items) =>
             updateSessionByRuntimeId(items, runtimeId, (current) => ({
@@ -1699,6 +1739,7 @@ export function App(): ReactElement {
           recoveryGeneration
         ) {
           attachedRecoveryRequests.current.delete(runtimeId);
+          attachedRecoveryEvents.current.delete(runtimeId);
         }
       });
     attachedRecoveryRequests.current.set(runtimeId, request);
@@ -1765,6 +1806,14 @@ export function App(): ReactElement {
         );
         // Do not let a late startup scan replace a workspace the user has
         // since selected, or overwrite a newer explicit refresh.
+        if (
+          disposed ||
+          generation !== sessionListGeneration.current ||
+          currentWorkspaceRef.current.id !== workspace.id
+        ) {
+          return;
+        }
+        await adoptIncomingRuntimeIdentities(listedSessions);
         if (
           disposed ||
           generation !== sessionListGeneration.current ||
@@ -1951,6 +2000,10 @@ export function App(): ReactElement {
         );
         setSelectedSessionId(draft.id);
         setCurrentProject(bootstrap.project);
+        // Bootstrap identity is authoritative before discovery can settle;
+        // React's later commit must not make another workspace look current.
+        currentWorkspaceRef.current = bootstrapWorkspace;
+        resetProjectModelConfiguration(bootstrapWorkspace.id);
         setCurrentWorkspace(bootstrapWorkspace);
         setWorkspaces(
           bootstrap.backendMode === "real"
@@ -1985,9 +2038,7 @@ export function App(): ReactElement {
             .listModels(modelDiscoveryRequestForWorkspace(bootstrapWorkspace))
             .then((result) => {
               if (disposed) return;
-              if (currentWorkspaceRef.current.id === bootstrapWorkspace.id) {
-                commitProjectModelConfiguration(bootstrapWorkspace.id, result);
-              }
+              commitProjectModelConfiguration(bootstrapWorkspace.id, result);
               setSessions((items) =>
                 applyPiDefaultsToDraftSessions(
                   items,
@@ -1997,10 +2048,7 @@ export function App(): ReactElement {
               );
             })
             .catch(() => {
-              if (
-                !disposed &&
-                currentWorkspaceRef.current.id === bootstrapWorkspace.id
-              ) {
+              if (!disposed) {
                 resetProjectModelConfiguration(bootstrapWorkspace.id);
               }
             });
@@ -2037,6 +2085,7 @@ export function App(): ReactElement {
       disposed = true;
       rendererDisposedRef.current = true;
       attachedRecoveryRequests.current.clear();
+      attachedRecoveryEvents.current.clear();
       unsubscribe?.();
       unsubscribeMultitask?.();
       eventBuffer?.dispose();
@@ -2970,10 +3019,10 @@ export function App(): ReactElement {
   }
 
   function applyRuntimeEvent(event: ChatRuntimeEvent): void {
-    runtimeEventRevisions.current.set(
-      event.runtimeId,
-      (runtimeEventRevisions.current.get(event.runtimeId) ?? 0) + 1,
-    );
+    // Recovery starts from a durable snapshot and replays only events observed
+    // after its read began. Unsupported/no-op events therefore do not force a
+    // broad "prefer current" merge or erase reducer-owned terminal metadata.
+    attachedRecoveryEvents.current.get(event.runtimeId)?.push(event);
     if (event.type === "agent_end" || event.type === "worker_exit") {
       clearRuntimeStatusRetry(event.runtimeId);
     }
@@ -4772,47 +4821,61 @@ export function App(): ReactElement {
       setUiMessage(`Opening ${workspace.name}; active Pi work stays attached…`);
     }
     try {
-      const listedSessions = await listSessionsForWorkspaces(
-        window.piDeck,
-        nextWorkspaces.length > 0 ? nextWorkspaces : [workspace],
-      );
-      if (sessionListRequest !== sessionListGeneration.current) {
-        return false;
-      }
-      const savedRows = listedSessions;
-      const existingRuntime = sessionsRef.current.find(
-        (session) =>
-          session.runtimeBacked && session.workspaceId === workspace.id,
-      );
-      const existingDraft = sessionsRef.current.find(
-        (session) =>
-          session.draftSession === true && session.workspaceId === workspace.id,
-      );
-      const selectedId =
-        preferredSessionId ??
-        existingRuntime?.id ??
-        existingDraft?.id ??
-        createId("draft-session");
-      const activeBackendMode = backendModeRef.current;
-      const draftConfiguration =
-        activeBackendMode === "real"
-          ? draftDefaultsForWorkspace(
-              projectModelConfigurationRef.current,
-              workspace.id,
-            )
-          : undefined;
-      const draft =
-        existingRuntime === undefined && existingDraft === undefined
-          ? draftSessionForWorkspace(
-              workspace,
-              selectedId,
-              activeBackendMode,
-              draftConfiguration,
-            )
-          : undefined;
+      const creation = await createDraftAfterWorkspaceActivation({
+        workspaceId: workspace.id,
+        activation: listSessionsForWorkspaces(
+          window.piDeck,
+          nextWorkspaces.length > 0 ? nextWorkspaces : [workspace],
+        ),
+        readDefaults: () => projectModelConfigurationRef.current,
+        createDraft: (listedSessions, latestConfiguration) => {
+          const existingRuntime = sessionsRef.current.find(
+            (session) =>
+              session.runtimeBacked && session.workspaceId === workspace.id,
+          );
+          const existingDraft = sessionsRef.current.find(
+            (session) =>
+              session.draftSession === true &&
+              session.workspaceId === workspace.id,
+          );
+          const selectedId =
+            preferredSessionId ??
+            existingRuntime?.id ??
+            existingDraft?.id ??
+            createId("draft-session");
+          const activeBackendMode = backendModeRef.current;
+          return {
+            activeBackendMode,
+            listedSessions,
+            selectedId,
+            draft:
+              existingRuntime === undefined && existingDraft === undefined
+                ? draftSessionForWorkspace(
+                    workspace,
+                    selectedId,
+                    activeBackendMode,
+                    activeBackendMode === "real"
+                      ? latestConfiguration
+                      : undefined,
+                  )
+                : undefined,
+          };
+        },
+      });
+      if (sessionListRequest !== sessionListGeneration.current) return false;
+      const {
+        activeBackendMode,
+        listedSessions: savedRows,
+        selectedId,
+        draft,
+      } = creation.draft;
       // Fake mode's fixture rows are renderer-owned, not saved-session rows.
       // Never let a compatibility list call evict them during workspace
       // activation; real mode continues to replace only canonical saved rows.
+      if (activeBackendMode === "real") {
+        await adoptIncomingRuntimeIdentities(savedRows);
+      }
+      if (sessionListRequest !== sessionListGeneration.current) return false;
       setSessions((items) =>
         activeBackendMode === "real"
           ? replaceWorkspaceTreeSavedRows(
@@ -4826,6 +4889,15 @@ export function App(): ReactElement {
       if (!isNavigationCurrent(generation)) {
         return false;
       }
+      // Commit the routing identity synchronously. Discovery callbacks must
+      // not observe the previous workspace during React's commit gap.
+      currentWorkspaceRef.current = workspace;
+      setProjectModelConfiguration(
+        draftDefaultsForWorkspace(
+          projectModelConfigurationRef.current,
+          workspace.id,
+        ) ?? emptyDraftModelConfiguration(),
+      );
       setCurrentWorkspace(workspace);
       setWorkspaces(nextWorkspaces);
       if (workspace.defaultProject !== undefined) {
@@ -7364,6 +7436,57 @@ function removeSavedSessionsForProject(
   );
 }
 
+interface SessionIdentityMigration {
+  fromSessionId: string;
+  toSessionId: string;
+  sessionFile: string;
+}
+
+/**
+ * A cached durable row can retain composer state while a refresh reveals that
+ * main still owns its attached runtime. Return the exact key migration before
+ * file-based row de-duplication so text and attachment ownership follow the
+ * authoritative runtime id.
+ */
+function incomingRuntimeIdentityMigrations(
+  current: readonly SessionViewModel[],
+  incoming: readonly SessionViewModel[],
+): SessionIdentityMigration[] {
+  const migrations: SessionIdentityMigration[] = [];
+  for (const runtime of incoming) {
+    if (!runtime.runtimeBacked || runtime.sessionFile === undefined) continue;
+    const cached = current.find(
+      (candidate) =>
+        !candidate.runtimeBacked &&
+        candidate.id !== runtime.id &&
+        candidate.sessionFile === runtime.sessionFile,
+    );
+    if (cached !== undefined) {
+      migrations.push({
+        fromSessionId: cached.id,
+        toSessionId: runtime.id,
+        sessionFile: runtime.sessionFile,
+      });
+    }
+  }
+  return migrations;
+}
+
+function migrateComposerDraftIdentities(
+  drafts: ComposerDraftsBySession,
+  migrations: readonly SessionIdentityMigration[],
+): ComposerDraftsBySession {
+  return migrations.reduce(
+    (current, migration) =>
+      moveComposerDraft(
+        current,
+        migration.fromSessionId,
+        migration.toSessionId,
+      ),
+    drafts,
+  );
+}
+
 function mergeSessions(
   primary: SessionViewModel[],
   secondary: SessionViewModel[],
@@ -7378,6 +7501,13 @@ function mergeSessions(
     );
     if (duplicateIndex === -1) {
       merged.push(session);
+    } else if (
+      session.runtimeBacked &&
+      !merged[duplicateIndex]!.runtimeBacked
+    ) {
+      // File identity de-duplication must never allow a composer-retained
+      // cache row to suppress main's attached runtime id and transcript.
+      merged[duplicateIndex] = session;
     }
   }
   return merged;
@@ -7888,6 +8018,8 @@ function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
     : completedAtFromSnapshotMessages(snapshot.messages);
   const authRecovery = authRecoveryFromSnapshotMessages(snapshot.messages);
   const authRequired = authRecovery.failure !== undefined;
+  const pendingExtensionUiRequests = snapshot.pendingExtensionUiRequests ?? [];
+  const waitingForExtensionUi = pendingExtensionUiRequests.length > 0;
   const timeline = timelineFromMessages(snapshot.messages);
   if (authRecovery.failure !== undefined) {
     timeline.push({
@@ -7909,19 +8041,35 @@ function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
     project: snapshot.state.cwd?.split(/[\\/]/).pop() ?? "pi-deck",
     projectPath:
       snapshot.state.cwd ?? processCwdPlaceholder(snapshot.backendMode),
-    subtitle: isAgentActive
-      ? `Working · ${backendLabelFromMode(snapshot.backendMode)}`
-      : authRequired
-        ? "Error · OpenAI authentication verification pending"
-        : `Idle · ${backendLabelFromMode(snapshot.backendMode)} ready`,
-    status: isAgentActive ? "working" : authRequired ? "error" : "idle",
+    subtitle: waitingForExtensionUi
+      ? "Waiting · extension input required"
+      : isAgentActive
+        ? `Working · ${backendLabelFromMode(snapshot.backendMode)}`
+        : authRequired
+          ? "Error · OpenAI authentication verification pending"
+          : `Idle · ${backendLabelFromMode(snapshot.backendMode)} ready`,
+    status: waitingForExtensionUi
+      ? "waiting"
+      : isAgentActive
+        ? "working"
+        : authRequired
+          ? "error"
+          : "idle",
     updatedAt: "Now",
     updatedAtMs: Date.now(),
-    baseState: isAgentActive ? "working" : authRequired ? "error" : "idle",
+    baseState: waitingForExtensionUi
+      ? "waitingForInput"
+      : isAgentActive
+        ? "working"
+        : authRequired
+          ? "error"
+          : "idle",
     overlays: {
       ...emptyOverlays,
       streaming: isAgentActive,
+      needsUserInput: waitingForExtensionUi,
     },
+    ...(waitingForExtensionUi ? { pendingExtensionUiRequests } : {}),
     ...(isAgentActive
       ? {
           workingStartedAtMs: Date.now(),
@@ -13588,6 +13736,10 @@ export const __rendererTestHooks = {
   savedSessionsForDeletedFiles,
   removeSavedSessionsForProject,
   replaceWorkspaceSavedRows,
+  replaceWorkspaceTreeSavedRows,
+  incomingRuntimeIdentityMigrations,
+  migrateComposerDraftIdentities,
+  mergeSessions,
   initialWorkspaceDialogName,
   updateWorkspaceSessionLabels,
   archiveWorkspaceBlockReason,

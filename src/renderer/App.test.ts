@@ -3283,6 +3283,38 @@ describe("renderer session actions", () => {
     ).toBe(false);
   });
 
+  it("projects snapshot-owned extension requests into a restored waiting session", () => {
+    const restored = __rendererTestHooks.sessionFromSnapshot({
+      runtimeId: "runtime-1",
+      backendMode: "real",
+      workspaceId: "workspace-a",
+      state: { isAgentActive: true },
+      messages: [],
+      pendingExtensionUiRequests: [
+        {
+          id: "request-1",
+          method: "confirm",
+          title: "Confirm recovery",
+          message: "Continue?",
+        },
+      ],
+    } as any);
+
+    expect(restored).toMatchObject({
+      status: "waiting",
+      baseState: "waitingForInput",
+      overlays: { streaming: true, needsUserInput: true },
+      pendingExtensionUiRequests: [
+        {
+          id: "request-1",
+          method: "confirm",
+          title: "Confirm recovery",
+          message: "Continue?",
+        },
+      ],
+    });
+  });
+
   it("blocks waiting sessions from prompts and membership mutations", () => {
     const waiting = {
       ...baseSession(),
@@ -5161,5 +5193,77 @@ describe("incremental timeline projection", () => {
 
     expect(marker.length).toBeLessThan(1_000);
     expect(marker).toContain("|500|");
+  });
+});
+
+describe("attached runtime row identity reconciliation", () => {
+  function row(id: string, runtimeBacked: boolean) {
+    return {
+      id,
+      workspaceId: "workspace-a",
+      title: runtimeBacked ? "Attached transcript" : "Cached preview",
+      project: "Project",
+      projectPath: "/project",
+      subtitle: runtimeBacked ? "Idle · attached real Pi session" : "Saved",
+      status: "idle",
+      updatedAt: "Now",
+      updatedAtMs: 1,
+      timeline: runtimeBacked
+        ? [{ id: "user-1", kind: "user", content: "durable", createdAt: "Now" }]
+        : [],
+      baseState: "idle",
+      overlays: { ...emptyOverlays },
+      runtimeBacked,
+      resumeBacked: !runtimeBacked,
+      backendMode: "real",
+      sessionFile: "/sessions/shared.jsonl",
+    } as any;
+  }
+
+  it("upgrades a composer-retained cache row to the incoming runtime id", () => {
+    const cached = row("durable-session-id", false);
+    const attached = row("runtime-id", true);
+    const drafts = {
+      [cached.id]: {
+        text: "unsent persisted text",
+        attachments: [],
+        slashOpen: false,
+      },
+    };
+    const migrations = __rendererTestHooks.incomingRuntimeIdentityMigrations(
+      [cached],
+      [attached],
+    );
+    const migratedDrafts = __rendererTestHooks.migrateComposerDraftIdentities(
+      drafts,
+      migrations,
+    );
+    const rows = __rendererTestHooks.replaceWorkspaceTreeSavedRows(
+      [cached],
+      ["workspace-a"],
+      [attached],
+      drafts,
+    );
+
+    expect(migrations).toEqual([
+      {
+        fromSessionId: "durable-session-id",
+        toSessionId: "runtime-id",
+        sessionFile: "/sessions/shared.jsonl",
+      },
+    ]);
+    expect(migratedDrafts).toEqual({
+      "runtime-id": {
+        text: "unsent persisted text",
+        attachments: [],
+        slashOpen: false,
+      },
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: "runtime-id",
+      runtimeBacked: true,
+      timeline: [{ id: "user-1", content: "durable" }],
+    });
   });
 });

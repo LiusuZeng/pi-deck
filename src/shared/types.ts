@@ -46,6 +46,7 @@ import type {
   multitaskTaskSummarySchema,
   parallelWorkerModelSchema,
   parallelWorkerSettingsSchema,
+  pendingExtensionUiRequestSchema,
   pickAttachmentsResultSchema,
   pickProjectResultSchema,
   projectListResultSchema,
@@ -175,6 +176,9 @@ export type ChatRespondToExtensionUiRequest = z.infer<
   typeof chatRespondToExtensionUiRequestSchema
 >;
 export type ChatSnapshotRequest = z.infer<typeof chatSnapshotRequestSchema>;
+export type PendingExtensionUiRequestDto = z.infer<
+  typeof pendingExtensionUiRequestSchema
+>;
 export type ChatSnapshot = z.infer<typeof chatSnapshotSchema>;
 export type ChatForkSessionRequest = z.infer<
   typeof chatForkSessionRequestSchema
