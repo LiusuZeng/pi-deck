@@ -352,10 +352,6 @@ test("repeated quit must wait for the same active-worker shutdown barrier (#148)
     );
     await closed;
     console.info("#148 worker PIDs still alive at will-quit:", aliveAtQuit);
-
-    // Setup/transport failures above remain real failures. Only the known
-    // invariant violation below is expected; remove this when #148 is fixed.
-    test.fail(true, "https://github.com/LiusuZeng/pi-deck/issues/148");
     expect(aliveAtQuit).toEqual([]);
   } finally {
     await closeHarness(harness);

@@ -17,6 +17,15 @@ import { z } from "zod";
 import { initializeMacOSDockIcon, resolveAppIconPath } from "./appIcon.js";
 import { initializeAppIdentity } from "./appIdentity.js";
 import {
+  QuitLifecycleCoordinator,
+  RendererCrashRecovery,
+  withTimeoutResult,
+  type CrashRecoveryOutcome,
+  type QuitActivitySummary,
+  type QuitDialogOutcome,
+  type QuitRequestSource,
+} from "./appLifecycle.js";
+import {
   appBootstrapStateSchema,
   appSettingsPatchSchema,
   appSettingsSchema,
@@ -501,13 +510,36 @@ const pendingChatAttachmentWorkers = new Map<
 >();
 let chatEventUnsubscribe: (() => void) | undefined;
 let selectedRealProjectCwd: string | undefined;
-let isQuittingAfterChatWorkerCleanup = false;
 let testProjectPickQueue: string[] | undefined;
 
 let workflowScheduler: WorkflowScheduler | undefined;
 let workflowOccurrenceScheduler: WorkflowOccurrenceScheduler | undefined;
 let backendInitializationPromise: Promise<void> | undefined;
 const processStartedAtMs = Date.now();
+
+const appLifecycle = new QuitLifecycleCoordinator({
+  inspectActivity: inspectQuitActivity,
+  confirmQuit: showActiveWorkQuitDialog,
+  cleanup: () => closeChatWorker({ shutdownWorkflowRuntimes: true }),
+  requestFinalQuit: () => app.quit(),
+  recordDiagnostic: (message) => {
+    diagnostics?.recordError(message);
+    console.error(message);
+  },
+});
+
+const rendererCrashRecovery = new RendererCrashRecovery({
+  reloadRenderer: reloadMainRenderer,
+  showFallback: showRendererRecoveryDialog,
+  recreateRenderer: recreateMainWindowAfterCrash,
+  stopWorkAndQuit: async () => {
+    await appLifecycle.requestQuit("renderer-crash", { confirmed: true });
+  },
+  recordDiagnostic: (message) => {
+    diagnostics?.recordError(message);
+    console.error(message);
+  },
+});
 
 const maxImportedImageBytes = MAX_IMAGE_BYTES;
 const maxPromptImages = 10;
@@ -660,9 +692,9 @@ async function bootstrap(): Promise<void> {
   await backendInitializationPromise;
 }
 
-function createMainWindow(): void {
+function createMainWindow(): BrowserWindow {
   const preloadPath = path.join(__dirname, "../preload/index.js");
-  mainWindow = new BrowserWindow({
+  const window = new BrowserWindow({
     width: 1200,
     height: 800,
     minWidth: 900,
@@ -682,14 +714,16 @@ function createMainWindow(): void {
     ? new URL(process.env.VITE_DEV_SERVER_URL as string).origin
     : "file://";
 
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+  mainWindow = window;
+
+  window.webContents.setWindowOpenHandler(({ url }) => {
     if (isAllowedExternalUrl(url)) {
       void shell.openExternal(url);
     }
     return { action: "deny" };
   });
 
-  mainWindow.webContents.on("will-navigate", (event, targetUrl) => {
+  window.webContents.on("will-navigate", (event, targetUrl) => {
     if (!shouldAllowNavigation(targetUrl, appOrigin)) {
       event.preventDefault();
       if (isAllowedExternalUrl(targetUrl)) {
@@ -698,17 +732,44 @@ function createMainWindow(): void {
     }
   });
 
-  registerDevReloadShortcut(mainWindow);
+  registerDevReloadShortcut(window);
 
-  mainWindow.on("closed", () => {
-    mainWindow = undefined;
+  window.on("close", (event) => {
+    if (appLifecycle.allowsExit || !isLastOpenWindow(window)) return;
+    event.preventDefault();
+    void appLifecycle.requestQuit("last-window");
+  });
+
+  window.on("closed", () => {
+    if (mainWindow === window) mainWindow = undefined;
+  });
+
+  window.webContents.on("render-process-gone", (_event, details) => {
+    if (
+      appLifecycle.allowsExit ||
+      window.isDestroyed() ||
+      mainWindow !== window
+    )
+      return;
+    void rendererCrashRecovery.handleCrash(
+      `${details.reason} (exit code ${details.exitCode})`,
+    );
   });
 
   if (isDev) {
-    void mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL as string);
+    void window.loadURL(process.env.VITE_DEV_SERVER_URL as string);
   } else {
-    void mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
+    void window.loadFile(path.join(__dirname, "../renderer/index.html"));
   }
+  return window;
+}
+
+function isLastOpenWindow(window: BrowserWindow): boolean {
+  return (
+    BrowserWindow.getAllWindows().filter(
+      (candidate) => !candidate.isDestroyed() && candidate !== window,
+    ).length === 0
+  );
 }
 
 function applyAppTheme(settings: AppSettings): void {
@@ -8600,26 +8661,208 @@ function isLikelyTextPath(extension: string): boolean {
   ]).has(extension);
 }
 
-app.on("before-quit", (event) => {
-  if (
-    isQuittingAfterChatWorkerCleanup ||
-    (!chatLifecycleStopRequested &&
-      (chatAdapter === undefined || chatRuntimeIds.size === 0) &&
-      pendingChatAttachmentWorkers.size === 0 &&
-      chatLifecycleOperations.size === 0 &&
-      activeChatReset === undefined &&
-      !workflowRuntimeOwnership.hasOwnedRuntimes())
-  ) {
-    return;
+async function inspectQuitActivity(): Promise<QuitActivitySummary> {
+  let activeChats = 0;
+  let privateTasks = 0;
+  let pendingOperations =
+    chatLifecycleOperations.size +
+    pendingChatAttachmentWorkers.size +
+    chatSessionResumePromises.size +
+    taskSessionSynthesisTails.size +
+    pendingFailedForkCleanups.size +
+    (activeChatReset === undefined ? 0 : 1);
+  const adapter = chatAdapter;
+
+  for (const runtimeId of chatRuntimeIds) {
+    if (workflowRuntimeOwnership.isOwned(runtimeId)) continue;
+    if (adapter === undefined || !adapter.hasRuntime(runtimeId)) {
+      pendingOperations += 1;
+      continue;
+    }
+    const status = await boundedBestEffort(
+      Promise.resolve().then(() => adapter.getRuntimeStatus(runtimeId)),
+      1_000,
+    );
+    if (status === undefined) {
+      // An unresponsive owned child is conservatively treated as pending work.
+      pendingOperations += 1;
+    } else {
+      const record = status as Record<string, unknown>;
+      if (
+        status.isAgentActive === true ||
+        (typeof record.isStreaming === "boolean" && record.isStreaming)
+      ) {
+        activeChats += 1;
+      }
+    }
+
+    try {
+      privateTasks +=
+        taskSessionOrchestrator
+          ?.state(runtimeId)
+          .tasks.filter(
+            (task) =>
+              task.lifecycle !== "completed" &&
+              task.lifecycle !== "failed" &&
+              task.lifecycle !== "interrupted",
+          ).length ?? 0;
+    } catch {
+      // The parent may be between worker exit and bookkeeping removal.
+    }
+    privateTasks += legacyNonterminalTaskCount(runtimeId);
+  }
+  for (const runs of taskSessionPlannerRuns.values()) {
+    privateTasks += [...runs].filter((run) => !run.cancelled).length;
   }
 
-  event.preventDefault();
-  // A second quit request must not bypass child cleanup already in flight.
-  if (chatLifecycleStopRequested) return;
-  void closeChatWorker({ shutdownWorkflowRuntimes: true }).finally(() => {
-    isQuittingAfterChatWorkerCleanup = true;
-    app.quit();
+  return {
+    activeChats,
+    privateTasks,
+    workflowRuntimes: workflowRuntimeOwnership.ownedRuntimeIds().length,
+    pendingOperations,
+  };
+}
+
+async function showActiveWorkQuitDialog(
+  activity: QuitActivitySummary,
+  source: QuitRequestSource,
+): Promise<QuitDialogOutcome> {
+  const testOutcome = consumeHiddenWindowDialogOutcome(
+    "PI_DECK_E2E_QUIT_DIALOG_RESPONSES",
+    "quit",
+  );
+  if (testOutcome !== undefined) return testOutcome as QuitDialogOutcome;
+
+  const parts = [
+    activity.activeChats > 0 ? `${activity.activeChats} active chat(s)` : "",
+    activity.privateTasks > 0 ? `${activity.privateTasks} private task(s)` : "",
+    activity.workflowRuntimes > 0
+      ? `${activity.workflowRuntimes} workflow runtime(s)`
+      : "",
+    activity.pendingOperations > 0
+      ? `${activity.pendingOperations} pending operation(s)`
+      : "",
+  ].filter(Boolean);
+  const detail = `${parts.join(", ")} will be stopped. Saved history remains available, but interrupted computation does not resume automatically.`;
+  const options = {
+    type: "warning" as const,
+    title: "Quit Pi Deck?",
+    message:
+      source === "last-window"
+        ? "Closing the last window will quit Pi Deck and stop active work."
+        : "Quitting Pi Deck will stop active work.",
+    detail,
+    buttons: ["Cancel", "Quit and Stop Work"],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  };
+  const window = mainWindow;
+  const result =
+    window !== undefined && !window.isDestroyed()
+      ? await dialog.showMessageBox(window, options)
+      : await dialog.showMessageBox(options);
+  return result.response === 1 ? "quit" : "cancel";
+}
+
+async function showRendererRecoveryDialog(
+  details: string,
+): Promise<CrashRecoveryOutcome> {
+  const testOutcome = consumeHiddenWindowDialogOutcome(
+    "PI_DECK_E2E_CRASH_DIALOG_RESPONSES",
+    "recover",
+  );
+  if (testOutcome !== undefined) return testOutcome as CrashRecoveryOutcome;
+
+  const options = {
+    type: "error" as const,
+    title: "Pi Deck UI stopped",
+    message: "The Pi Deck interface could not recover automatically.",
+    detail: `Main-process work is still owned by Pi Deck (${details}). Recover the UI, or stop work and quit safely. Unsent drafts may be lost.`,
+    buttons: ["Recover UI", "Stop Work and Quit"],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  };
+  const window = mainWindow;
+  const result =
+    window !== undefined && !window.isDestroyed()
+      ? await dialog.showMessageBox(window, options)
+      : await dialog.showMessageBox(options);
+  return result.response === 1 ? "quit" : "recover";
+}
+
+/** Hidden E2E must never allocate a native dialog. Production never uses this. */
+function consumeHiddenWindowDialogOutcome(
+  environmentName: string,
+  defaultOutcome: string,
+): string | undefined {
+  if (
+    process.env.PI_DECK_E2E_TEST !== "1" ||
+    process.env.PI_DECK_E2E_HIDE_WINDOWS !== "1"
+  ) {
+    return undefined;
+  }
+  const outcomes = (process.env[environmentName] ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const outcome = outcomes.shift() ?? defaultOutcome;
+  process.env[environmentName] = outcomes.join(",");
+  return outcome;
+}
+
+async function reloadMainRenderer(): Promise<boolean> {
+  const window = mainWindow;
+  if (
+    window === undefined ||
+    window.isDestroyed() ||
+    window.webContents.isDestroyed()
+  ) {
+    return false;
+  }
+  let finished: (() => void) | undefined;
+  let gone: (() => void) | undefined;
+  const loaded = new Promise<boolean>((resolve) => {
+    finished = () => resolve(true);
+    gone = () => resolve(false);
+    window.webContents.once("did-finish-load", finished);
+    window.webContents.once("render-process-gone", gone);
+    try {
+      window.webContents.reload();
+    } catch {
+      resolve(false);
+    }
   });
+  try {
+    return await withTimeoutResult(loaded, 10_000, false);
+  } finally {
+    if (finished !== undefined)
+      window.webContents.removeListener("did-finish-load", finished);
+    if (gone !== undefined)
+      window.webContents.removeListener("render-process-gone", gone);
+  }
+}
+
+async function recreateMainWindowAfterCrash(): Promise<void> {
+  const oldWindow = mainWindow;
+  const replacement = createMainWindow();
+  oldWindow?.destroy();
+  const loaded = new Promise<boolean>((resolve) => {
+    replacement.webContents.once("did-finish-load", () => resolve(true));
+    replacement.webContents.once("render-process-gone", () => resolve(false));
+  });
+  if (!(await withTimeoutResult(loaded, 10_000, false))) {
+    throw new Error("The replacement renderer did not become ready.");
+  }
+}
+
+app.on("before-quit", (event) => {
+  if (appLifecycle.allowsExit) return;
+  // Every external request remains blocked behind the same dialog/cleanup
+  // transaction. Only requestFinalQuit re-enters after the barrier completes.
+  event.preventDefault();
+  void appLifecycle.requestQuit("application");
 });
 
 app.on("window-all-closed", () => {
