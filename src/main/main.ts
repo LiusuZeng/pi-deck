@@ -474,11 +474,13 @@ type ChatLifecyclePhase = "running" | "draining" | "replacing" | "stopped";
 type ChatLifecycleOperation = {
   generation: number;
   cancelled: boolean;
+  abortController: AbortController;
   completion: Promise<void>;
   complete: () => void;
 };
 // This is the single lifecycle transaction shared by ordinary creation,
-// resume, fork, and reset replacement creation. A destructive boundary first
+// resume, fork, bootstrap model discovery, and reset replacement creation.
+// A destructive boundary first
 // cancels every operation in the current generation, then waits for each one
 // and every spawned-but-unregistered worker before releasing the old adapter.
 let chatLifecyclePhase: ChatLifecyclePhase = "running";
@@ -3747,6 +3749,7 @@ function beginChatLifecycleOperation(
   const operation: ChatLifecycleOperation = {
     generation: chatSessionAttachmentGeneration,
     cancelled: false,
+    abortController: new AbortController(),
     completion: new Promise<void>((resolve) => {
       complete = resolve;
     }),
@@ -5588,7 +5591,10 @@ async function closeChatWorker(
   }
   chatLifecyclePhase = "draining";
   const teardownGeneration = ++chatSessionAttachmentGeneration;
-  for (const operation of chatLifecycleOperations) operation.cancelled = true;
+  for (const operation of chatLifecycleOperations) {
+    operation.cancelled = true;
+    operation.abortController.abort(chatLifecycleCancelledError());
+  }
   const teardown = closeChatWorkerGeneration(options, teardownGeneration);
   chatLifecycleTeardownPromise = teardown;
   try {
@@ -5800,33 +5806,42 @@ async function listChatModels(
         ],
       };
     }
-    const launch = await resolveRealChatLaunchConfig(store, project);
-    try {
-      const discovery = await discoverPiRuntimeModels({
+    // Own discovery before async launch resolution, even when no chat runtime
+    // exists yet. Reset/quit cancels its child and awaits this whole operation.
+    return withChatLifecycleOperation(async (operation) => {
+      const launch = await resolveRealChatLaunchConfig(store, project);
+      assertChatLifecycleOperationActive(operation);
+      const options = {
         command: launch.effective.config.piBinary,
         args: launch.effective.workerArgs,
         cwd: launch.projectCwd,
         env: launch.effective.config.env,
-        requestTimeoutMs: Number(
-          process.env.PI_DECK_REAL_RPC_TIMEOUT_MS ?? 30_000,
-        ),
-      });
-      return chatListModelsResultSchema.parse(discovery);
-    } catch (error) {
-      diagnosticsService.recordError(
-        `Pi runtime model discovery failed; falling back to --list-models: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      const models = await discoverPiModels({
-        command: launch.effective.config.piBinary,
-        args: launch.effective.workerArgs,
-        cwd: launch.projectCwd,
-        env: launch.effective.config.env,
-      });
-      return chatListModelsResultSchema.parse({
-        models,
-        thinkingLevels: [],
-      });
-    }
+        signal: operation.abortController.signal,
+      };
+      try {
+        const discovery = await discoverPiRuntimeModels({
+          ...options,
+          requestTimeoutMs: Number(
+            process.env.PI_DECK_REAL_RPC_TIMEOUT_MS ?? 30_000,
+          ),
+        });
+        assertChatLifecycleOperationActive(operation);
+        return chatListModelsResultSchema.parse(discovery);
+      } catch (error) {
+        // Cancellation is not a discovery failure. Never spawn a fallback
+        // behind the destructive boundary, including after launch resolution.
+        assertChatLifecycleOperationActive(operation);
+        diagnosticsService.recordError(
+          `Pi runtime model discovery failed; falling back to --list-models: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        const models = await discoverPiModels(options);
+        assertChatLifecycleOperationActive(operation);
+        return chatListModelsResultSchema.parse({
+          models,
+          thinkingLevels: [],
+        });
+      }
+    });
   }
 
   const adapter = await ensureChatAdapter(store, diagnosticsService);
@@ -8588,7 +8603,8 @@ function isLikelyTextPath(extension: string): boolean {
 app.on("before-quit", (event) => {
   if (
     isQuittingAfterChatWorkerCleanup ||
-    ((chatAdapter === undefined || chatRuntimeIds.size === 0) &&
+    (!chatLifecycleStopRequested &&
+      (chatAdapter === undefined || chatRuntimeIds.size === 0) &&
       pendingChatAttachmentWorkers.size === 0 &&
       chatLifecycleOperations.size === 0 &&
       activeChatReset === undefined &&
@@ -8598,8 +8614,10 @@ app.on("before-quit", (event) => {
   }
 
   event.preventDefault();
-  isQuittingAfterChatWorkerCleanup = true;
+  // A second quit request must not bypass child cleanup already in flight.
+  if (chatLifecycleStopRequested) return;
   void closeChatWorker({ shutdownWorkflowRuntimes: true }).finally(() => {
+    isQuittingAfterChatWorkerCleanup = true;
     app.quit();
   });
 });

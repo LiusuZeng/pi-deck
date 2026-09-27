@@ -988,12 +988,6 @@ class FakeRpcServer {
           this.holdForkStateAtBarrier(command.id, name);
           break;
         }
-        if (!forkGetState && this.options.getStateSignalFile) {
-          fs.writeFileSync(
-            this.options.getStateSignalFile,
-            `${this.sessionFile}\n`,
-          );
-        }
         const delayOnce =
           !forkGetState && this.options.getStateDelayOnceFile !== undefined
             ? (() => {
@@ -1012,6 +1006,15 @@ class FakeRpcServer {
         const genericDelayEnabled =
           this.options.getStateDelayEnabledFile !== undefined &&
           fs.existsSync(this.options.getStateDelayEnabledFile);
+        // Latch the request's barrier choice before publishing readiness. A
+        // consumer may remove the enable marker immediately upon this signal;
+        // that must affect only later requests, never release this one.
+        if (!forkGetState && this.options.getStateSignalFile) {
+          fs.writeFileSync(
+            this.options.getStateSignalFile,
+            `${this.sessionFile}\n`,
+          );
+        }
         if (
           !forkGetState &&
           genericDelayEnabled &&
