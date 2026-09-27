@@ -3231,6 +3231,85 @@ describe("Pi draft defaults and thinking capabilities", () => {
     ]);
   });
 
+  it("retains runtime state-only identity ahead of workspace defaults without crossing runtime owners", () => {
+    const session = {
+      ...baseSession(),
+      modelLabel: "runtime / runtime-one",
+    } as any;
+    const runtimeModel = {
+      id: "runtime-one",
+      provider: "runtime",
+      input: ["text", "image"],
+    };
+    const workspaceModel = { id: "runtime-one", provider: "runtime" };
+    const defaults = new Map([
+      [
+        session.workspaceId,
+        {
+          models: [],
+          activeModel: workspaceModel,
+          thinkingLevels: [],
+        },
+      ],
+    ]);
+    const capabilities = __rendererTestHooks.updateRuntimeCapabilities(
+      {},
+      session.id,
+      {
+        models: [],
+        activeModel: runtimeModel,
+        thinkingLevels: [],
+      },
+    );
+    const resolved = __rendererTestHooks.findComposerActiveRealModel(
+      session,
+      [],
+      defaults,
+      capabilities,
+    );
+    expect(resolved).toBe(runtimeModel);
+    expect(__rendererTestHooks.realModelSupportsImages(resolved)).toBe(true);
+    expect(
+      __rendererTestHooks.findComposerActiveRealModel(session, [], new Map(), {
+        otherRuntime: { activeModel: runtimeModel },
+      }),
+    ).toBeUndefined();
+    expect(
+      __rendererTestHooks.findComposerActiveRealModel(
+        { ...session, modelLabel: "explicit / another-model" },
+        [],
+        defaults,
+        capabilities,
+      ),
+    ).toBeUndefined();
+    // A workspace catalog need not contain the active runtime's selected model.
+    expect(
+      __rendererTestHooks.findComposerActiveRealModel(
+        session,
+        [{ id: "workspace-default", provider: "workspace" }],
+        new Map(),
+        capabilities,
+      ),
+    ).toBe(runtimeModel);
+    const cleared = __rendererTestHooks.updateRuntimeCapabilities(
+      capabilities,
+      session.id,
+      {
+        activeModel: undefined,
+        models: [],
+        thinkingLevels: [],
+      },
+    );
+    expect(
+      __rendererTestHooks.findComposerActiveRealModel(
+        session,
+        [],
+        new Map(),
+        cleared,
+      ),
+    ).toBeUndefined();
+  });
+
   it("does not replace an explicit model from another model or workspace", () => {
     const session = {
       ...baseSession(),

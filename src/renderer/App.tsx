@@ -1043,6 +1043,7 @@ interface SlashCommand {
 }
 
 interface RuntimeCapabilities {
+  activeModel?: ChatModelSummary | undefined;
   models?: ChatModelSummary[];
   thinkingLevels?: string[];
   commands?: SlashCommand[];
@@ -3026,6 +3027,7 @@ export function App(): ReactElement {
     selectedSession,
     realModels,
     projectModelConfigurationRef.current,
+    realCapabilitiesByRuntime,
   );
   const runtimeThinkingLevels = selectedRealCapabilities?.thinkingLevels ?? [];
   const availableRealThinkingLevels =
@@ -4368,6 +4370,7 @@ export function App(): ReactElement {
         realModels,
         selectedModel,
         projectModelConfigurationRef.current,
+        realCapabilitiesByRuntime,
       ),
     });
     if (validationError !== undefined) {
@@ -4407,6 +4410,7 @@ export function App(): ReactElement {
         realModels,
         selectedModel,
         projectModelConfigurationRef.current,
+        realCapabilitiesByRuntime,
       ),
     });
     if (validationError !== undefined) {
@@ -4462,6 +4466,7 @@ export function App(): ReactElement {
         realModels,
         selectedModel,
         projectModelConfigurationRef.current,
+        realCapabilitiesByRuntime,
       ),
     });
     if (validationError !== undefined) {
@@ -5013,6 +5018,7 @@ export function App(): ReactElement {
         realModels,
         selectedModel,
         projectModelConfigurationRef.current,
+        realCapabilitiesByRuntime,
       ),
     });
     if (validationError !== undefined) {
@@ -5065,6 +5071,7 @@ export function App(): ReactElement {
         realModels,
         selectedModel,
         projectModelConfigurationRef.current,
+        realCapabilitiesByRuntime,
       )
     ) {
       setComposerError("Selected model does not support image input.");
@@ -6303,6 +6310,7 @@ export function App(): ReactElement {
       const result = await window.piDeck.chat.listModels({ runtimeId });
       setRealCapabilitiesByRuntime((current) =>
         updateRuntimeCapabilities(current, runtimeId, {
+          activeModel: result.activeModel,
           models: result.models,
           thinkingLevels: result.thinkingLevels,
         }),
@@ -6310,6 +6318,7 @@ export function App(): ReactElement {
     } catch {
       setRealCapabilitiesByRuntime((current) =>
         updateRuntimeCapabilities(current, runtimeId, {
+          activeModel: undefined,
           models: [],
           thinkingLevels: [],
         }),
@@ -9397,12 +9406,18 @@ function selectedSessionSupportsImages(
   realModels: ChatModelSummary[],
   selectedModel: ModelOption | undefined,
   configurations: WorkspaceDraftDefaults,
+  capabilities: RuntimeCapabilitiesById,
 ): boolean {
   if (session.backendMode !== "real") {
     return Boolean(selectedModel?.supportsImages);
   }
   return realModelSupportsImages(
-    findComposerActiveRealModel(session, realModels, configurations),
+    findComposerActiveRealModel(
+      session,
+      realModels,
+      configurations,
+      capabilities,
+    ),
   );
 }
 
@@ -9427,16 +9442,28 @@ function findActiveRealModel(
 
 /**
  * An authoritative active model can identify the selected model when discovery
- * returned no inventory. Keep it out of the catalog and only use the default
- * owned by this session's workspace when its identity matches the session.
+ * returned no inventory. Keep it out of the catalog; prefer matching runtime
+ * state, then the default owned by this session's workspace.
  */
 function findComposerActiveRealModel(
   session: SessionViewModel,
   realModels: ChatModelSummary[],
   configurations: WorkspaceDraftDefaults,
+  capabilities: RuntimeCapabilitiesById = {},
 ): ChatModelSummary | undefined {
   const discovered = findActiveRealModel(session, realModels);
-  if (discovered !== undefined || realModels.length > 0) return discovered;
+  if (discovered !== undefined) return discovered;
+  const runtimeModel = runtimeCapabilitiesFor(
+    capabilities,
+    session.id,
+  )?.activeModel;
+  if (
+    runtimeModel !== undefined &&
+    modelMatchesSessionIdentity(session, runtimeModel)
+  ) {
+    return runtimeModel;
+  }
+  if (realModels.length > 0) return undefined;
   const configured = draftDefaultsForWorkspace(
     configurations,
     session.workspaceId,
