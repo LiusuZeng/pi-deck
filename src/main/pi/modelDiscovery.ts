@@ -49,6 +49,25 @@ export class PiRuntimeModelDiscoveryError extends Error {
   }
 }
 
+/**
+ * Neither discovery path produced inventory or authoritative runtime state.
+ * Callers surface this failure instead of fabricating a model or thinking
+ * default from the optional thinking-level-list response.
+ */
+export class PiModelDiscoveryUnavailableError extends AggregateError {
+  readonly name = "PiModelDiscoveryUnavailableError";
+
+  constructor(
+    readonly runtimeFailure: unknown,
+    readonly fallbackFailure: unknown,
+  ) {
+    super(
+      [runtimeFailure, fallbackFailure],
+      "Pi model discovery failed: runtime RPC returned no usable inventory or authoritative state, and --list-models failed.",
+    );
+  }
+}
+
 export async function discoverPiRuntimeModels(options: {
   command: string;
   args?: string[];
@@ -194,6 +213,40 @@ export function partialPiRuntimeModelDiscovery(
   return error instanceof PiRuntimeModelDiscoveryError
     ? error.partialResult
     : undefined;
+}
+
+/**
+ * Recover a failed runtime probe without discarding successful sibling RPCs.
+ * A usable runtime inventory is authoritative and needs no CLI supplement. If
+ * inventory is missing, `--list-models` may supply it; if that also fails, an
+ * active model or thinking level from get_state is still returned. With
+ * neither inventory nor usable state, discovery fails explicitly.
+ */
+export async function recoverPiRuntimeModelDiscovery(
+  runtimeFailure: unknown,
+  discoverFallbackModels: () => Promise<ChatModelSummary[]>,
+): Promise<ChatListModelsResult> {
+  const partialResult = partialPiRuntimeModelDiscovery(runtimeFailure);
+  if (partialResult !== undefined && partialResult.models.length > 0) {
+    return partialResult;
+  }
+
+  try {
+    const fallbackModels = await discoverFallbackModels();
+    return mergePiRuntimeDiscoveryWithModelFallback(
+      partialResult ?? { models: [], thinkingLevels: [] },
+      fallbackModels,
+    );
+  } catch (fallbackFailure) {
+    if (
+      partialResult !== undefined &&
+      (partialResult.activeModel !== undefined ||
+        partialResult.thinkingLevel !== undefined)
+    ) {
+      return partialResult;
+    }
+    throw new PiModelDiscoveryUnavailableError(runtimeFailure, fallbackFailure);
+  }
 }
 
 export function parsePiModelList(stdout: string): ChatModelSummary[] {

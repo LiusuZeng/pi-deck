@@ -130,12 +130,63 @@ describe("model discovery child ownership", () => {
     expect(worker.closeSession).toHaveBeenCalledOnce();
   });
 
-  it("cancels pending RPC and retains ownership until close completes", async () => {
+  it("waits for a bounded sibling request after a fast failure, then closes with partial state", async () => {
     const { worker, exit } = mockWorker();
-    const request = deferred<unknown>();
-    worker.getState.mockReturnValue(request.promise);
+    const fastFailure = new Error("inventory failed immediately");
+    const siblingTimeout = new Error("thinking request timed out");
+    const thinkingLevels = deferred<unknown>();
+    worker.getState.mockResolvedValue({
+      model: "runtime-model",
+      provider: "runtime",
+      thinkingLevel: "medium",
+    });
+    worker.request.mockImplementation((command: string) =>
+      command === "get_available_models"
+        ? Promise.reject(fastFailure)
+        : thinkingLevels.promise,
+    );
+
+    const outcome = discoverPiRuntimeModels(options).catch(
+      (error: unknown) => error,
+    );
+    await vi.waitFor(() => expect(worker.request).toHaveBeenCalledTimes(2));
+    // Promise.allSettled retains successful siblings, but every real request is
+    // bounded by PiWorker's request timeout. Simulate that timeout directly.
+    expect(worker.closeSession).not.toHaveBeenCalled();
+    thinkingLevels.reject(siblingTimeout);
+    await vi.waitFor(() => expect(worker.closeSession).toHaveBeenCalledOnce());
+    exit.resolve();
+
+    const error = await outcome;
+    expect(error).toBeInstanceOf(PiRuntimeModelDiscoveryError);
+    expect(error).toMatchObject({
+      failedCommands: ["get_available_models", "get_available_thinking_levels"],
+      partialResult: {
+        models: [],
+        activeModel: { id: "runtime-model", provider: "runtime" },
+        thinkingLevel: "medium",
+        thinkingLevels: [],
+      },
+      cause: fastFailure,
+    });
+  });
+
+  it("cancels all pending sibling RPCs promptly and retains ownership until close completes", async () => {
+    const { worker, exit } = mockWorker();
+    const state = deferred<unknown>();
+    const models = deferred<unknown>();
+    const thinkingLevels = deferred<unknown>();
+    worker.getState.mockReturnValue(state.promise);
+    worker.request.mockImplementation((command: string) =>
+      command === "get_available_models"
+        ? models.promise
+        : thinkingLevels.promise,
+    );
     worker.closeSession.mockImplementation(() => {
-      request.reject(new Error("worker exited"));
+      const workerExit = new Error("worker exited");
+      state.reject(workerExit);
+      models.reject(workerExit);
+      thinkingLevels.reject(workerExit);
       return exit.promise;
     });
     const controller = new AbortController();
@@ -148,6 +199,7 @@ describe("model discovery child ownership", () => {
       settled = true;
       return error;
     });
+    await vi.waitFor(() => expect(worker.request).toHaveBeenCalledTimes(2));
     controller.abort(reason);
     await vi.waitFor(() => expect(worker.closeSession).toHaveBeenCalledOnce());
     expect(settled).toBe(false);
