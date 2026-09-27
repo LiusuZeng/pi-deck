@@ -165,7 +165,9 @@ import { registerValidatedIpc } from "./ipc/registerIpc.js";
 import {
   discoverPiModels,
   discoverPiRuntimeModels,
+  mergePiRuntimeDiscoveryWithModelFallback,
   parsePiRuntimeModelDiscovery,
+  partialPiRuntimeModelDiscovery,
 } from "./pi/modelDiscovery.js";
 import { SinglePiAdapter } from "./pi/piAdapter.js";
 import {
@@ -5943,10 +5945,18 @@ async function listChatModels(
         );
         const models = await discoverPiModels(options);
         assertChatLifecycleOperationActive(operation);
-        return chatListModelsResultSchema.parse({
-          models,
+        const partialRuntimeDiscovery = partialPiRuntimeModelDiscovery(
+          error,
+        ) ?? {
+          models: [],
           thinkingLevels: [],
-        });
+        };
+        return chatListModelsResultSchema.parse(
+          mergePiRuntimeDiscoveryWithModelFallback(
+            partialRuntimeDiscovery,
+            models,
+          ),
+        );
       }
     });
   }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  mergePiRuntimeDiscoveryWithModelFallback,
   parsePiModelList,
   parsePiRuntimeModelDiscovery,
 } from "./modelDiscovery.js";
@@ -205,6 +206,57 @@ local         text-model           32K      8K       no        no
       xhigh: null,
       max: null,
     });
+  });
+
+  it("keeps runtime defaults when CLI inventory supplements a partial probe", () => {
+    const result = mergePiRuntimeDiscoveryWithModelFallback(
+      {
+        models: [],
+        activeModel: {
+          id: "active-model",
+          provider: "active-provider",
+        },
+        thinkingLevel: "high",
+        thinkingLevels: ["off", "high"],
+      },
+      [
+        {
+          id: "active-model",
+          name: "Active model",
+          provider: "active-provider",
+          reasoning: true,
+        },
+      ],
+    );
+
+    expect(result).toEqual({
+      models: [
+        {
+          id: "active-model",
+          name: "Active model",
+          provider: "active-provider",
+          reasoning: true,
+        },
+      ],
+      activeModel: {
+        id: "active-model",
+        name: "Active model",
+        provider: "active-provider",
+        reasoning: true,
+      },
+      thinkingLevel: "high",
+      thinkingLevels: ["off", "high"],
+    });
+  });
+
+  it("does not invent a thinking default when runtime state was unavailable", () => {
+    const result = mergePiRuntimeDiscoveryWithModelFallback(
+      { models: [], thinkingLevels: [] },
+      [{ id: "fallback-model", provider: "fallback-provider" }],
+    );
+
+    expect(result.models).toHaveLength(1);
+    expect(result).not.toHaveProperty("thinkingLevel");
   });
 
   it("ignores unrelated output instead of inventing models", () => {

@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { discoverPiModels, discoverPiRuntimeModels } from "./modelDiscovery.js";
+import {
+  discoverPiModels,
+  discoverPiRuntimeModels,
+  PiRuntimeModelDiscoveryError,
+} from "./modelDiscovery.js";
 import { PiWorker } from "./piWorker.js";
 
 vi.mock("./piWorker.js", () => ({ PiWorker: vi.fn() }));
@@ -80,7 +84,50 @@ describe("model discovery child ownership", () => {
     await vi.waitFor(() => expect(worker.closeSession).toHaveBeenCalledOnce());
     expect(settled).toBe(false);
     exit.resolve();
-    await expect(outcome).resolves.toBe(reason);
+    const error = await outcome;
+    expect(error).toBeInstanceOf(PiRuntimeModelDiscoveryError);
+    const discoveryError = error as PiRuntimeModelDiscoveryError;
+    expect(discoveryError.failedCommands).toEqual(["get_state"]);
+    expect(discoveryError.partialResult).toEqual({
+      models: [],
+      thinkingLevels: ["medium"],
+    });
+    expect(discoveryError.cause).toBe(reason);
+  });
+
+  it("retains a slower get_state default when model inventory fails first", async () => {
+    const { worker, exit } = mockWorker();
+    const state = deferred<{ thinkingLevel: string }>();
+    const reason = new Error("model inventory failed");
+    worker.getState.mockReturnValue(state.promise);
+    worker.request.mockImplementation((command: string) =>
+      command === "get_available_models"
+        ? Promise.reject(reason)
+        : Promise.resolve({ levels: ["off", "medium", "high"] }),
+    );
+
+    const outcome = discoverPiRuntimeModels(options).catch(
+      (error: unknown) => error,
+    );
+    await vi.waitFor(() =>
+      expect(worker.request).toHaveBeenCalledWith("get_available_models"),
+    );
+    expect(worker.closeSession).not.toHaveBeenCalled();
+    state.resolve({ thinkingLevel: "medium" });
+    await vi.waitFor(() => expect(worker.closeSession).toHaveBeenCalledOnce());
+    exit.resolve();
+
+    const error = await outcome;
+    expect(error).toBeInstanceOf(PiRuntimeModelDiscoveryError);
+    const discoveryError = error as PiRuntimeModelDiscoveryError;
+    expect(discoveryError.failedCommands).toEqual(["get_available_models"]);
+    expect(discoveryError.partialResult).toEqual({
+      models: [],
+      thinkingLevel: "medium",
+      thinkingLevels: ["off", "medium", "high"],
+    });
+    expect(discoveryError.cause).toBe(reason);
+    expect(worker.closeSession).toHaveBeenCalledOnce();
   });
 
   it("cancels pending RPC and retains ownership until close completes", async () => {

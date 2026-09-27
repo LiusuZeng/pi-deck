@@ -6870,12 +6870,22 @@ export function App(): ReactElement {
             workspaces,
           );
     const workspace = requestedWorkspace ?? currentWorkspaceRef.current;
-    let creationWorkspace = workspace;
+    let creation: { activation: WorkspaceRef; draft: SessionViewModel };
     try {
-      creationWorkspace = await activateWorkspaceForSessionCreation(
-        workspace,
-        generation,
-      );
+      creation = await createDraftAfterWorkspaceActivation({
+        workspaceId: workspace.id,
+        activation: activateWorkspaceForSessionCreation(workspace, generation),
+        readDefaults: () => projectModelConfigurationRef.current,
+        createDraft: (creationWorkspace, latestConfiguration) => {
+          const activeBackendMode = backendModeRef.current;
+          return draftSessionForWorkspace(
+            creationWorkspace,
+            createId("draft-session"),
+            activeBackendMode,
+            activeBackendMode === "real" ? latestConfiguration : undefined,
+          );
+        },
+      });
     } catch (error) {
       if (isNavigationCurrent(generation)) {
         setUiMessage(
@@ -6886,21 +6896,11 @@ export function App(): ReactElement {
     }
     if (!isNavigationCurrent(generation)) return;
 
-    // Workspace activation crosses an async barrier. Read the scoped ref now,
-    // not the render-time configuration captured before the await: bootstrap
-    // discovery may have completed while creation was in flight (#156).
-    const latestDraftConfiguration = isRealBackendMode
-      ? draftDefaultsForWorkspace(
-          projectModelConfigurationRef.current,
-          creationWorkspace.id,
-        )
-      : undefined;
-    const next = draftSessionForWorkspace(
-      creationWorkspace,
-      createId("draft-session"),
-      isRealBackendMode ? "real" : "fake",
-      latestDraftConfiguration,
-    );
+    // The helper owns the await boundary: it reads the workspace-keyed ref
+    // only after activation, so bootstrap discovery cannot leave this first
+    // replacement draft with inventory but without Pi's effective defaults.
+    const creationWorkspace = creation.activation;
+    const next = creation.draft;
     setComposerError(null);
     setSessions((items) =>
       mergeSessions(
@@ -6908,7 +6908,7 @@ export function App(): ReactElement {
         items.filter(
           (item) =>
             item.draftSession !== true ||
-            hasComposerDraft(composerDrafts, item.id) ||
+            hasComposerDraft(composerDraftsRef.current, item.id) ||
             item.workspaceId !== creationWorkspace.id,
         ),
       ),

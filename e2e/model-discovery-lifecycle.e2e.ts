@@ -11,7 +11,7 @@ const repoRoot = path.resolve(__dirname, "..");
 const mainEntry = path.join(repoRoot, "dist/main/main.js");
 const heldDiscoveryTimeoutMs = 120_000;
 
-type DiscoveryMode = "success" | "hold" | "fail";
+type DiscoveryMode = "success" | "hold" | "fail" | "model-fail";
 
 interface HarnessOptions {
   name: string;
@@ -138,6 +138,7 @@ if (argv.includes("--list-models")) {
   }
   console.log("provider  model          context  max-out  thinking  images");
   console.log("fallback  fallback-one   64K      16K      yes       no");
+  console.log("runtime   runtime-one    128K     32K      yes       no");
   process.exit(0);
 }
 if (argv.includes("--mode") && argv.includes("rpc") && argv.includes("--no-session")) {
@@ -150,6 +151,7 @@ if (argv.includes("--mode") && argv.includes("rpc") && argv.includes("--no-sessi
     process.exit(42);
   }
   let buffer = "";
+  let heldStateRequest;
   process.stdin.on("data", (chunk) => {
     buffer += chunk.toString("utf8");
     for (;;) {
@@ -162,9 +164,19 @@ if (argv.includes("--mode") && argv.includes("rpc") && argv.includes("--no-sessi
       if (request.type === "get_state") {
         append(process.env.MODEL_LIFECYCLE_RPC_REQUEST_FILE, String(process.pid));
         if (process.env.MODEL_LIFECYCLE_DISCOVERY_MODE === "hold") continue;
+        if (process.env.MODEL_LIFECYCLE_DISCOVERY_MODE === "model-fail") {
+          heldStateRequest = request;
+          continue;
+        }
         write({ type: "response", id: request.id, command: "get_state", success: true, data: { model: "runtime-one", provider: "runtime", thinkingLevel: "medium" } });
       } else if (request.type === "get_available_models") {
-        write({ type: "response", id: request.id, command: "get_available_models", success: true, data: { models: [{ id: "runtime-one", name: "Runtime One", provider: "runtime", reasoning: true, input: ["text"] }] } });
+        if (process.env.MODEL_LIFECYCLE_DISCOVERY_MODE === "model-fail") {
+          write({ type: "response", id: request.id, command: "get_available_models", success: false, error: "intentional model inventory failure" });
+          write({ type: "response", id: heldStateRequest.id, command: "get_state", success: true, data: { model: "runtime-one", provider: "runtime", thinkingLevel: "medium" } });
+          heldStateRequest = undefined;
+        } else {
+          write({ type: "response", id: request.id, command: "get_available_models", success: true, data: { models: [{ id: "runtime-one", name: "Runtime One", provider: "runtime", reasoning: true, input: ["text"] }] } });
+        }
       } else if (request.type === "get_available_thinking_levels") {
         write({ type: "response", id: request.id, command: "get_available_thinking_levels", success: true, data: { levels: ["off", "medium", "high"] } });
       } else {
@@ -476,6 +488,56 @@ test("reset cancels held --list-models fallback and replacement worker remains u
         settled: true,
         outcome: { ok: false },
       });
+  } finally {
+    await closeHarness(harness);
+  }
+});
+
+test("partial RPC discovery keeps state defaults while CLI supplies failed inventory", async () => {
+  const harness = await launchHarness({
+    name: "partial-rpc-fallback",
+    discoveryMode: "model-fail",
+  });
+  try {
+    await expect.poll(() => pidCount(harness.rpcPidFile)).toBe(1);
+    await expect.poll(() => pidCount(harness.listPidFile)).toBe(1);
+    await expect
+      .poll(() => pids(harness.rpcPidFile).filter(isPidAlive))
+      .toEqual([]);
+    await expect
+      .poll(() => pids(harness.listPidFile).filter(isPidAlive))
+      .toEqual([]);
+
+    await harness.page
+      .getByLabel("Sessions", { exact: true })
+      .getByRole("button", { name: "New session", exact: true })
+      .click();
+    const configuration = harness.page.locator(".pi-configuration-trigger");
+    await expect(configuration).toHaveAttribute("data-model-id", "runtime-one");
+    await expect(configuration).toHaveAttribute(
+      "data-model-provider",
+      "runtime",
+    );
+    await expect(configuration).toHaveAttribute(
+      "data-thinking-level",
+      "medium",
+    );
+
+    const result = await harness.page.evaluate(
+      (workspaceId) => window.piDeck.chat.listModels({ workspaceId }),
+      await activeWorkspaceId(harness.page),
+    );
+    expect(result.models.map((model) => model.id)).toContain("fallback-one");
+    expect(result.activeModel).toMatchObject({
+      id: "runtime-one",
+      provider: "runtime",
+    });
+    expect(result.thinkingLevel).toBe("medium");
+    expect(result.thinkingLevels).toEqual(["off", "medium", "high"]);
+    expect(pidCount(harness.rpcPidFile)).toBe(2);
+    expect(pidCount(harness.listPidFile)).toBe(2);
+    expectAllExited(harness.rpcPidFile);
+    expectAllExited(harness.listPidFile);
   } finally {
     await closeHarness(harness);
   }
