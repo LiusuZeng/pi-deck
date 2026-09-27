@@ -33,22 +33,25 @@ interface Harness {
   listReleaseFile: string;
 }
 
-function lastPid(file: string): number {
-  if (!fs.existsSync(file)) return 0;
-  const values = fs
+function pids(file: string): number[] {
+  if (!fs.existsSync(file)) return [];
+  return fs
     .readFileSync(file, "utf8")
     .split("\n")
     .map((line) => Number(line.trim()))
     .filter((value) => Number.isSafeInteger(value) && value > 0);
-  return values.at(-1) ?? 0;
+}
+
+function lastPid(file: string): number {
+  return pids(file).at(-1) ?? 0;
 }
 
 function pidCount(file: string): number {
-  if (!fs.existsSync(file)) return 0;
-  return fs
-    .readFileSync(file, "utf8")
-    .split("\n")
-    .filter((line) => line.trim().length > 0).length;
+  return pids(file).length;
+}
+
+function expectAllExited(file: string): void {
+  expect(pids(file).filter(isPidAlive)).toEqual([]);
 }
 
 function isPidAlive(pid: number): boolean {
@@ -123,8 +126,11 @@ if (argv.includes("--version")) {
   process.exit(0);
 }
 if (argv.includes("--list-models")) {
+  if (process.env.MODEL_LIFECYCLE_IGNORE_DISCOVERY_SIGTERM === "1") {
+    process.on("SIGTERM", () => {});
+  }
   append(process.env.MODEL_LIFECYCLE_LIST_PID_FILE, String(process.pid));
-  fs.writeFileSync(process.env.MODEL_LIFECYCLE_LIST_READY_FILE, "ready\\n");
+  append(process.env.MODEL_LIFECYCLE_LIST_READY_FILE, String(process.pid));
   if (process.env.MODEL_LIFECYCLE_HOLD_LIST === "1") {
     waitForRelease(process.env.MODEL_LIFECYCLE_LIST_RELEASE_FILE);
     setInterval(() => undefined, 1 << 30);
@@ -154,7 +160,7 @@ if (argv.includes("--mode") && argv.includes("rpc") && argv.includes("--no-sessi
       if (!line.trim()) continue;
       const request = JSON.parse(line);
       if (request.type === "get_state") {
-        fs.writeFileSync(process.env.MODEL_LIFECYCLE_RPC_REQUEST_FILE, String(process.pid) + "\\n");
+        append(process.env.MODEL_LIFECYCLE_RPC_REQUEST_FILE, String(process.pid));
         if (process.env.MODEL_LIFECYCLE_DISCOVERY_MODE === "hold") continue;
         write({ type: "response", id: request.id, command: "get_state", success: true, data: { model: "runtime-one", provider: "runtime", thinkingLevel: "medium" } });
       } else if (request.type === "get_available_models") {
@@ -354,10 +360,7 @@ test("quit kills held RPC model discovery before temp cleanup and does not spawn
     ignoreDiscoverySigterm: true,
   });
   try {
-    await startRendererModelDiscovery(
-      harness.page,
-      await activeWorkspaceId(harness.page),
-    );
+    // Bootstrap alone must be owned even though no session has been attached.
     const pid = await waitForPid(harness.rpcRequestFile);
     expect(pidCount(harness.listPidFile)).toBe(0);
 
@@ -379,7 +382,8 @@ test("reset cancels held RPC model discovery without fallback and replacement wo
   try {
     const workspaceId = await activeWorkspaceId(harness.page);
     await startRendererModelDiscovery(harness.page, workspaceId);
-    const pid = await waitForPid(harness.rpcRequestFile);
+    await expect.poll(() => pidCount(harness.rpcRequestFile)).toBe(2);
+    expect(pids(harness.rpcPidFile).every(isPidAlive)).toBe(true);
     expect(pidCount(harness.listPidFile)).toBe(0);
 
     await startRendererReset(harness.page);
@@ -400,10 +404,15 @@ test("reset cancels held RPC model discovery without fallback and replacement wo
         }),
       }),
     );
-    await expect.poll(() => isPidAlive(pid), { timeout: 10_000 }).toBe(false);
+    // No eventual-exit polling: reset must already have awaited every child.
+    expectAllExited(harness.rpcPidFile);
     expect(pidCount(harness.listPidFile)).toBe(0);
-    const outcome = await discoveryOutcome(harness.page);
-    expect(outcome).toMatchObject({ settled: true, outcome: { ok: false } });
+    await expect
+      .poll(() => discoveryOutcome(harness.page))
+      .toMatchObject({
+        settled: true,
+        outcome: { ok: false },
+      });
   } finally {
     await closeHarness(harness);
   }
@@ -414,13 +423,10 @@ test("quit kills held --list-models fallback after RPC discovery failure", async
     name: "quit-fallback",
     discoveryMode: "fail",
     holdListModels: true,
+    ignoreDiscoverySigterm: true,
   });
   try {
-    await startRendererModelDiscovery(
-      harness.page,
-      await activeWorkspaceId(harness.page),
-    );
-    const pid = await waitForPid(harness.listPidFile);
+    const pid = await waitForPid(harness.listReadyFile);
     expect(pidCount(harness.rpcPidFile)).toBe(1);
 
     const closeResult = await closeAppWithBound(harness.app);
@@ -441,7 +447,8 @@ test("reset cancels held --list-models fallback and replacement worker remains u
   try {
     const workspaceId = await activeWorkspaceId(harness.page);
     await startRendererModelDiscovery(harness.page, workspaceId);
-    const pid = await waitForPid(harness.listPidFile);
+    await expect.poll(() => pidCount(harness.listReadyFile)).toBe(2);
+    expect(pids(harness.listPidFile).every(isPidAlive)).toBe(true);
 
     await startRendererReset(harness.page);
     await expect
@@ -461,9 +468,14 @@ test("reset cancels held --list-models fallback and replacement worker remains u
         }),
       }),
     );
-    await expect.poll(() => isPidAlive(pid), { timeout: 10_000 }).toBe(false);
-    const outcome = await discoveryOutcome(harness.page);
-    expect(outcome).toMatchObject({ settled: true, outcome: { ok: false } });
+    expectAllExited(harness.rpcPidFile);
+    expectAllExited(harness.listPidFile);
+    await expect
+      .poll(() => discoveryOutcome(harness.page))
+      .toMatchObject({
+        settled: true,
+        outcome: { ok: false },
+      });
   } finally {
     await closeHarness(harness);
   }
@@ -472,12 +484,18 @@ test("reset cancels held --list-models fallback and replacement worker remains u
 test("model discovery succeeds through RPC and falls back to --list-models after RPC failure", async () => {
   const rpcHarness = await launchHarness({ name: "success-rpc" });
   try {
+    await expect.poll(() => pidCount(rpcHarness.rpcPidFile)).toBe(1);
+    await expect
+      .poll(() => pids(rpcHarness.rpcPidFile).filter(isPidAlive))
+      .toEqual([]);
     const result = await rpcHarness.page.evaluate(
       (workspaceId) => window.piDeck.chat.listModels({ workspaceId }),
       await activeWorkspaceId(rpcHarness.page),
     );
     expect(result.models.map((model) => model.id)).toContain("runtime-one");
     expect(result.activeModel?.id).toBe("runtime-one");
+    expect(pidCount(rpcHarness.rpcPidFile)).toBe(2);
+    expectAllExited(rpcHarness.rpcPidFile);
     expect(pidCount(rpcHarness.listPidFile)).toBe(0);
   } finally {
     await closeHarness(rpcHarness);
@@ -488,12 +506,18 @@ test("model discovery succeeds through RPC and falls back to --list-models after
     discoveryMode: "fail",
   });
   try {
+    await expect.poll(() => pidCount(fallbackHarness.listPidFile)).toBe(1);
+    await expect
+      .poll(() => pids(fallbackHarness.listPidFile).filter(isPidAlive))
+      .toEqual([]);
     const result = await fallbackHarness.page.evaluate(
       (workspaceId) => window.piDeck.chat.listModels({ workspaceId }),
       await activeWorkspaceId(fallbackHarness.page),
     );
     expect(result.models.map((model) => model.id)).toContain("fallback-one");
-    expect(pidCount(fallbackHarness.listPidFile)).toBe(1);
+    expect(pidCount(fallbackHarness.listPidFile)).toBe(2);
+    expectAllExited(fallbackHarness.rpcPidFile);
+    expectAllExited(fallbackHarness.listPidFile);
   } finally {
     await closeHarness(fallbackHarness);
   }
