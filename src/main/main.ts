@@ -166,6 +166,7 @@ import {
   discoverPiModels,
   discoverPiRuntimeModels,
   parsePiRuntimeModelDiscovery,
+  recoverPiRuntimeModelDiscovery,
 } from "./pi/modelDiscovery.js";
 import { SinglePiAdapter } from "./pi/piAdapter.js";
 import {
@@ -5939,14 +5940,28 @@ async function listChatModels(
         // behind the destructive boundary, including after launch resolution.
         assertChatLifecycleOperationActive(operation);
         diagnosticsService.recordError(
-          `Pi runtime model discovery failed; falling back to --list-models: ${error instanceof Error ? error.message : String(error)}`,
+          `Pi runtime model discovery failed; preserving successful RPC fields: ${error instanceof Error ? error.message : String(error)}`,
         );
-        const models = await discoverPiModels(options);
+        const recovered = await recoverPiRuntimeModelDiscovery(
+          error,
+          async () => {
+            diagnosticsService.recordError(
+              "Pi runtime model inventory was unavailable; falling back to --list-models.",
+            );
+            try {
+              const models = await discoverPiModels(options);
+              assertChatLifecycleOperationActive(operation);
+              return models;
+            } catch (fallbackError) {
+              diagnosticsService.recordError(
+                `Pi --list-models fallback failed: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`,
+              );
+              throw fallbackError;
+            }
+          },
+        );
         assertChatLifecycleOperationActive(operation);
-        return chatListModelsResultSchema.parse({
-          models,
-          thinkingLevels: [],
-        });
+        return chatListModelsResultSchema.parse(recovered);
       }
     });
   }

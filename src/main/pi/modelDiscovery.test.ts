@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  mergePiRuntimeDiscoveryWithModelFallback,
   parsePiModelList,
   parsePiRuntimeModelDiscovery,
+  PiModelDiscoveryUnavailableError,
+  PiRuntimeModelDiscoveryError,
+  recoverPiRuntimeModelDiscovery,
 } from "./modelDiscovery.js";
 
 describe("Pi model discovery", () => {
@@ -205,6 +209,119 @@ local         text-model           32K      8K       no        no
       xhigh: null,
       max: null,
     });
+  });
+
+  it("keeps runtime defaults when CLI inventory supplements a partial probe", () => {
+    const result = mergePiRuntimeDiscoveryWithModelFallback(
+      {
+        models: [],
+        activeModel: {
+          id: "active-model",
+          provider: "active-provider",
+        },
+        thinkingLevel: "high",
+        thinkingLevels: ["off", "high"],
+      },
+      [
+        {
+          id: "active-model",
+          name: "Active model",
+          provider: "active-provider",
+          reasoning: true,
+        },
+      ],
+    );
+
+    expect(result).toEqual({
+      models: [
+        {
+          id: "active-model",
+          name: "Active model",
+          provider: "active-provider",
+          reasoning: true,
+        },
+      ],
+      activeModel: {
+        id: "active-model",
+        name: "Active model",
+        provider: "active-provider",
+        reasoning: true,
+      },
+      thinkingLevel: "high",
+      thinkingLevels: ["off", "high"],
+    });
+  });
+
+  it("does not invent a thinking default when runtime state was unavailable", () => {
+    const result = mergePiRuntimeDiscoveryWithModelFallback(
+      { models: [], thinkingLevels: [] },
+      [{ id: "fallback-model", provider: "fallback-provider" }],
+    );
+
+    expect(result.models).toHaveLength(1);
+    expect(result).not.toHaveProperty("thinkingLevel");
+  });
+
+  it("uses valid RPC inventory without invoking CLI when only thinking-level discovery fails", async () => {
+    const runtimeFailure = new PiRuntimeModelDiscoveryError(
+      ["get_available_thinking_levels"],
+      {
+        models: [{ id: "runtime-model", provider: "runtime" }],
+        activeModel: { id: "runtime-model", provider: "runtime" },
+        thinkingLevel: "medium",
+        thinkingLevels: [],
+      },
+      new Error("thinking levels unsupported"),
+    );
+    let fallbackCalls = 0;
+
+    const result = await recoverPiRuntimeModelDiscovery(
+      runtimeFailure,
+      async () => {
+        fallbackCalls += 1;
+        throw new Error("CLI must not run");
+      },
+    );
+
+    expect(fallbackCalls).toBe(0);
+    expect(result).toEqual(runtimeFailure.partialResult);
+  });
+
+  it("returns authoritative state when inventory and CLI discovery fail", async () => {
+    const runtimeFailure = new PiRuntimeModelDiscoveryError(
+      ["get_available_models"],
+      {
+        models: [],
+        activeModel: { id: "runtime-model", provider: "runtime" },
+        thinkingLevel: "high",
+        thinkingLevels: ["off", "high"],
+      },
+      new Error("inventory failed"),
+    );
+
+    await expect(
+      recoverPiRuntimeModelDiscovery(runtimeFailure, async () => {
+        throw new Error("CLI failed");
+      }),
+    ).resolves.toEqual(runtimeFailure.partialResult);
+  });
+
+  it("fails explicitly when RPC has neither state nor inventory and CLI fails", async () => {
+    const runtimeFailure = new PiRuntimeModelDiscoveryError(
+      ["get_state", "get_available_models"],
+      { models: [], thinkingLevels: ["off", "high"] },
+      new Error("state and inventory failed"),
+    );
+    const fallbackFailure = new Error("CLI failed");
+
+    const outcome = recoverPiRuntimeModelDiscovery(runtimeFailure, async () => {
+      throw fallbackFailure;
+    }).catch((error: unknown) => error);
+
+    const error = await outcome;
+    expect(error).toBeInstanceOf(PiModelDiscoveryUnavailableError);
+    expect(error).toMatchObject({ runtimeFailure, fallbackFailure });
+    expect((error as Error).message).not.toContain("thinkingLevel");
   });
 
   it("ignores unrelated output instead of inventing models", () => {

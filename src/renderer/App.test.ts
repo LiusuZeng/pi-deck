@@ -1,6 +1,6 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { chatSnapshotSchema } from "../shared/ipcSchemas.js";
 import { buildActivityInbox } from "./activityInbox.js";
 import { emptyOverlays, selectSidebarIndicator } from "./sessionState.js";
@@ -59,6 +59,29 @@ it("keeps live sidebar buckets in source order while idle saved rows use recency
       )
       .idleSaved.map((session: any) => session.id),
   ).toEqual(["newer", "older"]);
+});
+
+it("only prevents the default paste when supported images are imported", () => {
+  const textFile = { name: "notes.txt", type: "text/plain" } as File;
+  const imageFile = { name: "capture.png", type: "image/png" } as File;
+  const preventDefault = vi.fn();
+  const importImages = vi.fn();
+
+  __rendererTestHooks.importPastedImageAttachments(
+    [textFile],
+    preventDefault,
+    importImages,
+  );
+  expect(preventDefault).not.toHaveBeenCalled();
+  expect(importImages).not.toHaveBeenCalled();
+
+  __rendererTestHooks.importPastedImageAttachments(
+    [textFile, imageFile],
+    preventDefault,
+    importImages,
+  );
+  expect(preventDefault).toHaveBeenCalledOnce();
+  expect(importImages).toHaveBeenCalledWith([imageFile]);
 });
 
 it("only materializes the Work inbox model while Work is visible", () => {
@@ -3197,6 +3220,175 @@ describe("Pi draft defaults and thinking capabilities", () => {
 
     expect(draft.modelLabel).toBe("openai-codex / gpt-5.6-sol");
     expect(draft.thinkingLevel).toBe("xhigh");
+  });
+
+  it("uses matching authoritative state as composer identity without inventing capabilities", () => {
+    const authoritativeModel = {
+      id: "runtime-one",
+      name: "runtime-one",
+      provider: "runtime",
+    };
+    const session = {
+      ...baseSession(),
+      modelLabel: "runtime / runtime-one",
+    } as any;
+    const resolved = __rendererTestHooks.findComposerActiveRealModel(
+      session,
+      [],
+      new Map([
+        [
+          session.workspaceId,
+          {
+            models: [],
+            activeModel: authoritativeModel,
+            thinkingLevels: [],
+          },
+        ],
+      ]),
+    );
+
+    expect(resolved).toBe(authoritativeModel);
+    expect(__rendererTestHooks.realModelSupportsImages(resolved)).toBe(false);
+    expect(__rendererTestHooks.thinkingLevelsForModel(resolved, [])).toEqual([
+      "off",
+    ]);
+  });
+
+  it("retains runtime state-only identity ahead of workspace defaults without crossing runtime owners", () => {
+    const session = {
+      ...baseSession(),
+      modelLabel: "runtime / runtime-one",
+    } as any;
+    const runtimeModel = {
+      id: "runtime-one",
+      provider: "runtime",
+      input: ["text", "image"],
+    };
+    const workspaceModel = { id: "runtime-one", provider: "runtime" };
+    const defaults = new Map([
+      [
+        session.workspaceId,
+        {
+          models: [],
+          activeModel: workspaceModel,
+          thinkingLevels: [],
+        },
+      ],
+    ]);
+    const capabilities = __rendererTestHooks.updateRuntimeCapabilities(
+      {},
+      session.id,
+      {
+        models: [],
+        activeModel: runtimeModel,
+        thinkingLevels: [],
+      },
+    );
+    const resolved = __rendererTestHooks.findComposerActiveRealModel(
+      session,
+      [],
+      defaults,
+      capabilities,
+    );
+    expect(resolved).toBe(runtimeModel);
+    expect(__rendererTestHooks.realModelSupportsImages(resolved)).toBe(true);
+    // The same ID in a workspace fallback catalog cannot shadow runtime state.
+    expect(
+      __rendererTestHooks.findComposerActiveRealModel(
+        session,
+        [workspaceModel],
+        defaults,
+        capabilities,
+      ),
+    ).toBe(runtimeModel);
+    const runtimeInventoryModel = {
+      ...runtimeModel,
+      name: "Runtime inventory",
+    };
+    expect(
+      __rendererTestHooks.findComposerActiveRealModel(
+        session,
+        [workspaceModel],
+        defaults,
+        {
+          [session.id]: {
+            models: [runtimeInventoryModel],
+            activeModel: runtimeModel,
+          },
+        },
+      ),
+    ).toBe(runtimeInventoryModel);
+    expect(
+      __rendererTestHooks.findComposerActiveRealModel(session, [], new Map(), {
+        otherRuntime: { activeModel: runtimeModel },
+      }),
+    ).toBeUndefined();
+    expect(
+      __rendererTestHooks.findComposerActiveRealModel(
+        { ...session, modelLabel: "explicit / another-model" },
+        [],
+        defaults,
+        capabilities,
+      ),
+    ).toBeUndefined();
+    // A workspace catalog need not contain the active runtime's selected model.
+    expect(
+      __rendererTestHooks.findComposerActiveRealModel(
+        session,
+        [{ id: "workspace-default", provider: "workspace" }],
+        new Map(),
+        capabilities,
+      ),
+    ).toBe(runtimeModel);
+    const cleared = __rendererTestHooks.updateRuntimeCapabilities(
+      capabilities,
+      session.id,
+      {
+        activeModel: undefined,
+        models: [],
+        thinkingLevels: [],
+      },
+    );
+    expect(
+      __rendererTestHooks.findComposerActiveRealModel(
+        session,
+        [],
+        new Map(),
+        cleared,
+      ),
+    ).toBeUndefined();
+  });
+
+  it("does not replace an explicit model from another model or workspace", () => {
+    const session = {
+      ...baseSession(),
+      modelLabel: "chosen-provider / chosen-model",
+    } as any;
+    const configuredModel = {
+      id: "runtime-one",
+      name: "runtime-one",
+      provider: "runtime",
+    };
+    const configuration = {
+      models: [],
+      activeModel: configuredModel,
+      thinkingLevels: ["off", "medium"],
+    };
+
+    expect(
+      __rendererTestHooks.findComposerActiveRealModel(
+        session,
+        [],
+        new Map([[session.workspaceId, configuration]]),
+      ),
+    ).toBeUndefined();
+    expect(
+      __rendererTestHooks.findComposerActiveRealModel(
+        { ...session, modelLabel: "runtime / runtime-one" },
+        [],
+        new Map([["workspace-b", configuration]]),
+      ),
+    ).toBeUndefined();
   });
 
   it("keeps fake workspace drafts fake without Pi defaults", () => {

@@ -338,7 +338,15 @@ test("a first draft receives real thinking defaults after delayed bootstrap disc
     await expect
       .poll(() => fs.existsSync(harness!.discoverySignalFile))
       .toBe(true);
+    // The signal is emitted only after bootstrap get_state has latched the
+    // production fake-RPC barrier. Create and edit through App while discovery
+    // is still pending, then release that exact request below.
     await openNewSession(harness.page);
+    const composer = harness.page.getByLabel("Prompt text");
+    await composer.fill("text edited while bootstrap discovery is pending");
+    await expect(composer).toHaveValue(
+      "text edited while bootstrap discovery is pending",
+    );
 
     fs.writeFileSync(
       path.join(harness.discoveryBarrierDir, "release-get-state"),
@@ -353,6 +361,9 @@ test("a first draft receives real thinking defaults after delayed bootstrap disc
     await expect(configuration).toHaveAttribute(
       "data-thinking-level",
       "medium",
+    );
+    await expect(composer).toHaveValue(
+      "text edited while bootstrap discovery is pending",
     );
     expect(sessionPids(harness)).toEqual([]);
   } finally {
