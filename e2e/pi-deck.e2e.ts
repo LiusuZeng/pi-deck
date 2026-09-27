@@ -5648,7 +5648,7 @@ test("model picker shows id and provider for colliding display names", async () 
   }
 });
 
-test("bootstrap creates no saved session and the first draft send creates one", async () => {
+test("bootstrap creates no saved session and the first draft send creates one", async ({}, testInfo) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deck-e2e-lazy-new-"));
   const projectCwd = path.join(root, "project");
   const agentDir = path.join(root, "agent");
@@ -5668,10 +5668,23 @@ test("bootstrap creates no saved session and the first draft send creates one", 
       "data-model-provider",
       "fake-provider",
     );
-    await expect(configuration).toHaveAttribute(
-      "data-thinking-level",
-      "medium",
-    );
+    try {
+      await expect(configuration).toHaveAttribute(
+        "data-thinking-level",
+        "medium",
+      );
+    } catch (error) {
+      // #156: retain producer-side diagnostics before finally removes this
+      // isolated profile. Do not rediscover models, relax, or retry assertions.
+      const diagnostics = await page
+        .evaluate(() => window.piDeck.app.getDiagnosticsSummary())
+        .catch((failure: unknown) => ({ unavailable: String(failure) }));
+      await testInfo.attach("bootstrap-model-discovery-diagnostics.json", {
+        body: JSON.stringify(diagnostics, null, 2),
+        contentType: "application/json",
+      });
+      throw error;
+    }
     await expect(configuration).toHaveCSS("width", "90px");
     await configuration.click();
     const maxThinking = page.getByRole("menuitemradio", {

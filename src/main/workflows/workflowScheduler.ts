@@ -117,6 +117,15 @@ export class WorkflowScheduler {
     this.now = dependencies.now ?? (() => Date.now());
   }
 
+  /** Persisted allocation work that can resume without an owned runtime. */
+  get queuedWorkCount(): number {
+    let count = 0;
+    for (const run of this.runs.values()) {
+      count += run.stepRuns.filter((step) => step.status === "queued").length;
+    }
+    return count;
+  }
+
   async schedule(run: WorkflowRun): Promise<WorkflowRun> {
     // Queued is an allocation outcome, not a durable pause. A run restored
     // after workspace recovery must get another allocation attempt without
@@ -925,6 +934,18 @@ export class WorkflowOccurrenceScheduler {
   ) {
     this.now = dependencies.now ?? (() => Date.now());
   }
+
+  /** Persisted allocation work that can resume without an owned runtime. */
+  get queuedWorkCount(): number {
+    let count = 0;
+    for (const run of this.runs.values()) {
+      count += run.occurrences.filter(
+        (occurrence) => occurrence.status === "queued",
+      ).length;
+    }
+    return count;
+  }
+
   async schedule(run: WorkflowRoleRun): Promise<WorkflowRoleRun> {
     this.ensureLifecycleWake(run.workspaceId);
     return this.serialize(run.id, async () => {

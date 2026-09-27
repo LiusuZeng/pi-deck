@@ -17,6 +17,17 @@ import { z } from "zod";
 import { initializeMacOSDockIcon, resolveAppIconPath } from "./appIcon.js";
 import { initializeAppIdentity } from "./appIdentity.js";
 import {
+  chatRuntimeHasActiveWork,
+  consumeHiddenWindowDialogOutcome,
+  QuitLifecycleCoordinator,
+  RendererCrashRecovery,
+  withTimeoutResult,
+  type CrashRecoveryOutcome,
+  type QuitActivitySummary,
+  type QuitDialogOutcome,
+  type QuitRequestSource,
+} from "./appLifecycle.js";
+import {
   appBootstrapStateSchema,
   appSettingsPatchSchema,
   appSettingsSchema,
@@ -56,6 +67,7 @@ import {
   ipcChannels,
   noPayloadSchema,
   openPiCodexLoginResultSchema,
+  pendingExtensionUiRequestSchema,
   pickAttachmentsResultSchema,
   pickProjectResultSchema,
   projectListResultSchema,
@@ -139,6 +151,7 @@ import type {
   ChatSessionSummary,
   ChatSnapshot,
   PickAttachmentsResult,
+  PendingExtensionUiRequestDto,
   ProjectRef,
   PickProjectResult,
   WorkspaceListResult,
@@ -147,6 +160,7 @@ import type {
 } from "../shared/types.js";
 import { DiagnosticsService } from "./diagnostics/diagnostics.js";
 import { ForkCleanupJournal } from "./forkCleanupJournal.js";
+import { ExtensionUiRequestRegistry } from "./extensionUiRequestRegistry.js";
 import { registerValidatedIpc } from "./ipc/registerIpc.js";
 import {
   discoverPiModels,
@@ -447,17 +461,18 @@ const workflowRuntimeOwnership = new WorkflowRuntimeOwnershipRegistry();
 // A single-delete transaction may detach Pi before filesystem removal commits.
 // Its worker-exit event must not revoke retryable composer selections.
 const attachmentPreservingRuntimeClosures = new Set<string>();
-const pendingExtensionUiRequests = new Map<
-  string,
-  Map<
-    string,
-    {
-      method: "select" | "confirm" | "input" | "editor";
-      timer?: NodeJS.Timeout;
-    }
-  >
->();
 const extensionUiTimeoutGraceMs = 1_000;
+const pendingExtensionUiRequests =
+  new ExtensionUiRequestRegistry<PendingExtensionUiRequestDto>({
+    timeoutGraceMs: extensionUiTimeoutGraceMs,
+    onTimeout: (runtimeId, requestId) => {
+      sendChatEventToRenderer({
+        type: "extension_ui_request_timeout",
+        runtimeId,
+        requestId,
+      });
+    },
+  });
 let chatWorkerCreationTail: Promise<void> = Promise.resolve();
 // Serializes every Pi session discovery/attach/fork registration transaction.
 // The lock begins before native fork inventory and ends only after durable
@@ -501,13 +516,38 @@ const pendingChatAttachmentWorkers = new Map<
 >();
 let chatEventUnsubscribe: (() => void) | undefined;
 let selectedRealProjectCwd: string | undefined;
-let isQuittingAfterChatWorkerCleanup = false;
 let testProjectPickQueue: string[] | undefined;
 
 let workflowScheduler: WorkflowScheduler | undefined;
 let workflowOccurrenceScheduler: WorkflowOccurrenceScheduler | undefined;
 let backendInitializationPromise: Promise<void> | undefined;
+let backendInitializationPending = true;
 const processStartedAtMs = Date.now();
+
+const appLifecycle = new QuitLifecycleCoordinator({
+  inspectActivity: inspectQuitActivity,
+  confirmQuit: showActiveWorkQuitDialog,
+  cleanup: () => closeChatWorker({ shutdownWorkflowRuntimes: true }),
+  requestFinalQuit: () => app.quit(),
+  recordDiagnostic: (message) => {
+    diagnostics?.recordError(message);
+    console.error(message);
+  },
+});
+
+const rendererCrashRecovery = new RendererCrashRecovery({
+  reloadRenderer: reloadMainRenderer,
+  showFallback: showRendererRecoveryDialog,
+  recreateRenderer: recreateMainWindowAfterCrash,
+  stopWorkAndQuit: async () => {
+    await appLifecycle.requestQuit("renderer-crash", { confirmed: true });
+  },
+  isStopping: () => appLifecycle.isStopping,
+  recordDiagnostic: (message) => {
+    diagnostics?.recordError(message);
+    console.error(message);
+  },
+});
 
 const maxImportedImageBytes = MAX_IMAGE_BYTES;
 const maxPromptImages = 10;
@@ -594,7 +634,10 @@ async function bootstrap(): Promise<void> {
       registerIpcHandlers(settings, diagnosticsService);
       createMainWindow();
       app.on("activate", () => {
-        if (BrowserWindow.getAllWindows().length === 0) {
+        if (
+          !appLifecycle.isStopping &&
+          BrowserWindow.getAllWindows().length === 0
+        ) {
           createMainWindow();
         }
       });
@@ -610,7 +653,8 @@ async function bootstrap(): Promise<void> {
         failedForkCleanup.loadIfNeeded(),
       ]);
 
-      workflowInitialization = await initializeWorkflows(async () => {
+      if (chatLifecycleStopRequested) return;
+      const initializedWorkflows = await initializeWorkflows(async () => {
         const store = new WorkflowStore(
           resolvePiDeckHome(process.env),
           diagnosticsService,
@@ -618,7 +662,9 @@ async function bootstrap(): Promise<void> {
         await store.loadIfNeeded();
         return store;
       });
-      if (workflowInitialization.status === "available") {
+      if (chatLifecycleStopRequested) return;
+      workflowInitialization = initializedWorkflows;
+      if (initializedWorkflows.status === "available") {
         workflowScheduler = createWorkflowScheduler(
           settings,
           diagnosticsService,
@@ -628,7 +674,7 @@ async function bootstrap(): Promise<void> {
           diagnosticsService,
         );
       } else {
-        diagnosticsService.recordError(workflowInitialization.diagnostic);
+        diagnosticsService.recordError(initializedWorkflows.diagnostic);
       }
 
       // Reconstruct target blocks from source-only reservations before legacy
@@ -638,31 +684,41 @@ async function bootstrap(): Promise<void> {
         workspacesStore,
         projects,
       );
+      if (chatLifecycleStopRequested) return;
       const hadWorkspaceMetadata =
         (await workspacesStore.list()).workspaces.length > 0;
+      if (chatLifecycleStopRequested) return;
       await migrateLegacyProjectsToWorkspaces();
+      if (chatLifecycleStopRequested) return;
       await workspacesStore.ensureDefaultWorkspace({
-        activate: !hadWorkspaceMetadata || resolveChatBackendMode() === "fake",
+        activate: !hadWorkspaceMetadata,
       });
+      if (chatLifecycleStopRequested) return;
       await startDelegationBridge();
+      if (chatLifecycleStopRequested) return;
       await ensureChatAdapter(settings, diagnosticsService);
+      if (chatLifecycleStopRequested) return;
       await rehydrateWorkflowRuns();
     },
   });
 
-  backendInitializationPromise = startup.backendReady.then((timings) => {
-    if (process.env.PI_DECK_STARTUP_METRICS === "1") {
-      console.info(
-        `[startup] shell-ready=${timings.shellReadyMs}ms backend-ready=${timings.backendReadyMs}ms`,
-      );
-    }
-  });
+  backendInitializationPromise = startup.backendReady
+    .then((timings) => {
+      if (process.env.PI_DECK_STARTUP_METRICS === "1") {
+        console.info(
+          `[startup] shell-ready=${timings.shellReadyMs}ms backend-ready=${timings.backendReadyMs}ms`,
+        );
+      }
+    })
+    .finally(() => {
+      backendInitializationPending = false;
+    });
   await backendInitializationPromise;
 }
 
-function createMainWindow(): void {
+function createMainWindow(): BrowserWindow {
   const preloadPath = path.join(__dirname, "../preload/index.js");
-  mainWindow = new BrowserWindow({
+  const window = new BrowserWindow({
     width: 1200,
     height: 800,
     minWidth: 900,
@@ -682,14 +738,16 @@ function createMainWindow(): void {
     ? new URL(process.env.VITE_DEV_SERVER_URL as string).origin
     : "file://";
 
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+  mainWindow = window;
+
+  window.webContents.setWindowOpenHandler(({ url }) => {
     if (isAllowedExternalUrl(url)) {
       void shell.openExternal(url);
     }
     return { action: "deny" };
   });
 
-  mainWindow.webContents.on("will-navigate", (event, targetUrl) => {
+  window.webContents.on("will-navigate", (event, targetUrl) => {
     if (!shouldAllowNavigation(targetUrl, appOrigin)) {
       event.preventDefault();
       if (isAllowedExternalUrl(targetUrl)) {
@@ -698,17 +756,44 @@ function createMainWindow(): void {
     }
   });
 
-  registerDevReloadShortcut(mainWindow);
+  registerDevReloadShortcut(window);
 
-  mainWindow.on("closed", () => {
-    mainWindow = undefined;
+  window.on("close", (event) => {
+    if (appLifecycle.allowsExit || !isLastOpenWindow(window)) return;
+    event.preventDefault();
+    void appLifecycle.requestQuit("last-window");
+  });
+
+  window.on("closed", () => {
+    if (mainWindow === window) mainWindow = undefined;
+  });
+
+  window.webContents.on("render-process-gone", (_event, details) => {
+    if (
+      appLifecycle.allowsExit ||
+      window.isDestroyed() ||
+      mainWindow !== window
+    )
+      return;
+    void rendererCrashRecovery.handleCrash(
+      `${details.reason} (exit code ${details.exitCode})`,
+    );
   });
 
   if (isDev) {
-    void mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL as string);
+    void window.loadURL(process.env.VITE_DEV_SERVER_URL as string);
   } else {
-    void mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
+    void window.loadFile(path.join(__dirname, "../renderer/index.html"));
   }
+  return window;
+}
+
+function isLastOpenWindow(window: BrowserWindow): boolean {
+  return (
+    BrowserWindow.getAllWindows().filter(
+      (candidate) => !candidate.isDestroyed() && candidate !== window,
+    ).length === 0
+  );
 }
 
 function applyAppTheme(settings: AppSettings): void {
@@ -3946,44 +4031,56 @@ function getChatWorkerCapacity(): WorkerCapacity {
 function trackExtensionUiRuntimeEvent(
   event: z.infer<typeof chatRuntimeEventSchema>,
 ): void {
-  if (event.type !== "extension_ui_request") {
-    return;
-  }
+  if (event.type !== "extension_ui_request") return;
+  const request = normalizePendingExtensionUiRequest(event);
+  if (request === undefined) return;
+
+  pendingExtensionUiRequests.register(event.runtimeId, request);
+}
+
+function normalizePendingExtensionUiRequest(
+  event: z.infer<typeof chatRuntimeEventSchema>,
+): PendingExtensionUiRequestDto | undefined {
   const method = getExtensionUiDialogMethod(event.method);
   const requestId = typeof event.id === "string" ? event.id : undefined;
-  if (method === undefined || requestId === undefined) {
-    return;
-  }
-
-  const requests = pendingExtensionUiRequests.get(event.runtimeId) ?? new Map();
-  const existing = requests.get(requestId);
-  if (existing?.timer !== undefined) clearTimeout(existing.timer);
+  if (method === undefined || requestId === undefined) return undefined;
+  const params =
+    event.params &&
+    typeof event.params === "object" &&
+    !Array.isArray(event.params)
+      ? (event.params as Record<string, unknown>)
+      : undefined;
+  const stringField = (name: string): string | undefined => {
+    const value = event[name] ?? params?.[name];
+    return typeof value === "string" ? value : undefined;
+  };
   const timeout =
-    typeof event.timeout === "number" && event.timeout >= 0
+    typeof event.timeout === "number" &&
+    Number.isFinite(event.timeout) &&
+    event.timeout >= 0
       ? event.timeout
       : undefined;
-  const timer =
-    timeout === undefined
-      ? undefined
-      : setTimeout(() => {
-          const pending = pendingExtensionUiRequests.get(event.runtimeId);
-          if (pending === undefined || pending.get(requestId)?.timer !== timer)
-            return;
-          pending.delete(requestId);
-          if (pending.size === 0)
-            pendingExtensionUiRequests.delete(event.runtimeId);
-          sendChatEventToRenderer({
-            type: "extension_ui_request_timeout",
-            runtimeId: event.runtimeId,
-            requestId,
-          });
-        }, timeout + extensionUiTimeoutGraceMs);
-  if (timer !== undefined) timer.unref();
-  requests.set(requestId, {
+  const rawOptions = event.options ?? params?.options;
+  const options = Array.isArray(rawOptions)
+    ? rawOptions.filter((value): value is string => typeof value === "string")
+    : undefined;
+  const parsed = pendingExtensionUiRequestSchema.safeParse({
+    id: requestId,
     method,
-    ...(timer !== undefined ? { timer } : {}),
+    title: stringField("title") ?? method,
+    ...(stringField("message") !== undefined
+      ? { message: stringField("message") }
+      : {}),
+    ...(options !== undefined ? { options } : {}),
+    ...(stringField("placeholder") !== undefined
+      ? { placeholder: stringField("placeholder") }
+      : {}),
+    ...(stringField("prefill") !== undefined
+      ? { prefill: stringField("prefill") }
+      : {}),
+    ...(timeout !== undefined ? { timeout } : {}),
   });
-  pendingExtensionUiRequests.set(event.runtimeId, requests);
+  return parsed.success ? parsed.data : undefined;
 }
 
 async function respondToExtensionUi(
@@ -4000,9 +4097,10 @@ async function respondToExtensionUi(
       `Extension UI runtime is no longer attached: ${request.runtimeId}`,
     );
   }
-  const pending = pendingExtensionUiRequests
-    .get(request.runtimeId)
-    ?.get(request.requestId);
+  const pending = pendingExtensionUiRequests.peek(
+    request.runtimeId,
+    request.requestId,
+  );
   if (pending === undefined) {
     throw new Error(
       `Extension UI request ${request.requestId} is no longer pending for this runtime. It may have timed out or already been answered.`,
@@ -4014,6 +4112,17 @@ async function respondToExtensionUi(
     );
   }
 
+  // Claim before the asynchronous write. A timeout or duplicate response can
+  // no longer race this authorized response and later resurrect stale UI.
+  const claimed = pendingExtensionUiRequests.claim(
+    request.runtimeId,
+    request.requestId,
+  );
+  if (claimed === undefined) {
+    throw new Error(
+      `Extension UI request ${request.requestId} is no longer pending for this runtime. It may have timed out or already been answered.`,
+    );
+  }
   try {
     assertChatRuntimeSessionNotMutating(
       request.runtimeId,
@@ -4028,25 +4137,28 @@ async function respondToExtensionUi(
     diagnosticsService.recordError(
       `Failed to write extension UI response ${request.requestId} for ${request.runtimeId}: ${message}`,
     );
-    sendChatEventToRenderer({
-      type: "extension_ui_response_failed",
-      runtimeId: request.runtimeId,
-      requestId: request.requestId,
-      message: `Could not deliver extension UI response: ${message}`,
-    });
+    // A failed write remains actionable only while the original request is
+    // still live and no newer event reused its id.
+    if (pendingExtensionUiRequests.restore(claimed) === "restored") {
+      sendChatEventToRenderer({
+        type: "extension_ui_response_failed",
+        runtimeId: request.runtimeId,
+        requestId: request.requestId,
+        message: `Could not deliver extension UI response: ${message}`,
+      });
+    }
     throw error;
   }
 
-  if (pending.timer !== undefined) clearTimeout(pending.timer);
-  const requests = pendingExtensionUiRequests.get(request.runtimeId);
-  requests?.delete(request.requestId);
-  if (requests?.size === 0)
-    pendingExtensionUiRequests.delete(request.runtimeId);
-  sendChatEventToRenderer({
-    type: "extension_ui_response_sent",
-    runtimeId: request.runtimeId,
-    requestId: request.requestId,
-  });
+  // Runtime teardown or a newer same-id request can invalidate this response
+  // while the write is in flight. Only the exact live claim may clear UI.
+  if (pendingExtensionUiRequests.complete(claimed)) {
+    sendChatEventToRenderer({
+      type: "extension_ui_response_sent",
+      runtimeId: request.runtimeId,
+      requestId: request.requestId,
+    });
+  }
 }
 
 function getExtensionUiDialogMethod(
@@ -4069,12 +4181,7 @@ function isValidExtensionUiResponse(
 }
 
 function clearPendingExtensionUiRequests(runtimeId: string): void {
-  const requests = pendingExtensionUiRequests.get(runtimeId);
-  if (requests === undefined) return;
-  for (const pending of requests.values()) {
-    if (pending.timer !== undefined) clearTimeout(pending.timer);
-  }
-  pendingExtensionUiRequests.delete(runtimeId);
+  pendingExtensionUiRequests.clearRuntime(runtimeId);
 }
 
 function sendChatEventToRenderer(
@@ -8060,6 +8167,15 @@ async function getChatSnapshotForRuntime(
       cwd: state.cwd ?? chatWorkerCwds.get(runtimeId),
     },
     messages: messages.map((message) => chatMessageSchema.parse(message)),
+    // Copy the main-owned authorization queue synchronously after runtime
+    // ownership has been validated. A renderer can recover the same request,
+    // but cannot add one or answer anything absent from this queue.
+    ...(pendingExtensionUiRequests.has(runtimeId)
+      ? {
+          pendingExtensionUiRequests:
+            pendingExtensionUiRequests.snapshot(runtimeId),
+        }
+      : {}),
   };
 }
 
@@ -8600,26 +8716,199 @@ function isLikelyTextPath(extension: string): boolean {
   ]).has(extension);
 }
 
-app.on("before-quit", (event) => {
-  if (
-    isQuittingAfterChatWorkerCleanup ||
-    (!chatLifecycleStopRequested &&
-      (chatAdapter === undefined || chatRuntimeIds.size === 0) &&
-      pendingChatAttachmentWorkers.size === 0 &&
-      chatLifecycleOperations.size === 0 &&
-      activeChatReset === undefined &&
-      !workflowRuntimeOwnership.hasOwnedRuntimes())
-  ) {
-    return;
+async function inspectQuitActivity(): Promise<QuitActivitySummary> {
+  let activeChats = 0;
+  let privateTasks = 0;
+  let pendingOperations =
+    chatLifecycleOperations.size +
+    pendingChatAttachmentWorkers.size +
+    chatSessionResumePromises.size +
+    taskSessionSynthesisTails.size +
+    pendingFailedForkCleanups.size +
+    chatSessionDiscoveryGate.pendingCount +
+    (workflowScheduler?.queuedWorkCount ?? 0) +
+    (workflowOccurrenceScheduler?.queuedWorkCount ?? 0) +
+    (backendInitializationPending ? 1 : 0) +
+    pendingExtensionUiRequests.pendingCount +
+    (activeChatReset === undefined ? 0 : 1);
+  const adapter = chatAdapter;
+
+  for (const runtimeId of chatRuntimeIds) {
+    if (workflowRuntimeOwnership.isOwned(runtimeId)) continue;
+    if (adapter === undefined || !adapter.hasRuntime(runtimeId)) {
+      pendingOperations += 1;
+      continue;
+    }
+    const status = await boundedBestEffort(
+      Promise.resolve().then(() => adapter.getRuntimeStatus(runtimeId)),
+      1_000,
+    );
+    if (status === undefined) {
+      // An unresponsive owned child is conservatively treated as pending work.
+      pendingOperations += 1;
+    } else if (chatRuntimeHasActiveWork(status)) {
+      // Merely attaching an idle saved chat is harmless and must not turn an
+      // ordinary close into a destructive-work warning.
+      activeChats += 1;
+    }
+
+    try {
+      privateTasks +=
+        taskSessionOrchestrator
+          ?.state(runtimeId)
+          .tasks.filter(
+            (task) =>
+              task.lifecycle !== "completed" &&
+              task.lifecycle !== "failed" &&
+              task.lifecycle !== "interrupted",
+          ).length ?? 0;
+    } catch {
+      // The parent may be between worker exit and bookkeeping removal.
+    }
+    privateTasks += legacyNonterminalTaskCount(runtimeId);
+  }
+  for (const runs of taskSessionPlannerRuns.values()) {
+    privateTasks += [...runs].filter((run) => !run.cancelled).length;
   }
 
-  event.preventDefault();
-  // A second quit request must not bypass child cleanup already in flight.
-  if (chatLifecycleStopRequested) return;
-  void closeChatWorker({ shutdownWorkflowRuntimes: true }).finally(() => {
-    isQuittingAfterChatWorkerCleanup = true;
-    app.quit();
+  return {
+    activeChats,
+    privateTasks,
+    workflowRuntimes: workflowRuntimeOwnership.ownedRuntimeIds().length,
+    pendingOperations,
+  };
+}
+
+async function showActiveWorkQuitDialog(
+  activity: QuitActivitySummary,
+  source: QuitRequestSource,
+): Promise<QuitDialogOutcome> {
+  const testOutcome = consumeHiddenWindowDialogOutcome(
+    process.env,
+    "PI_DECK_E2E_QUIT_DIALOG_RESPONSES",
+    "quit",
+  );
+  if (testOutcome !== undefined) return testOutcome as QuitDialogOutcome;
+
+  const parts = [
+    activity.activeChats > 0 ? `${activity.activeChats} active chat(s)` : "",
+    activity.privateTasks > 0 ? `${activity.privateTasks} private task(s)` : "",
+    activity.workflowRuntimes > 0
+      ? `${activity.workflowRuntimes} workflow runtime(s)`
+      : "",
+    activity.pendingOperations > 0
+      ? `${activity.pendingOperations} pending operation(s)`
+      : "",
+  ].filter(Boolean);
+  const detail = `${parts.join(", ")} will be stopped. Saved history remains available, but interrupted computation does not resume automatically.`;
+  const options = {
+    type: "warning" as const,
+    title: "Quit Pi Deck?",
+    message:
+      source === "last-window"
+        ? "Closing the last window will quit Pi Deck and stop active work."
+        : "Quitting Pi Deck will stop active work.",
+    detail,
+    buttons: ["Cancel", "Quit and Stop Work"],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  };
+  const window = mainWindow;
+  const result =
+    window !== undefined && !window.isDestroyed()
+      ? await dialog.showMessageBox(window, options)
+      : await dialog.showMessageBox(options);
+  return result.response === 1 ? "quit" : "cancel";
+}
+
+async function showRendererRecoveryDialog(
+  details: string,
+): Promise<CrashRecoveryOutcome> {
+  const testOutcome = consumeHiddenWindowDialogOutcome(
+    process.env,
+    "PI_DECK_E2E_CRASH_DIALOG_RESPONSES",
+    "recover",
+  );
+  if (testOutcome !== undefined) return testOutcome as CrashRecoveryOutcome;
+
+  const options = {
+    type: "error" as const,
+    title: "Pi Deck UI stopped",
+    message: "The Pi Deck interface could not recover automatically.",
+    detail: `Main-process work is still owned by Pi Deck (${details}). Recover the UI, or stop work and quit safely. Unsent drafts may be lost.`,
+    buttons: ["Recover UI", "Stop Work and Quit"],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  };
+  const window = mainWindow;
+  const result =
+    window !== undefined && !window.isDestroyed()
+      ? await dialog.showMessageBox(window, options)
+      : await dialog.showMessageBox(options);
+  return result.response === 1 ? "quit" : "recover";
+}
+
+async function reloadMainRenderer(): Promise<boolean> {
+  const window = mainWindow;
+  if (
+    window === undefined ||
+    window.isDestroyed() ||
+    window.webContents.isDestroyed()
+  ) {
+    return false;
+  }
+  let finished: (() => void) | undefined;
+  let gone: (() => void) | undefined;
+  const loaded = new Promise<boolean>((resolve) => {
+    finished = () => resolve(true);
+    gone = () => resolve(false);
+    window.webContents.once("did-finish-load", finished);
+    window.webContents.once("render-process-gone", gone);
+    try {
+      window.webContents.reload();
+    } catch {
+      resolve(false);
+    }
   });
+  try {
+    return await withTimeoutResult(loaded, 10_000, false);
+  } finally {
+    if (finished !== undefined)
+      window.webContents.removeListener("did-finish-load", finished);
+    if (gone !== undefined)
+      window.webContents.removeListener("render-process-gone", gone);
+  }
+}
+
+async function recreateMainWindowAfterCrash(): Promise<void> {
+  // This synchronous fence and create are one event-loop turn: once cleanup is
+  // pending, no replacement BrowserWindow can be allocated behind it.
+  if (appLifecycle.isStopping) return;
+  const oldWindow = mainWindow;
+  const replacement = createMainWindow();
+  oldWindow?.destroy();
+  const loaded = new Promise<boolean>((resolve) => {
+    replacement.webContents.once("did-finish-load", () => resolve(true));
+    replacement.webContents.once("render-process-gone", () => resolve(false));
+  });
+  const ready = await withTimeoutResult(loaded, 10_000, false);
+  if (appLifecycle.isStopping) {
+    if (!replacement.isDestroyed()) replacement.destroy();
+    return;
+  }
+  if (!ready) {
+    throw new Error("The replacement renderer did not become ready.");
+  }
+}
+
+app.on("before-quit", (event) => {
+  if (appLifecycle.allowsExit) return;
+  // Every external request remains blocked behind the same dialog/cleanup
+  // transaction. Only requestFinalQuit re-enters after the barrier completes.
+  event.preventDefault();
+  void appLifecycle.requestQuit("application");
 });
 
 app.on("window-all-closed", () => {

@@ -425,6 +425,25 @@ Security boundaries include:
 - Image content sniffing and decode-safety limits in Electron main.
 - External-link allowlisting for `http`, `https`, and `mailto`.
 
+## Closing and restarting Pi Deck
+
+Closing the last window quits Pi Deck, including on macOS. If work is active,
+Pi Deck asks before stopping it; Cancel keeps the window and workers alive.
+Confirmed quit waits for owned worker cleanup. Sessions do not continue in the
+background after quitting. Restarting restores saved history and workspace
+metadata, not live execution; reopen a saved session to continue with a new worker.
+
+Unsent composer text is saved locally in the Electron profile across reload and
+restart. Selected attachments must be reselected; their authorization tokens and
+image payloads are never saved in draft storage. If reload interrupts a send and
+its acceptance is uncertain, Pi Deck preserves the text behind an explicit
+recovery action—check history before sending it again. Draft storage is bounded
+and reports storage/limit failures; incomplete streamed output may still be lost.
+Renderer crashes receive bounded UI recovery while main-owned work is retained.
+
+See the [basic session lifecycle audit](docs/basic-session-lifecycle-audit.md)
+for tested behavior, recovery boundaries, and tracked gaps.
+
 ## Current limitations
 
 - Pi Deck currently runs from source; there is no signed/notarized installer or packaged release yet.

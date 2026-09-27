@@ -101,6 +101,16 @@ import {
   shouldReconcileSession as shouldReconcileSessionInDomain,
 } from "./sessionRuntimeReconciliation.js";
 import {
+  loadAttachedSessionRecovery,
+  projectAttachedSessionRecovery,
+} from "./attachedSessionRecovery.js";
+import {
+  createDraftAfterWorkspaceActivation,
+  draftDefaultsForWorkspace,
+  emptyDraftModelConfiguration,
+  type WorkspaceDraftDefaults,
+} from "./draftDefaults.js";
+import {
   activeSessionLifecycle,
   inactiveSessionLifecycle,
   resolveSessionLifecycle,
@@ -172,6 +182,7 @@ import {
 import { Menu } from "./components/ui/Menu.js";
 import {
   attachmentTokens,
+  fenceAttachmentOwnerTransfer,
   getOrCreateAttachmentOwnerGeneration,
   mergeAttachmentDrafts,
   releaseAttachmentOwner,
@@ -179,6 +190,14 @@ import {
   transferAttachmentOwnership,
 } from "./attachmentLifecycle.js";
 import { RuntimeEventBuffer } from "./runtimeEventBuffer.js";
+import {
+  ComposerDraftPersistence,
+  type ComposerDraftPersistenceResult,
+  type ComposerDraftSessionIdentitySource,
+  type ComposerSubmissionDestination,
+  type PendingComposerSubmissionRecovery,
+  type RestoredComposerDraft,
+} from "./composerDraftPersistence.js";
 import {
   buildActivityInbox,
   countActivityInboxItems,
@@ -957,11 +976,17 @@ interface PendingTaskSubmission {
   text: string;
   attachments: AttachmentDraft[];
   timelineItemId: string;
+  composerRevision: number;
 }
 
 type PendingTaskSubmissionsBySession = Record<
   string,
   PendingTaskSubmission | undefined
+>;
+
+type PendingComposerRecoveriesBySession = Record<
+  string,
+  PendingComposerSubmissionRecovery | undefined
 >;
 
 type WorkspaceDialogState =
@@ -1028,6 +1053,8 @@ type RuntimeCapabilitiesById = Record<string, RuntimeCapabilities>;
 const appStartedAt = Date.now();
 const WORKING_SESSION_RECONCILE_AFTER_MS = 3_000;
 const NO_VISIBLE_OUTPUT_NOTICE_MS = 3_000;
+const RESTORED_ATTACHMENT_RESELECTION_MESSAGE =
+  "Draft text was restored. Attachments are not retained across reload or restart; reselect them before sending.";
 const modelOptions: ModelOption[] = [
   {
     provider: "anthropic",
@@ -1273,6 +1300,12 @@ export function App(): ReactElement {
   const [composerDrafts, setComposerDrafts] = useState<ComposerDraftsBySession>(
     {},
   );
+  // Durable records are loaded before bootstrap but cannot write until their
+  // stable workspace/session identities have been reconciled after readiness.
+  const [composerDraftPersistenceReady, setComposerDraftPersistenceReady] =
+    useState(false);
+  const [pendingComposerRecoveries, setPendingComposerRecoveries] =
+    useState<PendingComposerRecoveriesBySession>({});
   const [composerError, setComposerError] = useState<string | null>(null);
   const [multitask, setMultitask] = useState<
     Record<string, MultitaskStateEvent>
@@ -1334,7 +1367,10 @@ export function App(): ReactElement {
   const [realCapabilitiesByRuntime, setRealCapabilitiesByRuntime] =
     useState<RuntimeCapabilitiesById>({});
   const [projectModelConfiguration, setProjectModelConfiguration] =
-    useState<ChatListModelsResult>({ models: [], thinkingLevels: [] });
+    useState<ChatListModelsResult>(emptyDraftModelConfiguration);
+  const projectModelConfigurationRef = useRef<WorkspaceDraftDefaults>(
+    new Map([[currentWorkspace.id, projectModelConfiguration]]),
+  );
   const [sidebarVisible, setSidebarVisible] = useState(() =>
     loadSidebarVisiblePreference(),
   );
@@ -1402,8 +1438,24 @@ export function App(): ReactElement {
   // A stale/missed lifecycle event may need recovery, but never let repeated
   // renders fan out duplicate status requests for the same runtime.
   const reconcilingRuntimeIds = useRef(new Set<string>());
+  const attachedRecoveryRequests = useRef(new Map<string, Promise<void>>());
+  const attachedRecoveryGenerations = useRef(new Map<string, number>());
+  const attachedRecoveryEvents = useRef(new Map<string, ChatRuntimeEvent[]>());
+  const rendererDisposedRef = useRef(false);
   const sessionsRef = useRef<SessionViewModel[]>([]);
   const composerDraftsRef = useRef<ComposerDraftsBySession>({});
+  const composerDraftPersistenceRef = useRef<
+    ComposerDraftPersistence | undefined
+  >(undefined);
+  if (composerDraftPersistenceRef.current === undefined) {
+    composerDraftPersistenceRef.current = new ComposerDraftPersistence(
+      rendererComposerDraftStorage(),
+    );
+  }
+  const composerDraftPersistenceWarningRef = useRef(new Set<string>());
+  const attachmentReselectionSessionIdsRef = useRef(new Set<string>());
+  const composerRevisionBySessionRef = useRef(new Map<string, number>());
+  const nextComposerRevisionRef = useRef(0);
   const promptHistoryStateRef = useRef<PromptHistoryState>(
     initialPromptHistoryState(),
   );
@@ -1449,6 +1501,236 @@ export function App(): ReactElement {
   selectedSessionIdRef.current = selectedSessionId;
   currentProjectRef.current = currentProject;
   currentWorkspaceRef.current = currentWorkspace;
+
+  function commitProjectModelConfiguration(
+    workspaceId: string,
+    configuration: ChatListModelsResult,
+  ): void {
+    const next = new Map(projectModelConfigurationRef.current);
+    next.set(workspaceId, configuration);
+    projectModelConfigurationRef.current = next;
+    if (currentWorkspaceRef.current.id === workspaceId) {
+      setProjectModelConfiguration(configuration);
+    }
+  }
+
+  function resetProjectModelConfiguration(workspaceId: string): void {
+    commitProjectModelConfiguration(
+      workspaceId,
+      emptyDraftModelConfiguration(),
+    );
+  }
+
+  function reportComposerDraftPersistenceResult(
+    result: ComposerDraftPersistenceResult,
+  ): void {
+    const warning =
+      result.status === "storage-error"
+        ? "Unsent draft storage is unavailable. Keep a separate copy before reloading or quitting."
+        : result.status === "unsupported-version"
+          ? "Unsent drafts were saved by a newer Pi Deck version and were left untouched."
+          : result.truncated || result.pruned > 0
+            ? "Unsent draft storage reached its safety limit. Keep a separate copy of unusually large drafts."
+            : undefined;
+    if (
+      warning === undefined ||
+      composerDraftPersistenceWarningRef.current.has(warning)
+    ) {
+      return;
+    }
+    composerDraftPersistenceWarningRef.current.add(warning);
+    setUiMessage(warning);
+  }
+
+  function reportRestoredAttachmentSelections(
+    restorations: readonly RestoredComposerDraft[],
+  ): void {
+    for (const restoration of restorations) {
+      if (restoration.attachmentsNeedReselection) {
+        attachmentReselectionSessionIdsRef.current.add(restoration.sessionId);
+      }
+    }
+    if (
+      attachmentReselectionSessionIdsRef.current.has(
+        selectedSessionIdRef.current,
+      )
+    ) {
+      setComposerError(RESTORED_ATTACHMENT_RESELECTION_MESSAGE);
+    }
+  }
+
+  function composerRevision(sessionId: string): number {
+    return composerRevisionBySessionRef.current.get(sessionId) ?? 0;
+  }
+
+  function reviseComposer(sessionId: string): number {
+    const revision = ++nextComposerRevisionRef.current;
+    composerRevisionBySessionRef.current.set(sessionId, revision);
+    return revision;
+  }
+
+  function clearAcceptedComposerDraft(
+    session: ComposerDraftSessionIdentitySource,
+    submittedText: string,
+    submittedAttachments: readonly AttachmentDraft[],
+    submittedRevision: number,
+  ): void {
+    const current = composerDraftsRef.current;
+    const sameComposerGeneration = shouldApplySubmissionResult(
+      submittedRevision,
+      composerRevision(session.id),
+    );
+    const next = sameComposerGeneration
+      ? clearSubmittedTaskDraft(
+          current,
+          session.id,
+          submittedText,
+          submittedAttachments,
+        )
+      : current;
+    const acceptedDraftIsStillCurrent =
+      sameComposerGeneration &&
+      (next !== current ||
+        isEmptyComposerDraft(composerDraftForSession(current, session.id)));
+    if (acceptedDraftIsStillCurrent) {
+      attachmentReselectionSessionIdsRef.current.delete(session.id);
+    }
+    if (next !== current) {
+      // Keep synchronous ownership in lockstep with acceptance so a following
+      // send cannot clear a newer draft before React commits this update.
+      composerDraftsRef.current = next;
+      setComposerDrafts(next);
+    }
+    if (!acceptedDraftIsStillCurrent) {
+      // The user's newer edit may not have reached the React persistence effect
+      // yet. Persist its synchronous ref before removing pending metadata.
+      reportComposerDraftPersistenceResult(
+        composerDraftPersistenceRef.current!.persist(
+          [
+            ...sessionsRef.current.filter((item) => item.id !== session.id),
+            session,
+          ],
+          composerDraftPersistenceSnapshots(composerDraftsRef.current),
+        ),
+      );
+    }
+    reportComposerDraftPersistenceResult(
+      composerDraftPersistenceRef.current!.finishSubmission(
+        session,
+        "accepted",
+        acceptedDraftIsStillCurrent,
+      ),
+    );
+    publishPendingComposerRecovery(session);
+  }
+
+  function optimisticallyClearSubmittedComposerDraft(
+    sessionId: string,
+    submittedText: string,
+    submittedAttachments: readonly AttachmentDraft[],
+  ): void {
+    const next = clearSubmittedTaskDraft(
+      composerDraftsRef.current,
+      sessionId,
+      submittedText,
+      submittedAttachments,
+    );
+    composerDraftsRef.current = next;
+    setComposerDrafts(next);
+  }
+
+  function restoreRejectedComposerDraft(
+    sessionId: string,
+    submittedText: string,
+    submittedAttachments: AttachmentDraft[],
+    submittedRevision: number,
+  ): boolean {
+    const current = composerDraftsRef.current;
+    const next = shouldApplySubmissionResult(
+      submittedRevision,
+      composerRevision(sessionId),
+    )
+      ? restoreFailedTaskDraft(
+          current,
+          sessionId,
+          submittedText,
+          submittedAttachments,
+        )
+      : current;
+    composerDraftsRef.current = next;
+    setComposerDrafts(next);
+    return next !== current;
+  }
+
+  function publishPendingComposerRecovery(
+    session: ComposerDraftSessionIdentitySource,
+  ): PendingComposerSubmissionRecovery | undefined {
+    const recovery =
+      composerDraftPersistenceRef.current!.pendingSubmissionForSession(session);
+    setPendingComposerRecoveries((current) => {
+      if (recovery !== undefined) {
+        return mergePendingComposerRecoveries(current, [recovery]);
+      }
+      const { [session.id]: _settled, ...remaining } = current;
+      return remaining;
+    });
+    return recovery;
+  }
+
+  function submissionBlockedByPendingRecovery(
+    session: ComposerDraftSessionIdentitySource,
+  ): boolean {
+    const recovery = publishPendingComposerRecovery(session);
+    if (recovery === undefined) return false;
+    setComposerError(
+      "Recover or discard the previous uncertain submission before sending another draft.",
+    );
+    setUiMessage(
+      "A previous submission still needs an explicit recover or discard decision.",
+    );
+    return true;
+  }
+
+  function recoverPendingComposerSubmission(sessionId: string): void {
+    const session = sessionsRef.current.find((item) => item.id === sessionId);
+    if (session === undefined) return;
+    if (
+      !isEmptyComposerDraft(
+        composerDraftForSession(composerDraftsRef.current, sessionId),
+      )
+    ) {
+      setComposerError(
+        "The composer already has newer text. Keep or copy it, then clear the composer before recovering the previous uncertain submission.",
+      );
+      return;
+    }
+    const restoration =
+      composerDraftPersistenceRef.current!.recoverPendingSubmission(session);
+    if (restoration === undefined) return;
+    const next = restoreComposerDraftText(composerDraftsRef.current, [
+      restoration,
+    ]);
+    composerDraftsRef.current = next;
+    reviseComposer(sessionId);
+    setComposerDrafts(next);
+    publishPendingComposerRecovery(session);
+    reportRestoredAttachmentSelections([restoration]);
+    setUiMessage(
+      "Recovered the interrupted submission as editable text. It was not sent again automatically.",
+    );
+  }
+
+  function discardPendingComposerSubmission(sessionId: string): void {
+    const session = sessionsRef.current.find((item) => item.id === sessionId);
+    if (session === undefined) return;
+    reportComposerDraftPersistenceResult(
+      composerDraftPersistenceRef.current!.discardPendingSubmission(session),
+    );
+    publishPendingComposerRecovery(session);
+    setUiMessage(
+      "Discarded the previous submission recovery after checking session history.",
+    );
+  }
 
   function beginNavigation(): number {
     latestWorkspaceSelectionTarget.current = currentWorkspaceRef.current.id;
@@ -1557,6 +1839,252 @@ export function App(): ReactElement {
     );
   }
 
+  async function adoptIncomingRuntimeIdentities(
+    incoming: readonly SessionViewModel[],
+  ): Promise<void> {
+    const migrations = incomingRuntimeIdentityMigrations(
+      sessionsRef.current,
+      incoming,
+    );
+    if (migrations.length === 0) return;
+
+    const attachmentTransferResults = new Map<string, boolean>();
+    for (const { fromSessionId, toSessionId } of migrations) {
+      // Fence the cached owner before crossing IPC. A picker/import that
+      // resolves while adoption is pending must release its late tokens rather
+      // than repopulating the source composer after it has moved.
+      const draft = composerDraftForSession(
+        composerDraftsRef.current,
+        fromSessionId,
+      );
+      const transferred = await fenceAttachmentOwnerTransfer(
+        blockedAttachmentOwnerIds.current,
+        fromSessionId,
+        () =>
+          transferComposerAttachmentOwnership(
+            fromSessionId,
+            toSessionId,
+            draft.attachments,
+          ),
+      );
+      attachmentTransferResults.set(fromSessionId, transferred);
+      if (transferred) {
+        unblockAttachmentOwner(toSessionId);
+      } else {
+        // The incoming runtime is authoritative, but stale token authority is
+        // not. Revoke the old generation and keep the destination fenced until
+        // a fresh picker creates its next one-use owner.
+        blockAttachmentOwner(toSessionId);
+        const expiredOwnerId =
+          attachmentOwnersBySession.current.get(fromSessionId);
+        attachmentOwnersBySession.current.delete(fromSessionId);
+        if (expiredOwnerId !== undefined) {
+          void releaseAttachmentOwner(
+            window.piDeck.attachments,
+            expiredOwnerId,
+          ).catch(() => undefined);
+        }
+      }
+    }
+    // Publish row, durable identity, and composer ownership in one synchronous
+    // transaction after attachment transfers. No render may persist the old
+    // cached row with an empty composer while its text moves to a runtime ID.
+    const replacements = new Map<string, SessionViewModel>();
+    for (const { fromSessionId, toSessionId } of migrations) {
+      const from = sessionsRef.current.find((row) => row.id === fromSessionId);
+      const to = incoming.find((row) => row.id === toSessionId);
+      if (from === undefined || to === undefined) continue;
+      reportComposerDraftPersistenceResult(
+        composerDraftPersistenceRef.current!.migrateSession(from, to),
+      );
+      replacements.set(fromSessionId, to);
+      const attachmentTransferFailed =
+        attachmentTransferResults.get(fromSessionId) === false;
+      if (
+        attachmentReselectionSessionIdsRef.current.delete(fromSessionId) ||
+        attachmentTransferFailed
+      ) {
+        attachmentReselectionSessionIdsRef.current.add(toSessionId);
+      }
+      if (attachmentTransferFailed) {
+        reportComposerDraftPersistenceResult(
+          composerDraftPersistenceRef.current!.markAttachmentsNeedReselection(
+            to,
+          ),
+        );
+      }
+      const revision = composerRevisionBySessionRef.current.get(fromSessionId);
+      if (revision !== undefined) {
+        composerRevisionBySessionRef.current.set(toSessionId, revision);
+        composerRevisionBySessionRef.current.delete(fromSessionId);
+      }
+      if (selectedSessionIdRef.current === fromSessionId) {
+        selectedSessionIdRef.current = toSessionId;
+        setSelectedSessionId(toSessionId);
+      }
+      setPrimaryView((current) =>
+        replaceSessionRouteId(current, fromSessionId, toSessionId),
+      );
+    }
+    const nextSessions = sessionsRef.current.map(
+      (row) => replacements.get(row.id) ?? row,
+    );
+    sessionsRef.current = nextSessions;
+    setSessions(nextSessions);
+    setPendingComposerRecoveries((current) => {
+      const next = { ...current };
+      for (const { fromSessionId, toSessionId } of migrations) {
+        const recovery = next[fromSessionId];
+        if (recovery === undefined) continue;
+        next[toSessionId] = { ...recovery, sessionId: toSessionId };
+        delete next[fromSessionId];
+      }
+      return next;
+    });
+    const nextDrafts = migrateComposerDraftIdentities(
+      composerDraftsRef.current,
+      migrations.map((migration) => ({
+        ...migration,
+        attachmentsTransferred:
+          attachmentTransferResults.get(migration.fromSessionId) !== false,
+      })),
+    );
+    if (nextDrafts !== composerDraftsRef.current) {
+      composerDraftsRef.current = nextDrafts;
+      setComposerDrafts(nextDrafts);
+    }
+    if (
+      migrations.some(
+        ({ fromSessionId, toSessionId }) =>
+          attachmentTransferResults.get(fromSessionId) === false &&
+          selectedSessionIdRef.current === toSessionId,
+      )
+    ) {
+      setComposerError(
+        "One or more attachments expired; reselect them before sending.",
+      );
+    }
+  }
+
+  function hydrateAttachedSession(
+    source: SessionViewModel,
+    options: { generation?: number; showLoading?: boolean } = {},
+  ): Promise<void> {
+    if (!isAttachedSessionSummary(source)) {
+      return Promise.resolve();
+    }
+    const existing = attachedRecoveryRequests.current.get(source.id);
+    if (existing !== undefined) return existing;
+
+    const runtimeId = source.id;
+    const recoveryGeneration =
+      (attachedRecoveryGenerations.current.get(runtimeId) ?? 0) + 1;
+    attachedRecoveryGenerations.current.set(runtimeId, recoveryGeneration);
+    attachedRecoveryEvents.current.set(runtimeId, []);
+    if (options.showLoading === true) {
+      setSessions((items) =>
+        updateSessionByRuntimeId(items, runtimeId, (current) =>
+          current.runtimeBacked
+            ? {
+                ...current,
+                status: "reconnecting",
+                baseState: "attaching",
+                subtitle: "Reconnecting · restoring attached Pi history…",
+              }
+            : current,
+        ),
+      );
+    }
+
+    const request = loadAttachedSessionRecovery({
+      api: window.piDeck.chat,
+      runtimeId,
+    })
+      .then(({ snapshot, status }) => {
+        if (
+          rendererDisposedRef.current ||
+          attachedRecoveryGenerations.current.get(runtimeId) !==
+            recoveryGeneration
+        ) {
+          return;
+        }
+        const observedRuntimeEvents = [
+          ...(attachedRecoveryEvents.current.get(runtimeId) ?? []),
+        ];
+        setSessions((items) =>
+          updateSessionByRuntimeId(items, runtimeId, (current) =>
+            !current.runtimeBacked
+              ? current
+              : projectAttachedSessionRecovery({
+                  snapshot,
+                  status,
+                  current,
+                  observedRuntimeEvents,
+                  sessionFromSnapshot,
+                  // getRuntimeStatus is the normalized lifecycle authority.
+                  // Raw snapshots may expose isStreaming instead.
+                  reconcileRuntimeStatus: reconcileSessionWithRuntimeStatus,
+                  reduceRuntimeEvent,
+                }),
+          ),
+        );
+        loadRealCapabilities(runtimeId);
+        if (
+          options.generation !== undefined &&
+          isNavigationCurrent(options.generation) &&
+          selectedSessionIdRef.current === runtimeId
+        ) {
+          setUiMessage("Restored the attached Pi session.");
+        }
+      })
+      .catch((error) => {
+        if (
+          rendererDisposedRef.current ||
+          attachedRecoveryGenerations.current.get(runtimeId) !==
+            recoveryGeneration
+        ) {
+          return;
+        }
+        // Loading is a bounded presentation state. Runtime events observed
+        // during the request remain authoritative; otherwise restore the
+        // attached summary instead of leaving controls disabled forever.
+        if (
+          options.showLoading === true &&
+          (attachedRecoveryEvents.current.get(runtimeId)?.length ?? 0) === 0
+        ) {
+          setSessions((items) =>
+            updateSessionByRuntimeId(items, runtimeId, (current) => ({
+              ...current,
+              status: source.status,
+              baseState: source.baseState,
+              overlays: source.overlays,
+              subtitle: source.subtitle,
+            })),
+          );
+        }
+        if (
+          options.generation !== undefined &&
+          isNavigationCurrent(options.generation) &&
+          selectedSessionIdRef.current === runtimeId
+        ) {
+          setUiMessage(
+            `Could not restore the attached Pi session: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      })
+      .finally(() => {
+        if (
+          attachedRecoveryGenerations.current.get(runtimeId) ===
+          recoveryGeneration
+        ) {
+          attachedRecoveryRequests.current.delete(runtimeId);
+          attachedRecoveryEvents.current.delete(runtimeId);
+        }
+      });
+    attachedRecoveryRequests.current.set(runtimeId, request);
+    return request;
+  }
+
   const workflowView: WorkflowSurface | undefined =
     primaryView.kind === "workflow" ? primaryView.view : undefined;
   const activityScope: WorkScope =
@@ -1592,6 +2120,7 @@ export function App(): ReactElement {
 
   useEffect(() => {
     let disposed = false;
+    rendererDisposedRef.current = false;
     let unsubscribe: (() => void) | undefined;
     let unsubscribeMultitask: (() => void) | undefined;
     let eventBuffer: RuntimeEventBuffer | undefined;
@@ -1623,6 +2152,14 @@ export function App(): ReactElement {
         ) {
           return;
         }
+        await adoptIncomingRuntimeIdentities(listedSessions);
+        if (
+          disposed ||
+          generation !== sessionListGeneration.current ||
+          currentWorkspaceRef.current.id !== workspace.id
+        ) {
+          return;
+        }
         setSessions((items) =>
           replaceWorkspaceTreeSavedRows(
             items,
@@ -1631,6 +2168,9 @@ export function App(): ReactElement {
             composerDraftsRef.current,
           ),
         );
+        for (const session of listedSessions) {
+          if (session.runtimeBacked) void hydrateAttachedSession(session);
+        }
         setUiMessage(
           `Real Pi mode active. Found ${listedSessions.length} saved session(s) across ${workspaceList.workspaces.length} workspace(s).`,
         );
@@ -1799,6 +2339,10 @@ export function App(): ReactElement {
         );
         setSelectedSessionId(draft.id);
         setCurrentProject(bootstrap.project);
+        // Bootstrap identity is authoritative before discovery can settle;
+        // React's later commit must not make another workspace look current.
+        currentWorkspaceRef.current = bootstrapWorkspace;
+        resetProjectModelConfiguration(bootstrapWorkspace.id);
         setCurrentWorkspace(bootstrapWorkspace);
         setWorkspaces(
           bootstrap.backendMode === "real"
@@ -1832,23 +2376,19 @@ export function App(): ReactElement {
           void api.chat
             .listModels(modelDiscoveryRequestForWorkspace(bootstrapWorkspace))
             .then((result) => {
-              if (!disposed) {
-                setProjectModelConfiguration(result);
-                setSessions((items) =>
-                  applyPiDefaultsToDraftSessions(
-                    items,
-                    bootstrapWorkspace.id,
-                    result,
-                  ),
-                );
-              }
+              if (disposed) return;
+              commitProjectModelConfiguration(bootstrapWorkspace.id, result);
+              setSessions((items) =>
+                applyPiDefaultsToDraftSessions(
+                  items,
+                  bootstrapWorkspace.id,
+                  result,
+                ),
+              );
             })
             .catch(() => {
               if (!disposed) {
-                setProjectModelConfiguration({
-                  models: [],
-                  thinkingLevels: [],
-                });
+                resetProjectModelConfiguration(bootstrapWorkspace.id);
               }
             });
           const generation = ++sessionListGeneration.current;
@@ -1882,6 +2422,9 @@ export function App(): ReactElement {
     void load();
     return () => {
       disposed = true;
+      rendererDisposedRef.current = true;
+      attachedRecoveryRequests.current.clear();
+      attachedRecoveryEvents.current.clear();
       unsubscribe?.();
       unsubscribeMultitask?.();
       eventBuffer?.dispose();
@@ -1898,6 +2441,132 @@ export function App(): ReactElement {
       reconciliationRetryAttempts.current.clear();
     };
   }, []);
+
+  // Reconcile profile-local records only after bootstrap has committed stable
+  // workspace/session identities. A separate readiness bit is the write
+  // barrier that prevents empty bootstrap state from erasing durable text.
+  useEffect(() => {
+    if (loadState.state !== "ready" || composerDraftPersistenceReady) return;
+    const activeWorkspaces = [currentWorkspace, ...workspaces].filter(
+      (workspace, index, candidates) =>
+        !archivedWorkspaces.some((archived) => archived.id === workspace.id) &&
+        candidates.findIndex((candidate) => candidate.id === workspace.id) ===
+          index,
+    );
+    const persistence = composerDraftPersistenceRef.current!;
+    const plan = persistence.hydrate(
+      sessionsRef.current,
+      activeWorkspaces.map((workspace) => workspace.id),
+    );
+    const restoredShells = plan.workspaceShells.flatMap((restored) => {
+      const workspace = activeWorkspaces.find(
+        (candidate) => candidate.id === restored.identity.workspaceId,
+      );
+      return workspace === undefined
+        ? []
+        : [
+            draftSessionForWorkspace(
+              workspace,
+              restored.sessionId,
+              backendModeRef.current,
+              backendModeRef.current === "real"
+                ? draftDefaultsForWorkspace(
+                    projectModelConfigurationRef.current,
+                    workspace.id,
+                  )
+                : undefined,
+            ),
+          ];
+    });
+    if (restoredShells.length > 0) {
+      setSessions((current) => mergeSessions(current, restoredShells));
+    }
+    const restorations = [...plan.restored, ...plan.workspaceShells];
+    if (restorations.length > 0) {
+      const next = restoreComposerDraftText(
+        composerDraftsRef.current,
+        restorations,
+      );
+      // Effects from this render may persist before React commits another
+      // render. Publish restoration synchronously so no old empty snapshot can
+      // transiently remove the durable record.
+      composerDraftsRef.current = next;
+      setComposerDrafts(next);
+    }
+    if (plan.pendingSubmissions.length > 0) {
+      setPendingComposerRecoveries((current) =>
+        mergePendingComposerRecoveries(current, plan.pendingSubmissions),
+      );
+    }
+    reportRestoredAttachmentSelections(restorations);
+    if (
+      persistence.loadStatus === "invalid" ||
+      persistence.loadStatus === "unsupported-version" ||
+      persistence.loadStatus === "storage-error"
+    ) {
+      reportComposerDraftPersistenceResult({
+        status:
+          persistence.loadStatus === "unsupported-version"
+            ? "unsupported-version"
+            : "storage-error",
+        truncated: false,
+        pruned: 0,
+      });
+    }
+    setComposerDraftPersistenceReady(true);
+  }, [
+    archivedWorkspaces,
+    composerDraftPersistenceReady,
+    currentWorkspace,
+    loadState.state,
+    projectModelConfiguration,
+    workspaces,
+  ]);
+
+  // Native rows may arrive in the post-paint background session scan. Restore
+  // their text once, without fabricating a saved-session shell for a missing
+  // file and without replacing text the user has already begun typing.
+  useEffect(() => {
+    if (!composerDraftPersistenceReady) return;
+    const plan =
+      composerDraftPersistenceRef.current!.restoreAvailableSessions(sessions);
+    if (plan.restored.length > 0) {
+      const next = restoreComposerDraftText(
+        composerDraftsRef.current,
+        plan.restored,
+      );
+      composerDraftsRef.current = next;
+      setComposerDrafts(next);
+      reportRestoredAttachmentSelections(plan.restored);
+    }
+    if (plan.pendingSubmissions.length > 0) {
+      setPendingComposerRecoveries((current) =>
+        mergePendingComposerRecoveries(current, plan.pendingSubmissions),
+      );
+    }
+  }, [composerDraftPersistenceReady, sessions]);
+
+  useEffect(() => {
+    if (!composerDraftPersistenceReady) return;
+    reportComposerDraftPersistenceResult(
+      composerDraftPersistenceRef.current!.persist(
+        sessions,
+        composerDraftPersistenceSnapshots(composerDraftsRef.current),
+      ),
+    );
+  }, [composerDraftPersistenceReady, composerDrafts, sessions]);
+
+  useEffect(() => {
+    if (!composerDraftPersistenceReady) return;
+    const flush = (): void => {
+      composerDraftPersistenceRef.current!.persist(
+        sessionsRef.current,
+        composerDraftPersistenceSnapshots(composerDraftsRef.current),
+      );
+    };
+    window.addEventListener("beforeunload", flush);
+    return () => window.removeEventListener("beforeunload", flush);
+  }, [composerDraftPersistenceReady]);
 
   useEffect(() => {
     return window.piDeck.workflows.onCanonicalEvent((event) => {
@@ -2088,6 +2757,13 @@ export function App(): ReactElement {
 
   useEffect(() => {
     promptHistoryStateRef.current = initialPromptHistoryState();
+    setComposerError((current) =>
+      attachmentReselectionSessionIdsRef.current.has(selectedSession.id)
+        ? RESTORED_ATTACHMENT_RESELECTION_MESSAGE
+        : current === RESTORED_ATTACHMENT_RESELECTION_MESSAGE
+          ? null
+          : current,
+    );
   }, [selectedSession.id]);
 
   const activityWorkspaces = useMemo(
@@ -2648,6 +3324,15 @@ export function App(): ReactElement {
     if (uniqueSessionIds.length === 0) {
       return;
     }
+    const discardedSessions = sessionsRef.current.filter((session) =>
+      uniqueSessionIds.includes(session.id),
+    );
+    for (const sessionId of uniqueSessionIds) {
+      attachmentReselectionSessionIdsRef.current.delete(sessionId);
+    }
+    reportComposerDraftPersistenceResult(
+      composerDraftPersistenceRef.current!.discardSessions(discardedSessions),
+    );
     const ownerIds: string[] = [];
     for (const sessionId of uniqueSessionIds) {
       blockAttachmentOwner(sessionId);
@@ -2664,6 +3349,41 @@ export function App(): ReactElement {
       void releaseAttachmentOwner(window.piDeck.attachments, ownerId).catch(
         () => undefined,
       );
+    }
+  }
+
+  function expireComposerAttachmentsPreservingText(sessionId: string): void {
+    const session = sessionsRef.current.find((item) => item.id === sessionId);
+    const draft = composerDraftForSession(composerDraftsRef.current, sessionId);
+    const hadAttachments = draft.attachments.length > 0;
+    blockAttachmentOwner(sessionId);
+    const ownerId = attachmentOwnersBySession.current.get(sessionId);
+    attachmentOwnersBySession.current.delete(sessionId);
+    if (ownerId !== undefined) {
+      void releaseAttachmentOwner(window.piDeck.attachments, ownerId).catch(
+        () => undefined,
+      );
+    }
+    if (hadAttachments) {
+      attachmentReselectionSessionIdsRef.current.add(sessionId);
+      if (session !== undefined) {
+        reportComposerDraftPersistenceResult(
+          composerDraftPersistenceRef.current!.markAttachmentsNeedReselection(
+            session,
+          ),
+        );
+      }
+      setComposerDrafts((items) =>
+        updateComposerDraft(items, sessionId, (current) => ({
+          ...current,
+          attachments: [],
+        })),
+      );
+      if (selectedSessionIdRef.current === sessionId) {
+        setComposerError(
+          "Attachments expired when the Pi worker exited. Draft text was kept; reselect attachments before sending.",
+        );
+      }
     }
   }
 
@@ -2743,6 +3463,9 @@ export function App(): ReactElement {
       }
       const current = composerDraftForSession(items, sessionId);
       const merged = mergeAttachmentDrafts(current.attachments, imported);
+      if (merged.attachments !== current.attachments) {
+        reviseComposer(sessionId);
+      }
       releaseSelectedAttachmentTokens(
         ownerId,
         attachmentTokens(merged.discarded),
@@ -2815,6 +3538,10 @@ export function App(): ReactElement {
   }
 
   function applyRuntimeEvent(event: ChatRuntimeEvent): void {
+    // Recovery starts from a durable snapshot and replays only events observed
+    // after its read began. Unsupported/no-op events therefore do not force a
+    // broad "prefer current" merge or erase reducer-owned terminal metadata.
+    attachedRecoveryEvents.current.get(event.runtimeId)?.push(event);
     if (event.type === "agent_end" || event.type === "worker_exit") {
       clearRuntimeStatusRetry(event.runtimeId);
     }
@@ -2828,9 +3555,9 @@ export function App(): ReactElement {
       return;
     }
     if (event.type === "worker_exit") {
-      // Main has already released this runtime owner. Drop renderer references
-      // too, so a later resume cannot try to reuse revoked tokens.
-      discardComposerAttachmentOwner(event.runtimeId);
+      // Main has released attachment authority, but unsent text still belongs
+      // to the stable native session and must survive orderly app shutdown.
+      expireComposerAttachmentsPreservingText(event.runtimeId);
     }
     setSessions((current) =>
       updateSessionByRuntimeId(current, event.runtimeId, (session) =>
@@ -2859,6 +3586,7 @@ export function App(): ReactElement {
         if (navigation !== undefined) {
           event.preventDefault();
           promptHistoryStateRef.current = navigation.state;
+          reviseComposer(selectedSession.id);
           setComposerDrafts((items) =>
             updateComposerDraft(items, selectedSession.id, (current) => ({
               ...current,
@@ -2903,13 +3631,18 @@ export function App(): ReactElement {
 
   function handleDraftChange(value: string): void {
     promptHistoryStateRef.current = initialPromptHistoryState();
-    setComposerDrafts((items) =>
-      updateComposerDraft(items, selectedSession.id, (current) => ({
+    reviseComposer(selectedSession.id);
+    const next = updateComposerDraft(
+      composerDraftsRef.current,
+      selectedSession.id,
+      (current) => ({
         ...current,
         text: value,
         slashOpen: value.trimStart().startsWith("/"),
-      })),
+      }),
     );
+    composerDraftsRef.current = next;
+    setComposerDrafts(next);
   }
 
   function handleDraftWorkspaceChange(
@@ -3288,6 +4021,12 @@ export function App(): ReactElement {
           showSessionDetail(session.id, origin, generation);
           if (session.backendMode === "real") {
             loadRealCapabilities(session.id);
+            if (isAttachedSessionSummary(session)) {
+              void hydrateAttachedSession(session, {
+                generation,
+                showLoading: true,
+              });
+            }
           }
           return;
         }
@@ -3317,6 +4056,12 @@ export function App(): ReactElement {
     }
     if (session?.backendMode === "real" && session.runtimeBacked) {
       loadRealCapabilities(session.id);
+      if (isAttachedSessionSummary(session)) {
+        void hydrateAttachedSession(session, {
+          generation,
+          showLoading: true,
+        });
+      }
     }
   }
 
@@ -3399,6 +4144,12 @@ export function App(): ReactElement {
     if (session.runtimeBacked) {
       showSessionDetail(session.id, origin, generation);
       loadRealCapabilities(session.id);
+      if (isAttachedSessionSummary(session)) {
+        void hydrateAttachedSession(session, {
+          generation,
+          showLoading: true,
+        });
+      }
       return;
     }
     if (session.sessionFile !== undefined) {
@@ -3502,9 +4253,16 @@ export function App(): ReactElement {
           ),
         ),
       );
-      setComposerDrafts((items) =>
-        moveComposerDraft(items, session.id, resumed.id),
+      if (attachmentReselectionSessionIdsRef.current.delete(session.id)) {
+        attachmentReselectionSessionIdsRef.current.add(resumed.id);
+      }
+      const resumedComposerDrafts = moveComposerDraft(
+        composerDraftsRef.current,
+        session.id,
+        resumed.id,
       );
+      composerDraftsRef.current = resumedComposerDrafts;
+      setComposerDrafts(resumedComposerDrafts);
       if (isNavigationCurrent(generation)) {
         setSelectedSessionId(resumed.id);
         if (origin !== undefined) {
@@ -3611,7 +4369,14 @@ export function App(): ReactElement {
     );
     const resumed = await resumeSession(session, generation, origin);
     if (resumed !== undefined) {
-      await sendPrompt(resumed.id, prompt, promptAttachments);
+      await sendPrompt(
+        resumed.id,
+        prompt,
+        promptAttachments,
+        "parent",
+        {},
+        resumed,
+      );
     }
   }
 
@@ -3619,6 +4384,7 @@ export function App(): ReactElement {
     if (!canSend && !canSendTask) {
       return;
     }
+    if (submissionBlockedByPendingRecovery(selectedSession)) return;
     promptHistoryStateRef.current = initialPromptHistoryState();
     const prompt = draft.trimEnd();
     const promptAttachments = attachments;
@@ -3675,6 +4441,7 @@ export function App(): ReactElement {
     overrides: ParallelWorkerSettings,
   ): Promise<void> {
     const generation = navigationGeneration.current;
+    if (submissionBlockedByPendingRecovery(draftSession)) return;
     const validationError = validateComposerInput({
       attachments: promptAttachments,
       supportsImages: selectedSessionSupportsImages(
@@ -3779,6 +4546,15 @@ export function App(): ReactElement {
         title: draftSession.title,
       };
       backendSession = initializedSession;
+      // Creation changes a renderer-only workspace draft into a native-file
+      // draft. Migrate synchronously before prompt acceptance so reload cannot
+      // resurrect the old shell or lose a rejected first send.
+      reportComposerDraftPersistenceResult(
+        composerDraftPersistenceRef.current!.migrateSession(
+          draftSession,
+          initializedSession,
+        ),
+      );
       setSessions((items) =>
         mergeSessions(
           [initializedSession],
@@ -3822,9 +4598,16 @@ export function App(): ReactElement {
         const { [draftSession.id]: draftOverrides, ...remaining } = current;
         return { ...remaining, [initializedSession.id]: draftOverrides ?? {} };
       });
-      setComposerDrafts((items) =>
-        moveComposerDraft(items, draftSession.id, initializedSession.id),
+      if (attachmentReselectionSessionIdsRef.current.delete(draftSession.id)) {
+        attachmentReselectionSessionIdsRef.current.add(initializedSession.id);
+      }
+      const materializedComposerDrafts = moveComposerDraft(
+        composerDraftsRef.current,
+        draftSession.id,
+        initializedSession.id,
       );
+      composerDraftsRef.current = materializedComposerDrafts;
+      setComposerDrafts(materializedComposerDrafts);
       if (initializedSession.backendMode === "real") {
         rememberPiDefaults(initializedSession);
         loadRealCapabilities(initializedSession.id);
@@ -3913,6 +4696,7 @@ export function App(): ReactElement {
         promptAttachments,
         destination,
         overrides,
+        backendSession,
       );
     }
   }
@@ -3923,13 +4707,38 @@ export function App(): ReactElement {
     promptAttachments: AttachmentDraft[],
     destination: "parent" | "newTaskSession" = "parent",
     overrides: ParallelWorkerSettings = {},
+    durableSession?: ComposerDraftSessionIdentitySource,
   ): Promise<void> {
     const now = formatTime();
     const sentAttachments = timelineAttachmentsFromDrafts(promptAttachments);
+    const submissionSession =
+      durableSession ??
+      sessionsRef.current.find((session) => session.id === runtimeId);
+    const submissionRevision = composerRevision(runtimeId);
+    if (
+      submissionSession !== undefined &&
+      submissionBlockedByPendingRecovery(submissionSession)
+    ) {
+      return;
+    }
     setComposerError(null);
     if (destination === "parent") {
+      if (submissionSession !== undefined) {
+        reportComposerDraftPersistenceResult(
+          composerDraftPersistenceRef.current!.beginSubmission(
+            submissionSession,
+            prompt,
+            promptAttachments.length,
+            destination,
+          ),
+        );
+      }
       blockAttachmentOwner(runtimeId);
-      setComposerDrafts((items) => clearComposerDraft(items, runtimeId));
+      optimisticallyClearSubmittedComposerDraft(
+        runtimeId,
+        prompt,
+        promptAttachments,
+      );
       setSessions((current) =>
         current.map((session) =>
           session.id === runtimeId
@@ -3982,13 +4791,26 @@ export function App(): ReactElement {
         prompt,
         promptAttachments,
         timelineItemId,
+        submissionRevision,
       );
       if (nextPending === undefined) return;
       pendingTaskSubmissionsRef.current = nextPending;
       setPendingTaskSubmissions(nextPending);
+      if (submissionSession !== undefined) {
+        reportComposerDraftPersistenceResult(
+          composerDraftPersistenceRef.current!.beginSubmission(
+            submissionSession,
+            prompt,
+            promptAttachments.length,
+            destination,
+          ),
+        );
+      }
       blockAttachmentOwner(runtimeId);
-      setComposerDrafts((items) =>
-        clearSubmittedTaskDraft(items, runtimeId, prompt, promptAttachments),
+      optimisticallyClearSubmittedComposerDraft(
+        runtimeId,
+        prompt,
+        promptAttachments,
       );
       setSessions((current) =>
         current.map((session) =>
@@ -4042,6 +4864,14 @@ export function App(): ReactElement {
           ? { workerOverrides: overrides }
           : {}),
       });
+      if (submissionSession !== undefined) {
+        clearAcceptedComposerDraft(
+          submissionSession,
+          prompt,
+          promptAttachments,
+          submissionRevision,
+        );
+      }
       if (destination === "newTaskSession") {
         // Main has consumed the attachment selections before this resolves.
         // The parent remains idle; only the child-task panel reports work.
@@ -4054,24 +4884,26 @@ export function App(): ReactElement {
       setWorkInParentOnce((current) => ({ ...current, [runtimeId]: false }));
       setWorkerOverrides((current) => ({ ...current, [runtimeId]: {} }));
     } catch (error) {
+      let submittedDraftWasRestored = false;
       if (destination === "parent") {
         unblockAttachmentOwner(runtimeId);
       } else {
         // Main rejected the submission, so it has not consumed these tokens.
         // Restore it only when the user has not begun a newer draft; otherwise
         // release the now-invisible submitted selections.
-        const shouldRestore = isEmptyComposerDraft(
-          composerDraftForSession(composerDraftsRef.current, runtimeId),
+        const shouldRestore = restoreRejectedComposerDraft(
+          runtimeId,
+          prompt,
+          promptAttachments,
+          submissionRevision,
         );
+        submittedDraftWasRestored = shouldRestore;
         unblockAttachmentOwner(runtimeId);
         const failedSubmission = pendingTaskSubmissionsRef.current[runtimeId];
         const { [runtimeId]: _failed, ...remaining } =
           pendingTaskSubmissionsRef.current;
         pendingTaskSubmissionsRef.current = remaining;
         setPendingTaskSubmissions(remaining);
-        setComposerDrafts((items) =>
-          restoreFailedTaskDraft(items, runtimeId, prompt, promptAttachments),
-        );
         setSessions((current) =>
           current.map((session) =>
             session.id === runtimeId && failedSubmission !== undefined
@@ -4089,19 +4921,46 @@ export function App(): ReactElement {
           if (ownerId !== undefined) {
             releaseSelectedAttachmentTokens(
               ownerId,
-              attachmentTokens(promptAttachments),
+              rejectedSubmissionTokensToRelease(
+                destination,
+                shouldRestore,
+                promptAttachments,
+              ),
             );
           }
         }
       }
       setComposerError(error instanceof Error ? error.message : String(error));
       if (destination === "parent") {
-        setComposerDrafts((items) =>
-          updateComposerDraft(items, runtimeId, (current) => ({
-            ...current,
-            attachments: promptAttachments,
-          })),
+        submittedDraftWasRestored = restoreRejectedComposerDraft(
+          runtimeId,
+          prompt,
+          promptAttachments,
+          submissionRevision,
         );
+        if (!submittedDraftWasRestored) {
+          const ownerId = attachmentOwnersBySession.current.get(runtimeId);
+          if (ownerId !== undefined) {
+            releaseSelectedAttachmentTokens(
+              ownerId,
+              rejectedSubmissionTokensToRelease(
+                destination,
+                submittedDraftWasRestored,
+                promptAttachments,
+              ),
+            );
+          }
+        }
+      }
+      if (submissionSession !== undefined) {
+        reportComposerDraftPersistenceResult(
+          composerDraftPersistenceRef.current!.finishSubmission(
+            submissionSession,
+            "rejected",
+            submittedDraftWasRestored,
+          ),
+        );
+        publishPendingComposerRecovery(submissionSession);
       }
       const message = error instanceof Error ? error.message : String(error);
       setSessions((current) =>
@@ -4192,12 +5051,28 @@ export function App(): ReactElement {
       return;
     }
 
+    if (submissionBlockedByPendingRecovery(selectedSession)) return;
     const text = draft.trimEnd();
     const queuedAttachments = attachments;
     const interventionId = createId("intervention");
     const interventionKind = kind === "steer" ? "steer" : "followUp";
     const sentAttachments = timelineAttachmentsFromDrafts(queuedAttachments);
+    const submissionRevision = composerRevision(selectedSession.id);
     setComposerError(null);
+    reportComposerDraftPersistenceResult(
+      composerDraftPersistenceRef.current!.beginSubmission(
+        selectedSession,
+        text,
+        queuedAttachments.length,
+        kind,
+      ),
+    );
+    blockAttachmentOwner(selectedSession.id);
+    optimisticallyClearSubmittedComposerDraft(
+      selectedSession.id,
+      text,
+      queuedAttachments,
+    );
     setSessions((current) =>
       updateSessionByRuntimeId(current, selectedSession.id, (session) => ({
         ...session,
@@ -4249,9 +5124,13 @@ export function App(): ReactElement {
           ),
         })),
       );
-      setComposerDrafts((items) =>
-        clearComposerDraft(items, selectedSession.id),
+      clearAcceptedComposerDraft(
+        selectedSession,
+        text,
+        queuedAttachments,
+        submissionRevision,
       );
+      unblockAttachmentOwner(selectedSession.id);
       setUiMessage(
         kind === "steer"
           ? "Steering instruction queued in Pi."
@@ -4260,12 +5139,36 @@ export function App(): ReactElement {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setComposerError(message);
-      setComposerDrafts((items) =>
-        updateComposerDraft(items, selectedSession.id, (current) => ({
-          ...current,
-          attachments: queuedAttachments,
-        })),
+      const restored = restoreRejectedComposerDraft(
+        selectedSession.id,
+        text,
+        queuedAttachments,
+        submissionRevision,
       );
+      unblockAttachmentOwner(selectedSession.id);
+      if (!restored) {
+        const ownerId = attachmentOwnersBySession.current.get(
+          selectedSession.id,
+        );
+        if (ownerId !== undefined) {
+          releaseSelectedAttachmentTokens(
+            ownerId,
+            rejectedSubmissionTokensToRelease(
+              kind,
+              restored,
+              queuedAttachments,
+            ),
+          );
+        }
+      }
+      reportComposerDraftPersistenceResult(
+        composerDraftPersistenceRef.current!.finishSubmission(
+          selectedSession,
+          "rejected",
+          restored,
+        ),
+      );
+      publishPendingComposerRecovery(selectedSession);
       setSessions((current) =>
         updateSessionByRuntimeId(current, selectedSession.id, (session) =>
           appendNonfatalDiagnostic(
@@ -4591,49 +5494,65 @@ export function App(): ReactElement {
     const sessionListRequest = ++sessionListGeneration.current;
     if (isNavigationCurrent(generation)) {
       setComposerError(null);
-      setProjectModelConfiguration({ models: [], thinkingLevels: [] });
+      resetProjectModelConfiguration(workspace.id);
       setUiMessage(`Opening ${workspace.name}; active Pi work stays attached…`);
     }
     try {
-      const listedSessions = await listSessionsForWorkspaces(
-        window.piDeck,
-        nextWorkspaces.length > 0 ? nextWorkspaces : [workspace],
-      );
-      if (sessionListRequest !== sessionListGeneration.current) {
-        return false;
-      }
-      const savedRows = listedSessions;
-      const existingRuntime = sessionsRef.current.find(
-        (session) =>
-          session.runtimeBacked && session.workspaceId === workspace.id,
-      );
-      const existingDraft = sessionsRef.current.find(
-        (session) =>
-          session.draftSession === true && session.workspaceId === workspace.id,
-      );
-      const selectedId =
-        preferredSessionId ??
-        existingRuntime?.id ??
-        existingDraft?.id ??
-        createId("draft-session");
-      const activeBackendMode = backendModeRef.current;
-      const draftConfiguration =
-        activeBackendMode === "real" &&
-        currentWorkspaceRef.current.id === workspace.id
-          ? projectModelConfiguration
-          : undefined;
-      const draft =
-        existingRuntime === undefined && existingDraft === undefined
-          ? draftSessionForWorkspace(
-              workspace,
-              selectedId,
-              activeBackendMode,
-              draftConfiguration,
-            )
-          : undefined;
+      const creation = await createDraftAfterWorkspaceActivation({
+        workspaceId: workspace.id,
+        activation: listSessionsForWorkspaces(
+          window.piDeck,
+          nextWorkspaces.length > 0 ? nextWorkspaces : [workspace],
+        ),
+        readDefaults: () => projectModelConfigurationRef.current,
+        createDraft: (listedSessions, latestConfiguration) => {
+          const existingRuntime = sessionsRef.current.find(
+            (session) =>
+              session.runtimeBacked && session.workspaceId === workspace.id,
+          );
+          const existingDraft = sessionsRef.current.find(
+            (session) =>
+              session.draftSession === true &&
+              session.workspaceId === workspace.id,
+          );
+          const selectedId =
+            preferredSessionId ??
+            existingRuntime?.id ??
+            existingDraft?.id ??
+            createId("draft-session");
+          const activeBackendMode = backendModeRef.current;
+          return {
+            activeBackendMode,
+            listedSessions,
+            selectedId,
+            draft:
+              existingRuntime === undefined && existingDraft === undefined
+                ? draftSessionForWorkspace(
+                    workspace,
+                    selectedId,
+                    activeBackendMode,
+                    activeBackendMode === "real"
+                      ? latestConfiguration
+                      : undefined,
+                  )
+                : undefined,
+          };
+        },
+      });
+      if (sessionListRequest !== sessionListGeneration.current) return false;
+      const {
+        activeBackendMode,
+        listedSessions: savedRows,
+        selectedId,
+        draft,
+      } = creation.draft;
       // Fake mode's fixture rows are renderer-owned, not saved-session rows.
       // Never let a compatibility list call evict them during workspace
       // activation; real mode continues to replace only canonical saved rows.
+      if (activeBackendMode === "real") {
+        await adoptIncomingRuntimeIdentities(savedRows);
+      }
+      if (sessionListRequest !== sessionListGeneration.current) return false;
       setSessions((items) =>
         activeBackendMode === "real"
           ? replaceWorkspaceTreeSavedRows(
@@ -4647,6 +5566,15 @@ export function App(): ReactElement {
       if (!isNavigationCurrent(generation)) {
         return false;
       }
+      // Commit the routing identity synchronously. Discovery callbacks must
+      // not observe the previous workspace during React's commit gap.
+      currentWorkspaceRef.current = workspace;
+      setProjectModelConfiguration(
+        draftDefaultsForWorkspace(
+          projectModelConfigurationRef.current,
+          workspace.id,
+        ) ?? emptyDraftModelConfiguration(),
+      );
       setCurrentWorkspace(workspace);
       setWorkspaces(nextWorkspaces);
       if (workspace.defaultProject !== undefined) {
@@ -4662,7 +5590,7 @@ export function App(): ReactElement {
             // session before discovery completes; the latest session-list token
             // still prevents an older workspace result from winning.
             if (sessionListRequest === sessionListGeneration.current) {
-              setProjectModelConfiguration(result);
+              commitProjectModelConfiguration(workspace.id, result);
               setSessions((items) =>
                 applyPiDefaultsToDraftSessions(items, workspace.id, result),
               );
@@ -5258,7 +6186,7 @@ export function App(): ReactElement {
       return;
     }
     setComposerError(null);
-    setProjectModelConfiguration({ models: [], thinkingLevels: [] });
+    resetProjectModelConfiguration(project.id);
     setUiMessage(
       `Opening ${project.displayName}; existing Pi workers stay attached…`,
     );
@@ -5323,10 +6251,10 @@ export function App(): ReactElement {
         return;
       }
       if (result === undefined) {
-        setProjectModelConfiguration({ models: [], thinkingLevels: [] });
+        resetProjectModelConfiguration(project.id);
         return;
       }
-      setProjectModelConfiguration(result);
+      commitProjectModelConfiguration(project.id, result);
       setSessions((items) =>
         applyPiDefaultsToDraftSessions(items, project.id, result),
       );
@@ -5649,7 +6577,12 @@ export function App(): ReactElement {
 
   function rememberPiDefaults(session: SessionViewModel): void {
     const activeModel = findActiveRealModel(session, realModels);
-    setProjectModelConfiguration((current) => ({
+    const current =
+      draftDefaultsForWorkspace(
+        projectModelConfigurationRef.current,
+        session.workspaceId,
+      ) ?? emptyDraftModelConfiguration();
+    commitProjectModelConfiguration(session.workspaceId, {
       ...current,
       ...(activeModel !== undefined ? { activeModel } : {}),
       ...(session.thinkingLevel !== undefined
@@ -5659,7 +6592,7 @@ export function App(): ReactElement {
         activeModel,
         current.thinkingLevels,
       ),
-    }));
+    });
   }
 
   async function handleSetRealModel(
@@ -5860,6 +6793,7 @@ export function App(): ReactElement {
     if (attachment === undefined) {
       return;
     }
+    reviseComposer(ownerId);
     setComposerDrafts((items) =>
       updateComposerDraft(items, ownerId, (current) => ({
         ...current,
@@ -5952,11 +6886,20 @@ export function App(): ReactElement {
     }
     if (!isNavigationCurrent(generation)) return;
 
+    // Workspace activation crosses an async barrier. Read the scoped ref now,
+    // not the render-time configuration captured before the await: bootstrap
+    // discovery may have completed while creation was in flight (#156).
+    const latestDraftConfiguration = isRealBackendMode
+      ? draftDefaultsForWorkspace(
+          projectModelConfigurationRef.current,
+          creationWorkspace.id,
+        )
+      : undefined;
     const next = draftSessionForWorkspace(
       creationWorkspace,
       createId("draft-session"),
       isRealBackendMode ? "real" : "fake",
-      isRealBackendMode ? projectModelConfiguration : undefined,
+      latestDraftConfiguration,
     );
     setComposerError(null);
     setSessions((items) =>
@@ -5979,6 +6922,7 @@ export function App(): ReactElement {
   function handleSelectCommand(command: SlashCommand): void {
     const inserted = command.insertText ?? `${command.name} `;
     promptHistoryStateRef.current = initialPromptHistoryState();
+    reviseComposer(selectedSession.id);
     setComposerDrafts((items) =>
       updateComposerDraft(items, selectedSession.id, (current) => ({
         ...current,
@@ -6102,6 +7046,7 @@ export function App(): ReactElement {
       isPlanningTask={pendingTaskSubmissions[selectedSession.id] !== undefined}
       knownExtensionCommand={knownExtensionCommand}
       error={composerError}
+      pendingSubmissionRecovery={pendingComposerRecoveries[selectedSession.id]}
       attachments={attachments}
       slashOpen={slashOpen}
       slashCommands={filteredCommands}
@@ -6227,6 +7172,12 @@ export function App(): ReactElement {
       onSteer={handleSteer}
       onFollowUp={handleFollowUp}
       onRunExtensionCommand={handleRunExtensionCommand}
+      onRecoverPendingSubmission={() =>
+        recoverPendingComposerSubmission(selectedSession.id)
+      }
+      onDiscardPendingSubmission={() =>
+        discardPendingComposerSubmission(selectedSession.id)
+      }
       onAbort={handleAbort}
       onPickAttachments={() => void handlePickAttachments()}
       onImportDroppedFileAttachments={(files) =>
@@ -6869,6 +7820,48 @@ function isDetachedRuntimeError(message: string): boolean {
   return /chat runtime is no longer attached|unknown pi runtime/i.test(message);
 }
 
+function rendererComposerDraftStorage(): Storage | undefined {
+  try {
+    return window.localStorage;
+  } catch {
+    return undefined;
+  }
+}
+
+function composerDraftPersistenceSnapshots(
+  drafts: ComposerDraftsBySession,
+): Record<string, { text: string; attachmentCount: number } | undefined> {
+  return Object.fromEntries(
+    Object.entries(drafts).flatMap(([sessionId, draft]) =>
+      draft === undefined
+        ? []
+        : [
+            [
+              sessionId,
+              { text: draft.text, attachmentCount: draft.attachments.length },
+            ],
+          ],
+    ),
+  );
+}
+
+function restoreComposerDraftText(
+  drafts: ComposerDraftsBySession,
+  restorations: readonly Pick<RestoredComposerDraft, "sessionId" | "text">[],
+): ComposerDraftsBySession {
+  let restored = drafts;
+  for (const item of restorations) {
+    const current = composerDraftForSession(restored, item.sessionId);
+    if (current.text.length > 0) continue;
+    restored = updateComposerDraft(restored, item.sessionId, (draft) => ({
+      ...draft,
+      text: item.text,
+      slashOpen: item.text.trimStart().startsWith("/"),
+    }));
+  }
+  return restored;
+}
+
 function composerDraftForSession(
   drafts: ComposerDraftsBySession,
   sessionId: string,
@@ -6906,9 +7899,18 @@ function beginTaskSubmission(
   text: string,
   attachments: AttachmentDraft[],
   timelineItemId: string,
+  composerRevision = 0,
 ): PendingTaskSubmissionsBySession | undefined {
   if (pending[sessionId] !== undefined) return undefined;
-  return { ...pending, [sessionId]: { text, attachments, timelineItemId } };
+  return {
+    ...pending,
+    [sessionId]: {
+      text,
+      attachments,
+      timelineItemId,
+      composerRevision,
+    },
+  };
 }
 
 function clearSubmittedTaskDraft(
@@ -6927,6 +7929,33 @@ function clearSubmittedTaskDraft(
         submittedAttachments[index]?.selectedPathToken,
     );
   return isSubmittedDraft ? clearComposerDraft(drafts, sessionId) : drafts;
+}
+
+function shouldApplySubmissionResult(
+  submittedRevision: number,
+  currentRevision: number,
+): boolean {
+  return submittedRevision === currentRevision;
+}
+
+function rejectedSubmissionTokensToRelease(
+  _destination: ComposerSubmissionDestination,
+  submittedDraftWasRestored: boolean,
+  attachments: readonly AttachmentDraft[],
+): string[] {
+  // Destination is explicit so parent and task call sites cannot silently
+  // diverge again even though their token-release rule is intentionally equal.
+  return submittedDraftWasRestored ? [] : attachmentTokens(attachments);
+}
+
+function mergePendingComposerRecoveries(
+  current: PendingComposerRecoveriesBySession,
+  incoming: readonly PendingComposerSubmissionRecovery[],
+): PendingComposerRecoveriesBySession {
+  return {
+    ...current,
+    ...Object.fromEntries(incoming.map((item) => [item.sessionId, item])),
+  };
 }
 
 function isEmptyComposerDraft(draft: ComposerDraftState): boolean {
@@ -7171,6 +8200,70 @@ function removeSavedSessionsForProject(
   );
 }
 
+interface SessionIdentityMigration {
+  fromSessionId: string;
+  toSessionId: string;
+  sessionFile: string;
+  /** False means identity moves but stale attachment chips must not. */
+  attachmentsTransferred?: boolean;
+}
+
+/**
+ * A cached durable row can retain composer state while a refresh reveals that
+ * main still owns its attached runtime. Return the exact key migration before
+ * file-based row de-duplication so text and attachment ownership follow the
+ * authoritative runtime id.
+ */
+function incomingRuntimeIdentityMigrations(
+  current: readonly SessionViewModel[],
+  incoming: readonly SessionViewModel[],
+): SessionIdentityMigration[] {
+  const migrations: SessionIdentityMigration[] = [];
+  for (const runtime of incoming) {
+    if (!runtime.runtimeBacked || runtime.sessionFile === undefined) continue;
+    const cached = current.find(
+      (candidate) =>
+        !candidate.runtimeBacked &&
+        candidate.id !== runtime.id &&
+        candidate.sessionFile === runtime.sessionFile,
+    );
+    if (cached !== undefined) {
+      migrations.push({
+        fromSessionId: cached.id,
+        toSessionId: runtime.id,
+        sessionFile: runtime.sessionFile,
+      });
+    }
+  }
+  return migrations;
+}
+
+function migrateComposerDraftIdentities(
+  drafts: ComposerDraftsBySession,
+  migrations: readonly SessionIdentityMigration[],
+): ComposerDraftsBySession {
+  return migrations.reduce((current, migration) => {
+    const moved = moveComposerDraft(
+      current,
+      migration.fromSessionId,
+      migration.toSessionId,
+    );
+    if (migration.attachmentsTransferred !== false) return moved;
+    const destination = moved[migration.toSessionId];
+    return destination === undefined
+      ? moved
+      : {
+          ...moved,
+          [migration.toSessionId]: {
+            ...destination,
+            // Text remains owned by the stable file identity, while failed
+            // token authority is represented only by the reselection marker.
+            attachments: [],
+          },
+        };
+  }, drafts);
+}
+
 function mergeSessions(
   primary: SessionViewModel[],
   secondary: SessionViewModel[],
@@ -7185,6 +8278,13 @@ function mergeSessions(
     );
     if (duplicateIndex === -1) {
       merged.push(session);
+    } else if (
+      session.runtimeBacked &&
+      !merged[duplicateIndex]!.runtimeBacked
+    ) {
+      // File identity de-duplication must never allow a composer-retained
+      // cache row to suppress main's attached runtime id and transcript.
+      merged[duplicateIndex] = session;
     }
   }
   return merged;
@@ -7654,6 +8754,14 @@ function sessionFromSummary(
   };
 }
 
+function isAttachedSessionSummary(session: SessionViewModel): boolean {
+  return (
+    session.runtimeBacked &&
+    session.backendMode === "real" &&
+    session.subtitle === "Idle · attached real Pi session"
+  );
+}
+
 function workspaceIdFromSnapshot(snapshot: ChatSnapshot): string {
   const workspaceId = Reflect.get(snapshot, "workspaceId");
   if (typeof workspaceId === "string" && workspaceId.length > 0) {
@@ -7687,6 +8795,8 @@ function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
     : completedAtFromSnapshotMessages(snapshot.messages);
   const authRecovery = authRecoveryFromSnapshotMessages(snapshot.messages);
   const authRequired = authRecovery.failure !== undefined;
+  const pendingExtensionUiRequests = snapshot.pendingExtensionUiRequests ?? [];
+  const waitingForExtensionUi = pendingExtensionUiRequests.length > 0;
   const timeline = timelineFromMessages(snapshot.messages);
   if (authRecovery.failure !== undefined) {
     timeline.push({
@@ -7708,19 +8818,35 @@ function sessionFromSnapshot(snapshot: ChatSnapshot): SessionViewModel {
     project: snapshot.state.cwd?.split(/[\\/]/).pop() ?? "pi-deck",
     projectPath:
       snapshot.state.cwd ?? processCwdPlaceholder(snapshot.backendMode),
-    subtitle: isAgentActive
-      ? `Working · ${backendLabelFromMode(snapshot.backendMode)}`
-      : authRequired
-        ? "Error · OpenAI authentication verification pending"
-        : `Idle · ${backendLabelFromMode(snapshot.backendMode)} ready`,
-    status: isAgentActive ? "working" : authRequired ? "error" : "idle",
+    subtitle: waitingForExtensionUi
+      ? "Waiting · extension input required"
+      : isAgentActive
+        ? `Working · ${backendLabelFromMode(snapshot.backendMode)}`
+        : authRequired
+          ? "Error · OpenAI authentication verification pending"
+          : `Idle · ${backendLabelFromMode(snapshot.backendMode)} ready`,
+    status: waitingForExtensionUi
+      ? "waiting"
+      : isAgentActive
+        ? "working"
+        : authRequired
+          ? "error"
+          : "idle",
     updatedAt: "Now",
     updatedAtMs: Date.now(),
-    baseState: isAgentActive ? "working" : authRequired ? "error" : "idle",
+    baseState: waitingForExtensionUi
+      ? "waitingForInput"
+      : isAgentActive
+        ? "working"
+        : authRequired
+          ? "error"
+          : "idle",
     overlays: {
       ...emptyOverlays,
       streaming: isAgentActive,
+      needsUserInput: waitingForExtensionUi,
     },
+    ...(waitingForExtensionUi ? { pendingExtensionUiRequests } : {}),
     ...(isAgentActive
       ? {
           workingStartedAtMs: Date.now(),
@@ -12215,6 +13341,7 @@ function Composer(props: {
   isPlanningTask: boolean;
   knownExtensionCommand: string | undefined;
   error: string | null;
+  pendingSubmissionRecovery: PendingComposerSubmissionRecovery | undefined;
   attachments: AttachmentDraft[];
   slashOpen: boolean;
   slashCommands: SlashCommand[];
@@ -12240,6 +13367,8 @@ function Composer(props: {
   onSteer(): void;
   onFollowUp(): void;
   onRunExtensionCommand(): void;
+  onRecoverPendingSubmission(): void;
+  onDiscardPendingSubmission(): void;
   onAbort(): void;
   onPickAttachments(): void;
   onImportDroppedFileAttachments(files: File[]): void;
@@ -12479,7 +13608,28 @@ function Composer(props: {
               />
             ) : null}
           </div>
-          {props.error !== null ? (
+          {props.pendingSubmissionRecovery !== undefined ? (
+            <span
+              className="composer-status composer-error"
+              id={composerErrorId}
+              role="alert"
+            >
+              A previous send may have been accepted. Check session history
+              before recovering its text. It will not be resent automatically.
+              <Button
+                variant="subtle"
+                onClick={props.onRecoverPendingSubmission}
+              >
+                Recover text after checking history
+              </Button>
+              <Button
+                variant="subtle"
+                onClick={props.onDiscardPendingSubmission}
+              >
+                Discard recovery after checking history
+              </Button>
+            </span>
+          ) : props.error !== null ? (
             <span
               className="composer-status composer-error"
               id={composerErrorId}
@@ -13340,6 +14490,11 @@ export const __rendererTestHooks = {
   beginTaskSubmission,
   clearSubmittedTaskDraft,
   restoreFailedTaskDraft,
+  shouldApplySubmissionResult,
+  rejectedSubmissionTokensToRelease,
+  mergePendingComposerRecoveries,
+  restoreComposerDraftText,
+  composerDraftPersistenceSnapshots,
   isEmptyComposerDraft,
   clearComposerDraftsForSessions,
   moveComposerDraft,
@@ -13387,6 +14542,10 @@ export const __rendererTestHooks = {
   savedSessionsForDeletedFiles,
   removeSavedSessionsForProject,
   replaceWorkspaceSavedRows,
+  replaceWorkspaceTreeSavedRows,
+  incomingRuntimeIdentityMigrations,
+  migrateComposerDraftIdentities,
+  mergeSessions,
   initialWorkspaceDialogName,
   updateWorkspaceSessionLabels,
   archiveWorkspaceBlockReason,

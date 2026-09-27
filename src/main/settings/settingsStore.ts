@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   appSettingsPatchSchema,
@@ -18,6 +18,24 @@ export const defaultAppSettings: AppSettings = Object.freeze({
   },
 });
 
+interface SettingsStoreFileSystem {
+  mkdir: typeof mkdir;
+  readFile: typeof readFile;
+  rename: typeof rename;
+  unlink: typeof unlink;
+  writeFile: typeof writeFile;
+}
+
+const defaultFileSystem: SettingsStoreFileSystem = {
+  mkdir,
+  readFile,
+  rename,
+  unlink,
+  writeFile,
+};
+
+let tempFileCounter = 0;
+
 export class SettingsStore {
   readonly settingsFile: string;
   private settings: AppSettings = { ...defaultAppSettings };
@@ -27,6 +45,7 @@ export class SettingsStore {
   constructor(
     private readonly userDataPath: string,
     private readonly diagnostics?: DiagnosticsRecorder,
+    private readonly fileSystem: SettingsStoreFileSystem = defaultFileSystem,
   ) {
     this.settingsFile = path.join(userDataPath, "settings.json");
   }
@@ -69,10 +88,10 @@ export class SettingsStore {
       return;
     }
 
-    await mkdir(this.userDataPath, { recursive: true });
+    await this.fileSystem.mkdir(this.userDataPath, { recursive: true });
 
     try {
-      const raw = await readFile(this.settingsFile, "utf8");
+      const raw = await this.fileSystem.readFile(this.settingsFile, "utf8");
       const parsed: unknown = JSON.parse(raw);
       this.settings = appSettingsSchema.parse({
         ...defaultAppSettings,
@@ -95,18 +114,33 @@ export class SettingsStore {
   }
 
   private async persist(settings: AppSettings = this.settings): Promise<void> {
-    await mkdir(this.userDataPath, { recursive: true });
-    await writeFile(
-      this.settingsFile,
-      `${JSON.stringify(settings, null, 2)}\n`,
-      { mode: 0o600 },
+    await this.fileSystem.mkdir(this.userDataPath, { recursive: true });
+    const tempFile = this.createTempFilePath();
+    try {
+      await this.fileSystem.writeFile(
+        tempFile,
+        `${JSON.stringify(settings, null, 2)}\n`,
+        { flag: "wx", mode: 0o600 },
+      );
+      await this.fileSystem.rename(tempFile, this.settingsFile);
+    } catch (error) {
+      await this.fileSystem.unlink(tempFile).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private createTempFilePath(): string {
+    tempFileCounter = (tempFileCounter + 1) % Number.MAX_SAFE_INTEGER;
+    return path.join(
+      this.userDataPath,
+      `.settings.json.${process.pid}.${Date.now()}.${tempFileCounter}.tmp`,
     );
   }
 
   private async backupCorruptSettings(): Promise<void> {
     const backupFile = `${this.settingsFile}.corrupt-${Date.now()}`;
     try {
-      await rename(this.settingsFile, backupFile);
+      await this.fileSystem.rename(this.settingsFile, backupFile);
       this.diagnostics?.recordError(
         `Corrupt settings file moved to ${backupFile}`,
       );

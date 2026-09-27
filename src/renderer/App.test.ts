@@ -7,6 +7,10 @@ import { emptyOverlays, selectSidebarIndicator } from "./sessionState.js";
 import { reduceRuntimeEvent } from "./sessionRuntimeReducer.js";
 import { defaultAgentWorkflowDefinition } from "./workflows/agentWorkflowDefinition.js";
 import { __rendererTestHooks, AutolinkedText, MarkdownView } from "./App.js";
+import {
+  COMPOSER_DRAFT_STORAGE_KEY,
+  ComposerDraftPersistence,
+} from "./composerDraftPersistence.js";
 
 it("keeps live sidebar buckets in source order while idle saved rows use recency", () => {
   const liveSession = (id: string, updatedAtMs: number) => ({
@@ -2585,6 +2589,7 @@ describe("renderer per-session composer drafts", () => {
         text: "Plan this",
         attachments: [attachment],
         timelineItemId: "user-1",
+        composerRevision: 0,
       },
     });
     expect(
@@ -2660,6 +2665,114 @@ describe("renderer per-session composer drafts", () => {
     ).toEqual({
       "session-a": { text: "New draft", attachments: [], slashOpen: false },
     });
+  });
+
+  it("does not clear newly retyped identical text after deferred acceptance", () => {
+    const submittedRevision = 7;
+    const retypedRevision = 8;
+    expect(
+      __rendererTestHooks.shouldApplySubmissionResult(
+        submittedRevision,
+        submittedRevision,
+      ),
+    ).toBe(true);
+    expect(
+      __rendererTestHooks.shouldApplySubmissionResult(
+        submittedRevision,
+        retypedRevision,
+      ),
+    ).toBe(false);
+
+    const identicalRetypedDraft = {
+      "session-a": {
+        text: "identical text",
+        attachments: [],
+        slashOpen: false,
+      },
+    };
+    const afterAcceptance = __rendererTestHooks.shouldApplySubmissionResult(
+      submittedRevision,
+      retypedRevision,
+    )
+      ? __rendererTestHooks.clearSubmittedTaskDraft(
+          identicalRetypedDraft,
+          "session-a",
+          "identical text",
+          [],
+        )
+      : identicalRetypedDraft;
+    expect(afterAcceptance).toBe(identicalRetypedDraft);
+  });
+
+  it("releases hidden attachment tokens for rejected parent and task sends", () => {
+    const attachment = {
+      id: "attachment-1",
+      selectedPathToken: "opaque-token-1",
+    } as any;
+    for (const destination of ["parent", "newTaskSession"] as const) {
+      expect(
+        __rendererTestHooks.rejectedSubmissionTokensToRelease(
+          destination,
+          false,
+          [attachment],
+        ),
+        destination,
+      ).toEqual(["opaque-token-1"]);
+      expect(
+        __rendererTestHooks.rejectedSubmissionTokensToRelease(
+          destination,
+          true,
+          [attachment],
+        ),
+        destination,
+      ).toEqual([]);
+    }
+  });
+
+  it("publishes late native restoration before persistence can clear it", () => {
+    const values = new Map<string, string>();
+    const writes: Array<string | null> = [];
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        values.set(key, value);
+        writes.push(value);
+      },
+      removeItem: (key: string) => {
+        values.delete(key);
+        writes.push(null);
+      },
+    };
+    const native = {
+      id: "runtime-late",
+      workspaceId: "workspace-a",
+      sessionFile: "/sessions/late.jsonl",
+    };
+    const first = new ComposerDraftPersistence(storage, { now: () => 1 });
+    first.hydrate([native], ["workspace-a"]);
+    first.persist([native], {
+      [native.id]: { text: "restore after scan", attachmentCount: 0 },
+    });
+
+    const reloaded = new ComposerDraftPersistence(storage, { now: () => 2 });
+    reloaded.hydrate([], ["workspace-a"]);
+    const late = reloaded.restoreAvailableSessions([native]);
+    expect(late.restored).toHaveLength(1);
+
+    // This is the exact effect ordering contract: publish to the synchronous
+    // ref first, then let the same-render persistence effect read that ref.
+    const draftsRef = {
+      current: __rendererTestHooks.restoreComposerDraftText({}, late.restored),
+    };
+    reloaded.persist(
+      [native],
+      __rendererTestHooks.composerDraftPersistenceSnapshots(draftsRef.current),
+    );
+
+    expect(writes).not.toContain(null);
+    expect(values.get(COMPOSER_DRAFT_STORAGE_KEY)).toContain(
+      "restore after scan",
+    );
   });
 
   it("reports invalid attachments or image models before work is started", () => {
@@ -3281,6 +3394,38 @@ describe("renderer session actions", () => {
         baseState: "working",
       }),
     ).toBe(false);
+  });
+
+  it("projects snapshot-owned extension requests into a restored waiting session", () => {
+    const restored = __rendererTestHooks.sessionFromSnapshot({
+      runtimeId: "runtime-1",
+      backendMode: "real",
+      workspaceId: "workspace-a",
+      state: { isAgentActive: true },
+      messages: [],
+      pendingExtensionUiRequests: [
+        {
+          id: "request-1",
+          method: "confirm",
+          title: "Confirm recovery",
+          message: "Continue?",
+        },
+      ],
+    } as any);
+
+    expect(restored).toMatchObject({
+      status: "waiting",
+      baseState: "waitingForInput",
+      overlays: { streaming: true, needsUserInput: true },
+      pendingExtensionUiRequests: [
+        {
+          id: "request-1",
+          method: "confirm",
+          title: "Confirm recovery",
+          message: "Continue?",
+        },
+      ],
+    });
   });
 
   it("blocks waiting sessions from prompts and membership mutations", () => {
@@ -5161,5 +5306,115 @@ describe("incremental timeline projection", () => {
 
     expect(marker.length).toBeLessThan(1_000);
     expect(marker).toContain("|500|");
+  });
+});
+
+describe("attached runtime row identity reconciliation", () => {
+  function row(id: string, runtimeBacked: boolean) {
+    return {
+      id,
+      workspaceId: "workspace-a",
+      title: runtimeBacked ? "Attached transcript" : "Cached preview",
+      project: "Project",
+      projectPath: "/project",
+      subtitle: runtimeBacked ? "Idle · attached real Pi session" : "Saved",
+      status: "idle",
+      updatedAt: "Now",
+      updatedAtMs: 1,
+      timeline: runtimeBacked
+        ? [{ id: "user-1", kind: "user", content: "durable", createdAt: "Now" }]
+        : [],
+      baseState: "idle",
+      overlays: { ...emptyOverlays },
+      runtimeBacked,
+      resumeBacked: !runtimeBacked,
+      backendMode: "real",
+      sessionFile: "/sessions/shared.jsonl",
+    } as any;
+  }
+
+  it("drops invalid ready chips but keeps text when runtime ownership transfer fails", () => {
+    const cached = row("durable-session-id", false);
+    const attached = row("runtime-id", true);
+    const attachment = {
+      id: "attachment-1",
+      selectedPathToken: "expired-token",
+      fileName: "notes.txt",
+      displayPath: "notes.txt",
+      kind: "textFile",
+      sendMode: "pathReference",
+      outsideProject: false,
+      status: "ready",
+    } as const;
+    const drafts = {
+      [cached.id]: {
+        text: "keep text after rejected transfer",
+        attachments: [attachment],
+        slashOpen: false,
+      },
+    };
+    const [migration] = __rendererTestHooks.incomingRuntimeIdentityMigrations(
+      [cached],
+      [attached],
+    );
+
+    expect(
+      __rendererTestHooks.migrateComposerDraftIdentities(drafts, [
+        { ...migration!, attachmentsTransferred: false },
+      ]),
+    ).toEqual({
+      "runtime-id": {
+        text: "keep text after rejected transfer",
+        attachments: [],
+        slashOpen: false,
+      },
+    });
+  });
+
+  it("upgrades a composer-retained cache row to the incoming runtime id", () => {
+    const cached = row("durable-session-id", false);
+    const attached = row("runtime-id", true);
+    const drafts = {
+      [cached.id]: {
+        text: "unsent persisted text",
+        attachments: [],
+        slashOpen: false,
+      },
+    };
+    const migrations = __rendererTestHooks.incomingRuntimeIdentityMigrations(
+      [cached],
+      [attached],
+    );
+    const migratedDrafts = __rendererTestHooks.migrateComposerDraftIdentities(
+      drafts,
+      migrations,
+    );
+    const rows = __rendererTestHooks.replaceWorkspaceTreeSavedRows(
+      [cached],
+      ["workspace-a"],
+      [attached],
+      drafts,
+    );
+
+    expect(migrations).toEqual([
+      {
+        fromSessionId: "durable-session-id",
+        toSessionId: "runtime-id",
+        sessionFile: "/sessions/shared.jsonl",
+      },
+    ]);
+    expect(migratedDrafts).toEqual({
+      "runtime-id": {
+        text: "unsent persisted text",
+        attachments: [],
+        slashOpen: false,
+      },
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: "runtime-id",
+      runtimeBacked: true,
+      timeline: [{ id: "user-1", content: "durable" }],
+    });
   });
 });

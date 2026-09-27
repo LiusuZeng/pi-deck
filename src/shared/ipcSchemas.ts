@@ -257,6 +257,19 @@ export const chatSnapshotRequestSchema = z
   .strict()
   .optional();
 
+export const pendingExtensionUiRequestSchema = z
+  .object({
+    id: z.string().min(1),
+    method: z.enum(["select", "confirm", "input", "editor"]),
+    title: z.string(),
+    message: z.string().optional(),
+    options: z.array(z.string()).optional(),
+    placeholder: z.string().optional(),
+    prefill: z.string().optional(),
+    timeout: z.number().nonnegative().optional(),
+  })
+  .strict();
+
 export const chatSnapshotSchema = z
   .object({
     runtimeId: z.string(),
@@ -267,6 +280,12 @@ export const chatSnapshotSchema = z
     projectId: z.string().optional(),
     state: chatStateSchema,
     messages: z.array(chatMessageSchema),
+    // Main owns extension-response authorization. Exposing its normalized
+    // pending queue lets a replacement renderer restore actionable dialogs
+    // without replaying or synthesizing runtime events.
+    pendingExtensionUiRequests: z
+      .array(pendingExtensionUiRequestSchema)
+      .optional(),
   })
   .strict();
 

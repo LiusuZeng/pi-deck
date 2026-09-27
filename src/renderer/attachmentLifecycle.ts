@@ -25,6 +25,17 @@ export function getOrCreateAttachmentOwnerGeneration(
   return ownerId;
 }
 
+export async function fenceAttachmentOwnerTransfer(
+  blockedSessionIds: Set<string>,
+  sourceSessionId: string,
+  transfer: () => Promise<boolean>,
+): Promise<boolean> {
+  // This must happen synchronously before transfer starts: an import can
+  // resolve while ownership IPC is pending and must not repopulate the source.
+  blockedSessionIds.add(sourceSessionId);
+  return transfer();
+}
+
 export function attachmentTokens(
   attachments: readonly AttachmentDraft[],
 ): string[] {

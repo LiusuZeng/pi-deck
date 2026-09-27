@@ -683,6 +683,7 @@ describe("WorkflowScheduler", () => {
     expect(
       queued?.stepRuns.find((step) => step.templateStepId === "second")?.status,
     ).toBe("queued");
+    expect(fixture.scheduler.queuedWorkCount).toBe(1);
   });
 
   it("does not let a delayed completion overwrite a concurrent stop", async () => {
@@ -1288,6 +1289,7 @@ describe("WorkflowOccurrenceScheduler lifecycle conflicts", () => {
     const queued = await fixture.scheduler.schedule(fixture.run);
 
     expect(queued.occurrences[0]?.status).toBe("queued");
+    expect(fixture.scheduler.queuedWorkCount).toBe(1);
     expect(fixture.created).toBe(1);
     expect(fixture.wake).toBeDefined();
 
@@ -1302,6 +1304,7 @@ describe("WorkflowOccurrenceScheduler lifecycle conflicts", () => {
       status: "running",
       runtimeId: "runtime-2",
     });
+    expect(fixture.scheduler.queuedWorkCount).toBe(0);
     expect(fixture.unsubscribed).toBe(1);
   });
 
