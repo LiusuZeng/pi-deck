@@ -81,7 +81,8 @@ function createFixture(name: string, fakeArgs: string[]): Fixture {
       HOME: path.join(root, "home"),
       TMPDIR: os.tmpdir(),
       PI_DECK_E2E_TEST: "1",
-      PI_DECK_E2E_HIDE_WINDOWS: process.env.PI_DECK_E2E_HIDE_WINDOWS ?? "1",
+      // Never surface or focus a native window, even in a headed test shell.
+      PI_DECK_E2E_HIDE_WINDOWS: "1",
       PI_DECK_BACKEND: "real",
       PI_DECK_PI_BINARY: createFakePiWrapper(root, fakeArgsFile, pidFile),
       PI_DECK_PROJECT_CWD: projectCwd,
@@ -115,12 +116,22 @@ async function launchPiDeck(env: NodeJS.ProcessEnv): Promise<{
     cwd: repoRoot,
     env,
   });
-  const page = await app.firstWindow();
-  await page.waitForLoadState("domcontentloaded");
-  await expect(
-    page.locator('.workspace[data-load-state="ready"]'),
-  ).toBeVisible();
-  return { app, page };
+  try {
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    await expect(
+      page.locator('.workspace[data-load-state="ready"]'),
+    ).toBeVisible();
+    expect(
+      await app.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows().every((window) => !window.isVisible()),
+      ),
+    ).toBe(true);
+    return { app, page };
+  } catch (error) {
+    await app.close().catch(() => undefined);
+    throw error;
+  }
 }
 
 async function createNamedWorkspace(page: Page, name: string): Promise<string> {
@@ -360,7 +371,7 @@ test("completed ordinary chat in a named workspace survives normal quit and rela
       messageCount: 2,
       preview: `Fake response to: ${firstPrompt}`,
     });
-    await closeApp(firstApp);
+    await firstApp.close();
     firstApp = undefined;
 
     const secondLaunch = await launchPiDeck(fixture.env);
@@ -422,6 +433,48 @@ test("completed ordinary chat in a named workspace survives normal quit and rela
   }
 });
 
+test("fake mode must preserve the selected named workspace across restart (#152)", async () => {
+  const fixture = createFixture("restart-fake-workspace", []);
+  const env = { ...fixture.env, PI_DECK_BACKEND: "fake" };
+  const workspaceName = "Remember selected demo workspace";
+  let firstApp: ElectronApplication | undefined;
+  let secondApp: ElectronApplication | undefined;
+  try {
+    const first = await launchPiDeck(env);
+    firstApp = first.app;
+    const created = await first.page.evaluate(async (name) => {
+      const result = await window.piDeck.workspaces.create({ name });
+      return result.activeWorkspace;
+    }, workspaceName);
+    expect(created?.name).toBe(workspaceName);
+    expect(created?.id).toBeTruthy();
+    await expect(activeWorkspace(first.page)).resolves.toEqual({
+      id: created!.id,
+      name: workspaceName,
+    });
+    await firstApp.close();
+    firstApp = undefined;
+
+    const second = await launchPiDeck(env);
+    secondApp = second.app;
+    const workspaceIds = await second.page.evaluate(async () => {
+      const result = await window.piDeck.workspaces.list();
+      return result.workspaces.map((workspace) => workspace.id);
+    });
+    // Only active selection is lost; missing/corrupt workspace metadata must
+    // not be mistaken for this specific expected failure.
+    expect(workspaceIds).toContain(created!.id);
+    const actual = await activeWorkspace(second.page);
+    console.info("#152 active workspace after fake-mode restart:", actual);
+    test.fail(true, "https://github.com/LiusuZeng/pi-deck/issues/152");
+    expect(actual).toEqual({ id: created!.id, name: workspaceName });
+  } finally {
+    await closeApp(firstApp);
+    await closeApp(secondApp);
+    cleanupFixture(fixture);
+  }
+});
+
 test("interrupted active ordinary turn persists user prompt without runtime resurrection and can resume", async ({}, testInfo) => {
   const receiptSignal = path.join(
     os.tmpdir(),
@@ -456,7 +509,15 @@ test("interrupted active ordinary turn persists user prompt without runtime resu
       interruptedPrompt,
     );
     expect(activeSummary.messageCount).toBeGreaterThanOrEqual(1);
-    await closeApp(firstApp);
+    await expect
+      .poll(() =>
+        page.evaluate(async (runtimeId) => {
+          const snapshot = await window.piDeck.chat.getSnapshot({ runtimeId });
+          return snapshot.state.isAgentActive === true;
+        }, firstRuntimeId),
+      )
+      .toBe(true);
+    await firstApp.close();
     firstApp = undefined;
 
     setFakeArgs(fixture, ["--stream-delay-ms", "1"]);

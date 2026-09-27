@@ -425,6 +425,18 @@ Security boundaries include:
 - Image content sniffing and decode-safety limits in Electron main.
 - External-link allowlisting for `http`, `https`, and `mailto`.
 
+## Closing and restarting Pi Deck
+
+Closing the last window quits Pi Deck, including on macOS, and stops attached
+Pi workers; sessions do not continue in the background. There is currently no
+active-work quit confirmation. Restarting restores saved session history and
+workspace metadata, not live execution. Reopen a saved session to continue it
+with a new worker. Unsent composer drafts are not yet preserved across reload
+or restart, and incomplete streamed output may be lost.
+
+See the [basic session lifecycle audit](docs/basic-session-lifecycle-audit.md)
+for tested behavior, recovery boundaries, and tracked gaps.
+
 ## Current limitations
 
 - Pi Deck currently runs from source; there is no signed/notarized installer or packaged release yet.

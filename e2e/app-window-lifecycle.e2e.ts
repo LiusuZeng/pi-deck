@@ -74,8 +74,14 @@ async function launchHarness(
     args: [mainEntry],
     cwd: repoRoot,
     env: {
-      ...process.env,
-      PI_DECK_E2E_HIDE_WINDOWS: process.env.PI_DECK_E2E_HIDE_WINDOWS ?? "1",
+      PATH: process.env.PATH ?? "",
+      HOME: path.join(root, "home"),
+      TMPDIR: os.tmpdir(),
+      XDG_CONFIG_HOME: path.join(root, "xdg-config"),
+      XDG_DATA_HOME: path.join(root, "xdg-data"),
+      XDG_CACHE_HOME: path.join(root, "xdg-cache"),
+      // Lifecycle coverage never needs a visible/focused native window.
+      PI_DECK_E2E_HIDE_WINDOWS: "1",
       PI_DECK_E2E_TEST: "1",
       PI_DECK_BACKEND: "real",
       PI_DECK_PI_BINARY: fakePiBinary(root, allFakeArgs),
@@ -85,28 +91,46 @@ async function launchHarness(
       PI_DECK_USER_DATA_DIR: userDataDir,
     },
   });
-  const page = await app.firstWindow();
-  await page.waitForLoadState("domcontentloaded");
-  await expect(page.getByText("Preload error")).toHaveCount(0);
-  await expect(
-    page.locator('.workspace[data-load-state="ready"]'),
-  ).toBeVisible();
+  try {
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    await expect(page.getByText("Preload error")).toHaveCount(0);
+    await expect(
+      page.locator('.workspace[data-load-state="ready"]'),
+    ).toBeVisible();
+    expect(
+      await app.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows().every((window) => !window.isVisible()),
+      ),
+    ).toBe(true);
 
-  return {
-    app,
-    page,
-    root,
-    projectCwd,
-    pidLogFile: path.join(root, "worker-pids.log"),
-    promptReceiptFile,
-    sigtermReceivedFile,
-    exitSignalFile,
-  };
+    return {
+      app,
+      page,
+      root,
+      projectCwd,
+      pidLogFile: path.join(root, "worker-pids.log"),
+      promptReceiptFile,
+      sigtermReceivedFile,
+      exitSignalFile,
+    };
+  } catch (error) {
+    killKnownWorkers(path.join(root, "worker-pids.log"));
+    await app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 async function closeHarness(harness: Harness | undefined): Promise<void> {
   if (harness === undefined) return;
-  for (const pid of readWorkerPids(harness.pidLogFile)) {
+  killKnownWorkers(harness.pidLogFile);
+  await harness.app.close().catch(() => undefined);
+  fs.rmSync(harness.root, { recursive: true, force: true });
+}
+
+function killKnownWorkers(pidLogFile: string): void {
+  for (const pid of readWorkerPids(pidLogFile)) {
     if (isPidAlive(pid)) {
       try {
         process.kill(pid, "SIGKILL");
@@ -115,8 +139,6 @@ async function closeHarness(harness: Harness | undefined): Promise<void> {
       }
     }
   }
-  await harness.app.close().catch(() => undefined);
-  fs.rmSync(harness.root, { recursive: true, force: true });
 }
 
 function readWorkerPids(pidLogFile: string): number[] {
@@ -191,6 +213,43 @@ async function runtimeIdentity(page: Page): Promise<RuntimeIdentity> {
   });
 }
 
+async function workerPidsAtQuit(
+  app: ElectronApplication,
+  pids: number[],
+  action: "window" | "quit" | "repeatQuit",
+): Promise<number[]> {
+  return app.evaluate(
+    async ({ app, BrowserWindow }, { pids, action }) => {
+      const willQuit = new Promise<number[]>((resolve) => {
+        app.once("will-quit", () => {
+          resolve(
+            pids.filter((pid) => {
+              try {
+                process.kill(pid, 0);
+                return true;
+              } catch {
+                return false;
+              }
+            }),
+          );
+        });
+      });
+      if (action === "window") {
+        const window = BrowserWindow.getAllWindows()[0];
+        if (window === undefined) throw new Error("Expected a BrowserWindow.");
+        window.close();
+      } else {
+        app.quit();
+        // Deliberately reenter before async cleanup can settle. This avoids a
+        // timing race against PiWorker's two-second SIGKILL escalation.
+        if (action === "repeatQuit") app.quit();
+      }
+      return willQuit;
+    },
+    { pids, action },
+  );
+}
+
 test("closing the last BrowserWindow during an active prompt exits after the RPC worker exits", async () => {
   let harness: Harness | undefined;
   try {
@@ -210,11 +269,9 @@ test("closing the last BrowserWindow during an active prompt exits after the RPC
     expect(knownWorkerPids.length).toBeGreaterThan(0);
 
     const closed = harness.app.waitForEvent("close");
-    await harness.app.evaluate(({ BrowserWindow }) => {
-      const window = BrowserWindow.getAllWindows()[0];
-      if (window === undefined) throw new Error("Expected a BrowserWindow.");
-      window.close();
-    });
+    expect(
+      await workerPidsAtQuit(harness.app, knownWorkerPids, "window"),
+    ).toEqual([]);
 
     await expect
       .poll(() => fs.existsSync(harness!.sigtermReceivedFile), {
@@ -256,32 +313,48 @@ test("app.quit escalates a SIGTERM-ignoring active RPC worker before Electron ex
     const knownWorkerPids = liveWorkerPids(harness);
     expect(knownWorkerPids.length).toBeGreaterThan(0);
     const closed = harness.app.waitForEvent("close");
-    const willQuitWorkerState = await harness.app.evaluate(
-      async ({ app }, { pids }) => {
-        const willQuit = new Promise<string>((resolve) => {
-          app.once("will-quit", () => {
-            const alivePids = pids.filter((pid) => {
-              try {
-                process.kill(pid, 0);
-                return true;
-              } catch {
-                return false;
-              }
-            });
-            resolve(
-              alivePids.length === 0 ? "dead" : `alive:${alivePids.join(",")}`,
-            );
-          });
-        });
-        app.quit();
-        return willQuit;
-      },
-      { pids: knownWorkerPids },
-    );
-
-    expect(willQuitWorkerState).toBe("dead");
+    expect(
+      await workerPidsAtQuit(harness.app, knownWorkerPids, "quit"),
+    ).toEqual([]);
     await closed;
     expect(knownWorkerPids.every((pid) => !isPidAlive(pid))).toBe(true);
+  } finally {
+    await closeHarness(harness);
+  }
+});
+
+test("repeated quit must wait for the same active-worker shutdown barrier (#148)", async () => {
+  let harness: Harness | undefined;
+  try {
+    harness = await launchHarness("repeat-quit", [
+      "--sigterm-exit-delay-ms",
+      String(longFixtureTimeoutMs),
+      "--prompt-scenario",
+      "extension-ui",
+      "--extension-ui-auto-complete-timeout-ms",
+      String(longFixtureTimeoutMs),
+    ]);
+    await startPrompt(harness.page, "repeated quit active prompt");
+    await waitForPromptReceipt(harness);
+    await expect(
+      harness.page.getByText("Fake confirm", { exact: true }),
+    ).toBeVisible();
+    const pids = await workerPids(harness);
+    const livePids = pids.filter(isPidAlive);
+    expect(livePids.length).toBeGreaterThan(0);
+    const closed = harness.app.waitForEvent("close");
+    const aliveAtQuit = await workerPidsAtQuit(
+      harness.app,
+      livePids,
+      "repeatQuit",
+    );
+    await closed;
+    console.info("#148 worker PIDs still alive at will-quit:", aliveAtQuit);
+
+    // Setup/transport failures above remain real failures. Only the known
+    // invariant violation below is expected; remove this when #148 is fixed.
+    test.fail(true, "https://github.com/LiusuZeng/pi-deck/issues/148");
+    expect(aliveAtQuit).toEqual([]);
   } finally {
     await closeHarness(harness);
   }
@@ -301,6 +374,7 @@ test("renderer reload preserves the active prompt runtime and does not spawn an 
       harness.page.getByRole("button", { name: "Abort" }),
     ).toBeVisible();
     const before = await runtimeIdentity(harness.page);
+    expect(before.sessionFile).toBeTruthy();
     await workerPids(harness);
     const beforeWorkerPids = readWorkerPids(harness.pidLogFile);
 
@@ -322,9 +396,18 @@ test("renderer reload preserves the active prompt runtime and does not spawn an 
       sortedPids(beforeWorkerPids),
     );
 
-    await harness.page.evaluate(async (runtimeId) => {
-      await window.piDeck.chat.abort({ runtimeId });
-    }, after.runtimeId);
+    const abortButton = harness.page.getByRole("button", { name: "Abort" });
+    await expect(abortButton).toBeEnabled();
+    await abortButton.click();
+    await expect(abortButton).toHaveCount(0);
+    await expect
+      .poll(() =>
+        harness!.page.evaluate(async (runtimeId) => {
+          const snapshot = await window.piDeck.chat.getSnapshot({ runtimeId });
+          return snapshot.state.isAgentActive === true;
+        }, after.runtimeId),
+      )
+      .toBe(false);
     expect(sortedPids(readWorkerPids(harness.pidLogFile))).toEqual(
       sortedPids(beforeWorkerPids),
     );
