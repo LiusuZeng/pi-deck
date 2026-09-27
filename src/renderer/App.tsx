@@ -101,6 +101,15 @@ import {
   shouldReconcileSession as shouldReconcileSessionInDomain,
 } from "./sessionRuntimeReconciliation.js";
 import {
+  loadAttachedSessionRecovery,
+  projectAttachedSessionRecovery,
+} from "./attachedSessionRecovery.js";
+import {
+  draftDefaultsForWorkspace,
+  emptyDraftModelConfiguration,
+  type ScopedDraftDefaults,
+} from "./draftDefaults.js";
+import {
   activeSessionLifecycle,
   inactiveSessionLifecycle,
   resolveSessionLifecycle,
@@ -1334,7 +1343,11 @@ export function App(): ReactElement {
   const [realCapabilitiesByRuntime, setRealCapabilitiesByRuntime] =
     useState<RuntimeCapabilitiesById>({});
   const [projectModelConfiguration, setProjectModelConfiguration] =
-    useState<ChatListModelsResult>({ models: [], thinkingLevels: [] });
+    useState<ChatListModelsResult>(emptyDraftModelConfiguration);
+  const projectModelConfigurationRef = useRef<ScopedDraftDefaults>({
+    workspaceId: currentWorkspace.id,
+    configuration: projectModelConfiguration,
+  });
   const [sidebarVisible, setSidebarVisible] = useState(() =>
     loadSidebarVisiblePreference(),
   );
@@ -1402,6 +1415,10 @@ export function App(): ReactElement {
   // A stale/missed lifecycle event may need recovery, but never let repeated
   // renders fan out duplicate status requests for the same runtime.
   const reconcilingRuntimeIds = useRef(new Set<string>());
+  const attachedRecoveryRequests = useRef(new Map<string, Promise<void>>());
+  const attachedRecoveryGenerations = useRef(new Map<string, number>());
+  const runtimeEventRevisions = useRef(new Map<string, number>());
+  const rendererDisposedRef = useRef(false);
   const sessionsRef = useRef<SessionViewModel[]>([]);
   const composerDraftsRef = useRef<ComposerDraftsBySession>({});
   const promptHistoryStateRef = useRef<PromptHistoryState>(
@@ -1449,6 +1466,21 @@ export function App(): ReactElement {
   selectedSessionIdRef.current = selectedSessionId;
   currentProjectRef.current = currentProject;
   currentWorkspaceRef.current = currentWorkspace;
+
+  function commitProjectModelConfiguration(
+    workspaceId: string,
+    configuration: ChatListModelsResult,
+  ): void {
+    projectModelConfigurationRef.current = { workspaceId, configuration };
+    setProjectModelConfiguration(configuration);
+  }
+
+  function resetProjectModelConfiguration(workspaceId: string): void {
+    commitProjectModelConfiguration(
+      workspaceId,
+      emptyDraftModelConfiguration(),
+    );
+  }
 
   function beginNavigation(): number {
     latestWorkspaceSelectionTarget.current = currentWorkspaceRef.current.id;
@@ -1557,6 +1589,122 @@ export function App(): ReactElement {
     );
   }
 
+  function hydrateAttachedSession(
+    source: SessionViewModel,
+    options: { generation?: number; showLoading?: boolean } = {},
+  ): Promise<void> {
+    if (!isAttachedSessionSummary(source)) {
+      return Promise.resolve();
+    }
+    const existing = attachedRecoveryRequests.current.get(source.id);
+    if (existing !== undefined) return existing;
+
+    const runtimeId = source.id;
+    const recoveryGeneration =
+      (attachedRecoveryGenerations.current.get(runtimeId) ?? 0) + 1;
+    attachedRecoveryGenerations.current.set(runtimeId, recoveryGeneration);
+    const eventRevision = runtimeEventRevisions.current.get(runtimeId) ?? 0;
+    if (options.showLoading === true) {
+      setSessions((items) =>
+        updateSessionByRuntimeId(items, runtimeId, (current) =>
+          current.runtimeBacked
+            ? {
+                ...current,
+                status: "reconnecting",
+                baseState: "attaching",
+                subtitle: "Reconnecting · restoring attached Pi history…",
+              }
+            : current,
+        ),
+      );
+    }
+
+    const request = loadAttachedSessionRecovery({
+      api: window.piDeck.chat,
+      runtimeId,
+    })
+      .then(({ snapshot, status }) => {
+        if (
+          rendererDisposedRef.current ||
+          attachedRecoveryGenerations.current.get(runtimeId) !==
+            recoveryGeneration
+        ) {
+          return;
+        }
+        setSessions((items) =>
+          updateSessionByRuntimeId(items, runtimeId, (current) =>
+            !current.runtimeBacked
+              ? current
+              : projectAttachedSessionRecovery({
+                  snapshot,
+                  status,
+                  current,
+                  runtimeEventObserved:
+                    (runtimeEventRevisions.current.get(runtimeId) ?? 0) !==
+                    eventRevision,
+                  sessionFromSnapshot,
+                  // getRuntimeStatus is the normalized lifecycle authority.
+                  // Raw snapshots may expose isStreaming instead.
+                  reconcileRuntimeStatus: reconcileSessionWithRuntimeStatus,
+                }),
+          ),
+        );
+        loadRealCapabilities(runtimeId);
+        if (
+          options.generation !== undefined &&
+          isNavigationCurrent(options.generation) &&
+          selectedSessionIdRef.current === runtimeId
+        ) {
+          setUiMessage("Restored the attached Pi session.");
+        }
+      })
+      .catch((error) => {
+        if (
+          rendererDisposedRef.current ||
+          attachedRecoveryGenerations.current.get(runtimeId) !==
+            recoveryGeneration
+        ) {
+          return;
+        }
+        // Loading is a bounded presentation state. Runtime events observed
+        // during the request remain authoritative; otherwise restore the
+        // attached summary instead of leaving controls disabled forever.
+        if (
+          options.showLoading === true &&
+          (runtimeEventRevisions.current.get(runtimeId) ?? 0) === eventRevision
+        ) {
+          setSessions((items) =>
+            updateSessionByRuntimeId(items, runtimeId, (current) => ({
+              ...current,
+              status: source.status,
+              baseState: source.baseState,
+              overlays: source.overlays,
+              subtitle: source.subtitle,
+            })),
+          );
+        }
+        if (
+          options.generation !== undefined &&
+          isNavigationCurrent(options.generation) &&
+          selectedSessionIdRef.current === runtimeId
+        ) {
+          setUiMessage(
+            `Could not restore the attached Pi session: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      })
+      .finally(() => {
+        if (
+          attachedRecoveryGenerations.current.get(runtimeId) ===
+          recoveryGeneration
+        ) {
+          attachedRecoveryRequests.current.delete(runtimeId);
+        }
+      });
+    attachedRecoveryRequests.current.set(runtimeId, request);
+    return request;
+  }
+
   const workflowView: WorkflowSurface | undefined =
     primaryView.kind === "workflow" ? primaryView.view : undefined;
   const activityScope: WorkScope =
@@ -1592,6 +1740,7 @@ export function App(): ReactElement {
 
   useEffect(() => {
     let disposed = false;
+    rendererDisposedRef.current = false;
     let unsubscribe: (() => void) | undefined;
     let unsubscribeMultitask: (() => void) | undefined;
     let eventBuffer: RuntimeEventBuffer | undefined;
@@ -1631,6 +1780,9 @@ export function App(): ReactElement {
             composerDraftsRef.current,
           ),
         );
+        for (const session of listedSessions) {
+          if (session.runtimeBacked) void hydrateAttachedSession(session);
+        }
         setUiMessage(
           `Real Pi mode active. Found ${listedSessions.length} saved session(s) across ${workspaceList.workspaces.length} workspace(s).`,
         );
@@ -1832,23 +1984,24 @@ export function App(): ReactElement {
           void api.chat
             .listModels(modelDiscoveryRequestForWorkspace(bootstrapWorkspace))
             .then((result) => {
-              if (!disposed) {
-                setProjectModelConfiguration(result);
-                setSessions((items) =>
-                  applyPiDefaultsToDraftSessions(
-                    items,
-                    bootstrapWorkspace.id,
-                    result,
-                  ),
-                );
+              if (disposed) return;
+              if (currentWorkspaceRef.current.id === bootstrapWorkspace.id) {
+                commitProjectModelConfiguration(bootstrapWorkspace.id, result);
               }
+              setSessions((items) =>
+                applyPiDefaultsToDraftSessions(
+                  items,
+                  bootstrapWorkspace.id,
+                  result,
+                ),
+              );
             })
             .catch(() => {
-              if (!disposed) {
-                setProjectModelConfiguration({
-                  models: [],
-                  thinkingLevels: [],
-                });
+              if (
+                !disposed &&
+                currentWorkspaceRef.current.id === bootstrapWorkspace.id
+              ) {
+                resetProjectModelConfiguration(bootstrapWorkspace.id);
               }
             });
           const generation = ++sessionListGeneration.current;
@@ -1882,6 +2035,8 @@ export function App(): ReactElement {
     void load();
     return () => {
       disposed = true;
+      rendererDisposedRef.current = true;
+      attachedRecoveryRequests.current.clear();
       unsubscribe?.();
       unsubscribeMultitask?.();
       eventBuffer?.dispose();
@@ -2815,6 +2970,10 @@ export function App(): ReactElement {
   }
 
   function applyRuntimeEvent(event: ChatRuntimeEvent): void {
+    runtimeEventRevisions.current.set(
+      event.runtimeId,
+      (runtimeEventRevisions.current.get(event.runtimeId) ?? 0) + 1,
+    );
     if (event.type === "agent_end" || event.type === "worker_exit") {
       clearRuntimeStatusRetry(event.runtimeId);
     }
@@ -3288,6 +3447,12 @@ export function App(): ReactElement {
           showSessionDetail(session.id, origin, generation);
           if (session.backendMode === "real") {
             loadRealCapabilities(session.id);
+            if (isAttachedSessionSummary(session)) {
+              void hydrateAttachedSession(session, {
+                generation,
+                showLoading: true,
+              });
+            }
           }
           return;
         }
@@ -3317,6 +3482,12 @@ export function App(): ReactElement {
     }
     if (session?.backendMode === "real" && session.runtimeBacked) {
       loadRealCapabilities(session.id);
+      if (isAttachedSessionSummary(session)) {
+        void hydrateAttachedSession(session, {
+          generation,
+          showLoading: true,
+        });
+      }
     }
   }
 
@@ -3399,6 +3570,12 @@ export function App(): ReactElement {
     if (session.runtimeBacked) {
       showSessionDetail(session.id, origin, generation);
       loadRealCapabilities(session.id);
+      if (isAttachedSessionSummary(session)) {
+        void hydrateAttachedSession(session, {
+          generation,
+          showLoading: true,
+        });
+      }
       return;
     }
     if (session.sessionFile !== undefined) {
@@ -4591,7 +4768,7 @@ export function App(): ReactElement {
     const sessionListRequest = ++sessionListGeneration.current;
     if (isNavigationCurrent(generation)) {
       setComposerError(null);
-      setProjectModelConfiguration({ models: [], thinkingLevels: [] });
+      resetProjectModelConfiguration(workspace.id);
       setUiMessage(`Opening ${workspace.name}; active Pi work stays attached…`);
     }
     try {
@@ -4618,9 +4795,11 @@ export function App(): ReactElement {
         createId("draft-session");
       const activeBackendMode = backendModeRef.current;
       const draftConfiguration =
-        activeBackendMode === "real" &&
-        currentWorkspaceRef.current.id === workspace.id
-          ? projectModelConfiguration
+        activeBackendMode === "real"
+          ? draftDefaultsForWorkspace(
+              projectModelConfigurationRef.current,
+              workspace.id,
+            )
           : undefined;
       const draft =
         existingRuntime === undefined && existingDraft === undefined
@@ -4662,7 +4841,7 @@ export function App(): ReactElement {
             // session before discovery completes; the latest session-list token
             // still prevents an older workspace result from winning.
             if (sessionListRequest === sessionListGeneration.current) {
-              setProjectModelConfiguration(result);
+              commitProjectModelConfiguration(workspace.id, result);
               setSessions((items) =>
                 applyPiDefaultsToDraftSessions(items, workspace.id, result),
               );
@@ -5258,7 +5437,7 @@ export function App(): ReactElement {
       return;
     }
     setComposerError(null);
-    setProjectModelConfiguration({ models: [], thinkingLevels: [] });
+    resetProjectModelConfiguration(project.id);
     setUiMessage(
       `Opening ${project.displayName}; existing Pi workers stay attached…`,
     );
@@ -5323,10 +5502,10 @@ export function App(): ReactElement {
         return;
       }
       if (result === undefined) {
-        setProjectModelConfiguration({ models: [], thinkingLevels: [] });
+        resetProjectModelConfiguration(project.id);
         return;
       }
-      setProjectModelConfiguration(result);
+      commitProjectModelConfiguration(project.id, result);
       setSessions((items) =>
         applyPiDefaultsToDraftSessions(items, project.id, result),
       );
@@ -5649,7 +5828,12 @@ export function App(): ReactElement {
 
   function rememberPiDefaults(session: SessionViewModel): void {
     const activeModel = findActiveRealModel(session, realModels);
-    setProjectModelConfiguration((current) => ({
+    const current =
+      draftDefaultsForWorkspace(
+        projectModelConfigurationRef.current,
+        session.workspaceId,
+      ) ?? emptyDraftModelConfiguration();
+    commitProjectModelConfiguration(session.workspaceId, {
       ...current,
       ...(activeModel !== undefined ? { activeModel } : {}),
       ...(session.thinkingLevel !== undefined
@@ -5659,7 +5843,7 @@ export function App(): ReactElement {
         activeModel,
         current.thinkingLevels,
       ),
-    }));
+    });
   }
 
   async function handleSetRealModel(
@@ -5952,11 +6136,20 @@ export function App(): ReactElement {
     }
     if (!isNavigationCurrent(generation)) return;
 
+    // Workspace activation crosses an async barrier. Read the scoped ref now,
+    // not the render-time configuration captured before the await: bootstrap
+    // discovery may have completed while creation was in flight (#156).
+    const latestDraftConfiguration = isRealBackendMode
+      ? draftDefaultsForWorkspace(
+          projectModelConfigurationRef.current,
+          creationWorkspace.id,
+        )
+      : undefined;
     const next = draftSessionForWorkspace(
       creationWorkspace,
       createId("draft-session"),
       isRealBackendMode ? "real" : "fake",
-      isRealBackendMode ? projectModelConfiguration : undefined,
+      latestDraftConfiguration,
     );
     setComposerError(null);
     setSessions((items) =>
@@ -7652,6 +7845,14 @@ function sessionFromSummary(
         ]
       : [],
   };
+}
+
+function isAttachedSessionSummary(session: SessionViewModel): boolean {
+  return (
+    session.runtimeBacked &&
+    session.backendMode === "real" &&
+    session.subtitle === "Idle · attached real Pi session"
+  );
 }
 
 function workspaceIdFromSnapshot(snapshot: ChatSnapshot): string {
