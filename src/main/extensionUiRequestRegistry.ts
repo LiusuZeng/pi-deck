@@ -106,23 +106,12 @@ export class ExtensionUiRequestRegistry<
   }
 
   complete(claimed: ClaimedExtensionUiRequest<TRequest>): boolean {
-    return this.deleteInFlight(
-      claimed.runtimeId,
-      claimed.request.id,
-      claimed,
-    );
+    return this.deleteInFlight(claimed.runtimeId, claimed.request.id, claimed);
   }
 
   snapshot(runtimeId: string): TRequest[] {
     return [...(this.requests.get(runtimeId)?.values() ?? [])].map(
       ({ request }) => ({ ...request }),
-    );
-  }
-
-  get pendingCount(): number {
-    return [...this.requests.values()].reduce(
-      (count, requests) => count + requests.size,
-      0,
     );
   }
 
