@@ -1044,6 +1044,7 @@ interface SlashCommand {
 }
 
 interface RuntimeCapabilities {
+  activeModel?: ChatModelSummary | undefined;
   models?: ChatModelSummary[];
   thinkingLevels?: string[];
   commands?: SlashCommand[];
@@ -3014,21 +3015,33 @@ export function App(): ReactElement {
       ? runtimeCapabilitiesFor(realCapabilitiesByRuntime, selectedSession.id)
       : undefined;
   const runtimeModels = selectedRealCapabilities?.models ?? [];
+  const selectedModelConfiguration =
+    draftDefaultsForWorkspace(
+      projectModelConfigurationRef.current,
+      selectedSession.workspaceId,
+    ) ?? emptyDraftModelConfiguration();
   const realModels =
-    runtimeModels.length > 0 ? runtimeModels : projectModelConfiguration.models;
-  const activeRealModel = findActiveRealModel(selectedSession, realModels);
+    runtimeModels.length > 0
+      ? runtimeModels
+      : selectedModelConfiguration.models;
+  const activeRealModel = findComposerActiveRealModel(
+    selectedSession,
+    realModels,
+    projectModelConfigurationRef.current,
+    realCapabilitiesByRuntime,
+  );
   const runtimeThinkingLevels = selectedRealCapabilities?.thinkingLevels ?? [];
   const availableRealThinkingLevels =
     runtimeThinkingLevels.length > 0
       ? runtimeThinkingLevels
       : thinkingLevelsForModel(
           activeRealModel,
-          projectModelConfiguration.thinkingLevels,
+          selectedModelConfiguration.thinkingLevels,
         );
   const workflowAvailableThinkingLevels =
     selectedSession.backendMode === "real" &&
     (runtimeThinkingLevels.length > 0 ||
-      projectModelConfiguration.thinkingLevels.length > 0)
+      selectedModelConfiguration.thinkingLevels.length > 0)
       ? availableRealThinkingLevels
       : [];
   const workflowThinkingChoices = workflowThinkingChoicesFor(
@@ -4357,6 +4370,8 @@ export function App(): ReactElement {
         session,
         realModels,
         selectedModel,
+        projectModelConfigurationRef.current,
+        realCapabilitiesByRuntime,
       ),
     });
     if (validationError !== undefined) {
@@ -4395,6 +4410,8 @@ export function App(): ReactElement {
         selectedSession,
         realModels,
         selectedModel,
+        projectModelConfigurationRef.current,
+        realCapabilitiesByRuntime,
       ),
     });
     if (validationError !== undefined) {
@@ -4449,6 +4466,8 @@ export function App(): ReactElement {
         draftSession,
         realModels,
         selectedModel,
+        projectModelConfigurationRef.current,
+        realCapabilitiesByRuntime,
       ),
     });
     if (validationError !== undefined) {
@@ -4999,6 +5018,8 @@ export function App(): ReactElement {
         selectedSession,
         realModels,
         selectedModel,
+        projectModelConfigurationRef.current,
+        realCapabilitiesByRuntime,
       ),
     });
     if (validationError !== undefined) {
@@ -5046,7 +5067,13 @@ export function App(): ReactElement {
     }
     if (
       hasImageAttachment &&
-      !selectedSessionSupportsImages(selectedSession, realModels, selectedModel)
+      !selectedSessionSupportsImages(
+        selectedSession,
+        realModels,
+        selectedModel,
+        projectModelConfigurationRef.current,
+        realCapabilitiesByRuntime,
+      )
     ) {
       setComposerError("Selected model does not support image input.");
       return;
@@ -6284,6 +6311,7 @@ export function App(): ReactElement {
       const result = await window.piDeck.chat.listModels({ runtimeId });
       setRealCapabilitiesByRuntime((current) =>
         updateRuntimeCapabilities(current, runtimeId, {
+          activeModel: result.activeModel,
           models: result.models,
           thinkingLevels: result.thinkingLevels,
         }),
@@ -6291,6 +6319,7 @@ export function App(): ReactElement {
     } catch {
       setRealCapabilitiesByRuntime((current) =>
         updateRuntimeCapabilities(current, runtimeId, {
+          activeModel: undefined,
           models: [],
           thinkingLevels: [],
         }),
@@ -6610,7 +6639,7 @@ export function App(): ReactElement {
       );
       const nextThinkingLevels = thinkingLevelsForModel(
         nextModel,
-        projectModelConfiguration.thinkingLevels,
+        selectedModelConfiguration.thinkingLevels,
       );
       setSessions((items) =>
         items.map((session) =>
@@ -6871,12 +6900,22 @@ export function App(): ReactElement {
             workspaces,
           );
     const workspace = requestedWorkspace ?? currentWorkspaceRef.current;
-    let creationWorkspace = workspace;
+    let creation: { activation: WorkspaceRef; draft: SessionViewModel };
     try {
-      creationWorkspace = await activateWorkspaceForSessionCreation(
-        workspace,
-        generation,
-      );
+      creation = await createDraftAfterWorkspaceActivation({
+        workspaceId: workspace.id,
+        activation: activateWorkspaceForSessionCreation(workspace, generation),
+        readDefaults: () => projectModelConfigurationRef.current,
+        createDraft: (creationWorkspace, latestConfiguration) => {
+          const activeBackendMode = backendModeRef.current;
+          return draftSessionForWorkspace(
+            creationWorkspace,
+            createId("draft-session"),
+            activeBackendMode,
+            activeBackendMode === "real" ? latestConfiguration : undefined,
+          );
+        },
+      });
     } catch (error) {
       if (isNavigationCurrent(generation)) {
         setUiMessage(
@@ -6887,21 +6926,11 @@ export function App(): ReactElement {
     }
     if (!isNavigationCurrent(generation)) return;
 
-    // Workspace activation crosses an async barrier. Read the scoped ref now,
-    // not the render-time configuration captured before the await: bootstrap
-    // discovery may have completed while creation was in flight (#156).
-    const latestDraftConfiguration = isRealBackendMode
-      ? draftDefaultsForWorkspace(
-          projectModelConfigurationRef.current,
-          creationWorkspace.id,
-        )
-      : undefined;
-    const next = draftSessionForWorkspace(
-      creationWorkspace,
-      createId("draft-session"),
-      isRealBackendMode ? "real" : "fake",
-      latestDraftConfiguration,
-    );
+    // The helper owns the await boundary: it reads the workspace-keyed ref
+    // only after activation, so bootstrap discovery cannot leave this first
+    // replacement draft with inventory but without Pi's effective defaults.
+    const creationWorkspace = creation.activation;
+    const next = creation.draft;
     setComposerError(null);
     setSessions((items) =>
       mergeSessions(
@@ -6909,7 +6938,7 @@ export function App(): ReactElement {
         items.filter(
           (item) =>
             item.draftSession !== true ||
-            hasComposerDraft(composerDrafts, item.id) ||
+            hasComposerDraft(composerDraftsRef.current, item.id) ||
             item.workspaceId !== creationWorkspace.id,
         ),
       ),
@@ -7054,6 +7083,7 @@ export function App(): ReactElement {
       selectedModel={selectedModel}
       backendLabel={backendLabel(selectedSession)}
       realModels={realModels}
+      activeRealModel={activeRealModel}
       realThinkingLevels={availableRealThinkingLevels}
       selectedSession={selectedSession}
       allowAttachments={true}
@@ -9390,32 +9420,81 @@ function selectedSessionSupportsImages(
   session: SessionViewModel,
   realModels: ChatModelSummary[],
   selectedModel: ModelOption | undefined,
+  configurations: WorkspaceDraftDefaults,
+  capabilities: RuntimeCapabilitiesById,
 ): boolean {
   if (session.backendMode !== "real") {
     return Boolean(selectedModel?.supportsImages);
   }
-  return realModelSupportsImages(findActiveRealModel(session, realModels));
+  return realModelSupportsImages(
+    findComposerActiveRealModel(
+      session,
+      realModels,
+      configurations,
+      capabilities,
+    ),
+  );
+}
+
+function modelMatchesSessionIdentity(
+  session: SessionViewModel,
+  model: ChatModelSummary,
+): boolean {
+  const normalizedLabel = session.modelLabel?.replace(/\s+\/\s+/, "/");
+  if (!normalizedLabel) return false;
+  const providerModel = `${model.provider ?? ""}/${model.id}`;
+  return providerModel === normalizedLabel || model.id === normalizedLabel;
 }
 
 function findActiveRealModel(
   session: SessionViewModel,
   realModels: ChatModelSummary[],
 ): ChatModelSummary | undefined {
-  const normalizedLabel = session.modelLabel?.replace(/\s+\/\s+/, "/");
-  if (!normalizedLabel) {
-    return undefined;
+  return realModels.find((model) =>
+    modelMatchesSessionIdentity(session, model),
+  );
+}
+
+/**
+ * An authoritative active model can identify the selected model when discovery
+ * returned no inventory. Keep it out of the catalog; prefer matching runtime
+ * state, then the default owned by this session's workspace.
+ */
+function findComposerActiveRealModel(
+  session: SessionViewModel,
+  realModels: ChatModelSummary[],
+  configurations: WorkspaceDraftDefaults,
+  capabilities: RuntimeCapabilitiesById = {},
+): ChatModelSummary | undefined {
+  const runtime = runtimeCapabilitiesFor(capabilities, session.id);
+  const runtimeInventoryModel = findActiveRealModel(
+    session,
+    runtime?.models ?? [],
+  );
+  if (runtimeInventoryModel !== undefined) return runtimeInventoryModel;
+  const runtimeModel = runtime?.activeModel;
+  if (
+    runtimeModel !== undefined &&
+    modelMatchesSessionIdentity(session, runtimeModel)
+  ) {
+    return runtimeModel;
   }
-  return realModels.find((model) => {
-    const providerModel = `${model.provider ?? ""}/${model.id}`;
-    return providerModel === normalizedLabel || model.id === normalizedLabel;
-  });
+  // realModels can be a workspace fallback when runtime inventory is empty.
+  // Never let that less-specific catalog shadow matching runtime state.
+  const discovered = findActiveRealModel(session, realModels);
+  if (discovered !== undefined || realModels.length > 0) return discovered;
+  const configured = draftDefaultsForWorkspace(
+    configurations,
+    session.workspaceId,
+  )?.activeModel;
+  return configured !== undefined &&
+    modelMatchesSessionIdentity(session, configured)
+    ? configured
+    : undefined;
 }
 
 function realModelSupportsImages(model: ChatModelSummary | undefined): boolean {
-  if (model === undefined) {
-    return true;
-  }
-  return model.input?.some((value) => /image/i.test(value)) ?? false;
+  return model?.input?.some((value) => /image/i.test(value)) ?? false;
 }
 
 function backendLabel(session: SessionViewModel): string {
@@ -13363,6 +13442,7 @@ function Composer(props: {
   selectedModel: ModelOption | undefined;
   backendLabel: string;
   realModels: ChatModelSummary[];
+  activeRealModel: ChatModelSummary | undefined;
   realThinkingLevels: string[];
   selectedSession: SessionViewModel;
   allowAttachments: boolean;
@@ -13393,20 +13473,19 @@ function Composer(props: {
   onRemoveAttachment(id: string): void;
   onSelectCommand(command: SlashCommand): void;
 }): ReactElement {
-  const activeRealModel = findActiveRealModel(
-    props.selectedSession,
-    props.realModels,
-  );
   const selectedModelSupportsImages =
     props.selectedSession.backendMode === "real"
-      ? realModelSupportsImages(activeRealModel)
+      ? realModelSupportsImages(props.activeRealModel)
       : Boolean(props.selectedModel?.supportsImages);
   const hasImageWarning =
     props.attachments.some((attachment) => attachment.kind === "image") &&
     !selectedModelSupportsImages;
   const selectedRealModel =
-    activeRealModel ??
-    (props.realModels.length === 1 ? props.realModels[0] : undefined);
+    props.activeRealModel ??
+    (props.selectedSession.modelLabel === undefined &&
+    props.realModels.length === 1
+      ? props.realModels[0]
+      : undefined);
   const [dragActive, setDragActive] = useState(false);
   const [activeCommandIndex, setActiveCommandIndex] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -14602,6 +14681,8 @@ export const __rendererTestHooks = {
   workspaceForSessionOwner,
   thinkingLevelsForModel,
   clampThinkingLevel,
+  findComposerActiveRealModel,
+  realModelSupportsImages,
   applyPiDefaultsToDraftSessions,
   modelDiscoveryRequestForWorkspace,
   draftSessionForWorkspace,
