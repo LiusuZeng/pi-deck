@@ -4,6 +4,7 @@ export type InterventionStatus =
   | "sending"
   | "queued"
   | "accepted"
+  | "unconfirmed"
   | "consumed"
   | "failed";
 
@@ -79,8 +80,23 @@ export function markInterventionFailed(
   item: InterventionTimelineItem,
   failureMessage: string,
 ): InterventionTimelineItem {
-  if (item.status === "consumed") return item;
+  // A late transport rejection after worker exit cannot disprove delivery.
+  // Only an item still in flight is known not to have reached Pi.
+  if (item.status === "consumed" || item.status === "unconfirmed") return item;
   return { ...item, status: "failed", failureMessage };
+}
+
+/**
+ * A broken Pi connection is not evidence that a queued instruction failed or
+ * was consumed. Preserve it as a recoverable local receipt until a resumed
+ * runtime's durable transcript or queue can reconcile it.
+ */
+export function markInterventionDeliveryUnconfirmed(
+  item: InterventionTimelineItem,
+  message: string,
+): InterventionTimelineItem {
+  if (item.status === "consumed" || item.status === "failed") return item;
+  return { ...item, status: "unconfirmed", failureMessage: message };
 }
 
 /**
@@ -136,9 +152,9 @@ export function reconcileInterventionQueueEvidence(
 
   return items.map((item) => {
     const status = nextStatus.get(item.id);
-    return status === undefined || status === item.status
-      ? item
-      : { ...item, status };
+    if (status === undefined || status === item.status) return item;
+    const { failureMessage: _failureMessage, ...withoutOutcomeMessage } = item;
+    return { ...withoutOutcomeMessage, status };
   });
 }
 
@@ -202,8 +218,10 @@ export function matchDurableInterventionMessages(options: {
       (item) => item.id === candidate.id,
     );
     if (interventionIndex >= 0) {
+      const { failureMessage: _failureMessage, ...withoutOutcomeMessage } =
+        candidate;
       interventions[interventionIndex] = {
-        ...candidate,
+        ...withoutOutcomeMessage,
         status: "consumed",
         durableMessageId: durable.id,
       };
@@ -252,6 +270,8 @@ export function interventionStatusLabel(status: InterventionStatus): string {
       return "queued";
     case "accepted":
       return "accepted · confirming transcript receipt";
+    case "unconfirmed":
+      return "delivery unconfirmed";
     case "consumed":
       return "consumed by Pi";
     case "failed":

@@ -2986,6 +2986,54 @@ describe("renderer resume recovery", () => {
     });
   });
 
+  it("reconciles an unconfirmed intervention when reopening a saved session", () => {
+    const saved = {
+      ...baseSession(),
+      id: "saved-before-resume",
+      sessionFile: "/sessions/saved.jsonl",
+      runtimeBacked: false,
+      resumeBacked: true,
+      timeline: [
+        {
+          id: "local-steer-1",
+          kind: "intervention",
+          interventionKind: "steer",
+          status: "unconfirmed",
+          content: "Focus the tests",
+          createdAt: "10:00",
+          failureMessage: "Pi disconnected before delivery could be confirmed.",
+        },
+      ],
+    } as any;
+    const resumed = {
+      ...baseSession(),
+      id: "runtime-after-resume",
+      sessionFile: saved.sessionFile,
+      runtimeBacked: true,
+      timeline: [
+        {
+          id: "pi-user-1",
+          kind: "user",
+          content: "Focus the tests",
+          createdAt: "10:01",
+        },
+      ],
+    } as any;
+
+    const result = __rendererTestHooks.resumedSessionForCurrentSavedRow(
+      resumed,
+      saved,
+    );
+    expect(result.timeline).toEqual([
+      expect.objectContaining({
+        id: "local-steer-1",
+        status: "consumed",
+        durableMessageId: "pi-user-1",
+      }),
+    ]);
+    expect(result.timeline[0]).not.toHaveProperty("failureMessage");
+  });
+
   it("allows renaming a working saved session without permitting membership changes", () => {
     const workingSavedSession = {
       ...baseSession(),

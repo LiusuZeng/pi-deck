@@ -1216,6 +1216,11 @@ h1 {
   color: var(--color-danger, #b42318);
 }
 
+.intervention-row.unconfirmed .intervention-status,
+.intervention-row.unconfirmed .intervention-failure {
+  color: var(--color-warning);
+}
+
 .intervention-failure {
   display: block;
   margin-top: 6px;

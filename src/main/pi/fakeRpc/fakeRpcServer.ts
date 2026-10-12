@@ -81,6 +81,10 @@ interface FakeOptions {
    * only the terminal refresh can observe the persisted id-less user turn.
    */
   interventionSnapshotRace: boolean;
+  /** Exit after accepting an intervention, before delivery can be observed. */
+  exitAfterInterventionReceipt: boolean;
+  /** Persist the intervention's user turn before that transport-loss exit. */
+  persistInterventionBeforeExit: boolean;
   exitAfterFollowUpReceipt: boolean;
   /** Model an already-active parent when this test barrier file exists. */
   activeOnStartMs: number;
@@ -187,6 +191,8 @@ function parseOptions(argv: string[]): FakeOptions {
     failTaskPromptRecordWhileActive: false,
     consumeSteeringAfterMs: 0,
     interventionSnapshotRace: false,
+    exitAfterInterventionReceipt: false,
+    persistInterventionBeforeExit: false,
     exitAfterFollowUpReceipt: false,
     activeOnStartMs: 0,
     clearActiveOnStartEnabledFileAfterFollowUpReceipt: false,
@@ -300,6 +306,10 @@ function parseOptions(argv: string[]): FakeOptions {
       index += 1;
     } else if (arg === "--intervention-snapshot-race") {
       options.interventionSnapshotRace = true;
+    } else if (arg === "--exit-after-intervention-receipt") {
+      options.exitAfterInterventionReceipt = true;
+    } else if (arg === "--persist-intervention-before-exit") {
+      options.persistInterventionBeforeExit = true;
     } else if (arg === "--exit-after-follow-up-receipt") {
       options.exitAfterFollowUpReceipt = true;
     } else if (arg === "--active-on-start-ms") {
@@ -2520,6 +2530,25 @@ class FakeRpcServer {
     }
     this.respond(command.id, kind);
     this.emitQueueUpdate();
+    if (this.options.exitAfterInterventionReceipt) {
+      // The command acknowledgement can have reached Pi while the renderer's
+      // transport dies. Most tests deliberately supply no durable user turn;
+      // the companion persistence mode makes resume reconciliation deterministic.
+      if (this.options.persistInterventionBeforeExit) {
+        const userMessage: PiMessage = {
+          id: `msg_intervention_${this.promptCounter + 1}`,
+          role: "user",
+          content: message,
+          createdAt: Date.now(),
+        };
+        // Do not add it to this worker's live history: the transport-loss
+        // test must first show an unconfirmed local receipt. A resumed worker
+        // reloads the persisted turn and supplies the reconciliation evidence.
+        this.appendPersistedMessage(userMessage);
+      }
+      setTimeout(() => process.exit(42), 25);
+      return;
+    }
     if (kind === "steer" && this.options.interventionSnapshotRace) {
       this.interventionSnapshotRaceText = message;
       this.interventionSnapshotRaceStage = "awaiting-queued-snapshot";

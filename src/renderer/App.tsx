@@ -103,6 +103,7 @@ import {
 import {
   loadAttachedSessionRecovery,
   projectAttachedSessionRecovery,
+  reconcileRecoveredInterventionTimeline,
 } from "./attachedSessionRecovery.js";
 import {
   createDraftAfterWorkspaceActivation,
@@ -8060,15 +8061,28 @@ function resumedSessionForCurrentSavedRow(
     resumed.failureKind !== "auth-required" &&
     resumed.authVerified !== true;
   const originalDiagnostic = currentSession.lastError;
+  const reconciledTimeline = reconcileRecoveredInterventionTimeline(
+    resumed.timeline,
+    currentSession.timeline,
+  );
+  const recoveredTimeline = [
+    ...reconciledTimeline.recovered,
+    ...reconciledTimeline.current.filter(
+      (item) =>
+        !reconciledTimeline.recovered.some(
+          (recoveredItem) => recoveredItem.id === item.id,
+        ),
+    ),
+  ];
   const timeline =
     authStillPending &&
     originalDiagnostic !== undefined &&
-    !resumed.timeline.some(
+    !recoveredTimeline.some(
       (item) =>
         item.kind === "diagnostic" && item.content === originalDiagnostic,
     )
       ? [
-          ...resumed.timeline,
+          ...recoveredTimeline,
           {
             id: createId("auth-diagnostic"),
             kind: "diagnostic" as const,
@@ -8077,9 +8091,10 @@ function resumedSessionForCurrentSavedRow(
             createdAt: formatTime(),
           },
         ]
-      : resumed.timeline;
+      : recoveredTimeline;
   return {
     ...resumed,
+    timeline,
     // Pi snapshots carry the generated title. Preserve the latest local
     // display-name override, including a rename that was queued while this
     // saved session was being resumed.
