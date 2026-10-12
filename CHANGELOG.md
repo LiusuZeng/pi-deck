@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added a manual text-deliverables **Outputs MVP**: save a completed visible
+  assistant response without another model call, search verified title/body
+  text across workspaces, review immutable revisions, and start a revision
+  session with the selected content and feedback already attached. Outputs
+  survive restart and source-session loss; integrity failures are blocked.
+  This advances [#141](https://github.com/LiusuZeng/pi-deck/issues/141) but does
+  not yet provide automatic agent publication or arbitrary multi-file outputs.
+
 ## [0.6.4] - 2026-09-12
 
 Fourth dogfood stabilization release after Unified Work. This patch corrects a

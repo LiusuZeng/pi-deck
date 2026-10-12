@@ -41,6 +41,7 @@ import type {
   MultitaskStateEvent,
   MultitaskTaskSummary,
   ParallelWorkerSettings,
+  SavedAnswerDetail,
 } from "../shared/types.js";
 import type {
   CanonicalNodeOccurrence,
@@ -219,6 +220,7 @@ import {
   ActivityInbox,
   type ActivityInboxFilter,
 } from "./components/ActivityInbox.js";
+import { SavedAnswers } from "./components/SavedAnswers.js";
 import {
   isNavigationGenerationCurrent,
   nextNavigationGeneration,
@@ -232,6 +234,7 @@ import {
   backToWorkView,
   isAllWorkPrimaryView,
   replaceSessionRouteId,
+  savedAnswersView,
   sessionView,
   workflowView as workflowPrimaryView,
   workOriginForPrimaryView,
@@ -252,6 +255,70 @@ import type {
   SubagentActivity,
   SubagentActivityChild,
 } from "./subagentActivity.js";
+
+interface SaveAnswerDialogState {
+  requestId: string;
+  runtimeId: string;
+  assistantText: string;
+  assistantMessageId?: string;
+  title: string;
+  target?: { outputId: string; expectedRevisionId: string };
+  returnFocus: HTMLButtonElement;
+}
+
+interface OutputRevisionTarget {
+  outputId: string;
+  expectedRevisionId: string;
+  title: string;
+  displayNumber: number;
+}
+
+const OUTPUT_REVISION_TARGETS_KEY = "pi-deck.output-revision-targets.v1";
+
+function loadOutputRevisionTargets(): Record<string, OutputRevisionTarget> {
+  try {
+    const parsed = JSON.parse(
+      window.localStorage.getItem(OUTPUT_REVISION_TARGETS_KEY) ?? "{}",
+    ) as unknown;
+    if (
+      parsed === null ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
+    ) {
+      return {};
+    }
+    const result: Record<string, OutputRevisionTarget> = {};
+    for (const [runtimeId, candidate] of Object.entries(parsed)) {
+      if (
+        candidate === null ||
+        typeof candidate !== "object" ||
+        Array.isArray(candidate)
+      )
+        continue;
+      const value = candidate as Record<string, unknown>;
+      if (
+        typeof value.outputId === "string" &&
+        typeof value.expectedRevisionId === "string" &&
+        typeof value.title === "string" &&
+        value.title.length > 0 &&
+        value.title.length <= 240 &&
+        typeof value.displayNumber === "number" &&
+        Number.isInteger(value.displayNumber) &&
+        value.displayNumber > 0
+      ) {
+        result[runtimeId] = {
+          outputId: value.outputId,
+          expectedRevisionId: value.expectedRevisionId,
+          title: value.title,
+          displayNumber: value.displayNumber,
+        };
+      }
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
 
 const AgentWorkflowBuilder = lazy(() =>
   import("./components/workflows/AgentWorkflowBuilder.js").then((module) => ({
@@ -1308,6 +1375,13 @@ export function App(): ReactElement {
   const [pendingComposerRecoveries, setPendingComposerRecoveries] =
     useState<PendingComposerRecoveriesBySession>({});
   const [composerError, setComposerError] = useState<string | null>(null);
+  const [saveAnswerDialog, setSaveAnswerDialog] =
+    useState<SaveAnswerDialogState>();
+  const [saveAnswerPending, setSaveAnswerPending] = useState(false);
+  const [saveAnswerError, setSaveAnswerError] = useState<string>();
+  const [outputRevisionTargets, setOutputRevisionTargets] = useState<
+    Record<string, OutputRevisionTarget>
+  >(loadOutputRevisionTargets);
   const [multitask, setMultitask] = useState<
     Record<string, MultitaskStateEvent>
   >({});
@@ -1811,6 +1885,21 @@ export function App(): ReactElement {
     );
   }
 
+  function showSavedAnswers(
+    workspaceId: string,
+    selectedOutputId?: string,
+  ): void {
+    const generation = beginNavigation();
+    if (!isNavigationCurrent(generation)) return;
+    setPrimaryView((current) =>
+      savedAnswersView(
+        workspaceId,
+        workOriginForPrimaryView(current, currentWorkspaceRef.current.id),
+        selectedOutputId,
+      ),
+    );
+  }
+
   function showSessionDetail(
     sessionId: string,
     origin?: WorkOrigin,
@@ -2086,6 +2175,71 @@ export function App(): ReactElement {
     return request;
   }
 
+  function requestSaveAnswer(
+    item: Extract<TimelineItem, { kind: "assistant" }>,
+    returnFocus: HTMLButtonElement,
+  ): void {
+    if (!selectedSession.runtimeBacked || item.streaming === true) return;
+    const target = outputRevisionTargets[selectedSession.id];
+    setSaveAnswerError(undefined);
+    setSaveAnswerDialog({
+      requestId: window.crypto.randomUUID(),
+      runtimeId: selectedSession.id,
+      assistantText: item.content,
+      ...(item.sourceMessageId === undefined
+        ? {}
+        : { assistantMessageId: item.sourceMessageId }),
+      title: (target?.title ?? `${selectedSession.title} answer`).slice(0, 240),
+      ...(target === undefined
+        ? {}
+        : {
+            target: {
+              outputId: target.outputId,
+              expectedRevisionId: target.expectedRevisionId,
+            },
+          }),
+      returnFocus,
+    });
+  }
+
+  function cancelSaveAnswer(): void {
+    if (saveAnswerPending) return;
+    const returnFocus = saveAnswerDialog?.returnFocus;
+    setSaveAnswerDialog(undefined);
+    setSaveAnswerError(undefined);
+    window.requestAnimationFrame(() => {
+      if (returnFocus?.isConnected) returnFocus.focus();
+    });
+  }
+
+  async function saveSelectedAnswer(): Promise<void> {
+    const dialog = saveAnswerDialog;
+    if (dialog === undefined || saveAnswerPending) return;
+    setSaveAnswerPending(true);
+    setSaveAnswerError(undefined);
+    try {
+      const { returnFocus: _returnFocus, ...request } = dialog;
+      const saved = await window.piDeck.savedAnswers.save(request);
+      setSaveAnswerDialog(undefined);
+      setOutputRevisionTargets((current) => {
+        const { [dialog.runtimeId]: _savedTarget, ...remaining } = current;
+        return remaining;
+      });
+      setUiMessage(
+        dialog.target === undefined
+          ? `Saved “${saved.title}” to Outputs.`
+          : `Saved revision ${saved.displayNumber} of “${saved.title}”.`,
+      );
+      showSavedAnswers(saved.workspaceId, saved.outputId);
+    } catch (error) {
+      setSaveAnswerError(
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      setSaveAnswerPending(false);
+    }
+  }
+
   const workflowView: WorkflowSurface | undefined =
     primaryView.kind === "workflow" ? primaryView.view : undefined;
   const activityScope: WorkScope =
@@ -2098,6 +2252,17 @@ export function App(): ReactElement {
     activityFiltersByScope[activityFilterScopeKey] ?? "all";
   const activitySearchQuery =
     activitySearchQueriesByScope[activityFilterScopeKey] ?? "";
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        OUTPUT_REVISION_TARGETS_KEY,
+        JSON.stringify(outputRevisionTargets),
+      );
+    } catch {
+      // A revision can still be completed in the current renderer lifetime.
+    }
+  }, [outputRevisionTargets]);
 
   useEffect(() => {
     const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
@@ -4609,6 +4774,12 @@ export function App(): ReactElement {
       );
       composerDraftsRef.current = materializedComposerDrafts;
       setComposerDrafts(materializedComposerDrafts);
+      setOutputRevisionTargets((current) => {
+        const draftTarget = current[draftSession.id];
+        if (draftTarget === undefined) return current;
+        const { [draftSession.id]: _draftTarget, ...remaining } = current;
+        return { ...remaining, [initializedSession.id]: draftTarget };
+      });
       if (initializedSession.backendMode === "real") {
         rememberPiDefaults(initializedSession);
         loadRealCapabilities(initializedSession.id);
@@ -6920,6 +7091,100 @@ export function App(): ReactElement {
     );
   }
 
+  async function handleReviseOutput(detail: SavedAnswerDetail): Promise<void> {
+    const generation = beginNavigation();
+    const workspace = workspaceForId(
+      detail.workspaceId,
+      currentWorkspaceRef.current,
+      workspaces,
+    );
+    if (workspace === undefined) {
+      setUiMessage("The output workspace is no longer available.");
+      return;
+    }
+    const origin = workOriginForPrimaryView(
+      primaryView,
+      currentWorkspaceRef.current.id,
+    );
+    let creationWorkspace = workspace;
+    try {
+      creationWorkspace = await activateWorkspaceForSessionCreation(
+        workspace,
+        generation,
+      );
+    } catch (error) {
+      if (isNavigationCurrent(generation)) {
+        setUiMessage(
+          `Could not open the output workspace: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      return;
+    }
+    if (!isNavigationCurrent(generation)) return;
+
+    const latestDraftConfiguration = isRealBackendMode
+      ? draftDefaultsForWorkspace(
+          projectModelConfigurationRef.current,
+          creationWorkspace.id,
+        )
+      : undefined;
+    const next = draftSessionForWorkspace(
+      creationWorkspace,
+      createId("draft-session"),
+      isRealBackendMode ? "real" : "fake",
+      latestDraftConfiguration,
+    );
+    next.title = `Revise ${detail.title}`.slice(0, 240);
+    const feedback = detail.reviews
+      .filter(
+        (event) => event.revisionId === detail.selectedRevisionId && event.note,
+      )
+      .map((event) => `- ${event.note}`)
+      .join("\n");
+    const revisionPrompt = [
+      `Revise the pinned text deliverable “${detail.title}” (revision ${detail.selectedDisplayNumber}).`,
+      feedback
+        ? `Review feedback:\n${feedback}`
+        : "No review feedback was recorded.",
+      "Return the complete revised deliverable. Preserve anything that does not need to change.",
+      "\n--- PINNED DELIVERABLE START ---",
+      detail.content,
+      "--- PINNED DELIVERABLE END ---",
+    ].join("\n\n");
+
+    setComposerError(null);
+    setSessions((items) =>
+      mergeSessions(
+        [next],
+        items.filter(
+          (item) =>
+            item.draftSession !== true ||
+            hasComposerDraft(composerDrafts, item.id) ||
+            item.workspaceId !== creationWorkspace.id,
+        ),
+      ),
+    );
+    setComposerDrafts((items) =>
+      updateComposerDraft(items, next.id, (current) => ({
+        ...current,
+        text: revisionPrompt,
+      })),
+    );
+    setOutputRevisionTargets((current) => ({
+      ...current,
+      [next.id]: {
+        outputId: detail.outputId,
+        expectedRevisionId: detail.revisionId,
+        title: detail.title,
+        displayNumber: detail.selectedDisplayNumber,
+      },
+    }));
+    showSessionDetail(next.id, origin, generation);
+    setUiMessage(
+      `Created a draft pinned to revision ${detail.selectedDisplayNumber}. Send it, then save the completed response as the next revision.`,
+    );
+  }
+
   function handleSelectCommand(command: SlashCommand): void {
     const inserted = command.insertText ?? `${command.name} `;
     promptHistoryStateRef.current = initialPromptHistoryState();
@@ -7036,164 +7301,179 @@ export function App(): ReactElement {
     }
   }
 
+  const selectedOutputRevisionTarget =
+    outputRevisionTargets[selectedSession.id];
   const composer = (
-    <Composer
-      value={draft}
-      isWorking={isWorking}
-      status={selectedSession.status}
-      canSend={canSend || canSendTask}
-      canSendTask={canSendTask}
-      canIntervene={canIntervene}
-      isPlanningTask={pendingTaskSubmissions[selectedSession.id] !== undefined}
-      knownExtensionCommand={knownExtensionCommand}
-      error={composerError}
-      pendingSubmissionRecovery={pendingComposerRecoveries[selectedSession.id]}
-      attachments={attachments}
-      slashOpen={slashOpen}
-      slashCommands={filteredCommands}
-      selectedModel={selectedModel}
-      backendLabel={backendLabel(selectedSession)}
-      realModels={realModels}
-      realThinkingLevels={availableRealThinkingLevels}
-      selectedSession={selectedSession}
-      allowAttachments={true}
-      multitaskMode={multitaskState?.mode}
-      multitaskTasks={multitaskState?.tasks ?? []}
-      multitaskSettings={multitaskState?.settings ?? {}}
-      multitaskDestination={promptDestination}
-      workerOverrides={promptWorkerOverrides}
-      onSetPromptDestination={(destination) =>
-        setWorkInParentOnce((current) => ({
-          ...current,
-          [selectedSession.id]: destination === "parent",
-        }))
-      }
-      onSetWorkerOverrides={(overrides) =>
-        setWorkerOverrides((current) => ({
-          ...current,
-          [selectedSession.id]: overrides,
-        }))
-      }
-      onUpdateWorkerDefaults={(settings) => {
-        const previousSettings = multitaskState?.settings ?? {};
-        const generation =
-          (workerSettingsGenerationRef.current[selectedSession.id] ?? 0) + 1;
-        workerSettingsGenerationRef.current[selectedSession.id] = generation;
-        setMultitask((current) => ({
-          ...current,
-          [selectedSession.id]: {
-            ...(current[selectedSession.id] ?? {
-              runtimeId: selectedSession.id,
-              mode: "sequential" as const,
-              activeCount: 0,
-              activeLimit: 10,
-              tasks: [],
-            }),
-            settings,
-          },
-        }));
-        if (!selectedSession.runtimeBacked) return;
-        void window.piDeck.multitask
-          .updateSettings({ runtimeId: selectedSession.id, settings })
-          .then((updated) => {
-            if (
-              workerSettingsGenerationRef.current[selectedSession.id] !==
-              generation
-            )
-              return;
-            setMultitask((current) => ({
-              ...current,
-              [selectedSession.id]: {
-                ...(current[selectedSession.id] ?? {
-                  runtimeId: selectedSession.id,
-                  mode: "parallel" as const,
-                  activeCount: 0,
-                  activeLimit: 10,
-                  tasks: [],
-                }),
-                settings: updated,
-              },
-            }));
-          })
-          .catch((error) => {
-            if (
-              workerSettingsGenerationRef.current[selectedSession.id] !==
-              generation
-            )
-              return;
-            setMultitask((current) => ({
-              ...current,
-              [selectedSession.id]: {
-                ...(current[selectedSession.id] ??
-                  initialDraftMultitaskState(selectedSession.id)),
-                settings: previousSettings,
-              },
-            }));
-            setComposerError(
-              `Worker defaults unavailable: ${error instanceof Error ? error.message : String(error)}`,
-            );
-          });
-      }}
-      onToggleMultitask={() => {
-        const mode =
-          multitaskState?.mode === "parallel" ? "sequential" : "parallel";
-        if (selectedSession.draftSession) {
+    <>
+      {selectedOutputRevisionTarget === undefined ? null : (
+        <div className="output-revision-target" role="status">
+          Revising <strong>{selectedOutputRevisionTarget.title}</strong>,
+          revision {selectedOutputRevisionTarget.displayNumber}. The completed
+          response can be saved as its next revision.
+        </div>
+      )}
+      <Composer
+        value={draft}
+        isWorking={isWorking}
+        status={selectedSession.status}
+        canSend={canSend || canSendTask}
+        canSendTask={canSendTask}
+        canIntervene={canIntervene}
+        isPlanningTask={
+          pendingTaskSubmissions[selectedSession.id] !== undefined
+        }
+        knownExtensionCommand={knownExtensionCommand}
+        error={composerError}
+        pendingSubmissionRecovery={
+          pendingComposerRecoveries[selectedSession.id]
+        }
+        attachments={attachments}
+        slashOpen={slashOpen}
+        slashCommands={filteredCommands}
+        selectedModel={selectedModel}
+        backendLabel={backendLabel(selectedSession)}
+        realModels={realModels}
+        realThinkingLevels={availableRealThinkingLevels}
+        selectedSession={selectedSession}
+        allowAttachments={true}
+        multitaskMode={multitaskState?.mode}
+        multitaskTasks={multitaskState?.tasks ?? []}
+        multitaskSettings={multitaskState?.settings ?? {}}
+        multitaskDestination={promptDestination}
+        workerOverrides={promptWorkerOverrides}
+        onSetPromptDestination={(destination) =>
+          setWorkInParentOnce((current) => ({
+            ...current,
+            [selectedSession.id]: destination === "parent",
+          }))
+        }
+        onSetWorkerOverrides={(overrides) =>
+          setWorkerOverrides((current) => ({
+            ...current,
+            [selectedSession.id]: overrides,
+          }))
+        }
+        onUpdateWorkerDefaults={(settings) => {
+          const previousSettings = multitaskState?.settings ?? {};
+          const generation =
+            (workerSettingsGenerationRef.current[selectedSession.id] ?? 0) + 1;
+          workerSettingsGenerationRef.current[selectedSession.id] = generation;
           setMultitask((current) => ({
             ...current,
             [selectedSession.id]: {
-              runtimeId: selectedSession.id,
-              mode,
-              settings: current[selectedSession.id]?.settings ?? {},
-              activeCount: current[selectedSession.id]?.activeCount ?? 0,
-              activeLimit: current[selectedSession.id]?.activeLimit ?? 10,
-              tasks: current[selectedSession.id]?.tasks ?? [],
+              ...(current[selectedSession.id] ?? {
+                runtimeId: selectedSession.id,
+                mode: "sequential" as const,
+                activeCount: 0,
+                activeLimit: 10,
+                tasks: [],
+              }),
+              settings,
             },
           }));
-          return;
-        }
-        if (!selectedSession.runtimeBacked) return;
-        void window.piDeck.multitask
-          .updateMode({ runtimeId: selectedSession.id, mode })
-          .then((state) =>
+          if (!selectedSession.runtimeBacked) return;
+          void window.piDeck.multitask
+            .updateSettings({ runtimeId: selectedSession.id, settings })
+            .then((updated) => {
+              if (
+                workerSettingsGenerationRef.current[selectedSession.id] !==
+                generation
+              )
+                return;
+              setMultitask((current) => ({
+                ...current,
+                [selectedSession.id]: {
+                  ...(current[selectedSession.id] ?? {
+                    runtimeId: selectedSession.id,
+                    mode: "parallel" as const,
+                    activeCount: 0,
+                    activeLimit: 10,
+                    tasks: [],
+                  }),
+                  settings: updated,
+                },
+              }));
+            })
+            .catch((error) => {
+              if (
+                workerSettingsGenerationRef.current[selectedSession.id] !==
+                generation
+              )
+                return;
+              setMultitask((current) => ({
+                ...current,
+                [selectedSession.id]: {
+                  ...(current[selectedSession.id] ??
+                    initialDraftMultitaskState(selectedSession.id)),
+                  settings: previousSettings,
+                },
+              }));
+              setComposerError(
+                `Worker defaults unavailable: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            });
+        }}
+        onToggleMultitask={() => {
+          const mode =
+            multitaskState?.mode === "parallel" ? "sequential" : "parallel";
+          if (selectedSession.draftSession) {
             setMultitask((current) => ({
               ...current,
-              [state.runtimeId]: state,
-            })),
-          )
-          .catch((error) =>
-            setComposerError(
-              `Multitasking mode unavailable: ${error instanceof Error ? error.message : String(error)}`,
-            ),
-          );
-      }}
-      onChange={handleDraftChange}
-      onKeyDown={handleComposerKeyDown}
-      onDismissSlashPicker={handleDismissSlashPicker}
-      onSend={handleSend}
-      onSteer={handleSteer}
-      onFollowUp={handleFollowUp}
-      onRunExtensionCommand={handleRunExtensionCommand}
-      onRecoverPendingSubmission={() =>
-        recoverPendingComposerSubmission(selectedSession.id)
-      }
-      onDiscardPendingSubmission={() =>
-        discardPendingComposerSubmission(selectedSession.id)
-      }
-      onAbort={handleAbort}
-      onPickAttachments={() => void handlePickAttachments()}
-      onImportDroppedFileAttachments={(files) =>
-        void handleImportDroppedFileAttachments(files)
-      }
-      onImportImageAttachments={(files) =>
-        void handleImportImageAttachments(files)
-      }
-      onSetModel={(provider, modelId) =>
-        void handleSetRealModel(provider, modelId)
-      }
-      onSetThinking={(level) => void handleSetRealThinking(level)}
-      onRemoveAttachment={handleRemoveAttachment}
-      onSelectCommand={handleSelectCommand}
-    />
+              [selectedSession.id]: {
+                runtimeId: selectedSession.id,
+                mode,
+                settings: current[selectedSession.id]?.settings ?? {},
+                activeCount: current[selectedSession.id]?.activeCount ?? 0,
+                activeLimit: current[selectedSession.id]?.activeLimit ?? 10,
+                tasks: current[selectedSession.id]?.tasks ?? [],
+              },
+            }));
+            return;
+          }
+          if (!selectedSession.runtimeBacked) return;
+          void window.piDeck.multitask
+            .updateMode({ runtimeId: selectedSession.id, mode })
+            .then((state) =>
+              setMultitask((current) => ({
+                ...current,
+                [state.runtimeId]: state,
+              })),
+            )
+            .catch((error) =>
+              setComposerError(
+                `Multitasking mode unavailable: ${error instanceof Error ? error.message : String(error)}`,
+              ),
+            );
+        }}
+        onChange={handleDraftChange}
+        onKeyDown={handleComposerKeyDown}
+        onDismissSlashPicker={handleDismissSlashPicker}
+        onSend={handleSend}
+        onSteer={handleSteer}
+        onFollowUp={handleFollowUp}
+        onRunExtensionCommand={handleRunExtensionCommand}
+        onRecoverPendingSubmission={() =>
+          recoverPendingComposerSubmission(selectedSession.id)
+        }
+        onDiscardPendingSubmission={() =>
+          discardPendingComposerSubmission(selectedSession.id)
+        }
+        onAbort={handleAbort}
+        onPickAttachments={() => void handlePickAttachments()}
+        onImportDroppedFileAttachments={(files) =>
+          void handleImportDroppedFileAttachments(files)
+        }
+        onImportImageAttachments={(files) =>
+          void handleImportImageAttachments(files)
+        }
+        onSetModel={(provider, modelId) =>
+          void handleSetRealModel(provider, modelId)
+        }
+        onSetThinking={(level) => void handleSetRealThinking(level)}
+        onRemoveAttachment={handleRemoveAttachment}
+        onSelectCommand={handleSelectCommand}
+      />
+    </>
   );
 
   return (
@@ -7213,6 +7493,7 @@ export function App(): ReactElement {
           activityTotalCount={activityTotalCount}
           onSelect={handleSelectSession}
           onOpenActivity={handleToggleActivity}
+          onOpenSavedAnswers={() => showSavedAnswers(currentWorkspace.id)}
           onOpenWorkflows={handleOpenWorkflows}
           onOpenWorkspaceActivity={handleOpenWorkspaceActivity}
           onSelectWorkspace={(workspace) =>
@@ -7259,9 +7540,11 @@ export function App(): ReactElement {
         aria-label={
           primaryView.kind === "workflow"
             ? "Agent Workflows"
-            : primaryView.kind === "work"
-              ? workScopeLabel(primaryView.scope, activityWorkspaceNameById)
-              : "Pi Deck chat workspace"
+            : primaryView.kind === "savedAnswers"
+              ? "Outputs"
+              : primaryView.kind === "work"
+                ? workScopeLabel(primaryView.scope, activityWorkspaceNameById)
+                : "Pi Deck chat workspace"
         }
         data-load-state={loadState.state}
         data-primary-view={primaryView.kind}
@@ -7280,7 +7563,9 @@ export function App(): ReactElement {
               ? workScopeLabel(primaryView.scope, activityWorkspaceNameById)
               : primaryView.kind === "workflow"
                 ? "Agent Workflows"
-                : selectedSession.title
+                : primaryView.kind === "savedAnswers"
+                  ? "Outputs"
+                  : selectedSession.title
           }
           showSessionControls={primaryView.kind === "session"}
           selectedSession={selectedSession}
@@ -7508,6 +7793,35 @@ export function App(): ReactElement {
               ) : null}
             </Suspense>
           </div>
+        ) : primaryView.kind === "savedAnswers" ? (
+          <SavedAnswers
+            workspaceId={primaryView.workspaceId}
+            workspaceName={
+              activityWorkspaceNameById[primaryView.workspaceId] ??
+              "this workspace"
+            }
+            workspaces={workspaces}
+            {...(primaryView.selectedOutputId === undefined
+              ? {}
+              : { selectedOutputId: primaryView.selectedOutputId })}
+            onSelect={(outputId, workspaceId) =>
+              setPrimaryView((current) =>
+                current.kind === "savedAnswers"
+                  ? outputId === undefined
+                    ? (({ selectedOutputId: _selected, ...rest }) => rest)(
+                        current,
+                      )
+                    : {
+                        ...current,
+                        workspaceId: workspaceId ?? current.workspaceId,
+                        selectedOutputId: outputId,
+                      }
+                  : current,
+              )
+            }
+            onRevise={(detail) => void handleReviseOutput(detail)}
+            onBack={() => setPrimaryView(primaryView.origin)}
+          />
         ) : primaryView.kind === "work" ? (
           activityInboxModel === undefined ? null : (
             <ActivityInbox
@@ -7568,6 +7882,7 @@ export function App(): ReactElement {
                     onRespondToExtensionUi={onRespondToChatTimelineExtensionUi}
                     onRetrySession={onRetryChatTimelineSession}
                     onCopyDiagnostics={onCopyChatTimelineDiagnostics}
+                    onSaveAnswer={requestSaveAnswer}
                   />
                   {composer}
                 </>
@@ -7575,6 +7890,22 @@ export function App(): ReactElement {
             </div>
           </div>
         )}
+        {saveAnswerDialog !== undefined ? (
+          <SaveAnswerDialog
+            state={saveAnswerDialog}
+            pending={saveAnswerPending}
+            {...(saveAnswerError === undefined
+              ? {}
+              : { error: saveAnswerError })}
+            onTitleChange={(title) =>
+              setSaveAnswerDialog((current) =>
+                current === undefined ? current : { ...current, title },
+              )
+            }
+            onCancel={cancelSaveAnswer}
+            onSave={() => void saveSelectedAnswer()}
+          />
+        ) : null}
         {workspaceDialog !== undefined ? (
           <WorkspaceManagementDialog
             busy={workspaceDialogBusy}
@@ -9330,7 +9661,17 @@ function timelineFromMessages(messages: ChatMessage[]): TimelineItem[] {
 
     if (message.role === "assistant") {
       return content.trim().length > 0
-        ? [{ id, kind: "assistant", content, createdAt }]
+        ? [
+            {
+              id,
+              kind: "assistant",
+              content,
+              createdAt,
+              ...(message.id?.trim()
+                ? { sourceMessageId: message.id.trim() }
+                : {}),
+            },
+          ]
         : [];
     }
 
@@ -9558,6 +9899,7 @@ function SessionSidebar(props: {
   activityTotalCount: number;
   onSelect(sessionId: string): void;
   onOpenActivity(): void;
+  onOpenSavedAnswers(): void;
   onOpenWorkflows(): void;
   onOpenWorkspaceActivity(workspaceId: string): void;
   onSelectWorkspace(workspace: WorkspaceRef): void;
@@ -9895,6 +10237,19 @@ function SessionSidebar(props: {
             </span>
           </span>
         ) : null}
+      </Button>
+      <Button
+        className={`sidebar-new-chat saved-answers-button ${
+          props.primaryView.kind === "savedAnswers" ? "active" : ""
+        }`}
+        aria-current={
+          props.primaryView.kind === "savedAnswers" ? "page" : undefined
+        }
+        aria-pressed={props.primaryView.kind === "savedAnswers"}
+        onClick={props.onOpenSavedAnswers}
+      >
+        <Archive aria-hidden="true" size={16} strokeWidth={1.75} />
+        Outputs
       </Button>
       <Button
         className={`sidebar-new-chat workflow-inbox-button ${
@@ -11690,6 +12045,101 @@ function StarterPage(props: { composer: ReactElement }): ReactElement {
   );
 }
 
+function SaveAnswerDialog(props: {
+  state: SaveAnswerDialogState;
+  pending: boolean;
+  error?: string;
+  onTitleChange(title: string): void;
+  onCancel(): void;
+  onSave(): void;
+}): ReactElement {
+  const dialogRef = useRef<HTMLDialogElement | null>(null);
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (dialog === null) return;
+    if (typeof dialog.showModal === "function") dialog.showModal();
+    else dialog.setAttribute("open", "");
+    return () => {
+      if (dialog.open && typeof dialog.close === "function") dialog.close();
+    };
+  }, []);
+
+  return (
+    <dialog
+      ref={dialogRef}
+      aria-labelledby="save-answer-title"
+      className="workspace-modal save-answer-dialog"
+      onCancel={(event) => {
+        event.preventDefault();
+        if (!props.pending) props.onCancel();
+      }}
+    >
+      <div className="workspace-modal-header">
+        <div>
+          <p className="saved-answers-eyebrow">Local workspace library</p>
+          <h2 id="save-answer-title">
+            {props.state.target === undefined
+              ? "Save as output"
+              : "Save as next revision"}
+          </h2>
+        </div>
+        <IconButton
+          icon={X}
+          label="Cancel save"
+          disabled={props.pending}
+          onClick={props.onCancel}
+        />
+      </div>
+      <form
+        className="workspace-modal-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          props.onSave();
+        }}
+      >
+        <label>
+          Title
+          <input
+            autoFocus
+            maxLength={240}
+            value={props.state.title}
+            disabled={props.pending || props.state.target !== undefined}
+            onChange={(event) => props.onTitleChange(event.target.value)}
+          />
+        </label>
+        <p className="workspace-modal-note">
+          {props.state.target === undefined
+            ? "Saves this completed assistant response as an exact local text snapshot. It does not call the model again."
+            : "Adds this completed assistant response as the next immutable revision. The previous revision and its review remain available."}
+        </p>
+        <pre className="save-answer-preview">{props.state.assistantText}</pre>
+        {props.error ? (
+          <p className="workspace-modal-warning" role="alert">
+            {props.error}
+          </p>
+        ) : null}
+        <div className="workspace-modal-actions">
+          <Button
+            type="button"
+            disabled={props.pending}
+            onClick={props.onCancel}
+          >
+            Cancel
+          </Button>
+          <Button
+            type="submit"
+            variant="solid"
+            loading={props.pending}
+            disabled={props.state.title.trim().length === 0}
+          >
+            {props.state.target === undefined ? "Save output" : "Save revision"}
+          </Button>
+        </div>
+      </form>
+    </dialog>
+  );
+}
+
 function TranscriptLoading(props: { sessionTitle: string }): ReactElement {
   return (
     <section
@@ -11719,6 +12169,10 @@ const ChatTimeline = memo(function ChatTimeline(props: {
   ): Promise<void>;
   onRetrySession(): void;
   onCopyDiagnostics(): void;
+  onSaveAnswer(
+    item: Extract<TimelineItem, { kind: "assistant" }>,
+    returnFocus: HTMLButtonElement,
+  ): void;
 }): ReactElement {
   const hasItems = props.session.timeline.length > 0;
   const showPendingAgent =
@@ -12308,6 +12762,8 @@ const ChatTimeline = memo(function ChatTimeline(props: {
               <TimelineRow
                 key={item.item.id}
                 item={item.item}
+                canSaveAnswer={props.session.runtimeBacked}
+                onSaveAnswer={props.onSaveAnswer}
                 onDetailsSummaryClick={handleTimelineDetailsSummaryClick}
                 onDetailsToggle={handleTimelineDetailsToggle}
               />
@@ -12996,6 +13452,11 @@ function formatAgentActivityState(state: AgentActivityState): string {
 
 function TimelineRow(props: {
   item: TimelineItem;
+  canSaveAnswer: boolean;
+  onSaveAnswer(
+    item: Extract<TimelineItem, { kind: "assistant" }>,
+    returnFocus: HTMLButtonElement,
+  ): void;
   onDetailsSummaryClick(event: ReactMouseEvent<HTMLElement>): void;
   onDetailsToggle(event: SyntheticEvent<HTMLDetailsElement>): void;
 }): ReactElement {
@@ -13050,6 +13511,7 @@ function TimelineRow(props: {
   }
 
   if (props.item.kind === "assistant") {
+    const assistantItem = props.item;
     return (
       <article className="timeline-row assistant-row">
         <div className="assistant-avatar">π</div>
@@ -13061,7 +13523,20 @@ function TimelineRow(props: {
               aria-label="Assistant is streaming"
             />
           ) : null}
-          <time>{props.item.createdAt}</time>
+          <div className="assistant-message-footer">
+            <time>{props.item.createdAt}</time>
+            {props.item.streaming === true || !props.canSaveAnswer ? null : (
+              <Button
+                className="save-answer-button"
+                size="sm"
+                onClick={(event) =>
+                  props.onSaveAnswer(assistantItem, event.currentTarget)
+                }
+              >
+                Save as output
+              </Button>
+            )}
+          </div>
         </div>
       </article>
     );

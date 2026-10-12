@@ -12,8 +12,8 @@ Pi Deck is a Pi coding-agent GUI that gives Pi a dedicated desktop control plane
 
 ## At a glance
 
-| Organize the work                                                                                                                            | Automate repeatable work                                                                                               | Triage what matters                                                                                                    | Direct the next step                                                                                                                                                       |
-| -------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Organize the work                                                                                                                            | Automate repeatable work                                                                                               | Triage what matters                                                                                                                                        | Direct the next step                                                                                                                                                                |
+| -------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Named workspaces keep related sessions organized independently of folders. [Explore workspaces](#workspaces-projects-and-pi-native-sessions) | Agent Workflows compose Workers, Deciders, Orchestrators, and Human checkpoints. [Explore workflows](#agent-workflows) | **All Work** supervises active and saved work globally, then scopes to the selected workspace. [Explore Work](#all-work-workspace-work-and-session-detail) | Session detail keeps chat, tools, model controls, files, images, and optional Parallel mode in one control plane. [Explore session detail](#multi-session-control-and-multitasking) |
 
 ## What Pi Deck is
@@ -176,6 +176,12 @@ _A deterministic real-mode UI walkthrough driven by production-shaped fake Pi RP
 - Run active-worker extension commands immediately through Pi's prompt path.
 - **Abort** current work and reconcile the resulting runtime state.
 - Retry failed prompts, reopen exited saved sessions, and copy session diagnostics.
+
+### Outputs
+
+Turn a completed assistant response into a durable local text deliverable without another model call. **Outputs** can search titles and verified body text across one or all workspaces, preserve immutable revision history, record notes and Accepted/Changes requested decisions per revision, and start a new revision session with the selected text and feedback already attached. Exact revisions remain available after restart or source-session loss, and damaged packages are hidden instead of displaying unverified content.
+
+This manual text-deliverables MVP is intentionally narrower than the complete Local Output Library planned in #141: it does not automatically publish agent files, enforce required-output policy, support arbitrary multi-file deliverables, or expose private Parallel work.
 
 ### Models, thinking, commands, and usage
 
@@ -383,17 +389,17 @@ npm run deck:real -- --pi /absolute/path/to/pi /absolute/path/to/project
 
 Useful environment overrides:
 
-| Variable                                       | Purpose                                                                                                          |
-| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `PI_DECK_PI_BINARY`                            | Absolute path to the Pi executable                                                                               |
-| `PI_DECK_PROJECT_CWD`                          | Initial project directory                                                                                        |
-| `PI_CODING_AGENT_DIR`                          | Override Pi's agent/configuration directory                                                                      |
-| `PI_CODING_AGENT_SESSION_DIR`                  | Override Pi's session directory                                                                                  |
-| `PI_DECK_HOME`                                 | Override Pi Deck's local metadata directory                                                                      |
-| `PI_DECK_REAL_RPC_TIMEOUT_MS`                  | Override the RPC command-response timeout                                                                        |
+| Variable                                       | Purpose                                                                                                                              |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `PI_DECK_PI_BINARY`                            | Absolute path to the Pi executable                                                                                                   |
+| `PI_DECK_PROJECT_CWD`                          | Initial project directory                                                                                                            |
+| `PI_CODING_AGENT_DIR`                          | Override Pi's agent/configuration directory                                                                                          |
+| `PI_CODING_AGENT_SESSION_DIR`                  | Override Pi's session directory                                                                                                      |
+| `PI_DECK_HOME`                                 | Override Pi Deck's local metadata directory                                                                                          |
+| `PI_DECK_REAL_RPC_TIMEOUT_MS`                  | Override the RPC command-response timeout                                                                                            |
 | `PI_DECK_TASK_PROMPT_RECORD_TIMEOUT_MS`        | Positive integer milliseconds to wait for an active parent to become idle before recording a private task prompt (default: `180000`) |
-| `PI_DECK_SCAN_PROJECT_SESSION_DIR_CANDIDATE=1` | Explicitly include a trust-dependent project `sessionDir` candidate in bounded scanning                          |
-| `PI_DECK_ENABLE_LEGACY_DELEGATE_BRIDGE=1`      | Opt in to the model-visible legacy `deck_delegate` compatibility tool; ordinary Parallel routing does not use it |
+| `PI_DECK_SCAN_PROJECT_SESSION_DIR_CANDIDATE=1` | Explicitly include a trust-dependent project `sessionDir` candidate in bounded scanning                                              |
+| `PI_DECK_ENABLE_LEGACY_DELEGATE_BRIDGE=1`      | Opt in to the model-visible legacy `deck_delegate` compatibility tool; ordinary Parallel routing does not use it                     |
 
 Pi Deck narrowly reads effective `sessionDir`, `images.blockImages`, and `images.autoResize` values needed before worker launch. Other Pi settings and resource behavior remain owned by Pi.
 
