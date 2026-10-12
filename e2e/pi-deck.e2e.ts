@@ -7064,7 +7064,9 @@ test("OpenAI Codex auth repair stays pending across relaunch until an explicit p
       secondLaunch.page.getByText("OpenAI authentication required"),
     ).toBeVisible();
     await expect(
-      secondLaunch.page.getByText("Provided authentication token is expired."),
+      secondLaunch.page
+        .getByText("Provided authentication token is expired.")
+        .first(),
     ).toBeVisible();
 
     const beforeRepair = await secondLaunch.page.evaluate(() =>
@@ -7082,7 +7084,9 @@ test("OpenAI Codex auth repair stays pending across relaunch until an explicit p
       secondLaunch.page.getByRole("button", { name: "Check again / Resume" }),
     ).toBeVisible();
     await expect(
-      secondLaunch.page.getByText("Provided authentication token is expired."),
+      secondLaunch.page
+        .getByText("Provided authentication token is expired.")
+        .first(),
     ).toBeVisible();
     const reopened = await secondLaunch.page.evaluate(
       (file) => window.piDeck.chat.resumeSession({ sessionFile: file }),
@@ -7097,9 +7101,11 @@ test("OpenAI Codex auth repair stays pending across relaunch until an explicit p
       .fill("verify repaired credentials");
     await secondLaunch.page.getByRole("button", { name: "Send" }).click();
     await expect(
-      secondLaunch.page.getByText(
-        "I’ll review the workspace and summarize the next steps.",
-      ),
+      secondLaunch.page
+        .getByLabel("Chat / Agent Timeline")
+        .getByText("I’ll review the workspace and summarize the next steps.", {
+          exact: true,
+        }),
     ).toBeVisible();
     await expect(
       secondLaunch.page.getByText("OpenAI authentication required"),
@@ -7133,9 +7139,11 @@ test("OpenAI Codex auth repair stays pending across relaunch until an explicit p
       .getByRole("button", { name: "Session: keep this durable work" })
       .click();
     await expect(
-      thirdLaunch.page.getByText(
-        "I’ll review the workspace and summarize the next steps.",
-      ),
+      thirdLaunch.page
+        .getByLabel("Chat / Agent Timeline")
+        .getByText("I’ll review the workspace and summarize the next steps.", {
+          exact: true,
+        }),
     ).toBeVisible();
     await expect(
       thirdLaunch.page.getByText("OpenAI authentication required"),
