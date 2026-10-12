@@ -103,6 +103,7 @@ import {
 import {
   loadAttachedSessionRecovery,
   projectAttachedSessionRecovery,
+  reconcileRecoveredInterventionTimeline,
 } from "./attachedSessionRecovery.js";
 import {
   createDraftAfterWorkspaceActivation,
@@ -8060,15 +8061,28 @@ function resumedSessionForCurrentSavedRow(
     resumed.failureKind !== "auth-required" &&
     resumed.authVerified !== true;
   const originalDiagnostic = currentSession.lastError;
+  const reconciledTimeline = reconcileRecoveredInterventionTimeline(
+    resumed.timeline,
+    currentSession.timeline,
+  );
+  const recoveredTimeline = [
+    ...reconciledTimeline.recovered,
+    ...reconciledTimeline.current.filter(
+      (item) =>
+        !reconciledTimeline.recovered.some(
+          (recoveredItem) => recoveredItem.id === item.id,
+        ),
+    ),
+  ];
   const timeline =
     authStillPending &&
     originalDiagnostic !== undefined &&
-    !resumed.timeline.some(
+    !recoveredTimeline.some(
       (item) =>
         item.kind === "diagnostic" && item.content === originalDiagnostic,
     )
       ? [
-          ...resumed.timeline,
+          ...recoveredTimeline,
           {
             id: createId("auth-diagnostic"),
             kind: "diagnostic" as const,
@@ -8077,9 +8091,10 @@ function resumedSessionForCurrentSavedRow(
             createdAt: formatTime(),
           },
         ]
-      : resumed.timeline;
+      : recoveredTimeline;
   return {
     ...resumed,
+    timeline,
     // Pi snapshots carry the generated title. Preserve the latest local
     // display-name override, including a rename that was queued while this
     // saved session was being resumed.
@@ -13466,10 +13481,11 @@ function Composer(props: {
   }
 
   function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>): void {
-    const files = Array.from(event.clipboardData.files);
-    if (files.some(isSupportedDroppedImage)) {
-      props.onImportImageAttachments(files);
-    }
+    importPastedImageAttachments(
+      Array.from(event.clipboardData.files),
+      () => event.preventDefault(),
+      props.onImportImageAttachments,
+    );
   }
 
   return (
@@ -14238,6 +14254,17 @@ function isSupportedDroppedImage(file: File): boolean {
   );
 }
 
+function importPastedImageAttachments(
+  files: readonly File[],
+  preventDefault: () => void,
+  importImages: (files: File[]) => void,
+): void {
+  const imageFiles = files.filter(isSupportedDroppedImage);
+  if (imageFiles.length === 0) return;
+  preventDefault();
+  importImages(imageFiles);
+}
+
 async function readDroppedImageFile(file: File): Promise<{
   fileName: string;
   mimeType: string;
@@ -14509,6 +14536,7 @@ export const __rendererTestHooks = {
     existing: AttachmentDraft[],
     incoming: AttachmentDraft[],
   ) => mergeAttachmentDrafts(existing, incoming).attachments,
+  importPastedImageAttachments,
   isMissingSessionFileError,
   isDetachedRuntimeError,
   isSessionDeletable,

@@ -1,6 +1,6 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { chatSnapshotSchema } from "../shared/ipcSchemas.js";
 import { buildActivityInbox } from "./activityInbox.js";
 import { emptyOverlays, selectSidebarIndicator } from "./sessionState.js";
@@ -59,6 +59,29 @@ it("keeps live sidebar buckets in source order while idle saved rows use recency
       )
       .idleSaved.map((session: any) => session.id),
   ).toEqual(["newer", "older"]);
+});
+
+it("only prevents the default paste when supported images are imported", () => {
+  const textFile = { name: "notes.txt", type: "text/plain" } as File;
+  const imageFile = { name: "capture.png", type: "image/png" } as File;
+  const preventDefault = vi.fn();
+  const importImages = vi.fn();
+
+  __rendererTestHooks.importPastedImageAttachments(
+    [textFile],
+    preventDefault,
+    importImages,
+  );
+  expect(preventDefault).not.toHaveBeenCalled();
+  expect(importImages).not.toHaveBeenCalled();
+
+  __rendererTestHooks.importPastedImageAttachments(
+    [textFile, imageFile],
+    preventDefault,
+    importImages,
+  );
+  expect(preventDefault).toHaveBeenCalledOnce();
+  expect(importImages).toHaveBeenCalledWith([imageFile]);
 });
 
 it("only materializes the Work inbox model while Work is visible", () => {
@@ -2984,6 +3007,54 @@ describe("renderer resume recovery", () => {
       titleOverride: "Queued rename",
       workspaceId: original.workspaceId,
     });
+  });
+
+  it("reconciles an unconfirmed intervention when reopening a saved session", () => {
+    const saved = {
+      ...baseSession(),
+      id: "saved-before-resume",
+      sessionFile: "/sessions/saved.jsonl",
+      runtimeBacked: false,
+      resumeBacked: true,
+      timeline: [
+        {
+          id: "local-steer-1",
+          kind: "intervention",
+          interventionKind: "steer",
+          status: "unconfirmed",
+          content: "Focus the tests",
+          createdAt: "10:00",
+          failureMessage: "Pi disconnected before delivery could be confirmed.",
+        },
+      ],
+    } as any;
+    const resumed = {
+      ...baseSession(),
+      id: "runtime-after-resume",
+      sessionFile: saved.sessionFile,
+      runtimeBacked: true,
+      timeline: [
+        {
+          id: "pi-user-1",
+          kind: "user",
+          content: "Focus the tests",
+          createdAt: "10:01",
+        },
+      ],
+    } as any;
+
+    const result = __rendererTestHooks.resumedSessionForCurrentSavedRow(
+      resumed,
+      saved,
+    );
+    expect(result.timeline).toEqual([
+      expect.objectContaining({
+        id: "local-steer-1",
+        status: "consumed",
+        durableMessageId: "pi-user-1",
+      }),
+    ]);
+    expect(result.timeline[0]).not.toHaveProperty("failureMessage");
   });
 
   it("allows renaming a working saved session without permitting membership changes", () => {

@@ -684,7 +684,7 @@ describe("sessionRuntimeReducer", () => {
       status: "idle",
       overlays: { streaming: false },
       usageStats: { inputTokens: 21, outputTokens: 3, cacheReadTokens: 2 },
-      timeline: [{ id: "steer-aborted", status: "queued" }],
+      timeline: [{ id: "steer-aborted", status: "unconfirmed" }],
     });
   });
 
@@ -725,6 +725,52 @@ describe("sessionRuntimeReducer", () => {
     expect(countOnlyReset.timeline[0]).toMatchObject({ status: "accepted" });
     expect(explicitRemoval.timeline[0]).toMatchObject({ status: "accepted" });
     expect(explicitRemoval.overlays.piQueuedSteeringCount).toBe(0);
+  });
+
+  it("marks queued interventions delivery-unconfirmed and clears queue counts on worker exit", () => {
+    const detached = reduceRuntimeEvent(
+      {
+        ...session(),
+        status: "working",
+        baseState: "working",
+        overlays: {
+          ...emptyOverlays,
+          piQueuedSteeringCount: 1,
+          piQueuedFollowUpCount: 1,
+        },
+        timeline: [
+          markInterventionQueued(
+            createInterventionTimelineItem({
+              id: "steer-1",
+              interventionKind: "steer",
+              content: "Focus the tests",
+              createdAt: "10:00",
+            }),
+          ),
+          markInterventionQueued(
+            createInterventionTimelineItem({
+              id: "follow-up-1",
+              interventionKind: "followUp",
+              content: "Summarize afterward",
+              createdAt: "10:01",
+            }),
+          ),
+        ],
+      },
+      { type: "worker_exit", runtimeId: "runtime-1", code: 1 } as any,
+    );
+
+    expect(detached.overlays).toMatchObject({
+      piQueuedSteeringCount: 0,
+      piQueuedFollowUpCount: 0,
+    });
+    expect(detached.timeline.slice(0, 2)).toMatchObject([
+      { id: "steer-1", status: "unconfirmed" },
+      { id: "follow-up-1", status: "unconfirmed" },
+    ]);
+    expect(detached.timeline[0]).toMatchObject({
+      failureMessage: expect.stringContaining("disconnected"),
+    });
   });
 
   it("uses a durable user message to consume the same intervention item", () => {

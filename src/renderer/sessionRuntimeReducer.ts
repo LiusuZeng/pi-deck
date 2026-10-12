@@ -1,5 +1,6 @@
 import type { AttachmentDraft, ChatRuntimeEvent } from "../shared/types.js";
 import {
+  markInterventionDeliveryUnconfirmed,
   matchDurableInterventionMessages,
   reconcileInterventionQueueEvidence,
   type DurableUserMessageEvidence,
@@ -669,8 +670,20 @@ export function reduceRuntimeEventUnprioritized(
         timelineWithDurableInterventions,
         aborted,
       );
+      // A terminal abort/error can clear Pi's in-memory queues. Without a
+      // durable user turn, neither outcome proves delivery; leave a visible
+      // receipt that a later snapshot can still reconcile.
+      const deliveryTimeline =
+        aborted || endedWithError
+          ? markInterventionsDeliveryUnconfirmed(
+              finalizedTimeline,
+              aborted
+                ? "Pi stopped before delivery could be confirmed. Reopen the saved session to reconcile its transcript."
+                : "Pi ended with an error before delivery could be confirmed. Reopen the saved session to reconcile its transcript.",
+            )
+          : finalizedTimeline;
       const completedTimeline = removeEmptyAssistantMessages(
-        finalizedTimeline.map((item) =>
+        deliveryTimeline.map((item) =>
           item.kind === "assistant" && item.streaming === true
             ? { ...item, streaming: false }
             : item,
@@ -861,7 +874,18 @@ export function reduceRuntimeEventUnprioritized(
       // resumable row rather than presenting a backend failure.
       const detachedSession = clearPendingExtensionUiRequests({
         ...session,
-        timeline: finalizeUnresolvedSubagentActivities(session.timeline, true),
+        // Once the worker is gone, its last queue update is no longer live
+        // evidence. Do not call the instruction failed: Pi may have accepted
+        // it before the transport died, and a resumed transcript can still
+        // prove consumption.
+        timeline: markInterventionsDeliveryUnconfirmed(
+          finalizeUnresolvedSubagentActivities(session.timeline, true),
+        ),
+        overlays: {
+          ...session.overlays,
+          piQueuedSteeringCount: 0,
+          piQueuedFollowUpCount: 0,
+        },
       });
       if (intentional && session.sessionFile !== undefined) {
         const lifecycle =
@@ -1892,6 +1916,17 @@ function reduceMessageUpdate(
 function removeEmptyAssistantMessages(items: TimelineItem[]): TimelineItem[] {
   return items.filter(
     (item) => item.kind !== "assistant" || item.content.trim().length > 0,
+  );
+}
+
+function markInterventionsDeliveryUnconfirmed(
+  timeline: readonly TimelineItem[],
+  message = "Pi disconnected before delivery could be confirmed. Reopen the saved session to reconcile its transcript.",
+): TimelineItem[] {
+  return timeline.map((item) =>
+    item.kind === "intervention"
+      ? markInterventionDeliveryUnconfirmed(item, message)
+      : item,
   );
 }
 

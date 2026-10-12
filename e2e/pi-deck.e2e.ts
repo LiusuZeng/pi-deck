@@ -798,8 +798,10 @@ async function pasteTinyImageAttachment(
   fileName = "draft-image.png",
 ): Promise<void> {
   const base64 = tinyPngBase64();
-  await page.getByLabel("Prompt text").focus();
-  await page.evaluate(
+  const prompt = page.getByLabel("Prompt text");
+  const promptValue = await prompt.inputValue();
+  await prompt.focus();
+  const paste = await page.evaluate(
     ({ base64, fileName }) => {
       const textarea = document.querySelector<HTMLTextAreaElement>(
         'textarea[aria-label="Prompt text"]',
@@ -809,16 +811,35 @@ async function pasteTinyImageAttachment(
       const file = new File([bytes], fileName, { type: "image/png" });
       const dataTransfer = new DataTransfer();
       dataTransfer.items.add(file);
-      textarea.dispatchEvent(
-        new ClipboardEvent("paste", {
-          bubbles: true,
-          cancelable: true,
-          clipboardData: dataTransfer,
-        }),
-      );
+      const pasteEvent = new ClipboardEvent("paste", {
+        bubbles: true,
+        cancelable: true,
+      });
+      // Define the fixture payload directly instead of relying on synthetic
+      // ClipboardEvent initializer or OS clipboard behavior.
+      Object.defineProperty(pasteEvent, "clipboardData", {
+        value: dataTransfer,
+      });
+      const dispatched = textarea.dispatchEvent(pasteEvent);
+      const pastedFile = dataTransfer.files.item(0);
+      return {
+        defaultPrevented: pasteEvent.defaultPrevented,
+        dispatched,
+        fileCount: dataTransfer.files.length,
+        fileName: pastedFile?.name,
+        mimeType: pastedFile?.type,
+      };
     },
     { base64, fileName },
   );
+  expect(paste).toEqual({
+    defaultPrevented: true,
+    dispatched: false,
+    fileCount: 1,
+    fileName,
+    mimeType: "image/png",
+  });
+  await expect(prompt).toHaveValue(promptValue);
   await expect(page.locator(".composer .attachment-chip")).toContainText(
     fileName,
   );
@@ -7064,7 +7085,9 @@ test("OpenAI Codex auth repair stays pending across relaunch until an explicit p
       secondLaunch.page.getByText("OpenAI authentication required"),
     ).toBeVisible();
     await expect(
-      secondLaunch.page.getByText("Provided authentication token is expired."),
+      secondLaunch.page
+        .getByText("Provided authentication token is expired.")
+        .first(),
     ).toBeVisible();
 
     const beforeRepair = await secondLaunch.page.evaluate(() =>
@@ -7082,7 +7105,9 @@ test("OpenAI Codex auth repair stays pending across relaunch until an explicit p
       secondLaunch.page.getByRole("button", { name: "Check again / Resume" }),
     ).toBeVisible();
     await expect(
-      secondLaunch.page.getByText("Provided authentication token is expired."),
+      secondLaunch.page
+        .getByText("Provided authentication token is expired.")
+        .first(),
     ).toBeVisible();
     const reopened = await secondLaunch.page.evaluate(
       (file) => window.piDeck.chat.resumeSession({ sessionFile: file }),
@@ -7097,9 +7122,11 @@ test("OpenAI Codex auth repair stays pending across relaunch until an explicit p
       .fill("verify repaired credentials");
     await secondLaunch.page.getByRole("button", { name: "Send" }).click();
     await expect(
-      secondLaunch.page.getByText(
-        "I’ll review the workspace and summarize the next steps.",
-      ),
+      secondLaunch.page
+        .getByLabel("Chat / Agent Timeline")
+        .getByText("I’ll review the workspace and summarize the next steps.", {
+          exact: true,
+        }),
     ).toBeVisible();
     await expect(
       secondLaunch.page.getByText("OpenAI authentication required"),
@@ -7133,9 +7160,11 @@ test("OpenAI Codex auth repair stays pending across relaunch until an explicit p
       .getByRole("button", { name: "Session: keep this durable work" })
       .click();
     await expect(
-      thirdLaunch.page.getByText(
-        "I’ll review the workspace and summarize the next steps.",
-      ),
+      thirdLaunch.page
+        .getByLabel("Chat / Agent Timeline")
+        .getByText("I’ll review the workspace and summarize the next steps.", {
+          exact: true,
+        }),
     ).toBeVisible();
     await expect(
       thirdLaunch.page.getByText("OpenAI authentication required"),

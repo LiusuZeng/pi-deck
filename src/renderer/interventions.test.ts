@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   createInterventionTimelineItem,
   interventionAccessibleLabel,
+  markInterventionDeliveryUnconfirmed,
   markInterventionFailed,
   markInterventionQueued,
   matchDurableInterventionMessages,
@@ -49,6 +50,47 @@ describe("intervention timeline model", () => {
         steer: ["Focus the tests"],
       })[0]?.status,
     ).toBe("queued");
+  });
+
+  it("keeps a lost connection distinct from a rejected send and reconciles it later", () => {
+    const unconfirmed = markInterventionDeliveryUnconfirmed(
+      markInterventionQueued(intervention("steer-1", "Focus the tests")),
+      "Pi disconnected before delivery could be confirmed.",
+    );
+    expect(interventionAccessibleLabel(unconfirmed)).toBe(
+      "Steering delivery unconfirmed",
+    );
+
+    const requeued = reconcileInterventionQueueEvidence([unconfirmed], {
+      steer: ["Focus the tests"],
+    });
+    expect(requeued[0]).toMatchObject({ status: "queued" });
+    expect(requeued[0]?.failureMessage).toBeUndefined();
+
+    const consumed = matchDurableInterventionMessages({
+      localTimeline: requeued,
+      durableUsers: [
+        { id: "durable-1", content: "Focus the tests", createdAt: "10:01" },
+      ],
+    });
+    expect(consumed.interventions[0]).toMatchObject({
+      status: "consumed",
+      durableMessageId: "durable-1",
+    });
+    expect(consumed.interventions[0]?.failureMessage).toBeUndefined();
+  });
+
+  it("keeps an unconfirmed receipt when late acknowledgement or rejection arrives", () => {
+    const unconfirmed = markInterventionDeliveryUnconfirmed(
+      intervention("steer-1", "Focus the tests"),
+      "Pi disconnected before delivery could be confirmed.",
+    );
+
+    // A worker exit can race both the command response and its rejection.
+    expect(markInterventionQueued(unconfirmed)).toEqual(unconfirmed);
+    expect(
+      markInterventionFailed(unconfirmed, "RPC connection closed"),
+    ).toEqual(unconfirmed);
   });
 
   it("does not infer consumption from queue disappearance", () => {
