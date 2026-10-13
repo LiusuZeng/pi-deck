@@ -51,6 +51,14 @@ import type {
   pickProjectResultSchema,
   projectListResultSchema,
   projectRefSchema,
+  savedAnswerDetailSchema,
+  savedAnswerListRequestSchema,
+  savedAnswerListResultSchema,
+  savedAnswerReadRequestSchema,
+  savedAnswerReviewRequestSchema,
+  savedAnswerRevealRequestSchema,
+  savedAnswerSaveRequestSchema,
+  savedAnswerSummarySchema,
   themePreferenceSchema,
   workspaceAddSessionRequestSchema,
   workspaceArchiveSessionRequestSchema,
@@ -255,6 +263,24 @@ export type WorkspaceSessionMutationResult = z.infer<
 export type WorkspaceUsageRequest = z.infer<typeof workspaceUsageRequestSchema>;
 export type WorkspaceUsageTotals = z.infer<typeof workspaceUsageTotalsSchema>;
 export type WorkspaceUsageResult = z.infer<typeof workspaceUsageResultSchema>;
+export type SavedAnswerSaveRequest = z.infer<
+  typeof savedAnswerSaveRequestSchema
+>;
+export type SavedAnswerListRequest = z.infer<
+  typeof savedAnswerListRequestSchema
+>;
+export type SavedAnswerReadRequest = z.infer<
+  typeof savedAnswerReadRequestSchema
+>;
+export type SavedAnswerReviewRequest = z.infer<
+  typeof savedAnswerReviewRequestSchema
+>;
+export type SavedAnswerRevealRequest = z.infer<
+  typeof savedAnswerRevealRequestSchema
+>;
+export type SavedAnswerSummary = z.infer<typeof savedAnswerSummarySchema>;
+export type SavedAnswerListResult = z.infer<typeof savedAnswerListResultSchema>;
+export type SavedAnswerDetail = z.infer<typeof savedAnswerDetailSchema>;
 export type AttachmentDraft = z.infer<typeof attachmentDraftSchema>;
 export type AttachmentImportDroppedFilesRequest = z.infer<
   typeof attachmentImportDroppedFilesRequestSchema
@@ -426,6 +452,13 @@ export interface PiDeckApi {
     ): Promise<ChatListSessionsResult>;
     getUsage(request: WorkspaceUsageRequest): Promise<WorkspaceUsageResult>;
     listUnassignedSessions(): Promise<ChatListSessionsResult>;
+  };
+  savedAnswers: {
+    save(request: SavedAnswerSaveRequest): Promise<SavedAnswerSummary>;
+    list(request: SavedAnswerListRequest): Promise<SavedAnswerListResult>;
+    read(request: SavedAnswerReadRequest): Promise<SavedAnswerDetail>;
+    review(request: SavedAnswerReviewRequest): Promise<SavedAnswerDetail>;
+    reveal(request: SavedAnswerRevealRequest): Promise<{ revealed: true }>;
   };
   workflows: {
     listWorkflows(

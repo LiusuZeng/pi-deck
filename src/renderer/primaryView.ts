@@ -26,6 +26,12 @@ export type PrimaryView =
       kind: "workflow";
       view: WorkflowSurface;
       origin: WorkOrigin;
+    }
+  | {
+      kind: "savedAnswers";
+      workspaceId: string;
+      selectedOutputId?: string;
+      origin: WorkOrigin;
     };
 
 export function allWorkView(): WorkOrigin {
@@ -55,7 +61,9 @@ export function shouldFallbackToAllWorkAfterArchive(
   const origin =
     view.kind === "work"
       ? view
-      : view.kind === "session" || view.kind === "workflow"
+      : view.kind === "session" ||
+          view.kind === "workflow" ||
+          view.kind === "savedAnswers"
         ? view.origin
         : undefined;
   return (
@@ -83,12 +91,29 @@ export function workflowView(
   return { kind: "workflow", view, origin };
 }
 
+export function savedAnswersView(
+  workspaceId: string,
+  origin: WorkOrigin,
+  selectedOutputId?: string,
+): Extract<PrimaryView, { kind: "savedAnswers" }> {
+  return {
+    kind: "savedAnswers",
+    workspaceId,
+    origin,
+    ...(selectedOutputId === undefined ? {} : { selectedOutputId }),
+  };
+}
+
 export function workOriginForPrimaryView(
   view: PrimaryView,
   fallbackWorkspaceId: string,
 ): WorkOrigin {
   if (view.kind === "work") return view;
-  if (view.kind === "session" || view.kind === "workflow") {
+  if (
+    view.kind === "session" ||
+    view.kind === "workflow" ||
+    view.kind === "savedAnswers"
+  ) {
     return view.origin;
   }
   return workspaceWorkView(fallbackWorkspaceId);
