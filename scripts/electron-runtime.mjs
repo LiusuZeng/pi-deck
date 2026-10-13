@@ -2,6 +2,7 @@ import { constants as fsConstants } from "node:fs";
 import {
   access,
   cp,
+  mkdir,
   readFile,
   readdir,
   rename,
@@ -10,7 +11,9 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
+import os from "node:os";
 import path from "node:path";
 
 export const piDeckApplicationName = "Pi Deck";
@@ -18,7 +21,8 @@ export const piDeckBundleName = `${piDeckApplicationName}.app`;
 export const piDeckBundleIdentifier = "com.pi-deck.desktop";
 
 const require = createRequire(import.meta.url);
-const runtimeIdentitySchemaVersion = 1;
+const runtimeIdentitySchemaVersion = 2;
+const runtimeCacheDirectoryEnvVar = "PI_DECK_ELECTRON_RUNTIME_CACHE_DIR";
 
 export function resolveInstalledElectronExecutable() {
   return require("electron");
@@ -41,10 +45,40 @@ export function findMacOSAppBundle(executablePath) {
   );
 }
 
-function runtimeIdentityMarkerPath(sourceBundle) {
+export function resolvePiDeckElectronRuntimeCacheRoot({
+  env = process.env,
+  homedir = os.homedir,
+} = {}) {
+  const explicitCacheRoot = env[runtimeCacheDirectoryEnvVar]?.trim();
+  if (explicitCacheRoot) {
+    return path.resolve(explicitCacheRoot);
+  }
   return path.join(
-    path.dirname(sourceBundle),
-    ".pi-deck-electron-runtime.json",
+    homedir(),
+    "Library",
+    "Caches",
+    "Pi Deck",
+    "electron-runtime",
+  );
+}
+
+function sourceRuntimeCacheKey(sourceBundle, executableRelativePath) {
+  return createHash("sha256")
+    .update(path.resolve(sourceBundle))
+    .update("\0")
+    .update(executableRelativePath)
+    .digest("hex")
+    .slice(0, 16);
+}
+
+function runtimeIdentityMarkerPath(runtimeDirectory) {
+  return path.join(runtimeDirectory, ".pi-deck-electron-runtime.json");
+}
+
+function cachePreparationError(cacheRoot, runtimeDirectory, error) {
+  return new Error(
+    `Unable to prepare the Pi Deck Electron runtime in cache directory ${runtimeDirectory}. Ensure ${cacheRoot} is writable or set ${runtimeCacheDirectoryEnvVar} to a writable directory.`,
+    { cause: error },
   );
 }
 
@@ -158,6 +192,7 @@ async function preparedRuntimeLooksCurrent(
   sourceExecutable,
   brandedExecutable,
   markerPath,
+  { sourceBundle, executableRelativePath },
 ) {
   try {
     const [sourceStats, brandedStats, markerText] = await Promise.all([
@@ -174,6 +209,8 @@ async function preparedRuntimeLooksCurrent(
       marker.schemaVersion === runtimeIdentitySchemaVersion &&
       marker.applicationName === piDeckApplicationName &&
       marker.bundleIdentifier === piDeckBundleIdentifier &&
+      marker.sourceBundle === path.resolve(sourceBundle) &&
+      marker.executableRelativePath === executableRelativePath &&
       marker.sourceSize === sourceStats.size &&
       marker.sourceMtimeMs === sourceStats.mtimeMs
     );
@@ -210,16 +247,17 @@ export async function cloneElectronBundle(sourceBundle, destinationBundle) {
 /**
  * `app.setName()` only changes Electron's internal application name. macOS
  * takes the Dock/application identity from the running .app bundle, so normal
- * source-run launches use a sibling Pi Deck.app clone with Pi Deck plist
- * metadata. APFS clone-copy keeps the first preparation cheap and the marker
- * makes later launches constant-time until the installed Electron runtime
- * changes.
+ * source-run launches use a cached Pi Deck.app clone with Pi Deck plist
+ * metadata, avoiding writes to the installed Electron directory. APFS clone-copy
+ * keeps the first preparation cheap and the marker makes later launches
+ * constant-time until the installed Electron runtime changes.
  */
 export async function preparePiDeckElectronExecutable({
   platform = process.platform,
   electronExecutable = resolveInstalledElectronExecutable(),
   copyBundle = cloneElectronBundle,
   patchBundleIdentity = patchMacOSBundleIdentity,
+  runtimeCacheRoot = resolvePiDeckElectronRuntimeCacheRoot(),
 } = {}) {
   if (platform !== "darwin") {
     return electronExecutable;
@@ -240,22 +278,34 @@ export async function preparePiDeckElectronExecutable({
     );
   }
 
-  const brandedBundle = path.join(path.dirname(sourceBundle), piDeckBundleName);
+  const cacheRoot = path.resolve(runtimeCacheRoot);
+  const runtimeDirectory = path.join(
+    cacheRoot,
+    `source-${sourceRuntimeCacheKey(sourceBundle, executableRelativePath)}`,
+  );
+  const brandedBundle = path.join(runtimeDirectory, piDeckBundleName);
   const brandedExecutable = path.join(brandedBundle, executableRelativePath);
-  const markerPath = runtimeIdentityMarkerPath(sourceBundle);
+  const markerPath = runtimeIdentityMarkerPath(runtimeDirectory);
 
   if (
     await preparedRuntimeLooksCurrent(
       electronExecutable,
       brandedExecutable,
       markerPath,
+      { sourceBundle, executableRelativePath },
     )
   ) {
     return brandedExecutable;
   }
 
-  await rm(markerPath, { force: true });
   try {
+    await mkdir(runtimeDirectory, { recursive: true });
+  } catch (error) {
+    throw cachePreparationError(cacheRoot, runtimeDirectory, error);
+  }
+
+  try {
+    await rm(markerPath, { force: true });
     await copyBundle(sourceBundle, brandedBundle);
     await patchBundleIdentity(brandedBundle);
 
@@ -267,6 +317,8 @@ export async function preparePiDeckElectronExecutable({
           schemaVersion: runtimeIdentitySchemaVersion,
           applicationName: piDeckApplicationName,
           bundleIdentifier: piDeckBundleIdentifier,
+          sourceBundle: path.resolve(sourceBundle),
+          executableRelativePath,
           sourceSize: sourceStats.size,
           sourceMtimeMs: sourceStats.mtimeMs,
         },
@@ -275,11 +327,11 @@ export async function preparePiDeckElectronExecutable({
       )}\n`,
     );
   } catch (error) {
-    await Promise.all([
+    await Promise.allSettled([
       rm(brandedBundle, { recursive: true, force: true }),
       rm(markerPath, { force: true }),
     ]);
-    throw error;
+    throw cachePreparationError(cacheRoot, runtimeDirectory, error);
   }
 
   if (
@@ -287,6 +339,7 @@ export async function preparePiDeckElectronExecutable({
       electronExecutable,
       brandedExecutable,
       markerPath,
+      { sourceBundle, executableRelativePath },
     ))
   ) {
     throw new Error(
