@@ -159,6 +159,7 @@ import type {
   WorkflowRun,
 } from "../shared/types.js";
 import { DiagnosticsService } from "./diagnostics/diagnostics.js";
+import { acquireMetadataOwnership } from "./metadataOwnership.js";
 import { ForkCleanupJournal } from "./forkCleanupJournal.js";
 import { ExtensionUiRequestRegistry } from "./extensionUiRequestRegistry.js";
 import { registerValidatedIpc } from "./ipc/registerIpc.js";
@@ -363,6 +364,7 @@ let projectStore: ProjectStore | undefined;
 let workspaceStore: WorkspaceStore | undefined;
 let workspaceUsageStore: WorkspaceUsageStore | undefined;
 let forkCleanupJournal: ForkCleanupJournal | undefined;
+let metadataOwnershipRelease: (() => Promise<void>) | undefined;
 let workflowInitialization: WorkflowInitialization<WorkflowStore> | undefined;
 const realChatLaunchConfigCache = new RealChatLaunchConfigCache();
 let loginShellEnvCaptureCache:
@@ -527,7 +529,11 @@ const processStartedAtMs = Date.now();
 const appLifecycle = new QuitLifecycleCoordinator({
   inspectActivity: inspectQuitActivity,
   confirmQuit: showActiveWorkQuitDialog,
-  cleanup: () => closeChatWorker({ shutdownWorkflowRuntimes: true }),
+  cleanup: async () => {
+    await closeChatWorker({ shutdownWorkflowRuntimes: true });
+    await metadataOwnershipRelease?.();
+    metadataOwnershipRelease = undefined;
+  },
   requestFinalQuit: () => app.quit(),
   recordDiagnostic: (message) => {
     diagnostics?.recordError(message);
@@ -603,24 +609,22 @@ async function bootstrap(): Promise<void> {
     updateWindowBackground(mainWindow, nativeTheme);
   });
 
-  const projects = new ProjectStore(
-    resolvePiDeckHome(process.env),
-    diagnosticsService,
-  );
+  const piDeckHome = resolvePiDeckHome(process.env);
+  const metadataOwnership = await acquireMetadataOwnership(piDeckHome);
+  metadataOwnershipRelease = metadataOwnership.release;
+
+  const projects = new ProjectStore(piDeckHome, diagnosticsService);
   projectStore = projects;
   const multitask = new MultitaskStateStore(app.getPath("userData"));
   multitaskStateStore = multitask;
   const taskSessions = new TaskSessionMainStateStore(app.getPath("userData"));
   taskSessionStateStore = taskSessions;
-  const workspacesStore = new WorkspaceStore(
-    resolvePiDeckHome(process.env),
-    diagnosticsService,
-  );
+  const workspacesStore = new WorkspaceStore(piDeckHome, diagnosticsService);
   workspaceStore = workspacesStore;
-  const usageStore = new WorkspaceUsageStore(resolvePiDeckHome(process.env));
+  const usageStore = new WorkspaceUsageStore(piDeckHome);
   workspaceUsageStore = usageStore;
   const failedForkCleanup = new ForkCleanupJournal(
-    resolvePiDeckHome(process.env),
+    piDeckHome,
     diagnosticsService,
   );
   forkCleanupJournal = failedForkCleanup;
@@ -655,10 +659,7 @@ async function bootstrap(): Promise<void> {
 
       if (chatLifecycleStopRequested) return;
       const initializedWorkflows = await initializeWorkflows(async () => {
-        const store = new WorkflowStore(
-          resolvePiDeckHome(process.env),
-          diagnosticsService,
-        );
+        const store = new WorkflowStore(piDeckHome, diagnosticsService);
         await store.loadIfNeeded();
         return store;
       });
@@ -8923,7 +8924,10 @@ bootstrap().catch((error: unknown) => {
     error instanceof Error ? (error.stack ?? error.message) : String(error);
   diagnostics?.recordError(`Fatal startup error: ${message}`);
   console.error(message);
-  app.quit();
+  // Keep the metadata lease held until the normal quit cleanup barrier closes
+  // workers/workflow runtimes and releases ownership. Releasing here would let a
+  // second process acquire PI_DECK_HOME while this failed startup is still alive.
+  void appLifecycle.requestQuit("application", { confirmed: true });
 });
 
 // Subscriptions belong to a specific renderer webContents and retain the
