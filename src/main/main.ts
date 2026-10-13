@@ -173,6 +173,7 @@ import { selectCompletedAssistantAnswer } from "./outputs/savedAnswerSelection.j
 import { ForkCleanupJournal } from "./forkCleanupJournal.js";
 import { ExtensionUiRequestRegistry } from "./extensionUiRequestRegistry.js";
 import { registerValidatedIpc } from "./ipc/registerIpc.js";
+import { coercePreDispatchPromptError } from "./promptDeliveryErrors.js";
 import {
   discoverPiModels,
   discoverPiRuntimeModels,
@@ -1202,17 +1203,15 @@ function registerIpcHandlers(
               activeRuntimeId,
               "sending a prompt to it",
             );
-            await adapter.prompt(
+            const input = await buildPromptInputWithImagePolicy(
+              store,
+              adapter,
               activeRuntimeId,
-              await buildPromptInputWithImagePolicy(
-                store,
-                adapter,
-                activeRuntimeId,
-                text,
-                promptAttachments,
-                attachmentOwnerId,
-              ),
-            );
+              text,
+              promptAttachments,
+              attachmentOwnerId,
+            ).catch(coercePreDispatchPromptError);
+            await adapter.prompt(activeRuntimeId, input);
           }),
       });
       return undefined;

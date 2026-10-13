@@ -86,6 +86,16 @@ describe("IPC schemas", () => {
         },
       }),
     ).toMatchObject({ ok: false });
+    expect(
+      apiResponseSchema(appSettingsSchema).parse({
+        ok: false,
+        error: {
+          code: "INTERNAL_ERROR",
+          message: "RPC command timed out before response: prompt",
+          deliveryStatus: "unknown",
+        },
+      }),
+    ).toMatchObject({ ok: false, error: { deliveryStatus: "unknown" } });
   });
 
   it("validates a compact local-only bootstrap DTO", () => {

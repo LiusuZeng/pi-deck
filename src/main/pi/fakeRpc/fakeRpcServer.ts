@@ -46,6 +46,8 @@ interface FakeOptions {
   exitAfterExtensionUiRequest: boolean;
   stderrOnStart: boolean;
   streamDelayMs: number;
+  /** Delay prompt command success after the user turn is already recorded. */
+  promptResponseDelayMs: number;
   ignoredCommands: Set<string>;
   failedCommands: Set<string>;
   promptScenario: PromptScenario;
@@ -174,6 +176,7 @@ function parseOptions(argv: string[]): FakeOptions {
     exitAfterExtensionUiRequest: false,
     stderrOnStart: false,
     streamDelayMs: 5,
+    promptResponseDelayMs: 0,
     ignoredCommands: new Set<string>(),
     failedCommands: new Set<string>(),
     promptScenario: "basic",
@@ -220,6 +223,9 @@ function parseOptions(argv: string[]): FakeOptions {
       options.stderrOnStart = true;
     } else if (arg === "--stream-delay-ms") {
       options.streamDelayMs = Number(argv[index + 1] ?? "5");
+      index += 1;
+    } else if (arg === "--delay-prompt-response-ms") {
+      options.promptResponseDelayMs = Number(argv[index + 1] ?? "0");
       index += 1;
     } else if (arg === "--ignore-command") {
       options.ignoredCommands.add(argv[index + 1] ?? "");
@@ -1339,7 +1345,7 @@ class FakeRpcServer {
     this.signalReceipt(this.options.promptReceiptSignalFile, "prompt");
     if (recordedTaskPrompt !== undefined) {
       this.promptCounter += 1;
-      this.respond(command.id, "prompt");
+      this.respondPrompt(command.id);
       this.traceFixture("task_session_prompt_recorded");
       return;
     }
@@ -1358,7 +1364,7 @@ class FakeRpcServer {
     const assistantId = `msg_assistant_${this.promptCounter}`;
     this.agentActive = true;
 
-    this.respond(command.id, "prompt");
+    this.respondPrompt(command.id);
     this.write({
       type: "agent_start",
       runId: `run_${this.promptCounter}`,
@@ -2733,6 +2739,20 @@ class FakeRpcServer {
       steering: [...this.steering],
       followUp: [...this.followUp],
     });
+  }
+
+  private respondPrompt(id: string | undefined): void {
+    if (this.options.promptResponseDelayMs > 0) {
+      const timer = setTimeout(() => {
+        this.currentTimers = this.currentTimers.filter(
+          (item) => item !== timer,
+        );
+        this.respond(id, "prompt");
+      }, this.options.promptResponseDelayMs);
+      this.currentTimers.push(timer);
+      return;
+    }
+    this.respond(id, "prompt");
   }
 
   private respond(

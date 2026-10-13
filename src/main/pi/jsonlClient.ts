@@ -248,12 +248,25 @@ interface PendingRequest {
   resolve: (value: JsonValue) => void;
   reject: (reason: Error) => void;
   timer: NodeJS.Timeout;
+  possibleDispatch: boolean;
 }
 
 export interface JsonlRpcClientEvents {
   event: [RpcEventRecord];
   diagnostic: [string];
   close: [{ code: number | null; signal: NodeJS.Signals | null }];
+}
+
+export type JsonlRpcDeliveryStatus = "unknown" | "not-dispatched";
+
+export class JsonlRpcDeliveryError extends Error {
+  readonly deliveryStatus: JsonlRpcDeliveryStatus;
+
+  constructor(message: string, deliveryStatus: JsonlRpcDeliveryStatus) {
+    super(message);
+    this.name = "JsonlRpcDeliveryError";
+    this.deliveryStatus = deliveryStatus;
+  }
 }
 
 export class JsonlRpcError extends Error {
@@ -405,7 +418,12 @@ export class JsonlRpcClient extends EventEmitter {
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`RPC command timed out before response: ${command}`));
+        reject(
+          new JsonlRpcDeliveryError(
+            `RPC command timed out before response: ${command}`,
+            "unknown",
+          ),
+        );
       }, timeoutMs);
 
       this.pending.set(id, {
@@ -414,6 +432,7 @@ export class JsonlRpcClient extends EventEmitter {
         resolve: (value) => resolve(value as T),
         reject,
         timer,
+        possibleDispatch: true,
       });
 
       this.child.stdin!.write(payload, "utf8", (error?: Error | null) => {
@@ -425,8 +444,9 @@ export class JsonlRpcClient extends EventEmitter {
           clearTimeout(pending.timer);
           this.pending.delete(id);
           pending.reject(
-            new Error(
+            new JsonlRpcDeliveryError(
               `Failed to write RPC command ${command}: ${error.message}`,
+              "not-dispatched",
             ),
           );
         }
@@ -590,7 +610,11 @@ export class JsonlRpcClient extends EventEmitter {
   private rejectAll(error: Error): void {
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
-      pending.reject(error);
+      pending.reject(
+        pending.possibleDispatch
+          ? new JsonlRpcDeliveryError(error.message, "unknown")
+          : error,
+      );
     }
     this.pending.clear();
   }

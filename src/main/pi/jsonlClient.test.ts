@@ -5,6 +5,7 @@ import { it as test, vi } from "vitest";
 import { spawnFakeRpc } from "../../test/fakeRpcHarness.js";
 import {
   JsonlRpcClient,
+  JsonlRpcDeliveryError,
   JsonlRpcError,
   type JsonlRpcClientOptions,
   spawnJsonlRpcClient,
@@ -333,14 +334,44 @@ test("JSONL RPC client rejects exact Pi RPC error responses", async () => {
   }
 });
 
-test("JSONL RPC client times out command responses and clears pending request", async () => {
+test("JSONL RPC client times out command responses as unknown delivery and clears pending request", async () => {
   const client = spawnFake(["--ignore-command", "get_state"]);
   try {
     await assert.rejects(
       client.request("get_state", undefined, 20),
-      /timed out/i,
+      (error: unknown) => {
+        assert.ok(error instanceof JsonlRpcDeliveryError);
+        assert.equal(error.deliveryStatus, "unknown");
+        assert.match(error.message, /timed out/i);
+        return true;
+      },
     );
     assert.equal(client.pendingCount, 0);
+  } finally {
+    client.close();
+  }
+});
+
+test("fake RPC can record a prompt and delay its success response past the client timeout", async () => {
+  const client = spawnFake(["--delay-prompt-response-ms", "50"]);
+  const diagnostics: string[] = [];
+  client.on("diagnostic", (message: string) => diagnostics.push(message));
+  try {
+    const started = waitForEvent(
+      client,
+      (event) => event.type === "agent_start",
+    );
+    await assert.rejects(
+      client.request("prompt", { text: "delayed success" }, 10),
+      (error: unknown) => {
+        assert.ok(error instanceof JsonlRpcDeliveryError);
+        assert.equal(error.deliveryStatus, "unknown");
+        return true;
+      },
+    );
+    await started;
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.match(diagnostics.join("\n"), /unknown RPC id/);
   } finally {
     client.close();
   }

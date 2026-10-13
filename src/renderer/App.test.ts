@@ -4273,6 +4273,107 @@ describe("renderer intervention UX", () => {
     expect(inbox.groups.inProgress).toHaveLength(0);
   });
 
+  it("keeps timed out parent prompt delivery unconfirmed instead of failed", () => {
+    const sending = {
+      ...baseSession(),
+      status: "sending",
+      baseState: "attaching",
+      lifecycle: { phase: "active" },
+      overlays: { ...emptyOverlays, streaming: false, toolRunning: false },
+      retryPrompt: { text: "Try this", attachments: [] },
+    } as any;
+    const unconfirmed = __rendererTestHooks.markPromptDeliveryUnconfirmed(
+      sending,
+      "RPC command timed out before response: prompt",
+    );
+    const source = __rendererTestHooks.activitySourceSessions([unconfirmed], {
+      "workspace-a": "Workspace A",
+    })[0]!;
+    const inbox = buildActivityInbox([source]);
+
+    expect(unconfirmed).toMatchObject({
+      status: "idle",
+      baseState: "idle",
+      lifecycle: { phase: "inactive" },
+      overlays: { streaming: false, toolRunning: false },
+      retryPrompt: { text: "Try this", attachments: [] },
+      subtitle: "Delivery unconfirmed · Pi may have received the prompt",
+    });
+    expect(unconfirmed.lastError).toContain("retrying may duplicate work");
+    expect(unconfirmed.timeline.at(-1)).toMatchObject({
+      kind: "diagnostic",
+      tone: "error",
+      content: expect.stringContaining("Prompt delivery unconfirmed"),
+    });
+    expect(__rendererTestHooks.isSessionBusy(unconfirmed)).toBe(false);
+    expect(inbox.groups.inProgress).toHaveLength(0);
+    expect(inbox.groups.failed).toHaveLength(0);
+  });
+
+  it("preserves runtime progress evidence when prompt confirmation times out", () => {
+    const sending = {
+      ...baseSession(),
+      status: "sending",
+      baseState: "attaching",
+      lifecycle: { phase: "active" },
+      overlays: { ...emptyOverlays, streaming: false, toolRunning: false },
+      retryPrompt: { text: "Try this", attachments: [] },
+    } as any;
+    const working = reduceRuntimeEvent(sending, {
+      type: "agent_start",
+      runtimeId: "session-1",
+    } as any) as any;
+
+    const unconfirmed = __rendererTestHooks.markPromptDeliveryUnconfirmed(
+      working,
+      "RPC command timed out before response: prompt",
+    );
+    const source = __rendererTestHooks.activitySourceSessions([unconfirmed], {
+      "workspace-a": "Workspace A",
+    })[0]!;
+    const inbox = buildActivityInbox([source]);
+
+    expect(unconfirmed).toMatchObject({
+      status: "working",
+      baseState: "working",
+      lifecycle: { phase: "active" },
+      overlays: { streaming: true },
+      subtitle: expect.stringContaining("Working"),
+      lastRuntimeEventLabel: "Pi agent started",
+    });
+    expect(unconfirmed.timeline.at(-1)).toMatchObject({
+      kind: "diagnostic",
+      content: expect.stringContaining("Prompt delivery unconfirmed"),
+    });
+    expect(__rendererTestHooks.isSessionBusy(unconfirmed)).toBe(true);
+    expect(inbox.groups.inProgress).toHaveLength(1);
+    expect(inbox.groups.failed).toHaveLength(0);
+  });
+
+  it("does not rewrite an already-terminal turn when prompt delivery becomes unconfirmed", () => {
+    const completed = {
+      ...baseSession(),
+      status: "idle",
+      baseState: "idle",
+      lifecycle: { phase: "terminal", outcome: "completed" },
+      overlays: { ...emptyOverlays, streaming: false, toolRunning: false },
+    } as any;
+    const unconfirmed = __rendererTestHooks.markPromptDeliveryUnconfirmed(
+      completed,
+      "RPC command timed out before response: prompt",
+    );
+
+    expect(unconfirmed).toMatchObject({
+      status: "idle",
+      baseState: "idle",
+      lifecycle: { phase: "terminal", outcome: "completed" },
+    });
+    expect(unconfirmed.timeline.at(-1)).toMatchObject({
+      kind: "diagnostic",
+      content: expect.stringContaining("Prompt delivery unconfirmed"),
+    });
+  });
+
   it("identifies only known extension commands as unavailable for queues", () => {
     const commands = [
       { name: "/deploy", description: "Deploy", source: "extension" },

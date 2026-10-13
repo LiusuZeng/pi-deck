@@ -170,8 +170,13 @@ async function invokeValidated<TRequest, TResponse>(options: {
   const response = apiResponseSchema(options.responseSchema).parse(rawResponse);
 
   if (!response.ok) {
-    const error = new Error(response.error.message);
+    const error = new Error(response.error.message) as Error & {
+      deliveryStatus?: "unknown";
+    };
     error.name = response.error.code;
+    if (response.error.deliveryStatus === "unknown") {
+      error.deliveryStatus = "unknown";
+    }
     throw error;
   }
 
