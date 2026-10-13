@@ -70,6 +70,43 @@ describe("preload PiDeck API validation", () => {
     expect(electronMock.ipcRenderer.off).toHaveBeenCalledOnce();
   });
 
+  it("exposes strict Saved answers IPC without renderer paths", async () => {
+    const request = {
+      requestId: "00000000-0000-4000-8000-000000000001",
+      runtimeId: "runtime-1",
+      assistantText: "Useful answer",
+      title: "Saved answer",
+    };
+    electronMock.ipcRenderer.invoke.mockResolvedValue({
+      ok: true,
+      data: {
+        outputId: "00000000-0000-4000-8000-000000000002",
+        revisionId: "00000000-0000-4000-8000-000000000003",
+        workspaceId: "00000000-0000-4000-8000-000000000004",
+        title: request.title,
+        createdAtMs: 1,
+        updatedAtMs: 1,
+        displayNumber: 1,
+        revisionCount: 1,
+        reviewState: "unreviewed",
+        size: request.assistantText.length,
+        origin: "manual-save",
+      },
+    });
+
+    await api.savedAnswers.save(request);
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenCalledWith(
+      "savedAnswers:save",
+      request,
+    );
+    expect(() =>
+      api.savedAnswers.save({
+        ...request,
+        sourcePath: "/tmp/untrusted.md",
+      } as never),
+    ).toThrow();
+  });
+
   it("rejects invalid attachment picker requests before invoking IPC", () => {
     expect(() =>
       api.attachments.pickFiles({
