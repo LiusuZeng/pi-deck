@@ -776,33 +776,6 @@ function activityInboxModelForPrimaryView(
   return primaryView.kind === "work" ? buildActivityInbox(sources) : undefined;
 }
 
-function visibleSessionIdForPrimaryView(
-  primaryView: PrimaryView,
-  selectedSessionId: string,
-): string {
-  return primaryView.kind === "session"
-    ? primaryView.sessionId
-    : selectedSessionId;
-}
-
-function selectedSessionForPrimaryView(
-  sessions: readonly SessionViewModel[],
-  selectedSessionId: string,
-  primaryView: PrimaryView,
-  fallback: SessionViewModel,
-): SessionViewModel {
-  const routeSessionId = visibleSessionIdForPrimaryView(
-    primaryView,
-    selectedSessionId,
-  );
-  return (
-    sessions.find((session) => session.id === routeSessionId) ??
-    sessions.find((session) => session.id === selectedSessionId) ??
-    sessions[0] ??
-    fallback
-  );
-}
-
 function useStableEvent<TArguments extends unknown[], TResult>(
   callback: (...args: TArguments) => TResult,
 ): (...args: TArguments) => TResult {
@@ -2943,13 +2916,10 @@ export function App(): ReactElement {
     }
   }, [composerDrafts, sessions]);
 
-  const selectedSession = selectedSessionForPrimaryView(
-    sessions,
-    selectedSessionId,
-    primaryView,
-    loadingSession,
-  );
-  selectedSessionIdRef.current = selectedSession.id;
+  const selectedSession =
+    sessions.find((session) => session.id === selectedSessionId) ??
+    sessions[0] ??
+    loadingSession;
 
   useEffect(() => {
     promptHistoryStateRef.current = initialPromptHistoryState();
@@ -15033,8 +15003,6 @@ export const __rendererTestHooks = {
   hasComposerDraft,
   activitySourceSessions,
   activityInboxModelForPrimaryView,
-  selectedSessionForPrimaryView,
-  visibleSessionIdForPrimaryView,
   workspaceUsageRefreshRevision,
   activitySessionForItem,
   sessionForActivityItem,

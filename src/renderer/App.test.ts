@@ -12,41 +12,6 @@ import {
   ComposerDraftPersistence,
 } from "./composerDraftPersistence.js";
 
-it("uses the session route when the cached selected id is stale", () => {
-  const draft = {
-    id: "draft-session",
-    title: "Untitled new session",
-    status: "idle",
-  };
-  const active = {
-    id: "runtime-active",
-    title: "reload retains active work",
-    status: "working",
-    runtimeBacked: true,
-  };
-
-  expect(
-    __rendererTestHooks.selectedSessionForPrimaryView(
-      [draft, active] as any,
-      draft.id,
-      __rendererTestHooks.sessionView(
-        active.id,
-        __rendererTestHooks.allWorkView(),
-      ),
-      draft as any,
-    ).id,
-  ).toBe(active.id);
-  expect(
-    __rendererTestHooks.visibleSessionIdForPrimaryView(
-      __rendererTestHooks.sessionView(
-        active.id,
-        __rendererTestHooks.allWorkView(),
-      ),
-      draft.id,
-    ),
-  ).toBe(active.id);
-});
-
 it("keeps live sidebar buckets in source order while idle saved rows use recency", () => {
   const liveSession = (id: string, updatedAtMs: number) => ({
     id,
