@@ -49,6 +49,15 @@ import {
   pickProjectResultSchema,
   projectListResultSchema,
   projectSelectRequestSchema,
+  savedAnswerDetailSchema,
+  savedAnswerListRequestSchema,
+  savedAnswerListResultSchema,
+  savedAnswerReadRequestSchema,
+  savedAnswerReviewRequestSchema,
+  savedAnswerRevealRequestSchema,
+  savedAnswerRevealResultSchema,
+  savedAnswerSaveRequestSchema,
+  savedAnswerSummarySchema,
   workspaceAddSessionRequestSchema,
   workspaceArchiveSessionRequestSchema,
   workspaceArchiveRequestSchema,
@@ -122,6 +131,11 @@ import type {
   MultitaskSettingsUpdateRequest,
   MultitaskStateEvent,
   PiDeckApi,
+  SavedAnswerListRequest,
+  SavedAnswerReadRequest,
+  SavedAnswerReviewRequest,
+  SavedAnswerRevealRequest,
+  SavedAnswerSaveRequest,
   WorkspaceAddSessionRequest,
   WorkspaceArchiveSessionRequest,
   WorkspaceCreateRequest,
@@ -516,6 +530,38 @@ const api: PiDeckApi = Object.freeze({
         channel: ipcChannels.workspaceListUnassignedSessions,
         request: undefined,
         responseSchema: chatListSessionsResultSchema,
+      }),
+  }),
+  savedAnswers: Object.freeze({
+    save: (request: SavedAnswerSaveRequest) =>
+      invokeValidated({
+        channel: ipcChannels.savedAnswersSave,
+        request: savedAnswerSaveRequestSchema.parse(request),
+        responseSchema: savedAnswerSummarySchema,
+      }),
+    list: (request: SavedAnswerListRequest) =>
+      invokeValidated({
+        channel: ipcChannels.savedAnswersList,
+        request: savedAnswerListRequestSchema.parse(request),
+        responseSchema: savedAnswerListResultSchema,
+      }),
+    read: (request: SavedAnswerReadRequest) =>
+      invokeValidated({
+        channel: ipcChannels.savedAnswersRead,
+        request: savedAnswerReadRequestSchema.parse(request),
+        responseSchema: savedAnswerDetailSchema,
+      }),
+    review: (request: SavedAnswerReviewRequest) =>
+      invokeValidated({
+        channel: ipcChannels.savedAnswersReview,
+        request: savedAnswerReviewRequestSchema.parse(request),
+        responseSchema: savedAnswerDetailSchema,
+      }),
+    reveal: (request: SavedAnswerRevealRequest) =>
+      invokeValidated({
+        channel: ipcChannels.savedAnswersReveal,
+        request: savedAnswerRevealRequestSchema.parse(request),
+        responseSchema: savedAnswerRevealResultSchema,
       }),
   }),
   workflows: Object.freeze({
