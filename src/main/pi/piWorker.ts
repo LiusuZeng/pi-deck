@@ -53,6 +53,7 @@ export class PiWorker {
   private signal: NodeJS.Signals | null | undefined;
   private isClosingIntentionally = false;
   private workerExitEmitted = false;
+  private transportFailureCleanupStarted = false;
   /** Resolves exactly when the child is terminal (or spawn itself failed). */
   private readonly exitPromise: Promise<void>;
   private resolveExit!: () => void;
@@ -110,6 +111,11 @@ export class PiWorker {
     });
     this.client.typedOn("diagnostic", (message) => {
       this.addDiagnostic("warn", message.trimEnd() || "RPC diagnostic");
+    });
+    this.client.typedOn("transportError", (error) => {
+      this.health = "unhealthy";
+      this.addDiagnostic("error", error.message);
+      this.startTransportFailureCleanup();
     });
     this.client.typedOn("close", ({ code, signal }) => {
       this.exitCode = code;
@@ -231,7 +237,9 @@ export class PiWorker {
     // Mark intent before signalling so an immediate exit remains a clean
     // shutdown. Do not use `child.killed` as a lifecycle predicate: it flips
     // after SIGTERM even when the child ignores that signal.
-    this.isClosingIntentionally = true;
+    if (!this.transportFailureCleanupStarted) {
+      this.isClosingIntentionally = true;
+    }
     try {
       child.kill("SIGTERM");
     } catch {
@@ -258,6 +266,36 @@ export class PiWorker {
   /** Backward-compatible lifecycle entry point. */
   closeSession(): Promise<void> {
     return this.closeAndWait();
+  }
+
+  private startTransportFailureCleanup(): void {
+    if (this.transportFailureCleanupStarted) {
+      return;
+    }
+    this.transportFailureCleanupStarted = true;
+    const child = this.client.child;
+    if (child.exitCode !== null || child.signalCode !== null) {
+      return;
+    }
+
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      // Keep ownership until terminal child confirmation arrives.
+    }
+
+    const escalation = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // Keep waiting. A failed kill is not proof that the process exited.
+        }
+      }
+    }, this.killGraceMs);
+    void this.waitForChildExit().finally(() => {
+      clearTimeout(escalation);
+    });
   }
 
   private waitForChildExit(): Promise<void> {
