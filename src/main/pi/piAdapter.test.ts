@@ -46,6 +46,162 @@ function eventTypesFor(events: RuntimeEvent[], runtimeId: string): Set<string> {
   );
 }
 
+async function closeIfPresent(
+  adapter: SinglePiAdapter,
+  runtimeId: string,
+): Promise<void> {
+  if (adapter.hasRuntime(runtimeId)) {
+    await adapter.closeSession(runtimeId);
+  }
+}
+
+test("SinglePiAdapter releases a fatal malformed worker only after cooperative exit", async () => {
+  const adapter = new SinglePiAdapter();
+  const events: RuntimeEvent[] = [];
+  const unsubscribe = adapter.onEvent((event) => events.push(event));
+  const fakeServer = buildFakeRpcServer();
+  const worker = adapter.createWorker({
+    runtimeId: "fatal-cooperative",
+    command: process.execPath,
+    args: [fakeServer, "--malformed-on-start", "--sigterm-exit-delay-ms", "80"],
+    cwd: process.cwd(),
+    env: process.env,
+    requestTimeoutMs: 200,
+    killGraceMs: 500,
+  });
+
+  try {
+    await waitForEvents(events, () =>
+      events.some(
+        (event) =>
+          event.runtimeId === worker.runtimeId &&
+          event.type === "rpc_parse_error",
+      ),
+    );
+    assert.equal(adapter.hasRuntime(worker.runtimeId), true);
+    assert.equal(adapter.workerCount(), 1);
+
+    await waitForEvents(events, () =>
+      events.some(
+        (event) =>
+          event.runtimeId === worker.runtimeId && event.type === "worker_exit",
+      ),
+    );
+
+    assert.equal(adapter.hasRuntime(worker.runtimeId), false);
+    assert.equal(adapter.workerCount(), 0);
+    const exits = events.filter(
+      (event) =>
+        event.runtimeId === worker.runtimeId && event.type === "worker_exit",
+    );
+    assert.equal(exits.length, 1);
+    assert.equal((exits[0] as { intentional?: boolean }).intentional, false);
+  } finally {
+    unsubscribe();
+    await closeIfPresent(adapter, worker.runtimeId);
+  }
+});
+
+test("SinglePiAdapter escalates a SIGTERM-resistant fatal malformed worker", async () => {
+  const adapter = new SinglePiAdapter();
+  const events: RuntimeEvent[] = [];
+  const unsubscribe = adapter.onEvent((event) => events.push(event));
+  const fakeServer = buildFakeRpcServer();
+  const worker = adapter.createWorker({
+    runtimeId: "fatal-resistant",
+    command: process.execPath,
+    args: [fakeServer, "--malformed-on-start", "--ignore-sigterm"],
+    cwd: process.cwd(),
+    env: process.env,
+    requestTimeoutMs: 200,
+    killGraceMs: 50,
+  });
+
+  try {
+    await waitForEvents(events, () =>
+      events.some(
+        (event) =>
+          event.runtimeId === worker.runtimeId &&
+          event.type === "rpc_parse_error",
+      ),
+    );
+    await assert.rejects(
+      adapter.getState(worker.runtimeId),
+      /Malformed JSONL from RPC subprocess/i,
+    );
+    assert.equal(adapter.hasRuntime(worker.runtimeId), true);
+
+    await waitForEvents(events, () =>
+      events.some(
+        (event) =>
+          event.runtimeId === worker.runtimeId && event.type === "worker_exit",
+      ),
+    );
+
+    assert.equal(adapter.workerCount(), 0);
+    const exits = events.filter(
+      (event) =>
+        event.runtimeId === worker.runtimeId && event.type === "worker_exit",
+    );
+    assert.equal(exits.length, 1);
+    assert.equal((exits[0] as { signal?: string }).signal, "SIGKILL");
+    assert.equal((exits[0] as { intentional?: boolean }).intentional, false);
+  } finally {
+    unsubscribe();
+    await closeIfPresent(adapter, worker.runtimeId);
+  }
+});
+
+test("SinglePiAdapter handles repeated malformed output racing explicit close", async () => {
+  const adapter = new SinglePiAdapter();
+  const events: RuntimeEvent[] = [];
+  const unsubscribe = adapter.onEvent((event) => events.push(event));
+  const script = `
+    process.on("SIGTERM", () => {});
+    process.stdout.write("not-json\\nalso-not-json\\n");
+    setInterval(() => {}, 1000);
+  `;
+  const worker = adapter.createWorker({
+    runtimeId: "fatal-repeat-close-race",
+    command: process.execPath,
+    args: ["-e", script],
+    cwd: process.cwd(),
+    env: process.env,
+    requestTimeoutMs: 200,
+    killGraceMs: 50,
+  });
+
+  try {
+    await waitForEvents(events, () =>
+      events.some(
+        (event) =>
+          event.runtimeId === worker.runtimeId &&
+          event.type === "rpc_parse_error",
+      ),
+    );
+    const close = adapter.closeSession(worker.runtimeId);
+    await close;
+
+    assert.equal(adapter.workerCount(), 0);
+    const parseErrors = events.filter(
+      (event) =>
+        event.runtimeId === worker.runtimeId &&
+        event.type === "rpc_parse_error",
+    );
+    assert.equal(parseErrors.length, 2);
+    const exits = events.filter(
+      (event) =>
+        event.runtimeId === worker.runtimeId && event.type === "worker_exit",
+    );
+    assert.equal(exits.length, 1);
+    assert.equal((exits[0] as { signal?: string }).signal, "SIGKILL");
+    assert.equal((exits[0] as { intentional?: boolean }).intentional, false);
+  } finally {
+    unsubscribe();
+    await closeIfPresent(adapter, worker.runtimeId);
+  }
+});
+
 test("SinglePiAdapter routes concurrent worker events by runtime id", async () => {
   const adapter = new SinglePiAdapter();
   const events: RuntimeEvent[] = [];
