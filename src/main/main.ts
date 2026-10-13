@@ -629,7 +629,10 @@ async function bootstrap(): Promise<void> {
   projectStore = projects;
   const multitask = new MultitaskStateStore(app.getPath("userData"));
   multitaskStateStore = multitask;
-  const taskSessions = new TaskSessionMainStateStore(app.getPath("userData"));
+  const taskSessions = new TaskSessionMainStateStore(
+    app.getPath("userData"),
+    diagnosticsService,
+  );
   taskSessionStateStore = taskSessions;
   const workspacesStore = new WorkspaceStore(piDeckHome, diagnosticsService);
   workspaceStore = workspacesStore;
