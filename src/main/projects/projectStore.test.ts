@@ -55,6 +55,163 @@ test("ProjectStore persists active canonical project and avoids duplicate upsert
   assert.equal(listed.projects.length, 1);
 });
 
+test("ProjectStore keeps a failed project upsert out of memory and later saves", async () => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "pi-deck-project-store-upsert-failure-"),
+  );
+  const home = path.join(root, "home");
+  const firstDir = path.join(root, "first");
+  const rejectedDir = path.join(root, "rejected");
+  const laterDir = path.join(root, "later");
+  await fs.mkdir(firstDir, { recursive: true });
+  await fs.mkdir(rejectedDir, { recursive: true });
+  await fs.mkdir(laterDir, { recursive: true });
+  const first = await fs.realpath(firstDir);
+  const rejected = await fs.realpath(rejectedDir);
+  const later = await fs.realpath(laterDir);
+
+  const store = new ProjectStore(home);
+  await store.upsertAndActivateProject(first);
+  const storeFile = path.join(home, "projects.json");
+  const lastGood = await fs.readFile(storeFile, "utf8");
+  const rename = vi.spyOn(fs, "rename");
+  rename.mockRejectedValueOnce(new Error("injected project rename failure"));
+
+  await assert.rejects(
+    store.upsertAndActivateProject(rejected),
+    /injected project rename failure/,
+  );
+  rename.mockRestore();
+  assert.equal(await fs.readFile(storeFile, "utf8"), lastGood);
+  assert.equal((await store.getActiveProject())?.id, first);
+
+  await store.upsertAndActivateProject(later);
+  const persisted = JSON.parse(await fs.readFile(storeFile, "utf8")) as {
+    activeProjectId?: string;
+    projects: Array<{ id: string }>;
+  };
+  assert.equal(persisted.activeProjectId, later);
+  assert.deepEqual(
+    persisted.projects.map((project) => project.id).sort(),
+    [first, later].sort(),
+  );
+  assert.equal(
+    persisted.projects.some((project) => project.id === rejected),
+    false,
+  );
+});
+
+test("ProjectStore keeps failed project selection out of memory and later saves", async () => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "pi-deck-project-store-select-failure-"),
+  );
+  const home = path.join(root, "home");
+  const firstDir = path.join(root, "first");
+  const secondDir = path.join(root, "second");
+  const laterDir = path.join(root, "later");
+  await fs.mkdir(firstDir, { recursive: true });
+  await fs.mkdir(secondDir, { recursive: true });
+  await fs.mkdir(laterDir, { recursive: true });
+  const first = await fs.realpath(firstDir);
+  const second = await fs.realpath(secondDir);
+  const later = await fs.realpath(laterDir);
+
+  const store = new ProjectStore(home);
+  await store.upsertAndActivateProject(first);
+  await store.upsertAndActivateProject(second);
+  const storeFile = path.join(home, "projects.json");
+  const lastGood = await fs.readFile(storeFile, "utf8");
+  const rename = vi.spyOn(fs, "rename");
+  rename.mockRejectedValueOnce(new Error("injected project select failure"));
+
+  await assert.rejects(
+    store.selectProject(first),
+    /injected project select failure/,
+  );
+  rename.mockRestore();
+  assert.equal(await fs.readFile(storeFile, "utf8"), lastGood);
+  assert.equal((await store.getActiveProject())?.id, second);
+
+  await store.upsertAndActivateProject(later);
+  const persisted = JSON.parse(await fs.readFile(storeFile, "utf8")) as {
+    activeProjectId?: string;
+  };
+  assert.equal(persisted.activeProjectId, later);
+});
+
+test("ProjectStore keeps failed session ref mutations out of memory and later saves", async () => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "pi-deck-project-store-session-failure-"),
+  );
+  const home = path.join(root, "home");
+  const projectDir = path.join(root, "project");
+  const rejectedSession = path.join(root, "rejected.jsonl");
+  const keptSession = path.join(root, "kept.jsonl");
+  await fs.mkdir(projectDir, { recursive: true });
+  await fs.writeFile(rejectedSession, "");
+  await fs.writeFile(keptSession, "");
+  const project = await fs.realpath(projectDir);
+  const rejected = await fs.realpath(rejectedSession);
+  const kept = await fs.realpath(keptSession);
+
+  const store = new ProjectStore(home);
+  await store.upsertAndActivateProject(project);
+  const storeFile = path.join(home, "projects.json");
+  const lastGood = await fs.readFile(storeFile, "utf8");
+  const rename = vi.spyOn(fs, "rename");
+  rename.mockRejectedValueOnce(new Error("injected session upsert failure"));
+
+  await assert.rejects(
+    store.upsertSessionRef(project, {
+      id: rejected,
+      sessionFile: rejected,
+      title: "Rejected",
+      updatedAtMs: Date.now(),
+      messageCount: 0,
+    }),
+    /injected session upsert failure/,
+  );
+  rename.mockRestore();
+  assert.equal(await fs.readFile(storeFile, "utf8"), lastGood);
+  assert.equal((await store.getSessionRefs(project)).length, 0);
+
+  await store.upsertSessionRefFromSnapshot({
+    projectId: project,
+    sessionFile: kept,
+    title: "Kept",
+  });
+  let persisted = JSON.parse(await fs.readFile(storeFile, "utf8")) as {
+    sessionRefs: Array<{ sessionFile: string; missingSinceMs?: number }>;
+  };
+  assert.deepEqual(
+    persisted.sessionRefs.map((ref) => ref.sessionFile),
+    [kept],
+  );
+
+  const beforeMissing = await fs.readFile(storeFile, "utf8");
+  const markMissingRename = vi.spyOn(fs, "rename");
+  markMissingRename.mockRejectedValueOnce(
+    new Error("injected mark missing failure"),
+  );
+  await assert.rejects(
+    store.markSessionMissing(project, kept),
+    /injected mark missing failure/,
+  );
+  markMissingRename.mockRestore();
+  assert.equal(await fs.readFile(storeFile, "utf8"), beforeMissing);
+  assert.equal(
+    (await store.getSessionRefs(project))[0]?.missingSinceMs,
+    undefined,
+  );
+
+  await store.upsertAndActivateProject(project);
+  persisted = JSON.parse(await fs.readFile(storeFile, "utf8")) as {
+    sessionRefs: Array<{ sessionFile: string; missingSinceMs?: number }>;
+  };
+  assert.equal(persisted.sessionRefs[0]?.sessionFile, kept);
+  assert.equal(persisted.sessionRefs[0]?.missingSinceMs, undefined);
+});
+
 test("ProjectStore registers symlink roots and session metadata by canonical identity", async () => {
   const root = await fs.mkdtemp(
     path.join(os.tmpdir(), "pi-deck-project-store-identity-"),
