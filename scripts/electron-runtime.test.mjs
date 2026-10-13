@@ -1,5 +1,13 @@
 import { execFile } from "node:child_process";
-import { chmod, cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  cp,
+  mkdir,
+  mkdtemp,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -11,6 +19,7 @@ import {
   piDeckBundleName,
   preparePiDeckElectronExecutable,
   readMacOSPlistString,
+  resolvePiDeckElectronRuntimeCacheRoot,
   resolveInstalledElectronExecutable,
 } from "./electron-runtime.mjs";
 
@@ -41,10 +50,31 @@ describe("Pi Deck Electron runtime", () => {
     ).resolves.toBe("/tmp/electron");
   });
 
-  it("launches macOS from a Pi Deck-named bundle and reuses the prepared runtime", async () => {
+  it("resolves the default macOS runtime cache under the user cache directory", () => {
+    expect(
+      resolvePiDeckElectronRuntimeCacheRoot({
+        env: {},
+        homedir: () => "/Users/example",
+      }),
+    ).toBe("/Users/example/Library/Caches/Pi Deck/electron-runtime");
+  });
+
+  it("allows tests and callers to override the runtime cache directory", () => {
+    expect(
+      resolvePiDeckElectronRuntimeCacheRoot({
+        env: { PI_DECK_ELECTRON_RUNTIME_CACHE_DIR: "relative-cache" },
+        homedir: () => "/Users/example",
+      }),
+    ).toBe(path.resolve("relative-cache"));
+  });
+
+  it("launches macOS from a cached Pi Deck-named bundle and reuses the prepared runtime", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "pi-deck-electron-"));
     try {
-      const { bundle, executable } = await writeFakeElectronBundle(root);
+      const sourceRoot = path.join(root, "source");
+      const cacheRoot = path.join(root, "cache");
+      await mkdir(cacheRoot, { recursive: true });
+      const { bundle, executable } = await writeFakeElectronBundle(sourceRoot);
       const copyBundle = vi.fn(async (source, destination) => {
         await cp(source, destination, {
           recursive: true,
@@ -58,33 +88,101 @@ describe("Pi Deck Electron runtime", () => {
         electronExecutable: executable,
         copyBundle,
         patchBundleIdentity,
+        runtimeCacheRoot: cacheRoot,
       });
-      const expected = path.join(
-        root,
-        piDeckBundleName,
-        "Contents",
-        "MacOS",
-        "Electron",
+      const brandedBundle = findMacOSAppBundle(first);
+      const relativeBrandedBundle = path.relative(cacheRoot, brandedBundle);
+      expect(relativeBrandedBundle.startsWith("..")).toBe(false);
+      expect(path.isAbsolute(relativeBrandedBundle)).toBe(false);
+      expect(path.basename(brandedBundle)).toBe(piDeckBundleName);
+      expect(first).toBe(
+        path.join(brandedBundle, "Contents", "MacOS", "Electron"),
       );
-      expect(first).toBe(expected);
       expect(copyBundle).toHaveBeenCalledTimes(1);
-      expect(copyBundle).toHaveBeenCalledWith(
-        bundle,
-        path.join(root, piDeckBundleName),
-      );
-      expect(patchBundleIdentity).toHaveBeenCalledWith(
-        path.join(root, piDeckBundleName),
-      );
+      expect(copyBundle).toHaveBeenCalledWith(bundle, brandedBundle);
+      expect(patchBundleIdentity).toHaveBeenCalledWith(brandedBundle);
 
       const second = await preparePiDeckElectronExecutable({
         platform: "darwin",
         electronExecutable: executable,
         copyBundle,
         patchBundleIdentity,
+        runtimeCacheRoot: cacheRoot,
       });
-      expect(second).toBe(expected);
+      expect(second).toBe(first);
       expect(copyBundle).toHaveBeenCalledTimes(1);
       expect(patchBundleIdentity).toHaveBeenCalledTimes(1);
+
+      await writeFile(executable, "fake-electron-updated");
+      await chmod(executable, 0o755);
+      const third = await preparePiDeckElectronExecutable({
+        platform: "darwin",
+        electronExecutable: executable,
+        copyBundle,
+        patchBundleIdentity,
+        runtimeCacheRoot: cacheRoot,
+      });
+      expect(third).toBe(first);
+      expect(copyBundle).toHaveBeenCalledTimes(2);
+      expect(patchBundleIdentity).toHaveBeenCalledTimes(2);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("prepares the runtime from a read-only source installation", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "pi-deck-electron-"));
+    const sourceRoot = path.join(root, "readonly-source");
+    try {
+      const cacheRoot = path.join(root, "cache");
+      await mkdir(cacheRoot, { recursive: true });
+      const { bundle, executable } = await writeFakeElectronBundle(sourceRoot);
+      await chmod(sourceRoot, 0o555);
+
+      const brandedExecutable = await preparePiDeckElectronExecutable({
+        platform: "darwin",
+        electronExecutable: executable,
+        runtimeCacheRoot: cacheRoot,
+        patchBundleIdentity: async () => undefined,
+      });
+      const brandedBundle = findMacOSAppBundle(brandedExecutable);
+
+      expect(path.relative(cacheRoot, brandedBundle).startsWith("..")).toBe(
+        false,
+      );
+      await expect(
+        access(path.join(path.dirname(bundle), piDeckBundleName)),
+      ).rejects.toThrow();
+      await expect(
+        access(
+          path.join(path.dirname(bundle), ".pi-deck-electron-runtime.json"),
+        ),
+      ).rejects.toThrow();
+    } finally {
+      await chmod(sourceRoot, 0o755).catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports an actionable error when the runtime cache is unavailable", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "pi-deck-electron-"));
+    try {
+      const { executable } = await writeFakeElectronBundle(
+        path.join(root, "source"),
+      );
+      const unavailableCacheRoot = path.join(root, "cache-file");
+      await writeFile(unavailableCacheRoot, "not a directory");
+
+      await expect(
+        preparePiDeckElectronExecutable({
+          platform: "darwin",
+          electronExecutable: executable,
+          runtimeCacheRoot: unavailableCacheRoot,
+          patchBundleIdentity: async () => undefined,
+        }),
+      ).rejects.toThrow(
+        /Unable to prepare the Pi Deck Electron runtime.*PI_DECK_ELECTRON_RUNTIME_CACHE_DIR/,
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -94,25 +192,20 @@ describe("Pi Deck Electron runtime", () => {
     "rebrands the installed Electron bundle with OS-visible Pi Deck identity",
     async () => {
       const electronExecutable = resolveInstalledElectronExecutable();
-      const sourceBundle = findMacOSAppBundle(electronExecutable);
-      const brandedBundle = path.join(
-        path.dirname(sourceBundle),
-        piDeckBundleName,
-      );
-      const markerPath = path.join(
-        path.dirname(sourceBundle),
-        ".pi-deck-electron-runtime.json",
+      const cacheRoot = await mkdtemp(
+        path.join(os.tmpdir(), "pi-deck-electron-cache-"),
       );
 
-      await Promise.all([
-        rm(brandedBundle, { recursive: true, force: true }),
-        rm(markerPath, { force: true }),
-      ]);
       try {
         const brandedExecutable = await preparePiDeckElectronExecutable({
           electronExecutable,
+          runtimeCacheRoot: cacheRoot,
         });
-        expect(findMacOSAppBundle(brandedExecutable)).toBe(brandedBundle);
+        const brandedBundle = findMacOSAppBundle(brandedExecutable);
+        expect(path.relative(cacheRoot, brandedBundle).startsWith("..")).toBe(
+          false,
+        );
+        expect(path.basename(brandedBundle)).toBe(piDeckBundleName);
 
         const infoPlist = path.join(brandedBundle, "Contents", "Info.plist");
         await expect(
@@ -130,10 +223,7 @@ describe("Pi Deck Electron runtime", () => {
         ]);
         expect(stdout.trim()).toMatch(/^v?\d+\.\d+\.\d+/);
       } finally {
-        await Promise.all([
-          rm(brandedBundle, { recursive: true, force: true }),
-          rm(markerPath, { force: true }),
-        ]);
+        await rm(cacheRoot, { recursive: true, force: true });
       }
     },
     30_000,
