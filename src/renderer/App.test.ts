@@ -280,6 +280,30 @@ it("keeps timeline scroll ownership exclusive across directional reader intent",
   ).toBe("bottom");
 });
 
+it("updates timeline scroll direction from actual scroll movement", () => {
+  expect(
+    __rendererTestHooks.timelineScrollDirectionAfterScroll({
+      previousScrollTop: 120,
+      currentScrollTop: 20,
+      currentDirection: "toward-end",
+    }),
+  ).toBe("away-from-end");
+  expect(
+    __rendererTestHooks.timelineScrollDirectionAfterScroll({
+      previousScrollTop: 20,
+      currentScrollTop: 120,
+      currentDirection: "away-from-end",
+    }),
+  ).toBe("toward-end");
+  expect(
+    __rendererTestHooks.timelineScrollDirectionAfterScroll({
+      previousScrollTop: 40,
+      currentScrollTop: 40,
+      currentDirection: "away-from-end",
+    }),
+  ).toBe("away-from-end");
+});
+
 it("maps timeline scroll keys to their navigation direction", () => {
   expect(
     __rendererTestHooks.timelineScrollDirectionForKey("ArrowUp", false),
