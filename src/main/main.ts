@@ -72,6 +72,15 @@ import {
   pickProjectResultSchema,
   projectListResultSchema,
   projectSelectRequestSchema,
+  savedAnswerDetailSchema,
+  savedAnswerListRequestSchema,
+  savedAnswerListResultSchema,
+  savedAnswerReadRequestSchema,
+  savedAnswerReviewRequestSchema,
+  savedAnswerRevealRequestSchema,
+  savedAnswerRevealResultSchema,
+  savedAnswerSaveRequestSchema,
+  savedAnswerSummarySchema,
   workspaceAddSessionRequestSchema,
   workspaceArchiveSessionRequestSchema,
   workspaceArchiveRequestSchema,
@@ -160,6 +169,8 @@ import type {
 } from "../shared/types.js";
 import { DiagnosticsService } from "./diagnostics/diagnostics.js";
 import { acquireMetadataOwnership } from "./metadataOwnership.js";
+import { SavedAnswerService } from "./outputs/savedAnswerService.js";
+import { selectCompletedAssistantAnswer } from "./outputs/savedAnswerSelection.js";
 import { ForkCleanupJournal } from "./forkCleanupJournal.js";
 import { ExtensionUiRequestRegistry } from "./extensionUiRequestRegistry.js";
 import { registerValidatedIpc } from "./ipc/registerIpc.js";
@@ -363,6 +374,7 @@ let settingsStore: SettingsStore | undefined;
 let projectStore: ProjectStore | undefined;
 let workspaceStore: WorkspaceStore | undefined;
 let workspaceUsageStore: WorkspaceUsageStore | undefined;
+let savedAnswerService: SavedAnswerService | undefined;
 let forkCleanupJournal: ForkCleanupJournal | undefined;
 let metadataOwnershipRelease: (() => Promise<void>) | undefined;
 let workflowInitialization: WorkflowInitialization<WorkflowStore> | undefined;
@@ -623,6 +635,7 @@ async function bootstrap(): Promise<void> {
   workspaceStore = workspacesStore;
   const usageStore = new WorkspaceUsageStore(piDeckHome);
   workspaceUsageStore = usageStore;
+  savedAnswerService = new SavedAnswerService(piDeckHome);
   const failedForkCleanup = new ForkCleanupJournal(
     piDeckHome,
     diagnosticsService,
@@ -1741,6 +1754,107 @@ function registerIpcHandlers(
   });
 
   registerValidatedIpc({
+    channel: ipcChannels.savedAnswersSave,
+    requestSchema: savedAnswerSaveRequestSchema,
+    responseSchema: savedAnswerSummarySchema,
+    diagnostics: diagnosticsService,
+    handler: async ({
+      requestId,
+      runtimeId,
+      assistantText,
+      assistantMessageId,
+      title,
+      target,
+    }) => {
+      const snapshot = await getChatSnapshot(
+        store,
+        diagnosticsService,
+        runtimeId,
+      );
+      const selectedContent = selectCompletedAssistantAnswer({
+        isAgentActive: snapshot.state.isAgentActive === true,
+        messages: snapshot.messages,
+        assistantText,
+        ...(assistantMessageId === undefined ? {} : { assistantMessageId }),
+      });
+      const workspaceId = chatRuntimeWorkspaceIds.get(runtimeId);
+      if (
+        workspaceId === undefined ||
+        (snapshot.workspaceId !== undefined &&
+          snapshot.workspaceId !== workspaceId)
+      ) {
+        throw new Error("Chat runtime has no valid workspace ownership.");
+      }
+      await requireOpenWorkspace(workspaceId);
+      return ensureSavedAnswerService().save({
+        requestId,
+        workspaceId,
+        source: { kind: "normal-parent", runtimeId },
+        title,
+        content: selectedContent,
+        ...(target === undefined ? {} : { target }),
+      });
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.savedAnswersList,
+    requestSchema: savedAnswerListRequestSchema,
+    responseSchema: savedAnswerListResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ workspaceId, query }) => {
+      if (workspaceId !== undefined) await requireOpenWorkspace(workspaceId);
+      const listed = await ensureWorkspaceStore().list();
+      const workspaceIds =
+        workspaceId === undefined
+          ? listed.workspaces.map((workspace) => workspace.id)
+          : [workspaceId];
+      return ensureSavedAnswerService().list({
+        workspaceIds,
+        ...(query === undefined ? {} : { query }),
+      });
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.savedAnswersRead,
+    requestSchema: savedAnswerReadRequestSchema,
+    responseSchema: savedAnswerDetailSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ workspaceId, outputId, revisionId }) => {
+      await requireOpenWorkspace(workspaceId);
+      return ensureSavedAnswerService().read(workspaceId, outputId, revisionId);
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.savedAnswersReview,
+    requestSchema: savedAnswerReviewRequestSchema,
+    responseSchema: savedAnswerDetailSchema,
+    diagnostics: diagnosticsService,
+    handler: async (request) => {
+      await requireOpenWorkspace(request.workspaceId);
+      return ensureSavedAnswerService().review(request);
+    },
+  });
+
+  registerValidatedIpc({
+    channel: ipcChannels.savedAnswersReveal,
+    requestSchema: savedAnswerRevealRequestSchema,
+    responseSchema: savedAnswerRevealResultSchema,
+    diagnostics: diagnosticsService,
+    handler: async ({ workspaceId, outputId }) => {
+      await requireOpenWorkspace(workspaceId);
+      const directory = await ensureSavedAnswerService().reveal(
+        workspaceId,
+        outputId,
+      );
+      shell.showItemInFolder(path.join(directory, "output.json"));
+      return { revealed: true as const };
+    },
+  });
+
+  registerValidatedIpc({
     channel: ipcChannels.workflowListWorkflows,
     requestSchema: workflowListRequestSchema,
     responseSchema: workflowScopedDefinitionSchema.array(),
@@ -2295,6 +2409,13 @@ function ensureWorkspaceUsageStore(): WorkspaceUsageStore {
     throw new Error("Workspace usage store is not initialized");
   }
   return workspaceUsageStore;
+}
+
+function ensureSavedAnswerService(): SavedAnswerService {
+  if (savedAnswerService === undefined) {
+    throw new Error("Saved answers storage is not initialized");
+  }
+  return savedAnswerService;
 }
 
 function ensureForkCleanupJournal(): ForkCleanupJournal {

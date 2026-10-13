@@ -798,6 +798,125 @@ export const workspaceSessionMutationResultSchema = z
   })
   .strict();
 
+const savedAnswerIdSchema = z.string().uuid();
+
+export const savedAnswerSaveRequestSchema = z
+  .object({
+    requestId: savedAnswerIdSchema,
+    runtimeId: z.string().min(1).max(256),
+    assistantText: z
+      .string()
+      .min(1)
+      .max(2 * 1024 * 1024),
+    assistantMessageId: z.string().min(1).max(512).optional(),
+    title: z.string().trim().min(1).max(240),
+    target: z
+      .object({
+        outputId: savedAnswerIdSchema,
+        expectedRevisionId: savedAnswerIdSchema,
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+export const savedAnswerListRequestSchema = z
+  .object({
+    workspaceId: savedAnswerIdSchema.optional(),
+    query: z.string().max(500).optional(),
+  })
+  .strict();
+
+export const savedAnswerReadRequestSchema = z
+  .object({
+    workspaceId: savedAnswerIdSchema,
+    outputId: savedAnswerIdSchema,
+    revisionId: savedAnswerIdSchema.optional(),
+  })
+  .strict();
+
+export const savedAnswerReviewRequestSchema = z
+  .object({
+    workspaceId: savedAnswerIdSchema,
+    outputId: savedAnswerIdSchema,
+    revisionId: savedAnswerIdSchema,
+    action: z.enum(["note", "changes-requested", "accepted", "reopened"]),
+    note: z.string().max(4_000).optional(),
+  })
+  .strict();
+
+export const savedAnswerRevealRequestSchema = z
+  .object({
+    workspaceId: savedAnswerIdSchema,
+    outputId: savedAnswerIdSchema,
+  })
+  .strict();
+
+export const savedAnswerSummarySchema = z
+  .object({
+    outputId: savedAnswerIdSchema,
+    revisionId: savedAnswerIdSchema,
+    workspaceId: savedAnswerIdSchema,
+    title: z.string().min(1).max(240),
+    createdAtMs: z.number().int().nonnegative(),
+    updatedAtMs: z.number().int().nonnegative(),
+    displayNumber: z.number().int().positive(),
+    revisionCount: z.number().int().positive(),
+    reviewState: z.enum(["unreviewed", "changes-requested", "accepted"]),
+    size: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(2 * 1024 * 1024),
+    origin: z.literal("manual-save"),
+  })
+  .strict();
+
+export const savedAnswerListResultSchema = z
+  .object({
+    items: z.array(savedAnswerSummarySchema),
+    warnings: z.array(z.string().max(2_048)).max(100),
+  })
+  .strict();
+
+export const savedAnswerRevisionSummarySchema = z
+  .object({
+    revisionId: savedAnswerIdSchema,
+    displayNumber: z.number().int().positive(),
+    createdAtMs: z.number().int().nonnegative(),
+    size: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(2 * 1024 * 1024),
+    integrity: z.enum(["available", "damaged"]),
+    reviewState: z.enum(["unreviewed", "changes-requested", "accepted"]),
+  })
+  .strict();
+
+export const savedAnswerReviewEventSchema = z
+  .object({
+    revisionId: savedAnswerIdSchema,
+    createdAtMs: z.number().int().nonnegative(),
+    action: z.enum(["note", "changes-requested", "accepted", "reopened"]),
+    note: z.string().max(16_384).optional(),
+  })
+  .strict();
+
+export const savedAnswerDetailSchema = savedAnswerSummarySchema
+  .extend({
+    content: z.string().max(2 * 1024 * 1024),
+    selectedRevisionId: savedAnswerIdSchema,
+    selectedDisplayNumber: z.number().int().positive(),
+    revisions: z.array(savedAnswerRevisionSummarySchema),
+    reviews: z.array(savedAnswerReviewEventSchema),
+  })
+  .strict();
+
+export const savedAnswerRevealResultSchema = z
+  .object({ revealed: z.literal(true) })
+  .strict();
+
 // Startup projection intentionally excludes runtime state and messages. It is
 // assembled solely from local app/project metadata so rendering it can never
 // create a Pi worker or trigger a session-repository scan.
@@ -1080,6 +1199,11 @@ export const ipcChannels = {
   workspaceListSessions: "workspaces:listSessions",
   workspaceGetUsage: "workspaces:getUsage",
   workspaceListUnassignedSessions: "workspaces:listUnassignedSessions",
+  savedAnswersSave: "savedAnswers:save",
+  savedAnswersList: "savedAnswers:list",
+  savedAnswersRead: "savedAnswers:read",
+  savedAnswersReview: "savedAnswers:review",
+  savedAnswersReveal: "savedAnswers:reveal",
   attachmentsPickFiles: "attachments:pickFiles",
   attachmentsImportDroppedFiles: "attachments:importDroppedFiles",
   attachmentsImportImages: "attachments:importImages",

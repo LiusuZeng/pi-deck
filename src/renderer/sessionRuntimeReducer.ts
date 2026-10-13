@@ -113,6 +113,8 @@ export type TimelineItem =
       content: string;
       createdAt: string;
       streaming?: boolean;
+      /** Durable Pi message identity when this row came from get_messages. */
+      sourceMessageId?: string;
     }
   | {
       id: string;
