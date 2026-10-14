@@ -42,6 +42,17 @@ export interface UsageSnapshot {
   recordedAtMs: number;
   sessionFileSize?: number;
   sessionFileMtimeMs?: number;
+  forkParentSession?: string;
+  inheritedInputTokens?: number;
+  inheritedOutputTokens?: number;
+  inheritedCacheReadTokens?: number;
+  inheritedCacheWriteTokens?: number;
+  inheritedTotalTokens?: number;
+  inheritedCostUsd?: number;
+  inheritedContributorsWithCost?: number;
+  inheritedContributorsWithoutCost?: number;
+  inheritedUsageEntryCount?: number;
+  inheritedUsageFingerprint?: string;
 }
 
 export const emptyUsageTotals = (): WorkspaceUsageTotals => ({
@@ -122,6 +133,17 @@ const usageSnapshotSchema = z
     recordedAtMs: z.number().nonnegative(),
     sessionFileSize: z.number().nonnegative().optional(),
     sessionFileMtimeMs: z.number().nonnegative().optional(),
+    forkParentSession: z.string().min(1).optional(),
+    inheritedInputTokens: z.number().nonnegative().optional(),
+    inheritedOutputTokens: z.number().nonnegative().optional(),
+    inheritedCacheReadTokens: z.number().nonnegative().optional(),
+    inheritedCacheWriteTokens: z.number().nonnegative().optional(),
+    inheritedTotalTokens: z.number().nonnegative().optional(),
+    inheritedCostUsd: z.number().nonnegative().optional(),
+    inheritedContributorsWithCost: z.number().int().nonnegative().optional(),
+    inheritedContributorsWithoutCost: z.number().int().nonnegative().optional(),
+    inheritedUsageEntryCount: z.number().int().nonnegative().optional(),
+    inheritedUsageFingerprint: z.string().min(1).optional(),
   })
   .strict();
 
@@ -201,7 +223,14 @@ export class WorkspaceUsageStore {
       options.source === "session" && ownerSessionFile !== undefined
         ? sessionSnapshotId(ownerSessionFile)
         : `${options.source}:${options.sessionKey}`;
-    const snapshot = usageSnapshotFromMessages({
+    await this.loadIfNeeded();
+    const existing = this.state.snapshots.find(
+      (snapshot) => snapshot.id === id,
+    );
+    const existingForkBaseline = hasDurableForkBaseline(existing)
+      ? inheritedTotalsFromSnapshot(existing)
+      : undefined;
+    const snapshot = await usageSnapshotFromMessages({
       id,
       workspaceId: options.workspaceId,
       ...(ownerSessionFile !== undefined ? { ownerSessionFile } : {}),
@@ -209,6 +238,9 @@ export class WorkspaceUsageStore {
       messages: options.messages,
       ...(options.recordedAtMs !== undefined
         ? { recordedAtMs: options.recordedAtMs }
+        : {}),
+      ...(existingForkBaseline !== undefined
+        ? { inheritedBaseline: existingForkBaseline }
         : {}),
     });
     if (snapshot === undefined) return;
@@ -240,25 +272,52 @@ export class WorkspaceUsageStore {
     const existing = this.state.snapshots.find(
       (snapshot) => snapshot.id === id,
     );
+    const forkBaseline = hasDurableForkBaseline(existing)
+      ? inheritedTotalsFromSnapshot(existing)
+      : await resolveForkBaselineForSessionFile(ownerSessionFile);
+    const adjustedUsage = subtractInheritedRuntimeUsage(
+      options.usage,
+      forkBaseline,
+    );
     const hasReportedUsage =
-      options.usage.totalTokens > 0 || options.usage.totalCostUsd !== undefined;
-    const contributorsWithCost =
-      existing?.contributorsWithCost ??
-      (hasReportedUsage && options.usage.totalCostUsd !== undefined ? 1 : 0);
-    const contributorsWithoutCost =
-      existing?.contributorsWithoutCost ??
-      (hasReportedUsage && options.usage.totalCostUsd === undefined ? 1 : 0);
-    const totalCostUsd = options.usage.totalCostUsd ?? existing?.totalCostUsd;
+      adjustedUsage.totalTokens > 0 || adjustedUsage.totalCostUsd !== undefined;
+    const inheritedOnlyRuntime =
+      forkBaseline !== undefined &&
+      adjustedUsage.totalTokens === 0 &&
+      adjustedUsage.totalCostUsd === undefined;
+    const existingHasReportedUsage =
+      existing !== undefined &&
+      (existing.totalTokens > 0 ||
+        existing.totalCostUsd !== undefined ||
+        existing.contributorsWithCost > 0 ||
+        existing.contributorsWithoutCost > 0);
+    const deriveRuntimeContributors =
+      inheritedOnlyRuntime ||
+      existing === undefined ||
+      (forkBaseline !== undefined && !existingHasReportedUsage);
+    const contributorsWithCost = deriveRuntimeContributors
+      ? hasReportedUsage && adjustedUsage.totalCostUsd !== undefined
+        ? 1
+        : 0
+      : existing.contributorsWithCost;
+    const contributorsWithoutCost = deriveRuntimeContributors
+      ? hasReportedUsage && adjustedUsage.totalCostUsd === undefined
+        ? 1
+        : 0
+      : existing.contributorsWithoutCost;
+    const totalCostUsd =
+      adjustedUsage.totalCostUsd ??
+      (inheritedOnlyRuntime ? undefined : existing?.totalCostUsd);
     await this.upsertSnapshot({
       id,
       workspaceId: options.workspaceId,
       ownerSessionFile,
       source: "session",
-      inputTokens: options.usage.inputTokens,
-      outputTokens: options.usage.outputTokens,
-      cacheReadTokens: options.usage.cacheReadTokens,
-      cacheWriteTokens: options.usage.cacheWriteTokens,
-      totalTokens: options.usage.totalTokens,
+      inputTokens: adjustedUsage.inputTokens,
+      outputTokens: adjustedUsage.outputTokens,
+      cacheReadTokens: adjustedUsage.cacheReadTokens,
+      cacheWriteTokens: adjustedUsage.cacheWriteTokens,
+      totalTokens: adjustedUsage.totalTokens,
       ...(totalCostUsd !== undefined ? { totalCostUsd } : {}),
       contributorsWithCost,
       contributorsWithoutCost,
@@ -269,6 +328,7 @@ export class WorkspaceUsageStore {
       ...(existing?.sessionFileMtimeMs !== undefined
         ? { sessionFileMtimeMs: existing.sessionFileMtimeMs }
         : {}),
+      ...forkBaselineSnapshotFields(forkBaseline),
     });
   }
 
@@ -308,9 +368,23 @@ export class WorkspaceUsageStore {
         existing?.sessionFileSize === signature.size &&
         existing.sessionFileMtimeMs === signature.mtimeMs
       ) {
-        return { diagnostics: [], refreshed: false };
+        const forkParentSession =
+          source === "session"
+            ? await sessionFileParentSession(canonicalSessionFile)
+            : undefined;
+        const needsForkRepair =
+          forkParentSession !== undefined &&
+          (existing.forkParentSession === undefined ||
+            existing.inheritedUsageEntryCount === undefined ||
+            existing.inheritedUsageFingerprint === undefined);
+        if (!needsForkRepair) {
+          return { diagnostics: [], refreshed: false };
+        }
       }
 
+      const existingForkBaseline = hasDurableForkBaseline(existing)
+        ? inheritedTotalsFromSnapshot(existing)
+        : undefined;
       const result = await usageSnapshotFromSessionFile({
         id,
         workspaceId: options.workspaceId,
@@ -318,6 +392,9 @@ export class WorkspaceUsageStore {
         source,
         recordedAtMs: Date.now(),
         signature,
+        ...(existingForkBaseline !== undefined
+          ? { inheritedBaseline: existingForkBaseline }
+          : {}),
       });
       if (result.snapshot !== undefined && result.diagnostics.length === 0) {
         await this.upsertSnapshot(result.snapshot);
@@ -540,36 +617,118 @@ function snapshotFromContribution(
   };
 }
 
-function usageSnapshotFromMessages(options: {
+async function usageSnapshotFromMessages(options: {
   id: string;
   workspaceId: string;
   ownerSessionFile?: string;
   source: UsageContributionSource;
   messages: readonly PiMessage[];
   recordedAtMs?: number;
-}): UsageSnapshot | undefined {
-  let totals = emptyUsageTotals();
-  let found = false;
+  inheritedBaseline?: ForkBaseline;
+}): Promise<UsageSnapshot | undefined> {
+  const entries: UsageEntry[] = [];
   for (const message of options.messages) {
-    const usage = extractUsage(message);
-    if (usage === undefined) continue;
-    found = true;
-    totals = {
-      inputTokens: totals.inputTokens + usage.inputTokens,
-      outputTokens: totals.outputTokens + usage.outputTokens,
-      cacheReadTokens: totals.cacheReadTokens + usage.cacheReadTokens,
-      cacheWriteTokens: totals.cacheWriteTokens + usage.cacheWriteTokens,
-      totalTokens: totals.totalTokens + usage.totalTokens,
-      knownCostUsd: totals.knownCostUsd + (usage.totalCostUsd ?? 0),
-      contributorsWithCost:
-        totals.contributorsWithCost +
-        (usage.totalCostUsd === undefined ? 0 : 1),
-      contributorsWithoutCost:
-        totals.contributorsWithoutCost +
-        (usage.totalCostUsd === undefined ? 1 : 0),
-    };
+    const entry = usageEntryFromMessage(message, entries.length);
+    if (entry !== undefined) entries.push(entry);
   }
-  if (!found) return undefined;
+  const inherited =
+    options.inheritedBaseline ??
+    (options.source === "session" && options.ownerSessionFile !== undefined
+      ? await resolveForkBaselineForMessageEntries(
+          options.ownerSessionFile,
+          entries,
+        )
+      : undefined);
+  const adjustedEntries = inherited
+    ? entries.slice(forkBaselineEntryCount(inherited))
+    : entries;
+  if (adjustedEntries.length === 0 && inherited === undefined) return undefined;
+  return snapshotFromUsageEntries({
+    id: options.id,
+    workspaceId: options.workspaceId,
+    ...(options.ownerSessionFile !== undefined
+      ? { ownerSessionFile: options.ownerSessionFile }
+      : {}),
+    source: options.source,
+    entries: adjustedEntries,
+    recordedAtMs: options.recordedAtMs ?? Date.now(),
+    ...(inherited !== undefined ? { inherited } : {}),
+  });
+}
+
+async function usageSnapshotFromSessionFile(options: {
+  id: string;
+  workspaceId: string;
+  sessionFile: string;
+  source: UsageContributionSource;
+  recordedAtMs: number;
+  signature: { size: number; mtimeMs: number };
+  inheritedBaseline?: ForkBaseline;
+}): Promise<{ snapshot?: UsageSnapshot; diagnostics: string[] }> {
+  const scanned = await scanSessionFileUsageDetails(options.sessionFile);
+  if (scanned.diagnostics.length > 0) {
+    return { diagnostics: scanned.diagnostics };
+  }
+  const inherited =
+    options.inheritedBaseline ??
+    (options.source === "session"
+      ? await resolveForkBaselineForScannedEntries(scanned)
+      : undefined);
+  const entries = inherited
+    ? scanned.entries.slice(forkBaselineEntryCount(inherited))
+    : scanned.entries;
+  return {
+    snapshot: snapshotFromUsageEntries({
+      id: options.id,
+      workspaceId: options.workspaceId,
+      ownerSessionFile: scanned.canonicalSessionFile,
+      source: options.source,
+      entries,
+      recordedAtMs: options.recordedAtMs,
+      sessionFileSize: options.signature.size,
+      sessionFileMtimeMs: options.signature.mtimeMs,
+      ...(inherited !== undefined ? { inherited } : {}),
+    }),
+    diagnostics: [],
+  };
+}
+
+interface UsageEntry {
+  usage: ExtractedUsage;
+  signature: string;
+  messageId?: string;
+  lineNumber?: number;
+  timestampMs?: number;
+}
+
+interface ForkBaseline {
+  parentSession: string;
+  entries: UsageEntry[];
+  totals: WorkspaceUsageTotals;
+  entryCount?: number;
+  fingerprint?: string;
+}
+
+interface ScannedSessionUsage {
+  canonicalSessionFile: string;
+  parentSession?: string;
+  forkStartedAtMs?: number;
+  entries: UsageEntry[];
+  diagnostics: string[];
+}
+
+function snapshotFromUsageEntries(options: {
+  id: string;
+  workspaceId: string;
+  ownerSessionFile?: string;
+  source: UsageContributionSource;
+  entries: readonly UsageEntry[];
+  recordedAtMs: number;
+  sessionFileSize?: number;
+  sessionFileMtimeMs?: number;
+  inherited?: ForkBaseline;
+}): UsageSnapshot {
+  const totals = summarizeUsageEntries(options.entries);
   return {
     id: options.id,
     workspaceId: options.workspaceId,
@@ -587,60 +746,246 @@ function usageSnapshotFromMessages(options: {
       : {}),
     contributorsWithCost: totals.contributorsWithCost,
     contributorsWithoutCost: totals.contributorsWithoutCost,
-    recordedAtMs: options.recordedAtMs ?? Date.now(),
+    recordedAtMs: options.recordedAtMs,
+    ...(options.sessionFileSize !== undefined
+      ? { sessionFileSize: options.sessionFileSize }
+      : {}),
+    ...(options.sessionFileMtimeMs !== undefined
+      ? { sessionFileMtimeMs: options.sessionFileMtimeMs }
+      : {}),
+    ...forkBaselineSnapshotFields(options.inherited),
   };
 }
 
-async function usageSnapshotFromSessionFile(options: {
-  id: string;
-  workspaceId: string;
-  sessionFile: string;
-  source: UsageContributionSource;
-  recordedAtMs: number;
-  signature: { size: number; mtimeMs: number };
-}): Promise<{ snapshot?: UsageSnapshot; diagnostics: string[] }> {
-  let totals = emptyUsageTotals();
-  const scanned = await scanSessionFileUsage(options.sessionFile, (usage) => {
-    totals = {
-      inputTokens: totals.inputTokens + usage.inputTokens,
-      outputTokens: totals.outputTokens + usage.outputTokens,
-      cacheReadTokens: totals.cacheReadTokens + usage.cacheReadTokens,
-      cacheWriteTokens: totals.cacheWriteTokens + usage.cacheWriteTokens,
-      totalTokens: totals.totalTokens + usage.totalTokens,
-      knownCostUsd: totals.knownCostUsd + (usage.totalCostUsd ?? 0),
-      contributorsWithCost:
-        totals.contributorsWithCost +
-        (usage.totalCostUsd === undefined ? 0 : 1),
-      contributorsWithoutCost:
-        totals.contributorsWithoutCost +
-        (usage.totalCostUsd === undefined ? 1 : 0),
-    };
-  });
-  if (scanned.diagnostics.length > 0) {
-    return { diagnostics: scanned.diagnostics };
+function summarizeUsageEntries(
+  entries: readonly UsageEntry[],
+): WorkspaceUsageTotals {
+  return entries.reduce(
+    (totals, entry) => addUsageContribution(totals, entry.usage),
+    emptyUsageTotals(),
+  );
+}
+
+async function resolveForkBaselineForMessageEntries(
+  sessionFile: string,
+  childEntries: readonly UsageEntry[],
+): Promise<ForkBaseline | undefined> {
+  const scanned = await scanSessionFileUsageDetails(sessionFile);
+  if (scanned.diagnostics.length > 0 || scanned.parentSession === undefined) {
+    return undefined;
   }
+  return resolveForkBaseline(
+    scanned.parentSession,
+    childEntries,
+    scanned.forkStartedAtMs,
+  );
+}
+
+async function resolveForkBaselineForSessionFile(
+  sessionFile: string,
+): Promise<ForkBaseline | undefined> {
+  const scanned = await scanSessionFileUsageDetails(sessionFile);
+  if (scanned.diagnostics.length > 0) return undefined;
+  return resolveForkBaselineForScannedEntries(scanned);
+}
+
+async function resolveForkBaselineForScannedEntries(
+  scanned: ScannedSessionUsage,
+): Promise<ForkBaseline | undefined> {
+  if (scanned.parentSession === undefined) return undefined;
+  return resolveForkBaseline(
+    scanned.parentSession,
+    scanned.entries,
+    scanned.forkStartedAtMs,
+  );
+}
+
+async function resolveForkBaseline(
+  parentSession: string,
+  childEntries: readonly UsageEntry[],
+  forkStartedAtMs: number | undefined,
+): Promise<ForkBaseline | undefined> {
+  const canonicalParentSession = await canonicalOrResolved(parentSession);
+  if (forkStartedAtMs === undefined) return undefined;
+
+  const parent = await scanSessionFileUsageDetails(canonicalParentSession);
+  // If the ancestor transcript was frozen/deleted before durable fork metadata
+  // was repaired, recover the copied prefix from the child's own fork point
+  // instead of subtracting the parent's current cumulative total.
+  const inheritedCount =
+    parent.diagnostics.length === 0
+      ? commonUsagePrefixLength(parent.entries, childEntries, forkStartedAtMs)
+      : forkPointInheritedPrefixLength(childEntries, forkStartedAtMs);
+  const entries = childEntries.slice(0, inheritedCount);
   return {
-    snapshot: {
-      id: options.id,
-      workspaceId: options.workspaceId,
-      ownerSessionFile: scanned.canonicalSessionFile,
-      source: options.source,
-      inputTokens: totals.inputTokens,
-      outputTokens: totals.outputTokens,
-      cacheReadTokens: totals.cacheReadTokens,
-      cacheWriteTokens: totals.cacheWriteTokens,
-      totalTokens: totals.totalTokens,
-      ...(totals.contributorsWithCost > 0
-        ? { totalCostUsd: totals.knownCostUsd }
-        : {}),
-      contributorsWithCost: totals.contributorsWithCost,
-      contributorsWithoutCost: totals.contributorsWithoutCost,
-      recordedAtMs: options.recordedAtMs,
-      sessionFileSize: options.signature.size,
-      sessionFileMtimeMs: options.signature.mtimeMs,
-    },
-    diagnostics: [],
+    parentSession: canonicalParentSession,
+    entries,
+    totals: summarizeUsageEntries(entries),
+    entryCount: entries.length,
+    fingerprint: usageEntriesFingerprint(entries),
   };
+}
+
+function forkPointInheritedPrefixLength(
+  childEntries: readonly UsageEntry[],
+  forkStartedAtMs: number,
+): number {
+  let count = 0;
+  while (
+    count < childEntries.length &&
+    usageEntryCanBeInherited(childEntries[count]!, forkStartedAtMs)
+  ) {
+    count += 1;
+  }
+  return count;
+}
+
+function commonUsagePrefixLength(
+  parentEntries: readonly UsageEntry[],
+  childEntries: readonly UsageEntry[],
+  forkStartedAtMs: number,
+): number {
+  const limit = Math.min(parentEntries.length, childEntries.length);
+  let count = 0;
+  while (
+    count < limit &&
+    usageEntryCanBeInherited(childEntries[count]!, forkStartedAtMs) &&
+    usageEntryMatches(parentEntries[count]!, childEntries[count]!)
+  ) {
+    count += 1;
+  }
+  return count;
+}
+
+function usageEntryCanBeInherited(
+  entry: UsageEntry,
+  forkStartedAtMs: number,
+): boolean {
+  return (
+    entry.timestampMs !== undefined && entry.timestampMs <= forkStartedAtMs
+  );
+}
+
+function usageEntryMatches(left: UsageEntry, right: UsageEntry): boolean {
+  if (
+    left.messageId !== undefined &&
+    right.messageId !== undefined &&
+    left.messageId !== right.messageId
+  ) {
+    return false;
+  }
+  return left.signature === right.signature;
+}
+
+function forkBaselineSnapshotFields(
+  baseline: ForkBaseline | undefined,
+): Partial<UsageSnapshot> {
+  if (baseline === undefined) return {};
+  return {
+    forkParentSession: baseline.parentSession,
+    inheritedInputTokens: baseline.totals.inputTokens,
+    inheritedOutputTokens: baseline.totals.outputTokens,
+    inheritedCacheReadTokens: baseline.totals.cacheReadTokens,
+    inheritedCacheWriteTokens: baseline.totals.cacheWriteTokens,
+    inheritedTotalTokens: baseline.totals.totalTokens,
+    ...(baseline.totals.contributorsWithCost > 0
+      ? { inheritedCostUsd: baseline.totals.knownCostUsd }
+      : {}),
+    inheritedContributorsWithCost: baseline.totals.contributorsWithCost,
+    inheritedContributorsWithoutCost: baseline.totals.contributorsWithoutCost,
+    inheritedUsageEntryCount: forkBaselineEntryCount(baseline),
+    inheritedUsageFingerprint: forkBaselineFingerprint(baseline),
+  };
+}
+
+function hasDurableForkBaseline(
+  snapshot: UsageSnapshot | undefined,
+): snapshot is UsageSnapshot {
+  return (
+    snapshot?.forkParentSession !== undefined &&
+    snapshot.inheritedUsageEntryCount !== undefined &&
+    snapshot.inheritedUsageFingerprint !== undefined
+  );
+}
+
+function inheritedTotalsFromSnapshot(
+  snapshot: UsageSnapshot | undefined,
+): ForkBaseline | undefined {
+  if (snapshot?.forkParentSession === undefined) return undefined;
+  return {
+    parentSession: snapshot.forkParentSession,
+    entries: [],
+    totals: {
+      inputTokens: snapshot.inheritedInputTokens ?? 0,
+      outputTokens: snapshot.inheritedOutputTokens ?? 0,
+      cacheReadTokens: snapshot.inheritedCacheReadTokens ?? 0,
+      cacheWriteTokens: snapshot.inheritedCacheWriteTokens ?? 0,
+      totalTokens: snapshot.inheritedTotalTokens ?? 0,
+      knownCostUsd: snapshot.inheritedCostUsd ?? 0,
+      contributorsWithCost: snapshot.inheritedContributorsWithCost ?? 0,
+      contributorsWithoutCost: snapshot.inheritedContributorsWithoutCost ?? 0,
+    },
+    entryCount: snapshot.inheritedUsageEntryCount ?? 0,
+    ...(snapshot.inheritedUsageFingerprint !== undefined
+      ? { fingerprint: snapshot.inheritedUsageFingerprint }
+      : {}),
+  };
+}
+
+function forkBaselineEntryCount(baseline: ForkBaseline): number {
+  return baseline.entryCount ?? baseline.entries.length;
+}
+
+function forkBaselineFingerprint(baseline: ForkBaseline): string {
+  return baseline.fingerprint ?? usageEntriesFingerprint(baseline.entries);
+}
+
+function usageEntriesFingerprint(entries: readonly UsageEntry[]): string {
+  return hashStable(
+    JSON.stringify(
+      entries.map((entry) => ({
+        messageId: entry.messageId,
+        signature: entry.signature,
+      })),
+    ),
+  );
+}
+
+function subtractInheritedRuntimeUsage(
+  usage: ChatRuntimeUsage,
+  baseline: ForkBaseline | undefined,
+): ChatRuntimeUsage {
+  if (baseline === undefined) return usage;
+  const totals = baseline.totals;
+  const totalTokens = Math.max(0, usage.totalTokens - totals.totalTokens);
+  const totalCostUsd =
+    usage.totalCostUsd === undefined
+      ? undefined
+      : Math.max(
+          0,
+          usage.totalCostUsd -
+            (totals.contributorsWithCost > 0 ? totals.knownCostUsd : 0),
+        );
+  const adjusted: ChatRuntimeUsage = {
+    ...usage,
+    inputTokens: Math.max(0, usage.inputTokens - totals.inputTokens),
+    outputTokens: Math.max(0, usage.outputTokens - totals.outputTokens),
+    cacheReadTokens: Math.max(
+      0,
+      usage.cacheReadTokens - totals.cacheReadTokens,
+    ),
+    cacheWriteTokens: Math.max(
+      0,
+      usage.cacheWriteTokens - totals.cacheWriteTokens,
+    ),
+    totalTokens,
+  };
+  if (totalCostUsd !== undefined && totalCostUsd > 0) {
+    adjusted.totalCostUsd = totalCostUsd;
+  } else {
+    delete adjusted.totalCostUsd;
+  }
+  return adjusted;
 }
 
 async function sessionFileSignature(
@@ -709,6 +1054,13 @@ async function canonicalSnapshot(
           ),
         }
       : {}),
+    ...(snapshot.forkParentSession !== undefined
+      ? {
+          forkParentSession: await canonicalOrResolved(
+            snapshot.forkParentSession,
+          ),
+        }
+      : {}),
   });
   return toUsageSnapshot(parsed);
 }
@@ -740,6 +1092,42 @@ function toUsageSnapshot(
     ...(parsed.sessionFileMtimeMs !== undefined
       ? { sessionFileMtimeMs: parsed.sessionFileMtimeMs }
       : {}),
+    ...(parsed.forkParentSession !== undefined
+      ? { forkParentSession: parsed.forkParentSession }
+      : {}),
+    ...(parsed.inheritedInputTokens !== undefined
+      ? { inheritedInputTokens: parsed.inheritedInputTokens }
+      : {}),
+    ...(parsed.inheritedOutputTokens !== undefined
+      ? { inheritedOutputTokens: parsed.inheritedOutputTokens }
+      : {}),
+    ...(parsed.inheritedCacheReadTokens !== undefined
+      ? { inheritedCacheReadTokens: parsed.inheritedCacheReadTokens }
+      : {}),
+    ...(parsed.inheritedCacheWriteTokens !== undefined
+      ? { inheritedCacheWriteTokens: parsed.inheritedCacheWriteTokens }
+      : {}),
+    ...(parsed.inheritedTotalTokens !== undefined
+      ? { inheritedTotalTokens: parsed.inheritedTotalTokens }
+      : {}),
+    ...(parsed.inheritedCostUsd !== undefined
+      ? { inheritedCostUsd: parsed.inheritedCostUsd }
+      : {}),
+    ...(parsed.inheritedContributorsWithCost !== undefined
+      ? { inheritedContributorsWithCost: parsed.inheritedContributorsWithCost }
+      : {}),
+    ...(parsed.inheritedContributorsWithoutCost !== undefined
+      ? {
+          inheritedContributorsWithoutCost:
+            parsed.inheritedContributorsWithoutCost,
+        }
+      : {}),
+    ...(parsed.inheritedUsageEntryCount !== undefined
+      ? { inheritedUsageEntryCount: parsed.inheritedUsageEntryCount }
+      : {}),
+    ...(parsed.inheritedUsageFingerprint !== undefined
+      ? { inheritedUsageFingerprint: parsed.inheritedUsageFingerprint }
+      : {}),
   };
 }
 
@@ -758,7 +1146,20 @@ function sameSnapshot(left: UsageSnapshot, right: UsageSnapshot): boolean {
     left.contributorsWithCost === right.contributorsWithCost &&
     left.contributorsWithoutCost === right.contributorsWithoutCost &&
     left.sessionFileSize === right.sessionFileSize &&
-    left.sessionFileMtimeMs === right.sessionFileMtimeMs
+    left.sessionFileMtimeMs === right.sessionFileMtimeMs &&
+    left.forkParentSession === right.forkParentSession &&
+    left.inheritedInputTokens === right.inheritedInputTokens &&
+    left.inheritedOutputTokens === right.inheritedOutputTokens &&
+    left.inheritedCacheReadTokens === right.inheritedCacheReadTokens &&
+    left.inheritedCacheWriteTokens === right.inheritedCacheWriteTokens &&
+    left.inheritedTotalTokens === right.inheritedTotalTokens &&
+    left.inheritedCostUsd === right.inheritedCostUsd &&
+    left.inheritedContributorsWithCost ===
+      right.inheritedContributorsWithCost &&
+    left.inheritedContributorsWithoutCost ===
+      right.inheritedContributorsWithoutCost &&
+    left.inheritedUsageEntryCount === right.inheritedUsageEntryCount &&
+    left.inheritedUsageFingerprint === right.inheritedUsageFingerprint
   );
 }
 
@@ -838,11 +1239,29 @@ async function scanSessionFileUsage(
     lineNumber: number,
   ) => void,
 ): Promise<{ canonicalSessionFile: string; diagnostics: string[] }> {
+  const scanned = await scanSessionFileUsageDetails(sessionFile);
+  if (scanned.diagnostics.length === 0) {
+    for (const entry of scanned.entries) {
+      visitor(entry.usage, entry.messageId, entry.lineNumber ?? 0);
+    }
+  }
+  return {
+    canonicalSessionFile: scanned.canonicalSessionFile,
+    diagnostics: scanned.diagnostics,
+  };
+}
+
+async function scanSessionFileUsageDetails(
+  sessionFile: string,
+): Promise<ScannedSessionUsage> {
   const canonicalSessionFile = await canonicalOrResolved(sessionFile);
   try {
     const input = createReadStream(canonicalSessionFile, { encoding: "utf8" });
     const lines = createInterface({ input, crlfDelay: Infinity });
     let lineNumber = 0;
+    let parentSession: string | undefined;
+    let forkStartedAtMs: number | undefined;
+    const entries: UsageEntry[] = [];
     for await (const line of lines) {
       lineNumber += 1;
       if (line.trim().length === 0) continue;
@@ -856,35 +1275,99 @@ async function scanSessionFileUsage(
         continue;
       }
       const object = record as Record<string, unknown>;
+      if (object.type === "session" && parentSession === undefined) {
+        const rawParent = firstString(object.parentSession);
+        if (rawParent !== undefined) {
+          parentSession = await canonicalOrResolved(rawParent);
+        }
+        forkStartedAtMs = firstTimestampMs(
+          object.timestamp,
+          object.createdAt,
+          object.startedAt,
+        );
+        continue;
+      }
       if (object.type !== "message") continue;
-      const usage = extractUsage(object.message ?? object);
-      if (usage === undefined) continue;
       const message =
         object.message &&
         typeof object.message === "object" &&
         !Array.isArray(object.message)
           ? (object.message as Record<string, unknown>)
           : object;
-      visitor(
-        usage,
-        firstString(
-          message.id,
-          object.id,
-          message.responseId,
-          object.responseId,
-        ),
-        lineNumber,
-      );
+      const entry = usageEntryFromMessage(message, entries.length, object);
+      if (entry !== undefined) {
+        entries.push({ ...entry, lineNumber });
+      }
     }
-    return { canonicalSessionFile, diagnostics: [] };
+    return {
+      canonicalSessionFile,
+      ...(parentSession !== undefined ? { parentSession } : {}),
+      ...(forkStartedAtMs !== undefined ? { forkStartedAtMs } : {}),
+      entries,
+      diagnostics: [],
+    };
   } catch (error) {
     return {
       canonicalSessionFile,
+      entries: [],
       diagnostics: [
         `Could not read session usage ${sessionFile}: ${error instanceof Error ? error.message : String(error)}`,
       ],
     };
   }
+}
+
+async function sessionFileParentSession(
+  sessionFile: string,
+): Promise<string | undefined> {
+  const scanned = await scanSessionFileUsageDetails(sessionFile);
+  return scanned.parentSession;
+}
+
+function usageEntryFromMessage(
+  message: unknown,
+  fallbackIndex: number,
+  record?: Record<string, unknown>,
+): UsageEntry | undefined {
+  const usage = extractUsage(message);
+  if (usage === undefined) return undefined;
+  const messageRecord =
+    message && typeof message === "object" && !Array.isArray(message)
+      ? (message as Record<string, unknown>)
+      : {};
+  const messageId = firstString(
+    messageRecord.id,
+    record?.id,
+    messageRecord.responseId,
+    record?.responseId,
+  );
+  const timestampMs = firstTimestampMs(
+    messageRecord.timestamp,
+    messageRecord.createdAt,
+    record?.timestamp,
+    record?.createdAt,
+  );
+  return {
+    usage,
+    ...(messageId !== undefined ? { messageId } : {}),
+    ...(timestampMs !== undefined ? { timestampMs } : {}),
+    signature: usageEntrySignature(messageRecord, usage, fallbackIndex),
+  };
+}
+
+function usageEntrySignature(
+  message: Record<string, unknown>,
+  usage: ExtractedUsage,
+  fallbackIndex: number,
+): string {
+  return hashStable(
+    JSON.stringify({
+      index: fallbackIndex,
+      role: message.role,
+      content: message.content,
+      usage,
+    }).slice(0, 8192),
+  );
 }
 
 export function runtimeUsageContribution(options: {
@@ -1012,6 +1495,20 @@ function readNumber(
 function firstString(...values: unknown[]): string | undefined {
   for (const value of values) {
     if (typeof value === "string" && value.length > 0) return value;
+  }
+  return undefined;
+}
+
+function firstTimestampMs(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+      return value;
+    }
+    if (typeof value !== "string" || value.length === 0) continue;
+    const numeric = Number(value);
+    if (Number.isFinite(numeric) && numeric >= 0) return numeric;
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed) && parsed >= 0) return parsed;
   }
   return undefined;
 }
