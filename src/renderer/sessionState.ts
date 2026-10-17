@@ -235,6 +235,23 @@ function reduceSessionRuntimeEventUnprioritized(
       return state.runtimeDetached
         ? state
         : clearPendingExtensionUiRequest(state, getExtensionUiRequestId(event));
+    case "extension_ui_response_delivery_unknown": {
+      if (state.runtimeDetached) return state;
+      const cleared = clearPendingExtensionUiRequest(
+        state,
+        getExtensionUiRequestId(event),
+      );
+      return {
+        ...cleared,
+        baseState: "error",
+        overlays: { ...cleared.overlays, needsUserInput: false },
+        diagnostics: [
+          ...cleared.diagnostics,
+          getString(event, "message") ??
+            "Pi Deck is closing this session because the extension response may have been delivered late.",
+        ],
+      };
+    }
     case "extension_ui_response_failed":
       return state.runtimeDetached
         ? state

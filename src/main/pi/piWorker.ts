@@ -1,5 +1,9 @@
 import { EventEmitter } from "node:events";
-import { spawnJsonlRpcClient, type JsonlRpcClient } from "./jsonlClient.js";
+import {
+  JsonlRpcNotificationTimeoutError,
+  spawnJsonlRpcClient,
+  type JsonlRpcClient,
+} from "./jsonlClient.js";
 import type {
   ExtensionUiResponse,
   JsonObject,
@@ -53,6 +57,7 @@ export class PiWorker {
   private signal: NodeJS.Signals | null | undefined;
   private isClosingIntentionally = false;
   private workerExitEmitted = false;
+  private notificationWriteFault: JsonlRpcNotificationTimeoutError | undefined;
   /** Resolves exactly when the child is terminal (or spawn itself failed). */
   private readonly exitPromise: Promise<void>;
   private resolveExit!: () => void;
@@ -66,11 +71,15 @@ export class PiWorker {
     const args = options.args ?? ["--mode", "rpc"];
     const clientOptions: {
       requestTimeoutMs?: number;
+      notificationTimeoutMs?: number;
       stderrBufferBytes?: number;
       commandProtocol?: "command-field" | "type-field";
     } = {};
     if (options.requestTimeoutMs !== undefined) {
       clientOptions.requestTimeoutMs = options.requestTimeoutMs;
+    }
+    if (options.notificationTimeoutMs !== undefined) {
+      clientOptions.notificationTimeoutMs = options.notificationTimeoutMs;
     }
     if (options.stderrBufferBytes !== undefined) {
       clientOptions.stderrBufferBytes = options.stderrBufferBytes;
@@ -205,10 +214,23 @@ export class PiWorker {
 
   /** Send Pi's response-only extension UI record; no command response exists. */
   async respondToExtensionUi(response: ExtensionUiResponse): Promise<void> {
-    await this.client.send({
-      type: "extension_ui_response",
-      ...response,
-    });
+    if (this.notificationWriteFault !== undefined) {
+      throw this.notificationWriteFault;
+    }
+    try {
+      await this.client.send({
+        type: "extension_ui_response",
+        ...response,
+      });
+    } catch (error) {
+      if (error instanceof JsonlRpcNotificationTimeoutError) {
+        // The old bytes can still be queued in stdin. Quarantine this worker
+        // instead of allowing a second response to race their late delivery.
+        this.notificationWriteFault = error;
+        void this.closeAndWait().catch(() => undefined);
+      }
+      throw error;
+    }
   }
 
   async request(command: string, params?: JsonObject): Promise<unknown> {
