@@ -1136,11 +1136,15 @@ export const multitaskStateEventSchema = multitaskModeStateSchema
   })
   .strict();
 
+export const ipcDeliveryStatusSchema = z.enum(["unknown"]);
+
 export const ipcErrorSchema = z
   .object({
     code: z.string(),
     message: z.string(),
     issues: z.unknown().optional(),
+    /** Present when an IPC failure cannot prove Pi did not receive the request. */
+    deliveryStatus: ipcDeliveryStatusSchema.optional(),
   })
   .strict();
 

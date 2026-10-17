@@ -174,6 +174,7 @@ import { selectCompletedAssistantAnswer } from "./outputs/savedAnswerSelection.j
 import { ForkCleanupJournal } from "./forkCleanupJournal.js";
 import { ExtensionUiRequestRegistry } from "./extensionUiRequestRegistry.js";
 import { registerValidatedIpc } from "./ipc/registerIpc.js";
+import { coercePreDispatchPromptError } from "./promptDeliveryErrors.js";
 import {
   discoverPiModels,
   discoverPiRuntimeModels,
@@ -1203,17 +1204,15 @@ function registerIpcHandlers(
               activeRuntimeId,
               "sending a prompt to it",
             );
-            await adapter.prompt(
+            const input = await buildPromptInputWithImagePolicy(
+              store,
+              adapter,
               activeRuntimeId,
-              await buildPromptInputWithImagePolicy(
-                store,
-                adapter,
-                activeRuntimeId,
-                text,
-                promptAttachments,
-                attachmentOwnerId,
-              ),
-            );
+              text,
+              promptAttachments,
+              attachmentOwnerId,
+            ).catch(coercePreDispatchPromptError);
+            await adapter.prompt(activeRuntimeId, input);
           }),
       });
       return undefined;
@@ -3370,6 +3369,31 @@ async function getAppBootstrapState(
   );
 }
 
+async function bootstrapCachedSessionSummaries(
+  workspaceId: string,
+  assertActive: () => void,
+): Promise<ChatSessionSummary[]> {
+  const refs = await filterForkCleanupBlockedSessions(
+    await ensureWorkspaceStore().getCachedSessionSummaries(workspaceId),
+    [],
+    "bootstrap workspace cache",
+  );
+  const sessions: ChatSessionSummary[] = [];
+  for (const ref of refs) {
+    assertActive();
+    const canonical = await safeRealpath(ref.sessionFile);
+    if (canonical === undefined) continue;
+    const attachedRuntimeId = chatSessionFileLocks.get(canonical);
+    sessions.push({
+      ...ref,
+      id: canonical,
+      sessionFile: canonical,
+      ...(attachedRuntimeId ? { attachedRuntimeId } : {}),
+    });
+  }
+  return sessions;
+}
+
 async function getAppBootstrapStateUnderLease(
   store: SettingsStore,
   diagnosticsService: DiagnosticsService,
@@ -3415,13 +3439,7 @@ async function getAppBootstrapStateUnderLease(
   const workspaceList = await projectWorkspaceListResult();
   const cachedSessions =
     mode === "real"
-      ? await filterForkCleanupBlockedSessions(
-          await ensureWorkspaceStore().getCachedSessionSummaries(
-            activeWorkspace.id,
-          ),
-          [],
-          "bootstrap workspace cache",
-        )
+      ? await bootstrapCachedSessionSummaries(activeWorkspace.id, assertActive)
       : [];
   assertActive();
 
