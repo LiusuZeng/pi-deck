@@ -295,6 +295,55 @@ test("PiWorker writes exact extension UI response records and resumes the reques
   }
 });
 
+test("PiWorker quarantines a stalled extension response until SIGKILL proves exit", async () => {
+  const adapter = new SinglePiAdapter();
+  const worker = adapter.createWorker({
+    runtimeId: "stalled-extension-response",
+    command: process.execPath,
+    args: [
+      "-e",
+      "process.stdin.pause(); process.on('SIGTERM', () => {}); process.stdout.write('{\"type\":\"ready\"}\\n'); setInterval(() => {}, 1_000);",
+    ],
+    cwd: process.cwd(),
+    env: process.env,
+    notificationTimeoutMs: 20,
+    killGraceMs: 80,
+  });
+  await waitForWorkerEvent(worker, (event) => event.type === "ready");
+  const stdinError = waitForWorkerEvent(
+    worker,
+    (event) =>
+      event.type === "diagnostic" &&
+      /RPC stdin error:.*EPIPE/i.test(
+        (event as { message?: string }).message ?? "",
+      ),
+  );
+  const exited = waitForWorkerEvent(
+    worker,
+    (event) => event.type === "worker_exit",
+  );
+
+  await assert.rejects(
+    worker.respondToExtensionUi({
+      id: "approval-1",
+      value: "x".repeat(1024 * 1024),
+    }),
+    /delivery status is unknown/i,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(adapter.hasRuntime(worker.runtimeId), true);
+  assert.equal(adapter.workerCount(), 1);
+  await stdinError;
+  await exited;
+  assert.equal(adapter.hasRuntime(worker.runtimeId), false);
+  assert.equal(worker.getDiagnostics().signal, "SIGKILL");
+
+  await assert.rejects(
+    worker.respondToExtensionUi({ id: "approval-1", cancelled: true }),
+    /delivery status is unknown/i,
+  );
+});
+
 test("PiWorker abort path emits a sensible aborted end state", async () => {
   const worker = createWorker(["--stream-delay-ms", "50"]);
   try {

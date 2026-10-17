@@ -131,6 +131,28 @@ describe("ExtensionUiRequestRegistry", () => {
     expect(value.snapshot("runtime-1")).toMatchObject([{ title: "New" }]);
   });
 
+  it("discards an unknown-delivery claim without clearing a newer same-id request", () => {
+    const { value } = registry();
+    value.register("runtime-1", {
+      id: "approval-1",
+      method: "confirm",
+      title: "Old request without a dialog timeout",
+    });
+    const oldClaim = value.claim("runtime-1", "approval-1")!;
+
+    value.register("runtime-1", {
+      id: "approval-1",
+      method: "confirm",
+      title: "New request",
+    });
+
+    expect(value.complete(oldClaim)).toBe(false);
+    expect(value.snapshot("runtime-1")).toMatchObject([
+      { title: "New request" },
+    ]);
+    expect(value.pendingCount).toBe(1);
+  });
+
   it("invalidates a claim when its runtime is cleared with no pending record", () => {
     const { value } = registry();
     value.register("runtime-1", {

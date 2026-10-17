@@ -596,6 +596,24 @@ export function reduceRuntimeEventUnprioritized(
       return session.runtimeBacked
         ? clearExtensionUiRequest(session, getString(event, "requestId"))
         : session;
+    case "extension_ui_response_delivery_unknown": {
+      if (!session.runtimeBacked) return session;
+      const cleared = clearExtensionUiRequest(
+        session,
+        getString(event, "requestId"),
+      );
+      return appendRuntimeErrorDiagnostic(
+        {
+          ...cleared,
+          status: "error",
+          baseState: "error",
+          overlays: { ...cleared.overlays, needsUserInput: false },
+          subtitle: "Error · extension response delivery is unknown",
+        },
+        getString(event, "message") ??
+          "Pi Deck is closing this session because the extension response may have been delivered late.",
+      );
+    }
     case "extension_ui_response_failed": {
       if (!session.runtimeBacked) {
         return session;

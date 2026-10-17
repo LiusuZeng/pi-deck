@@ -179,6 +179,7 @@ import {
   discoverPiRuntimeModels,
   parsePiRuntimeModelDiscovery,
 } from "./pi/modelDiscovery.js";
+import { JsonlRpcNotificationTimeoutError } from "./pi/jsonlClient.js";
 import { SinglePiAdapter } from "./pi/piAdapter.js";
 import {
   runtimeTotalTokensFromSessionStats,
@@ -4259,9 +4260,22 @@ async function respondToExtensionUi(
     diagnosticsService.recordError(
       `Failed to write extension UI response ${request.requestId} for ${request.runtimeId}: ${message}`,
     );
-    // A failed write remains actionable only while the original request is
-    // still live and no newer event reused its id.
-    if (pendingExtensionUiRequests.restore(claimed) === "restored") {
+    if (error instanceof JsonlRpcNotificationTimeoutError) {
+      // Node may still deliver the queued bytes after this deadline. Remove
+      // only this exact claim and tell the renderer that retrying would be
+      // unsafe; PiWorker is concurrently closing the quarantined worker.
+      if (pendingExtensionUiRequests.complete(claimed)) {
+        sendChatEventToRenderer({
+          type: "extension_ui_response_delivery_unknown",
+          runtimeId: request.runtimeId,
+          requestId: request.requestId,
+          message:
+            "Pi stopped accepting the extension response. Its delivery status is unknown, so the session is being closed instead of retrying.",
+        });
+      }
+    } else if (pendingExtensionUiRequests.restore(claimed) === "restored") {
+      // Immediate write failures remain actionable only while the original
+      // request is still live and no newer event reused its id.
       sendChatEventToRenderer({
         type: "extension_ui_response_failed",
         runtimeId: request.runtimeId,
