@@ -4310,6 +4310,99 @@ describe("renderer intervention UX", () => {
     expect(inbox.groups.failed).toHaveLength(0);
   });
 
+  it("keeps sendPrompt's unknown-delivery catch path quarantined for explicit recovery", () => {
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    };
+    const session = {
+      ...baseSession(),
+      sessionFile: "/sessions/session-1.jsonl",
+    };
+    const persistence = new ComposerDraftPersistence(storage, { now: () => 1 });
+    persistence.hydrate([session], ["workspace-a"]);
+    persistence.beginSubmission(session, "Try this", 0, "parent");
+    const restoreRejectedComposerDraft = vi.fn(() => true);
+    const onRejectedDraftNotRestored = vi.fn();
+    const reports: unknown[] = [];
+    const recoveries: unknown[] = [];
+
+    const restored = __rendererTestHooks.settleFailedParentPromptSubmission({
+      promptDeliveryUnconfirmed: true,
+      submissionSession: session,
+      composerDraftPersistence: persistence,
+      restoreRejectedComposerDraft,
+      onRejectedDraftNotRestored,
+      reportComposerDraftPersistenceResult: (result: unknown) =>
+        reports.push(result),
+      publishPendingComposerRecovery: (recoverySession: typeof session) => {
+        recoveries.push(
+          persistence.pendingSubmissionForSession(recoverySession),
+        );
+      },
+    });
+
+    expect(restored).toBe(false);
+    expect(restoreRejectedComposerDraft).not.toHaveBeenCalled();
+    expect(onRejectedDraftNotRestored).not.toHaveBeenCalled();
+    expect(reports).toEqual([
+      { status: "unchanged", truncated: false, pruned: 0 },
+    ]);
+    expect(recoveries).toEqual([
+      expect.objectContaining({
+        sessionId: "session-1",
+        text: "Try this",
+        destination: "parent",
+      }),
+    ]);
+    const serialized = JSON.parse(values.get(COMPOSER_DRAFT_STORAGE_KEY)!);
+    expect(serialized.drafts[0]).toMatchObject({
+      text: "",
+      pendingSubmission: { text: "Try this", destination: "parent" },
+    });
+  });
+
+  it("keeps explicit prompt rejection on the restored-draft path", () => {
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    };
+    const session = {
+      ...baseSession(),
+      sessionFile: "/sessions/session-1.jsonl",
+    };
+    const persistence = new ComposerDraftPersistence(storage, { now: () => 1 });
+    persistence.hydrate([session], ["workspace-a"]);
+    persistence.beginSubmission(session, "Try this", 0, "parent");
+    const restoreRejectedComposerDraft = vi.fn(() => true);
+    const onRejectedDraftNotRestored = vi.fn();
+    const reports: unknown[] = [];
+
+    const restored = __rendererTestHooks.settleFailedParentPromptSubmission({
+      promptDeliveryUnconfirmed: false,
+      submissionSession: session,
+      composerDraftPersistence: persistence,
+      restoreRejectedComposerDraft,
+      onRejectedDraftNotRestored,
+      reportComposerDraftPersistenceResult: (result: unknown) =>
+        reports.push(result),
+      publishPendingComposerRecovery: vi.fn(),
+    });
+
+    expect(restored).toBe(true);
+    expect(restoreRejectedComposerDraft).toHaveBeenCalledOnce();
+    expect(onRejectedDraftNotRestored).not.toHaveBeenCalled();
+    expect(persistence.pendingSubmissionForSession(session)).toBeUndefined();
+    expect(reports).toEqual([{ status: "ok", truncated: false, pruned: 0 }]);
+    const serialized = JSON.parse(values.get(COMPOSER_DRAFT_STORAGE_KEY)!);
+    expect(serialized.drafts[0]).toMatchObject({ text: "Try this" });
+    expect(serialized.drafts[0].pendingSubmission).toBeUndefined();
+  });
+
   it("preserves runtime progress evidence when prompt confirmation times out", () => {
     const sending = {
       ...baseSession(),

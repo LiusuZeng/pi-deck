@@ -74,6 +74,8 @@ interface FakeOptions {
   failTaskPromptRecordWhileActive: boolean;
   /** Signal after a prompt user turn is durable but before its RPC response. */
   promptReceiptSignalFile?: string;
+  /** Exit after the ordinary prompt user turn is durable, before responding. */
+  exitAfterPromptReceipt: boolean;
   /** Signal/exit after a queued follow-up becomes a durable user turn. */
   followUpReceiptSignalFile?: string;
   /** Test-only delay before a steering item becomes durable history. */
@@ -192,6 +194,7 @@ function parseOptions(argv: string[]): FakeOptions {
     structuredMessages: false,
     noSession: false,
     failTaskPromptRecordWhileActive: false,
+    exitAfterPromptReceipt: false,
     consumeSteeringAfterMs: 0,
     interventionSnapshotRace: false,
     exitAfterInterventionReceipt: false,
@@ -296,6 +299,8 @@ function parseOptions(argv: string[]): FakeOptions {
       const file = argv[index + 1];
       if (file) options.promptReceiptSignalFile = file;
       index += 1;
+    } else if (arg === "--exit-after-prompt-receipt") {
+      options.exitAfterPromptReceipt = true;
     } else if (arg === "--follow-up-receipt-signal-file") {
       const file = argv[index + 1];
       if (file) options.followUpReceiptSignalFile = file;
@@ -1341,8 +1346,20 @@ class FakeRpcServer {
       createdAt: Date.now(),
     };
     this.messages.push(userMessage);
-    this.appendPersistedMessage(userMessage);
+    const persisted = this.appendPersistedMessage(userMessage);
     this.signalReceipt(this.options.promptReceiptSignalFile, "prompt");
+    if (this.options.exitAfterPromptReceipt) {
+      // Do not claim an accepted receipt unless the fixture persisted it first.
+      if (!persisted) {
+        process.stderr.write(
+          "fake-rpc: prompt was not durably persisted before crash injection\n",
+        );
+        process.exit(1);
+      }
+      // The durable user turn was accepted before the RPC acknowledgement was
+      // lost. This deliberately models a transport disconnect, not rejection.
+      process.exit(42);
+    }
     if (recordedTaskPrompt !== undefined) {
       this.promptCounter += 1;
       this.respondPrompt(command.id);

@@ -352,6 +352,61 @@ test("JSONL RPC client times out command responses as unknown delivery and clear
   }
 });
 
+test("JSONL RPC client treats a post-dispatch write callback error as unknown delivery", async () => {
+  const stdout = new EventEmitter();
+  const stderr = new EventEmitter();
+  const child = Object.assign(new EventEmitter(), {
+    stdout,
+    stderr,
+    killed: false,
+    kill(): boolean {
+      this.killed = true;
+      return true;
+    },
+    stdin: {
+      destroyed: false,
+      write(
+        _payload: string,
+        _encoding: string,
+        callback: (error?: Error | null) => void,
+      ): boolean {
+        callback(new Error("EPIPE after accepting bytes"));
+        return false;
+      },
+    },
+  }) as unknown as ChildProcess;
+  const client = new JsonlRpcClient(child);
+
+  await assert.rejects(
+    client.request("prompt", { text: "write failure" }),
+    (error: unknown) => {
+      assert.ok(error instanceof JsonlRpcDeliveryError);
+      assert.equal(error.deliveryStatus, "unknown");
+      assert.match(error.message, /failed to write/i);
+      return true;
+    },
+  );
+  assert.equal(client.pendingCount, 0);
+});
+
+test("fake RPC can record a prompt and disconnect before responding", async () => {
+  const client = spawnFake(["--exit-after-prompt-receipt"]);
+  try {
+    await assert.rejects(
+      client.request("prompt", { text: "accepted before disconnect" }),
+      (error: unknown) => {
+        assert.ok(error instanceof JsonlRpcDeliveryError);
+        assert.equal(error.deliveryStatus, "unknown");
+        assert.match(error.message, /exited/i);
+        return true;
+      },
+    );
+    assert.equal(client.pendingCount, 0);
+  } finally {
+    client.close();
+  }
+});
+
 test("fake RPC can record a prompt and delay its success response past the client timeout", async () => {
   const client = spawnFake(["--delay-prompt-response-ms", "50"]);
   const diagnostics: string[] = [];

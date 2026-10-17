@@ -3369,6 +3369,31 @@ async function getAppBootstrapState(
   );
 }
 
+async function bootstrapCachedSessionSummaries(
+  workspaceId: string,
+  assertActive: () => void,
+): Promise<ChatSessionSummary[]> {
+  const refs = await filterForkCleanupBlockedSessions(
+    await ensureWorkspaceStore().getCachedSessionSummaries(workspaceId),
+    [],
+    "bootstrap workspace cache",
+  );
+  const sessions: ChatSessionSummary[] = [];
+  for (const ref of refs) {
+    assertActive();
+    const canonical = await safeRealpath(ref.sessionFile);
+    if (canonical === undefined) continue;
+    const attachedRuntimeId = chatSessionFileLocks.get(canonical);
+    sessions.push({
+      ...ref,
+      id: canonical,
+      sessionFile: canonical,
+      ...(attachedRuntimeId ? { attachedRuntimeId } : {}),
+    });
+  }
+  return sessions;
+}
+
 async function getAppBootstrapStateUnderLease(
   store: SettingsStore,
   diagnosticsService: DiagnosticsService,
@@ -3414,13 +3439,7 @@ async function getAppBootstrapStateUnderLease(
   const workspaceList = await projectWorkspaceListResult();
   const cachedSessions =
     mode === "real"
-      ? await filterForkCleanupBlockedSessions(
-          await ensureWorkspaceStore().getCachedSessionSummaries(
-            activeWorkspace.id,
-          ),
-          [],
-          "bootstrap workspace cache",
-        )
+      ? await bootstrapCachedSessionSummaries(activeWorkspace.id, assertActive)
       : [];
   assertActive();
 

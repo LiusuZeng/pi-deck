@@ -435,22 +435,30 @@ export class JsonlRpcClient extends EventEmitter {
         possibleDispatch: true,
       });
 
-      this.child.stdin!.write(payload, "utf8", (error?: Error | null) => {
-        if (!error) {
-          return;
-        }
+      const rejectWriteFailure = (error: Error): void => {
         const pending = this.pending.get(id);
-        if (pending) {
-          clearTimeout(pending.timer);
-          this.pending.delete(id);
-          pending.reject(
-            new JsonlRpcDeliveryError(
-              `Failed to write RPC command ${command}: ${error.message}`,
-              "not-dispatched",
-            ),
-          );
-        }
-      });
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        this.pending.delete(id);
+        // The write was attempted against the stream. A callback error (or a
+        // synchronous stream race) cannot prove that the subprocess received
+        // no prefix of this command, so preserve lost-response uncertainty.
+        pending.reject(
+          new JsonlRpcDeliveryError(
+            `Failed to write RPC command ${command}: ${error.message}`,
+            "unknown",
+          ),
+        );
+      };
+      try {
+        this.child.stdin!.write(payload, "utf8", (error?: Error | null) => {
+          if (error) rejectWriteFailure(error);
+        });
+      } catch (error) {
+        rejectWriteFailure(
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      }
     });
   }
 

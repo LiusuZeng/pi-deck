@@ -5123,39 +5123,41 @@ export function App(): ReactElement {
           ? "Pi may have received this prompt before the response failed. Check session history before recovering or retrying; retrying may duplicate work."
           : message,
       );
-      if (destination === "parent" && !promptDeliveryUnconfirmed) {
-        submittedDraftWasRestored = restoreRejectedComposerDraft(
-          runtimeId,
-          prompt,
-          promptAttachments,
-          submissionRevision,
-        );
-        if (!submittedDraftWasRestored) {
-          const ownerId = attachmentOwnersBySession.current.get(runtimeId);
-          if (ownerId !== undefined) {
-            releaseSelectedAttachmentTokens(
-              ownerId,
-              rejectedSubmissionTokensToRelease(
-                destination,
-                submittedDraftWasRestored,
-                promptAttachments,
-              ),
-            );
-          }
-        }
-      }
-      if (submissionSession !== undefined) {
+      if (destination === "parent") {
+        submittedDraftWasRestored = settleFailedParentPromptSubmission({
+          promptDeliveryUnconfirmed,
+          submissionSession,
+          composerDraftPersistence: composerDraftPersistenceRef.current!,
+          restoreRejectedComposerDraft: () =>
+            restoreRejectedComposerDraft(
+              runtimeId,
+              prompt,
+              promptAttachments,
+              submissionRevision,
+            ),
+          onRejectedDraftNotRestored: () => {
+            const ownerId = attachmentOwnersBySession.current.get(runtimeId);
+            if (ownerId !== undefined) {
+              releaseSelectedAttachmentTokens(
+                ownerId,
+                rejectedSubmissionTokensToRelease(
+                  destination,
+                  false,
+                  promptAttachments,
+                ),
+              );
+            }
+          },
+          reportComposerDraftPersistenceResult,
+          publishPendingComposerRecovery,
+        });
+      } else if (submissionSession !== undefined) {
         reportComposerDraftPersistenceResult(
-          promptDeliveryUnconfirmed
-            ? composerDraftPersistenceRef.current!.reconcilePendingSubmission(
-                submissionSession,
-                "unknown",
-              )
-            : composerDraftPersistenceRef.current!.finishSubmission(
-                submissionSession,
-                "rejected",
-                submittedDraftWasRestored,
-              ),
+          composerDraftPersistenceRef.current!.finishSubmission(
+            submissionSession,
+            "rejected",
+            submittedDraftWasRestored,
+          ),
         );
         publishPendingComposerRecovery(submissionSession);
       }
@@ -9836,6 +9838,51 @@ function appendNonfatalDiagnostic(
       },
     ],
   };
+}
+
+interface FailedParentPromptSubmissionSettlementOptions {
+  promptDeliveryUnconfirmed: boolean;
+  submissionSession: ComposerDraftSessionIdentitySource | undefined;
+  composerDraftPersistence: Pick<
+    ComposerDraftPersistence,
+    "reconcilePendingSubmission" | "finishSubmission"
+  >;
+  restoreRejectedComposerDraft: () => boolean;
+  onRejectedDraftNotRestored: () => void;
+  reportComposerDraftPersistenceResult: (
+    result: ComposerDraftPersistenceResult,
+  ) => void;
+  publishPendingComposerRecovery: (
+    session: ComposerDraftSessionIdentitySource,
+  ) => void;
+}
+
+function settleFailedParentPromptSubmission(
+  options: FailedParentPromptSubmissionSettlementOptions,
+): boolean {
+  let submittedDraftWasRestored = false;
+  if (!options.promptDeliveryUnconfirmed) {
+    submittedDraftWasRestored = options.restoreRejectedComposerDraft();
+    if (!submittedDraftWasRestored) {
+      options.onRejectedDraftNotRestored();
+    }
+  }
+  if (options.submissionSession !== undefined) {
+    options.reportComposerDraftPersistenceResult(
+      options.promptDeliveryUnconfirmed
+        ? options.composerDraftPersistence.reconcilePendingSubmission(
+            options.submissionSession,
+            "unknown",
+          )
+        : options.composerDraftPersistence.finishSubmission(
+            options.submissionSession,
+            "rejected",
+            submittedDraftWasRestored,
+          ),
+    );
+    options.publishPendingComposerRecovery(options.submissionSession);
+  }
+  return submittedDraftWasRestored;
 }
 
 function isPromptDeliveryUnconfirmedError(error: unknown): boolean {
@@ -15138,6 +15185,7 @@ export const __rendererTestHooks = {
   updateSessionByRuntimeId,
   appendNonfatalDiagnostic,
   markPromptDeliveryUnconfirmed,
+  settleFailedParentPromptSubmission,
   markPromptDeliveryFailed,
   eventHasUsageMetadata,
   currentSessionForSavedResume,

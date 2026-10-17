@@ -216,6 +216,37 @@ describe("preload PiDeck API validation", () => {
     ).toThrow();
   });
 
+  it("preserves unknown delivery status on IPC errors for renderer callers", async () => {
+    electronMock.ipcRenderer.invoke.mockResolvedValue({
+      ok: false,
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "RPC command timed out before response: prompt",
+        deliveryStatus: "unknown",
+      },
+    });
+
+    await expect(
+      api.chat.prompt({
+        runtimeId: "runtime-1",
+        text: "Do something once",
+        destination: "parent",
+      }),
+    ).rejects.toMatchObject({
+      name: "INTERNAL_ERROR",
+      message: "RPC command timed out before response: prompt",
+      deliveryStatus: "unknown",
+    });
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenCalledWith(
+      "chat:prompt",
+      {
+        runtimeId: "runtime-1",
+        text: "Do something once",
+        destination: "parent",
+      },
+    );
+  });
+
   it("exposes strict steer and follow-up IPC methods", async () => {
     electronMock.ipcRenderer.invoke.mockResolvedValue({
       ok: true,
