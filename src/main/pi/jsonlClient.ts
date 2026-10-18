@@ -269,6 +269,20 @@ export class JsonlRpcDeliveryError extends Error {
   }
 }
 
+/**
+ * Class identity can be lost when an error crosses a bundled Electron module
+ * boundary. Keep delivery classification explicit and structural so that
+ * boundary does not turn uncertain prompt receipt into a safe rejection.
+ */
+export function isUnknownJsonlRpcDeliveryError(
+  error: unknown,
+): error is Error & { deliveryStatus: "unknown" } {
+  return (
+    error instanceof Error &&
+    (error as Error & { deliveryStatus?: unknown }).deliveryStatus === "unknown"
+  );
+}
+
 export class JsonlRpcError extends Error {
   readonly code?: string;
   readonly details?: JsonValue;

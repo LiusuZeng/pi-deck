@@ -92,6 +92,33 @@ describe("registerValidatedIpc", () => {
     );
   });
 
+  it("preserves unknown delivery classification across a module boundary", async () => {
+    registerValidatedIpc({
+      channel: ipcChannels.chatPrompt,
+      requestSchema: z.object({ runtimeId: z.string() }).strict(),
+      responseSchema: z.void(),
+      diagnostics: { recordError: () => undefined },
+      handler: () => {
+        throw Object.assign(
+          new Error("RPC command timed out before response: prompt"),
+          { deliveryStatus: "unknown" },
+        );
+      },
+    });
+
+    const ipcHandler = electronMock.handlers.get(ipcChannels.chatPrompt);
+    await expect(ipcHandler?.({}, { runtimeId: "runtime-1" })).resolves.toEqual(
+      {
+        ok: false,
+        error: {
+          code: "INTERNAL_ERROR",
+          message: "RPC command timed out before response: prompt",
+          deliveryStatus: "unknown",
+        },
+      },
+    );
+  });
+
   it("validates handler responses before returning success", async () => {
     registerValidatedIpc({
       channel: ipcChannels.appGetVersion,

@@ -1,4 +1,4 @@
-import { JsonlRpcDeliveryError } from "./pi/jsonlClient.js";
+import { isUnknownJsonlRpcDeliveryError } from "./pi/jsonlClient.js";
 
 /**
  * Convert failures that happen before the prompt command is dispatched into a
@@ -7,10 +7,7 @@ import { JsonlRpcDeliveryError } from "./pi/jsonlClient.js";
  * the user's prompt.
  */
 export function coercePreDispatchPromptError(error: unknown): never {
-  if (
-    error instanceof JsonlRpcDeliveryError &&
-    error.deliveryStatus === "unknown"
-  ) {
+  if (isUnknownJsonlRpcDeliveryError(error)) {
     throw new Error(
       `Prompt preparation failed before dispatch; Pi has not received the prompt command: ${error.message}`,
       { cause: error },

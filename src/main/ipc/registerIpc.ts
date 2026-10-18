@@ -2,7 +2,7 @@ import { ipcMain, type IpcMainInvokeEvent } from "electron";
 import type { ZodType } from "zod";
 import { ZodError } from "zod";
 import { apiResponseSchema, type IpcChannel } from "../../shared/ipcSchemas.js";
-import { JsonlRpcDeliveryError } from "../pi/jsonlClient.js";
+import { isUnknownJsonlRpcDeliveryError } from "../pi/jsonlClient.js";
 import type { IpcErrorPayload } from "../../shared/types.js";
 import type { DiagnosticsRecorder } from "../diagnostics/diagnostics.js";
 
@@ -51,8 +51,7 @@ function toIpcErrorPayload(error: unknown): IpcErrorPayload {
     return {
       code: "INTERNAL_ERROR",
       message: error.message,
-      ...(error instanceof JsonlRpcDeliveryError &&
-      error.deliveryStatus === "unknown"
+      ...(isUnknownJsonlRpcDeliveryError(error)
         ? { deliveryStatus: "unknown" as const }
         : {}),
     };
