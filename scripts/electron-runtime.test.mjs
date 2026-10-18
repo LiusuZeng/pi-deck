@@ -5,6 +5,7 @@ import {
   cp,
   mkdir,
   mkdtemp,
+  readFile,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -13,6 +14,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it, vi } from "vitest";
 import {
+  cloneElectronBundle,
   findMacOSAppBundle,
   piDeckApplicationName,
   piDeckBundleIdentifier,
@@ -32,6 +34,50 @@ async function writeFakeElectronBundle(root) {
   await writeFile(executable, "fake-electron");
   await chmod(executable, 0o755);
   return { bundle, executable };
+}
+
+function runtimeIdentityMarkerPath(sourceBundle) {
+  return path.join(
+    path.dirname(sourceBundle),
+    ".pi-deck-electron-runtime.json",
+  );
+}
+
+async function prepareIsolatedPiDeckElectronRuntime({
+  electronExecutable = resolveInstalledElectronExecutable(),
+  copySourceBundle = cloneElectronBundle,
+  prepareOptions = {},
+} = {}) {
+  const sourceBundle = findMacOSAppBundle(electronExecutable);
+  const executableRelativePath = path.relative(
+    sourceBundle,
+    electronExecutable,
+  );
+  const root = await mkdtemp(
+    path.join(os.tmpdir(), "pi-deck-electron-runtime-test-"),
+  );
+  const isolatedSourceBundle = path.join(root, path.basename(sourceBundle));
+  const runtimeCacheRoot = path.join(root, "runtime-cache");
+
+  try {
+    await copySourceBundle(sourceBundle, isolatedSourceBundle);
+    return {
+      root,
+      runtimeCacheRoot,
+      isolatedSourceBundle,
+      brandedExecutable: await preparePiDeckElectronExecutable({
+        runtimeCacheRoot,
+        ...prepareOptions,
+        electronExecutable: path.join(
+          isolatedSourceBundle,
+          executableRelativePath,
+        ),
+      }),
+    };
+  } catch (error) {
+    await rm(root, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 describe("Pi Deck Electron runtime", () => {
@@ -188,23 +234,123 @@ describe("Pi Deck Electron runtime", () => {
     }
   });
 
-  it.runIf(process.platform === "darwin")(
-    "rebrands the installed Electron bundle with OS-visible Pi Deck identity",
-    async () => {
-      const electronExecutable = resolveInstalledElectronExecutable();
-      const cacheRoot = await mkdtemp(
-        path.join(os.tmpdir(), "pi-deck-electron-cache-"),
+  it("prepares integration runtimes from an isolated copy on success and failure", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "pi-deck-electron-"));
+    try {
+      const { bundle, executable } = await writeFakeElectronBundle(root);
+      const sharedSentinelPath = path.join(
+        root,
+        piDeckBundleName,
+        "sentinel.txt",
+      );
+      const sharedMarkerPath = runtimeIdentityMarkerPath(bundle);
+      await mkdir(path.dirname(sharedSentinelPath), { recursive: true });
+      await writeFile(sharedSentinelPath, "keep shared bundle");
+      await writeFile(sharedMarkerPath, "keep shared marker");
+
+      const copySourceBundle = vi.fn(async (source, destination) => {
+        await cp(source, destination, {
+          recursive: true,
+          preserveTimestamps: true,
+        });
+      });
+      const copyBundle = vi.fn(async (source, destination) => {
+        await cp(source, destination, {
+          recursive: true,
+          preserveTimestamps: true,
+        });
+      });
+      const patchBundleIdentity = vi.fn(async () => undefined);
+
+      const fixture = await prepareIsolatedPiDeckElectronRuntime({
+        electronExecutable: executable,
+        copySourceBundle,
+        prepareOptions: {
+          platform: "darwin",
+          copyBundle,
+          patchBundleIdentity,
+        },
+      });
+      try {
+        const brandedBundle = findMacOSAppBundle(fixture.brandedExecutable);
+        expect(
+          path
+            .relative(fixture.runtimeCacheRoot, brandedBundle)
+            .startsWith(".."),
+        ).toBe(false);
+        expect(path.basename(brandedBundle)).toBe(piDeckBundleName);
+        expect(copySourceBundle).toHaveBeenCalledWith(
+          bundle,
+          fixture.isolatedSourceBundle,
+        );
+        expect(copyBundle).toHaveBeenCalledWith(
+          fixture.isolatedSourceBundle,
+          brandedBundle,
+        );
+      } finally {
+        await rm(fixture.root, { recursive: true, force: true });
+      }
+      await expect(readFile(sharedSentinelPath, "utf8")).resolves.toBe(
+        "keep shared bundle",
+      );
+      await expect(readFile(sharedMarkerPath, "utf8")).resolves.toBe(
+        "keep shared marker",
       );
 
+      let failingFixtureRoot;
+      await expect(
+        prepareIsolatedPiDeckElectronRuntime({
+          electronExecutable: executable,
+          copySourceBundle: async (source, destination) => {
+            failingFixtureRoot = path.dirname(destination);
+            await cp(source, destination, {
+              recursive: true,
+              preserveTimestamps: true,
+            });
+          },
+          prepareOptions: {
+            platform: "darwin",
+            copyBundle: async (source, destination) => {
+              await cp(source, destination, {
+                recursive: true,
+                preserveTimestamps: true,
+              });
+            },
+            patchBundleIdentity: async () => {
+              throw new Error("patch failed");
+            },
+          },
+        }),
+      ).rejects.toThrow(
+        /Unable to prepare the Pi Deck Electron runtime.*PI_DECK_ELECTRON_RUNTIME_CACHE_DIR/,
+      );
+      expect(failingFixtureRoot).toBeDefined();
+      await expect(access(failingFixtureRoot)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      await expect(readFile(sharedSentinelPath, "utf8")).resolves.toBe(
+        "keep shared bundle",
+      );
+      await expect(readFile(sharedMarkerPath, "utf8")).resolves.toBe(
+        "keep shared marker",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it.runIf(process.platform === "darwin")(
+    "rebrands an isolated Electron bundle with OS-visible Pi Deck identity",
+    async () => {
+      const fixture = await prepareIsolatedPiDeckElectronRuntime();
       try {
-        const brandedExecutable = await preparePiDeckElectronExecutable({
-          electronExecutable,
-          runtimeCacheRoot: cacheRoot,
-        });
+        const { brandedExecutable } = fixture;
         const brandedBundle = findMacOSAppBundle(brandedExecutable);
-        expect(path.relative(cacheRoot, brandedBundle).startsWith("..")).toBe(
-          false,
-        );
+        expect(
+          path
+            .relative(fixture.runtimeCacheRoot, brandedBundle)
+            .startsWith(".."),
+        ).toBe(false);
         expect(path.basename(brandedBundle)).toBe(piDeckBundleName);
 
         const infoPlist = path.join(brandedBundle, "Contents", "Info.plist");
@@ -223,9 +369,9 @@ describe("Pi Deck Electron runtime", () => {
         ]);
         expect(stdout.trim()).toMatch(/^v?\d+\.\d+\.\d+/);
       } finally {
-        await rm(cacheRoot, { recursive: true, force: true });
+        await rm(fixture.root, { recursive: true, force: true });
       }
     },
-    30_000,
+    60_000,
   );
 });
