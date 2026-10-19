@@ -578,6 +578,8 @@ export class WorkspaceStore {
       clearLegacyExclusions?: boolean;
       /** Permit metadata-only refreshes for refs in an archived workspace. */
       allowArchived?: boolean;
+      /** Recovery must only update refs still owned by this workspace and still marked missing. */
+      requireMissingRefs?: boolean;
     } = {},
   ): Promise<WorkspaceSessionMutationResult[]> {
     const id = z.string().uuid().parse(workspaceId);
@@ -625,6 +627,17 @@ export class WorkspaceStore {
         const existingIndex = byFile.get(sessionFile);
         const existing =
           existingIndex === undefined ? undefined : refs[existingIndex];
+        // Missing-ref recovery is a focused revalidation of an existing explicit
+        // membership. If the ref was intentionally removed or moved while the
+        // filesystem check was in flight, do not recreate or steal it.
+        if (
+          options.requireMissingRefs === true &&
+          (existing === undefined ||
+            existing.workspaceId !== id ||
+            existing.missingSinceMs === undefined)
+        ) {
+          continue;
+        }
         // Batched upserts are repository discovery, not an explicit user move.
         // They may refresh refs already owned by the target or claim unassigned
         // files, but must not undo a legacy removal or steal another workspace's
