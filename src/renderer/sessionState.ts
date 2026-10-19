@@ -237,10 +237,9 @@ function reduceSessionRuntimeEventUnprioritized(
         : clearPendingExtensionUiRequest(state, getExtensionUiRequestId(event));
     case "extension_ui_response_delivery_unknown": {
       if (state.runtimeDetached) return state;
-      const cleared = clearPendingExtensionUiRequest(
-        state,
-        getExtensionUiRequestId(event),
-      );
+      // The worker is quarantined: a timed-out response can still be queued
+      // in stdin, so no remaining dialog is safe to answer or retry.
+      const cleared = clearAllPendingExtensionUiRequests(state);
       return {
         ...cleared,
         baseState: "error",
@@ -625,6 +624,18 @@ function clearPendingExtensionUiRequest(
       ...state.overlays,
       needsUserInput: stillWaitingForInput,
     },
+  };
+}
+
+function clearAllPendingExtensionUiRequests(
+  state: ReducedSessionState,
+): ReducedSessionState {
+  if (state.pendingExtensionUiQueue.length === 0) return state;
+  return {
+    ...state,
+    baseState: lifecycleBaseState(state.lifecycle, false),
+    pendingExtensionUiQueue: [],
+    overlays: { ...state.overlays, needsUserInput: false },
   };
 }
 

@@ -335,7 +335,7 @@ describe("sessionRuntimeReducer", () => {
     },
   );
 
-  it("clears an unknown-delivery dialog into an explicit non-retryable error", () => {
+  it("quarantines every dialog after an unknown-delivery response", () => {
     const waiting = reduceRuntimeEvent(session(), {
       type: "extension_ui_request",
       runtimeId: "runtime-1",
@@ -343,7 +343,14 @@ describe("sessionRuntimeReducer", () => {
       method: "editor",
       title: "Edit",
     } as any);
-    const recovered = reduceRuntimeEvent(waiting, {
+    const waitingWithSecondDialog = reduceRuntimeEvent(waiting, {
+      type: "extension_ui_request",
+      runtimeId: "runtime-1",
+      id: "request-2",
+      method: "confirm",
+      title: "Continue?",
+    } as any);
+    const recovered = reduceRuntimeEvent(waitingWithSecondDialog, {
       type: "extension_ui_response_delivery_unknown",
       runtimeId: "runtime-1",
       requestId: "request-1",

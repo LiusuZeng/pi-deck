@@ -153,6 +153,48 @@ describe("ExtensionUiRequestRegistry", () => {
     expect(value.pendingCount).toBe(1);
   });
 
+  it("quarantines every dialog and rejects new dialogs until worker exit", () => {
+    const { value } = registry();
+    value.register("runtime-1", {
+      id: "approval-1",
+      method: "confirm",
+      title: "First pending dialog",
+    });
+    value.register("runtime-1", {
+      id: "approval-2",
+      method: "confirm",
+      title: "Second pending dialog",
+      timeout: 100,
+    });
+    const claimed = value.claim("runtime-1", "approval-1")!;
+
+    value.quarantineRuntime("runtime-1");
+
+    expect(value.isRuntimeQuarantined("runtime-1")).toBe(true);
+    expect(value.pendingCount).toBe(0);
+    expect(value.snapshot("runtime-1")).toEqual([]);
+    expect(value.complete(claimed)).toBe(false);
+    expect(
+      value.register("runtime-1", {
+        id: "approval-3",
+        method: "confirm",
+        title: "Late dialog from quarantined worker",
+      }),
+    ).toBe(false);
+    expect(value.snapshot("runtime-1")).toEqual([]);
+
+    value.releaseRuntime("runtime-1");
+    expect(value.isRuntimeQuarantined("runtime-1")).toBe(false);
+    expect(
+      value.register("runtime-1", {
+        id: "approval-4",
+        method: "confirm",
+        title: "Dialog from a replacement worker",
+      }),
+    ).toBe(true);
+    expect(value.snapshot("runtime-1")).toMatchObject([{ id: "approval-4" }]);
+  });
+
   it("invalidates a claim when its runtime is cleared with no pending record", () => {
     const { value } = registry();
     value.register("runtime-1", {

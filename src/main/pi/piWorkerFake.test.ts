@@ -310,6 +310,7 @@ test("PiWorker quarantines a stalled extension response until SIGKILL proves exi
     killGraceMs: 80,
   });
   await waitForWorkerEvent(worker, (event) => event.type === "ready");
+  const request = vi.spyOn((worker as any).client, "request");
   const stdinError = waitForWorkerEvent(
     worker,
     (event) =>
@@ -330,6 +331,25 @@ test("PiWorker quarantines a stalled extension response until SIGKILL proves exi
     }),
     /delivery status is unknown/i,
   );
+
+  // The SIGTERM-resistant child is still alive here. Its timed-out response
+  // can remain queued in stdin, so every RPC entry point must fail locally
+  // rather than enqueueing a command behind it.
+  const rejectsQuarantinedWrite = (operation: () => Promise<unknown>) =>
+    assert.rejects(operation(), /delivery status is unknown/i);
+  await rejectsQuarantinedWrite(() => worker.getState());
+  await rejectsQuarantinedWrite(() => worker.getRuntimeStatus());
+  await rejectsQuarantinedWrite(() => worker.getSessionStats());
+  await rejectsQuarantinedWrite(() => worker.getMessages());
+  await rejectsQuarantinedWrite(() => worker.prompt({ text: "new prompt" }));
+  await rejectsQuarantinedWrite(() => worker.steer({ text: "new steer" }));
+  await rejectsQuarantinedWrite(() =>
+    worker.followUp({ text: "new follow-up" }),
+  );
+  await rejectsQuarantinedWrite(() => worker.abort());
+  await rejectsQuarantinedWrite(() => worker.request("get_state"));
+  assert.equal(request.mock.calls.length, 0);
+
   await new Promise((resolve) => setTimeout(resolve, 25));
   assert.equal(adapter.hasRuntime(worker.runtimeId), true);
   assert.equal(adapter.workerCount(), 1);

@@ -47,7 +47,7 @@ export type PiWorkerHealth = "starting" | "healthy" | "unhealthy" | "closed";
 
 export class PiWorker {
   readonly runtimeId: RuntimeSessionId;
-  readonly client: JsonlRpcClient;
+  private readonly client: JsonlRpcClient;
   readonly pid: number | undefined;
   private readonly events = new EventEmitter();
   private readonly recentDiagnostics: RuntimeDiagnosticEvent[] = [];
@@ -163,7 +163,7 @@ export class PiWorker {
   }
 
   async getState(): Promise<PiState> {
-    const state = (await this.client.request("get_state")) as PiState;
+    const state = (await this.request("get_state")) as PiState;
     return { ...state, runtimeId: this.runtimeId };
   }
 
@@ -177,11 +177,11 @@ export class PiWorker {
   }
 
   getSessionStats(): Promise<unknown> {
-    return this.client.request("get_session_stats");
+    return this.request("get_session_stats");
   }
 
   async getMessages(): Promise<PiMessage[]> {
-    const response = await this.client.request("get_messages");
+    const response = await this.request("get_messages");
     const messages = Array.isArray(response)
       ? response
       : response &&
@@ -197,19 +197,19 @@ export class PiWorker {
   }
 
   async prompt(input: PromptInput): Promise<void> {
-    await this.client.request("prompt", toJsonObject(input));
+    await this.request("prompt", toJsonObject(input));
   }
 
   async steer(input: PromptInput): Promise<void> {
-    await this.client.request("steer", toJsonObject(input));
+    await this.request("steer", toJsonObject(input));
   }
 
   async followUp(input: PromptInput): Promise<void> {
-    await this.client.request("follow_up", toJsonObject(input));
+    await this.request("follow_up", toJsonObject(input));
   }
 
   async abort(): Promise<void> {
-    await this.client.request("abort");
+    await this.request("abort");
   }
 
   /** Send Pi's response-only extension UI record; no command response exists. */
@@ -233,8 +233,16 @@ export class PiWorker {
     }
   }
 
-  async request(command: string, params?: JsonObject): Promise<unknown> {
-    return this.client.request(command, params);
+  async request<T extends JsonValue = JsonValue>(
+    command: string,
+    params?: JsonObject,
+  ): Promise<T> {
+    // A timed-out notification can still be queued in stdin, so no later RPC
+    // write is safe until the quarantined worker has actually exited.
+    if (this.notificationWriteFault !== undefined) {
+      throw this.notificationWriteFault;
+    }
+    return this.client.request<T>(command, params);
   }
 
   /**

@@ -598,10 +598,9 @@ export function reduceRuntimeEventUnprioritized(
         : session;
     case "extension_ui_response_delivery_unknown": {
       if (!session.runtimeBacked) return session;
-      const cleared = clearExtensionUiRequest(
-        session,
-        getString(event, "requestId"),
-      );
+      // The worker is quarantined: a timed-out response can still be queued
+      // in stdin, so no remaining dialog is safe to answer or retry.
+      const cleared = clearPendingExtensionUiRequests(session);
       return appendRuntimeErrorDiagnostic(
         {
           ...cleared,
