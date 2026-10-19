@@ -980,7 +980,14 @@ function subtractInheritedRuntimeUsage(
     ),
     totalTokens,
   };
-  if (totalCostUsd !== undefined && totalCostUsd > 0) {
+  // A runtime aggregate equal to a non-zero inherited cost cannot establish
+  // whether a new turn was free or omitted cost. A directly reported zero,
+  // however, is a known provider cost and must remain distinguishable from an
+  // unavailable cost after baseline subtraction.
+  if (
+    totalCostUsd !== undefined &&
+    (totalCostUsd > 0 || usage.totalCostUsd === 0)
+  ) {
     adjusted.totalCostUsd = totalCostUsd;
   } else {
     delete adjusted.totalCostUsd;

@@ -1027,6 +1027,86 @@ describe("workspace usage accounting", () => {
     assert.equal(childSnapshot?.contributorsWithoutCost, 0);
   });
 
+  it("preserves known zero cost for a child runtime turn after a fork", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-usage-fork-runtime-zero-cost-"),
+    );
+    const sourceFile = path.join(root, "source.jsonl");
+    const childFile = path.join(root, "child.jsonl");
+    const forkStartedAtMs = Date.now();
+    const parentAnswer = assistantMessage("assistant-parent", 10, 0);
+    parentAnswer.timestamp = forkStartedAtMs - 1_000;
+    const childAnswer = assistantMessage("assistant-child-zero-cost", 5, 0);
+    childAnswer.timestamp = forkStartedAtMs + 1_000;
+
+    await writeSessionFixture({
+      sessionFile: sourceFile,
+      messages: [parentAnswer],
+    });
+    await writeSessionFixture({
+      sessionFile: childFile,
+      parentSession: sourceFile,
+      sessionTimestamp: new Date(forkStartedAtMs).toISOString(),
+      messages: [parentAnswer, childAnswer],
+    });
+
+    const store = new WorkspaceUsageStore(root);
+    await store.recordSessionMessagesUsage({
+      workspaceId: workspaceA,
+      sessionFile: sourceFile,
+      sessionKey: sourceFile,
+      source: "session",
+      messages: [parentAnswer],
+    });
+    await store.recordSessionMessagesUsage({
+      workspaceId: workspaceA,
+      sessionFile: childFile,
+      sessionKey: childFile,
+      source: "session",
+      messages: [parentAnswer],
+    });
+    await store.recordRuntimeUsage({
+      workspaceId: workspaceA,
+      sessionFile: childFile,
+      usage: {
+        inputTokens: 15,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        totalTokens: 15,
+        totalCostUsd: 0,
+      },
+    });
+
+    const usage = await store.getWorkspaceUsage({
+      workspaceId: workspaceA,
+      sessionFiles: [sourceFile, childFile],
+    });
+    assert.equal(usage.totalTokens, 15);
+    assert.equal(usage.knownCostUsd, 0);
+    assert.equal(usage.contributorsWithCost, 2);
+    assert.equal(usage.contributorsWithoutCost, 0);
+
+    const persisted = JSON.parse(
+      await fs.readFile(store.storeFile, "utf8"),
+    ) as {
+      snapshots: Array<{
+        ownerSessionFile?: string;
+        totalTokens: number;
+        totalCostUsd?: number;
+        contributorsWithCost: number;
+        contributorsWithoutCost: number;
+      }>;
+    };
+    const childSnapshot = persisted.snapshots.find(
+      (snapshot) => snapshot.ownerSessionFile === path.resolve(childFile),
+    );
+    assert.equal(childSnapshot?.totalTokens, 5);
+    assert.equal(childSnapshot?.totalCostUsd, 0);
+    assert.equal(childSnapshot?.contributorsWithCost, 1);
+    assert.equal(childSnapshot?.contributorsWithoutCost, 0);
+  });
+
   it("preserves unknown child cost when runtime fork totals include only inherited known cost", async () => {
     const root = await fs.mkdtemp(
       path.join(os.tmpdir(), "pi-deck-usage-fork-runtime-unknown-cost-"),
