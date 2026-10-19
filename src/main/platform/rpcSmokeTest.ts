@@ -185,13 +185,14 @@ function closeClient(client: JsonlRpcClient): Promise<void> {
       }
       child.off("exit", finish);
       child.off("close", finish);
-      child.off("error", finish);
       resolve();
     };
 
+    // A spawn error before a PID is assigned is handled by isChildTerminal()
+    // above. Once we own a PID, only exit/close is confirmation that it is
+    // gone; an error can report failed signal delivery while it remains alive.
     child.once("exit", finish);
     child.once("close", finish);
-    child.once("error", finish);
 
     try {
       client.close("SIGTERM");
