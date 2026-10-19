@@ -630,7 +630,10 @@ async function bootstrap(): Promise<void> {
   projectStore = projects;
   const multitask = new MultitaskStateStore(app.getPath("userData"));
   multitaskStateStore = multitask;
-  const taskSessions = new TaskSessionMainStateStore(app.getPath("userData"));
+  const taskSessions = new TaskSessionMainStateStore(
+    app.getPath("userData"),
+    diagnosticsService,
+  );
   taskSessionStateStore = taskSessions;
   const workspacesStore = new WorkspaceStore(piDeckHome, diagnosticsService);
   workspaceStore = workspacesStore;
@@ -3850,7 +3853,11 @@ async function initializeChatAdapter(
     },
     onState: (parentId) => {
       emitTaskSessionState(parentId);
-      void persistTaskSession(parentId);
+      void persistTaskSession(parentId).catch((error) => {
+        diagnostics?.recordError(
+          `Failed to persist task-session state for ${parentId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
     },
   });
   multitaskSupervisor = new MultitaskSupervisor({
