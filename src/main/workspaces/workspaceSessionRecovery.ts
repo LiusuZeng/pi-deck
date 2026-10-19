@@ -124,11 +124,13 @@ function isRecoveredSummaryForRef(
     );
     return false;
   }
-  if (
-    ref.sessionId !== undefined &&
-    summary.sessionId !== undefined &&
-    summary.sessionId !== ref.sessionId
-  ) {
+  if (ref.sessionId === undefined || summary.sessionId === undefined) {
+    diagnostics.push(
+      `Rejected recovered workspace session without matching durable session identity: ${ref.sessionFile}`,
+    );
+    return false;
+  }
+  if (summary.sessionId !== ref.sessionId) {
     diagnostics.push(
       `Rejected recovered workspace session with changed session identity: ${ref.sessionFile}`,
     );

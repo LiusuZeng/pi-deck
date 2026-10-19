@@ -350,6 +350,40 @@ test("rejects recovered files with changed durable session identity", async () =
   assert.match(diagnostics.join("\n"), /changed session identity/);
 });
 
+test("does not recover a replacement when the stored ref lacks durable identity", async () => {
+  const { home, project, sessionDir, sessionFile } = await temporaryFixture();
+  await writePiSession(sessionFile, project, "original-session");
+  const store = new WorkspaceStore(home);
+  const workspace = await store.create({
+    name: "Reject unidentifiable replacement",
+  });
+  const { sessionId: _sessionId, ...summaryWithoutSessionId } = cachedSummary(
+    sessionFile,
+    "original-session",
+  );
+  await store.upsertSessionRef(workspace.id, summaryWithoutSessionId);
+  await fs.rename(sessionFile, `${sessionFile}.original`);
+  await store.markSessionMissing(workspace.id, sessionFile);
+  await writePiSession(sessionFile, project, "replacement-session");
+
+  const diagnostics: string[] = [];
+  const recovered = await recoverMissingWorkspaceSessionRefs({
+    store,
+    workspace,
+    includeArchived: false,
+    sessionDir,
+    diagnostics,
+    assertActive: () => {},
+  });
+
+  assert.equal(recovered, 0);
+  const [ref] = await store.getSessionRefs(workspace.id);
+  assert.equal(ref?.sessionId, undefined);
+  assert.notEqual(ref?.missingSinceMs, undefined);
+  assert.deepEqual(await store.getCachedSessionSummaries(workspace.id), []);
+  assert.match(diagnostics.join("\n"), /matching durable session identity/);
+});
+
 test("does not resurrect a ref removed while recovery is in flight", async () => {
   const { home, project, sessionDir, sessionFile } = await temporaryFixture();
   await writePiSession(sessionFile, project, "removed-session");
