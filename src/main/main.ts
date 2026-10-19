@@ -168,6 +168,7 @@ import type {
   WorkflowRun,
 } from "../shared/types.js";
 import { DiagnosticsService } from "./diagnostics/diagnostics.js";
+import { acquireMetadataOwnership } from "./metadataOwnership.js";
 import { SavedAnswerService } from "./outputs/savedAnswerService.js";
 import { selectCompletedAssistantAnswer } from "./outputs/savedAnswerSelection.js";
 import { ForkCleanupJournal } from "./forkCleanupJournal.js";
@@ -223,6 +224,7 @@ import {
   WorkspaceStore,
   type WorkspaceRecord,
 } from "./workspaces/workspaceStore.js";
+import { recoverMissingWorkspaceSessionRefs } from "./workspaces/workspaceSessionRecovery.js";
 import { WorkspaceUsageStore } from "./workspaces/workspaceUsage.js";
 import { WorkspaceRuntimeLifecycleGate } from "./workspaceRuntimeLifecycleGate.js";
 import { WorkspaceRuntimeShutdownTombstones } from "./workspaceRuntimeShutdownTombstones.js";
@@ -375,6 +377,7 @@ let workspaceStore: WorkspaceStore | undefined;
 let workspaceUsageStore: WorkspaceUsageStore | undefined;
 let savedAnswerService: SavedAnswerService | undefined;
 let forkCleanupJournal: ForkCleanupJournal | undefined;
+let metadataOwnershipRelease: (() => Promise<void>) | undefined;
 let workflowInitialization: WorkflowInitialization<WorkflowStore> | undefined;
 const realChatLaunchConfigCache = new RealChatLaunchConfigCache();
 let loginShellEnvCaptureCache:
@@ -539,7 +542,11 @@ const processStartedAtMs = Date.now();
 const appLifecycle = new QuitLifecycleCoordinator({
   inspectActivity: inspectQuitActivity,
   confirmQuit: showActiveWorkQuitDialog,
-  cleanup: () => closeChatWorker({ shutdownWorkflowRuntimes: true }),
+  cleanup: async () => {
+    await closeChatWorker({ shutdownWorkflowRuntimes: true });
+    await metadataOwnershipRelease?.();
+    metadataOwnershipRelease = undefined;
+  },
   requestFinalQuit: () => app.quit(),
   recordDiagnostic: (message) => {
     diagnostics?.recordError(message);
@@ -615,10 +622,11 @@ async function bootstrap(): Promise<void> {
     updateWindowBackground(mainWindow, nativeTheme);
   });
 
-  const projects = new ProjectStore(
-    resolvePiDeckHome(process.env),
-    diagnosticsService,
-  );
+  const piDeckHome = resolvePiDeckHome(process.env);
+  const metadataOwnership = await acquireMetadataOwnership(piDeckHome);
+  metadataOwnershipRelease = metadataOwnership.release;
+
+  const projects = new ProjectStore(piDeckHome, diagnosticsService);
   projectStore = projects;
   const multitask = new MultitaskStateStore(app.getPath("userData"));
   multitaskStateStore = multitask;
@@ -627,16 +635,13 @@ async function bootstrap(): Promise<void> {
     diagnosticsService,
   );
   taskSessionStateStore = taskSessions;
-  const workspacesStore = new WorkspaceStore(
-    resolvePiDeckHome(process.env),
-    diagnosticsService,
-  );
+  const workspacesStore = new WorkspaceStore(piDeckHome, diagnosticsService);
   workspaceStore = workspacesStore;
-  const usageStore = new WorkspaceUsageStore(resolvePiDeckHome(process.env));
+  const usageStore = new WorkspaceUsageStore(piDeckHome);
   workspaceUsageStore = usageStore;
-  savedAnswerService = new SavedAnswerService(resolvePiDeckHome(process.env));
+  savedAnswerService = new SavedAnswerService(piDeckHome);
   const failedForkCleanup = new ForkCleanupJournal(
-    resolvePiDeckHome(process.env),
+    piDeckHome,
     diagnosticsService,
   );
   forkCleanupJournal = failedForkCleanup;
@@ -671,10 +676,7 @@ async function bootstrap(): Promise<void> {
 
       if (chatLifecycleStopRequested) return;
       const initializedWorkflows = await initializeWorkflows(async () => {
-        const store = new WorkflowStore(
-          resolvePiDeckHome(process.env),
-          diagnosticsService,
-        );
+        const store = new WorkflowStore(piDeckHome, diagnosticsService);
         await store.loadIfNeeded();
         return store;
       });
@@ -3851,7 +3853,11 @@ async function initializeChatAdapter(
     },
     onState: (parentId) => {
       emitTaskSessionState(parentId);
-      void persistTaskSession(parentId);
+      void persistTaskSession(parentId).catch((error) => {
+        diagnostics?.recordError(
+          `Failed to persist task-session state for ${parentId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
     },
   });
   multitaskSupervisor = new MultitaskSupervisor({
@@ -6369,11 +6375,35 @@ async function listWorkspaceChatSessionsUnderLease(
     options.includeArchived === undefined
       ? {}
       : { includeArchived: options.includeArchived };
+  const diagnostics: string[] = [];
+  let recoverySessionDirResolved = false;
+  let recoverySessionDir: string | undefined;
+  const resolveRecoverySessionDir = async (): Promise<string | undefined> => {
+    if (!recoverySessionDirResolved) {
+      recoverySessionDir = await resolveWorkspaceSessionDir(
+        settings,
+        workspace,
+        diagnostics,
+        "recovery",
+      );
+      recoverySessionDirResolved = true;
+    }
+    return recoverySessionDir;
+  };
+  await recoverMissingWorkspaceSessionRefs({
+    store: ensureWorkspaceStore(),
+    workspace,
+    includeArchived: options.includeArchived === true,
+    sessionDir: resolveRecoverySessionDir,
+    diagnostics,
+    assertActive,
+    isSessionBlocked: (sessionFile) =>
+      ensureForkCleanupJournal().blocks(sessionFile),
+  });
   let refs = await ensureWorkspaceStore().getCachedSessionSummaries(
     workspace.id,
     sessionListOptions,
   );
-  const diagnostics: string[] = [];
   refs = await filterForkCleanupBlockedSessions(
     refs,
     diagnostics,
@@ -6446,6 +6476,7 @@ async function listWorkspaceChatSessionsUnderLease(
     options.includeArchived === true,
     diagnostics,
     assertActive,
+    recoverySessionDirResolved ? recoverySessionDir : undefined,
   );
   const sessions: ChatListSessionsResult["sessions"] = [];
   for (const ref of refs) {
@@ -6494,6 +6525,34 @@ async function listWorkspaceChatSessionsUnderLease(
   };
 }
 
+async function resolveWorkspaceSessionDir(
+  settings: SettingsStore,
+  workspace: WorkspaceRecord,
+  diagnostics: string[],
+  purpose: string,
+): Promise<string | undefined> {
+  if (resolveChatBackendMode() !== "real") {
+    return undefined;
+  }
+  try {
+    const project =
+      workspace.archivedAtMs === undefined
+        ? await resolveWorkspaceRepositoryProject(workspace.id)
+        : workspace.defaultProjectId === undefined
+          ? await resolveManagedRuntimeProject()
+          : await ensureProjectStore()
+              .resolveAuthorizedProject(workspace.defaultProjectId)
+              .catch(() => resolveManagedRuntimeProject());
+    const launch = await resolveRealChatLaunchConfig(settings, project);
+    return launch.effective.config.sessionDir;
+  } catch (error) {
+    diagnostics.push(
+      `Workspace session ${purpose} unavailable: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return undefined;
+  }
+}
+
 /**
  * Refresh metadata for explicit workspace members without scanning every Pi
  * session. The cache is populated when a runtime is first created, so a
@@ -6507,29 +6566,20 @@ async function refreshWorkspaceSessionSummaries(
   includeArchived: boolean,
   diagnostics: string[],
   assertActive: () => void,
+  resolvedSessionDir?: string,
 ): Promise<ChatSessionSummary[]> {
   if (refs.length === 0 || resolveChatBackendMode() !== "real") {
     return refs;
   }
 
-  let sessionDir: string | undefined;
-  try {
-    const project =
-      workspace.archivedAtMs === undefined
-        ? await resolveWorkspaceRepositoryProject(workspace.id)
-        : workspace.defaultProjectId === undefined
-          ? await resolveManagedRuntimeProject()
-          : await ensureProjectStore()
-              .resolveAuthorizedProject(workspace.defaultProjectId)
-              .catch(() => resolveManagedRuntimeProject());
-    const launch = await resolveRealChatLaunchConfig(settings, project);
-    sessionDir = launch.effective.config.sessionDir;
-  } catch (error) {
-    diagnostics.push(
-      `Workspace session metadata refresh unavailable: ${error instanceof Error ? error.message : String(error)}`,
-    );
-    return refs;
-  }
+  const sessionDir =
+    resolvedSessionDir ??
+    (await resolveWorkspaceSessionDir(
+      settings,
+      workspace,
+      diagnostics,
+      "metadata refresh",
+    ));
   if (sessionDir === undefined) {
     return refs;
   }
@@ -9027,6 +9077,33 @@ async function recreateMainWindowAfterCrash(): Promise<void> {
   }
 }
 
+export const __testing = {
+  configureWorkspaceListing(options: {
+    projectStore: ProjectStore;
+    workspaceStore: WorkspaceStore;
+    workspaceUsageStore: WorkspaceUsageStore;
+    forkCleanupJournal: ForkCleanupJournal;
+  }): () => void {
+    const previous = {
+      projectStore,
+      workspaceStore,
+      workspaceUsageStore,
+      forkCleanupJournal,
+    };
+    projectStore = options.projectStore;
+    workspaceStore = options.workspaceStore;
+    workspaceUsageStore = options.workspaceUsageStore;
+    forkCleanupJournal = options.forkCleanupJournal;
+    return () => {
+      projectStore = previous.projectStore;
+      workspaceStore = previous.workspaceStore;
+      workspaceUsageStore = previous.workspaceUsageStore;
+      forkCleanupJournal = previous.forkCleanupJournal;
+    };
+  },
+  listWorkspaceChatSessions,
+};
+
 app.on("before-quit", (event) => {
   if (appLifecycle.allowsExit) return;
   // Every external request remains blocked behind the same dialog/cleanup
@@ -9042,13 +9119,23 @@ app.on("window-all-closed", () => {
   app.quit();
 });
 
-bootstrap().catch((error: unknown) => {
-  const message =
-    error instanceof Error ? (error.stack ?? error.message) : String(error);
-  diagnostics?.recordError(`Fatal startup error: ${message}`);
-  console.error(message);
-  app.quit();
-});
+if (
+  !(
+    process.env.NODE_ENV === "test" &&
+    process.env.PI_DECK_MAIN_TEST_IMPORT === "1"
+  )
+) {
+  bootstrap().catch((error: unknown) => {
+    const message =
+      error instanceof Error ? (error.stack ?? error.message) : String(error);
+    diagnostics?.recordError(`Fatal startup error: ${message}`);
+    console.error(message);
+    // Keep the metadata lease held until the normal quit cleanup barrier closes
+    // workers/workflow runtimes and releases ownership. Releasing here would let a
+    // second process acquire PI_DECK_HOME while this failed startup is still alive.
+    void appLifecycle.requestQuit("application", { confirmed: true });
+  });
+}
 
 // Subscriptions belong to a specific renderer webContents and retain the
 // workspace authorized at registration. They are never a global run-ID list.

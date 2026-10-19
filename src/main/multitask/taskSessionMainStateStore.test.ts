@@ -120,6 +120,10 @@ describe("TaskSessionMainStateStore", () => {
         store.set("/another-parent.jsonl", validState()),
       (resumed: TaskSessionMainStateStore) => {
         expect(resumed.get("/existing-parent.jsonl")).toEqual(validState());
+        expect(resumed.getSettings("/existing-parent.jsonl")).toEqual({
+          model: "provider:existing-model",
+          thinkingLevel: "medium",
+        });
         expect(resumed.get("/another-parent.jsonl")).toEqual(validState());
       },
     ],
@@ -144,6 +148,10 @@ describe("TaskSessionMainStateStore", () => {
         store.delete("/missing-parent.jsonl"),
       (resumed: TaskSessionMainStateStore) => {
         expect(resumed.get("/existing-parent.jsonl")).toEqual(validState());
+        expect(resumed.getSettings("/existing-parent.jsonl")).toEqual({
+          model: "provider:existing-model",
+          thinkingLevel: "medium",
+        });
       },
     ],
   ])(
@@ -152,6 +160,10 @@ describe("TaskSessionMainStateStore", () => {
       const root = await temporaryRoot();
       const existing = new TaskSessionMainStateStore(root);
       await existing.set("/existing-parent.jsonl", validState());
+      await existing.setSettings("/existing-parent.jsonl", {
+        model: "provider:existing-model",
+        thinkingLevel: "medium",
+      });
       const original = await fs.readFile(stateFile(root), "utf8");
 
       const healthy = new TaskSessionMainStateStore(root);
@@ -159,7 +171,7 @@ describe("TaskSessionMainStateStore", () => {
       expect(healthy.get("/existing-parent.jsonl")).toEqual(validState());
 
       const actualFs = await vi.importActual<typeof fs>("node:fs/promises");
-      let failuresRemaining = 2;
+      let failuresRemaining = 1;
       vi.spyOn(fs, "readFile").mockImplementation(async (file, options) => {
         if (file === stateFile(root) && failuresRemaining > 0) {
           failuresRemaining -= 1;
@@ -175,11 +187,6 @@ describe("TaskSessionMainStateStore", () => {
       expect(recovering.get("/existing-parent.jsonl")).toBeUndefined();
       expect(await actualFs.readFile(stateFile(root), "utf8")).toBe(original);
 
-      await expect(mutate(recovering)).rejects.toThrow(
-        "refusing to overwrite existing recovery data",
-      );
-      expect(await actualFs.readFile(stateFile(root), "utf8")).toBe(original);
-
       vi.restoreAllMocks();
       await expect(mutate(recovering)).resolves.toBeUndefined();
       const resumed = new TaskSessionMainStateStore(root);
@@ -187,6 +194,30 @@ describe("TaskSessionMainStateStore", () => {
       assertRecovered(resumed);
     },
   );
+
+  it("refuses writes while recovery data remains unreadable", async () => {
+    const root = await temporaryRoot();
+    const existing = new TaskSessionMainStateStore(root);
+    await existing.set("/existing-parent.jsonl", validState());
+    const original = await fs.readFile(stateFile(root), "utf8");
+
+    const actualFs = await vi.importActual<typeof fs>("node:fs/promises");
+    vi.spyOn(fs, "readFile").mockImplementation(async (file, options) => {
+      if (file === stateFile(root)) {
+        const error = new Error("injected EIO") as NodeJS.ErrnoException;
+        error.code = "EIO";
+        throw error;
+      }
+      return await actualFs.readFile(file, options);
+    });
+
+    const recovering = new TaskSessionMainStateStore(root);
+    await recovering.loadIfNeeded();
+    await expect(
+      recovering.set("/another-parent.jsonl", validState()),
+    ).rejects.toThrow("refusing to overwrite existing recovery data");
+    expect(await actualFs.readFile(stateFile(root), "utf8")).toBe(original);
+  });
 
   it("shares a pending initial load with concurrent mutations", async () => {
     const root = await temporaryRoot();
