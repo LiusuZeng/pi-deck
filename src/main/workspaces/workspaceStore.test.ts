@@ -118,6 +118,51 @@ test("WorkspaceStore applies queued archive to the latest accepted workspace sta
   }
 });
 
+test("WorkspaceStore serializes concurrent archive and restore", async () => {
+  const { home } = await temporaryHome();
+  const store = new WorkspaceStore(home);
+  const workspace = await store.create({ name: "Concurrent archive" });
+  const originalRename = fs.rename;
+  let releaseRename!: () => void;
+  let renameStarted!: () => void;
+  const renameStartedPromise = new Promise<void>((resolve) => {
+    renameStarted = resolve;
+  });
+  const renameReleasePromise = new Promise<void>((resolve) => {
+    releaseRename = resolve;
+  });
+  const rename = vi.spyOn(fs, "rename");
+  rename.mockImplementationOnce(async (oldPath, newPath) => {
+    renameStarted();
+    await renameReleasePromise;
+    return originalRename(oldPath, newPath);
+  });
+
+  try {
+    const archivePromise = store.archive(workspace.id);
+    await renameStartedPromise;
+    const restorePromise = store.restore(workspace.id);
+    releaseRename();
+    await Promise.all([archivePromise, restorePromise]);
+
+    assert.equal(
+      (await store.getWorkspace(workspace.id))?.archivedAtMs,
+      undefined,
+    );
+    assert.equal((await store.getActiveWorkspace())?.id, workspace.id);
+    const persisted = JSON.parse(
+      await fs.readFile(path.join(home, "workspaces.json"), "utf8"),
+    ) as { workspaces: Array<{ id: string; archivedAtMs?: number }> };
+    assert.equal(
+      persisted.workspaces.find((item) => item.id === workspace.id)
+        ?.archivedAtMs,
+      undefined,
+    );
+  } finally {
+    rename.mockRestore();
+  }
+});
+
 test("WorkspaceStore provides a stable, folderless default workspace", async () => {
   const { home } = await temporaryHome();
   const store = new WorkspaceStore(home);
