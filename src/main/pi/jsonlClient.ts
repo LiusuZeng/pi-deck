@@ -290,9 +290,15 @@ interface PendingRequest {
   timer: NodeJS.Timeout;
 }
 
+export interface JsonlRpcClientFatalEvent {
+  reason: "malformed_output";
+  error: Error;
+}
+
 export interface JsonlRpcClientEvents {
   event: [RpcEventRecord];
   diagnostic: [string];
+  fatal: [JsonlRpcClientFatalEvent];
   close: [{ code: number | null; signal: NodeJS.Signals | null }];
 }
 
@@ -326,6 +332,7 @@ export class JsonlRpcClient extends EventEmitter {
   private signal: NodeJS.Signals | null = null;
   private closeEmitted = false;
   private closeRequested = false;
+  private fatalError: Error | undefined;
   private exitFinalizationTimer: NodeJS.Timeout | undefined;
 
   constructor(
@@ -426,6 +433,9 @@ export class JsonlRpcClient extends EventEmitter {
     params?: JsonObject,
     timeoutMs = this.requestTimeoutMs,
   ): Promise<T> {
+    if (this.fatalError) {
+      return Promise.reject(this.fatalError);
+    }
     if (
       this.closed ||
       this.child.killed ||
@@ -480,6 +490,9 @@ export class JsonlRpcClient extends EventEmitter {
    * does not emit a normal command response.
    */
   send(record: JsonObject): Promise<void> {
+    if (this.fatalError) {
+      return Promise.reject(this.fatalError);
+    }
     if (
       this.closed ||
       this.child.killed ||
@@ -617,13 +630,21 @@ export class JsonlRpcClient extends EventEmitter {
       message: error.message,
     });
 
-    if (this.malformedOutputIsFatal) {
-      this.rejectAll(
-        new Error(`Malformed JSONL from RPC subprocess: ${error.message}`),
-      );
-      if (!this.child.killed) {
-        this.child.kill("SIGTERM");
-      }
+    if (!this.malformedOutputIsFatal || this.fatalError) {
+      return;
+    }
+
+    this.fatalError = new Error(
+      `Malformed JSONL from RPC subprocess: ${error.message}`,
+    );
+    this.markClosed(null, null);
+    this.rejectAll(this.fatalError);
+    this.emit("fatal", {
+      reason: "malformed_output",
+      error: this.fatalError,
+    });
+    if (!this.child.killed) {
+      this.child.kill("SIGTERM");
     }
   }
 
