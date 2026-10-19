@@ -20,6 +20,30 @@ function writeExecutable(file: string, content: string): void {
   fs.chmodSync(file, 0o755);
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (cause) {
+    const code = (cause as NodeJS.ErrnoException).code;
+    return code !== "ESRCH";
+  }
+}
+
+async function waitForProcessExit(
+  pid: number,
+  timeoutMs = 2_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (isProcessRunning(pid) && Date.now() < deadline) {
+    await delay(20);
+  }
+}
+
 function fakePiScript(version: string): string {
   return fakePiScriptWithRecording(version);
 }
@@ -47,6 +71,40 @@ if (process.argv.includes('--mode') && process.argv.includes('rpc')) {
     const command = msg.command || msg.type;
     if (command === 'get_state') {
       process.stdout.write(JSON.stringify({ type: 'response', id: msg.id, success: true, data: { ok: true, sessionFile: undefined } }) + '\\n');
+    } else {
+      process.stdout.write(JSON.stringify({ type: 'response', id: msg.id, success: false, error: 'unknown command' }) + '\\n');
+    }
+  });
+} else {
+  console.error('unexpected args', process.argv.slice(2).join(' '));
+  process.exit(2);
+}
+`;
+}
+
+function stubbornSigtermPiScript(
+  version: string,
+  pidRecordPath: string,
+): string {
+  return `#!${process.execPath}
+const fs = require('node:fs');
+const readline = require('node:readline');
+const pidRecordPath = ${JSON.stringify(pidRecordPath)};
+if (process.argv.includes('--version')) {
+  console.log(${JSON.stringify(version)});
+  process.exit(0);
+}
+if (process.argv.includes('--mode') && process.argv.includes('rpc')) {
+  fs.writeFileSync(pidRecordPath, String(process.pid), 'utf8');
+  process.on('SIGTERM', () => {
+    fs.appendFileSync(pidRecordPath, '\\nsigterm', 'utf8');
+  });
+  const rl = readline.createInterface({ input: process.stdin });
+  rl.on('line', (line) => {
+    const msg = JSON.parse(line);
+    const command = msg.command || msg.type;
+    if (command === 'get_state') {
+      process.stdout.write(JSON.stringify({ type: 'response', id: msg.id, success: true, data: { ok: true } }) + '\\n');
     } else {
       process.stdout.write(JSON.stringify({ type: 'response', id: msg.id, success: false, error: 'unknown command' }) + '\\n');
     }
@@ -441,4 +499,46 @@ test("runMinimalRpcSmokeTest uses canonical no-resource command, temp cwd, valid
   assert.equal(second.ok, true);
   assert.equal(second.fromCache, true);
   assert.equal(second.cacheKey, first.cacheKey);
+});
+
+test("runMinimalRpcSmokeTest waits for a SIGTERM-ignoring child before cleanup", async () => {
+  clearRpcSmokeTestCache();
+  const root = tempDir("pi-deck-smoke-stubborn-");
+  const pi = path.join(root, "pi");
+  const pidRecord = path.join(root, "pid.txt");
+  writeExecutable(
+    pi,
+    stubbornSigtermPiScript("pi stubborn-version", pidRecord),
+  );
+
+  let pid: number | undefined;
+  try {
+    const result = await runMinimalRpcSmokeTest({
+      config: { piBinary: pi, env: { PATH: process.env.PATH ?? "" } },
+      version: "pi stubborn-version",
+      tempRoot: root,
+      timeoutMs: 5_000,
+      force: true,
+    });
+
+    pid = Number(fs.readFileSync(pidRecord, "utf8").split(/\r?\n/, 1)[0]);
+    assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+    assert.equal(result.fromCache, false);
+    assert.ok(result.tempCwd?.startsWith(root));
+    assert.equal(fs.existsSync(result.tempCwd!), false);
+    assert.equal(
+      isProcessRunning(pid),
+      false,
+      "stubborn smoke child should be reaped before success is returned",
+    );
+  } finally {
+    if (pid === undefined && fs.existsSync(pidRecord)) {
+      pid = Number(fs.readFileSync(pidRecord, "utf8").split(/\r?\n/, 1)[0]);
+    }
+    if (pid !== undefined && Number.isFinite(pid) && isProcessRunning(pid)) {
+      process.kill(pid, "SIGKILL");
+      await waitForProcessExit(pid);
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
