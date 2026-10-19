@@ -88,9 +88,12 @@ export interface JsonlFramingParserOptions {
   /**
    * Maximum UTF-8 byte length of one record, excluding its LF delimiter and
    * optional CR before that delimiter.
-   * This also bounds the retained unterminated-record buffer.
+   * This also bounds the retained unterminated-record buffer, aside from one
+   * pending CR byte while waiting to see whether the next byte is LF.
    */
   maxLineBytes?: number;
+  /** @internal Test instrumentation for deterministic framing complexity checks. */
+  onFramingScan?: (characters: number) => void;
 }
 
 /**
@@ -105,8 +108,10 @@ export interface JsonlFramingParserOptions {
 export class JsonlFramingParser {
   private readonly decoder = new StringDecoder("utf8");
   private readonly maxLineBytes: number;
-  private buffer = "";
-  private bufferBytes = 0;
+  // Preserve the unterminated record as decoded chunks. Joining only when a
+  // delimiter arrives avoids repeatedly copying or flattening accumulated text.
+  private lineSegments: string[] = [];
+  private lineBytes = 0;
   private discardingOversizedLine = false;
 
   constructor(private readonly options: JsonlFramingParserOptions) {
@@ -117,20 +122,24 @@ export class JsonlFramingParser {
   }
 
   push(chunk: Buffer | string): void {
-    this.append(typeof chunk === "string" ? chunk : this.decoder.write(chunk));
-    this.drainCompleteLines();
+    this.drainText(
+      typeof chunk === "string" ? chunk : this.decoder.write(chunk),
+    );
   }
 
   end(): void {
-    this.append(this.decoder.end());
-    this.drainCompleteLines();
+    this.drainText(this.decoder.end());
     if (this.discardingOversizedLine) {
       return;
     }
-    if (this.buffer.length > 0) {
-      const line = this.buffer;
-      this.buffer = "";
-      this.bufferBytes = 0;
+    if (this.lineBytes > this.maxLineBytes) {
+      this.resetLine();
+      this.reportOversizedLine();
+      return;
+    }
+    if (this.lineSegments.length > 0) {
+      const line = this.materializeLine();
+      this.resetLine();
       this.options.onMalformed({
         line,
         message: "Incomplete JSONL record at EOF",
@@ -138,57 +147,88 @@ export class JsonlFramingParser {
     }
   }
 
-  private append(text: string): void {
+  private drainText(text: string): void {
     if (text.length === 0) {
       return;
     }
-    this.buffer += text;
-    this.bufferBytes += Buffer.byteLength(text, "utf8");
-  }
 
-  private drainCompleteLines(): void {
     let cursor = 0;
     let lineStart = 0;
-    while (cursor < this.buffer.length) {
-      if (this.buffer.charCodeAt(cursor) !== 0x0a) {
+    let scanned = 0;
+    while (cursor < text.length) {
+      scanned += 1;
+      if (text.charCodeAt(cursor) !== 0x0a) {
         cursor += 1;
         continue;
       }
 
-      const rawLine = this.buffer.slice(lineStart, cursor);
-      const rawLineBytes = Buffer.byteLength(rawLine, "utf8");
-      this.bufferBytes -= rawLineBytes + 1; // Include the LF delimiter.
-      cursor += 1;
-      lineStart = cursor;
-
       if (this.discardingOversizedLine) {
         this.discardingOversizedLine = false;
-        continue;
+      } else {
+        this.appendLineSegment(text.slice(lineStart, cursor));
+        this.parseBufferedLine();
       }
-
-      const hasCarriageReturn = rawLine.endsWith("\r");
-      const line = hasCarriageReturn ? rawLine.slice(0, -1) : rawLine;
-      const lineBytes = hasCarriageReturn ? rawLineBytes - 1 : rawLineBytes;
-      if (lineBytes > this.maxLineBytes) {
-        this.reportOversizedLine();
-        continue;
-      }
-      this.parseLine(line);
+      cursor += 1;
+      lineStart = cursor;
     }
+    this.options.onFramingScan?.(scanned);
 
-    // Do not repeatedly slice the whole remaining buffer for every record.
-    this.buffer = this.buffer.slice(lineStart);
     if (this.discardingOversizedLine) {
-      this.buffer = "";
-      this.bufferBytes = 0;
       return;
     }
-    if (this.bufferBytes > this.maxLineBytes) {
-      this.buffer = "";
-      this.bufferBytes = 0;
+
+    this.appendLineSegment(text.slice(lineStart));
+    if (
+      this.lineBytes > this.maxLineBytes &&
+      !(
+        this.lineBytes === this.maxLineBytes + 1 &&
+        this.lineEndsWithCarriageReturn()
+      )
+    ) {
+      this.resetLine();
       this.discardingOversizedLine = true;
       this.reportOversizedLine();
     }
+  }
+
+  private appendLineSegment(segment: string): void {
+    if (segment.length === 0) {
+      return;
+    }
+    this.lineSegments.push(segment);
+    this.lineBytes += Buffer.byteLength(segment, "utf8");
+  }
+
+  private parseBufferedLine(): void {
+    const rawLineBytes = this.lineBytes;
+    const rawLine = this.materializeLine();
+    this.resetLine();
+
+    const hasCarriageReturn = rawLine.endsWith("\r");
+    const line = hasCarriageReturn ? rawLine.slice(0, -1) : rawLine;
+    const lineBytes = hasCarriageReturn ? rawLineBytes - 1 : rawLineBytes;
+    if (lineBytes > this.maxLineBytes) {
+      this.reportOversizedLine();
+      return;
+    }
+    this.parseLine(line);
+  }
+
+  private materializeLine(): string {
+    if (this.lineSegments.length === 1) {
+      return this.lineSegments[0]!;
+    }
+    return this.lineSegments.join("");
+  }
+
+  private lineEndsWithCarriageReturn(): boolean {
+    const lastSegment = this.lineSegments.at(-1);
+    return lastSegment?.endsWith("\r") ?? false;
+  }
+
+  private resetLine(): void {
+    this.lineSegments = [];
+    this.lineBytes = 0;
   }
 
   private reportOversizedLine(): void {
