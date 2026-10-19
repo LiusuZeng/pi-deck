@@ -17,6 +17,7 @@ import {
   type WorkflowSessionSnapshot,
 } from "./workflowScheduler.js";
 import { WorkspaceRuntimeLifecycleConflictError } from "../workspaceRuntimeLifecycleGate.js";
+import { WorkflowRuntimeOwnershipRegistry } from "../workflowRuntimeOwnership.js";
 import type { AgentWorkflowDefinition } from "../../shared/agentWorkflowSchemas.js";
 import type {
   WorkflowRun,
@@ -835,9 +836,19 @@ describe("WorkflowOccurrenceScheduler Stop during automatic launch", () => {
     const secondConfiguration = deferred();
     const releaseSecondConfiguration = deferred();
     const secondClosed = deferred();
+    const releaseSecondClose = deferred();
+    const ownership = new WorkflowRuntimeOwnershipRegistry();
+    let secondReleases = 0;
     const scheduler = new WorkflowOccurrenceScheduler({
-      createSession: async () => {
+      createSession: async (_workspaceId, request) => {
         const runtimeId = `runtime-${++created}`;
+        const claim = ownership.claim(runtimeId, {
+          scheduler: "occurrence",
+          runId: request!.runId,
+          itemId: request!.itemId,
+          itemKind: request!.itemKind,
+          workspaceId: "workspace",
+        });
         return {
           runtimeId,
           state: {
@@ -845,6 +856,16 @@ describe("WorkflowOccurrenceScheduler Stop during automatic launch", () => {
             sessionFile: `/tmp/${runtimeId}.jsonl`,
           },
           messages: [],
+          workflowOwnershipClaim:
+            runtimeId === "runtime-2"
+              ? {
+                  ...claim,
+                  release: () => {
+                    secondReleases += 1;
+                    claim.release();
+                  },
+                }
+              : claim,
         };
       },
       configureSession: async (runtimeId) => {
@@ -863,7 +884,11 @@ describe("WorkflowOccurrenceScheduler Stop during automatic launch", () => {
       }),
       closeSession: async (runtimeId) => {
         closed.push(runtimeId);
-        if (runtimeId === "runtime-2") secondClosed.resolve();
+        if (runtimeId === "runtime-2") {
+          expect(ownership.isOwned(runtimeId)).toBe(true);
+          secondClosed.resolve();
+          await releaseSecondClose.promise;
+        }
       },
       getRun: async () => structuredClone(persisted),
       persist: async (run) => {
@@ -886,12 +911,18 @@ describe("WorkflowOccurrenceScheduler Stop during automatic launch", () => {
 
     await secondClosed.promise;
     expect(prompts.map((item) => item.runtimeId)).toEqual(["runtime-1"]);
+    expect(ownership.get("runtime-2")?.phase).toBe("closing");
+    expect(ownership.isOwned("runtime-2")).toBe(true);
+    expect(secondReleases).toBe(0);
 
     releaseSecondConfiguration.resolve();
+    releaseSecondClose.resolve();
     await Promise.all([advance, stop]);
 
     expect(prompts.map((item) => item.runtimeId)).toEqual(["runtime-1"]);
     expect(closed).toEqual(["runtime-1", "runtime-2"]);
+    expect(ownership.isOwned("runtime-2")).toBe(false);
+    expect(secondReleases).toBe(1);
     expect(persisted).toMatchObject({ status: "stopped" });
     expect(persisted.occurrences).toEqual(
       expect.arrayContaining([
@@ -916,13 +947,24 @@ describe("WorkflowOccurrenceScheduler Stop during automatic launch", () => {
     const closed: string[] = [];
     const secondCreation = deferred();
     const releaseSecondCreation = deferred();
+    const secondCloseStarted = deferred();
+    const releaseSecondClose = deferred();
+    const ownership = new WorkflowRuntimeOwnershipRegistry();
+    let secondReleases = 0;
     const scheduler = new WorkflowOccurrenceScheduler({
-      createSession: async () => {
+      createSession: async (_workspaceId, request) => {
         const runtimeId = `runtime-${++created}`;
         if (runtimeId === "runtime-2") {
           secondCreation.resolve();
           await releaseSecondCreation.promise;
         }
+        const claim = ownership.claim(runtimeId, {
+          scheduler: "occurrence",
+          runId: request!.runId,
+          itemId: request!.itemId,
+          itemKind: request!.itemKind,
+          workspaceId: "workspace",
+        });
         return {
           runtimeId,
           state: {
@@ -930,6 +972,16 @@ describe("WorkflowOccurrenceScheduler Stop during automatic launch", () => {
             sessionFile: `/tmp/${runtimeId}.jsonl`,
           },
           messages: [],
+          workflowOwnershipClaim:
+            runtimeId === "runtime-2"
+              ? {
+                  ...claim,
+                  release: () => {
+                    secondReleases += 1;
+                    claim.release();
+                  },
+                }
+              : claim,
         };
       },
       configureSession: async () => undefined,
@@ -943,6 +995,11 @@ describe("WorkflowOccurrenceScheduler Stop during automatic launch", () => {
       }),
       closeSession: async (runtimeId) => {
         closed.push(runtimeId);
+        if (runtimeId === "runtime-2") {
+          expect(ownership.isOwned(runtimeId)).toBe(true);
+          secondCloseStarted.resolve();
+          await releaseSecondClose.promise;
+        }
       },
       getRun: async () => structuredClone(persisted),
       persist: async (run) => {
@@ -963,10 +1020,19 @@ describe("WorkflowOccurrenceScheduler Stop during automatic launch", () => {
     await secondCreation.promise;
     const stop = scheduler.stop(persisted.id, persisted.revision);
     releaseSecondCreation.resolve();
+    await secondCloseStarted.promise;
+
+    expect(ownership.get("runtime-2")?.phase).toBe("closing");
+    expect(ownership.isOwned("runtime-2")).toBe(true);
+    expect(secondReleases).toBe(0);
+
+    releaseSecondClose.resolve();
     await Promise.all([advance, stop]);
 
     expect(prompts).toEqual(["runtime-1"]);
     expect(closed).toEqual(["runtime-1", "runtime-2"]);
+    expect(ownership.isOwned("runtime-2")).toBe(false);
+    expect(secondReleases).toBe(1);
     expect(persisted).toMatchObject({ status: "stopped" });
     expect(persisted.occurrences).toEqual(
       expect.arrayContaining([

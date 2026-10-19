@@ -11917,20 +11917,6 @@ function timelineScrollOwnerAfterUserIntent(
   return owner;
 }
 
-function timelineScrollDirectionAfterScroll(options: {
-  previousScrollTop: number;
-  currentScrollTop: number;
-  currentDirection: TimelineScrollDirection;
-}): TimelineScrollDirection {
-  if (options.currentScrollTop < options.previousScrollTop) {
-    return "away-from-end";
-  }
-  if (options.currentScrollTop > options.previousScrollTop) {
-    return "toward-end";
-  }
-  return options.currentDirection;
-}
-
 function timelineScrollOwnerAfterScroll(options: {
   owner: TimelineScrollOwner;
   nearBottom: boolean;
@@ -12530,12 +12516,12 @@ const ChatTimeline = memo(function ChatTimeline(props: {
     const userIntent =
       window.performance.now() <= userScrollIntentUntilRef.current;
     let userDirection = userScrollDirectionRef.current;
-    if (userIntent) {
-      userDirection = timelineScrollDirectionAfterScroll({
-        previousScrollTop: lastTimelineScrollTopRef.current,
-        currentScrollTop: scrollContainer.scrollTop,
-        currentDirection: userDirection,
-      });
+    if (userIntent && userDirection === "unknown") {
+      if (scrollContainer.scrollTop < lastTimelineScrollTopRef.current) {
+        userDirection = "away-from-end";
+      } else if (scrollContainer.scrollTop > lastTimelineScrollTopRef.current) {
+        userDirection = "toward-end";
+      }
       userScrollDirectionRef.current = userDirection;
     }
     lastTimelineScrollTopRef.current = scrollContainer.scrollTop;
@@ -15099,7 +15085,6 @@ export const __rendererTestHooks = {
   isScrolledNearBottom,
   shouldAutoFollowTimelineUpdate,
   timelineScrollDirectionForKey,
-  timelineScrollDirectionAfterScroll,
   timelineScrollOwnerAfterUserIntent,
   timelineScrollOwnerAfterScroll,
   timelineDetailsRevealScrollDelta,
