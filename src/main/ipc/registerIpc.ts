@@ -47,13 +47,18 @@ function toIpcErrorPayload(error: unknown): IpcErrorPayload {
     };
   }
 
+  if (isUnknownJsonlRpcDeliveryError(error)) {
+    return {
+      code: "INTERNAL_ERROR",
+      message: error.message,
+      deliveryStatus: "unknown",
+    };
+  }
+
   if (error instanceof Error) {
     return {
       code: "INTERNAL_ERROR",
       message: error.message,
-      ...(isUnknownJsonlRpcDeliveryError(error)
-        ? { deliveryStatus: "unknown" as const }
-        : {}),
     };
   }
 

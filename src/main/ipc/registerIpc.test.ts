@@ -99,10 +99,12 @@ describe("registerValidatedIpc", () => {
       responseSchema: z.void(),
       diagnostics: { recordError: () => undefined },
       handler: () => {
-        throw Object.assign(
-          new Error("RPC command timed out before response: prompt"),
-          { deliveryStatus: "unknown" },
-        );
+        // A cross-realm Electron error can retain its own fields without
+        // inheriting this main process's Error.prototype.
+        throw {
+          message: "RPC command timed out before response: prompt",
+          deliveryStatus: "unknown",
+        };
       },
     });
 

@@ -5120,7 +5120,7 @@ export function App(): ReactElement {
       const message = error instanceof Error ? error.message : String(error);
       setComposerError(
         promptDeliveryUnconfirmed
-          ? "Pi may have received this prompt before the response failed. Check session history before recovering or retrying; retrying may duplicate work."
+          ? "A previous send may have been accepted by Pi. Check session history before recovering or retrying; retrying may duplicate work."
           : message,
       );
       if (destination === "parent") {

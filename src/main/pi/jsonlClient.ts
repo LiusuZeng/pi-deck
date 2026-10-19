@@ -276,10 +276,15 @@ export class JsonlRpcDeliveryError extends Error {
  */
 export function isUnknownJsonlRpcDeliveryError(
   error: unknown,
-): error is Error & { deliveryStatus: "unknown" } {
+): error is { message: string; deliveryStatus: "unknown" } {
+  // Errors arriving from Electron's bundled module context do not necessarily
+  // inherit this realm's Error.prototype. Do not use instanceof here: the
+  // explicit, schema-validated status is the delivery contract.
   return (
-    error instanceof Error &&
-    (error as Error & { deliveryStatus?: unknown }).deliveryStatus === "unknown"
+    typeof error === "object" &&
+    error !== null &&
+    typeof (error as { message?: unknown }).message === "string" &&
+    (error as { deliveryStatus?: unknown }).deliveryStatus === "unknown"
   );
 }
 
