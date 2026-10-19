@@ -3,6 +3,7 @@ import {
   access,
   cp,
   mkdir,
+  mkdtemp,
   readFile,
   readdir,
   rename,
@@ -76,10 +77,33 @@ function runtimeIdentityMarkerPath(runtimeDirectory) {
 }
 
 function cachePreparationError(cacheRoot, runtimeDirectory, error) {
+  const detail = error instanceof Error ? `: ${error.message}` : "";
   return new Error(
-    `Unable to prepare the Pi Deck Electron runtime in cache directory ${runtimeDirectory}. Ensure ${cacheRoot} is writable or set ${runtimeCacheDirectoryEnvVar} to a writable directory.`,
+    `Unable to prepare the Pi Deck Electron runtime in cache directory ${runtimeDirectory}${detail}. Ensure ${cacheRoot} is writable or set ${runtimeCacheDirectoryEnvVar} to a writable directory.`,
     { cause: error },
   );
+}
+
+async function removePreparedRuntime(brandedBundle, markerPath) {
+  await Promise.allSettled([
+    rm(brandedBundle, { recursive: true, force: true }),
+    rm(markerPath, { force: true }),
+  ]);
+}
+
+async function assertRuntimeDirectoryWritable(runtimeDirectory) {
+  let probePath;
+  try {
+    probePath = await mkdtemp(
+      path.join(runtimeDirectory, ".pi-deck-write-probe-"),
+    );
+  } finally {
+    if (probePath) {
+      await rm(probePath, { recursive: true, force: true }).catch(
+        () => undefined,
+      );
+    }
+  }
 }
 
 async function runCommand(command, args, { captureStdout = false } = {}) {
@@ -305,33 +329,40 @@ export async function preparePiDeckElectronExecutable({
   }
 
   try {
+    await assertRuntimeDirectoryWritable(runtimeDirectory);
     await rm(markerPath, { force: true });
+  } catch (error) {
+    throw cachePreparationError(cacheRoot, runtimeDirectory, error);
+  }
+
+  try {
     await copyBundle(sourceBundle, brandedBundle);
     await patchBundleIdentity(brandedBundle);
 
     const sourceStats = await stat(electronExecutable);
-    await writeFile(
-      markerPath,
-      `${JSON.stringify(
-        {
-          schemaVersion: runtimeIdentitySchemaVersion,
-          applicationName: piDeckApplicationName,
-          bundleIdentifier: piDeckBundleIdentifier,
-          sourceBundle: path.resolve(sourceBundle),
-          executableRelativePath,
-          sourceSize: sourceStats.size,
-          sourceMtimeMs: sourceStats.mtimeMs,
-        },
-        null,
-        2,
-      )}\n`,
-    );
+    try {
+      await writeFile(
+        markerPath,
+        `${JSON.stringify(
+          {
+            schemaVersion: runtimeIdentitySchemaVersion,
+            applicationName: piDeckApplicationName,
+            bundleIdentifier: piDeckBundleIdentifier,
+            sourceBundle: path.resolve(sourceBundle),
+            executableRelativePath,
+            sourceSize: sourceStats.size,
+            sourceMtimeMs: sourceStats.mtimeMs,
+          },
+          null,
+          2,
+        )}\n`,
+      );
+    } catch (error) {
+      throw cachePreparationError(cacheRoot, runtimeDirectory, error);
+    }
   } catch (error) {
-    await Promise.allSettled([
-      rm(brandedBundle, { recursive: true, force: true }),
-      rm(markerPath, { force: true }),
-    ]);
-    throw cachePreparationError(cacheRoot, runtimeDirectory, error);
+    await removePreparedRuntime(brandedBundle, markerPath);
+    throw error;
   }
 
   if (

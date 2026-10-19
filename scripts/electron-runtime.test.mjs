@@ -227,8 +227,68 @@ describe("Pi Deck Electron runtime", () => {
           patchBundleIdentity: async () => undefined,
         }),
       ).rejects.toThrow(
-        /Unable to prepare the Pi Deck Electron runtime.*PI_DECK_ELECTRON_RUNTIME_CACHE_DIR/,
+        /Unable to prepare the Pi Deck Electron runtime.*ENOTDIR.*PI_DECK_ELECTRON_RUNTIME_CACHE_DIR/,
       );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports an actionable error for an existing unwritable runtime directory", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "pi-deck-electron-"));
+    let runtimeDirectory;
+    try {
+      const { executable } = await writeFakeElectronBundle(
+        path.join(root, "source"),
+      );
+      const cacheRoot = path.join(root, "cache");
+      const preparedExecutable = await preparePiDeckElectronExecutable({
+        platform: "darwin",
+        electronExecutable: executable,
+        runtimeCacheRoot: cacheRoot,
+        patchBundleIdentity: async () => undefined,
+      });
+      const brandedBundle = findMacOSAppBundle(preparedExecutable);
+      runtimeDirectory = path.dirname(brandedBundle);
+      await rm(brandedBundle, { recursive: true, force: true });
+      await rm(runtimeIdentityMarkerPath(brandedBundle), { force: true });
+      await chmod(runtimeDirectory, 0o555);
+
+      await expect(
+        preparePiDeckElectronExecutable({
+          platform: "darwin",
+          electronExecutable: executable,
+          runtimeCacheRoot: cacheRoot,
+          patchBundleIdentity: async () => undefined,
+        }),
+      ).rejects.toThrow(
+        /Unable to prepare the Pi Deck Electron runtime.*EACCES.*PI_DECK_ELECTRON_RUNTIME_CACHE_DIR/,
+      );
+    } finally {
+      if (runtimeDirectory) {
+        await chmod(runtimeDirectory, 0o755).catch(() => undefined);
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves source-copy failures instead of misreporting a cache error", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "pi-deck-electron-"));
+    try {
+      const { executable } = await writeFakeElectronBundle(
+        path.join(root, "source"),
+      );
+
+      await expect(
+        preparePiDeckElectronExecutable({
+          platform: "darwin",
+          electronExecutable: executable,
+          runtimeCacheRoot: path.join(root, "cache"),
+          copyBundle: async () => {
+            throw new Error("source copy failed");
+          },
+        }),
+      ).rejects.toThrow("source copy failed");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -321,9 +381,7 @@ describe("Pi Deck Electron runtime", () => {
             },
           },
         }),
-      ).rejects.toThrow(
-        /Unable to prepare the Pi Deck Electron runtime.*PI_DECK_ELECTRON_RUNTIME_CACHE_DIR/,
-      );
+      ).rejects.toThrow("patch failed");
       expect(failingFixtureRoot).toBeDefined();
       await expect(access(failingFixtureRoot)).rejects.toMatchObject({
         code: "ENOENT",
