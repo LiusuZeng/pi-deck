@@ -9886,9 +9886,14 @@ function settleFailedParentPromptSubmission(
 }
 
 function isPromptDeliveryUnconfirmedError(error: unknown): boolean {
+  // Preload errors cross Electron's isolated-world boundary, so their Error
+  // prototype is not guaranteed to be this renderer's Error.prototype. The
+  // explicit status is schema-validated at IPC boundaries; retain it without
+  // relying on cross-realm instanceof identity.
   return (
-    error instanceof Error &&
-    (error as Error & { deliveryStatus?: unknown }).deliveryStatus === "unknown"
+    typeof error === "object" &&
+    error !== null &&
+    (error as { deliveryStatus?: unknown }).deliveryStatus === "unknown"
   );
 }
 
@@ -15184,6 +15189,7 @@ export const __rendererTestHooks = {
   mergeSessionUsageFromRuntimeStatus,
   updateSessionByRuntimeId,
   appendNonfatalDiagnostic,
+  isPromptDeliveryUnconfirmedError,
   markPromptDeliveryUnconfirmed,
   settleFailedParentPromptSubmission,
   markPromptDeliveryFailed,

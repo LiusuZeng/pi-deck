@@ -4310,6 +4310,22 @@ describe("renderer intervention UX", () => {
     expect(inbox.groups.failed).toHaveLength(0);
   });
 
+  it("recognizes unknown delivery status from a cross-realm-shaped preload error", () => {
+    // Electron can proxy an Error from its isolated preload world without this
+    // renderer's Error prototype. The typed IPC status must survive that seam.
+    expect(
+      __rendererTestHooks.isPromptDeliveryUnconfirmedError({
+        message: "RPC command timed out before response: prompt",
+        deliveryStatus: "unknown",
+      }),
+    ).toBe(true);
+    expect(
+      __rendererTestHooks.isPromptDeliveryUnconfirmedError({
+        message: "Prompt was rejected",
+      }),
+    ).toBe(false);
+  });
+
   it("keeps sendPrompt's unknown-delivery catch path quarantined for explicit recovery", () => {
     const values = new Map<string, string>();
     const storage = {
