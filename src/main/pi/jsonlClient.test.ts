@@ -426,6 +426,24 @@ test("JSONL RPC client treats malformed output as fatal and emits parse error ev
   assert.match(client.stderr.snapshot(), /Malformed JSONL/);
 });
 
+test("JSONL RPC client preserves nonfatal malformed-output mode", async () => {
+  const client = spawnFake(["--malformed-on-start"], {
+    malformedOutputIsFatal: false,
+  });
+  try {
+    const parseError = waitForEvent(
+      client,
+      (event) => event.type === "rpc_parse_error",
+    );
+    await parseError;
+    assert.equal(client.child.killed, false);
+    const state = await client.request("get_state");
+    assert.equal((state as { sessionId?: string }).sessionId, "fake-session-1");
+  } finally {
+    client.close();
+  }
+});
+
 test("JSONL RPC client treats an oversized record as fatal by default", async () => {
   const client = spawnFake([], { maxLineBytes: 1 });
   try {

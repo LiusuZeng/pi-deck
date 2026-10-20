@@ -153,7 +153,7 @@ describe("ExtensionUiRequestRegistry", () => {
     expect(value.pendingCount).toBe(1);
   });
 
-  it("quarantines every dialog and rejects new dialogs until worker exit", () => {
+  it("quarantines every dialog until confirmed worker exit", () => {
     const { value } = registry();
     value.register("runtime-1", {
       id: "approval-1",
@@ -183,6 +183,18 @@ describe("ExtensionUiRequestRegistry", () => {
     ).toBe(false);
     expect(value.snapshot("runtime-1")).toEqual([]);
 
+    // A failed reset/close attempt is not evidence that the queued response
+    // cannot still arrive, so it must leave this runtime quarantined.
+    expect(value.isRuntimeQuarantined("runtime-1")).toBe(true);
+    expect(
+      value.register("runtime-1", {
+        id: "approval-after-failed-close",
+        method: "confirm",
+        title: "Must remain blocked until actual exit",
+      }),
+    ).toBe(false);
+
+    // Main releases this only after closeSession confirms PiWorker exit.
     value.releaseRuntime("runtime-1");
     expect(value.isRuntimeQuarantined("runtime-1")).toBe(false);
     expect(
