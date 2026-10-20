@@ -250,7 +250,17 @@ test("reload restores a pending extension request and answers it on the same wor
   try {
     harness = await launchHarness({
       name: "extension-ui",
-      fakeArgs: ["--prompt-scenario", "extension-ui", "--stream-delay-ms", "1"],
+      fakeArgs: [
+        "--prompt-scenario",
+        "extension-ui",
+        "--stream-delay-ms",
+        "1",
+        // Keep the fake request pending across a potentially slow renderer
+        // reload. The default fixture expiry is intentionally short for other
+        // scenarios, but would make this recovery assertion race completion.
+        "--extension-ui-auto-complete-timeout-ms",
+        String(longTurnMs),
+      ],
     });
     const prompt = "recover pending extension input";
     await startPrompt(harness.page, prompt);

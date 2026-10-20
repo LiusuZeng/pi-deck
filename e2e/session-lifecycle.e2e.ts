@@ -218,6 +218,51 @@ test("delayed ordinary prompt acknowledgement keeps recovery quarantined through
   }
 });
 
+test("terminal error before a delayed acknowledgement cannot retry an unconfirmed prompt", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-prompt-terminal-unconfirmed-"),
+  );
+  const receiptFile = path.join(root, "prompt-receipts.log");
+  let app: ElectronApplication | undefined;
+  try {
+    const launched = await launchLifecycleFixture(
+      root,
+      [
+        "--prompt-scenario",
+        "error",
+        "--delay-prompt-response-ms",
+        "1000",
+        "--prompt-receipt-signal-file",
+        receiptFile,
+      ],
+      { PI_DECK_REAL_RPC_TIMEOUT_MS: "100" },
+    );
+    app = launched.app;
+    const prompt = "terminal before delayed acknowledgement fixture";
+    await startPrompt(launched.page, prompt);
+
+    // Pi emits its terminal provider error while the accepted command's
+    // response remains delayed. That error exposes Retry prompt, but the
+    // timeout still makes receipt uncertain.
+    await expect.poll(() => readPromptReceipts(receiptFile)).toBe(1);
+    await expect(
+      launched.page.getByRole("button", { name: "Retry prompt" }),
+    ).toBeVisible();
+    await expect(
+      launched.page.locator('.composer-error[role="alert"]'),
+    ).toContainText("A previous send may have been accepted");
+
+    await launched.page.getByRole("button", { name: "Retry prompt" }).click();
+    await expect(
+      launched.page.locator('.composer-error[role="alert"]'),
+    ).toContainText("Recover or discard the previous uncertain submission");
+    expect(readPromptReceipts(receiptFile)).toBe(1);
+  } finally {
+    await app?.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("accepted prompt disconnect keeps the renderer delivery quarantine", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-e2e-prompt-delivery-disconnect-"),

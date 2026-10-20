@@ -216,7 +216,7 @@ describe("preload PiDeck API validation", () => {
     ).toThrow();
   });
 
-  it("preserves unknown delivery status on IPC errors for renderer callers", async () => {
+  it("returns unknown prompt delivery status for context-bridge-safe renderer handling", async () => {
     electronMock.ipcRenderer.invoke.mockResolvedValue({
       ok: false,
       error: {
@@ -232,10 +232,9 @@ describe("preload PiDeck API validation", () => {
         text: "Do something once",
         destination: "parent",
       }),
-    ).rejects.toMatchObject({
-      name: "INTERNAL_ERROR",
-      message: "RPC command timed out before response: prompt",
+    ).resolves.toEqual({
       deliveryStatus: "unknown",
+      message: "RPC command timed out before response: prompt",
     });
     expect(electronMock.ipcRenderer.invoke).toHaveBeenCalledWith(
       "chat:prompt",
@@ -245,6 +244,23 @@ describe("preload PiDeck API validation", () => {
         destination: "parent",
       },
     );
+  });
+
+  it("keeps definite prompt failures on the ordinary rejection path", async () => {
+    electronMock.ipcRenderer.invoke.mockResolvedValue({
+      ok: false,
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "Pi rejected the prompt",
+      },
+    });
+
+    await expect(
+      api.chat.prompt({ runtimeId: "runtime-1", text: "retry is safe" }),
+    ).rejects.toMatchObject({
+      name: "INTERNAL_ERROR",
+      message: "Pi rejected the prompt",
+    });
   });
 
   it("exposes strict steer and follow-up IPC methods", async () => {

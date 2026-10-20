@@ -5022,7 +5022,7 @@ export function App(): ReactElement {
           "Attachment owner generation is unavailable; reselect attachments and retry.",
         );
       }
-      await window.piDeck.chat.prompt({
+      const delivery = await window.piDeck.chat.prompt({
         runtimeId,
         text: prompt,
         attachments: promptAttachments.map((attachment) => ({
@@ -5036,6 +5036,17 @@ export function App(): ReactElement {
           ? { workerOverrides: overrides }
           : {}),
       });
+      if (delivery?.deliveryStatus === "unknown") {
+        // This outcome is returned from preload instead of rejected because
+        // Electron context bridge error serialization drops custom Error
+        // fields. Re-create it locally so the existing uncertain-receipt path
+        // retains the explicit, schema-validated classification.
+        const error = new Error(delivery.message) as Error & {
+          deliveryStatus: "unknown";
+        };
+        error.deliveryStatus = "unknown";
+        throw error;
+      }
       if (submissionSession !== undefined) {
         clearAcceptedComposerDraft(
           submissionSession,
@@ -5522,6 +5533,10 @@ export function App(): ReactElement {
       setUiMessage("There is no failed prompt available to retry.");
       return;
     }
+    // Runtime terminal evidence can make Retry prompt visible before a lost
+    // acknowledgement classifies this send as unconfirmed. Do not let that
+    // control bypass the pending-submission quarantine.
+    if (submissionBlockedByPendingRecovery(selectedSession)) return;
     void sendPrompt(selectedSession.id, retry.text, retry.attachments);
   }
 

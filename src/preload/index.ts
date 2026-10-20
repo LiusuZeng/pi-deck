@@ -123,6 +123,7 @@ import type {
   ChatCreateSessionRequest,
   ChatInterventionRequest,
   ChatPromptRequest,
+  ChatPromptDeliveryResult,
   ChatRespondToExtensionUiRequest,
   ChatRuntimeEvent,
   MultitaskModeRequest,
@@ -158,6 +159,21 @@ import type {
   WorkflowEvent,
 } from "../shared/types.js";
 
+function throwIpcError(errorPayload: {
+  code: string;
+  message: string;
+  deliveryStatus?: "unknown" | undefined;
+}): never {
+  const error = new Error(errorPayload.message) as Error & {
+    deliveryStatus?: "unknown";
+  };
+  error.name = errorPayload.code;
+  if (errorPayload.deliveryStatus === "unknown") {
+    error.deliveryStatus = "unknown";
+  }
+  throw error;
+}
+
 async function invokeValidated<TRequest, TResponse>(options: {
   channel: string;
   request: TRequest;
@@ -170,17 +186,31 @@ async function invokeValidated<TRequest, TResponse>(options: {
   const response = apiResponseSchema(options.responseSchema).parse(rawResponse);
 
   if (!response.ok) {
-    const error = new Error(response.error.message) as Error & {
-      deliveryStatus?: "unknown";
-    };
-    error.name = response.error.code;
-    if (response.error.deliveryStatus === "unknown") {
-      error.deliveryStatus = "unknown";
-    }
-    throw error;
+    throwIpcError(response.error);
   }
 
   return response.data;
+}
+
+/**
+ * Context bridge promise rejections serialize Error objects down to their
+ * message, dropping custom fields such as `deliveryStatus`. Return the
+ * schema-validated uncertain-receipt outcome instead, while ordinary failures
+ * keep the established rejection contract.
+ */
+async function invokePrompt(
+  request: ChatPromptRequest,
+): Promise<ChatPromptDeliveryResult> {
+  const rawResponse: unknown = await ipcRenderer.invoke(
+    ipcChannels.chatPrompt,
+    chatPromptRequestSchema.parse(request),
+  );
+  const response = apiResponseSchema(z.void()).parse(rawResponse);
+  if (response.ok) return undefined;
+  if (response.error.deliveryStatus === "unknown") {
+    return { deliveryStatus: "unknown", message: response.error.message };
+  }
+  throwIpcError(response.error);
 }
 
 const api: PiDeckApi = Object.freeze({
@@ -310,12 +340,7 @@ const api: PiDeckApi = Object.freeze({
         request: chatSetThinkingRequestSchema.parse(request),
         responseSchema: chatSnapshotSchema,
       }),
-    prompt: (request: ChatPromptRequest) =>
-      invokeValidated({
-        channel: ipcChannels.chatPrompt,
-        request: chatPromptRequestSchema.parse(request),
-        responseSchema: z.void(),
-      }),
+    prompt: (request: ChatPromptRequest) => invokePrompt(request),
     steer: (request: ChatInterventionRequest) =>
       invokeValidated({
         channel: ipcChannels.chatSteer,
