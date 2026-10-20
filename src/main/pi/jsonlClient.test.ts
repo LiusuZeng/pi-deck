@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
-import type { ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { buildSync } from "esbuild";
 import { it as test, vi } from "vitest";
 import { spawnFakeRpc } from "../../test/fakeRpcHarness.js";
 import {
@@ -41,6 +46,131 @@ function waitForEvent(
     };
     client.on("event", listener);
   });
+}
+
+interface DriverResult {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+}
+
+async function runBrokenStdinDriver(
+  mode: "request" | "send",
+): Promise<DriverResult> {
+  const directory = mkdtempSync(path.join(tmpdir(), "pi-deck-stdin-driver-"));
+  try {
+    const entry = path.join(directory, "driver.ts");
+    const outfile = path.join(directory, "driver.cjs");
+    const jsonlClientPath = fileURLToPath(
+      new URL("./jsonlClient.ts", import.meta.url),
+    );
+    writeFileSync(
+      entry,
+      `
+        import { spawnJsonlRpcClient } from ${JSON.stringify(jsonlClientPath)};
+
+        process.on("uncaughtExceptionMonitor", (error) => {
+          const code = error && typeof error === "object" && "code" in error ? error.code : "";
+          console.error("UNCAUGHT", code, error instanceof Error ? error.message : String(error));
+        });
+        process.on("unhandledRejection", (error) => {
+          console.error("UNHANDLED_REJECTION", error instanceof Error ? error.message : String(error));
+          process.exitCode = 3;
+        });
+
+        const childScript = ${JSON.stringify(`
+          require("node:fs").closeSync(0);
+          process.stdout.write(JSON.stringify({ type: "ready" }) + "\\n");
+          setTimeout(() => process.exit(0), 400);
+        `)};
+        const client = spawnJsonlRpcClient(
+          process.execPath,
+          ["-e", childScript],
+          { cwd: process.cwd(), env: process.env },
+          { requestTimeoutMs: 1_000 },
+        );
+
+        const ready = new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("ready timeout")), 1_000);
+          client.on("event", (event) => {
+            if (event.type === "ready") {
+              clearTimeout(timer);
+              resolve(undefined);
+            }
+          });
+        });
+
+        async function main() {
+          await ready;
+          try {
+            if (process.argv[2] === "request") {
+              await client.request("get_state", undefined, 1_000);
+            } else {
+              await client.send({ type: "extension_ui_response", id: "review", value: "answer" });
+            }
+            console.log("unexpected-success");
+            process.exitCode = 4;
+          } catch (error) {
+            console.log("handled", process.argv[2], error instanceof Error ? error.message : String(error));
+          }
+
+          try {
+            await client.request("after_failure", undefined, 1_000);
+            console.log("unexpected-future-success");
+            process.exitCode = 5;
+          } catch (error) {
+            console.log("future-rejected", error instanceof Error ? error.message : String(error));
+          }
+
+          await new Promise((resolve) => client.child.once("exit", resolve));
+        }
+
+        main().catch((error) => {
+          console.error("DRIVER_FAILED", error instanceof Error ? error.stack : String(error));
+          process.exitCode = 2;
+        });
+      `,
+      "utf8",
+    );
+    buildSync({
+      entryPoints: [entry],
+      outfile,
+      bundle: true,
+      platform: "node",
+      format: "cjs",
+      target: "node26",
+    });
+
+    return await new Promise<DriverResult>((resolve, reject) => {
+      const child = spawn(process.execPath, [outfile, mode], {
+        cwd: process.cwd(),
+        env: process.env,
+      });
+      let stdout = "";
+      let stderr = "";
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error("broken stdin driver timed out"));
+      }, 5_000);
+      child.stdout.on("data", (chunk: Buffer) => {
+        stdout += chunk.toString("utf8");
+      });
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderr += chunk.toString("utf8");
+      });
+      child.on("error", (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      child.on("exit", (code, signal) => {
+        clearTimeout(timer);
+        resolve({ code, signal, stdout, stderr });
+      });
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 test("JSONL RPC client matches responses by request id", async () => {
@@ -123,6 +253,107 @@ test("JSONL RPC client routes completion coalesced with the prompt response", as
   } finally {
     client.close();
   }
+});
+
+test("broken RPC stdin is contained on the request path", async () => {
+  const result = await runBrokenStdinDriver("request");
+
+  assert.equal(
+    result.code,
+    0,
+    `driver stderr:\n${result.stderr}\ndriver stdout:\n${result.stdout}`,
+  );
+  assert.match(
+    result.stdout,
+    /handled request .*EPIPE|handled request .*stdin/i,
+  );
+  assert.match(
+    result.stdout,
+    /future-rejected .*EPIPE|future-rejected .*stdin/i,
+  );
+  assert.doesNotMatch(result.stderr, /Unhandled 'error' event|UNCAUGHT/);
+  assert.equal(result.signal, null);
+});
+
+test("broken RPC stdin is contained on the notification path", async () => {
+  const result = await runBrokenStdinDriver("send");
+
+  assert.equal(
+    result.code,
+    0,
+    `driver stderr:\n${result.stderr}\ndriver stdout:\n${result.stdout}`,
+  );
+  assert.match(result.stdout, /handled send .*EPIPE|handled send .*stdin/i);
+  assert.match(
+    result.stdout,
+    /future-rejected .*EPIPE|future-rejected .*stdin/i,
+  );
+  assert.doesNotMatch(result.stderr, /Unhandled 'error' event|UNCAUGHT/);
+  assert.equal(result.signal, null);
+});
+
+test("stdin stream failure rejects pending and future writes without fabricating close", async () => {
+  const stdout = new EventEmitter();
+  const stderr = new EventEmitter();
+  const writeCallbacks: Array<(error?: Error | null) => void> = [];
+  const stdin = Object.assign(new EventEmitter(), {
+    destroyed: false,
+    write(
+      _payload: string,
+      _encoding: string,
+      callback: (error?: Error | null) => void,
+    ): boolean {
+      writeCallbacks.push(callback);
+      return false;
+    },
+  });
+  const child = Object.assign(new EventEmitter(), {
+    stdin,
+    stdout,
+    stderr,
+    killed: false,
+    kill(): boolean {
+      this.killed = true;
+      return true;
+    },
+  }) as unknown as ChildProcess;
+  const client = new JsonlRpcClient(child, { requestTimeoutMs: 1_000 });
+  const transportErrors: Error[] = [];
+  const closes: Array<{ code: number | null; signal: NodeJS.Signals | null }> =
+    [];
+  client.typedOn("transportError", (error) => transportErrors.push(error));
+  client.typedOn("close", (status) => closes.push(status));
+
+  const request = client.request("get_state");
+  const notification = client.send({
+    type: "extension_ui_response",
+    id: "review",
+  });
+
+  stdin.emit(
+    "error",
+    Object.assign(new Error("write EPIPE"), { code: "EPIPE" }),
+  );
+
+  await assert.rejects(request, /EPIPE/);
+  await assert.rejects(notification, /EPIPE/);
+  assert.equal(client.pendingCount, 0);
+  assert.equal(transportErrors.length, 1);
+  assert.deepEqual(closes, []);
+
+  await assert.rejects(client.request("future"), /EPIPE/);
+  await assert.rejects(client.send({ type: "future" }), /EPIPE/);
+
+  for (const callback of writeCallbacks) {
+    callback(new Error("late write EPIPE"));
+  }
+  stdin.emit("error", new Error("duplicate EPIPE"));
+  assert.equal(transportErrors.length, 1);
+  assert.deepEqual(closes, []);
+
+  child.emit("exit", 0, null);
+  child.emit("close", 0, null);
+  assert.deepEqual(closes, [{ code: 0, signal: null }]);
 });
 
 test("JSONL RPC client reports command and captured stderr on unexpected exit", async () => {
