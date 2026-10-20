@@ -5022,7 +5022,7 @@ export function App(): ReactElement {
           "Attachment owner generation is unavailable; reselect attachments and retry.",
         );
       }
-      await window.piDeck.chat.prompt({
+      const delivery = await window.piDeck.chat.prompt({
         runtimeId,
         text: prompt,
         attachments: promptAttachments.map((attachment) => ({
@@ -5036,6 +5036,17 @@ export function App(): ReactElement {
           ? { workerOverrides: overrides }
           : {}),
       });
+      if (delivery?.deliveryStatus === "unknown") {
+        // This outcome is returned from preload instead of rejected because
+        // Electron context bridge error serialization drops custom Error
+        // fields. Re-create it locally so the existing uncertain-receipt path
+        // retains the explicit, schema-validated classification.
+        const error = new Error(delivery.message) as Error & {
+          deliveryStatus: "unknown";
+        };
+        error.deliveryStatus = "unknown";
+        throw error;
+      }
       if (submissionSession !== undefined) {
         clearAcceptedComposerDraft(
           submissionSession,
@@ -5057,8 +5068,23 @@ export function App(): ReactElement {
       setWorkerOverrides((current) => ({ ...current, [runtimeId]: {} }));
     } catch (error) {
       let submittedDraftWasRestored = false;
+      const promptDeliveryUnconfirmed =
+        destination === "parent" && isPromptDeliveryUnconfirmedError(error);
       if (destination === "parent") {
         unblockAttachmentOwner(runtimeId);
+        if (promptDeliveryUnconfirmed) {
+          const ownerId = attachmentOwnersBySession.current.get(runtimeId);
+          if (ownerId !== undefined) {
+            releaseSelectedAttachmentTokens(
+              ownerId,
+              rejectedSubmissionTokensToRelease(
+                destination,
+                false,
+                promptAttachments,
+              ),
+            );
+          }
+        }
       } else {
         // Main rejected the submission, so it has not consumed these tokens.
         // Restore it only when the user has not begun a newer draft; otherwise
@@ -5102,29 +5128,41 @@ export function App(): ReactElement {
           }
         }
       }
-      setComposerError(error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      setComposerError(
+        promptDeliveryUnconfirmed
+          ? "A previous send may have been accepted by Pi. Check session history before recovering or retrying; retrying may duplicate work."
+          : message,
+      );
       if (destination === "parent") {
-        submittedDraftWasRestored = restoreRejectedComposerDraft(
-          runtimeId,
-          prompt,
-          promptAttachments,
-          submissionRevision,
-        );
-        if (!submittedDraftWasRestored) {
-          const ownerId = attachmentOwnersBySession.current.get(runtimeId);
-          if (ownerId !== undefined) {
-            releaseSelectedAttachmentTokens(
-              ownerId,
-              rejectedSubmissionTokensToRelease(
-                destination,
-                submittedDraftWasRestored,
-                promptAttachments,
-              ),
-            );
-          }
-        }
-      }
-      if (submissionSession !== undefined) {
+        submittedDraftWasRestored = settleFailedParentPromptSubmission({
+          promptDeliveryUnconfirmed,
+          submissionSession,
+          composerDraftPersistence: composerDraftPersistenceRef.current!,
+          restoreRejectedComposerDraft: () =>
+            restoreRejectedComposerDraft(
+              runtimeId,
+              prompt,
+              promptAttachments,
+              submissionRevision,
+            ),
+          onRejectedDraftNotRestored: () => {
+            const ownerId = attachmentOwnersBySession.current.get(runtimeId);
+            if (ownerId !== undefined) {
+              releaseSelectedAttachmentTokens(
+                ownerId,
+                rejectedSubmissionTokensToRelease(
+                  destination,
+                  false,
+                  promptAttachments,
+                ),
+              );
+            }
+          },
+          reportComposerDraftPersistenceResult,
+          publishPendingComposerRecovery,
+        });
+      } else if (submissionSession !== undefined) {
         reportComposerDraftPersistenceResult(
           composerDraftPersistenceRef.current!.finishSubmission(
             submissionSession,
@@ -5134,13 +5172,14 @@ export function App(): ReactElement {
         );
         publishPendingComposerRecovery(submissionSession);
       }
-      const message = error instanceof Error ? error.message : String(error);
       setSessions((current) =>
         current.map((session) =>
           session.id !== runtimeId
             ? session
             : destination === "parent"
-              ? markPromptDeliveryFailed(session, message)
+              ? promptDeliveryUnconfirmed
+                ? markPromptDeliveryUnconfirmed(session, message)
+                : markPromptDeliveryFailed(session, message)
               : appendNonfatalDiagnostic(session, {
                   tone: "error",
                   content: `Task submission failed: ${message}`,
@@ -5494,6 +5533,10 @@ export function App(): ReactElement {
       setUiMessage("There is no failed prompt available to retry.");
       return;
     }
+    // Runtime terminal evidence can make Retry prompt visible before a lost
+    // acknowledgement classifies this send as unconfirmed. Do not let that
+    // control bypass the pending-submission quarantine.
+    if (submissionBlockedByPendingRecovery(selectedSession)) return;
     void sendPrompt(selectedSession.id, retry.text, retry.attachments);
   }
 
@@ -9810,6 +9853,134 @@ function appendNonfatalDiagnostic(
       },
     ],
   };
+}
+
+interface FailedParentPromptSubmissionSettlementOptions {
+  promptDeliveryUnconfirmed: boolean;
+  submissionSession: ComposerDraftSessionIdentitySource | undefined;
+  composerDraftPersistence: Pick<
+    ComposerDraftPersistence,
+    "reconcilePendingSubmission" | "finishSubmission"
+  >;
+  restoreRejectedComposerDraft: () => boolean;
+  onRejectedDraftNotRestored: () => void;
+  reportComposerDraftPersistenceResult: (
+    result: ComposerDraftPersistenceResult,
+  ) => void;
+  publishPendingComposerRecovery: (
+    session: ComposerDraftSessionIdentitySource,
+  ) => void;
+}
+
+function settleFailedParentPromptSubmission(
+  options: FailedParentPromptSubmissionSettlementOptions,
+): boolean {
+  let submittedDraftWasRestored = false;
+  if (!options.promptDeliveryUnconfirmed) {
+    submittedDraftWasRestored = options.restoreRejectedComposerDraft();
+    if (!submittedDraftWasRestored) {
+      options.onRejectedDraftNotRestored();
+    }
+  }
+  if (options.submissionSession !== undefined) {
+    options.reportComposerDraftPersistenceResult(
+      options.promptDeliveryUnconfirmed
+        ? options.composerDraftPersistence.reconcilePendingSubmission(
+            options.submissionSession,
+            "unknown",
+          )
+        : options.composerDraftPersistence.finishSubmission(
+            options.submissionSession,
+            "rejected",
+            submittedDraftWasRestored,
+          ),
+    );
+    options.publishPendingComposerRecovery(options.submissionSession);
+  }
+  return submittedDraftWasRestored;
+}
+
+function isPromptDeliveryUnconfirmedError(error: unknown): boolean {
+  // Preload errors cross Electron's isolated-world boundary, so their Error
+  // prototype is not guaranteed to be this renderer's Error.prototype. The
+  // explicit status is schema-validated at IPC boundaries; retain it without
+  // relying on cross-realm instanceof identity.
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { deliveryStatus?: unknown }).deliveryStatus === "unknown"
+  );
+}
+
+function promptDeliveryUnconfirmedDiagnostic(message: string): string {
+  return `Prompt delivery unconfirmed: Pi may have received this prompt before confirmation failed. Check session history before recovering or retrying; retrying may duplicate work. Details: ${message}`;
+}
+
+function markPromptDeliveryUnconfirmed(
+  session: SessionViewModel,
+  message: string,
+): SessionViewModel {
+  const currentLifecycle = resolveSessionLifecycle(session);
+  const diagnostic = promptDeliveryUnconfirmedDiagnostic(message);
+  if (currentLifecycle.phase === "terminal") {
+    return appendNonfatalDiagnostic(session, {
+      tone: "error",
+      content: diagnostic,
+    });
+  }
+  if (hasPromptRuntimeProgressEvidence(session, currentLifecycle)) {
+    return appendNonfatalDiagnostic(
+      {
+        ...session,
+        lastError: diagnostic,
+      },
+      { tone: "error", content: diagnostic },
+    );
+  }
+  return appendNonfatalDiagnostic(
+    {
+      ...session,
+      lifecycle: inactiveSessionLifecycle,
+      status: "idle",
+      baseState: "idle",
+      awaitingAgentEnd: false,
+      providerErrorObserved: false,
+      overlays: {
+        ...session.overlays,
+        streaming: false,
+        toolRunning: false,
+        compacting: false,
+        retrying: false,
+      },
+      subtitle: "Delivery unconfirmed · Pi may have received the prompt",
+      lastError: diagnostic,
+      workingStartedAtMs: undefined,
+      lastRuntimeEventLabel:
+        "Prompt delivery unconfirmed; recover or discard before retrying",
+      updatedAt: "Now",
+      updatedAtMs: Date.now(),
+    },
+    { tone: "error", content: diagnostic },
+  );
+}
+
+function hasPromptRuntimeProgressEvidence(
+  session: SessionViewModel,
+  lifecycle: ReturnType<typeof resolveSessionLifecycle>,
+): boolean {
+  return (
+    lifecycle.phase === "aborting" ||
+    session.awaitingAgentEnd === true ||
+    session.status === "working" ||
+    session.status === "aborting" ||
+    session.baseState === "working" ||
+    session.overlays.streaming ||
+    session.overlays.toolRunning ||
+    session.overlays.compacting ||
+    session.overlays.retrying ||
+    session.overlays.needsUserInput ||
+    hasActiveTimelineOutput(session.timeline)
+  );
 }
 
 function markPromptDeliveryFailed(
@@ -15033,6 +15204,9 @@ export const __rendererTestHooks = {
   mergeSessionUsageFromRuntimeStatus,
   updateSessionByRuntimeId,
   appendNonfatalDiagnostic,
+  isPromptDeliveryUnconfirmedError,
+  markPromptDeliveryUnconfirmed,
+  settleFailedParentPromptSubmission,
   markPromptDeliveryFailed,
   eventHasUsageMetadata,
   currentSessionForSavedResume,

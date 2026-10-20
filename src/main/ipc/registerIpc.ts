@@ -2,6 +2,7 @@ import { ipcMain, type IpcMainInvokeEvent } from "electron";
 import type { ZodType } from "zod";
 import { ZodError } from "zod";
 import { apiResponseSchema, type IpcChannel } from "../../shared/ipcSchemas.js";
+import { isUnknownJsonlRpcDeliveryError } from "../pi/jsonlClient.js";
 import type { IpcErrorPayload } from "../../shared/types.js";
 import type { DiagnosticsRecorder } from "../diagnostics/diagnostics.js";
 
@@ -43,6 +44,14 @@ function toIpcErrorPayload(error: unknown): IpcErrorPayload {
       code: "VALIDATION_ERROR",
       message: "IPC payload validation failed",
       issues: error.issues,
+    };
+  }
+
+  if (isUnknownJsonlRpcDeliveryError(error)) {
+    return {
+      code: "INTERNAL_ERROR",
+      message: error.message,
+      deliveryStatus: "unknown",
     };
   }
 
