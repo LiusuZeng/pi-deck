@@ -52,8 +52,9 @@ export class PiWorker {
   private exitCode: number | null | undefined;
   private signal: NodeJS.Signals | null | undefined;
   private isClosingIntentionally = false;
+  private fatalTransportError: Error | undefined;
+  private shutdownPromise: Promise<void> | undefined;
   private workerExitEmitted = false;
-  private transportFailureCleanupStarted = false;
   /** Resolves exactly when the child is terminal (or spawn itself failed). */
   private readonly exitPromise: Promise<void>;
   private resolveExit!: () => void;
@@ -113,23 +114,26 @@ export class PiWorker {
       this.addDiagnostic("warn", message.trimEnd() || "RPC diagnostic");
     });
     this.client.typedOn("transportError", (error) => {
-      this.health = "unhealthy";
-      this.addDiagnostic("error", error.message);
-      this.startTransportFailureCleanup();
+      this.terminateAfterFatalTransportError(error);
+    });
+    this.client.typedOn("fatal", ({ error }) => {
+      this.terminateAfterFatalTransportError(error);
     });
     this.client.typedOn("close", ({ code, signal }) => {
       this.exitCode = code;
       this.signal = signal;
 
-      if (this.isClosingIntentionally) {
+      if (this.isClosingIntentionally && !this.fatalTransportError) {
         this.health = "closed";
         this.addDiagnostic(
           "info",
           `RPC worker closed (code=${code ?? "null"}, signal=${signal ?? "null"})`,
         );
       } else {
-        this.health = code === 0 ? "closed" : "unhealthy";
-        const level = code === 0 ? "info" : "error";
+        this.health =
+          code === 0 && !this.fatalTransportError ? "closed" : "unhealthy";
+        const level =
+          code === 0 && !this.fatalTransportError ? "info" : "error";
         this.addDiagnostic(
           level,
           `RPC worker exited (code=${code ?? "null"}, signal=${signal ?? "null"})`,
@@ -155,7 +159,7 @@ export class PiWorker {
       runtimeId: this.runtimeId,
       code,
       signal,
-      intentional: this.isClosingIntentionally,
+      intentional: this.isClosingIntentionally && !this.fatalTransportError,
     } as RuntimeEvent);
   }
 
@@ -228,18 +232,39 @@ export class PiWorker {
    * a signal was sent, not that Pi has stopped writing its JSONL.
    */
   async closeAndWait(): Promise<void> {
+    if (!this.fatalTransportError) {
+      this.isClosingIntentionally = true;
+    }
+    await this.requestTerminationAndWait();
+  }
+
+  private terminateAfterFatalTransportError(error: Error): void {
+    if (!this.fatalTransportError) {
+      this.fatalTransportError = error;
+      this.health = "unhealthy";
+      this.addDiagnostic("error", error.message);
+    }
+    void this.requestTerminationAndWait();
+  }
+
+  private requestTerminationAndWait(): Promise<void> {
+    if (this.shutdownPromise) {
+      return this.shutdownPromise;
+    }
+
+    this.shutdownPromise = this.terminateChildWithEscalation();
+    return this.shutdownPromise;
+  }
+
+  private async terminateChildWithEscalation(): Promise<void> {
     const child = this.client.child;
     if (child.exitCode !== null || child.signalCode !== null) {
       await this.waitForChildExit();
       return;
     }
 
-    // Mark intent before signalling so an immediate exit remains a clean
-    // shutdown. Do not use `child.killed` as a lifecycle predicate: it flips
-    // after SIGTERM even when the child ignores that signal.
-    if (!this.transportFailureCleanupStarted) {
-      this.isClosingIntentionally = true;
-    }
+    // Do not use `child.killed` as a lifecycle predicate: it flips after
+    // SIGTERM even when the child ignores that signal.
     try {
       child.kill("SIGTERM");
     } catch {
@@ -266,36 +291,6 @@ export class PiWorker {
   /** Backward-compatible lifecycle entry point. */
   closeSession(): Promise<void> {
     return this.closeAndWait();
-  }
-
-  private startTransportFailureCleanup(): void {
-    if (this.transportFailureCleanupStarted) {
-      return;
-    }
-    this.transportFailureCleanupStarted = true;
-    const child = this.client.child;
-    if (child.exitCode !== null || child.signalCode !== null) {
-      return;
-    }
-
-    try {
-      child.kill("SIGTERM");
-    } catch {
-      // Keep ownership until terminal child confirmation arrives.
-    }
-
-    const escalation = setTimeout(() => {
-      if (child.exitCode === null && child.signalCode === null) {
-        try {
-          child.kill("SIGKILL");
-        } catch {
-          // Keep waiting. A failed kill is not proof that the process exited.
-        }
-      }
-    }, this.killGraceMs);
-    void this.waitForChildExit().finally(() => {
-      clearTimeout(escalation);
-    });
   }
 
   private waitForChildExit(): Promise<void> {
