@@ -335,6 +335,40 @@ describe("sessionRuntimeReducer", () => {
     },
   );
 
+  it("quarantines every dialog after an unknown-delivery response", () => {
+    const waiting = reduceRuntimeEvent(session(), {
+      type: "extension_ui_request",
+      runtimeId: "runtime-1",
+      id: "request-1",
+      method: "editor",
+      title: "Edit",
+    } as any);
+    const waitingWithSecondDialog = reduceRuntimeEvent(waiting, {
+      type: "extension_ui_request",
+      runtimeId: "runtime-1",
+      id: "request-2",
+      method: "confirm",
+      title: "Continue?",
+    } as any);
+    const recovered = reduceRuntimeEvent(waitingWithSecondDialog, {
+      type: "extension_ui_response_delivery_unknown",
+      runtimeId: "runtime-1",
+      requestId: "request-1",
+      message: "Delivery is unknown; closing session.",
+    } as any);
+
+    expect(recovered).toMatchObject({
+      status: "error",
+      baseState: "error",
+      pendingExtensionUiRequests: [],
+      overlays: { needsUserInput: false },
+    });
+    expect(recovered.timeline.at(-1)).toMatchObject({
+      kind: "diagnostic",
+      content: "Delivery is unknown; closing session.",
+    });
+  });
+
   it("does not let a duplicate post-terminal update revive active presentation", () => {
     const completed = reduceRuntimeEvent(session(), {
       type: "agent_end",
