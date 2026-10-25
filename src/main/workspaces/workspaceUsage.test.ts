@@ -3,6 +3,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, it } from "vitest";
+import type { ChatSessionSummary } from "../../shared/types.js";
+import { buildFakeRpcServer } from "../../test/fakeRpcHarness.js";
+import { PiWorker } from "../pi/piWorker.js";
+import type { PiMessage } from "../pi/types.js";
+import { WorkspaceStore } from "./workspaceStore.js";
 import {
   WorkspaceUsageStore,
   contributionsFromSessionFile,
@@ -54,10 +59,31 @@ function messageRecord(message: Record<string, unknown>): string {
   });
 }
 
+function sessionUsageRecord(options: {
+  type: "usage" | "compaction" | "branch_summary";
+  id: string;
+  inputTokens: number;
+  totalCostUsd: number;
+  timestamp: number;
+}): Record<string, unknown> {
+  return {
+    type: options.type,
+    id: options.id,
+    parentId: null,
+    timestamp: new Date(options.timestamp).toISOString(),
+    usage: assistantMessage(
+      options.id,
+      options.inputTokens,
+      options.totalCostUsd,
+    ).usage,
+  };
+}
+
 async function writeSessionFixture(options: {
   sessionFile: string;
   parentSession?: string;
   messages: readonly Record<string, unknown>[];
+  entries?: readonly Record<string, unknown>[];
   sessionTimestamp?: string;
 }): Promise<void> {
   await fs.writeFile(
@@ -74,7 +100,28 @@ async function writeSessionFixture(options: {
           : {}),
       }),
       ...options.messages.map(messageRecord),
+      ...(options.entries ?? []).map((entry) => JSON.stringify(entry)),
     ].join("\n") + "\n",
+  );
+}
+
+function workspaceSessionSummary(sessionFile: string): ChatSessionSummary {
+  return {
+    id: path.basename(sessionFile, ".jsonl"),
+    sessionFile,
+    title: path.basename(sessionFile),
+    updatedAtMs: 1,
+    createdAtMs: 1,
+    messageCount: 1,
+  };
+}
+
+async function visibleSessionFiles(
+  store: WorkspaceStore,
+  workspaceId: string,
+): Promise<string[]> {
+  return (await store.getCachedSessionSummaries(workspaceId)).map(
+    (summary) => summary.sessionFile,
   );
 }
 
@@ -790,6 +837,211 @@ describe("workspace usage accounting", () => {
     );
   });
 
+  it("accounts fake-native fork history once through moves, archiving, runtime, and recovery", async () => {
+    const root = await fs.realpath(
+      await fs.mkdtemp(
+        path.join(os.tmpdir(), "pi-deck-usage-native-fork-lifecycle-"),
+      ),
+    );
+    const sourceFile = path.join(root, "source.jsonl");
+    const childFile = path.join(root, "child.jsonl");
+    const parentAnswer = assistantMessage("assistant-parent", 10, 0.01);
+    parentAnswer.timestamp = "2024-01-01T00:00:00.000Z";
+    await writeSessionFixture({
+      sessionFile: sourceFile,
+      sessionTimestamp: "2024-01-01T00:00:00.000Z",
+      messages: [parentAnswer],
+    });
+
+    const worker = new PiWorker({
+      command: process.execPath,
+      args: [
+        buildFakeRpcServer(),
+        "--fork",
+        sourceFile,
+        "--fork-target",
+        childFile,
+      ],
+      cwd: process.cwd(),
+      env: process.env,
+      requestTimeoutMs: 5_000,
+      killGraceMs: 100,
+    });
+    let childMessages: PiMessage[];
+    try {
+      const state = await worker.getState();
+      assert.equal(state.sessionFile, childFile);
+      childMessages = await worker.getMessages();
+    } finally {
+      await worker.closeSession();
+    }
+
+    const workspaces = new WorkspaceStore(root);
+    const sourceWorkspace = await workspaces.create({ name: "Source" });
+    const childWorkspace = await workspaces.create({ name: "Child" });
+    await workspaces.upsertSessionRef(
+      sourceWorkspace.id,
+      workspaceSessionSummary(sourceFile),
+    );
+    await workspaces.upsertSessionRef(
+      sourceWorkspace.id,
+      workspaceSessionSummary(childFile),
+    );
+
+    const usage = new WorkspaceUsageStore(root);
+    await usage.refreshSessionFileUsage({
+      workspaceId: sourceWorkspace.id,
+      sessionFile: sourceFile,
+    });
+    await usage.recordSessionMessagesUsage({
+      workspaceId: sourceWorkspace.id,
+      sessionFile: childFile,
+      sessionKey: childFile,
+      source: "session",
+      messages: childMessages,
+    });
+    await usage.recordRuntimeUsage({
+      workspaceId: sourceWorkspace.id,
+      sessionFile: childFile,
+      usage: {
+        inputTokens: 10,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        totalTokens: 10,
+        totalCostUsd: 0.01,
+      },
+    });
+    assert.equal(
+      (
+        await usage.getWorkspaceUsage({
+          workspaceId: sourceWorkspace.id,
+          sessionFiles: await visibleSessionFiles(
+            workspaces,
+            sourceWorkspace.id,
+          ),
+        })
+      ).totalTokens,
+      10,
+    );
+
+    await workspaces.moveSession(childFile, childWorkspace.id);
+    assert.equal(
+      (
+        await usage.getWorkspaceUsage({
+          workspaceId: childWorkspace.id,
+          sessionFiles: await visibleSessionFiles(
+            workspaces,
+            childWorkspace.id,
+          ),
+        })
+      ).totalTokens,
+      0,
+    );
+    await usage.recordRuntimeUsage({
+      workspaceId: childWorkspace.id,
+      sessionFile: childFile,
+      usage: {
+        inputTokens: 10,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        totalTokens: 10,
+        totalCostUsd: 0.01,
+      },
+    });
+    assert.equal(
+      (
+        await usage.getWorkspaceUsage({
+          workspaceId: sourceWorkspace.id,
+          sessionFiles: await visibleSessionFiles(
+            workspaces,
+            sourceWorkspace.id,
+          ),
+        })
+      ).totalTokens,
+      10,
+    );
+
+    await workspaces.moveSession(sourceFile, childWorkspace.id);
+    assert.equal(
+      (
+        await usage.getWorkspaceUsage({
+          workspaceId: sourceWorkspace.id,
+          sessionFiles: await visibleSessionFiles(
+            workspaces,
+            sourceWorkspace.id,
+          ),
+        })
+      ).totalTokens,
+      0,
+    );
+    assert.equal(
+      (
+        await usage.getWorkspaceUsage({
+          workspaceId: childWorkspace.id,
+          sessionFiles: await visibleSessionFiles(
+            workspaces,
+            childWorkspace.id,
+          ),
+        })
+      ).totalTokens,
+      10,
+    );
+
+    await workspaces.archiveSession(childWorkspace.id, childFile);
+    assert.equal(
+      (
+        await usage.getWorkspaceUsage({
+          workspaceId: childWorkspace.id,
+          sessionFiles: await visibleSessionFiles(
+            workspaces,
+            childWorkspace.id,
+          ),
+        })
+      ).totalTokens,
+      10,
+    );
+    await workspaces.archiveSession(childWorkspace.id, sourceFile);
+    assert.equal(
+      (
+        await usage.getWorkspaceUsage({
+          workspaceId: childWorkspace.id,
+          sessionFiles: await visibleSessionFiles(
+            workspaces,
+            childWorkspace.id,
+          ),
+        })
+      ).totalTokens,
+      0,
+    );
+    await workspaces.restoreSession(childWorkspace.id, sourceFile);
+
+    const recovered = new WorkspaceUsageStore(
+      await fs.mkdtemp(path.join(os.tmpdir(), "pi-deck-usage-fork-recover-")),
+    );
+    await recovered.refreshSessionFileUsage({
+      workspaceId: childWorkspace.id,
+      sessionFile: sourceFile,
+    });
+    await recovered.refreshSessionFileUsage({
+      workspaceId: childWorkspace.id,
+      sessionFile: childFile,
+    });
+    assert.equal(
+      (
+        await recovered.getWorkspaceUsage({
+          workspaceId: childWorkspace.id,
+          sessionFiles: await visibleSessionFiles(
+            workspaces,
+            childWorkspace.id,
+          ),
+        })
+      ).totalTokens,
+      10,
+    );
+  });
+
   it("counts native fork inherited history only once across live, runtime, recovery, and reload", async () => {
     const root = await fs.mkdtemp(
       path.join(os.tmpdir(), "pi-deck-usage-fork-"),
@@ -941,6 +1193,225 @@ describe("workspace usage accounting", () => {
         sessionFiles: [sourceFile, childFile],
       }),
     );
+  });
+
+  it("keeps child work when a compacted fork projection omits inherited messages", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-usage-fork-compacted-live-"),
+    );
+    const sourceFile = path.join(root, "source.jsonl");
+    const childFile = path.join(root, "child.jsonl");
+    const forkStartedAtMs = Date.now();
+    const parentAnswer = assistantMessage("assistant-parent", 10, 0.01);
+    parentAnswer.timestamp = forkStartedAtMs - 1_000;
+    const childAnswer = assistantMessage("assistant-child", 5, 0.005);
+    childAnswer.timestamp = forkStartedAtMs + 1_000;
+    const compactionMarker = {
+      type: "compaction",
+      id: "compaction-after-parent",
+      timestamp: new Date(forkStartedAtMs - 500).toISOString(),
+      firstKeptEntryId: "assistant-child",
+    };
+
+    // The raw source/child JSONL retain the copied parent turn, but Pi's
+    // compaction-aware get_messages projection need not include it.
+    await writeSessionFixture({
+      sessionFile: sourceFile,
+      messages: [parentAnswer],
+      entries: [compactionMarker],
+    });
+    await writeSessionFixture({
+      sessionFile: childFile,
+      parentSession: sourceFile,
+      sessionTimestamp: new Date(forkStartedAtMs).toISOString(),
+      messages: [parentAnswer, childAnswer],
+      entries: [compactionMarker],
+    });
+
+    const store = new WorkspaceUsageStore(root);
+    await store.refreshSessionFileUsage({
+      workspaceId: workspaceA,
+      sessionFile: sourceFile,
+    });
+    await store.recordSessionMessagesUsage({
+      workspaceId: workspaceA,
+      sessionFile: childFile,
+      sessionKey: childFile,
+      source: "session",
+      // Simulate get_messages after compaction: inherited history is absent.
+      messages: [childAnswer],
+    });
+
+    const assertExpected = async (): Promise<void> => {
+      const usage = await store.getWorkspaceUsage({
+        workspaceId: workspaceA,
+        sessionFiles: [sourceFile, childFile],
+      });
+      assert.equal(usage.totalTokens, 15);
+      assert.ok(Math.abs(usage.knownCostUsd - 0.015) < 1e-12);
+      assert.equal(usage.contributorsWithCost, 2);
+    };
+    await assertExpected();
+
+    await store.recordRuntimeUsage({
+      workspaceId: workspaceA,
+      sessionFile: childFile,
+      usage: {
+        inputTokens: 15,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        totalTokens: 15,
+        totalCostUsd: 0.015,
+      },
+    });
+    await assertExpected();
+
+    await store.refreshSessionFileUsage({
+      workspaceId: workspaceA,
+      sessionFile: childFile,
+    });
+    await assertExpected();
+
+    const recovered = new WorkspaceUsageStore(
+      await fs.mkdtemp(path.join(os.tmpdir(), "pi-deck-usage-fork-recover-")),
+    );
+    await recovered.refreshSessionFileUsage({
+      workspaceId: workspaceA,
+      sessionFile: sourceFile,
+    });
+    await recovered.refreshSessionFileUsage({
+      workspaceId: workspaceA,
+      sessionFile: childFile,
+    });
+    assert.equal(
+      (
+        await recovered.getWorkspaceUsage({
+          workspaceId: workspaceA,
+          sessionFiles: [sourceFile, childFile],
+        })
+      ).totalTokens,
+      15,
+    );
+  });
+
+  it("excludes copied native non-message usage from live, recovery, and runtime fork totals", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-usage-fork-native-entries-"),
+    );
+    const sourceFile = path.join(root, "source.jsonl");
+    const childFile = path.join(root, "child.jsonl");
+    const forkStartedAtMs = Date.now();
+    const parentAnswer = assistantMessage("assistant-parent", 10, 0.01);
+    parentAnswer.timestamp = forkStartedAtMs - 4_000;
+    const inheritedEntries = [
+      sessionUsageRecord({
+        type: "usage",
+        id: "usage-parent",
+        inputTokens: 2,
+        totalCostUsd: 0.002,
+        timestamp: forkStartedAtMs - 3_000,
+      }),
+      sessionUsageRecord({
+        type: "compaction",
+        id: "compaction-parent",
+        inputTokens: 3,
+        totalCostUsd: 0.003,
+        timestamp: forkStartedAtMs - 2_000,
+      }),
+      sessionUsageRecord({
+        type: "branch_summary",
+        id: "branch-summary-parent",
+        inputTokens: 4,
+        totalCostUsd: 0.004,
+        timestamp: forkStartedAtMs - 1_000,
+      }),
+    ];
+
+    await writeSessionFixture({
+      sessionFile: sourceFile,
+      messages: [parentAnswer],
+      entries: inheritedEntries,
+    });
+    await writeSessionFixture({
+      sessionFile: childFile,
+      parentSession: sourceFile,
+      sessionTimestamp: new Date(forkStartedAtMs).toISOString(),
+      messages: [parentAnswer],
+      entries: inheritedEntries,
+    });
+
+    const store = new WorkspaceUsageStore(root);
+    await store.refreshSessionFileUsage({
+      workspaceId: workspaceA,
+      sessionFile: sourceFile,
+    });
+    await store.recordSessionMessagesUsage({
+      workspaceId: workspaceA,
+      sessionFile: childFile,
+      sessionKey: childFile,
+      source: "session",
+      messages: [parentAnswer],
+    });
+    await store.recordRuntimeUsage({
+      workspaceId: workspaceA,
+      sessionFile: childFile,
+      usage: {
+        inputTokens: 19,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        totalTokens: 19,
+        totalCostUsd: 0.019,
+      },
+    });
+
+    const usage = await store.getWorkspaceUsage({
+      workspaceId: workspaceA,
+      sessionFiles: [sourceFile, childFile],
+    });
+    assert.equal(usage.totalTokens, 19);
+    assert.ok(Math.abs(usage.knownCostUsd - 0.019) < 1e-12);
+    assert.equal(usage.contributorsWithCost, 4);
+    assert.equal(usage.contributorsWithoutCost, 0);
+
+    const recovered = new WorkspaceUsageStore(
+      await fs.mkdtemp(path.join(os.tmpdir(), "pi-deck-usage-fork-recover-")),
+    );
+    await recovered.refreshSessionFileUsage({
+      workspaceId: workspaceA,
+      sessionFile: sourceFile,
+    });
+    await recovered.refreshSessionFileUsage({
+      workspaceId: workspaceA,
+      sessionFile: childFile,
+    });
+    assert.equal(
+      (
+        await recovered.getWorkspaceUsage({
+          workspaceId: workspaceA,
+          sessionFiles: [sourceFile, childFile],
+        })
+      ).totalTokens,
+      19,
+    );
+
+    const persisted = JSON.parse(
+      await fs.readFile(store.storeFile, "utf8"),
+    ) as {
+      snapshots: Array<{
+        ownerSessionFile?: string;
+        inheritedTotalTokens?: number;
+        inheritedUsageEntryCount?: number;
+        inheritedMessageUsageEntryCount?: number;
+      }>;
+    };
+    const childSnapshot = persisted.snapshots.find(
+      (snapshot) => snapshot.ownerSessionFile === path.resolve(childFile),
+    );
+    assert.equal(childSnapshot?.inheritedTotalTokens, 19);
+    assert.equal(childSnapshot?.inheritedUsageEntryCount, 4);
+    assert.equal(childSnapshot?.inheritedMessageUsageEntryCount, 1);
   });
 
   it("derives runtime contributors when a fork previously stored only inherited history", async () => {

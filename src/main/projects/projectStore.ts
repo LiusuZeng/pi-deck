@@ -128,30 +128,42 @@ export class ProjectStore {
 
   async list(): Promise<ProjectListResult> {
     await this.loadIfNeeded();
-    let changed = false;
+    const invalidReasons = new Map<string, string | undefined>();
     for (const project of this.state.projects) {
       if (project.archivedAtMs !== undefined) {
         continue;
       }
       try {
         const stat = await fs.stat(project.rootPath);
-        const invalidReason = stat.isDirectory()
-          ? undefined
-          : "Project path is not a folder.";
-        if (project.invalidReason !== invalidReason) {
-          project.invalidReason = invalidReason;
-          changed = true;
-        }
+        invalidReasons.set(
+          project.id,
+          stat.isDirectory() ? undefined : "Project path is not a folder.",
+        );
       } catch {
-        const invalidReason = "Project folder is missing or unreadable.";
-        if (project.invalidReason !== invalidReason) {
-          project.invalidReason = invalidReason;
-          changed = true;
-        }
+        invalidReasons.set(
+          project.id,
+          "Project folder is missing or unreadable.",
+        );
       }
     }
-    if (changed) {
-      await this.persist();
+    if (
+      [...invalidReasons].some(
+        ([id, invalidReason]) =>
+          this.state.projects.find((project) => project.id === id)
+            ?.invalidReason !== invalidReason,
+      )
+    ) {
+      await this.transact(() => {
+        let changed = false;
+        const projects = this.state.projects.map((project) => {
+          if (!invalidReasons.has(project.id)) return project;
+          const invalidReason = invalidReasons.get(project.id);
+          if (project.invalidReason === invalidReason) return project;
+          changed = true;
+          return withInvalidReason(project, invalidReason);
+        });
+        return { next: { ...this.state, projects }, changed };
+      });
     }
 
     const activeProject = this.getActiveProjectRecordSync();
@@ -181,36 +193,38 @@ export class ProjectStore {
     await this.loadIfNeeded();
     const canonical = await canonicalProjectPath(rootPath);
     const now = Date.now();
-    const existingIndex = this.state.projects.findIndex(
-      (project) => project.id === canonical,
-    );
-    const existing =
-      existingIndex >= 0 ? this.state.projects[existingIndex] : undefined;
-    const next: ProjectRecord = existing
-      ? {
-          ...existing,
-          rootPath: canonical,
-          displayName: existing.displayName ?? displayNameFromPath(canonical),
-          updatedAtMs: now,
-          lastOpenedAtMs: now,
-        }
-      : {
-          id: canonical,
-          rootPath: canonical,
-          displayName: displayNameFromPath(canonical),
-          createdAtMs: now,
-          updatedAtMs: now,
-          lastOpenedAtMs: now,
-        };
-
-    if (existingIndex >= 0) {
-      this.state.projects[existingIndex] = next;
-    } else {
-      this.state.projects.push(next);
-    }
-    this.state.activeProjectId = next.id;
-    await this.persist();
-    return toProjectRef(next);
+    return this.transact(() => {
+      const existingIndex = this.state.projects.findIndex(
+        (project) => project.id === canonical,
+      );
+      const existing =
+        existingIndex >= 0 ? this.state.projects[existingIndex] : undefined;
+      const next: ProjectRecord = existing
+        ? {
+            ...existing,
+            rootPath: canonical,
+            displayName: existing.displayName ?? displayNameFromPath(canonical),
+            updatedAtMs: now,
+            lastOpenedAtMs: now,
+          }
+        : {
+            id: canonical,
+            rootPath: canonical,
+            displayName: displayNameFromPath(canonical),
+            createdAtMs: now,
+            updatedAtMs: now,
+            lastOpenedAtMs: now,
+          };
+      const projects =
+        existingIndex >= 0
+          ? replaceAt(this.state.projects, existingIndex, next)
+          : [...this.state.projects, next];
+      return {
+        next: { ...this.state, activeProjectId: next.id, projects },
+        result: toProjectRef(next),
+        changed: true,
+      };
+    });
   }
 
   /**
@@ -235,14 +249,14 @@ export class ProjectStore {
       stat = await fs.stat(canonical);
     } catch {
       await this.setProjectInvalidReason(
-        project,
+        project.id,
         "Project folder is missing or unreadable.",
       );
       throw new Error(`Project folder is missing or unreadable: ${project.id}`);
     }
     if (!stat.isDirectory()) {
       await this.setProjectInvalidReason(
-        project,
+        project.id,
         "Project path is not a folder.",
       );
       throw new Error(`Project path is not a folder: ${project.id}`);
@@ -252,7 +266,7 @@ export class ProjectStore {
     // or require that implementation detail for future/migrated records.
     if (canonical !== project.rootPath) {
       await this.setProjectInvalidReason(
-        project,
+        project.id,
         "Project folder moved or its canonical path changed.",
       );
       throw new Error(
@@ -261,27 +275,42 @@ export class ProjectStore {
     }
 
     if (project.invalidReason !== undefined) {
-      project.invalidReason = undefined;
-      await this.persist();
+      await this.setProjectInvalidReason(project.id, undefined);
     }
-    return toProjectRef(project);
+    return toProjectRef(withInvalidReason(project, undefined));
   }
 
   async selectProject(projectId: string): Promise<ProjectRef> {
     await this.resolveAuthorizedProject(projectId);
-    const project = this.state.projects.find((item) => item.id === projectId);
-    if (!project) {
-      // resolveAuthorizedProject above makes this unreachable, but retain a
-      // defensive error if future store mutations become concurrent.
-      throw new Error(`Unknown project: ${projectId}`);
-    }
-    const now = Date.now();
-    project.lastOpenedAtMs = now;
-    project.updatedAtMs = now;
-    project.invalidReason = undefined;
-    this.state.activeProjectId = project.id;
-    await this.persist();
-    return toProjectRef(project);
+    return this.transact(() => {
+      const projectIndex = this.state.projects.findIndex(
+        (item) => item.id === projectId,
+      );
+      if (projectIndex < 0) {
+        // resolveAuthorizedProject above makes this unreachable, but retain a
+        // defensive error if future store mutations become concurrent.
+        throw new Error(`Unknown project: ${projectId}`);
+      }
+      const project = this.state.projects[projectIndex]!;
+      const now = Date.now();
+      const next = withInvalidReason(
+        {
+          ...project,
+          lastOpenedAtMs: now,
+          updatedAtMs: now,
+        },
+        undefined,
+      );
+      return {
+        next: {
+          ...this.state,
+          activeProjectId: next.id,
+          projects: replaceAt(this.state.projects, projectIndex, next),
+        },
+        changed: true,
+        result: toProjectRef(next),
+      };
+    });
   }
 
   async upsertSessionRef(
@@ -325,79 +354,78 @@ export class ProjectStore {
       ]);
 
     await this.loadIfNeeded();
-    const now = Date.now();
-    const nextRefs = [...this.state.sessionRefs];
-    const indexes = new Map(
-      nextRefs.map((ref, index) => [
-        sessionRefKey(ref.projectId, ref.sessionFile),
-        index,
-      ]),
-    );
-    let changed = false;
+    const changed = await this.transact(() => {
+      const now = Date.now();
+      const nextRefs = [...this.state.sessionRefs];
+      const indexes = new Map(
+        nextRefs.map((ref, index) => [
+          sessionRefKey(ref.projectId, ref.sessionFile),
+          index,
+        ]),
+      );
+      let changed = false;
 
-    for (const { summary, sessionFile, canonicalCwd } of canonicalSummaries) {
-      const key = sessionRefKey(validProjectId, sessionFile);
-      const index = indexes.get(key);
-      const existing = index === undefined ? undefined : nextRefs[index];
-      const candidate: ProjectSessionRef = {
-        projectId: validProjectId,
-        sessionFile,
-        ...(summary.sessionId ? { sessionId: summary.sessionId } : {}),
-        title: summary.title,
-        ...(summary.cwd ? { cwd: summary.cwd } : {}),
-        ...(canonicalCwd ? { canonicalCwd } : {}),
-        ...(summary.preview ? { preview: summary.preview } : {}),
-        addedAtMs: existing?.addedAtMs ?? now,
-        lastSeenAtMs: existing?.lastSeenAtMs ?? now,
-        lastKnownUpdatedAtMs: summary.updatedAtMs,
-        ...(summary.createdAtMs !== undefined
-          ? { createdAtMs: summary.createdAtMs }
-          : {}),
-        ...(summary.completedAtMs !== undefined
-          ? { completedAtMs: summary.completedAtMs }
-          : {}),
-        messageCount: summary.messageCount,
-      };
+      for (const { summary, sessionFile, canonicalCwd } of canonicalSummaries) {
+        const key = sessionRefKey(validProjectId, sessionFile);
+        const index = indexes.get(key);
+        const existing = index === undefined ? undefined : nextRefs[index];
+        const candidate: ProjectSessionRef = {
+          projectId: validProjectId,
+          sessionFile,
+          ...(summary.sessionId ? { sessionId: summary.sessionId } : {}),
+          title: summary.title,
+          ...(summary.cwd ? { cwd: summary.cwd } : {}),
+          ...(canonicalCwd ? { canonicalCwd } : {}),
+          ...(summary.preview ? { preview: summary.preview } : {}),
+          addedAtMs: existing?.addedAtMs ?? now,
+          lastSeenAtMs: existing?.lastSeenAtMs ?? now,
+          lastKnownUpdatedAtMs: summary.updatedAtMs,
+          ...(summary.createdAtMs !== undefined
+            ? { createdAtMs: summary.createdAtMs }
+            : {}),
+          ...(summary.completedAtMs !== undefined
+            ? { completedAtMs: summary.completedAtMs }
+            : {}),
+          messageCount: summary.messageCount,
+        };
 
-      if (existing && sameSessionRefData(existing, candidate)) {
-        continue;
-      }
-      candidate.lastSeenAtMs = now;
-      if (index === undefined) {
-        indexes.set(key, nextRefs.length);
-        nextRefs.push(candidate);
-      } else {
-        nextRefs[index] = candidate;
-      }
-      changed = true;
-    }
-
-    for (const sessionFile of canonicalMissingSessionFiles) {
-      const index = indexes.get(sessionRefKey(validProjectId, sessionFile));
-      if (index === undefined) {
-        continue;
-      }
-      const existing = nextRefs[index];
-      if (existing && existing.missingSinceMs === undefined) {
-        nextRefs[index] = { ...existing, missingSinceMs: now };
+        if (existing && sameSessionRefData(existing, candidate)) {
+          continue;
+        }
+        candidate.lastSeenAtMs = now;
+        if (index === undefined) {
+          indexes.set(key, nextRefs.length);
+          nextRefs.push(candidate);
+        } else {
+          nextRefs[index] = candidate;
+        }
         changed = true;
       }
-    }
 
-    if (changed) {
-      // Keep the on-disk schema as the final guard before committing the batch.
-      const nextState = projectStoreFileSchema.parse({
-        ...this.state,
-        sessionRefs: nextRefs,
-      });
-      this.state = nextState;
-      this.sessionRefsGeneration += 1;
-    }
+      for (const sessionFile of canonicalMissingSessionFiles) {
+        const index = indexes.get(sessionRefKey(validProjectId, sessionFile));
+        if (index === undefined) {
+          continue;
+        }
+        const existing = nextRefs[index];
+        if (existing && existing.missingSinceMs === undefined) {
+          nextRefs[index] = { ...existing, missingSinceMs: now };
+          changed = true;
+        }
+      }
 
-    // Retry a prior failed batch write even when this scan produced the same
-    // normalized state. Otherwise the in-memory update could be lost at exit.
+      return {
+        next: { ...this.state, sessionRefs: nextRefs },
+        changed,
+        result: changed,
+      };
+    });
+
+    // Retry an accepted migration write even when this scan produced the same
+    // normalized state. Rejected writes never publish state, so they do not set
+    // this dirty bit.
     if (
-      changed ||
+      !changed &&
       this.persistedSessionRefsGeneration < this.sessionRefsGeneration
     ) {
       await this.persist();
@@ -420,58 +448,65 @@ export class ProjectStore {
     const canonicalCwd = options.cwd
       ? await canonicalProjectPath(options.cwd)
       : undefined;
-    const now = Date.now();
-    const index = this.state.sessionRefs.findIndex(
-      (ref) =>
-        ref.projectId === options.projectId && ref.sessionFile === sessionFile,
-    );
-    const existing = index >= 0 ? this.state.sessionRefs[index] : undefined;
-    const next: ProjectSessionRef = {
-      projectId: options.projectId,
-      sessionFile,
-      ...(options.sessionId
-        ? { sessionId: options.sessionId }
-        : existing?.sessionId
-          ? { sessionId: existing.sessionId }
-          : {}),
-      title:
-        options.title ??
-        existing?.title ??
-        path.basename(sessionFile, ".jsonl"),
-      ...(options.cwd
-        ? { cwd: options.cwd, canonicalCwd }
-        : existing?.cwd
-          ? {
-              cwd: existing.cwd,
-              ...(existing.canonicalCwd
-                ? { canonicalCwd: existing.canonicalCwd }
-                : {}),
-            }
-          : {}),
-      ...(options.preview
-        ? { preview: options.preview }
-        : existing?.preview
-          ? { preview: existing.preview }
-          : {}),
-      addedAtMs: existing?.addedAtMs ?? now,
-      lastSeenAtMs: now,
-      lastKnownUpdatedAtMs:
-        options.updatedAtMs ?? existing?.lastKnownUpdatedAtMs ?? now,
-      ...(existing?.createdAtMs ? { createdAtMs: existing.createdAtMs } : {}),
-      ...(options.completedAtMs !== undefined
-        ? { completedAtMs: options.completedAtMs }
-        : options.messageCount === undefined &&
-            existing?.completedAtMs !== undefined
-          ? { completedAtMs: existing.completedAtMs }
-          : {}),
-      messageCount: options.messageCount ?? existing?.messageCount ?? 0,
-    };
-    if (index >= 0) {
-      this.state.sessionRefs[index] = next;
-    } else {
-      this.state.sessionRefs.push(next);
-    }
-    await this.persist();
+    await this.transact(() => {
+      const now = Date.now();
+      const index = this.state.sessionRefs.findIndex(
+        (ref) =>
+          ref.projectId === options.projectId &&
+          ref.sessionFile === sessionFile,
+      );
+      const existing = index >= 0 ? this.state.sessionRefs[index] : undefined;
+      const next: ProjectSessionRef = {
+        projectId: options.projectId,
+        sessionFile,
+        ...(options.sessionId
+          ? { sessionId: options.sessionId }
+          : existing?.sessionId
+            ? { sessionId: existing.sessionId }
+            : {}),
+        title:
+          options.title ??
+          existing?.title ??
+          path.basename(sessionFile, ".jsonl"),
+        ...(options.cwd
+          ? { cwd: options.cwd, canonicalCwd }
+          : existing?.cwd
+            ? {
+                cwd: existing.cwd,
+                ...(existing.canonicalCwd
+                  ? { canonicalCwd: existing.canonicalCwd }
+                  : {}),
+              }
+            : {}),
+        ...(options.preview
+          ? { preview: options.preview }
+          : existing?.preview
+            ? { preview: existing.preview }
+            : {}),
+        addedAtMs: existing?.addedAtMs ?? now,
+        lastSeenAtMs: now,
+        lastKnownUpdatedAtMs:
+          options.updatedAtMs ?? existing?.lastKnownUpdatedAtMs ?? now,
+        ...(existing?.createdAtMs ? { createdAtMs: existing.createdAtMs } : {}),
+        ...(options.completedAtMs !== undefined
+          ? { completedAtMs: options.completedAtMs }
+          : options.messageCount === undefined &&
+              existing?.completedAtMs !== undefined
+            ? { completedAtMs: existing.completedAtMs }
+            : {}),
+        messageCount: options.messageCount ?? existing?.messageCount ?? 0,
+      };
+      return {
+        next: {
+          ...this.state,
+          sessionRefs:
+            index >= 0
+              ? replaceAt(this.state.sessionRefs, index, next)
+              : [...this.state.sessionRefs, next],
+        },
+        changed: true,
+      };
+    });
   }
 
   async getSessionRefs(projectId: string): Promise<ProjectSessionRef[]> {
@@ -518,13 +553,26 @@ export class ProjectStore {
   ): Promise<void> {
     await this.loadIfNeeded();
     const canonical = await canonicalSessionFilePath(sessionFile);
-    const ref = this.state.sessionRefs.find(
-      (item) => item.projectId === projectId && item.sessionFile === canonical,
-    );
-    if (ref && ref.missingSinceMs === undefined) {
-      ref.missingSinceMs = Date.now();
-      await this.persist();
-    }
+    await this.transact(() => {
+      const index = this.state.sessionRefs.findIndex(
+        (item) =>
+          item.projectId === projectId && item.sessionFile === canonical,
+      );
+      const ref = index >= 0 ? this.state.sessionRefs[index] : undefined;
+      if (!ref || ref.missingSinceMs !== undefined) {
+        return { next: this.state, changed: false };
+      }
+      return {
+        next: {
+          ...this.state,
+          sessionRefs: replaceAt(this.state.sessionRefs, index, {
+            ...ref,
+            missingSinceMs: Date.now(),
+          }),
+        },
+        changed: true,
+      };
+    });
   }
 
   async removeSessionRef(
@@ -549,14 +597,27 @@ export class ProjectStore {
   }
 
   private async setProjectInvalidReason(
-    project: ProjectRecord,
-    invalidReason: string,
+    projectId: string,
+    invalidReason: string | undefined,
   ): Promise<void> {
-    if (project.invalidReason === invalidReason) {
-      return;
-    }
-    project.invalidReason = invalidReason;
-    await this.persist();
+    await this.transact(() => {
+      const projectIndex = this.state.projects.findIndex(
+        (project) => project.id === projectId,
+      );
+      const project =
+        projectIndex >= 0 ? this.state.projects[projectIndex] : undefined;
+      if (!project || project.invalidReason === invalidReason) {
+        return { next: this.state, changed: false };
+      }
+      const nextProject = withInvalidReason(project, invalidReason);
+      return {
+        next: {
+          ...this.state,
+          projects: replaceAt(this.state.projects, projectIndex, nextProject),
+        },
+        changed: true,
+      };
+    });
   }
 
   private getActiveProjectRecordSync(): ProjectRecord | undefined {
@@ -566,9 +627,9 @@ export class ProjectStore {
       : undefined;
   }
 
-  private async transact(
-    operation: () => { next: ProjectStoreFile; changed: boolean },
-  ): Promise<void> {
+  private async transact<T = void>(
+    operation: () => { next: ProjectStoreFile; changed: boolean; result?: T },
+  ): Promise<T> {
     const transaction = this.persistQueue
       .catch(() => undefined)
       .then(async () => {
@@ -576,8 +637,8 @@ export class ProjectStore {
         // racing update so a durable remove cannot discard it.
         for (;;) {
           const stateBeforeTransaction = JSON.stringify(this.state);
-          const { next, changed } = operation();
-          if (!changed) return;
+          const { next, changed, result } = operation();
+          if (!changed) return result as T;
           const candidate = projectStoreFileSchema.parse(next);
           await this.writeStoreFile(candidate);
           if (JSON.stringify(this.state) !== stateBeforeTransaction) continue;
@@ -587,7 +648,7 @@ export class ProjectStore {
             this.persistedSessionRefsGeneration,
             this.sessionRefsGeneration,
           );
-          return;
+          return result as T;
         }
       });
     this.persistQueue = transaction.then(
@@ -624,6 +685,20 @@ export class ProjectStore {
       throw error;
     }
   }
+}
+
+function replaceAt<T>(items: readonly T[], index: number, item: T): T[] {
+  return [...items.slice(0, index), item, ...items.slice(index + 1)];
+}
+
+function withInvalidReason(
+  project: ProjectRecord,
+  invalidReason: string | undefined,
+): ProjectRecord {
+  const { invalidReason: _invalidReason, ...withoutInvalidReason } = project;
+  return invalidReason === undefined
+    ? withoutInvalidReason
+    : { ...withoutInvalidReason, invalidReason };
 }
 
 function sessionRefKey(projectId: string, sessionFile: string): string {

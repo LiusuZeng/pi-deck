@@ -52,6 +52,7 @@ export interface UsageSnapshot {
   inheritedContributorsWithCost?: number;
   inheritedContributorsWithoutCost?: number;
   inheritedUsageEntryCount?: number;
+  inheritedMessageUsageEntryCount?: number;
   inheritedUsageFingerprint?: string;
 }
 
@@ -143,6 +144,7 @@ const usageSnapshotSchema = z
     inheritedContributorsWithCost: z.number().int().nonnegative().optional(),
     inheritedContributorsWithoutCost: z.number().int().nonnegative().optional(),
     inheritedUsageEntryCount: z.number().int().nonnegative().optional(),
+    inheritedMessageUsageEntryCount: z.number().int().nonnegative().optional(),
     inheritedUsageFingerprint: z.string().min(1).optional(),
   })
   .strict();
@@ -227,6 +229,13 @@ export class WorkspaceUsageStore {
     const existing = this.state.snapshots.find(
       (snapshot) => snapshot.id === id,
     );
+    // Re-read the copied raw prefix for live projections. Pi compaction can
+    // remove arbitrary inherited messages from get_messages(), so a persisted
+    // count cannot safely be used to slice the projected list positionally.
+    const resolvedForkBaseline =
+      options.source === "session" && ownerSessionFile !== undefined
+        ? await resolveForkBaselineForMessageEntries(ownerSessionFile)
+        : undefined;
     const existingForkBaseline = hasDurableForkBaseline(existing)
       ? inheritedTotalsFromSnapshot(existing)
       : undefined;
@@ -239,9 +248,11 @@ export class WorkspaceUsageStore {
       ...(options.recordedAtMs !== undefined
         ? { recordedAtMs: options.recordedAtMs }
         : {}),
-      ...(existingForkBaseline !== undefined
-        ? { inheritedBaseline: existingForkBaseline }
-        : {}),
+      ...(resolvedForkBaseline !== undefined
+        ? { inheritedBaseline: resolvedForkBaseline }
+        : existingForkBaseline !== undefined
+          ? { inheritedBaseline: existingForkBaseline }
+          : {}),
     });
     if (snapshot === undefined) return;
 
@@ -376,6 +387,7 @@ export class WorkspaceUsageStore {
           forkParentSession !== undefined &&
           (existing.forkParentSession === undefined ||
             existing.inheritedUsageEntryCount === undefined ||
+            existing.inheritedMessageUsageEntryCount === undefined ||
             existing.inheritedUsageFingerprint === undefined);
         if (!needsForkRepair) {
           return { diagnostics: [], refreshed: false };
@@ -634,14 +646,12 @@ async function usageSnapshotFromMessages(options: {
   const inherited =
     options.inheritedBaseline ??
     (options.source === "session" && options.ownerSessionFile !== undefined
-      ? await resolveForkBaselineForMessageEntries(
-          options.ownerSessionFile,
-          entries,
-        )
+      ? await resolveForkBaselineForMessageEntries(options.ownerSessionFile)
       : undefined);
-  const adjustedEntries = inherited
-    ? entries.slice(forkBaselineEntryCount(inherited))
-    : entries;
+  const adjustedEntries =
+    inherited === undefined
+      ? entries
+      : entriesWithoutInheritedMessageUsage(entries, inherited);
   if (adjustedEntries.length === 0 && inherited === undefined) return undefined;
   return snapshotFromUsageEntries({
     id: options.id,
@@ -696,6 +706,8 @@ async function usageSnapshotFromSessionFile(options: {
 interface UsageEntry {
   usage: ExtractedUsage;
   signature: string;
+  projectedSignature: string;
+  entryType: string;
   messageId?: string;
   lineNumber?: number;
   timestampMs?: number;
@@ -706,6 +718,7 @@ interface ForkBaseline {
   entries: UsageEntry[];
   totals: WorkspaceUsageTotals;
   entryCount?: number;
+  messageEntryCount?: number;
   fingerprint?: string;
 }
 
@@ -768,15 +781,17 @@ function summarizeUsageEntries(
 
 async function resolveForkBaselineForMessageEntries(
   sessionFile: string,
-  childEntries: readonly UsageEntry[],
 ): Promise<ForkBaseline | undefined> {
   const scanned = await scanSessionFileUsageDetails(sessionFile);
   if (scanned.diagnostics.length > 0 || scanned.parentSession === undefined) {
     return undefined;
   }
+  // The transcript includes Pi's non-message usage entries, which are omitted
+  // from get_messages but included in cumulative runtime stats. Persist the
+  // complete copied prefix; messageEntryCount keeps live message slicing aligned.
   return resolveForkBaseline(
     scanned.parentSession,
-    childEntries,
+    scanned.entries,
     scanned.forkStartedAtMs,
   );
 }
@@ -822,6 +837,8 @@ async function resolveForkBaseline(
     entries,
     totals: summarizeUsageEntries(entries),
     entryCount: entries.length,
+    messageEntryCount: entries.filter((entry) => entry.entryType === "message")
+      .length,
     fingerprint: usageEntriesFingerprint(entries),
   };
 }
@@ -877,6 +894,48 @@ function usageEntryMatches(left: UsageEntry, right: UsageEntry): boolean {
   return left.signature === right.signature;
 }
 
+function entriesWithoutInheritedMessageUsage(
+  entries: readonly UsageEntry[],
+  baseline: ForkBaseline,
+): UsageEntry[] {
+  // get_messages() is a compaction-aware projection, unlike the raw JSONL
+  // entries used to establish the fork point. Remove only provenance matches,
+  // not a prefix count: a compacted projection may omit inherited turns before
+  // a child-only turn.
+  const unmatchedInherited = baseline.entries.filter(
+    (entry) => entry.entryType === "message",
+  );
+  if (unmatchedInherited.length === 0) return [...entries];
+
+  return entries.filter((entry) => {
+    const inheritedIndex = unmatchedInherited.findIndex((candidate) =>
+      usageEntryMatchesProjectedMessage(candidate, entry),
+    );
+    if (inheritedIndex < 0) return true;
+    unmatchedInherited.splice(inheritedIndex, 1);
+    return false;
+  });
+}
+
+function usageEntryMatchesProjectedMessage(
+  inherited: UsageEntry,
+  projected: UsageEntry,
+): boolean {
+  if (inherited.entryType !== "message") return false;
+  const sameMessageId =
+    inherited.messageId !== undefined &&
+    projected.messageId !== undefined &&
+    inherited.messageId === projected.messageId;
+  const sameTimestamp =
+    inherited.timestampMs !== undefined &&
+    projected.timestampMs !== undefined &&
+    inherited.timestampMs === projected.timestampMs;
+  // Do not de-duplicate merely identical text/usage. A copied record must
+  // retain a stable Pi identity or timestamp in the projected transcript.
+  if (!sameMessageId && !sameTimestamp) return false;
+  return inherited.projectedSignature === projected.projectedSignature;
+}
+
 function forkBaselineSnapshotFields(
   baseline: ForkBaseline | undefined,
 ): Partial<UsageSnapshot> {
@@ -894,6 +953,7 @@ function forkBaselineSnapshotFields(
     inheritedContributorsWithCost: baseline.totals.contributorsWithCost,
     inheritedContributorsWithoutCost: baseline.totals.contributorsWithoutCost,
     inheritedUsageEntryCount: forkBaselineEntryCount(baseline),
+    inheritedMessageUsageEntryCount: forkBaselineMessageEntryCount(baseline),
     inheritedUsageFingerprint: forkBaselineFingerprint(baseline),
   };
 }
@@ -904,6 +964,7 @@ function hasDurableForkBaseline(
   return (
     snapshot?.forkParentSession !== undefined &&
     snapshot.inheritedUsageEntryCount !== undefined &&
+    snapshot.inheritedMessageUsageEntryCount !== undefined &&
     snapshot.inheritedUsageFingerprint !== undefined
   );
 }
@@ -926,6 +987,7 @@ function inheritedTotalsFromSnapshot(
       contributorsWithoutCost: snapshot.inheritedContributorsWithoutCost ?? 0,
     },
     entryCount: snapshot.inheritedUsageEntryCount ?? 0,
+    messageEntryCount: snapshot.inheritedMessageUsageEntryCount ?? 0,
     ...(snapshot.inheritedUsageFingerprint !== undefined
       ? { fingerprint: snapshot.inheritedUsageFingerprint }
       : {}),
@@ -934,6 +996,13 @@ function inheritedTotalsFromSnapshot(
 
 function forkBaselineEntryCount(baseline: ForkBaseline): number {
   return baseline.entryCount ?? baseline.entries.length;
+}
+
+function forkBaselineMessageEntryCount(baseline: ForkBaseline): number {
+  return (
+    baseline.messageEntryCount ??
+    baseline.entries.filter((entry) => entry.entryType === "message").length
+  );
 }
 
 function forkBaselineFingerprint(baseline: ForkBaseline): string {
@@ -1132,6 +1201,12 @@ function toUsageSnapshot(
     ...(parsed.inheritedUsageEntryCount !== undefined
       ? { inheritedUsageEntryCount: parsed.inheritedUsageEntryCount }
       : {}),
+    ...(parsed.inheritedMessageUsageEntryCount !== undefined
+      ? {
+          inheritedMessageUsageEntryCount:
+            parsed.inheritedMessageUsageEntryCount,
+        }
+      : {}),
     ...(parsed.inheritedUsageFingerprint !== undefined
       ? { inheritedUsageFingerprint: parsed.inheritedUsageFingerprint }
       : {}),
@@ -1166,6 +1241,8 @@ function sameSnapshot(left: UsageSnapshot, right: UsageSnapshot): boolean {
     left.inheritedContributorsWithoutCost ===
       right.inheritedContributorsWithoutCost &&
     left.inheritedUsageEntryCount === right.inheritedUsageEntryCount &&
+    left.inheritedMessageUsageEntryCount ===
+      right.inheritedMessageUsageEntryCount &&
     left.inheritedUsageFingerprint === right.inheritedUsageFingerprint
   );
 }
@@ -1294,8 +1371,14 @@ async function scanSessionFileUsageDetails(
         );
         continue;
       }
-      if (object.type !== "message") continue;
+      const isMessage = object.type === "message";
+      const isUsageBearingEntry =
+        object.type === "usage" ||
+        object.type === "compaction" ||
+        object.type === "branch_summary";
+      if (!isMessage && !isUsageBearingEntry) continue;
       const message =
+        isMessage &&
         object.message &&
         typeof object.message === "object" &&
         !Array.isArray(object.message)
@@ -1354,22 +1437,45 @@ function usageEntryFromMessage(
     record?.timestamp,
     record?.createdAt,
   );
+  const entryType = firstString(record?.type) ?? "message";
   return {
     usage,
+    entryType,
+    projectedSignature: usageEntryProjectedSignature(messageRecord, usage),
     ...(messageId !== undefined ? { messageId } : {}),
     ...(timestampMs !== undefined ? { timestampMs } : {}),
-    signature: usageEntrySignature(messageRecord, usage, fallbackIndex),
+    signature: usageEntrySignature(
+      messageRecord,
+      usage,
+      fallbackIndex,
+      entryType,
+    ),
   };
+}
+
+function usageEntryProjectedSignature(
+  message: Record<string, unknown>,
+  usage: ExtractedUsage,
+): string {
+  return hashStable(
+    JSON.stringify({
+      role: message.role,
+      content: message.content,
+      usage,
+    }).slice(0, 8192),
+  );
 }
 
 function usageEntrySignature(
   message: Record<string, unknown>,
   usage: ExtractedUsage,
   fallbackIndex: number,
+  entryType: string,
 ): string {
   return hashStable(
     JSON.stringify({
       index: fallbackIndex,
+      type: entryType,
       role: message.role,
       content: message.content,
       usage,
