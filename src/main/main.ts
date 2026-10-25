@@ -413,11 +413,18 @@ const taskSessionSynthesisTails = new Map<string, Promise<void>>();
 type TaskSessionPlannerRun = {
   cancelled: boolean;
   cancel(): void;
+  /** Resolves after terminal usage recording and private-worker close finish. */
+  cleanup: Promise<void>;
+  /** Gracefully end an active turn so its terminal usage remains observable. */
+  abortWorker?: () => Promise<void>;
   closeWorker?: () => Promise<void>;
 };
 // Planner workers are not task-session workers, so they need their own parent
 // ownership registry for close/delete races and allocation timeouts.
 const taskSessionPlannerRuns = new Map<string, Set<TaskSessionPlannerRun>>();
+let taskSessionPlannerWorkerObserver:
+  | ((worker: ReturnType<SinglePiAdapter["createWorker"]>) => void)
+  | undefined;
 type ChatBackendMode = "fake" | "real";
 
 let chatAdapter: SinglePiAdapter | undefined;
@@ -4507,7 +4514,10 @@ async function closeAttachedChatRuntime(
   // prevent the authoritative child close from being attempted.
   await attempt(async () => {
     delegationBridge?.removeParent(runtimeId);
-    cancelTaskSessionPlanners(runtimeId);
+    // A deleted session freezes its usage snapshot immediately after this
+    // close path. Wait for any SIGTERM terminal usage before dropping parent
+    // ownership, or that final private-planner work would be excluded.
+    await cancelTaskSessionPlanners(runtimeId);
     await taskSessionOrchestrator?.removeParent(runtimeId);
     await multitaskSupervisor?.removeParent(runtimeId);
   });
@@ -4573,7 +4583,10 @@ function forgetChatRuntime(
       delegateCalls.delete(key);
     }
   }
-  cancelTaskSessionPlanners(runtimeId);
+  // This can also be reached from an unsolicited parent worker_exit, where
+  // there is no caller to await. closeAttachedChatRuntime handles the normal
+  // close/delete path before it clears accounting ownership.
+  void cancelTaskSessionPlanners(runtimeId);
   void taskSessionOrchestrator?.removeParent(runtimeId);
   taskSessionSettings.delete(runtimeId);
   taskSessionSynthesisTails.delete(runtimeId);
@@ -4761,9 +4774,158 @@ function ensureTaskSessionStillParallel(parentId: string): void {
   }
 }
 
-function cancelTaskSessionPlanners(parentId: string): void {
-  for (const run of taskSessionPlannerRuns.get(parentId) ?? []) run.cancel();
+async function cancelTaskSessionPlanners(parentId: string): Promise<void> {
+  const runs = [...(taskSessionPlannerRuns.get(parentId) ?? [])];
+  for (const run of runs) run.cancel();
+  // Closing/deleting a parent must not freeze or discard its session before a
+  // cooperative child has published its terminal usage. Do not let a broken
+  // child stall the destructive lifecycle forever, though: each planner's
+  // normal cleanup already gives accounting the same bounded window.
+  await Promise.all(
+    runs.map((run) =>
+      withTimeoutResult(
+        run.cleanup,
+        TASK_SESSION_PLANNER_CLEANUP_TIMEOUT_MS,
+        undefined,
+      ),
+    ),
+  );
 }
+
+function resolveFakeRpcServerPath(): string {
+  const testOverride = process.env.PI_DECK_TEST_FAKE_RPC_SERVER;
+  if (process.env.NODE_ENV === "test" && testOverride) return testOverride;
+  return path.join(__dirname, "pi/fakeRpc/fakeRpcServer.js");
+}
+
+/** Extract terminal Pi messages without retaining unrelated event payload data. */
+function terminalPlannerMessages(event: { messages?: unknown }): PiMessage[] {
+  if (!Array.isArray(event.messages)) return [];
+  return event.messages.filter(
+    (message) =>
+      message !== null &&
+      typeof message === "object" &&
+      !Array.isArray(message) &&
+      typeof (message as { role?: unknown }).role === "string",
+  ) as PiMessage[];
+}
+
+/** Keep only bounded reported-usage fields; planner output remains private. */
+const PLANNER_USAGE_FIELDS = [
+  "input",
+  "inputTokens",
+  "promptTokens",
+  "prompt_tokens",
+  "output",
+  "outputTokens",
+  "completionTokens",
+  "completion_tokens",
+  "cacheRead",
+  "cacheReadTokens",
+  "cache_read",
+  "cache_read_tokens",
+  "cacheWrite",
+  "cacheWriteTokens",
+  "cache_write",
+  "cache_write_tokens",
+  "totalTokens",
+  "total",
+  "cost",
+  "costUsd",
+  "totalCostUsd",
+  "total_cost_usd",
+] as const;
+
+function plannerUsageMessage(message: PiMessage): PiMessage {
+  const usageMessage: PiMessage = { role: message.role };
+  if (typeof message.id === "string") usageMessage.id = message.id;
+  for (const field of ["usage", ...PLANNER_USAGE_FIELDS]) {
+    if (field in message) usageMessage[field] = message[field];
+  }
+  return usageMessage;
+}
+
+function plannerMessageHasReportedUsage(message: PiMessage): boolean {
+  const record = message as Record<string, unknown>;
+  const usage = record.usage;
+  const source =
+    usage && typeof usage === "object" && !Array.isArray(usage)
+      ? (usage as Record<string, unknown>)
+      : record;
+  return PLANNER_USAGE_FIELDS.some((field) => Object.hasOwn(source, field));
+}
+
+/** Capture usage that Pi reports directly on a fieldless terminal event. */
+function terminalPlannerEventUsage(
+  event: Record<string, unknown>,
+): PiMessage | undefined {
+  const usageMessage: PiMessage = { role: "assistant" };
+  if (Object.hasOwn(event, "usage")) usageMessage.usage = event.usage;
+  for (const field of PLANNER_USAGE_FIELDS) {
+    if (Object.hasOwn(event, field)) usageMessage[field] = event[field];
+  }
+  return plannerMessageHasReportedUsage(usageMessage)
+    ? usageMessage
+    : undefined;
+}
+
+function plannerUsageMessageKey(
+  message: PiMessage,
+  terminalObservationId: string,
+  index: number,
+): string {
+  // A provider can reuse a message id across distinct retry attempts. The
+  // terminal run/event identity keeps those attempts distinct while a repeat
+  // observation of the same event retains its idempotent key.
+  if (typeof message.id === "string")
+    return `terminal:${terminalObservationId}:id:${message.id}`;
+  // Message ids are optional, so retain the same attempt identity for id-less
+  // messages without deriving identity from private planner content.
+  return `terminal:${terminalObservationId}:message:${index}`;
+}
+
+function plannerTerminalObservationId(
+  event: { id?: unknown; runId?: unknown; messageId?: unknown },
+  messages: readonly PiMessage[],
+  fallbackAttempt: number,
+): string {
+  if (typeof event.runId === "string") return `run:${event.runId}`;
+  if (typeof event.messageId === "string") return `message:${event.messageId}`;
+  // Runtime events have their own optional stable id. Prefer it before an
+  // assistant row so duplicate id-less retry notifications remain one attempt.
+  if (typeof event.id === "string") return `event:${event.id}`;
+  // Some Pi terminal events omit their own ids but retain the assistant turn's
+  // stable id. Use it before allocating a fallback so a repeated observation
+  // of that same retry does not become a second accounting attempt. A reported
+  // timestamp distinguishes separate malformed retries that reused an id.
+  const message = messages.find(
+    (candidate): candidate is PiMessage & { id: string } =>
+      typeof candidate.id === "string",
+  );
+  if (message !== undefined) {
+    const timestamp = message.createdAt ?? message.timestamp;
+    if (typeof timestamp === "string" || typeof timestamp === "number")
+      return `message:${message.id}:at:${timestamp}`;
+    return `message:${message.id}`;
+  }
+  // Well-formed Pi terminal events carry a run or message id. Preserve
+  // distinct malformed retry boundaries without deriving identity from usage.
+  return `attempt:${fallbackAttempt}`;
+}
+
+// Planner results must not become a fallback merely because accounting I/O is
+// slow. Keep a finite cleanup wait after the terminal response was captured.
+const TASK_SESSION_PLANNER_USAGE_RECORD_TIMEOUT_MS = 5_000;
+// Abort keeps the private Pi process alive long enough to fetch a fieldless
+// terminal turn. Fall back to process close if Pi does not acknowledge it.
+const TASK_SESSION_PLANNER_ABORT_GRACE_MS = 5_000;
+// Once a fieldless terminal event is received, its worker remains alive only
+// for this bounded get_messages collection before ordinary cleanup closes it.
+const TASK_SESSION_PLANNER_TERMINAL_COLLECTION_TIMEOUT_MS = 5_000;
+const TASK_SESSION_PLANNER_CLEANUP_TIMEOUT_MS =
+  TASK_SESSION_PLANNER_ABORT_GRACE_MS +
+  TASK_SESSION_PLANNER_TERMINAL_COLLECTION_TIMEOUT_MS +
+  TASK_SESSION_PLANNER_USAGE_RECORD_TIMEOUT_MS;
 
 async function runTaskSessionPlanner(
   adapter: SinglePiAdapter,
@@ -4776,16 +4938,60 @@ async function runTaskSessionPlanner(
   const parentMode = chatRuntimeModes.get(parentId);
   const cwd = chatWorkerCwds.get(parentId);
   const projectId = chatRuntimeProjectIds.get(parentId);
+  // Parent teardown clears the runtime maps before a private child is always
+  // guaranteed to have stopped. Retain only the accounting owner, not planner
+  // content, so a terminal usage event that races that teardown is not lost.
+  const plannerWorkspaceId = chatRuntimeWorkspaceIds.get(parentId);
+  const plannerSessionFile = chatRuntimeSessionFiles.get(parentId);
+  const plannerUsageOwner = {
+    ...(plannerWorkspaceId !== undefined
+      ? { workspaceId: plannerWorkspaceId }
+      : {}),
+    ...(plannerSessionFile !== undefined
+      ? { sessionFile: plannerSessionFile }
+      : {}),
+    ...(workspaceUsageStore !== undefined
+      ? { usageStore: workspaceUsageStore }
+      : {}),
+  };
   if (!parentMode || !cwd)
     throw new Error("Task-session parent is no longer attached.");
 
   const runs = taskSessionPlannerRuns.get(parentId) ?? new Set();
   taskSessionPlannerRuns.set(parentId, runs);
+  let resolvePlannerCleanup: () => void = () => undefined;
+  const plannerCleanup = new Promise<void>((resolve) => {
+    resolvePlannerCleanup = resolve;
+  });
+  let plannerCancelCloseTimer: NodeJS.Timeout | undefined;
+  let plannerAbortRequested = false;
+  let plannerTerminalCollectionActive = false;
   const run: TaskSessionPlannerRun = {
     cancelled: false,
+    cleanup: plannerCleanup,
     cancel: () => {
       run.cancelled = true;
-      void run.closeWorker?.().catch(() => undefined);
+      // A direct close sends SIGTERM and can make a fieldless agent_end's
+      // get_messages RPC lose its only reported usage. Ask Pi to abort the
+      // active turn first; it remains available through its terminal event.
+      // A non-responsive Pi still receives the ordinary bounded close.
+      if (run.abortWorker !== undefined && !plannerAbortRequested) {
+        plannerAbortRequested = true;
+        void run.abortWorker().catch(() => {
+          void run.closeWorker?.().catch(() => undefined);
+        });
+        plannerCancelCloseTimer = setTimeout(() => {
+          // A fieldless terminal event must retain its worker until its
+          // get_messages snapshot settles. That collection has its own finite
+          // deadline and closes the worker through normal cleanup.
+          if (!plannerTerminalCollectionActive)
+            void run.closeWorker?.().catch(() => undefined);
+        }, TASK_SESSION_PLANNER_ABORT_GRACE_MS);
+        return;
+      }
+      if (run.abortWorker === undefined) {
+        void run.closeWorker?.().catch(() => undefined);
+      }
     },
   };
   runs.add(run);
@@ -4797,6 +5003,7 @@ async function runTaskSessionPlanner(
       reject(new Error(`Task-session planner timed out after ${timeoutMs}ms.`));
     }, timeoutMs);
   });
+  let plannerUsageRecording: Promise<void> | undefined;
   const operation = (async (): Promise<string> => {
     let worker: ReturnType<SinglePiAdapter["createWorker"]> | undefined;
     try {
@@ -4817,10 +5024,11 @@ async function runTaskSessionPlanner(
                 ? adapter.createWorker({
                     command: process.execPath,
                     args: [
-                      path.join(__dirname, "pi/fakeRpc/fakeRpcServer.js"),
+                      resolveFakeRpcServerPath(),
                       "--stream-delay-ms",
                       "10",
                       "--no-session",
+                      "--include-usage",
                     ],
                     cwd,
                     env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
@@ -4833,8 +5041,13 @@ async function runTaskSessionPlanner(
         }
       }
       const plannerWorker = worker;
+      run.abortWorker = () => plannerWorker.abort();
       run.closeWorker = () => adapter.closeSession(plannerWorker.runtimeId);
-      if (run.cancelled) throw new Error("Task-session planner was cancelled.");
+      taskSessionPlannerWorkerObserver?.(plannerWorker);
+      if (run.cancelled) {
+        run.cancel();
+        throw new Error("Task-session planner was cancelled.");
+      }
       const parentState = await adapter.getRuntimeStatus(parentId);
       try {
         const parentModel = runtimeModelSelection(parentState);
@@ -4857,21 +5070,175 @@ async function runTaskSessionPlanner(
       return await new Promise<string>((resolve, reject) => {
         let settled = false;
         let unsubscribe: () => void = () => undefined;
+        // Pi may emit an agent_end for a failed attempt before automatically
+        // retrying. Retain only each attempt's compact usage record, then
+        // replace the private-worker snapshot with the cumulative set.
+        const capturedUsageMessages = new Map<string, PiMessage>();
+        let terminalAttempt = 0;
+        const captureUsage = (
+          messages: readonly PiMessage[],
+          terminalObservationId: string,
+        ) => {
+          let changed = false;
+          for (const [index, message] of messages.entries()) {
+            const usageMessage = plannerUsageMessage(message);
+            const key = plannerUsageMessageKey(
+              usageMessage,
+              terminalObservationId,
+              index,
+            );
+            const previous = capturedUsageMessages.get(key);
+            if (JSON.stringify(previous) === JSON.stringify(usageMessage))
+              continue;
+            capturedUsageMessages.set(key, usageMessage);
+            changed = true;
+          }
+          if (!changed) return;
+          // Persistence deliberately continues outside the planner response
+          // deadline so an accounting stall cannot turn an otherwise valid
+          // plan into a fallback. Serialize replacements so a late retry
+          // observation cannot overwrite a cumulative final snapshot.
+          plannerUsageRecording = (plannerUsageRecording ?? Promise.resolve())
+            .then(() =>
+              recordPrivateWorkerMessagesUsage({
+                parentId,
+                childRuntimeId: plannerWorker.runtimeId,
+                messages: [...capturedUsageMessages.values()],
+                ...plannerUsageOwner,
+              }),
+            )
+            .catch((error) =>
+              diagnostics?.recordError(
+                `Failed to record private planner usage for ${plannerWorker.runtimeId}: ${error instanceof Error ? error.message : String(error)}`,
+              ),
+            );
+        };
         const finish = (fn: () => void) => {
-          if (settled) return;
+          if (settled) return false;
           settled = true;
           unsubscribe();
           fn();
+          return true;
         };
         unsubscribe = plannerWorker.onEvent((event) => {
           if (event.type === "agent_end") {
-            void plannerWorker.getMessages().then(
-              (messages) => {
-                const last = messages.at(-1);
-                finish(() => resolve(piMessageText(last)));
-              },
-              (error) => finish(() => reject(error)),
+            // A cancellation/parent-close can dispose the worker before a
+            // follow-up getMessages RPC resolves. Pi terminal events sometimes
+            // carry the final assistant turn, so capture that authoritative
+            // reported usage synchronously while it is still available.
+            const terminalMessages = terminalPlannerMessages(
+              event as unknown as { messages?: unknown },
             );
+            const terminalObservationId = plannerTerminalObservationId(
+              event as { runId?: unknown; messageId?: unknown },
+              terminalMessages,
+              ++terminalAttempt,
+            );
+            // Pi can report the authoritative usage directly on agent_end.
+            // Capture that compact snapshot synchronously, before cleanup can
+            // make get_messages unavailable. When both shapes are supplied,
+            // the terminal event is authoritative for that attempt; recording
+            // its assistant row too would count the same model turn twice.
+            const eventUsage = terminalPlannerEventUsage(
+              event as Record<string, unknown>,
+            );
+            if (eventUsage !== undefined) {
+              captureUsage([eventUsage], `${terminalObservationId}:event`);
+            } else if (terminalMessages.length > 0) {
+              captureUsage(terminalMessages, terminalObservationId);
+            }
+            // An agent_end with willRetry is an attempt boundary, not the
+            // planner's terminal result. Keep the worker and observer alive so
+            // its final response and every reported retry attempt are counted.
+            if ((event as { willRetry?: unknown }).willRetry === true) return;
+            if (!finish(() => undefined)) return;
+            // Event payloads can contain the private response but omit its
+            // usage. Reconcile that compact event with Pi's authoritative
+            // transcript before teardown; otherwise a successful plan could
+            // silently drop provider-reported usage.
+            const needsTranscript =
+              terminalMessages.length === 0 ||
+              terminalMessages.some(
+                (message) => !plannerMessageHasReportedUsage(message),
+              );
+            const eventResponse = piMessageText(terminalMessages.at(-1));
+            if (!needsTranscript) {
+              if (run.cancelled) {
+                reject(new Error("Task-session planner was cancelled."));
+                return;
+              }
+              resolve(eventResponse);
+              return;
+            }
+            // Cancellation asks Pi to abort before closing its RPC transport.
+            // Keep that transport alive for this bounded snapshot: fieldless
+            // terminal events, and content-bearing events without usage, need
+            // get_messages to retain authoritative accounting evidence.
+            plannerTerminalCollectionActive = true;
+            if (plannerCancelCloseTimer !== undefined) {
+              clearTimeout(plannerCancelCloseTimer);
+              plannerCancelCloseTimer = undefined;
+            }
+            void (async () => {
+              let collectionTimer: NodeJS.Timeout | undefined;
+              try {
+                const messages = await new Promise<PiMessage[]>(
+                  (resolveMessages, rejectMessages) => {
+                    collectionTimer = setTimeout(
+                      () =>
+                        rejectMessages(
+                          new Error(
+                            "Timed out collecting planner terminal messages.",
+                          ),
+                        ),
+                      TASK_SESSION_PLANNER_TERMINAL_COLLECTION_TIMEOUT_MS,
+                    );
+                    void plannerWorker.getMessages().then(
+                      (messages) => {
+                        if (collectionTimer !== undefined)
+                          clearTimeout(collectionTimer);
+                        collectionTimer = undefined;
+                        resolveMessages(messages);
+                      },
+                      (error) => {
+                        if (collectionTimer !== undefined)
+                          clearTimeout(collectionTimer);
+                        collectionTimer = undefined;
+                        rejectMessages(error);
+                      },
+                    );
+                  },
+                );
+                // Event-level usage is the terminal attempt's authoritative
+                // snapshot. Reconciliation is only for private response text
+                // in that case; adding its transcript row would count the
+                // same reported turn a second time.
+                if (eventUsage === undefined)
+                  captureUsage(messages, terminalObservationId);
+                if (run.cancelled)
+                  throw new Error("Task-session planner was cancelled.");
+                return terminalMessages.length > 0
+                  ? eventResponse
+                  : piMessageText(messages.at(-1));
+              } finally {
+                if (collectionTimer !== undefined)
+                  clearTimeout(collectionTimer);
+                plannerTerminalCollectionActive = false;
+              }
+            })().then(resolve, (error) => {
+              // The event already supplied a complete plan. An accounting
+              // reconciliation failure is diagnostic-only and must not
+              // reroute it into a fallback; fieldless terminals still need
+              // transcript content to produce a response.
+              if (terminalMessages.length > 0 && !run.cancelled) {
+                diagnostics?.recordError(
+                  `Failed to collect private planner terminal usage for ${plannerWorker.runtimeId}: ${error instanceof Error ? error.message : String(error)}`,
+                );
+                resolve(eventResponse);
+                return;
+              }
+              reject(error);
+            });
           } else if (event.type === "worker_exit") {
             finish(() =>
               reject(
@@ -4889,16 +5256,49 @@ async function runTaskSessionPlanner(
           })
           .catch((error) => finish(() => reject(error)));
       });
-    } finally {
-      await run.closeWorker?.().catch(() => undefined);
+    } catch (error) {
+      // Rejecting before a terminal response must also release any worker that
+      // was allocated while the asynchronous cleanup continuation is pending.
+      run.cancel();
+      throw error;
     }
   })();
   // Keep a timed-out allocation registered until it resolves, so a late worker
-  // is immediately closed rather than escaping parent cleanup.
+  // is immediately closed rather than escaping parent cleanup. Once terminal
+  // messages are captured, accounting has its own bounded cleanup window;
+  // the caller may use the plan without waiting for unrelated filesystem I/O.
   void operation
-    .finally(() => {
+    // A cancelled/failed planner can still have captured reported usage.
+    // Account and await that bounded write before close regardless of whether
+    // the planner response resolved successfully.
+    .finally(async () => {
+      const recording = plannerUsageRecording;
+      if (recording === undefined) return;
+      let settled = false;
+      void recording.finally(() => {
+        settled = true;
+      });
+      await withTimeoutResult(
+        recording,
+        TASK_SESSION_PLANNER_USAGE_RECORD_TIMEOUT_MS,
+        undefined,
+      );
+      if (!settled) {
+        diagnostics?.recordError(
+          `Timed out recording private planner usage for ${run.closeWorker ? "worker" : "unallocated planner"}.`,
+        );
+      }
+    })
+    .finally(async () => {
+      if (plannerCancelCloseTimer !== undefined) {
+        clearTimeout(plannerCancelCloseTimer);
+        plannerCancelCloseTimer = undefined;
+      }
+      plannerTerminalCollectionActive = false;
+      await run.closeWorker?.().catch(() => undefined);
       runs.delete(run);
       if (runs.size === 0) taskSessionPlannerRuns.delete(parentId);
+      resolvePlannerCleanup();
     })
     .catch(() => undefined);
   try {
@@ -5919,7 +6319,7 @@ async function closeChatWorkerGeneration(
     await Promise.all(
       runtimeIds.map(async (runtimeId) => {
         delegationBridge?.removeParent(runtimeId);
-        cancelTaskSessionPlanners(runtimeId);
+        await cancelTaskSessionPlanners(runtimeId);
         await taskSessionOrchestrator?.removeParent(runtimeId);
         await multitaskSupervisor?.removeParent(runtimeId);
       }),
@@ -8142,11 +8542,19 @@ async function recordPrivateWorkerMessagesUsage(options: {
   parentId: string;
   childRuntimeId: string;
   messages: readonly PiMessage[];
+  /** Captured before parent teardown can clear its runtime ownership maps. */
+  workspaceId?: string;
+  sessionFile?: string;
+  usageStore?: WorkspaceUsageStore;
 }): Promise<void> {
-  const workspaceId = chatRuntimeWorkspaceIds.get(options.parentId);
-  const sessionFile = chatRuntimeSessionFiles.get(options.parentId);
+  const workspaceId =
+    options.workspaceId ?? chatRuntimeWorkspaceIds.get(options.parentId);
+  const sessionFile =
+    options.sessionFile ?? chatRuntimeSessionFiles.get(options.parentId);
   if (workspaceId === undefined) return;
-  await ensureWorkspaceUsageStore().recordSessionMessagesUsage({
+  await (
+    options.usageStore ?? ensureWorkspaceUsageStore()
+  ).recordSessionMessagesUsage({
     workspaceId,
     ...(sessionFile !== undefined ? { sessionFile } : {}),
     sessionKey: `${options.parentId}:private:${options.childRuntimeId}`,
@@ -9040,16 +9448,81 @@ app.on("window-all-closed", () => {
   app.quit();
 });
 
-bootstrap().catch((error: unknown) => {
-  const message =
-    error instanceof Error ? (error.stack ?? error.message) : String(error);
-  diagnostics?.recordError(`Fatal startup error: ${message}`);
-  console.error(message);
-  // Keep the metadata lease held until the normal quit cleanup barrier closes
-  // workers/workflow runtimes and releases ownership. Releasing here would let a
-  // second process acquire PI_DECK_HOME while this failed startup is still alive.
-  void appLifecycle.requestQuit("application", { confirmed: true });
-});
+if (
+  process.env.NODE_ENV !== "test" ||
+  process.env.PI_DECK_SKIP_BOOTSTRAP_FOR_TESTS !== "1"
+) {
+  bootstrap().catch((error: unknown) => {
+    const message =
+      error instanceof Error ? (error.stack ?? error.message) : String(error);
+    diagnostics?.recordError(`Fatal startup error: ${message}`);
+    console.error(message);
+    // Keep the metadata lease held until the normal quit cleanup barrier closes
+    // workers/workflow runtimes and releases ownership. Releasing here would let a
+    // second process acquire PI_DECK_HOME while this failed startup is still alive.
+    void appLifecycle.requestQuit("application", { confirmed: true });
+  });
+}
+
+export const __taskSessionPlannerTestHooks = {
+  configurePlannerRuntime(options: {
+    adapter: SinglePiAdapter;
+    workspaceUsageStore: WorkspaceUsageStore;
+    parentId: string;
+    cwd: string;
+    workspaceId: string;
+    sessionFile: string;
+    mode?: ChatBackendMode;
+    onPlannerWorkerCreated?: (
+      worker: ReturnType<SinglePiAdapter["createWorker"]>,
+    ) => void;
+  }): void {
+    chatAdapter = options.adapter;
+    chatWorkerCapacity = new WorkerCapacity(() =>
+      options.adapter.workerCount(),
+    );
+    workspaceUsageStore = options.workspaceUsageStore;
+    taskSessionPlannerWorkerObserver = options.onPlannerWorkerCreated;
+    chatRuntimeIds.add(options.parentId);
+    chatRuntimeModes.set(options.parentId, options.mode ?? "fake");
+    chatWorkerCwds.set(options.parentId, options.cwd);
+    chatRuntimeWorkspaceIds.set(options.parentId, options.workspaceId);
+    chatRuntimeSessionFiles.set(options.parentId, options.sessionFile);
+    taskSessionOrchestrator = {
+      state: () => ({ mode: "parallel" }),
+      removeParent: async () => undefined,
+    } as unknown as NonNullable<typeof taskSessionOrchestrator>;
+  },
+  clearPlannerUsageOwnership(parentId: string): void {
+    chatRuntimeWorkspaceIds.delete(parentId);
+    chatRuntimeSessionFiles.delete(parentId);
+  },
+  async resetPlannerRuntime(parentId: string): Promise<void> {
+    await cancelTaskSessionPlanners(parentId);
+    taskSessionPlannerRuns.delete(parentId);
+    chatRuntimeIds.delete(parentId);
+    chatRuntimeModes.delete(parentId);
+    chatWorkerCwds.delete(parentId);
+    chatRuntimeWorkspaceIds.delete(parentId);
+    chatRuntimeSessionFiles.delete(parentId);
+    chatRuntimeProjectIds.delete(parentId);
+    taskSessionOrchestrator = undefined;
+    taskSessionPlannerWorkerObserver = undefined;
+    chatAdapter = undefined;
+    chatWorkerCapacity = undefined;
+    workspaceUsageStore = undefined;
+  },
+  planTaskSession,
+  runTaskSessionPlanner,
+  cancelPlannerRuntime: cancelTaskSessionPlanners,
+  closePlannerParent(parentId: string): Promise<void> {
+    const adapter = chatAdapter;
+    if (adapter === undefined) {
+      throw new Error("Planner test runtime is not attached.");
+    }
+    return closeAttachedChatRuntime(adapter, parentId);
+  },
+};
 
 // Subscriptions belong to a specific renderer webContents and retain the
 // workspace authorized at registration. They are never a global run-ID list.

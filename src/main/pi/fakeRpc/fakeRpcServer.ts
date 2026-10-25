@@ -66,6 +66,36 @@ interface FakeOptions {
   collidingModels: boolean;
   productionShaped: boolean;
   includeUsage: boolean;
+  /** Omit only the reported dollar cost from otherwise complete fake usage. */
+  omitUsageCost: boolean;
+  /** Test-only complete response override for planner integration coverage. */
+  responseText?: string;
+  /** Emit reported usage on an aborted terminal event when requested. */
+  abortWithUsage: boolean;
+  /** Keep aborted usage in get_messages but omit it from agent_end. */
+  abortFieldlessWithUsage: boolean;
+  /** Emit a retrying usage-bearing terminal attempt before a final response. */
+  plannerRetryWithUsage: boolean;
+  /** Omit planner message ids while retaining terminal run identities. */
+  plannerRetryIdlessUsage: boolean;
+  /** Reuse a message id across retry attempts with distinct terminal runs. */
+  plannerRetryReusedMessageId: boolean;
+  /** Repeat one retry terminal event to verify duplicate-observation handling. */
+  plannerRepeatTerminalObservation: boolean;
+  /** Omit retry event ids while retaining a stable assistant message id. */
+  plannerRetryWithoutTerminalIds: boolean;
+  /** Report usage on a fieldless terminal event rather than get_messages. */
+  plannerFieldlessTerminalEventUsage: boolean;
+  /** Exit immediately after that event so terminal transcript recovery fails. */
+  plannerExitAfterTerminalEventUsage: boolean;
+  /** Include plan content in agent_end but retain usage only in get_messages. */
+  plannerTerminalWithoutUsage: boolean;
+  /** Abort with a completed, usage-bearing planner response to test close races. */
+  abortWithValidPlan: boolean;
+  /** Emit a reported terminal event when parent cleanup sends SIGTERM. */
+  sigtermAgentEndWithUsage: boolean;
+  /** Delay that SIGTERM terminal event to exercise parent teardown ordering. */
+  sigtermAgentEndDelayMs: number;
   /** Return provider-native mixed content and message-level timestamps. */
   structuredMessages: boolean;
   noSession: boolean;
@@ -186,6 +216,20 @@ function parseOptions(argv: string[]): FakeOptions {
     collidingModels: false,
     productionShaped: false,
     includeUsage: false,
+    omitUsageCost: false,
+    abortWithUsage: false,
+    abortFieldlessWithUsage: false,
+    plannerRetryWithUsage: false,
+    plannerRetryIdlessUsage: false,
+    plannerRetryReusedMessageId: false,
+    plannerRepeatTerminalObservation: false,
+    plannerRetryWithoutTerminalIds: false,
+    plannerFieldlessTerminalEventUsage: false,
+    plannerExitAfterTerminalEventUsage: false,
+    plannerTerminalWithoutUsage: false,
+    abortWithValidPlan: false,
+    sigtermAgentEndWithUsage: false,
+    sigtermAgentEndDelayMs: 0,
     structuredMessages: false,
     noSession: false,
     failTaskPromptRecordWhileActive: false,
@@ -280,6 +324,46 @@ function parseOptions(argv: string[]): FakeOptions {
       options.productionShaped = true;
     } else if (arg === "--include-usage") {
       options.includeUsage = true;
+    } else if (arg === "--omit-usage-cost") {
+      options.omitUsageCost = true;
+    } else if (arg === "--response-text") {
+      options.responseText = argv[index + 1] ?? "";
+      index += 1;
+    } else if (arg === "--abort-with-usage") {
+      options.abortWithUsage = true;
+    } else if (arg === "--abort-with-fieldless-usage") {
+      options.abortWithUsage = true;
+      options.abortFieldlessWithUsage = true;
+    } else if (arg === "--planner-retry-with-usage") {
+      options.plannerRetryWithUsage = true;
+    } else if (arg === "--planner-retry-idless-usage") {
+      options.plannerRetryIdlessUsage = true;
+    } else if (arg === "--planner-retry-reused-message-id") {
+      options.plannerRetryReusedMessageId = true;
+    } else if (arg === "--planner-repeat-terminal-observation") {
+      options.plannerRepeatTerminalObservation = true;
+    } else if (arg === "--planner-retry-without-terminal-ids") {
+      options.plannerRetryWithoutTerminalIds = true;
+    } else if (arg === "--planner-fieldless-terminal-event-usage") {
+      options.plannerFieldlessTerminalEventUsage = true;
+    } else if (arg === "--planner-exit-after-terminal-event-usage") {
+      options.plannerExitAfterTerminalEventUsage = true;
+    } else if (arg === "--planner-terminal-without-usage") {
+      options.plannerTerminalWithoutUsage = true;
+    } else if (arg === "--abort-with-valid-plan") {
+      options.abortWithValidPlan = true;
+    } else if (arg === "--sigterm-agent-end-with-usage") {
+      options.sigtermAgentEndWithUsage = true;
+    } else if (arg === "--sigterm-agent-end-delay-ms") {
+      const delay = Number(argv[index + 1]);
+      if (
+        Number.isSafeInteger(delay) &&
+        delay >= 0 &&
+        delay <= MAX_NODE_TIMEOUT_MS
+      ) {
+        options.sigtermAgentEndDelayMs = delay;
+      }
+      index += 1;
     } else if (arg === "--structured-messages") {
       options.structuredMessages = true;
     } else if (arg === "--no-session") {
@@ -704,7 +788,9 @@ class FakeRpcServer {
       this.options.exitSignalFile ||
       this.options.sigtermExitDelayMs > 0 ||
       this.options.sigtermReceivedSignalFile !== undefined ||
-      this.options.sigtermExitWaitFile !== undefined
+      this.options.sigtermExitWaitFile !== undefined ||
+      this.options.sigtermAgentEndWithUsage ||
+      this.options.sigtermAgentEndDelayMs > 0
     ) {
       process.once("SIGTERM", () => {
         if (this.options.sigtermReceivedSignalFile !== undefined) {
@@ -717,17 +803,47 @@ class FakeRpcServer {
             // Test diagnostics must never prevent worker shutdown.
           }
         }
+        for (const timer of this.currentTimers) clearTimeout(timer);
+        this.currentTimers = [];
+        this.agentActive = false;
         const exit = () => process.exit(0);
-        if (this.options.sigtermExitWaitFile !== undefined) {
-          const wait = setInterval(() => {
-            if (fs.existsSync(this.options.sigtermExitWaitFile!)) {
-              clearInterval(wait);
-              exit();
-            }
-          }, 5);
-          return;
-        }
-        setTimeout(exit, this.options.sigtermExitDelayMs);
+        const finish = () => {
+          if (this.options.sigtermAgentEndWithUsage) {
+            const assistantMessage: PiMessage = {
+              id: `assistant_sigterm_${this.promptCounter}`,
+              role: "assistant",
+              content: "Cancelled after reported usage.",
+              createdAt: Date.now(),
+              usage: {
+                inputTokens: 100,
+                outputTokens: 10,
+                cacheReadTokens: 5,
+                cacheWriteTokens: 0,
+                totalTokens: 115,
+                ...(this.options.omitUsageCost ? {} : { totalCostUsd: 0.05 }),
+              },
+            };
+            this.messages.push(assistantMessage);
+            this.write({
+              type: "agent_end",
+              runId: `run_${this.promptCounter}`,
+              status: "aborted",
+              messages: [assistantMessage as unknown as JsonObject],
+            });
+            this.write({ type: "agent_settled" });
+          }
+          if (this.options.sigtermExitWaitFile !== undefined) {
+            const wait = setInterval(() => {
+              if (fs.existsSync(this.options.sigtermExitWaitFile!)) {
+                clearInterval(wait);
+                exit();
+              }
+            }, 5);
+            return;
+          }
+          setTimeout(exit, this.options.sigtermExitDelayMs);
+        };
+        setTimeout(finish, this.options.sigtermAgentEndDelayMs);
       });
     }
     this.ensurePersistedSessionRecord();
@@ -1365,6 +1481,11 @@ class FakeRpcServer {
       messageId: assistantId,
     });
 
+    if (this.options.plannerRetryWithUsage) {
+      this.completeRetryingPlannerPrompt(assistantId, text);
+      return;
+    }
+
     if (
       this.options.promptScenario === "delegate" &&
       !this.isDirectHandlingOverride(text)
@@ -1386,20 +1507,29 @@ class FakeRpcServer {
         provider: this.currentProvider,
         model: this.currentModel,
         responseId: assistantId,
-        usage: {
-          input: 0,
-          output: 0,
-          cacheRead: 0,
-          cacheWrite: 0,
-          totalTokens: 0,
-          cost: {
-            input: 0,
-            output: 0,
-            cacheRead: 0,
-            cacheWrite: 0,
-            total: 0,
-          },
-        },
+        usage: this.options.includeUsage
+          ? {
+              inputTokens: 100,
+              outputTokens: 10,
+              cacheReadTokens: 5,
+              cacheWriteTokens: 0,
+              totalTokens: 115,
+              ...(this.options.omitUsageCost ? {} : { totalCostUsd: 0.05 }),
+            }
+          : {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 0,
+              cost: {
+                input: 0,
+                output: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+                total: 0,
+              },
+            },
         stopReason: "error",
         errorMessage,
         createdAt: timestamp,
@@ -1667,6 +1797,56 @@ class FakeRpcServer {
     return `AWS probe succeeded: ${(result.stdout || result.stderr).trim()}`;
   }
 
+  private completeRetryingPlannerPrompt(
+    assistantId: string,
+    text: string,
+  ): void {
+    this.currentTimers.push(
+      setTimeout(
+        () => {
+          const retryAssistant: PiMessage = {
+            ...(this.options.plannerRetryIdlessUsage
+              ? {}
+              : {
+                  id: this.options.plannerRetryReusedMessageId
+                    ? assistantId
+                    : `${assistantId}_retry_1`,
+                }),
+            role: "assistant",
+            content: "Retryable planner failure.",
+            stopReason: "error",
+            createdAt: Date.now(),
+            usage: {
+              inputTokens: 100,
+              outputTokens: 10,
+              cacheReadTokens: 5,
+              cacheWriteTokens: 0,
+              totalTokens: 115,
+              ...(this.options.omitUsageCost ? {} : { totalCostUsd: 0.05 }),
+            },
+          };
+          this.messages.push(retryAssistant);
+          this.appendPersistedMessage(retryAssistant);
+          const retryTerminalEvent = {
+            type: "agent_end" as const,
+            ...(this.options.plannerRetryWithoutTerminalIds
+              ? {}
+              : { runId: `planner-retry-${this.promptCounter}` }),
+            messages: [retryAssistant as unknown as JsonObject],
+            willRetry: true,
+          };
+          this.write(retryTerminalEvent);
+          if (this.options.plannerRepeatTerminalObservation) {
+            this.write(retryTerminalEvent);
+          }
+          this.write({ type: "auto_retry_start", attempt: 1, maxAttempts: 2 });
+          this.completePrompt(assistantId, text);
+        },
+        Math.max(1, this.options.streamDelayMs),
+      ),
+    );
+  }
+
   private completePrompt(
     assistantId: string,
     text: string,
@@ -1676,21 +1856,23 @@ class FakeRpcServer {
     const chunks =
       decision !== undefined
         ? [String(decision)]
-        : text.includes("Task-session synthesis for:")
-          ? ["Synthesis observed:\n", text]
-          : this.options.promptScenario === "routing"
-            ? [
-                "Ordinary routing fixture accepted ",
-                `(${this.options.taskRoutingFixture ?? "default"}).`,
-              ]
-            : this.options.promptScenario === "env-probe"
-              ? [this.environmentProbeResponse()]
-              : this.options.productionShaped
-                ? [
-                    "I’ll review the workspace",
-                    " and summarize the next steps.",
-                  ]
-                : ["Fake response", " to: ", text || "(empty prompt)"];
+        : this.options.responseText !== undefined
+          ? [this.options.responseText]
+          : text.includes("Task-session synthesis for:")
+            ? ["Synthesis observed:\n", text]
+            : this.options.promptScenario === "routing"
+              ? [
+                  "Ordinary routing fixture accepted ",
+                  `(${this.options.taskRoutingFixture ?? "default"}).`,
+                ]
+              : this.options.promptScenario === "env-probe"
+                ? [this.environmentProbeResponse()]
+                : this.options.productionShaped
+                  ? [
+                      "I’ll review the workspace",
+                      " and summarize the next steps.",
+                    ]
+                  : ["Fake response", " to: ", text || "(empty prompt)"];
     let accumulated = "";
     chunks.forEach((chunk, index) => {
       this.currentTimers.push(
@@ -1716,7 +1898,9 @@ class FakeRpcServer {
           this.agentActive = false;
           const completedAt = Date.now();
           const assistantMessage: PiMessage = {
-            id: assistantId,
+            ...(this.options.plannerRetryIdlessUsage
+              ? {}
+              : { id: assistantId }),
             role: "assistant",
             content: this.options.structuredMessages
               ? [
@@ -1743,7 +1927,9 @@ class FakeRpcServer {
                     cacheReadTokens: 5,
                     cacheWriteTokens: 0,
                     totalTokens: 115,
-                    totalCostUsd: 0.05,
+                    ...(this.options.omitUsageCost
+                      ? {}
+                      : { totalCostUsd: 0.05 }),
                   },
                 }
               : {}),
@@ -1759,17 +1945,45 @@ class FakeRpcServer {
               done: true,
             });
             if (!this.options.dropAgentEnd) {
+              const terminalAssistant = this.options.plannerTerminalWithoutUsage
+                ? (() => {
+                    const compact = { ...assistantMessage };
+                    delete compact.usage;
+                    return compact;
+                  })()
+                : assistantMessage;
               this.write({
                 type: "agent_end",
                 runId: `run_${this.promptCounter}`,
                 status: "completed",
+                ...(this.options.plannerFieldlessTerminalEventUsage &&
+                this.options.includeUsage
+                  ? {
+                      usage: {
+                        inputTokens: 100,
+                        outputTokens: 10,
+                        cacheReadTokens: 5,
+                        cacheWriteTokens: 0,
+                        totalTokens: 115,
+                        ...(this.options.omitUsageCost
+                          ? {}
+                          : { totalCostUsd: 0.05 }),
+                      },
+                    }
+                  : {}),
                 ...(this.options.productionShaped
                   ? {
-                      messages: [assistantMessage as unknown as JsonObject],
+                      messages: [terminalAssistant as unknown as JsonObject],
                       willRetry: false,
                     }
                   : {}),
               });
+              if (this.options.plannerExitAfterTerminalEventUsage) {
+                // Let the event flush, then make a follow-up get_messages RPC
+                // fail exactly as a teardown race would.
+                setTimeout(() => process.exit(0), 0);
+                return;
+              }
             }
             // Pi consumes queued follow-ups as new user turns only after the
             // active turn ends. Persist that turn before the next settlement so
@@ -2719,10 +2933,41 @@ class FakeRpcServer {
     this.currentTimers = [];
     this.agentActive = false;
     this.respond(command.id, "abort");
+    const assistantMessage: PiMessage | undefined =
+      (this.options.abortWithUsage && this.options.includeUsage) ||
+      this.options.abortWithValidPlan
+        ? {
+            id: `assistant_abort_${this.promptCounter}`,
+            role: "assistant",
+            content: this.options.abortWithValidPlan
+              ? (this.options.responseText ?? "")
+              : "Aborted after reported usage.",
+            createdAt: Date.now(),
+            ...(this.options.includeUsage
+              ? {
+                  usage: {
+                    inputTokens: 100,
+                    outputTokens: 10,
+                    cacheReadTokens: 5,
+                    cacheWriteTokens: 0,
+                    totalTokens: 115,
+                    ...(this.options.omitUsageCost
+                      ? {}
+                      : { totalCostUsd: 0.05 }),
+                  },
+                }
+              : {}),
+          }
+        : undefined;
+    if (assistantMessage) this.messages.push(assistantMessage);
     this.write({
       type: "agent_end",
       runId: `run_${this.promptCounter}`,
-      status: "aborted",
+      status: this.options.abortWithValidPlan ? "completed" : "aborted",
+      ...(assistantMessage &&
+      (!this.options.abortFieldlessWithUsage || this.options.abortWithValidPlan)
+        ? { messages: [assistantMessage as unknown as JsonObject] }
+        : {}),
     });
     this.write({ type: "agent_settled" });
   }

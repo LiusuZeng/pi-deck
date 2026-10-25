@@ -6,6 +6,7 @@ import { it as test, vi } from "vitest";
 import { buildFakeRpcServer as fakePath } from "../../test/fakeRpcHarness.js";
 import { PiWorker } from "./piWorker.js";
 import { SinglePiAdapter } from "./piAdapter.js";
+import { WorkspaceUsageStore } from "../workspaces/workspaceUsage.js";
 import type { RuntimeEvent } from "./types.js";
 
 function createWorker(args: string[] = []): PiWorker {
@@ -438,6 +439,74 @@ test("PiWorker unexpected exit preserves transport diagnostics", async () => {
   const diagnostics = worker.getDiagnostics();
   assert.equal(diagnostics.healthy, false);
   assert.match(diagnostics.stderr, /deterministic stderr diagnostic/);
+});
+
+test("private planner terminal usage from fake RPC is recorded once as parallel workspace usage", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "pi-deck-planner-usage-"));
+  const sessionFile = path.join(root, "parent.jsonl");
+  writeFileSync(sessionFile, "");
+  const store = new WorkspaceUsageStore(root);
+  const workspaceId = "11111111-1111-4111-8111-111111111111";
+  const parentRuntimeId = "parent-runtime";
+  const worker = createWorker([
+    "--stream-delay-ms",
+    "1",
+    "--no-session",
+    "--include-usage",
+  ]);
+  try {
+    await worker.prompt({ text: "plan private tasks" });
+    await waitForWorkerEvent(worker, (event) => event.type === "agent_end");
+    const messages = await worker.getMessages();
+    const recordPlannerUsage = (recordedAtMs: number): Promise<void> =>
+      store.recordSessionMessagesUsage({
+        workspaceId,
+        sessionFile,
+        sessionKey: `${parentRuntimeId}:private:${worker.runtimeId}`,
+        source: "parallel",
+        messages,
+        recordedAtMs,
+      });
+
+    await recordPlannerUsage(1);
+    await recordPlannerUsage(2);
+
+    assert.deepEqual(
+      await store.getWorkspaceUsage({
+        workspaceId,
+        sessionFiles: [sessionFile],
+      }),
+      {
+        inputTokens: 100,
+        outputTokens: 10,
+        cacheReadTokens: 5,
+        cacheWriteTokens: 0,
+        totalTokens: 115,
+        knownCostUsd: 0.05,
+        contributorsWithCost: 1,
+        contributorsWithoutCost: 0,
+      },
+    );
+    assert.equal(
+      JSON.stringify(
+        JSON.parse(readFileSync(store.storeFile, "utf8")),
+      ).includes("plan private tasks"),
+      false,
+    );
+    const reloaded = new WorkspaceUsageStore(root);
+    assert.equal(
+      (
+        await reloaded.getWorkspaceUsage({
+          workspaceId,
+          sessionFiles: [sessionFile],
+        })
+      ).totalTokens,
+      115,
+    );
+  } finally {
+    await worker.closeSession();
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("session stats uses get_session_stats without transferring messages", async () => {
