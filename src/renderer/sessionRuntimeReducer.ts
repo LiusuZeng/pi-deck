@@ -395,7 +395,12 @@ export function reduceRuntimeEventUnprioritized(
         subtitle: `Working · ${backendLabel(session)} stream`,
         workingStartedAtMs: session.workingStartedAtMs ?? Date.now(),
         lastRuntimeEventLabel: "Pi agent started",
-        retryPrompt: undefined,
+        // A sending state owns an optimistic retry source for this same prompt.
+        // Keep it through agent_start so a terminal provider error can expose
+        // Retry prompt; pending-recovery quarantine still blocks that retry
+        // when its acknowledgement is later classified as uncertain.
+        retryPrompt:
+          session.status === "sending" ? session.retryPrompt : undefined,
         // Starting/replacing a worker and get_state only prove transport
         // availability. Keep auth repair pending until a model turn ends.
         providerErrorObserved: false,

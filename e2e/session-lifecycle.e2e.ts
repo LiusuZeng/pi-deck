@@ -253,9 +253,11 @@ test("terminal error before a delayed acknowledgement cannot retry an unconfirme
     ).toContainText("A previous send may have been accepted");
 
     await launched.page.getByRole("button", { name: "Retry prompt" }).click();
+    // The persistent recovery warning takes precedence over the blocked-action
+    // error, so it remains visible while the retry is rejected by quarantine.
     await expect(
       launched.page.locator('.composer-error[role="alert"]'),
-    ).toContainText("Recover or discard the previous uncertain submission");
+    ).toContainText("A previous send may have been accepted");
     expect(readPromptReceipts(receiptFile)).toBe(1);
   } finally {
     await app?.close().catch(() => undefined);
