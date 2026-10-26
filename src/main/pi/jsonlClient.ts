@@ -291,6 +291,10 @@ interface PendingRequest {
   possibleDispatch: boolean;
 }
 
+interface PendingNotificationWrite {
+  reject: (reason: Error) => void;
+}
+
 export interface JsonlRpcClientFatalEvent {
   reason: "malformed_output";
   error: Error;
@@ -299,6 +303,8 @@ export interface JsonlRpcClientFatalEvent {
 export interface JsonlRpcClientEvents {
   event: [RpcEventRecord];
   diagnostic: [string];
+  /** A write-side stream failure that leaves child termination unconfirmed. */
+  transportError: [Error];
   fatal: [JsonlRpcClientFatalEvent];
   close: [{ code: number | null; signal: NodeJS.Signals | null }];
 }
@@ -358,8 +364,13 @@ export class JsonlRpcClient extends EventEmitter {
   private readonly malformedOutputIsFatal: boolean;
   private readonly commandProtocol: JsonlRpcCommandProtocol;
   private readonly pending = new Map<string, PendingRequest>();
+  private readonly pendingNotificationWrites = new Map<
+    symbol,
+    PendingNotificationWrite
+  >();
   private readonly parser: JsonlFramingParser;
   private closed = false;
+  private transportFatalError: Error | undefined;
   private exitCode: number | null = null;
   private signal: NodeJS.Signals | null = null;
   private closeEmitted = false;
@@ -389,6 +400,11 @@ export class JsonlRpcClient extends EventEmitter {
 
     child.stdout?.on("data", (chunk: Buffer) => this.parser.push(chunk));
     child.stdout?.on("end", () => this.parser.end());
+    if (typeof child.stdin?.on === "function") {
+      child.stdin.on("error", (error: Error) => {
+        this.handleStdinFailure(error, "RPC stdin stream error");
+      });
+    }
     child.stderr?.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
       this.stderr.append(text);
@@ -469,12 +485,13 @@ export class JsonlRpcClient extends EventEmitter {
       return Promise.reject(this.fatalError);
     }
     if (
+      this.transportFatalError ||
       this.closed ||
       this.child.killed ||
       !this.child.stdin ||
       this.child.stdin.destroyed
     ) {
-      return Promise.reject(new Error("RPC subprocess is not writable"));
+      return Promise.reject(this.notWritableError());
     }
 
     const id = randomUUID();
@@ -504,28 +521,20 @@ export class JsonlRpcClient extends EventEmitter {
         possibleDispatch: true,
       });
 
-      const rejectWriteFailure = (error: Error): void => {
-        const pending = this.pending.get(id);
-        if (!pending) return;
-        clearTimeout(pending.timer);
-        this.pending.delete(id);
-        // The write was attempted against the stream. A callback error (or a
-        // synchronous stream race) cannot prove that the subprocess received
-        // no prefix of this command, so preserve lost-response uncertainty.
-        pending.reject(
-          new JsonlRpcDeliveryError(
-            `Failed to write RPC command ${command}: ${error.message}`,
-            "unknown",
-          ),
-        );
-      };
       try {
         this.child.stdin!.write(payload, "utf8", (error?: Error | null) => {
-          if (error) rejectWriteFailure(error);
+          if (!error) {
+            return;
+          }
+          this.handleStdinFailure(
+            error,
+            `Failed to write RPC command ${command}`,
+          );
         });
       } catch (error) {
-        rejectWriteFailure(
+        this.handleStdinFailure(
           error instanceof Error ? error : new Error(String(error)),
+          `Failed to write RPC command ${command}`,
         );
       }
     });
@@ -541,25 +550,44 @@ export class JsonlRpcClient extends EventEmitter {
       return Promise.reject(this.fatalError);
     }
     if (
+      this.transportFatalError ||
       this.closed ||
       this.child.killed ||
       !this.child.stdin ||
       this.child.stdin.destroyed
     ) {
-      return Promise.reject(new Error("RPC subprocess is not writable"));
+      return Promise.reject(this.notWritableError());
     }
 
     const payload = JSON.stringify(record) + "\n";
     return new Promise<void>((resolve, reject) => {
-      this.child.stdin!.write(payload, "utf8", (error?: Error | null) => {
-        if (error) {
-          reject(
-            new Error(`Failed to write RPC notification: ${error.message}`),
-          );
-          return;
-        }
-        resolve();
-      });
+      const token = Symbol("rpc-notification-write");
+      let settled = false;
+      const rejectOnce = (error: Error): void => {
+        if (settled) return;
+        settled = true;
+        this.pendingNotificationWrites.delete(token);
+        reject(error);
+      };
+      this.pendingNotificationWrites.set(token, { reject: rejectOnce });
+
+      try {
+        this.child.stdin!.write(payload, "utf8", (error?: Error | null) => {
+          if (error) {
+            this.handleStdinFailure(error, "Failed to write RPC notification");
+            return;
+          }
+          if (settled) return;
+          settled = true;
+          this.pendingNotificationWrites.delete(token);
+          resolve();
+        });
+      } catch (error) {
+        this.handleStdinFailure(
+          error instanceof Error ? error : new Error(String(error)),
+          "Failed to write RPC notification",
+        );
+      }
     });
   }
 
@@ -577,6 +605,13 @@ export class JsonlRpcClient extends EventEmitter {
     }
     this.closeRequested = true;
     this.child.kill(signal);
+  }
+
+  private notWritableError(): Error {
+    if (this.transportFatalError) {
+      return new Error(this.transportFatalError.message);
+    }
+    return new Error("RPC subprocess is not writable");
   }
 
   private withUnexpectedExitDiagnostics(summary: string): string {
@@ -613,6 +648,25 @@ export class JsonlRpcClient extends EventEmitter {
     this.markClosed(code, signal);
     this.rejectAll(new Error(reason));
     this.emit("close", { code, signal });
+  }
+
+  private handleStdinFailure(error: Error, context: string): Error {
+    if (this.transportFatalError) {
+      return this.transportFatalError;
+    }
+
+    const diagnostic = `${context}: ${error.message}`;
+    const transportError = new Error(diagnostic);
+    this.transportFatalError = transportError;
+    const diagnosticLine = `${diagnostic}\n`;
+    this.stderr.append(diagnosticLine);
+    this.emit("diagnostic", diagnosticLine);
+    this.rejectAll(transportError);
+
+    if (!this.closed && !this.closeEmitted) {
+      this.emit("transportError", transportError);
+    }
+    return transportError;
   }
 
   private markClosed(code: number | null, signal: NodeJS.Signals | null): void {
@@ -705,6 +759,10 @@ export class JsonlRpcClient extends EventEmitter {
       );
     }
     this.pending.clear();
+    for (const pending of this.pendingNotificationWrites.values()) {
+      pending.reject(error);
+    }
+    this.pendingNotificationWrites.clear();
   }
 }
 
