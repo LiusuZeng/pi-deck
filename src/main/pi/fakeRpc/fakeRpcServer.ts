@@ -84,6 +84,16 @@ interface FakeOptions {
   plannerRepeatTerminalObservation: boolean;
   /** Omit retry event ids while retaining a stable assistant message id. */
   plannerRetryWithoutTerminalIds: boolean;
+  /** Omit retry event messages while retaining usage in get_messages. */
+  plannerRetryFieldlessTerminal: boolean;
+  /** Omit final event messages while retaining usage in get_messages. */
+  plannerFinalFieldlessTerminal: boolean;
+  /** Fail the first planner get_messages call, then allow final reconciliation. */
+  plannerFailFirstGetMessages: boolean;
+  /** Put cumulative history in the final planner terminal event. */
+  plannerTerminalHistory: boolean;
+  /** Exit after a retry boundary before a final planner attempt starts. */
+  plannerExitAfterRetry: boolean;
   /** Report usage on a fieldless terminal event rather than get_messages. */
   plannerFieldlessTerminalEventUsage: boolean;
   /** Exit immediately after that event so terminal transcript recovery fails. */
@@ -224,6 +234,11 @@ function parseOptions(argv: string[]): FakeOptions {
     plannerRetryReusedMessageId: false,
     plannerRepeatTerminalObservation: false,
     plannerRetryWithoutTerminalIds: false,
+    plannerRetryFieldlessTerminal: false,
+    plannerFinalFieldlessTerminal: false,
+    plannerFailFirstGetMessages: false,
+    plannerTerminalHistory: false,
+    plannerExitAfterRetry: false,
     plannerFieldlessTerminalEventUsage: false,
     plannerExitAfterTerminalEventUsage: false,
     plannerTerminalWithoutUsage: false,
@@ -344,6 +359,16 @@ function parseOptions(argv: string[]): FakeOptions {
       options.plannerRepeatTerminalObservation = true;
     } else if (arg === "--planner-retry-without-terminal-ids") {
       options.plannerRetryWithoutTerminalIds = true;
+    } else if (arg === "--planner-retry-fieldless-terminal") {
+      options.plannerRetryFieldlessTerminal = true;
+    } else if (arg === "--planner-final-fieldless-terminal") {
+      options.plannerFinalFieldlessTerminal = true;
+    } else if (arg === "--planner-fail-first-get-messages") {
+      options.plannerFailFirstGetMessages = true;
+    } else if (arg === "--planner-terminal-history") {
+      options.plannerTerminalHistory = true;
+    } else if (arg === "--planner-exit-after-retry") {
+      options.plannerExitAfterRetry = true;
     } else if (arg === "--planner-fieldless-terminal-event-usage") {
       options.plannerFieldlessTerminalEventUsage = true;
     } else if (arg === "--planner-exit-after-terminal-event-usage") {
@@ -634,6 +659,7 @@ class FakeRpcServer {
   private buffer = "";
   private firstCommandSeen = false;
   private promptCounter = 0;
+  private plannerGetMessagesFailed = false;
   private steeringReceiptCounter = 0;
   private workflowDecisionIndex = 0;
   private currentTimers: NodeJS.Timeout[] = [];
@@ -1092,6 +1118,20 @@ class FakeRpcServer {
         name,
         undefined,
         `Fake RPC configured to fail command: ${name}`,
+      );
+      return;
+    }
+    if (
+      name === "get_messages" &&
+      this.options.plannerFailFirstGetMessages &&
+      !this.plannerGetMessagesFailed
+    ) {
+      this.plannerGetMessagesFailed = true;
+      this.respond(
+        command.id,
+        name,
+        undefined,
+        "Fake RPC configured to fail first planner get_messages command.",
       );
       return;
     }
@@ -1832,12 +1872,23 @@ class FakeRpcServer {
             ...(this.options.plannerRetryWithoutTerminalIds
               ? {}
               : { runId: `planner-retry-${this.promptCounter}` }),
-            messages: [retryAssistant as unknown as JsonObject],
+            ...(this.options.plannerRetryFieldlessTerminal
+              ? {}
+              : { messages: [retryAssistant as unknown as JsonObject] }),
             willRetry: true,
           };
           this.write(retryTerminalEvent);
           if (this.options.plannerRepeatTerminalObservation) {
             this.write(retryTerminalEvent);
+          }
+          if (this.options.plannerExitAfterRetry) {
+            // Leave a small RPC window so the planner can retrieve the retry
+            // transcript, then model the failure before a final agent_end.
+            setTimeout(
+              () => process.exit(0),
+              Math.max(1, this.options.streamDelayMs),
+            );
+            return;
           }
           this.write({ type: "auto_retry_start", attempt: 1, maxAttempts: 2 });
           this.completePrompt(assistantId, text);
@@ -1971,9 +2022,12 @@ class FakeRpcServer {
                       },
                     }
                   : {}),
-                ...(this.options.productionShaped
+                ...(this.options.productionShaped &&
+                !this.options.plannerFinalFieldlessTerminal
                   ? {
-                      messages: [terminalAssistant as unknown as JsonObject],
+                      messages: this.options.plannerTerminalHistory
+                        ? (this.messages as unknown as JsonObject[])
+                        : [terminalAssistant as unknown as JsonObject],
                       willRetry: false,
                     }
                   : {}),

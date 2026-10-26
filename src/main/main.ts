@@ -224,6 +224,7 @@ import {
   WorkspaceStore,
   type WorkspaceRecord,
 } from "./workspaces/workspaceStore.js";
+import { recoverMissingWorkspaceSessionRefs } from "./workspaces/workspaceSessionRecovery.js";
 import { WorkspaceUsageStore } from "./workspaces/workspaceUsage.js";
 import { WorkspaceRuntimeLifecycleGate } from "./workspaceRuntimeLifecycleGate.js";
 import { WorkspaceRuntimeShutdownTombstones } from "./workspaceRuntimeShutdownTombstones.js";
@@ -636,7 +637,10 @@ async function bootstrap(): Promise<void> {
   projectStore = projects;
   const multitask = new MultitaskStateStore(app.getPath("userData"));
   multitaskStateStore = multitask;
-  const taskSessions = new TaskSessionMainStateStore(app.getPath("userData"));
+  const taskSessions = new TaskSessionMainStateStore(
+    app.getPath("userData"),
+    diagnosticsService,
+  );
   taskSessionStateStore = taskSessions;
   const workspacesStore = new WorkspaceStore(piDeckHome, diagnosticsService);
   workspaceStore = workspacesStore;
@@ -3856,7 +3860,11 @@ async function initializeChatAdapter(
     },
     onState: (parentId) => {
       emitTaskSessionState(parentId);
-      void persistTaskSession(parentId);
+      void persistTaskSession(parentId).catch((error) => {
+        diagnostics?.recordError(
+          `Failed to persist task-session state for ${parentId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
     },
   });
   multitaskSupervisor = new MultitaskSupervisor({
@@ -4798,16 +4806,16 @@ function resolveFakeRpcServerPath(): string {
   return path.join(__dirname, "pi/fakeRpc/fakeRpcServer.js");
 }
 
-/** Extract terminal Pi messages without retaining unrelated event payload data. */
+/** Extract terminal assistant rows without retaining them beyond this event. */
 function terminalPlannerMessages(event: { messages?: unknown }): PiMessage[] {
   if (!Array.isArray(event.messages)) return [];
   return event.messages.filter(
-    (message) =>
+    (message): message is PiMessage =>
       message !== null &&
       typeof message === "object" &&
       !Array.isArray(message) &&
-      typeof (message as { role?: unknown }).role === "string",
-  ) as PiMessage[];
+      (message as { role?: unknown }).role === "assistant",
+  );
 }
 
 /** Keep only bounded reported-usage fields; planner output remains private. */
@@ -4894,19 +4902,19 @@ function plannerTerminalObservationId(
   // Runtime events have their own optional stable id. Prefer it before an
   // assistant row so duplicate id-less retry notifications remain one attempt.
   if (typeof event.id === "string") return `event:${event.id}`;
-  // Some Pi terminal events omit their own ids but retain the assistant turn's
-  // stable id. Use it before allocating a fallback so a repeated observation
-  // of that same retry does not become a second accounting attempt. A reported
-  // timestamp distinguishes separate malformed retries that reused an id.
-  const message = messages.find(
-    (candidate): candidate is PiMessage & { id: string } =>
-      typeof candidate.id === "string",
-  );
+  // The final row represents this terminal observation. Its timestamp is
+  // stable across a repeated id-less notification, yet does not retain private
+  // planner content. Prefer it to allocating a new fallback attempt.
+  const message = messages.at(-1);
   if (message !== undefined) {
     const timestamp = message.createdAt ?? message.timestamp;
-    if (typeof timestamp === "string" || typeof timestamp === "number")
-      return `message:${message.id}:at:${timestamp}`;
-    return `message:${message.id}`;
+    const hasTimestamp =
+      typeof timestamp === "string" || typeof timestamp === "number";
+    if (typeof message.id === "string")
+      return hasTimestamp
+        ? `message:${message.id}:at:${timestamp}`
+        : `message:${message.id}`;
+    if (hasTimestamp) return `message:at:${timestamp}`;
   }
   // Well-formed Pi terminal events carry a run or message id. Preserve
   // distinct malformed retry boundaries without deriving identity from usage.
@@ -4965,7 +4973,7 @@ async function runTaskSessionPlanner(
   });
   let plannerCancelCloseTimer: NodeJS.Timeout | undefined;
   let plannerAbortRequested = false;
-  let plannerTerminalCollectionActive = false;
+  let plannerTerminalCollections = 0;
   const run: TaskSessionPlannerRun = {
     cancelled: false,
     cleanup: plannerCleanup,
@@ -4984,7 +4992,7 @@ async function runTaskSessionPlanner(
           // A fieldless terminal event must retain its worker until its
           // get_messages snapshot settles. That collection has its own finite
           // deadline and closes the worker through normal cleanup.
-          if (!plannerTerminalCollectionActive)
+          if (plannerTerminalCollections === 0)
             void run.closeWorker?.().catch(() => undefined);
         }, TASK_SESSION_PLANNER_ABORT_GRACE_MS);
         return;
@@ -5004,6 +5012,7 @@ async function runTaskSessionPlanner(
     }, timeoutMs);
   });
   let plannerUsageRecording: Promise<void> | undefined;
+  const usageTranscriptCollections = new Set<Promise<void>>();
   const operation = (async (): Promise<string> => {
     let worker: ReturnType<SinglePiAdapter["createWorker"]> | undefined;
     try {
@@ -5074,26 +5083,19 @@ async function runTaskSessionPlanner(
         // retrying. Retain only each attempt's compact usage record, then
         // replace the private-worker snapshot with the cumulative set.
         const capturedUsageMessages = new Map<string, PiMessage>();
+        // Direct terminal events are captured before a teardown can make
+        // get_messages unavailable. A later transcript reconciliation must
+        // recognize those same rows rather than count them a second time.
+        const eventUsageFingerprints = new Map<string, string>();
+        const pendingEventUsageFingerprints = new Map<string, number>();
+        const reconciledTranscriptKeys = new Set<string>();
+        // A final agent_end may include cumulative assistant history. Remember
+        // which older history rows were matched to a prior terminal event so a
+        // repeated notification cannot turn that already-accounted retry into
+        // a new usage contribution.
+        const reconciledTerminalHistoryKeys = new Set<string>();
         let terminalAttempt = 0;
-        const captureUsage = (
-          messages: readonly PiMessage[],
-          terminalObservationId: string,
-        ) => {
-          let changed = false;
-          for (const [index, message] of messages.entries()) {
-            const usageMessage = plannerUsageMessage(message);
-            const key = plannerUsageMessageKey(
-              usageMessage,
-              terminalObservationId,
-              index,
-            );
-            const previous = capturedUsageMessages.get(key);
-            if (JSON.stringify(previous) === JSON.stringify(usageMessage))
-              continue;
-            capturedUsageMessages.set(key, usageMessage);
-            changed = true;
-          }
-          if (!changed) return;
+        const scheduleUsageRecording = () => {
           // Persistence deliberately continues outside the planner response
           // deadline so an accounting stall cannot turn an otherwise valid
           // plan into a fallback. Serialize replacements so a late retry
@@ -5112,6 +5114,164 @@ async function runTaskSessionPlanner(
                 `Failed to record private planner usage for ${plannerWorker.runtimeId}: ${error instanceof Error ? error.message : String(error)}`,
               ),
             );
+        };
+        const usageFingerprint = (message: PiMessage): string => {
+          const { id: _id, ...withoutId } = plannerUsageMessage(message);
+          return JSON.stringify(withoutId);
+        };
+        const captureUsageMessage = (
+          key: string,
+          message: PiMessage,
+          fromTerminalEvent = false,
+        ) => {
+          if (!plannerMessageHasReportedUsage(message)) return;
+          const usageMessage = plannerUsageMessage(message);
+          const previous = capturedUsageMessages.get(key);
+          if (JSON.stringify(previous) === JSON.stringify(usageMessage)) return;
+          if (fromTerminalEvent) {
+            const previousFingerprint = eventUsageFingerprints.get(key);
+            if (previousFingerprint !== undefined) {
+              const count =
+                pendingEventUsageFingerprints.get(previousFingerprint);
+              if (count === 1)
+                pendingEventUsageFingerprints.delete(previousFingerprint);
+              else if (count !== undefined)
+                pendingEventUsageFingerprints.set(
+                  previousFingerprint,
+                  count - 1,
+                );
+            }
+            const fingerprint = usageFingerprint(usageMessage);
+            eventUsageFingerprints.set(key, fingerprint);
+            pendingEventUsageFingerprints.set(
+              fingerprint,
+              (pendingEventUsageFingerprints.get(fingerprint) ?? 0) + 1,
+            );
+          }
+          capturedUsageMessages.set(key, usageMessage);
+          scheduleUsageRecording();
+        };
+        const captureUsage = (
+          messages: readonly PiMessage[],
+          terminalObservationId: string,
+          skipTerminalMessage = false,
+        ) => {
+          // Pi normally sends the terminal assistant row alone, but some
+          // transports send cumulative history. Older rows can describe a
+          // retry already captured from its own agent_end; match them before
+          // retaining any otherwise-unobserved history usage. The newest row
+          // remains this event's own terminal attempt, even when its reported
+          // totals equal an earlier retry.
+          const terminalIndex = messages.length - 1;
+          for (const [index, message] of messages.entries()) {
+            const usageMessage = plannerUsageMessage(message);
+            const historyKey = `terminal-history:${terminalObservationId}:${index}`;
+            if (index < terminalIndex) {
+              if (reconciledTerminalHistoryKeys.has(historyKey)) continue;
+              const fingerprint = usageFingerprint(usageMessage);
+              const pending =
+                pendingEventUsageFingerprints.get(fingerprint) ?? 0;
+              if (pending > 0) {
+                // Keep the prior event's pending fingerprint for the later
+                // cumulative transcript reconciliation. This history row is
+                // already accounted, but get_messages still contains it too.
+                reconciledTerminalHistoryKeys.add(historyKey);
+                continue;
+              }
+            } else if (skipTerminalMessage) {
+              // Top-level agent_end usage is the authoritative record for the
+              // newest assistant row. Retain older history rows, which can be
+              // the only evidence for an earlier fieldless retry, without
+              // counting the final attempt twice.
+              continue;
+            }
+            captureUsageMessage(
+              plannerUsageMessageKey(
+                usageMessage,
+                terminalObservationId,
+                index,
+              ),
+              usageMessage,
+              true,
+            );
+          }
+        };
+        const captureTranscriptUsage = (messages: readonly PiMessage[]) => {
+          // get_messages is cumulative. Match direct terminal observations from
+          // its tail: a final event and a prior retry can report identical usage
+          // values, but the final terminal row is always the newest one.
+          // Stable transcript positions preserve distinct id-less/reused-id
+          // retries while repeated observations remain idempotent without
+          // retaining planner content.
+          for (let index = messages.length - 1; index >= 0; index -= 1) {
+            const message = messages[index]!;
+            if (!plannerMessageHasReportedUsage(message)) continue;
+            const key = `transcript:${index}`;
+            if (
+              capturedUsageMessages.has(key) ||
+              reconciledTranscriptKeys.has(key)
+            )
+              continue;
+            const fingerprint = usageFingerprint(message);
+            const pending = pendingEventUsageFingerprints.get(fingerprint) ?? 0;
+            if (pending > 0) {
+              if (pending === 1)
+                pendingEventUsageFingerprints.delete(fingerprint);
+              else pendingEventUsageFingerprints.set(fingerprint, pending - 1);
+              reconciledTranscriptKeys.add(key);
+              continue;
+            }
+            captureUsageMessage(key, message);
+          }
+        };
+        const collectTerminalMessages = async (): Promise<PiMessage[]> => {
+          plannerTerminalCollections += 1;
+          let collectionTimer: NodeJS.Timeout | undefined;
+          try {
+            return await new Promise<PiMessage[]>(
+              (resolveMessages, rejectMessages) => {
+                collectionTimer = setTimeout(
+                  () =>
+                    rejectMessages(
+                      new Error(
+                        "Timed out collecting planner terminal messages.",
+                      ),
+                    ),
+                  TASK_SESSION_PLANNER_TERMINAL_COLLECTION_TIMEOUT_MS,
+                );
+                void plannerWorker.getMessages().then(
+                  (messages) => {
+                    if (collectionTimer !== undefined)
+                      clearTimeout(collectionTimer);
+                    collectionTimer = undefined;
+                    resolveMessages(messages);
+                  },
+                  (error) => {
+                    if (collectionTimer !== undefined)
+                      clearTimeout(collectionTimer);
+                    collectionTimer = undefined;
+                    rejectMessages(error);
+                  },
+                );
+              },
+            );
+          } finally {
+            if (collectionTimer !== undefined) clearTimeout(collectionTimer);
+            plannerTerminalCollections -= 1;
+          }
+        };
+        const collectUsageTranscript = (phase: "retry" | "terminal") => {
+          const collection = collectTerminalMessages()
+            .then(captureTranscriptUsage)
+            .catch((error) =>
+              diagnostics?.recordError(
+                `Failed to collect private planner ${phase} usage for ${plannerWorker.runtimeId}: ${error instanceof Error ? error.message : String(error)}`,
+              ),
+            );
+          usageTranscriptCollections.add(collection);
+          void collection.finally(() =>
+            usageTranscriptCollections.delete(collection),
+          );
         };
         const finish = (fn: () => void) => {
           if (settled) return false;
@@ -5143,15 +5303,14 @@ async function runTaskSessionPlanner(
               event as Record<string, unknown>,
             );
             if (eventUsage !== undefined) {
+              // A combined payload can still contain cumulative retry history.
+              // Only its newest assistant row is represented by eventUsage;
+              // preserve the prior rows before this worker can disappear.
+              captureUsage(terminalMessages, terminalObservationId, true);
               captureUsage([eventUsage], `${terminalObservationId}:event`);
             } else if (terminalMessages.length > 0) {
               captureUsage(terminalMessages, terminalObservationId);
             }
-            // An agent_end with willRetry is an attempt boundary, not the
-            // planner's terminal result. Keep the worker and observer alive so
-            // its final response and every reported retry attempt are counted.
-            if ((event as { willRetry?: unknown }).willRetry === true) return;
-            if (!finish(() => undefined)) return;
             // Event payloads can contain the private response but omit its
             // usage. Reconcile that compact event with Pi's authoritative
             // transcript before teardown; otherwise a successful plan could
@@ -5161,8 +5320,21 @@ async function runTaskSessionPlanner(
               terminalMessages.some(
                 (message) => !plannerMessageHasReportedUsage(message),
               );
+            // An agent_end with willRetry is an attempt boundary, not the
+            // planner's terminal result. It needs the same transcript
+            // reconciliation as a final fieldless event: the next attempt may
+            // never start because cancellation or worker exit can follow it.
+            if ((event as { willRetry?: unknown }).willRetry === true) {
+              if (needsTranscript) collectUsageTranscript("retry");
+              return;
+            }
+            if (!finish(() => undefined)) return;
             const eventResponse = piMessageText(terminalMessages.at(-1));
             if (!needsTranscript) {
+              // Even a usage-bearing final event needs a bounded cumulative
+              // reconciliation: an earlier fieldless retry collection may have
+              // failed, and its reported usage is only present in this snapshot.
+              collectUsageTranscript("terminal");
               if (run.cancelled) {
                 reject(new Error("Task-session planner was cancelled."));
                 return;
@@ -5174,57 +5346,21 @@ async function runTaskSessionPlanner(
             // Keep that transport alive for this bounded snapshot: fieldless
             // terminal events, and content-bearing events without usage, need
             // get_messages to retain authoritative accounting evidence.
-            plannerTerminalCollectionActive = true;
             if (plannerCancelCloseTimer !== undefined) {
               clearTimeout(plannerCancelCloseTimer);
               plannerCancelCloseTimer = undefined;
             }
             void (async () => {
-              let collectionTimer: NodeJS.Timeout | undefined;
-              try {
-                const messages = await new Promise<PiMessage[]>(
-                  (resolveMessages, rejectMessages) => {
-                    collectionTimer = setTimeout(
-                      () =>
-                        rejectMessages(
-                          new Error(
-                            "Timed out collecting planner terminal messages.",
-                          ),
-                        ),
-                      TASK_SESSION_PLANNER_TERMINAL_COLLECTION_TIMEOUT_MS,
-                    );
-                    void plannerWorker.getMessages().then(
-                      (messages) => {
-                        if (collectionTimer !== undefined)
-                          clearTimeout(collectionTimer);
-                        collectionTimer = undefined;
-                        resolveMessages(messages);
-                      },
-                      (error) => {
-                        if (collectionTimer !== undefined)
-                          clearTimeout(collectionTimer);
-                        collectionTimer = undefined;
-                        rejectMessages(error);
-                      },
-                    );
-                  },
-                );
-                // Event-level usage is the terminal attempt's authoritative
-                // snapshot. Reconciliation is only for private response text
-                // in that case; adding its transcript row would count the
-                // same reported turn a second time.
-                if (eventUsage === undefined)
-                  captureUsage(messages, terminalObservationId);
-                if (run.cancelled)
-                  throw new Error("Task-session planner was cancelled.");
-                return terminalMessages.length > 0
-                  ? eventResponse
-                  : piMessageText(messages.at(-1));
-              } finally {
-                if (collectionTimer !== undefined)
-                  clearTimeout(collectionTimer);
-                plannerTerminalCollectionActive = false;
-              }
+              const messages = await collectTerminalMessages();
+              // The transcript is cumulative, including prior retries. Its
+              // stable compact-row reconciliation preserves every distinct
+              // attempt and suppresses rows already captured from agent_end.
+              captureTranscriptUsage(messages);
+              if (run.cancelled)
+                throw new Error("Task-session planner was cancelled.");
+              return terminalMessages.length > 0
+                ? eventResponse
+                : piMessageText(messages.at(-1));
             })().then(resolve, (error) => {
               // The event already supplied a complete plan. An accounting
               // reconciliation failure is diagnostic-only and must not
@@ -5272,6 +5408,17 @@ async function runTaskSessionPlanner(
     // Account and await that bounded write before close regardless of whether
     // the planner response resolved successfully.
     .finally(async () => {
+      // Terminal/retry reconciliation is deliberately asynchronous when the
+      // response itself is complete. Before teardown, retain each bounded
+      // transcript RPC and include its resulting cumulative snapshot.
+      const transcriptCollections = [...usageTranscriptCollections];
+      if (transcriptCollections.length > 0) {
+        await withTimeoutResult(
+          Promise.allSettled(transcriptCollections),
+          TASK_SESSION_PLANNER_TERMINAL_COLLECTION_TIMEOUT_MS,
+          undefined,
+        );
+      }
       const recording = plannerUsageRecording;
       if (recording === undefined) return;
       let settled = false;
@@ -5294,7 +5441,6 @@ async function runTaskSessionPlanner(
         clearTimeout(plannerCancelCloseTimer);
         plannerCancelCloseTimer = undefined;
       }
-      plannerTerminalCollectionActive = false;
       await run.closeWorker?.().catch(() => undefined);
       runs.delete(run);
       if (runs.size === 0) taskSessionPlannerRuns.delete(parentId);
@@ -6767,11 +6913,35 @@ async function listWorkspaceChatSessionsUnderLease(
     options.includeArchived === undefined
       ? {}
       : { includeArchived: options.includeArchived };
+  const diagnostics: string[] = [];
+  let recoverySessionDirResolved = false;
+  let recoverySessionDir: string | undefined;
+  const resolveRecoverySessionDir = async (): Promise<string | undefined> => {
+    if (!recoverySessionDirResolved) {
+      recoverySessionDir = await resolveWorkspaceSessionDir(
+        settings,
+        workspace,
+        diagnostics,
+        "recovery",
+      );
+      recoverySessionDirResolved = true;
+    }
+    return recoverySessionDir;
+  };
+  await recoverMissingWorkspaceSessionRefs({
+    store: ensureWorkspaceStore(),
+    workspace,
+    includeArchived: options.includeArchived === true,
+    sessionDir: resolveRecoverySessionDir,
+    diagnostics,
+    assertActive,
+    isSessionBlocked: (sessionFile) =>
+      ensureForkCleanupJournal().blocks(sessionFile),
+  });
   let refs = await ensureWorkspaceStore().getCachedSessionSummaries(
     workspace.id,
     sessionListOptions,
   );
-  const diagnostics: string[] = [];
   refs = await filterForkCleanupBlockedSessions(
     refs,
     diagnostics,
@@ -6844,6 +7014,7 @@ async function listWorkspaceChatSessionsUnderLease(
     options.includeArchived === true,
     diagnostics,
     assertActive,
+    recoverySessionDirResolved ? recoverySessionDir : undefined,
   );
   const sessions: ChatListSessionsResult["sessions"] = [];
   for (const ref of refs) {
@@ -6892,6 +7063,34 @@ async function listWorkspaceChatSessionsUnderLease(
   };
 }
 
+async function resolveWorkspaceSessionDir(
+  settings: SettingsStore,
+  workspace: WorkspaceRecord,
+  diagnostics: string[],
+  purpose: string,
+): Promise<string | undefined> {
+  if (resolveChatBackendMode() !== "real") {
+    return undefined;
+  }
+  try {
+    const project =
+      workspace.archivedAtMs === undefined
+        ? await resolveWorkspaceRepositoryProject(workspace.id)
+        : workspace.defaultProjectId === undefined
+          ? await resolveManagedRuntimeProject()
+          : await ensureProjectStore()
+              .resolveAuthorizedProject(workspace.defaultProjectId)
+              .catch(() => resolveManagedRuntimeProject());
+    const launch = await resolveRealChatLaunchConfig(settings, project);
+    return launch.effective.config.sessionDir;
+  } catch (error) {
+    diagnostics.push(
+      `Workspace session ${purpose} unavailable: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return undefined;
+  }
+}
+
 /**
  * Refresh metadata for explicit workspace members without scanning every Pi
  * session. The cache is populated when a runtime is first created, so a
@@ -6905,29 +7104,20 @@ async function refreshWorkspaceSessionSummaries(
   includeArchived: boolean,
   diagnostics: string[],
   assertActive: () => void,
+  resolvedSessionDir?: string,
 ): Promise<ChatSessionSummary[]> {
   if (refs.length === 0 || resolveChatBackendMode() !== "real") {
     return refs;
   }
 
-  let sessionDir: string | undefined;
-  try {
-    const project =
-      workspace.archivedAtMs === undefined
-        ? await resolveWorkspaceRepositoryProject(workspace.id)
-        : workspace.defaultProjectId === undefined
-          ? await resolveManagedRuntimeProject()
-          : await ensureProjectStore()
-              .resolveAuthorizedProject(workspace.defaultProjectId)
-              .catch(() => resolveManagedRuntimeProject());
-    const launch = await resolveRealChatLaunchConfig(settings, project);
-    sessionDir = launch.effective.config.sessionDir;
-  } catch (error) {
-    diagnostics.push(
-      `Workspace session metadata refresh unavailable: ${error instanceof Error ? error.message : String(error)}`,
-    );
-    return refs;
-  }
+  const sessionDir =
+    resolvedSessionDir ??
+    (await resolveWorkspaceSessionDir(
+      settings,
+      workspace,
+      diagnostics,
+      "metadata refresh",
+    ));
   if (sessionDir === undefined) {
     return refs;
   }
@@ -9433,6 +9623,33 @@ async function recreateMainWindowAfterCrash(): Promise<void> {
   }
 }
 
+export const __testing = {
+  configureWorkspaceListing(options: {
+    projectStore: ProjectStore;
+    workspaceStore: WorkspaceStore;
+    workspaceUsageStore: WorkspaceUsageStore;
+    forkCleanupJournal: ForkCleanupJournal;
+  }): () => void {
+    const previous = {
+      projectStore,
+      workspaceStore,
+      workspaceUsageStore,
+      forkCleanupJournal,
+    };
+    projectStore = options.projectStore;
+    workspaceStore = options.workspaceStore;
+    workspaceUsageStore = options.workspaceUsageStore;
+    forkCleanupJournal = options.forkCleanupJournal;
+    return () => {
+      projectStore = previous.projectStore;
+      workspaceStore = previous.workspaceStore;
+      workspaceUsageStore = previous.workspaceUsageStore;
+      forkCleanupJournal = previous.forkCleanupJournal;
+    };
+  },
+  listWorkspaceChatSessions,
+};
+
 app.on("before-quit", (event) => {
   if (appLifecycle.allowsExit) return;
   // Every external request remains blocked behind the same dialog/cleanup
@@ -9449,8 +9666,11 @@ app.on("window-all-closed", () => {
 });
 
 if (
-  process.env.NODE_ENV !== "test" ||
-  process.env.PI_DECK_SKIP_BOOTSTRAP_FOR_TESTS !== "1"
+  !(
+    process.env.NODE_ENV === "test" &&
+    (process.env.PI_DECK_MAIN_TEST_IMPORT === "1" ||
+      process.env.PI_DECK_SKIP_BOOTSTRAP_FOR_TESTS === "1")
+  )
 ) {
   bootstrap().catch((error: unknown) => {
     const message =
@@ -9463,7 +9683,6 @@ if (
     void appLifecycle.requestQuit("application", { confirmed: true });
   });
 }
-
 export const __taskSessionPlannerTestHooks = {
   configurePlannerRuntime(options: {
     adapter: SinglePiAdapter;

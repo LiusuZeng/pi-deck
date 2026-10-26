@@ -264,10 +264,13 @@ describe("task-session planner usage accounting", () => {
       // planner must remain alive for the final response and retain both
       // reported attempts in its one private-worker usage snapshot. Distinct
       // run ids must still count separately when a provider reuses message ids.
+      // Production terminal payloads can be history-shaped: the final event
+      // must account only for its terminal assistant, not the retry again.
       setPlannerFixture("retry", [
         "--planner-retry-with-usage",
         "--planner-retry-reused-message-id",
         "--planner-repeat-terminal-observation",
+        "--planner-terminal-history",
         "--production-shaped",
         "--response-text",
         '{"contextSummary":"Retry complete","tasks":[{"generatedName":"Task retry","brief":"Use the final response."}]}',
@@ -289,11 +292,12 @@ describe("task-session planner usage accounting", () => {
         "retrying planner attempts were not both persisted",
       );
 
-      // Pi can repeat a retry terminal event without a run/message id of its
-      // own. Its stable assistant message id must still make the repeated
-      // observation idempotent, while the final run remains a second attempt.
+      // Pi can repeat a retry terminal event without any event or assistant
+      // message id. Its stable assistant timestamp must still make the repeat
+      // idempotent, while the final run remains a second attempt.
       setPlannerFixture("idless-terminal-retry", [
         "--planner-retry-with-usage",
+        "--planner-retry-idless-usage",
         "--planner-retry-without-terminal-ids",
         "--planner-repeat-terminal-observation",
         "--production-shaped",
@@ -305,7 +309,7 @@ describe("task-session planner usage accounting", () => {
           adapter,
           settings,
           parentId,
-          "A repeated retry event without terminal ids is still one attempt.",
+          "A repeated retry event without terminal or message ids is still one attempt.",
         );
       assert.deepEqual(idlessRetryPlan, {
         contextSummary: "Idless retry complete",
@@ -537,6 +541,216 @@ describe("task-session planner usage accounting", () => {
           "Split this request",
         ),
         false,
+      );
+    } finally {
+      await __taskSessionPlannerTestHooks.resetPlannerRuntime(parentId);
+      await adapter.closeSession(parentId).catch(() => undefined);
+    }
+  });
+
+  it("reconciles fieldless retry transcripts before finalization or cancellation", async () => {
+    const { __taskSessionPlannerTestHooks } = await import("./main.js");
+    const root = mkdtempSync(path.join(tmpdir(), "pi-deck-planner-retry-"));
+    roots.push(root);
+    const sessionFile = path.join(root, "parent.jsonl");
+    writeFileSync(sessionFile, "");
+    const workspaceId = "44444444-4444-4444-8444-444444444444";
+    const parentId = "parent-planner-fieldless-retry";
+    const adapter = new PlannerHarnessAdapter(
+      parentId,
+    ) as unknown as SinglePiAdapter;
+    const settings = new SettingsStore(root);
+    const usageStore = new WorkspaceUsageStore(root);
+    const usage = () =>
+      usageStore.getWorkspaceUsage({
+        workspaceId,
+        sessionFiles: [sessionFile],
+      });
+    const setPlannerFixture = (name: string, args: string[]) => {
+      const shim = path.join(root, `${name}.cjs`);
+      writeFakePiShim(shim, args);
+      process.env.PI_DECK_TEST_FAKE_RPC_SERVER = shim;
+    };
+    let cancelAtRetry = false;
+    __taskSessionPlannerTestHooks.configurePlannerRuntime({
+      adapter,
+      workspaceUsageStore: usageStore,
+      parentId,
+      cwd: process.cwd(),
+      workspaceId,
+      sessionFile,
+      onPlannerWorkerCreated: (worker) => {
+        worker.onEvent((event) => {
+          if (
+            !cancelAtRetry ||
+            event.type !== "agent_end" ||
+            (event as { willRetry?: unknown }).willRetry !== true
+          )
+            return;
+          cancelAtRetry = false;
+          __taskSessionPlannerTestHooks.cancelPlannerRuntime(parentId);
+        });
+      },
+    });
+
+    try {
+      // The retry agent_end has neither event-level usage nor messages. Its
+      // get_messages result is cumulative by the fieldless final event, so
+      // both attempts must remain distinct without duplicating the retry.
+      setPlannerFixture("fieldless-retry-final", [
+        "--planner-retry-with-usage",
+        "--planner-retry-fieldless-terminal",
+        "--planner-final-fieldless-terminal",
+        "--production-shaped",
+        "--response-text",
+        '{"contextSummary":"Fieldless retry complete","tasks":[{"generatedName":"Task retry","brief":"Reconcile both private attempts."}]}',
+      ]);
+      const completed = await __taskSessionPlannerTestHooks.planTaskSession(
+        adapter,
+        settings,
+        parentId,
+        "A fieldless retry and final response must both be accounted.",
+      );
+      assert.deepEqual(completed, {
+        contextSummary: "Fieldless retry complete",
+        tasks: [
+          {
+            generatedName: "Task retry",
+            brief: "Reconcile both private attempts.",
+          },
+        ],
+      });
+      await eventually(
+        async () => (await usage()).totalTokens === 230,
+        "fieldless retry and final usage were not reconciled exactly once",
+      );
+
+      // A fieldless retry's asynchronous collection can fail before the final
+      // event. The final event has its own reported usage and cumulative
+      // history, so final reconciliation must still recover the retry rather
+      // than treating direct final usage as a reason to skip the snapshot.
+      setPlannerFixture("fieldless-retry-failed-collection-final-history", [
+        "--planner-retry-with-usage",
+        "--planner-retry-fieldless-terminal",
+        "--planner-fail-first-get-messages",
+        "--planner-terminal-history",
+        "--production-shaped",
+        "--response-text",
+        '{"contextSummary":"Recovered retry","tasks":[{"generatedName":"Task recovered retry","brief":"Reconcile cumulative evidence after retry collection fails."}]}',
+      ]);
+      const recovered = await __taskSessionPlannerTestHooks.planTaskSession(
+        adapter,
+        settings,
+        parentId,
+        "A final usage-bearing event must reconcile an earlier fieldless retry.",
+      );
+      assert.deepEqual(recovered, {
+        contextSummary: "Recovered retry",
+        tasks: [
+          {
+            generatedName: "Task recovered retry",
+            brief:
+              "Reconcile cumulative evidence after retry collection fails.",
+          },
+        ],
+      });
+      await eventually(
+        async () => (await usage()).totalTokens === 460,
+        "final cumulative evidence did not recover failed fieldless retry collection",
+      );
+
+      // The final terminal event can carry cumulative retry history even when
+      // both the earlier retry collection and post-event get_messages fail.
+      // Its top-level final usage represents only the newest row, so also
+      // capture every prior usage-bearing terminal assistant history row
+      // synchronously before the worker exits and its private transcript
+      // disappears.
+      setPlannerFixture("fieldless-retry-history-teardown-race", [
+        "--planner-retry-with-usage",
+        "--planner-retry-fieldless-terminal",
+        "--planner-fail-first-get-messages",
+        "--planner-terminal-history",
+        "--planner-fieldless-terminal-event-usage",
+        "--planner-exit-after-terminal-event-usage",
+        "--fail-command",
+        "get_messages",
+        "--production-shaped",
+        "--response-text",
+        '{"contextSummary":"Terminal history survives teardown","tasks":[{"generatedName":"Task terminal history","brief":"Account every history row before the private worker exits."}]}',
+      ]);
+      const terminalHistory =
+        await __taskSessionPlannerTestHooks.planTaskSession(
+          adapter,
+          settings,
+          parentId,
+          "Terminal history must retain retry usage through teardown.",
+        );
+      assert.deepEqual(terminalHistory, {
+        contextSummary: "Terminal history survives teardown",
+        tasks: [
+          {
+            generatedName: "Task terminal history",
+            brief: "Account every history row before the private worker exits.",
+          },
+        ],
+      });
+      await eventually(
+        async () => (await usage()).totalTokens === 690,
+        "terminal history lost retry usage when post-event collection failed",
+      );
+
+      // A worker can exit after a fieldless retry without another agent_end.
+      // This proves retry-boundary reconciliation itself preserves the only
+      // reported usage, rather than relying on a later final observation.
+      setPlannerFixture("fieldless-retry-failed", [
+        "--planner-retry-with-usage",
+        "--planner-retry-fieldless-terminal",
+        "--planner-exit-after-retry",
+        "--stream-delay-ms",
+        "50",
+      ]);
+      const failed = await __taskSessionPlannerTestHooks.planTaskSession(
+        adapter,
+        settings,
+        parentId,
+        "A fieldless retry may be the planner's final observable attempt.",
+      );
+      assert.equal(
+        failed.contextSummary.startsWith("Planning was unavailable"),
+        true,
+      );
+      await eventually(
+        async () => (await usage()).totalTokens === 805,
+        "fieldless retry usage was lost when worker exit prevented a final event",
+      );
+
+      // Cancellation immediately after that fieldless retry prevents its
+      // final response. The retry transcript is still the only evidence of
+      // reported provider work and must survive bounded cleanup.
+      cancelAtRetry = true;
+      setPlannerFixture("fieldless-retry-cancelled", [
+        "--planner-retry-with-usage",
+        "--planner-retry-fieldless-terminal",
+        "--stream-delay-ms",
+        "25",
+      ]);
+      const cancelled = await __taskSessionPlannerTestHooks.planTaskSession(
+        adapter,
+        settings,
+        parentId,
+        "Cancellation after a fieldless retry retains that retry usage.",
+      );
+      assert.equal(
+        cancelled.contextSummary.startsWith("Planning was unavailable"),
+        true,
+      );
+      await eventually(
+        async () => (await usage()).totalTokens === 920,
+        "fieldless retry usage was lost when cancellation prevented the final attempt",
+      );
+      await eventually(
+        () => adapter.workerCount() === 1,
+        "cancelled fieldless retry planner was not closed",
       );
     } finally {
       await __taskSessionPlannerTestHooks.resetPlannerRuntime(parentId);
