@@ -4273,6 +4273,216 @@ describe("renderer intervention UX", () => {
     expect(inbox.groups.inProgress).toHaveLength(0);
   });
 
+  it("keeps timed out parent prompt delivery unconfirmed instead of failed", () => {
+    const sending = {
+      ...baseSession(),
+      status: "sending",
+      baseState: "attaching",
+      lifecycle: { phase: "active" },
+      overlays: { ...emptyOverlays, streaming: false, toolRunning: false },
+      retryPrompt: { text: "Try this", attachments: [] },
+    } as any;
+    const unconfirmed = __rendererTestHooks.markPromptDeliveryUnconfirmed(
+      sending,
+      "RPC command timed out before response: prompt",
+    );
+    const source = __rendererTestHooks.activitySourceSessions([unconfirmed], {
+      "workspace-a": "Workspace A",
+    })[0]!;
+    const inbox = buildActivityInbox([source]);
+
+    expect(unconfirmed).toMatchObject({
+      status: "idle",
+      baseState: "idle",
+      lifecycle: { phase: "inactive" },
+      overlays: { streaming: false, toolRunning: false },
+      retryPrompt: { text: "Try this", attachments: [] },
+      subtitle: "Delivery unconfirmed · Pi may have received the prompt",
+    });
+    expect(unconfirmed.lastError).toContain("retrying may duplicate work");
+    expect(unconfirmed.timeline.at(-1)).toMatchObject({
+      kind: "diagnostic",
+      tone: "error",
+      content: expect.stringContaining("Prompt delivery unconfirmed"),
+    });
+    expect(__rendererTestHooks.isSessionBusy(unconfirmed)).toBe(false);
+    expect(inbox.groups.inProgress).toHaveLength(0);
+    expect(inbox.groups.failed).toHaveLength(0);
+  });
+
+  it("recognizes unknown delivery status from a cross-realm-shaped preload error", () => {
+    // Electron can proxy an Error from its isolated preload world without this
+    // renderer's Error prototype. The typed IPC status must survive that seam.
+    expect(
+      __rendererTestHooks.isPromptDeliveryUnconfirmedError({
+        message: "RPC command timed out before response: prompt",
+        deliveryStatus: "unknown",
+      }),
+    ).toBe(true);
+    expect(
+      __rendererTestHooks.isPromptDeliveryUnconfirmedError({
+        message: "Prompt was rejected",
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps sendPrompt's unknown-delivery catch path quarantined for explicit recovery", () => {
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    };
+    const session = {
+      ...baseSession(),
+      sessionFile: "/sessions/session-1.jsonl",
+    };
+    const persistence = new ComposerDraftPersistence(storage, { now: () => 1 });
+    persistence.hydrate([session], ["workspace-a"]);
+    persistence.beginSubmission(session, "Try this", 0, "parent");
+    const restoreRejectedComposerDraft = vi.fn(() => true);
+    const onRejectedDraftNotRestored = vi.fn();
+    const reports: unknown[] = [];
+    const recoveries: unknown[] = [];
+
+    const restored = __rendererTestHooks.settleFailedParentPromptSubmission({
+      promptDeliveryUnconfirmed: true,
+      submissionSession: session,
+      composerDraftPersistence: persistence,
+      restoreRejectedComposerDraft,
+      onRejectedDraftNotRestored,
+      reportComposerDraftPersistenceResult: (result: unknown) =>
+        reports.push(result),
+      publishPendingComposerRecovery: (recoverySession: typeof session) => {
+        recoveries.push(
+          persistence.pendingSubmissionForSession(recoverySession),
+        );
+      },
+    });
+
+    expect(restored).toBe(false);
+    expect(restoreRejectedComposerDraft).not.toHaveBeenCalled();
+    expect(onRejectedDraftNotRestored).not.toHaveBeenCalled();
+    expect(reports).toEqual([
+      { status: "unchanged", truncated: false, pruned: 0 },
+    ]);
+    expect(recoveries).toEqual([
+      expect.objectContaining({
+        sessionId: "session-1",
+        text: "Try this",
+        destination: "parent",
+      }),
+    ]);
+    const serialized = JSON.parse(values.get(COMPOSER_DRAFT_STORAGE_KEY)!);
+    expect(serialized.drafts[0]).toMatchObject({
+      text: "",
+      pendingSubmission: { text: "Try this", destination: "parent" },
+    });
+  });
+
+  it("keeps explicit prompt rejection on the restored-draft path", () => {
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    };
+    const session = {
+      ...baseSession(),
+      sessionFile: "/sessions/session-1.jsonl",
+    };
+    const persistence = new ComposerDraftPersistence(storage, { now: () => 1 });
+    persistence.hydrate([session], ["workspace-a"]);
+    persistence.beginSubmission(session, "Try this", 0, "parent");
+    const restoreRejectedComposerDraft = vi.fn(() => true);
+    const onRejectedDraftNotRestored = vi.fn();
+    const reports: unknown[] = [];
+
+    const restored = __rendererTestHooks.settleFailedParentPromptSubmission({
+      promptDeliveryUnconfirmed: false,
+      submissionSession: session,
+      composerDraftPersistence: persistence,
+      restoreRejectedComposerDraft,
+      onRejectedDraftNotRestored,
+      reportComposerDraftPersistenceResult: (result: unknown) =>
+        reports.push(result),
+      publishPendingComposerRecovery: vi.fn(),
+    });
+
+    expect(restored).toBe(true);
+    expect(restoreRejectedComposerDraft).toHaveBeenCalledOnce();
+    expect(onRejectedDraftNotRestored).not.toHaveBeenCalled();
+    expect(persistence.pendingSubmissionForSession(session)).toBeUndefined();
+    expect(reports).toEqual([{ status: "ok", truncated: false, pruned: 0 }]);
+    const serialized = JSON.parse(values.get(COMPOSER_DRAFT_STORAGE_KEY)!);
+    expect(serialized.drafts[0]).toMatchObject({ text: "Try this" });
+    expect(serialized.drafts[0].pendingSubmission).toBeUndefined();
+  });
+
+  it("preserves runtime progress evidence when prompt confirmation times out", () => {
+    const sending = {
+      ...baseSession(),
+      status: "sending",
+      baseState: "attaching",
+      lifecycle: { phase: "active" },
+      overlays: { ...emptyOverlays, streaming: false, toolRunning: false },
+      retryPrompt: { text: "Try this", attachments: [] },
+    } as any;
+    const working = reduceRuntimeEvent(sending, {
+      type: "agent_start",
+      runtimeId: "session-1",
+    } as any) as any;
+
+    const unconfirmed = __rendererTestHooks.markPromptDeliveryUnconfirmed(
+      working,
+      "RPC command timed out before response: prompt",
+    );
+    const source = __rendererTestHooks.activitySourceSessions([unconfirmed], {
+      "workspace-a": "Workspace A",
+    })[0]!;
+    const inbox = buildActivityInbox([source]);
+
+    expect(unconfirmed).toMatchObject({
+      status: "working",
+      baseState: "working",
+      lifecycle: { phase: "active" },
+      overlays: { streaming: true },
+      subtitle: expect.stringContaining("Working"),
+      lastRuntimeEventLabel: "Pi agent started",
+    });
+    expect(unconfirmed.timeline.at(-1)).toMatchObject({
+      kind: "diagnostic",
+      content: expect.stringContaining("Prompt delivery unconfirmed"),
+    });
+    expect(__rendererTestHooks.isSessionBusy(unconfirmed)).toBe(true);
+    expect(inbox.groups.inProgress).toHaveLength(1);
+    expect(inbox.groups.failed).toHaveLength(0);
+  });
+
+  it("does not rewrite an already-terminal turn when prompt delivery becomes unconfirmed", () => {
+    const completed = {
+      ...baseSession(),
+      status: "idle",
+      baseState: "idle",
+      lifecycle: { phase: "terminal", outcome: "completed" },
+      overlays: { ...emptyOverlays, streaming: false, toolRunning: false },
+    } as any;
+    const unconfirmed = __rendererTestHooks.markPromptDeliveryUnconfirmed(
+      completed,
+      "RPC command timed out before response: prompt",
+    );
+
+    expect(unconfirmed).toMatchObject({
+      status: "idle",
+      baseState: "idle",
+      lifecycle: { phase: "terminal", outcome: "completed" },
+    });
+    expect(unconfirmed.timeline.at(-1)).toMatchObject({
+      kind: "diagnostic",
+      content: expect.stringContaining("Prompt delivery unconfirmed"),
+    });
+  });
+
   it("identifies only known extension commands as unavailable for queues", () => {
     const commands = [
       { name: "/deploy", description: "Deploy", source: "extension" },

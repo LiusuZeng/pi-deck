@@ -579,6 +579,36 @@ describe("ordering, acceptance, and storage failures", () => {
     expect(rejectedRecord?.pendingSubmission).toBeUndefined();
   });
 
+  it("preserves newer text beside an unknown delivery through reload and recovery", () => {
+    const storage = new MemoryStorage();
+    const first = new ComposerDraftPersistence(storage, { now: () => 50 });
+    first.hydrate([nativeSession], ["workspace-a"]);
+    first.beginSubmission(nativeSession, "possibly accepted text", 0);
+    first.persist([nativeSession], {
+      [nativeSession.id]: { text: "newer unsent draft", attachmentCount: 0 },
+    });
+
+    const reloaded = new ComposerDraftPersistence(storage, { now: () => 60 });
+    const plan = reloaded.hydrate([nativeSession], ["workspace-a"]);
+    expect(plan.restored).toMatchObject([
+      { sessionId: nativeSession.id, text: "newer unsent draft" },
+    ]);
+    expect(plan.pendingSubmissions).toMatchObject([
+      { sessionId: nativeSession.id, text: "possibly accepted text" },
+    ]);
+    expect(
+      reloaded.reconcilePendingSubmission(nativeSession, "unknown"),
+    ).toMatchObject({ status: "unchanged" });
+
+    // An explicit recovery may not overwrite newer user input. Both values
+    // remain durable until the newer draft is deliberately handled.
+    expect(reloaded.recoverPendingSubmission(nativeSession)).toBeUndefined();
+    expect(readComposerDraftStore(storage).records[0]).toMatchObject({
+      text: "newer unsent draft",
+      pendingSubmission: { text: "possibly accepted text" },
+    });
+  });
+
   it.each(["parent", "newTaskSession"] as const)(
     "preserves rejected %s text beside a newer draft until explicit recovery",
     (destination) => {
