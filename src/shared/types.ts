@@ -174,6 +174,14 @@ export type ParallelWorkerSettings = z.infer<
 // Input keeps destination optional for callers upgrading from the legacy
 // parent-only prompt contract; schema parsing supplies the parent default.
 export type ChatPromptRequest = z.input<typeof chatPromptRequestSchema>;
+/**
+ * A prompt command may have reached Pi even though its acknowledgement was
+ * lost. This is resolved (rather than thrown) so Electron's context bridge
+ * cannot discard the explicit delivery classification from an Error object.
+ */
+export type ChatPromptDeliveryResult =
+  | { deliveryStatus: "unknown"; message: string }
+  | undefined;
 export type ChatInterventionRequest = z.infer<
   typeof chatInterventionRequestSchema
 >;
@@ -403,7 +411,7 @@ export interface PiDeckApi {
       runtimeId: string;
       level: string;
     }): Promise<ChatSnapshot>;
-    prompt(request: ChatPromptRequest): Promise<void>;
+    prompt(request: ChatPromptRequest): Promise<ChatPromptDeliveryResult>;
     steer(request: ChatInterventionRequest): Promise<void>;
     followUp(request: ChatInterventionRequest): Promise<void>;
     abort(request: { runtimeId: string }): Promise<void>;

@@ -288,6 +288,7 @@ interface PendingRequest {
   resolve: (value: JsonValue) => void;
   reject: (reason: Error) => void;
   timer: NodeJS.Timeout;
+  possibleDispatch: boolean;
 }
 
 interface PendingNotificationWrite {
@@ -306,6 +307,37 @@ export interface JsonlRpcClientEvents {
   transportError: [Error];
   fatal: [JsonlRpcClientFatalEvent];
   close: [{ code: number | null; signal: NodeJS.Signals | null }];
+}
+
+export type JsonlRpcDeliveryStatus = "unknown" | "not-dispatched";
+
+export class JsonlRpcDeliveryError extends Error {
+  readonly deliveryStatus: JsonlRpcDeliveryStatus;
+
+  constructor(message: string, deliveryStatus: JsonlRpcDeliveryStatus) {
+    super(message);
+    this.name = "JsonlRpcDeliveryError";
+    this.deliveryStatus = deliveryStatus;
+  }
+}
+
+/**
+ * Class identity can be lost when an error crosses a bundled Electron module
+ * boundary. Keep delivery classification explicit and structural so that
+ * boundary does not turn uncertain prompt receipt into a safe rejection.
+ */
+export function isUnknownJsonlRpcDeliveryError(
+  error: unknown,
+): error is { message: string; deliveryStatus: "unknown" } {
+  // Errors arriving from Electron's bundled module context do not necessarily
+  // inherit this realm's Error.prototype. Do not use instanceof here: the
+  // explicit, schema-validated status is the delivery contract.
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    typeof (error as { message?: unknown }).message === "string" &&
+    (error as { deliveryStatus?: unknown }).deliveryStatus === "unknown"
+  );
 }
 
 export class JsonlRpcError extends Error {
@@ -472,7 +504,12 @@ export class JsonlRpcClient extends EventEmitter {
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`RPC command timed out before response: ${command}`));
+        reject(
+          new JsonlRpcDeliveryError(
+            `RPC command timed out before response: ${command}`,
+            "unknown",
+          ),
+        );
       }, timeoutMs);
 
       this.pending.set(id, {
@@ -481,6 +518,7 @@ export class JsonlRpcClient extends EventEmitter {
         resolve: (value) => resolve(value as T),
         reject,
         timer,
+        possibleDispatch: true,
       });
 
       try {
@@ -714,7 +752,11 @@ export class JsonlRpcClient extends EventEmitter {
   private rejectAll(error: Error): void {
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
-      pending.reject(error);
+      pending.reject(
+        pending.possibleDispatch
+          ? new JsonlRpcDeliveryError(error.message, "unknown")
+          : error,
+      );
     }
     this.pending.clear();
     for (const pending of this.pendingNotificationWrites.values()) {
