@@ -726,6 +726,87 @@ describe("workspace usage accounting", () => {
     );
   });
 
+  it("keeps deleted usage when a restored path records new usage and moves", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-usage-restore-"),
+    );
+    const sessionFile = path.join(root, "session.jsonl");
+    await fs.writeFile(sessionFile, "");
+    const firstStore = new WorkspaceUsageStore(root);
+    const record = async (store: WorkspaceUsageStore, totalTokens: number) =>
+      store.recordSessionMessagesUsage({
+        workspaceId: workspaceA,
+        sessionFile,
+        sessionKey: "private-child",
+        source: "parallel",
+        messages: [
+          {
+            id: "assistant-child",
+            role: "assistant",
+            usage: { inputTokens: totalTokens, totalTokens },
+          },
+        ],
+      });
+
+    await record(firstStore, 10);
+    await firstStore.freezeSessionUsage({
+      workspaceId: workspaceA,
+      sessionFile,
+    });
+
+    // Reload between deletion and restore. The new store must retain the
+    // tombstone generation instead of reusing deleted:1 on the next delete.
+    const restoredStore = new WorkspaceUsageStore(root);
+    // A restored session reuses its former filesystem path, but its new
+    // snapshot must stay live rather than overwrite the frozen history.
+    await fs.writeFile(sessionFile, "restored");
+    await record(restoredStore, 20);
+
+    assert.equal(
+      (
+        await restoredStore.getWorkspaceUsage({
+          workspaceId: workspaceA,
+          sessionFiles: [],
+        })
+      ).totalTokens,
+      10,
+    );
+    assert.equal(
+      (
+        await restoredStore.getWorkspaceUsage({
+          workspaceId: workspaceB,
+          sessionFiles: [sessionFile],
+        })
+      ).totalTokens,
+      20,
+    );
+
+    // A later deletion gets a distinct tombstone, preserving the first
+    // workspace's historical usage instead of replacing it by snapshot id.
+    await restoredStore.freezeSessionUsage({
+      workspaceId: workspaceB,
+      sessionFile,
+    });
+    assert.equal(
+      (
+        await restoredStore.getWorkspaceUsage({
+          workspaceId: workspaceA,
+          sessionFiles: [],
+        })
+      ).totalTokens,
+      10,
+    );
+    assert.equal(
+      (
+        await restoredStore.getWorkspaceUsage({
+          workspaceId: workspaceB,
+          sessionFiles: [],
+        })
+      ).totalTokens,
+      20,
+    );
+  });
+
   it("serves cached workspace usage without reading the session file", async () => {
     const root = await fs.mkdtemp(
       path.join(os.tmpdir(), "pi-deck-usage-cheap-read-"),
