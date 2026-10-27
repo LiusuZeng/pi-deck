@@ -4406,6 +4406,12 @@ export function App(): ReactElement {
           );
         }
       }
+      // The resumed worker owns a new renderer id for the same native file.
+      // Rebind before publishing the replacement row so persistence requeues
+      // any saved-row restoration that raced this renderer-row replacement.
+      reportComposerDraftPersistenceResult(
+        composerDraftPersistenceRef.current!.migrateSession(session, resumed),
+      );
       // Use the state at completion time: another runtime can stream while
       // this saved session is being resumed. This merge is intentionally not
       // guarded by navigation: the worker must remain retained in background.
