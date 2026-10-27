@@ -95,33 +95,53 @@ export class ProjectStore {
       return;
     }
     await fs.mkdir(this.piDeckHome, { recursive: true, mode: 0o700 });
+    let raw: string;
     try {
-      const raw = await fs.readFile(this.storeFile, "utf8");
-      const parsed = projectStoreFileSchema.parse(JSON.parse(raw));
-      this.state = await normalizeProjectStoreFilesystemIdentities(parsed);
-      if (JSON.stringify(this.state) !== JSON.stringify(parsed)) {
-        // Keep migrated identities dirty so the next normal store write makes
-        // them durable without turning a migration write failure into a
-        // corrupt-file recovery.
-        this.sessionRefsGeneration += 1;
-      }
+      raw = await fs.readFile(this.storeFile, "utf8");
     } catch (error) {
       if (!isMissingFile(error)) {
-        const backup = `${this.storeFile}.corrupt-${Date.now()}`;
         this.diagnostics?.recordError(
-          `Pi Deck project metadata was invalid and defaults were applied: ${errorToMessage(error)}`,
+          `Pi Deck project metadata could not be read; existing metadata was preserved: ${errorToMessage(error)}`,
         );
-        try {
-          await fs.rename(this.storeFile, backup);
-          this.diagnostics?.recordError(
-            `Corrupt Pi Deck project metadata moved to ${backup}`,
-          );
-        } catch {
-          // Best effort only.
-        }
+        throw error;
       }
       this.state = emptyStore();
       await this.persist();
+      this.loaded = true;
+      return;
+    }
+
+    let parsed: ProjectStoreFile;
+    try {
+      parsed = projectStoreFileSchema.parse(JSON.parse(raw));
+    } catch (error) {
+      const backup = `${this.storeFile}.corrupt-${Date.now()}`;
+      this.diagnostics?.recordError(
+        `Pi Deck project metadata was invalid; preserving it before defaults are applied: ${errorToMessage(error)}`,
+      );
+      try {
+        await fs.rename(this.storeFile, backup);
+      } catch (backupError) {
+        this.diagnostics?.recordError(
+          `Could not preserve invalid Pi Deck project metadata; defaults were not applied: ${errorToMessage(backupError)}`,
+        );
+        throw backupError;
+      }
+      this.diagnostics?.recordError(
+        `Corrupt Pi Deck project metadata moved to ${backup}`,
+      );
+      this.state = emptyStore();
+      await this.persist();
+      this.loaded = true;
+      return;
+    }
+
+    this.state = await normalizeProjectStoreFilesystemIdentities(parsed);
+    if (JSON.stringify(this.state) !== JSON.stringify(parsed)) {
+      // Keep migrated identities dirty so the next normal store write makes
+      // them durable without turning a migration write failure into a
+      // corrupt-file recovery.
+      this.sessionRefsGeneration += 1;
     }
     this.loaded = true;
   }
