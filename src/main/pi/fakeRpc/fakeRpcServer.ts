@@ -84,6 +84,8 @@ interface FakeOptions {
   plannerRepeatTerminalObservation: boolean;
   /** Omit retry event ids while retaining a stable assistant message id. */
   plannerRetryWithoutTerminalIds: boolean;
+  /** Omit the retry assistant timestamp along with its optional ids. */
+  plannerRetryWithoutMessageTimestamp: boolean;
   /** Omit retry event messages while retaining usage in get_messages. */
   plannerRetryFieldlessTerminal: boolean;
   /** Omit final event messages while retaining usage in get_messages. */
@@ -234,6 +236,7 @@ function parseOptions(argv: string[]): FakeOptions {
     plannerRetryReusedMessageId: false,
     plannerRepeatTerminalObservation: false,
     plannerRetryWithoutTerminalIds: false,
+    plannerRetryWithoutMessageTimestamp: false,
     plannerRetryFieldlessTerminal: false,
     plannerFinalFieldlessTerminal: false,
     plannerFailFirstGetMessages: false,
@@ -359,6 +362,8 @@ function parseOptions(argv: string[]): FakeOptions {
       options.plannerRepeatTerminalObservation = true;
     } else if (arg === "--planner-retry-without-terminal-ids") {
       options.plannerRetryWithoutTerminalIds = true;
+    } else if (arg === "--planner-retry-without-message-timestamp") {
+      options.plannerRetryWithoutMessageTimestamp = true;
     } else if (arg === "--planner-retry-fieldless-terminal") {
       options.plannerRetryFieldlessTerminal = true;
     } else if (arg === "--planner-final-fieldless-terminal") {
@@ -1855,7 +1860,9 @@ class FakeRpcServer {
             role: "assistant",
             content: "Retryable planner failure.",
             stopReason: "error",
-            createdAt: Date.now(),
+            ...(this.options.plannerRetryWithoutMessageTimestamp
+              ? {}
+              : { createdAt: Date.now() }),
             usage: {
               inputTokens: 100,
               outputTokens: 10,

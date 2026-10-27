@@ -4915,6 +4915,12 @@ function plannerTerminalObservationId(
         ? `message:${message.id}:at:${timestamp}`
         : `message:${message.id}`;
     if (hasTimestamp) return `message:at:${timestamp}`;
+    // Some adapters omit every event/message identity field. A bounded usage
+    // snapshot is still stable across a repeated notification, unlike the
+    // fallback sequence number. Later cumulative transcript reconciliation
+    // retains genuinely distinct same-usage attempts by their positions.
+    if (plannerMessageHasReportedUsage(message))
+      return `usage:${JSON.stringify(plannerUsageMessage(message))}`;
   }
   // Well-formed Pi terminal events carry a run or message id. Preserve
   // distinct malformed retry boundaries without deriving identity from usage.
@@ -5088,6 +5094,11 @@ async function runTaskSessionPlanner(
         // recognize those same rows rather than count them a second time.
         const eventUsageFingerprints = new Map<string, string>();
         const pendingEventUsageFingerprints = new Map<string, number>();
+        // A fieldless retry can be captured from get_messages before its row
+        // reappears in a later cumulative terminal event. Keep just its usage
+        // fingerprint occurrence so that history observation is not another
+        // usage contribution; planner text remains private.
+        const pendingTranscriptUsageFingerprints = new Map<string, number>();
         const reconciledTranscriptKeys = new Set<string>();
         // A final agent_end may include cumulative assistant history. Remember
         // which older history rows were matched to a prior terminal event so a
@@ -5178,6 +5189,19 @@ async function runTaskSessionPlanner(
                 reconciledTerminalHistoryKeys.add(historyKey);
                 continue;
               }
+              const transcriptPending =
+                pendingTranscriptUsageFingerprints.get(fingerprint) ?? 0;
+              if (transcriptPending > 0) {
+                if (transcriptPending === 1)
+                  pendingTranscriptUsageFingerprints.delete(fingerprint);
+                else
+                  pendingTranscriptUsageFingerprints.set(
+                    fingerprint,
+                    transcriptPending - 1,
+                  );
+                reconciledTerminalHistoryKeys.add(historyKey);
+                continue;
+              }
             } else if (skipTerminalMessage) {
               // Top-level agent_end usage is the authoritative record for the
               // newest assistant row. Retain older history rows, which can be
@@ -5222,6 +5246,10 @@ async function runTaskSessionPlanner(
               continue;
             }
             captureUsageMessage(key, message);
+            pendingTranscriptUsageFingerprints.set(
+              fingerprint,
+              (pendingTranscriptUsageFingerprints.get(fingerprint) ?? 0) + 1,
+            );
           }
         };
         const collectTerminalMessages = async (): Promise<PiMessage[]> => {

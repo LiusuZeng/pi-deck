@@ -292,13 +292,14 @@ describe("task-session planner usage accounting", () => {
         "retrying planner attempts were not both persisted",
       );
 
-      // Pi can repeat a retry terminal event without any event or assistant
-      // message id. Its stable assistant timestamp must still make the repeat
-      // idempotent, while the final run remains a second attempt.
+      // Pi can repeat a retry terminal event without any event/message id or
+      // assistant timestamp. Its compact reported-usage snapshot must make the
+      // repeat idempotent, while the final run remains a distinct attempt.
       setPlannerFixture("idless-terminal-retry", [
         "--planner-retry-with-usage",
         "--planner-retry-idless-usage",
         "--planner-retry-without-terminal-ids",
+        "--planner-retry-without-message-timestamp",
         "--planner-repeat-terminal-observation",
         "--production-shaped",
         "--response-text",
@@ -309,7 +310,7 @@ describe("task-session planner usage accounting", () => {
           adapter,
           settings,
           parentId,
-          "A repeated retry event without terminal or message ids is still one attempt.",
+          "A repeated retry event without terminal ids, message ids, or timestamps is still one attempt.",
         );
       assert.deepEqual(idlessRetryPlan, {
         contextSummary: "Idless retry complete",
@@ -625,6 +626,42 @@ describe("task-session planner usage accounting", () => {
         "fieldless retry and final usage were not reconciled exactly once",
       );
 
+      // A successful retry transcript collection can precede a final event
+      // whose cumulative history also includes that retry. The event's
+      // top-level usage is only the final turn, so reconcile the same retry
+      // across both observation orders without counting it twice.
+      setPlannerFixture("fieldless-retry-successful-collection-final-history", [
+        "--planner-retry-with-usage",
+        "--planner-retry-fieldless-terminal",
+        "--planner-terminal-history",
+        "--planner-fieldless-terminal-event-usage",
+        "--production-shaped",
+        "--stream-delay-ms",
+        "50",
+        "--response-text",
+        '{"contextSummary":"Reconciled retry","tasks":[{"generatedName":"Task reconciled retry","brief":"Keep the transcript retry distinct from the final top-level usage."}]}',
+      ]);
+      const reconciled = await __taskSessionPlannerTestHooks.planTaskSession(
+        adapter,
+        settings,
+        parentId,
+        "A collected fieldless retry must not be duplicated by final history.",
+      );
+      assert.deepEqual(reconciled, {
+        contextSummary: "Reconciled retry",
+        tasks: [
+          {
+            generatedName: "Task reconciled retry",
+            brief:
+              "Keep the transcript retry distinct from the final top-level usage.",
+          },
+        ],
+      });
+      await eventually(
+        async () => (await usage()).totalTokens === 460,
+        "final cumulative history duplicated a successfully collected fieldless retry",
+      );
+
       // A fieldless retry's asynchronous collection can fail before the final
       // event. The final event has its own reported usage and cumulative
       // history, so final reconciliation must still recover the retry rather
@@ -655,7 +692,7 @@ describe("task-session planner usage accounting", () => {
         ],
       });
       await eventually(
-        async () => (await usage()).totalTokens === 460,
+        async () => (await usage()).totalTokens === 690,
         "final cumulative evidence did not recover failed fieldless retry collection",
       );
 
@@ -695,7 +732,7 @@ describe("task-session planner usage accounting", () => {
         ],
       });
       await eventually(
-        async () => (await usage()).totalTokens === 690,
+        async () => (await usage()).totalTokens === 920,
         "terminal history lost retry usage when post-event collection failed",
       );
 
@@ -720,7 +757,7 @@ describe("task-session planner usage accounting", () => {
         true,
       );
       await eventually(
-        async () => (await usage()).totalTokens === 805,
+        async () => (await usage()).totalTokens === 1_035,
         "fieldless retry usage was lost when worker exit prevented a final event",
       );
 
@@ -745,7 +782,7 @@ describe("task-session planner usage accounting", () => {
         true,
       );
       await eventually(
-        async () => (await usage()).totalTokens === 920,
+        async () => (await usage()).totalTokens === 1_150,
         "fieldless retry usage was lost when cancellation prevented the final attempt",
       );
       await eventually(

@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { it as test, vi } from "vitest";
@@ -41,6 +47,23 @@ function waitForWorkerEvent(
       clearTimeout(timer);
       unsubscribe();
     };
+  });
+}
+
+function waitForFile(file: string, timeoutMs = 5_000): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
+    const timer = setInterval(() => {
+      if (existsSync(file)) {
+        clearInterval(timer);
+        resolve();
+        return;
+      }
+      if (Date.now() > deadline) {
+        clearInterval(timer);
+        reject(new Error(`Timed out waiting for file: ${file}`));
+      }
+    }, 10);
   });
 }
 
@@ -334,6 +357,77 @@ test("PiWorker closeAndWait retains adapter capacity until delayed child exit", 
   await close;
   assert.equal(adapter.hasRuntime(worker.runtimeId), false);
   assert.equal(adapter.workerCount(), 0);
+});
+
+test("PiWorker cleans up broken stdin while retaining adapter ownership until exit", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "pi-deck-broken-stdin-"));
+  const signalFile = path.join(directory, "sigterm-received");
+  const waitFile = path.join(directory, "allow-exit");
+  const script = `
+    const fs = require("node:fs");
+    fs.closeSync(0);
+    process.stdout.write(JSON.stringify({ type: "ready" }) + "\\n");
+    process.on("SIGTERM", () => {
+      fs.writeFileSync(${JSON.stringify(signalFile)}, "received\\n");
+      const timer = setInterval(() => {
+        if (fs.existsSync(${JSON.stringify(waitFile)})) {
+          clearInterval(timer);
+          process.exit(0);
+        }
+      }, 10);
+    });
+    setTimeout(() => {}, 60_000);
+  `;
+  const adapter = new SinglePiAdapter();
+  const worker = adapter.createWorker({
+    runtimeId: "broken-stdin-cleanup",
+    command: process.execPath,
+    args: ["-e", script],
+    cwd: process.cwd(),
+    env: process.env,
+    requestTimeoutMs: 1_000,
+    killGraceMs: 500,
+  });
+  const exitEvents: RuntimeEvent[] = [];
+  const unsubscribe = adapter.onEvent((event) => {
+    if (event.type === "worker_exit") exitEvents.push(event);
+  });
+
+  try {
+    await waitForWorkerEvent(worker, (event) => event.type === "ready");
+    await assert.rejects(adapter.getState(worker.runtimeId), /EPIPE|stdin/i);
+    await waitForFile(signalFile);
+
+    assert.equal(adapter.hasRuntime(worker.runtimeId), true);
+    assert.equal(adapter.workerCount(), 1);
+    assert.equal(exitEvents.length, 0);
+
+    const workerExit = waitForWorkerEvent(
+      worker,
+      (event) => event.type === "worker_exit",
+    );
+    writeFileSync(waitFile, "go\n");
+    const exit = await workerExit;
+
+    assert.equal((exit as { intentional?: boolean }).intentional, false);
+    assert.equal(adapter.hasRuntime(worker.runtimeId), false);
+    assert.equal(adapter.workerCount(), 0);
+    const diagnostics = worker.getDiagnostics();
+    assert.equal(diagnostics.healthy, false);
+    assert.ok(
+      diagnostics.recentDiagnostics.some(
+        (diagnostic) =>
+          diagnostic.level === "error" &&
+          /EPIPE|stdin/i.test(diagnostic.message),
+      ),
+    );
+  } finally {
+    unsubscribe();
+    if (adapter.hasRuntime(worker.runtimeId)) {
+      await adapter.closeSession(worker.runtimeId);
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("PiWorker escalates a SIGTERM-ignoring child and waits for SIGKILL exit", async () => {
