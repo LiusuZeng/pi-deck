@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, fork } from "node:child_process";
 import {
   access,
   chmod,
@@ -6,6 +6,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -26,6 +27,90 @@ import {
 } from "./electron-runtime.mjs";
 
 const execFileAsync = promisify(execFile);
+
+function startRuntimePreparationChild(options) {
+  const child = fork(
+    new URL("./electron-runtime-child.fixture.mjs", import.meta.url),
+    [],
+    {
+      env: {
+        ...process.env,
+        PI_DECK_RUNTIME_CHILD_OPTIONS: JSON.stringify(options),
+      },
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
+    },
+  );
+  const messages = [];
+  const waiters = [];
+  let result;
+  let exit;
+  let resolveResult;
+  let rejectResult;
+  const completed = new Promise((resolve, reject) => {
+    resolveResult = resolve;
+    rejectResult = reject;
+  });
+
+  child.on("message", (message) => {
+    messages.push(message);
+    for (const waiter of waiters.splice(0)) {
+      if (waiter.type === message.type) {
+        waiter.resolve(message);
+      } else {
+        waiters.push(waiter);
+      }
+    }
+    if (message.type === "result") {
+      result = message;
+      if (message.ok) {
+        resolveResult(message);
+      } else {
+        rejectResult(new Error(message.error));
+      }
+    }
+  });
+  completed.catch(() => undefined);
+  child.once("error", rejectResult);
+  child.once("exit", (code, signal) => {
+    exit = { code, signal };
+    if (!result) {
+      rejectResult(
+        new Error(`runtime child exited before returning (${code}, ${signal})`),
+      );
+    }
+  });
+
+  return {
+    child,
+    completed,
+    waitFor(type) {
+      const existing = messages.find((message) => message.type === type);
+      if (existing) {
+        return Promise.resolve(existing);
+      }
+      return new Promise((resolve) => waiters.push({ type, resolve }));
+    },
+    waitForAny(types) {
+      const existing = messages.find((message) => types.includes(message.type));
+      if (existing) {
+        return Promise.resolve(existing);
+      }
+      return new Promise((resolve) => {
+        for (const type of types) {
+          waiters.push({ type, resolve });
+        }
+      });
+    },
+    waitForExit() {
+      if (exit) {
+        return Promise.resolve(exit.code);
+      }
+      return new Promise((resolve) => {
+        child.once("exit", (code) => resolve(code));
+      });
+    },
+  };
+}
 
 async function writeFakeElectronBundle(root) {
   const bundle = path.join(root, "Electron.app");
@@ -145,8 +230,13 @@ describe("Pi Deck Electron runtime", () => {
         path.join(brandedBundle, "Contents", "MacOS", "Electron"),
       );
       expect(copyBundle).toHaveBeenCalledTimes(1);
-      expect(copyBundle).toHaveBeenCalledWith(bundle, brandedBundle);
-      expect(patchBundleIdentity).toHaveBeenCalledWith(brandedBundle);
+      expect(copyBundle).toHaveBeenCalledWith(
+        bundle,
+        expect.stringMatching(/\.pi-deck-attempt-[^/]+\/Pi Deck\.app$/),
+      );
+      expect(patchBundleIdentity).toHaveBeenCalledWith(
+        expect.stringMatching(/\.pi-deck-attempt-[^/]+\/Pi Deck\.app$/),
+      );
 
       const second = await preparePiDeckElectronExecutable({
         platform: "darwin",
@@ -171,6 +261,207 @@ describe("Pi Deck Electron runtime", () => {
       expect(third).toBe(first);
       expect(copyBundle).toHaveBeenCalledTimes(2);
       expect(patchBundleIdentity).toHaveBeenCalledTimes(2);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("serializes concurrent preparation and preserves the prior runtime when a refresh fails", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "pi-deck-electron-"));
+    try {
+      const cacheRoot = path.join(root, "cache");
+      const { executable } = await writeFakeElectronBundle(
+        path.join(root, "source"),
+      );
+      let allowFirstCopy;
+      const firstCopyStarted = new Promise((resolve) => {
+        allowFirstCopy = resolve;
+      });
+      let releaseFirstCopy;
+      const firstCopyMayFinish = new Promise((resolve) => {
+        releaseFirstCopy = resolve;
+      });
+      const copyBundle = vi.fn(async (source, destination) => {
+        allowFirstCopy();
+        await firstCopyMayFinish;
+        await cp(source, destination, {
+          recursive: true,
+          preserveTimestamps: true,
+        });
+      });
+
+      const first = preparePiDeckElectronExecutable({
+        platform: "darwin",
+        electronExecutable: executable,
+        runtimeCacheRoot: cacheRoot,
+        copyBundle,
+        patchBundleIdentity: async () => undefined,
+      });
+      await firstCopyStarted;
+      const delayedContender = preparePiDeckElectronExecutable({
+        platform: "darwin",
+        electronExecutable: executable,
+        runtimeCacheRoot: cacheRoot,
+        copyBundle: async () => {
+          throw new Error(
+            "delayed contender should reuse the completed runtime",
+          );
+        },
+        patchBundleIdentity: async () => undefined,
+      });
+      releaseFirstCopy();
+
+      const [preparedExecutable, contenderExecutable] = await Promise.all([
+        first,
+        delayedContender,
+      ]);
+      const markerPath = runtimeIdentityMarkerPath(
+        findMacOSAppBundle(preparedExecutable),
+      );
+      expect(contenderExecutable).toBe(preparedExecutable);
+      expect(copyBundle).toHaveBeenCalledTimes(1);
+      await expect(access(preparedExecutable)).resolves.toBeUndefined();
+      await expect(access(markerPath)).resolves.toBeUndefined();
+
+      await writeFile(executable, "fake-electron-updated");
+      await chmod(executable, 0o755);
+      await expect(
+        preparePiDeckElectronExecutable({
+          platform: "darwin",
+          electronExecutable: executable,
+          runtimeCacheRoot: cacheRoot,
+          copyBundle: async (source, destination) => {
+            await cp(source, destination, {
+              recursive: true,
+              preserveTimestamps: true,
+            });
+          },
+          patchBundleIdentity: async () => {
+            throw new Error("delayed refresh failed");
+          },
+        }),
+      ).rejects.toThrow("delayed refresh failed");
+      await expect(access(preparedExecutable)).resolves.toBeUndefined();
+      await expect(access(markerPath)).resolves.toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers crashed process locks and serializes independent preparers", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "pi-deck-electron-"));
+    try {
+      const runtimeCacheRoot = path.join(root, "cache");
+      const { executable } = await writeFakeElectronBundle(
+        path.join(root, "source"),
+      );
+      const crashedPreparer = startRuntimePreparationChild({
+        copyMode: "exit",
+        electronExecutable: executable,
+        runtimeCacheRoot,
+      });
+      await crashedPreparer.waitFor("copy-started");
+      await expect(crashedPreparer.waitForExit()).resolves.toBe(0);
+
+      const recoveringPreparer = startRuntimePreparationChild({
+        copyMode: "hold",
+        electronExecutable: executable,
+        runtimeCacheRoot,
+      });
+      await recoveringPreparer.waitFor("copy-started");
+      const contender = startRuntimePreparationChild({
+        copyMode: "fail",
+        electronExecutable: executable,
+        runtimeCacheRoot,
+        waitForLock: true,
+      });
+      const contenderState = await contender.waitForAny([
+        "lock-waiting",
+        "contender-copy-started",
+      ]);
+      if (contenderState.type === "contender-copy-started") {
+        recoveringPreparer.child.send("continue-copy");
+        const recovered = await recoveringPreparer.completed;
+        contender.child.send("continue-copy");
+        await expect(contender.completed).rejects.toThrow(
+          "contender copy should not run",
+        );
+        await expect(access(recovered.executable)).resolves.toBeUndefined();
+        await expect(
+          access(
+            runtimeIdentityMarkerPath(findMacOSAppBundle(recovered.executable)),
+          ),
+        ).resolves.toBeUndefined();
+        throw new Error(
+          "independent contender ran without waiting for the lock",
+        );
+      }
+
+      contender.child.send("continue-lock-wait");
+      recoveringPreparer.child.send("continue-copy");
+      const [recovered, reused] = await Promise.all([
+        recoveringPreparer.completed,
+        contender.completed,
+      ]);
+      expect(reused.executable).toBe(recovered.executable);
+      await expect(access(recovered.executable)).resolves.toBeUndefined();
+      await expect(
+        access(
+          runtimeIdentityMarkerPath(findMacOSAppBundle(recovered.executable)),
+        ),
+      ).resolves.toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("publishes complete lock ownership before a concurrent contender can observe it", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "pi-deck-electron-"));
+    try {
+      const runtimeCacheRoot = path.join(root, "cache");
+      const { executable } = await writeFakeElectronBundle(
+        path.join(root, "source"),
+      );
+      const delayedPublisher = startRuntimePreparationChild({
+        copyMode: "hold",
+        electronExecutable: executable,
+        holdLockPublication: true,
+        runtimeCacheRoot,
+        waitForLock: true,
+      });
+      await delayedPublisher.waitFor("lock-candidate-ready");
+      const [runtimeDirectory] = await readdir(runtimeCacheRoot);
+      const lockEntries = await readdir(
+        path.join(runtimeCacheRoot, runtimeDirectory),
+      );
+      expect(lockEntries).not.toContain(".pi-deck-preparation-lock");
+      expect(lockEntries).toContainEqual(
+        expect.stringMatching(/^\.pi-deck-preparation-lock\.candidate-/),
+      );
+
+      const contender = startRuntimePreparationChild({
+        copyMode: "hold",
+        electronExecutable: executable,
+        runtimeCacheRoot,
+      });
+      await contender.waitFor("copy-started");
+
+      delayedPublisher.child.send("continue-lock-publication");
+      await delayedPublisher.waitFor("lock-waiting");
+      delayedPublisher.child.send("continue-lock-wait");
+      contender.child.send("continue-copy");
+      const [published, reused] = await Promise.all([
+        contender.completed,
+        delayedPublisher.completed,
+      ]);
+
+      expect(reused.executable).toBe(published.executable);
+      await expect(access(published.executable)).resolves.toBeUndefined();
+      await expect(
+        access(
+          runtimeIdentityMarkerPath(findMacOSAppBundle(published.executable)),
+        ),
+      ).resolves.toBeUndefined();
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -345,7 +636,7 @@ describe("Pi Deck Electron runtime", () => {
         );
         expect(copyBundle).toHaveBeenCalledWith(
           fixture.isolatedSourceBundle,
-          brandedBundle,
+          expect.stringMatching(/\.pi-deck-attempt-[^/]+\/Pi Deck\.app$/),
         );
       } finally {
         await rm(fixture.root, { recursive: true, force: true });
