@@ -248,10 +248,16 @@ export class WorkspaceStore {
 
   async loadIfNeeded(): Promise<void> {
     if (this.loaded) return;
-    if (!this.loadPromise) {
-      this.loadPromise = this.load();
+    if (this.loadPromise) {
+      await this.loadPromise;
+      return;
     }
-    await this.loadPromise;
+    this.loadPromise = this.load();
+    try {
+      await this.loadPromise;
+    } finally {
+      this.loadPromise = undefined;
+    }
   }
 
   async list(): Promise<WorkspaceListResult> {
@@ -1359,33 +1365,54 @@ export class WorkspaceStore {
 
   private async load(): Promise<void> {
     await fs.mkdir(this.piDeckHome, { recursive: true, mode: 0o700 });
+    let raw: string;
     try {
-      const raw = await fs.readFile(this.storeFile, "utf8");
-      const parsed = workspaceStoreFileV1Schema.parse(JSON.parse(raw));
-      this.state = await normalizeWorkspaceStoreFilesystemIdentities(parsed);
-      if (JSON.stringify(this.state) !== JSON.stringify(parsed)) {
-        // Persist on the next normal mutation/no-op flush; a migration write
-        // failure must not classify otherwise valid metadata as corrupt.
-        this.generation += 1;
-      }
+      raw = await fs.readFile(this.storeFile, "utf8");
     } catch (error) {
       if (!isMissingFile(error)) {
-        const backup = `${this.storeFile}.corrupt-${Date.now()}`;
         this.diagnostics?.recordError(
-          `Pi Deck workspace metadata was invalid and defaults were applied: ${errorToMessage(error)}`,
+          `Pi Deck workspace metadata could not be read; existing metadata was preserved: ${errorToMessage(error)}`,
         );
-        try {
-          await fs.rename(this.storeFile, backup);
-          this.diagnostics?.recordError(
-            `Corrupt Pi Deck workspace metadata moved to ${backup}`,
-          );
-        } catch {
-          // A corrupt backup is best effort; recovery is still safe.
-        }
+        throw error;
       }
       this.state = emptyStore();
       this.generation += 1;
       await this.persist();
+      this.loaded = true;
+      return;
+    }
+
+    let parsed: WorkspaceStoreFileV1;
+    try {
+      parsed = workspaceStoreFileV1Schema.parse(JSON.parse(raw));
+    } catch (error) {
+      const backup = `${this.storeFile}.corrupt-${Date.now()}`;
+      this.diagnostics?.recordError(
+        `Pi Deck workspace metadata was invalid; preserving it before defaults are applied: ${errorToMessage(error)}`,
+      );
+      try {
+        await fs.rename(this.storeFile, backup);
+      } catch (backupError) {
+        this.diagnostics?.recordError(
+          `Could not preserve invalid Pi Deck workspace metadata; defaults were not applied: ${errorToMessage(backupError)}`,
+        );
+        throw backupError;
+      }
+      this.diagnostics?.recordError(
+        `Corrupt Pi Deck workspace metadata moved to ${backup}`,
+      );
+      this.state = emptyStore();
+      this.generation += 1;
+      await this.persist();
+      this.loaded = true;
+      return;
+    }
+
+    this.state = await normalizeWorkspaceStoreFilesystemIdentities(parsed);
+    if (JSON.stringify(this.state) !== JSON.stringify(parsed)) {
+      // Persist on the next normal mutation/no-op flush; a migration write
+      // failure must not classify otherwise valid metadata as corrupt.
+      this.generation += 1;
     }
     this.loaded = true;
   }
