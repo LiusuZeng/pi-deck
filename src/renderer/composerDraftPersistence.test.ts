@@ -286,6 +286,78 @@ describe("identity restoration and migration", () => {
     ).toContain("/sessions/stable.jsonl");
   });
 
+  it("restores a definitely rejected first send after native row rebinding", () => {
+    const storage = new MemoryStorage();
+    const firstRuntimeSession = {
+      id: "first-runtime-id",
+      workspaceId: "workspace-a",
+      sessionFile: "/sessions/rejected-first-send.jsonl",
+    };
+    const cachedNativeSession = {
+      ...firstRuntimeSession,
+      id: "saved-row-id",
+    };
+    const reloadedRuntimeSession = {
+      ...firstRuntimeSession,
+      id: "new-runtime-id",
+    };
+    const first = new ComposerDraftPersistence(storage, {
+      now: () => 12,
+      createDraftId: () => "first-send-draft",
+    });
+    first.hydrate([workspaceDraftSession], ["workspace-a"]);
+    first.persist([workspaceDraftSession], {
+      [workspaceDraftSession.id]: {
+        text: "rejected first send remains editable",
+        attachmentCount: 0,
+      },
+    });
+
+    // A first send materializes the renderer-only shell as a native session.
+    first.migrateSession(workspaceDraftSession, firstRuntimeSession);
+    first.beginSubmission(
+      firstRuntimeSession,
+      "rejected first send remains editable",
+      0,
+    );
+    first.finishSubmission(firstRuntimeSession, "rejected", true);
+
+    // Reload hydration first finds the canonical file as a saved row, then a
+    // resumed worker replaces that row with a new runtime id.
+    const reloaded = new ComposerDraftPersistence(storage);
+    expect(
+      reloaded.hydrate([cachedNativeSession], ["workspace-a"]).restored,
+    ).toMatchObject([
+      {
+        sessionId: "saved-row-id",
+        text: "rejected first send remains editable",
+      },
+    ]);
+    // A background/attached-runtime replacement can happen before React has
+    // committed that saved-row restoration. Rebinding must requeue it for the
+    // replacement row instead of treating the prior row id as permanently
+    // restored. This fails if native-to-native migration leaves restoredKeys
+    // unchanged.
+    reloaded.migrateSession(cachedNativeSession, reloadedRuntimeSession);
+    expect(
+      reloaded.restoreAvailableSessions([reloadedRuntimeSession]).restored,
+    ).toEqual([
+      {
+        sessionId: "new-runtime-id",
+        identity: {
+          kind: "sessionFile",
+          workspaceId: "workspace-a",
+          sessionFile: "/sessions/rejected-first-send.jsonl",
+        },
+        text: "rejected first send remains editable",
+        attachmentsNeedReselection: false,
+      },
+    ]);
+    expect(
+      reloaded.pendingSubmissionForSession(reloadedRuntimeSession),
+    ).toBeUndefined();
+  });
+
   it("rekeys and restores an attachment-only reselection marker", () => {
     const storage = new MemoryStorage();
     const cached = {

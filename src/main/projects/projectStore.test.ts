@@ -379,19 +379,84 @@ test("ProjectStore marks deleted recent project folders as invalid", async () =>
   );
 });
 
-test("ProjectStore backs up corrupt metadata and recovers to defaults", async () => {
+test("ProjectStore preserves valid metadata after a transient read failure and retries loading", async () => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "pi-deck-project-store-read-failure-"),
+  );
+  const home = path.join(root, "home");
+  const projectDirectory = path.join(root, "project");
+  await fs.mkdir(projectDirectory, { recursive: true });
+  const project = await fs.realpath(projectDirectory);
+  await new ProjectStore(home).upsertAndActivateProject(project);
+  const storeFile = path.join(home, "projects.json");
+  const actualFs = await vi.importActual<typeof fs>("node:fs/promises");
+  const original = await actualFs.readFile(storeFile, "utf8");
+
+  const healthy = new ProjectStore(home);
+  assert.equal((await healthy.list()).projects[0]?.id, project);
+
+  let failuresRemaining = 1;
+  const readFile = vi
+    .spyOn(fs, "readFile")
+    .mockImplementation(async (file, options) => {
+      if (file === storeFile && failuresRemaining > 0) {
+        failuresRemaining -= 1;
+        const error = new Error("injected EIO") as NodeJS.ErrnoException;
+        error.code = "EIO";
+        throw error;
+      }
+      return await actualFs.readFile(file, options);
+    });
+  const rename = vi.spyOn(fs, "rename");
+  rename.mockRejectedValueOnce(new Error("injected backup rename failure"));
+  const recovering = new ProjectStore(home);
+  try {
+    await assert.rejects(recovering.list(), /injected EIO/);
+    assert.equal(rename.mock.calls.length, 0);
+    assert.equal(await actualFs.readFile(storeFile, "utf8"), original);
+    assert.equal(
+      (await actualFs.readdir(home)).some((file) =>
+        file.startsWith("projects.json.corrupt-"),
+      ),
+      false,
+    );
+  } finally {
+    readFile.mockRestore();
+    rename.mockRestore();
+  }
+
+  assert.equal((await recovering.list()).projects[0]?.id, project);
+});
+
+test("ProjectStore refuses defaults until corrupt metadata is backed up", async () => {
   const root = await fs.mkdtemp(
     path.join(os.tmpdir(), "pi-deck-project-store-"),
   );
   const home = path.join(root, "home");
+  const storeFile = path.join(home, "projects.json");
   await fs.mkdir(home, { recursive: true });
-  await fs.writeFile(path.join(home, "projects.json"), "{ not json\n");
+  await fs.writeFile(storeFile, "{ not json\n");
+  const actualFs = await vi.importActual<typeof fs>("node:fs/promises");
+  const original = await actualFs.readFile(storeFile, "utf8");
 
+  const rename = vi.spyOn(fs, "rename");
+  rename.mockRejectedValueOnce(new Error("injected backup rename failure"));
   const store = new ProjectStore(home);
-  const listed = await store.list();
+  try {
+    await assert.rejects(store.list(), /injected backup rename failure/);
+    assert.equal(await actualFs.readFile(storeFile, "utf8"), original);
+    assert.equal(
+      (await actualFs.readdir(home)).some((file) =>
+        file.startsWith("projects.json.corrupt-"),
+      ),
+      false,
+    );
+  } finally {
+    rename.mockRestore();
+  }
 
-  assert.equal(listed.projects.length, 0);
-  const files = await fs.readdir(home);
+  assert.equal((await store.list()).projects.length, 0);
+  const files = await actualFs.readdir(home);
   assert.ok(files.some((file) => file.startsWith("projects.json.corrupt-")));
 });
 

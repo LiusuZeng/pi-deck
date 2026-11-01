@@ -725,15 +725,77 @@ test("WorkspaceStore keeps a failed move out of memory and later saves", async (
   );
 });
 
-test("WorkspaceStore backs up corrupt metadata and recovers an empty store", async () => {
-  const { home } = await temporaryHome();
-  await fs.mkdir(home, { recursive: true });
-  await fs.writeFile(path.join(home, "workspaces.json"), "{ broken\n");
+test("WorkspaceStore preserves valid metadata after a transient read failure and retries loading", async () => {
+  const { root, home } = await temporaryHome();
+  const seeded = new WorkspaceStore(home);
+  const workspace = await seeded.create({ name: "Preserved workspace" });
+  const storeFile = path.join(home, "workspaces.json");
+  const actualFs = await vi.importActual<typeof fs>("node:fs/promises");
+  const original = await actualFs.readFile(storeFile, "utf8");
 
+  const healthy = new WorkspaceStore(home);
+  assert.equal((await healthy.list()).workspaces[0]?.id, workspace.id);
+
+  let failuresRemaining = 1;
+  const readFile = vi
+    .spyOn(fs, "readFile")
+    .mockImplementation(async (file, options) => {
+      if (file === storeFile && failuresRemaining > 0) {
+        failuresRemaining -= 1;
+        const error = new Error("injected EIO") as NodeJS.ErrnoException;
+        error.code = "EIO";
+        throw error;
+      }
+      return await actualFs.readFile(file, options);
+    });
+  const rename = vi.spyOn(fs, "rename");
+  rename.mockRejectedValueOnce(new Error("injected backup rename failure"));
+  const recovering = new WorkspaceStore(home);
+  try {
+    await assert.rejects(recovering.list(), /injected EIO/);
+    assert.equal(rename.mock.calls.length, 0);
+    assert.equal(await actualFs.readFile(storeFile, "utf8"), original);
+    assert.equal(
+      (await actualFs.readdir(home)).some((file) =>
+        file.startsWith("workspaces.json.corrupt-"),
+      ),
+      false,
+    );
+  } finally {
+    readFile.mockRestore();
+    rename.mockRestore();
+  }
+
+  assert.equal((await recovering.list()).workspaces[0]?.id, workspace.id);
+});
+
+test("WorkspaceStore refuses defaults until corrupt metadata is backed up", async () => {
+  const { home } = await temporaryHome();
+  const storeFile = path.join(home, "workspaces.json");
+  await fs.mkdir(home, { recursive: true });
+  await fs.writeFile(storeFile, "{ broken\n");
+  const actualFs = await vi.importActual<typeof fs>("node:fs/promises");
+  const original = await actualFs.readFile(storeFile, "utf8");
+
+  const rename = vi.spyOn(fs, "rename");
+  rename.mockRejectedValueOnce(new Error("injected backup rename failure"));
   const store = new WorkspaceStore(home);
+  try {
+    await assert.rejects(store.list(), /injected backup rename failure/);
+    assert.equal(await actualFs.readFile(storeFile, "utf8"), original);
+    assert.equal(
+      (await actualFs.readdir(home)).some((file) =>
+        file.startsWith("workspaces.json.corrupt-"),
+      ),
+      false,
+    );
+  } finally {
+    rename.mockRestore();
+  }
+
   assert.deepEqual(await store.list(), { workspaces: [] });
   assert.ok(
-    (await fs.readdir(home)).some((file) =>
+    (await actualFs.readdir(home)).some((file) =>
       file.startsWith("workspaces.json.corrupt-"),
     ),
   );
