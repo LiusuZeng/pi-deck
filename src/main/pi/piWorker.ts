@@ -113,6 +113,9 @@ export class PiWorker {
     this.client.typedOn("diagnostic", (message) => {
       this.addDiagnostic("warn", message.trimEnd() || "RPC diagnostic");
     });
+    this.client.typedOn("transportError", (error) => {
+      this.terminateAfterFatalTransportError(error);
+    });
     this.client.typedOn("fatal", ({ error }) => {
       this.terminateAfterFatalTransportError(error);
     });

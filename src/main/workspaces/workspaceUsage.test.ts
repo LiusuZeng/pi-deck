@@ -2099,6 +2099,98 @@ describe("workspace usage accounting", () => {
     );
   });
 
+  it("keeps child work at the fork timestamp after its parent is deleted", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-usage-fork-deleted-parent-live-"),
+    );
+    const sourceFile = path.join(root, "source.jsonl");
+    const childFile = path.join(root, "child.jsonl");
+    const forkStartedAtMs = Date.now();
+    const parentAnswer = assistantMessage("assistant-parent", 10, 0.01);
+    parentAnswer.timestamp = forkStartedAtMs - 1_000;
+    const childAnswer = assistantMessage("assistant-child", 5, 0.005);
+    childAnswer.timestamp = forkStartedAtMs;
+
+    await writeSessionFixture({
+      sessionFile: sourceFile,
+      messages: [parentAnswer],
+    });
+    await writeSessionFixture({
+      sessionFile: childFile,
+      parentSession: sourceFile,
+      sessionTimestamp: new Date(forkStartedAtMs).toISOString(),
+      messages: [parentAnswer],
+    });
+
+    const store = new WorkspaceUsageStore(root);
+    await store.recordSessionMessagesUsage({
+      workspaceId: workspaceA,
+      sessionFile: sourceFile,
+      sessionKey: sourceFile,
+      source: "session",
+      messages: [parentAnswer],
+    });
+    await store.recordSessionMessagesUsage({
+      workspaceId: workspaceA,
+      sessionFile: childFile,
+      sessionKey: childFile,
+      source: "session",
+      messages: [parentAnswer],
+    });
+
+    await writeSessionFixture({
+      sessionFile: childFile,
+      parentSession: sourceFile,
+      sessionTimestamp: new Date(forkStartedAtMs).toISOString(),
+      messages: [parentAnswer, childAnswer],
+    });
+    await fs.unlink(sourceFile);
+    await store.recordSessionMessagesUsage({
+      workspaceId: workspaceA,
+      sessionFile: childFile,
+      sessionKey: childFile,
+      source: "session",
+      messages: [parentAnswer, childAnswer],
+    });
+    await store.recordRuntimeUsage({
+      workspaceId: workspaceA,
+      sessionFile: childFile,
+      usage: {
+        inputTokens: 15,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        totalTokens: 15,
+        totalCostUsd: 0.015,
+      },
+    });
+
+    const expected = {
+      inputTokens: 15,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 15,
+      knownCostUsd: 0.015,
+      contributorsWithCost: 2,
+      contributorsWithoutCost: 0,
+    };
+    assert.deepEqual(
+      await store.getWorkspaceUsage({
+        workspaceId: workspaceA,
+        sessionFiles: [sourceFile, childFile],
+      }),
+      expected,
+    );
+    assert.deepEqual(
+      await new WorkspaceUsageStore(root).getWorkspaceUsage({
+        workspaceId: workspaceA,
+        sessionFiles: [sourceFile, childFile],
+      }),
+      expected,
+    );
+  });
+
   it("serves cached workspace usage without reading the session file", async () => {
     const root = await fs.mkdtemp(
       path.join(os.tmpdir(), "pi-deck-usage-cheap-read-"),

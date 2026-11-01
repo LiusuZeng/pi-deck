@@ -21,6 +21,7 @@ function fakePiBinary(root: string, args: readonly string[]): string {
 async function launchLifecycleFixture(
   root: string,
   fakeArgs: readonly string[],
+  extraEnv: NodeJS.ProcessEnv = {},
 ): Promise<{ app: ElectronApplication; page: Page }> {
   const projectCwd = path.join(root, "project");
   const agentDir = path.join(root, "agent");
@@ -51,6 +52,7 @@ async function launchLifecycleFixture(
       PI_CODING_AGENT_DIR: agentDir,
       PI_DECK_HOME: path.join(root, "pideck-home"),
       PI_DECK_USER_DATA_DIR: userDataDir,
+      ...extraEnv,
     },
   });
   const page = await app.firstWindow();
@@ -147,6 +149,165 @@ test("prompt IPC rejection becomes Failed Work with retry controls", async () =>
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("delayed ordinary prompt acknowledgement keeps recovery quarantined through reload", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-prompt-delivery-unconfirmed-"),
+  );
+  const receiptFile = path.join(root, "prompt-receipts.log");
+  let app: ElectronApplication | undefined;
+  try {
+    const launched = await launchLifecycleFixture(
+      root,
+      [
+        "--delay-prompt-response-ms",
+        "1000",
+        "--stream-delay-ms",
+        "150",
+        "--prompt-receipt-signal-file",
+        receiptFile,
+      ],
+      { PI_DECK_REAL_RPC_TIMEOUT_MS: "100" },
+    );
+    app = launched.app;
+    const { page } = launched;
+    const prompt = "accepted before delayed acknowledgement fixture";
+    await startPrompt(page, prompt);
+
+    // The fake records the ordinary user turn before deliberately withholding
+    // its successful RPC acknowledgement past Deck's timeout.
+    await expect.poll(() => readPromptReceipts(receiptFile)).toBe(1);
+    await expect(page.locator('.composer-error[role="alert"]')).toContainText(
+      "A previous send may have been accepted",
+    );
+    await expect(page.getByLabel("Prompt text")).toHaveValue("");
+    expect(readPromptReceipts(receiptFile)).toBe(1);
+
+    // Stream output arrives after the acknowledgement deadline. It is runtime
+    // evidence, not permission to clear the pending-delivery quarantine.
+    await expect(page.getByText(`Fake response to: ${prompt}`)).toBeVisible();
+    await expect(page.locator('.composer-error[role="alert"]')).toContainText(
+      "A previous send may have been accepted",
+    );
+
+    // Renderer reload must retain the quarantine and must not replay the
+    // already-recorded text while it reconnects to the attached runtime.
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expect(
+      page.locator('.workspace[data-load-state="ready"]'),
+    ).toBeVisible();
+    await page
+      .getByRole("button", { name: `Session: ${prompt}`, exact: true })
+      .click();
+    await expect(page.locator('.composer-error[role="alert"]')).toContainText(
+      "A previous send may have been accepted",
+    );
+    await expect(page.getByLabel("Prompt text")).toHaveValue("");
+    expect(readPromptReceipts(receiptFile)).toBe(1);
+
+    // Recovery restores editable text only; it is an explicit user decision
+    // and never sends a second ordinary prompt by itself.
+    await page
+      .getByRole("button", { name: "Recover text after checking history" })
+      .click();
+    await expect(page.getByLabel("Prompt text")).toHaveValue(prompt);
+    expect(readPromptReceipts(receiptFile)).toBe(1);
+  } finally {
+    await app?.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("terminal error before a delayed acknowledgement cannot retry an unconfirmed prompt", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-prompt-terminal-unconfirmed-"),
+  );
+  const receiptFile = path.join(root, "prompt-receipts.log");
+  let app: ElectronApplication | undefined;
+  try {
+    const launched = await launchLifecycleFixture(
+      root,
+      [
+        "--prompt-scenario",
+        "error",
+        "--delay-prompt-response-ms",
+        "1000",
+        "--prompt-receipt-signal-file",
+        receiptFile,
+      ],
+      { PI_DECK_REAL_RPC_TIMEOUT_MS: "100" },
+    );
+    app = launched.app;
+    const prompt = "terminal before delayed acknowledgement fixture";
+    await startPrompt(launched.page, prompt);
+
+    // Pi emits its terminal provider error while the accepted command's
+    // response remains delayed. That error exposes Retry prompt, but the
+    // timeout still makes receipt uncertain.
+    await expect.poll(() => readPromptReceipts(receiptFile)).toBe(1);
+    await expect(
+      launched.page.getByRole("button", { name: "Retry prompt" }),
+    ).toBeVisible();
+    await expect(
+      launched.page.locator('.composer-error[role="alert"]'),
+    ).toContainText("A previous send may have been accepted");
+
+    await launched.page.getByRole("button", { name: "Retry prompt" }).click();
+    // The persistent recovery warning takes precedence over the blocked-action
+    // error, so it remains visible while the retry is rejected by quarantine.
+    await expect(
+      launched.page.locator('.composer-error[role="alert"]'),
+    ).toContainText("A previous send may have been accepted");
+    expect(readPromptReceipts(receiptFile)).toBe(1);
+  } finally {
+    await app?.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("accepted prompt disconnect keeps the renderer delivery quarantine", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-e2e-prompt-delivery-disconnect-"),
+  );
+  const receiptFile = path.join(root, "prompt-receipts.log");
+  let app: ElectronApplication | undefined;
+  try {
+    const launched = await launchLifecycleFixture(root, [
+      "--exit-after-prompt-receipt",
+      "--prompt-receipt-signal-file",
+      receiptFile,
+    ]);
+    app = launched.app;
+    const prompt = "accepted before transport disconnect fixture";
+    await startPrompt(launched.page, prompt);
+
+    // The worker accepts the durable user turn, then exits before its RPC
+    // acknowledgement. The actual main/IPC/preload/renderer path must keep
+    // recovery quarantined instead of offering an ordinary safe retry.
+    await expect.poll(() => readPromptReceipts(receiptFile)).toBe(1);
+    await expect(
+      launched.page.locator('.composer-error[role="alert"]'),
+    ).toContainText("A previous send may have been accepted");
+    await expect(launched.page.getByLabel("Prompt text")).toHaveValue("");
+    await expect(
+      launched.page.getByText("Error · prompt was not accepted by Pi", {
+        exact: true,
+      }),
+    ).toHaveCount(0);
+    expect(readPromptReceipts(receiptFile)).toBe(1);
+  } finally {
+    await app?.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function readPromptReceipts(file: string): number {
+  if (!fs.existsSync(file)) return 0;
+  return fs
+    .readFileSync(file, "utf8")
+    .split(/\r?\n/)
+    .filter((receipt) => receipt === "prompt").length;
+}
 
 test("terminal Extension UI response and duplicate clear cannot resurrect work", async () => {
   const root = fs.mkdtempSync(

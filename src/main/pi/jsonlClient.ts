@@ -288,6 +288,11 @@ interface PendingRequest {
   resolve: (value: JsonValue) => void;
   reject: (reason: Error) => void;
   timer: NodeJS.Timeout;
+  possibleDispatch: boolean;
+}
+
+interface PendingNotificationWrite {
+  reject: (reason: Error) => void;
 }
 
 export interface JsonlRpcClientFatalEvent {
@@ -298,8 +303,41 @@ export interface JsonlRpcClientFatalEvent {
 export interface JsonlRpcClientEvents {
   event: [RpcEventRecord];
   diagnostic: [string];
+  /** A write-side stream failure that leaves child termination unconfirmed. */
+  transportError: [Error];
   fatal: [JsonlRpcClientFatalEvent];
   close: [{ code: number | null; signal: NodeJS.Signals | null }];
+}
+
+export type JsonlRpcDeliveryStatus = "unknown" | "not-dispatched";
+
+export class JsonlRpcDeliveryError extends Error {
+  readonly deliveryStatus: JsonlRpcDeliveryStatus;
+
+  constructor(message: string, deliveryStatus: JsonlRpcDeliveryStatus) {
+    super(message);
+    this.name = "JsonlRpcDeliveryError";
+    this.deliveryStatus = deliveryStatus;
+  }
+}
+
+/**
+ * Class identity can be lost when an error crosses a bundled Electron module
+ * boundary. Keep delivery classification explicit and structural so that
+ * boundary does not turn uncertain prompt receipt into a safe rejection.
+ */
+export function isUnknownJsonlRpcDeliveryError(
+  error: unknown,
+): error is { message: string; deliveryStatus: "unknown" } {
+  // Errors arriving from Electron's bundled module context do not necessarily
+  // inherit this realm's Error.prototype. Do not use instanceof here: the
+  // explicit, schema-validated status is the delivery contract.
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    typeof (error as { message?: unknown }).message === "string" &&
+    (error as { deliveryStatus?: unknown }).deliveryStatus === "unknown"
+  );
 }
 
 export class JsonlRpcError extends Error {
@@ -326,8 +364,13 @@ export class JsonlRpcClient extends EventEmitter {
   private readonly malformedOutputIsFatal: boolean;
   private readonly commandProtocol: JsonlRpcCommandProtocol;
   private readonly pending = new Map<string, PendingRequest>();
+  private readonly pendingNotificationWrites = new Map<
+    symbol,
+    PendingNotificationWrite
+  >();
   private readonly parser: JsonlFramingParser;
   private closed = false;
+  private transportFatalError: Error | undefined;
   private exitCode: number | null = null;
   private signal: NodeJS.Signals | null = null;
   private closeEmitted = false;
@@ -357,6 +400,11 @@ export class JsonlRpcClient extends EventEmitter {
 
     child.stdout?.on("data", (chunk: Buffer) => this.parser.push(chunk));
     child.stdout?.on("end", () => this.parser.end());
+    if (typeof child.stdin?.on === "function") {
+      child.stdin.on("error", (error: Error) => {
+        this.handleStdinFailure(error, "RPC stdin stream error");
+      });
+    }
     child.stderr?.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
       this.stderr.append(text);
@@ -437,12 +485,13 @@ export class JsonlRpcClient extends EventEmitter {
       return Promise.reject(this.fatalError);
     }
     if (
+      this.transportFatalError ||
       this.closed ||
       this.child.killed ||
       !this.child.stdin ||
       this.child.stdin.destroyed
     ) {
-      return Promise.reject(new Error("RPC subprocess is not writable"));
+      return Promise.reject(this.notWritableError());
     }
 
     const id = randomUUID();
@@ -455,7 +504,12 @@ export class JsonlRpcClient extends EventEmitter {
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`RPC command timed out before response: ${command}`));
+        reject(
+          new JsonlRpcDeliveryError(
+            `RPC command timed out before response: ${command}`,
+            "unknown",
+          ),
+        );
       }, timeoutMs);
 
       this.pending.set(id, {
@@ -464,23 +518,25 @@ export class JsonlRpcClient extends EventEmitter {
         resolve: (value) => resolve(value as T),
         reject,
         timer,
+        possibleDispatch: true,
       });
 
-      this.child.stdin!.write(payload, "utf8", (error?: Error | null) => {
-        if (!error) {
-          return;
-        }
-        const pending = this.pending.get(id);
-        if (pending) {
-          clearTimeout(pending.timer);
-          this.pending.delete(id);
-          pending.reject(
-            new Error(
-              `Failed to write RPC command ${command}: ${error.message}`,
-            ),
+      try {
+        this.child.stdin!.write(payload, "utf8", (error?: Error | null) => {
+          if (!error) {
+            return;
+          }
+          this.handleStdinFailure(
+            error,
+            `Failed to write RPC command ${command}`,
           );
-        }
-      });
+        });
+      } catch (error) {
+        this.handleStdinFailure(
+          error instanceof Error ? error : new Error(String(error)),
+          `Failed to write RPC command ${command}`,
+        );
+      }
     });
   }
 
@@ -494,25 +550,44 @@ export class JsonlRpcClient extends EventEmitter {
       return Promise.reject(this.fatalError);
     }
     if (
+      this.transportFatalError ||
       this.closed ||
       this.child.killed ||
       !this.child.stdin ||
       this.child.stdin.destroyed
     ) {
-      return Promise.reject(new Error("RPC subprocess is not writable"));
+      return Promise.reject(this.notWritableError());
     }
 
     const payload = JSON.stringify(record) + "\n";
     return new Promise<void>((resolve, reject) => {
-      this.child.stdin!.write(payload, "utf8", (error?: Error | null) => {
-        if (error) {
-          reject(
-            new Error(`Failed to write RPC notification: ${error.message}`),
-          );
-          return;
-        }
-        resolve();
-      });
+      const token = Symbol("rpc-notification-write");
+      let settled = false;
+      const rejectOnce = (error: Error): void => {
+        if (settled) return;
+        settled = true;
+        this.pendingNotificationWrites.delete(token);
+        reject(error);
+      };
+      this.pendingNotificationWrites.set(token, { reject: rejectOnce });
+
+      try {
+        this.child.stdin!.write(payload, "utf8", (error?: Error | null) => {
+          if (error) {
+            this.handleStdinFailure(error, "Failed to write RPC notification");
+            return;
+          }
+          if (settled) return;
+          settled = true;
+          this.pendingNotificationWrites.delete(token);
+          resolve();
+        });
+      } catch (error) {
+        this.handleStdinFailure(
+          error instanceof Error ? error : new Error(String(error)),
+          "Failed to write RPC notification",
+        );
+      }
     });
   }
 
@@ -530,6 +605,13 @@ export class JsonlRpcClient extends EventEmitter {
     }
     this.closeRequested = true;
     this.child.kill(signal);
+  }
+
+  private notWritableError(): Error {
+    if (this.transportFatalError) {
+      return new Error(this.transportFatalError.message);
+    }
+    return new Error("RPC subprocess is not writable");
   }
 
   private withUnexpectedExitDiagnostics(summary: string): string {
@@ -566,6 +648,25 @@ export class JsonlRpcClient extends EventEmitter {
     this.markClosed(code, signal);
     this.rejectAll(new Error(reason));
     this.emit("close", { code, signal });
+  }
+
+  private handleStdinFailure(error: Error, context: string): Error {
+    if (this.transportFatalError) {
+      return this.transportFatalError;
+    }
+
+    const diagnostic = `${context}: ${error.message}`;
+    const transportError = new Error(diagnostic);
+    this.transportFatalError = transportError;
+    const diagnosticLine = `${diagnostic}\n`;
+    this.stderr.append(diagnosticLine);
+    this.emit("diagnostic", diagnosticLine);
+    this.rejectAll(transportError);
+
+    if (!this.closed && !this.closeEmitted) {
+      this.emit("transportError", transportError);
+    }
+    return transportError;
   }
 
   private markClosed(code: number | null, signal: NodeJS.Signals | null): void {
@@ -651,9 +752,17 @@ export class JsonlRpcClient extends EventEmitter {
   private rejectAll(error: Error): void {
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
-      pending.reject(error);
+      pending.reject(
+        pending.possibleDispatch
+          ? new JsonlRpcDeliveryError(error.message, "unknown")
+          : error,
+      );
     }
     this.pending.clear();
+    for (const pending of this.pendingNotificationWrites.values()) {
+      pending.reject(error);
+    }
+    this.pendingNotificationWrites.clear();
   }
 }
 

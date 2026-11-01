@@ -229,16 +229,21 @@ export class WorkspaceUsageStore {
     const existing = this.state.snapshots.find(
       (snapshot) => snapshot.id === id,
     );
-    // Re-read the copied raw prefix for live projections. Pi compaction can
-    // remove arbitrary inherited messages from get_messages(), so a persisted
-    // count cannot safely be used to slice the projected list positionally.
-    const resolvedForkBaseline =
-      options.source === "session" && ownerSessionFile !== undefined
-        ? await resolveForkBaselineForMessageEntries(ownerSessionFile)
-        : undefined;
     const existingForkBaseline = hasDurableForkBaseline(existing)
       ? inheritedTotalsFromSnapshot(existing)
       : undefined;
+    // Keep an established fork boundary when an ancestor is unavailable. Pi
+    // compaction can omit inherited messages from get_messages(), so hydrate
+    // the durable raw-prefix boundary instead of slicing the live projection.
+    const forkBaseline =
+      existingForkBaseline !== undefined && ownerSessionFile !== undefined
+        ? await hydrateForkBaselineEntries(
+            existingForkBaseline,
+            ownerSessionFile,
+          )
+        : options.source === "session" && ownerSessionFile !== undefined
+          ? await resolveForkBaselineForMessageEntries(ownerSessionFile)
+          : undefined;
     const snapshot = await usageSnapshotFromMessages({
       id,
       workspaceId: options.workspaceId,
@@ -248,11 +253,9 @@ export class WorkspaceUsageStore {
       ...(options.recordedAtMs !== undefined
         ? { recordedAtMs: options.recordedAtMs }
         : {}),
-      ...(resolvedForkBaseline !== undefined
-        ? { inheritedBaseline: resolvedForkBaseline }
-        : existingForkBaseline !== undefined
-          ? { inheritedBaseline: existingForkBaseline }
-          : {}),
+      ...(forkBaseline !== undefined
+        ? { inheritedBaseline: forkBaseline }
+        : {}),
     });
     if (snapshot === undefined) return;
 
@@ -841,6 +844,25 @@ async function resolveForkBaseline(
       .length,
     fingerprint: usageEntriesFingerprint(entries),
   };
+}
+
+async function hydrateForkBaselineEntries(
+  baseline: ForkBaseline,
+  sessionFile: string,
+): Promise<ForkBaseline> {
+  const entryCount = forkBaselineEntryCount(baseline);
+  if (entryCount === 0) return baseline;
+
+  const scanned = await scanSessionFileUsageDetails(sessionFile);
+  if (scanned.diagnostics.length > 0) return baseline;
+  const entries = scanned.entries.slice(0, entryCount);
+  if (
+    entries.length !== entryCount ||
+    usageEntriesFingerprint(entries) !== forkBaselineFingerprint(baseline)
+  ) {
+    return baseline;
+  }
+  return { ...baseline, entries };
 }
 
 function forkPointInheritedPrefixLength(
