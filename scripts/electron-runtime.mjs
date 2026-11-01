@@ -229,8 +229,26 @@ async function publishPreparedRuntime({
   stagedMarkerPath,
 }) {
   const previousBundle = `${brandedBundle}.previous-${randomUUID()}`;
+  const previousMarkerPath = `${markerPath}.previous-${randomUUID()}`;
   let movedPreviousBundle = false;
+  let movedPreviousMarker = false;
   let publishedBundle = false;
+  let publishedMarker = false;
+
+  async function restorePreviousRuntime() {
+    if (publishedBundle) {
+      await rm(brandedBundle, { recursive: true, force: true });
+    }
+    if (publishedMarker) {
+      await rm(markerPath, { force: true });
+    }
+    if (movedPreviousBundle) {
+      await rename(previousBundle, brandedBundle);
+    }
+    if (movedPreviousMarker) {
+      await rename(previousMarkerPath, markerPath);
+    }
+  }
 
   try {
     try {
@@ -241,24 +259,32 @@ async function publishPreparedRuntime({
         throw error;
       }
     }
+    try {
+      await rename(markerPath, previousMarkerPath);
+      movedPreviousMarker = true;
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        throw error;
+      }
+    }
     await rename(stagedBundle, brandedBundle);
     publishedBundle = true;
     await rename(stagedMarkerPath, markerPath);
+    publishedMarker = true;
   } catch (error) {
-    if (publishedBundle) {
-      await rm(brandedBundle, { recursive: true, force: true }).catch(
-        () => undefined,
-      );
-    }
-    if (movedPreviousBundle) {
-      await rename(previousBundle, brandedBundle).catch(() => undefined);
-    }
+    await restorePreviousRuntime().catch(() => undefined);
     throw error;
   }
 
-  await rm(previousBundle, { recursive: true, force: true }).catch(
-    () => undefined,
-  );
+  return {
+    async discardPreviousRuntime() {
+      await rm(previousBundle, { recursive: true, force: true }).catch(
+        () => undefined,
+      );
+      await rm(previousMarkerPath, { force: true }).catch(() => undefined);
+    },
+    restorePreviousRuntime,
+  };
 }
 
 async function assertRuntimeDirectoryWritable(runtimeDirectory) {
@@ -454,6 +480,7 @@ export async function preparePiDeckElectronExecutable({
   runtimeCacheRoot = resolvePiDeckElectronRuntimeCacheRoot(),
   beforeRuntimePreparationLockPublish,
   onRuntimePreparationLockWait,
+  afterRuntimePublication = async () => undefined,
 } = {}) {
   if (platform !== "darwin") {
     return electronExecutable;
@@ -563,12 +590,31 @@ export async function preparePiDeckElectronExecutable({
               2,
             )}\n`,
           );
-          await publishPreparedRuntime({
+          const publication = await publishPreparedRuntime({
             brandedBundle,
             markerPath,
             stagedBundle,
             stagedMarkerPath,
           });
+          try {
+            await afterRuntimePublication();
+            if (
+              !(await preparedRuntimeLooksCurrent(
+                electronExecutable,
+                brandedExecutable,
+                markerPath,
+                { sourceBundle, executableRelativePath },
+              ))
+            ) {
+              throw new Error(
+                `Pi Deck Electron runtime was prepared but its executable is missing or stale: ${brandedExecutable}`,
+              );
+            }
+            await publication.discardPreviousRuntime();
+          } catch (error) {
+            await publication.restorePreviousRuntime().catch(() => undefined);
+            throw error;
+          }
         } catch (error) {
           throw cachePreparationError(cacheRoot, runtimeDirectory, error);
         }
@@ -576,18 +622,6 @@ export async function preparePiDeckElectronExecutable({
         await rm(attemptDirectory, { recursive: true, force: true });
       }
 
-      if (
-        !(await preparedRuntimeLooksCurrent(
-          electronExecutable,
-          brandedExecutable,
-          markerPath,
-          { sourceBundle, executableRelativePath },
-        ))
-      ) {
-        throw new Error(
-          `Pi Deck Electron runtime was prepared but its executable is missing or stale: ${brandedExecutable}`,
-        );
-      }
       return brandedExecutable;
     },
     {

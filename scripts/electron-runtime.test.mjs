@@ -348,6 +348,58 @@ describe("Pi Deck Electron runtime", () => {
     }
   });
 
+  it("restores the prior runtime when the source changes after publication", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "pi-deck-electron-"));
+    try {
+      const cacheRoot = path.join(root, "cache");
+      const { executable } = await writeFakeElectronBundle(
+        path.join(root, "source"),
+      );
+      const copyBundle = async (source, destination) => {
+        await cp(source, destination, {
+          recursive: true,
+          preserveTimestamps: true,
+        });
+      };
+      const preparedExecutable = await preparePiDeckElectronExecutable({
+        platform: "darwin",
+        electronExecutable: executable,
+        runtimeCacheRoot: cacheRoot,
+        copyBundle,
+        patchBundleIdentity: async () => undefined,
+      });
+      const markerPath = runtimeIdentityMarkerPath(
+        findMacOSAppBundle(preparedExecutable),
+      );
+      const priorMarker = await readFile(markerPath, "utf8");
+      const priorExecutable = await readFile(preparedExecutable, "utf8");
+
+      await writeFile(executable, "fake-electron-updated");
+      await chmod(executable, 0o755);
+      await expect(
+        preparePiDeckElectronExecutable({
+          platform: "darwin",
+          electronExecutable: executable,
+          runtimeCacheRoot: cacheRoot,
+          copyBundle,
+          patchBundleIdentity: async () => undefined,
+          afterRuntimePublication: async () => {
+            await writeFile(executable, "fake-electron-changed-after-publish");
+            await chmod(executable, 0o755);
+          },
+        }),
+      ).rejects.toThrow("executable is missing or stale");
+
+      await expect(access(preparedExecutable)).resolves.toBeUndefined();
+      await expect(readFile(preparedExecutable, "utf8")).resolves.toBe(
+        priorExecutable,
+      );
+      await expect(readFile(markerPath, "utf8")).resolves.toBe(priorMarker);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("recovers crashed process locks and serializes independent preparers", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "pi-deck-electron-"));
     try {
