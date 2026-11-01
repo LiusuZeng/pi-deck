@@ -365,7 +365,7 @@ test("PiWorker cleans up broken stdin while retaining adapter ownership until ex
   const script = `
     const fs = require("node:fs");
     fs.closeSync(0);
-    process.stdout.write(JSON.stringify({ type: "ready" }) + "\\n");
+    // Install the cleanup handler before the ready event lets the parent write.
     process.on("SIGTERM", () => {
       fs.writeFileSync(${JSON.stringify(signalFile)}, "received\\n");
       const timer = setInterval(() => {
@@ -375,6 +375,9 @@ test("PiWorker cleans up broken stdin while retaining adapter ownership until ex
         }
       }, 10);
     });
+    process.stdout.write(
+      JSON.stringify({ type: "ready", sigtermHandlerInstalled: true }) + "\\n",
+    );
     setTimeout(() => {}, 60_000);
   `;
   const adapter = new SinglePiAdapter();
@@ -385,7 +388,9 @@ test("PiWorker cleans up broken stdin while retaining adapter ownership until ex
     cwd: process.cwd(),
     env: process.env,
     requestTimeoutMs: 1_000,
-    killGraceMs: 500,
+    // The test has a 5s deadline; its controlled child must not be escalated
+    // while the parent verifies retained ownership before releasing that child.
+    killGraceMs: 10_000,
   });
   const exitEvents: RuntimeEvent[] = [];
   const unsubscribe = adapter.onEvent((event) => {
@@ -393,7 +398,14 @@ test("PiWorker cleans up broken stdin while retaining adapter ownership until ex
   });
 
   try {
-    await waitForWorkerEvent(worker, (event) => event.type === "ready");
+    const ready = await waitForWorkerEvent(
+      worker,
+      (event) => event.type === "ready",
+    );
+    assert.equal(
+      (ready as { sigtermHandlerInstalled?: boolean }).sigtermHandlerInstalled,
+      true,
+    );
     await assert.rejects(adapter.getState(worker.runtimeId), /EPIPE|stdin/i);
     await waitForFile(signalFile);
 
@@ -409,6 +421,7 @@ test("PiWorker cleans up broken stdin while retaining adapter ownership until ex
     const exit = await workerExit;
 
     assert.equal((exit as { intentional?: boolean }).intentional, false);
+    assert.equal(exitEvents.length, 1);
     assert.equal(adapter.hasRuntime(worker.runtimeId), false);
     assert.equal(adapter.workerCount(), 0);
     const diagnostics = worker.getDiagnostics();
@@ -422,6 +435,8 @@ test("PiWorker cleans up broken stdin while retaining adapter ownership until ex
     );
   } finally {
     unsubscribe();
+    // Let the fixture finish promptly when an assertion fails before release.
+    writeFileSync(waitFile, "go\n");
     if (adapter.hasRuntime(worker.runtimeId)) {
       await adapter.closeSession(worker.runtimeId);
     }
