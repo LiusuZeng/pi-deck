@@ -156,7 +156,9 @@ export class ComposerDraftPersistence {
     string,
     ComposerDraftIdentity
   >();
-  private readonly restoredKeys = new Set<string>();
+  // Durable identity alone is not sufficient after a renderer reload: main
+  // can replace a cached row with a new runtime ID for the same native file.
+  private readonly restoredSessionIdsByKey = new Map<string, string>();
   private readonly attachmentReselectionKeys = new Set<string>();
   private readonly now: () => number;
   private readonly createDraftId: () => string;
@@ -200,6 +202,7 @@ export class ComposerDraftPersistence {
     for (const [key, record] of this.records) {
       if (!activeWorkspaceSet.has(record.workspaceId)) {
         this.records.delete(key);
+        this.restoredSessionIdsByKey.delete(key);
         this.attachmentReselectionKeys.delete(key);
         prunedStaleWorkspaceCount += 1;
       }
@@ -565,7 +568,9 @@ export class ComposerDraftPersistence {
     // the new row; callers apply it only to an empty composer, so newer input
     // remains authoritative. Do not do this for a workspace-draft-to-native
     // migration: that occurs immediately before first-send quarantine.
-    if (fromKey === toKey) this.restoredKeys.delete(toKey);
+    if (fromKey === toKey) {
+      this.restoredSessionIdsByKey.delete(toKey);
+    }
     this.identitiesBySessionId.delete(from.id);
     this.identitiesBySessionId.set(to.id, toIdentity);
     return this.write();
@@ -576,6 +581,7 @@ export class ComposerDraftPersistence {
   ): ComposerDraftPersistenceResult {
     const key = composerDraftIdentityKey(identity);
     const changed = this.records.delete(key);
+    this.restoredSessionIdsByKey.delete(key);
     this.attachmentReselectionKeys.delete(key);
     if (!changed) {
       return { status: "unchanged", truncated: false, pruned: 0 };
@@ -592,6 +598,7 @@ export class ComposerDraftPersistence {
       if (identity !== undefined) {
         const key = composerDraftIdentityKey(identity);
         changed = this.records.delete(key) || changed;
+        this.restoredSessionIdsByKey.delete(key);
         this.attachmentReselectionKeys.delete(key);
       }
       this.identitiesBySessionId.delete(session.id);
@@ -692,7 +699,6 @@ export class ComposerDraftPersistence {
     )) {
       const identity = identityFromRecord(record);
       const key = composerDraftIdentityKey(identity);
-      if (this.restoredKeys.has(key)) continue;
       if (
         activeWorkspaceIds !== undefined &&
         !activeWorkspaceIds.has(record.workspaceId)
@@ -720,7 +726,10 @@ export class ComposerDraftPersistence {
       if (session !== undefined) {
         claimedSessionIds.add(session.id);
         this.bindSession(session.id, identity);
-        this.markRestored(key, record);
+        // Rebind a durable draft when discovery replaces its cached renderer
+        // row. Suppress only restoration to the exact row already restored.
+        if (this.restoredSessionIdsByKey.get(key) === session.id) continue;
+        this.markRestored(key, record, session.id);
         if (record.text.length > 0 || record.attachmentsNeedReselection) {
           restored.push(restorationFor(session.id, identity, record));
         }
@@ -733,6 +742,7 @@ export class ComposerDraftPersistence {
       }
       if (record.kind === "workspaceDraft" && includeWorkspaceShells) {
         const sessionId = restoredComposerDraftSessionId(record.draftId);
+        if (this.restoredSessionIdsByKey.get(key) === sessionId) continue;
         const workspaceIdentity: Extract<
           ComposerDraftIdentity,
           { kind: "workspaceDraft" }
@@ -742,7 +752,7 @@ export class ComposerDraftPersistence {
           draftId: record.draftId,
         };
         this.bindSession(sessionId, workspaceIdentity);
-        this.markRestored(key, record);
+        this.markRestored(key, record, sessionId);
         workspaceShells.push({
           sessionId,
           identity: workspaceIdentity,
@@ -764,8 +774,12 @@ export class ComposerDraftPersistence {
     return { restored, workspaceShells, pendingSubmissions };
   }
 
-  private markRestored(key: string, record: DurableComposerDraft): void {
-    this.restoredKeys.add(key);
+  private markRestored(
+    key: string,
+    record: DurableComposerDraft,
+    sessionId: string,
+  ): void {
+    this.restoredSessionIdsByKey.set(key, sessionId);
     if (record.attachmentsNeedReselection) {
       this.attachmentReselectionKeys.add(key);
     }
@@ -806,7 +820,11 @@ export class ComposerDraftPersistence {
     if (this.attachmentReselectionKeys.delete(fromKey)) {
       this.attachmentReselectionKeys.add(toKey);
     }
-    if (this.restoredKeys.delete(fromKey)) this.restoredKeys.add(toKey);
+    const restoredSessionId = this.restoredSessionIdsByKey.get(fromKey);
+    if (restoredSessionId !== undefined) {
+      this.restoredSessionIdsByKey.delete(fromKey);
+      this.restoredSessionIdsByKey.set(toKey, restoredSessionId);
+    }
   }
 
   private replaceRecords(records: DurableComposerDraft[]): void {
@@ -817,6 +835,11 @@ export class ComposerDraftPersistence {
     }
     for (const key of this.attachmentReselectionKeys) {
       if (!retainedKeys.has(key)) this.attachmentReselectionKeys.delete(key);
+    }
+    for (const key of this.restoredSessionIdsByKey.keys()) {
+      if (!retainedKeys.has(key)) {
+        this.restoredSessionIdsByKey.delete(key);
+      }
     }
   }
 
