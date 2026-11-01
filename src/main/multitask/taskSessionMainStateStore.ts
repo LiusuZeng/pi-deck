@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import type { DiagnosticsRecorder } from "../diagnostics/diagnostics.js";
 import {
   isPersistedTaskSessionState,
   type PersistedTaskSessionState,
@@ -11,29 +12,76 @@ export class TaskSessionMainStateStore {
   private states: Record<string, PersistedTaskSessionState> = {};
   private settings: Record<string, TaskSessionWorkerSettings> = {};
   private loaded = false;
+  private loadPromise: Promise<void> | undefined;
   private writeTail: Promise<void> = Promise.resolve();
 
-  constructor(private readonly userDataPath: string) {}
+  constructor(
+    private readonly userDataPath: string,
+    private readonly diagnostics?: DiagnosticsRecorder,
+  ) {}
 
   async loadIfNeeded(): Promise<void> {
     if (this.loaded) return;
-    this.loaded = true;
-    try {
-      const parsed: unknown = JSON.parse(
-        await fs.readFile(this.filePath(), "utf8"),
-      );
-      if (!isRecord(parsed)) return;
-      for (const [key, value] of Object.entries(parsed)) {
-        // Accept the initial raw-state format as well as the settings envelope.
-        if (isState(value)) this.states[key] = value;
-        else if (isRecord(value) && isState(value.state)) {
-          this.states[key] = value.state;
-          if (isSettings(value.settings)) this.settings[key] = value.settings;
-        }
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") this.states = {};
+    if (this.loadPromise) {
+      await this.loadPromise;
+      return;
     }
+
+    this.loadPromise = this.loadFromDisk();
+    try {
+      await this.loadPromise;
+    } finally {
+      this.loadPromise = undefined;
+    }
+  }
+
+  private async loadFromDisk(): Promise<void> {
+    let raw: string;
+    try {
+      raw = await fs.readFile(this.filePath(), "utf8");
+    } catch (error) {
+      if (isMissingFile(error)) {
+        this.states = {};
+        this.settings = {};
+        this.loaded = true;
+      } else {
+        this.recordDiagnostic(
+          `Task session state could not be read; writes are disabled until it can be recovered: ${errorToMessage(error)}`,
+        );
+      }
+      return;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      await this.handleInvalidTopLevel(
+        `Task session state JSON was invalid: ${errorToMessage(error)}`,
+      );
+      return;
+    }
+
+    if (!isRecord(parsed)) {
+      await this.handleInvalidTopLevel(
+        "Task session state JSON must contain an object at the top level.",
+      );
+      return;
+    }
+
+    const nextStates: Record<string, PersistedTaskSessionState> = {};
+    const nextSettings: Record<string, TaskSessionWorkerSettings> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      // Accept the initial raw-state format as well as the settings envelope.
+      if (isState(value)) nextStates[key] = value;
+      else if (isRecord(value) && isState(value.state)) {
+        nextStates[key] = value.state;
+        if (isSettings(value.settings)) nextSettings[key] = value.settings;
+      }
+    }
+    this.states = nextStates;
+    this.settings = nextSettings;
+    this.loaded = true;
   }
 
   get(sessionFile: string): PersistedTaskSessionState | undefined {
@@ -73,6 +121,12 @@ export class TaskSessionMainStateStore {
 
   private async mutate(change: () => void): Promise<void> {
     const write = this.writeTail.then(async () => {
+      await this.loadIfNeeded();
+      if (!this.loaded) {
+        throw new Error(
+          "Task session state could not be loaded; refusing to overwrite existing recovery data.",
+        );
+      }
       change();
       await fs.mkdir(path.dirname(this.filePath()), { recursive: true });
       const temporary = `${this.filePath()}.${process.pid}.${Date.now()}.tmp`;
@@ -92,9 +146,46 @@ export class TaskSessionMainStateStore {
     await write;
   }
 
+  private async handleInvalidTopLevel(message: string): Promise<void> {
+    this.recordDiagnostic(
+      `${message} Existing recovery data will be preserved.`,
+    );
+    const backup = `${this.filePath()}.invalid-${Date.now()}`;
+    try {
+      await fs.copyFile(this.filePath(), backup);
+      this.recordDiagnostic(
+        `Invalid task session state was preserved at ${backup}; starting with empty task-session recovery state.`,
+      );
+      this.states = {};
+      this.settings = {};
+      this.loaded = true;
+    } catch (error) {
+      this.recordDiagnostic(
+        `Could not preserve invalid task session state; writes remain disabled: ${errorToMessage(error)}`,
+      );
+    }
+  }
+
+  private recordDiagnostic(message: string): void {
+    this.diagnostics?.recordError(message);
+  }
+
   private filePath(): string {
     return path.join(this.userDataPath, "task-session-state.json");
   }
+}
+
+function isMissingFile(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "ENOENT"
+  );
+}
+
+function errorToMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

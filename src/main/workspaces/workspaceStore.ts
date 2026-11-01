@@ -296,53 +296,62 @@ export class WorkspaceStore {
     options: { activate?: boolean } = {},
   ): Promise<WorkspaceRecord> {
     await this.loadIfNeeded();
-    const existing = this.state.workspaces.find(
-      (workspace) => workspace.isDefault === true,
-    );
-    if (existing !== undefined) {
-      const shouldActivate =
-        options.activate === true &&
-        this.state.activeWorkspaceId !== existing.id;
-      if (shouldActivate || existing.archivedAtMs !== undefined) {
-        const restored = {
+    return this.transact(() => {
+      const existing = this.state.workspaces.find(
+        (workspace) => workspace.isDefault === true,
+      );
+      if (existing !== undefined) {
+        const shouldActivate =
+          options.activate === true &&
+          this.state.activeWorkspaceId !== existing.id;
+        if (!shouldActivate && existing.archivedAtMs === undefined) {
+          return {
+            next: this.state,
+            result: cloneWorkspace(existing),
+            changed: false,
+          };
+        }
+
+        const now = Date.now();
+        const index = this.requireWorkspaceIndex(existing.id);
+        const restored: WorkspaceRecord = {
           ...existing,
           ...(existing.archivedAtMs !== undefined
             ? { archivedAtMs: undefined }
             : {}),
-          updatedAtMs: Date.now(),
-          lastOpenedAtMs: options.activate
-            ? Date.now()
-            : existing.lastOpenedAtMs,
+          updatedAtMs: now,
+          lastOpenedAtMs: options.activate ? now : existing.lastOpenedAtMs,
         };
-        await this.commit({
-          ...this.state,
-          ...(options.activate ? { activeWorkspaceId: existing.id } : {}),
-          workspaces: replaceAt(
-            this.state.workspaces,
-            this.state.workspaces.indexOf(existing),
-            restored,
-          ),
-        });
-        return cloneWorkspace(restored);
+        return {
+          next: {
+            ...this.state,
+            ...(options.activate ? { activeWorkspaceId: existing.id } : {}),
+            workspaces: replaceAt(this.state.workspaces, index, restored),
+          },
+          result: cloneWorkspace(restored),
+          changed: true,
+        };
       }
-      return cloneWorkspace(existing);
-    }
 
-    const now = Date.now();
-    const workspace: WorkspaceRecord = {
-      id: randomUUID(),
-      name: defaultWorkspaceName,
-      isDefault: true,
-      createdAtMs: now,
-      updatedAtMs: now,
-      lastOpenedAtMs: now,
-    };
-    await this.commit({
-      ...this.state,
-      ...(options.activate ? { activeWorkspaceId: workspace.id } : {}),
-      workspaces: [...this.state.workspaces, workspace],
+      const now = Date.now();
+      const workspace: WorkspaceRecord = {
+        id: randomUUID(),
+        name: defaultWorkspaceName,
+        isDefault: true,
+        createdAtMs: now,
+        updatedAtMs: now,
+        lastOpenedAtMs: now,
+      };
+      return {
+        next: {
+          ...this.state,
+          ...(options.activate ? { activeWorkspaceId: workspace.id } : {}),
+          workspaces: [...this.state.workspaces, workspace],
+        },
+        result: cloneWorkspace(workspace),
+        changed: true,
+      };
     });
-    return cloneWorkspace(workspace);
   }
 
   async create(input: CreateWorkspaceInput): Promise<WorkspaceRecord> {
@@ -360,11 +369,11 @@ export class WorkspaceStore {
       updatedAtMs: now,
       lastOpenedAtMs: now,
     };
-    await this.commit({
-      ...this.state,
+    await this.commit((state) => ({
+      ...state,
       activeWorkspaceId: workspace.id,
-      workspaces: [...this.state.workspaces, workspace],
-    });
+      workspaces: [...state.workspaces, workspace],
+    }));
     return cloneWorkspace(workspace);
   }
 
@@ -386,6 +395,7 @@ export class WorkspaceStore {
       existing;
     const base =
       parsed.defaultProjectId === null ? withoutDefaultProjectId : existing;
+    const now = Date.now();
     const next: WorkspaceRecord = {
       ...base,
       ...(name === undefined ? {} : { name }),
@@ -394,11 +404,31 @@ export class WorkspaceStore {
         : parsed.defaultProjectId === null
           ? {}
           : { defaultProjectId: parsed.defaultProjectId }),
-      updatedAtMs: Date.now(),
+      updatedAtMs: now,
     };
-    await this.commit({
-      ...this.state,
-      workspaces: replaceAt(this.state.workspaces, index, next),
+    await this.commit((state) => {
+      const index = this.requireOpenWorkspaceIndex(parsed.workspaceId, state);
+      const existing = state.workspaces[index]!;
+      const {
+        defaultProjectId: _defaultProjectId,
+        ...withoutDefaultProjectId
+      } = existing;
+      const base =
+        parsed.defaultProjectId === null ? withoutDefaultProjectId : existing;
+      const next: WorkspaceRecord = {
+        ...base,
+        ...(name === undefined ? {} : { name }),
+        ...(parsed.defaultProjectId === undefined
+          ? {}
+          : parsed.defaultProjectId === null
+            ? {}
+            : { defaultProjectId: parsed.defaultProjectId }),
+        updatedAtMs: now,
+      };
+      return {
+        ...state,
+        workspaces: replaceAt(state.workspaces, index, next),
+      };
     });
     return cloneWorkspace(next);
   }
@@ -414,10 +444,19 @@ export class WorkspaceStore {
       updatedAtMs: now,
       lastOpenedAtMs: now,
     };
-    await this.commit({
-      ...this.state,
-      activeWorkspaceId: id,
-      workspaces: replaceAt(this.state.workspaces, index, next),
+    await this.commit((state) => {
+      const index = this.requireOpenWorkspaceIndex(id, state);
+      const existing = state.workspaces[index]!;
+      const next = {
+        ...existing,
+        updatedAtMs: now,
+        lastOpenedAtMs: now,
+      };
+      return {
+        ...state,
+        activeWorkspaceId: id,
+        workspaces: replaceAt(state.workspaces, index, next),
+      };
     });
     return cloneWorkspace(next);
   }
@@ -425,84 +464,96 @@ export class WorkspaceStore {
   async archive(workspaceId: string): Promise<WorkspaceRecord> {
     const id = z.string().uuid().parse(workspaceId);
     await this.loadIfNeeded();
-    const index = this.requireOpenWorkspaceIndex(id);
-    if (this.state.workspaces[index]!.isDefault === true) {
-      throw new Error("The default workspace cannot be archived.");
-    }
-    const now = Date.now();
-    const archived = {
-      ...this.state.workspaces[index]!,
-      updatedAtMs: now,
-      archivedAtMs: now,
-    };
-    const workspaces = replaceAt(this.state.workspaces, index, archived);
-    const sessionRefs = this.state.sessionRefs.map((ref) =>
-      ref.workspaceId === id && ref.archivedAtMs === undefined
-        ? {
-            ...ref,
-            archivedAtMs: now,
-            archivedByWorkspaceId: id,
-          }
-        : ref,
-    );
-    const nextActiveWorkspaceId =
-      this.state.activeWorkspaceId === id
-        ? workspaces
-            .filter((workspace) => workspace.archivedAtMs === undefined)
-            .sort(
-              (left, right) => right.lastOpenedAtMs - left.lastOpenedAtMs,
-            )[0]?.id
-        : this.state.activeWorkspaceId;
-    await this.commit({
-      ...this.state,
-      ...(nextActiveWorkspaceId
-        ? { activeWorkspaceId: nextActiveWorkspaceId }
-        : { activeWorkspaceId: undefined }),
-      workspaces,
-      sessionRefs,
+    return this.transact(() => {
+      const index = this.requireOpenWorkspaceIndex(id);
+      const existing = this.state.workspaces[index]!;
+      if (existing.isDefault === true) {
+        throw new Error("The default workspace cannot be archived.");
+      }
+      const now = Date.now();
+      const archived = {
+        ...existing,
+        updatedAtMs: now,
+        archivedAtMs: now,
+      };
+      const workspaces = replaceAt(this.state.workspaces, index, archived);
+      const sessionRefs = this.state.sessionRefs.map((ref) =>
+        ref.workspaceId === id && ref.archivedAtMs === undefined
+          ? {
+              ...ref,
+              archivedAtMs: now,
+              archivedByWorkspaceId: id,
+            }
+          : ref,
+      );
+      const nextActiveWorkspaceId =
+        this.state.activeWorkspaceId === id
+          ? workspaces
+              .filter((workspace) => workspace.archivedAtMs === undefined)
+              .sort(
+                (left, right) => right.lastOpenedAtMs - left.lastOpenedAtMs,
+              )[0]?.id
+          : this.state.activeWorkspaceId;
+      return {
+        next: {
+          ...this.state,
+          ...(nextActiveWorkspaceId
+            ? { activeWorkspaceId: nextActiveWorkspaceId }
+            : { activeWorkspaceId: undefined }),
+          workspaces,
+          sessionRefs,
+        },
+        result: cloneWorkspace(archived),
+        changed: true,
+      };
     });
-    return cloneWorkspace(archived);
   }
 
   /** Restore a workspace and only the session refs archived by its cascade. */
   async restore(workspaceId: string): Promise<WorkspaceRecord> {
     const id = z.string().uuid().parse(workspaceId);
     await this.loadIfNeeded();
-    const index = this.state.workspaces.findIndex(
-      (workspace) => workspace.id === id,
-    );
-    if (index < 0) throw new Error(`Unknown workspace: ${workspaceId}`);
-    const existing = this.state.workspaces[index]!;
-    if (existing.isDefault === true) {
-      throw new Error("The default workspace cannot be restored.");
-    }
-    if (existing.archivedAtMs === undefined) {
-      await this.persistIfDirty();
-      return cloneWorkspace(existing);
-    }
-    const now = Date.now();
-    const { archivedAtMs: _archivedAtMs, ...withoutArchive } = existing;
-    const restored = {
-      ...withoutArchive,
-      updatedAtMs: now,
-      lastOpenedAtMs: now,
-    };
-    const sessionRefs = this.state.sessionRefs.map((ref) => {
-      if (ref.archivedByWorkspaceId !== id) return ref;
-      const {
-        archivedAtMs: _sessionArchivedAtMs,
-        archivedByWorkspaceId: _sessionArchivedByWorkspaceId,
-        ...withoutCascadeArchive
-      } = ref;
-      return withoutCascadeArchive;
+    return this.transact(() => {
+      const index = this.requireWorkspaceIndex(id);
+      const existing = this.state.workspaces[index]!;
+      if (existing.isDefault === true) {
+        throw new Error("The default workspace cannot be restored.");
+      }
+      if (existing.archivedAtMs === undefined) {
+        return {
+          next: this.state,
+          result: cloneWorkspace(existing),
+          changed: false,
+          persistIfDirty: true,
+        };
+      }
+      const now = Date.now();
+      const { archivedAtMs: _archivedAtMs, ...withoutArchive } = existing;
+      const restored = {
+        ...withoutArchive,
+        updatedAtMs: now,
+        lastOpenedAtMs: now,
+      };
+      const sessionRefs = this.state.sessionRefs.map((ref) => {
+        if (ref.archivedByWorkspaceId !== id) return ref;
+        const {
+          archivedAtMs: _sessionArchivedAtMs,
+          archivedByWorkspaceId: _sessionArchivedByWorkspaceId,
+          ...withoutCascadeArchive
+        } = ref;
+        return withoutCascadeArchive;
+      });
+      return {
+        next: {
+          ...this.state,
+          activeWorkspaceId: id,
+          workspaces: replaceAt(this.state.workspaces, index, restored),
+          sessionRefs,
+        },
+        result: cloneWorkspace(restored),
+        changed: true,
+      };
     });
-    await this.commit({
-      ...this.state,
-      activeWorkspaceId: id,
-      workspaces: replaceAt(this.state.workspaces, index, restored),
-      sessionRefs,
-    });
-    return cloneWorkspace(restored);
   }
 
   async upsertSessionRef(
@@ -527,6 +578,8 @@ export class WorkspaceStore {
       clearLegacyExclusions?: boolean;
       /** Permit metadata-only refreshes for refs in an archived workspace. */
       allowArchived?: boolean;
+      /** Recovery must only update refs still owned by this workspace and still marked missing. */
+      requireMissingRefs?: boolean;
     } = {},
   ): Promise<WorkspaceSessionMutationResult[]> {
     const id = z.string().uuid().parse(workspaceId);
@@ -553,120 +606,144 @@ export class WorkspaceStore {
       "session summaries",
     );
     await this.loadIfNeeded();
-    const targetWorkspaceIndex =
-      options.allowArchived === true
-        ? this.requireWorkspaceIndex(id)
-        : this.requireOpenWorkspaceIndex(id);
-
     const now = Date.now();
-    const refs = [...this.state.sessionRefs];
-    let workspaces = this.state.workspaces;
-    let workspaceChanged = false;
-    const byFile = new Map(refs.map((ref, index) => [ref.sessionFile, index]));
-    const targetLegacyExclusions = new Set(
-      workspaces[targetWorkspaceIndex]?.legacyExcludedSessionFiles ?? [],
-    );
-    const results: WorkspaceSessionMutationResult[] = [];
-    let changed = false;
-    for (const { summary, sessionFile, canonicalCwd } of canonicalSummaries) {
-      const existingIndex = byFile.get(sessionFile);
-      const existing =
-        existingIndex === undefined ? undefined : refs[existingIndex];
-      // Batched upserts are repository discovery, not an explicit user move.
-      // They may refresh refs already owned by the target or claim unassigned
-      // files, but must not undo a legacy removal or steal another workspace's
-      // membership. Explicit upsertSessionRef/moveSession clear tombstones.
-      if (
-        options.clearLegacyExclusions !== true &&
-        (targetLegacyExclusions.has(sessionFile) ||
-          (existing !== undefined && existing.workspaceId !== id))
-      ) {
-        continue;
-      }
-      const candidate = sessionRefFromSummary(
-        id,
-        sessionFile,
-        summary,
-        existing,
-        now,
-        canonicalCwd,
+    const buildMutation = (state: WorkspaceStoreFileV1) => {
+      const targetWorkspaceIndex =
+        options.allowArchived === true
+          ? this.requireWorkspaceIndex(id, state)
+          : this.requireOpenWorkspaceIndex(id, state);
+      const refs = [...state.sessionRefs];
+      let workspaces = state.workspaces;
+      let workspaceChanged = false;
+      const byFile = new Map(
+        refs.map((ref, index) => [ref.sessionFile, index]),
       );
-      if (existing && sameSessionRefData(existing, candidate)) {
+      const targetLegacyExclusions = new Set(
+        workspaces[targetWorkspaceIndex]?.legacyExcludedSessionFiles ?? [],
+      );
+      const results: WorkspaceSessionMutationResult[] = [];
+      let changed = false;
+      for (const { summary, sessionFile, canonicalCwd } of canonicalSummaries) {
+        const existingIndex = byFile.get(sessionFile);
+        const existing =
+          existingIndex === undefined ? undefined : refs[existingIndex];
+        // Missing-ref recovery is a focused revalidation of an existing explicit
+        // membership. If the ref was intentionally removed or moved while the
+        // filesystem check was in flight, do not recreate or steal it.
+        if (
+          options.requireMissingRefs === true &&
+          (existing === undefined ||
+            existing.workspaceId !== id ||
+            existing.missingSinceMs === undefined)
+        ) {
+          continue;
+        }
+        // Batched upserts are repository discovery, not an explicit user move.
+        // They may refresh refs already owned by the target or claim unassigned
+        // files, but must not undo a legacy removal or steal another workspace's
+        // membership. Explicit upsertSessionRef/moveSession clear tombstones.
+        if (
+          options.clearLegacyExclusions !== true &&
+          (targetLegacyExclusions.has(sessionFile) ||
+            (existing !== undefined && existing.workspaceId !== id))
+        ) {
+          continue;
+        }
+        const candidate = sessionRefFromSummary(
+          id,
+          sessionFile,
+          summary,
+          existing,
+          now,
+          canonicalCwd,
+        );
+        if (existing && sameSessionRefData(existing, candidate)) {
+          results.push({
+            workspaceId: id,
+            sessionFile,
+            ...(existing.workspaceId === id
+              ? {}
+              : { previousWorkspaceId: existing.workspaceId }),
+          });
+          continue;
+        }
+        if (existingIndex === undefined) {
+          byFile.set(sessionFile, refs.length);
+          refs.push(candidate);
+        } else {
+          refs[existingIndex] = candidate;
+        }
+        if (
+          options.clearLegacyExclusions === true &&
+          existing?.workspaceId !== undefined &&
+          existing.workspaceId !== id
+        ) {
+          const sourceIndex = workspaces.findIndex(
+            (workspace) => workspace.id === existing.workspaceId,
+          );
+          const source = sourceIndex < 0 ? undefined : workspaces[sourceIndex];
+          if (source?.legacyProjectId !== undefined) {
+            const nextSource = addLegacySessionExclusion(
+              source,
+              sessionFile,
+              now,
+            );
+            if (nextSource !== source) {
+              workspaces = replaceAt(workspaces, sourceIndex, nextSource);
+              workspaceChanged = true;
+            }
+          }
+        }
+        changed = true;
         results.push({
           workspaceId: id,
           sessionFile,
-          ...(existing.workspaceId === id
-            ? {}
-            : { previousWorkspaceId: existing.workspaceId }),
+          ...(existing && existing.workspaceId !== id
+            ? { previousWorkspaceId: existing.workspaceId }
+            : {}),
         });
-        continue;
       }
-      if (existingIndex === undefined) {
-        byFile.set(sessionFile, refs.length);
-        refs.push(candidate);
-      } else {
-        refs[existingIndex] = candidate;
-      }
-      if (
-        options.clearLegacyExclusions === true &&
-        existing?.workspaceId !== undefined &&
-        existing.workspaceId !== id
-      ) {
-        const sourceIndex = workspaces.findIndex(
-          (workspace) => workspace.id === existing.workspaceId,
-        );
-        const source = sourceIndex < 0 ? undefined : workspaces[sourceIndex];
-        if (source?.legacyProjectId !== undefined) {
-          const nextSource = addLegacySessionExclusion(
-            source,
-            sessionFile,
-            now,
-          );
-          if (nextSource !== source) {
-            workspaces = replaceAt(workspaces, sourceIndex, nextSource);
-            workspaceChanged = true;
-          }
+      for (const sessionFile of canonicalMissing) {
+        const index = byFile.get(sessionFile);
+        const existing = index === undefined ? undefined : refs[index];
+        if (
+          index !== undefined &&
+          existing?.workspaceId === id &&
+          existing.missingSinceMs === undefined
+        ) {
+          refs[index] = { ...existing, missingSinceMs: now };
+          changed = true;
         }
       }
-      changed = true;
-      results.push({
-        workspaceId: id,
-        sessionFile,
-        ...(existing && existing.workspaceId !== id
-          ? { previousWorkspaceId: existing.workspaceId }
-          : {}),
-      });
-    }
-    for (const sessionFile of canonicalMissing) {
-      const index = byFile.get(sessionFile);
-      const existing = index === undefined ? undefined : refs[index];
-      if (
-        index !== undefined &&
-        existing?.workspaceId === id &&
-        existing.missingSinceMs === undefined
-      ) {
-        refs[index] = { ...existing, missingSinceMs: now };
-        changed = true;
+      if (options.clearLegacyExclusions === true) {
+        const target = workspaces[targetWorkspaceIndex]!;
+        const nextTarget = removeLegacySessionExclusions(
+          target,
+          canonicalSummaries.map((item) => item.sessionFile),
+          now,
+        );
+        if (nextTarget !== target) {
+          workspaces = replaceAt(workspaces, targetWorkspaceIndex, nextTarget);
+          workspaceChanged = true;
+        }
       }
-    }
-    if (options.clearLegacyExclusions === true) {
-      const target = workspaces[targetWorkspaceIndex]!;
-      const nextTarget = removeLegacySessionExclusions(
-        target,
-        canonicalSummaries.map((item) => item.sessionFile),
-        now,
-      );
-      if (nextTarget !== target) {
-        workspaces = replaceAt(workspaces, targetWorkspaceIndex, nextTarget);
-        workspaceChanged = true;
-      }
-    }
-    if (changed || workspaceChanged) {
-      await this.commit({ ...this.state, sessionRefs: refs, workspaces });
+      return {
+        next: {
+          ...state,
+          sessionRefs: refs,
+          workspaces,
+        },
+        results,
+        changed: changed || workspaceChanged,
+      };
+    };
+    const initial = buildMutation(this.state);
+    if (initial.changed) {
+      await this.commit((state) => buildMutation(state).next);
     } else {
       await this.persistIfDirty();
     }
-    return results;
+    return initial.results;
   }
 
   async upsertSessionRefFromSnapshot(options: {
@@ -798,71 +875,83 @@ export class WorkspaceStore {
       z.string().min(1).parse(sessionFile),
     );
     await this.loadIfNeeded();
-    const targetWorkspaceIndex = this.requireOpenWorkspaceIndex(targetId);
-    const index = this.state.sessionRefs.findIndex(
-      (ref) => ref.sessionFile === canonical,
-    );
-    if (index < 0)
-      throw new Error(`Session is not assigned to a workspace: ${canonical}`);
-    const existing = this.state.sessionRefs[index]!;
-    if (existing.workspaceId === targetId) {
-      const target = this.state.workspaces[targetWorkspaceIndex]!;
+    return this.transact<WorkspaceSessionMutationResult>(() => {
+      const targetWorkspaceIndex = this.requireOpenWorkspaceIndex(targetId);
+      const index = this.state.sessionRefs.findIndex(
+        (ref) => ref.sessionFile === canonical,
+      );
+      if (index < 0)
+        throw new Error(`Session is not assigned to a workspace: ${canonical}`);
+      const existing = this.state.sessionRefs[index]!;
+      const now = Date.now();
+      let workspaces = this.state.workspaces;
+      const target = workspaces[targetWorkspaceIndex]!;
+      if (existing.workspaceId === targetId) {
+        const nextTarget = removeLegacySessionExclusions(
+          target,
+          [canonical],
+          now,
+        );
+        if (nextTarget === target) {
+          return {
+            next: this.state,
+            result: { workspaceId: targetId, sessionFile: canonical },
+            changed: false,
+            persistIfDirty: true,
+          };
+        }
+        return {
+          next: {
+            ...this.state,
+            workspaces: replaceAt(workspaces, targetWorkspaceIndex, nextTarget),
+          },
+          result: { workspaceId: targetId, sessionFile: canonical },
+          changed: true,
+        };
+      }
+      const sourceWorkspaceIndex = workspaces.findIndex(
+        (workspace) => workspace.id === existing.workspaceId,
+      );
+      const source =
+        sourceWorkspaceIndex < 0 ? undefined : workspaces[sourceWorkspaceIndex];
+      if (source?.archivedAtMs !== undefined) {
+        throw new Error(
+          "Restore the source workspace before moving its session.",
+        );
+      }
+      if (source?.legacyProjectId !== undefined) {
+        const nextSource = addLegacySessionExclusion(source, canonical, now);
+        if (nextSource !== source) {
+          workspaces = replaceAt(workspaces, sourceWorkspaceIndex, nextSource);
+        }
+      }
+      const updatedTarget = workspaces[targetWorkspaceIndex]!;
       const nextTarget = removeLegacySessionExclusions(
-        target,
+        updatedTarget,
         [canonical],
-        Date.now(),
+        now,
       );
-      if (nextTarget !== target) {
-        await this.commit({
+      if (nextTarget !== updatedTarget) {
+        workspaces = replaceAt(workspaces, targetWorkspaceIndex, nextTarget);
+      }
+      return {
+        next: {
           ...this.state,
-          workspaces: replaceAt(
-            this.state.workspaces,
-            targetWorkspaceIndex,
-            nextTarget,
-          ),
-        });
-      } else {
-        await this.persistIfDirty();
-      }
-      return { workspaceId: targetId, sessionFile: canonical };
-    }
-    const now = Date.now();
-    let workspaces = this.state.workspaces;
-    const sourceWorkspaceIndex = workspaces.findIndex(
-      (workspace) => workspace.id === existing.workspaceId,
-    );
-    const source =
-      sourceWorkspaceIndex < 0 ? undefined : workspaces[sourceWorkspaceIndex];
-    if (source?.archivedAtMs !== undefined) {
-      throw new Error(
-        "Restore the source workspace before moving its session.",
-      );
-    }
-    if (source?.legacyProjectId !== undefined) {
-      const nextSource = addLegacySessionExclusion(source, canonical, now);
-      if (nextSource !== source) {
-        workspaces = replaceAt(workspaces, sourceWorkspaceIndex, nextSource);
-      }
-    }
-    const target = workspaces[targetWorkspaceIndex]!;
-    const nextTarget = removeLegacySessionExclusions(target, [canonical], now);
-    if (nextTarget !== target) {
-      workspaces = replaceAt(workspaces, targetWorkspaceIndex, nextTarget);
-    }
-    await this.commit({
-      ...this.state,
-      workspaces,
-      sessionRefs: replaceAt(this.state.sessionRefs, index, {
-        ...existing,
-        workspaceId: targetId,
-        missingSinceMs: undefined,
-      }),
+          workspaces,
+          sessionRefs: replaceAt(this.state.sessionRefs, index, {
+            ...existing,
+            workspaceId: targetId,
+            missingSinceMs: undefined,
+          }),
+        },
+        result: {
+          workspaceId: targetId,
+          sessionFile: canonical,
+          previousWorkspaceId: existing.workspaceId,
+        },
+        changed: true,
+      };
     });
-    return {
-      workspaceId: targetId,
-      sessionFile: canonical,
-      previousWorkspaceId: existing.workspaceId,
-    };
   }
 
   async removeSession(
@@ -922,26 +1011,39 @@ export class WorkspaceStore {
     );
     const normalizedTitle = normalizeSessionTitleOverride(title);
     await this.loadIfNeeded();
-    const index = this.state.sessionRefs.findIndex(
-      (ref) => ref.sessionFile === canonical,
-    );
-    if (index < 0) {
-      throw new Error(`Session is not assigned to a workspace: ${canonical}`);
-    }
-    const existing = this.state.sessionRefs[index]!;
-    this.requireOpenWorkspaceIndex(existing.workspaceId);
-    if (existing.titleOverride === normalizedTitle) {
-      await this.persistIfDirty();
-      return { workspaceId: existing.workspaceId, sessionFile: canonical };
-    }
-    await this.commit({
-      ...this.state,
-      sessionRefs: replaceAt(this.state.sessionRefs, index, {
-        ...existing,
-        titleOverride: normalizedTitle,
-      }),
+    return this.transact(() => {
+      const index = this.state.sessionRefs.findIndex(
+        (ref) => ref.sessionFile === canonical,
+      );
+      if (index < 0) {
+        throw new Error(`Session is not assigned to a workspace: ${canonical}`);
+      }
+      const existing = this.state.sessionRefs[index]!;
+      this.requireOpenWorkspaceIndex(existing.workspaceId);
+      const result = {
+        workspaceId: existing.workspaceId,
+        sessionFile: canonical,
+      };
+      if (existing.titleOverride === normalizedTitle) {
+        return {
+          next: this.state,
+          result,
+          changed: false,
+          persistIfDirty: true,
+        };
+      }
+      return {
+        next: {
+          ...this.state,
+          sessionRefs: replaceAt(this.state.sessionRefs, index, {
+            ...existing,
+            titleOverride: normalizedTitle,
+          }),
+        },
+        result,
+        changed: true,
+      };
     });
-    return { workspaceId: existing.workspaceId, sessionFile: canonical };
   }
 
   async archiveSession(
@@ -953,29 +1055,39 @@ export class WorkspaceStore {
       z.string().min(1).parse(sessionFile),
     );
     await this.loadIfNeeded();
-    this.requireOpenWorkspaceIndex(id);
-    const index = this.state.sessionRefs.findIndex(
-      (ref) => ref.workspaceId === id && ref.sessionFile === canonical,
-    );
-    if (index < 0) {
-      throw new Error(
-        `Session is not assigned to this workspace: ${canonical}`,
+    return this.transact(() => {
+      this.requireOpenWorkspaceIndex(id);
+      const index = this.state.sessionRefs.findIndex(
+        (ref) => ref.workspaceId === id && ref.sessionFile === canonical,
       );
-    }
-    const existing = this.state.sessionRefs[index]!;
-    if (existing.archivedAtMs === undefined) {
-      await this.commit({
-        ...this.state,
-        sessionRefs: replaceAt(this.state.sessionRefs, index, {
-          ...existing,
-          archivedAtMs: Date.now(),
-          archivedByWorkspaceId: undefined,
-        }),
-      });
-    } else {
-      await this.persistIfDirty();
-    }
-    return { workspaceId: id, sessionFile: canonical };
+      if (index < 0) {
+        throw new Error(
+          `Session is not assigned to this workspace: ${canonical}`,
+        );
+      }
+      const existing = this.state.sessionRefs[index]!;
+      const result = { workspaceId: id, sessionFile: canonical };
+      if (existing.archivedAtMs !== undefined) {
+        return {
+          next: this.state,
+          result,
+          changed: false,
+          persistIfDirty: true,
+        };
+      }
+      return {
+        next: {
+          ...this.state,
+          sessionRefs: replaceAt(this.state.sessionRefs, index, {
+            ...existing,
+            archivedAtMs: Date.now(),
+            archivedByWorkspaceId: undefined,
+          }),
+        },
+        result,
+        changed: true,
+      };
+    });
   }
 
   async restoreSession(
@@ -987,30 +1099,40 @@ export class WorkspaceStore {
       z.string().min(1).parse(sessionFile),
     );
     await this.loadIfNeeded();
-    this.requireOpenWorkspaceIndex(id);
-    const index = this.state.sessionRefs.findIndex(
-      (ref) => ref.workspaceId === id && ref.sessionFile === canonical,
-    );
-    if (index < 0) {
-      throw new Error(
-        `Session is not assigned to this workspace: ${canonical}`,
+    return this.transact(() => {
+      this.requireOpenWorkspaceIndex(id);
+      const index = this.state.sessionRefs.findIndex(
+        (ref) => ref.workspaceId === id && ref.sessionFile === canonical,
       );
-    }
-    const existing = this.state.sessionRefs[index]!;
-    if (existing.archivedAtMs !== undefined) {
+      if (index < 0) {
+        throw new Error(
+          `Session is not assigned to this workspace: ${canonical}`,
+        );
+      }
+      const existing = this.state.sessionRefs[index]!;
+      const result = { workspaceId: id, sessionFile: canonical };
+      if (existing.archivedAtMs === undefined) {
+        return {
+          next: this.state,
+          result,
+          changed: false,
+          persistIfDirty: true,
+        };
+      }
       const {
         archivedAtMs: _archivedAtMs,
         archivedByWorkspaceId: _archivedByWorkspaceId,
         ...restored
       } = existing;
-      await this.commit({
-        ...this.state,
-        sessionRefs: replaceAt(this.state.sessionRefs, index, restored),
-      });
-    } else {
-      await this.persistIfDirty();
-    }
-    return { workspaceId: id, sessionFile: canonical };
+      return {
+        next: {
+          ...this.state,
+          sessionRefs: replaceAt(this.state.sessionRefs, index, restored),
+        },
+        result,
+        changed: true,
+      };
+    });
   }
 
   async markSessionMissing(
@@ -1030,12 +1152,20 @@ export class WorkspaceStore {
       await this.persistIfDirty();
       return;
     }
-    await this.commit({
-      ...this.state,
-      sessionRefs: replaceAt(this.state.sessionRefs, index, {
-        ...existing,
-        missingSinceMs: Date.now(),
-      }),
+    const now = Date.now();
+    await this.commit((state) => {
+      const index = state.sessionRefs.findIndex(
+        (ref) => ref.workspaceId === id && ref.sessionFile === canonical,
+      );
+      const existing = index < 0 ? undefined : state.sessionRefs[index];
+      if (!existing || existing.missingSinceMs !== undefined) return state;
+      return {
+        ...state,
+        sessionRefs: replaceAt(state.sessionRefs, index, {
+          ...existing,
+          missingSinceMs: now,
+        }),
+      };
     });
   }
 
@@ -1210,12 +1340,19 @@ export class WorkspaceStore {
     const activeWorkspaceId =
       workspaceByProjectId.get(parsed.activeProjectId ?? "")?.id ??
       workspaces[0]?.id;
-    await this.commit({
-      version: 1,
-      ...(activeWorkspaceId ? { activeWorkspaceId } : {}),
-      projectsMigrationCompletedAtMs: now,
-      workspaces,
-      sessionRefs: refs,
+    await this.commit((state) => {
+      if (state.projectsMigrationCompletedAtMs !== undefined) return state;
+      return {
+        ...state,
+        ...(state.activeWorkspaceId
+          ? { activeWorkspaceId: state.activeWorkspaceId }
+          : activeWorkspaceId
+            ? { activeWorkspaceId }
+            : {}),
+        projectsMigrationCompletedAtMs: now,
+        workspaces: [...state.workspaces, ...workspaces],
+        sessionRefs: [...state.sessionRefs, ...refs],
+      };
     });
     return this.listSync();
   }
@@ -1284,26 +1421,47 @@ export class WorkspaceStore {
     return workspace?.archivedAtMs === undefined ? workspace : undefined;
   }
 
-  private requireOpenWorkspaceIndex(workspaceId: string): number {
-    const index = this.requireWorkspaceIndex(workspaceId);
-    if (this.state.workspaces[index]!.archivedAtMs !== undefined) {
+  private requireOpenWorkspaceIndex(
+    workspaceId: string,
+    state: WorkspaceStoreFileV1 = this.state,
+  ): number {
+    const index = this.requireWorkspaceIndex(workspaceId, state);
+    if (state.workspaces[index]!.archivedAtMs !== undefined) {
       throw new Error(`Workspace is archived: ${workspaceId}`);
     }
     return index;
   }
 
-  private requireWorkspaceIndex(workspaceId: string): number {
-    const index = this.state.workspaces.findIndex(
+  private requireWorkspaceIndex(
+    workspaceId: string,
+    state: WorkspaceStoreFileV1 = this.state,
+  ): number {
+    const index = state.workspaces.findIndex(
       (workspace) => workspace.id === workspaceId,
     );
     if (index < 0) throw new Error(`Unknown workspace: ${workspaceId}`);
     return index;
   }
 
-  private async commit(next: WorkspaceStoreFileV1): Promise<void> {
-    this.state = workspaceStoreFileV1Schema.parse(next);
-    this.generation += 1;
-    await this.persist();
+  private async commit(
+    operation: (state: WorkspaceStoreFileV1) => WorkspaceStoreFileV1,
+  ): Promise<void> {
+    const transaction = this.persistQueue
+      .catch(() => undefined)
+      .then(async () => {
+        const candidate = workspaceStoreFileV1Schema.parse(
+          operation(this.state),
+        );
+        await this.writeStoreFile(candidate);
+        this.state = candidate;
+        this.generation += 1;
+        this.persistedGeneration = this.generation;
+      });
+    this.persistQueue = transaction.then(
+      () => undefined,
+      () => undefined,
+    );
+    return transaction;
   }
 
   private async transact<T>(
@@ -1311,18 +1469,29 @@ export class WorkspaceStore {
       next: WorkspaceStoreFileV1;
       result: T;
       changed: boolean;
+      persistIfDirty?: boolean;
     },
   ): Promise<T> {
     const transaction = this.persistQueue
       .catch(() => undefined)
       .then(async () => {
-        // Most legacy mutations publish eagerly before queueing their write.
-        // Rebuild and write again when one races this durable transaction so
-        // we never replace that newer state with a stale candidate.
+        // Every mutation is serialized before publication. Rebuild if an
+        // in-memory change occurred while persistence was in flight so a
+        // candidate never replaces a newer accepted state.
         for (;;) {
           const stateBeforeTransaction = JSON.stringify(this.state);
-          const { next, result, changed } = operation();
-          if (!changed) return result;
+          const { next, result, changed, persistIfDirty } = operation();
+          if (!changed) {
+            if (persistIfDirty && this.persistedGeneration < this.generation) {
+              const generation = this.generation;
+              await this.writeStoreFile(this.state);
+              this.persistedGeneration = Math.max(
+                this.persistedGeneration,
+                generation,
+              );
+            }
+            return result;
+          }
           const candidate = workspaceStoreFileV1Schema.parse(next);
           await this.writeStoreFile(candidate);
           if (JSON.stringify(this.state) !== stateBeforeTransaction) continue;

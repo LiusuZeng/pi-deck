@@ -49,6 +49,120 @@ test("WorkspaceStore creates UUID workspaces, normalizes names, and archives the
   await assert.rejects(store.select(second.id), /archived/i);
 });
 
+test("WorkspaceStore serializes concurrent creates without rejecting or losing workspaces", async () => {
+  const { home } = await temporaryHome();
+  const store = new WorkspaceStore(home);
+
+  const [first, second] = await Promise.all([
+    store.create({ name: "First" }),
+    store.create({ name: "Second" }),
+  ]);
+
+  const listed = await store.list();
+  assert.deepEqual(
+    new Set(listed.workspaces.map((workspace) => workspace.id)),
+    new Set([first.id, second.id]),
+  );
+  assert.equal(listed.activeWorkspaceId, second.id);
+});
+
+test("WorkspaceStore applies queued archive to the latest accepted workspace state", async () => {
+  const { home } = await temporaryHome();
+  const store = new WorkspaceStore(home);
+  const baseline = await store.create({ name: "Baseline" });
+  const originalRename = fs.rename;
+  let releaseRename!: () => void;
+  let renameStarted!: () => void;
+  const renameStartedPromise = new Promise<void>((resolve) => {
+    renameStarted = resolve;
+  });
+  const renameReleasePromise = new Promise<void>((resolve) => {
+    releaseRename = resolve;
+  });
+  const rename = vi.spyOn(fs, "rename");
+  rename.mockImplementationOnce(async (oldPath, newPath) => {
+    renameStarted();
+    await renameReleasePromise;
+    return originalRename(oldPath, newPath);
+  });
+
+  try {
+    const createPromise = store.create({ name: "Concurrent accepted" });
+    await renameStartedPromise;
+    const archivePromise = store.archive(baseline.id);
+    releaseRename();
+
+    const [created] = await Promise.all([createPromise, archivePromise]);
+    const listed = await store.list();
+    assert.deepEqual(
+      new Set(listed.workspaces.map((workspace) => workspace.id)),
+      new Set([created.id]),
+    );
+    assert.equal(listed.archivedWorkspaces?.[0]?.id, baseline.id);
+    assert.equal(listed.activeWorkspaceId, created.id);
+
+    const persisted = JSON.parse(
+      await fs.readFile(path.join(home, "workspaces.json"), "utf8"),
+    ) as { workspaces: Array<{ id: string; archivedAtMs?: number }> };
+    assert.equal(
+      persisted.workspaces.some((workspace) => workspace.id === created.id),
+      true,
+    );
+    assert.equal(
+      persisted.workspaces.find((workspace) => workspace.id === baseline.id)
+        ?.archivedAtMs !== undefined,
+      true,
+    );
+  } finally {
+    rename.mockRestore();
+  }
+});
+
+test("WorkspaceStore serializes concurrent archive and restore", async () => {
+  const { home } = await temporaryHome();
+  const store = new WorkspaceStore(home);
+  const workspace = await store.create({ name: "Concurrent archive" });
+  const originalRename = fs.rename;
+  let releaseRename!: () => void;
+  let renameStarted!: () => void;
+  const renameStartedPromise = new Promise<void>((resolve) => {
+    renameStarted = resolve;
+  });
+  const renameReleasePromise = new Promise<void>((resolve) => {
+    releaseRename = resolve;
+  });
+  const rename = vi.spyOn(fs, "rename");
+  rename.mockImplementationOnce(async (oldPath, newPath) => {
+    renameStarted();
+    await renameReleasePromise;
+    return originalRename(oldPath, newPath);
+  });
+
+  try {
+    const archivePromise = store.archive(workspace.id);
+    await renameStartedPromise;
+    const restorePromise = store.restore(workspace.id);
+    releaseRename();
+    await Promise.all([archivePromise, restorePromise]);
+
+    assert.equal(
+      (await store.getWorkspace(workspace.id))?.archivedAtMs,
+      undefined,
+    );
+    assert.equal((await store.getActiveWorkspace())?.id, workspace.id);
+    const persisted = JSON.parse(
+      await fs.readFile(path.join(home, "workspaces.json"), "utf8"),
+    ) as { workspaces: Array<{ id: string; archivedAtMs?: number }> };
+    assert.equal(
+      persisted.workspaces.find((item) => item.id === workspace.id)
+        ?.archivedAtMs,
+      undefined,
+    );
+  } finally {
+    rename.mockRestore();
+  }
+});
+
 test("WorkspaceStore provides a stable, folderless default workspace", async () => {
   const { home } = await temporaryHome();
   const store = new WorkspaceStore(home);
@@ -65,6 +179,56 @@ test("WorkspaceStore provides a stable, folderless default workspace", async () 
     /default workspace/i,
   );
   await assert.rejects(store.archive(first.id), /default workspace/i);
+});
+
+test("WorkspaceStore serializes concurrent default workspace creation", async () => {
+  const { home } = await temporaryHome();
+  const store = new WorkspaceStore(home);
+  const originalRename = fs.rename;
+  let releaseRename!: () => void;
+  let renameStarted!: () => void;
+  const renameStartedPromise = new Promise<void>((resolve) => {
+    renameStarted = resolve;
+  });
+  const renameReleasePromise = new Promise<void>((resolve) => {
+    releaseRename = resolve;
+  });
+  const rename = vi.spyOn(fs, "rename");
+  rename.mockImplementationOnce(async (oldPath, newPath) => {
+    renameStarted();
+    await renameReleasePromise;
+    return originalRename(oldPath, newPath);
+  });
+
+  try {
+    const firstPromise = store.ensureDefaultWorkspace({ activate: true });
+    await renameStartedPromise;
+    const secondPromise = store.ensureDefaultWorkspace();
+    releaseRename();
+
+    const [first, second] = await Promise.all([firstPromise, secondPromise]);
+    assert.equal(first.id, second.id);
+
+    const listed = await store.list();
+    assert.equal(
+      listed.workspaces.filter((workspace) => workspace.isDefault === true)
+        .length,
+      1,
+    );
+    assert.equal(listed.activeWorkspaceId, first.id);
+
+    const persisted = JSON.parse(
+      await fs.readFile(path.join(home, "workspaces.json"), "utf8"),
+    ) as { workspaces: Array<{ id: string; isDefault?: boolean }> };
+    assert.deepEqual(
+      persisted.workspaces
+        .filter((workspace) => workspace.isDefault === true)
+        .map((workspace) => workspace.id),
+      [first.id],
+    );
+  } finally {
+    rename.mockRestore();
+  }
 });
 
 test("WorkspaceStore archives session membership without touching the Pi file", async () => {
@@ -458,6 +622,106 @@ test("WorkspaceStore does not publish a claim when atomic rename fails", async (
   assert.deepEqual(
     await new WorkspaceStore(home).getSessionRefs(workspace.id),
     [],
+  );
+});
+
+test("WorkspaceStore keeps a failed create out of memory and later saves", async () => {
+  const { home } = await temporaryHome();
+  const store = new WorkspaceStore(home);
+  await store.create({ name: "Baseline" });
+  const storeFile = path.join(home, "workspaces.json");
+  const lastGood = await fs.readFile(storeFile, "utf8");
+  const rename = vi.spyOn(fs, "rename");
+  rename.mockRejectedValueOnce(new Error("injected create rename failure"));
+
+  await assert.rejects(
+    store.create({ name: "Rejected workspace" }),
+    /injected create rename failure/,
+  );
+  rename.mockRestore();
+  assert.equal(await fs.readFile(storeFile, "utf8"), lastGood);
+  assert.deepEqual(
+    (await store.list()).workspaces.map((workspace) => workspace.name),
+    ["Baseline"],
+  );
+
+  await store.create({ name: "Accepted later" });
+  const persisted = JSON.parse(await fs.readFile(storeFile, "utf8")) as {
+    workspaces: Array<{ name: string }>;
+  };
+  assert.deepEqual(
+    persisted.workspaces.map((workspace) => workspace.name).sort(),
+    ["Accepted later", "Baseline"],
+  );
+});
+
+test("WorkspaceStore keeps a failed archive out of memory and later saves", async () => {
+  const { home } = await temporaryHome();
+  const store = new WorkspaceStore(home);
+  const workspace = await store.create({ name: "Archive failure" });
+  const storeFile = path.join(home, "workspaces.json");
+  const lastGood = await fs.readFile(storeFile, "utf8");
+  const rename = vi.spyOn(fs, "rename");
+  rename.mockRejectedValueOnce(new Error("injected archive rename failure"));
+
+  await assert.rejects(
+    store.archive(workspace.id),
+    /injected archive rename failure/,
+  );
+  rename.mockRestore();
+  assert.equal(await fs.readFile(storeFile, "utf8"), lastGood);
+  assert.equal(
+    (await store.getWorkspace(workspace.id))?.archivedAtMs,
+    undefined,
+  );
+
+  await store.create({ name: "Accepted later" });
+  const persisted = JSON.parse(await fs.readFile(storeFile, "utf8")) as {
+    workspaces: Array<{ id: string; archivedAtMs?: number }>;
+  };
+  assert.equal(
+    persisted.workspaces.find((item) => item.id === workspace.id)?.archivedAtMs,
+    undefined,
+  );
+});
+
+test("WorkspaceStore keeps a failed move out of memory and later saves", async () => {
+  const { root, home } = await temporaryHome();
+  const sessionFile = path.join(root, "move-failure.jsonl");
+  await fs.writeFile(sessionFile, "session\n");
+  const store = new WorkspaceStore(home);
+  const source = await store.create({ name: "Source" });
+  const target = await store.create({ name: "Target" });
+  await store.upsertSessionRef(source.id, summary(sessionFile));
+  const storeFile = path.join(home, "workspaces.json");
+  const lastGood = await fs.readFile(storeFile, "utf8");
+  const rename = vi.spyOn(fs, "rename");
+  rename.mockRejectedValueOnce(new Error("injected move rename failure"));
+
+  await assert.rejects(
+    store.moveSession(sessionFile, target.id),
+    /injected move rename failure/,
+  );
+  rename.mockRestore();
+  assert.equal(await fs.readFile(storeFile, "utf8"), lastGood);
+  assert.equal(
+    (await store.getSessionOwner(sessionFile))?.workspaceId,
+    source.id,
+  );
+
+  await store.create({ name: "Accepted later" });
+  const persisted = JSON.parse(await fs.readFile(storeFile, "utf8")) as {
+    sessionRefs: Array<{ sessionFile: string; workspaceId: string }>;
+  };
+  const canonicalSessionFile = path.join(
+    await fs.realpath(root),
+    "move-failure.jsonl",
+  );
+  assert.equal(
+    persisted.sessionRefs.find(
+      (ref) => ref.sessionFile === canonicalSessionFile,
+    )?.workspaceId,
+    source.id,
   );
 });
 
