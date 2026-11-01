@@ -666,8 +666,11 @@ describe("task-session planner usage accounting", () => {
       // event. The final event has its own reported usage and cumulative
       // history, so final reconciliation must still recover the retry rather
       // than treating direct final usage as a reason to skip the snapshot.
+      // Both history rows reuse their provider message id, making their stable
+      // cumulative positions necessary to preserve distinct attempts.
       setPlannerFixture("fieldless-retry-failed-collection-final-history", [
         "--planner-retry-with-usage",
+        "--planner-retry-reused-message-id",
         "--planner-retry-fieldless-terminal",
         "--planner-fail-first-get-messages",
         "--planner-terminal-history",

@@ -4885,7 +4885,7 @@ function plannerUsageMessageKey(
   // terminal run/event identity keeps those attempts distinct while a repeat
   // observation of the same event retains its idempotent key.
   if (typeof message.id === "string")
-    return `terminal:${terminalObservationId}:id:${message.id}`;
+    return `terminal:${terminalObservationId}:id:${message.id}:message:${index}`;
   // Message ids are optional, so retain the same attempt identity for id-less
   // messages without deriving identity from private planner content.
   return `terminal:${terminalObservationId}:message:${index}`;
