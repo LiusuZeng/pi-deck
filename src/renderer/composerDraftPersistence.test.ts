@@ -286,6 +286,78 @@ describe("identity restoration and migration", () => {
     ).toContain("/sessions/stable.jsonl");
   });
 
+  it("restores a definitely rejected first send after native row rebinding", () => {
+    const storage = new MemoryStorage();
+    const firstRuntimeSession = {
+      id: "first-runtime-id",
+      workspaceId: "workspace-a",
+      sessionFile: "/sessions/rejected-first-send.jsonl",
+    };
+    const cachedNativeSession = {
+      ...firstRuntimeSession,
+      id: "saved-row-id",
+    };
+    const reloadedRuntimeSession = {
+      ...firstRuntimeSession,
+      id: "new-runtime-id",
+    };
+    const first = new ComposerDraftPersistence(storage, {
+      now: () => 12,
+      createDraftId: () => "first-send-draft",
+    });
+    first.hydrate([workspaceDraftSession], ["workspace-a"]);
+    first.persist([workspaceDraftSession], {
+      [workspaceDraftSession.id]: {
+        text: "rejected first send remains editable",
+        attachmentCount: 0,
+      },
+    });
+
+    // A first send materializes the renderer-only shell as a native session.
+    first.migrateSession(workspaceDraftSession, firstRuntimeSession);
+    first.beginSubmission(
+      firstRuntimeSession,
+      "rejected first send remains editable",
+      0,
+    );
+    first.finishSubmission(firstRuntimeSession, "rejected", true);
+
+    // Reload hydration first finds the canonical file as a saved row, then a
+    // resumed worker replaces that row with a new runtime id.
+    const reloaded = new ComposerDraftPersistence(storage);
+    expect(
+      reloaded.hydrate([cachedNativeSession], ["workspace-a"]).restored,
+    ).toMatchObject([
+      {
+        sessionId: "saved-row-id",
+        text: "rejected first send remains editable",
+      },
+    ]);
+    // A background/attached-runtime replacement can happen before React has
+    // committed that saved-row restoration. Rebinding must requeue it for the
+    // replacement row instead of treating the prior row id as permanently
+    // restored. This fails if native-to-native migration leaves restoredKeys
+    // unchanged.
+    reloaded.migrateSession(cachedNativeSession, reloadedRuntimeSession);
+    expect(
+      reloaded.restoreAvailableSessions([reloadedRuntimeSession]).restored,
+    ).toEqual([
+      {
+        sessionId: "new-runtime-id",
+        identity: {
+          kind: "sessionFile",
+          workspaceId: "workspace-a",
+          sessionFile: "/sessions/rejected-first-send.jsonl",
+        },
+        text: "rejected first send remains editable",
+        attachmentsNeedReselection: false,
+      },
+    ]);
+    expect(
+      reloaded.pendingSubmissionForSession(reloadedRuntimeSession),
+    ).toBeUndefined();
+  });
+
   it("rekeys and restores an attachment-only reselection marker", () => {
     const storage = new MemoryStorage();
     const cached = {
@@ -577,6 +649,36 @@ describe("ordering, acceptance, and storage failures", () => {
     const rejectedRecord = readComposerDraftStore(rejectedStorage).records[0];
     expect(rejectedRecord).toMatchObject({ text: "definitely rejected" });
     expect(rejectedRecord?.pendingSubmission).toBeUndefined();
+  });
+
+  it("preserves newer text beside an unknown delivery through reload and recovery", () => {
+    const storage = new MemoryStorage();
+    const first = new ComposerDraftPersistence(storage, { now: () => 50 });
+    first.hydrate([nativeSession], ["workspace-a"]);
+    first.beginSubmission(nativeSession, "possibly accepted text", 0);
+    first.persist([nativeSession], {
+      [nativeSession.id]: { text: "newer unsent draft", attachmentCount: 0 },
+    });
+
+    const reloaded = new ComposerDraftPersistence(storage, { now: () => 60 });
+    const plan = reloaded.hydrate([nativeSession], ["workspace-a"]);
+    expect(plan.restored).toMatchObject([
+      { sessionId: nativeSession.id, text: "newer unsent draft" },
+    ]);
+    expect(plan.pendingSubmissions).toMatchObject([
+      { sessionId: nativeSession.id, text: "possibly accepted text" },
+    ]);
+    expect(
+      reloaded.reconcilePendingSubmission(nativeSession, "unknown"),
+    ).toMatchObject({ status: "unchanged" });
+
+    // An explicit recovery may not overwrite newer user input. Both values
+    // remain durable until the newer draft is deliberately handled.
+    expect(reloaded.recoverPendingSubmission(nativeSession)).toBeUndefined();
+    expect(readComposerDraftStore(storage).records[0]).toMatchObject({
+      text: "newer unsent draft",
+      pendingSubmission: { text: "possibly accepted text" },
+    });
   });
 
   it.each(["parent", "newTaskSession"] as const)(

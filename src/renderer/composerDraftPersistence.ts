@@ -556,7 +556,16 @@ export class ComposerDraftPersistence {
     if (fromIdentity === undefined || toIdentity === undefined) {
       return { status: "unchanged", truncated: false, pruned: 0 };
     }
+    const fromKey = composerDraftIdentityKey(fromIdentity);
+    const toKey = composerDraftIdentityKey(toIdentity);
     this.migrateIdentity(fromIdentity, toIdentity);
+    // A saved row can be hydrated before main replaces it with a runtime row
+    // for the same native file. The React move normally carries that text, but
+    // a replacement can race its render. Requeue the durable restoration for
+    // the new row; callers apply it only to an empty composer, so newer input
+    // remains authoritative. Do not do this for a workspace-draft-to-native
+    // migration: that occurs immediately before first-send quarantine.
+    if (fromKey === toKey) this.restoredKeys.delete(toKey);
     this.identitiesBySessionId.delete(from.id);
     this.identitiesBySessionId.set(to.id, toIdentity);
     return this.write();

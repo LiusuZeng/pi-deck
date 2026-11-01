@@ -100,6 +100,32 @@ describe("sessionRuntimeReducer", () => {
     ).toBe("completed");
   });
 
+  it("keeps a sending prompt's retry source through a terminal provider error", () => {
+    const sending = {
+      ...session(),
+      status: "sending" as const,
+      baseState: "attaching" as const,
+      retryPrompt: { text: "retry this prompt", attachments: [] },
+    };
+    const started = reduceRuntimeEvent(sending, {
+      type: "agent_start",
+      runtimeId: "runtime-1",
+    } as any);
+    const failed = reduceRuntimeEvent(started, {
+      type: "agent_end",
+      runtimeId: "runtime-1",
+      status: "error",
+      errorMessage: "provider failed",
+    } as any);
+
+    expect(started.retryPrompt).toEqual(sending.retryPrompt);
+    expect(failed).toMatchObject({
+      status: "error",
+      lifecycle: { phase: "terminal", outcome: "failed" },
+      retryPrompt: sending.retryPrompt,
+    });
+  });
+
   it("projects delegated child outcomes separately from the parent tool phase", () => {
     const running = reduceRuntimeEvent(session(), {
       type: "tool_execution_start",
