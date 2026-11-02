@@ -358,6 +358,59 @@ describe("identity restoration and migration", () => {
     ).toBeUndefined();
   });
 
+  it("rebinds a restored rejected draft when discovery replaces its row", () => {
+    const storage = new MemoryStorage();
+    const cachedRow = {
+      id: "cached-rejected-row",
+      workspaceId: "workspace-a",
+      sessionFile: "/sessions/rejected-discovery-race.jsonl",
+    };
+    const discoveredRuntime = {
+      ...cachedRow,
+      id: "discovered-runtime-row",
+    };
+    const first = new ComposerDraftPersistence(storage, { now: () => 20 });
+    first.hydrate([cachedRow], ["workspace-a"]);
+    first.beginSubmission(cachedRow, "definitely rejected during reload", 0);
+    first.finishSubmission(cachedRow, "rejected", true);
+
+    const reloaded = new ComposerDraftPersistence(storage);
+    // Bootstrap restores the cached row first. A subsequent discovery can
+    // replace it without the renderer receiving an explicit migration event.
+    expect(reloaded.hydrate([cachedRow], ["workspace-a"]).restored).toEqual([
+      {
+        sessionId: "cached-rejected-row",
+        identity: {
+          kind: "sessionFile",
+          workspaceId: "workspace-a",
+          sessionFile: "/sessions/rejected-discovery-race.jsonl",
+        },
+        text: "definitely rejected during reload",
+        attachmentsNeedReselection: false,
+      },
+    ]);
+    expect(
+      reloaded.restoreAvailableSessions([discoveredRuntime]).restored,
+    ).toEqual([
+      {
+        sessionId: "discovered-runtime-row",
+        identity: {
+          kind: "sessionFile",
+          workspaceId: "workspace-a",
+          sessionFile: "/sessions/rejected-discovery-race.jsonl",
+        },
+        text: "definitely rejected during reload",
+        attachmentsNeedReselection: false,
+      },
+    ]);
+
+    // A stable replacement row is restored once; this cannot turn into a
+    // repeated draft resurrection during ordinary renders.
+    expect(
+      reloaded.restoreAvailableSessions([discoveredRuntime]).restored,
+    ).toEqual([]);
+  });
+
   it("rekeys and restores an attachment-only reselection marker", () => {
     const storage = new MemoryStorage();
     const cached = {

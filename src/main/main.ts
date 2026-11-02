@@ -180,6 +180,7 @@ import {
   discoverPiRuntimeModels,
   parsePiRuntimeModelDiscovery,
 } from "./pi/modelDiscovery.js";
+import { JsonlRpcNotificationTimeoutError } from "./pi/jsonlClient.js";
 import { SinglePiAdapter } from "./pi/piAdapter.js";
 import {
   runtimeTotalTokensFromSessionStats,
@@ -3767,8 +3768,12 @@ async function initializeChatAdapter(
     // Private delegated workers share the adapter only for capacity and RPC;
     // their events/transcript identities never cross into renderer chat state.
     if (chatRuntimeIds.has(parsed.data.runtimeId)) {
-      trackExtensionUiRuntimeEvent(parsed.data);
-      sendChatEventToRenderer(parsed.data);
+      // A timed-out response write may still be queued in Pi's stdin. Do not
+      // surface any subsequent dialogs from that quarantined worker as
+      // actionable while its teardown waits for actual process exit.
+      if (trackExtensionUiRuntimeEvent(parsed.data)) {
+        sendChatEventToRenderer(parsed.data);
+      }
       if (parsed.data.type === "agent_end") {
         void adapter
           .getMessages(parsed.data.runtimeId)
@@ -4166,12 +4171,16 @@ function getChatWorkerCapacity(): WorkerCapacity {
 
 function trackExtensionUiRuntimeEvent(
   event: z.infer<typeof chatRuntimeEventSchema>,
-): void {
-  if (event.type !== "extension_ui_request") return;
+): boolean {
+  if (event.type !== "extension_ui_request") return true;
+  if (pendingExtensionUiRequests.isRuntimeQuarantined(event.runtimeId)) {
+    return false;
+  }
   const request = normalizePendingExtensionUiRequest(event);
-  if (request === undefined) return;
+  if (request === undefined) return true;
 
   pendingExtensionUiRequests.register(event.runtimeId, request);
+  return true;
 }
 
 function normalizePendingExtensionUiRequest(
@@ -4273,9 +4282,21 @@ async function respondToExtensionUi(
     diagnosticsService.recordError(
       `Failed to write extension UI response ${request.requestId} for ${request.runtimeId}: ${message}`,
     );
-    // A failed write remains actionable only while the original request is
-    // still live and no newer event reused its id.
-    if (pendingExtensionUiRequests.restore(claimed) === "restored") {
+    if (error instanceof JsonlRpcNotificationTimeoutError) {
+      // Node may still deliver the queued bytes after this deadline. Every
+      // dialog for this worker is therefore unsafe, including one received
+      // after this claim was superseded. Hide them all until actual exit.
+      pendingExtensionUiRequests.quarantineRuntime(request.runtimeId);
+      sendChatEventToRenderer({
+        type: "extension_ui_response_delivery_unknown",
+        runtimeId: request.runtimeId,
+        requestId: request.requestId,
+        message:
+          "Pi stopped accepting the extension response. Its delivery status is unknown, so the session is being closed instead of retrying.",
+      });
+    } else if (pendingExtensionUiRequests.restore(claimed) === "restored") {
+      // Immediate write failures remain actionable only while the original
+      // request is still live and no newer event reused its id.
       sendChatEventToRenderer({
         type: "extension_ui_response_failed",
         runtimeId: request.runtimeId,
@@ -4565,6 +4586,9 @@ function forgetChatRuntime(
     attachmentSelections.releaseSession(runtimeId);
   }
   clearPendingExtensionUiRequests(runtimeId);
+  // forgetChatRuntime runs only after adapter ownership has ended (normally
+  // from worker_exit), so a quarantined runtime may now accept a reused id.
+  pendingExtensionUiRequests.releaseRuntime(runtimeId);
   chatRuntimeIds.delete(runtimeId);
   chatRuntimeModes.delete(runtimeId);
   chatWorkerCwds.delete(runtimeId);
@@ -6560,6 +6584,11 @@ async function closeChatWorkerGeneration(
           }
         } finally {
           chatRuntimeShutdownFailures.finishClose(runtimeId, closed);
+          // closeSession resolves only after PiWorker observed actual exit. A
+          // timed-out Extension UI reply is delivery-unknown until this point;
+          // retain its quarantine if close failed so an old queued reply cannot
+          // authorize dialogs on a reused runtime id.
+          if (closed) pendingExtensionUiRequests.releaseRuntime(runtimeId);
           disposeShutdownWatcherIfSettled();
         }
       }),
