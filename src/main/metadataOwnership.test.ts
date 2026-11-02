@@ -748,7 +748,7 @@ test("separate processes allow exactly one simultaneous v2 stale-lock reclaimer"
     first.child.stdin.write("recover\n");
     second.child.stdin.write("recover\n");
 
-    const winner = await Promise.race([
+    const winner = await Promise.any([
       waitForChildOutput(first, "ready").then(() => first),
       waitForChildOutput(second, "ready").then(() => second),
     ]);
