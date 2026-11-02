@@ -275,6 +275,8 @@ export type JsonlRpcCommandProtocol = "command-field" | "type-field";
 
 export interface JsonlRpcClientOptions {
   requestTimeoutMs?: number;
+  /** Deadline for a response-less notification write to reach stdin. */
+  notificationTimeoutMs?: number;
   stderrBufferBytes?: number;
   /** Maximum UTF-8 byte length of one stdout JSONL record. */
   maxLineBytes?: number;
@@ -321,6 +323,20 @@ export class JsonlRpcDeliveryError extends Error {
   }
 }
 
+/** A notification deadline leaves queued stdin bytes' delivery unknown. */
+export class JsonlRpcNotificationTimeoutError extends JsonlRpcDeliveryError {
+  /** Retained for callers that predate the shared delivery-status contract. */
+  readonly deliveryUnknown = true;
+
+  constructor(timeoutMs: number) {
+    super(
+      `RPC notification write timed out after ${timeoutMs}ms; delivery status is unknown`,
+      "unknown",
+    );
+    this.name = "JsonlRpcNotificationTimeoutError";
+  }
+}
+
 /**
  * Class identity can be lost when an error crosses a bundled Electron module
  * boundary. Keep delivery classification explicit and structural so that
@@ -361,6 +377,7 @@ export class JsonlRpcError extends Error {
 export class JsonlRpcClient extends EventEmitter {
   readonly stderr: DiagnosticRingBuffer;
   private readonly requestTimeoutMs: number;
+  private readonly notificationTimeoutMs: number;
   private readonly malformedOutputIsFatal: boolean;
   private readonly commandProtocol: JsonlRpcCommandProtocol;
   private readonly pending = new Map<string, PendingRequest>();
@@ -385,6 +402,8 @@ export class JsonlRpcClient extends EventEmitter {
   ) {
     super();
     this.requestTimeoutMs = options.requestTimeoutMs ?? 10_000;
+    this.notificationTimeoutMs =
+      options.notificationTimeoutMs ?? this.requestTimeoutMs;
     this.malformedOutputIsFatal = options.malformedOutputIsFatal ?? true;
     this.commandProtocol = options.commandProtocol ?? "type-field";
     this.stderr = new DiagnosticRingBuffer(
@@ -410,6 +429,17 @@ export class JsonlRpcClient extends EventEmitter {
       this.stderr.append(text);
       this.emit("diagnostic", text);
     });
+    // A queued write can fail after its callback's caller has timed out (for
+    // example when quarantining a stalled worker closes its stdin). Keep this
+    // listener for the stream's whole lifetime: Writable emits an unhandled
+    // "error" otherwise, and the callback is not a substitute for observing
+    // later stream errors.
+    const stdin = child.stdin;
+    if (stdin && typeof stdin.on === "function") {
+      stdin.on("error", (error) => {
+        this.emit("diagnostic", `RPC stdin error: ${error.message}`);
+      });
+    }
     child.on("error", (error) => {
       // A spawn failure has no process exit event to wait for. It is still a
       // terminal lifecycle event: consumers must release capacity exactly as
@@ -545,7 +575,10 @@ export class JsonlRpcClient extends EventEmitter {
    * Extension UI responses use this path: Pi resumes the blocked extension but
    * does not emit a normal command response.
    */
-  send(record: JsonObject): Promise<void> {
+  send(
+    record: JsonObject,
+    timeoutMs = this.notificationTimeoutMs,
+  ): Promise<void> {
     if (this.fatalError) {
       return Promise.reject(this.fatalError);
     }
@@ -563,13 +596,23 @@ export class JsonlRpcClient extends EventEmitter {
     return new Promise<void>((resolve, reject) => {
       const token = Symbol("rpc-notification-write");
       let settled = false;
-      const rejectOnce = (error: Error): void => {
+      const settle = (callback: () => void): void => {
         if (settled) return;
         settled = true;
+        clearTimeout(timer);
         this.pendingNotificationWrites.delete(token);
-        reject(error);
+        callback();
       };
+      const rejectOnce = (error: Error): void => settle(() => reject(error));
       this.pendingNotificationWrites.set(token, { reject: rejectOnce });
+
+      // A write callback means Node drained its queued bytes, not that Pi
+      // handled this response. If it never fires, the bytes may still be in
+      // the pipe and arrive later, so callers must treat timeout as unknown
+      // delivery rather than safely retrying the notification.
+      const timer = setTimeout(() => {
+        rejectOnce(new JsonlRpcNotificationTimeoutError(timeoutMs));
+      }, timeoutMs);
 
       try {
         this.child.stdin!.write(payload, "utf8", (error?: Error | null) => {
@@ -577,10 +620,7 @@ export class JsonlRpcClient extends EventEmitter {
             this.handleStdinFailure(error, "Failed to write RPC notification");
             return;
           }
-          if (settled) return;
-          settled = true;
-          this.pendingNotificationWrites.delete(token);
-          resolve();
+          settle(resolve);
         });
       } catch (error) {
         this.handleStdinFailure(

@@ -1039,7 +1039,15 @@ export class OutputLibraryStore {
           // A process killed between mkdir and owner creation leaves no PID.
           // Only reclaim a sufficiently old incomplete acquisition, avoiding a
           // race with the normal tiny owner-file write.
-          const age = Date.now() - (await fs.stat(lock)).mtimeMs;
+          let age: number;
+          try {
+            age = Date.now() - (await fs.stat(lock)).mtimeMs;
+          } catch (error) {
+            // A releasing owner can remove the lock after mkdir reported it.
+            // Restart acquisition so the operation rechecks the current head.
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+            throw error;
+          }
           if (age > 30_000) await fs.rm(lock, { recursive: true, force: true });
           else await new Promise((resolve) => setTimeout(resolve, 10));
           continue;
