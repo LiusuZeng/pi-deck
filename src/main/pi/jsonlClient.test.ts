@@ -12,6 +12,7 @@ import {
   JsonlRpcClient,
   JsonlRpcDeliveryError,
   JsonlRpcError,
+  JsonlRpcNotificationTimeoutError,
   type JsonlRpcClientOptions,
   spawnJsonlRpcClient,
 } from "./jsonlClient.js";
@@ -560,6 +561,66 @@ test("JSONL RPC client rejects exact Pi RPC error responses", async () => {
       },
     );
     assert.equal(client.pendingCount, 0);
+  } finally {
+    client.close();
+  }
+});
+
+test("JSONL notification write deadline reports unknown delivery and ignores a late callback", async () => {
+  const childScript = `
+    let buffer = "";
+    process.stdin.pause();
+    process.stdin.on("data", (chunk) => {
+      buffer += chunk;
+      const newline = buffer.indexOf("\\n");
+      if (newline >= 0) {
+        process.stdout.write(JSON.stringify({
+          type: "notification_received",
+          bytes: Buffer.byteLength(buffer.slice(0, newline)),
+        }) + "\\n");
+      }
+    });
+    setTimeout(() => process.stdin.resume(), 100);
+    setInterval(() => {}, 1_000);
+  `;
+  const client = spawnJsonlRpcClient(
+    process.execPath,
+    ["-e", childScript],
+    { cwd: process.cwd(), env: process.env },
+    { notificationTimeoutMs: 20 },
+  );
+  let resolved = false;
+  try {
+    const notification = client.send({
+      type: "extension_ui_response",
+      value: "x".repeat(1024 * 1024),
+    });
+    void notification.then(
+      () => {
+        resolved = true;
+      },
+      () => undefined,
+    );
+    await assert.rejects(notification, (error: unknown) => {
+      assert.ok(error instanceof JsonlRpcNotificationTimeoutError);
+      assert.ok(error instanceof JsonlRpcDeliveryError);
+      assert.equal(error.deliveryStatus, "unknown");
+      assert.equal(error.deliveryUnknown, true);
+      return true;
+    });
+    assert.equal(client.child.exitCode, null);
+
+    const delivered = await waitForEvent(
+      client,
+      (event) => event.type === "notification_received",
+    );
+    assert.ok(Number(delivered.bytes) > 1024 * 1024);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(
+      resolved,
+      false,
+      "a late stdin callback must not report success",
+    );
   } finally {
     client.close();
   }

@@ -148,6 +148,36 @@ describe("reduceSessionRuntimeEvent", () => {
     expect(cleared.overlays.needsUserInput).toBe(false);
   });
 
+  it("clears every queued extension dialog when delivery is unknown", () => {
+    const waiting = applyEvents([
+      {
+        type: "extension_ui_request",
+        requestId: "ext-1",
+        method: "confirm",
+      },
+      {
+        type: "extension_ui_request",
+        requestId: "ext-2",
+        method: "input",
+      },
+    ]);
+
+    const quarantined = reduceSessionRuntimeEvent(waiting, {
+      type: "extension_ui_response_delivery_unknown",
+      requestId: "ext-1",
+      message: "Pi is closing this session because delivery is unknown.",
+    });
+
+    expect(quarantined).toMatchObject({
+      baseState: "error",
+      pendingExtensionUiQueue: [],
+      overlays: { needsUserInput: false },
+    });
+    expect(quarantined.diagnostics).toContain(
+      "Pi is closing this session because delivery is unknown.",
+    );
+  });
+
   it.each(["extension_ui_response_sent", "extension_ui_request_timeout"])(
     "keeps successful terminal lifecycle after a late %s",
     (clearType) => {
