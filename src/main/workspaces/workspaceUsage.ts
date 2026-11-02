@@ -160,15 +160,24 @@ const usageStoreSchema = z
   .object({
     version: z.literal(2),
     snapshots: z.array(usageSnapshotSchema),
+    // Optional for stores written before deletion generations were durable.
+    sessionFreezeGenerations: z
+      .record(z.string(), z.number().int().nonnegative())
+      .optional(),
   })
   .strict();
 
 interface UsageStoreState {
   version: 2;
   snapshots: UsageSnapshot[];
+  sessionFreezeGenerations: Record<string, number>;
 }
 
-const emptyStore = (): UsageStoreState => ({ version: 2, snapshots: [] });
+const emptyStore = (): UsageStoreState => ({
+  version: 2,
+  snapshots: [],
+  sessionFreezeGenerations: {},
+});
 
 export class WorkspaceUsageStore {
   readonly storeFile: string;
@@ -178,6 +187,10 @@ export class WorkspaceUsageStore {
   private persistTail: Promise<void> = Promise.resolve();
   private generation = 0;
   private persistedGeneration = 0;
+  // Each deletion advances the owner generation. A write that started before
+  // that deletion is frozen under that deletion's unique snapshot id; writes
+  // begun after it remain live if the same path is restored.
+  private readonly sessionFreezeGenerations = new Map<string, number>();
   private readonly sessionRefreshInFlight = new Map<
     string,
     Promise<{ diagnostics: string[]; refreshed: boolean }>
@@ -226,6 +239,10 @@ export class WorkspaceUsageStore {
         ? sessionSnapshotId(ownerSessionFile)
         : `${options.source}:${options.sessionKey}`;
     await this.loadIfNeeded();
+    const freezeGeneration =
+      ownerSessionFile === undefined
+        ? undefined
+        : (this.sessionFreezeGenerations.get(ownerSessionFile) ?? 0);
     const existing = this.state.snapshots.find(
       (snapshot) => snapshot.id === id,
     );
@@ -266,7 +283,7 @@ export class WorkspaceUsageStore {
         snapshot.sessionFileMtimeMs = signature.mtimeMs;
       }
     }
-    await this.upsertSnapshot(snapshot);
+    await this.upsertSnapshot(snapshot, freezeGeneration);
   }
 
   /**
@@ -282,6 +299,8 @@ export class WorkspaceUsageStore {
   }): Promise<void> {
     const ownerSessionFile = await canonicalOrResolved(options.sessionFile);
     await this.loadIfNeeded();
+    const freezeGeneration =
+      this.sessionFreezeGenerations.get(ownerSessionFile) ?? 0;
     const id = sessionSnapshotId(ownerSessionFile);
     const existing = this.state.snapshots.find(
       (snapshot) => snapshot.id === id,
@@ -322,28 +341,31 @@ export class WorkspaceUsageStore {
     const totalCostUsd =
       adjustedUsage.totalCostUsd ??
       (inheritedOnlyRuntime ? undefined : existing?.totalCostUsd);
-    await this.upsertSnapshot({
-      id,
-      workspaceId: options.workspaceId,
-      ownerSessionFile,
-      source: "session",
-      inputTokens: adjustedUsage.inputTokens,
-      outputTokens: adjustedUsage.outputTokens,
-      cacheReadTokens: adjustedUsage.cacheReadTokens,
-      cacheWriteTokens: adjustedUsage.cacheWriteTokens,
-      totalTokens: adjustedUsage.totalTokens,
-      ...(totalCostUsd !== undefined ? { totalCostUsd } : {}),
-      contributorsWithCost,
-      contributorsWithoutCost,
-      recordedAtMs: options.recordedAtMs ?? Date.now(),
-      ...(existing?.sessionFileSize !== undefined
-        ? { sessionFileSize: existing.sessionFileSize }
-        : {}),
-      ...(existing?.sessionFileMtimeMs !== undefined
-        ? { sessionFileMtimeMs: existing.sessionFileMtimeMs }
-        : {}),
-      ...forkBaselineSnapshotFields(forkBaseline),
-    });
+    await this.upsertSnapshot(
+      {
+        id,
+        workspaceId: options.workspaceId,
+        ownerSessionFile,
+        source: "session",
+        inputTokens: adjustedUsage.inputTokens,
+        outputTokens: adjustedUsage.outputTokens,
+        cacheReadTokens: adjustedUsage.cacheReadTokens,
+        cacheWriteTokens: adjustedUsage.cacheWriteTokens,
+        totalTokens: adjustedUsage.totalTokens,
+        ...(totalCostUsd !== undefined ? { totalCostUsd } : {}),
+        contributorsWithCost,
+        contributorsWithoutCost,
+        recordedAtMs: options.recordedAtMs ?? Date.now(),
+        ...(existing?.sessionFileSize !== undefined
+          ? { sessionFileSize: existing.sessionFileSize }
+          : {}),
+        ...(existing?.sessionFileMtimeMs !== undefined
+          ? { sessionFileMtimeMs: existing.sessionFileMtimeMs }
+          : {}),
+        ...forkBaselineSnapshotFields(forkBaseline),
+      },
+      freezeGeneration,
+    );
   }
 
   async refreshSessionFileUsage(options: {
@@ -361,6 +383,8 @@ export class WorkspaceUsageStore {
 
     const refresh = (async () => {
       await this.loadIfNeeded();
+      const freezeGeneration =
+        this.sessionFreezeGenerations.get(canonicalSessionFile) ?? 0;
       const signature = await sessionFileSignature(canonicalSessionFile);
       if (signature === undefined) {
         return {
@@ -412,7 +436,7 @@ export class WorkspaceUsageStore {
           : {}),
       });
       if (result.snapshot !== undefined && result.diagnostics.length === 0) {
-        await this.upsertSnapshot(result.snapshot);
+        await this.upsertSnapshot(result.snapshot, freezeGeneration);
       }
       return {
         diagnostics: result.diagnostics,
@@ -440,11 +464,33 @@ export class WorkspaceUsageStore {
     const owned = this.state.snapshots.filter(
       (snapshot) => snapshot.ownerSessionFile === sessionFile,
     );
-    if (owned.length === 0) return;
+    let freezeGeneration =
+      (this.sessionFreezeGenerations.get(sessionFile) ?? 0) + 1;
+    // Some v2 stores predate persisted generation metadata. A private-worker
+    // tombstone cannot be associated with its former session path after it is
+    // frozen, so avoid reusing any legacy tombstone id that this deletion
+    // would produce even when loading could not infer its generation.
+    while (
+      owned.some((snapshot) =>
+        this.state.snapshots.some(
+          (existing) =>
+            existing.id === deletedSnapshotId(snapshot.id, freezeGeneration),
+        ),
+      )
+    ) {
+      freezeGeneration += 1;
+    }
+    this.sessionFreezeGenerations.set(sessionFile, freezeGeneration);
+    if (owned.length === 0) {
+      // Retain the generation even without a current snapshot: a later
+      // restored session must not reuse an earlier deletion's tombstone id.
+      await this.commit({ version: 2, snapshots: this.state.snapshots });
+      return;
+    }
 
     const frozen = owned.map(
       (snapshot): UsageSnapshot => ({
-        id: `deleted:${snapshot.id}`,
+        id: deletedSnapshotId(snapshot.id, freezeGeneration),
         workspaceId: options.workspaceId,
         source: snapshot.source,
         inputTokens: snapshot.inputTokens,
@@ -502,9 +548,25 @@ export class WorkspaceUsageStore {
     return totals;
   }
 
-  private async upsertSnapshot(snapshot: UsageSnapshot): Promise<void> {
-    const parsed = await canonicalSnapshot(snapshot);
+  private async upsertSnapshot(
+    snapshot: UsageSnapshot,
+    capturedFreezeGeneration?: number,
+  ): Promise<void> {
+    let parsed = await canonicalSnapshot(snapshot);
     await this.loadIfNeeded();
+    if (parsed.ownerSessionFile !== undefined) {
+      const currentFreezeGeneration =
+        this.sessionFreezeGenerations.get(parsed.ownerSessionFile) ?? 0;
+      const capturedGeneration =
+        capturedFreezeGeneration ?? currentFreezeGeneration;
+      if (currentFreezeGeneration > capturedGeneration) {
+        const { ownerSessionFile: _ownerSessionFile, ...frozen } = parsed;
+        parsed = {
+          ...frozen,
+          id: deletedSnapshotId(parsed.id, capturedGeneration + 1),
+        };
+      }
+    }
     const index = this.state.snapshots.findIndex(
       (item) => item.id === parsed.id,
     );
@@ -526,16 +588,29 @@ export class WorkspaceUsageStore {
       );
       const current = usageStoreSchema.safeParse(raw);
       if (current.success) {
+        const snapshots = current.data.snapshots.map(toUsageSnapshot);
         this.state = {
           version: 2,
-          snapshots: current.data.snapshots.map(toUsageSnapshot),
+          snapshots,
+          sessionFreezeGenerations: mergeFreezeGenerations(
+            current.data.sessionFreezeGenerations ?? {},
+            inferFreezeGenerations(snapshots),
+          ),
         };
+        this.sessionFreezeGenerations.clear();
+        for (const [sessionFile, generation] of Object.entries(
+          this.state.sessionFreezeGenerations,
+        )) {
+          this.sessionFreezeGenerations.set(sessionFile, generation);
+        }
       } else {
         const legacy = legacyUsageStoreSchema.parse(raw);
         this.state = {
           version: 2,
           snapshots: migrateLegacyContributions(legacy.contributions),
+          sessionFreezeGenerations: {},
         };
+        this.sessionFreezeGenerations.clear();
         this.generation += 1;
         await this.persist();
       }
@@ -546,17 +621,26 @@ export class WorkspaceUsageStore {
           .catch(() => undefined);
       }
       this.state = emptyStore();
+      this.sessionFreezeGenerations.clear();
       this.generation += 1;
       await this.persist();
     }
     this.loaded = true;
   }
 
-  private async commit(next: UsageStoreState): Promise<void> {
-    const parsed = usageStoreSchema.parse(next);
+  private async commit(
+    next: Omit<UsageStoreState, "sessionFreezeGenerations">,
+  ): Promise<void> {
+    const parsed = usageStoreSchema.parse({
+      ...next,
+      sessionFreezeGenerations: Object.fromEntries(
+        this.sessionFreezeGenerations,
+      ),
+    });
     this.state = {
       version: 2,
       snapshots: parsed.snapshots.map(toUsageSnapshot),
+      sessionFreezeGenerations: parsed.sessionFreezeGenerations ?? {},
     };
     this.generation += 1;
     await this.persist();
@@ -606,6 +690,43 @@ function addUsageSnapshot(
 
 function sessionSnapshotId(sessionFile: string): string {
   return `session:${path.resolve(sessionFile)}`;
+}
+
+function deletedSnapshotId(
+  snapshotId: string,
+  freezeGeneration: number,
+): string {
+  // Keep the original first-deletion identifier so existing frozen history is
+  // neither duplicated nor hidden during the generation-aware migration.
+  return freezeGeneration <= 1
+    ? `deleted:${snapshotId}`
+    : `deleted:${freezeGeneration}:${snapshotId}`;
+}
+
+function mergeFreezeGenerations(
+  persisted: Record<string, number>,
+  inferred: Record<string, number>,
+): Record<string, number> {
+  const merged = { ...persisted };
+  for (const [sessionFile, generation] of Object.entries(inferred)) {
+    merged[sessionFile] = Math.max(merged[sessionFile] ?? 0, generation);
+  }
+  return merged;
+}
+
+function inferFreezeGenerations(
+  snapshots: readonly UsageSnapshot[],
+): Record<string, number> {
+  const inferred: Record<string, number> = {};
+  for (const snapshot of snapshots) {
+    const match = /^deleted:(?:(\d+):)?session:(.+)$/.exec(snapshot.id);
+    if (match === null) continue;
+    const sessionFile = match[2]!;
+    // The original unnumbered tombstone was generation one.
+    const generation = match[1] === undefined ? 1 : Number(match[1]);
+    inferred[sessionFile] = Math.max(inferred[sessionFile] ?? 0, generation);
+  }
+  return inferred;
 }
 
 function snapshotFromContribution(

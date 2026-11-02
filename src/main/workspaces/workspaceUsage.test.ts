@@ -837,6 +837,232 @@ describe("workspace usage accounting", () => {
     );
   });
 
+  it("keeps deleted usage when a restored path records new usage and moves", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-usage-restore-"),
+    );
+    const sessionFile = path.join(root, "session.jsonl");
+    await fs.writeFile(sessionFile, "");
+    const firstStore = new WorkspaceUsageStore(root);
+    const record = async (store: WorkspaceUsageStore, totalTokens: number) =>
+      store.recordSessionMessagesUsage({
+        workspaceId: workspaceA,
+        sessionFile,
+        sessionKey: "private-child",
+        source: "parallel",
+        messages: [
+          {
+            id: "assistant-child",
+            role: "assistant",
+            usage: { inputTokens: totalTokens, totalTokens },
+          },
+        ],
+      });
+
+    await record(firstStore, 10);
+    await firstStore.freezeSessionUsage({
+      workspaceId: workspaceA,
+      sessionFile,
+    });
+
+    // Reload between deletion and restore. The new store must retain the
+    // tombstone generation instead of reusing deleted:1 on the next delete.
+    const restoredStore = new WorkspaceUsageStore(root);
+    // A restored session reuses its former filesystem path, but its new
+    // snapshot must stay live rather than overwrite the frozen history.
+    await fs.writeFile(sessionFile, "restored");
+    await record(restoredStore, 20);
+
+    assert.equal(
+      (
+        await restoredStore.getWorkspaceUsage({
+          workspaceId: workspaceA,
+          sessionFiles: [],
+        })
+      ).totalTokens,
+      10,
+    );
+    assert.equal(
+      (
+        await restoredStore.getWorkspaceUsage({
+          workspaceId: workspaceB,
+          sessionFiles: [sessionFile],
+        })
+      ).totalTokens,
+      20,
+    );
+
+    // A later deletion gets a distinct tombstone, preserving the first
+    // workspace's historical usage instead of replacing it by snapshot id.
+    await restoredStore.freezeSessionUsage({
+      workspaceId: workspaceB,
+      sessionFile,
+    });
+    assert.equal(
+      (
+        await restoredStore.getWorkspaceUsage({
+          workspaceId: workspaceA,
+          sessionFiles: [],
+        })
+      ).totalTokens,
+      10,
+    );
+    assert.equal(
+      (
+        await restoredStore.getWorkspaceUsage({
+          workspaceId: workspaceB,
+          sessionFiles: [],
+        })
+      ).totalTokens,
+      20,
+    );
+  });
+
+  it("preserves legacy v2 tombstones after restore and deletion", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-usage-legacy-tombstone-"),
+    );
+    const sessionFile = path.join(root, "session.jsonl");
+    const resolvedSessionFile = path.resolve(sessionFile);
+    await fs.writeFile(sessionFile, "");
+    // Stores written before deletion generations deliberately have no
+    // sessionFreezeGenerations field and use the unnumbered tombstone id.
+    await fs.writeFile(
+      path.join(root, "workspace-usage.json"),
+      JSON.stringify({
+        version: 2,
+        snapshots: [
+          {
+            id: `deleted:session:${resolvedSessionFile}`,
+            workspaceId: workspaceA,
+            source: "session",
+            inputTokens: 10,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            totalTokens: 10,
+            contributorsWithCost: 0,
+            contributorsWithoutCost: 1,
+            recordedAtMs: 1,
+          },
+        ],
+      }),
+    );
+
+    const store = new WorkspaceUsageStore(root);
+    await store.recordSessionMessagesUsage({
+      workspaceId: workspaceB,
+      sessionFile,
+      sessionKey: sessionFile,
+      source: "session",
+      messages: [
+        {
+          id: "assistant-restored",
+          role: "assistant",
+          usage: { inputTokens: 20, totalTokens: 20 },
+        },
+      ],
+    });
+    await store.freezeSessionUsage({ workspaceId: workspaceB, sessionFile });
+
+    assert.equal(
+      (
+        await store.getWorkspaceUsage({
+          workspaceId: workspaceA,
+          sessionFiles: [],
+        })
+      ).totalTokens,
+      10,
+    );
+    assert.equal(
+      (
+        await store.getWorkspaceUsage({
+          workspaceId: workspaceB,
+          sessionFiles: [],
+        })
+      ).totalTokens,
+      20,
+    );
+    const persisted = JSON.parse(
+      await fs.readFile(store.storeFile, "utf8"),
+    ) as {
+      snapshots: Array<{ id: string }>;
+      sessionFreezeGenerations: Record<string, number>;
+    };
+    assert.deepEqual(
+      persisted.snapshots.map((snapshot) => snapshot.id).sort(),
+      [
+        `deleted:2:session:${resolvedSessionFile}`,
+        `deleted:session:${resolvedSessionFile}`,
+      ],
+    );
+    assert.equal(persisted.sessionFreezeGenerations[resolvedSessionFile], 2);
+  });
+
+  it("does not overwrite an unassociated legacy private tombstone", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "pi-deck-usage-legacy-private-tombstone-"),
+    );
+    const sessionFile = path.join(root, "session.jsonl");
+    await fs.writeFile(sessionFile, "");
+    await fs.writeFile(
+      path.join(root, "workspace-usage.json"),
+      JSON.stringify({
+        version: 2,
+        snapshots: [
+          {
+            id: "deleted:parallel:planner",
+            workspaceId: workspaceA,
+            source: "parallel",
+            inputTokens: 10,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            totalTokens: 10,
+            contributorsWithCost: 0,
+            contributorsWithoutCost: 1,
+            recordedAtMs: 1,
+          },
+        ],
+      }),
+    );
+
+    const store = new WorkspaceUsageStore(root);
+    await store.recordSessionMessagesUsage({
+      workspaceId: workspaceB,
+      sessionFile,
+      sessionKey: "planner",
+      source: "parallel",
+      messages: [
+        {
+          id: "assistant-restored",
+          role: "assistant",
+          usage: { inputTokens: 20, totalTokens: 20 },
+        },
+      ],
+    });
+    await store.freezeSessionUsage({ workspaceId: workspaceB, sessionFile });
+
+    assert.equal(
+      (
+        await store.getWorkspaceUsage({
+          workspaceId: workspaceA,
+          sessionFiles: [],
+        })
+      ).totalTokens,
+      10,
+    );
+    assert.equal(
+      (
+        await store.getWorkspaceUsage({
+          workspaceId: workspaceB,
+          sessionFiles: [],
+        })
+      ).totalTokens,
+      20,
+    );
+  });
+
   it("accounts fake-native fork history once through moves, archiving, runtime, and recovery", async () => {
     const root = await fs.realpath(
       await fs.mkdtemp(
