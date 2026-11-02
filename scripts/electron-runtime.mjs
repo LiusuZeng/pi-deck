@@ -2,6 +2,7 @@ import { constants as fsConstants } from "node:fs";
 import {
   access,
   cp,
+  link,
   mkdir,
   mkdtemp,
   readFile,
@@ -12,7 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -84,11 +85,206 @@ function cachePreparationError(cacheRoot, runtimeDirectory, error) {
   );
 }
 
-async function removePreparedRuntime(brandedBundle, markerPath) {
-  await Promise.allSettled([
-    rm(brandedBundle, { recursive: true, force: true }),
-    rm(markerPath, { force: true }),
-  ]);
+const runtimePreparationTurns = new Map();
+
+function waitForRuntimePreparationLock() {
+  return new Promise((resolve) => setTimeout(resolve, 25));
+}
+
+async function readRuntimePreparationLockOwner(lockPath) {
+  try {
+    const owner = JSON.parse(await readFile(lockPath, "utf8"));
+    if (
+      typeof owner.token !== "string" ||
+      typeof owner.hostname !== "string" ||
+      !Number.isSafeInteger(owner.pid) ||
+      owner.pid <= 0
+    ) {
+      return undefined;
+    }
+    return owner;
+  } catch {
+    return undefined;
+  }
+}
+
+function processIsRunning(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+async function reclaimAbandonedRuntimePreparationLock(lockPath) {
+  const abandonedLockPath = `${lockPath}.abandoned-${randomUUID()}`;
+  try {
+    await rename(lockPath, abandonedLockPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+  await rm(abandonedLockPath, { recursive: true, force: true });
+}
+
+async function releaseRuntimePreparationLock(lockPath, token) {
+  const owner = await readRuntimePreparationLockOwner(lockPath);
+  if (owner?.token === token) {
+    await rm(lockPath, { recursive: true, force: true });
+  }
+}
+
+async function acquireRuntimePreparationLock(
+  lockPath,
+  {
+    beforePublish = async () => undefined,
+    onWait = async () => undefined,
+  } = {},
+) {
+  const owner = {
+    hostname: os.hostname(),
+    pid: process.pid,
+    token: randomUUID(),
+  };
+  const candidatePath = `${lockPath}.candidate-${owner.token}`;
+  let candidatePublicationAttempted = false;
+
+  await writeFile(candidatePath, `${JSON.stringify(owner)}\n`, { flag: "wx" });
+  try {
+    while (true) {
+      try {
+        // link() publishes a fully written, owner-identified lock in one
+        // filesystem operation. mkdir() followed by owner metadata creation
+        // leaves a window where another process can mistake a new lock for an
+        // abandoned one and prepare concurrently.
+        if (!candidatePublicationAttempted) {
+          candidatePublicationAttempted = true;
+          await beforePublish();
+        }
+        await link(candidatePath, lockPath);
+        return async () => releaseRuntimePreparationLock(lockPath, owner.token);
+      } catch (error) {
+        if (error?.code !== "EEXIST") {
+          throw error;
+        }
+      }
+
+      const existingOwner = await readRuntimePreparationLockOwner(lockPath);
+      if (
+        existingOwner?.hostname === owner.hostname &&
+        processIsRunning(existingOwner.pid)
+      ) {
+        await onWait();
+        await waitForRuntimePreparationLock();
+      } else if (!existingOwner || existingOwner.hostname === owner.hostname) {
+        // A published lock always has complete owner metadata. Therefore an
+        // invalid lock, or one whose local owner PID is gone, cannot be
+        // actively publishing and can be atomically retired by one waiter.
+        await reclaimAbandonedRuntimePreparationLock(lockPath);
+      } else {
+        await onWait();
+        await waitForRuntimePreparationLock();
+      }
+    }
+  } finally {
+    await rm(candidatePath, { force: true });
+  }
+}
+
+async function withRuntimePreparationLock(lockPath, prepare, lockOptions) {
+  const previousTurn = runtimePreparationTurns.get(lockPath);
+  let finishTurn;
+  const turn = new Promise((resolve) => {
+    finishTurn = resolve;
+  });
+  runtimePreparationTurns.set(lockPath, turn);
+
+  if (previousTurn) {
+    await previousTurn;
+  }
+
+  let releaseLock;
+  try {
+    releaseLock = await acquireRuntimePreparationLock(lockPath, lockOptions);
+    return await prepare();
+  } finally {
+    try {
+      await releaseLock?.();
+    } finally {
+      finishTurn();
+      if (runtimePreparationTurns.get(lockPath) === turn) {
+        runtimePreparationTurns.delete(lockPath);
+      }
+    }
+  }
+}
+
+async function publishPreparedRuntime({
+  brandedBundle,
+  markerPath,
+  stagedBundle,
+  stagedMarkerPath,
+}) {
+  const previousBundle = `${brandedBundle}.previous-${randomUUID()}`;
+  const previousMarkerPath = `${markerPath}.previous-${randomUUID()}`;
+  let movedPreviousBundle = false;
+  let movedPreviousMarker = false;
+  let publishedBundle = false;
+  let publishedMarker = false;
+
+  async function restorePreviousRuntime() {
+    if (publishedBundle) {
+      await rm(brandedBundle, { recursive: true, force: true });
+    }
+    if (publishedMarker) {
+      await rm(markerPath, { force: true });
+    }
+    if (movedPreviousBundle) {
+      await rename(previousBundle, brandedBundle);
+    }
+    if (movedPreviousMarker) {
+      await rename(previousMarkerPath, markerPath);
+    }
+  }
+
+  try {
+    try {
+      await rename(brandedBundle, previousBundle);
+      movedPreviousBundle = true;
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        throw error;
+      }
+    }
+    try {
+      await rename(markerPath, previousMarkerPath);
+      movedPreviousMarker = true;
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        throw error;
+      }
+    }
+    await rename(stagedBundle, brandedBundle);
+    publishedBundle = true;
+    await rename(stagedMarkerPath, markerPath);
+    publishedMarker = true;
+  } catch (error) {
+    await restorePreviousRuntime().catch(() => undefined);
+    throw error;
+  }
+
+  return {
+    async discardPreviousRuntime() {
+      await rm(previousBundle, { recursive: true, force: true }).catch(
+        () => undefined,
+      );
+      await rm(previousMarkerPath, { force: true }).catch(() => undefined);
+    },
+    restorePreviousRuntime,
+  };
 }
 
 async function assertRuntimeDirectoryWritable(runtimeDirectory) {
@@ -282,6 +478,9 @@ export async function preparePiDeckElectronExecutable({
   copyBundle = cloneElectronBundle,
   patchBundleIdentity = patchMacOSBundleIdentity,
   runtimeCacheRoot = resolvePiDeckElectronRuntimeCacheRoot(),
+  beforeRuntimePreparationLockPublish,
+  onRuntimePreparationLockWait,
+  afterRuntimePublication = async () => undefined,
 } = {}) {
   if (platform !== "darwin") {
     return electronExecutable;
@@ -330,52 +529,104 @@ export async function preparePiDeckElectronExecutable({
 
   try {
     await assertRuntimeDirectoryWritable(runtimeDirectory);
-    await rm(markerPath, { force: true });
   } catch (error) {
     throw cachePreparationError(cacheRoot, runtimeDirectory, error);
   }
 
-  try {
-    await copyBundle(sourceBundle, brandedBundle);
-    await patchBundleIdentity(brandedBundle);
+  const lockPath = path.join(runtimeDirectory, ".pi-deck-preparation-lock");
+  return withRuntimePreparationLock(
+    lockPath,
+    async () => {
+      if (
+        await preparedRuntimeLooksCurrent(
+          electronExecutable,
+          brandedExecutable,
+          markerPath,
+          { sourceBundle, executableRelativePath },
+        )
+      ) {
+        return brandedExecutable;
+      }
 
-    const sourceStats = await stat(electronExecutable);
-    try {
-      await writeFile(
-        markerPath,
-        `${JSON.stringify(
-          {
-            schemaVersion: runtimeIdentitySchemaVersion,
-            applicationName: piDeckApplicationName,
-            bundleIdentifier: piDeckBundleIdentifier,
-            sourceBundle: path.resolve(sourceBundle),
-            executableRelativePath,
-            sourceSize: sourceStats.size,
-            sourceMtimeMs: sourceStats.mtimeMs,
-          },
-          null,
-          2,
-        )}\n`,
+      try {
+        await assertRuntimeDirectoryWritable(runtimeDirectory);
+      } catch (error) {
+        throw cachePreparationError(cacheRoot, runtimeDirectory, error);
+      }
+
+      let attemptDirectory;
+      try {
+        attemptDirectory = await mkdtemp(
+          path.join(runtimeDirectory, ".pi-deck-attempt-"),
+        );
+      } catch (error) {
+        throw cachePreparationError(cacheRoot, runtimeDirectory, error);
+      }
+      const stagedBundle = path.join(attemptDirectory, piDeckBundleName);
+      const stagedMarkerPath = path.join(
+        attemptDirectory,
+        ".pi-deck-electron-runtime.json",
       );
-    } catch (error) {
-      throw cachePreparationError(cacheRoot, runtimeDirectory, error);
-    }
-  } catch (error) {
-    await removePreparedRuntime(brandedBundle, markerPath);
-    throw error;
-  }
 
-  if (
-    !(await preparedRuntimeLooksCurrent(
-      electronExecutable,
-      brandedExecutable,
-      markerPath,
-      { sourceBundle, executableRelativePath },
-    ))
-  ) {
-    throw new Error(
-      `Pi Deck Electron runtime was prepared but its executable is missing or stale: ${brandedExecutable}`,
-    );
-  }
-  return brandedExecutable;
+      try {
+        await copyBundle(sourceBundle, stagedBundle);
+        await patchBundleIdentity(stagedBundle);
+
+        const sourceStats = await stat(electronExecutable);
+        try {
+          await writeFile(
+            stagedMarkerPath,
+            `${JSON.stringify(
+              {
+                schemaVersion: runtimeIdentitySchemaVersion,
+                applicationName: piDeckApplicationName,
+                bundleIdentifier: piDeckBundleIdentifier,
+                sourceBundle: path.resolve(sourceBundle),
+                executableRelativePath,
+                sourceSize: sourceStats.size,
+                sourceMtimeMs: sourceStats.mtimeMs,
+              },
+              null,
+              2,
+            )}\n`,
+          );
+          const publication = await publishPreparedRuntime({
+            brandedBundle,
+            markerPath,
+            stagedBundle,
+            stagedMarkerPath,
+          });
+          try {
+            await afterRuntimePublication();
+            if (
+              !(await preparedRuntimeLooksCurrent(
+                electronExecutable,
+                brandedExecutable,
+                markerPath,
+                { sourceBundle, executableRelativePath },
+              ))
+            ) {
+              throw new Error(
+                `Pi Deck Electron runtime was prepared but its executable is missing or stale: ${brandedExecutable}`,
+              );
+            }
+            await publication.discardPreviousRuntime();
+          } catch (error) {
+            await publication.restorePreviousRuntime().catch(() => undefined);
+            throw error;
+          }
+        } catch (error) {
+          throw cachePreparationError(cacheRoot, runtimeDirectory, error);
+        }
+      } finally {
+        await rm(attemptDirectory, { recursive: true, force: true });
+      }
+
+      return brandedExecutable;
+    },
+    {
+      beforePublish: beforeRuntimePreparationLockPublish,
+      onWait: onRuntimePreparationLockWait,
+    },
+  );
 }
