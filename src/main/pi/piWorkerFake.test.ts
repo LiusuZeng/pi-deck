@@ -26,12 +26,19 @@ function createWorker(args: string[] = []): PiWorker {
   });
 }
 
-function waitForWorkerEvent(
+type CancellableWorkerEventWait = {
+  promise: Promise<RuntimeEvent>;
+  cancel: () => void;
+};
+
+function createCancellableWorkerEventWait(
   worker: PiWorker,
   predicate: (event: RuntimeEvent) => boolean,
   timeoutMs = 5_000,
-): Promise<RuntimeEvent> {
-  return new Promise((resolve, reject) => {
+): CancellableWorkerEventWait {
+  let cleanedUp = false;
+  let cleanup = (): void => {};
+  const promise = new Promise<RuntimeEvent>((resolve, reject) => {
     const timer = setTimeout(() => {
       cleanup();
       reject(new Error("Timed out waiting for worker event"));
@@ -43,11 +50,44 @@ function waitForWorkerEvent(
       cleanup();
       resolve(event);
     });
-    const cleanup = (): void => {
+    cleanup = (): void => {
+      if (cleanedUp) {
+        return;
+      }
+      cleanedUp = true;
       clearTimeout(timer);
       unsubscribe();
     };
   });
+  return { promise, cancel: () => cleanup() };
+}
+
+function waitForWorkerEvent(
+  worker: PiWorker,
+  predicate: (event: RuntimeEvent) => boolean,
+  timeoutMs = 5_000,
+): Promise<RuntimeEvent> {
+  return createCancellableWorkerEventWait(worker, predicate, timeoutMs).promise;
+}
+
+async function promptAndWaitForAgentEnd(
+  worker: PiWorker,
+  text: string,
+): Promise<RuntimeEvent> {
+  const completed = createCancellableWorkerEventWait(
+    worker,
+    (event) => event.type === "agent_end",
+  );
+  // The timeout can elapse while command acceptance is still pending. Observe
+  // that rejection now so it cannot become unhandled; awaiting the original
+  // promise below still propagates it once acceptance completes.
+  void completed.promise.catch(() => {});
+  try {
+    await worker.prompt({ text });
+    return await completed.promise;
+  } finally {
+    completed.cancel();
+  }
 }
 
 function waitForFile(file: string, timeoutMs = 5_000): Promise<void> {
@@ -188,8 +228,7 @@ test("PiWorker --fork creates an independent persisted history and identity", as
       messages.some((message) => message.content === token),
       true,
     );
-    await worker.prompt({ text: "fork-only prompt" });
-    await waitForWorkerEvent(worker, (event) => event.type === "agent_end");
+    await promptAndWaitForAgentEnd(worker, "fork-only prompt");
     assert.equal(
       readFileSync(sourceFile, "utf8").includes("fork-only prompt"),
       false,
@@ -213,8 +252,7 @@ test("PiWorker supports real-Pi type-field command protocol", async () => {
   try {
     const state = await worker.getState();
     assert.equal(state.sessionId, "fake-session-1");
-    await worker.prompt({ text: "type field prompt" });
-    await waitForWorkerEvent(worker, (event) => event.type === "agent_end");
+    await promptAndWaitForAgentEnd(worker, "type field prompt");
   } finally {
     await worker.closeSession();
   }
@@ -229,16 +267,65 @@ test("PiWorker prompt resolves on command acceptance and continues streaming eve
     }
   });
   try {
-    await worker.prompt({ text: "stream please" });
-    const endEvent = await waitForWorkerEvent(
-      worker,
-      (event) => event.type === "agent_end",
-    );
+    const endEvent = await promptAndWaitForAgentEnd(worker, "stream please");
     assert.equal((endEvent as { status?: string }).status, "completed");
     assert.ok(messageUpdates.length >= 1);
     assert.equal(messageUpdates[0].runtimeId, worker.runtimeId);
   } finally {
     unsubscribe();
+    await worker.closeSession();
+  }
+});
+
+test("PiWorker observes terminal events emitted synchronously with prompt acceptance", async () => {
+  const worker = createWorker();
+  const client = (worker as any).client;
+  const request = vi
+    .spyOn(client, "request")
+    .mockImplementation((command: string) => {
+      // Resolve command acceptance before the terminal event, as the JSONL
+      // parser does while synchronously draining both records. A post-acceptance
+      // subscription still misses the terminal event.
+      const accepted = Promise.resolve(null);
+      if (command === "prompt") {
+        client.emit("event", { type: "agent_end", status: "completed" });
+      }
+      return accepted;
+    });
+  try {
+    const event = await promptAndWaitForAgentEnd(
+      worker,
+      "synchronous completion",
+    );
+    assert.equal((event as { status?: string }).status, "completed");
+  } finally {
+    request.mockRestore();
+    await worker.closeSession();
+  }
+});
+
+test("PiWorker cancels terminal waits when prompt acceptance rejects", async () => {
+  const worker = createWorker();
+  const client = (worker as any).client;
+  const unsubscribe = vi.fn();
+  const onEvent = vi.spyOn(worker, "onEvent").mockReturnValue(unsubscribe);
+  const request = vi
+    .spyOn(client, "request")
+    .mockImplementation((command: string) => {
+      if (command === "prompt") {
+        return Promise.reject(new Error("prompt acceptance failed"));
+      }
+      return Promise.resolve(null);
+    });
+  try {
+    await assert.rejects(
+      promptAndWaitForAgentEnd(worker, "rejected prompt"),
+      /prompt acceptance failed/,
+    );
+    assert.equal(unsubscribe.mock.calls.length, 1);
+  } finally {
+    request.mockRestore();
+    onEvent.mockRestore();
     await worker.closeSession();
   }
 });
@@ -633,8 +720,7 @@ test("private planner terminal usage from fake RPC is recorded once as parallel 
     "--include-usage",
   ]);
   try {
-    await worker.prompt({ text: "plan private tasks" });
-    await waitForWorkerEvent(worker, (event) => event.type === "agent_end");
+    await promptAndWaitForAgentEnd(worker, "plan private tasks");
     const messages = await worker.getMessages();
     const recordPlannerUsage = (recordedAtMs: number): Promise<void> =>
       store.recordSessionMessagesUsage({
@@ -692,8 +778,7 @@ test("session stats uses get_session_stats without transferring messages", async
   const getMessages = vi.spyOn(worker, "getMessages");
   const request = vi.spyOn((worker as any).client, "request");
   try {
-    await worker.prompt({ text: "usage please" });
-    await waitForWorkerEvent(worker, (event) => event.type === "agent_end");
+    await promptAndWaitForAgentEnd(worker, "usage please");
     const stats = await worker.getSessionStats();
     assert.deepEqual((stats as any).tokens, {
       input: 100,
