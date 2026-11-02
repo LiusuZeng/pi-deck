@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-11-01
+
+Fifth dogfood stabilization release after Unified Work. This patch adds a
+manual text Outputs MVP and several backward-compatible supervision tools while
+substantially hardening session recovery, durable metadata, Pi transport,
+workflow retries, usage accounting, and macOS launch behavior.
+
 ### Added
 
 - Added a manual text-deliverables **Outputs MVP**: save a completed visible
@@ -15,7 +22,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session with the selected content and feedback already attached. Outputs
   survive restart and source-session loss; integrity failures are blocked.
   This advances [#141](https://github.com/LiusuZeng/pi-deck/issues/141) but does
-  not yet provide automatic agent publication or arbitrary multi-file outputs.
+  not yet provide automatic agent publication or arbitrary multi-file outputs
+  ([#177](https://github.com/LiusuZeng/pi-deck/pull/177)).
+- Added scoped Work search across activity titles and workspace names, with
+  independently retained All Work and workspace queries, filtered counts, and
+  deterministic status-aware triage ordering
+  ([#86](https://github.com/LiusuZeng/pi-deck/issues/86), [#123](https://github.com/LiusuZeng/pi-deck/pull/123)).
+- Added safe native Pi session forking for eligible idle sessions. Forks retain
+  workspace/project ownership and provenance while protecting source sessions
+  and recovering interrupted cleanup
+  ([#100](https://github.com/LiusuZeng/pi-deck/issues/100), [#124](https://github.com/LiusuZeng/pi-deck/pull/124)).
+- Added a workspace-scoped **New session** action directly to Workspace Work
+  ([#96](https://github.com/LiusuZeng/pi-deck/issues/96), [#118](https://github.com/LiusuZeng/pi-deck/pull/118)).
+- Added privacy-preserving progress for delegated Parallel workers and read-only
+  activity disclosures for ordinary extension subagents, including bounded
+  phase, recency, turn/token counters, and terminal outcomes without exposing
+  child prompts, arguments, thinking, raw output, or controls
+  ([#101](https://github.com/LiusuZeng/pi-deck/issues/101), [#120](https://github.com/LiusuZeng/pi-deck/pull/120), [#135](https://github.com/LiusuZeng/pi-deck/issues/135), [#139](https://github.com/LiusuZeng/pi-deck/pull/139)).
+
+### Changed
+
+- Allowed saved sessions to be renamed while working or reconnecting without
+  interrupting execution, while retaining busy-state restrictions for workspace
+  membership changes
+  ([#95](https://github.com/LiusuZeng/pi-deck/issues/95), [#107](https://github.com/LiusuZeng/pi-deck/pull/107)).
+- Animated actively running Work status icons while keeping inactive states and
+  reduced-motion experiences static
+  ([#97](https://github.com/LiusuZeng/pi-deck/issues/97), [#110](https://github.com/LiusuZeng/pi-deck/pull/110)).
+- Reserved **Needs attention** for actionable runtime input rather than ordinary
+  terminal/tool failures, while retaining failure diagnostics
+  ([#106](https://github.com/LiusuZeng/pi-deck/issues/106), [#117](https://github.com/LiusuZeng/pi-deck/pull/117)).
+
+### Fixed
+
+- Made app shutdown, renderer reload/crash recovery, and composer drafts safer:
+  active work now receives quit confirmation and orderly worker cleanup;
+  attached transcript/activity, Abort, pending extension UI, workspace defaults,
+  and bounded text drafts recover without duplicate workers or automatic prompt
+  replay. Definitely rejected first-send drafts now remain editable across
+  reload and native identity rebinding
+  ([#148](https://github.com/LiusuZeng/pi-deck/issues/148), [#149](https://github.com/LiusuZeng/pi-deck/issues/149), [#150](https://github.com/LiusuZeng/pi-deck/issues/150), [#151](https://github.com/LiusuZeng/pi-deck/issues/151), [#152](https://github.com/LiusuZeng/pi-deck/issues/152), [#153](https://github.com/LiusuZeng/pi-deck/issues/153), [#155](https://github.com/LiusuZeng/pi-deck/issues/155), [#158](https://github.com/LiusuZeng/pi-deck/pull/158), [#194](https://github.com/LiusuZeng/pi-deck/issues/194), [#195](https://github.com/LiusuZeng/pi-deck/pull/195), [#204](https://github.com/LiusuZeng/pi-deck/issues/204), [#205](https://github.com/LiusuZeng/pi-deck/pull/205)).
+- Preserved immutable workflow context, retry/fan-out state, and exactly-once
+  terminal synthesis across retry, stop, crash, and restore; Stop intent now
+  prevents a later asynchronous stage from submitting new work
+  ([#74](https://github.com/LiusuZeng/pi-deck/issues/74), [#75](https://github.com/LiusuZeng/pi-deck/issues/75), [#84](https://github.com/LiusuZeng/pi-deck/issues/84), [#102](https://github.com/LiusuZeng/pi-deck/issues/102), [#103](https://github.com/LiusuZeng/pi-deck/issues/103), [#104](https://github.com/LiusuZeng/pi-deck/pull/104), [#105](https://github.com/LiusuZeng/pi-deck/pull/105), [#116](https://github.com/LiusuZeng/pi-deck/pull/116), [#119](https://github.com/LiusuZeng/pi-deck/pull/119), [#126](https://github.com/LiusuZeng/pi-deck/pull/126), [#169](https://github.com/LiusuZeng/pi-deck/issues/169), [#186](https://github.com/LiusuZeng/pi-deck/pull/186)).
+- Preserved honest steering/follow-up and ordinary prompt delivery state across
+  timeouts or disconnects. Unconfirmed delivery is reconciled against durable
+  Pi history instead of being mislabeled as rejection or inviting an unsafe
+  duplicate retry
+  ([#146](https://github.com/LiusuZeng/pi-deck/issues/146), [#160](https://github.com/LiusuZeng/pi-deck/pull/160), [#172](https://github.com/LiusuZeng/pi-deck/issues/172), [#190](https://github.com/LiusuZeng/pi-deck/pull/190)).
+- Added single-writer ownership and safer recovery for shared project/workspace
+  metadata, rolled back mutations whose durable save failed, preserved valid
+  files through transient read/backup failures, and recovered abandoned
+  ownership sentinels without weakening concurrent-instance protection
+  ([#161](https://github.com/LiusuZeng/pi-deck/issues/161), [#178](https://github.com/LiusuZeng/pi-deck/pull/178), [#162](https://github.com/LiusuZeng/pi-deck/issues/162), [#181](https://github.com/LiusuZeng/pi-deck/pull/181), [#196](https://github.com/LiusuZeng/pi-deck/issues/196), [#199](https://github.com/LiusuZeng/pi-deck/pull/199), [#197](https://github.com/LiusuZeng/pi-deck/issues/197), [#201](https://github.com/LiusuZeng/pi-deck/pull/201)).
+- Recovered explicit workspace sessions when temporarily unavailable files return
+  and prevented transient reads or malformed data from erasing previously valid
+  Parallel recovery state
+  ([#167](https://github.com/LiusuZeng/pi-deck/issues/167), [#184](https://github.com/LiusuZeng/pi-deck/pull/184), [#168](https://github.com/LiusuZeng/pi-deck/issues/168), [#185](https://github.com/LiusuZeng/pi-deck/pull/185)).
+- Hardened Pi RPC transport and worker ownership: chunked large records now frame
+  in linear work; malformed output, broken stdin, and stalled extension replies
+  produce bounded isolated failures and confirmed worker cleanup instead of
+  blocked capacity, uncaught main-process errors, or indefinitely disabled UI
+  ([#165](https://github.com/LiusuZeng/pi-deck/issues/165), [#182](https://github.com/LiusuZeng/pi-deck/pull/182), [#166](https://github.com/LiusuZeng/pi-deck/issues/166), [#183](https://github.com/LiusuZeng/pi-deck/pull/183), [#170](https://github.com/LiusuZeng/pi-deck/issues/170), [#187](https://github.com/LiusuZeng/pi-deck/pull/187), [#171](https://github.com/LiusuZeng/pi-deck/issues/171), [#188](https://github.com/LiusuZeng/pi-deck/pull/188), [#176](https://github.com/LiusuZeng/pi-deck/issues/176), [#192](https://github.com/LiusuZeng/pi-deck/pull/192)).
+- Restored honest live parent usage and structured Pi transcript projection, kept
+  parent/private-worker lifecycle states distinct, prevented native fork history
+  from being counted twice, and included private Parallel planner work in
+  workspace totals
+  ([#76](https://github.com/LiusuZeng/pi-deck/issues/76), [#77](https://github.com/LiusuZeng/pi-deck/issues/77), [#79](https://github.com/LiusuZeng/pi-deck/issues/79), [#81](https://github.com/LiusuZeng/pi-deck/issues/81), [#82](https://github.com/LiusuZeng/pi-deck/issues/82), [#83](https://github.com/LiusuZeng/pi-deck/issues/83), [#143](https://github.com/LiusuZeng/pi-deck/pull/143), [#174](https://github.com/LiusuZeng/pi-deck/issues/174), [#191](https://github.com/LiusuZeng/pi-deck/pull/191), [#175](https://github.com/LiusuZeng/pi-deck/issues/175), [#193](https://github.com/LiusuZeng/pi-deck/pull/193)).
+- Serialized session discovery with native-fork ownership, canonicalized symlink
+  authorization, filtered cleanup-blocked candidates, and cancelled bootstrap
+  RPC/fallback model discovery cleanly during reset and quit
+  ([#80](https://github.com/LiusuZeng/pi-deck/issues/80), [#109](https://github.com/LiusuZeng/pi-deck/pull/109), [#140](https://github.com/LiusuZeng/pi-deck/issues/140), [#142](https://github.com/LiusuZeng/pi-deck/pull/142), [#144](https://github.com/LiusuZeng/pi-deck/issues/144), [#145](https://github.com/LiusuZeng/pi-deck/pull/145)).
+- Restored Pi-managed OpenAI Codex authentication with a narrow re-authentication
+  state and same-session resume path that does not replay the failed prompt
+  ([#99](https://github.com/LiusuZeng/pi-deck/issues/99), [#121](https://github.com/LiusuZeng/pi-deck/pull/121)).
+- Stabilized timeline bottom-follow, detail reveal, and manual reading ownership
+  for real wheel, keyboard, touch, and scrollbar navigation
+  ([#136](https://github.com/LiusuZeng/pi-deck/issues/136), [#138](https://github.com/LiusuZeng/pi-deck/pull/138)).
+- Moved branded macOS Electron runtime preparation to a writable application
+  cache and coordinated concurrent preparation so one failed launch cannot
+  remove another launch's prepared runtime
+  ([#164](https://github.com/LiusuZeng/pi-deck/issues/164), [#180](https://github.com/LiusuZeng/pi-deck/pull/180), [#198](https://github.com/LiusuZeng/pi-deck/issues/198), [#200](https://github.com/LiusuZeng/pi-deck/pull/200)).
+- Made diagnostic-log retention failures nonfatal to startup, avoided disabled
+  session-sound audio contexts, and aligned **Add existing session** with peer
+  sidebar actions
+  ([#173](https://github.com/LiusuZeng/pi-deck/issues/173), [#189](https://github.com/LiusuZeng/pi-deck/pull/189), [#98](https://github.com/LiusuZeng/pi-deck/issues/98), [#122](https://github.com/LiusuZeng/pi-deck/pull/122), [#108](https://github.com/LiusuZeng/pi-deck/issues/108), [#115](https://github.com/LiusuZeng/pi-deck/pull/115)).
+
+### Tests
+
+- Expanded deterministic unit and Electron coverage for Outputs integrity,
+  session forks, workflow retry/restore, shutdown/recovery, drafts, intervention
+  delivery, discovery lifecycle, delegated/subagent activity, usage accounting,
+  metadata fault injection, RPC transport failures, and real-input scrolling.
+- Removed fake-RPC bundle, child-shutdown, fork-completion, and synthesis-resume
+  ordering races without adding retries, sleeps, or weaker assertions
+  ([#128](https://github.com/LiusuZeng/pi-deck/issues/128), [#134](https://github.com/LiusuZeng/pi-deck/issues/134), [#137](https://github.com/LiusuZeng/pi-deck/pull/137), [#163](https://github.com/LiusuZeng/pi-deck/issues/163), [#179](https://github.com/LiusuZeng/pi-deck/pull/179), [#202](https://github.com/LiusuZeng/pi-deck/issues/202), [#203](https://github.com/LiusuZeng/pi-deck/pull/203), [#206](https://github.com/LiusuZeng/pi-deck/issues/206), [#207](https://github.com/LiusuZeng/pi-deck/pull/207)).
 
 ## [0.6.4] - 2026-09-12
 
@@ -621,7 +723,8 @@ coding-agent sessions.
   crash; persisted sessions can be reopened, but unsaved partial stream text may
   be lost.
 
-[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.4...HEAD
+[Unreleased]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.5...HEAD
+[0.6.5]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.4...v0.6.5
 [0.6.4]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.3...v0.6.4
 [0.6.3]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/LiusuZeng/pi-deck/compare/v0.6.1...v0.6.2
