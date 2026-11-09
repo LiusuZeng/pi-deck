@@ -1314,31 +1314,25 @@ export function AgentWorkflowBuilder(props: {
                     </button>
                   ) : null}
                 </div>
-                {(["maxAttempts", "timeoutSeconds"] as const).map((field) => (
-                  <label className="workflow-field" key={field}>
-                    <span>
-                      {field === "maxAttempts"
-                        ? "Max attempts"
-                        : "Timeout seconds"}
-                    </span>
-                    <input
-                      type="number"
-                      min="1"
-                      value={selected.execution?.[field] ?? ""}
-                      onChange={(event) =>
-                        patch({
-                          ...selected,
-                          execution: {
-                            ...selected.execution,
-                            [field]: event.target.value
-                              ? Number(event.target.value)
-                              : undefined,
-                          },
-                        } as AgentWorkflowNode)
-                      }
-                    />
-                  </label>
-                ))}
+                <label className="workflow-field">
+                  <span>Max attempts</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={selected.execution?.maxAttempts ?? ""}
+                    onChange={(event) =>
+                      patch({
+                        ...selected,
+                        execution: {
+                          ...selected.execution,
+                          maxAttempts: event.target.value
+                            ? Number(event.target.value)
+                            : undefined,
+                        },
+                      } as AgentWorkflowNode)
+                    }
+                  />
+                </label>
               </details>
             )}
           </aside>

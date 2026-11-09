@@ -453,6 +453,34 @@ describe("WorkflowStore agentWorkflow migration foundation", () => {
     );
   });
 
+  it("preserves legacy timeout definitions with explicit recovery guidance", async () => {
+    const store = await fresh();
+    const original = JSON.stringify({
+      version: 3,
+      workflows: [
+        {
+          ...agentWorkflowDefinition(),
+          nodes: [
+            {
+              ...agentWorkflowDefinition().nodes[0],
+              execution: { timeoutSeconds: 60 },
+            },
+          ],
+        },
+      ],
+      occurrences: [],
+      runs: [],
+      legacyRuns: [],
+      workflowScopes: {},
+    });
+    await fs.writeFile(store.storeFile, original);
+
+    await expect(store.listWorkflows()).rejects.toThrow(
+      "Workflow metadata contains unsupported Timeout seconds. Remove each execution.timeoutSeconds value before reopening Pi Deck; timeout limits cannot be enforced.",
+    );
+    expect(await fs.readFile(store.storeFile, "utf8")).toBe(original);
+  });
+
   it("preserves malformed v3 and future stores byte-for-byte and rejects them", async () => {
     const store = await fresh();
     const malformedV3 = '{"version":3,"workflows":[]}';
