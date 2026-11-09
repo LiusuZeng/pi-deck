@@ -6,7 +6,6 @@ import {
   isWorkspaceWorkPrimaryView,
   replaceSessionRouteId,
   savedAnswersView,
-  selectedSessionIdForPrimaryView,
   sessionView,
   workflowSidebarView,
   workflowView,
@@ -90,17 +89,6 @@ describe("primary renderer view transitions", () => {
       ...session,
       sessionId: "runtime-a-resumed",
     });
-  });
-
-  it("keeps a newly opened session visible when bootstrap retains its draft selection", () => {
-    const activeSession = sessionView("runtime-active", allWorkView());
-
-    expect(selectedSessionIdForPrimaryView(activeSession, "draft-new")).toBe(
-      "runtime-active",
-    );
-    expect(selectedSessionIdForPrimaryView(allWorkView(), "draft-new")).toBe(
-      "draft-new",
-    );
   });
 
   it("preserves Work origin while browsing workspace Saved answers", () => {

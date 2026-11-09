@@ -237,7 +237,6 @@ import {
   isAllWorkPrimaryView,
   replaceSessionRouteId,
   savedAnswersView,
-  selectedSessionIdForPrimaryView,
   sessionView,
   workflowView as workflowPrimaryView,
   workOriginForPrimaryView,
@@ -2943,11 +2942,7 @@ export function App(): ReactElement {
   }, [composerDrafts, sessions]);
 
   const selectedSession =
-    sessions.find(
-      (session) =>
-        session.id ===
-        selectedSessionIdForPrimaryView(primaryView, selectedSessionId),
-    ) ??
+    sessions.find((session) => session.id === selectedSessionId) ??
     sessions[0] ??
     loadingSession;
 
