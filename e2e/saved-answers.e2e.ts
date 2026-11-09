@@ -153,6 +153,10 @@ test("a completed answer can be saved and reopened after app restart", async () 
     await expect(revisionDialog).toBeVisible();
     await revisionDialog.getByRole("button", { name: "Save revision" }).click();
     await expect(first.page.getByText("Revision 2 of 2")).toBeVisible();
+    await first.page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      await window.piDeck.chat.closeSession({ runtimeId: snapshot.runtimeId });
+    });
     await first.page.getByRole("button", { name: /Revision 1/ }).click();
     await expect(
       first.page.getByText("Add a rollback section with concrete steps."),
