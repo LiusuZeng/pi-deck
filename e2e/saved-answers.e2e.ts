@@ -146,21 +146,45 @@ test("a completed answer can be saved and reopened after app restart", async () 
     await expect(
       revisedRow.getByRole("button", { name: "Save as output" }),
     ).toBeVisible();
-    await revisedRow.getByRole("button", { name: "Save as output" }).click();
-    const revisionDialog = first.page.getByRole("dialog", {
-      name: "Save as next revision",
+    await first.page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      await window.piDeck.chat.closeSession({ runtimeId: snapshot.runtimeId });
     });
-    await expect(revisionDialog).toBeVisible();
-    await revisionDialog.getByRole("button", { name: "Save revision" }).click();
-    await expect(first.page.getByText("Revision 2 of 2")).toBeVisible();
-    await first.page.getByRole("button", { name: /Revision 1/ }).click();
     await expect(
-      first.page.getByText("Add a rollback section with concrete steps."),
+      first.page.locator("button.session-item.active"),
+    ).toContainText("Saved · click to resume");
+    await first.page.locator("button.session-item.active").click();
+    await expect(
+      first.page.getByText(/Revising Kept answer, revision 1/),
     ).toBeVisible();
     await first.app.close();
     first = undefined;
 
     second = await launch(env);
+    await second.page
+      .getByRole("button", {
+        name: /Session: Revise the pinned text deliverable/,
+      })
+      .click();
+    await expect(
+      second.page.getByText(/Revising Kept answer, revision 1/),
+    ).toBeVisible();
+    const resumedRevisionRow = second.page
+      .locator("article.assistant-row")
+      .last();
+    await resumedRevisionRow
+      .getByRole("button", { name: "Save as output" })
+      .click();
+    const revisionDialog = second.page.getByRole("dialog", {
+      name: "Save as next revision",
+    });
+    await expect(revisionDialog).toBeVisible();
+    await revisionDialog.getByRole("button", { name: "Save revision" }).click();
+    await expect(second.page.getByText("Revision 2 of 2")).toBeVisible();
+    await second.page.getByRole("button", { name: /Revision 1/ }).click();
+    await expect(
+      second.page.getByText("Add a rollback section with concrete steps."),
+    ).toBeVisible();
     await second.page.getByRole("button", { name: "Outputs" }).click();
     await expect(
       second.page.getByRole("heading", { name: "Outputs" }),

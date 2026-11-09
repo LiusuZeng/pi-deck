@@ -251,6 +251,13 @@ import {
   PiModelThinkingMenu,
   nextMenuItemIndex,
 } from "./components/PiModelThinkingMenu.js";
+import {
+  moveOutputRevisionTarget,
+  outputRevisionTargetForSession,
+  outputRevisionTargetKey,
+  removeOutputRevisionTarget,
+  type OutputRevisionTarget,
+} from "./outputRevisionTargets.js";
 import type {
   SubagentActivity,
   SubagentActivityChild,
@@ -263,17 +270,11 @@ interface SaveAnswerDialogState {
   assistantMessageId?: string;
   title: string;
   target?: { outputId: string; expectedRevisionId: string };
+  revisionTargetKey?: string;
   returnFocus: HTMLButtonElement;
 }
 
-interface OutputRevisionTarget {
-  outputId: string;
-  expectedRevisionId: string;
-  title: string;
-  displayNumber: number;
-}
-
-const OUTPUT_REVISION_TARGETS_KEY = "pi-deck.output-revision-targets.v1";
+const OUTPUT_REVISION_TARGETS_KEY = "pi-deck.output-revision-targets.v2";
 
 function loadOutputRevisionTargets(): Record<string, OutputRevisionTarget> {
   try {
@@ -2180,7 +2181,10 @@ export function App(): ReactElement {
     returnFocus: HTMLButtonElement,
   ): void {
     if (!selectedSession.runtimeBacked || item.streaming === true) return;
-    const target = outputRevisionTargets[selectedSession.id];
+    const target = outputRevisionTargetForSession(
+      outputRevisionTargets,
+      selectedSession,
+    );
     setSaveAnswerError(undefined);
     setSaveAnswerDialog({
       requestId: window.crypto.randomUUID(),
@@ -2197,6 +2201,7 @@ export function App(): ReactElement {
               outputId: target.outputId,
               expectedRevisionId: target.expectedRevisionId,
             },
+            revisionTargetKey: outputRevisionTargetKey(selectedSession),
           }),
       returnFocus,
     });
@@ -2218,13 +2223,18 @@ export function App(): ReactElement {
     setSaveAnswerPending(true);
     setSaveAnswerError(undefined);
     try {
-      const { returnFocus: _returnFocus, ...request } = dialog;
+      const {
+        returnFocus: _returnFocus,
+        revisionTargetKey: _revisionTargetKey,
+        ...request
+      } = dialog;
       const saved = await window.piDeck.savedAnswers.save(request);
       setSaveAnswerDialog(undefined);
-      setOutputRevisionTargets((current) => {
-        const { [dialog.runtimeId]: _savedTarget, ...remaining } = current;
-        return remaining;
-      });
+      setOutputRevisionTargets((current) =>
+        dialog.revisionTargetKey === undefined
+          ? current
+          : removeOutputRevisionTarget(current, dialog.revisionTargetKey),
+      );
       setUiMessage(
         dialog.target === undefined
           ? `Saved “${saved.title}” to Outputs.`
@@ -4780,12 +4790,9 @@ export function App(): ReactElement {
       );
       composerDraftsRef.current = materializedComposerDrafts;
       setComposerDrafts(materializedComposerDrafts);
-      setOutputRevisionTargets((current) => {
-        const draftTarget = current[draftSession.id];
-        if (draftTarget === undefined) return current;
-        const { [draftSession.id]: _draftTarget, ...remaining } = current;
-        return { ...remaining, [initializedSession.id]: draftTarget };
-      });
+      setOutputRevisionTargets((current) =>
+        moveOutputRevisionTarget(current, draftSession, initializedSession),
+      );
       if (initializedSession.backendMode === "real") {
         rememberPiDefaults(initializedSession);
         loadRealCapabilities(initializedSession.id);
@@ -7221,7 +7228,7 @@ export function App(): ReactElement {
     );
     setOutputRevisionTargets((current) => ({
       ...current,
-      [next.id]: {
+      [outputRevisionTargetKey(next)]: {
         outputId: detail.outputId,
         expectedRevisionId: detail.revisionId,
         title: detail.title,
@@ -7350,8 +7357,10 @@ export function App(): ReactElement {
     }
   }
 
-  const selectedOutputRevisionTarget =
-    outputRevisionTargets[selectedSession.id];
+  const selectedOutputRevisionTarget = outputRevisionTargetForSession(
+    outputRevisionTargets,
+    selectedSession,
+  );
   const composer = (
     <>
       {selectedOutputRevisionTarget === undefined ? null : (
