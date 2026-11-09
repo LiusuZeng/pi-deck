@@ -7,6 +7,10 @@ import path from "node:path";
 
 const repoRoot = path.resolve(__dirname, "..");
 const mainEntry = path.join(repoRoot, "dist/main/main.js");
+// The worker-wide timeout must admit cold bootstrap get_state, while the fake's
+// controlled prompt acknowledgement remains delayed beyond that deadline.
+const delayedPromptResponseMs = 5_000;
+const promptAcknowledgementTimeoutMs = 2_000;
 
 function fakePiBinary(root: string, args: readonly string[]): string {
   const binary = path.join(root, "fake-pi.js");
@@ -161,13 +165,15 @@ test("delayed ordinary prompt acknowledgement keeps recovery quarantined through
       root,
       [
         "--delay-prompt-response-ms",
-        "1000",
+        String(delayedPromptResponseMs),
         "--stream-delay-ms",
         "150",
         "--prompt-receipt-signal-file",
         receiptFile,
       ],
-      { PI_DECK_REAL_RPC_TIMEOUT_MS: "100" },
+      {
+        PI_DECK_REAL_RPC_TIMEOUT_MS: String(promptAcknowledgementTimeoutMs),
+      },
     );
     app = launched.app;
     const { page } = launched;
@@ -231,11 +237,13 @@ test("terminal error before a delayed acknowledgement cannot retry an unconfirme
         "--prompt-scenario",
         "error",
         "--delay-prompt-response-ms",
-        "1000",
+        String(delayedPromptResponseMs),
         "--prompt-receipt-signal-file",
         receiptFile,
       ],
-      { PI_DECK_REAL_RPC_TIMEOUT_MS: "100" },
+      {
+        PI_DECK_REAL_RPC_TIMEOUT_MS: String(promptAcknowledgementTimeoutMs),
+      },
     );
     app = launched.app;
     const prompt = "terminal before delayed acknowledgement fixture";
