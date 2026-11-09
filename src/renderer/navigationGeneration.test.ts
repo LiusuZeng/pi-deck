@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   canApplyBootstrapSessionRefresh,
+  canReportBootstrapSessionRefresh,
   isNavigationGenerationCurrent,
   nextNavigationGeneration,
 } from "./navigationGeneration.js";
@@ -54,6 +55,7 @@ describe("renderer navigation generations", () => {
       refresh.currentNavigation,
     );
     expect(canApplyBootstrapSessionRefresh(refresh)).toBe(false);
+    expect(canReportBootstrapSessionRefresh(refresh)).toBe(true);
     selectedSessionId = "runtime-active";
     primaryView = "session:runtime-active";
     sessionList.resolve(["draft-new"]);

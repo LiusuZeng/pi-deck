@@ -223,6 +223,7 @@ import {
 import { SavedAnswers } from "./components/SavedAnswers.js";
 import {
   canApplyBootstrapSessionRefresh,
+  canReportBootstrapSessionRefresh,
   isNavigationGenerationCurrent,
   nextNavigationGeneration,
 } from "./navigationGeneration.js";
@@ -2309,16 +2310,24 @@ export function App(): ReactElement {
       const workspace =
         workspaceList.activeWorkspace ??
         workspaceFromLegacyProject(bootstrap.project);
+      const refreshState = () => ({
+        disposed,
+        sessionListRequest,
+        currentSessionListRequest: sessionListGeneration.current,
+        bootstrapWorkspaceId: workspace.id,
+        currentWorkspaceId: currentWorkspaceRef.current.id,
+      });
       const canApplyRefresh = (): boolean =>
         canApplyBootstrapSessionRefresh({
-          disposed,
-          sessionListRequest,
-          currentSessionListRequest: sessionListGeneration.current,
+          ...refreshState(),
           navigationRequest,
           currentNavigation: navigationGeneration.current,
-          bootstrapWorkspaceId: workspace.id,
-          currentWorkspaceId: currentWorkspaceRef.current.id,
         });
+      // Navigation may move to a newly opened session while discovery runs.
+      // That blocks session-row adoption, but not the status of this still
+      // current workspace scan.
+      const canReportRefresh = (): boolean =>
+        canReportBootstrapSessionRefresh(refreshState());
       try {
         const listedSessions = await listSessionsForWorkspaces(
           api,
@@ -2329,7 +2338,14 @@ export function App(): ReactElement {
         // Do not let a late startup scan replace a workspace the user has
         // since selected, overwrite a newer explicit refresh, or overwrite a
         // session route opened after this scan was scheduled.
-        if (!canApplyRefresh()) return;
+        if (!canApplyRefresh()) {
+          if (canReportRefresh()) {
+            setUiMessage(
+              `Real Pi mode active. Found ${listedSessions.length} saved session(s) across ${workspaceList.workspaces.length} workspace(s).`,
+            );
+          }
+          return;
+        }
         await adoptIncomingRuntimeIdentities(listedSessions);
         if (!canApplyRefresh()) return;
         setSessions((items) =>
@@ -2343,11 +2359,13 @@ export function App(): ReactElement {
         for (const session of listedSessions) {
           if (session.runtimeBacked) void hydrateAttachedSession(session);
         }
-        setUiMessage(
-          `Real Pi mode active. Found ${listedSessions.length} saved session(s) across ${workspaceList.workspaces.length} workspace(s).`,
-        );
+        if (canReportRefresh()) {
+          setUiMessage(
+            `Real Pi mode active. Found ${listedSessions.length} saved session(s) across ${workspaceList.workspaces.length} workspace(s).`,
+          );
+        }
       } catch (error) {
-        if (canApplyRefresh()) {
+        if (canReportRefresh()) {
           setUiMessage(
             `Saved-session refresh failed: ${error instanceof Error ? error.message : String(error)}`,
           );
