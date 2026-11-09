@@ -150,24 +150,71 @@ test("a completed answer can be saved and reopened after app restart", async () 
       const snapshot = await window.piDeck.chat.getSnapshot();
       await window.piDeck.chat.closeSession({ runtimeId: snapshot.runtimeId });
     });
+    // Exercise close/resume without relaunching. An externally closed worker
+    // is recoverable from its saved native session in the current renderer.
+    const reopenRevision = first.page.getByRole("button", {
+      name: "Reopen saved session",
+    });
+    await expect(reopenRevision).toBeVisible();
+    await reopenRevision.click();
     await expect(
-      first.page.locator("button.session-item.active"),
-    ).toContainText("Saved · click to resume");
-    await first.page.locator("button.session-item.active").click();
-    await expect(
-      first.page.getByText(/Revising Kept answer, revision 1/),
+      first.page.getByText("Resumed saved Pi session."),
     ).toBeVisible();
+    await first.page
+      .locator("article.assistant-row")
+      .last()
+      .getByRole("button", { name: "Save as output" })
+      .click();
+    const firstRevisionDialog = first.page.getByRole("dialog", {
+      name: "Save as next revision",
+    });
+    await expect(firstRevisionDialog).toBeVisible();
+    await firstRevisionDialog
+      .getByRole("button", { name: "Save revision" })
+      .click();
+    await expect(first.page.getByText("Revision 2 of 2")).toBeVisible();
+
+    // Create another revision, then prove the target also survives a full
+    // application restart before that completed response is saved.
+    await first.page
+      .getByLabel("Review feedback")
+      .fill("Add an incident-owner checklist.");
+    await first.page.getByRole("button", { name: "Request changes" }).click();
+    await expect(
+      first.page.getByText("Changes requested", { exact: true }).first(),
+    ).toBeVisible();
+    await first.page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      await window.piDeck.chat.closeSession({ runtimeId: snapshot.runtimeId });
+    });
+    await first.page
+      .getByRole("button", { name: "Revise in new session" })
+      .click();
+    await expect(
+      first.page.getByText(/Revising Kept answer, revision 2/),
+    ).toBeVisible();
+    await first.page.getByRole("button", { name: "Send" }).click();
+    await expect(
+      first.page
+        .locator("article.assistant-row")
+        .last()
+        .getByRole("button", { name: "Save as output" }),
+    ).toBeVisible();
+    await first.page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      await window.piDeck.chat.closeSession({ runtimeId: snapshot.runtimeId });
+    });
     await first.app.close();
     first = undefined;
 
     second = await launch(env);
-    await second.page
-      .getByRole("button", {
-        name: /Session: Revise the pinned text deliverable/,
-      })
-      .click();
+    const savedRevisionSessions = second.page.getByRole("button", {
+      name: /Session: Revise the pinned text deliverable/,
+    });
+    await expect(savedRevisionSessions.first()).toBeVisible();
+    await savedRevisionSessions.first().click();
     await expect(
-      second.page.getByText(/Revising Kept answer, revision 1/),
+      second.page.getByText(/Revising Kept answer, revision 2/),
     ).toBeVisible();
     const resumedRevisionRow = second.page
       .locator("article.assistant-row")
@@ -180,10 +227,10 @@ test("a completed answer can be saved and reopened after app restart", async () 
     });
     await expect(revisionDialog).toBeVisible();
     await revisionDialog.getByRole("button", { name: "Save revision" }).click();
-    await expect(second.page.getByText("Revision 2 of 2")).toBeVisible();
-    await second.page.getByRole("button", { name: /Revision 1/ }).click();
+    await expect(second.page.getByText("Revision 3 of 3")).toBeVisible();
+    await second.page.getByRole("button", { name: /Revision 2/ }).click();
     await expect(
-      second.page.getByText("Add a rollback section with concrete steps."),
+      second.page.getByText("Add an incident-owner checklist."),
     ).toBeVisible();
     await second.page.getByRole("button", { name: "Outputs" }).click();
     await expect(
@@ -198,7 +245,7 @@ test("a completed answer can be saved and reopened after app restart", async () 
     await expect(second.page.locator(".saved-answer-content")).toContainText(
       "Add a rollback section with concrete steps.",
     );
-    await expect(second.page.getByText("Revision 2 of 2")).toBeVisible();
+    await expect(second.page.getByText("Revision 3 of 3")).toBeVisible();
     const savedIdentity = await second.page.evaluate(async () => {
       const workspace = await window.piDeck.workspaces.getActive();
       if (workspace.activeWorkspace === undefined) {
