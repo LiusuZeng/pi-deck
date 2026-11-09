@@ -7,6 +7,10 @@ import path from "node:path";
 
 const repoRoot = path.resolve(__dirname, "..");
 const mainEntry = path.join(repoRoot, "dist/main/main.js");
+// The worker-wide timeout must admit cold bootstrap get_state, while the fake's
+// controlled intervention acknowledgement remains delayed beyond that deadline.
+const delayedInterventionResponseMs = 5_000;
+const interventionAcknowledgementTimeoutMs = 2_000;
 
 function interventionEnv(
   root: string,
@@ -252,11 +256,15 @@ for (const intervention of [
           "--stream-delay-ms",
           "5000",
           "--delay-intervention-response-ms",
-          "1000",
+          String(delayedInterventionResponseMs),
           "--fixture-trace-file",
           traceFile,
         ],
-        { PI_DECK_REAL_RPC_TIMEOUT_MS: "100" },
+        {
+          PI_DECK_REAL_RPC_TIMEOUT_MS: String(
+            interventionAcknowledgementTimeoutMs,
+          ),
+        },
       ),
     );
     try {
