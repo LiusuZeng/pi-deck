@@ -84,6 +84,17 @@ export function sessionView(
   return { kind: "session", sessionId, origin };
 }
 
+/**
+ * A session route is a newer, explicit navigation intent than an incidental
+ * selection update from background bootstrap or discovery work.
+ */
+export function selectedSessionIdForPrimaryView(
+  view: PrimaryView,
+  selectedSessionId: string,
+): string {
+  return view.kind === "session" ? view.sessionId : selectedSessionId;
+}
+
 export function workflowView(
   view: WorkflowSurface,
   origin: WorkOrigin,
