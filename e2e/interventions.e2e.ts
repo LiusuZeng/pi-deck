@@ -11,6 +11,7 @@ const mainEntry = path.join(repoRoot, "dist/main/main.js");
 function interventionEnv(
   root: string,
   fakePiArgs: string[],
+  overrides: NodeJS.ProcessEnv = {},
 ): NodeJS.ProcessEnv {
   const projectCwd = path.join(root, "project");
   const agentDir = path.join(root, "agent");
@@ -41,6 +42,7 @@ function interventionEnv(
     PI_CODING_AGENT_DIR: agentDir,
     PI_DECK_HOME: path.join(root, "pideck-home"),
     PI_DECK_USER_DATA_DIR: userDataDir,
+    ...overrides,
   };
 }
 
@@ -168,6 +170,12 @@ test("lost Pi transport leaves an intervention visibly delivery-unconfirmed", as
     await expect(intervention).toContainText(
       "Reopen the saved session to reconcile its transcript.",
     );
+    await expect(composer).toHaveValue("");
+    await expect(
+      page.getByText("A previous send may have been accepted.", {
+        exact: false,
+      }),
+    ).toBeVisible();
     // A resumed snapshot without queue/transcript evidence must not make the
     // receipt disappear or claim delivery.
     await page.locator("button.session-item.active").click();
@@ -183,6 +191,131 @@ test("lost Pi transport leaves an intervention visibly delivery-unconfirmed", as
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("post-dispatch follow-up disconnect quarantines its receipt", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-follow-up-disconnect-"),
+  );
+  const launched = await launch(
+    interventionEnv(root, [
+      "--stream-delay-ms",
+      "5000",
+      "--exit-after-intervention-receipt",
+    ]),
+  );
+  try {
+    const { page } = launched;
+    const composer = page.getByLabel("Prompt text");
+    await composer.fill("start disconnected follow-up fixture");
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Follow-up" })).toBeVisible();
+
+    const instruction =
+      "Do not retry this disconnected follow-up automatically";
+    await composer.fill(instruction);
+    await page.getByRole("button", { name: "Follow-up" }).click();
+    const intervention = page.locator('[data-intervention-kind="followUp"]', {
+      hasText: instruction,
+    });
+    await expect(intervention).toHaveAttribute(
+      "data-intervention-status",
+      "unconfirmed",
+    );
+    await expect(intervention).toHaveAccessibleName(
+      "Follow-up delivery unconfirmed",
+    );
+    await expect(composer).toHaveValue("");
+    await expect(
+      page.getByText("A previous send may have been accepted.", {
+        exact: false,
+      }),
+    ).toBeVisible();
+  } finally {
+    await launched.app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+for (const intervention of [
+  { kind: "steer", button: "Steer", label: "Steering" },
+  { kind: "followUp", button: "Follow-up", label: "Follow-up" },
+] as const) {
+  test(`${intervention.label} timeout retains quarantine across late acknowledgement and queue evidence`, async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), `pi-deck-${intervention.kind}-late-receipt-`),
+    );
+    const traceFile = path.join(root, "intervention-delay.log");
+    const launched = await launch(
+      interventionEnv(
+        root,
+        [
+          "--stream-delay-ms",
+          "5000",
+          "--delay-intervention-response-ms",
+          "1000",
+          "--fixture-trace-file",
+          traceFile,
+        ],
+        { PI_DECK_REAL_RPC_TIMEOUT_MS: "100" },
+      ),
+    );
+    try {
+      const { page } = launched;
+      const composer = page.getByLabel("Prompt text");
+      await composer.fill(`start delayed ${intervention.label} fixture`);
+      await page.getByRole("button", { name: "Send", exact: true }).click();
+      await expect(
+        page.getByRole("button", { name: intervention.button }),
+      ).toBeVisible();
+
+      const instruction = `Do not replay delayed ${intervention.label}`;
+      await composer.fill(instruction);
+      await page.getByRole("button", { name: intervention.button }).click();
+      const receipt = page.locator(
+        `[data-intervention-kind="${intervention.kind}"]`,
+        { hasText: instruction },
+      );
+
+      // The fake first reports queue evidence, then withholds its successful
+      // response past the short Deck deadline. That pre-timeout event cannot
+      // make the uncertain receipt safe to retry.
+      await expect(receipt).toHaveAttribute(
+        "data-intervention-status",
+        "unconfirmed",
+      );
+      await expect(page.locator('.composer-error[role="alert"]')).toContainText(
+        "Pi may have received this instruction",
+      );
+      await expect(composer).toHaveValue("");
+
+      // The late response is deliberately followed by another queue event.
+      // Authoritative queue evidence may requeue the local receipt, but must
+      // not clear the persisted delivery quarantine or manufacture a retry.
+      await expect(receipt).toHaveAttribute(
+        "data-intervention-status",
+        "queued",
+      );
+      await expect(page.locator('.composer-error[role="alert"]')).toContainText(
+        "Pi may have received this instruction",
+      );
+      await expect(
+        page.locator(`[data-intervention-kind="${intervention.kind}"]`, {
+          hasText: instruction,
+        }),
+      ).toHaveCount(1);
+      await expect
+        .poll(() => fs.readFileSync(traceFile, "utf8").trim().split("\n"))
+        .toEqual([
+          `intervention-delay:${intervention.kind === "steer" ? "steer" : "follow_up"}:queue-before-response`,
+          `intervention-delay:${intervention.kind === "steer" ? "steer" : "follow_up"}:response-after-timeout`,
+          `intervention-delay:${intervention.kind === "steer" ? "steer" : "follow_up"}:queue-after-response`,
+        ]);
+    } finally {
+      await launched.app.close().catch(() => undefined);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("reopening a saved session reconciles or retains a lost intervention receipt", async () => {
   const root = fs.mkdtempSync(

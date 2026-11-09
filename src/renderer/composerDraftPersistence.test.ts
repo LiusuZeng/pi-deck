@@ -704,6 +704,33 @@ describe("ordering, acceptance, and storage failures", () => {
     expect(rejectedRecord?.pendingSubmission).toBeUndefined();
   });
 
+  it.each(["steer", "followUp"] as const)(
+    "quarantines unknown %s delivery through reload",
+    (destination) => {
+      const storage = new MemoryStorage();
+      const first = new ComposerDraftPersistence(storage, { now: () => 50 });
+      first.hydrate([nativeSession], ["workspace-a"]);
+      first.beginSubmission(
+        nativeSession,
+        `possibly accepted ${destination}`,
+        1,
+        destination,
+      );
+      first.reconcilePendingSubmission(nativeSession, "unknown");
+
+      const reloaded = new ComposerDraftPersistence(storage, { now: () => 60 });
+      const plan = reloaded.hydrate([nativeSession], ["workspace-a"]);
+      expect(plan.restored).toEqual([]);
+      expect(plan.pendingSubmissions).toMatchObject([
+        {
+          text: `possibly accepted ${destination}`,
+          destination,
+          attachmentsNeedReselection: true,
+        },
+      ]);
+    },
+  );
+
   it("preserves newer text beside an unknown delivery through reload and recovery", () => {
     const storage = new MemoryStorage();
     const first = new ComposerDraftPersistence(storage, { now: () => 50 });

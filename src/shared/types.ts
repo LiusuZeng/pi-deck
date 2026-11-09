@@ -182,6 +182,8 @@ export type ChatPromptRequest = z.input<typeof chatPromptRequestSchema>;
 export type ChatPromptDeliveryResult =
   | { deliveryStatus: "unknown"; message: string }
   | undefined;
+/** Steering and follow-up commands have the same uncertain-receipt contract. */
+export type ChatInterventionDeliveryResult = ChatPromptDeliveryResult;
 export type ChatInterventionRequest = z.infer<
   typeof chatInterventionRequestSchema
 >;
@@ -412,8 +414,12 @@ export interface PiDeckApi {
       level: string;
     }): Promise<ChatSnapshot>;
     prompt(request: ChatPromptRequest): Promise<ChatPromptDeliveryResult>;
-    steer(request: ChatInterventionRequest): Promise<void>;
-    followUp(request: ChatInterventionRequest): Promise<void>;
+    steer(
+      request: ChatInterventionRequest,
+    ): Promise<ChatInterventionDeliveryResult>;
+    followUp(
+      request: ChatInterventionRequest,
+    ): Promise<ChatInterventionDeliveryResult>;
     abort(request: { runtimeId: string }): Promise<void>;
     respondToExtensionUi(
       request: ChatRespondToExtensionUiRequest,
