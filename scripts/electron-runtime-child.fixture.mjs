@@ -14,6 +14,10 @@ let continueLockWait;
 const lockWaitMayFinish = new Promise((resolve) => {
   continueLockWait = resolve;
 });
+let continueLockReclaim;
+const lockReclaimMayFinish = new Promise((resolve) => {
+  continueLockReclaim = resolve;
+});
 
 function send(message) {
   process.send?.(message);
@@ -29,6 +33,9 @@ process.on("message", (message) => {
   if (message === "continue-lock-wait") {
     continueLockWait();
   }
+  if (message === "continue-lock-reclaim") {
+    continueLockReclaim();
+  }
 });
 
 try {
@@ -36,25 +43,28 @@ try {
     platform: "darwin",
     electronExecutable: options.electronExecutable,
     runtimeCacheRoot: options.runtimeCacheRoot,
-    copyBundle: async (source, destination) => {
-      if (options.copyMode === "exit") {
-        send({ type: "copy-started" });
-        process.exit(0);
-      }
-      if (options.copyMode === "hold") {
-        send({ type: "copy-started" });
-        await copyMayFinish;
-      }
-      if (options.copyMode === "fail") {
-        send({ type: "contender-copy-started" });
-        await copyMayFinish;
-        throw new Error("contender copy should not run");
-      }
-      await cp(source, destination, {
-        recursive: true,
-        preserveTimestamps: true,
-      });
-    },
+    copyBundle:
+      options.copyMode === "default"
+        ? undefined
+        : async (source, destination) => {
+            if (options.copyMode === "exit") {
+              send({ type: "copy-started" });
+              process.exit(0);
+            }
+            if (options.copyMode === "hold") {
+              send({ type: "copy-started" });
+              await copyMayFinish;
+            }
+            if (options.copyMode === "fail") {
+              send({ type: "contender-copy-started" });
+              await copyMayFinish;
+              throw new Error("contender copy should not run");
+            }
+            await cp(source, destination, {
+              recursive: true,
+              preserveTimestamps: true,
+            });
+          },
     patchBundleIdentity: async () => undefined,
     beforeRuntimePreparationLockPublish:
       options.holdLockPublication === true
@@ -63,11 +73,25 @@ try {
             await lockPublicationMayFinish;
           }
         : undefined,
+    beforeRuntimePreparationLockReclaim:
+      options.holdLockReclaim === true
+        ? async () => {
+            send({ type: "lock-reclaiming" });
+            await lockReclaimMayFinish;
+          }
+        : undefined,
     onRuntimePreparationLockWait:
       options.waitForLock === true
         ? async () => {
             send({ type: "lock-waiting" });
             await lockWaitMayFinish;
+          }
+        : undefined,
+    afterRuntimePublication:
+      options.failAfterRuntimePublication === true
+        ? async () => {
+            send({ type: "runtime-published" });
+            throw new Error("post-publication failure");
           }
         : undefined,
   });
