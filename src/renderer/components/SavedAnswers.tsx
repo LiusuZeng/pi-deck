@@ -35,6 +35,7 @@ export function SavedAnswers(props: {
   const [detailError, setDetailError] = useState<string | undefined>();
   const listGeneration = useRef(0);
   const detailGeneration = useRef(0);
+  const latestLoadList = useRef<(() => Promise<void>) | undefined>(undefined);
   const loading = listLoading || detailLoading || mutationPending;
   const error = detailError ?? listError;
 
@@ -59,10 +60,19 @@ export function SavedAnswers(props: {
     }
   }
 
+  latestLoadList.current = loadList;
+
+  useEffect(() => {
+    return () => {
+      latestLoadList.current = undefined;
+    };
+  }, []);
+
   async function loadDetail(revisionId?: string): Promise<void> {
     const outputId = props.selectedOutputId;
     if (outputId === undefined) return;
     const generation = ++detailGeneration.current;
+    setMutationPending(false);
     setDetailLoading(true);
     setDetailError(undefined);
     try {
@@ -96,6 +106,7 @@ export function SavedAnswers(props: {
 
   useEffect(() => {
     if (props.selectedOutputId === undefined) {
+      setMutationPending(false);
       setDetail(undefined);
       setDetailError(undefined);
       setDetailLoading(false);
@@ -116,6 +127,7 @@ export function SavedAnswers(props: {
     action: "note" | "changes-requested" | "accepted" | "reopened",
   ): Promise<void> {
     if (detail === undefined) return;
+    const generation = detailGeneration.current;
     setMutationPending(true);
     setDetailError(undefined);
     try {
@@ -126,13 +138,19 @@ export function SavedAnswers(props: {
         action,
         ...(reviewNote.trim() ? { note: reviewNote.trim() } : {}),
       });
-      setDetail(next);
-      setReviewNote("");
-      void loadList();
+      if (generation === detailGeneration.current) {
+        setDetail(next);
+        setReviewNote("");
+      }
+      void latestLoadList.current?.();
     } catch (reason) {
-      setDetailError(reason instanceof Error ? reason.message : String(reason));
+      if (generation === detailGeneration.current) {
+        setDetailError(
+          reason instanceof Error ? reason.message : String(reason),
+        );
+      }
     } finally {
-      setMutationPending(false);
+      if (generation === detailGeneration.current) setMutationPending(false);
     }
   }
 
