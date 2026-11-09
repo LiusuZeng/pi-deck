@@ -5,6 +5,7 @@ import {
   markInterventionQueued,
 } from "./interventions.js";
 import { emptyOverlays } from "./sessionState.js";
+import { shouldReconcileSession } from "./sessionRuntimeReconciliation.js";
 import {
   reduceRuntimeEvent,
   type SessionViewModel,
@@ -1229,8 +1230,12 @@ describe("sessionRuntimeReducer", () => {
     ).toBe(exited);
   });
 
-  it("settles a missing tool end as unknown rather than completed", () => {
-    const running = reduceRuntimeEvent(session(), {
+  it("settles a missing tool end as unknown while completing its canonical lifecycle", () => {
+    const started = reduceRuntimeEvent(session(), {
+      type: "agent_start",
+      runtimeId: "runtime-1",
+    } as any);
+    const running = reduceRuntimeEvent(started, {
       type: "tool_execution_update",
       runtimeId: "runtime-1",
       toolCallId: "subagent-settled",
@@ -1258,6 +1263,13 @@ describe("sessionRuntimeReducer", () => {
 
     expect(settled).toMatchObject({
       status: "idle",
+      baseState: "idle",
+      completedAtMs: 1_000,
+      lifecycle: {
+        phase: "terminal",
+        outcome: "completed",
+        settledAtMs: 1_000,
+      },
       overlays: { toolRunning: false },
       timeline: [
         {
@@ -1265,6 +1277,191 @@ describe("sessionRuntimeReducer", () => {
           subagentActivity: { children: [{ state: "Unknown" }] },
         },
       ],
+    });
+    expect(classifyActivity({ ...settled, workspaceName: "Workspace" })).toBe(
+      "completed",
+    );
+    expect(shouldReconcileSession(settled)).toBe(false);
+  });
+
+  it("finalizes unresolved children when an error update precedes agent_settled", () => {
+    const started = reduceRuntimeEvent(session(), {
+      type: "agent_start",
+      runtimeId: "runtime-1",
+    } as any);
+    const running = reduceRuntimeEvent(started, {
+      type: "tool_execution_update",
+      runtimeId: "runtime-1",
+      toolCallId: "subagent-error-recovery",
+      toolName: "subagent",
+      args: { agent: "worker", task: "Recover" },
+      partialResult: { details: { mode: "single", results: [] } },
+    } as any);
+
+    const failed = reduceRuntimeEvent(running, {
+      type: "message_update",
+      runtimeId: "runtime-1",
+      role: "assistant",
+      done: true,
+      status: "error",
+      provider: "openai-codex",
+      error: "Provided authentication token is invalid",
+    } as any);
+    const settled = reduceRuntimeEvent(failed, {
+      type: "agent_settled",
+      runtimeId: "runtime-1",
+    } as any);
+
+    expect(failed).toMatchObject({
+      status: "error",
+      failureKind: "auth-required",
+      lifecycle: { phase: "terminal", outcome: "failed" },
+    });
+    expect(failed.timeline).toContainEqual(
+      expect.objectContaining({
+        status: "collapsed",
+        subagentActivity: expect.objectContaining({
+          children: [expect.objectContaining({ state: "Unknown" })],
+        }),
+      }),
+    );
+    expect(settled).toBe(failed);
+  });
+
+  it("does not revive a terminal turn when agent_settled follows agent_end", () => {
+    const started = reduceRuntimeEvent(session(), {
+      type: "agent_start",
+      runtimeId: "runtime-1",
+    } as any);
+    const running = reduceRuntimeEvent(started, {
+      type: "tool_execution_update",
+      runtimeId: "runtime-1",
+      toolCallId: "subagent-normal-end",
+      toolName: "subagent",
+      args: { agent: "worker", task: "Finish" },
+      partialResult: { details: { mode: "single", results: [] } },
+    } as any);
+    const ended = reduceRuntimeEvent(running, {
+      type: "agent_end",
+      runtimeId: "runtime-1",
+      status: "success",
+    } as any);
+
+    const settled = reduceRuntimeEvent(ended, {
+      type: "agent_settled",
+      runtimeId: "runtime-1",
+    } as any);
+    expect(settled).toBe(ended);
+    expect(
+      reduceRuntimeEvent(settled, {
+        type: "agent_settled",
+        runtimeId: "runtime-1",
+      } as any),
+    ).toBe(ended);
+  });
+
+  it("rejects a run-id-tagged stale agent_settled event", () => {
+    const currentTurn = reduceRuntimeEvent(session(), {
+      type: "agent_start",
+      runtimeId: "runtime-1",
+      runId: "turn-b",
+    } as any);
+    const currentTurnWithSubagent = reduceRuntimeEvent(currentTurn, {
+      type: "tool_execution_update",
+      runtimeId: "runtime-1",
+      toolCallId: "subagent-current",
+      toolName: "subagent",
+      args: { agent: "worker", task: "Current turn" },
+      partialResult: { details: { mode: "single", results: [] } },
+    } as any);
+    expect(
+      reduceRuntimeEvent(currentTurnWithSubagent, {
+        type: "agent_settled",
+        runtimeId: "runtime-1",
+        runId: "turn-a",
+      } as any),
+    ).toBe(currentTurnWithSubagent);
+  });
+
+  it("preserves failure, abort, and pending-input evidence while recovering a settled subagent", () => {
+    const unresolvedSubagent = (current: SessionViewModel) =>
+      reduceRuntimeEvent(current, {
+        type: "tool_execution_update",
+        runtimeId: "runtime-1",
+        toolCallId: "subagent-recovery",
+        toolName: "subagent",
+        args: { agent: "worker", task: "Recover" },
+        partialResult: { details: { mode: "single", results: [] } },
+      } as any);
+    const started = reduceRuntimeEvent(session(), {
+      type: "agent_start",
+      runtimeId: "runtime-1",
+    } as any);
+
+    const failed = reduceRuntimeEvent(
+      {
+        ...unresolvedSubagent(started),
+        status: "error",
+        baseState: "error",
+        providerErrorObserved: true,
+        failureKind: "auth-required",
+      },
+      { type: "agent_settled", runtimeId: "runtime-1" } as any,
+    );
+    expect(failed).toMatchObject({
+      status: "error",
+      baseState: "error",
+      completedAtMs: undefined,
+      lifecycle: { phase: "terminal", outcome: "failed" },
+      providerErrorObserved: true,
+      failureKind: "auth-required",
+    });
+
+    const aborted = reduceRuntimeEvent(
+      {
+        ...unresolvedSubagent(started),
+        status: "aborting",
+        lifecycle: { phase: "aborting" },
+      },
+      { type: "agent_settled", runtimeId: "runtime-1" } as any,
+    );
+    expect(aborted).toMatchObject({
+      status: "idle",
+      lifecycle: { phase: "terminal", outcome: "aborted" },
+      completedAtMs: 1_000,
+      timeline: [
+        { subagentActivity: { children: [{ state: "Interrupted" }] } },
+      ],
+    });
+
+    const waiting = reduceRuntimeEvent(
+      reduceRuntimeEvent(started, {
+        type: "extension_ui_request",
+        runtimeId: "runtime-1",
+        id: "request-1",
+        method: "confirm",
+        title: "Continue?",
+      } as any),
+      {
+        type: "tool_execution_update",
+        runtimeId: "runtime-1",
+        toolCallId: "subagent-waiting",
+        toolName: "subagent",
+        args: { agent: "worker", task: "Recover" },
+        partialResult: { details: { mode: "single", results: [] } },
+      } as any,
+    );
+    const settledWhileWaiting = reduceRuntimeEvent(waiting, {
+      type: "agent_settled",
+      runtimeId: "runtime-1",
+    } as any);
+    expect(settledWhileWaiting).toMatchObject({
+      status: "waiting",
+      baseState: "waitingForInput",
+      completedAtMs: 1_000,
+      lifecycle: { phase: "terminal", outcome: "completed" },
+      pendingExtensionUiRequests: [{ id: "request-1" }],
+      overlays: { needsUserInput: true },
     });
   });
 
