@@ -106,29 +106,61 @@ describe("SavedAnswerService", () => {
     expect(second.reviewState).toBe("unreviewed");
 
     const restarted = new SavedAnswerService(home);
-    const current = await restarted.read(workspaceId, first.outputId);
-    expect(current.revisionCount).toBe(2);
-    expect(current.selectedDisplayNumber).toBe(2);
-    expect(current.reviewState).toBe("unreviewed");
+    const latest = await restarted.read(workspaceId, first.outputId);
+    expect(latest).toMatchObject({
+      revisionCount: 2,
+      selectedDisplayNumber: 2,
+      selectedRevisionId: second.revisionId,
+      currentRevisionId: second.revisionId,
+      reviewState: "unreviewed",
+    });
     const original = await restarted.read(
       workspaceId,
       first.outputId,
       first.revisionId,
     );
-    expect(original.content).toBe(firstInput.content);
-    expect(original.reviewState).toBe("changes-requested");
+    expect(original).toMatchObject({
+      content: firstInput.content,
+      selectedRevisionId: first.revisionId,
+      currentRevisionId: second.revisionId,
+      reviewState: "changes-requested",
+    });
     expect(original.reviews).toContainEqual(
       expect.objectContaining({ note: "Add a rollback section." }),
     );
 
+    const third = await service.save(
+      saveInput({
+        workspaceId,
+        content: "Revision based on the original answer.",
+        target: {
+          outputId: first.outputId,
+          expectedRevisionId: original.currentRevisionId,
+        },
+      }),
+    );
+    expect(third).toMatchObject({
+      outputId: first.outputId,
+      displayNumber: 3,
+    });
+
+    const preparedTarget = {
+      outputId: first.outputId,
+      expectedRevisionId: third.revisionId,
+    };
+    await service.save(
+      saveInput({
+        workspaceId,
+        content: "Concurrent revision.",
+        target: preparedTarget,
+      }),
+    );
     await expect(
       service.save(
         saveInput({
           workspaceId,
-          target: {
-            outputId: first.outputId,
-            expectedRevisionId: first.revisionId,
-          },
+          content: "Stale revision candidate.",
+          target: preparedTarget,
         }),
       ),
     ).rejects.toThrow(/newer revision/i);
