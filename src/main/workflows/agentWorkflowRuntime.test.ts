@@ -87,6 +87,18 @@ function fanoutDefinition(
 }
 
 describe("agentWorkflow occurrence runtime", () => {
+  it("rejects unsupported timeout seconds with the schema migration guidance", () => {
+    const definition = fanoutDefinition("all");
+    definition.nodes[1] = {
+      ...definition.nodes[1]!,
+      execution: { timeoutSeconds: 60 },
+    } as never;
+
+    expect(() => createWorkflowRoleRun(definition, "workspace")).toThrow(
+      "Timeout seconds is not supported. Remove timeoutSeconds before saving or importing this workflow.",
+    );
+  });
+
   it("captures only configured upstream outputs in a durable ordered binding snapshot", () => {
     const definition: WorkflowRoleDefinition = {
       ...base,

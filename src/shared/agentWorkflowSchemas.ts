@@ -19,9 +19,20 @@ const executionSchema = z
     model: z.string().min(1).optional(),
     thinking: z.string().min(1).optional(),
     maxAttempts: z.number().int().min(1).optional(),
+    // Retain this field solely to return a useful migration error for old
+    // definitions, rather than silently discarding a requested limit.
     timeoutSeconds: z.number().int().min(1).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((execution, context) => {
+    if (execution.timeoutSeconds !== undefined)
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["timeoutSeconds"],
+        message:
+          "Timeout seconds is not supported. Remove timeoutSeconds before saving or importing this workflow.",
+      });
+  });
 
 export const workflowNodeInputBindingSchema = z
   .object({

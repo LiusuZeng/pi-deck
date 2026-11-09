@@ -390,8 +390,18 @@ export class WorkflowStore {
         );
       } else if (version === 3) {
         const v3 = agentWorkflowStoreSchema.safeParse(parsed);
-        if (!v3.success)
+        if (!v3.success) {
+          if (
+            v3.error.issues.some(
+              (issue) => issue.path.at(-1) === "timeoutSeconds",
+            )
+          )
+            throw new UnsupportedWorkflowStoreVersionError(
+              version,
+              "Workflow metadata contains unsupported Timeout seconds. Remove each execution.timeoutSeconds value before reopening Pi Deck; timeout limits cannot be enforced.",
+            );
           throw new UnsupportedWorkflowStoreVersionError(version);
+        }
         this.state = v3.data;
       } else throw new UnsupportedWorkflowStoreVersionError(version);
     } catch (error) {
@@ -494,8 +504,8 @@ export function migrateV1(file: V1Store): WorkflowStoreFile {
   });
 }
 export class UnsupportedWorkflowStoreVersionError extends Error {
-  constructor(version: number) {
-    super(`Unsupported workflow metadata version: ${version}`);
+  constructor(version: number, message?: string) {
+    super(message ?? `Unsupported workflow metadata version: ${version}`);
     this.name = "UnsupportedWorkflowStoreVersionError";
   }
 }
