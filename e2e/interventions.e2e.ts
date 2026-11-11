@@ -1,5 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
-import { _electron as electron, type ElectronApplication } from "playwright";
+import {
+  _electron as electron,
+  type ElectronApplication,
+  type Locator,
+} from "playwright";
 import electronPath from "electron";
 import fs from "node:fs";
 import os from "node:os";
@@ -7,10 +11,60 @@ import path from "node:path";
 
 const repoRoot = path.resolve(__dirname, "..");
 const mainEntry = path.join(repoRoot, "dist/main/main.js");
+// The worker-wide timeout must admit cold bootstrap get_state, while the fake's
+// controlled intervention acknowledgement remains delayed beyond that deadline.
+const delayedInterventionResponseMs = 5_000;
+const interventionAcknowledgementTimeoutMs = 2_000;
+
+type InterventionButtonName = "Steer" | "Follow-up";
+
+function interventionButton(page: Page, name: InterventionButtonName): Locator {
+  return page.getByRole("button", { name, exact: true });
+}
+
+async function submitIntervention(
+  page: Page,
+  composer: Locator,
+  name: InterventionButtonName,
+  instruction: string,
+): Promise<void> {
+  const button = interventionButton(page, name);
+  // Controls render only after the parent is working; entering the instruction
+  // is what enables them. Wait for both states rather than racing startup.
+  await expect(button).toBeVisible();
+  await composer.fill(instruction);
+  await expect(button).toBeEnabled();
+  await button.click();
+}
+
+async function expectInformedUnconfirmedRecovery(page: Page): Promise<void> {
+  // The persisted recovery quarantine intentionally takes precedence over the
+  // transient intervention error. It requires a deliberate history review,
+  // exposes recovery/discard choices, and never resends automatically.
+  const alert = page.locator('.composer-error[role="alert"]');
+  await expect(alert).toContainText("A previous send may have been accepted");
+  await expect(alert).toContainText(
+    "Check session history before recovering its text",
+  );
+  await expect(alert).toContainText("It will not be resent automatically");
+  await expect(
+    alert.getByRole("button", {
+      name: "Recover text after checking history",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    alert.getByRole("button", {
+      name: "Discard recovery after checking history",
+      exact: true,
+    }),
+  ).toBeVisible();
+}
 
 function interventionEnv(
   root: string,
   fakePiArgs: string[],
+  overrides: NodeJS.ProcessEnv = {},
 ): NodeJS.ProcessEnv {
   const projectCwd = path.join(root, "project");
   const agentDir = path.join(root, "agent");
@@ -41,6 +95,7 @@ function interventionEnv(
     PI_CODING_AGENT_DIR: agentDir,
     PI_DECK_HOME: path.join(root, "pideck-home"),
     PI_DECK_USER_DATA_DIR: userDataDir,
+    ...overrides,
   };
 }
 
@@ -89,11 +144,8 @@ test("terminal refresh consumes an id-less intervention after a pre-persistence 
     const composer = page.getByLabel("Prompt text");
     await composer.fill("start intervention evidence fixture");
     await page.getByRole("button", { name: "Send", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Steer" })).toBeVisible();
-
     const instruction = "Keep the intervention instruction visible";
-    await composer.fill(instruction);
-    await page.getByRole("button", { name: "Steer" }).click();
+    await submitIntervention(page, composer, "Steer", instruction);
     const intervention = page.locator('[data-intervention-kind="steer"]', {
       hasText: instruction,
     });
@@ -150,11 +202,8 @@ test("lost Pi transport leaves an intervention visibly delivery-unconfirmed", as
     const composer = page.getByLabel("Prompt text");
     await composer.fill("start disconnected intervention fixture");
     await page.getByRole("button", { name: "Send", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Steer" })).toBeVisible();
-
     const instruction = "Do not claim delivery after disconnect";
-    await composer.fill(instruction);
-    await page.getByRole("button", { name: "Steer" }).click();
+    await submitIntervention(page, composer, "Steer", instruction);
     const intervention = page.locator('[data-intervention-kind="steer"]', {
       hasText: instruction,
     });
@@ -165,9 +214,8 @@ test("lost Pi transport leaves an intervention visibly delivery-unconfirmed", as
     await expect(intervention).toHaveAccessibleName(
       "Steering delivery unconfirmed",
     );
-    await expect(intervention).toContainText(
-      "Reopen the saved session to reconcile its transcript.",
-    );
+    await expect(composer).toHaveValue("");
+    await expectInformedUnconfirmedRecovery(page);
     // A resumed snapshot without queue/transcript evidence must not make the
     // receipt disappear or claim delivery.
     await page.locator("button.session-item.active").click();
@@ -183,6 +231,124 @@ test("lost Pi transport leaves an intervention visibly delivery-unconfirmed", as
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("post-dispatch follow-up disconnect quarantines its receipt", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-follow-up-disconnect-"),
+  );
+  const launched = await launch(
+    interventionEnv(root, [
+      "--stream-delay-ms",
+      "5000",
+      "--exit-after-intervention-receipt",
+    ]),
+  );
+  try {
+    const { page } = launched;
+    const composer = page.getByLabel("Prompt text");
+    await composer.fill("start disconnected follow-up fixture");
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+    const instruction =
+      "Do not retry this disconnected follow-up automatically";
+    await submitIntervention(page, composer, "Follow-up", instruction);
+    const intervention = page.locator('[data-intervention-kind="followUp"]', {
+      hasText: instruction,
+    });
+    await expect(intervention).toHaveAttribute(
+      "data-intervention-status",
+      "unconfirmed",
+    );
+    await expect(intervention).toHaveAccessibleName(
+      "Follow-up delivery unconfirmed",
+    );
+    await expect(composer).toHaveValue("");
+    await expectInformedUnconfirmedRecovery(page);
+  } finally {
+    await launched.app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+for (const intervention of [
+  { kind: "steer", button: "Steer", label: "Steering" },
+  { kind: "followUp", button: "Follow-up", label: "Follow-up" },
+] as const) {
+  test(`${intervention.label} timeout retains quarantine across late acknowledgement and queue evidence`, async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), `pi-deck-${intervention.kind}-late-receipt-`),
+    );
+    const traceFile = path.join(root, "intervention-delay.log");
+    const launched = await launch(
+      interventionEnv(
+        root,
+        [
+          "--stream-delay-ms",
+          "5000",
+          "--delay-intervention-response-ms",
+          String(delayedInterventionResponseMs),
+          "--fixture-trace-file",
+          traceFile,
+        ],
+        {
+          PI_DECK_REAL_RPC_TIMEOUT_MS: String(
+            interventionAcknowledgementTimeoutMs,
+          ),
+        },
+      ),
+    );
+    try {
+      const { page } = launched;
+      const composer = page.getByLabel("Prompt text");
+      await composer.fill(`start delayed ${intervention.label} fixture`);
+      await page.getByRole("button", { name: "Send", exact: true }).click();
+      const instruction = `Do not replay delayed ${intervention.label}`;
+      await submitIntervention(
+        page,
+        composer,
+        intervention.button,
+        instruction,
+      );
+      const receipt = page.locator(
+        `[data-intervention-kind="${intervention.kind}"]`,
+        { hasText: instruction },
+      );
+
+      // The fake first reports queue evidence, then withholds its successful
+      // response past the short Deck deadline. That pre-timeout event cannot
+      // make the uncertain receipt safe to retry.
+      await expect(receipt).toHaveAttribute(
+        "data-intervention-status",
+        "unconfirmed",
+      );
+      await expectInformedUnconfirmedRecovery(page);
+      await expect(composer).toHaveValue("");
+
+      // The late response is deliberately followed by another queue event.
+      // Authoritative queue evidence may requeue the local receipt, but must
+      // not clear the persisted delivery quarantine or manufacture a retry.
+      await expect(receipt).toHaveAttribute(
+        "data-intervention-status",
+        "queued",
+      );
+      await expectInformedUnconfirmedRecovery(page);
+      await expect(
+        page.locator(`[data-intervention-kind="${intervention.kind}"]`, {
+          hasText: instruction,
+        }),
+      ).toHaveCount(1);
+      await expect
+        .poll(() => fs.readFileSync(traceFile, "utf8").trim().split("\n"))
+        .toEqual([
+          `intervention-delay:${intervention.kind === "steer" ? "steer" : "follow_up"}:queue-before-response`,
+          `intervention-delay:${intervention.kind === "steer" ? "steer" : "follow_up"}:response-after-timeout`,
+          `intervention-delay:${intervention.kind === "steer" ? "steer" : "follow_up"}:queue-after-response`,
+        ]);
+    } finally {
+      await launched.app.close().catch(() => undefined);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("reopening a saved session reconciles or retains a lost intervention receipt", async () => {
   const root = fs.mkdtempSync(
@@ -201,11 +367,8 @@ test("reopening a saved session reconciles or retains a lost intervention receip
     const composer = page.getByLabel("Prompt text");
     await composer.fill("start resumable intervention fixture");
     await page.getByRole("button", { name: "Send", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Steer" })).toBeVisible();
-
     const instruction = "Persist this receipt before transport loss";
-    await composer.fill(instruction);
-    await page.getByRole("button", { name: "Steer" }).click();
+    await submitIntervention(page, composer, "Steer", instruction);
     const intervention = page.locator('[data-intervention-kind="steer"]', {
       hasText: instruction,
     });
@@ -252,11 +415,8 @@ test("rejected steering and follow-up sends stay failed without failing the pare
     const composer = page.getByLabel("Prompt text");
     await composer.fill("start failed intervention fixture");
     await page.getByRole("button", { name: "Send", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Steer" })).toBeVisible();
-
     const instruction = "This steering send must fail honestly";
-    await composer.fill(instruction);
-    await page.getByRole("button", { name: "Steer" }).click();
+    await submitIntervention(page, composer, "Steer", instruction);
     const intervention = page.locator('[data-intervention-kind="steer"]', {
       hasText: instruction,
     });
@@ -272,8 +432,7 @@ test("rejected steering and follow-up sends stay failed without failing the pare
     );
 
     const followUpInstruction = "This follow-up send must also fail honestly";
-    await composer.fill(followUpInstruction);
-    await page.getByRole("button", { name: "Follow-up" }).click();
+    await submitIntervention(page, composer, "Follow-up", followUpInstruction);
     const failedFollowUp = page.locator('[data-intervention-kind="followUp"]', {
       hasText: followUpInstruction,
     });

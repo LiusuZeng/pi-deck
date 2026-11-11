@@ -122,6 +122,8 @@ interface FakeOptions {
   followUpReceiptSignalFile?: string;
   /** Test-only delay before a steering item becomes durable history. */
   consumeSteeringAfterMs: number;
+  /** Delay an accepted intervention response while queue events still flow. */
+  interventionResponseDelayMs: number;
   /**
    * Queue removal is followed by an intentionally stale get_messages result;
    * only the terminal refresh can observe the persisted id-less user turn.
@@ -258,6 +260,7 @@ function parseOptions(argv: string[]): FakeOptions {
     failTaskPromptRecordWhileActive: false,
     exitAfterPromptReceipt: false,
     consumeSteeringAfterMs: 0,
+    interventionResponseDelayMs: 0,
     interventionSnapshotRace: false,
     exitAfterInterventionReceipt: false,
     persistInterventionBeforeExit: false,
@@ -427,6 +430,16 @@ function parseOptions(argv: string[]): FakeOptions {
         delay <= MAX_NODE_TIMEOUT_MS
       ) {
         options.consumeSteeringAfterMs = delay;
+      }
+      index += 1;
+    } else if (arg === "--delay-intervention-response-ms") {
+      const delay = Number(argv[index + 1]);
+      if (
+        Number.isSafeInteger(delay) &&
+        delay >= 0 &&
+        delay <= MAX_NODE_TIMEOUT_MS
+      ) {
+        options.interventionResponseDelayMs = delay;
       }
       index += 1;
     } else if (arg === "--intervention-snapshot-race") {
@@ -2826,12 +2839,11 @@ class FakeRpcServer {
     } else {
       this.followUp.push(message);
     }
-    this.respond(command.id, kind);
-    this.emitQueueUpdate();
     if (this.options.exitAfterInterventionReceipt) {
-      // The command acknowledgement can have reached Pi while the renderer's
-      // transport dies. Most tests deliberately supply no durable user turn;
-      // the companion persistence mode makes resume reconciliation deterministic.
+      this.emitQueueUpdate();
+      // The fake worker has accepted and reported the queue update, but exits
+      // before its command response. This is a post-dispatch disconnect, so
+      // Deck must preserve an uncertain receipt rather than offer a safe retry.
       if (this.options.persistInterventionBeforeExit) {
         const userMessage: PiMessage = {
           id: `msg_intervention_${this.promptCounter + 1}`,
@@ -2847,6 +2859,26 @@ class FakeRpcServer {
       setTimeout(() => process.exit(42), 25);
       return;
     }
+    if (this.options.interventionResponseDelayMs > 0) {
+      // The first event is emitted before the response deadline. The second
+      // is intentionally released after the late acknowledgement so E2E can
+      // prove queue reconciliation neither retries nor duplicates either kind.
+      this.emitQueueUpdate();
+      this.traceFixture(`intervention-delay:${kind}:queue-before-response`);
+      const timer = setTimeout(() => {
+        this.currentTimers = this.currentTimers.filter(
+          (item) => item !== timer,
+        );
+        this.respond(command.id, kind);
+        this.traceFixture(`intervention-delay:${kind}:response-after-timeout`);
+        this.emitQueueUpdate();
+        this.traceFixture(`intervention-delay:${kind}:queue-after-response`);
+      }, this.options.interventionResponseDelayMs);
+      this.currentTimers.push(timer);
+      return;
+    }
+    this.respond(command.id, kind);
+    this.emitQueueUpdate();
     if (kind === "steer" && this.options.interventionSnapshotRace) {
       this.interventionSnapshotRaceText = message;
       this.interventionSnapshotRaceStage = "awaiting-queued-snapshot";
