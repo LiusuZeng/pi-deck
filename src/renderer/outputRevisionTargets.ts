@@ -20,7 +20,10 @@ export function outputRevisionTargetKey(
     // cannot inherit this output's revision target.
     return `session:${JSON.stringify([session.workspaceId, session.sessionFile])}`;
   }
-  return `runtime:${session.id}`;
+  // Draft/runtime IDs are renderer-generated and need workspace scoping too:
+  // another workspace can otherwise reuse an ID before this session gets a
+  // durable native file.
+  return `runtime:${JSON.stringify([session.workspaceId, session.id])}`;
 }
 
 export function outputRevisionTargetForSession(

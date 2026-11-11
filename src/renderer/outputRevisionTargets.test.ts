@@ -55,6 +55,7 @@ describe("output revision targets", () => {
   it("does not attach a target to a fork or a different workspace", () => {
     const targets = {
       [outputRevisionTargetKey(firstRuntime)]: target,
+      [outputRevisionTargetKey(draft)]: target,
     };
 
     expect(
@@ -68,6 +69,12 @@ describe("output revision targets", () => {
       outputRevisionTargetForSession(targets, {
         ...firstRuntime,
         id: "other-workspace-runtime",
+        workspaceId: "workspace-b",
+      }),
+    ).toBeUndefined();
+    expect(
+      outputRevisionTargetForSession(targets, {
+        ...draft,
         workspaceId: "workspace-b",
       }),
     ).toBeUndefined();

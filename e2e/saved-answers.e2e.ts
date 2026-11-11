@@ -146,20 +146,53 @@ test("a completed answer can be saved and reopened after app restart", async () 
     await expect(
       revisedRow.getByRole("button", { name: "Save as output" }),
     ).toBeVisible();
-    await first.page.evaluate(async () => {
+    const closedRevision = await first.page.evaluate(async () => {
       const snapshot = await window.piDeck.chat.getSnapshot();
+      const [status, workspace] = await Promise.all([
+        window.piDeck.chat.getRuntimeStatus({ runtimeId: snapshot.runtimeId }),
+        window.piDeck.workspaces.getActive(),
+      ]);
+      if (
+        status.state.sessionFile === undefined ||
+        workspace.activeWorkspace === undefined
+      ) {
+        throw new Error("Missing durable revision session identity");
+      }
       await window.piDeck.chat.closeSession({ runtimeId: snapshot.runtimeId });
+      return {
+        runtimeId: snapshot.runtimeId,
+        sessionFile: status.state.sessionFile,
+        workspaceId: workspace.activeWorkspace.id,
+      };
     });
-    // Exercise close/resume without relaunching. An externally closed worker
-    // is recoverable from its saved native session in the current renderer.
-    const reopenRevision = first.page.getByRole("button", {
-      name: "Reopen saved session",
-    });
-    await expect(reopenRevision).toBeVisible();
-    await reopenRevision.click();
+    // Intentional close leaves a completed saved session idle, not failed. Go
+    // through Work and reopen its durable Activity row, which calls the real
+    // resume path instead of exposing an error-only recovery control.
+    await first.page.getByTestId("session-origin-back").click();
+    const closedRevisionRow = first.page
+      .locator(".activity-inbox-row")
+      .filter({ hasText: "Revise Kept answer" });
+    await expect(closedRevisionRow).toHaveCount(1);
+    await expect(closedRevisionRow).toHaveAttribute(
+      "data-activity-item-id",
+      `activity:${closedRevision.workspaceId}:${closedRevision.sessionFile}`,
+    );
+    await closedRevisionRow.click();
     await expect(
       first.page.getByText("Resumed saved Pi session."),
     ).toBeVisible();
+    const resumedRevision = await first.page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      const status = await window.piDeck.chat.getRuntimeStatus({
+        runtimeId: snapshot.runtimeId,
+      });
+      return {
+        runtimeId: snapshot.runtimeId,
+        sessionFile: status.state.sessionFile,
+      };
+    });
+    expect(resumedRevision.runtimeId).not.toBe(closedRevision.runtimeId);
+    expect(resumedRevision.sessionFile).toBe(closedRevision.sessionFile);
     await first.page
       .locator("article.assistant-row")
       .last()
@@ -200,22 +233,63 @@ test("a completed answer can be saved and reopened after app restart", async () 
         .last()
         .getByRole("button", { name: "Save as output" }),
     ).toBeVisible();
-    await first.page.evaluate(async () => {
+    const restartRevision = await first.page.evaluate(async () => {
       const snapshot = await window.piDeck.chat.getSnapshot();
+      const [status, workspace] = await Promise.all([
+        window.piDeck.chat.getRuntimeStatus({ runtimeId: snapshot.runtimeId }),
+        window.piDeck.workspaces.getActive(),
+      ]);
+      if (
+        status.state.sessionFile === undefined ||
+        workspace.activeWorkspace === undefined
+      ) {
+        throw new Error("Missing durable revision session identity");
+      }
       await window.piDeck.chat.closeSession({ runtimeId: snapshot.runtimeId });
+      return {
+        runtimeId: snapshot.runtimeId,
+        sessionFile: status.state.sessionFile,
+        workspaceId: workspace.activeWorkspace.id,
+      };
     });
     await first.app.close();
     first = undefined;
 
     second = await launch(env);
-    const savedRevisionSessions = second.page.getByRole("button", {
-      name: /Session: Revise the pinned text deliverable/,
-    });
-    await expect(savedRevisionSessions.first()).toBeVisible();
-    await savedRevisionSessions.first().click();
+    const restartedRevisionRow = second.page.locator(
+      `.activity-inbox-row[data-activity-item-id=${JSON.stringify(
+        `activity:${restartRevision.workspaceId}:${restartRevision.sessionFile}`,
+      )}]`,
+    );
+    await expect(restartedRevisionRow).toHaveCount(1);
+    await restartedRevisionRow.click();
+    await expect(
+      second.page.getByText("Resumed saved Pi session."),
+    ).toBeVisible();
     await expect(
       second.page.getByText(/Revising Kept answer, revision 2/),
     ).toBeVisible();
+    const restartedRevision = await second.page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      const [status, workspace] = await Promise.all([
+        window.piDeck.chat.getRuntimeStatus({ runtimeId: snapshot.runtimeId }),
+        window.piDeck.workspaces.getActive(),
+      ]);
+      if (
+        status.state.sessionFile === undefined ||
+        workspace.activeWorkspace === undefined
+      ) {
+        throw new Error("Missing resumed revision session identity");
+      }
+      return {
+        runtimeId: snapshot.runtimeId,
+        sessionFile: status.state.sessionFile,
+        workspaceId: workspace.activeWorkspace.id,
+      };
+    });
+    expect(restartedRevision.runtimeId).not.toBe(restartRevision.runtimeId);
+    expect(restartedRevision.sessionFile).toBe(restartRevision.sessionFile);
+    expect(restartedRevision.workspaceId).toBe(restartRevision.workspaceId);
     const resumedRevisionRow = second.page
       .locator("article.assistant-row")
       .last();
