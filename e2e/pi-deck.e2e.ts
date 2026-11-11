@@ -3107,7 +3107,7 @@ test("scrollbar navigation releases follow and reacquires only toward the end", 
     // It still drives the browser scrollbar with real mouse input (and thus
     // exercises the product's pointer/scroll ownership handlers), but does not
     // claim coverage of OS-themed scrollbar painting or overlay behavior.
-    await timeline.evaluate((element) => {
+    await timeline.evaluate(async (element) => {
       const fixtureStyles = new CSSStyleSheet();
       fixtureStyles.replaceSync(`
         .timeline-scroll[data-e2e-standard-scrollbar="true"]::-webkit-scrollbar {
@@ -3134,6 +3134,11 @@ test("scrollbar navigation releases follow and reacquires only toward the end", 
         fixtureStyles,
       ];
       element.dataset.e2eStandardScrollbar = "true";
+      // Do not calculate a native scrollbar hit target until Chromium has
+      // committed the fixture's pseudo-element geometry.
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
     });
     test.info().annotations.push({
       type: "standardized-browser-scrollbar-input",
@@ -3192,7 +3197,11 @@ test("scrollbar navigation releases follow and reacquires only toward the end", 
       const before = await timelineScrollSample(timeline);
       await page.mouse.move(x, startY);
       await page.mouse.down();
-      await page.mouse.move(x, targetY, { steps: 8 });
+      // A stepped synthetic move can be consumed as a single native track
+      // increment in hidden Electron windows. Keep this a real thumb drag,
+      // but dispatch its terminal movement directly so Chromium retains the
+      // thumb capture through the intended geometry.
+      await page.mouse.move(x, targetY);
       await page.mouse.up();
       const after = await timelineScrollSample(timeline);
       await test.info().attach(`browser-scrollbar-drag-${targetRatio}`, {
