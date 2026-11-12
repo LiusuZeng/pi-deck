@@ -8,6 +8,16 @@ import path from "node:path";
 const repoRoot = path.resolve(__dirname, "..");
 const mainEntry = path.join(repoRoot, "dist/main/main.js");
 
+function createFakePiBinary(root: string): string {
+  const fakePiPath = path.join(root, "fake-pi.js");
+  fs.writeFileSync(
+    fakePiPath,
+    `#!${process.execPath}\nif (process.argv.includes("--version")) {\n  console.log("v42.5.0");\n  process.exit(0);\n}\nif (process.argv.includes("--list-models")) {\n  console.log("provider  model       context  max-out  thinking  images");\n  console.log("fake-provider  fake-model  128K     32K      yes       yes");\n  process.exit(0);\n}\nrequire(${JSON.stringify(path.join(repoRoot, "dist/main/pi/fakeRpc/fakeRpcServer.js"))});\n`,
+    { mode: 0o755 },
+  );
+  return fakePiPath;
+}
+
 async function launch(env: NodeJS.ProcessEnv): Promise<{
   app: ElectronApplication;
   page: Page;
@@ -32,13 +42,30 @@ test("a completed answer can be saved and reopened after app restart", async () 
   );
   const home = path.join(root, "pideck-home");
   const userData = path.join(root, "user-data");
-  fs.mkdirSync(home, { recursive: true });
-  fs.mkdirSync(userData, { recursive: true });
+  const projectCwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  for (const directory of [home, userData, projectCwd, agentDir]) {
+    fs.mkdirSync(directory, { recursive: true });
+  }
+  fs.writeFileSync(
+    path.join(userData, "settings.json"),
+    `${JSON.stringify({
+      theme: "system",
+      maxRunningSessions: 4,
+      warmWorkerLimit: 1,
+      enableLoginShellEnvCapture: false,
+    })}\n`,
+  );
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     PI_DECK_E2E_TEST: "1",
     PI_DECK_E2E_HIDE_WINDOWS: "1",
-    PI_DECK_BACKEND: "fake",
+    // Real mode is required to exercise main's native session-file resume.
+    // The checked-in RPC fixture is a credential-free Pi CLI transport.
+    PI_DECK_BACKEND: "real",
+    PI_DECK_PI_BINARY: createFakePiBinary(root),
+    PI_DECK_PROJECT_CWD: projectCwd,
+    PI_CODING_AGENT_DIR: agentDir,
     PI_DECK_HOME: home,
     PI_DECK_USER_DATA_DIR: userData,
   };

@@ -222,6 +222,8 @@ import {
 } from "./components/ActivityInbox.js";
 import { SavedAnswers } from "./components/SavedAnswers.js";
 import {
+  canApplyBootstrapSessionRefresh,
+  canReportBootstrapSessionRefresh,
   isNavigationGenerationCurrent,
   nextNavigationGeneration,
 } from "./navigationGeneration.js";
@@ -1908,6 +1910,10 @@ export function App(): ReactElement {
   ): void {
     const routeGeneration = generation ?? beginNavigation();
     if (!isNavigationCurrent(routeGeneration)) return;
+    // Keep synchronous consumers aligned with the explicit route while React
+    // commits it. A late bootstrap refresh must not observe the old draft as
+    // the selected session and restore that stale selection.
+    selectedSessionIdRef.current = sessionId;
     setSelectedSessionId(sessionId);
     setPrimaryView((current) =>
       sessionView(
@@ -2306,12 +2312,31 @@ export function App(): ReactElement {
     async function refreshBootstrapSessionList(
       api: typeof window.piDeck,
       bootstrap: AppBootstrapState,
-      generation: number,
+      sessionListRequest: number,
+      navigationRequest: number,
     ): Promise<void> {
       const workspaceList = workspaceListFromBootstrap(bootstrap);
       const workspace =
         workspaceList.activeWorkspace ??
         workspaceFromLegacyProject(bootstrap.project);
+      const refreshState = () => ({
+        disposed,
+        sessionListRequest,
+        currentSessionListRequest: sessionListGeneration.current,
+        bootstrapWorkspaceId: workspace.id,
+        currentWorkspaceId: currentWorkspaceRef.current.id,
+      });
+      const canApplyRefresh = (): boolean =>
+        canApplyBootstrapSessionRefresh({
+          ...refreshState(),
+          navigationRequest,
+          currentNavigation: navigationGeneration.current,
+        });
+      // Navigation may move to a newly opened session while discovery runs.
+      // That blocks session-row adoption, but not the status of this still
+      // current workspace scan.
+      const canReportRefresh = (): boolean =>
+        canReportBootstrapSessionRefresh(refreshState());
       try {
         const listedSessions = await listSessionsForWorkspaces(
           api,
@@ -2320,22 +2345,18 @@ export function App(): ReactElement {
             : [workspace],
         );
         // Do not let a late startup scan replace a workspace the user has
-        // since selected, or overwrite a newer explicit refresh.
-        if (
-          disposed ||
-          generation !== sessionListGeneration.current ||
-          currentWorkspaceRef.current.id !== workspace.id
-        ) {
+        // since selected, overwrite a newer explicit refresh, or overwrite a
+        // session route opened after this scan was scheduled.
+        if (!canApplyRefresh()) {
+          if (canReportRefresh()) {
+            setUiMessage(
+              `Real Pi mode active. Found ${listedSessions.length} saved session(s) across ${workspaceList.workspaces.length} workspace(s).`,
+            );
+          }
           return;
         }
         await adoptIncomingRuntimeIdentities(listedSessions);
-        if (
-          disposed ||
-          generation !== sessionListGeneration.current ||
-          currentWorkspaceRef.current.id !== workspace.id
-        ) {
-          return;
-        }
+        if (!canApplyRefresh()) return;
         setSessions((items) =>
           replaceWorkspaceTreeSavedRows(
             items,
@@ -2347,15 +2368,13 @@ export function App(): ReactElement {
         for (const session of listedSessions) {
           if (session.runtimeBacked) void hydrateAttachedSession(session);
         }
-        setUiMessage(
-          `Real Pi mode active. Found ${listedSessions.length} saved session(s) across ${workspaceList.workspaces.length} workspace(s).`,
-        );
+        if (canReportRefresh()) {
+          setUiMessage(
+            `Real Pi mode active. Found ${listedSessions.length} saved session(s) across ${workspaceList.workspaces.length} workspace(s).`,
+          );
+        }
       } catch (error) {
-        if (
-          !disposed &&
-          generation === sessionListGeneration.current &&
-          currentWorkspaceRef.current.id === workspace.id
-        ) {
+        if (canReportRefresh()) {
           setUiMessage(
             `Saved-session refresh failed: ${error instanceof Error ? error.message : String(error)}`,
           );
@@ -2567,13 +2586,19 @@ export function App(): ReactElement {
                 resetProjectModelConfiguration(bootstrapWorkspace.id);
               }
             });
-          const generation = ++sessionListGeneration.current;
+          const sessionListRequest = ++sessionListGeneration.current;
+          const navigationRequest = navigationGeneration.current;
           // Two animation frames guarantee the ready shell has an opportunity
           // to commit and paint before main begins its potentially expensive
           // repository scan.
           bootstrapRefreshFrame = window.requestAnimationFrame(() => {
             bootstrapRefreshSecondFrame = window.requestAnimationFrame(() => {
-              void refreshBootstrapSessionList(api, bootstrap, generation);
+              void refreshBootstrapSessionList(
+                api,
+                bootstrap,
+                sessionListRequest,
+                navigationRequest,
+              );
             });
           });
         }
