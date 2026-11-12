@@ -222,6 +222,8 @@ import {
 } from "./components/ActivityInbox.js";
 import { SavedAnswers } from "./components/SavedAnswers.js";
 import {
+  canApplyBootstrapSessionRefresh,
+  canReportBootstrapSessionRefresh,
   isNavigationGenerationCurrent,
   nextNavigationGeneration,
 } from "./navigationGeneration.js";
@@ -251,6 +253,13 @@ import {
   PiModelThinkingMenu,
   nextMenuItemIndex,
 } from "./components/PiModelThinkingMenu.js";
+import {
+  moveOutputRevisionTarget,
+  outputRevisionTargetForSession,
+  outputRevisionTargetKey,
+  removeOutputRevisionTarget,
+  type OutputRevisionTarget,
+} from "./outputRevisionTargets.js";
 import type {
   SubagentActivity,
   SubagentActivityChild,
@@ -263,17 +272,11 @@ interface SaveAnswerDialogState {
   assistantMessageId?: string;
   title: string;
   target?: { outputId: string; expectedRevisionId: string };
+  revisionTargetKey?: string;
   returnFocus: HTMLButtonElement;
 }
 
-interface OutputRevisionTarget {
-  outputId: string;
-  expectedRevisionId: string;
-  title: string;
-  displayNumber: number;
-}
-
-const OUTPUT_REVISION_TARGETS_KEY = "pi-deck.output-revision-targets.v1";
+const OUTPUT_REVISION_TARGETS_KEY = "pi-deck.output-revision-targets.v2";
 
 function loadOutputRevisionTargets(): Record<string, OutputRevisionTarget> {
   try {
@@ -1907,6 +1910,10 @@ export function App(): ReactElement {
   ): void {
     const routeGeneration = generation ?? beginNavigation();
     if (!isNavigationCurrent(routeGeneration)) return;
+    // Keep synchronous consumers aligned with the explicit route while React
+    // commits it. A late bootstrap refresh must not observe the old draft as
+    // the selected session and restore that stale selection.
+    selectedSessionIdRef.current = sessionId;
     setSelectedSessionId(sessionId);
     setPrimaryView((current) =>
       sessionView(
@@ -2180,7 +2187,10 @@ export function App(): ReactElement {
     returnFocus: HTMLButtonElement,
   ): void {
     if (!selectedSession.runtimeBacked || item.streaming === true) return;
-    const target = outputRevisionTargets[selectedSession.id];
+    const target = outputRevisionTargetForSession(
+      outputRevisionTargets,
+      selectedSession,
+    );
     setSaveAnswerError(undefined);
     setSaveAnswerDialog({
       requestId: window.crypto.randomUUID(),
@@ -2197,6 +2207,7 @@ export function App(): ReactElement {
               outputId: target.outputId,
               expectedRevisionId: target.expectedRevisionId,
             },
+            revisionTargetKey: outputRevisionTargetKey(selectedSession),
           }),
       returnFocus,
     });
@@ -2218,13 +2229,18 @@ export function App(): ReactElement {
     setSaveAnswerPending(true);
     setSaveAnswerError(undefined);
     try {
-      const { returnFocus: _returnFocus, ...request } = dialog;
+      const {
+        returnFocus: _returnFocus,
+        revisionTargetKey: _revisionTargetKey,
+        ...request
+      } = dialog;
       const saved = await window.piDeck.savedAnswers.save(request);
       setSaveAnswerDialog(undefined);
-      setOutputRevisionTargets((current) => {
-        const { [dialog.runtimeId]: _savedTarget, ...remaining } = current;
-        return remaining;
-      });
+      setOutputRevisionTargets((current) =>
+        dialog.revisionTargetKey === undefined
+          ? current
+          : removeOutputRevisionTarget(current, dialog.revisionTargetKey),
+      );
       setUiMessage(
         dialog.target === undefined
           ? `Saved “${saved.title}” to Outputs.`
@@ -2296,12 +2312,31 @@ export function App(): ReactElement {
     async function refreshBootstrapSessionList(
       api: typeof window.piDeck,
       bootstrap: AppBootstrapState,
-      generation: number,
+      sessionListRequest: number,
+      navigationRequest: number,
     ): Promise<void> {
       const workspaceList = workspaceListFromBootstrap(bootstrap);
       const workspace =
         workspaceList.activeWorkspace ??
         workspaceFromLegacyProject(bootstrap.project);
+      const refreshState = () => ({
+        disposed,
+        sessionListRequest,
+        currentSessionListRequest: sessionListGeneration.current,
+        bootstrapWorkspaceId: workspace.id,
+        currentWorkspaceId: currentWorkspaceRef.current.id,
+      });
+      const canApplyRefresh = (): boolean =>
+        canApplyBootstrapSessionRefresh({
+          ...refreshState(),
+          navigationRequest,
+          currentNavigation: navigationGeneration.current,
+        });
+      // Navigation may move to a newly opened session while discovery runs.
+      // That blocks session-row adoption, but not the status of this still
+      // current workspace scan.
+      const canReportRefresh = (): boolean =>
+        canReportBootstrapSessionRefresh(refreshState());
       try {
         const listedSessions = await listSessionsForWorkspaces(
           api,
@@ -2310,22 +2345,18 @@ export function App(): ReactElement {
             : [workspace],
         );
         // Do not let a late startup scan replace a workspace the user has
-        // since selected, or overwrite a newer explicit refresh.
-        if (
-          disposed ||
-          generation !== sessionListGeneration.current ||
-          currentWorkspaceRef.current.id !== workspace.id
-        ) {
+        // since selected, overwrite a newer explicit refresh, or overwrite a
+        // session route opened after this scan was scheduled.
+        if (!canApplyRefresh()) {
+          if (canReportRefresh()) {
+            setUiMessage(
+              `Real Pi mode active. Found ${listedSessions.length} saved session(s) across ${workspaceList.workspaces.length} workspace(s).`,
+            );
+          }
           return;
         }
         await adoptIncomingRuntimeIdentities(listedSessions);
-        if (
-          disposed ||
-          generation !== sessionListGeneration.current ||
-          currentWorkspaceRef.current.id !== workspace.id
-        ) {
-          return;
-        }
+        if (!canApplyRefresh()) return;
         setSessions((items) =>
           replaceWorkspaceTreeSavedRows(
             items,
@@ -2337,15 +2368,13 @@ export function App(): ReactElement {
         for (const session of listedSessions) {
           if (session.runtimeBacked) void hydrateAttachedSession(session);
         }
-        setUiMessage(
-          `Real Pi mode active. Found ${listedSessions.length} saved session(s) across ${workspaceList.workspaces.length} workspace(s).`,
-        );
+        if (canReportRefresh()) {
+          setUiMessage(
+            `Real Pi mode active. Found ${listedSessions.length} saved session(s) across ${workspaceList.workspaces.length} workspace(s).`,
+          );
+        }
       } catch (error) {
-        if (
-          !disposed &&
-          generation === sessionListGeneration.current &&
-          currentWorkspaceRef.current.id === workspace.id
-        ) {
+        if (canReportRefresh()) {
           setUiMessage(
             `Saved-session refresh failed: ${error instanceof Error ? error.message : String(error)}`,
           );
@@ -2557,13 +2586,19 @@ export function App(): ReactElement {
                 resetProjectModelConfiguration(bootstrapWorkspace.id);
               }
             });
-          const generation = ++sessionListGeneration.current;
+          const sessionListRequest = ++sessionListGeneration.current;
+          const navigationRequest = navigationGeneration.current;
           // Two animation frames guarantee the ready shell has an opportunity
           // to commit and paint before main begins its potentially expensive
           // repository scan.
           bootstrapRefreshFrame = window.requestAnimationFrame(() => {
             bootstrapRefreshSecondFrame = window.requestAnimationFrame(() => {
-              void refreshBootstrapSessionList(api, bootstrap, generation);
+              void refreshBootstrapSessionList(
+                api,
+                bootstrap,
+                sessionListRequest,
+                navigationRequest,
+              );
             });
           });
         }
@@ -4780,12 +4815,9 @@ export function App(): ReactElement {
       );
       composerDraftsRef.current = materializedComposerDrafts;
       setComposerDrafts(materializedComposerDrafts);
-      setOutputRevisionTargets((current) => {
-        const draftTarget = current[draftSession.id];
-        if (draftTarget === undefined) return current;
-        const { [draftSession.id]: _draftTarget, ...remaining } = current;
-        return { ...remaining, [initializedSession.id]: draftTarget };
-      });
+      setOutputRevisionTargets((current) =>
+        moveOutputRevisionTarget(current, draftSession, initializedSession),
+      );
       if (initializedSession.backendMode === "real") {
         rememberPiDefaults(initializedSession);
         loadRealCapabilities(initializedSession.id);
@@ -7221,7 +7253,7 @@ export function App(): ReactElement {
     );
     setOutputRevisionTargets((current) => ({
       ...current,
-      [next.id]: {
+      [outputRevisionTargetKey(next)]: {
         outputId: detail.outputId,
         expectedRevisionId: detail.revisionId,
         title: detail.title,
@@ -7350,8 +7382,10 @@ export function App(): ReactElement {
     }
   }
 
-  const selectedOutputRevisionTarget =
-    outputRevisionTargets[selectedSession.id];
+  const selectedOutputRevisionTarget = outputRevisionTargetForSession(
+    outputRevisionTargets,
+    selectedSession,
+  );
   const composer = (
     <>
       {selectedOutputRevisionTarget === undefined ? null : (

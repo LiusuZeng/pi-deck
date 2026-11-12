@@ -3916,10 +3916,23 @@ test("streaming Agent activity respects manual scroll intent", async () => {
     expect(whileReading.scrollTop).toBeLessThanOrEqual(30);
     expect(whileReading.bottomDistance).toBeGreaterThan(80);
 
-    await page.locator(".timeline-scroll").evaluate((timeline: HTMLElement) => {
-      timeline.scrollTop = timeline.scrollHeight;
-      timeline.dispatchEvent(new Event("scroll", { bubbles: true }));
-    });
+    // End is explicit toward-end input, so it both reaches the actual bottom
+    // and returns follow ownership to the live stream. Setting scrollTop alone
+    // would skip the user-intent path under test.
+    const timeline = page.locator(".timeline-scroll");
+    await timeline.focus();
+    await expect(timeline).toBeFocused();
+    await page.keyboard.press("End");
+    await expect
+      .poll(async () =>
+        timeline.evaluate((element) =>
+          Math.max(
+            0,
+            element.scrollHeight - element.scrollTop - element.clientHeight,
+          ),
+        ),
+      )
+      .toBeLessThanOrEqual(1);
     await expect(
       page.getByText("Fake response to: stream manual scroll"),
     ).toBeVisible({ timeout: 20_000 });
