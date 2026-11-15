@@ -90,7 +90,11 @@ test("a completed answer can be saved and reopened after app restart", async () 
         }
       }),
     ).resolves.toMatch(/no longer attached|unknown/i);
-    await first.page.getByRole("button", { name: "New session" }).click();
+    const newSessionButton = first.page
+      .getByLabel("Sessions", { exact: true })
+      .getByRole("button", { name: "New session" });
+    await expect(newSessionButton).toHaveCount(1);
+    await newSessionButton.click();
     await first.page.getByLabel("Prompt text").fill("Answer worth keeping");
     await first.page.getByRole("button", { name: "Send" }).click();
     const answer = first.page.getByText(
