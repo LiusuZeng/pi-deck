@@ -8,6 +8,13 @@ import path from "node:path";
 const repoRoot = path.resolve(__dirname, "..");
 const mainEntry = path.join(repoRoot, "dist/main/main.js");
 
+function canonicalSessionFile(sessionFile: string | undefined): string {
+  if (sessionFile === undefined) {
+    throw new Error("Missing durable revision session file");
+  }
+  return fs.realpathSync(sessionFile);
+}
+
 function createFakePiBinary(root: string): string {
   const fakePiPath = path.join(root, "fake-pi.js");
   fs.writeFileSync(
@@ -177,7 +184,7 @@ test("a completed answer can be saved and reopened after app restart", async () 
     await expect(
       revisedRow.getByRole("button", { name: "Save as output" }),
     ).toBeVisible();
-    const closedRevision = await first.page.evaluate(async () => {
+    const closedRevisionRaw = await first.page.evaluate(async () => {
       const snapshot = await window.piDeck.chat.getSnapshot();
       const [status, workspace] = await Promise.all([
         window.piDeck.chat.getRuntimeStatus({ runtimeId: snapshot.runtimeId }),
@@ -196,6 +203,10 @@ test("a completed answer can be saved and reopened after app restart", async () 
         workspaceId: workspace.activeWorkspace.id,
       };
     });
+    const closedRevision = {
+      ...closedRevisionRaw,
+      sessionFile: canonicalSessionFile(closedRevisionRaw.sessionFile),
+    };
     // Intentional close leaves a completed saved session idle, not failed. Go
     // through Work and reopen its durable Activity row, which calls the real
     // resume path instead of exposing an error-only recovery control.
@@ -223,7 +234,9 @@ test("a completed answer can be saved and reopened after app restart", async () 
       };
     });
     expect(resumedRevision.runtimeId).not.toBe(closedRevision.runtimeId);
-    expect(resumedRevision.sessionFile).toBe(closedRevision.sessionFile);
+    expect(canonicalSessionFile(resumedRevision.sessionFile)).toBe(
+      closedRevision.sessionFile,
+    );
     await first.page
       .locator("article.assistant-row")
       .last()
@@ -264,7 +277,7 @@ test("a completed answer can be saved and reopened after app restart", async () 
         .last()
         .getByRole("button", { name: "Save as output" }),
     ).toBeVisible();
-    const restartRevision = await first.page.evaluate(async () => {
+    const restartRevisionRaw = await first.page.evaluate(async () => {
       const snapshot = await window.piDeck.chat.getSnapshot();
       const [status, workspace] = await Promise.all([
         window.piDeck.chat.getRuntimeStatus({ runtimeId: snapshot.runtimeId }),
@@ -283,6 +296,10 @@ test("a completed answer can be saved and reopened after app restart", async () 
         workspaceId: workspace.activeWorkspace.id,
       };
     });
+    const restartRevision = {
+      ...restartRevisionRaw,
+      sessionFile: canonicalSessionFile(restartRevisionRaw.sessionFile),
+    };
     await first.app.close();
     first = undefined;
 
@@ -319,7 +336,9 @@ test("a completed answer can be saved and reopened after app restart", async () 
       };
     });
     expect(restartedRevision.runtimeId).not.toBe(restartRevision.runtimeId);
-    expect(restartedRevision.sessionFile).toBe(restartRevision.sessionFile);
+    expect(canonicalSessionFile(restartedRevision.sessionFile)).toBe(
+      restartRevision.sessionFile,
+    );
     expect(restartedRevision.workspaceId).toBe(restartRevision.workspaceId);
     const resumedRevisionRow = second.page
       .locator("article.assistant-row")
